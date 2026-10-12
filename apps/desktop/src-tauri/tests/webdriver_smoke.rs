@@ -146,6 +146,31 @@ async fn click(driver: &WebDriver, by: By, secs: u64) -> WebDriverResult<()> {
     }
 }
 
+/// Click `by` until `proof` appears, within `secs`. For targets on a screen
+/// still settling: Home's sections and the pods table land at different
+/// times, so a row can move between WebDriver locating it and its click
+/// arriving, and the click then lands on whatever took the row's place —
+/// accepted, with no error to retry on (seen in CI: the cluster row's click
+/// left the window on Home). Proof of the click's effect is what is waited on.
+async fn click_until(driver: &WebDriver, by: By, proof: By, secs: u64) -> WebDriverResult<()> {
+    let deadline = Instant::now() + Duration::from_secs(secs);
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now()).as_secs().max(1);
+        click(driver, by.clone(), remaining).await?;
+        let landed = driver
+            .query(proof.clone())
+            .wait(Duration::from_secs(5), Duration::from_millis(250))
+            .exists()
+            .await?;
+        if landed {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            return driver.query(proof).nowait().first().await.map(|_| ());
+        }
+    }
+}
+
 #[tokio::test]
 #[ignore]
 async fn smoke_launch_to_logs_against_kind() {
@@ -325,9 +350,13 @@ async fn run_flow(driver: &WebDriver, context: &str, full: bool) -> Result<(), F
     // ---- 3. A fresh profile opens on Home; open the kind context from its
     // cluster list. The row's name carries the link state after the em dash
     // (`Open cluster <name> — Connected`), which changes as the probe lands.
-    click(
+    // Opening it always opens the cluster's overview tab, which is the proof.
+    click_until(
         driver,
         By::XPath(format!("//button[starts-with(@aria-label, 'Open cluster {context} \u{2014}')]")),
+        By::XPath(format!(
+            "//*[@role='tablist' and @aria-label='Open tabs']//*[@role='tab' and starts-with(@aria-label, 'Cluster overview')]"
+        )),
         60,
     )
     .await?;
@@ -352,17 +381,18 @@ async fn run_flow(driver: &WebDriver, context: &str, full: bool) -> Result<(), F
     // ---- 5. The fixture pod is in the default namespace, which a fresh
     // profile's "all namespaces" includes. A single click on its row opens
     // the peek beside the list. Rows the table renders aria-hidden — its
-    // row-height sample — are not the row a reader clicks.
-    click(
+    // row-height sample — are not the row a reader clicks. The peek's action
+    // bar (Logs and Shell on it, the rest in its overflow) is the proof.
+    let actions = "//*[@role='group' and @aria-label='Pod actions']";
+    click_until(
         driver,
         By::XPath(format!(
             "//tbody//tr[not(@aria-hidden='true')]//*[normalize-space(text())='{POD}']"
         )),
+        By::XPath(actions.to_string()),
         60,
     )
     .await?;
-    // The peek's action bar: Logs and Shell on it, the rest in its overflow.
-    let actions = "//*[@role='group' and @aria-label='Pod actions']";
 
     if full {
         // ---- 5F. Port-forward: Forward is in the bar's overflow. The dialog
