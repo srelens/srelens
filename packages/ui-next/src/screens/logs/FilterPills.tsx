@@ -11,10 +11,16 @@ export function FilterPills({
   query,
   clauses,
   onQueryChange,
+  onRemoved,
 }: {
   query: string;
   clauses: readonly QueryClause[];
   onQueryChange: (query: string) => void;
+  /**
+   * Called after a × or Clear all. The control that had focus is about to
+   * unmount, and focus would otherwise fall to the body.
+   */
+  onRemoved?: () => void;
 }) {
   if (clauses.length === 0) return null;
   return (
@@ -27,14 +33,20 @@ export function FilterPills({
             label={clause.negated ? `NOT ${spelled.slice(1)}` : spelled}
             negated={clause.negated}
             removeLabel={`Remove filter ${spelled}`}
-            onRemove={() => onQueryChange(removeClause(query, clause))}
+            onRemove={() => {
+              onQueryChange(removeClause(query, clause));
+              onRemoved?.();
+            }}
           />
         );
       })}
       <button
         type="button"
-        className="text-[0.75rem] text-muted hover:text-soft"
-        onClick={() => onQueryChange("")}
+        className="text-btn"
+        onClick={() => {
+          onQueryChange("");
+          onRemoved?.();
+        }}
       >
         Clear all
       </button>
@@ -56,7 +68,7 @@ export function Pill({
   return (
     <span
       data-slot="pill"
-      className="inline-flex items-center gap-1 rounded border px-1.5 py-[1px] font-mono text-[0.6875rem]"
+      className="inline-flex max-w-full items-center gap-1 break-all rounded border px-1.5 py-[1px] font-mono text-[0.6875rem]"
       style={negated ? { borderColor: toneColor("sev"), color: toneColor("sev") } : { borderColor: "var(--rule)" }}
     >
       {label}

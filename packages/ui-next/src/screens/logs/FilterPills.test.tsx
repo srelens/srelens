@@ -8,8 +8,11 @@ function pills(query: string) {
   const parsed = parseLogQuery(query);
   const clauses: readonly QueryClause[] = parsed.ok ? parsed.clauses : [];
   const onQueryChange = vi.fn();
-  const { container } = render(<FilterPills query={query} clauses={clauses} onQueryChange={onQueryChange} />);
-  return { container, onQueryChange };
+  const onRemoved = vi.fn();
+  const { container } = render(
+    <FilterPills query={query} clauses={clauses} onQueryChange={onQueryChange} onRemoved={onRemoved} />,
+  );
+  return { container, onQueryChange, onRemoved };
 }
 
 const labels = (container: HTMLElement) =>
@@ -38,5 +41,31 @@ describe("FilterPills", () => {
     const { onQueryChange } = pills("a b");
     await userEvent.click(screen.getByRole("button", { name: "Clear all" }));
     expect(onQueryChange).toHaveBeenCalledWith("");
+  });
+
+  it("tells the caller a pill was removed, once", async () => {
+    // The caller uses this to put focus back in the box, since the × that had
+    // it is about to unmount.
+    const { onRemoved } = pills("level:error -system:dev");
+    await userEvent.click(screen.getByRole("button", { name: "Remove filter level:error" }));
+    expect(onRemoved).toHaveBeenCalledTimes(1);
+  });
+
+  it("tells the caller Clear all was used, once", async () => {
+    const { onRemoved } = pills("a b");
+    await userEvent.click(screen.getByRole("button", { name: "Clear all" }));
+    expect(onRemoved).toHaveBeenCalledTimes(1);
+  });
+
+  it("draws Clear all as the kit's text button", () => {
+    pills("a b");
+    expect(screen.getByRole("button", { name: "Clear all" }).classList.contains("text-btn")).toBe(true);
+  });
+
+  it("lets a long unbroken clause wrap inside the pane", () => {
+    const { container } = pills("x".repeat(120));
+    const pill = container.querySelector('[data-slot="pill"]');
+    expect(pill?.classList.contains("max-w-full")).toBe(true);
+    expect(pill?.classList.contains("break-all")).toBe(true);
   });
 });

@@ -2119,4 +2119,24 @@ describe("structured lines and the query (#898)", () => {
     await userEvent.click(screen.getByRole("button", { name: "Remove filter level:error" }));
     expect(filterField()).toHaveProperty("value", "pool");
   });
+
+  it("keeps the keyboard in the box when a pill goes from the keyboard", async () => {
+    await (draw(), body());
+    push(...LINES);
+    await userEvent.type(filterField(), "level:error pool");
+    screen.getByRole("button", { name: "Remove filter level:error" }).focus();
+    await userEvent.keyboard("{Enter}");
+    expect(document.activeElement).toBe(filterField());
+    expect(filterField()).toHaveProperty("value", "pool");
+  });
+
+  it("keeps the keyboard in the box after Clear all", async () => {
+    await (draw(), body());
+    push(...LINES);
+    await userEvent.type(filterField(), "level:error pool");
+    screen.getByRole("button", { name: "Clear all" }).focus();
+    await userEvent.keyboard("{Enter}");
+    expect(document.activeElement).toBe(filterField());
+    expect(filterField()).toHaveProperty("value", "");
+  });
 });

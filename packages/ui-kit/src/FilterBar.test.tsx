@@ -1,4 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
+import { createRef } from "react";
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { FilterBar } from "./FilterBar";
@@ -72,6 +73,21 @@ describe("FilterBar", () => {
   it("puts focus back in the field after clearing", async () => {
     // Otherwise the next keystroke goes nowhere and the filter is over.
     setup({ value: "nginx" });
+    await userEvent.click(clear());
+    expect(document.activeElement).toBe(field());
+  });
+
+  it("hands the field to a caller that asks for it", () => {
+    // A caller that puts focus back in the field after removing a control beside
+    // it needs the element itself, not a flag to go looking for it.
+    const inputRef = createRef<HTMLInputElement>();
+    setup({ inputRef });
+    expect(inputRef.current).toBe(field());
+  });
+
+  it("keeps focus in the field after clearing, even when a caller holds it too", async () => {
+    const inputRef = createRef<HTMLInputElement>();
+    setup({ value: "nginx", inputRef });
     await userEvent.click(clear());
     expect(document.activeElement).toBe(field());
   });

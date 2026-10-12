@@ -726,6 +726,8 @@ function LogsStream({
 }) {
   const { ask } = useConsole();
   const [text, setText] = useState("");
+  /** Where focus goes when a pill is removed: the × that had it is about to unmount. */
+  const searchRef = useRef<HTMLInputElement>(null);
   // `all`, as classic has always defaulted, and not the design's drawn `5m`.
   // A mock is drawn against a fixture that never stops talking; a real
   // workload that has been quiet for six minutes renders "Nothing has been
@@ -1231,6 +1233,7 @@ function LogsStream({
           onValueChange={setText}
           label="Filter lines"
           placeholder="Filter lines"
+          inputRef={searchRef}
         >
           {providers.length > 0 && (
             <div className="flex items-center gap-1.5">
@@ -1348,7 +1351,12 @@ function LogsStream({
             {typed.error}
           </div>
         )}
-        <FilterPills query={text} clauses={typed.ok ? typed.clauses : NO_CLAUSES} onQueryChange={setText} />
+        <FilterPills
+          query={text}
+          clauses={typed.ok ? typed.clauses : NO_CLAUSES}
+          onQueryChange={setText}
+          onRemoved={() => searchRef.current?.focus()}
+        />
 
         {offered.status === "error" && (
           // The list the picker is drawn from could not be read again: what it
