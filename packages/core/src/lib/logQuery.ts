@@ -1,3 +1,4 @@
+import type { HealthKind } from "./k8sHealth";
 import { logObject, tokenize } from "./logTerms";
 
 /**
@@ -164,4 +165,185 @@ export function inlineFields(fields: Readonly<Record<string, string>>): string {
     .filter(([key]) => !HIDDEN_KEYS.has(key.toLowerCase()))
     .map(([key, value]) => `${key}=${/\s/.test(value) ? JSON.stringify(value) : value}`)
     .join(" ");
+}
+
+/** The line as the query reads it. The Logs screen's `Row` extends this. */
+export interface QueryLine {
+  /** The line with its k8s stamp stripped: what a regex tests. */
+  readonly text: string;
+  /** `${text} ${health}`, lowercased: what free text and phrases search. */
+  readonly haystack: string;
+  /** `logLineWords(message)`: what a phrase also matches, at word boundaries. */
+  readonly words: string;
+  readonly fields: Readonly<Record<string, string>>;
+  /** The level word as the line spelled it; `""` when it has none. */
+  readonly level: string;
+  readonly health: HealthKind;
+  /** Epoch ms from the stream's stamp; absent for a line that came without one. */
+  readonly at?: number;
+}
+
+interface ClauseBase {
+  /** The field it reads, as typed. Absent for free text; `level` is the line's level word. */
+  readonly field?: string;
+  readonly negated: boolean;
+  /** Where it sits in the query text, `-` included: `[start, end)`. */
+  readonly span: readonly [number, number];
+}
+
+export type QueryClause = ClauseBase &
+  (
+    | { readonly match: "text" | "equals"; readonly value: string }
+    | { readonly match: "phrase"; readonly value: string; readonly words: string }
+    | { readonly match: "regex"; readonly value: string; readonly regex: RegExp }
+  );
+
+export type ParsedQuery =
+  | { readonly ok: true; readonly clauses: readonly QueryClause[] }
+  | { readonly ok: false; readonly error: string; readonly at: number };
+
+const QUERYABLE_KEY = /^[A-Za-z_@][\w.@/-]*$/;
+const FIELD_PREFIX = /[A-Za-z_@][\w.@/-]*:/y;
+
+/** Whether `key:` would parse as a field. A facet or a filter button may only offer one that does. */
+export function isQueryableKey(key: string): boolean {
+  return QUERYABLE_KEY.test(key);
+}
+
+const isSpace = (ch: string) => /\s/.test(ch);
+
+type Term =
+  | { readonly kind: "bare" | "quoted" | "regex"; readonly value: string; readonly end: number }
+  | { readonly error: string; readonly at: number };
+
+/**
+ * Whitespace-separated clauses: `word`, `"phrase"`, `/regex/`, `field:value`,
+ * `field:"value"`, `field:/regex/`, each optionally `-`-negated. Everything
+ * that compares is lowercased here once, so matching 5,000 lines does no
+ * case folding of the query.
+ */
+export function parseLogQuery(query: string): ParsedQuery {
+  const clauses: QueryClause[] = [];
+  let i = 0;
+  while (i < query.length) {
+    if (isSpace(query[i])) {
+      i += 1;
+      continue;
+    }
+    const start = i;
+    const negated = query[i] === "-";
+    if (negated) i += 1;
+    if (i >= query.length || isSpace(query[i])) {
+      return { ok: false, error: "A '-' needs something to exclude", at: start };
+    }
+    FIELD_PREFIX.lastIndex = i;
+    const prefix = FIELD_PREFIX.exec(query);
+    const field = prefix === null ? undefined : prefix[0].slice(0, -1);
+    if (prefix !== null) i += prefix[0].length;
+    const term = readTerm(query, i);
+    if ("error" in term) return { ok: false, error: term.error, at: term.at };
+    if (term.end < query.length && !isSpace(query[term.end])) {
+      return { ok: false, error: "Put a space after a quote or a regex", at: term.end };
+    }
+    const clause = toClause(field, term, negated, [start, term.end]);
+    if ("error" in clause) return { ok: false, error: clause.error, at: start };
+    clauses.push(clause);
+    i = term.end;
+  }
+  return { ok: true, clauses };
+}
+
+function readTerm(q: string, i: number): Term {
+  if (i >= q.length || isSpace(q[i])) {
+    // Only reachable after a field prefix: the loop never starts a term on a space.
+    return { error: "A field needs a value after ':'", at: i };
+  }
+  if (q[i] === '"') {
+    const close = q.indexOf('"', i + 1);
+    if (close < 0) return { error: "This quote is never closed", at: i };
+    return { kind: "quoted", value: q.slice(i + 1, close), end: close + 1 };
+  }
+  if (q[i] === "/") {
+    let j = i + 1;
+    while (j < q.length && q[j] !== "/") j += q[j] === "\\" ? 2 : 1;
+    if (j >= q.length) {
+      return { error: "This regex is never closed; to search for a path, put it in quotes", at: i };
+    }
+    return { kind: "regex", value: q.slice(i + 1, j), end: j + 1 };
+  }
+  let j = i;
+  while (j < q.length && !isSpace(q[j])) j += 1;
+  return { kind: "bare", value: q.slice(i, j), end: j };
+}
+
+function toClause(
+  field: string | undefined,
+  term: { readonly kind: "bare" | "quoted" | "regex"; readonly value: string },
+  negated: boolean,
+  span: readonly [number, number],
+): QueryClause | { readonly error: string } {
+  const base = { ...(field === undefined ? {} : { field }), negated, span };
+  if (term.kind === "regex") {
+    if (term.value === "") {
+      return { error: "An empty regex matches everything; to search for a URL, put it in quotes" };
+    }
+    try {
+      return { ...base, match: "regex", value: term.value, regex: new RegExp(term.value, "i") };
+    } catch (e) {
+      return { error: `Invalid regex: ${e instanceof Error ? e.message : String(e)}` };
+    }
+  }
+  const value = term.value.toLowerCase();
+  if (field !== undefined) return { ...base, match: "equals", value };
+  if (term.kind === "quoted") {
+    if (value === "") return { error: "An empty phrase matches everything" };
+    return { ...base, match: "phrase", value, words: logLineWords(term.value) };
+  }
+  return { ...base, match: "text", value };
+}
+
+/**
+ * Whether a line passes. Positive clauses on ONE field OR together — so two
+ * clicks on the Level facet show both levels — and everything else ANDs.
+ * `ignoreField` skips that field's clauses, which is how a facet counts its
+ * own values without filtering itself down to the one already picked.
+ */
+export function matchLine(line: QueryLine, clauses: readonly QueryClause[], ignoreField?: string): boolean {
+  const ignored = ignoreField?.toLowerCase();
+  let anyOf: Map<string, boolean> | undefined;
+  for (const clause of clauses) {
+    const field = clause.field?.toLowerCase();
+    if (field !== undefined && field === ignored) continue;
+    const hit = hits(line, clause);
+    if (clause.negated) {
+      if (hit) return false;
+    } else if (field === undefined) {
+      if (!hit) return false;
+    } else {
+      anyOf ??= new Map();
+      anyOf.set(field, (anyOf.get(field) ?? false) || hit);
+    }
+  }
+  if (anyOf !== undefined) for (const ok of anyOf.values()) if (!ok) return false;
+  return true;
+}
+
+function hits(line: QueryLine, clause: QueryClause): boolean {
+  if (clause.field === undefined) {
+    if (clause.match === "regex") return clause.regex.test(line.text);
+    if (line.haystack.includes(clause.value)) return true;
+    return clause.match === "phrase" && clause.words !== "" && ` ${line.words} `.includes(` ${clause.words} `);
+  }
+  const value = fieldValue(line, clause.field);
+  if (value === undefined) return false;
+  return clause.match === "regex" ? clause.regex.test(value) : value.toLowerCase() === clause.value;
+}
+
+/** A field's value, with `level` meaning the line's level word. Own keys only. */
+export function fieldValue(line: QueryLine, field: string): string | undefined {
+  const lower = field.toLowerCase();
+  if (lower === "level") return line.level === "" ? undefined : line.level;
+  if (Object.hasOwn(line.fields, field)) return line.fields[field];
+  for (const key of Object.keys(line.fields)) if (key.toLowerCase() === lower) return line.fields[key];
+  return undefined;
 }

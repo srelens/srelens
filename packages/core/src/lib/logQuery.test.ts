@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
-import { inlineFields, logLineWords, parseLogFields } from "./logQuery";
-import { healthRank } from "./logTerms";
+import { inlineFields, isQueryableKey, logLineWords, matchLine, parseLogFields, parseLogQuery, type QueryClause, type QueryLine } from "./logQuery";
+import { healthRank, logLineHealth, logLineLevel } from "./logTerms";
 
 describe("parseLogFields", () => {
   it("takes a JSON logger's msg as the message and keeps every key as a field", () => {
@@ -149,5 +149,141 @@ describe("healthRank", () => {
   it("ranks success between info and neutral", () => {
     expect(healthRank("info")).toBeGreaterThan(healthRank("success"));
     expect(healthRank("success")).toBeGreaterThan(healthRank("neutral"));
+  });
+});
+
+/** A QueryLine the way the Logs screen builds one from a stamp-stripped line. */
+function ql(text: string, at?: number): QueryLine {
+  const { message, fields } = parseLogFields(text);
+  const health = logLineHealth(text);
+  return {
+    text,
+    haystack: `${text} ${health}`.toLowerCase(),
+    words: logLineWords(message),
+    fields,
+    level: logLineLevel(text) ?? "",
+    health,
+    ...(at === undefined ? {} : { at }),
+  };
+}
+
+function clauses(query: string): readonly QueryClause[] {
+  const parsed = parseLogQuery(query);
+  if (!parsed.ok) throw new Error(`did not parse: ${parsed.error}`);
+  return parsed.clauses;
+}
+
+const matches = (query: string, ...texts: string[]) =>
+  texts
+    .map((t) => ql(t))
+    .filter((l) => matchLine(l, clauses(query)))
+    .map((l) => l.text);
+
+describe("parseLogQuery", () => {
+  it("reads every clause form, with the span each one occupies", () => {
+    const q = 'timeout "wrote batch" /err(or)?/ system:camlog note:"two words" ref:"" app:/^cid/ -level:debug';
+    expect(
+      clauses(q).map((c) => [c.field ?? null, c.match, c.value, c.negated, q.slice(c.span[0], c.span[1])]),
+    ).toEqual([
+      [null, "text", "timeout", false, "timeout"],
+      [null, "phrase", "wrote batch", false, '"wrote batch"'],
+      [null, "regex", "err(or)?", false, "/err(or)?/"],
+      ["system", "equals", "camlog", false, "system:camlog"],
+      ["note", "equals", "two words", false, 'note:"two words"'],
+      ["ref", "equals", "", false, 'ref:""'],
+      ["app", "regex", "^cid", false, "app:/^cid/"],
+      ["level", "equals", "debug", true, "-level:debug"],
+    ]);
+  });
+
+  it("lowercases what it compares, but keeps a field name and a regex as typed", () => {
+    expect(clauses("Timeout System:CamLog /ABC/").map((c) => [c.field ?? null, c.value])).toEqual([
+      [null, "timeout"],
+      ["System", "camlog"],
+      [null, "ABC"],
+    ]);
+  });
+
+  it("reads a colon that does not follow a field name as text", () => {
+    expect(clauses("10:33:03").map((c) => [c.field ?? null, c.match])).toEqual([[null, "text"]]);
+  });
+
+  it.each([
+    ['"wrote batch', "This quote is never closed", 0],
+    ["pool /err(", "This regex is never closed", 5],
+    ["/(/", "Invalid regex", 0],
+    ["a -", "A '-' needs something to exclude", 2],
+    ["system: x", "A field needs a value after ':'", 7],
+    ['"a"b', "Put a space after a quote or a regex", 3],
+    ["//", "An empty regex", 0],
+    ['""', "An empty phrase", 0],
+  ] as const)("refuses %j", (query, error, at) => {
+    const parsed = parseLogQuery(query);
+    expect(parsed.ok).toBe(false);
+    if (parsed.ok) return;
+    expect(parsed.error).toContain(error);
+    expect(parsed.at).toBe(at);
+  });
+});
+
+describe("matchLine", () => {
+  const A = '{"level":"info","msg":"Wrote batch","system":"camlog"}';
+  const B = '{"level":"warn","msg":"Skipping checkpoint","system":"schwarz"}';
+  const C = '{"level":"error","msg":"Write failed: timeout","system":"camlog"}';
+  const D = "GET /healthz 200 1ms";
+
+  it("ANDs free text and different fields", () => {
+    expect(matches("system:camlog timeout", A, B, C, D)).toEqual([C]);
+  });
+
+  it("ORs values of one field, so two level clicks show both", () => {
+    expect(matches("level:warn level:error", A, B, C, D)).toEqual([B, C]);
+  });
+
+  it("excludes with '-', and a line without the field is not excluded", () => {
+    expect(matches("-system:camlog", A, B, C, D)).toEqual([B, D]);
+  });
+
+  it("compares field names and values case-insensitively", () => {
+    expect(matches("SYSTEM:CamLog", A, B)).toEqual([A]);
+  });
+
+  it("reads level off a plain-text line as well as a JSON one", () => {
+    const P = "error pool timeout waited=30s in_use=5";
+    expect(matches("level:error", P, "info all good", C)).toEqual([P, C]);
+  });
+
+  it("still finds core's severity word in free text, as the filter always has", () => {
+    expect(matches("danger", "error pool timeout", "info fine")).toEqual(["error pool timeout"]);
+  });
+
+  it("finds a phrase across the punctuation the term tally strips", () => {
+    const S = '{"msg":"Success: Wrote batch","n":1}';
+    expect(matches('"success wrote batch"', S, "nothing here")).toEqual([S]);
+  });
+
+  it("anchors a regex at the line, not after the severity word appended for search", () => {
+    expect(matches("/timeout$/", "error pool timeout")).toEqual(["error pool timeout"]);
+  });
+
+  it("matches a field regex against that field's value", () => {
+    expect(matches("system:/^schw/", A, B)).toEqual([B]);
+  });
+
+  it("skips the ignored field's clauses, which is what a facet's own counts need", () => {
+    const line = ql(B);
+    expect(matchLine(line, clauses("level:error system:schwarz"))).toBe(false);
+    expect(matchLine(line, clauses("level:error system:schwarz"), "level")).toBe(true);
+  });
+
+  it("never reads a field off the object prototype", () => {
+    expect(matches("constructor:x", A)).toEqual([]);
+  });
+});
+
+describe("isQueryableKey", () => {
+  it("accepts what `field:` parses as, and nothing else", () => {
+    expect(["system", "http.status", "@timestamp", "app.kubernetes.io/name", "x_ref"].map(isQueryableKey)).toEqual([true, true, true, true, true]);
+    expect(["bad key", "1st", "", "a:b"].map(isQueryableKey)).toEqual([false, false, false, false]);
   });
 });
