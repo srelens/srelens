@@ -413,6 +413,32 @@ async fn run_flow(driver: &WebDriver, context: &str, full: bool) -> Result<(), F
     )
     .await?;
 
+    // The new design zooms its webview to 110% at the default scale
+    // (`uiScaleFactor`), and WebKitWebDriver aims a pointer click in CSS
+    // pixels without that zoom: in CI every click landed a tenth short, and no
+    // event reached the row it was meant for (a script click on the same row
+    // worked). The clicks below are what this smoke is for, so the webview
+    // goes back to 100% first, through the same command `setWebviewZoom`
+    // uses. The viewport it reports is logged, beside the window's size.
+    let viewport = driver
+        .execute(
+            r#"
+            const internals = window.__TAURI_INTERNALS__;
+            return internals
+                .invoke('plugin:webview|set_webview_zoom', {
+                    label: internals.metadata.currentWebview.label,
+                    value: 1,
+                })
+                .then(() => new Promise((done) => setTimeout(done, 300)))
+                .then(() => [innerWidth, innerHeight, outerWidth, outerHeight]);
+            "#,
+            vec![],
+        )
+        .await?
+        .json()
+        .clone();
+    println!("viewport after resetting the webview zoom: {viewport}");
+
     // ---- 3. A fresh profile opens on Home; open the kind context from its
     // cluster list. The row's name carries the link state after the em dash
     // (`Open cluster <name> — Connected`), which changes as the probe lands.
