@@ -1,28 +1,35 @@
-import { removeClause, type QueryClause } from "@srelens/core";
+import { removeClause, type QueryClause, type TimeRange } from "@srelens/core";
 import { toneColor } from "@srelens/ui-kit";
 import { Icons } from "../../lib/icons";
+import { rangeLabel } from "./time";
 
 /**
- * The query's clauses as removable pills. A VIEW of the search box's text,
- * never a second copy of it: each × removes its clause from the text by the
- * span it was parsed from, so the box and the pills can't disagree.
+ * The query's clauses as removable pills, and the time window beside them. The
+ * clause pills are a VIEW of the search box's text, never a second copy of it:
+ * each × removes its clause from the text by the span it was parsed from, so
+ * the box and the pills can't disagree. The window is the one filter that is
+ * not query text, so it gets a pill of its own and is cleared by Clear all too.
  */
 export function FilterPills({
   query,
   clauses,
+  range,
   onQueryChange,
+  onRangeChange,
   onRemoved,
 }: {
   query: string;
   clauses: readonly QueryClause[];
+  range: TimeRange | undefined;
   onQueryChange: (query: string) => void;
+  onRangeChange: (range: TimeRange | undefined) => void;
   /**
    * Called after a × or Clear all. The control that had focus is about to
    * unmount, and focus would otherwise fall to the body.
    */
   onRemoved?: () => void;
 }) {
-  if (clauses.length === 0) return null;
+  if (clauses.length === 0 && range === undefined) return null;
   return (
     <div data-slot="filter-pills" className="flex flex-wrap items-center gap-1.5 px-3 pt-2">
       {clauses.map((clause) => {
@@ -40,11 +47,22 @@ export function FilterPills({
           />
         );
       })}
+      {range !== undefined && (
+        <Pill
+          label={rangeLabel(range)}
+          removeLabel="Remove the time window"
+          onRemove={() => {
+            onRangeChange(undefined);
+            onRemoved?.();
+          }}
+        />
+      )}
       <button
         type="button"
         className="text-btn"
         onClick={() => {
           onQueryChange("");
+          onRangeChange(undefined);
           onRemoved?.();
         }}
       >

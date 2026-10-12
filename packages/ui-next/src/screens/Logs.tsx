@@ -12,6 +12,7 @@ import {
   absoluteTimestamp,
   describeStreamEnd,
   discoverFields,
+  inRange,
   logConnectionStatus,
   logLineHealth,
   logLineLevel,
@@ -28,6 +29,7 @@ import {
   type LogTarget,
   type QueryClause,
   type QueryLine,
+  type TimeRange,
 } from "@srelens/core";
 import {
   Alert,
@@ -73,6 +75,7 @@ import {
   STREAM_RAIL_WIDTH,
   type StreamPod,
 } from "./logs/StreamRail";
+import { VolumeHistogram } from "./logs/VolumeHistogram";
 import { NoClusterScreen } from "./resourceShell";
 
 /**
@@ -730,6 +733,8 @@ function LogsStream({
 }) {
   const { ask } = useConsole();
   const [text, setText] = useState("");
+  /** The window picked off the histogram, if any. The one filter that isn't query text. */
+  const [range, setRange] = useState<TimeRange | undefined>(undefined);
   /** Where focus goes when a pill is removed: the × that had it is about to unmount. */
   const searchRef = useRef<HTMLInputElement>(null);
   // `all`, as classic has always defaulted, and not the design's drawn `5m`.
@@ -949,9 +954,19 @@ function LogsStream({
     () => rows.filter((row) => !hidden.includes(row.pod) && (container === ALL_CONTAINERS || row.container === container)),
     [rows, hidden, container],
   );
-  const filtered = useMemo(
+  /** The query applied, but not the window: what the histogram counts, so it can shade the window instead of cropping to it. */
+  const queried = useMemo(
     () => (clauses.length === 0 ? scoped : scoped.filter((row) => matchLine(row, clauses))),
     [scoped, clauses],
+  );
+  const filtered = useMemo(
+    () => (range === undefined ? queried : queried.filter((row) => inRange(row, range))),
+    [queried, range],
+  );
+  /** In scope and in the window, but not queried: what the facets count over. */
+  const windowed = useMemo(
+    () => (range === undefined ? scoped : scoped.filter((row) => inRange(row, range))),
+    [scoped, range],
   );
   /**
    * The buffer's facet fields, from every row: sections must not come and go as
@@ -968,7 +983,9 @@ function LogsStream({
     return (fieldsRef.current = next);
   }, [deferredRows]);
   /** The facets recount a beat behind, like the query, so a busy stream never starves the box. */
-  const facetLines = useDeferredValue(scoped);
+  const facetLines = useDeferredValue(windowed);
+  /** The histogram counts the queried lines, not the windowed ones, and recounts a beat behind too. */
+  const volumeLines = useDeferredValue(queried);
   /** A facet click: rewrites the search box, the one place filters live. */
   const toggleFilter = useCallback(
     (target: ClauseTarget, mode: ClauseMode) => setText((q) => toggleClause(q, target, mode)),
@@ -989,6 +1006,7 @@ function LogsStream({
    *  that reports "no lines match" cannot undo the tick that caused it. */
   const clearFilters = useCallback(() => {
     setText("");
+    setRange(undefined);
     setContainer(ALL_CONTAINERS);
     setHidden([]);
   }, []);
@@ -1380,9 +1398,12 @@ function LogsStream({
         <FilterPills
           query={text}
           clauses={typed.ok ? typed.clauses : NO_CLAUSES}
+          range={range}
           onQueryChange={setText}
+          onRangeChange={setRange}
           onRemoved={() => searchRef.current?.focus()}
         />
+        <VolumeHistogram lines={volumeLines} range={range} onRangeChange={setRange} />
 
         {offered.status === "error" && (
           // The list the picker is drawn from could not be read again: what it

@@ -2181,3 +2181,52 @@ describe("structured lines and the query (#898)", () => {
     expect([...h.facetPasses].sort()).toEqual(["level", "system"]);
   });
 });
+
+describe("the volume histogram (#898)", () => {
+  it("narrows the body and the export to a clicked bar, and the window's pill takes it back", async () => {
+    const { container } = draw();
+    const region = await body();
+    push(...LINES);
+    const bars = container.querySelectorAll('[data-slot="bucket"]');
+    expect(bars).toHaveLength(4);
+    fireEvent.pointerDown(bars[0]);
+    fireEvent.pointerUp(bars[0]);
+    expect(messages(region)).toEqual(["info starting checkout-api build=4f2a1c"]);
+    await userEvent.click(screen.getByRole("button", { name: "Export" }));
+    await waitFor(() => expect(h.saved).toHaveBeenCalled());
+    expect(String(h.saved.mock.calls[0][1]).split("\n")).toHaveLength(1);
+    await userEvent.click(screen.getByRole("button", { name: "Remove the time window" }));
+    expect(rendered(region)).toHaveLength(4);
+  });
+
+  it("shades the window instead of cropping to it, and the rail counts what is inside it", async () => {
+    const { container } = draw();
+    await body();
+    push(...JSON_LINES);
+    const bars = () => container.querySelectorAll('[data-slot="bucket"]');
+    expect(screen.getByRole("button", { name: "level = info, 1 line" })).toBeTruthy();
+    fireEvent.pointerDown(bars()[1]);
+    fireEvent.pointerUp(bars()[1]);
+    // The histogram keeps all three bars, so the reader can still see the spike's surroundings.
+    expect(bars()).toHaveLength(3);
+    expect(screen.getByRole("button", { name: "level = warn, 1 line" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "level = info, 1 line" })).toBeNull();
+  });
+
+  it("takes the window away with the rest of the filters when nothing is left to show", async () => {
+    const { container } = draw();
+    const region = await body();
+    push(
+      line("api-7/api", "14:07:41.208000000", "info before the gap"),
+      line("api-7/api", "14:07:44.010000000", "info after the gap"),
+    );
+    const bars = container.querySelectorAll('[data-slot="bucket"]');
+    // Four one-second bars, and the second is empty.
+    fireEvent.pointerDown(bars[1]);
+    fireEvent.pointerUp(bars[1]);
+    expect(rendered(region)).toHaveLength(0);
+    await userEvent.click(screen.getByRole("button", { name: "Clear the filter" }));
+    expect(rendered(region)).toHaveLength(2);
+    expect(screen.queryByRole("button", { name: "Remove the time window" })).toBeNull();
+  });
+});

@@ -1,18 +1,26 @@
 import { describe, it, expect, vi } from "vitest";
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { parseLogQuery, type QueryClause } from "@srelens/core";
+import { parseLogQuery, type QueryClause, type TimeRange } from "@srelens/core";
 import { FilterPills } from "./FilterPills";
 
-function pills(query: string) {
+function pills(query: string, range?: TimeRange) {
   const parsed = parseLogQuery(query);
   const clauses: readonly QueryClause[] = parsed.ok ? parsed.clauses : [];
   const onQueryChange = vi.fn();
+  const onRangeChange = vi.fn();
   const onRemoved = vi.fn();
   const { container } = render(
-    <FilterPills query={query} clauses={clauses} onQueryChange={onQueryChange} onRemoved={onRemoved} />,
+    <FilterPills
+      query={query}
+      clauses={clauses}
+      range={range}
+      onQueryChange={onQueryChange}
+      onRangeChange={onRangeChange}
+      onRemoved={onRemoved}
+    />,
   );
-  return { container, onQueryChange, onRemoved };
+  return { container, onQueryChange, onRangeChange, onRemoved };
 }
 
 const labels = (container: HTMLElement) =>
@@ -60,6 +68,32 @@ describe("FilterPills", () => {
   it("draws Clear all as the kit's text button", () => {
     pills("a b");
     expect(screen.getByRole("button", { name: "Clear all" }).classList.contains("text-btn")).toBe(true);
+  });
+
+  it("draws the time window as a pill of its own, and Clear all clears it too", async () => {
+    const from = new Date(2026, 9, 12, 10, 33, 0).getTime();
+    const { container, onQueryChange, onRangeChange } = pills("", { from, to: from + 90_000 });
+    expect(labels(container)).toEqual(["10:33:00 – 10:34:30"]);
+    await userEvent.click(screen.getByRole("button", { name: "Clear all" }));
+    expect(onQueryChange).toHaveBeenCalledWith("");
+    expect(onRangeChange).toHaveBeenCalledWith(undefined);
+  });
+
+  it("removes the window alone with its ×, and tells the caller, once", async () => {
+    // Same reason as a clause's ×: the button that had focus is about to unmount.
+    const from = new Date(2026, 9, 12, 10, 33, 0).getTime();
+    const { onQueryChange, onRangeChange, onRemoved } = pills("a", { from, to: from + 1000 });
+    await userEvent.click(screen.getByRole("button", { name: "Remove the time window" }));
+    expect(onRangeChange).toHaveBeenCalledWith(undefined);
+    expect(onQueryChange).not.toHaveBeenCalled();
+    expect(onRemoved).toHaveBeenCalledTimes(1);
+  });
+
+  it("clears the window before telling the caller Clear all was used", async () => {
+    const from = new Date(2026, 9, 12, 10, 33, 0).getTime();
+    const { onRangeChange, onRemoved } = pills("a", { from, to: from + 1000 });
+    await userEvent.click(screen.getByRole("button", { name: "Clear all" }));
+    expect(onRangeChange.mock.invocationCallOrder[0]).toBeLessThan(onRemoved.mock.invocationCallOrder[0]);
   });
 
   it("lets a long unbroken clause wrap inside the pane", () => {
