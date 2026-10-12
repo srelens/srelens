@@ -32,6 +32,7 @@ import { useActiveContext, useContexts } from "../lib/clusters";
 import { detailRoute } from "../lib/detailRoute";
 import { hint } from "../lib/shortcuts";
 import { openTab, setActiveCluster, switchWorkspace, useTabs } from "../lib/tabsStore";
+import { openOnNamedCluster } from "../lib/openCluster";
 import { logsRoute } from "../screens/Logs";
 import { Transcript } from "../screens/agent/Transcript";
 import { useWorkspaceSealed } from "./LockGate";
@@ -360,7 +361,8 @@ export function Console({ fullView }: { fullView?: boolean }) {
           // kind/namespace/name into the URL itself, so this is the one `Go`
           // command whose label ("Follow logs · <name>") is a promise the
           // navigation actually keeps.
-          openTab(logsRoute(r.kind, r.namespace, r.name), { clusterName: r.context });
+          // The Logs screen follows the rail; see `openOnNamedCluster` (#834).
+          openOnNamedCluster(r.context, logsRoute(r.kind, r.namespace, r.name));
           return;
         }
         // `shell` and `forward` have no such route — see `agentCommands.ts`'s

@@ -11,6 +11,7 @@ vi.mock("@srelens/core", async (importOriginal) => ({
   podsOnNode,
 }));
 
+import { resetContexts, setContexts } from "../../lib/clusters";
 import { defaultState } from "../../lib/tabs";
 import * as store from "../../lib/tabsStore";
 import { NodePodsSection } from "./sections";
@@ -46,6 +47,7 @@ beforeEach(() => {
   podsOnNode.mockReset();
   podsOnNode.mockResolvedValue({ pods: Array.from({ length: 14 }, (_, i) => pod(i)) });
   store.setState(defaultState([CTX]));
+  resetContexts();
 });
 
 afterEach(() => vi.useRealTimers());
@@ -119,6 +121,29 @@ describe("NodePodsSection", () => {
     expect(store.activeRoute()).toBe("/k/pods");
     const tab = store.currentWorkspace().tabs.find((candidate) => candidate.route === "/k/pods");
     expect(tab?.view).toMatchObject({ filter: "worker-2", filterKey: "node" });
+  });
+
+  it("brings the node's own cluster into focus before View all, when the rail shows another (#834)", async () => {
+    const stage: ClusterContext = { ...CTX, name: "stage-eu", stableId: "stage", key: "stage", cluster: "stage" };
+    setContexts([CTX, stage]);
+    store.setState(defaultState([CTX, stage]));
+    store.setActiveCluster("stage", "stage-eu");
+    render(<NodePodsSection context="prod-eu" node="worker-2" />);
+    await act(async () => Promise.resolve());
+    fireEvent.click(screen.getByRole("button", { name: "View all 14 pods on worker-2" }));
+    expect(store.currentWorkspace().activeCluster).toBe("prod");
+    expect(store.activeRoute()).toBe("/k/pods");
+  });
+
+  it("leaves a paused cluster paused when it is already the one in focus", async () => {
+    setContexts([CTX]);
+    store.setState(defaultState([CTX]));
+    store.setClusterPaused(store.currentWorkspace().id, "prod", true);
+    render(<NodePodsSection context="prod-eu" node="worker-2" />);
+    await act(async () => Promise.resolve());
+    fireEvent.click(screen.getByRole("button", { name: "View all 14 pods on worker-2" }));
+    expect(store.currentWorkspace().pausedClusters).toEqual(["prod"]);
+    expect(store.activeRoute()).toBe("/k/pods");
   });
 
   it("keeps loading, refusal and an empty node distinct", async () => {

@@ -1153,6 +1153,22 @@ describe("Console — debt 2's real navigation", () => {
     expect(tab?.sub).toBe("prod-eu");
   });
 
+  it("Follow logs from a detail tab pinned to another cluster brings that cluster into focus (#834)", async () => {
+    // The dock speaks for the detail tab's own cluster, and the Logs screen
+    // reads the rail's: with the rail on stage, prod's pod would otherwise be
+    // followed on stage under a prod-labelled tab.
+    const user = userEvent.setup();
+    const contexts = [ctx("prod", "prod-eu"), ctx("stage", "stage-eu")];
+    setContexts(contexts);
+    tabsStore.setState(defaultState(contexts));
+    tabsStore.setActiveCluster("stage", "stage-eu");
+    tabsStore.openTab("/k/prod-eu/Pod/checkout/api-0", { clusterName: "prod-eu" });
+    setup();
+    await user.type(screen.getByRole("textbox", { name: "Console prompt" }), "/follow logs{Enter}");
+    expect(tabsStore.activeRoute()).toBe("/logs/Pod/checkout/api-0");
+    expect(tabsStore.currentWorkspace().activeCluster).toBe("prod");
+  });
+
   it("Open a shell reaches Terminals — generic navigation, per debt 2's resolution", async () => {
     const user = userEvent.setup();
     tabsStore.openTab("/k/Pod/checkout/api-0");

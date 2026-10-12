@@ -42,6 +42,7 @@ import { AgeCell } from "../../lib/ageCell";
 import type { WorkloadSelector } from "../../lib/workloadSelector";
 import { detailRoute } from "../../lib/detailRoute";
 import { currentWorkspace, openTab, setTabView } from "../../lib/tabsStore";
+import { openOnNamedCluster } from "../../lib/openCluster";
 import { ContainerBlocks } from "../../lib/kinds/containerBlocks";
 
 /**
@@ -463,7 +464,9 @@ export function NodePodsSection({ context, node }: { context: string; node: stri
   const openPod = (pod: PodSummary) =>
     openTab(detailRoute("Pod", pod.namespace, pod.name, { cluster: context }), { clusterName: context });
   const viewAll = () => {
-    openTab("/k/pods", { clusterName: context });
+    // The Pods list follows the rail: the node's cluster comes into focus
+    // first when the rail shows another (#834).
+    openOnNamedCluster(context, "/k/pods");
     setTabView(currentWorkspace().activeId, { filter: node, filterKey: "node" });
   };
 

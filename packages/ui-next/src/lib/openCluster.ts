@@ -1,4 +1,5 @@
 import type { ClusterContext } from "@srelens/core";
+import { getContexts } from "./clusters";
 import { currentWorkspace, openTab, setActiveCluster, setClusterPaused, setWorkspaceClusters } from "./tabsStore";
 import { invalidateProbe, probeCluster } from "./probe";
 
@@ -54,6 +55,21 @@ export function openCluster(context: ClusterContext): void {
 export function openOnCluster(context: ClusterContext, route: string): void {
   focusCluster(context);
   openTab(route, { clusterName: context.name });
+}
+
+/**
+ * Open a route that follows the rail — a pod's logs, a list filtered to one
+ * node — about the cluster named `cluster`. A detail tab keeps its own cluster
+ * (#834) while the rail moves on, and a route opened from it that read the
+ * rail would show the rail's cluster under this one's label. So that cluster
+ * is brought into focus first, but only when the rail shows another: one
+ * already in focus is not read again or unpaused for a click that changes
+ * nothing about it.
+ */
+export function openOnNamedCluster(cluster: string | undefined, route: string): void {
+  const context = cluster ? getContexts().find((c) => c.name === cluster) : undefined;
+  if (context && currentWorkspace().activeCluster !== context.stableId) focusCluster(context);
+  openTab(route, { clusterName: cluster });
 }
 
 /**
