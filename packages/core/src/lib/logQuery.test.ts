@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { inlineFields, isQueryableKey, logLineWords, matchLine, parseLogFields, parseLogQuery, type QueryClause, type QueryLine } from "./logQuery";
+import { clauseState, inlineFields, isQueryableKey, logLineWords, matchLine, parseLogFields, parseLogQuery, removeClause, toggleClause, type QueryClause, type QueryLine } from "./logQuery";
 import { healthRank, logLineHealth, logLineLevel } from "./logTerms";
 
 describe("parseLogFields", () => {
@@ -285,5 +285,68 @@ describe("isQueryableKey", () => {
   it("accepts what `field:` parses as, and nothing else", () => {
     expect(["system", "http.status", "@timestamp", "app.kubernetes.io/name", "x_ref"].map(isQueryableKey)).toEqual([true, true, true, true, true]);
     expect(["bad key", "1st", "", "a:b"].map(isQueryableKey)).toEqual([false, false, false, false]);
+  });
+});
+
+describe("toggleClause", () => {
+  const sys = { field: "system", value: "camlog" };
+
+  it.each([
+    ["", "include", "system:camlog"],
+    ["", "exclude", "-system:camlog"],
+    ["pool system:camlog", "include", "pool"],
+    ["pool system:camlog", "exclude", "pool -system:camlog"],
+    ["pool -system:camlog", "include", "pool system:camlog"],
+    ["pool -system:camlog x", "exclude", "pool x"],
+    ["pool", "include", "pool system:camlog"],
+    ["pool  ", "include", "pool system:camlog"],
+  ] as const)("%j, %s", (query, mode, expected) => {
+    expect(toggleClause(query, sys, mode)).toBe(expected);
+  });
+
+  it("finds the clause however it was typed", () => {
+    expect(toggleClause("System:CamLog", sys, "include")).toBe("");
+  });
+
+  it("quotes a value the query would otherwise misread", () => {
+    expect(toggleClause("", { field: "note", value: "two words" }, "include")).toBe('note:"two words"');
+    expect(toggleClause("", { field: "ref", value: "" }, "include")).toBe('ref:""');
+    expect(toggleClause("", { field: "path", value: "/healthz" }, "include")).toBe('path:"/healthz"');
+    expect(toggleClause("", { field: "addr", value: "10.0.0.1:443" }, "include")).toBe('addr:"10.0.0.1:443"');
+  });
+
+  it("writes a value holding a quote as an exact regex, and finds it again", () => {
+    const target = { field: "q", value: 'say "hi"' };
+    const once = toggleClause("", target, "include");
+    expect(once).toBe('q:/^say "hi"$/');
+    expect(matches(once, '{"q":"say \\"hi\\""}', '{"q":"say hi"}')).toHaveLength(1);
+    expect(toggleClause(once, target, "include")).toBe("");
+  });
+
+  it("toggles a phrase for a Top term", () => {
+    expect(toggleClause("x", { phrase: "Wrote batch" }, "include")).toBe('x "Wrote batch"');
+    expect(toggleClause('x "wrote batch"', { phrase: "Wrote batch" }, "exclude")).toBe('x -"Wrote batch"');
+  });
+
+  it("appends to a query that does not parse rather than losing what was typed", () => {
+    expect(toggleClause('"open', sys, "include")).toBe('"open system:camlog');
+  });
+});
+
+describe("removeClause", () => {
+  it("removes exactly one clause and closes the gap it leaves", () => {
+    const q = 'a  "b c"   -d:e f';
+    const [, phrase, negated] = clauses(q);
+    expect(removeClause(q, phrase)).toBe("a -d:e f");
+    expect(removeClause(q, negated)).toBe('a  "b c" f');
+  });
+});
+
+describe("clauseState", () => {
+  it("says whether a value is included, excluded or neither", () => {
+    const cs = clauses("system:camlog -level:debug");
+    expect(clauseState(cs, { field: "system", value: "CamLog" })).toBe("include");
+    expect(clauseState(cs, { field: "level", value: "debug" })).toBe("exclude");
+    expect(clauseState(cs, { field: "level", value: "info" })).toBeUndefined();
   });
 });

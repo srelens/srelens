@@ -347,3 +347,74 @@ export function fieldValue(line: QueryLine, field: string): string | undefined {
   for (const key of Object.keys(line.fields)) if (key.toLowerCase() === lower) return line.fields[key];
   return undefined;
 }
+
+/** What a click filters on: a field's value, or a Top term as a phrase. */
+export type ClauseTarget = { readonly field: string; readonly value: string } | { readonly phrase: string };
+export type ClauseMode = "include" | "exclude";
+
+/** Whether the query already includes or excludes `target`. */
+export function clauseState(clauses: readonly QueryClause[], target: ClauseTarget): ClauseMode | undefined {
+  const found = clauses.find((c) => sameTarget(c, target));
+  return found === undefined ? undefined : found.negated ? "exclude" : "include";
+}
+
+/**
+ * The query after a facet click: absent → appended; same mode → removed;
+ * other mode → flipped in place. Every other character of what was typed is
+ * left alone — the box is the reader's, and a click must not rewrite it.
+ */
+export function toggleClause(query: string, target: ClauseTarget, mode: ClauseMode): string {
+  const parsed = parseLogQuery(query);
+  const found = parsed.ok ? parsed.clauses.find((c) => sameTarget(c, target)) : undefined;
+  const spelled = mode === "exclude" ? `-${spell(target)}` : spell(target);
+  if (found === undefined) return append(query, spelled);
+  if ((mode === "exclude") === found.negated) return removeSpan(query, found.span);
+  return query.slice(0, found.span[0]) + spelled + query.slice(found.span[1]);
+}
+
+/** The query without `clause`, which must come from parsing this same text. */
+export function removeClause(query: string, clause: QueryClause): string {
+  return removeSpan(query, clause.span);
+}
+
+function sameTarget(c: QueryClause, t: ClauseTarget): boolean {
+  if ("phrase" in t) {
+    if (c.field !== undefined) return false;
+    return (
+      (c.match === "phrase" && c.value === t.phrase.toLowerCase()) ||
+      (c.match === "regex" && c.value === escapeRegex(t.phrase))
+    );
+  }
+  if (c.field?.toLowerCase() !== t.field.toLowerCase()) return false;
+  return (
+    (c.match === "equals" && c.value === t.value.toLowerCase()) ||
+    (c.match === "regex" && c.value === `^${escapeRegex(t.value)}$`)
+  );
+}
+
+function spell(t: ClauseTarget): string {
+  if ("phrase" in t) return t.phrase.includes('"') ? `/${escapeRegex(t.phrase)}/` : `"${t.phrase}"`;
+  return `${t.field}:${spellValue(t.value)}`;
+}
+
+/** A value spelled so it parses back to itself: a quote cannot be quoted, so it becomes an exact regex. */
+function spellValue(value: string): string {
+  if (value.includes('"')) return `/^${escapeRegex(value)}$/`;
+  if (value === "" || /[\s:]/.test(value) || value.startsWith("/")) return `"${value}"`;
+  return value;
+}
+
+function escapeRegex(text: string): string {
+  return text.replace(/[.*+?^${}()|[\]\\/]/g, "\\$&");
+}
+
+function append(query: string, clause: string): string {
+  const base = query.trimEnd();
+  return base === "" ? clause : `${base} ${clause}`;
+}
+
+function removeSpan(query: string, [start, end]: readonly [number, number]): string {
+  const left = query.slice(0, start).trimEnd();
+  const right = query.slice(end).trimStart();
+  return left !== "" && right !== "" ? `${left} ${right}` : left + right;
+}
