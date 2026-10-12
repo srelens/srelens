@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { clauseState, inlineFields, isQueryableKey, logLineWords, matchLine, parseLogFields, parseLogQuery, removeClause, toggleClause, type QueryClause, type QueryLine } from "./logQuery";
+import { clauseState, discoverFields, facetCounts, inlineFields, isQueryableKey, logLineWords, matchLine, parseLogFields, parseLogQuery, removeClause, toggleClause, type QueryClause, type QueryLine } from "./logQuery";
 import { healthRank, logLineHealth, logLineLevel } from "./logTerms";
 
 describe("parseLogFields", () => {
@@ -348,5 +348,56 @@ describe("clauseState", () => {
     expect(clauseState(cs, { field: "system", value: "CamLog" })).toBe("include");
     expect(clauseState(cs, { field: "level", value: "debug" })).toBe("exclude");
     expect(clauseState(cs, { field: "level", value: "info" })).toBeUndefined();
+  });
+});
+
+describe("discoverFields", () => {
+  const json = (o: Record<string, unknown>) => ql(JSON.stringify(o));
+
+  it("offers keys most lines carry with a handful of values, most common first", () => {
+    const lines = Array.from({ length: 60 }, (_, i) =>
+      json({
+        level: i % 3 ? "info" : "warn",
+        msg: `m${i}`,
+        system: `s${i % 3}`,
+        app: "syncer",
+        id: `req-${i}`,
+        ...(i % 4 === 0 ? { region: i % 8 ? "eu" : "us" } : {}),
+        ...(i === 0 ? { rare: "x" } : {}),
+        "bad key": i % 2 ? "a" : "b",
+      }),
+    );
+    lines.push(ql("a plain line"));
+    // system: every line, 3 values. region: 15 of 60 lines (≥ 20%), 2 values.
+    // app has one value, id has 60, rare is on one line, `bad key` can't be
+    // typed, and level/msg have columns of their own.
+    expect(discoverFields(lines)).toEqual(["system", "region"]);
+  });
+
+  it("offers at most six, ties broken by name", () => {
+    const keys = ["g", "f", "e", "d", "c", "b", "a"];
+    const lines = Array.from({ length: 10 }, (_, i) => json(Object.fromEntries(keys.map((k) => [k, `${k}${i % 2}`]))));
+    expect(discoverFields(lines)).toEqual(["a", "b", "c", "d", "e", "f"]);
+  });
+});
+
+describe("facetCounts", () => {
+  const lines = [
+    '{"level":"info","system":"camlog"}',
+    '{"level":"INFO","system":"camlog"}',
+    '{"level":"warn","system":"schwarz"}',
+    '{"level":"error","system":"camlog"}',
+    "no fields here",
+  ].map((t) => ql(t));
+
+  it("counts a field's values among the lines the rest of the query keeps, ignoring its own clauses", () => {
+    expect(facetCounts(lines, clauses("level:warn system:camlog"), "level")).toEqual([
+      { value: "info", count: 2 },
+      { value: "error", count: 1 },
+    ]);
+  });
+
+  it("counts another field with every clause applied", () => {
+    expect(facetCounts(lines, clauses("level:warn"), "system")).toEqual([{ value: "schwarz", count: 1 }]);
   });
 });

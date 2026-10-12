@@ -418,3 +418,71 @@ function removeSpan(query: string, [start, end]: readonly [number, number]): str
   const right = query.slice(end).trimStart();
   return left !== "" && right !== "" ? `${left} ${right}` : left + right;
 }
+
+export interface FacetValue {
+  readonly value: string;
+  readonly count: number;
+}
+
+const MIN_COVERAGE = 0.2;
+const MIN_DISTINCT = 2;
+const MAX_DISTINCT = 50;
+const MAX_FIELDS = 6;
+
+/**
+ * The fields worth a facet: carried by at least a fifth of the lines that have
+ * fields at all, with between two and fifty values. One value leaves nothing
+ * to choose between, and more than fifty is an id or a timestamp, not a
+ * category. Run over the whole buffer, never the filtered view, so the rail's
+ * sections don't come and go as the reader filters.
+ */
+export function discoverFields(lines: readonly QueryLine[]): string[] {
+  let structured = 0;
+  const seen = new Map<string, { lines: number; values: Set<string> }>();
+  for (const line of lines) {
+    const keys = Object.keys(line.fields);
+    if (keys.length === 0) continue;
+    structured += 1;
+    for (const key of keys) {
+      if (HIDDEN_KEYS.has(key.toLowerCase()) || !isQueryableKey(key)) continue;
+      let entry = seen.get(key);
+      if (entry === undefined) {
+        entry = { lines: 0, values: new Set() };
+        seen.set(key, entry);
+      }
+      entry.lines += 1;
+      // Past the cap the key is out anyway, so the set stops growing.
+      if (entry.values.size <= MAX_DISTINCT) entry.values.add(line.fields[key].toLowerCase());
+    }
+  }
+  return [...seen.entries()]
+    .filter(
+      ([, e]) =>
+        e.lines >= structured * MIN_COVERAGE && e.values.size >= MIN_DISTINCT && e.values.size <= MAX_DISTINCT,
+    )
+    .sort((a, b) => b[1].lines - a[1].lines || compare(a[0], b[0]))
+    .slice(0, MAX_FIELDS)
+    .map(([key]) => key);
+}
+
+/**
+ * A field's values among the lines every OTHER clause keeps, most frequent
+ * first. Grouped case-insensitively, because that is how they match, and
+ * named by the first spelling seen.
+ */
+export function facetCounts(lines: readonly QueryLine[], clauses: readonly QueryClause[], field: string): FacetValue[] {
+  const counts = new Map<string, { value: string; count: number }>();
+  for (const line of lines) {
+    const value = fieldValue(line, field);
+    if (value === undefined || !matchLine(line, clauses, field)) continue;
+    const key = value.toLowerCase();
+    const entry = counts.get(key);
+    if (entry === undefined) counts.set(key, { value, count: 1 });
+    else entry.count += 1;
+  }
+  return [...counts.values()].sort((a, b) => b.count - a.count || compare(a.value, b.value));
+}
+
+function compare(a: string, b: string): number {
+  return a < b ? -1 : a > b ? 1 : 0;
+}
