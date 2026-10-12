@@ -6644,6 +6644,21 @@ fn open_browser_url_runs_the_browser_env_command_on_the_url() {
     );
 }
 
+#[test]
+fn browser_env_command_passes_the_options_then_the_url() {
+    // Built, never spawned: the program, its options and the URL arrive as
+    // separate arguments.
+    let cmd = srectl::app::browser_env_command(
+        "\"srelens-no-such-browser-0x380\" --new-tab",
+        "https://example.invalid/srelens-896",
+    )
+    .expect("a non-empty $BROWSER is a command");
+    assert_eq!(cmd.get_program(), "srelens-no-such-browser-0x380");
+    let args: Vec<_> = cmd.get_args().collect();
+    assert_eq!(args, ["--new-tab", "https://example.invalid/srelens-896"]);
+    assert!(srectl::app::browser_env_command("  ", "https://example.invalid").is_none());
+}
+
 #[tokio::test]
 async fn argo_view_key_bindings_and_actions() {
     let _settings = common::env::isolate_settings();
