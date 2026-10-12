@@ -1000,6 +1000,16 @@ function LogsStream({
     (target: ClauseTarget, mode: ClauseMode) => setText((q) => toggleClause(q, target, mode)),
     [],
   );
+  /**
+   * A legend click: every level word of a group in or out, in one update. The
+   * legend only offers words of lines the query keeps, so a group's words are
+   * all in the text or all out of it, and flipping each one is the whole job.
+   */
+  const toggleLevels = useCallback(
+    (words: string[]) =>
+      setText((q) => words.reduce((query, value) => toggleClause(query, { field: "level", value }, "include"), q)),
+    [],
+  );
 
   const selectedIndex = selected === null ? -1 : filtered.indexOf(selected);
 
@@ -1476,7 +1486,13 @@ function LogsStream({
           onRangeChange={setRange}
           onRemoved={() => searchRef.current?.focus()}
         />
-        <VolumeHistogram lines={volumeLines} range={range} onRangeChange={setRange} />
+        <VolumeHistogram
+          lines={volumeLines}
+          range={range}
+          onRangeChange={setRange}
+          clauses={typed.ok ? typed.clauses : NO_CLAUSES}
+          onToggleLevels={toggleLevels}
+        />
 
         {offered.status === "error" && (
           // The list the picker is drawn from could not be read again: what it

@@ -8,6 +8,8 @@ import {
   logLineLevel,
   logLineWords,
   parseLogFields,
+  parseLogQuery,
+  type QueryClause,
   type QueryLine,
   type Volume,
 } from "@srelens/core";
@@ -53,13 +55,39 @@ function ql(text: string, at?: number): QueryLine {
 /** Bars at :00, :01 and :03, an empty one at :02, and one line with no time. */
 const LINES = [ql("error a", T0), ql("info b", T0 + 1000), ql("info c", T0 + 3000), ql("no time")];
 
-function draw(range?: { from: number; to: number }) {
+/** For a render that isn't about the legend. */
+const QUIET = { clauses: [] as readonly QueryClause[], onToggleLevels: () => undefined };
+
+const clausesOf = (query: string): readonly QueryClause[] => {
+  const parsed = parseLogQuery(query);
+  return parsed.ok ? parsed.clauses : [];
+};
+
+function draw(range?: { from: number; to: number }, clauses: readonly QueryClause[] = []) {
   const onRangeChange = vi.fn();
-  const view = render(<VolumeHistogram lines={LINES} range={range} onRangeChange={onRangeChange} />);
+  const onToggleLevels = vi.fn();
+  const view = render(
+    <VolumeHistogram
+      lines={LINES}
+      range={range}
+      onRangeChange={onRangeChange}
+      clauses={clauses}
+      onToggleLevels={onToggleLevels}
+    />,
+  );
   const bars = () => Array.from(view.container.querySelectorAll('[data-slot="bucket"]'));
   const caption = () => view.container.querySelector('[data-slot="volume-caption"]')?.textContent ?? "";
-  return { ...view, onRangeChange, bars, caption };
+  return { ...view, onRangeChange, onToggleLevels, bars, caption };
 }
+
+/** One bucket holding `texts`, all at the same instant. */
+const one = (...texts: string[]) =>
+  render(<VolumeHistogram {...QUIET} lines={texts.map((t) => ql(t, T0))} range={undefined} onRangeChange={vi.fn()} />);
+const segments = (container: HTMLElement) =>
+  Array.from(container.querySelectorAll<SVGRectElement>('[data-slot="bucket"] rect[data-slot="segment"]'));
+const num = (el: Element, attr: string) => Number(el.getAttribute(attr));
+const texts = (container: HTMLElement, slot: string) =>
+  Array.from(container.querySelectorAll(`[data-slot="${slot}"]`)).map((e) => e.textContent);
 
 describe("VolumeHistogram", () => {
   it("draws one bar per bucket, gaps included, and says what it counted", () => {
@@ -89,7 +117,7 @@ describe("VolumeHistogram", () => {
     await userEvent.keyboard("{ArrowRight}{ArrowRight}{Enter}");
     expect(onRangeChange).toHaveBeenLastCalledWith({ from: T0 + 1000, to: T0 + 2000 });
     rerender(
-      <VolumeHistogram lines={LINES} range={{ from: T0 + 1000, to: T0 + 2000 }} onRangeChange={onRangeChange} />,
+      <VolumeHistogram {...QUIET} lines={LINES} range={{ from: T0 + 1000, to: T0 + 2000 }} onRangeChange={onRangeChange} />,
     );
     await userEvent.keyboard("{Escape}");
     expect(onRangeChange).toHaveBeenLastCalledWith(undefined);
@@ -105,7 +133,7 @@ describe("VolumeHistogram", () => {
     // `inRange` is false for it too, but it has no time to be outside of.
     const lines = [ql("a", T0), ql("b", T0 + 1000), ql("bad stamp", NaN)];
     const { container } = render(
-      <VolumeHistogram lines={lines} range={{ from: T0, to: T0 + 1000 }} onRangeChange={vi.fn()} />,
+      <VolumeHistogram {...QUIET} lines={lines} range={{ from: T0, to: T0 + 1000 }} onRangeChange={vi.fn()} />,
     );
     const caption = container.querySelector('[data-slot="volume-caption"]')?.textContent ?? "";
     expect(caption).toMatch(/^2 lines · .* · 1 without a time · 1 outside the window$/);
@@ -114,11 +142,11 @@ describe("VolumeHistogram", () => {
   it("still picks a window when the stream coarsens its bars mid-drag", () => {
     // A live tail re-buckets under the pointer: the bar pressed may be gone by the release.
     const onRangeChange = vi.fn();
-    const view = render(<VolumeHistogram lines={LINES} range={undefined} onRangeChange={onRangeChange} />);
+    const view = render(<VolumeHistogram {...QUIET} lines={LINES} range={undefined} onRangeChange={onRangeChange} />);
     const bars = () => view.container.querySelectorAll('[data-slot="bucket"]');
     fireEvent.pointerDown(bars()[3]);
     view.rerender(
-      <VolumeHistogram lines={[ql("info b", T0 + 1000)]} range={undefined} onRangeChange={onRangeChange} />,
+      <VolumeHistogram {...QUIET} lines={[ql("info b", T0 + 1000)]} range={undefined} onRangeChange={onRangeChange} />,
     );
     expect(bars()).toHaveLength(1);
     fireEvent.pointerUp(bars()[0]);
@@ -163,6 +191,18 @@ describe("VolumeHistogram", () => {
       expect(ring?.getAttribute("x")).toBe("12");
       expect(ring?.closest('[opacity="0.35"]')).toBeNull();
       expect(ring?.getAttribute("vector-effect")).toBe("non-scaling-stroke");
+    });
+
+    it("draws the focus wash behind the bars, the ring over them, and clips neither", async () => {
+      const { container, bars } = draw();
+      group().focus();
+      await userEvent.keyboard("{ArrowRight}");
+      const wash = container.querySelector('[data-slot="bucket-focus-wash"]') as Element;
+      const ring = container.querySelector('[data-slot="bucket-focus"]') as Element;
+      expect(wash.compareDocumentPosition(bars()[0]) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+      expect(ring.compareDocumentPosition(bars()[3]) & Node.DOCUMENT_POSITION_PRECEDING).toBeTruthy();
+      // A ring on the first bar sits half outside the viewBox.
+      expect(container.querySelector("svg")?.style.overflow).toBe("visible");
     });
 
     it("leaves a modified arrow to the browser", () => {
@@ -219,12 +259,6 @@ describe("VolumeHistogram", () => {
   });
 
   describe("the bars", () => {
-    const one = (...texts: string[]) =>
-      render(<VolumeHistogram lines={texts.map((t) => ql(t, T0))} range={undefined} onRangeChange={vi.fn()} />);
-    const segments = (container: HTMLElement) =>
-      Array.from(container.querySelectorAll<SVGRectElement>('[data-slot="bucket"] rect[data-slot="segment"]'));
-    const num = (el: Element, attr: string) => Number(el.getAttribute(attr));
-
     it("is 96 pixels tall", () => {
       const { container } = one("info a");
       expect(container.querySelector("svg")?.style.height).toBe("96px");
@@ -256,9 +290,150 @@ describe("VolumeHistogram", () => {
     });
   });
 
+  describe("the y axis", () => {
+    const hundreds = (n: number): Volume => ({
+      step: 1000,
+      untimed: 0,
+      buckets: [{ start: T0, end: T0 + 1000, danger: 0, warning: 0, info: n, other: 0 }],
+    });
+
+    it("scales the bars to a round top rather than to the tallest bar", () => {
+      const { container } = one("error a", "error b", "error c");
+      // Three lines under a top of five.
+      expect(num(segments(container)[0], "height")).toBeCloseTo((3 / 5) * 96);
+    });
+
+    it("labels the round top and its half", () => {
+      const { container } = one("info a", "info b", "info c", "info d", "info e", "info f");
+      expect(texts(container, "y-label")).toEqual(["10", "5"]);
+    });
+
+    it("groups the digits of a long label like every other count", () => {
+      stub.volume = hundreds(1200);
+      const { container } = one("info a");
+      expect(texts(container, "y-label")).toEqual(["2 000", "1 000"]);
+    });
+
+    it("draws gridlines at zero, half and the top, at a constant width", () => {
+      const { container } = one("info a");
+      const lines = Array.from(container.querySelectorAll('[data-slot="gridline"]'));
+      expect(lines.map((l) => num(l, "y1"))).toEqual([96, 48, 0]);
+      for (const l of lines) expect(l.getAttribute("vector-effect")).toBe("non-scaling-stroke");
+    });
+  });
+
+  describe("the time axis", () => {
+    const minute = 60_000;
+    const across = (from: number, bars: number): Volume => ({
+      step: minute,
+      untimed: 0,
+      buckets: Array.from({ length: bars }, (_, i) => ({
+        start: from + i * minute,
+        end: from + (i + 1) * minute,
+        danger: 0,
+        warning: 0,
+        info: 1,
+        other: 0,
+      })),
+    });
+    const ticks = (container: HTMLElement) =>
+      Array.from(container.querySelectorAll<HTMLElement>('[data-slot="x-tick"]')).map((t) => [
+        t.textContent,
+        t.style.left,
+      ]);
+
+    it("puts round local times under the bars, where they fall along the span", () => {
+      stub.volume = across(new Date(2026, 9, 12, 10).getTime(), 10);
+      const { container } = one("info a");
+      expect(ticks(container)).toEqual([
+        ["10:00", "0%"],
+        ["10:02", "20%"],
+        ["10:04", "40%"],
+        ["10:06", "60%"],
+        ["10:08", "80%"],
+        ["10:10", "100%"],
+      ]);
+    });
+
+    it("dates the tick that starts a new day", () => {
+      stub.volume = across(new Date(2026, 9, 12, 23).getTime(), 120);
+      const { container } = one("info a");
+      expect(ticks(container).map(([label]) => label)).toEqual(["23:00", "23:30", "10-13 00:00", "00:30", "01:00"]);
+    });
+  });
+
+  describe("the legend", () => {
+    const entries = (container: HTMLElement) => texts(container, "legend-item");
+    const words = [ql("error a", T0), ql("fatal b", T0 + 1000), ql("FATAL c", T0 + 2000), ql("info d", T0 + 3000)];
+    const withWords = (clauses: readonly QueryClause[]) => {
+      const onToggleLevels = vi.fn();
+      const view = render(
+        <VolumeHistogram
+          lines={words}
+          range={undefined}
+          onRangeChange={vi.fn()}
+          clauses={clauses}
+          onToggleLevels={onToggleLevels}
+        />,
+      );
+      return { ...view, onToggleLevels };
+    };
+
+    it("counts each group's lines, and offers only the groups that are there", () => {
+      const { container } = draw();
+      // The line with no time is still a line of the query, so it is counted.
+      expect(entries(container)).toEqual(["error 1", "info 2", "other 1"]);
+    });
+
+    it("colours each entry's dot as its bars are coloured", () => {
+      const { container } = draw();
+      const dots = Array.from(container.querySelectorAll('[data-slot="legend-dot"] circle'));
+      expect(dots.map((d) => d.getAttribute("fill"))).toEqual([
+        toneColor(statusTone("danger")),
+        toneColor(statusTone("info")),
+        toneColor(statusTone("neutral")),
+      ]);
+    });
+
+    it("makes error, warn and info buttons, and leaves other as plain text", () => {
+      draw();
+      expect(screen.getByRole("button", { name: "error 1" })).toBeTruthy();
+      expect(screen.getByRole("button", { name: "info 2" })).toBeTruthy();
+      expect(screen.queryByRole("button", { name: /^other/ })).toBeNull();
+      expect(screen.getByText("other")).toBeTruthy();
+    });
+
+    it("asks for every level word of the group that the lines carry", async () => {
+      const { onToggleLevels } = withWords([]);
+      await userEvent.click(screen.getByRole("button", { name: "error 3" }));
+      expect(onToggleLevels).toHaveBeenCalledWith(["error", "fatal"], true);
+    });
+
+    it("is pressed when all of the group's words are in the query, and then asks to take them out", async () => {
+      const { onToggleLevels } = withWords(clausesOf("level:error level:fatal"));
+      const button = screen.getByRole("button", { name: "error 3" });
+      expect(button.getAttribute("aria-pressed")).toBe("true");
+      await userEvent.click(button);
+      expect(onToggleLevels).toHaveBeenCalledWith(["error", "fatal"], false);
+    });
+
+    it("is not pressed while a word of the group is missing, and then asks for all of them", async () => {
+      const { onToggleLevels } = withWords(clausesOf("level:error"));
+      const button = screen.getByRole("button", { name: "error 3" });
+      expect(button.getAttribute("aria-pressed")).toBe("false");
+      await userEvent.click(button);
+      expect(onToggleLevels).toHaveBeenCalledWith(["error", "fatal"], true);
+    });
+
+    it("reads an excluded word as not included", () => {
+      withWords(clausesOf("-level:error level:fatal"));
+      expect(screen.getByRole("button", { name: "error 3" }).getAttribute("aria-pressed")).toBe("false");
+    });
+  });
+
   it("keeps a lone error visible beside a spike in the same bar", () => {
     const spike = [...Array.from({ length: 500 }, () => ql("info x", T0)), ql("error y", T0)];
-    const { container } = render(<VolumeHistogram lines={spike} range={undefined} onRangeChange={vi.fn()} />);
+    const { container } = render(<VolumeHistogram {...QUIET} lines={spike} range={undefined} onRangeChange={vi.fn()} />);
     const rects = Array.from(container.querySelectorAll('[data-slot="bucket"] rect[fill^="var(--"]'));
     const danger = rects.filter((r) => r.getAttribute("fill") === toneColor(statusTone("danger")));
     expect(danger).toHaveLength(1);
@@ -281,14 +456,14 @@ describe("VolumeHistogram", () => {
         untimed: 0,
         buckets: [bar(day(10), day(11)), bar(day(11), day(12)), bar(day(12), day(13))],
       };
-      const { container } = render(<VolumeHistogram lines={LINES} range={undefined} onRangeChange={vi.fn()} />);
+      const { container } = render(<VolumeHistogram {...QUIET} lines={LINES} range={undefined} onRangeChange={vi.fn()} />);
       expect(caption(container)).toContain("2026-10-10 00:00–2026-10-13 00:00");
       expect(titles(container)[0]).toBe("2026-10-10 00:00–2026-10-11 00:00 · 1 line");
     });
 
     it("dates the bars once the span crosses a day, whatever the bar width", () => {
       const lines = [ql("info a", day(10) + 9 * 3_600_000), ql("info b", day(13) + 9 * 3_600_000)];
-      const { container } = render(<VolumeHistogram lines={lines} range={undefined} onRangeChange={vi.fn()} />);
+      const { container } = render(<VolumeHistogram {...QUIET} lines={lines} range={undefined} onRangeChange={vi.fn()} />);
       expect(caption(container)).toMatch(/ · 2026-10-10 \d\d:\d\d–2026-10-1\d \d\d:\d\d · /);
       expect(titles(container)[0]).toMatch(/^2026-10-10 \d\d:\d\d–2026-10-10 \d\d:\d\d · 1 line$/);
     });
@@ -298,18 +473,18 @@ describe("VolumeHistogram", () => {
         ql("info a", new Date(2026, 9, 12, 23, 59, 58).getTime()),
         ql("info b", new Date(2026, 9, 13, 0, 0, 1).getTime()),
       ];
-      const { container } = render(<VolumeHistogram lines={lines} range={undefined} onRangeChange={vi.fn()} />);
+      const { container } = render(<VolumeHistogram {...QUIET} lines={lines} range={undefined} onRangeChange={vi.fn()} />);
       expect(caption(container)).toContain("2026-10-12 23:59:58–2026-10-13 00:00:02 · 1s bars");
     });
 
     it("leaves the date off a span within one day", () => {
-      const { container } = render(<VolumeHistogram lines={LINES} range={undefined} onRangeChange={vi.fn()} />);
+      const { container } = render(<VolumeHistogram {...QUIET} lines={LINES} range={undefined} onRangeChange={vi.fn()} />);
       expect(caption(container)).not.toMatch(/\d{4}-\d\d-\d\d/);
     });
   });
 
   it("draws nothing when no line has a time", () => {
-    const { container } = render(<VolumeHistogram lines={[ql("no time")]} range={undefined} onRangeChange={vi.fn()} />);
+    const { container } = render(<VolumeHistogram {...QUIET} lines={[ql("no time")]} range={undefined} onRangeChange={vi.fn()} />);
     expect(container.innerHTML).toBe("");
   });
 });

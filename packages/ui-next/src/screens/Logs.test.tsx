@@ -2232,6 +2232,30 @@ describe("the volume histogram (#898)", () => {
     expect(rendered(region)).toHaveLength(2);
     expect(screen.queryByRole("button", { name: "Remove the time window" })).toBeNull();
   });
+  describe("the legend", () => {
+    it("filters on a level clicked in it, writing it into the search box, and takes it back", async () => {
+      await (draw(), body());
+      push(...LINES);
+      await userEvent.click(screen.getByRole("button", { name: "error 1" }));
+      expect(filterField()).toHaveProperty("value", "level:error");
+      expect(screen.getByRole("button", { name: "error 1" }).getAttribute("aria-pressed")).toBe("true");
+      await userEvent.click(screen.getByRole("button", { name: "error 1" }));
+      expect(filterField()).toHaveProperty("value", "");
+    });
+
+    it("writes every level word of the group, and takes them all out again", async () => {
+      await (draw(), body());
+      push(
+        line("api-7/api", "14:07:41.208000000", "error a"),
+        line("api-7/api", "14:07:42.208000000", "fatal b"),
+        line("api-7/api", "14:07:43.208000000", "info c"),
+      );
+      await userEvent.click(screen.getByRole("button", { name: "error 2" }));
+      expect(filterField()).toHaveProperty("value", "level:error level:fatal");
+      await userEvent.click(screen.getByRole("button", { name: "error 2" }));
+      expect(filterField()).toHaveProperty("value", "");
+    });
+  });
 });
 
 describe("the line detail (#898)", () => {
