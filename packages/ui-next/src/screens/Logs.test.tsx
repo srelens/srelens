@@ -237,6 +237,17 @@ const line = (source: string, ts: string, text: string) => ({
   text: `2026-08-24T${ts}Z ${text}`,
 });
 
+/**
+ * The `HH:MM:SS.mmm` the time column draws for an instant: the reader's own
+ * clock, so the expectation holds in whatever zone the suite runs in. Built
+ * from local `Date` getters on purpose — it must not share the code under test.
+ */
+const localTs = (iso: string) => {
+  const at = new Date(iso);
+  const two = (n: number) => String(n).padStart(2, "0");
+  return `${two(at.getHours())}:${two(at.getMinutes())}:${two(at.getSeconds())}.${String(at.getMilliseconds()).padStart(3, "0")}`;
+};
+
 const LINES = [
   line("api-7/api", "14:07:41.208000000", "info starting checkout-api build=4f2a1c"),
   line("api-7/otel-sidecar", "14:07:42.100000000", "warn exporter queue is full"),
@@ -507,10 +518,10 @@ describe("Logs", () => {
       // `warning` tone name, and `error`, not `danger`. A column printing the
       // severity vocabulary reports a word that appears nowhere in the log it
       // is describing (and `WARNING` does not fit its 44px gutter either).
-      "14:07:41.208|api-7 · api|info|info starting checkout-api build=4f2a1c",
-      "14:07:42.100|api-7 · otel-sidecar|warn|warn exporter queue is full",
-      "14:07:43.900|api-8 · api|error|error pool timeout waited=30.0s in_use=5",
-      "14:07:44.010|api-9 · api||GET /healthz 200 1ms",
+      `${localTs("2026-08-24T14:07:41.208Z")}|api-7 · api|info|info starting checkout-api build=4f2a1c`,
+      `${localTs("2026-08-24T14:07:42.100Z")}|api-7 · otel-sidecar|warn|warn exporter queue is full`,
+      `${localTs("2026-08-24T14:07:43.900Z")}|api-8 · api|error|error pool timeout waited=30.0s in_use=5`,
+      `${localTs("2026-08-24T14:07:44.010Z")}|api-9 · api||GET /healthz 200 1ms`,
     ]);
   });
 
@@ -521,8 +532,8 @@ describe("Logs", () => {
     // screen's, drawn beside the line's text rather than in it, so the filter
     // and an export never see it.
     expect(rendered(region)).toEqual([
-      "14:07:41.208|api-7 · api|info|info the start of it [line cut: too long]",
-      "14:07:42.100|api-7 · otel-sidecar|warn|warn exporter queue is full",
+      `${localTs("2026-08-24T14:07:41.208Z")}|api-7 · api|info|info the start of it [line cut: too long]`,
+      `${localTs("2026-08-24T14:07:42.100Z")}|api-7 · otel-sidecar|warn|warn exporter queue is full`,
     ]);
     const notes = Array.from(region.querySelectorAll(".logline")).map(
       (row) => row.querySelector("[data-slot=message] .text-faint")?.textContent ?? null,
@@ -670,8 +681,8 @@ describe("Logs", () => {
       // Still there — and the gutter still names the pod ALONE, because the
       // fix carries the container as data beside the label rather than
       // putting it back into the string the reader sees.
-      "14:07:41.208|web-0|info|info serving on :8080",
-      "14:07:42.100|web-1|warn|warn upstream slow",
+      `${localTs("2026-08-24T14:07:41.208Z")}|web-0|info|info serving on :8080`,
+      `${localTs("2026-08-24T14:07:42.100Z")}|web-1|warn|warn upstream slow`,
     ]);
   });
 
@@ -745,6 +756,30 @@ describe("Logs", () => {
     h.state.lines = [{ source: "", text: "2026-08-25T08:13:41.721258+02:00 pool timeout waited=30.0s" }];
     const region = await (draw(), body());
     expect(within(region).getByText(/^pool timeout waited=30.0s$/)).toBeTruthy();
+  });
+
+  it("draws a line's time on the reader's clock, not the stamp's own", async () => {
+    // The histogram axis, its caption and the window pill are all local, so a
+    // time column left on the stamp's UTC wall time disagrees with them by the
+    // reader's offset: a line at 22:00:29Z sat beside an axis reading 00:00:29.
+    // An offset stamp is the same instant read the same way, not its own wall
+    // time. -03:30 is no zone's August offset, so its written clock cannot
+    // coincide with the machine's.
+    const region = await (draw(), body());
+    push(
+      line("api-7/api", "14:07:41.208000000", "info stamped in Z"),
+      { source: "api-8/api", text: "2026-08-24T10:37:42.100000000-03:30 info stamped with an offset" },
+    );
+    expect(rendered(region).map((r) => r.split("|")[0])).toEqual([
+      localTs("2026-08-24T14:07:41.208Z"),
+      localTs("2026-08-24T14:07:42.100Z"),
+    ]);
+  });
+
+  it("leaves the time column empty for a line that arrived without a stamp", async () => {
+    const region = await (draw(), body());
+    push({ source: "api-7/api", text: "info no stamp on this one" });
+    expect(rendered(region)).toEqual(["|api-7 · api|info|info no stamp on this one"]);
   });
 
   it("opens on the whole log, not the last five minutes", async () => {
@@ -1547,10 +1582,10 @@ describe("the previous instance", () => {
     // live one would be a second severity rule in the same pane.
     await waitFor(() =>
       expect(rendered(region)).toEqual([
-        "14:07:11.004|api-7 · api|info|info starting checkout-api build=4f2a1c pool_size=5",
-        "14:07:12.880|api-7 · api|warn|warn pool saturated within 1.8s of accepting traffic",
-        "14:07:41.902|api-7 · api|error|error pool timeout waited=30.0s pool_size=5 in_use=5",
-        "14:07:42.410|api-7 · api|fatal|fatal liveness deadline exceeded, terminating",
+        `${localTs("2026-08-24T14:07:11.004Z")}|api-7 · api|info|info starting checkout-api build=4f2a1c pool_size=5`,
+        `${localTs("2026-08-24T14:07:12.880Z")}|api-7 · api|warn|warn pool saturated within 1.8s of accepting traffic`,
+        `${localTs("2026-08-24T14:07:41.902Z")}|api-7 · api|error|error pool timeout waited=30.0s pool_size=5 in_use=5`,
+        `${localTs("2026-08-24T14:07:42.410Z")}|api-7 · api|fatal|fatal liveness deadline exceeded, terminating`,
       ]),
     );
     // And the live lines are gone from the pane, not merged into it: the two
@@ -2077,7 +2112,9 @@ describe("structured lines and the query (#898)", () => {
   it("shows a JSON line as its msg with the other fields after it, not as the raw object", async () => {
     const region = await (draw(), body());
     push(...JSON_LINES);
-    expect(rendered(region)[0]).toBe("14:07:41.208|api-7 · api|info|Wrote batch  system=camlog internal_use=true");
+    expect(rendered(region)[0]).toBe(
+      `${localTs("2026-08-24T14:07:41.208Z")}|api-7 · api|info|Wrote batch  system=camlog internal_use=true`,
+    );
   });
 
   it("filters on a field, and ORs two values of one field", async () => {

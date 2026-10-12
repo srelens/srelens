@@ -78,6 +78,7 @@ import {
   STREAM_RAIL_WIDTH,
   type StreamPod,
 } from "./logs/StreamRail";
+import { clockTime } from "./logs/time";
 import { VolumeHistogram } from "./logs/VolumeHistogram";
 import { NoClusterScreen } from "./resourceShell";
 
@@ -271,7 +272,11 @@ const NO_CLAUSES: readonly QueryClause[] = [];
 
 /** One line as the body draws it: the four columns, plus what a filter reads. */
 interface Row extends QueryLine {
-  /** `14:07:41.208`, or `""` for a line that arrived without a stamp. */
+  /**
+   * `16:07:41.208`: the stamp's instant on the reader's clock, or `""` for a
+   * line without a parseable stamp. Derived from `at`, so the two cannot
+   * disagree about when the line happened.
+   */
   ts: string;
   /** Which pod wrote the line. DATA — read off the target, not the label. */
   pod: string;
@@ -359,7 +364,11 @@ function indexTargets(targets: readonly LogTarget[]): ReadonlyMap<string, LogTar
  */
 function toRow(line: StreamLine, byLabel: ReadonlyMap<string, LogTarget>): Row {
   const stamp = line.text.match(RFC3339);
-  const ts = stamp ? `${stamp[2]}${(stamp[3] ?? "").slice(0, 4)}` : "";
+  const at = stamp ? stampTime(stamp) : undefined;
+  // The reader's clock, like the histogram's axis and the window pill beside
+  // it, rather than the stamp's own wall time (UTC from the backend): two
+  // clocks on one screen put every line a zone's offset from the axis.
+  const ts = at === undefined ? "" : `${clockTime(at)}.${String(new Date(at).getMilliseconds()).padStart(3, "0")}`;
   const text = stamp ? line.text.slice(stamp[0].length) : line.text;
   const slash = line.source.indexOf("/");
   const target = byLabel.get(line.source);
@@ -377,7 +386,6 @@ function toRow(line: StreamLine, byLabel: ReadonlyMap<string, LogTarget>): Row {
         : line.source.slice(slash + 1);
   const health = logLineHealth(text);
   const parsed = parseLogFields(text);
-  const at = stamp ? stampTime(stamp) : undefined;
   return {
     ts,
     pod,
