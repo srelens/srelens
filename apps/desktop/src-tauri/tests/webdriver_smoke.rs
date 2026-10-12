@@ -154,7 +154,11 @@ async fn click(driver: &WebDriver, by: By, secs: u64) -> WebDriverResult<()> {
 /// on, and each miss logs what the click was aimed at.
 async fn click_until(driver: &WebDriver, target: &str, proof: By, secs: u64) -> WebDriverResult<()> {
     let deadline = Instant::now() + Duration::from_secs(secs);
+    let xpath = vec![serde_json::Value::String(target.to_string())];
     loop {
+        // Listeners on the target, so a miss can say which of the click's
+        // events reached it, and a record of page errors.
+        driver.execute(PROBE_INSTALL, xpath.clone()).await.ok();
         let remaining = deadline.saturating_duration_since(Instant::now()).as_secs().max(1);
         click(driver, By::XPath(target.to_string()), remaining).await?;
         let landed = driver
@@ -166,36 +170,68 @@ async fn click_until(driver: &WebDriver, target: &str, proof: By, secs: u64) -> 
             return Ok(());
         }
         // A miss with no error is otherwise invisible: where the target is,
-        // the viewport, and what the point the click aimed at actually holds.
-        let aimed = driver
-            .execute(
-                r#"
-                const xpath = arguments[0];
-                const found = document.evaluate(xpath, document, null, XPathResult.ORDERED_NODE_SNAPSHOT_TYPE, null);
-                const el = found.snapshotLength ? found.snapshotItem(0) : null;
-                if (!el) return JSON.stringify({ matches: 0 });
-                const r = el.getBoundingClientRect();
-                const x = r.x + r.width / 2, y = r.y + r.height / 2;
-                const top = document.elementFromPoint(x, y);
-                return JSON.stringify({
-                    matches: found.snapshotLength,
-                    rect: [r.x, r.y, r.width, r.height],
-                    viewport: [innerWidth, innerHeight, devicePixelRatio, screen.width, screen.height],
-                    topIsTarget: !!top && el.contains(top),
-                    top: top ? top.outerHTML.slice(0, 160) : null,
-                });
-                "#,
-                vec![serde_json::Value::String(target.to_string())],
-            )
-            .await
-            .map(|ret| ret.json().to_string())
-            .unwrap_or_else(|e| format!("(could not describe it: {e})"));
+        // the viewport, what the aimed-at point holds, which events arrived,
+        // and whether React has a click handler on it at all.
+        let aimed = describe(driver, PROBE_DESCRIBE, xpath.clone()).await;
         println!("click on {target} changed nothing; aimed at {aimed}");
         if Instant::now() >= deadline {
+            // One script click, as evidence only: does the handler work when
+            // it is called directly? The step still fails either way.
+            let scripted = describe(driver, "arguments[0] && document.evaluate(arguments[0], document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null).singleNodeValue.click(); return 'clicked';", xpath.clone()).await;
+            let opened = driver
+                .query(proof.clone())
+                .wait(Duration::from_secs(3), Duration::from_millis(250))
+                .exists()
+                .await
+                .unwrap_or(false);
+            println!("a script click on {target} ({scripted}) {} the proof", if opened { "DID bring" } else { "did not bring" });
             return driver.query(proof).nowait().first().await.map(|_| ());
         }
     }
 }
+
+async fn describe(driver: &WebDriver, script: &str, args: Vec<serde_json::Value>) -> String {
+    driver
+        .execute(script, args)
+        .await
+        .map(|ret| ret.json().to_string())
+        .unwrap_or_else(|e| format!("(script failed: {e})"))
+}
+
+const PROBE_INSTALL: &str = r#"
+    const el = document.evaluate(arguments[0], document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null).singleNodeValue;
+    if (!window.__smokeErrors) {
+        window.__smokeErrors = [];
+        addEventListener('error', (e) => __smokeErrors.push(String(e.message)));
+        addEventListener('unhandledrejection', (e) => __smokeErrors.push(String(e.reason)));
+    }
+    window.__smokeEvents = [];
+    if (el && !el.__smokeProbe) {
+        el.__smokeProbe = true;
+        for (const type of ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click']) {
+            el.addEventListener(type, () => window.__smokeEvents.push(type), true);
+        }
+    }
+"#;
+
+const PROBE_DESCRIBE: &str = r#"
+    const found = document.evaluate(arguments[0], document, null, XPathResult.ORDERED_NODE_SNAPSHOT_TYPE, null);
+    const el = found.snapshotLength ? found.snapshotItem(0) : null;
+    if (!el) return JSON.stringify({ matches: 0, errors: window.__smokeErrors });
+    const r = el.getBoundingClientRect();
+    const top = document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2);
+    const propsKey = Object.keys(el).find((k) => k.startsWith('__reactProps'));
+    return JSON.stringify({
+        matches: found.snapshotLength,
+        rect: [r.x, r.y, r.width, r.height],
+        viewport: [innerWidth, innerHeight, devicePixelRatio, screen.width, screen.height],
+        topIsTarget: !!top && el.contains(top),
+        events: window.__smokeEvents,
+        errors: window.__smokeErrors,
+        reactOnClick: propsKey ? typeof el[propsKey].onClick : 'no react props',
+        focused: document.hasFocus(),
+    });
+"#;
 
 #[tokio::test]
 #[ignore]
