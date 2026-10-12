@@ -498,6 +498,7 @@ function compare(a: string, b: string): number {
 }
 
 export interface VolumeBucket {
+  /** Epoch ms of the bucket's wall-clock start. Across a DST change `end - start` is not `step`. */
   readonly start: number;
   readonly end: number;
   readonly danger: number;
@@ -506,7 +507,7 @@ export interface VolumeBucket {
 }
 
 export interface Volume {
-  /** Bucket width in ms; 0 when no line had a time. */
+  /** Nominal width in wall-clock ms; 0 when no line had a time. */
   readonly step: number;
   /** Contiguous, empty ones included, so a quiet minute is drawn as a gap. */
   readonly buckets: readonly VolumeBucket[];
@@ -516,44 +517,83 @@ export interface Volume {
 const SECOND = 1000;
 const MINUTE = 60 * SECOND;
 const HOUR = 60 * MINUTE;
+const DAY = 24 * HOUR;
+/** The widest instant a Date can hold (ECMAScript's limit, ±8.64e15 ms). */
+const MAX_TIME = 8.64e15;
 const STEPS = [
   ...[1, 2, 5, 10, 15, 30].map((n) => n * SECOND),
   ...[1, 2, 5, 10, 15, 30].map((n) => n * MINUTE),
   ...[1, 2, 3, 6, 12].map((n) => n * HOUR),
-  24 * HOUR,
+  DAY,
 ];
 
+/** The UTC offset in ms at `at`. Clamped into the Date range, so an edge stamp never reads NaN. */
+const offsetAt = (at: number): number =>
+  new Date(Math.max(-MAX_TIME, Math.min(MAX_TIME, at))).getTimezoneOffset() * MINUTE;
+
+/** A stamp the histogram can place. NaN, infinite and out-of-range stamps are untimed. */
+const isTimed = (at: number | undefined): at is number =>
+  at !== undefined && Number.isFinite(at) && Math.abs(at) <= MAX_TIME;
+
+/** A stamp's wall-clock reading. Taken per line, because the offset changes across DST. */
+const wallClock = (at: number): number => at - offsetAt(at);
+
 /**
- * The lines' volume over time, in the smallest round step that fits the span in
- * `maxBars`, stacked by core's severity. Boundaries are local wall-clock
- * time: an hour bar starts at :00 where the reader is, which in a half-hour
- * zone is not :00 UTC.
+ * The instant whose wall clock reads `local`. The offset is read at a guess and
+ * then at the guess, so a boundary that sits either side of a DST change lands
+ * on the right side of it.
+ */
+const instantOf = (local: number): number => local + offsetAt(local + offsetAt(local));
+
+/**
+ * The lines' volume over time, stacked by core's severity, in the smallest round
+ * step that fits the span in `maxBars`. When none does, the step is the fewest
+ * whole days that fit, so the bucket count never exceeds `maxBars`, except for
+ * `maxBars` of 1 with a span that straddles local 1970-01-01: an aligned grid
+ * cannot give one bucket there. Bars are local wall-clock: an hour bar starts at
+ * :00 where the reader is, and a day bar at local midnight, across DST.
  */
 export function volumeBuckets(lines: readonly QueryLine[], maxBars = 60): Volume {
   let min = Infinity;
   let max = -Infinity;
   let untimed = 0;
   for (const line of lines) {
-    if (line.at === undefined) {
+    if (!isTimed(line.at)) {
       untimed += 1;
       continue;
     }
-    if (line.at < min) min = line.at;
-    if (line.at > max) max = line.at;
+    const local = wallClock(line.at);
+    if (local < min) min = local;
+    if (local > max) max = local;
   }
   if (min === Infinity) return { step: 0, buckets: [], untimed };
 
-  const offset = new Date(min).getTimezoneOffset() * MINUTE;
-  const index = (at: number, step: number) => Math.floor((at - offset) / step);
-  const step = STEPS.find((s) => index(max, s) - index(min, s) + 1 <= maxBars) ?? STEPS[STEPS.length - 1];
-  const first = index(min, step);
-  const buckets = Array.from({ length: index(max, step) - first + 1 }, (_, i) => {
-    const start = (first + i) * step + offset;
-    return { start, end: start + step, danger: 0, warning: 0, other: 0 };
-  });
+  const bars = Number.isFinite(maxBars) ? Math.max(1, Math.floor(maxBars)) : 1;
+  // A bucket is floor(wall / step), so this is the exact bucket count for a step.
+  const fits = (s: number) => Math.floor(max / s) - Math.floor(min / s) + 1 <= bars;
+  let step = STEPS.find(fits);
+  if (step === undefined) {
+    // A count of `bars` or fewer needs a step wider than span / bars, so the search
+    // starts at span / (bars * DAY) days. Past `cap` the count no longer changes with the step.
+    const cap = Math.ceil((Math.abs(min) + Math.abs(max)) / DAY) + 1;
+    let days = Math.max(1, Math.floor((max - min) / (bars * DAY)));
+    while (days < cap && !fits(days * DAY)) days += 1;
+    step = days * DAY;
+  }
+  const first = Math.floor(min / step);
+  const last = Math.floor(max / step);
+  const starts = Array.from({ length: last - first + 2 }, (_, i) => instantOf((first + i) * step));
+  const buckets = Array.from({ length: last - first + 1 }, (_, i) => ({
+    start: starts[i],
+    end: starts[i + 1],
+    danger: 0,
+    warning: 0,
+    other: 0,
+  }));
   for (const line of lines) {
-    if (line.at === undefined) continue;
-    const bucket = buckets[index(line.at, step) - first];
+    if (!isTimed(line.at)) continue;
+    // Each line uses its own offset: one offset for the whole span drifts by an hour past a DST change.
+    const bucket = buckets[Math.floor(wallClock(line.at) / step) - first];
     if (line.health === "danger") bucket.danger += 1;
     else if (line.health === "warning") bucket.warning += 1;
     else bucket.other += 1;
@@ -567,7 +607,7 @@ export interface TimeRange {
   readonly to: number;
 }
 
-/** A line with no time can't be placed in a window, so it is never inside one. */
+/** A line with no usable time can't be placed in a window, so it is never inside one. */
 export function inRange(line: QueryLine, range: TimeRange): boolean {
-  return line.at !== undefined && line.at >= range.from && line.at < range.to;
+  return isTimed(line.at) && line.at >= range.from && line.at < range.to;
 }

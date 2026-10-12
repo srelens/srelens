@@ -517,3 +517,136 @@ describe("inRange", () => {
     ]);
   });
 });
+
+const DAY_MS = 86_400_000;
+const HOUR_MS = 3_600_000;
+
+describe("volumeBuckets, untrusted stamps", () => {
+  it("counts a stamp that is not a finite instant as untimed, and never throws on it", () => {
+    const junk = [Number.NaN, Infinity, -Infinity, 1e300].map((at) => ql("info junk", at));
+    const v = volumeBuckets([ql("info a", Date.parse("2026-10-12T10:00:00Z")), ...junk]);
+    expect(v.untimed).toBe(4);
+    expect(v.buckets.map((b) => b.other)).toEqual([1]);
+  });
+
+  it("keeps the bucket count within sixty when the span is wider than the widest round step", () => {
+    const v = volumeBuckets([ql("info a", 0), ql("info b", Date.parse("2026-10-12T10:00:00Z"))]);
+    expect(v.buckets.length).toBeLessThanOrEqual(60);
+    expect(v.step % DAY_MS).toBe(0);
+  });
+
+  it("bounds the bucket count for a stamp at the edge of the date range", () => {
+    const v = volumeBuckets([ql("info a", 8.64e15), ql("info b", Date.parse("2026-10-12T10:00:00Z"))]);
+    expect(v.buckets.length).toBeLessThanOrEqual(60);
+    expect(v.buckets.every((b) => Number.isFinite(b.start) && Number.isFinite(b.end))).toBe(true);
+  });
+
+  it("counts a stamp one past the date range as untimed", () => {
+    const v = volumeBuckets([ql("info a", 8.64e15 + 1), ql("info b", Date.parse("2026-10-12T10:00:00Z"))]);
+    expect(v.untimed).toBe(1);
+    expect(v.buckets.length).toBe(1);
+  });
+
+  it("respects a custom maxBars", () => {
+    const v = volumeBuckets(
+      [ql("info a", Date.parse("2026-10-01T00:00:00Z")), ql("info b", Date.parse("2026-10-31T00:00:00Z"))],
+      10,
+    );
+    expect(v.buckets.length).toBeLessThanOrEqual(10);
+  });
+
+  it("treats a maxBars that is not finite or below one as one bar", () => {
+    const lines = [ql("info a", Date.parse("2026-10-12T10:00:00Z")), ql("info b", Date.parse("2026-10-14T10:00:00Z"))];
+    for (const bad of [Number.NaN, 0, -3, Infinity]) {
+      expect(volumeBuckets(lines, bad).buckets.length, `maxBars ${bad}`).toBeLessThanOrEqual(1);
+    }
+  });
+});
+
+describe("volumeBuckets, local time across DST", () => {
+  /** Pins the zone for one body. Runtime assignment reaches the vitest worker on this machine (probed). */
+  function inZone(zone: string, body: () => void): void {
+    const saved = process.env.TZ;
+    process.env.TZ = zone;
+    try {
+      body();
+    } finally {
+      if (saved === undefined) delete process.env.TZ;
+      else process.env.TZ = saved;
+    }
+  }
+  const at = (iso: string) => Date.parse(iso);
+
+  it("starts every day bar at local midnight, and the 25-hour day of 2026-10-25 is 25 hours", () => {
+    inZone("Europe/Berlin", () => {
+      // Guard: the zone really is Berlin (CEST on 1 Oct, CET on 26 Oct).
+      expect(new Date(at("2026-10-01T12:00:00Z")).getTimezoneOffset()).toBe(-120);
+      expect(new Date(at("2026-10-26T12:00:00Z")).getTimezoneOffset()).toBe(-60);
+      const v = volumeBuckets([ql("info a", at("2026-10-01T12:00:00Z")), ql("info b", at("2026-11-20T12:00:00Z"))]);
+      expect(v.step).toBe(DAY_MS);
+      for (const b of v.buckets) {
+        const local = new Date(b.start);
+        expect([local.getHours(), local.getMinutes()]).toEqual([0, 0]);
+      }
+      const noon = at("2026-10-25T12:00:00Z");
+      const day = v.buckets.find((b) => b.start <= noon && noon < b.end);
+      expect(day).toBeDefined();
+      expect(day!.end - day!.start).toBe(25 * HOUR_MS);
+    });
+  });
+
+  it("keeps hour bars on the hour in a half-hour zone", () => {
+    inZone("Asia/Kolkata", () => {
+      expect(new Date(at("2026-10-12T00:00:00Z")).getTimezoneOffset()).toBe(-330);
+      const v = volumeBuckets([ql("info a", at("2026-10-12T00:10:00Z")), ql("info b", at("2026-10-13T12:00:00Z"))]);
+      expect(v.step).toBe(HOUR_MS);
+      for (const b of v.buckets) expect(new Date(b.start).getMinutes()).toBe(0);
+    });
+  });
+});
+
+describe("inRange, untrusted stamps", () => {
+  it("never places a NaN stamp inside a window", () => {
+    expect(inRange(ql("info a", Number.NaN), { from: Number.NEGATIVE_INFINITY, to: Number.POSITIVE_INFINITY })).toBe(
+      false,
+    );
+  });
+});
+
+describe("volumeBuckets, two-hour bars across DST", () => {
+  it("keeps every two-hour bar on an even local hour across the clocks going back", () => {
+    const saved = process.env.TZ;
+    process.env.TZ = "Europe/Berlin";
+    try {
+      expect(new Date(Date.parse("2026-10-23T12:00:00Z")).getTimezoneOffset()).toBe(-120);
+      expect(new Date(Date.parse("2026-10-27T12:00:00Z")).getTimezoneOffset()).toBe(-60);
+      const v = volumeBuckets([
+        ql("info a", Date.parse("2026-10-23T12:00:00Z")),
+        ql("info b", Date.parse("2026-10-27T12:00:00Z")),
+      ]);
+      expect(v.step).toBe(2 * 3_600_000);
+      for (const b of v.buckets) {
+        const local = new Date(b.start);
+        expect([local.getHours() % 2, local.getMinutes()]).toEqual([0, 0]);
+      }
+    } finally {
+      if (saved === undefined) delete process.env.TZ;
+      else process.env.TZ = saved;
+    }
+  });
+});
+
+describe("volumeBuckets, the hour the clocks go back", () => {
+  it("starts the 01:00 bar at the instant that reads 01:00 before the change, 23:00 UTC", () => {
+    const saved = process.env.TZ;
+    process.env.TZ = "Europe/Berlin";
+    try {
+      const v = volumeBuckets([ql("info a", Date.parse("2026-10-24T12:00:00Z")), ql("info b", Date.parse("2026-10-26T12:00:00Z"))]);
+      expect(v.step).toBe(3_600_000);
+      expect(v.buckets.some((b) => b.start === Date.parse("2026-10-24T23:00:00Z"))).toBe(true);
+    } finally {
+      if (saved === undefined) delete process.env.TZ;
+      else process.env.TZ = saved;
+    }
+  });
+});
