@@ -150,6 +150,7 @@ import { ConsoleProvider, useConsole } from "../console";
 import * as store from "../lib/tabsStore";
 import { TabScope } from "../lib/tabScope";
 import { defaultState } from "../lib/tabs";
+import { detailRoute } from "../lib/detailRoute";
 import { resetContexts, setContexts, setKubeconfigFiles } from "../lib/clusters";
 import { hiddenColumns, loadColumnPrefs, toggleColumn } from "../lib/columnPrefs";
 import {
@@ -988,7 +989,7 @@ describe("Resources", () => {
    */
   describe("a node clicked in the Pods list", () => {
     const nodeTabs = () =>
-      store.currentWorkspace().tabs.filter((t) => t.route.startsWith("/k/Node/"));
+      store.currentWorkspace().tabs.filter((t) => t.route.startsWith("/k/prod-eu/Node/"));
 
     it("opens that node's detail in a tab on this cluster, and does not peek the pod", async () => {
       open("/k/pods");
@@ -1519,7 +1520,7 @@ describe("Resources", () => {
     expect(screen.queryByText("Stream lost")).toBeNull();
   });
 
-  it("opens the resource's /k/<kind>/<namespace>/<name> route when a row is activated", async () => {
+  it("opens the resource's /k/<cluster>/<kind>/<namespace>/<name> route when a row is activated", async () => {
     open("/k/pods");
     await waitFor(() => expect(rowNames()).toEqual(["web-1", "api-7"]));
 
@@ -1527,8 +1528,8 @@ describe("Resources", () => {
 
     // web-1's own namespace is "default" (PODS above) — the descriptor's
     // k8sKind ("Pod"), not the /k/pods slug, is what mints the route.
-    await waitFor(() => expect(tabFor("/k/Pod/default/web-1")).toBeTruthy());
-    expect(store.currentWorkspace().activeId).toBe(tabFor("/k/Pod/default/web-1").id);
+    await waitFor(() => expect(tabFor("/k/prod-eu/Pod/default/web-1")).toBeTruthy());
+    expect(store.currentWorkspace().activeId).toBe(tabFor("/k/prod-eu/Pod/default/web-1").id);
   });
 
   it("gives two same-named resources of different kinds their own tabs", async () => {
@@ -1544,7 +1545,7 @@ describe("Resources", () => {
     const podView = open("/k/pods");
     await waitFor(() => expect(rowNames()).toEqual(["web"]));
     fireEvent.doubleClick(screen.getByText("web").closest("tr")!);
-    await waitFor(() => expect(tabFor("/k/Pod/default/web")).toBeTruthy());
+    await waitFor(() => expect(tabFor("/k/prod-eu/Pod/default/web")).toBeTruthy());
     podView.unmount();
 
     watchResource.mockImplementation(
@@ -1556,13 +1557,13 @@ describe("Resources", () => {
     open("/k/configmaps");
     await waitFor(() => expect(rowNames()).toEqual(["web"]));
     fireEvent.doubleClick(screen.getByText("web").closest("tr")!);
-    await waitFor(() => expect(tabFor("/k/ConfigMap/default/web")).toBeTruthy());
+    await waitFor(() => expect(tabFor("/k/prod-eu/ConfigMap/default/web")).toBeTruthy());
 
     const tabs = store.currentWorkspace().tabs;
-    expect(tabs.some((t) => t.route === "/k/Pod/default/web")).toBe(true);
-    expect(tabs.some((t) => t.route === "/k/ConfigMap/default/web")).toBe(true);
+    expect(tabs.some((t) => t.route === "/k/prod-eu/Pod/default/web")).toBe(true);
+    expect(tabs.some((t) => t.route === "/k/prod-eu/ConfigMap/default/web")).toBe(true);
     // Two distinct tabs, not one that the second activation merely reused.
-    expect(tabFor("/k/Pod/default/web").id).not.toBe(tabFor("/k/ConfigMap/default/web").id);
+    expect(tabFor("/k/prod-eu/Pod/default/web").id).not.toBe(tabFor("/k/prod-eu/ConfigMap/default/web").id);
   });
 
   it("deletes only the checked row when two selected candidates share a name across namespaces", async () => {
@@ -1839,6 +1840,47 @@ describe("the detail pane's two hosts", () => {
     expect(getObject).toHaveBeenCalledWith("prod-eu", "Node", null, "worker-1");
   });
 
+  /**
+   * #834: a detail tab belongs to the cluster it was opened on. It read
+   * `useActiveContext()`, so moving the rail turned prod's worker-1 into
+   * staging's worker-1 under the same tab.
+   */
+  it("reads the cluster in its route, and keeps reading it when the rail moves", async () => {
+    setContexts([CTX, STAGE]);
+    store.setState(defaultState([CTX, STAGE]));
+
+    openDetailTab(detailRoute("Node", null, "worker-1", { cluster: "stage-eu" }));
+
+    await waitFor(() => expect(paneName()).toBe("worker-1"));
+    expect(getObject).toHaveBeenCalledWith("stage-eu", "Node", null, "worker-1");
+
+    act(() => store.setActiveCluster("stage", "stage-eu"));
+    act(() => store.setActiveCluster("prod", "prod-eu"));
+
+    expect(getObject).not.toHaveBeenCalledWith("prod-eu", "Node", null, "worker-1");
+    expect(tabProps[tabProps.length - 1].context).toBe("stage-eu");
+  });
+
+  it("opens a pod's node link on the tab's own cluster, not the rail's (#834)", async () => {
+    setContexts([CTX, STAGE]);
+    store.setState(defaultState([CTX, STAGE]));
+    getObject.mockImplementation(async (_c: string, kind: string, namespace: string | null, name: string) => ({
+      object: { kind, apiVersion: "v1", metadata: { name, ...(namespace ? { namespace } : {}) }, spec: { nodeName: "n1" } },
+    }));
+
+    openDetailTab(detailRoute("Pod", "default", "web-1", { cluster: "stage-eu" }));
+    await userEvent.click((await screen.findAllByRole("button", { name: "Open node n1" }))[0]);
+
+    expect(store.activeRoute()).toBe(detailRoute("Node", null, "n1", { cluster: "stage-eu" }));
+  });
+
+  it("says its cluster is gone, rather than reading another, when the kubeconfig no longer has it", async () => {
+    openDetailTab(detailRoute("Node", null, "worker-1", { cluster: "gone-eu" }));
+
+    expect(screen.getByText("gone-eu is no longer in your kubeconfig files")).toBeTruthy();
+    expect(getObject).not.toHaveBeenCalled();
+  });
+
   it("prompts for a cluster rather than reading anything when the workspace has none", async () => {
     setContexts([]);
     store.setState(defaultState([]));
@@ -1899,8 +1941,8 @@ describe("the detail pane's two hosts", () => {
 
     await userEvent.click(screen.getByRole("button", { name: "Open tab" }));
 
-    await waitFor(() => expect(tabFor("/k/Pod/default/web-1")).toBeTruthy());
-    expect(store.currentWorkspace().activeId).toBe(tabFor("/k/Pod/default/web-1").id);
+    await waitFor(() => expect(tabFor("/k/prod-eu/Pod/default/web-1")).toBeTruthy());
+    expect(store.currentWorkspace().activeId).toBe(tabFor("/k/prod-eu/Pod/default/web-1").id);
     const routes = store.currentWorkspace().tabs.map((t) => t.route);
 
     // The same route the row's own activate gesture mints. `openTab` dedupes

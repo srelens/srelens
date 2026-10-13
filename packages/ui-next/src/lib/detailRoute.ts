@@ -1,8 +1,11 @@
 /**
- * `/k/<kind>/<namespace>/<name>` — the resource detail route.
+ * `/k/<cluster>/<kind>/<namespace>/<name>` — the resource detail route.
  *
  * `openTab` dedupes by route string, so the route IS a resource's identity: a
  * Pod named `web` and a ConfigMap named `web` must not collapse onto one tab.
+ * Neither may prod's `worker-1` and staging's (#834): a detail tab is pinned to
+ * the cluster it was opened on, as the editor is, so the cluster is in the
+ * route for the reason {@link EditRouteParts} gives for the edit route's.
  * Four segments always, with `CLUSTER_SCOPED_SEGMENT` standing in for a
  * cluster-scoped kind's namespace, so the arity never varies and parsing can
  * count segments rather than pattern-match one.
@@ -15,15 +18,26 @@
 /** Stands in for a cluster-scoped kind's namespace, which does not exist. */
 export const CLUSTER_SCOPED_SEGMENT = "-";
 
-export function detailRoute(kind: string, namespace: string | null, name: string): string {
+export function detailRoute(
+  kind: string,
+  namespace: string | null,
+  name: string,
+  on: {
+    /** The cluster's context name: the tab shows this cluster's object, whatever the rail does. */
+    cluster: string;
+  },
+): string {
   const ns = namespace === null ? CLUSTER_SCOPED_SEGMENT : encodeURIComponent(namespace);
-  return `/k/${encodeURIComponent(kind)}/${ns}/${encodeURIComponent(name)}`;
+  return `/k/${encodeURIComponent(on.cluster)}/${encodeURIComponent(kind)}/${ns}/${encodeURIComponent(name)}`;
 }
 
 export interface DetailRouteParts {
   kind: string;
   namespace: string | null;
   name: string;
+  /** The cluster the tab is pinned to. Absent only on the shape an earlier
+   *  build persisted, which had no cluster in it; such a tab follows the rail. */
+  cluster?: string;
 }
 
 /**
@@ -72,8 +86,9 @@ export function editRoute(
  * and `openTab` dedupes by route string. With the cluster left out, Edit on
  * staging's `default/web` while prod's editor for `default/web` was open
  * focused prod's draft, and staging's resource could not be opened at all
- * without closing that tab first. The detail route has no cluster in it
- * because the detail pane follows the rail; the editor deliberately does not.
+ * without closing that tab first. A detail tab pins its cluster the same way
+ * (#834), so the detail route carries it too; the peek beside a list does not
+ * mint a route, and follows the rail with the list.
  *
  * **The group is in the route for a custom kind** because a kind NAME alone
  * does not identify one: a CRD may legally reuse a built-in kind's name in its
@@ -126,32 +141,33 @@ function parseResourceRoute(route: string, prefix: string): DetailRouteParts | n
 }
 
 /**
- * The inverse of {@link editRoute}, or `null` for anything it cannot make a
- * subject of — including the legacy one-segment `/edit/<name>`.
- *
- * Six segments is the shape `editRoute` mints; five is the shape before the
- * cluster joined it, still parsed so a tab an earlier build persisted opens
- * an editor rather than the Placeholder.
+ * {@link parseResourceRoute} for a route that pins its cluster: six segments,
+ * the cluster first, is the shape `editRoute` and `detailRoute` mint; five is
+ * the shape before the cluster joined it, still parsed so a tab an earlier
+ * build persisted opens rather than rendering the Placeholder.
  */
-export function parseEditRoute(route: string): EditRouteParts | null {
+function parsePinnedRoute(route: string, prefix: string): DetailRouteParts | null {
   const segments = route.split("/");
-  if (segments.length === 5) {
-    const parts = parseResourceRoute(route, "edit");
-    return parts ? splitGroup(parts) : null;
-  }
+  if (segments.length === 5) return parseResourceRoute(route, prefix);
   if (segments.length !== 6) return null;
   const [empty, head, rawCluster, ...rest] = segments;
-  if (empty !== "" || head !== "edit" || !rawCluster) return null;
-  const parts = parseResourceRoute(`/edit/${rest.join("/")}`, "edit");
+  if (empty !== "" || head !== prefix || !rawCluster) return null;
+  const parts = parseResourceRoute(`/${prefix}/${rest.join("/")}`, prefix);
   if (!parts) return null;
-  let cluster: string;
   try {
-    cluster = decodeURIComponent(rawCluster);
+    return { ...parts, cluster: decodeURIComponent(rawCluster) };
   } catch {
     return null;
   }
-  const qualified = splitGroup(parts);
-  return qualified ? { ...qualified, cluster } : null;
+}
+
+/**
+ * The inverse of {@link editRoute}, or `null` for anything it cannot make a
+ * subject of — including the legacy one-segment `/edit/<name>`.
+ */
+export function parseEditRoute(route: string): EditRouteParts | null {
+  const parts = parsePinnedRoute(route, "edit");
+  return parts ? splitGroup(parts) : null;
 }
 
 /**
@@ -197,10 +213,11 @@ function splitGroup(parts: DetailRouteParts): EditRouteParts | null {
  * including characters that would otherwise look like part of the route's
  * shape.
  *
- * A `/k/<slug>` LIST route (three segments once split) and a `/k/<kind>/<ns>/<name>`
- * DETAIL route (five) share the `/k/` prefix; this refuses anything that
- * isn't exactly five, so `screenFor` can tell the two apart.
+ * A `/k/<slug>` LIST route (three segments once split) and a
+ * `/k/<cluster>/<kind>/<ns>/<name>` DETAIL route (six, or five without the
+ * cluster) share the `/k/` prefix; this refuses any other count, so
+ * `screenFor` can tell the two apart.
  */
 export function parseDetailRoute(route: string): DetailRouteParts | null {
-  return parseResourceRoute(route, "k");
+  return parsePinnedRoute(route, "k");
 }

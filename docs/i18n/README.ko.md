@@ -61,6 +61,10 @@
 </p>
 
 <p align="center">
+  <img alt="Kubernetes 오브젝트를 실시간으로 나열하고 검색 및 네임스페이스 필터를 지원하는 srelens 데스크톱 앱" src="../assets/screenshots/srelens-demo-changes.gif" width="100%">
+</p>
+
+<p align="center">
   <picture>
     <source media="(prefers-color-scheme: light)" srcset="../assets/screenshots/gui-overview-light.webp">
     <img alt="새 디자인이 적용된 srelens 데스크톱 앱: 노드 용량, 준비되지 않은 워크로드, 종류(kind)별 오브젝트를 보여 주는 클러스터 개요" src="../assets/screenshots/gui-overview-dark.webp" width="100%">

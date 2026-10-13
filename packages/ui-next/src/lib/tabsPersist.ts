@@ -1,7 +1,9 @@
 import { describe } from "./routes";
+import { detailRoute, parseDetailRoute } from "./detailRoute";
 import { loadRestoreSession, scopedSettingsKey, settingsStorage } from "@srelens/core";
 import type { TableSort } from "@srelens/ui-kit";
-import type { Tab, TabsState, Workspace } from "./tabs";
+import type { ClusterStrip, Tab, TabsState, Workspace } from "./tabs";
+import { isPaletteColor } from "./markSymbols";
 
 /**
  * Where the shell's tabs live between launches.
@@ -63,6 +65,13 @@ function parseTab(v: unknown): Tab | null {
   if (!isRecord(v) || !isString(v.id) || !isString(v.route) || !isString(v.title) || !isString(v.kind)) return null;
   const tab: Tab = { id: v.id, route: v.route, title: v.title, kind: v.kind as Tab["kind"] };
   if (isString(v.sub)) tab.sub = v.sub;
+  // An earlier build's detail route had no cluster and showed the rail's — the
+  // cluster its `sub` was last relabelled for. Pin it there (#834), so it comes
+  // back showing what it showed; with no `sub` it follows the rail as before.
+  const detail = parseDetailRoute(tab.route);
+  if (detail && !detail.cluster && tab.sub) {
+    tab.route = detailRoute(detail.kind, detail.namespace, detail.name, { cluster: tab.sub });
+  }
   // The former Control room route is now app-wide; retain the tab's identity
   // and pin preference while dropping its obsolete cluster label.
   if (tab.route === "/") {
@@ -77,7 +86,31 @@ function parseTab(v: unknown): Tab | null {
   if (view !== undefined) tab.view = view;
   const namespaces = parseNamespaces(v.namespaces);
   if (namespaces !== undefined) tab.namespaces = namespaces;
+  if (typeof v.closedAt === "number" && Number.isFinite(v.closedAt)) tab.closedAt = v.closedAt;
   return tab;
+}
+
+/**
+ * The tabs of the clusters not in focus (#908). One cluster's entry that
+ * cannot be read costs that cluster's tabs, not the workspace; an entry for a
+ * cluster the workspace does not have is dropped, as `reconcile` would.
+ */
+function parseShelved(v: unknown, clusters: readonly string[]): Workspace["shelved"] | undefined {
+  if (!isRecord(v)) return undefined;
+  const shelved: Record<string, ClusterStrip> = {};
+  for (const [id, raw] of Object.entries(v)) {
+    if (!clusters.includes(id) || !isRecord(raw) || !Array.isArray(raw.tabs)) continue;
+    const tabs = raw.tabs.map(parseTab).filter((t): t is Tab => t !== null);
+    const closed = Array.isArray(raw.closed) ? raw.closed.map(parseTab).filter((t): t is Tab => t !== null) : [];
+    if (tabs.length === 0 && closed.length === 0) continue;
+    shelved[id] = {
+      tabs,
+      order: Array.isArray(raw.order) ? raw.order.filter(isString) : tabs.map((t) => t.id),
+      activeId: isString(raw.activeId) ? raw.activeId : (tabs[0]?.id ?? ""),
+      closed,
+    };
+  }
+  return Object.keys(shelved).length > 0 ? shelved : undefined;
 }
 
 function parseWorkspace(v: unknown): Workspace | null {
@@ -98,6 +131,13 @@ function parseWorkspace(v: unknown): Workspace | null {
   // Only a cluster the workspace actually has: the field is an index into
   // `clusters`, and `reconcile` would drop a dangling one anyway.
   if (isString(v.activeCluster) && clusters.includes(v.activeCluster)) ws.activeCluster = v.activeCluster;
+  // Not the cluster in focus: its tabs are the strip itself.
+  const shelved = parseShelved(v.shelved, clusters.filter((id) => id !== ws.activeCluster));
+  if (shelved) ws.shelved = shelved;
+  // Only a palette colour: the chip paints whatever it is handed, and a value
+  // from a hand-edited file or another build's palette is not one this build
+  // can name.
+  if (isPaletteColor(v.color)) ws.color = v.color;
   return ws;
 }
 

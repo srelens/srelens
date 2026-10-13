@@ -2,7 +2,7 @@
 // `@xterm/addon-fit` — a UMD bundle that reads `self` as it evaluates.
 import { describe, it, expect, vi, afterEach } from "vitest";
 import type { ClusterContext } from "@srelens/core";
-import { CLOSED_CAP, defaultState, makeTab, newId, reconcile, type TabsState, type Workspace } from "./tabs";
+import { CLOSED_CAP, defaultState, focusStrip, makeTab, newId, reconcile, workspaceTabCount, type TabsState, type Workspace } from "./tabs";
 
 const ctx = (stableId: string, name = stableId): ClusterContext => ({
   name, stableId, key: stableId, cluster: name, server: `https://${name}`, isCurrent: false,
@@ -88,6 +88,18 @@ describe("defaultState", () => {
   });
 });
 
+describe("workspaceTabCount", () => {
+  it("counts the strip on screen and the strips put away under other clusters, each tab once", () => {
+    // On a: Home and a's Pods. Focus moves to b, which has nothing yet: Pods is
+    // put away under a, and Home, app-wide, stays on screen and is not copied.
+    const away = focusStrip(ws({ activeCluster: "a" }), "b");
+    expect(away.tabs.map((t) => t.route)).toEqual(["/"]);
+    expect(away.shelved?.a.tabs.map((t) => t.route)).toEqual(["/k/pods"]);
+    expect(workspaceTabCount(away)).toBe(2);
+    expect(workspaceTabCount(ws())).toBe(2);
+  });
+});
+
 describe("reconcile", () => {
   it("drops cluster ids that no longer exist", () => {
     const state: TabsState = { workspaces: [ws({ clusters: ["a", "gone", "b"] })], currentId: "w1" };
@@ -149,7 +161,13 @@ describe("reconcile", () => {
     expect(reconcile(s, [ctx("b")]).workspaces[0].pausedClusters).toEqual(["b"]);
   });
 
-  it("relabels cluster-scoped tabs when reconciliation picks a surviving context", () => {
+  /**
+   * A cluster that is gone takes its own tabs with it (#908). They used to be
+   * relabelled for whichever cluster took over the focus, which showed that
+   * cluster's objects in tabs nobody had opened there. The app-wide tab stays,
+   * and so do the editor and "New resource": they name a cluster of their own.
+   */
+  it("drops a vanished cluster's own tabs when another takes the focus, and keeps the rest", () => {
     const s = defaultState([ctx("a", "prod"), ctx("b", "staging")]);
     s.workspaces[0].tabs = [
       makeTab("/k/pods", { clusterName: "prod" }),
@@ -161,10 +179,67 @@ describe("reconcile", () => {
 
     const out = reconcile(s, [ctx("b", "staging")]).workspaces[0];
     expect(out.activeCluster).toBe("b");
-    expect(out.tabs[0].sub).toBe("staging");
-    expect(out.tabs[1].sub).toBeUndefined();
-    expect(out.tabs[2].sub).toBe("prod");
-    expect(out.tabs[3].sub).toBe("prod");
+    expect(out.tabs.map((t) => t.route)).toEqual(["/settings", "/edit/prod/Pod/default/api", "/new/prod"]);
+    expect(out.tabs.map((t) => t.sub)).toEqual([undefined, "prod", "prod"]);
+    expect(out.activeId).toBe(out.tabs[0].id);
+    expect(out.shelved).toBeUndefined();
+  });
+
+  it("brings back the tabs of the cluster that takes the focus when the one in focus vanishes", () => {
+    const s = defaultState([ctx("a", "prod"), ctx("b", "staging")]);
+    const w = s.workspaces[0];
+    const pods = makeTab("/k/pods", { clusterName: "prod" });
+    w.tabs = [w.tabs[0], pods];
+    w.activeId = pods.id;
+    const services = makeTab("/k/services", { clusterName: "staging" });
+    w.shelved = { b: { tabs: [services], order: [w.tabs[0].id, services.id], activeId: services.id, closed: [] } };
+
+    const out = reconcile(s, [ctx("b", "staging")]).workspaces[0];
+    expect(out.tabs.map((t) => t.route)).toEqual(["/", "/k/services"]);
+    expect(out.activeId).toBe(services.id);
+    expect(out.shelved).toBeUndefined();
+  });
+
+  it("forgets the shelved tabs of a cluster that vanished while another was in focus", () => {
+    const s = defaultState([ctx("a", "prod"), ctx("b", "staging")]);
+    const w = s.workspaces[0];
+    const services = makeTab("/k/services", { clusterName: "staging" });
+    w.shelved = { b: { tabs: [services], order: [services.id], activeId: services.id, closed: [] } };
+
+    const out = reconcile(s, [ctx("a", "prod")]).workspaces[0];
+    expect(out.activeCluster).toBe("a");
+    expect(out.shelved).toBeUndefined();
+  });
+
+  /**
+   * A context can be renamed while its tabs are put away. The focus can then
+   * reach it with no name in hand — the cluster in focus removed from the
+   * sidebar — and its tabs came back under the old name, which is also how
+   * the window finds a tab's context.
+   */
+  it("labels the tabs put away for their cluster's name as it is now, open and recently closed", () => {
+    const s = defaultState([ctx("a", "prod"), ctx("b", "staging")]);
+    const w = s.workspaces[0];
+    const services = makeTab("/k/services", { clusterName: "staging" });
+    const closed = makeTab("/k/pods", { clusterName: "staging" });
+    w.shelved = { b: { tabs: [services], order: [services.id], activeId: services.id, closed: [closed] } };
+
+    const out = reconcile(s, [ctx("a", "prod"), ctx("b", "staging-renamed")]).workspaces[0];
+    expect(out.shelved?.b.tabs.map((t) => t.sub)).toEqual(["staging-renamed"]);
+    expect(out.shelved?.b.closed.map((t) => t.sub)).toEqual(["staging-renamed"]);
+
+    // And nothing moves when the names already hold.
+    const again = reconcile({ ...s, workspaces: [out] }, [ctx("a", "prod"), ctx("b", "staging-renamed")]);
+    expect(again.workspaces[0]).toBe(out);
+  });
+
+  it("caps a shelved strip's recently closed list as it caps the one on screen", () => {
+    const s = defaultState([ctx("a", "prod"), ctx("b", "staging")]);
+    const w = s.workspaces[0];
+    const many = Array.from({ length: CLOSED_CAP + 3 }, () => makeTab("/k/services", { clusterName: "staging" }));
+    w.shelved = { b: { tabs: [], order: [], activeId: "", closed: many } };
+    const out = reconcile(s, [ctx("a", "prod"), ctx("b", "staging")]).workspaces[0];
+    expect(out.shelved?.b.closed).toHaveLength(CLOSED_CAP);
   });
 
   it("relabels cluster-following tabs when the active context gains a prefix", () => {

@@ -62,6 +62,10 @@
 </p>
 
 <p align="center">
+  <img alt="O aplicativo desktop do srelens lista objetos do Kubernetes em tempo real, com pesquisa e filtros de namespace" src="../assets/screenshots/srelens-demo-changes.gif" width="100%">
+</p>
+
+<p align="center">
   <picture>
     <source media="(prefers-color-scheme: light)" srcset="../assets/screenshots/gui-overview-light.webp">
     <img alt="O aplicativo desktop do srelens no novo design: uma visão geral do cluster com capacidade dos nodes, workloads que não estão prontos e objetos por kind" src="../assets/screenshots/gui-overview-dark.webp" width="100%">

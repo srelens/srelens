@@ -3,7 +3,9 @@ import { ConfirmDialog, IconButton, Titlebar, WorkspaceSwitcher } from "@srelens
 import { applyUiScale, getUiScale, isApplePlatform, isTauri, setUiScale, stepUiScale } from "@srelens/core";
 import { rememberTheme } from "../lib/appearance";
 import { Icons } from "../lib/icons";
+import { openSettings } from "../lib/settingsRequest";
 import { hint } from "../lib/shortcuts";
+import { workspaceTabCount } from "../lib/tabs";
 import { openTab, removeWorkspace, switchWorkspace, useTabs } from "../lib/tabsStore";
 import { useCanLockWorkspace, useWorkspaceSealed } from "./LockGate";
 import { StarButton } from "./StarButton";
@@ -132,11 +134,13 @@ export function Chrome({ controls, clusterName, onToggleTheme, onNewWorkspace, o
   function askRemove(id: string) {
     const w = workspaces.find((x) => x.id === id);
     if (!w) return;
-    if (w.tabs.length <= 1) removeWorkspace(id);
+    // Every cluster's tabs, not only the strip on screen (#908): a workspace
+    // showing just its home tab can hold another cluster's work put away.
+    if (workspaceTabCount(w) <= 1) removeWorkspace(id);
     else setRemoving(id);
   }
 
-  const openTabs = target ? target.tabs.length : 0;
+  const openTabs = target ? workspaceTabCount(target) : 0;
 
   return (
     <>
@@ -158,6 +162,9 @@ export function Chrome({ controls, clusterName, onToggleTheme, onNewWorkspace, o
                  to offer Remove is the last thing this should grow. */
               <span className="ws-chip" data-sealed="true">
                 {Icons.workspace && <Icons.workspace size={12} aria-hidden="true" />}
+                {workspace.color && (
+                  <span data-slot="workspace-color" aria-hidden="true" className="h-2 w-2 shrink-0 rounded-full" style={{ background: workspace.color }} />
+                )}
                 <span className="max-w-[110px] truncate">{workspace.name}</span>
               </span>
             ) : (
@@ -166,13 +173,15 @@ export function Chrome({ controls, clusterName, onToggleTheme, onNewWorkspace, o
                 workspaces={workspaces.map((w) => ({
                   id: w.id,
                   name: w.name,
+                  color: w.color,
                   clusters: w.clusters.length,
-                  tabs: w.tabs.length,
+                  tabs: workspaceTabCount(w),
                 }))}
                 activeId={workspace.id}
                 onSelect={switchWorkspace}
                 onRemove={askRemove}
                 onCreate={onNewWorkspace}
+                onManage={() => openSettings("workspaces")}
               />
             )}
           </>

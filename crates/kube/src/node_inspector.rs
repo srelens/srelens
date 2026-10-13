@@ -1,10 +1,24 @@
 use k8s_openapi::api::core::v1::{Node, Pod};
 use kube::{api::ListParams, Api, Client};
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use std::time::Duration;
+use srelens_capability::{Annotations, Capability, CapabilityError};
+use std::sync::Arc;
+
+use crate::client_cache::ClientCache;
+use crate::connect::request_timeout;
+
+/// Input payload for `k8s.nodeInspect`.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct NodeInspectIn {
+    pub context: String,
+    pub node: String,
+}
 
 /// Comprehensive inspection details for a single Kubernetes Node.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema, Default)]
+#[serde(rename_all = "camelCase")]
 pub struct NodeInspectorDetails {
     pub name: String,
     pub status: String,
@@ -28,8 +42,11 @@ pub struct NodeInspectorDetails {
     pub cpu_allocatable_millicores: i64,
     pub cpu_requests_millicores: i64,
 
+    #[serde(rename = "memCapacityMiB")]
     pub mem_capacity_mib: i64,
+    #[serde(rename = "memAllocatableMiB")]
     pub mem_allocatable_mib: i64,
+    #[serde(rename = "memRequestsMiB")]
     pub mem_requests_mib: i64,
 
     pub pods_capacity: i64,
@@ -44,17 +61,19 @@ pub struct NodeInspectorDetails {
     pub gpu_capacity_count: i64,
     pub gpu_allocatable_count: i64,
     pub gpu_requests_count: i64,
+    #[serde(rename = "gpuMemoryTotalMiB")]
     pub gpu_memory_total_mib: Option<i64>,
+    #[serde(rename = "gpuMemoryRequestsMiB")]
     pub gpu_memory_requests_mib: i64,
     #[serde(default)]
     pub is_virtual_gpu: bool,
     #[serde(default)]
     pub physical_gpu_count: i64,
-    #[serde(default)]
+    #[serde(default, rename = "physicalGpuMemoryTotalMiB")]
     pub physical_gpu_memory_total_mib: Option<i64>,
     #[serde(default)]
     pub virtual_gpu_count: Option<i64>,
-    #[serde(default)]
+    #[serde(default, rename = "virtualGpuMemoryTotalMiB")]
     pub virtual_gpu_memory_total_mib: Option<i64>,
 
     pub conditions: Vec<NodeConditionInfo>,
@@ -62,22 +81,26 @@ pub struct NodeInspectorDetails {
     pub pods: Vec<NodePodItem>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct NodeConditionInfo {
+    #[serde(rename = "type")]
     pub type_: String,
     pub status: String,
     pub reason: Option<String>,
     pub message: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct NodeTaintInfo {
     pub key: String,
     pub value: Option<String>,
     pub effect: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema, Default)]
+#[serde(rename_all = "camelCase")]
 pub struct NodePodItem {
     pub name: String,
     pub namespace: String,
@@ -86,28 +109,59 @@ pub struct NodePodItem {
     pub restarts: i64,
     pub age: String,
     pub cpu_requests_millicores: i64,
+    #[serde(rename = "memRequestsMiB")]
     pub mem_requests_mib: i64,
     pub gpu_requests: i64,
+    #[serde(rename = "gpuMemRequestsMiB")]
     pub gpu_mem_requests_mib: i64,
     pub pod_ip: String,
+}
+
+/// `k8s.nodeInspect` — comprehensive inspection of node allocatable, requests, GPU, taints, conditions, and pods.
+pub fn node_inspect_capability(cache: Arc<ClientCache>) -> Capability {
+    Capability::typed::<NodeInspectIn, NodeInspectorDetails, _, _>(
+        "k8s.nodeInspect",
+        "comprehensive inspection of a node allocatable, requests, GPU, taints, conditions, and pods",
+        Annotations::READ_ONLY,
+        move |input: NodeInspectIn| {
+            let cache = cache.clone();
+            async move {
+                let client = cache
+                    .get(&input.context)
+                    .await
+                    .map_err(CapabilityError::Handler)?;
+                inspect_node(client, &input.node)
+                    .await
+                    .map_err(CapabilityError::Handler)
+            }
+        },
+    )
 }
 
 /// Query and inspect a live node and all pods scheduled on it.
 pub async fn inspect_node(client: Client, node_name: &str) -> Result<NodeInspectorDetails, String> {
     let node_api: Api<Node> = Api::all(client.clone());
-    let node = tokio::time::timeout(Duration::from_secs(10), node_api.get(node_name))
+    let node = tokio::time::timeout(request_timeout(), node_api.get(node_name))
         .await
         .map_err(|_| format!("Timed out fetching node '{}'", node_name))?
-        .map_err(|e| format!("Failed to fetch node '{}': {}", node_name, e))?;
+        .map_err(|e| match e {
+            kube::Error::Api(ref ae) if ae.code == 404 => format!("Node '{}' not found", node_name),
+            other => format!("Failed to fetch node '{}': {}", node_name, other),
+        })?;
 
     let pod_api: Api<Pod> = Api::all(client);
     let lp = ListParams::default().fields(&format!("spec.nodeName={}", node_name));
-    let pod_list = tokio::time::timeout(Duration::from_secs(10), pod_api.list(&lp))
+    let (pods, pod_trunc) = crate::list_cap::list_capped(&pod_api, lp)
         .await
-        .map_err(|_| format!("Timed out listing pods on node '{}'", node_name))?
         .map_err(|e| format!("Failed to list pods on node '{}': {}", node_name, e))?;
+    if pod_trunc {
+        return Err(format!(
+            "Pod list on node '{}' was truncated by list limit",
+            node_name
+        ));
+    }
 
-    Ok(parse_node_details(&node, &pod_list.items))
+    Ok(parse_node_details(&node, &pods))
 }
 
 /// Pure parser extracting `NodeInspectorDetails` from raw Kubernetes `Node` and `Pod` resources.
@@ -912,5 +966,77 @@ mod tests {
         assert_eq!(details.pods.len(), 1);
         assert_eq!(details.pods[0].gpu_requests, 1);
         assert_eq!(details.pods[0].gpu_mem_requests_mib, 5120);
+    }
+
+    #[test]
+    fn capability_has_expected_id() {
+        let cap = node_inspect_capability(ClientCache::new(std::path::PathBuf::from("/x")));
+        assert_eq!(cap.id, "k8s.nodeInspect");
+    }
+
+    #[test]
+    fn deserializes_caller_payload_and_denies_unknown_fields() {
+        // Valid payload
+        let valid = serde_json::json!({
+            "context": "kind-srelens",
+            "node": "worker-1"
+        });
+        let parsed: Result<NodeInspectIn, _> = serde_json::from_value(valid);
+        assert!(parsed.is_ok());
+        let input = parsed.unwrap();
+        assert_eq!(input.context, "kind-srelens");
+        assert_eq!(input.node, "worker-1");
+
+        // Missing required field 'node'
+        let missing_node = serde_json::json!({
+            "context": "kind-srelens"
+        });
+        assert!(serde_json::from_value::<NodeInspectIn>(missing_node).is_err());
+
+        // Wrong field name 'nodeName' rejected by deny_unknown_fields
+        let wrong_field = serde_json::json!({
+            "context": "kind-srelens",
+            "nodeName": "worker-1"
+        });
+        assert!(serde_json::from_value::<NodeInspectIn>(wrong_field).is_err());
+
+        // Extra unexpected fields rejected by deny_unknown_fields
+        let extra = serde_json::json!({
+            "context": "kind-srelens",
+            "node": "worker-1",
+            "extra": true
+        });
+        assert!(serde_json::from_value::<NodeInspectIn>(extra).is_err());
+    }
+
+    #[test]
+    fn serializes_wire_keys_as_camel_case_with_mib() {
+        let details = NodeInspectorDetails {
+            name: "node-1".to_string(),
+            cpu_capacity_millicores: 4000,
+            mem_capacity_mib: 16384,
+            gpu_memory_total_mib: Some(8192),
+            physical_gpu_memory_total_mib: Some(8192),
+            virtual_gpu_memory_total_mib: Some(8192),
+            pods: vec![NodePodItem {
+                name: "pod-1".to_string(),
+                mem_requests_mib: 1024,
+                gpu_mem_requests_mib: 512,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+
+        let val = serde_json::to_value(&details).unwrap();
+        assert_eq!(val["cpuCapacityMillicores"], 4000);
+        assert_eq!(val["memCapacityMiB"], 16384);
+        assert_eq!(val["gpuMemoryTotalMiB"], 8192);
+        assert_eq!(val["physicalGpuMemoryTotalMiB"], 8192);
+        assert_eq!(val["virtualGpuMemoryTotalMiB"], 8192);
+        assert_eq!(val["pods"][0]["memRequestsMiB"], 1024);
+        assert_eq!(val["pods"][0]["gpuMemRequestsMiB"], 512);
+        // Ensure no snake_case leaks
+        assert!(val.get("cpu_capacity_millicores").is_none());
+        assert!(val.get("mem_capacity_mib").is_none());
     }
 }

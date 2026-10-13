@@ -120,7 +120,7 @@ export function useDeepLinks({
         openCluster(context);
       } else {
         const namespace = targetNamespace(target.kind, target.namespace);
-        openOnCluster(context, detailRoute(target.kind, namespace, target.name));
+        openOnCluster(context, detailRoute(target.kind, namespace, target.name, { cluster: context.name }));
       }
     }
     if (held.length > 0 && !heldNoticeShown.current) {

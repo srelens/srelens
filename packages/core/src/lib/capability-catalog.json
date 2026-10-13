@@ -417,6 +417,15 @@
     "confirm": "Reveal secret material[ from {resource}][ in cluster {cluster}] to the caller?"
   },
   {
+    "id": "k8s.gpuInventory",
+    "readOnly": true,
+    "destructive": false,
+    "requiresConfirm": false,
+    "sensitive": false,
+    "impact": "low",
+    "confirm": null
+  },
+  {
     "id": "k8s.helmInstall",
     "readOnly": false,
     "destructive": false,
@@ -811,6 +820,15 @@
     "sensitive": false,
     "impact": "high",
     "confirm": "Apply the change this action declares[ to {resource}][ in cluster {cluster}]? It can start work the controller runs straight away, including replacing what is running."
+  },
+  {
+    "id": "k8s.nodeInspect",
+    "readOnly": true,
+    "destructive": false,
+    "requiresConfirm": false,
+    "sensitive": false,
+    "impact": "low",
+    "confirm": null
   },
   {
     "id": "k8s.nodeJournalLogs",

@@ -30,6 +30,10 @@ export const PALETTE = [
   { value: "var(--mark-ink)", label: "Ink" },
 ];
 
+/** Whether `value` is one of {@link PALETTE}'s colours: the only ones a workspace may be given. */
+export const isPaletteColor = (value: unknown): value is string =>
+  PALETTE.some((swatch) => swatch.value === value);
+
 /**
  * The symbols a mark may be drawn as, in place of its initials.
  *

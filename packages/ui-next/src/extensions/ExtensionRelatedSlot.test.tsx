@@ -282,18 +282,21 @@ it("opens a built-in target in the host's own Inspector, on the cluster the Insp
     to:"/ServiceAccount", capability:"", targets:[{ namespace:"team", name:"deployer", exists:true }] })]));
   render(<ExtensionRelatedSlot context="prod" resource={resource}/>);
   await userEvent.click(await screen.findByRole("button", { name:/References ServiceAccount team\/deployer/ }));
-  expect(vi.mocked(openTab).mock.calls).toEqual([[detailRoute("ServiceAccount", "team", "deployer"), { clusterName:"prod" }]]);
+  expect(vi.mocked(openTab).mock.calls).toEqual([[detailRoute("ServiceAccount", "team", "deployer", { cluster: "prod" }), { clusterName:"prod" }]]);
 });
 
-it("names a built-in target on a cluster the rail is not showing without a link to the wrong one", async () => {
-  // The detail route follows the rail: from an app page pinned to another cluster it
-  // would open the rail's namesake, so the target is named, not linked.
+it("opens a built-in target on the Inspector's cluster when the rail shows another (#834)", async () => {
+  // The detail route carries its cluster, so a link from a detail tab pinned to
+  // prod opens prod's target whatever the rail shows — not staging's namesake,
+  // and not nothing.
   vi.mocked(useActiveContext).mockReturnValue({ name:"staging", stableId:"file/staging", key:"staging-key" } as never);
   vi.mocked(resolveExtensionLinks).mockResolvedValue(answer([link({ id:"account", relation:"references",
     to:"/ServiceAccount", capability:"", targets:[{ namespace:"team", name:"deployer", exists:true }] })]));
   render(<ExtensionRelatedSlot context="prod" resource={resource}/>);
-  expect(await screen.findByText(/References ServiceAccount team\/deployer/)).toBeTruthy();
-  expect(screen.queryByRole("button", { name:/deployer/ })).toBeNull();
+  await userEvent.click(await screen.findByRole("button", { name:/References ServiceAccount team\/deployer/ }));
+  expect(vi.mocked(openTab).mock.calls).toEqual([
+    [detailRoute("ServiceAccount", "team", "deployer", { cluster: "prod" }), { clusterName:"prod" }],
+  ]);
 });
 
 it("shows what names this resource under the reverse relation, from the same declarations", async () => {
@@ -320,7 +323,7 @@ it("shows what names this resource under the reverse relation, from the same dec
   await userEvent.click(within(manages).getByRole("button", { name:"Deployment team/api" }));
   await userEvent.click(within(referenced).getByRole("button", { name:"Kustomization flux-system/apps" }));
   expect(vi.mocked(openTab).mock.calls).toEqual([
-    [detailRoute("Deployment", "team", "api"), { clusterName:"prod" }],
+    [detailRoute("Deployment", "team", "api", { cluster: "prod" }), { clusterName:"prod" }],
     [extensionClusterResourceRoute("cluster-key", "org.example.argocd", "kustomizations", "flux-system", "apps"), { clusterName:"prod" }],
   ]);
   expect(within(manages).getByRole("button", { name:"Deployment web/front" })).toBeTruthy();
@@ -382,6 +385,6 @@ it("reads both directions for a kind that is both a link's source and another's 
   render(<ExtensionRelatedSlot context="prod" resource={application}/>);
   // A cluster-scoped built-in target opens with the detail route's cluster-scoped segment.
   await userEvent.click(await screen.findByRole("button", { name:/References Namespace team/ }));
-  expect(vi.mocked(openTab).mock.calls[0]).toEqual([detailRoute("Namespace", null, "team"), { clusterName:"prod" }]);
+  expect(vi.mocked(openTab).mock.calls[0]).toEqual([detailRoute("Namespace", null, "team", { cluster: "prod" }), { clusterName:"prod" }]);
   expect(within(screen.getByRole("group", { name:"Manages" })).getByRole("button", { name:"Deployment team/api" })).toBeTruthy();
 });

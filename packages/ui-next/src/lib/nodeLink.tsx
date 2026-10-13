@@ -1,4 +1,4 @@
-import { useActiveContext } from "./clusters";
+import { useScreenContext } from "./clusters";
 import { detailRoute } from "./detailRoute";
 import { openTab } from "./tabsStore";
 
@@ -14,9 +14,9 @@ import { openTab } from "./tabsStore";
  * because the reader is leaving the pod's list for somewhere else and wants
  * the list still there to come back to.
  *
- * The cluster is the active one, read here rather than passed in: every
- * screen that shows a pod resolves its own cluster through the same
- * `useActiveContext`, so the node opens on the cluster the pod was read off.
+ * The cluster is the screen's, read here rather than passed in: a pinned
+ * detail tab's own (#834) through `useScreenContext`, and the rail's
+ * everywhere else, so the node opens on the cluster the pod was read off.
  * With no cluster resolved there is nowhere to open it, and the name is text.
  *
  * Inside a table row the click, the double-click and Enter/Space stop here,
@@ -25,7 +25,7 @@ import { openTab } from "./tabsStore";
  * node.
  */
 export function NodeLink({ name }: { name: string }) {
-  const context = useActiveContext();
+  const context = useScreenContext();
   if (!context) return <>{name}</>;
   const label = `Open node ${name}`;
   return (
@@ -40,7 +40,7 @@ export function NodeLink({ name }: { name: string }) {
       aria-label={label}
       onClick={(e) => {
         e.stopPropagation();
-        openTab(detailRoute("Node", null, name), { clusterName: context.name });
+        openTab(detailRoute("Node", null, name, { cluster: context.name }), { clusterName: context.name });
       }}
       onDoubleClick={(e) => e.stopPropagation()}
       onKeyDown={(e) => {

@@ -133,6 +133,7 @@ describe("Sidebar", () => {
 
       expect(coreMock.invokeCommand).toHaveBeenCalledWith("open_context_window", {
         contextId: "/k/config#kind-dev",
+        name: "kind-dev",
       });
       await waitFor(() => {
         expect(errorSpy).toHaveBeenCalledWith("Couldn't open window for kind-dev", "Window creation failed");
@@ -140,6 +141,31 @@ describe("Sidebar", () => {
     } finally {
       delete (window as unknown as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__;
       errorSpy.mockRestore();
+    }
+  });
+
+  // The window is titled with the name the row shows (#150): a profile's
+  // display name, not the kubeconfig's.
+  it("names a renamed context's window the way the row does", () => {
+    (window as unknown as { __TAURI_INTERNALS__: unknown }).__TAURI_INTERNALS__ = {};
+    coreMock.invokeCommand.mockResolvedValueOnce(undefined);
+
+    try {
+      render(
+        <Sidebar
+          {...base}
+          contextProfiles={{ "kind-dev": { displayName: "Dev cluster" } }}
+          contextKey={() => "/k/config#kind-dev"}
+        />,
+      );
+      fireEvent.click(screen.getByRole("button", { name: "Open in new window" }));
+
+      expect(coreMock.invokeCommand).toHaveBeenCalledWith("open_context_window", {
+        contextId: "/k/config#kind-dev",
+        name: "Dev cluster",
+      });
+    } finally {
+      delete (window as unknown as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__;
     }
   });
 

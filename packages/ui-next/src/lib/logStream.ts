@@ -6,6 +6,7 @@ import {
   describeError,
   startLogStream,
   type FriendlyError,
+  type LogBuffer,
   type LogLine,
   type LogStatus,
   type LogStream,
@@ -30,12 +31,16 @@ import {
  * immutable value with pure functions on it (`packages/core/src/lib/logBuffer.ts`),
  * built so a caller holding it in a mutable slot can reassign that slot from
  * a stream callback that fires many times in one tick, and only read the
- * result once at the end. `onLine` does exactly that: it mutates
- * `bufferRef.current` synchronously on every call — never dropping a line to
- * a stale closure, no matter how many arrive before React gets a turn — and
- * schedules a single microtask to fold the ref into render state once the
- * burst has finished. A hundred lines fired in one tick land as one commit,
- * not a race between a hundred `setState` closures.
+ * result once at the end. `onLine` does exactly that: it pushes every line
+ * onto a batch in a ref — never dropping one to a stale closure, no matter how
+ * many arrive before React gets a turn — and schedules a single commit, for the
+ * next frame, that folds the whole batch into the ring with ONE `appendLogLines`
+ * and hands the result to render state. However many lines arrive between two
+ * frames land as one copy of the ring and one commit, not one of each per line
+ * or per tick: each append copies the whole ring, and one at a time, ten
+ * thousand lines onto a full ring took ~80ms where one batch took ~1ms. A batch
+ * that reaches the ring's capacity before its commit is folded there and then,
+ * so a commit held back cannot grow a backlog.
  *
  * **Pause freezes the view, not the stream.** The design's toggle only
  * relabels a button; classic tears the stream down and re-tails on resume,
@@ -45,7 +50,9 @@ import {
  * ring's own capacity — but the rendered `lines` snapshot is not refreshed
  * from it until resume, and `pendingWhilePaused` counts what arrived in the
  * meantime. Resume folds the buffer into view and resets that count; it
- * never touches the connection, so it can never cause a re-tail.
+ * never touches the connection, so it can never cause a re-tail. A `hold`
+ * from the screen freezes the view the same way, for as long as the reader
+ * presses or selects in it, without touching their pause.
  *
  * **The unmount race `startLogStream` opens.** `startLogStream` is async: it
  * awaits an `invokeCommand` before its promise resolves. If the component
@@ -140,7 +147,7 @@ export function aggregateLogStatus(counts: LogTargetCounts): "connecting" | LogS
 }
 
 export interface UseLogStreamResult {
-  /** The visible lines, oldest first — frozen while `paused` is true. */
+  /** The visible lines, oldest first — frozen while `paused` or `held` is true. */
   lines: readonly LogLine[];
   /** How many lines the ring has dropped from the visible buffer. */
   dropped: number;
@@ -156,9 +163,17 @@ export interface UseLogStreamResult {
   /** Set when `status` is `"error"` — why the stream could not be opened. */
   error?: FriendlyError;
   paused: boolean;
-  /** Lines that have arrived since pausing, not yet folded into `lines`. */
+  /** Whether the screen is holding the view; see `hold`. */
+  held: boolean;
+  /** Lines the frozen view is not showing: those since the pause or hold froze it, and any that came just before. */
   pendingWhilePaused: number;
   togglePause: () => void;
+  /**
+   * Freeze the view (`true`) or let it go (`false`) while the reader presses or selects in the log, so the line
+   * under them is not moved or rewritten mid-click or mid-copy. Apart from `paused`, which is the reader's own
+   * choice and which this never changes: the view moves only while neither holds it.
+   */
+  hold: (on: boolean) => void;
   /** Empty the buffer and view without touching the connection. */
   clear: () => void;
   /**
@@ -170,6 +185,21 @@ export interface UseLogStreamResult {
 }
 
 const DEFAULT_CAPACITY = 5000;
+
+/**
+ * Run `fn` before the next frame is drawn: a commit is a render of the whole screen, and the backend can deliver a
+ * line per IPC event, many times between two frames. A hidden document draws no frames and would hold every line
+ * back until it is shown again, so it, and a host without frames, get a timer of about one frame instead.
+ * Returns what takes the request back.
+ */
+function nextFrame(fn: () => void): () => void {
+  if (typeof requestAnimationFrame === "function" && !document.hidden) {
+    const frame = requestAnimationFrame(fn);
+    return () => cancelAnimationFrame(frame);
+  }
+  const timer = setTimeout(fn, 16);
+  return () => clearTimeout(timer);
+}
 
 /** Before the connection effect has run there is nothing known about anything. */
 const NO_TARGETS: LogTargetCounts = { live: 0, reconnecting: 0, total: 0 };
@@ -199,29 +229,68 @@ export function useLogStream(
   openRef.current = options.source?.open;
 
   const bufferRef = useRef(createLogBuffer(capacity));
+  /** Lines that arrived since the last fold, oldest first: the ring is copied once per batch, not once per line. */
+  const batchRef = useRef<LogLine[]>([]);
   const pausedRef = useRef(false);
-  const pendingRef = useRef(0);
-  const flushScheduledRef = useRef(false);
+  const heldRef = useRef(false);
+  /** Takes back the commit asked for, while one is. */
+  const cancelCommitRef = useRef<(() => void) | undefined>(undefined);
   const firstRunRef = useRef(true);
 
   const [view, setView] = useState(() => bufferRef.current);
+  /** The ring as last shown, for counting what has come since: what a commit reads, `view` may not be yet. */
+  const shownRef = useRef(view);
   const [paused, setPaused] = useState(false);
+  const [held, setHeld] = useState(false);
   const [pendingWhilePaused, setPendingWhilePaused] = useState(0);
   const [counts, setCounts] = useState<LogTargetCounts>(NO_TARGETS);
   const [error, setError] = useState<FriendlyError | undefined>(undefined);
   const [restartCount, setRestartCount] = useState(0);
 
-  const commit = useCallback(() => {
-    flushScheduledRef.current = false;
-    if (pausedRef.current) return;
-    setView(bufferRef.current);
+  const fold = useCallback(() => {
+    if (batchRef.current.length === 0) return;
+    bufferRef.current = appendLogLines(bufferRef.current, batchRef.current);
+    batchRef.current = [];
   }, []);
 
+  const show = useCallback((buffer: LogBuffer) => {
+    shownRef.current = buffer;
+    setPendingWhilePaused(0);
+    setView(buffer);
+  }, []);
+
+  /** Fold what is waiting and show the whole ring: the end of the last pause or hold. */
+  const reveal = useCallback(() => {
+    fold();
+    show(bufferRef.current);
+  }, [fold, show]);
+
+  const commit = useCallback(() => {
+    cancelCommitRef.current = undefined;
+    // Folded while paused or held too: they freeze the view, not the ring.
+    fold();
+    if (pausedRef.current || heldRef.current) {
+      // Every line the ring has taken since the view froze, those it has since dropped among them, and those that
+      // came before the freeze but were not shown yet: counted off the ring, not as they arrive.
+      const taken = (buffer: LogBuffer) => buffer.dropped + buffer.lines.length;
+      setPendingWhilePaused(taken(bufferRef.current) - taken(shownRef.current));
+      return;
+    }
+    show(bufferRef.current);
+  }, [fold, show]);
+
   const scheduleCommit = useCallback(() => {
-    if (flushScheduledRef.current) return;
-    flushScheduledRef.current = true;
-    void Promise.resolve().then(commit);
+    cancelCommitRef.current ??= nextFrame(commit);
   }, [commit]);
+
+  // A commit still asked for when the screen goes would fold lines into a ring nothing reads.
+  useEffect(
+    () => () => {
+      cancelCommitRef.current?.();
+      cancelCommitRef.current = undefined;
+    },
+    [],
+  );
 
   // Stable across restarts: the same ref keeps accumulating, so a target
   // change doesn't need a new callback, only a fresh buffer (below).
@@ -229,45 +298,47 @@ export function useLogStream(
     (source: string, text: string, truncated = false) => {
       // Marked only when the host cut it (#747), so a whole line is `{source, text}`.
       const line = truncated ? { source, text, truncated: true as const } : { source, text };
-      bufferRef.current = appendLogLines(bufferRef.current, [line]);
-      if (pausedRef.current) {
-        pendingRef.current += 1;
-        setPendingWhilePaused(pendingRef.current);
-      } else {
-        scheduleCommit();
-      }
+      batchRef.current.push(line);
+      // A ring's worth waiting is folded now: whatever holds the commit back, the backlog stays bounded.
+      if (batchRef.current.length >= bufferRef.current.capacity) fold();
+      scheduleCommit();
     },
-    [scheduleCommit],
+    [fold, scheduleCommit],
   );
 
   const togglePause = useCallback(() => {
     const next = !pausedRef.current;
     pausedRef.current = next;
     setPaused(next);
-    if (!next) {
-      // Resuming folds the accumulated buffer into view in one step — never
-      // a re-tail, since the connection is untouched by this branch.
-      pendingRef.current = 0;
-      setPendingWhilePaused(0);
-      setView(bufferRef.current);
-    }
-  }, []);
+    // Resuming folds the accumulated buffer into view in one step — never
+    // a re-tail, since the connection is untouched by this branch — unless
+    // the screen is holding the view, whose release does it instead.
+    if (!next && !heldRef.current) reveal();
+  }, [reveal]);
+
+  const hold = useCallback(
+    (on: boolean) => {
+      if (heldRef.current === on) return;
+      heldRef.current = on;
+      setHeld(on);
+      if (!on && !pausedRef.current) reveal();
+    },
+    [reveal],
+  );
 
   const clear = useCallback(() => {
+    batchRef.current = [];
     bufferRef.current = clearLogBuffer(bufferRef.current);
-    pendingRef.current = 0;
-    setPendingWhilePaused(0);
-    setView(bufferRef.current);
-  }, []);
+    show(bufferRef.current);
+  }, [show]);
 
   useEffect(() => {
     let cancelled = false;
     let stopFn: (() => void) | undefined;
 
     bufferRef.current = createLogBuffer(capacity);
-    pendingRef.current = 0;
-    setPendingWhilePaused(0);
-    setView(bufferRef.current);
+    batchRef.current = [];
+    show(bufferRef.current);
     // A restart knows nothing about the new targets until they report; the
     // old targets' states are not evidence about these ones.
     const sources = new Set(targets.map((t) => t.label ?? ""));
@@ -376,7 +447,7 @@ export function useLogStream(
       stopFn?.();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [context, namespace, key, sourceKey, sinceSeconds, tailLines, timestamps, capacity, onLine]);
+  }, [context, namespace, key, sourceKey, sinceSeconds, tailLines, timestamps, capacity, onLine, show]);
 
   return useMemo(
     () => ({
@@ -391,11 +462,13 @@ export function useLogStream(
       totalTargets: counts.total,
       error,
       paused,
+      held,
       pendingWhilePaused,
       togglePause,
+      hold,
       clear,
       restartCount,
     }),
-    [view, counts, error, paused, pendingWhilePaused, togglePause, clear, restartCount],
+    [view, counts, error, paused, held, pendingWhilePaused, togglePause, hold, clear, restartCount],
   );
 }

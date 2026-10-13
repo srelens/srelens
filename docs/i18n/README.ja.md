@@ -58,6 +58,10 @@
 </p>
 
 <p align="center">
+  <img alt="Kubernetes オブジェクトをリアルタイムで一覧表示し、検索と Namespace フィルターに対応する srelens デスクトップアプリ" src="../assets/screenshots/srelens-demo-changes.gif" width="100%">
+</p>
+
+<p align="center">
   <picture>
     <source media="(prefers-color-scheme: light)" srcset="../assets/screenshots/gui-overview-light.webp">
     <img alt="新デザインの srelens デスクトップアプリ：ノードの容量、Ready になっていないワークロード、種類別のオブジェクトを表示するクラスター概要" src="../assets/screenshots/gui-overview-dark.webp" width="100%">

@@ -618,6 +618,12 @@ fn build_with(
         cache.clone(),
     ));
     reg.register(srelens_kube::nodes::list_nodes_capability(cache.clone()));
+    reg.register(srelens_kube::node_inspector::node_inspect_capability(
+        cache.clone(),
+    ));
+    reg.register(srelens_kube::gpu_info::gpu_inventory_capability(
+        cache.clone(),
+    ));
     reg.register(srelens_kube::node_ssh::node_service_status_capability(
         cache.clone(),
     ));

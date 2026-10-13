@@ -90,6 +90,18 @@ suite("describe", () => {
     expect(describe("/k/Node/-/worker-1", "c")).toMatchObject({ title: "worker-1", kind: "resource", sub: "c" });
   });
 
+  it("labels a detail tab with the cluster in its route, not the one it is told (#834)", () => {
+    // A detail tab is pinned to the cluster it was opened on. Every relabel —
+    // a rail switch, a reused tab, boot's reconcile — comes through here, and
+    // a pinned tab must keep naming its own cluster through all of them.
+    expect(describe("/k/prod/Node/-/worker-1", "staging")).toMatchObject({
+      title: "worker-1",
+      kind: "resource",
+      sub: "prod",
+    });
+    expect(describe("/k/prod/Pod/default/web-1")).toMatchObject({ sub: "prod" });
+  });
+
   it("titles the /resources/<name>/logs|shell|forward shapes distinctly from the bare resource tab", () => {
     // Same prefix as the bare resource route, so without a distinct title and
     // kind for each suffix, opening a pod three ways (Open in new tab, Follow
@@ -235,7 +247,7 @@ suite("isClusterScopedRoute", () => {
     for (const route of ["/overview", "/helm", "/k/pods"]) expect(keepsManagementWhenPaused(route)).toBe(false);
   });
   it("distinguishes cluster-following routes from app screens", () => {
-    for (const route of ["/overview", "/helm", "/forwards", "/terminals", "/k/pods", "/k/Pod/default/web", "/edit/Pod/default/web"]) {
+    for (const route of ["/overview", "/helm", "/forwards", "/terminals", "/k/pods", "/k/Pod/default/web", "/k/prod/Pod/default/web", "/edit/Pod/default/web"]) {
       expect(isClusterScopedRoute(route), route).toBe(true);
     }
     for (const route of ["/", "/settings", "/connections", "/notes"]) {
@@ -396,6 +408,8 @@ suite("screenFor", () => {
     // The cluster-scoped sentinel is a namespace segment like any other, so a
     // Node's route resolves the same way a Pod's does.
     expect(screenFor("/k/Node/-/worker-1")).toBe(ResourceDetailScreen);
+    // And with the cluster a detail tab is pinned to (#834).
+    expect(screenFor("/k/prod/Pod/default/web-1")).toBe(ResourceDetailScreen);
   });
 
   it("keeps a custom resource's detail route on the detail screen", () => {

@@ -98,6 +98,8 @@ function resetWorkspacesToHome(state: TabsState): void {
     w.tabs = [home];
     w.activeId = home.id;
     w.closed = [];
+    // The main window's other clusters' tabs are not this window's either.
+    delete w.shelved;
   }
 }
 import { useConsole } from "../console";

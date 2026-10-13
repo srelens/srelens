@@ -57,6 +57,10 @@
 </p>
 
 <p align="center">
+  <img alt="The srelens desktop app listing live Kubernetes objects by kind, with search and namespace filters" src="docs/assets/screenshots/srelens-demo-changes.gif" width="100%">
+</p>
+
+<p align="center">
   <picture>
     <source media="(prefers-color-scheme: light)" srcset="docs/assets/screenshots/gui-overview-light.webp">
     <img alt="The srelens desktop app in its new design: a cluster overview with node capacity, workloads that are not ready, and objects by kind" src="docs/assets/screenshots/gui-overview-dark.webp" width="100%">

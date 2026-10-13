@@ -4,7 +4,7 @@ import { useContexts } from "../../lib/clusters";
 import { recentKey, useAllRecentLogSubjects, useOfferedRecents } from "../../lib/logRecents";
 import { getMark } from "../../lib/marks";
 import { focusCluster, openOnCluster } from "../../lib/openCluster";
-import { reopenClosed, useTabs } from "../../lib/tabsStore";
+import { reopenClosed, useClosedEverywhere } from "../../lib/tabsStore";
 import { logsRoute } from "../Logs";
 
 /** How many recently closed tabs are offered — the most recent, not the whole stack. */
@@ -27,12 +27,16 @@ const label = (context: ClusterContext) => getMark(context.stableId, context.nam
  * is checked while `paused`: Home sealed, behind another tab, or hidden.
  */
 export function PickUp({ targets, paused = false }: { targets: readonly ClusterContext[]; paused?: boolean }) {
-  const { closed } = useTabs();
+  // Across clusters: a tab closed on one is put away with that cluster's tabs
+  // when another takes the focus (#908), and is still something to pick up.
+  const closed = useClosedEverywhere();
   const contexts = useContexts();
   const recents = useAllRecentLogSubjects();
   const tabs = closed
-    // One row per route: the stack is most recent first, so the first is the one to bring back.
-    .filter((tab, at) => closed.findIndex((t) => t.route === tab.route) === at)
+    // One row per route on a cluster: the stack is most recent first, so the
+    // first is the one to bring back. Per cluster, because Pods closed on two
+    // clusters are two tabs, each with its own filter and namespaces.
+    .filter((tab, at) => closed.findIndex((t) => t.route === tab.route && t.sub === tab.sub) === at)
     .map((tab) => ({ tab, context: tab.sub ? contexts.find((c) => c.name === tab.sub) : undefined }))
     .filter(({ tab, context }) => !tab.sub || context)
     .slice(0, CLOSED_SHOWN);

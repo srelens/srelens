@@ -60,6 +60,10 @@
 </p>
 
 <p align="center">
+  <img alt="srelens 桌面应用实时列出 Kubernetes 对象，并支持搜索和命名空间筛选" src="../assets/screenshots/srelens-demo-changes.gif" width="100%">
+</p>
+
+<p align="center">
   <picture>
     <source media="(prefers-color-scheme: light)" srcset="../assets/screenshots/gui-overview-light.webp">
     <img alt="采用新设计的 srelens 桌面应用：集群概览，展示节点容量、未就绪的工作负载，以及按 kind 分类的对象" src="../assets/screenshots/gui-overview-dark.webp" width="100%">

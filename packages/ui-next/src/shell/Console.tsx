@@ -32,6 +32,7 @@ import { useActiveContext, useContexts } from "../lib/clusters";
 import { detailRoute } from "../lib/detailRoute";
 import { hint } from "../lib/shortcuts";
 import { openTab, setActiveCluster, switchWorkspace, useTabs } from "../lib/tabsStore";
+import { openOnNamedCluster } from "../lib/openCluster";
 import { logsRoute } from "../screens/Logs";
 import { Transcript } from "../screens/agent/Transcript";
 import { useWorkspaceSealed } from "./LockGate";
@@ -352,7 +353,7 @@ export function Console({ fullView }: { fullView?: boolean }) {
         // command named, which would need a way to carry that intent across
         // a tab open that nothing here builds (see `openResource` below for
         // the same limit on `shell`/`forward`).
-        openTab(detailRoute(a.kind, a.namespace || null, a.name), { clusterName: a.context });
+        openTab(detailRoute(a.kind, a.namespace || null, a.name, { cluster: a.context }), { clusterName: a.context });
       },
       openResource: (r) => {
         if (r.as === "logs") {
@@ -360,7 +361,8 @@ export function Console({ fullView }: { fullView?: boolean }) {
           // kind/namespace/name into the URL itself, so this is the one `Go`
           // command whose label ("Follow logs · <name>") is a promise the
           // navigation actually keeps.
-          openTab(logsRoute(r.kind, r.namespace, r.name), { clusterName: r.context });
+          // The Logs screen follows the rail; see `openOnNamedCluster` (#834).
+          openOnNamedCluster(r.context, logsRoute(r.kind, r.namespace, r.name));
           return;
         }
         // `shell` and `forward` have no such route — see `agentCommands.ts`'s

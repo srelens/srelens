@@ -1,14 +1,18 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { act, renderHook, waitFor } from "@testing-library/react";
 import type { LogStatus, LogTarget } from "@srelens/core";
 
 const startLogStream = vi.fn();
+/** Calls through to the real ring; counts how often the hook folds lines into it. */
+const appendLogLines = vi.fn();
 
 vi.mock("@srelens/core", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@srelens/core")>();
+  appendLogLines.mockImplementation(actual.appendLogLines);
   return {
     ...actual,
     startLogStream: (...args: unknown[]) => startLogStream(...args),
+    appendLogLines: (...args: Parameters<typeof actual.appendLogLines>) => appendLogLines(...args),
   };
 });
 
@@ -126,6 +130,40 @@ describe("useLogStream", () => {
     expect(result.current.lines[99].text).toBe("line 99");
   });
 
+  it("folds a burst into the ring with one append, not one per line", async () => {
+    // Each append copies the whole ring: 10,000 lines one at a time onto a full 5,000-line ring took ~80ms where one
+    // batch took ~1ms, and the backend can deliver that many between two frames.
+    const s = fakeStream();
+    const { result } = renderHook(() => useLogStream("kind-dev", "default", [target]));
+    await s.connect();
+    appendLogLines.mockClear();
+
+    act(() => {
+      for (let i = 0; i < 100; i++) s.line("", `line ${i}`);
+    });
+    await waitFor(() => expect(result.current.lines).toHaveLength(100));
+    expect(appendLogLines).toHaveBeenCalledTimes(1);
+  });
+
+  it("folds a backlog the size of the ring before its commit, and keeps the drop count exact", async () => {
+    // A commit that is slow to come (a hidden window) must not let the lines waiting for it grow without bound.
+    const s = fakeStream();
+    const { result } = renderHook(() => useLogStream("kind-dev", "default", [target], { capacity: 10 }));
+    await s.connect();
+    appendLogLines.mockClear();
+
+    act(() => {
+      for (let i = 0; i < 25; i++) s.line("", `line ${i}`);
+    });
+    // No commit has run yet: lines 0-9 and 10-19 are in the ring, 20-24 still wait.
+    expect(appendLogLines).toHaveBeenCalledTimes(2);
+    await waitFor(() => expect(result.current.dropped).toBe(15));
+    expect(result.current.lines.map((l) => l.text)).toEqual(
+      ["15", "16", "17", "18", "19", "20", "21", "22", "23", "24"].map((n) => `line ${n}`),
+    );
+    expect(appendLogLines).toHaveBeenCalledTimes(3);
+  });
+
   it("holds the view and counts arrivals while paused", async () => {
     const s = fakeStream();
     const { result } = renderHook(() => useLogStream("kind-dev", "default", [target]));
@@ -152,22 +190,177 @@ describe("useLogStream", () => {
     const { result } = renderHook(() => useLogStream("kind-dev", "default", [target]));
     await s.connect();
 
-    // "one" schedules a microtask commit that has not run yet when pause is
-    // toggled immediately after, in the same synchronous span.
+    // "one" schedules a commit for the next frame that has not run yet when
+    // pause is toggled immediately after, in the same synchronous span.
     act(() => {
       s.line("", "one");
       result.current.togglePause();
     });
     expect(result.current.paused).toBe(true);
 
-    // Flush every pending microtask. If the scheduled commit still lands, the
-    // view moves right after pausing — exactly what pause promises not to do.
-    await act(async () => {
-      await Promise.resolve();
-      await Promise.resolve();
-      await Promise.resolve();
-    });
+    // Wait out the frame. If the scheduled commit still lands, the view moves
+    // right after pausing — exactly what pause promises not to do.
+    await act(() => new Promise((r) => setTimeout(r, 50)));
     expect(result.current.lines).toHaveLength(0);
+  });
+
+  describe("committing once a frame", () => {
+    afterEach(() => {
+      vi.unstubAllGlobals();
+      delete (document as { hidden?: boolean }).hidden;
+    });
+
+    /** Frames that run only when the test says so, and that a cancel takes back. */
+    function frames() {
+      const queued = new Map<number, FrameRequestCallback>();
+      let next = 0;
+      vi.stubGlobal("requestAnimationFrame", (run: FrameRequestCallback) => {
+        queued.set(++next, run);
+        return next;
+      });
+      vi.stubGlobal("cancelAnimationFrame", (id: number) => queued.delete(id));
+      return {
+        queued,
+        run: () =>
+          act(() => {
+            const runs = [...queued.values()];
+            queued.clear();
+            runs.forEach((run) => run(0));
+          }),
+      };
+    }
+
+    it("lands lines that arrive over several ticks in the next frame, together", async () => {
+      // A microtask per tick re-rendered the screen for every IPC event, hundreds of times between two frames.
+      const frame = frames();
+      const s = fakeStream();
+      const { result } = renderHook(() => useLogStream("kind-dev", "default", [target]));
+      await s.connect();
+
+      for (const text of ["one", "two", "three"]) {
+        await act(async () => {
+          s.line("", text);
+          await Promise.resolve();
+        });
+      }
+      expect(result.current.lines).toHaveLength(0);
+      expect(frame.queued.size).toBe(1);
+      frame.run();
+      expect(result.current.lines.map((l) => l.text)).toEqual(["one", "two", "three"]);
+    });
+
+    it("counts a line that came in before a pause, but was not drawn yet, among the lines waiting", async () => {
+      // Pause freezes the view it is pressed on. A line that had arrived but not been drawn is not in that view.
+      const frame = frames();
+      const s = fakeStream();
+      const { result } = renderHook(() => useLogStream("kind-dev", "default", [target]));
+      await s.connect();
+      act(() => {
+        s.line("", "one");
+        result.current.togglePause();
+      });
+      frame.run();
+      expect(result.current.lines).toHaveLength(0);
+      expect(result.current.pendingWhilePaused).toBe(1);
+      act(() => s.line("", "two"));
+      frame.run();
+      expect(result.current.pendingWhilePaused).toBe(2);
+    });
+
+    it("gives back a frame it asked for when the screen goes before it is drawn", async () => {
+      const frame = frames();
+      const s = fakeStream();
+      const { unmount } = renderHook(() => useLogStream("kind-dev", "default", [target]));
+      await s.connect();
+      act(() => s.line("", "one"));
+      expect(frame.queued.size).toBe(1);
+      unmount();
+      expect(frame.queued.size).toBe(0);
+    });
+
+    it("gives back the timer a hidden document gets when the screen goes before it fires", async () => {
+      vi.stubGlobal("requestAnimationFrame", undefined);
+      const s = fakeStream();
+      const { unmount } = renderHook(() => useLogStream("kind-dev", "default", [target]));
+      await s.connect();
+      vi.useFakeTimers();
+      try {
+        appendLogLines.mockClear();
+        act(() => s.line("", "one"));
+        unmount();
+        vi.advanceTimersByTime(100);
+        expect(appendLogLines).not.toHaveBeenCalled();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it.each([
+      [
+        "the document is hidden, which draws no frames",
+        () => {
+          frames();
+          Object.defineProperty(document, "hidden", { configurable: true, get: () => true });
+        },
+      ],
+      ["there are no frames to wait for", () => vi.stubGlobal("requestAnimationFrame", undefined)],
+    ])("still commits when %s", async (_, setUp) => {
+      setUp();
+      const s = fakeStream();
+      const { result } = renderHook(() => useLogStream("kind-dev", "default", [target]));
+      await s.connect();
+      act(() => s.line("", "one"));
+      await waitFor(() => expect(result.current.lines).toHaveLength(1));
+    });
+  });
+
+  it("holds the view while the screen asks, counts what arrives, and lets it in on release, leaving pause alone", async () => {
+    const s = fakeStream();
+    const { result } = renderHook(() => useLogStream("kind-dev", "default", [target]));
+    await s.connect();
+    act(() => s.line("", "before"));
+    await waitFor(() => expect(result.current.lines).toHaveLength(1));
+
+    act(() => result.current.hold(true));
+    expect(result.current.held).toBe(true);
+    expect(result.current.paused).toBe(false);
+    act(() => {
+      s.line("", "a");
+      s.line("", "b");
+    });
+    await waitFor(() => expect(result.current.pendingWhilePaused).toBe(2));
+    expect(result.current.lines).toHaveLength(1);
+
+    act(() => result.current.hold(false));
+    expect(result.current.held).toBe(false);
+    expect(result.current.lines.map((l) => l.text)).toEqual(["before", "a", "b"]);
+    expect(result.current.pendingWhilePaused).toBe(0);
+  });
+
+  it("keeps the reader's pause and a hold apart: letting go of one does not let go of the other", async () => {
+    const s = fakeStream();
+    const { result } = renderHook(() => useLogStream("kind-dev", "default", [target]));
+    await s.connect();
+    const aFrame = () => act(() => new Promise((r) => setTimeout(r, 50)));
+
+    // Paused, then held and let go: still paused, and nothing let in.
+    act(() => result.current.togglePause());
+    act(() => result.current.hold(true));
+    act(() => s.line("", "a"));
+    act(() => result.current.hold(false));
+    await aFrame();
+    expect(result.current.paused).toBe(true);
+    expect(result.current.lines).toHaveLength(0);
+    expect(result.current.pendingWhilePaused).toBe(1);
+
+    // Held, then resumed: the reader is following again, but nothing is let in until the hold goes.
+    act(() => result.current.hold(true));
+    act(() => result.current.togglePause());
+    await aFrame();
+    expect(result.current.paused).toBe(false);
+    expect(result.current.lines).toHaveLength(0);
+    act(() => result.current.hold(false));
+    expect(result.current.lines.map((l) => l.text)).toEqual(["a"]);
   });
 
   it("does not re-tail on resume, and folds in what arrived while paused", async () => {
@@ -473,6 +666,39 @@ describe("useLogStream", () => {
     act(() => result.current.clear());
     expect(result.current.lines).toHaveLength(0);
     expect(startLogStream).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not bring back a line that arrived before a clear, though it had not been committed yet", async () => {
+    const s = fakeStream();
+    const { result } = renderHook(() => useLogStream("kind-dev", "default", [target]));
+    await s.connect();
+    act(() => {
+      s.line("", "before-clear");
+      result.current.clear();
+      s.line("", "after-clear");
+    });
+    await waitFor(() => expect(result.current.lines).toHaveLength(1));
+    await act(() => new Promise((r) => setTimeout(r, 50)));
+    expect(result.current.lines.map((l) => l.text)).toEqual(["after-clear"]);
+  });
+
+  it("does not carry a line the old stream sent, not yet committed, into the restarted one", async () => {
+    const s = fakeStream();
+    const { result, rerender } = renderHook(
+      ({ targets }: { targets: LogTarget[] }) => useLogStream("kind-dev", "default", targets),
+      { initialProps: { targets: [target] } },
+    );
+    await s.connect();
+    const s2 = fakeStream();
+    act(() => {
+      s.line("", "old-stream");
+      rerender({ targets: [otherTarget] });
+    });
+    await s2.connect();
+    act(() => s2.line("", "new-stream"));
+    await waitFor(() => expect(result.current.lines).toHaveLength(1));
+    await act(() => new Promise((r) => setTimeout(r, 50)));
+    expect(result.current.lines.map((l) => l.text)).toEqual(["new-stream"]);
   });
 });
 

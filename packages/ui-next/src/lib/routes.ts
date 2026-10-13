@@ -185,12 +185,15 @@ export function describe(route: string, clusterName?: string): RouteInfo {
   // contain a `/`, so only the segment count tells the shape.
   const logs = parseLogsRoute(route);
   if (logs) return { route, title: `${logs.name} · logs`, sub, kind: "logs" };
-  // A detail route (`/k/<kind>/<namespace>/<name>`) shares the `/k/` prefix
+  // A detail route (`/k/<cluster>/<kind>/<namespace>/<name>`) shares the `/k/` prefix
   // with a LIST route (`/k/<slug>`) — this must run before the list branch
   // below, or a detail route would fall into it and title itself after the
   // raw "<kind>/<namespace>/<name>" slug instead of the resource's own name.
+  // A detail tab is pinned to the cluster in its route (#834), so that is its
+  // label whatever cluster the caller is relabelling for; only a route an
+  // earlier build persisted, with no cluster in it, takes the caller's.
   const detail = parseDetailRoute(route);
-  if (detail) return { route, title: detail.name, sub, kind: "resource" };
+  if (detail) return { route, title: detail.name, sub: detail.cluster ?? sub, kind: "resource" };
   if (route.startsWith("/k/")) {
     const slug = route.slice(3);
     const title = isBuiltInKind(slug) ? RESOURCE_LABELS[slug] : slug;
@@ -215,9 +218,10 @@ export function tabDetail(route: string): string | undefined {
 export function isClusterScopedRoute(route: string): boolean {
   if (parseExtensionRoute(route)) return true;
   // `describe` is already the one exhaustive parser for route shapes. Passing
-  // a sentinel lets its `sub` answer this without duplicating dynamic routes.
-  const sentinel = "__cluster_scope__";
-  return describe(route, sentinel).sub === sentinel;
+  // a sentinel lets its `sub` answer this without duplicating dynamic routes:
+  // an app-scoped route has none, and a route pinned to its own cluster (#834)
+  // answers with that cluster rather than the sentinel.
+  return describe(route, "__cluster_scope__").sub !== undefined;
 }
 
 /** These screens own controls for work that survives their component lifetime. */
@@ -381,7 +385,7 @@ export function screenFor(route: string): ScreenComponent | null {
   // thing standing between an arbitrary route string and something rendered as
   // a component, and it costs nothing to say so twice.
   if (Object.prototype.hasOwnProperty.call(SCREENS, route)) return SCREENS[route];
-  // A detail route (`/k/<kind>/<namespace>/<name>`, five segments) shares its
+  // A detail route (`/k/<cluster>/<kind>/<namespace>/<name>`, six segments) shares its
   // `/k/` prefix with a LIST route (`/k/<slug>`, three) — the more specific
   // match must win here, ahead of the prefix loop below, or a detail route
   // would render the LIST screen (`Resources`) as if the resource's own name

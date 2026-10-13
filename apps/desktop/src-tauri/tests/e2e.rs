@@ -1346,6 +1346,22 @@ async fn run_suite() {
         .as_str()
         .unwrap()
         .to_string();
+
+    let node_details = h
+        .ok(
+            "k8s.nodeInspect",
+            json!({ "context": ctx, "node": node_name }),
+        )
+        .await;
+    assert_eq!(node_details["name"], node_name);
+
+    let gpu_inv = h
+        .ok(
+            "k8s.gpuInventory",
+            json!({ "context": ctx }),
+        )
+        .await;
+    assert!(gpu_inv["total_gpu_nodes"].is_number() || gpu_inv["nodes"].is_array());
     let nd = h
         .ok(
             "k8s.createNodeDebugPod",

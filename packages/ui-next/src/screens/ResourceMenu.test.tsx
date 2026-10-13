@@ -247,7 +247,7 @@ describe("useRowMenu", () => {
   it("opens the resource in a tab, at its /k/<kind>/<namespace>/<name> route", async () => {
     render(<Harness args={POD_ARGS} row={POD_ROW} />);
     await userEvent.click(screen.getByRole("button", { name: "Open in new tab" }));
-    expect(store.currentWorkspace().tabs.some((t) => t.route === "/k/Pod/kube-system/web-0")).toBe(true);
+    expect(store.currentWorkspace().tabs.some((t) => t.route === "/k/prod/Pod/kube-system/web-0")).toBe(true);
   });
 
   /**
@@ -334,6 +334,20 @@ describe("useRowMenu", () => {
    * here already uses — so the peek's and the tab's action bars, which render
    * that slot too, get the door for free rather than growing a second one.
    */
+  it("brings the row's cluster into focus before Follow logs, when the rail shows another (#834)", async () => {
+    // A detail tab pinned to prod, with the rail moved on to stage: the Logs
+    // screen reads the rail's cluster, so without the focus it would follow
+    // stage's pod under a prod-labelled tab.
+    const contexts = ["prod", "stage"].map((name) => ({ name, stableId: `id-${name}`, key: `id-${name}`, cluster: name, server: "", isCurrent: false, sourceFile: "", authKind: "token" }));
+    setContexts(contexts);
+    store.setState(defaultState(contexts));
+    store.setActiveCluster("id-stage", "stage");
+    render(<Harness args={POD_ARGS} row={POD_ROW} />);
+    await userEvent.click(screen.getByRole("button", { name: "Follow logs" }));
+    expect(store.currentWorkspace().activeCluster).toBe("id-prod");
+    expect(store.activeRoute()).toBe("/logs/Pod/kube-system/web-0");
+  });
+
   it("opens §A.4's forward dialog on Port forward, rather than a placeholder tab", async () => {
     render(<Harness args={POD_ARGS} row={POD_ROW} />);
     // Nothing is mounted until the entry is picked: a dialog that were always
@@ -442,7 +456,7 @@ describe("useRowMenu", () => {
   it("opens a cluster-scoped resource with the placeholder namespace segment", async () => {
     render(<Harness args={NODE_ARGS} row={NODE_ROW} />);
     await userEvent.click(screen.getByRole("button", { name: "Open in new tab" }));
-    expect(store.currentWorkspace().tabs.some((t) => t.route === "/k/Node/-/worker-1")).toBe(true);
+    expect(store.currentWorkspace().tabs.some((t) => t.route === "/k/prod/Node/-/worker-1")).toBe(true);
   });
 
   it("asks before deleting, and calls nothing until the confirm is taken", async () => {

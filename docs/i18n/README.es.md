@@ -62,6 +62,10 @@
 </p>
 
 <p align="center">
+  <img alt="La aplicación de escritorio de srelens muestra objetos de Kubernetes en directo, con búsqueda y filtros de namespace" src="../assets/screenshots/srelens-demo-changes.gif" width="100%">
+</p>
+
+<p align="center">
   <picture>
     <source media="(prefers-color-scheme: light)" srcset="../assets/screenshots/gui-overview-light.webp">
     <img alt="La aplicación de escritorio de srelens con su nuevo diseño: una vista general del cluster con la capacidad de los nodos, las cargas de trabajo que no están listas y los objetos por tipo" src="../assets/screenshots/gui-overview-dark.webp" width="100%">

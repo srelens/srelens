@@ -59,6 +59,10 @@
 </p>
 
 <p align="center">
+  <img alt="Die srelens-Desktop-App zeigt Kubernetes-Objekte live mit Suche und Namespace-Filtern" src="../assets/screenshots/srelens-demo-changes.gif" width="100%">
+</p>
+
+<p align="center">
   <picture>
     <source media="(prefers-color-scheme: light)" srcset="../assets/screenshots/gui-overview-light.webp">
     <img alt="Die srelens-Desktop-App im neuen Design: eine Cluster-Übersicht mit Node-Kapazität, Workloads, die nicht bereit sind, und Objekten nach Ressourcentyp" src="../assets/screenshots/gui-overview-dark.webp" width="100%">

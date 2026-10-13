@@ -78,6 +78,37 @@ describe("parseStoredState", () => {
     expect(parseStoredState(storage.getItem(BASE_STORAGE_KEY))).toEqual(state);
   });
 
+  /**
+   * #834. An earlier build's detail route had no cluster in it, and the tab
+   * showed whichever cluster the rail was on — the cluster its label was last
+   * relabelled for, which is what was saved as `sub`. Pinning it to that
+   * cluster restores the tab showing what it showed, and makes it the same
+   * tab a fresh open of that resource on that cluster focuses.
+   */
+  it("pins an earlier build's detail tab to the cluster it was labelled with", () => {
+    const state = valid();
+    state.workspaces[0].tabs.push({ ...makeTab("/k/Node/-/worker-1"), sub: "prod" });
+    state.workspaces[0].closed.push({ ...makeTab("/k/Pod/default/web"), sub: "staging" });
+    const parsed = parseStoredState(JSON.stringify({ version: STORAGE_VERSION, ...state }))!;
+    expect(parsed.workspaces[0].tabs[2]).toMatchObject({ route: "/k/prod/Node/-/worker-1", sub: "prod" });
+    expect(parsed.workspaces[0].closed[0]).toMatchObject({ route: "/k/staging/Pod/default/web", sub: "staging" });
+  });
+
+  it("keeps an earlier build's detail tab with no label as it was, following the rail", () => {
+    const state = valid();
+    state.workspaces[0].tabs.push(makeTab("/k/Node/-/worker-1"));
+    const parsed = parseStoredState(JSON.stringify({ version: STORAGE_VERSION, ...state }))!;
+    expect(parsed.workspaces[0].tabs[2].route).toBe("/k/Node/-/worker-1");
+  });
+
+  it("never re-pins a detail tab that already names its cluster, whatever its label says", () => {
+    // The route is the tab's identity; a stale label is the thing to fix, not it.
+    const state = valid();
+    state.workspaces[0].tabs.push({ ...makeTab("/k/prod/Node/-/worker-1"), sub: "staging" });
+    const parsed = parseStoredState(JSON.stringify({ version: STORAGE_VERSION, ...state }))!;
+    expect(parsed.workspaces[0].tabs[2].route).toBe("/k/prod/Node/-/worker-1");
+  });
+
   it("returns null for nothing, for garbage, and for the wrong shape", () => {
     expect(parseStoredState(null)).toBeNull();
     expect(parseStoredState("not json")).toBeNull();
@@ -126,6 +157,95 @@ describe("parseStoredState", () => {
     s.workspaces[0].activeCluster = "a";
     const raw = JSON.stringify({ version: 1, ...s }).replace('"activeCluster":"a"', '"activeCluster":"gone"');
     expect(parseStoredState(raw)?.workspaces[0].activeCluster).toBeUndefined();
+  });
+
+  it("round-trips a workspace's colour", () => {
+    const s = valid();
+    s.workspaces[0].color = "var(--mark-teal)";
+    expect(parseStoredState(JSON.stringify({ version: 1, ...s }))?.workspaces[0].color).toBe("var(--mark-teal)");
+  });
+
+  it("drops a colour that is not in the mark palette", () => {
+    for (const junk of ['"#ff0000"', "7", '"var(--accent)"']) {
+      const s = valid();
+      s.workspaces[0].color = "var(--mark-teal)";
+      const raw = JSON.stringify({ version: 1, ...s }).replace('"color":"var(--mark-teal)"', `"color":${junk}`);
+      expect(parseStoredState(raw)?.workspaces[0], junk).not.toHaveProperty("color");
+    }
+  });
+
+  it("reads a workspace saved before colours existed with no colour", () => {
+    expect(parseStoredState(JSON.stringify({ version: 1, ...valid() }))?.workspaces[0]).not.toHaveProperty("color");
+  });
+
+  /** The tabs of the clusters not in focus (#908). */
+  describe("the strips put away", () => {
+    const shelving = (): TabsState => {
+      const s = defaultState([ctx("a"), ctx("b")]);
+      const w = s.workspaces[0];
+      const services = makeTab("/k/services", { clusterName: "b" });
+      services.view = { filter: "api" };
+      services.namespaces = { b: ["payments"] };
+      w.shelved = {
+        b: { tabs: [services], order: [w.tabs[0].id, services.id], activeId: services.id, closed: [makeTab("/k/pods", { clusterName: "b" })] },
+      };
+      return s;
+    };
+
+    it("keeps when a closed tab was closed, and drops a time that is not a number", () => {
+      const s = shelving();
+      s.workspaces[0].shelved!.b.closed[0].closedAt = 1_700_000_000_000;
+      const doc = JSON.parse(JSON.stringify({ version: 1, ...s }));
+      expect(parseStoredState(JSON.stringify(doc))!.workspaces[0].shelved!.b.closed[0].closedAt).toBe(1_700_000_000_000);
+      doc.workspaces[0].shelved.b.closed[0].closedAt = "yesterday";
+      expect(parseStoredState(JSON.stringify(doc))!.workspaces[0].shelved!.b.closed[0].closedAt).toBeUndefined();
+    });
+
+    it("round-trips them: tabs, order, active tab and recently closed", () => {
+      const s = shelving();
+      expect(parseStoredState(JSON.stringify({ version: 1, ...s }))).toEqual(s);
+    });
+
+    it("accepts a document written before clusters had tabs of their own", () => {
+      const s = defaultState([ctx("a"), ctx("b")]);
+      expect(parseStoredState(JSON.stringify({ version: 1, ...s }))?.workspaces[0].shelved).toBeUndefined();
+    });
+
+    it("drops a strip for a cluster the workspace does not have, and one for the cluster in focus", () => {
+      const s = shelving();
+      const strip = s.workspaces[0].shelved!.b;
+      s.workspaces[0].shelved = { gone: strip, a: strip, b: strip };
+      expect(Object.keys(parseStoredState(JSON.stringify({ version: 1, ...s }))!.workspaces[0].shelved!)).toEqual(["b"]);
+    });
+
+    it("loses one cluster's unreadable strip, not the workspace or the other clusters' tabs", () => {
+      const s = shelving();
+      s.workspaces[0].clusters.push("c");
+      const doc = JSON.parse(JSON.stringify({ version: 1, ...s }));
+      doc.workspaces[0].shelved.c = "not a strip";
+      const out = parseStoredState(JSON.stringify(doc))!.workspaces[0];
+      expect(Object.keys(out.shelved!)).toEqual(["b"]);
+      expect(out.tabs).toHaveLength(1);
+    });
+
+    it("drops a malformed tab from a strip, and reads a strip with no order or active tab", () => {
+      const s = shelving();
+      const doc = JSON.parse(JSON.stringify({ version: 1, ...s }));
+      const strip = doc.workspaces[0].shelved.b;
+      strip.tabs.push({ id: 3 });
+      delete strip.order;
+      delete strip.activeId;
+      const out = parseStoredState(JSON.stringify(doc))!.workspaces[0].shelved!.b;
+      expect(out.tabs).toHaveLength(1);
+      expect(out.order).toEqual([out.tabs[0].id]);
+      expect(out.activeId).toBe(out.tabs[0].id);
+    });
+
+    it("does not keep a strip with nothing in it", () => {
+      const s = shelving();
+      s.workspaces[0].shelved = { b: { tabs: [], order: [], activeId: "", closed: [] } };
+      expect(parseStoredState(JSON.stringify({ version: 1, ...s }))?.workspaces[0].shelved).toBeUndefined();
+    });
   });
 
   it("restores pauses only for clusters that remain in the workspace", () => {
