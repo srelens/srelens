@@ -80,10 +80,79 @@ function ticksEvery(from: number, to: number, step: number, cap: number): number
 }
 
 /**
+ * The ticks of a calendar grid inside `[from, to]`: `at(k)` is the instant of
+ * the k-th, for k from `first` to `last`. Undefined past `cap`. An instant that
+ * is not a number lies past the edge of what a Date holds, and is no tick.
+ */
+function gridTicks(
+  from: number,
+  to: number,
+  cap: number,
+  first: number,
+  last: number,
+  at: (k: number) => number,
+): number[] | undefined {
+  const ticks: number[] = [];
+  for (let k = first; k <= last; k += 1) {
+    const t = at(k);
+    // Not past the last: a day the clocks skipped can map two grid points to one instant.
+    if (!(t >= from && t <= to) || (ticks.length > 0 && t <= ticks[ticks.length - 1])) continue;
+    if (ticks.length === cap) return undefined;
+    ticks.push(t);
+  }
+  return ticks;
+}
+
+/** The local calendar day `ms` falls on, as a count of days since 1970-01-01: a 23-hour day is one. */
+const dayNumber = (ms: number) => {
+  const d = new Date(ms);
+  return Date.UTC(d.getFullYear(), d.getMonth(), d.getDate()) / DAY;
+};
+
+/** The first Monday after the epoch, as a `dayNumber`: 1970-01-05. */
+const FIRST_MONDAY = 4;
+
+/**
+ * Local Mondays at midnight, `weeks` apart. The grid is counted from the
+ * epoch's first Monday, not from `from`, so a live axis keeps its ticks on the
+ * same Mondays as the window slides.
+ */
+function mondayTicks(from: number, to: number, weeks: number, cap: number): number[] | undefined {
+  const days = 7 * weeks;
+  return gridTicks(
+    from,
+    to,
+    cap,
+    Math.ceil((dayNumber(from) - FIRST_MONDAY) / days),
+    Math.floor((dayNumber(to) - FIRST_MONDAY) / days),
+    // A day past the end of the month rolls over into the next, so the count needs no calendar of its own.
+    (k) => new Date(1970, 0, 1 + FIRST_MONDAY + k * days).getTime(),
+  );
+}
+
+/** Local 1sts at midnight, `months` apart, counted from January 1970 (every step offered divides a year). */
+function monthTicks(from: number, to: number, months: number, cap: number): number[] | undefined {
+  const monthOf = (ms: number) => {
+    const d = new Date(ms);
+    return (d.getFullYear() - 1970) * 12 + d.getMonth();
+  };
+  return gridTicks(
+    from,
+    to,
+    cap,
+    Math.ceil(monthOf(from) / months),
+    Math.floor(monthOf(to) / months),
+    (k) => new Date(1970, k * months, 1).getTime(),
+  );
+}
+
+/**
  * Ticks for a time axis over `[from, to]`: the smallest round interval that
  * puts at most `maxTicks` of them inside, each on a multiple of the interval
  * on the READER'S clock (so +05:45 gets :00 and :30, not :15 and :45). A span
- * of weeks that even a day overfills is given whole days, as few as fit.
+ * that even a day overfills is given whole days, as few as fit, while that is
+ * under a week a tick. Past that the ticks name the calendar instead: Mondays
+ * one, two or four weeks apart, then the 1st of a month, one to twelve apart.
  */
 export function timeTicks(from: number, to: number, maxTicks = DEFAULT_TICKS): number[] {
   if (!Number.isFinite(from) || !Number.isFinite(to) || !(to > from)) return [];
@@ -94,18 +163,33 @@ export function timeTicks(from: number, to: number, maxTicks = DEFAULT_TICKS): n
     if (ticks !== undefined) return ticks;
   }
   const days = Math.ceil((wallClock(to) - wallClock(from)) / DAY / Math.max(1, cap - 1));
+  if (days >= 7) {
+    for (const weeks of [1, 2, 4]) {
+      const ticks = mondayTicks(from, to, weeks, cap);
+      if (ticks !== undefined) return ticks;
+    }
+    for (const months of [1, 2, 3, 6, 12]) {
+      const ticks = monthTicks(from, to, months, cap);
+      if (ticks !== undefined) return ticks;
+    }
+  }
+  // ponytail: a span over five years is back on whole days from the epoch; year-aligned ticks if a log ever spans that.
   return ticksEvery(from, to, days * DAY, Infinity) ?? [];
 }
+
+/** Whether `ms` opens its local day: midnight, or the first instant after clocks that skipped it. */
+const startsDay = (ms: number) => dateOf(ms) !== dateOf(ms - 1);
 
 /**
  * The labels for `timeTicks`: a clock reading, with seconds when the ticks are
  * closer than a minute, and the date on a tick that starts a local day, where a
- * bare `00:00` would not say which.
+ * bare `00:00` would not say which. A day whose midnight the clocks skipped
+ * starts at the hour they jumped to, and is dated all the same.
  */
 export function tickLabels(ticks: readonly number[]): string[] {
   const seconds = ticks.some((t) => new Date(t).getSeconds() !== 0);
   return ticks.map((t) => {
     const clock = seconds ? clockTime(t) : clockTime(t).slice(0, 5);
-    return isMidnight(t) ? `${dateOf(t).slice(5)} ${clock}` : clock;
+    return startsDay(t) ? `${dateOf(t).slice(5)} ${clock}` : clock;
   });
 }
