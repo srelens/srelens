@@ -10,8 +10,11 @@ const HERE = __dirname;
  * The module `ShortcutsPane` is required to read its glyphs from, as text —
  * not trusted, the way `AppearancePane.test.tsx` reads `tokens.css` rather
  * than trusting the pane's own claims about it.
+ *
+ * Line breaks are normalised to `\n`: a Windows checkout has CRLF, and the
+ * union is found by a pattern that ends on a blank line.
  */
-const SHORTCUTS_SOURCE = readFileSync(join(HERE, "../../lib/shortcuts.ts"), "utf8");
+const SHORTCUTS_SOURCE = readFileSync(join(HERE, "../../lib/shortcuts.ts"), "utf8").replace(/\r\n/g, "\n");
 
 /**
  * Every `WindowAction["type"]` the module actually declares, pulled out of
