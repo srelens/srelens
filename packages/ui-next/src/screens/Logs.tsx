@@ -288,6 +288,17 @@ function stampTime(stamp: RegExpMatchArray): number | undefined {
   return Number.isNaN(ms) ? undefined : ms;
 }
 
+/**
+ * The stamp's fraction below the millisecond {@link stampTime} keeps, in
+ * nanoseconds: what orders two containers' lines inside one millisecond. Read
+ * from the digits rather than compared as text, because RFC3339Nano trims
+ * trailing zeros (`.2089Z` is later than `.208100000Z`).
+ */
+function subMillisecond(raw: string): number {
+  const fraction = raw.match(RFC3339)?.[3] ?? "";
+  return Number(fraction.slice(4, 10).padEnd(6, "0"));
+}
+
 /** No clauses: the query is empty, or it does not parse and so is not applied. */
 const NO_CLAUSES: readonly QueryClause[] = [];
 
@@ -1349,7 +1360,7 @@ function LogsStream({
         .map((l, i) => toRow(l, byLabel, i))
         .filter((row) => clauses.length === 0 || matchLine(row, clauses))
         // Stable, so lines of one container that share a stamp keep the order they were written in.
-        .sort((a, b) => (a.at ?? 0) - (b.at ?? 0));
+        .sort((a, b) => (a.at ?? 0) - (b.at ?? 0) || subMillisecond(a.raw) - subMillisecond(b.raw));
       await saveOrDownload(`${name}-${range.slug}.log`, exportContent(kept));
     } catch (e) {
       setExportFailure({ title: SAVE_FAILED, error: e });
@@ -1647,15 +1658,17 @@ function LogsStream({
               something to export". Classic disabled it on the same condition.
               A range of the cluster's history is offered beside it (#915),
               except over a provider's stream, which `podLogs` cannot read, and
-              a previous instance, whose last ten minutes before now are empty. */}
+              a previous instance, whose last ten minutes before now are empty.
+              A range still being read keeps either one busy: switching source
+              does not stop it, and its save is still to come. */}
           {previous || chosen ? (
             <Button
               variant="secondary"
               size="sm"
               onClick={exportView}
-              disabled={filtered.length === 0}
+              disabled={filtered.length === 0 || exporting}
             >
-              Export
+              {exporting ? "Exporting…" : "Export"}
             </Button>
           ) : (
             <Popover

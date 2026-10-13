@@ -1622,6 +1622,50 @@ describe("exporting a time range (#915)", () => {
     ]);
   });
 
+  it("orders two containers' lines inside one millisecond by the whole stamp", async () => {
+    // A trimmed fraction on purpose: the kubelet's RFC3339Nano drops trailing zeros.
+    const blobs: Record<string, string> = {
+      "api-7/api": "2026-08-24T14:07:41.2089Z info later\n",
+      "api-8/api": "2026-08-24T14:07:41.208100000Z info earlier\n",
+    };
+    h.fetched.mockImplementation(async (_c: string, _n: string, pod: string, _i: unknown, options: { container?: string }) => ({
+      logs: blobs[`${pod}/${options.container}`] ?? "",
+    }));
+    draw();
+    await body();
+    push(...LINES);
+    await pick("Last 1 h");
+    await waitFor(() => expect(h.saved).toHaveBeenCalledTimes(1));
+    expect(written()).toEqual([
+      "api-8/api | 2026-08-24T14:07:41.208100000Z info earlier",
+      "api-7/api | 2026-08-24T14:07:41.2089Z info later",
+    ]);
+  });
+
+  it("stays busy when the source changes while a range is read", async () => {
+    h.plugins = [observability()];
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    h.fetched.mockImplementation(async (...a: Parameters<typeof history>) => {
+      await gate;
+      return history(...a);
+    });
+    draw();
+    await body();
+    push(...LINES);
+    await pick("Last 1 h");
+    await screen.findByRole("button", { name: "Exporting…" });
+    fireEvent.change(screen.getByRole("combobox", { name: "Logs from" }), {
+      target: { value: "org.example.observability/loki" },
+    });
+    await waitFor(() => expect(h.seen.at(-1)?.options.source).toBeDefined());
+    // The provider's one-click Export, but not a second save while the first is still coming.
+    expect(screen.getByRole("button", { name: "Exporting…" })).toHaveProperty("disabled", true);
+    await act(async () => release());
+    await waitFor(() => expect(h.saved).toHaveBeenCalledTimes(1));
+    expect(screen.getByRole("button", { name: "Export" })).toHaveProperty("disabled", false);
+  });
+
   it("exports the whole range, not the window picked off the histogram", async () => {
     const { container } = draw();
     await body();
