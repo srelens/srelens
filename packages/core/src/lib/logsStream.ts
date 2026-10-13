@@ -179,7 +179,8 @@ async function downloadSpool(channel: string, filename: string, sinceSeconds?: n
   if (sinceSeconds !== undefined) query.set("sinceSeconds", String(sinceSeconds));
   const res = await fetch(`/api/logs/export?${query}`, { credentials: "include", headers: csrfHeader() });
   if (!res.ok) {
-    let message = res.statusText;
+    // Over HTTP/2 there is no reason phrase, so `statusText` can be empty.
+    let message = res.statusText || `HTTP ${res.status}`;
     try {
       const data = JSON.parse(await res.text()) as { error?: unknown };
       if (data.error !== undefined) message = String(data.error);
