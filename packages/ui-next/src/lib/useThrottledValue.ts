@@ -7,6 +7,8 @@ import { useEffect, useRef, useState } from "react";
  * A change after a quiet spell lands at once, so a single change is never late. Changes inside the spell wait for
  * its end, and then the latest of them lands, so the last value is never lost. With `ms` of 0 or less the value is
  * handed straight through.
+ *
+ * `value` must keep its identity until it changes: a new object on every render is a change on every render.
  */
 export function useThrottledValue<T>(value: T, ms: number): T {
   const [shown, setShown] = useState(value);

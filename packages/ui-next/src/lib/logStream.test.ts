@@ -210,13 +210,23 @@ describe("useLogStream", () => {
       delete (document as { hidden?: boolean }).hidden;
     });
 
-    /** Frames that run only when the test says so. */
+    /** Frames that run only when the test says so, and that a cancel takes back. */
     function frames() {
-      const queued: FrameRequestCallback[] = [];
-      vi.stubGlobal("requestAnimationFrame", (run: FrameRequestCallback) => queued.push(run));
+      const queued = new Map<number, FrameRequestCallback>();
+      let next = 0;
+      vi.stubGlobal("requestAnimationFrame", (run: FrameRequestCallback) => {
+        queued.set(++next, run);
+        return next;
+      });
+      vi.stubGlobal("cancelAnimationFrame", (id: number) => queued.delete(id));
       return {
         queued,
-        run: () => act(() => queued.splice(0).forEach((run) => run(0))),
+        run: () =>
+          act(() => {
+            const runs = [...queued.values()];
+            queued.clear();
+            runs.forEach((run) => run(0));
+          }),
       };
     }
 
@@ -234,9 +244,55 @@ describe("useLogStream", () => {
         });
       }
       expect(result.current.lines).toHaveLength(0);
-      expect(frame.queued).toHaveLength(1);
+      expect(frame.queued.size).toBe(1);
       frame.run();
       expect(result.current.lines.map((l) => l.text)).toEqual(["one", "two", "three"]);
+    });
+
+    it("counts a line that came in before a pause, but was not drawn yet, among the lines waiting", async () => {
+      // Pause freezes the view it is pressed on. A line that had arrived but not been drawn is not in that view.
+      const frame = frames();
+      const s = fakeStream();
+      const { result } = renderHook(() => useLogStream("kind-dev", "default", [target]));
+      await s.connect();
+      act(() => {
+        s.line("", "one");
+        result.current.togglePause();
+      });
+      frame.run();
+      expect(result.current.lines).toHaveLength(0);
+      expect(result.current.pendingWhilePaused).toBe(1);
+      act(() => s.line("", "two"));
+      frame.run();
+      expect(result.current.pendingWhilePaused).toBe(2);
+    });
+
+    it("gives back a frame it asked for when the screen goes before it is drawn", async () => {
+      const frame = frames();
+      const s = fakeStream();
+      const { unmount } = renderHook(() => useLogStream("kind-dev", "default", [target]));
+      await s.connect();
+      act(() => s.line("", "one"));
+      expect(frame.queued.size).toBe(1);
+      unmount();
+      expect(frame.queued.size).toBe(0);
+    });
+
+    it("gives back the timer a hidden document gets when the screen goes before it fires", async () => {
+      vi.stubGlobal("requestAnimationFrame", undefined);
+      const s = fakeStream();
+      const { unmount } = renderHook(() => useLogStream("kind-dev", "default", [target]));
+      await s.connect();
+      vi.useFakeTimers();
+      try {
+        appendLogLines.mockClear();
+        act(() => s.line("", "one"));
+        unmount();
+        vi.advanceTimersByTime(100);
+        expect(appendLogLines).not.toHaveBeenCalled();
+      } finally {
+        vi.useRealTimers();
+      }
     });
 
     it.each([
