@@ -143,4 +143,38 @@ describe("LineDetail", () => {
     const { container } = detail();
     expect(container.querySelector("pre")?.textContent).toContain('\n  "level": "warn"');
   });
+
+  // Machine text does not wrap (AGENTS.md): a thousand-character annotation
+  // run through `break-all` becomes a paragraph that hides the short lines
+  // around it. jsdom lays nothing out, so what can be held is the classes.
+  describe("long machine text", () => {
+    const long = "x".repeat(1000);
+
+    it("lets a field value run on and scroll sideways, in a cell that cannot widen the panel", () => {
+      const { container } = detail({ line: { ...LINE, level: "", fields: { annotation: long } } });
+      const value = container.querySelector('[data-slot="detail-value"]') as HTMLElement;
+      expect(value.textContent).toBe(long);
+      expect(value.classList.contains("whitespace-pre")).toBe(true);
+      expect(value.classList.contains("overflow-x-auto")).toBe(true);
+      expect(value.classList.contains("break-all")).toBe(false);
+      // A table cell grows to its content; `max-w-0` is what bounds it to the room the row leaves.
+      expect(value.closest("td")?.classList.contains("max-w-0")).toBe(true);
+    });
+
+    it("lets the Raw block run on and scroll sideways", () => {
+      const { container } = detail({ line: { ...LINE, raw: long, text: long, fields: {} } });
+      const raw = container.querySelector("pre") as HTMLElement;
+      expect(raw.textContent).toBe(long);
+      expect(raw.classList.contains("whitespace-pre")).toBe(true);
+      expect(raw.classList.contains("overflow-x-auto")).toBe(true);
+      expect(raw.classList.contains("whitespace-pre-wrap")).toBe(false);
+      expect(raw.classList.contains("break-all")).toBe(false);
+    });
+
+    it("breaks no text anywhere in the panel", () => {
+      const { container } = detail();
+      expect(container.innerHTML).not.toContain("break-all");
+      expect(container.innerHTML).not.toContain("whitespace-pre-wrap");
+    });
+  });
 });

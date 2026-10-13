@@ -115,8 +115,11 @@ export function LineDetail({
                   <th scope="row" className="w-[1%] whitespace-nowrap pr-4 text-left font-normal text-muted">
                     {r.key}
                   </th>
-                  <td className="break-all text-soft">
-                    {r.value === "" ? <span className="text-faint">(empty)</span> : r.value}
+                  {/* Machine text does not wrap. `max-w-0` bounds the cell to the room the row leaves; the value scrolls inside it. */}
+                  <td className="w-full max-w-0 text-soft">
+                    <div data-slot="detail-value" className="overflow-x-auto whitespace-pre">
+                      {r.value === "" ? <span className="text-faint">(empty)</span> : r.value}
+                    </div>
                   </td>
                   <td className="w-[1%] whitespace-nowrap pl-2">
                     {target !== undefined && (
@@ -149,7 +152,7 @@ export function LineDetail({
         </table>
         <details className="mt-2">
           <summary className="cursor-pointer text-muted">Raw</summary>
-          <pre className="whitespace-pre-wrap break-all text-soft">{pretty ?? line.raw}</pre>
+          <pre className="overflow-x-auto whitespace-pre text-soft">{pretty ?? line.raw}</pre>
         </details>
       </div>
     </section>

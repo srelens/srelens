@@ -103,10 +103,13 @@ describe("FilterPills", () => {
     expect(onRangeChange.mock.invocationCallOrder[0]).toBeLessThan(onRemoved.mock.invocationCallOrder[0]);
   });
 
-  it("lets a long unbroken clause wrap inside the pane", () => {
+  it("lets a long unbroken clause run on and scroll inside the pane, rather than wrap", () => {
+    // This pinned `break-all`. A clause is machine text, and AGENTS.md says that does not wrap.
     const { container } = pills("x".repeat(120));
     const pill = container.querySelector('[data-slot="pill"]');
     expect(pill?.classList.contains("max-w-full")).toBe(true);
-    expect(pill?.classList.contains("break-all")).toBe(true);
+    expect(pill?.classList.contains("whitespace-nowrap")).toBe(true);
+    expect(pill?.classList.contains("overflow-x-auto")).toBe(true);
+    expect(pill?.classList.contains("break-all")).toBe(false);
   });
 });

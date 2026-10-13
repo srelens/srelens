@@ -87,7 +87,7 @@ function Pill({
   return (
     <span
       data-slot="pill"
-      className="inline-flex max-w-full items-center gap-1 break-all rounded border px-1.5 py-[1px] font-mono text-[0.6875rem]"
+      className="inline-flex max-w-full items-center gap-1 overflow-x-auto whitespace-nowrap rounded border px-1.5 py-[1px] font-mono text-[0.6875rem]"
       style={negated ? { borderColor: toneColor("sev"), color: toneColor("sev") } : { borderColor: "var(--rule)" }}
     >
       {label}
