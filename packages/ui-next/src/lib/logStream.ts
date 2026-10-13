@@ -32,13 +32,14 @@ import {
  * a stream callback that fires many times in one tick, and only read the
  * result once at the end. `onLine` does exactly that: it pushes every line
  * onto a batch in a ref — never dropping one to a stale closure, no matter how
- * many arrive before React gets a turn — and schedules a single commit that
- * folds the whole batch into the ring with ONE `appendLogLines` and hands the
- * result to render state. A hundred lines fired in one tick land as one copy of
- * the ring and one commit, not a hundred of each: each append copies the whole
- * ring, and one at a time, ten thousand lines onto a full ring took ~80ms where
- * one batch took ~1ms. A batch that reaches the ring's capacity before its
- * commit is folded there and then, so a commit held back cannot grow a backlog.
+ * many arrive before React gets a turn — and schedules a single commit, for the
+ * next frame, that folds the whole batch into the ring with ONE `appendLogLines`
+ * and hands the result to render state. However many lines arrive between two
+ * frames land as one copy of the ring and one commit, not one of each per line
+ * or per tick: each append copies the whole ring, and one at a time, ten
+ * thousand lines onto a full ring took ~80ms where one batch took ~1ms. A batch
+ * that reaches the ring's capacity before its commit is folded there and then,
+ * so a commit held back cannot grow a backlog.
  *
  * **Pause freezes the view, not the stream.** The design's toggle only
  * relabels a button; classic tears the stream down and re-tails on resume,
@@ -174,6 +175,16 @@ export interface UseLogStreamResult {
 
 const DEFAULT_CAPACITY = 5000;
 
+/**
+ * Run `fn` before the next frame is drawn: a commit is a render of the whole screen, and the backend can deliver a
+ * line per IPC event, many times between two frames. A hidden document draws no frames and would hold every line
+ * back until it is shown again, so it, and a host without frames, get a timer of about one frame instead.
+ */
+function nextFrame(fn: () => void): void {
+  if (typeof requestAnimationFrame === "function" && !document.hidden) requestAnimationFrame(fn);
+  else setTimeout(fn, 16);
+}
+
 /** Before the connection effect has run there is nothing known about anything. */
 const NO_TARGETS: LogTargetCounts = { live: 0, reconnecting: 0, total: 0 };
 
@@ -236,7 +247,7 @@ export function useLogStream(
   const scheduleCommit = useCallback(() => {
     if (flushScheduledRef.current) return;
     flushScheduledRef.current = true;
-    void Promise.resolve().then(commit);
+    nextFrame(commit);
   }, [commit]);
 
   // Stable across restarts: the same ref keeps accumulating, so a target

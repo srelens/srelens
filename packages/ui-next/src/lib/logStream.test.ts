@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { act, renderHook, waitFor } from "@testing-library/react";
 import type { LogStatus, LogTarget } from "@srelens/core";
 
@@ -190,22 +190,72 @@ describe("useLogStream", () => {
     const { result } = renderHook(() => useLogStream("kind-dev", "default", [target]));
     await s.connect();
 
-    // "one" schedules a microtask commit that has not run yet when pause is
-    // toggled immediately after, in the same synchronous span.
+    // "one" schedules a commit for the next frame that has not run yet when
+    // pause is toggled immediately after, in the same synchronous span.
     act(() => {
       s.line("", "one");
       result.current.togglePause();
     });
     expect(result.current.paused).toBe(true);
 
-    // Flush every pending microtask. If the scheduled commit still lands, the
-    // view moves right after pausing — exactly what pause promises not to do.
-    await act(async () => {
-      await Promise.resolve();
-      await Promise.resolve();
-      await Promise.resolve();
-    });
+    // Wait out the frame. If the scheduled commit still lands, the view moves
+    // right after pausing — exactly what pause promises not to do.
+    await act(() => new Promise((r) => setTimeout(r, 50)));
     expect(result.current.lines).toHaveLength(0);
+  });
+
+  describe("committing once a frame", () => {
+    afterEach(() => {
+      vi.unstubAllGlobals();
+      delete (document as { hidden?: boolean }).hidden;
+    });
+
+    /** Frames that run only when the test says so. */
+    function frames() {
+      const queued: FrameRequestCallback[] = [];
+      vi.stubGlobal("requestAnimationFrame", (run: FrameRequestCallback) => queued.push(run));
+      return {
+        queued,
+        run: () => act(() => queued.splice(0).forEach((run) => run(0))),
+      };
+    }
+
+    it("lands lines that arrive over several ticks in the next frame, together", async () => {
+      // A microtask per tick re-rendered the screen for every IPC event, hundreds of times between two frames.
+      const frame = frames();
+      const s = fakeStream();
+      const { result } = renderHook(() => useLogStream("kind-dev", "default", [target]));
+      await s.connect();
+
+      for (const text of ["one", "two", "three"]) {
+        await act(async () => {
+          s.line("", text);
+          await Promise.resolve();
+        });
+      }
+      expect(result.current.lines).toHaveLength(0);
+      expect(frame.queued).toHaveLength(1);
+      frame.run();
+      expect(result.current.lines.map((l) => l.text)).toEqual(["one", "two", "three"]);
+    });
+
+    it.each([
+      [
+        "the document is hidden, which draws no frames",
+        () => {
+          frames();
+          Object.defineProperty(document, "hidden", { configurable: true, get: () => true });
+        },
+      ],
+      ["there are no frames to wait for", () => vi.stubGlobal("requestAnimationFrame", undefined)],
+    ])("still commits when %s", async (_, setUp) => {
+      setUp();
+      const s = fakeStream();
+      const { result } = renderHook(() => useLogStream("kind-dev", "default", [target]));
+      await s.connect();
+      act(() => s.line("", "one"));
+      await waitFor(() => expect(result.current.lines).toHaveLength(1));
+    });
   });
 
   it("does not re-tail on resume, and folds in what arrived while paused", async () => {
