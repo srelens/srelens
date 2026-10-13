@@ -240,13 +240,7 @@ impl SpoolSnapshot {
             };
             let mut record = String::new();
             while at < before && at < end {
-                record.clear();
-                if reader.read_line(&mut record)? == 0 {
-                    return Err(io::Error::new(
-                        io::ErrorKind::UnexpectedEof,
-                        format!("{} ends before line {at}", segment.path.display()),
-                    ));
-                }
+                read_record(&mut reader, &mut record, &segment.path, at)?;
                 if at >= seq {
                     let line: LogLine =
                         serde_json::from_str(record.trim_end()).map_err(io::Error::other)?;
@@ -273,6 +267,12 @@ impl SpoolSnapshot {
     /// `[error: …]` line the host injected) takes the stamp of the line before
     /// it, and a leading run with no stamp at all is kept. Returns how many
     /// lines were written.
+    ///
+    /// Any line it could not write is an error, never a shorter export: a
+    /// segment that cannot be read whole, or one rotated out after lines were
+    /// written, fails the call, and the caller must not keep the file. A
+    /// segment rotated out before any line is written is skipped, since the
+    /// export then starts at the oldest segment still on disk.
     pub fn export(
         &self,
         out: &mut dyn Write,
@@ -285,16 +285,15 @@ impl SpoolSnapshot {
         for segment in &self.segments {
             let mut reader = match open_at(&segment.path, 0, segment.bytes) {
                 Ok(reader) => reader,
-                // Rotated out since the snapshot: past the cap now, so not history.
-                Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
+                // Rotated out since the snapshot. Before any line is written that is
+                // a clean trim of the export's start; after one, the lines already
+                // written would have a hole, so it fails.
+                Err(e) if e.kind() == io::ErrorKind::NotFound && written == 0 => continue,
                 Err(e) => return Err(e),
             };
             let mut record = String::new();
-            loop {
-                record.clear();
-                if reader.read_line(&mut record)? == 0 {
-                    break;
-                }
+            for seq in segment.first..segment.first + segment.lines {
+                read_record(&mut reader, &mut record, &segment.path, seq)?;
                 let line: LogLine =
                     serde_json::from_str(record.trim_end()).map_err(io::Error::other)?;
                 if let Some(at) = stamp_of(&line.line) {
@@ -320,6 +319,20 @@ fn open_at(path: &Path, offset: u64, end: u64) -> io::Result<BufReader<io::Take<
     let mut file = File::open(path)?;
     file.seek(SeekFrom::Start(offset))?;
     Ok(BufReader::new(file.take(end - offset)))
+}
+
+/// The next record of a segment, into `record`. A segment that ends before the
+/// line count it was recorded with is an error, not the end of the lines: its
+/// index and count promise more than the file holds.
+fn read_record(reader: &mut impl BufRead, record: &mut String, path: &Path, seq: u64) -> io::Result<()> {
+    record.clear();
+    if reader.read_line(record)? == 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::UnexpectedEof,
+            format!("{} ends before line {seq}", path.display()),
+        ));
+    }
+    Ok(())
 }
 
 /// The RFC 3339 stamp the API server puts before a line when timestamps are on.
@@ -579,5 +592,49 @@ mod tests {
             String::from_utf8(out).unwrap(),
             "web-1 | [error: before any stamp]\nweb-1 | 2026-10-13T12:10:00+02:00 new\nweb-1 | [error: after new]\n"
         );
+    }
+
+    #[test]
+    fn an_export_of_a_segment_cut_short_is_an_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut spool = spool_of_100_lines_in_small_segments(tmp.path().join("s"));
+        let snapshot = spool.snapshot().unwrap();
+        // The same cut as the read test: the oldest segment ends after its first record.
+        let path = &snapshot.segments[0].path;
+        let first_record = fs::read(path).unwrap().iter().position(|b| *b == b'\n').unwrap() as u64 + 1;
+        OpenOptions::new().write(true).open(path).unwrap().set_len(first_record).unwrap();
+        let mut out = Vec::new();
+        let err = snapshot.export(&mut out, None, &named).expect_err("a short segment is an error");
+        assert_eq!(err.kind(), io::ErrorKind::UnexpectedEof);
+    }
+
+    #[test]
+    fn an_export_skips_a_leading_segment_rotated_out_before_any_line() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut spool = spool_of_100_lines_in_small_segments(tmp.path().join("s"));
+        let snapshot = spool.snapshot().unwrap();
+        // The writer rotates the oldest segment out after the snapshot. Nothing is
+        // written yet, so the export starts at the oldest segment still on disk.
+        let second = snapshot.segments[1].first;
+        fs::remove_file(&snapshot.segments[0].path).unwrap();
+        let mut out = Vec::new();
+        let n = snapshot.export(&mut out, None, &named).unwrap();
+        assert_eq!(n, 101 - second);
+        let text = String::from_utf8(out).unwrap();
+        assert!(text.starts_with(&format!("web-1 | line {second}\n")));
+        assert!(text.ends_with("web-1 | line 100\n"));
+    }
+
+    #[test]
+    fn an_export_fails_when_a_segment_goes_after_lines_were_written() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut spool = spool_of_100_lines_in_small_segments(tmp.path().join("s"));
+        let snapshot = spool.snapshot().unwrap();
+        // Rotation evicts oldest-first, so segment 1 can only go once segment 0 is
+        // written: the lines already out would have a hole before segment 2.
+        fs::remove_file(&snapshot.segments[1].path).unwrap();
+        let mut out = Vec::new();
+        let err = snapshot.export(&mut out, None, &named).expect_err("a hole is an error");
+        assert_eq!(err.kind(), io::ErrorKind::NotFound);
     }
 }
