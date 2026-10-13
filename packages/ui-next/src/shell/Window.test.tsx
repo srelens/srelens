@@ -39,6 +39,7 @@ const {
   getObjectSpy,
   updateCheck,
   closeCurrentWindow,
+  refreshSetting,
   bus,
 } = vi.hoisted(() => ({
   listContexts: vi.fn(),
@@ -84,6 +85,9 @@ const {
   // so the window's cadence and the core helper's dedupe both run for real.
   updateCheck: vi.fn<(channel: string) => Promise<{ version: string } | null>>(),
   closeCurrentWindow: vi.fn<() => Promise<void>>(async () => {}),
+  // Core's re-read of one settings key: a context window asks for main's
+  // saved workspaces when it is focused (#101).
+  refreshSetting: vi.fn<(key: string) => Promise<void>>(async () => {}),
   // The backend event bus, captured per channel so a test can emit exactly
   // what `mcp_confirm.rs` emits.
   //
@@ -110,6 +114,7 @@ vi.mock("@srelens/core", async (importOriginal) => {
     isApplePlatform: () => isApplePlatform(),
     isTauri: () => isTauri(),
     closeCurrentWindow: () => closeCurrentWindow(),
+    refreshSetting: (key: string) => refreshSetting(key),
     loadKubeconfigFiles: () => loadKubeconfigFiles(),
     vaultStatus: () => vaultStatus(),
     vaultLock: () => vaultLock(),
@@ -175,7 +180,15 @@ vi.mock("../lib/starOnGitHub", async (importOriginal) => ({
   useStarCountRefresh: starOnGitHub.useStarCountRefresh,
 }));
 
-vi.mock("../lib/tabsPersist", () => ({ loadTabsState, scheduleSave, installFlushOnUnload, flushSave }));
+// `getStorageKey` is the real one: protection names main's saved workspaces
+// by it when a context window is focused (#101).
+vi.mock("../lib/tabsPersist", async (importOriginal) => ({
+  getStorageKey: (await importOriginal<typeof import("../lib/tabsPersist")>()).getStorageKey,
+  loadTabsState,
+  scheduleSave,
+  installFlushOnUnload,
+  flushSave,
+}));
 
 // The zoom helper lives in Chrome (shared with its buttons); spied rather than
 // replaced outright so Chrome itself still renders for real.
@@ -317,6 +330,7 @@ beforeEach(() => {
   // sit in front of every notice another test asserts on.
   updateCheck.mockReset().mockResolvedValue(null);
   closeCurrentWindow.mockClear();
+  refreshSetting.mockReset().mockResolvedValue(undefined);
   bus.clear();
   resetLock();
   resetMcpAutoStart();
@@ -2572,5 +2586,36 @@ describe("Window — srelens:// deep links", () => {
       fireEvent.click(screen.getByRole("button", { name: "Dismiss notice" }));
     }
     expect(shownNotice()).toBeNull();
+  });
+});
+
+/**
+ * #101: a context window copied main's workspaces when it opened, so it reads
+ * main's save again each time it is focused. Main holds the workspaces itself.
+ */
+describe("Window — main's protection reaches a context window (#101)", () => {
+  async function bootedAs(windowLabel: string) {
+    render(
+      <ConsoleProvider>
+        <Window ported={[]} onOpenInClassic={() => {}} windowLabel={windowLabel} />
+      </ConsoleProvider>,
+    );
+    await waitFor(() => expect(screen.getByRole("tablist", { name: "Open tabs" })).toBeDefined());
+  }
+
+  it("re-reads main's saved workspaces when a context window is focused", async () => {
+    await bootedAs("ctx-stage");
+    await act(async () => {
+      window.dispatchEvent(new Event("focus"));
+    });
+    expect(refreshSetting).toHaveBeenCalledWith("srelens.next.workspaces");
+  });
+
+  it("asks the backend nothing when the main window is focused", async () => {
+    await bootedAs("main");
+    await act(async () => {
+      window.dispatchEvent(new Event("focus"));
+    });
+    expect(refreshSetting).not.toHaveBeenCalledWith("srelens.next.workspaces");
   });
 });
