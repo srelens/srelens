@@ -278,6 +278,12 @@ const NO_CLAUSES: readonly QueryClause[] = [];
 /** One line as the body draws it: the four columns, plus what a filter reads. */
 interface Row extends QueryLine {
   /**
+   * Which row this is, for as long as its line is in the buffer: the key it is drawn under. Nothing in a line can be
+   * (two identical lines a second apart are ordinary), and its place cannot: a full ring moves every line up each
+   * batch, and a row keyed by its place hands its element to the next line, under the reader's pointer or selection.
+   */
+  readonly id: number;
+  /**
    * The line's instant on the reader's clock, `HH:MM:SS.mmm`, or `""` for a
    * line without a parseable stamp. Derived from `at`, so the two cannot
    * disagree about when the line happened.
@@ -367,7 +373,7 @@ function indexTargets(targets: readonly LogTarget[]): ReadonlyMap<string, LogTar
  * line the screen did not ask for; naming it from its own string beats drawing
  * it nameless.
  */
-function toRow(line: StreamLine, byLabel: ReadonlyMap<string, LogTarget>): Row {
+function toRow(line: StreamLine, byLabel: ReadonlyMap<string, LogTarget>, id: number): Row {
   const stamp = line.text.match(RFC3339);
   const at = stamp ? stampTime(stamp) : undefined;
   // The reader's clock, like the histogram's axis and the window pill beside
@@ -392,6 +398,7 @@ function toRow(line: StreamLine, byLabel: ReadonlyMap<string, LogTarget>): Row {
   const health = logLineHealth(text);
   const parsed = parseLogFields(text);
   return {
+    id,
     ts,
     pod,
     container,
@@ -881,10 +888,11 @@ function LogsStream({
    */
   const rowOf = useMemo(() => {
     const cache = new WeakMap<StreamLine, Row>();
+    let next = 0;
     return (line: StreamLine): Row => {
       let row = cache.get(line);
       if (row === undefined) {
-        row = toRow(line, byLabel);
+        row = toRow(line, byLabel, next++);
         cache.set(line, row);
       }
       return row;
@@ -1801,13 +1809,13 @@ function LogsStream({
               {window_.topPad > 0 && (
                 <div style={{ height: window_.topPad }} aria-hidden="true" />
               )}
-              {drawn.map((row, i) => (
-                // The index is the key: two identical lines a second apart are
-                // ordinary in a log, so nothing in a line is a stable identity.
-                // It sits on the wrapper, which is the click target and carries
-                // the selection; `.logline` inside it is what `measure` reads.
+              {drawn.map((row) => (
+                // The row's own id is the key, so a drawn line keeps its element
+                // while the batches move it (see `Row.id`). It sits on the wrapper,
+                // which is the click target and carries the selection; `.logline`
+                // inside it is what `measure` reads.
                 <div
-                  key={window_.start + i}
+                  key={row.id}
                   aria-current={row === selected ? "true" : undefined}
                   onClick={() => {
                     // A drag that selected text to copy is not a request for the panel.

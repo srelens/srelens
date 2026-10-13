@@ -2999,6 +2999,28 @@ describe("the line detail (#898)", () => {
 describe("under a busy stream (#898)", () => {
   const caption = () => document.querySelector('[data-slot="volume-caption"]')?.textContent ?? "";
   const anotherError = line("api-8/api", "14:07:45.100000000", "error pool timeout waited=30.1s in_use=6");
+  const many = (n: number, from = 0) =>
+    Array.from({ length: n }, (_, i) => line("api-7/api", "14:07:41.208000000", `line ${from + i}`));
+  /** A full ring's next batch: `n` lines off the front and `n` new ones on the end. */
+  function ring(n: number, next: number) {
+    act(() => {
+      h.state.lines = [...h.state.lines.slice(n), ...many(n, next)];
+      h.state.dropped += n;
+      notify();
+    });
+  }
+  const lineRow = (n: number) =>
+    Array.from(logRegion().querySelectorAll(".logline")).find((r) => r.textContent?.includes(`line ${n}`)) as Element;
+
+  it("keeps a drawn line on its own element while a full ring drops lines from the front", async () => {
+    // An element that is handed another line under the pointer turns a click, or a selection, into one of that line.
+    await (draw(), body());
+    push(...many(30));
+    const drawn = lineRow(10);
+    ring(5, 30);
+    expect(drawn.isConnected).toBe(true);
+    expect(drawn.textContent).toContain("line 10");
+  });
 
   it("recounts the rail, the facets and the histogram at most four times a second, and the last batch always lands", async () => {
     const region = await (draw(), body());
