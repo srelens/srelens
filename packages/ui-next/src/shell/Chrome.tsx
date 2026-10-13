@@ -3,6 +3,7 @@ import { ConfirmDialog, IconButton, Titlebar, WorkspaceSwitcher } from "@srelens
 import { applyUiScale, getUiScale, isApplePlatform, isTauri, setUiScale, stepUiScale } from "@srelens/core";
 import { rememberTheme } from "../lib/appearance";
 import { Icons } from "../lib/icons";
+import { openSettings } from "../lib/settingsRequest";
 import { hint } from "../lib/shortcuts";
 import { openTab, removeWorkspace, switchWorkspace, useTabs } from "../lib/tabsStore";
 import { useCanLockWorkspace, useWorkspaceSealed } from "./LockGate";
@@ -158,6 +159,9 @@ export function Chrome({ controls, clusterName, onToggleTheme, onNewWorkspace, o
                  to offer Remove is the last thing this should grow. */
               <span className="ws-chip" data-sealed="true">
                 {Icons.workspace && <Icons.workspace size={12} aria-hidden="true" />}
+                {workspace.color && (
+                  <span data-slot="workspace-color" aria-hidden="true" className="h-2 w-2 shrink-0 rounded-full" style={{ background: workspace.color }} />
+                )}
                 <span className="max-w-[110px] truncate">{workspace.name}</span>
               </span>
             ) : (
@@ -166,6 +170,7 @@ export function Chrome({ controls, clusterName, onToggleTheme, onNewWorkspace, o
                 workspaces={workspaces.map((w) => ({
                   id: w.id,
                   name: w.name,
+                  color: w.color,
                   clusters: w.clusters.length,
                   tabs: w.tabs.length,
                 }))}
@@ -173,6 +178,7 @@ export function Chrome({ controls, clusterName, onToggleTheme, onNewWorkspace, o
                 onSelect={switchWorkspace}
                 onRemove={askRemove}
                 onCreate={onNewWorkspace}
+                onManage={() => openSettings("workspaces")}
               />
             )}
           </>

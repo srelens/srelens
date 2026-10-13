@@ -3,14 +3,17 @@ import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { Chrome } from "./Chrome";
 import {
+  activeRoute,
   createWorkspace,
   currentWorkspace,
   getState,
   openTab,
   setState,
+  setWorkspaceColor,
   switchWorkspace,
   togglePin,
 } from "../lib/tabsStore";
+import { takeSettingsRequest } from "../lib/settingsRequest";
 import { defaultState } from "../lib/tabs";
 import { APPEARANCE_KEY } from "../lib/appearance";
 import { lockWorkspace, resetLock, __setKnownVaultMode } from "./LockGate";
@@ -163,6 +166,24 @@ describe("Chrome", () => {
     expect(currentWorkspace().id).toBe(id);
   });
 
+  it("draws the workspace's colour on the chip and on its row", async () => {
+    setWorkspaceColor(getState().currentId, "var(--mark-teal)");
+    chrome();
+    const chip = screen.getByRole("button", { name: /Default/ });
+    expect(chip.querySelector<HTMLElement>('[data-slot="workspace-color"]')?.style.background).toBe("var(--mark-teal)");
+    await openSwitcher();
+    const row = screen.getAllByRole("button", { name: /^Default/ }).find((el) => el.classList.contains("ns-row"))!;
+    expect(row.querySelector<HTMLElement>('[data-slot="workspace-color"]')?.style.background).toBe("var(--mark-teal)");
+  });
+
+  it("opens Settings on Workspaces from the switcher", async () => {
+    chrome();
+    await openSwitcher();
+    await userEvent.click(screen.getByRole("button", { name: "Manage workspaces…" }));
+    expect(activeRoute()).toBe("/settings");
+    expect(takeSettingsRequest(null)?.section).toBe("workspaces");
+  });
+
   it("asks before removing a workspace holding tabs the user opened", async () => {
     const id = createWorkspace("Team", ["prod"]);
     // `createWorkspace` switches into it, so this tab lands in Team.
@@ -300,6 +321,14 @@ describe("Chrome", () => {
       expect(screen.queryByRole("button", { name: /^Team/ })).toBeNull();
       expect(screen.getByText("Team")).toBeDefined();
       expect(getState().workspaces.some((w) => w.id === id)).toBe(true);
+    });
+
+    it("keeps the workspace's colour on the sealed chip", () => {
+      setWorkspaceColor(getState().currentId, "var(--mark-teal)");
+      lockWorkspace();
+      const { container } = chrome();
+      const swatch = container.querySelector<HTMLElement>('[data-sealed="true"] [data-slot="workspace-color"]');
+      expect(swatch?.style.background).toBe("var(--mark-teal)");
     });
 
     it("disables the way into Settings, and says why", async () => {
