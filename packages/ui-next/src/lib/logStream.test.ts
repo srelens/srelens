@@ -3,12 +3,16 @@ import { act, renderHook, waitFor } from "@testing-library/react";
 import type { LogStatus, LogTarget } from "@srelens/core";
 
 const startLogStream = vi.fn();
+/** Calls through to the real ring; counts how often the hook folds lines into it. */
+const appendLogLines = vi.fn();
 
 vi.mock("@srelens/core", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@srelens/core")>();
+  appendLogLines.mockImplementation(actual.appendLogLines);
   return {
     ...actual,
     startLogStream: (...args: unknown[]) => startLogStream(...args),
+    appendLogLines: (...args: Parameters<typeof actual.appendLogLines>) => appendLogLines(...args),
   };
 });
 
@@ -124,6 +128,40 @@ describe("useLogStream", () => {
     await waitFor(() => expect(result.current.lines).toHaveLength(100));
     expect(result.current.lines[0].text).toBe("line 0");
     expect(result.current.lines[99].text).toBe("line 99");
+  });
+
+  it("folds a burst into the ring with one append, not one per line", async () => {
+    // Each append copies the whole ring: 10,000 lines one at a time onto a full 5,000-line ring took ~80ms where one
+    // batch took ~1ms, and the backend can deliver that many between two frames.
+    const s = fakeStream();
+    const { result } = renderHook(() => useLogStream("kind-dev", "default", [target]));
+    await s.connect();
+    appendLogLines.mockClear();
+
+    act(() => {
+      for (let i = 0; i < 100; i++) s.line("", `line ${i}`);
+    });
+    await waitFor(() => expect(result.current.lines).toHaveLength(100));
+    expect(appendLogLines).toHaveBeenCalledTimes(1);
+  });
+
+  it("folds a backlog the size of the ring before its commit, and keeps the drop count exact", async () => {
+    // A commit that is slow to come (a hidden window) must not let the lines waiting for it grow without bound.
+    const s = fakeStream();
+    const { result } = renderHook(() => useLogStream("kind-dev", "default", [target], { capacity: 10 }));
+    await s.connect();
+    appendLogLines.mockClear();
+
+    act(() => {
+      for (let i = 0; i < 25; i++) s.line("", `line ${i}`);
+    });
+    // No commit has run yet: lines 0-9 and 10-19 are in the ring, 20-24 still wait.
+    expect(appendLogLines).toHaveBeenCalledTimes(2);
+    await waitFor(() => expect(result.current.dropped).toBe(15));
+    expect(result.current.lines.map((l) => l.text)).toEqual(
+      ["15", "16", "17", "18", "19", "20", "21", "22", "23", "24"].map((n) => `line ${n}`),
+    );
+    expect(appendLogLines).toHaveBeenCalledTimes(3);
   });
 
   it("holds the view and counts arrivals while paused", async () => {
@@ -473,6 +511,39 @@ describe("useLogStream", () => {
     act(() => result.current.clear());
     expect(result.current.lines).toHaveLength(0);
     expect(startLogStream).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not bring back a line that arrived before a clear, though it had not been committed yet", async () => {
+    const s = fakeStream();
+    const { result } = renderHook(() => useLogStream("kind-dev", "default", [target]));
+    await s.connect();
+    act(() => {
+      s.line("", "before-clear");
+      result.current.clear();
+      s.line("", "after-clear");
+    });
+    await waitFor(() => expect(result.current.lines).toHaveLength(1));
+    await act(() => new Promise((r) => setTimeout(r, 50)));
+    expect(result.current.lines.map((l) => l.text)).toEqual(["after-clear"]);
+  });
+
+  it("does not carry a line the old stream sent, not yet committed, into the restarted one", async () => {
+    const s = fakeStream();
+    const { result, rerender } = renderHook(
+      ({ targets }: { targets: LogTarget[] }) => useLogStream("kind-dev", "default", targets),
+      { initialProps: { targets: [target] } },
+    );
+    await s.connect();
+    const s2 = fakeStream();
+    act(() => {
+      s.line("", "old-stream");
+      rerender({ targets: [otherTarget] });
+    });
+    await s2.connect();
+    act(() => s2.line("", "new-stream"));
+    await waitFor(() => expect(result.current.lines).toHaveLength(1));
+    await act(() => new Promise((r) => setTimeout(r, 50)));
+    expect(result.current.lines.map((l) => l.text)).toEqual(["new-stream"]);
   });
 });
 
