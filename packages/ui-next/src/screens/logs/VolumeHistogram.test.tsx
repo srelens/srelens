@@ -592,8 +592,19 @@ describe("VolumeHistogram", () => {
       const { container } = drawWith([], offered);
       expect(texts(container, "legend-item")).toEqual(["error 2", "info 1"]);
       expect(screen.getByText("No lines match")).toBeTruthy();
+      expect(screen.queryByText("No timed lines match")).toBeNull();
       expect(container.querySelector('[data-slot="gridline"]')).toBeNull();
       expect(container.querySelector('[data-slot="bucket"]')).toBeNull();
+    });
+
+    it("says no timed lines match when lines did match but none of them has a time", () => {
+      // Matching lines the bars cannot place: "No lines match" would be untrue, and the caption still counts them.
+      const stampless = [ql("error x"), ql("error y")];
+      const { container } = drawWith(stampless, [...offered, ...stampless]);
+      expect(screen.getByText("No timed lines match")).toBeTruthy();
+      expect(screen.queryByText("No lines match")).toBeNull();
+      expect(container.querySelector('[data-slot="volume-caption"]')?.textContent).toBe("0 lines · 2 without a time");
+      expect(texts(container, "legend-item")).toEqual(["error 4", "info 1"]);
     });
 
     it("lets a legend click put a level back", async () => {

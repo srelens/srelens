@@ -157,7 +157,8 @@ export function VolumeHistogram({
         {open && (
           <>
             <div data-slot="volume-empty" className="path text-muted">
-              No lines match
+              {/* Lines that matched but have no time are still matches: the bars just can't place them. */}
+              {lines.length > 0 ? "No timed lines match" : "No lines match"}
             </div>
             <VolumeLegend groups={groups} clauses={clauses} onToggleLevels={onToggleLevels} />
           </>
