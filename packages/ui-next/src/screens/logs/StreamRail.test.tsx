@@ -192,6 +192,18 @@ describe("StreamRail", () => {
       expect(container.querySelector(".badge")?.textContent).toBe("1 error");
     });
 
+    it("counts a line by the severity it arrives with, rather than reading its text again", () => {
+      const { container } = rail({
+        lines: [
+          { ...line("a", "disk gone"), health: "danger" },
+          { ...line("a", "disk still gone"), health: "danger" },
+          { ...line("a", "error is only a word in this one"), health: "neutral" },
+        ],
+      });
+
+      expect(container.querySelector(".badge")?.textContent).toBe("2 errors");
+    });
+
     it("says nothing at all rather than badging a zero", () => {
       const { container } = rail({ lines: [line("mk3wl", "info all quiet"), line("mk3wl", "info still quiet")] });
 
@@ -216,6 +228,19 @@ describe("StreamRail", () => {
       const rows = Array.from(container.querySelectorAll('[data-slot="term"]'));
 
       expect(rows.map(toneOf)).toEqual(["danger", "warning", "info"]);
+    });
+
+    it("tallies the message a line arrives with, and tones it by the severity it arrives with", () => {
+      // A logfmt line opens with its own time, which ends a term before any word of the message.
+      const logfmt = (n: number) => ({
+        ...line("a", `time=2026-10-12T10:33:0${n}Z level=error msg="Write failed: timeout" system=x`),
+        message: "Write failed: timeout",
+        health: "danger" as const,
+      });
+      const { container } = rail({ lines: [1, 2, 3].map(logfmt) });
+
+      expect(termRows(container)).toEqual([["Write failed timeout", "3"]]);
+      expect(Array.from(container.querySelectorAll('[data-slot="term"]')).map(toneOf)).toEqual(["danger"]);
     });
 
     it("tallies the lines in view, so the terms cannot disagree with the badge", () => {

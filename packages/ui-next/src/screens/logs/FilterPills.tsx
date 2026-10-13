@@ -59,7 +59,8 @@ export function FilterPills({
       )}
       <button
         type="button"
-        className="text-btn"
+        // The kit's text button takes the size of what it sits in, and a row of pills is not a size.
+        className="text-btn text-[0.75rem]"
         onClick={() => {
           onQueryChange("");
           onRangeChange(undefined);
@@ -72,7 +73,7 @@ export function FilterPills({
   );
 }
 
-export function Pill({
+function Pill({
   label,
   negated = false,
   removeLabel,

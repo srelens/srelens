@@ -31,6 +31,7 @@ import {
   type LogTarget,
   type QueryClause,
   type QueryLine,
+  type TermLine,
   type TimeRange,
 } from "@srelens/core";
 import {
@@ -314,12 +315,12 @@ interface Row extends QueryLine {
    * up red on one screen and grey on the next.
    */
   readonly level: string;
-  /** The line with its stamp off — what the term tally and an export's grep read. */
+  /** The line with its stamp off — what the term tally and a regex clause read. An export writes {@link Row.raw}. */
   readonly text: string;
   /** What the message column leads with: a JSON or logfmt `msg`, else `text`. */
-  message: string;
+  readonly message: string;
   /** Whether `message` came out of a field, so the row appends the rest inline. */
-  structured: boolean;
+  readonly structured: boolean;
   /** The line exactly as it arrived, stamp and all — what an export writes. */
   raw: string;
   /**
@@ -1092,9 +1093,13 @@ function LogsStream({
    * buffer tallies to NOTHING — no error, no warning, just an empty rail that
    * looks exactly like a quiet log. `row.text` is the stripped text; the
    * raw line never goes near this.
+   *
+   * The row's message and severity go with it. The tally reads a JSON `msg`
+   * from the text, but not a logfmt one: a logfmt line opens with its own
+   * `time=…`, and the tally would end the term there and show nothing.
    */
-  const railLines = useMemo<StreamLine[]>(
-    () => filtered.map((row) => ({ source: row.pod, text: row.text })),
+  const railLines = useMemo<TermLine[]>(
+    () => filtered.map((row) => ({ source: row.pod, text: row.text, message: row.message, health: row.health })),
     [filtered],
   );
 
@@ -1108,9 +1113,10 @@ function LogsStream({
    * far they happen to have scrolled, not of what they chose to look at.
    *
    * Each line goes out RAW, stamp and all, in classic's `source | line`
-   * shape. The column on screen truncates the stamp to `14:07:41.208` because
-   * a reader watching a live tail knows what day it is; a file read tomorrow
-   * does not, and the full RFC3339 is what makes an exported line greppable
+   * shape. The column on screen shows the time on the reader's clock, to the
+   * millisecond (`14:07:41.208`), because a reader watching a live tail knows
+   * what day it is; a file read tomorrow does not, and the full RFC3339, in
+   * the zone the cluster sent it, is what makes an exported line greppable
    * against anything else. Which lines are exported is what "on screen"
    * governs — not how much of each one an 86px gutter had room for.
    *

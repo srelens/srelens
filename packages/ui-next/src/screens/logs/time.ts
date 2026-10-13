@@ -1,4 +1,4 @@
-import { instantOf, wallClock, type TimeRange } from "@srelens/core";
+import { instantOf, VOLUME_STEPS, wallClock, type TimeRange } from "@srelens/core";
 
 const pad = (n: number) => String(n).padStart(2, "0");
 
@@ -13,7 +13,9 @@ const dateOf = (ms: number) => {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
 };
 
-export const DAY = 86_400_000;
+export const MINUTE = 60_000;
+const HOUR = 60 * MINUTE;
+export const DAY = 24 * HOUR;
 
 const isMidnight = (ms: number) => {
   const d = new Date(ms);
@@ -47,8 +49,8 @@ export function rangeLabel(range: TimeRange): string {
 /** `30s`, `5m`, `1h`, `1d`. */
 export function stepLabel(step: number): string {
   if (step % DAY === 0) return `${step / DAY}d`;
-  if (step % 3_600_000 === 0) return `${step / 3_600_000}h`;
-  if (step % 60_000 === 0) return `${step / 60_000}m`;
+  if (step % HOUR === 0) return `${step / HOUR}h`;
+  if (step % MINUTE === 0) return `${step / MINUTE}m`;
   return `${step / 1000}s`;
 }
 
@@ -62,16 +64,7 @@ export function niceCeil(n: number): number {
   return NICE.map((m) => m * power).find((c) => c >= n) ?? 10 * power;
 }
 
-const SECOND = 1000;
-const MINUTE = 60_000;
-const HOUR = 3_600_000;
 const DEFAULT_TICKS = 6;
-const TICK_STEPS = [
-  ...[1, 2, 5, 10, 15, 30].map((n) => n * SECOND),
-  ...[1, 2, 5, 10, 15, 30].map((n) => n * MINUTE),
-  ...[1, 2, 3, 6, 12].map((n) => n * HOUR),
-  DAY,
-];
 
 /** The instants in `[from, to]` on multiples of `step` of the local clock, or undefined past `cap`. */
 function ticksEvery(from: number, to: number, step: number, cap: number): number[] | undefined {
@@ -96,7 +89,7 @@ export function timeTicks(from: number, to: number, maxTicks = DEFAULT_TICKS): n
   if (!Number.isFinite(from) || !Number.isFinite(to) || !(to > from)) return [];
   // A cap that is NaN or infinite would never stop a fine interval from filling the axis.
   const cap = Number.isFinite(maxTicks) ? Math.max(1, Math.floor(maxTicks)) : DEFAULT_TICKS;
-  for (const step of TICK_STEPS) {
+  for (const step of VOLUME_STEPS) {
     const ticks = ticksEvery(from, to, step, cap);
     if (ticks !== undefined) return ticks;
   }

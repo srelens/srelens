@@ -9,9 +9,9 @@ import {
   type ClauseTarget,
   type FacetValue,
   type HealthKind,
-  type LogLine,
   type QueryClause,
   type QueryLine,
+  type TermLine,
 } from "@srelens/core";
 import { Badge, Checkbox, Section, StatusPill, toneWash } from "@srelens/ui-kit";
 import { groupNumber } from "../../lib/numbers";
@@ -71,18 +71,23 @@ export interface StreamRailProps {
   pods: readonly StreamPod[];
   /**
    * **The lines the body is drawing** — every filter applied, the pod
-   * checkboxes among them, and each line's RFC3339 stamp already stripped so
-   * `text` is the message.
+   * checkboxes among them, and each line's RFC3339 stamp already stripped from
+   * `text`.
    *
    * The stamp matters: it opens with a digit, which the tally reads as a
    * value and stops the term run on, so a buffer handed over still stamped
    * tallies to nothing at all.
    *
+   * A line that has been read already brings its `message` and `health`,
+   * which the tally and the badge use instead of reading `text` again. They
+   * are not optional for a logfmt line: it opens with a `time=…` no other
+   * line repeats, and read as text it ends the term before its first word.
+   *
    * One input drives the badge and the terms both, so the two cannot be
    * counted over different sets — which is precisely what a separate `terms`
    * prop would allow.
    */
-  lines: readonly LogLine[];
+  lines: readonly TermLine[];
   /** Given the pod and the state its box is moving to, not the event. */
   onTogglePod: (pod: string, checked: boolean) => void;
   /** The level and field facets, and the query a click on any facet or term edits. */
@@ -280,7 +285,7 @@ function activeFirst(values: FacetValue[], clauses: readonly QueryClause[], fiel
 export function StreamRail({ pods, lines, onTogglePod, query }: StreamRailProps) {
   const terms = useMemo(() => tallyLogTerms(lines), [lines]);
   const errors = useMemo(
-    () => lines.reduce((n, l) => (logLineHealth(l.text) === "danger" ? n + 1 : n), 0),
+    () => lines.reduce((n, l) => ((l.health ?? logLineHealth(l.text)) === "danger" ? n + 1 : n), 0),
     [lines],
   );
   const levels = useMemo(

@@ -65,9 +65,16 @@ describe("FilterPills", () => {
     expect(onRemoved).toHaveBeenCalledTimes(1);
   });
 
-  it("draws Clear all as the kit's text button", () => {
+  it("draws Clear all as the kit's text button, at the size of the pills beside it", () => {
     pills("a b");
-    expect(screen.getByRole("button", { name: "Clear all" }).classList.contains("text-btn")).toBe(true);
+    const clear = screen.getByRole("button", { name: "Clear all" });
+    expect(clear.classList.contains("text-btn")).toBe(true);
+    // The kit's button takes the size of whatever it sits in, and a flex row of pills is not a font size.
+    expect(clear.classList.contains("text-[0.75rem]")).toBe(true);
+  });
+
+  it("exports the filter strip alone: a pill is its detail", async () => {
+    expect(Object.keys(await import("./FilterPills"))).toEqual(["FilterPills"]);
   });
 
   it("draws the time window as a pill of its own, and Clear all clears it too", async () => {

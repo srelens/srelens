@@ -10,6 +10,9 @@ export interface MessageRow {
   readonly truncated: boolean;
 }
 
+/** What parts the message from its fields. */
+const GAP = "  ";
+
 /**
  * A row's message cell: the message, then (for a structured row) its other
  * fields in faint `key=value`, with the query's matches marked across both.
@@ -19,15 +22,24 @@ export interface MessageRow {
  */
 export function renderMessage(row: MessageRow, clauses: readonly QueryClause[]): ReactNode {
   const inline = row.structured ? inlineFields(row.fields) : "";
-  const shown = row.message !== "" && inline !== "" ? `${row.message}  ${inline}` : row.message || inline;
+  const gap = row.message !== "" && inline !== "" ? GAP : "";
+  const shown = `${row.message}${gap}${inline}`;
   if (shown === "" && !row.truncated) return "";
   // Where the faint part starts: after the message, or at 0 when there is none.
   const split = row.message === "" ? 0 : Math.min(row.message.length, shown.length);
   const ranges = clauses.length === 0 ? [] : highlightRanges(shown, clauses);
+  const rest = split + gap.length;
   return (
     <>
       {marked(shown.slice(0, split), ranges, 0)}
-      {split < shown.length && <span className="text-faint">{marked(shown.slice(split), ranges, split)}</span>}
+      {split < shown.length && (
+        <span className="text-faint">
+          {/* The row is `white-space: nowrap`, which collapses the gap to one space. Only the gap keeps its
+              spaces: pre-wrap on the whole faint part would let the row break, and the window needs its height. */}
+          {gap !== "" && <span className="whitespace-pre">{marked(gap, ranges, split)}</span>}
+          {marked(shown.slice(rest), ranges, rest)}
+        </span>
+      )}
       {/* A cut line says so at its end, in the message's own flow (#747): the
           trailing slot sits beside the message box, and with Wrap off a long
           message runs past that box and under it. */}

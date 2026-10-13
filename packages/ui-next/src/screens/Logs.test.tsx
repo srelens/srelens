@@ -159,7 +159,7 @@ vi.mock("@srelens/core", async (orig) => {
         },
       };
     },
-    };
+  };
 });
 
 vi.mock("../extensions/inventoryStore", async (orig) => ({
@@ -1300,6 +1300,20 @@ describe("the Stream rail", () => {
     expect(terms.every(([term]) => !/^\d{4}-\d{2}-\d{2}T/.test(term))).toBe(true);
   });
 
+  it("tallies the Top terms of a logfmt stream, whose every line opens with a time of its own", async () => {
+    // `time=…` is a key=value no other line repeats, and the tally ends a term at one before it reads a word of
+    // the message. The screen has read the message (`msg`) already, and hands it over.
+    const { container } = draw();
+    await body();
+    push(
+      ...[1, 2, 3].map((n) =>
+        line("api-8/api", `14:07:4${n}.000000000`, `time=2026-08-24T14:07:4${n}Z level=error msg="Write failed: timeout" system=x`),
+      ),
+    );
+    expect(railTerms(container)).toEqual([["Write failed timeout", "3"]]);
+    expect(container.querySelector('[data-slot="term"] .status')?.getAttribute("data-kind")).toBe("danger");
+  });
+
   it("counts what the BODY is drawing, so the badge and the terms cannot describe a different set", async () => {
     const { container } = draw();
     await body();
@@ -2148,6 +2162,31 @@ describe("structured lines and the query (#898)", () => {
     expect(rendered(region)[0]).toBe(
       `${localTs("2026-08-24T14:07:41.208Z")}|api-7 · api|info|Wrote batch  system=camlog internal_use=true`,
     );
+  });
+
+  it("keeps the two-space gap before the fields from collapsing, without changing the text or its marks", async () => {
+    // The row is `white-space: nowrap`, which collapses two spaces to one. The gap is its own pre-spaced span rather
+    // than a pre-wrap faint span, which would let the row break and lose the fixed height the window depends on.
+    const region = await (draw(), body());
+    push(...JSON_LINES);
+    const cell = () => region.querySelector("[data-slot=message]") as HTMLElement;
+    const gap = cell().querySelector(".whitespace-pre");
+    expect(gap?.textContent).toBe("  ");
+    expect(gap?.parentElement?.classList.contains("text-faint")).toBe(true);
+    expect(cell().querySelector(".text-faint")?.classList.contains("whitespace-pre")).toBe(false);
+    expect(cell().textContent).toBe("Wrote batch  system=camlog internal_use=true");
+    await userEvent.type(filterField(), "system:camlog");
+    expect(Array.from(cell().querySelectorAll("mark")).map((m) => m.textContent)).toEqual(["system=camlog"]);
+    expect(cell().textContent).toBe("Wrote batch  system=camlog internal_use=true");
+  });
+
+  it("draws no gap for a row with nothing after its message, or no message before its fields", async () => {
+    const region = await (draw(), body());
+    push(
+      line("api-7/api", "14:07:41.208000000", "info a plain line"),
+      line("api-7/api", "14:07:42.208000000", '{"level":"warn","system":"camlog"}'),
+    );
+    expect(region.querySelectorAll(".whitespace-pre")).toHaveLength(0);
   });
 
   it("filters on a field, and ORs two values of one field", async () => {

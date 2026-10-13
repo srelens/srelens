@@ -3,7 +3,7 @@ import { inRange, volumeBuckets, type QueryClause, type QueryLine, type TimeRang
 import { statusTone, toneColor, toneWash } from "@srelens/ui-kit";
 import { groupNumber } from "../../lib/numbers";
 import { setSectionOpen, useSectionOpen } from "../../lib/sectionFolds";
-import { clockTime, dateTime, DAY, niceCeil, spansDays, stepLabel, tickLabels, timeTicks } from "./time";
+import { clockTime, dateTime, DAY, MINUTE, niceCeil, spansDays, stepLabel, tickLabels, timeTicks } from "./time";
 import { TimeAxis } from "./TimeAxis";
 import { GROUPS, OTHER_OPACITY, type BarGroup } from "./volumeGroups";
 import { tallyLegend, VolumeLegend } from "./VolumeLegend";
@@ -14,7 +14,6 @@ const GAP = 2;
 const HEIGHT = 96;
 /** The least a non-empty segment is drawn, in viewBox units (about a pixel): a lone error beside a spike must not vanish. */
 const MIN_SEGMENT = 1;
-const MINUTE = 60_000;
 /** The brush over a drag: enough to see the bars through. */
 const BRUSH_OPACITY = 0.18;
 

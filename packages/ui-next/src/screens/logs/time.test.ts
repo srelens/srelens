@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
-import { clockTime, dateTime, niceCeil, rangeLabel, spansDays, stepLabel, tickLabels, timeTicks } from "./time";
+import { VOLUME_STEPS } from "@srelens/core";
+import { clockTime, DAY, dateTime, MINUTE, niceCeil, rangeLabel, spansDays, stepLabel, tickLabels, timeTicks } from "./time";
 
 // Local-time constructors, so these hold in every zone.
 const at = (day: number, h = 0, m = 0, s = 0) => new Date(2026, 9, day, h, m, s).getTime();
@@ -18,6 +19,26 @@ function inZone(zone: string, body: () => void): void {
     process.env.TZ = found;
   }
 }
+
+describe("the time units", () => {
+  it("are defined here once, for the axis and the histogram to share", () => {
+    expect(MINUTE).toBe(60_000);
+    expect(DAY).toBe(86_400_000);
+  });
+});
+
+describe("timeTicks, steps", () => {
+  it("cuts on the round steps the histogram's bars are cut on", () => {
+    // Ticks one step apart, whichever step fits: each is a step core's bucketing also offers.
+    const gaps = new Set<number>();
+    for (const span of [20_000, 400_000, 5 * 3_600_000, 3 * DAY]) {
+      const ticks = timeTicks(at(12), at(12) + span);
+      if (ticks.length > 1) gaps.add(ticks[1] - ticks[0]);
+    }
+    expect(gaps.size).toBeGreaterThan(1);
+    for (const gap of gaps) expect(VOLUME_STEPS).toContain(gap);
+  });
+});
 
 describe("clockTime", () => {
   it("pads each part to two digits", () => {
