@@ -1,4 +1,4 @@
-import { useMemo, useState, type KeyboardEvent } from "react";
+import { useMemo, type KeyboardEvent } from "react";
 import {
   clauseState,
   isQueryableKey,
@@ -7,8 +7,7 @@ import {
   type HealthKind,
   type QueryClause,
 } from "@srelens/core";
-import { Button, StatusPill } from "@srelens/ui-kit";
-import { FailureAlert } from "../../lib/errorCopy";
+import { CopyButton, StatusPill } from "@srelens/ui-kit";
 import { Icons } from "../../lib/icons";
 
 /** What the panel needs from a row. */
@@ -45,9 +44,6 @@ export function LineDetail({
   onToggle: (target: ClauseTarget, mode: ClauseMode) => void;
   onClose: () => void;
 }) {
-  // Kept with the line it failed for, so a failed copy does not follow the selection to the next line.
-  const [copyFailure, setCopyFailure] = useState<{ line: DetailLine; error: unknown } | undefined>(undefined);
-  const copyError = copyFailure?.line === line ? copyFailure : undefined;
   const stamp = line.raw.slice(0, line.raw.length - line.text.length).trim();
   // The level as a row of its own only when no field already carries it.
   const levelRow = line.level !== "" && !Object.keys(line.fields).some((k) => k.toLowerCase() === "level");
@@ -71,14 +67,6 @@ export function LineDetail({
     onClose();
   }
 
-  function copy() {
-    setCopyFailure(undefined);
-    // Through a promise, so a webview with no clipboard API fails here, said, rather than throwing out of a click handler.
-    void Promise.resolve()
-      .then(() => navigator.clipboard.writeText(line.raw))
-      .catch((e: unknown) => setCopyFailure({ line, error: e }));
-  }
-
   return (
     <section
       aria-label="Line detail"
@@ -93,17 +81,13 @@ export function LineDetail({
         {line.level !== "" && <StatusPill status={line.level} kind={line.health} />}
         {!inView && <span className="text-faint">No longer in view</span>}
         <span className="flex-1" />
-        <Button variant="secondary" size="xs" onClick={copy}>
-          <Icons.copy size={12} aria-hidden="true" />
-          Copy line
-        </Button>
+        {/* The kit's copy control, so the click answers: "Copied", or "Copy failed" when the clipboard refuses.
+            Keyed by the line so moving to another line starts it fresh rather than carrying the last answer. */}
+        <CopyButton key={line.raw} text={line.raw} label="Copy line" />
         <button type="button" className="icon-btn" aria-label="Close the line detail" onClick={onClose}>
           <Icons.close size={13} aria-hidden="true" />
         </button>
       </header>
-      {copyError !== undefined && (
-        <FailureAlert title="Could not copy the line" error={copyError.error} className="mx-3 mt-2" />
-      )}
       <div className="scroll min-h-0 flex-1 px-3 py-1.5 font-mono text-[0.75rem]">
         <table className="w-full border-collapse">
           <tbody>

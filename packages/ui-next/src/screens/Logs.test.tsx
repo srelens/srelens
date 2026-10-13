@@ -2501,7 +2501,7 @@ describe("the line detail (#898)", () => {
     await (draw(), body());
     push(...JSON_LINES);
     await userEvent.click(rows()[0]);
-    screen.getByRole("button", { name: /copy line/i }).focus();
+    screen.getByRole("button", { name: /^copy$/i }).focus();
     await userEvent.keyboard("{Escape}");
     expect(screen.queryByRole("region", { name: "Line detail" })).toBeNull();
     expect(document.activeElement).toBe(logRegion());

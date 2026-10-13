@@ -53,22 +53,24 @@ describe("LineDetail", () => {
     expect(onToggle).toHaveBeenCalledWith({ field: "system", value: "camlog" }, "exclude");
   });
 
-  it("copies the raw line, stamp and all", async () => {
+  it("copies the raw line, stamp and all, and says it did", async () => {
     const writeText = vi.fn<(text: string) => Promise<void>>().mockResolvedValue(undefined);
     Object.defineProperty(navigator, "clipboard", { value: { writeText }, configurable: true });
     detail();
-    await userEvent.click(screen.getByRole("button", { name: /copy line/i }));
+    await userEvent.click(screen.getByRole("button", { name: /copy/i }));
     expect(writeText).toHaveBeenCalledWith(LINE.raw);
+    // The reader's only sign the click did anything: the button turns to "Copied".
+    expect(await screen.findByRole("button", { name: /^copied$/i })).toBeTruthy();
   });
 
-  it("says so when the copy fails, and forgets it once another line is shown", async () => {
+  it("says so when the copy fails, and starts fresh once another line is shown", async () => {
     const writeText = vi.fn<(text: string) => Promise<void>>().mockRejectedValue(new Error("denied"));
     Object.defineProperty(navigator, "clipboard", { value: { writeText }, configurable: true });
     const { rerender, onToggle, onClose } = detail();
-    await userEvent.click(screen.getByRole("button", { name: /copy line/i }));
-    expect(await screen.findByText("Could not copy the line")).toBeTruthy();
+    await userEvent.click(screen.getByRole("button", { name: /copy/i }));
+    expect(await screen.findByRole("button", { name: /^copy failed$/i })).toBeTruthy();
     rerender(<LineDetail line={{ ...LINE, raw: `${LINE.raw} `, text: `${LINE.text} ` }} inView clauses={[]} onToggle={onToggle} onClose={onClose} />);
-    expect(screen.queryByText("Could not copy the line")).toBeNull();
+    expect(screen.getByRole("button", { name: /^copy$/i })).toBeTruthy();
   });
 
   it("names the level in the header, in the tone core gives it, and draws nothing for a line with none", () => {
@@ -134,7 +136,7 @@ describe("LineDetail", () => {
 
   it("closes on Escape", async () => {
     const { onClose } = detail();
-    screen.getByRole("button", { name: /copy line/i }).focus();
+    screen.getByRole("button", { name: /^copy$/i }).focus();
     await userEvent.keyboard("{Escape}");
     expect(onClose).toHaveBeenCalled();
   });
