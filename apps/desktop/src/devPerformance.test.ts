@@ -36,7 +36,10 @@ describe("trimDevMeasures", () => {
   it("clears every second by default", () => {
     const stop = trimDevMeasures();
     performance.measure("⚛ App");
-    vi.advanceTimersByTime(1000);
+    // Up to the last millisecond of the second, so a shorter default is caught as well as a longer one.
+    vi.advanceTimersByTime(999);
+    expect(measures()).toHaveLength(1);
+    vi.advanceTimersByTime(1);
     expect(measures()).toHaveLength(0);
     stop();
   });
