@@ -9,7 +9,6 @@ use std::fs::File;
 use std::io::BufWriter;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::{Duration, SystemTime};
 
 use srelens_streams::log_spool::SpoolPage;
 use srelens_streams::logs::{LogStreamManager, LogTarget};
@@ -142,11 +141,7 @@ pub(crate) async fn export_to(
     path: &Path,
     since_seconds: Option<u64>,
 ) -> Result<(), String> {
-    let since = since_seconds.map(|s| {
-        SystemTime::now()
-            .checked_sub(Duration::from_secs(s))
-            .unwrap_or(SystemTime::UNIX_EPOCH)
-    });
+    let since = since_seconds.map(srelens_streams::log_spool::cutoff);
     let mut partial = path.as_os_str().to_owned();
     partial.push(".partial");
     let partial = PathBuf::from(partial);
@@ -174,6 +169,7 @@ mod tests {
     use super::*;
     use srelens_kube::client_cache::ClientCache;
     use srelens_streams::log_spool::{SpoolDirs, DESKTOP_SPOOL_CEILING};
+    use std::time::Duration;
 
     /// The empty-target refusal comes back synchronously; a real target is
     /// accepted (its follow task dies later on the unresolvable context) and

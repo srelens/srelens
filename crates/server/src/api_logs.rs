@@ -1,9 +1,8 @@
-//! GET /api/logs/export â€” a log stream's history as a download (#914). It is
+//! GET /api/logs/export — a log stream's history as a download (#914). It is
 //! streamed from the spool in chunks, so a 256 MB history never sits whole in
 //! server memory.
 
 use std::io::{self, Write};
-use std::time::{Duration, SystemTime};
 
 use axum::body::{Body, Bytes};
 use axum::extract::{Query, State};
@@ -49,9 +48,7 @@ pub async fn export(
     if !env.streams.logs.keeps_history(&query.channel) {
         return error(StatusCode::NOT_FOUND, "this log stream keeps no history");
     }
-    let since = query
-        .since_seconds
-        .map(|s| SystemTime::now() - Duration::from_secs(s));
+    let since = query.since_seconds.map(srelens_streams::log_spool::cutoff);
     let (tx, rx) = mpsc::channel::<Result<Bytes, io::Error>>(8);
     tokio::spawn(async move {
         let out = ChunkSender {
@@ -208,6 +205,20 @@ mod tests {
         let (status, body) = get(&state, "/api/logs/export?channel=logs:1", &token, true).await;
         assert_eq!(status, StatusCode::OK, "{body}");
         assert!(body.starts_with("web-1 | [error:"), "{body}");
+    }
+
+    /// The browser sends `sinceSeconds`, so no value of it may panic the handler: one
+    /// reaching back past the clock's start means every line.
+    #[tokio::test]
+    async fn a_window_reaching_back_past_the_clocks_start_exports_every_line() {
+        let state = AppState::for_tests(Arc::new(Registry::new())).await;
+        let token = user_with_history(&state).await;
+        for seconds in ["1000000000000", "18446744073709551615"] {
+            let uri = format!("/api/logs/export?channel=logs:1&sinceSeconds={seconds}");
+            let (status, body) = get(&state, &uri, &token, true).await;
+            assert_eq!(status, StatusCode::OK, "{seconds}: {body}");
+            assert!(body.starts_with("web-1 | [error:"), "{seconds}: {body}");
+        }
     }
 
     #[tokio::test]

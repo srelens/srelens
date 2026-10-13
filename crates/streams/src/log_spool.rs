@@ -329,6 +329,14 @@ impl SpoolSnapshot {
     }
 }
 
+/// The cutoff for "the last `seconds`": now minus them, floored at the epoch, so a client's
+/// oversized value means "everything" instead of an overflow panic.
+pub fn cutoff(seconds: u64) -> SystemTime {
+    SystemTime::now()
+        .checked_sub(Duration::from_secs(seconds))
+        .unwrap_or(SystemTime::UNIX_EPOCH)
+}
+
 /// A reader over `path` from `offset` up to `end`: whole lines only, whatever
 /// the writer has flushed past them since.
 fn open_at(path: &Path, offset: u64, end: u64) -> io::Result<BufReader<io::Take<File>>> {
@@ -853,6 +861,16 @@ mod tests {
         assert_eq!(
             String::from_utf8(out).unwrap(),
             "web-1 | [error: before any stamp]\nweb-1 | 2026-10-13T12:10:00+02:00 new\nweb-1 | [error: after new]\n"
+        );
+    }
+
+    #[test]
+    fn a_cutoff_is_floored_at_the_epoch_so_an_oversized_window_cannot_overflow() {
+        assert_eq!(cutoff(u64::MAX), SystemTime::UNIX_EPOCH);
+        assert!(cutoff(0) <= SystemTime::now());
+        assert!(
+            cutoff(3600) < cutoff(0),
+            "a longer window reaches further back"
         );
     }
 
