@@ -1,18 +1,20 @@
 //! Live log-tail core: follows one or more pod/container log streams and
-//! pushes each line to an EventSink. A stream can span many targets (e.g.
+//! sends their lines to an EventSink as frames, keeping the history on disk
+//! when asked (#914). A stream can span many targets (e.g.
 //! every pod of a Deployment); they multiplex onto one channel so the
 //! frontend manages a single subscription.
 
 use std::collections::{HashMap, VecDeque};
+use std::io::Write;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use serde::{Deserialize, Serialize};
 use srelens_kube::client_cache::ClientCache;
 use srelens_kube::logs::{stream_pod_logs_resilient, Line, StreamOpts};
 use tokio::task::JoinHandle;
 
-use crate::log_spool::LogSpool;
+use crate::log_spool::{LogSpool, SpoolDirs, SpoolPage, SpoolSnapshot};
 use crate::sink::EventSink;
 
 const STREAM_TAIL_LINES: i64 = 200;
@@ -159,12 +161,20 @@ fn weight(line: &LogLine) -> usize {
 
 struct Stream {
     handles: Vec<JoinHandle<()>>,
+    /// The stream's history, when it keeps one (#914). Held here, not by the
+    /// writer: a stream whose targets all completed stops writing but stays
+    /// readable until it is stopped.
+    spool: Option<Arc<Mutex<LogSpool>>>,
+    /// The pod a line with no source tag came from — the lone target's — so an
+    /// export can name it the way the screen's own export does.
+    lone_pod: Option<String>,
 }
 
 /// Owns running log-tail streams (keyed by channel).
 pub struct LogStreamManager {
     cache: Arc<ClientCache>,
     streams: Mutex<HashMap<String, Stream>>,
+    spools: Option<SpoolDirs>,
 }
 
 impl LogStreamManager {
@@ -172,12 +182,23 @@ impl LogStreamManager {
         Self {
             cache,
             streams: Mutex::new(HashMap::new()),
+            spools: None,
         }
     }
 
-    /// Start following the given targets, emitting each line as a `LogLine` on
-    /// `channel`. The subscriber attaches to `channel` first, then calls this,
-    /// so the initial tail lines can't race ahead of the listener.
+    /// Keep each stream's history on disk under `dirs` when its start asks for
+    /// it (#914). Without this, a request for history is ignored.
+    pub fn with_spools(mut self, dirs: SpoolDirs) -> Self {
+        self.spools = Some(dirs);
+        self
+    }
+
+    /// Start following the given targets. Their lines go out on `channel` as
+    /// frames (`{seq, first?, lines}`) every [`FRAME_EVERY`]; each target's
+    /// status changes go out at once. The subscriber attaches to `channel`
+    /// first, then calls this, so the initial tail can't race the listener.
+    /// `spool_max_bytes` keeps the stream's history on disk, capped by the
+    /// manager's [`SpoolDirs`].
     #[allow(clippy::too_many_arguments)]
     pub async fn start(
         &self,
@@ -189,6 +210,7 @@ impl LogStreamManager {
         timestamps: Option<bool>,
         since_seconds: Option<i64>,
         tail_lines: Option<i64>,
+        spool_max_bytes: Option<u64>,
     ) -> Result<(), String> {
         if targets.is_empty() {
             return Err("cannot start live logs without a pod target".into());
@@ -201,21 +223,44 @@ impl LogStreamManager {
             ..StreamOpts::default()
         };
 
-        let handles = targets
+        // A spool that cannot be made costs the history, never the tail: the
+        // stream opens live-only and its first frame says why.
+        let mut notice = None;
+        let spool = match (spool_max_bytes, &self.spools) {
+            (Some(asked), Some(dirs)) => dirs.cap(asked).and_then(|cap| {
+                match dirs
+                    .next_stream_dir()
+                    .and_then(|dir| LogSpool::create(dir, cap))
+                {
+                    Ok(spool) => Some(Arc::new(Mutex::new(spool))),
+                    Err(e) => {
+                        notice = Some(e.to_string());
+                        None
+                    }
+                }
+            }),
+            _ => None,
+        };
+        let lone_pod = targets
+            .iter()
+            .find(|t| t.label.is_empty())
+            .map(|t| t.pod.clone());
+        // Fresh from `LogSpool::create`: `LogWriter` asserts the spool numbers from 1.
+        let writer = Arc::new(Mutex::new(LogWriter::new(spool.clone(), targets.len())));
+        writer.lock().unwrap().notice = notice;
+
+        let mut handles: Vec<JoinHandle<()>> = targets
             .into_iter()
             .map(|t| {
                 let cache = self.cache.clone();
-                let sink = sink.clone();
-                let channel = channel.clone();
+                let (status_sink, status_channel) = (sink.clone(), channel.clone());
                 let context = context.clone();
                 let namespace = namespace.clone();
                 let source = t.label.clone();
+                let writer = writer.clone();
                 tokio::spawn(async move {
-                    let (line_sink, line_channel) = (sink.clone(), channel.clone());
-                    let (status_sink, status_channel) = (sink.clone(), channel.clone());
-                    // Both closures need the label: the line closure takes
-                    // `source` by move, so the status closure gets its own copy.
                     let status_source = source.clone();
+                    let lines = writer.clone();
                     stream_pod_logs_resilient(
                         cache,
                         context,
@@ -224,13 +269,16 @@ impl LogStreamManager {
                         t.container,
                         opts,
                         move |line: Line| {
-                            if let Ok(v) = serde_json::to_value(LogLine {
+                            // ponytail: `push` does blocking file I/O (a BufWriter
+                            // flush, a rotation's `remove_file`) under a std mutex,
+                            // on a runtime worker. Briefly stalling that worker is
+                            // the ceiling; a dedicated writer thread, or batching
+                            // through `spawn_blocking`, if it ever shows up.
+                            lines.lock().unwrap().push(LogLine {
                                 source: source.clone(),
                                 line: line.text,
                                 truncated: line.truncated,
-                            }) {
-                                line_sink.emit(&line_channel, v);
-                            }
+                            })
                         },
                         move |status| {
                             if let Ok(v) = serde_json::to_value(LogStatusEvent {
@@ -242,18 +290,103 @@ impl LogStreamManager {
                         },
                     )
                     .await;
+                    // Only a completed target gets here; the rest run until stopped.
+                    writer.lock().unwrap().running -= 1;
                 })
             })
             .collect();
+        handles.push(tokio::spawn(send_frames(writer, sink, channel.clone())));
 
-        self.streams
-            .lock()
-            .unwrap()
-            .insert(channel, Stream { handles });
+        self.streams.lock().unwrap().insert(
+            channel,
+            Stream {
+                handles,
+                spool,
+                lone_pod,
+            },
+        );
         Ok(())
     }
 
-    /// Stop a log-tail stream and abort all of its follow tasks.
+    /// Whether `channel` keeps its history on disk.
+    pub fn keeps_history(&self, channel: &str) -> bool {
+        self.streams
+            .lock()
+            .unwrap()
+            .get(channel)
+            .is_some_and(|s| s.spool.is_some())
+    }
+
+    /// Lines `[before - limit, before)` of `channel`'s history.
+    pub async fn read(
+        &self,
+        channel: &str,
+        before: u64,
+        limit: usize,
+    ) -> Result<SpoolPage, String> {
+        let (spool, snapshot) = self.snapshot(channel)?;
+        tokio::task::spawn_blocking(move || {
+            let _keep = spool; // a stop mid-read waits for the read to finish
+            snapshot.read(before, limit)
+        })
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|e| e.to_string())
+    }
+
+    /// Write `channel`'s history to `out` as `<source> | <line>`: every line,
+    /// or those stamped at or after `since`. Returns how many were written.
+    pub async fn export<W: Write + Send + 'static>(
+        &self,
+        channel: &str,
+        mut out: W,
+        since: Option<SystemTime>,
+    ) -> Result<u64, String> {
+        let (spool, snapshot) = self.snapshot(channel)?;
+        let lone = self
+            .streams
+            .lock()
+            .unwrap()
+            .get(channel)
+            .and_then(|s| s.lone_pod.clone())
+            .unwrap_or_default();
+        tokio::task::spawn_blocking(move || {
+            let _keep = spool;
+            let name_of = |source: &str| {
+                if source.is_empty() {
+                    lone.clone()
+                } else {
+                    source.to_string()
+                }
+            };
+            let written = snapshot.export(&mut out, since, &name_of)?;
+            out.flush()?;
+            Ok::<_, std::io::Error>(written)
+        })
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|e| e.to_string())
+    }
+
+    /// `channel`'s spool and a snapshot of it, taken under the spool's lock.
+    fn snapshot(&self, channel: &str) -> Result<(Arc<Mutex<LogSpool>>, SpoolSnapshot), String> {
+        let spool = self
+            .streams
+            .lock()
+            .unwrap()
+            .get(channel)
+            .and_then(|s| s.spool.clone())
+            .ok_or_else(|| "this log stream keeps no history".to_string())?;
+        let snapshot = spool
+            .lock()
+            .unwrap()
+            .snapshot()
+            .map_err(|e| e.to_string())?;
+        Ok((spool, snapshot))
+    }
+
+    /// Stop a log-tail stream and abort all of its follow tasks. Its history
+    /// goes when the last task holding it has dropped.
     pub fn stop(&self, channel: &str) {
         if let Some(stream) = self.streams.lock().unwrap().remove(channel) {
             for h in stream.handles {
@@ -262,14 +395,40 @@ impl LogStreamManager {
         }
     }
 
-    /// Abort every running log-tail stream (used when a user's environment is
-    /// dropped).
+    /// Abort every running log-tail stream and remove every spool (a user's
+    /// environment dropped, or the app quitting).
     pub fn shutdown_all(&self) {
-        let mut streams = self.streams.lock().unwrap();
-        for (_, stream) in streams.drain() {
-            for h in stream.handles {
-                h.abort();
+        {
+            let mut streams = self.streams.lock().unwrap();
+            for (_, stream) in streams.drain() {
+                for h in stream.handles {
+                    h.abort();
+                }
             }
+        }
+        if let Some(dirs) = &self.spools {
+            dirs.remove_root();
+        }
+    }
+}
+
+/// Send a stream's lines as one frame every [`FRAME_EVERY`], until every
+/// target has completed and the last of their lines is out.
+async fn send_frames(writer: Arc<Mutex<LogWriter>>, sink: Arc<dyn EventSink>, channel: String) {
+    let mut tick = tokio::time::interval(FRAME_EVERY);
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    loop {
+        tick.tick().await;
+        let (out, done) = {
+            let mut writer = writer.lock().unwrap();
+            let out = writer.take();
+            (out, writer.running == 0)
+        };
+        for payload in out {
+            sink.emit(&channel, payload);
+        }
+        if done {
+            return;
         }
     }
 }
@@ -291,6 +450,7 @@ mod tests {
                 "ns".into(),
                 vec![],
                 "logs:1".into(),
+                None,
                 None,
                 None,
                 None,
@@ -326,6 +486,7 @@ mod tests {
                     },
                 ],
                 "logs:1".into(),
+                None,
                 None,
                 None,
                 None,
@@ -402,6 +563,7 @@ mod tests {
                     label: "p".into(),
                 }],
                 "logs:1".into(),
+                None,
                 None,
                 None,
                 None,
@@ -551,5 +713,310 @@ mod tests {
             out[1].get("first").is_none(),
             "no history to point at any more"
         );
+    }
+
+    use crate::log_spool::{SpoolDirs, DESKTOP_SPOOL_CEILING};
+    use std::time::Duration;
+
+    fn one_target() -> Vec<LogTarget> {
+        vec![LogTarget {
+            pod: "web-1".into(),
+            container: None,
+            label: String::new(),
+        }]
+    }
+
+    fn only_root(base: &std::path::Path) -> std::path::PathBuf {
+        std::fs::read_dir(base)
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path()
+    }
+
+    /// Neither target can connect (the cache holds no kubeconfig), so each one
+    /// pushes its `[error: …]` line straight away: two lines, framed.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn lines_go_out_as_frames_not_one_event_per_line() {
+        let manager = LogStreamManager::new(ClientCache::new_many(vec![]));
+        let sink = Arc::new(TestSink::default());
+        let targets = vec![
+            LogTarget {
+                pod: "web-1".into(),
+                container: None,
+                label: "web-1".into(),
+            },
+            LogTarget {
+                pod: "web-2".into(),
+                container: None,
+                label: "web-2".into(),
+            },
+        ];
+        manager
+            .start(
+                sink.clone(),
+                "ctx".into(),
+                "ns".into(),
+                targets,
+                "logs:1".into(),
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        let mut framed = 0;
+        for _ in 0..300 {
+            framed = sink
+                .payloads_for("logs:1")
+                .iter()
+                .filter_map(|p| p.get("lines").and_then(|l| l.as_array()).map(Vec::len))
+                .sum();
+            if framed >= 2 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        manager.stop("logs:1");
+        assert!(framed >= 2, "each target's line arrives in a frame");
+        assert!(
+            sink.payloads_for("logs:1")
+                .iter()
+                .all(|p| p.get("line").is_none()),
+            "no line is sent on its own any more"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_spooled_stream_reads_back_its_lines_and_stop_removes_them() {
+        let tmp = tempfile::tempdir().unwrap();
+        let manager = LogStreamManager::new(ClientCache::new_many(vec![])).with_spools(
+            SpoolDirs::per_process(tmp.path().to_path_buf(), DESKTOP_SPOOL_CEILING),
+        );
+        let sink = Arc::new(TestSink::default());
+        manager
+            .start(
+                sink.clone(),
+                "ctx".into(),
+                "ns".into(),
+                one_target(),
+                "logs:1".into(),
+                None,
+                None,
+                None,
+                Some(64 << 20),
+            )
+            .await
+            .unwrap();
+        assert!(manager.keeps_history("logs:1"));
+        let mut page = None;
+        for _ in 0..300 {
+            let p = manager.read("logs:1", u64::MAX, 10).await.unwrap();
+            if !p.lines.is_empty() {
+                page = Some(p);
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let page = page.expect("the error line reached the spool");
+        assert_eq!((page.first, page.seq), (1, 1));
+        assert!(
+            page.lines[0].line.starts_with("[error:"),
+            "{:?}",
+            page.lines[0]
+        );
+
+        let stream_dir = only_root(tmp.path()).join("0");
+        assert!(stream_dir.is_dir());
+        manager.stop("logs:1");
+        for _ in 0..300 {
+            if !stream_dir.exists() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(
+            !stream_dir.exists(),
+            "stopping a stream deletes its history"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_stream_that_asked_for_no_history_has_none() {
+        let tmp = tempfile::tempdir().unwrap();
+        let manager = LogStreamManager::new(ClientCache::new_many(vec![])).with_spools(
+            SpoolDirs::per_process(tmp.path().to_path_buf(), DESKTOP_SPOOL_CEILING),
+        );
+        manager
+            .start(
+                Arc::new(TestSink::default()),
+                "ctx".into(),
+                "ns".into(),
+                one_target(),
+                "logs:1".into(),
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(!manager.keeps_history("logs:1"));
+        let err = manager.read("logs:1", 10, 10).await.unwrap_err();
+        assert!(err.contains("keeps no history"), "{err}");
+        assert!(
+            std::fs::read_dir(tmp.path()).unwrap().next().is_none(),
+            "nothing written"
+        );
+        manager.stop("logs:1");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_export_names_the_lone_target_by_its_pod() {
+        let tmp = tempfile::tempdir().unwrap();
+        let manager = LogStreamManager::new(ClientCache::new_many(vec![])).with_spools(
+            SpoolDirs::per_process(tmp.path().to_path_buf(), DESKTOP_SPOOL_CEILING),
+        );
+        manager
+            .start(
+                Arc::new(TestSink::default()),
+                "ctx".into(),
+                "ns".into(),
+                one_target(),
+                "logs:1".into(),
+                None,
+                None,
+                None,
+                Some(64 << 20),
+            )
+            .await
+            .unwrap();
+        for _ in 0..300 {
+            if !manager
+                .read("logs:1", u64::MAX, 1)
+                .await
+                .unwrap()
+                .lines
+                .is_empty()
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let out = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        struct Shared(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+        impl std::io::Write for Shared {
+            fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(b);
+                Ok(b.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let n = manager
+            .export("logs:1", Shared(out.clone()), None)
+            .await
+            .unwrap();
+        assert!(n >= 1);
+        let text = String::from_utf8(out.lock().unwrap().clone()).unwrap();
+        assert!(text.starts_with("web-1 | [error:"), "{text}");
+        manager.stop("logs:1");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn shutdown_all_removes_every_spool() {
+        let tmp = tempfile::tempdir().unwrap();
+        let manager = LogStreamManager::new(ClientCache::new_many(vec![])).with_spools(
+            SpoolDirs::per_process(tmp.path().to_path_buf(), DESKTOP_SPOOL_CEILING),
+        );
+        manager
+            .start(
+                Arc::new(TestSink::default()),
+                "ctx".into(),
+                "ns".into(),
+                one_target(),
+                "logs:1".into(),
+                None,
+                None,
+                None,
+                Some(64 << 20),
+            )
+            .await
+            .unwrap();
+        assert!(std::fs::read_dir(tmp.path()).unwrap().next().is_some());
+        manager.shutdown_all();
+        assert!(
+            std::fs::read_dir(tmp.path()).unwrap().next().is_none(),
+            "the root is gone"
+        );
+    }
+
+    /// History that cannot be made costs the history, never the tail.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_spool_that_cannot_be_made_leaves_the_stream_live_and_says_why() {
+        let tmp = tempfile::tempdir().unwrap();
+        // The root would go under a file, so it cannot be made.
+        let file = tmp.path().join("not-a-dir");
+        std::fs::write(&file, b"").unwrap();
+        let manager = LogStreamManager::new(ClientCache::new_many(vec![]))
+            .with_spools(SpoolDirs::fixed(file.join("logs"), DESKTOP_SPOOL_CEILING));
+        let sink = Arc::new(TestSink::default());
+        manager
+            .start(
+                sink.clone(),
+                "ctx".into(),
+                "ns".into(),
+                one_target(),
+                "logs:1".into(),
+                None,
+                None,
+                None,
+                Some(64 << 20),
+            )
+            .await
+            .unwrap();
+        assert!(!manager.keeps_history("logs:1"));
+        let mut payloads = Vec::new();
+        for _ in 0..300 {
+            payloads = sink.payloads_for("logs:1");
+            if payloads.iter().any(|p| p.get("spool").is_some())
+                && payloads.iter().any(|p| p.get("lines").is_some())
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        manager.stop("logs:1");
+        assert!(
+            payloads.iter().any(|p| p["spool"]["failed"].is_string()),
+            "{payloads:?}"
+        );
+        assert!(
+            payloads.iter().any(|p| p.get("lines").is_some()),
+            "the live lines still go out"
+        );
+    }
+
+    /// A frame goes out on each tick, and once every target has completed the
+    /// ticker sends what the targets left and stops.
+    #[tokio::test(start_paused = true)]
+    async fn frames_stop_once_every_target_has_completed_and_the_last_lines_are_out() {
+        let writer = Arc::new(Mutex::new(LogWriter::new(None, 1)));
+        let sink = Arc::new(TestSink::default());
+        let task = tokio::spawn(send_frames(writer.clone(), sink.clone(), "logs:1".into()));
+        writer.lock().unwrap().push(ll(1));
+        tokio::time::sleep(FRAME_EVERY * 2).await;
+        assert_eq!(sink.payloads_for("logs:1").len(), 1);
+        {
+            let mut w = writer.lock().unwrap();
+            w.push(ll(2));
+            w.running = 0;
+        }
+        tokio::time::sleep(FRAME_EVERY * 2).await;
+        assert!(task.is_finished());
+        assert_eq!(sink.payloads_for("logs:1")[1]["lines"][0]["line"], "l2");
     }
 }

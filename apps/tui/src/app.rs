@@ -10013,6 +10013,7 @@ impl App {
                 Some(logs_state.timestamps),
                 None,
                 Some(200),
+                None,
             )
             .await;
 
@@ -10076,6 +10077,7 @@ impl App {
                 Some(logs_state.timestamps),
                 None,
                 Some(200),
+                None,
             )
             .await;
 

@@ -46,6 +46,7 @@ pub async fn start_log_stream<R: Runtime>(
             timestamps,
             since_seconds,
             tail_lines,
+            None,
         )
         .await?;
     owned.keep(window.label(), epoch, Stream::Log(channel.clone()), || {

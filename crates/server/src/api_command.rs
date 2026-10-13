@@ -261,6 +261,7 @@ async fn run(
                     a.timestamps,
                     a.since_seconds,
                     a.tail_lines,
+                    None,
                 )
                 .await
                 .map_err(|e| command_error(&e))?;
