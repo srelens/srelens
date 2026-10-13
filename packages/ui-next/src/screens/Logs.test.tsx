@@ -3216,6 +3216,30 @@ describe("under a busy stream (#898)", () => {
       expect(rendered(region)).toHaveLength(10);
     });
 
+    it.each([
+      ["Ctrl+A", () => select(document.body)],
+      [
+        "a drag from the filter bar to past the log",
+        () =>
+          act(() => {
+            const wrap = screen.getByRole("button", { name: "Wrap" });
+            (document.getSelection() as Selection).setBaseAndExtent(wrap, 0, document.body, document.body.childNodes.length);
+            document.dispatchEvent(new Event("selectionchange"));
+          }),
+      ],
+    ])("holds the view while %s selects the log, though neither end of the selection is in it", async (_, enclose) => {
+      // The text under the selection is rewritten as surely as under one that starts in the log.
+      const region = await (draw(), body());
+      push(...many(5));
+      enclose();
+      const selection = document.getSelection() as Selection;
+      expect(region.contains(selection.anchorNode) || region.contains(selection.focusNode)).toBe(false);
+      push(...many(3, 5));
+      expect(rendered(region)).toHaveLength(5);
+      select(null);
+      expect(rendered(region)).toHaveLength(8);
+    });
+
     it("says the view is held only once a hold has lasted, never for an ordinary click", async () => {
       // Every click holds the view for as long as the button is down; a note that flashed on each one would be noise.
       await (draw(), body());

@@ -893,7 +893,11 @@ function LogsStream({
         selection !== null &&
         !selection.isCollapsed &&
         viewport !== null &&
-        (viewport.contains(selection.anchorNode) || viewport.contains(selection.focusNode));
+        // Either end in the log, or the log inside it: Ctrl+A, or a drag from the filter bar past the whole log. A
+        // selection that only reaches into the log has an end in it, so the whole log is all there is left to ask.
+        (viewport.contains(selection.anchorNode) ||
+          viewport.contains(selection.focusNode) ||
+          selection.containsNode(viewport));
       syncHold();
     };
     // Anywhere on the window: a drag that started in the log can end anywhere, and a press the browser takes back,
