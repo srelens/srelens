@@ -79,10 +79,11 @@ const DESKTOP_SECTIONS = [
   "Accessibility",
   "Shortcuts",
   "Deep links",
-  "Workspace",
+  "Session & layout",
   "Kubernetes",
   "Application logs",
   "Updates",
+  "Workspaces",
   "Clusters",
   "Apps",
 ];
@@ -161,6 +162,16 @@ describe("Settings", () => {
     expect(screen.getByRole("region", { name: "App catalog" })).toBeTruthy();
     act(() => openSettings("appearance"));
     expect(within(rail).getByRole("tab", { name: "Appearance" }).getAttribute("aria-selected")).toBe("true");
+  });
+
+  it("opens on Workspaces when asked, and still finds Session & layout by its old id", () => {
+    openSettings("workspaces");
+    paint();
+    const rail = screen.getByRole("complementary", { name: "Settings" });
+    expect(within(rail).getByRole("tab", { name: "Workspaces" }).getAttribute("aria-selected")).toBe("true");
+    expect(screen.getByRole("list", { name: "Workspaces" })).toBeTruthy();
+    act(() => openSettings("workspace"));
+    expect(within(rail).getByRole("tab", { name: "Session & layout" }).getAttribute("aria-selected")).toBe("true");
   });
 
   it("hands a request to the Settings tab it brings to the front, not to another Settings tab", () => {
@@ -514,7 +525,7 @@ it("keeps an in-progress update when switching settings sections", async () => {
   await user.click(screen.getByRole("tab", { name: "Updates" }));
   await user.click(screen.getByRole("button", { name: "Check for updates" }));
   await user.click(await screen.findByRole("button", { name: "Download & install" }));
-  await user.click(screen.getByRole("tab", { name: "Workspace" }));
+  await user.click(screen.getByRole("tab", { name: "Session & layout" }));
   await act(async () => finish());
   await user.click(screen.getByRole("tab", { name: "Updates" }));
   expect(await screen.findByRole("button", { name: "Restart srelens" })).toBeTruthy();

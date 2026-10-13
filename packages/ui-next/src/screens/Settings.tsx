@@ -17,13 +17,14 @@ import { AuditPane } from "./settings/AuditPane";
 import { McpServer } from "./settings/McpServer";
 import { SecurityPane } from "./settings/SecurityPane";
 import { BackupPane } from "./settings/BackupPane";
+import { WorkspacesPane } from "./settings/WorkspacesPane";
 import { AccessibilityPane, ClustersPane, DeepLinksPane, ShortcutsPane } from "./settings/SmallPanes";
 
 /** Settings use the new design's stores and shared core commands. */
 /** §23's rail width for this screen, and this screen's alone (§A.1's table). */
 const NAV_WIDTH = 196;
 
-type SectionId = "extensions" | "agent" | "skills" | "security" | "backup" | "appearance" | "accessibility" | "shortcuts" | "deeplinks" | "workspace" | "kubernetes" | "logs" | "updates" | "clusters";
+type SectionId = "extensions" | "agent" | "skills" | "security" | "backup" | "appearance" | "accessibility" | "shortcuts" | "deeplinks" | "workspace" | "workspaces" | "kubernetes" | "logs" | "updates" | "clusters";
 
 /**
  * §23's nav, in §23's order.
@@ -98,10 +99,12 @@ const SECTIONS: ReadonlyArray<{ id: SectionId; label: string; desktopOnly?: true
   { id: "accessibility", label: "Accessibility" },
   { id: "shortcuts", label: "Shortcuts" },
   { id: "deeplinks", label: "Deep links", desktopOnly: true },
-  { id: "workspace", label: "Workspace" },
+  // Session restore, panel widths and the star prompt. The id is older than the label and stays, so openSettings("workspace") still lands here.
+  { id: "workspace", label: "Session & layout" },
   { id: "kubernetes", label: "Kubernetes" },
   { id: "logs", label: "Application logs" },
   { id: "updates", label: "Updates", desktopOnly: true },
+  { id: "workspaces", label: "Workspaces" },
   { id: "clusters", label: "Clusters" },
   // Not desktop-only: the web server keeps each user's own apps (#515).
   { id: "extensions", label: "Apps" },
@@ -252,6 +255,8 @@ export function Settings({ ported, onSwitchToClassic, onLocked }: SettingsProps)
         return <DeepLinksPane />;
       case "workspace":
         return <WorkspacePane />;
+      case "workspaces":
+        return <WorkspacesPane />;
       case "kubernetes":
         return <KubernetesPane />;
       case "logs":
