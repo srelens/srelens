@@ -330,15 +330,43 @@ describe("isQueryableKey", () => {
 
   // The parser and this predicate each decide what a field name is. They read
   // the same two character classes, and a facet button that offers a key the
-  // parser then reads as free text is the bug this pins.
-  it.each([
-    "system", "http.status", "@timestamp", "app.kubernetes.io/name", "x_ref", "_", "@", "a-b", "a/b", "A1", "a1.b2",
-    "bad key", "1st", "", "a:b", "-x", ".x", "x y", "éa", "aé", "a\tb", "a=b", "a,b",
-  ])("agrees with the parser about %j", (key) => {
+  // parser then reads as free text is the bug this pins. Each key says what it
+  // is as well as agreeing, so a character dropped from the class fails here
+  // even though both sides would drop it together.
+  it.each<[string, boolean]>([
+    ["system", true],
+    ["http.status", true],
+    ["@timestamp", true],
+    ["@ts", true],
+    ["app.kubernetes.io/name", true],
+    ["x_ref", true],
+    ["_", true],
+    ["@", true],
+    ["a-b", true],
+    ["a.b", true],
+    ["a/b", true],
+    ["A1", true],
+    ["a1.b2", true],
+    ["bad key", false],
+    ["1st", false],
+    ["1a", false],
+    ["", false],
+    ["a:b", false],
+    ["-x", false],
+    [".x", false],
+    ["/x", false],
+    ["x y", false],
+    ["éa", false],
+    ["aé", false],
+    ["a\tb", false],
+    ["a=b", false],
+    ["a,b", false],
+  ])("%j is a field name: %s, to the predicate and to the parser", (key, expected) => {
+    expect(isQueryableKey(key)).toBe(expected);
+    // "/x:x" is an unclosed regex, an error rather than a clause, so there is no field to read.
     const parsed = parseLogQuery(`${key}:x`);
-    expect(parsed.ok).toBe(true);
     const first = parsed.ok ? parsed.clauses[0] : undefined;
-    expect(first?.field === key).toBe(isQueryableKey(key));
+    expect(first?.field === key).toBe(expected);
   });
 });
 

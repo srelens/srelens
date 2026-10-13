@@ -1329,6 +1329,10 @@ function LogsStream({
     if (row === null || row === undefined) return;
     revealRef.current = false;
     row.scrollIntoView({ block: "nearest" });
+    // The view has moved, and the scroll event that says so only arrives at the next rendering step. A batch that
+    // lands before it is held from here, not from where the view was.
+    const viewport = viewportRef.current;
+    if (heldRef.current !== null && viewport !== null) heldRef.current.scroll = viewport.scrollTop;
   }
   useLayoutEffect(revealSelected, [selected, window_.start, window_.end]);
 

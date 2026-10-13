@@ -2891,6 +2891,34 @@ describe("the line detail (#898)", () => {
       }
     });
 
+    it("holds the selected line from where the reveal put the view, though the reveal's scroll event has not arrived", async () => {
+      // A click reveals its row, and scrollIntoView moves the view at once; the scroll event only arrives at the next
+      // rendering step. A batch that lands in between must not start from the position before the reveal.
+      const restore = layOut();
+      const reveal = vi.spyOn(HTMLElement.prototype, "scrollIntoView");
+      try {
+        const region = await (draw(), body());
+        const view = scrollable(region);
+        h.state.dropped = 100;
+        push(...many(30));
+        view.to(100);
+        // Down to the bottom of the pane, as a browser does for a row below it, and with no event.
+        reveal.mockImplementation(() => {
+          region.scrollTop = 250;
+        });
+        await userEvent.click(lineRow(20));
+        expect(view.top).toBe(250);
+        const before = onScreen(view);
+        ring(5, 30);
+        // Five rows of 20px left above it: 100px up from where the reveal left the view, not from where it was.
+        expect(view.top).toBe(150);
+        expect(onScreen(view)).toBe(before);
+      } finally {
+        reveal.mockRestore();
+        restore();
+      }
+    });
+
     it("holds the selected line by where its row is drawn when lines wrap and rows differ in height", async () => {
       // No sum of one row height says where a wrapped row is.
       const restore = layOut(byNumber);
