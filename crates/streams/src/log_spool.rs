@@ -435,10 +435,15 @@ impl SpoolDirs {
     }
 
     /// A fresh path for one stream's spool, which [`LogSpool::create`] makes.
-    /// Named by a counter, never by anything a client sent.
+    /// Named by a counter, never by anything a client sent. The root is made
+    /// again if it is gone, whoever deleted it: a sweep that raced this
+    /// process's launch, or a temp cleaner.
     pub fn next_stream_dir(&self) -> io::Result<PathBuf> {
         let mut made = self.made.lock().unwrap();
-        if made.is_none() {
+        // ponytail: a sweep can still delete a root between `make_private_dir` and
+        // `try_lock`, which costs at most one stream's history, because the next
+        // stream finds no directory here and makes the root again.
+        if made.as_ref().is_none_or(|m| !m.dir.is_dir()) {
             *made = Some(match &self.root {
                 Root::PerProcess(base) => make_process_root(base)?,
                 Root::Fixed(dir) => {
@@ -460,7 +465,9 @@ impl SpoolDirs {
     }
 
     /// Remove the root and everything under it. Best-effort: whatever is left
-    /// on the desktop, the next launch's [`sweep_stale`] removes.
+    /// on the desktop, the next launch's [`sweep_stale`] removes. A later
+    /// [`SpoolDirs::next_stream_dir`] makes a fresh root, and the counter keeps
+    /// counting, so names never collide.
     pub fn remove_root(&self) {
         if let Some(MadeRoot { dir, _lock }) = self.made.lock().unwrap().take() {
             drop(_lock);
@@ -478,13 +485,22 @@ fn make_process_root(base: &Path) -> io::Result<MadeRoot> {
         let dir = base.join(format!("{ROOT_PREFIX}{}-{nonce:08x}", std::process::id()));
         match make_private_dir(&dir) {
             Ok(()) => {
-                let lock = create_private_file(&dir.join(LOCK_FILE))?;
-                lock.try_lock()
-                    .map_err(|e| io::Error::other(e.to_string()))?;
-                return Ok(MadeRoot {
-                    dir,
-                    _lock: Some(lock),
+                let locked = create_private_file(&dir.join(LOCK_FILE)).and_then(|lock| {
+                    lock.try_lock()
+                        .map_err(|e| io::Error::other(e.to_string()))?;
+                    Ok(lock)
                 });
+                return match locked {
+                    Ok(lock) => Ok(MadeRoot {
+                        dir,
+                        _lock: Some(lock),
+                    }),
+                    // The root exists but is not ours to keep: do not leave it behind.
+                    Err(e) => {
+                        let _ = fs::remove_dir_all(&dir);
+                        Err(e)
+                    }
+                };
             }
             Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
             Err(e) => return Err(e),
@@ -974,6 +990,24 @@ mod tests {
             tmp.path().join("logs").join("0")
         );
         assert!(tmp.path().join("logs").is_dir());
+    }
+
+    #[test]
+    fn a_root_deleted_under_a_running_process_is_remade_for_the_next_stream() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dirs = SpoolDirs::per_process(tmp.path().to_path_buf(), DESKTOP_SPOOL_CEILING);
+        let first = dirs.next_stream_dir().unwrap();
+        let gone = first.parent().unwrap().to_path_buf();
+        // A sweep (or a temp cleaner) deletes the root while this process runs.
+        fs::remove_dir_all(&gone).unwrap();
+
+        let next = dirs.next_stream_dir().unwrap();
+
+        let root = next.parent().unwrap();
+        assert!(root.is_dir(), "the next stream gets a root that exists");
+        assert_ne!(root, gone, "a fresh root, not the deleted one");
+        // And a spool can be made in it: the failure this guards against.
+        LogSpool::create(next, 64 << 20).unwrap();
     }
 
     #[test]
