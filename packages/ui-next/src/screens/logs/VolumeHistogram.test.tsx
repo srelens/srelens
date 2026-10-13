@@ -423,6 +423,58 @@ describe("VolumeHistogram", () => {
       ]);
     });
 
+    // Every bar is drawn one slot wide, so a tick goes where its bar is, not
+    // where its elapsed time falls: a bar of two hours (the repeated hour of a
+    // fall-back) is still one slot, and the ticks after it sit in the slots after it.
+    const hour = 3_600_000;
+    const bar = (start: number, end: number) => ({ start, end, danger: 0, warning: 0, info: 1, other: 0 });
+
+    it("puts a tick under its bar when one bar covers more time than the others", () => {
+      const from = new Date(2026, 9, 12, 10).getTime();
+      stub.volume = {
+        step: hour,
+        untimed: 0,
+        buckets: [
+          bar(from, from + hour),
+          bar(from + hour, from + 3 * hour),
+          bar(from + 3 * hour, from + 4 * hour),
+          bar(from + 4 * hour, from + 5 * hour),
+        ],
+      };
+      const { container } = one("info a");
+      // 11:00 and 13:00 begin the 2nd and 3rd slots, 12:00 is halfway through the 2nd (the long one), 15:00 is the end.
+      expect(ticks(container)).toEqual([
+        ["10:00", "0%"],
+        ["11:00", "25%"],
+        ["12:00", "37.5%"],
+        ["13:00", "50%"],
+        ["14:00", "75%"],
+        ["15:00", "100%"],
+      ]);
+    });
+
+    it("puts a tick that begins the bar after a zero-width one in that bar's slot", () => {
+      // Spring forward: the skipped hour's bar has no width and starts where the next one does.
+      const from = new Date(2026, 9, 12, 10).getTime();
+      stub.volume = {
+        step: hour,
+        untimed: 0,
+        buckets: [
+          bar(from, from + hour),
+          bar(from + hour, from + hour),
+          bar(from + hour, from + 2 * hour),
+          bar(from + 2 * hour, from + 3 * hour),
+        ],
+      };
+      const { container } = one("info a");
+      expect(ticks(container)).toEqual([
+        ["10:00", "0%"],
+        ["11:00", "50%"],
+        ["12:00", "75%"],
+        ["13:00", "100%"],
+      ]);
+    });
+
     it("dates the tick that starts a new day", () => {
       stub.volume = across(new Date(2026, 9, 12, 23).getTime(), 120);
       const { container } = one("info a");

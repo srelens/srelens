@@ -329,7 +329,7 @@ export function VolumeHistogram({
                   )}
                 </svg>
               </div>
-              <TimeAxis ticks={ticks} labels={labels} from={from} to={to} />
+              <TimeAxis ticks={ticks} labels={labels} buckets={buckets} />
               {tip !== null && <VolumeTooltip {...tip} at={tipAt} />}
             </div>
           </div>
