@@ -1,6 +1,6 @@
 import { useId, useState } from "react";
 import { plural } from "@srelens/core";
-import { Button, ConfirmDialog, IconButton, Select, TextInput } from "@srelens/ui-kit";
+import { Button, Combobox, ConfirmDialog, IconButton, TextInput } from "@srelens/ui-kit";
 import { useContexts } from "../../lib/clusters";
 import { useOrderedContexts } from "../../lib/contextOrder";
 import { Icons } from "../../lib/icons";
@@ -56,10 +56,13 @@ function WorkspaceRow({ workspace, current, lone, onDelete }: {
         </li>)}
       </ul>
       {workspace.clusters.length === 0 && <span className="text-[0.75rem] text-muted">No clusters</span>}
-      <Select aria-label={`Add a cluster to ${workspace.name}`} value="" disabled={addable.length === 0}
-        placeholder={addable.length ? "Add cluster…" : "Every cluster is in"}
+      {/* Searched rather than listed: a kubeconfig can hold hundreds of contexts.
+          Combobox has no disabled state, so it is drawn only when there is one to add. */}
+      {addable.length ? <Combobox ariaLabel={`Add a cluster to ${workspace.name}`} value=""
+        placeholder="Add cluster…" searchPlaceholder="Search clusters…"
         options={addable.map((c) => ({ value: c.stableId, label: getMark(c.stableId, c.name).name }))}
         onValueChange={(id) => setWorkspaceClusters(workspace.id, [...workspace.clusters, id])} />
+        : <span className="text-[0.75rem] text-muted">Every cluster is in</span>}
     </div>
   </li>;
 }

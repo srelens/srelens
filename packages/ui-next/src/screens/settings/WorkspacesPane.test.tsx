@@ -8,6 +8,21 @@ import { defaultState } from "../../lib/tabs";
 import { createWorkspace, getState, openTab, setActiveCluster, setState, setWorkspaceClusters, switchWorkspace } from "../../lib/tabsStore";
 import { WorkspacesPane } from "./WorkspacesPane";
 
+// jsdom has neither, and the add-cluster picker is a Radix popover over a cmdk
+// list. Inert stubs: jsdom does no layout, so there is never a resize to report.
+if (!("ResizeObserver" in globalThis)) {
+  (globalThis as unknown as { ResizeObserver: unknown }).ResizeObserver = class {
+    observe() {}
+    unobserve() {}
+    disconnect() {}
+  };
+}
+const proto = window.HTMLElement.prototype as unknown as Record<string, unknown>;
+proto.scrollIntoView ??= () => {};
+proto.hasPointerCapture ??= () => false;
+proto.setPointerCapture ??= () => {};
+proto.releasePointerCapture ??= () => {};
+
 const contexts: ClusterContext[] = ["prod", "staging", "dev"].map((name) => ({
   name, stableId: `${name}-id`, key: `${name}-id`, cluster: name, server: `https://${name}`,
   sourceFile: "/config", authKind: "token", isCurrent: false,
@@ -76,18 +91,24 @@ it("sets and clears a workspace's colour", async () => {
   expect(stored(team)).not.toHaveProperty("color");
 });
 
-it("offers only the clusters a workspace does not have, and adds the one picked", async () => {
+/** The options the add-cluster picker offers, by name, once it is open. */
+const offered = () => screen.getAllByRole("option").map((o) => o.getAttribute("aria-label"));
+
+it("offers only the clusters a workspace does not have, searchably, and adds the one picked", async () => {
   const user = paint();
-  const picker = screen.getByRole("combobox", { name: "Add a cluster to Team" }) as HTMLSelectElement;
-  const offered = [...picker.options].filter((o) => !o.disabled).map((o) => o.textContent);
-  expect(offered).toEqual(["staging", "dev"]);
-  await user.selectOptions(picker, "dev-id");
+  await user.click(screen.getByRole("combobox", { name: "Add a cluster to Team" }));
+  expect(offered()).toEqual(["staging", "dev"]);
+  // Contexts can number in the hundreds, so they are searched (AGENTS.md, UI).
+  await user.type(screen.getByPlaceholderText("Search clusters…"), "de");
+  expect(offered()).toEqual(["dev"]);
+  await user.click(screen.getByRole("option", { name: "dev" }));
   expect(stored(team)?.clusters).toEqual(["prod-id", "dev-id"]);
 });
 
-it("disables the picker when every cluster is already in", () => {
+it("offers nothing to add when every cluster is already in", () => {
   paint();
-  expect((screen.getByRole("combobox", { name: "Add a cluster to Default" }) as HTMLSelectElement).disabled).toBe(true);
+  expect(within(row("Default")).queryByRole("combobox")).toBeNull();
+  expect(within(row("Default")).getByText("Every cluster is in")).toBeTruthy();
 });
 
 it("removes a cluster from a workspace", async () => {
@@ -97,17 +118,18 @@ it("removes a cluster from a workspace", async () => {
   expect(stored(team)?.clusters).toEqual([]);
 });
 
-it("names a workspace's clusters by their mark, and follows a mark renamed while it is open", () => {
+it("names a workspace's clusters by their mark, and follows a mark renamed while it is open", async () => {
   // A mark name that is not the context name, so a label read from the context fails.
   const mark = (name: string) => ({ name, short: name.slice(0, 2), color: "#123456", mark: "text" as const, withText: true });
   setMark("prod-id", mark("Production"));
   setMark("staging-id", mark("Pre-prod"));
-  render(<WorkspacesPane />);
+  const user = paint();
   const chips = within(screen.getByRole("list", { name: "Clusters in Team" }));
   expect(chips.getByText("Production")).toBeTruthy();
   expect(screen.getByRole("button", { name: "Remove Production from Team" })).toBeTruthy();
-  const picker = screen.getByRole("combobox", { name: "Add a cluster to Team" }) as HTMLSelectElement;
-  expect([...picker.options].filter((o) => !o.disabled).map((o) => o.textContent)).toEqual(["Pre-prod", "dev"]);
+  await user.click(screen.getByRole("combobox", { name: "Add a cluster to Team" }));
+  expect(offered()).toEqual(["Pre-prod", "dev"]);
+  await user.keyboard("{Escape}");
   // Renamed with the pane mounted: nothing in the workspace store changes, so only the mark subscription redraws it.
   act(() => setMark("prod-id", mark("Prod EU")));
   expect(chips.getByText("Prod EU")).toBeTruthy();
