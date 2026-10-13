@@ -893,22 +893,29 @@ function LogsStream({
     // or whose release never reaches the page (the window loses focus or is hidden), must not leave the view held.
     // Let go a task later, after the click a release makes: let go at once, the lines that waited move the view
     // first, and the pressed row is gone. A selection is not let go of here; only collapsing or leaving the log does.
+    // A release is heard on its way down, so nothing on the page that stops it on its way up keeps it from the
+    // window. Not `blur`: on the way down that is every field losing focus, as one does to the press itself; on
+    // the way up, where none of those bubble, it is the window's own.
+    let letGo: ReturnType<typeof setTimeout> | undefined;
     const onRelease = () => {
       if (!pressedRef.current) return;
       pressedRef.current = false;
-      setTimeout(syncHold, 0);
+      letGo = setTimeout(syncHold, 0);
     };
     const onVisibility = () => {
       if (document.hidden) onRelease();
     };
-    const releases = ["pointerup", "pointercancel", "blur"] as const;
+    const releases = ["pointerup", "pointercancel"] as const;
     document.addEventListener("selectionchange", onSelection);
     document.addEventListener("visibilitychange", onVisibility);
-    for (const type of releases) window.addEventListener(type, onRelease);
+    window.addEventListener("blur", onRelease);
+    for (const type of releases) window.addEventListener(type, onRelease, true);
     return () => {
+      clearTimeout(letGo);
       document.removeEventListener("selectionchange", onSelection);
       document.removeEventListener("visibilitychange", onVisibility);
-      for (const type of releases) window.removeEventListener(type, onRelease);
+      window.removeEventListener("blur", onRelease);
+      for (const type of releases) window.removeEventListener(type, onRelease, true);
     };
   }, [syncHold]);
   /**

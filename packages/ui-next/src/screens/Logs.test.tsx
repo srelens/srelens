@@ -3041,23 +3041,29 @@ describe("under a busy stream (#898)", () => {
   });
 
   it("recounts the rail, the facets and the histogram at most four times a second, and the last batch always lands", async () => {
-    const region = await (draw(), body());
-    push(...LINES);
-    expect(screen.getByText("1 error")).toBeTruthy();
-    push(anotherError);
-    // The body draws every batch.
-    expect(rendered(region)).toHaveLength(5);
-    // The counts wait out the quarter second since their last recount.
-    expect(screen.getByText("1 error")).toBeTruthy();
-    expect(screen.getByRole("button", { name: "level = error, 1 line" })).toBeTruthy();
-    expect(screen.getByRole("button", { name: "error 1" })).toBeTruthy();
-    expect(caption()).toMatch(/^4 lines · /);
-    await waitFor(() => {
-      expect(screen.getByText("2 errors")).toBeTruthy();
-      expect(screen.getByRole("button", { name: "level = error, 2 lines" })).toBeTruthy();
-      expect(screen.getByRole("button", { name: "error 2" })).toBeTruthy();
-      expect(caption()).toMatch(/^5 lines · /);
-    });
+    // The quarter second is read off the clock; stopped, a slow machine cannot run it out between two batches.
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      const region = await (draw(), body());
+      push(...LINES);
+      expect(screen.getByText("1 error")).toBeTruthy();
+      push(anotherError);
+      // The body draws every batch.
+      expect(rendered(region)).toHaveLength(5);
+      // The counts wait out the quarter second since their last recount.
+      expect(screen.getByText("1 error")).toBeTruthy();
+      expect(screen.getByRole("button", { name: "level = error, 1 line" })).toBeTruthy();
+      expect(screen.getByRole("button", { name: "error 1" })).toBeTruthy();
+      expect(caption()).toMatch(/^4 lines · /);
+      await waitFor(() => {
+        expect(screen.getByText("2 errors")).toBeTruthy();
+        expect(screen.getByRole("button", { name: "level = error, 2 lines" })).toBeTruthy();
+        expect(screen.getByRole("button", { name: "error 2" })).toBeTruthy();
+        expect(caption()).toMatch(/^5 lines · /);
+      });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   describe("holding the view while the reader works in it", () => {
@@ -3129,6 +3135,44 @@ describe("under a busy stream (#898)", () => {
       } finally {
         delete (document as { hidden?: boolean }).hidden;
       }
+    });
+
+    it("lets go of a press though something on the page stops its release on the way up", async () => {
+      const region = await (draw(), body());
+      push(...many(5));
+      press(lineRow(2));
+      push(...many(3, 5));
+      const swallow = (e: Event) => e.stopPropagation();
+      document.body.addEventListener("pointerup", swallow);
+      try {
+        fireEvent.pointerUp(document.body);
+        await released();
+        expect(rendered(region)).toHaveLength(8);
+      } finally {
+        document.body.removeEventListener("pointerup", swallow);
+      }
+    });
+
+    it("keeps holding when the press takes focus from the search box: only the window losing it lets go", async () => {
+      const region = await (draw(), body());
+      push(...many(5));
+      press(lineRow(2));
+      fireEvent.blur(filterField());
+      push(...many(3, 5));
+      await released();
+      expect(rendered(region)).toHaveLength(5);
+    });
+
+    it("lets go of nothing once the screen has gone, though the release came before it went", async () => {
+      // The hold is let go of a task after the release; by then there may be no screen, and no stream, to let go.
+      const view = draw();
+      await body();
+      push(...many(5));
+      press(lineRow(2));
+      fireEvent.pointerUp(window);
+      view.unmount();
+      await released();
+      expect(h.state.held).toBe(true);
     });
 
     it("holds the view while text is selected in the log, and lets go when it is cleared", async () => {
