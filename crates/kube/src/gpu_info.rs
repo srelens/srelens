@@ -135,15 +135,20 @@ pub fn gpu_inventory_capability(cache: Arc<ClientCache>) -> Capability {
                     let pod_api: Api<Pod> = Api::all(client);
                     let lp =
                         ListParams::default().fields(&format!("spec.nodeName={}", target_node));
-                    let (pods, _) =
-                        crate::list_cap::list_capped(&pod_api, lp)
-                            .await
-                            .map_err(|e| {
-                                CapabilityError::Handler(format!(
-                                    "Failed to list pods on node '{}': {}",
-                                    target_node, e
-                                ))
-                            })?;
+                    let (pods, pod_trunc) = crate::list_cap::list_capped(&pod_api, lp)
+                        .await
+                        .map_err(|e| {
+                            CapabilityError::Handler(format!(
+                                "Failed to list pods on node '{}': {}",
+                                target_node, e
+                            ))
+                        })?;
+                    if pod_trunc {
+                        return Err(CapabilityError::Handler(format!(
+                            "Pod list on node '{}' was truncated by list limit",
+                            target_node
+                        )));
+                    }
 
                     Ok(parse_gpu_cluster_info(&[node], &pods))
                 } else {
@@ -179,14 +184,20 @@ pub fn gpu_inventory_capability(cache: Arc<ClientCache>) -> Capability {
 /// Fetch cluster nodes and pods to compile comprehensive GPU and VRAM allocation info.
 pub async fn fetch_gpu_info(client: Client) -> Result<GpuClusterInfo, String> {
     let node_api: Api<Node> = Api::all(client.clone());
-    let (nodes, _) = crate::list_cap::list_capped(&node_api, ListParams::default())
+    let (nodes, node_trunc) = crate::list_cap::list_capped(&node_api, ListParams::default())
         .await
         .map_err(|e| format!("Failed to list cluster nodes: {}", e))?;
+    if node_trunc {
+        return Err("Cluster node list was truncated by list limit".to_string());
+    }
 
     let pod_api: Api<Pod> = Api::all(client);
-    let (pods, _) = crate::list_cap::list_capped(&pod_api, ListParams::default())
+    let (pods, pod_trunc) = crate::list_cap::list_capped(&pod_api, ListParams::default())
         .await
         .map_err(|e| format!("Failed to list cluster pods: {}", e))?;
+    if pod_trunc {
+        return Err("Cluster pod list was truncated by list limit".to_string());
+    }
 
     Ok(parse_gpu_cluster_info(&nodes, &pods))
 }

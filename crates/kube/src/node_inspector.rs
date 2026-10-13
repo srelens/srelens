@@ -151,9 +151,15 @@ pub async fn inspect_node(client: Client, node_name: &str) -> Result<NodeInspect
 
     let pod_api: Api<Pod> = Api::all(client);
     let lp = ListParams::default().fields(&format!("spec.nodeName={}", node_name));
-    let (pods, _) = crate::list_cap::list_capped(&pod_api, lp)
+    let (pods, pod_trunc) = crate::list_cap::list_capped(&pod_api, lp)
         .await
         .map_err(|e| format!("Failed to list pods on node '{}': {}", node_name, e))?;
+    if pod_trunc {
+        return Err(format!(
+            "Pod list on node '{}' was truncated by list limit",
+            node_name
+        ));
+    }
 
     Ok(parse_node_details(&node, &pods))
 }
