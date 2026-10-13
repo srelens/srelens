@@ -350,9 +350,9 @@ describe("timeTicks, past a day", () => {
   it("tells a Monday or a 1st by its date", () => {
     inZone("UTC", () => {
       const weeks = timeTicks(local(2026, 9, 2, 13), local(2026, 11, 11, 9));
-      expect(tickLabels(weeks)).toEqual(["09-14 00:00", "09-28 00:00", "10-12 00:00", "10-26 00:00", "11-09 00:00"]);
+      expect(tickLabels(weeks)).toEqual(["09-14", "09-28", "10-12", "10-26", "11-09"]);
       const months = timeTicks(local(2025, 3, 17, 8), local(2027, 3, 17, 8));
-      expect(tickLabels(months)).toEqual(months.map((t) => `${dateTime(t).slice(0, 10)} 00:00`));
+      expect(tickLabels(months)).toEqual(months.map((t) => dateTime(t).slice(0, 10)));
     });
   });
 
@@ -363,7 +363,10 @@ describe("timeTicks, past a day", () => {
       expect(new Date(oct).getHours()).toBe(1);
       const ticks = timeTicks(local(2023, 8, 1), local(2024, 8, 1), 4);
       expect(ticks).toEqual([oct, local(2024, 1, 1), local(2024, 4, 1), local(2024, 7, 1)]);
-      expect(tickLabels(ticks)).toEqual(["2023-10-01 01:00", "2024-01-01 00:00", "2024-04-01 00:00", "2024-07-01 00:00"]);
+      // Every tick starts a day, so the axis names days and leaves the clock off: the 01:00 is not shown either.
+      expect(tickLabels(ticks)).toEqual(["2023-10-01", "2024-01-01", "2024-04-01", "2024-07-01"]);
+      // Among hours, the same tick keeps its clock, and is dated all the same.
+      expect(tickLabels([oct - 3_600_000, oct, oct + 3_600_000])).toEqual(["23:00", "10-01 01:00", "02:00"]);
     });
   });
 
@@ -373,12 +376,7 @@ describe("timeTicks, past a day", () => {
         inZone(zone, () => {
           // Six months a tick across two years: the same 01-01 and 07-01 twice over without it.
           const labels = tickLabels(timeTicks(local(2025, 3, 17, 8), local(2027, 3, 17, 8)));
-          expect(labels, zone).toEqual([
-            "2025-07-01 00:00",
-            "2026-01-01 00:00",
-            "2026-07-01 00:00",
-            "2027-01-01 00:00",
-          ]);
+          expect(labels, zone).toEqual(["2025-07-01", "2026-01-01", "2026-07-01", "2027-01-01"]);
         });
       }
     });
@@ -397,7 +395,8 @@ describe("timeTicks, past a day", () => {
         inZone(zone, () => {
           // Weeks apart, and a New Year's Eve axis that has not reached the new year yet.
           const weeks = tickLabels(timeTicks(local(2026, 9, 2, 13), local(2026, 11, 11, 9)));
-          expect(weeks.every((label) => /^\d\d-\d\d 00:00$/.test(label)), zone).toBe(true);
+          expect(weeks.length, zone).toBeGreaterThan(1);
+          expect(weeks.every((label) => /^\d\d-\d\d$/.test(label)), zone).toBe(true);
           const evening = tickLabels(timeTicks(local(2026, 12, 30, 20), local(2026, 12, 31, 23)));
           expect(evening, zone).toEqual(["12-31 00:00", "06:00", "12:00", "18:00"]);
         });
@@ -418,7 +417,11 @@ describe("tickLabels", () => {
     expect(tickLabels(ticks)[0]).toMatch(/^10:00:[0-9]{2}$/);
   });
 
-  it("dates each tick of a span of days", () => {
-    expect(tickLabels([at(12), at(13), at(14)])).toEqual(["10-12 00:00", "10-13 00:00", "10-14 00:00"]);
+  it("gives each tick of a span of days its date alone, with no clock to repeat", () => {
+    expect(tickLabels([at(12), at(13), at(14)])).toEqual(["10-12", "10-13", "10-14"]);
+  });
+
+  it("keeps the clock on a day's tick that sits among hours", () => {
+    expect(tickLabels([at(12, 22), at(13), at(13, 2)])).toEqual(["22:00", "10-13 00:00", "02:00"]);
   });
 });
