@@ -3,14 +3,16 @@
 //! every pod of a Deployment); they multiplex onto one channel so the
 //! frontend manages a single subscription.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use srelens_kube::client_cache::ClientCache;
 use srelens_kube::logs::{stream_pod_logs_resilient, Line, StreamOpts};
 use tokio::task::JoinHandle;
 
+use crate::log_spool::LogSpool;
 use crate::sink::EventSink;
 
 const STREAM_TAIL_LINES: i64 = 200;
@@ -48,6 +50,92 @@ pub struct LogLine {
 pub struct LogStatusEvent {
     pub source: String,
     pub status: String,
+}
+
+/// How often a stream's lines go out, as one frame (#914). One event per line
+/// was one WebView script eval per line, and one WebSocket frame per line on a
+/// 256-frame queue that closes the socket when it fills.
+pub const FRAME_EVERY: Duration = Duration::from_millis(50);
+/// The most lines one frame carries: the UI's window. Past it, the oldest wait
+/// on disk (or, with no spool, are lost as the UI's ring would have lost them).
+pub const FRAME_MAX_LINES: usize = 5000;
+/// The most bytes of lines one frame carries.
+pub const FRAME_MAX_BYTES: usize = 512 * 1024;
+
+/// One stream's lines between the target tasks that read them and the frames
+/// that send them: numbered, spooled, and held until the next frame.
+///
+/// ponytail: one mutex per stream, taken per line; per-target buffers if a
+/// fan-out of hundreds of pods ever contends on it.
+pub(crate) struct LogWriter {
+    next_seq: u64,
+    pending: VecDeque<LogLine>,
+    pending_bytes: usize,
+    spool: Option<Arc<Mutex<LogSpool>>>,
+    /// Why the spool stopped, until the next frame says so.
+    pub(crate) notice: Option<String>,
+    /// Targets still following; a completed init container's ends.
+    pub(crate) running: usize,
+}
+
+impl LogWriter {
+    pub(crate) fn new(spool: Option<Arc<Mutex<LogSpool>>>, targets: usize) -> Self {
+        Self {
+            next_seq: 1,
+            pending: VecDeque::new(),
+            pending_bytes: 0,
+            spool,
+            notice: None,
+            running: targets,
+        }
+    }
+
+    pub(crate) fn push(&mut self, line: LogLine) {
+        if let Some(spool) = &self.spool {
+            let mut spool = spool.lock().unwrap();
+            if let Err(e) = spool.append(&line) {
+                // Losing the history never costs the live tail.
+                let reason = e.to_string();
+                spool.fail(reason.clone());
+                drop(spool);
+                self.spool = None;
+                self.notice = Some(reason);
+            }
+        }
+        self.next_seq += 1;
+        self.pending_bytes += weight(&line);
+        self.pending.push_back(line);
+        while self.pending.len() > FRAME_MAX_LINES
+            || (self.pending_bytes > FRAME_MAX_BYTES && self.pending.len() > 1)
+        {
+            let old = self.pending.pop_front().expect("pending is not empty");
+            self.pending_bytes -= weight(&old);
+        }
+    }
+
+    /// What goes out now: the spool notice, if one is due, then the frame.
+    pub(crate) fn take(&mut self) -> Vec<serde_json::Value> {
+        let mut out = Vec::new();
+        if let Some(reason) = self.notice.take() {
+            out.push(serde_json::json!({ "spool": { "failed": reason } }));
+        }
+        if !self.pending.is_empty() {
+            let seq = self.next_seq - self.pending.len() as u64;
+            let lines: Vec<LogLine> = self.pending.drain(..).collect();
+            self.pending_bytes = 0;
+            let mut frame = serde_json::json!({ "seq": seq, "lines": lines });
+            if let Some(spool) = &self.spool {
+                frame["first"] = serde_json::json!(spool.lock().unwrap().first());
+            }
+            out.push(frame);
+        }
+        out
+    }
+}
+
+/// A line's share of a frame: its text and tag, plus the JSON around them.
+fn weight(line: &LogLine) -> usize {
+    line.source.len() + line.line.len() + 32
 }
 
 struct Stream {
@@ -302,5 +390,101 @@ mod tests {
             .unwrap();
         manager.shutdown_all(); // no panic; subsequent stop is a no-op
         manager.stop("logs:1");
+    }
+
+    use crate::log_spool::LogSpool;
+    use serde_json::json;
+
+    fn ll(n: usize) -> LogLine {
+        LogLine {
+            source: String::new(),
+            line: format!("l{n}"),
+            truncated: false,
+        }
+    }
+
+    #[test]
+    fn a_frame_carries_what_arrived_since_the_last_numbered_from_one() {
+        let mut w = LogWriter::new(None, 1);
+        w.push(ll(1));
+        w.push(ll(2));
+        assert_eq!(
+            w.take(),
+            vec![
+                json!({"seq": 1, "lines": [{"source": "", "line": "l1"}, {"source": "", "line": "l2"}]})
+            ]
+        );
+        assert!(w.take().is_empty(), "nothing new, nothing sent");
+        w.push(ll(3));
+        assert_eq!(w.take()[0]["seq"], 3);
+    }
+
+    #[test]
+    fn under_a_flood_a_frame_keeps_the_newest_lines_and_its_seq_skips_the_rest() {
+        let mut w = LogWriter::new(None, 1);
+        for n in 1..=FRAME_MAX_LINES + 250 {
+            w.push(ll(n));
+        }
+        let frame = &w.take()[0];
+        assert_eq!(frame["seq"], 251);
+        assert_eq!(frame["lines"].as_array().unwrap().len(), FRAME_MAX_LINES);
+    }
+
+    #[test]
+    fn a_frame_stays_within_its_byte_cap() {
+        let mut w = LogWriter::new(None, 1);
+        let big = "x".repeat(100 * 1024);
+        for _ in 0..10 {
+            w.push(LogLine {
+                source: String::new(),
+                line: big.clone(),
+                truncated: false,
+            });
+        }
+        let frame = &w.take()[0];
+        assert_eq!(frame["lines"].as_array().unwrap().len(), 5);
+        assert_eq!(frame["seq"], 6);
+    }
+
+    #[test]
+    fn a_spooled_frame_names_the_oldest_line_on_disk_and_the_spool_has_every_line() {
+        let tmp = tempfile::tempdir().unwrap();
+        let spool = Arc::new(Mutex::new(
+            LogSpool::create(tmp.path().join("s"), 64 << 20).unwrap(),
+        ));
+        let mut w = LogWriter::new(Some(spool.clone()), 1);
+        for n in 1..=3 {
+            w.push(ll(n));
+        }
+        assert_eq!(w.take()[0]["first"], 1);
+        let page = spool
+            .lock()
+            .unwrap()
+            .snapshot()
+            .unwrap()
+            .read(4, 10)
+            .unwrap();
+        assert_eq!(page.lines.len(), 3);
+    }
+
+    #[test]
+    fn a_spool_that_fails_says_so_once_and_the_lines_still_go_out() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("s");
+        let spool = Arc::new(Mutex::new(LogSpool::create(dir.clone(), 64 << 20).unwrap()));
+        // Its first segment cannot be made: the directory has gone.
+        std::fs::remove_dir_all(&dir).unwrap();
+        let mut w = LogWriter::new(Some(spool.clone()), 1);
+        w.push(ll(1));
+        let out = w.take();
+        assert!(out[0]["spool"]["failed"].is_string(), "{out:?}");
+        assert_eq!(out[1]["seq"], 1);
+        assert!(
+            out[1].get("first").is_none(),
+            "no history to point at any more"
+        );
+        w.push(ll(2));
+        assert_eq!(w.take().len(), 1, "the notice is sent once");
+        assert!(spool.lock().unwrap().failed().is_some(), "reads say why");
     }
 }
