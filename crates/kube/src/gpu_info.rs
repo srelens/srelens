@@ -6,9 +6,9 @@ use serde::{Deserialize, Serialize};
 use srelens_capability::{Annotations, Capability, CapabilityError};
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Duration;
 
 use crate::client_cache::ClientCache;
+use crate::connect::request_timeout;
 
 /// Input payload for `k8s.gpuInventory`.
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -20,11 +20,13 @@ pub struct GpuInventoryIn {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Default)]
+#[serde(rename_all = "camelCase")]
 pub struct GpuPodItem {
     pub name: String,
     pub namespace: String,
     pub phase: String,
     pub gpu_requests: i64,
+    #[serde(rename = "vramRequestsMiB")]
     pub vram_requests_mib: i64,
     pub ready_containers: String,
     pub restarts: i64,
@@ -33,6 +35,7 @@ pub struct GpuPodItem {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Default)]
+#[serde(rename_all = "camelCase")]
 pub struct GpuNodeInfo {
     pub name: String,
     pub status: String,
@@ -45,27 +48,54 @@ pub struct GpuNodeInfo {
     pub gpu_capacity: i64,
     pub gpu_allocatable: i64,
     pub gpu_requests: i64,
+    #[serde(rename = "vramPerGpuMiB")]
     pub vram_per_gpu_mib: Option<i64>,
+    #[serde(rename = "vramCapacityTotalMiB")]
     pub vram_capacity_total_mib: Option<i64>,
+    #[serde(rename = "vramRequestsTotalMiB")]
     pub vram_requests_total_mib: i64,
     pub pods: Vec<GpuPodItem>,
     #[serde(default)]
     pub is_virtual_gpu: bool,
     #[serde(default)]
     pub physical_gpu_count: i64,
-    #[serde(default)]
+    #[serde(default, rename = "physicalVramTotalMiB")]
     pub physical_vram_total_mib: Option<i64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct GpuClusterInfo {
     pub nodes: Vec<GpuNodeInfo>,
     pub total_gpu_nodes: usize,
     pub total_gpus: i64,
     pub total_allocated_gpus: i64,
+    #[serde(rename = "totalVramMiB")]
     pub total_vram_mib: i64,
+    #[serde(rename = "totalAllocatedVramMiB")]
     pub total_allocated_vram_mib: i64,
     pub total_gpu_pods: usize,
+}
+
+/// Filter GPU cluster info down to a single node and recompute cluster aggregates accurately.
+pub fn filter_gpu_info_by_node(mut info: GpuClusterInfo, target_node: &str) -> GpuClusterInfo {
+    info.nodes.retain(|n| n.name == target_node);
+    recompute_cluster_aggregates(&mut info);
+    info
+}
+
+/// Recompute totals in `GpuClusterInfo` from its `nodes` list.
+pub fn recompute_cluster_aggregates(info: &mut GpuClusterInfo) {
+    info.total_gpu_nodes = info.nodes.len();
+    info.total_gpus = info.nodes.iter().map(|n| n.gpu_capacity).sum();
+    info.total_allocated_gpus = info.nodes.iter().map(|n| n.gpu_requests).sum();
+    info.total_vram_mib = info
+        .nodes
+        .iter()
+        .filter_map(|n| n.vram_capacity_total_mib)
+        .sum();
+    info.total_allocated_vram_mib = info.nodes.iter().map(|n| n.vram_requests_total_mib).sum();
+    info.total_gpu_pods = info.nodes.iter().map(|n| n.pods.len()).sum();
 }
 
 /// `k8s.gpuInventory` — cluster-wide physical and virtual GPU inventory, VRAM allocations, and GPU pods.
@@ -81,24 +111,66 @@ pub fn gpu_inventory_capability(cache: Arc<ClientCache>) -> Capability {
                     .get(&input.context)
                     .await
                     .map_err(CapabilityError::Handler)?;
-                let mut info = fetch_gpu_info(client)
-                    .await
-                    .map_err(CapabilityError::Handler)?;
+
                 if let Some(target_node) = &input.node {
-                    info.nodes.retain(|n| n.name == *target_node);
-                    info.total_gpu_nodes = info.nodes.len();
-                    info.total_gpus = info.nodes.iter().map(|n| n.gpu_capacity).sum();
-                    info.total_allocated_gpus = info.nodes.iter().map(|n| n.gpu_requests).sum();
-                    info.total_vram_mib = info
-                        .nodes
-                        .iter()
-                        .filter_map(|n| n.vram_capacity_total_mib)
-                        .sum();
-                    info.total_allocated_vram_mib =
-                        info.nodes.iter().map(|n| n.vram_requests_total_mib).sum();
-                    info.total_gpu_pods = info.nodes.iter().map(|n| n.pods.len()).sum();
+                    let node_api: Api<Node> = Api::all(client.clone());
+                    let node = tokio::time::timeout(request_timeout(), node_api.get(target_node))
+                        .await
+                        .map_err(|_| {
+                            CapabilityError::Handler(format!(
+                                "Timed out fetching node '{}'",
+                                target_node
+                            ))
+                        })?
+                        .map_err(|e| match e {
+                            kube::Error::Api(ref ae) if ae.code == 404 => CapabilityError::Handler(
+                                format!("Node '{}' not found", target_node),
+                            ),
+                            other => CapabilityError::Handler(format!(
+                                "Failed to fetch node '{}': {}",
+                                target_node, other
+                            )),
+                        })?;
+
+                    let pod_api: Api<Pod> = Api::all(client);
+                    let lp =
+                        ListParams::default().fields(&format!("spec.nodeName={}", target_node));
+                    let (pods, _) =
+                        crate::list_cap::list_capped(&pod_api, lp)
+                            .await
+                            .map_err(|e| {
+                                CapabilityError::Handler(format!(
+                                    "Failed to list pods on node '{}': {}",
+                                    target_node, e
+                                ))
+                            })?;
+
+                    Ok(parse_gpu_cluster_info(&[node], &pods))
+                } else {
+                    let node_api: Api<Node> = Api::all(client.clone());
+                    let (nodes, node_trunc) =
+                        crate::list_cap::list_capped(&node_api, ListParams::default())
+                            .await
+                            .map_err(|e| e.into_capability_error("list nodes"))?;
+                    if node_trunc {
+                        return Err(CapabilityError::Handler(
+                            "Cluster node list was truncated by list limit".to_string(),
+                        ));
+                    }
+
+                    let pod_api: Api<Pod> = Api::all(client);
+                    let (pods, pod_trunc) =
+                        crate::list_cap::list_capped(&pod_api, ListParams::default())
+                            .await
+                            .map_err(|e| e.into_capability_error("list pods"))?;
+                    if pod_trunc {
+                        return Err(CapabilityError::Handler(
+                            "Cluster pod list was truncated by list limit".to_string(),
+                        ));
+                    }
+
+                    Ok(parse_gpu_cluster_info(&nodes, &pods))
                 }
-                Ok(info)
             }
         },
     )
@@ -107,24 +179,16 @@ pub fn gpu_inventory_capability(cache: Arc<ClientCache>) -> Capability {
 /// Fetch cluster nodes and pods to compile comprehensive GPU and VRAM allocation info.
 pub async fn fetch_gpu_info(client: Client) -> Result<GpuClusterInfo, String> {
     let node_api: Api<Node> = Api::all(client.clone());
-    let node_list = tokio::time::timeout(
-        Duration::from_secs(12),
-        node_api.list(&ListParams::default()),
-    )
-    .await
-    .map_err(|_| "Timed out fetching cluster nodes".to_string())?
-    .map_err(|e| format!("Failed to list cluster nodes: {}", e))?;
+    let (nodes, _) = crate::list_cap::list_capped(&node_api, ListParams::default())
+        .await
+        .map_err(|e| format!("Failed to list cluster nodes: {}", e))?;
 
     let pod_api: Api<Pod> = Api::all(client);
-    let pod_list = tokio::time::timeout(
-        Duration::from_secs(15),
-        pod_api.list(&ListParams::default()),
-    )
-    .await
-    .map_err(|_| "Timed out fetching cluster pods".to_string())?
-    .map_err(|e| format!("Failed to list cluster pods: {}", e))?;
+    let (pods, _) = crate::list_cap::list_capped(&pod_api, ListParams::default())
+        .await
+        .map_err(|e| format!("Failed to list cluster pods: {}", e))?;
 
-    Ok(parse_gpu_cluster_info(&node_list.items, &pod_list.items))
+    Ok(parse_gpu_cluster_info(&nodes, &pods))
 }
 
 /// Pure parser extracting `GpuClusterInfo` from raw Kubernetes `Node` and `Pod` resources.
@@ -1202,5 +1266,129 @@ mod tests {
             "extra": true
         });
         assert!(serde_json::from_value::<GpuInventoryIn>(extra).is_err());
+    }
+
+    #[test]
+    fn filter_gpu_info_by_node_matches_missing_and_multi_node() {
+        let node_a = GpuNodeInfo {
+            name: "node-a".to_string(),
+            gpu_capacity: 4,
+            gpu_allocatable: 4,
+            gpu_requests: 2,
+            vram_capacity_total_mib: Some(32768),
+            vram_requests_total_mib: 16384,
+            pods: vec![GpuPodItem {
+                name: "pod-1".to_string(),
+                gpu_requests: 2,
+                vram_requests_mib: 16384,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+
+        let node_b = GpuNodeInfo {
+            name: "node-b".to_string(),
+            gpu_capacity: 8,
+            gpu_allocatable: 8,
+            gpu_requests: 4,
+            vram_capacity_total_mib: Some(65536),
+            vram_requests_total_mib: 32768,
+            pods: vec![
+                GpuPodItem {
+                    name: "pod-2".to_string(),
+                    gpu_requests: 2,
+                    vram_requests_mib: 16384,
+                    ..Default::default()
+                },
+                GpuPodItem {
+                    name: "pod-3".to_string(),
+                    gpu_requests: 2,
+                    vram_requests_mib: 16384,
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+
+        let initial_cluster = GpuClusterInfo {
+            nodes: vec![node_a, node_b],
+            total_gpu_nodes: 2,
+            total_gpus: 12,
+            total_allocated_gpus: 6,
+            total_vram_mib: 98304,
+            total_allocated_vram_mib: 49152,
+            total_gpu_pods: 3,
+        };
+
+        // 1. Filter by matching node "node-a"
+        let filtered_a = filter_gpu_info_by_node(initial_cluster.clone(), "node-a");
+        assert_eq!(filtered_a.total_gpu_nodes, 1);
+        assert_eq!(filtered_a.nodes.len(), 1);
+        assert_eq!(filtered_a.nodes[0].name, "node-a");
+        assert_eq!(filtered_a.total_gpus, 4);
+        assert_eq!(filtered_a.total_allocated_gpus, 2);
+        assert_eq!(filtered_a.total_vram_mib, 32768);
+        assert_eq!(filtered_a.total_allocated_vram_mib, 16384);
+        assert_eq!(filtered_a.total_gpu_pods, 1);
+
+        // 2. Filter by missing node "node-c"
+        let filtered_c = filter_gpu_info_by_node(initial_cluster, "node-c");
+        assert_eq!(filtered_c.total_gpu_nodes, 0);
+        assert!(filtered_c.nodes.is_empty());
+        assert_eq!(filtered_c.total_gpus, 0);
+        assert_eq!(filtered_c.total_allocated_gpus, 0);
+        assert_eq!(filtered_c.total_vram_mib, 0);
+        assert_eq!(filtered_c.total_allocated_vram_mib, 0);
+        assert_eq!(filtered_c.total_gpu_pods, 0);
+    }
+
+    #[test]
+    fn serializes_wire_keys_as_camel_case_with_mib() {
+        let cluster = GpuClusterInfo {
+            nodes: vec![GpuNodeInfo {
+                name: "gpu-node-1".to_string(),
+                gpu_capacity: 4,
+                gpu_allocatable: 4,
+                gpu_requests: 2,
+                vram_per_gpu_mib: Some(16384),
+                vram_capacity_total_mib: Some(65536),
+                vram_requests_total_mib: 32768,
+                physical_vram_total_mib: Some(65536),
+                pods: vec![GpuPodItem {
+                    name: "cuda-pod".to_string(),
+                    gpu_requests: 2,
+                    vram_requests_mib: 32768,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+            total_gpu_nodes: 1,
+            total_gpus: 4,
+            total_allocated_gpus: 2,
+            total_vram_mib: 65536,
+            total_allocated_vram_mib: 32768,
+            total_gpu_pods: 1,
+        };
+
+        let val = serde_json::to_value(&cluster).unwrap();
+        assert_eq!(val["totalGpuNodes"], 1);
+        assert_eq!(val["totalGpus"], 4);
+        assert_eq!(val["totalAllocatedGpus"], 2);
+        assert_eq!(val["totalVramMiB"], 65536);
+        assert_eq!(val["totalAllocatedVramMiB"], 32768);
+        assert_eq!(val["totalGpuPods"], 1);
+
+        assert_eq!(val["nodes"][0]["vramPerGpuMiB"], 16384);
+        assert_eq!(val["nodes"][0]["vramCapacityTotalMiB"], 65536);
+        assert_eq!(val["nodes"][0]["vramRequestsTotalMiB"], 32768);
+        assert_eq!(val["nodes"][0]["physicalVramTotalMiB"], 65536);
+
+        assert_eq!(val["nodes"][0]["pods"][0]["vramRequestsMiB"], 32768);
+        assert_eq!(val["nodes"][0]["pods"][0]["gpuRequests"], 2);
+
+        // Ensure no snake_case keys leak
+        assert!(val.get("total_gpu_nodes").is_none());
+        assert!(val.get("total_vram_mib").is_none());
+        assert!(val["nodes"][0].get("vram_capacity_total_mib").is_none());
     }
 }
