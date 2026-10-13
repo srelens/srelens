@@ -87,11 +87,14 @@ function Pill({
   return (
     <span
       data-slot="pill"
-      className="inline-flex max-w-full items-center gap-1 overflow-x-auto whitespace-nowrap rounded border px-1.5 py-[1px] font-mono text-[0.6875rem]"
+      className="inline-flex max-w-full items-center gap-1 rounded border px-1.5 py-[1px] font-mono text-[0.6875rem]"
       style={negated ? { borderColor: toneColor("sev"), color: toneColor("sev") } : { borderColor: "var(--rule)" }}
     >
-      {label}
-      <button type="button" className="icon-btn" aria-label={removeLabel} onClick={onRemove}>
+      {/* Machine text does not wrap: the label runs on and scrolls, and the × stays where it can be pressed. */}
+      <span data-slot="pill-label" className="min-w-0 overflow-x-auto whitespace-nowrap">
+        {label}
+      </span>
+      <button type="button" className="icon-btn shrink-0" aria-label={removeLabel} onClick={onRemove}>
         <Icons.close size={11} aria-hidden="true" />
       </button>
     </span>

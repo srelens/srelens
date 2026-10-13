@@ -2589,6 +2589,10 @@ describe("the line detail (#898)", () => {
           top = v;
           fireEvent.scroll(el);
         },
+        /** What a browser does when it lays the page out after the content got shorter. */
+        clamp() {
+          top = Math.min(top, max());
+        },
       };
     }
     const many = (n: number, from = 0) =>
@@ -2747,26 +2751,67 @@ describe("the line detail (#898)", () => {
       });
     }
     const indexOf = (n: number) => h.state.lines.findIndex((l) => l.text.endsWith(`line ${n}`));
-    const selectedRow = () => logRegion().querySelector('[aria-current="true"]');
+    const selectedRow = () => logRegion().querySelector('[aria-current="true"]') as HTMLElement | null;
+    const lineRow = (n: number) => rows().find((r) => r.textContent?.includes(`line ${n}`)) as Element;
+
+    const ROW = 20;
+    const BANNER = 30;
+    /**
+     * jsdom lays nothing out. Stack the children of the rows box the way a browser does, one under the next: a
+     * spacer as tall as its style says, the earlier-lines banner BANNER tall, a line `heightOf(wrapper)` tall.
+     * `onLayout` runs on every measurement, as the browser's own work on the page does before it answers one.
+     */
+    function layOut(heightOf: (wrapper: HTMLElement) => number = () => ROW, onLayout: () => void = () => undefined) {
+      const proto = window.HTMLElement.prototype;
+      const original = proto.getBoundingClientRect;
+      const tall = (el: Element) => {
+        const box = el as HTMLElement;
+        if (box.getAttribute("data-slot") === "dropped-banner") return BANNER;
+        return box.style.height !== "" ? parseFloat(box.style.height) : heightOf(box);
+      };
+      proto.getBoundingClientRect = function (this: HTMLElement) {
+        onLayout();
+        const box = this.parentElement;
+        if (box?.parentElement?.getAttribute("role") === "log") {
+          const above = Array.from(box.children).slice(0, Array.from(box.children).indexOf(this));
+          return { top: above.reduce((t, el) => t + tall(el), 0), height: tall(this) } as DOMRect;
+        }
+        // The first row's height is what the screen windows by.
+        if (this.classList.contains("logline")) return { height: ROW } as DOMRect;
+        return original.call(this);
+      };
+      return () => {
+        proto.getBoundingClientRect = original;
+      };
+    }
+    /** Where the selected row is drawn on screen: where the layout stacks it, less how far the view has scrolled. */
+    const onScreen = (view: { top: number }) => (selectedRow() as HTMLElement).getBoundingClientRect().top - view.top;
 
     it("holds the selected line where it is on screen while a full ring drops lines from the front", async () => {
-      const restore = measurableRows();
+      const restore = layOut();
       try {
         const region = await (draw(), body());
         const view = scrollable(region);
+        // The ring is already full, so the earlier-lines banner is above the rows before and after each batch.
+        h.state.dropped = 100;
         push(...many(300));
         view.to(2000);
-        await userEvent.click(rows().find((r) => r.textContent?.includes("line 100")) as Element);
-        // Where the row sits in the viewport: its place in the buffer, 20px a row, less how far the view has scrolled.
-        const offset = () => indexOf(100) * 20 - view.top;
-        expect(offset()).toBe(0);
+        await userEvent.click(lineRow(100));
+        // Where the row sits on screen: the banner, then its place in the buffer at 20px a row, less the scroll.
+        const offset = () => BANNER + indexOf(100) * ROW - view.top;
+        const before = offset();
+        expect(onScreen(view)).toBe(before);
         ring(30, 300);
         expect(indexOf(100)).toBe(70);
-        expect(offset()).toBe(0);
+        expect(offset()).toBe(before);
+        // The view moved with the content, so the row is still drawn, in the same place.
         expect(selectedRow()?.textContent).toContain("line 100");
+        expect(onScreen(view)).toBe(before);
         // The reader's own scrolling is theirs: it is not undone, and the next batch holds the row wherever they left it.
         view.to(1000);
-        expect(view.top).toBe(1000);
+        // A nudge of less than a row moves no slice, so nothing is redrawn for it: the next batch still starts from where the reader is.
+        view.to(1010);
+        expect(view.top).toBe(1010);
         const left = offset();
         ring(10, 330);
         expect(indexOf(100)).toBe(60);
@@ -2776,33 +2821,95 @@ describe("the line detail (#898)", () => {
       }
     });
 
-    it("holds the selected line by where its row is drawn when lines wrap and rows differ in height", async () => {
-      // jsdom lays nothing out: put each row of the wrapped log 30px below the one before it, and let no row
-      // have a measured height, so the 20px-a-row arithmetic of the unwrapped log has nothing to go on.
-      const proto = window.HTMLElement.prototype;
-      const original = proto.getBoundingClientRect;
-      proto.getBoundingClientRect = function (this: HTMLElement) {
-        const box = this.parentElement;
-        if (box?.parentElement?.getAttribute("role") === "log") {
-          return { top: Array.from(box.children).indexOf(this) * 30, height: 30 } as DOMRect;
-        }
-        return original.call(this);
-      };
+    it("holds the selected line through the first drop, which also brings in the earlier-lines banner", async () => {
+      const restore = layOut();
       try {
         const region = await (draw(), body());
         const view = scrollable(region);
-        // The ring is already full, so the earlier-lines banner is above the rows before and after the batch.
+        push(...many(300));
+        view.to(2000);
+        await userEvent.click(lineRow(100));
+        expect(screen.queryByText(/earlier lines dropped/)).toBeNull();
+        // 300 lines are windowed: after the batch the row is outside the slice drawn from the old scroll position.
+        const offset = () => (h.state.dropped > 0 ? BANNER : 0) + indexOf(100) * ROW - view.top;
+        const before = offset();
+        ring(30, 300);
+        expect(screen.getByText(/earlier lines dropped/)).toBeTruthy();
+        expect(offset()).toBe(before);
+        expect(onScreen(view)).toBe(before);
+      } finally {
+        restore();
+      }
+    });
+
+    // A line is as tall as its text needs when lines wrap: here 20, 30 or 40px by its number.
+    const byNumber = (wrapper: HTMLElement) => 20 + (Number(wrapper.textContent?.match(/line (\d+)/)?.[1]) % 3) * 10;
+
+    it("holds a drawn selected line through the first drop by where its row is drawn, not by the row height", async () => {
+      // Few enough lines that all are drawn. The first row, which the screen measures its row height from, is 20px,
+      // and the rows above the selected one are not: only the drawn row knows where it went.
+      const restore = layOut(byNumber);
+      try {
+        const region = await (draw(), body());
+        const view = scrollable(region);
+        push(...many(30));
+        view.to(200);
+        await userEvent.click(lineRow(20));
+        const before = onScreen(view);
+        ring(5, 30);
+        expect(screen.getByText(/earlier lines dropped/)).toBeTruthy();
+        // Lines 0 to 4 are 20, 30, 40, 20 and 30px, and a banner of 30 arrived: 110px up.
+        expect(view.top).toBe(200 - 140 + 30);
+        expect(onScreen(view)).toBe(before);
+      } finally {
+        restore();
+      }
+    });
+
+    it("does not correct twice when the browser has already pulled the scroll position back", async () => {
+      // A batch that shrinks the content leaves the scroll position past the new end, and the browser clamps it
+      // when it lays the page out: before the screen reads it, and before it has moved the view.
+      let view: ReturnType<typeof scrollable> | undefined;
+      const restore = layOut(undefined, () => view?.clamp());
+      try {
+        const region = await (draw(), body());
+        view = scrollable(region);
+        h.state.dropped = 100;
+        push(...many(30));
+        view.to(480);
+        await userEvent.click(lineRow(25));
+        const before = onScreen(view);
+        act(() => {
+          h.state.lines = h.state.lines.slice(10);
+          h.state.dropped += 10;
+          notify();
+        });
+        expect(view.top).toBe(280);
+        expect(onScreen(view)).toBe(before);
+      } finally {
+        restore();
+      }
+    });
+
+    it("holds the selected line by where its row is drawn when lines wrap and rows differ in height", async () => {
+      // No sum of one row height says where a wrapped row is.
+      const restore = layOut(byNumber);
+      try {
+        const region = await (draw(), body());
+        const view = scrollable(region);
         h.state.dropped = 100;
         push(...many(30));
         await userEvent.click(screen.getByRole("button", { name: "Wrap" }));
         view.to(300);
-        await userEvent.click(rows().find((r) => r.textContent?.includes("line 20")) as Element);
+        await userEvent.click(lineRow(20));
+        const before = onScreen(view);
         ring(5, 30);
         expect(indexOf(20)).toBe(15);
-        // Five rows of 30px left above it.
-        expect(view.top).toBe(150);
+        // Lines 0 to 4 are 20, 30, 40, 20 and 30px.
+        expect(view.top).toBe(300 - 140);
+        expect(onScreen(view)).toBe(before);
       } finally {
-        proto.getBoundingClientRect = original;
+        restore();
       }
     });
 

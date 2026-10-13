@@ -106,10 +106,24 @@ describe("FilterPills", () => {
   it("lets a long unbroken clause run on and scroll inside the pane, rather than wrap", () => {
     // This pinned `break-all`. A clause is machine text, and AGENTS.md says that does not wrap.
     const { container } = pills("x".repeat(120));
-    const pill = container.querySelector('[data-slot="pill"]');
-    expect(pill?.classList.contains("max-w-full")).toBe(true);
-    expect(pill?.classList.contains("whitespace-nowrap")).toBe(true);
-    expect(pill?.classList.contains("overflow-x-auto")).toBe(true);
-    expect(pill?.classList.contains("break-all")).toBe(false);
+    const pill = container.querySelector('[data-slot="pill"]') as HTMLElement;
+    const label = container.querySelector('[data-slot="pill-label"]') as HTMLElement;
+    expect(pill.classList.contains("max-w-full")).toBe(true);
+    expect(pill.classList.contains("break-all")).toBe(false);
+    // Only the label scrolls, and it may shrink below its text to do so.
+    expect(label.textContent).toBe("x".repeat(120));
+    for (const cls of ["min-w-0", "overflow-x-auto", "whitespace-nowrap"]) {
+      expect(label.classList.contains(cls)).toBe(true);
+    }
+  });
+
+  it("keeps the remove button outside the scrolling label, where a long clause cannot push it out of view", () => {
+    const { container } = pills("x".repeat(120));
+    const pill = container.querySelector('[data-slot="pill"]') as HTMLElement;
+    const label = container.querySelector('[data-slot="pill-label"]') as HTMLElement;
+    const remove = screen.getByRole("button", { name: `Remove filter ${"x".repeat(120)}` });
+    expect(label.contains(remove)).toBe(false);
+    expect(remove.parentElement).toBe(pill);
+    expect(remove.classList.contains("shrink-0")).toBe(true);
   });
 });

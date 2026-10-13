@@ -788,6 +788,19 @@ function LogsStream({
   const stickRef = useRef(true);
   /** An arrow key moved the selection and its row is still to be scrolled into view; see {@link revealSelected}. */
   const revealRef = useRef(false);
+  /**
+   * The selected line as of the last commit or scroll, for the effect that holds it in place: its place in
+   * `filtered`, where its row is drawn within the rows (when it is drawn), how tall the earlier-lines banner
+   * was, and the scroll position.
+   */
+  const heldRef = useRef<{
+    row: Row;
+    index: number;
+    top: number | undefined;
+    banner: number;
+    scroll: number;
+    wrap: boolean;
+  } | null>(null);
 
   /**
    * Where the lines come from (#569): the cluster, or one of the installed apps'
@@ -1185,55 +1198,6 @@ function LogsStream({
     viewport.scrollTop = viewport.scrollHeight;
   }, [filtered, wrap]);
 
-  /**
-   * Where the selected line sat in the content as of the last commit: its place
-   * in `filtered`, and its top within the rows. The top is only read when lines
-   * wrap, the one time the rows differ in height and are all drawn.
-   */
-  const heldRef = useRef<{ row: Row; index: number; top: number | undefined; wrap: boolean } | null>(null);
-
-  /**
-   * Hold the selected line where it is on screen. Once the ring is full each
-   * batch drops lines from the front, and everything after them moves up under a
-   * `scrollTop` that has not changed: the line being read would slide out of
-   * view, and the panel opened on it would be left describing a line the
-   * reader can no longer see. So the view moves with the content, by how far the
-   * line moved: its place in `filtered` times the row height, or in a wrapped
-   * log, where rows differ in height, how far its drawn row moved.
-   *
-   * It acts on a change to the lines or the selection, never on a scroll: the
-   * reader's own scrolling is theirs. A line that is not in `filtered`, before
-   * or after, has nowhere to be held.
-   */
-  useLayoutEffect(() => {
-    const viewport = viewportRef.current;
-    const box = rowsRef.current;
-    const drawnRow = box?.querySelector<HTMLElement>('[aria-current="true"]');
-    const top = box && drawnRow ? drawnRow.getBoundingClientRect().top - box.getBoundingClientRect().top : undefined;
-    const held = heldRef.current;
-    if (
-      viewport !== null &&
-      held !== null &&
-      held.row === selected &&
-      held.wrap === wrap &&
-      held.index >= 0 &&
-      selectedIndex >= 0 &&
-      !stickRef.current
-    ) {
-      const moved = wrap
-        ? top !== undefined && held.top !== undefined
-          ? top - held.top
-          : 0
-        : (selectedIndex - held.index) * metrics.rowHeight;
-      if (moved !== 0) {
-        viewport.scrollTop += moved;
-        // The window was drawn from the scroll position before this; draw it again from the new one.
-        measure();
-      }
-    }
-    heldRef.current = selected === null ? null : { row: selected, index: selectedIndex, top, wrap };
-  }, [filtered, selected, selectedIndex, wrap, metrics.rowHeight, measure]);
-
   function trackScroll() {
     const viewport = viewportRef.current;
     if (!viewport) return;
@@ -1243,6 +1207,8 @@ function LogsStream({
       selected === null &&
       viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight <
         STICK_SLACK;
+    // The reader moved, or the browser did: either way the next shift is measured from here.
+    if (heldRef.current !== null) heldRef.current.scroll = viewport.scrollTop;
     measure();
   }
 
@@ -1268,6 +1234,63 @@ function LogsStream({
   const drawn = window_.virtualized
     ? filtered.slice(window_.start, window_.end)
     : filtered;
+
+  /**
+   * Hold the selected line where it is on screen. Once the ring is full each
+   * batch drops lines from the front, and everything after them moves up under a
+   * `scrollTop` that has not changed: the line being read would slide out of
+   * view, and the panel opened on it would be left describing a line the
+   * reader can no longer see. So the view moves with the content, by how far the
+   * line's row moved.
+   *
+   * That is measured where the row is drawn, which counts everything above it
+   * that moved, the earlier-lines banner that the first drop brings in among it.
+   * A row outside the drawn slice has no element, and is placed by arithmetic
+   * instead: its place in `filtered` times the row height, and the banner. The
+   * new position is the last known one plus that shift, not the browser's
+   * current one plus it: a batch that shortens the content gets the scroll
+   * position clamped by the layout this effect has just forced, and a shift
+   * added on top of that would correct twice.
+   *
+   * It acts on a change to the lines or the selection, never on a scroll: the
+   * reader's own scrolling is theirs, and only moves where the shift is
+   * measured from. A line that is not in `filtered`, before or after, has
+   * nowhere to be held.
+   */
+  useLayoutEffect(() => {
+    const viewport = viewportRef.current;
+    const box = rowsRef.current;
+    const row = box?.querySelector<HTMLElement>('[aria-current="true"]');
+    // Within the rows, which scrolling does not change.
+    const top = box && row ? row.getBoundingClientRect().top - box.getBoundingClientRect().top : undefined;
+    const banner = box?.querySelector('[data-slot="dropped-banner"]')?.getBoundingClientRect().height ?? 0;
+    const held = heldRef.current;
+    if (
+      viewport !== null &&
+      held !== null &&
+      held.row === selected &&
+      held.wrap === wrap &&
+      held.index >= 0 &&
+      selectedIndex >= 0 &&
+      !stickRef.current
+    ) {
+      const moved =
+        top !== undefined && held.top !== undefined
+          ? top - held.top
+          : wrap
+            ? 0
+            : (selectedIndex - held.index) * metrics.rowHeight + banner - held.banner;
+      if (moved !== 0) {
+        viewport.scrollTop = held.scroll + moved;
+        // The window was drawn from the scroll position before this; draw it again from the new one.
+        measure();
+      }
+    }
+    heldRef.current =
+      selected === null || viewport === null
+        ? null
+        : { row: selected, index: selectedIndex, top, banner, scroll: viewport.scrollTop, wrap };
+  }, [filtered, selected, selectedIndex, wrap, metrics.rowHeight, window_.start, window_.end, measure]);
 
   function moveSelection(step: 1 | -1) {
     if (filtered.length === 0) return;
@@ -1742,7 +1765,7 @@ function LogsStream({
                 // would let them believe they are. It is a fact about the LIVE
                 // ring, though: the previous instance's buffer arrived whole,
                 // in one fetch, and nothing has pushed anything out of it.
-                <div className="px-2.5 py-1 text-muted">
+                <div data-slot="dropped-banner" className="px-2.5 py-1 text-muted">
                   Showing the newest {groupNumber(filtered.length)} lines ·{" "}
                   {groupNumber(stream.dropped)} earlier lines dropped
                 </div>
