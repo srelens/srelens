@@ -271,9 +271,15 @@ pub fn service_health_probe_capability(cache: Arc<ClientCache>) -> Capability {
                 let slice_api: Api<EndpointSlice> = Api::namespaced(client.clone(), &input.namespace);
                 let slice_params = ListParams::default()
                     .labels(&format!("kubernetes.io/service-name={}", input.service));
-                let (slices, _) = crate::list_cap::list_capped(&slice_api, slice_params)
+                let (slices, slices_trunc) = crate::list_cap::list_capped(&slice_api, slice_params)
                     .await
                     .map_err(|e| e.into_capability_error("list endpointslices"))?;
+                if slices_trunc {
+                    return Err(CapabilityError::Handler(format!(
+                        "EndpointSlices for service '{}/{}' were truncated by list limit",
+                        input.namespace, input.service
+                    )));
+                }
 
                 // If service defines a selector, query matching pods using bounded list
                 let pods = if let Some(sel) = svc.spec.as_ref().and_then(|s| s.selector.as_ref()) {
@@ -287,9 +293,15 @@ pub fn service_health_probe_capability(cache: Arc<ClientCache>) -> Capability {
                             .join(",");
                         let pod_api: Api<Pod> = Api::namespaced(client.clone(), &input.namespace);
                         let pod_params = ListParams::default().labels(&selector_str);
-                        let (pod_items, _) = crate::list_cap::list_capped(&pod_api, pod_params)
+                        let (pod_items, pod_trunc) = crate::list_cap::list_capped(&pod_api, pod_params)
                             .await
                             .map_err(|e| e.into_capability_error("list matching pods"))?;
+                        if pod_trunc {
+                            return Err(CapabilityError::Handler(format!(
+                                "Matching pods for service '{}/{}' were truncated by list limit",
+                                input.namespace, input.service
+                            )));
+                        }
                         pod_items
                     }
                 } else {

@@ -493,9 +493,15 @@ pub fn why_pending_capability(cache: Arc<ClientCache>) -> Capability {
                     "involvedObject.name={},involvedObject.kind=Pod",
                     input.pod
                 ));
-                let (raw_events, _) = crate::list_cap::list_capped(&event_api, event_params)
+                let (raw_events, events_trunc) = crate::list_cap::list_capped(&event_api, event_params)
                     .await
                     .map_err(|e| e.into_capability_error("list events"))?;
+                if events_trunc {
+                    return Err(CapabilityError::Handler(format!(
+                        "Events for pod '{}/{}' were truncated by list limit",
+                        input.namespace, input.pod
+                    )));
+                }
 
                 let events: Vec<_> = raw_events
                     .into_iter()
