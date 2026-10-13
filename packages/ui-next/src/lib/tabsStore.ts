@@ -450,6 +450,21 @@ export function setWorkspaceColor(id: string, color: string | undefined): void {
   });
 }
 
+/**
+ * Protect a workspace's clusters, or stop (#101). Off deletes the key rather
+ * than storing `false`, as clearing a colour does. The state it already has
+ * returns the workspace untouched, so nothing is emitted and nothing saved.
+ */
+export function setWorkspaceProtected(id: string, on: boolean): void {
+  patchWorkspace(id, (w) => {
+    if ((w.protected === true) === on) return w;
+    const next: Workspace = { ...w };
+    if (on) next.protected = true;
+    else delete next.protected;
+    return next;
+  });
+}
+
 export function removeWorkspace(id: string): void {
   const state = cur();
   if (state.workspaces.length <= 1) return;

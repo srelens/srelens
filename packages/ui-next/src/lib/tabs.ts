@@ -76,6 +76,13 @@ export interface Workspace {
    * restored and deleted with it.
    */
   color?: string;
+  /**
+   * The reader marked this workspace Protected (#101): every cluster it holds
+   * asks for its name to be typed before a change, whichever workspace the
+   * change is made from — see `lib/protection.ts`. `true` or absent, never
+   * `false`, so an unprotected workspace saves exactly as it did before.
+   */
+  protected?: true;
   /** `ClusterContext.stableId`s. Never display names — see #265. */
   clusters: string[];
   /** Clusters the reader has paused without removing from this workspace. */

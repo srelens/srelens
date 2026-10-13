@@ -509,6 +509,14 @@ describe("workspaces", () => {
     expect(store.currentWorkspace().color).toBe("var(--mark-teal)");
   });
 
+  it("protects a workspace and stops, leaving no key behind", () => {
+    const id = store.getState().currentId;
+    store.setWorkspaceProtected(id, true);
+    expect(store.currentWorkspace().protected).toBe(true);
+    store.setWorkspaceProtected(id, false);
+    expect(store.currentWorkspace()).not.toHaveProperty("protected");
+  });
+
   it("removes, moving to a neighbour, and refuses the last one", () => {
     const first = store.getState().currentId;
     const second = store.createWorkspace("Two", []);
@@ -1124,6 +1132,16 @@ describe("no-op actions do not notify", () => {
 
   silent("clearing a colour the workspace does not have", () => {}, () =>
     store.setWorkspaceColor(store.getState().currentId, undefined),
+  );
+
+  silent(
+    "setWorkspaceProtected on a workspace already protected",
+    () => store.setWorkspaceProtected(store.getState().currentId, true),
+    () => store.setWorkspaceProtected(store.getState().currentId, true),
+  );
+
+  silent("setWorkspaceProtected off on a workspace that is not protected", () => {}, () =>
+    store.setWorkspaceProtected(store.getState().currentId, false),
   );
 
   silent(

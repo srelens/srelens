@@ -138,6 +138,9 @@ function parseWorkspace(v: unknown): Workspace | null {
   // from a hand-edited file or another build's palette is not one this build
   // can name.
   if (isPaletteColor(v.color)) ws.color = v.color;
+  // Only `true`: a flag this build did not write is no flag, as a colour it
+  // cannot name is no colour.
+  if (v.protected === true) ws.protected = true;
   return ws;
 }
 
