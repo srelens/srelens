@@ -3040,6 +3040,27 @@ describe("under a busy stream (#898)", () => {
     expect(drawn.textContent).toContain("line 10");
   });
 
+  it("keeps a drawn line on its own element when the targets are resolved again, after the ring has dropped lines", async () => {
+    // A row's id belongs to the module, not to one indexing of the targets: numbered afresh from 0 by place in the
+    // buffer, a rebuilt row takes the id of a line the ring has since dropped, and that line's element with it.
+    const region = await (draw(), body());
+    push(...many(30));
+    ring(5, 30);
+    const drawn = lineRow(10);
+    // The same stream under a renamed context: the subject is resolved again, to targets the screen indexes afresh.
+    // The answer lands in the request's own tick, so React takes the loading state and the new targets as one render
+    // and the screen is rebuilt in place; an answer a network later unmounts it, and with it every drawn element.
+    const again = TARGETS.map((t) => ({ ...t }));
+    const answer = { status: "resolved", targets: again, pods: PODS, previous: [] };
+    h.resolve.mockReturnValue({ then: (done: (a: typeof answer) => void) => done(answer) });
+    act(() => setContexts([{ ...CTX, name: "prod-eu-2" }]));
+    expect(h.seen[h.seen.length - 1].targets).toBe(again);
+    expect(region.isConnected).toBe(true);
+    expect(rendered(region)).toHaveLength(30);
+    // Replaced by an element of its own, or still its own line: never another's.
+    expect(drawn.isConnected ? drawn.textContent : "line 10").toContain("line 10");
+  });
+
   it("recounts the rail, the facets and the histogram at most four times a second, and the last batch always lands", async () => {
     // The quarter second is read off the clock; stopped, a slow machine cannot run it out between two batches.
     vi.useFakeTimers({ toFake: ["Date"] });

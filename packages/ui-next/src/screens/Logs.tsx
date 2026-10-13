@@ -197,6 +197,13 @@ const RECOUNT_MS = 250;
 const HELD_NOTE_MS = 300;
 
 /**
+ * The next row's id, for the life of the module. A row's id is its element's key, so it must never be given to a
+ * second line: numbered again from 0 whenever the rows are rebuilt, a line would take the id of one the ring
+ * has since dropped, and with it that line's element, under the reader's pointer or selection.
+ */
+let nextRowId = 0;
+
+/**
  * The one state this readout can be in that the CONNECTION is not.
  *
  * Everything else comes from core's `logConnectionStatus` — the four
@@ -955,11 +962,10 @@ function LogsStream({
    */
   const rowOf = useMemo(() => {
     const cache = new WeakMap<StreamLine, Row>();
-    let next = 0;
     return (line: StreamLine): Row => {
       let row = cache.get(line);
       if (row === undefined) {
-        row = toRow(line, byLabel, next++);
+        row = toRow(line, byLabel, nextRowId++);
         cache.set(line, row);
       }
       return row;
