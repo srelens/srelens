@@ -197,6 +197,20 @@ describe("timeTicks", () => {
     expect([...ticks].sort((a, b) => a - b)).toEqual(ticks);
   });
 
+  // West of UTC the Date's first local day is before its first instant, so counting it has no answer.
+  it.each(["America/New_York", "Pacific/Honolulu", "Pacific/Auckland", "Pacific/Kiritimati"])(
+    "keeps a span as wide as a Date can hold to a handful of ticks in %s too",
+    (zone) => {
+      inZone(zone, () => {
+        const ticks = timeTicks(-8.64e15, 8.64e15);
+        expect(ticks.length).toBeGreaterThan(1);
+        expect(ticks.length).toBeLessThanOrEqual(6);
+        expect(ticks.every((t) => Number.isFinite(t))).toBe(true);
+        expect([...ticks].sort((a, b) => a - b)).toEqual(ticks);
+      });
+    },
+  );
+
   it("returns nothing for an empty or backwards span", () => {
     expect(timeTicks(at(12), at(12))).toEqual([]);
     expect(timeTicks(at(12, 1), at(12))).toEqual([]);

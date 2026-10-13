@@ -81,8 +81,10 @@ function ticksEvery(from: number, to: number, step: number, cap: number): number
 
 /**
  * The ticks of a calendar grid inside `[from, to]`: `at(k)` is the instant of
- * the k-th, for k from `first` to `last`. Undefined past `cap`. An instant that
- * is not a number lies past the edge of what a Date holds, and is no tick.
+ * the k-th, for k from `first` to `last`. Undefined past `cap`, and undefined
+ * when the grid has no tick inside, so the caller tries the next grid rather
+ * than taking an empty axis for a fit. An instant that is not a number lies
+ * past the edge of what a Date holds, and is no tick.
  */
 function gridTicks(
   from: number,
@@ -100,7 +102,7 @@ function gridTicks(
     if (ticks.length === cap) return undefined;
     ticks.push(t);
   }
-  return ticks;
+  return ticks.length > 0 ? ticks : undefined;
 }
 
 /** The local calendar day `ms` falls on, as a count of days since 1970-01-01: a 23-hour day is one. */
