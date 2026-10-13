@@ -58,6 +58,7 @@ import { useActiveContext } from "../lib/clusters";
 import { FailureAlert, FailureState } from "../lib/errorCopy";
 import { Icons } from "../lib/icons";
 import { useLogStream, type LogStreamStatus } from "../lib/logStream";
+import { useThrottledValue } from "../lib/useThrottledValue";
 import { groupNumber } from "../lib/numbers";
 import { saveOrDownload } from "../lib/saveOrDownload";
 import {
@@ -188,6 +189,9 @@ function providerKind(kind: string): string | undefined {
 
 /** How near the bottom still counts as being at it, in pixels. Classic's 48. */
 const STICK_SLACK = 48;
+
+/** How often, at most, a busy stream's lines reach the counts: four times a second. */
+const RECOUNT_MS = 250;
 
 /**
  * The one state this readout can be in that the CONNECTION is not.
@@ -847,6 +851,12 @@ function LogsStream({
   });
   // Home's "Live now" lists this tab only while the stream is actually running.
   useMarkLogStream(useTabScope(), stream.status !== "error" && stream.status !== "completed");
+  // A provider's stream that ended sends no more statuses, so the hook's last one
+  // would go on saying it follows: the ending is what the readout says instead.
+  const ended = chosen ? provider.end : null;
+  /** Whether new lines are arriving in THIS pane. A snapshot is not followed,
+   *  however healthy the connection underneath it is. */
+  const following = !previous && !stream.paused && !ended;
   /**
    * The restarts the "Scrollback cleared" notice is not about. That notice says a
    * change of window reopened the stream and nothing already sent comes back. A change
@@ -982,16 +992,36 @@ function LogsStream({
   const clauses = applied.ok ? applied.clauses : NO_CLAUSES;
 
   /** The pod boxes and the container select: the scope every view starts from. */
-  const scoped = useMemo(
-    () => rows.filter((row) => !hidden.includes(row.pod) && (container === ALL_CONTAINERS || row.container === container)),
-    [rows, hidden, container],
+  const inScope = useCallback(
+    (row: Row) => !hidden.includes(row.pod) && (container === ALL_CONTAINERS || row.container === container),
+    [hidden, container],
   );
+  /** Every filter applied: what the body draws, from every batch. */
+  const filtered = useMemo(
+    () =>
+      rows.filter(
+        (row) =>
+          inScope(row) &&
+          (clauses.length === 0 || matchLine(row, clauses)) &&
+          (range === undefined || inRange(row, range)),
+      ),
+    [rows, inScope, clauses, range],
+  );
+  /**
+   * The rows the rail, the facets and the histogram count. Each count is a pass over the whole buffer, and a busy
+   * stream commits every frame: while lines are arriving these take the stream's rows at most four times a second,
+   * the last batch always landing. A filter still applies at once, over the rows they have. Paused or reading a
+   * snapshot, nothing is arriving to hold back.
+   */
+  const counted = useThrottledValue(rows, following ? RECOUNT_MS : 0);
+  const scoped = useMemo(() => counted.filter(inScope), [counted, inScope]);
   /** The query applied, but not the window: what the histogram counts, so it can shade the window instead of cropping to it. */
   const queried = useMemo(
     () => (clauses.length === 0 ? scoped : scoped.filter((row) => matchLine(row, clauses))),
     [scoped, clauses],
   );
-  const filtered = useMemo(
+  /** The body's lines as of the last recount: what the rail tallies. */
+  const countedFiltered = useMemo(
     () => (range === undefined ? queried : queried.filter((row) => inRange(row, range))),
     [queried, range],
   );
@@ -1006,7 +1036,7 @@ function LogsStream({
    * array while the names are unchanged — a new array on every batch would
    * recount every facet in the urgent render, ahead of the deferral below.
    */
-  const deferredRows = useDeferredValue(rows);
+  const deferredRows = useDeferredValue(counted);
   const fieldsRef = useRef<string[]>([]);
   const fields = useMemo(() => {
     const next = discoverFields(deferredRows);
@@ -1099,7 +1129,7 @@ function LogsStream({
 
   /**
    * What the rail tallies: THE LINES THE BODY IS DRAWING, with every filter
-   * applied — and each one's RFC3339 stamp already off.
+   * applied, as of the last recount — and each one's RFC3339 stamp already off.
    *
    * The stamp is the trap. A stamped line opens with a digit, `tallyLogTerms`
    * reads a leading digit as a value and ends the term run there, so a stamped
@@ -1112,8 +1142,8 @@ function LogsStream({
    * `time=…`, and the tally would end the term there and show nothing.
    */
   const railLines = useMemo<TermLine[]>(
-    () => filtered.map((row) => ({ source: row.pod, text: row.text, message: row.message, health: row.health })),
-    [filtered],
+    () => countedFiltered.map((row) => ({ source: row.pod, text: row.text, message: row.message, health: row.health })),
+    [countedFiltered],
   );
 
   /**
@@ -1212,15 +1242,9 @@ function LogsStream({
     measure();
   }
 
-  // A provider's stream that ended sends no more statuses, so the hook's last one
-  // would go on saying it follows: the ending is what the readout says instead.
-  const ended = chosen ? provider.end : null;
   const signal = ended
     ? logConnectionStatus(ended.type === "error" ? "error" : "completed")
     : connectionSignal(stream.status, stream.paused);
-  /** Whether new lines are arriving in THIS pane. A snapshot is not followed,
-   *  however healthy the connection underneath it is. */
-  const following = !previous && !stream.paused && !ended;
   // A provider sends its history again on every restart, so none of its restarts
   // cleared anything; the notice is about the cluster's own stream alone.
   const restarted = !chosen && stream.restartCount > seenRestart;

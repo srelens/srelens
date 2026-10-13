@@ -2286,7 +2286,8 @@ describe("structured lines and the query (#898)", () => {
     h.facetPasses.length = 0;
     // No new field and no new value: the same three facets, one line heavier.
     push(line("api-9/api", "14:07:44.010000000", '{"level":"info","msg":"Wrote again","system":"camlog"}'));
-    expect(screen.getByRole("button", { name: "level = info, 2 lines" })).toBeTruthy();
+    // Within a quarter second of the last batch, so the recount lands when that is up.
+    expect(await screen.findByRole("button", { name: "level = info, 2 lines" })).toBeTruthy();
     // The Level facet and the one discovered field, once each: the deferred
     // pass. The urgent render must not rerun the field's count because the
     // list of fields came back as a new array of the same names.
@@ -2992,5 +2993,39 @@ describe("the line detail (#898)", () => {
         restore();
       }
     });
+  });
+});
+
+describe("under a busy stream (#898)", () => {
+  const caption = () => document.querySelector('[data-slot="volume-caption"]')?.textContent ?? "";
+  const anotherError = line("api-8/api", "14:07:45.100000000", "error pool timeout waited=30.1s in_use=6");
+
+  it("recounts the rail, the facets and the histogram at most four times a second, and the last batch always lands", async () => {
+    const region = await (draw(), body());
+    push(...LINES);
+    expect(screen.getByText("1 error")).toBeTruthy();
+    push(anotherError);
+    // The body draws every batch.
+    expect(rendered(region)).toHaveLength(5);
+    // The counts wait out the quarter second since their last recount.
+    expect(screen.getByText("1 error")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "level = error, 1 line" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "error 1" })).toBeTruthy();
+    expect(caption()).toMatch(/^4 lines · /);
+    await waitFor(() => {
+      expect(screen.getByText("2 errors")).toBeTruthy();
+      expect(screen.getByRole("button", { name: "level = error, 2 lines" })).toBeTruthy();
+      expect(screen.getByRole("button", { name: "error 2" })).toBeTruthy();
+      expect(caption()).toMatch(/^5 lines · /);
+    });
+  });
+
+  it("recounts at once while paused, when nothing is arriving to hold back", async () => {
+    await (draw(), body());
+    await userEvent.click(screen.getByRole("button", { name: "Pause" }));
+    push(...LINES);
+    push(anotherError);
+    expect(screen.getByText("2 errors")).toBeTruthy();
+    expect(caption()).toMatch(/^5 lines · /);
   });
 });
