@@ -3064,6 +3064,15 @@ describe("under a busy stream (#898)", () => {
     const heldNote = () => screen.queryByText(/^Held while you select/);
     /** The task after a release, which is when the screen lets go of a press. */
     const released = () => act(() => new Promise((r) => setTimeout(r, 0)));
+    /** A press on `el`, and its release, as a browser sends them: the pointer's event, then the mouse's. */
+    const press = (el: Element) => {
+      fireEvent.pointerDown(el);
+      fireEvent.mouseDown(el);
+    };
+    const lift = (el: Element) => {
+      fireEvent.pointerUp(el);
+      fireEvent.mouseUp(el);
+    };
     /** Select `node`'s text, a caret at its start, or nothing, and say so the way the browser does. */
     const select = (node: Node | null, caret = false) =>
       act(() => {
@@ -3077,19 +3086,52 @@ describe("under a busy stream (#898)", () => {
     it("holds the view while the mouse is down in the log, and lets go when it comes up, leaving Pause alone", async () => {
       const region = await (draw(), body());
       push(...many(5));
-      fireEvent.mouseDown(lineRow(2));
+      press(lineRow(2));
       push(...many(3, 5));
       expect(rendered(region)).toHaveLength(5);
-      expect(heldNote()).toBeTruthy();
       // The reader's own control still says what they chose.
       expect(screen.getByRole("button", { name: "Pause" })).toBeTruthy();
-      fireEvent.mouseUp(lineRow(2));
+      lift(lineRow(2));
       await released();
       expect(rendered(region)).toHaveLength(8);
-      expect(heldNote()).toBeNull();
     });
 
-    it("holds the view while text is selected in the log, says what is waiting, and lets go when it is cleared", async () => {
+    it.each([
+      ["a pointerup anywhere in the window", () => fireEvent.pointerUp(window)],
+      ["a pointercancel", () => fireEvent.pointerCancel(window)],
+      ["the window losing focus", () => fireEvent.blur(window)],
+      [
+        "the window being hidden",
+        () => {
+          Object.defineProperty(document, "hidden", { configurable: true, get: () => true });
+          fireEvent(document, new Event("visibilitychange"));
+        },
+      ],
+    ])("lets go of a press on %s, though not of a selection", async (_, end) => {
+      // A release that never reaches the log, or never comes at all, must not leave the view held.
+      try {
+        const region = await (draw(), body());
+        push(...many(5));
+        press(lineRow(2));
+        push(...many(3, 5));
+        expect(rendered(region)).toHaveLength(5);
+        end();
+        await released();
+        expect(rendered(region)).toHaveLength(8);
+        // A selection is let go of only by collapsing or leaving the log. (jsdom also queues a selectionchange of
+        // its own a task after the selection; it is let through first, so it cannot put back what `end` took.)
+        select(lineRow(2));
+        await released();
+        push(...many(1, 8));
+        end();
+        await released();
+        expect(rendered(region)).toHaveLength(8);
+      } finally {
+        delete (document as { hidden?: boolean }).hidden;
+      }
+    });
+
+    it("holds the view while text is selected in the log, and lets go when it is cleared", async () => {
       const region = await (draw(), body());
       push(...many(5));
       // A selection elsewhere on the screen is not the log's.
@@ -3097,19 +3139,49 @@ describe("under a busy stream (#898)", () => {
       push(...many(1, 5));
       expect(rendered(region)).toHaveLength(6);
       select(lineRow(2));
-      h.state.pending = 3;
       push(...many(3, 6));
       expect(rendered(region)).toHaveLength(6);
-      expect(heldNote()?.textContent).toBe("Held while you select · 3 new lines");
       // A caret is no selection: it is where a click in the log leaves one.
       select(lineRow(2), true);
       expect(rendered(region)).toHaveLength(9);
-      expect(heldNote()).toBeNull();
       select(lineRow(2));
       push(...many(1, 9));
       expect(rendered(region)).toHaveLength(9);
       select(null);
       expect(rendered(region)).toHaveLength(10);
+    });
+
+    it("says the view is held only once a hold has lasted, never for an ordinary click", async () => {
+      // Every click holds the view for as long as the button is down; a note that flashed on each one would be noise.
+      await (draw(), body());
+      push(...many(5));
+      vi.useFakeTimers();
+      try {
+        press(lineRow(2));
+        act(() => vi.advanceTimersByTime(100));
+        expect(heldNote()).toBeNull();
+        lift(lineRow(2));
+        act(() => vi.advanceTimersByTime(1000));
+        expect(heldNote()).toBeNull();
+        // A selection kept is a hold worth naming, and what waits behind it.
+        select(lineRow(3));
+        h.state.pending = 3;
+        push(...many(3, 5));
+        act(() => vi.advanceTimersByTime(299));
+        expect(heldNote()).toBeNull();
+        act(() => vi.advanceTimersByTime(1));
+        expect(heldNote()?.textContent).toBe("Held while you select · 3 new lines");
+        select(null);
+        expect(heldNote()).toBeNull();
+        // The next hold is timed afresh: a click after a long selection is still only a click.
+        press(lineRow(2));
+        act(() => vi.advanceTimersByTime(100));
+        expect(heldNote()).toBeNull();
+        lift(lineRow(2));
+        act(() => vi.advanceTimersByTime(0));
+      } finally {
+        vi.useRealTimers();
+      }
     });
 
     it("opens the line detail on the line pressed, though lines arrive and the view follows them before the release", async () => {
@@ -3132,17 +3204,17 @@ describe("under a busy stream (#898)", () => {
         push(...many(300));
         fireEvent.scroll(region);
         const pressed = lineRow(297);
-        fireEvent.mouseDown(pressed);
+        press(pressed);
         push(...many(100, 300));
         // The browser reports the scroll that following the end made.
         fireEvent.scroll(region);
-        fireEvent.mouseUp(pressed);
+        lift(pressed);
         fireEvent.click(pressed);
         expect(screen.getByRole("region", { name: "Line detail" }).textContent).toContain("line 297");
-        // Then the lines that waited come in, under the panel still on that line.
-        expect(heldNote()).toBeTruthy();
+        // Then the screen lets the lines that waited in, under the panel still on that line.
+        expect(h.state.held).toBe(true);
         await released();
-        expect(heldNote()).toBeNull();
+        expect(h.state.held).toBe(false);
         expect(screen.getByRole("region", { name: "Line detail" }).textContent).toContain("line 297");
       } finally {
         restore();

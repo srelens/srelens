@@ -193,6 +193,9 @@ const STICK_SLACK = 48;
 /** How often, at most, a busy stream's lines reach the counts: four times a second. */
 const RECOUNT_MS = 250;
 
+/** How long the view must be held before the filter bar says so: longer than a click's press. */
+const HELD_NOTE_MS = 300;
+
 /**
  * The one state this readout can be in that the CONNECTION is not.
  *
@@ -886,20 +889,41 @@ function LogsStream({
         (viewport.contains(selection.anchorNode) || viewport.contains(selection.focusNode));
       syncHold();
     };
-    // On the document: a drag that started in the log can end anywhere. Let go a task later, after the click this
-    // release makes: let go at once, the lines that waited move the view first, and the pressed row is gone.
+    // Anywhere on the window: a drag that started in the log can end anywhere, and a press the browser takes back,
+    // or whose release never reaches the page (the window loses focus or is hidden), must not leave the view held.
+    // Let go a task later, after the click a release makes: let go at once, the lines that waited move the view
+    // first, and the pressed row is gone. A selection is not let go of here; only collapsing or leaving the log does.
     const onRelease = () => {
       if (!pressedRef.current) return;
       pressedRef.current = false;
       setTimeout(syncHold, 0);
     };
+    const onVisibility = () => {
+      if (document.hidden) onRelease();
+    };
+    const releases = ["pointerup", "pointercancel", "blur"] as const;
     document.addEventListener("selectionchange", onSelection);
-    document.addEventListener("mouseup", onRelease);
+    document.addEventListener("visibilitychange", onVisibility);
+    for (const type of releases) window.addEventListener(type, onRelease);
     return () => {
       document.removeEventListener("selectionchange", onSelection);
-      document.removeEventListener("mouseup", onRelease);
+      document.removeEventListener("visibilitychange", onVisibility);
+      for (const type of releases) window.removeEventListener(type, onRelease);
     };
   }, [syncHold]);
+  /**
+   * Whether the hold has lasted long enough to name. Every click holds the view for as long as the button is down,
+   * and a note that flashed on each one would be noise; a press kept, or a selection, is worth the words.
+   */
+  const [heldLong, setHeldLong] = useState(false);
+  useEffect(() => {
+    if (!stream.held) {
+      setHeldLong(false);
+      return;
+    }
+    const timer = setTimeout(() => setHeldLong(true), HELD_NOTE_MS);
+    return () => clearTimeout(timer);
+  }, [stream.held]);
   /**
    * The restarts the "Scrollback cleared" notice is not about. That notice says a
    * change of window reopened the stream and nothing already sent comes back. A change
@@ -1648,7 +1672,7 @@ function LogsStream({
             </Eyebrow>
           )}
           {/* Why a following pane stopped moving under a press or a selection, and what waits for its release. */}
-          {!previous && !stream.paused && stream.held && (
+          {!previous && !stream.paused && stream.held && heldLong && (
             <Eyebrow>
               {`Held while you select${stream.pendingWhilePaused > 0 ? ` · ${groupNumber(stream.pendingWhilePaused)} new lines` : ""}`}
             </Eyebrow>
@@ -1787,7 +1811,7 @@ function LogsStream({
         <div
           ref={viewportRef}
           onScroll={trackScroll}
-          onMouseDown={() => {
+          onPointerDown={() => {
             pressedRef.current = true;
             syncHold();
           }}
