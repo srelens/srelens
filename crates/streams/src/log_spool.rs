@@ -190,8 +190,9 @@ struct SegmentView {
     index: Vec<u64>,
 }
 
-/// A spool as of one moment, readable without its lock. A segment rotation
-/// deletes after the snapshot is still readable through a handle already open.
+/// A spool as of one moment, readable without its lock. It holds paths, not open
+/// files: a segment the writer rotates out after the snapshot is skipped by
+/// [`SpoolSnapshot::read`], so a page that would have started in it starts after it.
 pub struct SpoolSnapshot {
     pub first: u64,
     next: u64,
@@ -201,7 +202,9 @@ pub struct SpoolSnapshot {
 impl SpoolSnapshot {
     /// Lines `[max(first, before - limit), before)`: at most
     /// [`MAX_READ_LINES`], and past [`MAX_READ_BYTES`] of text the oldest are
-    /// dropped, so the page always ends at `before`.
+    /// dropped, so the page always ends at `before`. The same goes for lines
+    /// whose segment was rotated out since the snapshot: the page starts later.
+    /// A segment cut short on disk is an error, not a shorter page.
     pub fn read(&self, before: u64, limit: usize) -> io::Result<SpoolPage> {
         let before = before.min(self.next);
         let start = before
@@ -220,12 +223,27 @@ impl SpoolSnapshot {
             }
             let k = ((seq - segment.first) / INDEX_EVERY) as usize;
             let mut at = segment.first + k as u64 * INDEX_EVERY;
-            let mut reader = open_at(&segment.path, segment.index[k], segment.bytes)?;
+            let mut reader = match open_at(&segment.path, segment.index[k], segment.bytes) {
+                Ok(reader) => reader,
+                // Rotated out since the snapshot. Segments go oldest first, so
+                // whatever came before it is gone too: drop what was gathered, or
+                // the page would have a hole, and start the page after it.
+                Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                    lines.clear();
+                    bytes = 0;
+                    seq = end;
+                    continue;
+                }
+                Err(e) => return Err(e),
+            };
             let mut record = String::new();
             while at < before && at < end {
                 record.clear();
                 if reader.read_line(&mut record)? == 0 {
-                    break;
+                    return Err(io::Error::new(
+                        io::ErrorKind::UnexpectedEof,
+                        format!("{} ends before line {at}", segment.path.display()),
+                    ));
                 }
                 if at >= seq {
                     let line: LogLine =
@@ -387,6 +405,61 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         std::fs::create_dir(tmp.path().join("s")).unwrap();
         assert!(LogSpool::create(tmp.path().join("s"), 64 << 20).is_err());
+    }
+
+    /// Several small segments and a roomy cap: the writer has not rotated yet.
+    fn spool_of_100_lines_in_small_segments(dir: PathBuf) -> LogSpool {
+        let mut spool = LogSpool::create_sized(dir, 64 << 20, 1000).unwrap();
+        for n in 1..=100 {
+            spool.append(&line(n)).unwrap();
+        }
+        spool
+    }
+
+    #[test]
+    fn a_read_skips_a_segment_rotated_out_after_the_snapshot() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut spool = spool_of_100_lines_in_small_segments(tmp.path().join("s"));
+        let snapshot = spool.snapshot().unwrap();
+        assert!(snapshot.segments.len() > 2, "the test needs several segments");
+        // The writer rotates the oldest segment out after the reader's snapshot.
+        let second = snapshot.segments[1].first;
+        fs::remove_file(&snapshot.segments[0].path).unwrap();
+        let page = snapshot.read(101, 100).unwrap();
+        assert_eq!(page.seq, second, "the page starts where the rotated-out segment ended");
+        assert_eq!(page.seq + page.lines.len() as u64, 101, "and still ends where it was asked to");
+        assert_eq!(texts(&page).first().unwrap(), &format!("line {second}"));
+        assert_eq!(texts(&page).last().unwrap(), "line 100");
+    }
+
+    #[test]
+    fn a_read_drops_what_it_gathered_when_a_newer_segment_goes_under_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut spool = spool_of_100_lines_in_small_segments(tmp.path().join("s"));
+        let snapshot = spool.snapshot().unwrap();
+        // Rotation evicts oldest-first, so a reader that has already read segment 0
+        // can find segment 1 gone only because segment 0 went too: what it read
+        // must not stay, or the page would have a hole before segment 2.
+        let third = snapshot.segments[2].first;
+        fs::remove_file(&snapshot.segments[1].path).unwrap();
+        let page = snapshot.read(101, 100).unwrap();
+        assert_eq!(page.seq, third, "the page starts after the missing segment");
+        assert_eq!(page.seq + page.lines.len() as u64, 101);
+        assert_eq!(texts(&page).first().unwrap(), &format!("line {third}"));
+    }
+
+    #[test]
+    fn a_read_of_a_segment_cut_short_is_an_error_not_a_panic() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut spool = spool_of_100_lines_in_small_segments(tmp.path().join("s"));
+        let snapshot = spool.snapshot().unwrap();
+        // Something outside the spool (a temp cleaner) cuts the oldest segment
+        // after its first record: the index and the line count now promise more.
+        let path = &snapshot.segments[0].path;
+        let first_record = fs::read(path).unwrap().iter().position(|b| *b == b'\n').unwrap() as u64 + 1;
+        OpenOptions::new().write(true).open(path).unwrap().set_len(first_record).unwrap();
+        let err = snapshot.read(101, 100).expect_err("a short segment is an error");
+        assert_eq!(err.kind(), io::ErrorKind::UnexpectedEof);
     }
 
     #[cfg(unix)]
