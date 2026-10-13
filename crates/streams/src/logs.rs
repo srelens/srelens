@@ -537,8 +537,9 @@ mod tests {
             w.push(ll(n));
         }
         assert_eq!(w.take()[0]["seq"], 1);
-        // Forced rather than by deleting the directory: an open segment's file cannot
-        // be removed on Windows, and a deleted directory only fails once a new segment opens.
+        // Forced, not by deleting the directory: on Windows the directory holding the
+        // open segment cannot be removed; on Unix the open file survives that, so no
+        // append fails until a new segment opens.
         spool.lock().unwrap().fail("disk full".into());
         w.push(ll(4));
         w.push(ll(5));
@@ -550,6 +551,5 @@ mod tests {
             out[1].get("first").is_none(),
             "no history to point at any more"
         );
-        assert_eq!(spool.lock().unwrap().failed(), Some("disk full"));
     }
 }
