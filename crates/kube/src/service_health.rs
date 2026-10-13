@@ -74,6 +74,8 @@ pub struct PortMismatchEvidence {
     pub target_port: String,
     pub container_ports_found: Vec<i32>,
     pub mismatch_kind: String, // "TargetPortNotFound" | "NamedPortNotFound" | "NoMatchingPods" | "ZeroReadyEndpoints"
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub failing_pods: Vec<String>,
 }
 
 /// Pure evaluation function comparing Service ports and selector against EndpointSlices and candidate Pods.
@@ -185,17 +187,61 @@ pub fn analyze_service_health(
                             target_port: num.to_string(),
                             container_ports_found: container_ports_found.clone(),
                             mismatch_kind: "TargetPortNotFound".to_string(),
+                            failing_pods: Vec::new(),
                         });
                     }
                 }
                 IntOrString::String(name) => {
-                    if !pods.is_empty() && !container_port_names.contains(&name) {
+                    let svc_proto = p.protocol.as_deref().unwrap_or("TCP");
+                    let mut failing_pods = Vec::new();
+
+                    for pod in pods {
+                        let pod_name = pod
+                            .metadata
+                            .name
+                            .clone()
+                            .unwrap_or_else(|| "unnamed".to_string());
+                        let mut has_named_port = false;
+
+                        if let Some(pspec) = &pod.spec {
+                            let all_containers = pspec.containers.iter().chain(
+                                pspec
+                                    .init_containers
+                                    .iter()
+                                    .flatten()
+                                    .filter(|c| c.restart_policy.as_deref() == Some("Always")),
+                            );
+                            for c in all_containers {
+                                if let Some(ports) = &c.ports {
+                                    for cp in ports {
+                                        let cp_proto = cp.protocol.as_deref().unwrap_or("TCP");
+                                        if cp.name.as_deref() == Some(name.as_str())
+                                            && cp_proto.eq_ignore_ascii_case(svc_proto)
+                                        {
+                                            has_named_port = true;
+                                            break;
+                                        }
+                                    }
+                                }
+                                if has_named_port {
+                                    break;
+                                }
+                            }
+                        }
+
+                        if !has_named_port {
+                            failing_pods.push(pod_name);
+                        }
+                    }
+
+                    if !pods.is_empty() && !failing_pods.is_empty() {
                         port_mismatches.push(PortMismatchEvidence {
                             port_name: p.name.clone(),
                             service_port: p.port,
                             target_port: name,
                             container_ports_found: container_ports_found.clone(),
                             mismatch_kind: "NamedPortNotFound".to_string(),
+                            failing_pods,
                         });
                     }
                 }
@@ -210,6 +256,7 @@ pub fn analyze_service_health(
             target_port: String::new(),
             container_ports_found: Vec::new(),
             mismatch_kind: "NoMatchingPods".to_string(),
+            failing_pods: Vec::new(),
         });
     } else if !pods.is_empty() && ready_endpoints == 0 {
         port_mismatches.push(PortMismatchEvidence {
@@ -218,6 +265,7 @@ pub fn analyze_service_health(
             target_port: String::new(),
             container_ports_found: container_ports_found.clone(),
             mismatch_kind: "ZeroReadyEndpoints".to_string(),
+            failing_pods: Vec::new(),
         });
     }
 
@@ -325,6 +373,7 @@ mod tests {
     use super::*;
     use k8s_openapi::api::core::v1::{Container, ContainerPort, PodSpec, ServicePort, ServiceSpec};
     use k8s_openapi::api::discovery::v1::{Endpoint, EndpointConditions, EndpointPort};
+    use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
     use std::collections::BTreeMap;
     use std::path::PathBuf;
 
@@ -550,5 +599,100 @@ mod tests {
             .port_mismatches
             .iter()
             .any(|m| m.mismatch_kind == "TargetPortNotFound"));
+    }
+
+    #[test]
+    fn detects_named_port_missing_on_subset_of_pods_and_checks_protocol() {
+        let mut selector = BTreeMap::new();
+        selector.insert("app".to_string(), "api".to_string());
+
+        let svc = Service {
+            spec: Some(ServiceSpec {
+                selector: Some(selector),
+                ports: Some(vec![ServicePort {
+                    port: 80,
+                    target_port: Some(IntOrString::String("http".to_string())),
+                    protocol: Some("TCP".to_string()),
+                    ..Default::default()
+                }]),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        // Pod 1 defines "http" on TCP
+        let pod1 = Pod {
+            metadata: ObjectMeta {
+                name: Some("pod-1".to_string()),
+                ..Default::default()
+            },
+            spec: Some(PodSpec {
+                containers: vec![Container {
+                    name: "web".to_string(),
+                    ports: Some(vec![ContainerPort {
+                        container_port: 8080,
+                        name: Some("http".to_string()),
+                        protocol: Some("TCP".to_string()),
+                        ..Default::default()
+                    }]),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        // Pod 2 defines "http" on UDP (protocol mismatch!)
+        let pod2 = Pod {
+            metadata: ObjectMeta {
+                name: Some("pod-2".to_string()),
+                ..Default::default()
+            },
+            spec: Some(PodSpec {
+                containers: vec![Container {
+                    name: "web".to_string(),
+                    ports: Some(vec![ContainerPort {
+                        container_port: 8080,
+                        name: Some("http".to_string()),
+                        protocol: Some("UDP".to_string()),
+                        ..Default::default()
+                    }]),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        // Pod 3 defines no port names
+        let pod3 = Pod {
+            metadata: ObjectMeta {
+                name: Some("pod-3".to_string()),
+                ..Default::default()
+            },
+            spec: Some(PodSpec {
+                containers: vec![Container {
+                    name: "web".to_string(),
+                    ports: Some(vec![ContainerPort {
+                        container_port: 8080,
+                        name: None,
+                        ..Default::default()
+                    }]),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let report = analyze_service_health("default", "api", &svc, &[], &[pod1, pod2, pod3]);
+        let named_mismatch = report
+            .port_mismatches
+            .iter()
+            .find(|m| m.mismatch_kind == "NamedPortNotFound" && m.target_port == "http");
+        assert!(named_mismatch.is_some());
+        let mismatch = named_mismatch.unwrap();
+        // pod-2 (protocol mismatch) and pod-3 (unnamed) must be flagged
+        assert_eq!(mismatch.failing_pods, vec!["pod-2", "pod-3"]);
     }
 }
