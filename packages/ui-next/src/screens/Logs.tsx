@@ -1098,9 +1098,10 @@ function LogsStream({
    * The rows the rail, the facets and the histogram count. Each count is a pass over the whole buffer, and a busy
    * stream commits every frame: while lines are arriving these take the stream's rows at most four times a second,
    * the last batch always landing. A filter still applies at once, over the rows they have. Paused or reading a
-   * snapshot, nothing is arriving to hold back.
+   * snapshot, nothing is arriving to hold back, and neither is an empty buffer (a restart or a clear): it has nothing
+   * to count, and must not go on showing the old buffer's counts for the wait.
    */
-  const counted = useThrottledValue(rows, following ? RECOUNT_MS : 0);
+  const counted = useThrottledValue(rows, following && rows.length > 0 ? RECOUNT_MS : 0);
   const scoped = useMemo(() => counted.filter(inScope), [counted, inScope]);
   /** The query applied, but not the window: what the histogram counts, so it can shade the window instead of cropping to it. */
   const queried = useMemo(

@@ -3087,6 +3087,32 @@ describe("under a busy stream (#898)", () => {
     }
   });
 
+  it("empties the counts at once when the buffer is emptied, though a recount is waiting", async () => {
+    // A restart leaves nothing to count: the old buffer's tallies must not go on being read for the quarter second a
+    // recount waits. The clock is stopped, so that quarter second cannot run out inside the test.
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      const region = await (draw(), body());
+      push(...LINES);
+      expect(screen.getByText("1 error")).toBeTruthy();
+      push(anotherError);
+      // The recount is waiting: the counts still hold the last one.
+      expect(screen.getByText("1 error")).toBeTruthy();
+      act(() => {
+        // What the hook does on a restart: a fresh buffer and a bumped restart count.
+        h.state.lines = [];
+        h.state.restarts = 1;
+        notify();
+      });
+      expect(rendered(region)).toHaveLength(0);
+      expect(screen.queryByText("1 error")).toBeNull();
+      expect(screen.queryByRole("button", { name: "error 1" })).toBeNull();
+      expect(caption()).toBe("");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   describe("holding the view while the reader works in it", () => {
     const heldNote = () => screen.queryByText(/^Held while you select/);
     /** The task after a release, which is when the screen lets go of a press. */
