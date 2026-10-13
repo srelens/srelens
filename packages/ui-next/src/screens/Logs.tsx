@@ -942,6 +942,8 @@ function LogsStream({
     const timer = setTimeout(() => setHeldLong(true), HELD_NOTE_MS);
     return () => clearTimeout(timer);
   }, [stream.held]);
+  /** Whether the filter bar says the view is held: a following pane, held long enough to name. */
+  const heldNoted = !previous && !stream.paused && stream.held && heldLong;
   /**
    * The restarts the "Scrollback cleared" notice is not about. That notice says a
    * change of window reopened the stream and nothing already sent comes back. A change
@@ -1689,11 +1691,16 @@ function LogsStream({
             </Eyebrow>
           )}
           {/* Why a following pane stopped moving under a press or a selection, and what waits for its release. */}
-          {!previous && !stream.paused && stream.held && heldLong && (
+          {heldNoted && (
             <Eyebrow>
               {`Held while you select${stream.pendingWhilePaused > 0 ? ` · ${groupNumber(stream.pendingWhilePaused)} new lines` : ""}`}
             </Eyebrow>
           )}
+          {/* The same for a screen reader, which the note's coming and going does not reach. Always mounted, so the
+              words are a change to a region it already has, and without the count: that moves with every batch. */}
+          <span className="sr-only" role="status" aria-live="polite" aria-atomic="true" data-slot="held-live">
+            {heldNoted ? "View held while you select" : ""}
+          </span>
           {!previous && (
             <LiveSignal
               label={connectionLabel(

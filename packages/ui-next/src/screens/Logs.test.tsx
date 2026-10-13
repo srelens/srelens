@@ -3273,6 +3273,37 @@ describe("under a busy stream (#898)", () => {
       }
     });
 
+    it("tells a screen reader the view is held while the note shows, without the count that changes under it", async () => {
+      await (draw(), body());
+      push(...many(5));
+      const live = () => document.querySelector('[data-slot="held-live"]') as HTMLElement;
+      // Mounted before anything is held, so the first announcement is a change to a region the reader already has.
+      expect(live().textContent).toBe("");
+      expect(live().getAttribute("role")).toBe("status");
+      expect(live().getAttribute("aria-live")).toBe("polite");
+      expect(live().getAttribute("aria-atomic")).toBe("true");
+      expect(live().className).toContain("sr-only");
+      vi.useFakeTimers();
+      try {
+        select(lineRow(3));
+        h.state.pending = 3;
+        push(...many(3, 5));
+        act(() => vi.advanceTimersByTime(299));
+        expect(live().textContent).toBe("");
+        act(() => vi.advanceTimersByTime(1));
+        expect(heldNote()?.textContent).toBe("Held while you select · 3 new lines");
+        // The count is the visible note's alone: said here, it would be read out again on every batch.
+        expect(live().textContent).toBe("View held while you select");
+        h.state.pending = 40;
+        push(...many(1, 8));
+        expect(live().textContent).toBe("View held while you select");
+        select(null);
+        expect(live().textContent).toBe("");
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
     it("opens the line detail on the line pressed, though lines arrive and the view follows them before the release", async () => {
       // A following view moves on every batch: the release lands on another row, or on none, and is no click at all.
       const restore = measurableRows();
