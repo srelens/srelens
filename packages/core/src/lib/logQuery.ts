@@ -202,12 +202,32 @@ export type ParsedQuery =
   | { readonly ok: true; readonly clauses: readonly QueryClause[] }
   | { readonly ok: false; readonly error: string; readonly at: number };
 
-const QUERYABLE_KEY = /^[A-Za-z_@][\w.@/-]*$/;
-const FIELD_PREFIX = /[A-Za-z_@][\w.@/-]*:/y;
+/**
+ * A field name is `[A-Za-z_@][A-Za-z0-9_.@/-]*`. It is scanned by index, not by
+ * a regex over the query, which CodeQL reads as polynomial on a run of `@`
+ * (see `tokenize` on #380). The parser and `isQueryableKey` share these two
+ * predicates, so they cannot disagree about what a field is.
+ */
+const isKeyStart = (ch: string) => /^[A-Za-z_@]$/.test(ch);
+const isKeyChar = (ch: string) => /^[A-Za-z0-9_.@/-]$/.test(ch);
+
+/** Index just past the key that starts at `from`, or `from` when no key does. */
+function keyEnd(q: string, from: number): number {
+  if (from >= q.length || !isKeyStart(q[from])) return from;
+  let j = from + 1;
+  while (j < q.length && isKeyChar(q[j])) j += 1;
+  return j;
+}
+
+/** Index just past the `:` of a `key:` that starts at `i`, or -1 when none does. */
+function fieldPrefixEnd(q: string, i: number): number {
+  const end = keyEnd(q, i);
+  return end > i && q[end] === ":" ? end + 1 : -1;
+}
 
 /** Whether `key:` would parse as a field. A facet or a filter button may only offer one that does. */
 export function isQueryableKey(key: string): boolean {
-  return QUERYABLE_KEY.test(key);
+  return key !== "" && keyEnd(key, 0) === key.length;
 }
 
 const isSpace = (ch: string) => /\s/.test(ch);
@@ -237,10 +257,9 @@ export function parseLogQuery(query: string): ParsedQuery {
     if (i >= query.length || isSpace(query[i])) {
       return { ok: false, error: "A '-' needs something to exclude", at: start };
     }
-    FIELD_PREFIX.lastIndex = i;
-    const prefix = FIELD_PREFIX.exec(query);
-    const field = prefix === null ? undefined : prefix[0].slice(0, -1);
-    if (prefix !== null) i += prefix[0].length;
+    const prefixEnd = fieldPrefixEnd(query, i);
+    const field = prefixEnd < 0 ? undefined : query.slice(i, prefixEnd - 1);
+    if (prefixEnd >= 0) i = prefixEnd;
     const term = readTerm(query, i);
     if ("error" in term) return { ok: false, error: term.error, at: term.at };
     if (term.end < query.length && !isSpace(query[term.end])) {

@@ -307,6 +307,40 @@ describe("isQueryableKey", () => {
     expect(["system", "http.status", "@timestamp", "app.kubernetes.io/name", "x_ref"].map(isQueryableKey)).toEqual([true, true, true, true, true]);
     expect(["bad key", "1st", "", "a:b"].map(isQueryableKey)).toEqual([false, false, false, false]);
   });
+
+  // The parser and this predicate each decide what a field name is. They read
+  // the same two character classes, and a facet button that offers a key the
+  // parser then reads as free text is the bug this pins.
+  it.each([
+    "system", "http.status", "@timestamp", "app.kubernetes.io/name", "x_ref", "_", "@", "a-b", "a/b", "A1", "a1.b2",
+    "bad key", "1st", "", "a:b", "-x", ".x", "x y", "éa", "aé", "a\tb", "a=b", "a,b",
+  ])("agrees with the parser about %j", (key) => {
+    const parsed = parseLogQuery(`${key}:x`);
+    expect(parsed.ok).toBe(true);
+    const first = parsed.ok ? parsed.clauses[0] : undefined;
+    expect(first?.field === key).toBe(isQueryableKey(key));
+  });
+});
+
+describe("parseLogQuery on a hostile key", () => {
+  // CodeQL js/polynomial-redos: a key scanned by regex is "strings starting
+  // with '@' and many repetitions of '@'". An index scan has no such shape.
+  it("reads 100,000 '@' with no colon as one free-text clause", () => {
+    const parsed = parseLogQuery("@".repeat(100_000));
+    expect(parsed.ok && parsed.clauses.length).toBe(1);
+    const clause = parsed.ok ? parsed.clauses[0] : undefined;
+    expect(clause?.field).toBeUndefined();
+    expect(clause?.match).toBe("text");
+    expect(clause?.value.length).toBe(100_000);
+  });
+
+  it("reads 100,000 '@' followed by a colon as one field clause", () => {
+    const parsed = parseLogQuery("@".repeat(100_000) + ":x");
+    expect(parsed.ok && parsed.clauses.length).toBe(1);
+    const clause = parsed.ok ? parsed.clauses[0] : undefined;
+    expect(clause?.field?.length).toBe(100_000);
+    expect(clause?.value).toBe("x");
+  });
 });
 
 describe("toggleClause", () => {
