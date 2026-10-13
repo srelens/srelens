@@ -1,7 +1,7 @@
 import { parseExtensionRoute, type ClusterContext } from "@srelens/core";
 import type { TableSort } from "@srelens/ui-kit";
-import { describe, type TabKind } from "./routes";
-import { parseEditRoute, parseNewRoute } from "./detailRoute";
+import { describe, isClusterScopedRoute, type TabKind } from "./routes";
+import { parseDetailRoute, parseEditRoute, parseNewRoute } from "./detailRoute";
 
 export interface Tab {
   id: string;
@@ -22,13 +22,48 @@ export interface Tab {
   /**
    * The namespace selection this tab is narrowed to, per cluster, keyed by
    * `ClusterContext.stableId`. On the tab, not the cluster: narrowing one tab
-   * must never narrow another tab looking at the same cluster. Per cluster
-   * within the tab because a tab follows the rail — the same tab shows
-   * whichever cluster is active, and one cluster's namespaces mean nothing on
-   * another. An empty array is an explicit "all namespaces"; a cluster with no
-   * entry follows the default-namespace preference.
+   * must never narrow another tab looking at the same cluster. Keyed by
+   * cluster because a tab used to follow the rail and show whichever cluster
+   * was active. A tab now belongs to the cluster it was opened on (#908, see
+   * {@link ClusterStrip}), so it normally holds one entry; documents saved
+   * before that hold several, and they are harmless. An empty array is an
+   * explicit "all namespaces"; a cluster with no entry follows the
+   * default-namespace preference.
    */
   namespaces?: Record<string, string[]>;
+  /**
+   * When the tab was closed, on a tab in a recently closed list only. It is
+   * what orders that list when a cluster's own closed tabs are brought back
+   * beside the app-wide ones that stayed (#908): without it one kind had to
+   * go first, and the cap then dropped the other however recent it was.
+   */
+  closedAt?: number;
+}
+
+/**
+ * One cluster's tabs while another cluster is in focus (#908).
+ *
+ * A workspace used to have one strip that followed the rail: every tab showed
+ * whichever cluster was in focus, so Pods, ConfigMaps and Services opened
+ * while working on one cluster were still there, relabelled, on the next —
+ * where nobody had opened them. Each cluster now keeps its own. The strip on
+ * screen (`Workspace.tabs`) is the one for the cluster in focus, and the rest
+ * wait here, keyed by `ClusterContext.stableId`, until their cluster is in
+ * focus again. See {@link focusStrip}.
+ */
+export interface ClusterStrip {
+  /** The cluster's own tabs, in strip order. */
+  tabs: Tab[];
+  /**
+   * The id of every tab that was in the strip, in order — the app-wide ones
+   * too, which stay on screen rather than being put away. It is what lets the
+   * strip come back in the order it was left in, instead of with every
+   * app-wide tab moved to one end.
+   */
+  order: string[];
+  activeId: string;
+  /** The cluster's own recently closed tabs, most recent first. */
+  closed: Tab[];
 }
 
 export interface Workspace {
@@ -47,10 +82,16 @@ export interface Workspace {
   pausedClusters?: string[];
   /** The cluster the sidebar and status bar are about. A `stableId` in `clusters`. */
   activeCluster?: string;
+  /**
+   * The strip on screen: the tabs of the cluster in focus, with the app-wide
+   * tabs and those that name a cluster of their own.
+   */
   tabs: Tab[];
   activeId: string;
   /** Recently closed, most recent first, for reopen-closed. */
   closed: Tab[];
+  /** The tabs of the clusters that are not in focus, by `stableId`. */
+  shelved?: Record<string, ClusterStrip>;
 }
 
 export interface TabsState {
@@ -130,6 +171,179 @@ function homeTab(): Tab {
 }
 
 /**
+ * Whether a tab belongs to the cluster in focus, and so is put away when
+ * another cluster takes it.
+ *
+ * Not an app-wide tab: Home, Settings and Connections are the same screen
+ * whichever cluster is in focus, and stay where they are. And not a tab whose
+ * route names a cluster of its own — the editor, "New resource", and a detail
+ * tab (#834) — for two reasons. It already shows that cluster whatever the
+ * rail says (see "The route is the identity" in `AGENTS.md`), under that
+ * cluster's name, so it is never the mislabelled tab #908 is about; a detail
+ * tab is pinned precisely so one cluster's object can stay open beside
+ * another's. And putting a tab away unmounts its screen, which for an editor
+ * is somebody's unsaved changes.
+ */
+export function followsFocus(tab: Tab): boolean {
+  if (parseEditRoute(tab.route)?.cluster || parseNewRoute(tab.route)?.cluster) return false;
+  if (parseDetailRoute(tab.route)?.cluster) return false;
+  return isClusterScopedRoute(tab.route);
+}
+
+/**
+ * Move a workspace's focus to cluster `to` (`undefined` for none): put the
+ * outgoing cluster's tabs away, and bring back the ones `to` last had.
+ *
+ * - **Outgoing.** Its tabs, the order of the whole strip, the active tab and
+ *   its own recently closed tabs are shelved under its id.
+ * - **Incoming.** Its shelved tabs come back in the order they were left in,
+ *   around the app-wide tabs that never went away, with the tab that was
+ *   active there active again. Relabelled for `clusterName`, because a context
+ *   can be renamed while its tabs are away.
+ * - **Nothing remembered.** A cluster seen for the first time gets the
+ *   app-wide tabs and nothing else — not a copy of another cluster's tabs.
+ *   Opening its overview is the caller's to do, and only a caller acting on
+ *   the reader's own gesture does ({@link withOverview}): a listing that
+ *   moves the focus because a cluster vanished must not throw the reader from
+ *   the screen they are on.
+ * - **No cluster was in focus.** Cluster tabs open with none in focus were
+ *   showing nothing; they become the incoming cluster's rather than being
+ *   lost, since there is no cluster to shelve them under.
+ *
+ * The same workspace back when the focus does not move, so a caller can
+ * decide by identity whether anything changed.
+ */
+export function focusStrip(w: Workspace, to: string | undefined, clusterName?: string): Workspace {
+  const from = w.activeCluster;
+  if (from === to) return w;
+
+  const shelved = { ...w.shelved };
+  const staying = from === undefined ? w.tabs : w.tabs.filter((t) => !followsFocus(t));
+  // The recently closed list is divided the same way: an app-wide tab that
+  // was closed can be brought back whichever cluster is in focus.
+  const closedStaying = from === undefined ? w.closed : w.closed.filter((t) => !followsFocus(t));
+  if (from !== undefined) {
+    const mine = w.tabs.filter(followsFocus);
+    const closed = w.closed.filter(followsFocus);
+    if (mine.length > 0 || closed.length > 0) {
+      shelved[from] = { tabs: mine, order: w.tabs.map((t) => t.id), activeId: w.activeId, closed };
+    } else {
+      delete shelved[from];
+    }
+  }
+
+  const incoming = to === undefined ? undefined : shelved[to];
+  if (to !== undefined) delete shelved[to];
+
+  let tabs = staying;
+  if (incoming) {
+    const back = new Map(incoming.tabs.map((t) => [t.id, relabel(t, clusterName)]));
+    const here = new Map(staying.map((t) => [t.id, t]));
+    const placed = new Set<string>();
+    tabs = [];
+    for (const id of incoming.order) {
+      const tab = back.get(id) ?? here.get(id);
+      if (!tab || placed.has(id)) continue;
+      placed.add(id);
+      tabs.push(tab);
+    }
+    // Opened since: app-wide tabs this cluster's strip never saw, and any of
+    // its own the saved order did not name.
+    for (const tab of [...staying, ...back.values()]) if (!placed.has(tab.id)) tabs.push(tab);
+  } else if (from === undefined && clusterName) {
+    const relabelled = tabs.map((t) => (followsFocus(t) ? relabel(t, clusterName) : t));
+    if (relabelled.some((t, i) => t !== tabs[i])) tabs = relabelled;
+  }
+
+  let activeId = incoming && tabs.some((t) => t.id === incoming.activeId) ? incoming.activeId : w.activeId;
+  if (tabs.length === 0) tabs = [homeTab()];
+  if (!tabs.some((t) => t.id === activeId)) activeId = tabs[0].id;
+
+  const next: Workspace = {
+    ...w,
+    tabs,
+    activeId,
+    closed: incoming?.closed.length ? mostRecentlyClosed(incoming.closed, closedStaying) : closedStaying,
+  };
+  if (to === undefined) delete next.activeCluster;
+  else next.activeCluster = to;
+  if (Object.keys(shelved).length > 0) next.shelved = shelved;
+  else delete next.shelved;
+  return next;
+}
+
+/**
+ * Two recently closed lists as one, most recent first.
+ *
+ * By when each tab was closed, so that the next close — which is what applies
+ * the cap — drops the oldest of either list and never a tab closed a moment
+ * ago because of which list it was in. A tab closed before that was recorded
+ * counts as oldest and keeps its place among its own: the sort is stable, and
+ * each list is already most recent first.
+ *
+ * **Not capped here.** Each list was capped when it was written, and bringing
+ * a cluster back must not cost it a closed tab: Home offers every cluster's,
+ * and reopens one by focusing its cluster and then asking for it by id. A cap
+ * applied in between dropped the very tab the reader had just picked whenever
+ * the shared list was the newer and full.
+ */
+function mostRecentlyClosed(own: Tab[], shared: Tab[]): Tab[] {
+  return [...own, ...shared].sort((a, b) => (b.closedAt ?? 0) - (a.closedAt ?? 0));
+}
+
+/**
+ * The workspace with its cluster's overview open and active, if the strip has
+ * nothing of that cluster's — which is what a cluster looked at for the first
+ * time has. The same workspace back otherwise.
+ */
+export function withOverview(w: Workspace, clusterName?: string): Workspace {
+  if (w.activeCluster === undefined || w.tabs.some(followsFocus)) return w;
+  const overview = makeTab("/overview", { clusterName });
+  return { ...w, tabs: [...w.tabs, overview], activeId: overview.id };
+}
+
+/** A workspace's shelved strips, less those of clusters it no longer has. */
+function shelvedFor(w: Workspace, clusters: readonly string[]): Workspace {
+  if (!w.shelved) return w;
+  const kept = Object.entries(w.shelved).filter(([id]) => clusters.includes(id));
+  if (kept.length === Object.keys(w.shelved).length) return w;
+  const next = { ...w };
+  if (kept.length > 0) next.shelved = Object.fromEntries(kept);
+  else delete next.shelved;
+  return next;
+}
+
+/**
+ * Give a workspace a new cluster list, moving the focus if the cluster that
+ * had it is gone.
+ *
+ * A cluster that is gone takes its tabs with it — the ones on screen if it
+ * was in focus, the shelved ones otherwise. They were about that cluster and
+ * no other, and leaving them up would show the next cluster's objects in
+ * tabs nobody opened there, which is what #908 is about.
+ */
+export function withClusters(w: Workspace, clusters: string[], nameOf?: (id: string) => string | undefined): Workspace {
+  const active = w.activeCluster && clusters.includes(w.activeCluster) ? w.activeCluster : clusters[0];
+  let next = w;
+  if (active !== w.activeCluster) {
+    const gone = w.activeCluster;
+    // Emptied first, so its tabs are dropped rather than shelved under an id
+    // the workspace is about to forget.
+    const emptied =
+      gone === undefined
+        ? w
+        : { ...w, tabs: w.tabs.filter((t) => !followsFocus(t)), closed: w.closed.filter((t) => !followsFocus(t)) };
+    next = focusStrip(emptied, active, active === undefined ? undefined : nameOf?.(active));
+  }
+  next = shelvedFor(next, clusters);
+  if (next.tabs.length === 0) {
+    const home = homeTab();
+    next = { ...next, tabs: [home], activeId: home.id };
+  }
+  return next;
+}
+
+/**
  * What a first launch gets: one workspace holding every cluster the user has,
  * so the rail is full rather than empty, and one pinned home tab so the strip
  * is never blank.
@@ -170,24 +384,18 @@ export function reconcile(state: TabsState, contexts: ClusterContext[]): TabsSta
 
     // The active cluster follows its list: it survives if it is still there,
     // and otherwise the first that remains takes over — including for a
-    // workspace stored before the field existed, which has none at all.
-    const active = w.activeCluster && clusters.includes(w.activeCluster) ? w.activeCluster : clusters[0];
-    const activeChanged = active !== w.activeCluster;
-    if (activeChanged) {
-      next = { ...next };
-      if (active) next.activeCluster = active;
-      else delete next.activeCluster;
-    }
+    // workspace stored before the field existed, which has none at all. Its
+    // own tabs come with it: see `withClusters`.
+    next = withClusters(next, clusters, (id) => contextNames.get(id));
+    const active = next.activeCluster;
 
     let tabs = next.tabs;
     if (tabs.length === 0) tabs = [homeTab()];
     if (active) {
       const clusterName = contextNames.get(active);
       if (clusterName) {
-        const relabelled = tabs.map((tab) =>
-          parseEditRoute(tab.route)?.cluster || parseNewRoute(tab.route)?.cluster
-            ? tab
-            : relabel(tab, clusterName));
+        // Only the tabs that are this cluster's: an editor names its own.
+        const relabelled = tabs.map((tab) => (followsFocus(tab) ? relabel(tab, clusterName) : tab));
         if (relabelled.some((tab, index) => tab !== tabs[index])) tabs = relabelled;
       }
     }
@@ -196,6 +404,28 @@ export function reconcile(state: TabsState, contexts: ClusterContext[]): TabsSta
     if (!tabs.some((t) => t.id === next.activeId)) next = { ...next, activeId: tabs[0].id };
 
     if (next.closed.length > CLOSED_CAP) next = { ...next, closed: next.closed.slice(0, CLOSED_CAP) };
+    // The strips put away are kept true as well: capped, and labelled for
+    // their cluster's name as it is now. A context renamed while its tabs are
+    // away would otherwise come back under the old name whenever the focus
+    // reaches it without a name in hand — a cluster removed from the sidebar,
+    // say — and the window finds a tab's context by that label.
+    if (next.shelved) {
+      let shelved = next.shelved;
+      for (const [id, strip] of Object.entries(next.shelved)) {
+        const name = contextNames.get(id);
+        const label = (list: Tab[]) => {
+          const out = list.map((tab) => relabel(tab, name));
+          return out.some((tab, index) => tab !== list[index]) ? out : list;
+        };
+        const stripTabs = label(strip.tabs);
+        let stripClosed = label(strip.closed);
+        if (stripClosed.length > CLOSED_CAP) stripClosed = stripClosed.slice(0, CLOSED_CAP);
+        if (stripTabs !== strip.tabs || stripClosed !== strip.closed) {
+          shelved = { ...shelved, [id]: { ...strip, tabs: stripTabs, closed: stripClosed } };
+        }
+      }
+      if (shelved !== next.shelved) next = { ...next, shelved };
+    }
 
     if (next !== w) changed = true;
     return next;

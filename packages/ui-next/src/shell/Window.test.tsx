@@ -864,7 +864,9 @@ describe("Window — the console dock's scope", () => {
     await bootedWithScope();
     expect(screen.getByTestId("scope-probe").textContent).toBe("prod-eu");
     act(() => store.setActiveCluster("stage", "stage-eu"));
-    await waitFor(() => expect(screen.getByTestId("scope-probe").textContent).toBe("stage-eu"));
+    // A cluster looked at for the first time opens on its overview (#908),
+    // so the dock is about that cluster's overview, not only the cluster.
+    await waitFor(() => expect(screen.getByTestId("scope-probe").textContent).toBe("stage-eu / cluster overview"));
   });
 });
 

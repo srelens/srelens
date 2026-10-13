@@ -2,6 +2,7 @@ import type { ClusterContext } from "@srelens/core";
 import { getContexts } from "./clusters";
 import { currentWorkspace, openTab, setActiveCluster, setClusterPaused, setWorkspaceClusters } from "./tabsStore";
 import { invalidateProbe, probeCluster } from "./probe";
+import { followsFocus } from "./tabs";
 
 /** Pause one workspace's reading and invalidate any observation already out. */
 export function pauseCluster(workspaceId: string, clusterId: string): void {
@@ -41,7 +42,18 @@ export function reconnectCluster(context: ClusterContext): void {
  * acting on a stale copy of the cluster list.
  */
 export function openCluster(context: ClusterContext): void {
-  openOnCluster(context, "/overview");
+  const switching = currentWorkspace().activeCluster !== context.stableId;
+  focusCluster(context);
+  // A cluster keeps its own tabs (#908), and switching to it brings them back
+  // with the tab that was active there. Opening the overview on top of that
+  // would move the reader off the tab they left. It still opens when there is
+  // nothing of the cluster's to land on — the active tab is an app-wide one —
+  // and when the cluster was already in focus, where this is "show me its
+  // overview" and nothing else.
+  const workspace = currentWorkspace();
+  const active = workspace.tabs.find((tab) => tab.id === workspace.activeId);
+  if (switching && active && followsFocus(active)) return;
+  openTab("/overview", { clusterName: context.name });
 }
 
 /**
@@ -87,9 +99,9 @@ export function focusCluster(context: ClusterContext): void {
   // By NAME as well as by stableId, and the name is not spare: the workspace
   // stores the id (#265), while the strip's labels — and core's `list*` and
   // `watchResource` — are all in terms of the context name. `setActiveCluster`
-  // relabels every cluster-scoped tab with it, because the screens behind those
-  // tabs have all just started rendering this cluster; `openTab` relabels the
-  // tab it may be reusing. Both live in the store, at the point each decision
-  // is made, rather than here — see their own notes.
+  // labels the tabs it brings back for this cluster with it, since a context
+  // can be renamed while its tabs are away; `openTab` relabels the tab it may
+  // be reusing. Both live in the store, at the point each decision is made,
+  // rather than here — see their own notes.
   setActiveCluster(id, context.name);
 }

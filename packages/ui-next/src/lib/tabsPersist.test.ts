@@ -178,6 +178,76 @@ describe("parseStoredState", () => {
     expect(parseStoredState(JSON.stringify({ version: 1, ...valid() }))?.workspaces[0]).not.toHaveProperty("color");
   });
 
+  /** The tabs of the clusters not in focus (#908). */
+  describe("the strips put away", () => {
+    const shelving = (): TabsState => {
+      const s = defaultState([ctx("a"), ctx("b")]);
+      const w = s.workspaces[0];
+      const services = makeTab("/k/services", { clusterName: "b" });
+      services.view = { filter: "api" };
+      services.namespaces = { b: ["payments"] };
+      w.shelved = {
+        b: { tabs: [services], order: [w.tabs[0].id, services.id], activeId: services.id, closed: [makeTab("/k/pods", { clusterName: "b" })] },
+      };
+      return s;
+    };
+
+    it("keeps when a closed tab was closed, and drops a time that is not a number", () => {
+      const s = shelving();
+      s.workspaces[0].shelved!.b.closed[0].closedAt = 1_700_000_000_000;
+      const doc = JSON.parse(JSON.stringify({ version: 1, ...s }));
+      expect(parseStoredState(JSON.stringify(doc))!.workspaces[0].shelved!.b.closed[0].closedAt).toBe(1_700_000_000_000);
+      doc.workspaces[0].shelved.b.closed[0].closedAt = "yesterday";
+      expect(parseStoredState(JSON.stringify(doc))!.workspaces[0].shelved!.b.closed[0].closedAt).toBeUndefined();
+    });
+
+    it("round-trips them: tabs, order, active tab and recently closed", () => {
+      const s = shelving();
+      expect(parseStoredState(JSON.stringify({ version: 1, ...s }))).toEqual(s);
+    });
+
+    it("accepts a document written before clusters had tabs of their own", () => {
+      const s = defaultState([ctx("a"), ctx("b")]);
+      expect(parseStoredState(JSON.stringify({ version: 1, ...s }))?.workspaces[0].shelved).toBeUndefined();
+    });
+
+    it("drops a strip for a cluster the workspace does not have, and one for the cluster in focus", () => {
+      const s = shelving();
+      const strip = s.workspaces[0].shelved!.b;
+      s.workspaces[0].shelved = { gone: strip, a: strip, b: strip };
+      expect(Object.keys(parseStoredState(JSON.stringify({ version: 1, ...s }))!.workspaces[0].shelved!)).toEqual(["b"]);
+    });
+
+    it("loses one cluster's unreadable strip, not the workspace or the other clusters' tabs", () => {
+      const s = shelving();
+      s.workspaces[0].clusters.push("c");
+      const doc = JSON.parse(JSON.stringify({ version: 1, ...s }));
+      doc.workspaces[0].shelved.c = "not a strip";
+      const out = parseStoredState(JSON.stringify(doc))!.workspaces[0];
+      expect(Object.keys(out.shelved!)).toEqual(["b"]);
+      expect(out.tabs).toHaveLength(1);
+    });
+
+    it("drops a malformed tab from a strip, and reads a strip with no order or active tab", () => {
+      const s = shelving();
+      const doc = JSON.parse(JSON.stringify({ version: 1, ...s }));
+      const strip = doc.workspaces[0].shelved.b;
+      strip.tabs.push({ id: 3 });
+      delete strip.order;
+      delete strip.activeId;
+      const out = parseStoredState(JSON.stringify(doc))!.workspaces[0].shelved!.b;
+      expect(out.tabs).toHaveLength(1);
+      expect(out.order).toEqual([out.tabs[0].id]);
+      expect(out.activeId).toBe(out.tabs[0].id);
+    });
+
+    it("does not keep a strip with nothing in it", () => {
+      const s = shelving();
+      s.workspaces[0].shelved = { b: { tabs: [], order: [], activeId: "", closed: [] } };
+      expect(parseStoredState(JSON.stringify({ version: 1, ...s }))?.workspaces[0].shelved).toBeUndefined();
+    });
+  });
+
   it("restores pauses only for clusters that remain in the workspace", () => {
     const s = defaultState([ctx("a"), ctx("b")]);
     s.workspaces[0].pausedClusters = ["a"];
