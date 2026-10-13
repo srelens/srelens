@@ -328,72 +328,141 @@ pub fn analyze_pod_readiness(
     }
 }
 
-/// Helper selecting candidate container for previous logs.
-/// Ranks currently failing containers ahead of historical restarts.
-pub fn select_target_container<'a>(pod: &'a Pod, explicit: Option<&'a str>) -> Option<String> {
+/// Returns ordered candidate container names to check for crash logs.
+/// Ranks failing containers with execution/crash history first, then other failing containers,
+/// unready containers, containers with restart history, and finally defaults to the first spec container.
+pub fn candidate_containers_for_logs(pod: &Pod, explicit: Option<&str>) -> Vec<String> {
     if let Some(name) = explicit {
-        return Some(name.to_string());
+        return vec![name.to_string()];
     }
 
     let status = pod.status.as_ref();
-    let spec = pod.spec.as_ref()?;
+    let spec = pod.spec.as_ref();
+    let mut candidates = Vec::new();
+    let mut seen = BTreeSet::new();
 
-    // 1. Check for currently failing app containers (waiting with error or terminated non-zero)
+    let mut add = |name: &str| {
+        if seen.insert(name.to_string()) {
+            candidates.push(name.to_string());
+        }
+    };
+
+    // 1. App containers with execution/crash history (CrashLoopBackOff, terminated non-zero, or Error with restarts)
     if let Some(cs) = status.and_then(|s| s.container_statuses.as_ref()) {
-        if let Some(found) = cs.iter().find(|c| {
-            c.state
+        for c in cs {
+            let has_crash_history = c
+                .state
                 .as_ref()
                 .and_then(|st| st.waiting.as_ref())
                 .is_some_and(|w| {
                     w.reason.as_deref() == Some("CrashLoopBackOff")
-                        || w.reason.as_deref() == Some("Error")
-                        || w.reason.as_deref() == Some("ImagePullBackOff")
-                        || w.reason.as_deref() == Some("ErrImagePull")
+                        || (w.reason.as_deref() == Some("Error") && c.restart_count > 0)
                 })
                 || c.state
                     .as_ref()
                     .and_then(|st| st.terminated.as_ref())
                     .is_some_and(|t| t.exit_code != 0)
-        }) {
-            return Some(found.name.clone());
+                || c.last_state
+                    .as_ref()
+                    .and_then(|st| st.terminated.as_ref())
+                    .is_some_and(|t| t.exit_code != 0);
+            if has_crash_history {
+                add(&c.name);
+            }
         }
     }
 
-    // 2. Check for failing init containers
+    // 2. Init containers with execution/crash history
     if let Some(ics) = status.and_then(|s| s.init_container_statuses.as_ref()) {
-        if let Some(found) = ics.iter().find(|c| {
-            c.state
+        for c in ics {
+            let has_crash_history = c
+                .state
                 .as_ref()
                 .and_then(|st| st.waiting.as_ref())
                 .is_some_and(|w| {
                     w.reason.as_deref() == Some("CrashLoopBackOff")
-                        || w.reason.as_deref() == Some("Error")
+                        || (w.reason.as_deref() == Some("Error") && c.restart_count > 0)
                 })
                 || c.state
                     .as_ref()
                     .and_then(|st| st.terminated.as_ref())
                     .is_some_and(|t| t.exit_code != 0)
-        }) {
-            return Some(found.name.clone());
+                || c.last_state
+                    .as_ref()
+                    .and_then(|st| st.terminated.as_ref())
+                    .is_some_and(|t| t.exit_code != 0);
+            if has_crash_history {
+                add(&c.name);
+            }
         }
     }
 
-    // 3. Check for unready app containers
+    // 3. Other waiting failing containers (ImagePullBackOff, ErrImagePull, etc.)
     if let Some(cs) = status.and_then(|s| s.container_statuses.as_ref()) {
-        if let Some(found) = cs.iter().find(|c| !c.ready) {
-            return Some(found.name.clone());
+        for c in cs {
+            if c.state
+                .as_ref()
+                .and_then(|st| st.waiting.as_ref())
+                .is_some_and(|w| {
+                    w.reason.as_deref() == Some("ImagePullBackOff")
+                        || w.reason.as_deref() == Some("ErrImagePull")
+                        || w.reason.as_deref() == Some("Error")
+                })
+            {
+                add(&c.name);
+            }
+        }
+    }
+    if let Some(ics) = status.and_then(|s| s.init_container_statuses.as_ref()) {
+        for c in ics {
+            if c.state
+                .as_ref()
+                .and_then(|st| st.waiting.as_ref())
+                .is_some_and(|w| {
+                    w.reason.as_deref() == Some("ImagePullBackOff")
+                        || w.reason.as_deref() == Some("ErrImagePull")
+                        || w.reason.as_deref() == Some("Error")
+                })
+            {
+                add(&c.name);
+            }
         }
     }
 
-    // 4. Check for containers with restart history
+    // 4. Unready app containers
     if let Some(cs) = status.and_then(|s| s.container_statuses.as_ref()) {
-        if let Some(found) = cs.iter().find(|c| c.restart_count > 0) {
-            return Some(found.name.clone());
+        for c in cs {
+            if !c.ready {
+                add(&c.name);
+            }
         }
     }
 
-    // 5. Default to the first container in spec
-    spec.containers.first().map(|c| c.name.clone())
+    // 5. Containers with restart history
+    if let Some(cs) = status.and_then(|s| s.container_statuses.as_ref()) {
+        for c in cs {
+            if c.restart_count > 0 {
+                add(&c.name);
+            }
+        }
+    }
+
+    // 6. Default to first container in spec
+    if let Some(s) = spec {
+        if let Some(first) = s.containers.first() {
+            add(&first.name);
+        }
+    }
+
+    candidates
+}
+
+/// Helper selecting candidate container for previous logs.
+/// Ranks currently failing containers ahead of historical restarts.
+pub fn select_target_container(pod: &Pod, explicit: Option<&str>) -> Option<String> {
+    candidate_containers_for_logs(pod, explicit)
+        .into_iter()
+        .next()
 }
 
 /// `k8s.whyNotReady` capability definition.
@@ -454,15 +523,18 @@ pub fn why_not_ready_capability(cache: Arc<ClientCache>) -> Capability {
                     })
                     .collect();
 
-                // Fetch previous or recent logs tail
-                let target_container =
-                    select_target_container(&pod, input.container_name.as_deref());
+                // Fetch previous or recent logs tail across candidate containers
+                let candidate_containers =
+                    candidate_containers_for_logs(&pod, input.container_name.as_deref());
                 let tail_lines = input
                     .tail_lines
                     .unwrap_or(DEFAULT_TAIL_LINES)
                     .clamp(1, MAX_TAIL_LINES);
 
-                let (previous_logs_tail, current_logs_tail) = if let Some(c_name) = target_container {
+                let mut previous_logs_tail = None;
+                let mut current_logs_tail = None;
+
+                for c_name in candidate_containers {
                     let log_params_prev = LogParams {
                         container: Some(c_name.clone()),
                         tail_lines: Some(tail_lines),
@@ -478,7 +550,8 @@ pub fn why_not_ready_capability(cache: Arc<ClientCache>) -> Capability {
 
                     match prev_res {
                         Ok(Ok(text)) if !text.is_empty() => {
-                            (Some(cap_log_tail(&text, MAX_LOG_TAIL_BYTES)), None)
+                            previous_logs_tail = Some(cap_log_tail(&text, MAX_LOG_TAIL_BYTES));
+                            break;
                         }
                         _ => {
                             // If previous logs not found, try current logs
@@ -498,12 +571,14 @@ pub fn why_not_ready_capability(cache: Arc<ClientCache>) -> Capability {
                             .and_then(|r| r.ok())
                             .filter(|text| !text.is_empty())
                             .map(|raw| cap_log_tail(&raw, MAX_LOG_TAIL_BYTES));
-                            (None, curr)
+
+                            if curr.is_some() {
+                                current_logs_tail = curr;
+                                break;
+                            }
                         }
                     }
-                } else {
-                    (None, None)
-                };
+                }
 
                 Ok(analyze_pod_readiness(&pod, &events, previous_logs_tail, current_logs_tail))
             }
@@ -809,5 +884,68 @@ mod tests {
         let capped = cap_log_tail(long, 10);
         assert!(capped.len() <= 10);
         assert_eq!(capped, "cccc\ndddd\n");
+    }
+
+    #[test]
+    fn ranks_crashing_containers_ahead_of_image_pull_backoff() {
+        let pod = Pod {
+            metadata: ObjectMeta {
+                name: Some("test-pod".to_string()),
+                namespace: Some("default".to_string()),
+                ..Default::default()
+            },
+            spec: Some(PodSpec {
+                containers: vec![
+                    Container {
+                        name: "pull-fail".to_string(),
+                        ..Default::default()
+                    },
+                    Container {
+                        name: "crash-loop".to_string(),
+                        ..Default::default()
+                    },
+                ],
+                ..Default::default()
+            }),
+            status: Some(PodStatus {
+                phase: Some("Running".to_string()),
+                container_statuses: Some(vec![
+                    ContainerStatus {
+                        name: "pull-fail".to_string(),
+                        ready: false,
+                        restart_count: 0,
+                        state: Some(ContainerState {
+                            waiting: Some(ContainerStateWaiting {
+                                reason: Some("ImagePullBackOff".to_string()),
+                                ..Default::default()
+                            }),
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    },
+                    ContainerStatus {
+                        name: "crash-loop".to_string(),
+                        ready: false,
+                        restart_count: 3,
+                        state: Some(ContainerState {
+                            waiting: Some(ContainerStateWaiting {
+                                reason: Some("CrashLoopBackOff".to_string()),
+                                ..Default::default()
+                            }),
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    },
+                ]),
+                ..Default::default()
+            }),
+        };
+
+        let candidates = candidate_containers_for_logs(&pod, None);
+        assert_eq!(
+            candidates,
+            vec!["crash-loop".to_string(), "pull-fail".to_string()],
+            "Container with crash history must be ranked ahead of ImagePullBackOff container"
+        );
     }
 }
