@@ -38,6 +38,10 @@ use crate::RegistryFactory;
 /// Idle eviction threshold for a user's environment.
 pub const USER_ENV_IDLE_SECS: u64 = 1800;
 
+/// Numbers each environment's log spool directory (#914), so an old environment's
+/// shutdown never removes a rebuilt one's spools under the same user directory.
+static NEXT_SPOOL_ROOT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 pub struct UserEnv {
     pub registry: Arc<Registry>,
     pub cache: Arc<ClientCache>,
@@ -69,6 +73,8 @@ pub struct UserEnvs {
     /// Public base URL of this server, used to build the cluster-OIDC redirect
     /// URI (`<public_url>/auth/cluster/callback`) for the token refresh client.
     public_url: String,
+    /// The ceiling on one log stream's history, in megabytes; 0 is none (#914).
+    log_spool_mb: u64,
     map: Mutex<HashMap<i64, Arc<UserEnv>>>,
     // Serializes concurrent first-time builds per user: two racing misses on
     // the same user must not both `remove_dir_all` + materialize the runtime
@@ -135,9 +141,16 @@ impl UserEnvs {
             inventory_locks: Mutex::new(HashMap::new()),
             data_dir,
             public_url,
+            log_spool_mb: crate::config::DEFAULT_LOG_SPOOL_MB,
             map: Mutex::new(HashMap::new()),
             build_locks: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// Cap each log stream's history at `mb` megabytes; 0 turns it off.
+    pub fn with_log_spool_mb(mut self, mb: u64) -> Self {
+        self.log_spool_mb = mb;
+        self
     }
 
     /// These environments with the shared catalog, and every user's app signatures,
@@ -265,7 +278,18 @@ impl UserEnvs {
         )
         .governed_by(self.policy.clone());
         let registry = Arc::new((self.factory)(cache.clone(), paths.clone(), apps));
-        let streams = Arc::new(crate::streams::UserStreams::new(cache.clone()));
+        // Under the runtime dir, so it goes with the environment and is wiped at start.
+        // One directory per environment built: after a kubeconfig change the old
+        // environment's shutdown removes its own spools, never the rebuilt one's.
+        let spools = srelens_streams::log_spool::SpoolDirs::fixed(
+            dir.join("logs").join(
+                NEXT_SPOOL_ROOT
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                    .to_string(),
+            ),
+            self.log_spool_mb.saturating_mul(1024 * 1024),
+        );
+        let streams = Arc::new(crate::streams::UserStreams::new(cache.clone(), spools));
         let env = Arc::new(UserEnv {
             registry,
             cache,
@@ -749,6 +773,73 @@ mod tests {
         );
         let bob_env_again = envs.env_for(&db, &k, bob.id).await.unwrap();
         assert!(Arc::ptr_eq(&bob_env, &bob_env_again));
+
+        let _ = std::fs::remove_dir_all(&data_dir);
+    }
+
+    /// Start a spooled log stream on `env` and wait for its first line (no cluster
+    /// answers, so that is the `[error: …]` line), so its history is on disk.
+    async fn start_spooled_log_stream(env: &UserEnv, channel: &str) {
+        env.streams
+            .logs
+            .start(
+                Arc::new(TestSink::default()),
+                "nope".into(),
+                "ns".into(),
+                vec![srelens_streams::logs::LogTarget {
+                    pod: "pod-a".into(),
+                    container: None,
+                    label: String::new(),
+                }],
+                channel.into(),
+                None,
+                None,
+                None,
+                Some(64 << 20),
+            )
+            .await
+            .unwrap();
+        for _ in 0..300 {
+            let page = env.streams.logs.read(channel, u64::MAX, 1).await.unwrap();
+            if !page.lines.is_empty() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("{channel} never wrote a line");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_rebuilt_environments_log_spools_survive_the_old_ones_drop() {
+        let db = Db::open_in_memory().await.unwrap();
+        let k = key();
+        let data_dir = test_data_dir();
+        let user = db.upsert_user("i", "u", "", "", 1).await.unwrap();
+        db.put_kubeconfig(user.id, "kc", &k, "apiVersion: v1", 1)
+            .await
+            .unwrap();
+        let envs = UserEnvs::new(
+            factory(),
+            data_dir.clone(),
+            "http://127.0.0.1:8080".into(),
+            Default::default(),
+        );
+
+        // Both environments have spooled, so each has made a spool root of its own.
+        let old = envs.env_for(&db, &k, user.id).await.unwrap();
+        start_spooled_log_stream(&old, "logs:1").await;
+        envs.invalidate(user.id); // the kubeconfigs changed
+        let new = envs.env_for(&db, &k, user.id).await.unwrap();
+        start_spooled_log_stream(&new, "logs:1").await;
+
+        // The old environment's last holder lets go: its shutdown removes its
+        // spools, and must not take the rebuilt environment's with them.
+        drop(old);
+        let page = new.streams.logs.read("logs:1", u64::MAX, 10).await;
+        assert!(
+            page.as_ref().is_ok_and(|p| !p.lines.is_empty()),
+            "the rebuilt environment lost its history: {page:?}"
+        );
 
         let _ = std::fs::remove_dir_all(&data_dir);
     }

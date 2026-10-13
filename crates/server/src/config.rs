@@ -32,6 +32,23 @@ pub fn ensure_data_dir(dir: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
+/// How large one log stream's history may grow on the server, in megabytes,
+/// unless `SRELENS_LOG_SPOOL_MB` says otherwise (#914). The per-user runtime
+/// directory it lives in is often tmpfs, which is RAM.
+pub const DEFAULT_LOG_SPOOL_MB: u64 = 256;
+
+/// Read `SRELENS_LOG_SPOOL_MB`. Unset or empty means the default, and 0 turns
+/// spooling off; anything else must be a whole number of megabytes. Pure: the
+/// caller passes the env value in.
+pub fn log_spool_mb(env: Option<&str>) -> Result<u64, String> {
+    match env.map(str::trim) {
+        None | Some("") => Ok(DEFAULT_LOG_SPOOL_MB),
+        Some(value) => value.parse().map_err(|_| {
+            format!("SRELENS_LOG_SPOOL_MB must be a whole number of megabytes, not {value:?}")
+        }),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -63,6 +80,17 @@ mod tests {
             resolve_data_dir(None, None),
             PathBuf::from("./srelens-data")
         );
+    }
+
+    #[test]
+    fn log_spool_size_defaults_parses_and_refuses_junk() {
+        assert_eq!(log_spool_mb(None), Ok(DEFAULT_LOG_SPOOL_MB));
+        assert_eq!(log_spool_mb(Some("")), Ok(DEFAULT_LOG_SPOOL_MB));
+        assert_eq!(log_spool_mb(Some("0")), Ok(0));
+        assert_eq!(log_spool_mb(Some(" 64 ")), Ok(64));
+        assert!(log_spool_mb(Some("lots"))
+            .unwrap_err()
+            .contains("SRELENS_LOG_SPOOL_MB"));
     }
 
     #[test]
