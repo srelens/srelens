@@ -12,7 +12,9 @@ use std::collections::VecDeque;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufRead, BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
+use chrono::{DateTime, Utc};
 use serde::Serialize;
 
 use crate::logs::LogLine;
@@ -264,6 +266,52 @@ impl SpoolSnapshot {
             lines: lines.into(),
         })
     }
+
+    /// Write the history as `<source> | <line>`, the shape the Logs screen's
+    /// own export writes, naming each source through `name_of`. With `since`,
+    /// only lines stamped at or after it: a line with no stamp of its own (an
+    /// `[error: …]` line the host injected) takes the stamp of the line before
+    /// it, and a leading run with no stamp at all is kept. Returns how many
+    /// lines were written.
+    pub fn export(
+        &self,
+        out: &mut dyn Write,
+        since: Option<SystemTime>,
+        name_of: &dyn Fn(&str) -> String,
+    ) -> io::Result<u64> {
+        let cutoff = since.map(DateTime::<Utc>::from);
+        let mut stamp: Option<DateTime<Utc>> = None;
+        let mut written = 0;
+        for segment in &self.segments {
+            let mut reader = match open_at(&segment.path, 0, segment.bytes) {
+                Ok(reader) => reader,
+                // Rotated out since the snapshot: past the cap now, so not history.
+                Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
+                Err(e) => return Err(e),
+            };
+            let mut record = String::new();
+            loop {
+                record.clear();
+                if reader.read_line(&mut record)? == 0 {
+                    break;
+                }
+                let line: LogLine =
+                    serde_json::from_str(record.trim_end()).map_err(io::Error::other)?;
+                if let Some(at) = stamp_of(&line.line) {
+                    stamp = Some(at);
+                }
+                let keep = match (cutoff, stamp) {
+                    (Some(cut), Some(at)) => at >= cut,
+                    _ => true,
+                };
+                if keep {
+                    writeln!(out, "{} | {}", name_of(&line.source), line.line)?;
+                    written += 1;
+                }
+            }
+        }
+        Ok(written)
+    }
 }
 
 /// A reader over `path` from `offset` up to `end`: whole lines only, whatever
@@ -272,6 +320,14 @@ fn open_at(path: &Path, offset: u64, end: u64) -> io::Result<BufReader<io::Take<
     let mut file = File::open(path)?;
     file.seek(SeekFrom::Start(offset))?;
     Ok(BufReader::new(file.take(end - offset)))
+}
+
+/// The RFC 3339 stamp the API server puts before a line when timestamps are on.
+fn stamp_of(text: &str) -> Option<DateTime<Utc>> {
+    let end = text.find(' ').unwrap_or(text.len());
+    DateTime::parse_from_rfc3339(&text[..end])
+        .ok()
+        .map(|at| at.with_timezone(&Utc))
 }
 
 /// Created with `O_EXCL` and its final mode, so an existing path is never
@@ -473,5 +529,55 @@ mod tests {
         let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode(&dir), 0o700);
         assert_eq!(mode(&dir.join(format!("{:020}.jsonl", 1))), 0o600);
+    }
+
+    fn lines_of(spool: &mut LogSpool, lines: &[(&str, &str)]) {
+        for (source, text) in lines {
+            spool
+                .append(&LogLine { source: (*source).into(), line: (*text).into(), truncated: false })
+                .unwrap();
+        }
+    }
+
+    fn named(source: &str) -> String {
+        if source.is_empty() { "web-1".into() } else { source.into() }
+    }
+
+    #[test]
+    fn an_export_writes_source_and_line_naming_an_untagged_source() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut spool = LogSpool::create(tmp.path().join("s"), 64 << 20).unwrap();
+        lines_of(&mut spool, &[
+            ("", "2026-10-13T10:00:00Z boot"),
+            ("web-2/app", "2026-10-13T10:05:00.5Z ready"),
+        ]);
+        let mut out = Vec::new();
+        let n = spool.snapshot().unwrap().export(&mut out, None, &named).unwrap();
+        assert_eq!(n, 2);
+        assert_eq!(
+            String::from_utf8(out).unwrap(),
+            "web-1 | 2026-10-13T10:00:00Z boot\nweb-2/app | 2026-10-13T10:05:00.5Z ready\n"
+        );
+    }
+
+    #[test]
+    fn an_export_since_a_time_keeps_lines_stamped_at_or_after_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut spool = LogSpool::create(tmp.path().join("s"), 64 << 20).unwrap();
+        lines_of(&mut spool, &[
+            ("", "[error: before any stamp]"),           // a leading run: kept
+            ("", "2026-10-13T10:00:00Z old"),            // before the cutoff
+            ("", "[error: after old]"),                  // inherits 10:00: dropped
+            ("", "2026-10-13T12:10:00+02:00 new"),       // 10:10 UTC: kept
+            ("", "[error: after new]"),                  // inherits 10:10: kept
+        ]);
+        let since: std::time::SystemTime =
+            chrono::DateTime::parse_from_rfc3339("2026-10-13T10:05:00Z").unwrap().into();
+        let mut out = Vec::new();
+        spool.snapshot().unwrap().export(&mut out, Some(since), &named).unwrap();
+        assert_eq!(
+            String::from_utf8(out).unwrap(),
+            "web-1 | [error: before any stamp]\nweb-1 | 2026-10-13T12:10:00+02:00 new\nweb-1 | [error: after new]\n"
+        );
     }
 }
