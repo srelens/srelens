@@ -1,9 +1,9 @@
 import { beforeEach, expect, it } from "vitest";
-import { render, screen, within } from "@testing-library/react";
+import { act, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { ClusterContext } from "@srelens/core";
 import { setContexts } from "../../lib/clusters";
-import { loadMarks } from "../../lib/marks";
+import { loadMarks, setMark } from "../../lib/marks";
 import { defaultState } from "../../lib/tabs";
 import { createWorkspace, getState, openTab, setState, switchWorkspace } from "../../lib/tabsStore";
 import { WorkspacesPane } from "./WorkspacesPane";
@@ -95,6 +95,24 @@ it("removes a cluster from a workspace", async () => {
   expect(within(screen.getByRole("list", { name: "Clusters in Team" })).getByText("prod")).toBeTruthy();
   await user.click(screen.getByRole("button", { name: "Remove prod from Team" }));
   expect(stored(team)?.clusters).toEqual([]);
+});
+
+it("names a workspace's clusters by their mark, and follows a mark renamed while it is open", () => {
+  // A mark name that is not the context name, so a label read from the context fails.
+  const mark = (name: string) => ({ name, short: name.slice(0, 2), color: "#123456", mark: "text" as const, withText: true });
+  setMark("prod-id", mark("Production"));
+  setMark("staging-id", mark("Pre-prod"));
+  render(<WorkspacesPane />);
+  const chips = within(screen.getByRole("list", { name: "Clusters in Team" }));
+  expect(chips.getByText("Production")).toBeTruthy();
+  expect(screen.getByRole("button", { name: "Remove Production from Team" })).toBeTruthy();
+  const picker = screen.getByRole("combobox", { name: "Add a cluster to Team" }) as HTMLSelectElement;
+  expect([...picker.options].filter((o) => !o.disabled).map((o) => o.textContent)).toEqual(["Pre-prod", "dev"]);
+  // Renamed with the pane mounted: nothing in the workspace store changes, so only the mark subscription redraws it.
+  act(() => setMark("prod-id", mark("Prod EU")));
+  expect(chips.getByText("Prod EU")).toBeTruthy();
+  expect(chips.queryByText("Production")).toBeNull();
+  expect(screen.getByRole("button", { name: "Remove Prod EU from Team" })).toBeTruthy();
 });
 
 it("deletes a workspace after saying what it holds", async () => {
