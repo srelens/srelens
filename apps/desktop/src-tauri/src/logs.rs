@@ -5,10 +5,16 @@
 //! them through `tauri::test::MockRuntime`, so this surface counts toward
 //! coverage instead of hiding behind the ignore-regex.
 
+use std::fs::File;
+use std::io::BufWriter;
+use std::path::Path;
 use std::sync::Arc;
+use std::time::{Duration, SystemTime};
 
+use srelens_streams::log_spool::SpoolPage;
 use srelens_streams::logs::{LogStreamManager, LogTarget};
-use tauri::{AppHandle, Runtime, State, Window};
+use tauri::{AppHandle, Manager, Runtime, State, Window};
+use tauri_plugin_dialog::DialogExt;
 
 use crate::sink::TauriSink;
 use crate::window_streams::{Stream, WindowStreams};
@@ -19,7 +25,8 @@ use crate::window_streams::{Stream, WindowStreams};
 ///
 /// The stream belongs to the calling window and stops when it closes or
 /// reloads (#735). One whose window reloaded while it was starting is stopped
-/// at once and refused.
+/// at once and refused. `spool_max_bytes` keeps the stream's history on disk
+/// (#914).
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
 pub async fn start_log_stream<R: Runtime>(
@@ -30,6 +37,7 @@ pub async fn start_log_stream<R: Runtime>(
     timestamps: Option<bool>,
     since_seconds: Option<i64>,
     tail_lines: Option<i64>,
+    spool_max_bytes: Option<u64>,
     app: AppHandle<R>,
     window: Window<R>,
     manager: State<'_, LogStreamManager>,
@@ -46,7 +54,7 @@ pub async fn start_log_stream<R: Runtime>(
             timestamps,
             since_seconds,
             tail_lines,
-            None,
+            spool_max_bytes,
         )
         .await?;
     owned.keep(window.label(), epoch, Stream::Log(channel.clone()), || {
@@ -70,6 +78,82 @@ pub async fn stop_log_stream<R: Runtime>(
         owned.disown(window.label(), &stream);
     }
     Ok(())
+}
+
+/// Lines `[before - limit, before)` of a stream's history (#914). Only the
+/// window that opened the stream may read it.
+#[tauri::command]
+pub async fn read_log_spool<R: Runtime>(
+    channel: String,
+    before: u64,
+    limit: usize,
+    window: Window<R>,
+    manager: State<'_, LogStreamManager>,
+    owned: State<'_, WindowStreams>,
+) -> Result<SpoolPage, String> {
+    owned_by(&owned, window.label(), &channel)?;
+    manager.read(&channel, before, limit).await
+}
+
+/// Save a stream's history through the native save dialog (#914): every line,
+/// or those of the last `since_seconds`. Rust copies it from the spool, so
+/// nothing passes through the webview. The saved path, or `None` when the
+/// reader cancelled.
+#[tauri::command]
+pub async fn export_log_spool<R: Runtime>(
+    app: AppHandle<R>,
+    channel: String,
+    filename: String,
+    since_seconds: Option<u64>,
+    window: Window<R>,
+    manager: State<'_, LogStreamManager>,
+    owned: State<'_, WindowStreams>,
+) -> Result<Option<String>, String> {
+    owned_by(&owned, window.label(), &channel)?;
+    let picked = app
+        .dialog()
+        .file()
+        .set_file_name(&filename)
+        .blocking_save_file();
+    let Some(file) = picked else {
+        return Ok(None);
+    };
+    let path = file.as_path().ok_or("invalid save path")?.to_path_buf();
+    export_to(&manager, &channel, &path, since_seconds).await?;
+    Ok(Some(path.to_string_lossy().into_owned()))
+}
+
+/// Refused unless `window` opened `channel` and it is still running.
+fn owned_by(owned: &WindowStreams, window: &str, channel: &str) -> Result<(), String> {
+    if owned.check(window, &Stream::Log(channel.to_owned()))? {
+        Ok(())
+    } else {
+        Err("this log stream has ended".into())
+    }
+}
+
+/// Write `channel`'s history to `path`. A file the export could not finish is
+/// removed rather than left looking whole.
+pub(crate) async fn export_to(
+    manager: &LogStreamManager,
+    channel: &str,
+    path: &Path,
+    since_seconds: Option<u64>,
+) -> Result<(), String> {
+    let since = since_seconds.map(|s| SystemTime::now() - Duration::from_secs(s));
+    let file = File::create(path).map_err(|e| e.to_string())?;
+    let written = manager.export(channel, BufWriter::new(file), since).await;
+    if written.is_err() {
+        let _ = std::fs::remove_file(path);
+    }
+    written.map(|_| ())
+}
+
+/// srelens is quitting: stop every log stream and remove the history it kept.
+pub fn quit<R: Runtime>(app: &AppHandle<R>) {
+    if let Some(manager) = app.try_state::<LogStreamManager>() {
+        manager.shutdown_all();
+    }
 }
 
 #[cfg(test)]
@@ -96,6 +180,7 @@ mod tests {
             None,
             None,
             None,
+            None,
             app.handle().clone(),
             window.clone(),
             app.state(),
@@ -117,6 +202,7 @@ mod tests {
             Some(true),
             Some(60),
             Some(100),
+            None,
             app.handle().clone(),
             window.clone(),
             app.state(),
@@ -131,5 +217,163 @@ mod tests {
         stop_log_stream("logs:unknown".into(), window, app.state(), app.state())
             .await
             .unwrap();
+    }
+
+    use srelens_streams::log_spool::{SpoolDirs, DESKTOP_SPOOL_CEILING};
+    use std::time::Duration;
+
+    fn spooled_app(tmp: &tempfile::TempDir) -> tauri::App<tauri::test::MockRuntime> {
+        let app = tauri::test::mock_app();
+        app.manage(
+            LogStreamManager::new(ClientCache::new_many(vec![])).with_spools(
+                SpoolDirs::per_process(tmp.path().to_path_buf(), DESKTOP_SPOOL_CEILING),
+            ),
+        );
+        app.manage(WindowStreams::default());
+        app
+    }
+
+    fn target() -> Vec<LogTarget> {
+        vec![LogTarget {
+            pod: "pod-0".into(),
+            container: None,
+            label: String::new(),
+        }]
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_window_reads_back_the_history_of_its_own_stream_and_no_other_window_can() {
+        let tmp = tempfile::tempdir().unwrap();
+        let app = spooled_app(&tmp);
+        let window = crate::window_streams::tests::mock_window(&app, "main");
+        let other = crate::window_streams::tests::mock_window(&app, "other");
+        start_log_stream(
+            "no-such-context".into(),
+            "ns".into(),
+            target(),
+            "logs:test".into(),
+            None,
+            None,
+            None,
+            Some(64 << 20),
+            app.handle().clone(),
+            window.clone(),
+            app.state(),
+            app.state(),
+        )
+        .await
+        .unwrap();
+
+        let mut lines = 0;
+        for _ in 0..300 {
+            let page = read_log_spool(
+                "logs:test".into(),
+                u64::MAX,
+                10,
+                window.clone(),
+                app.state(),
+                app.state(),
+            )
+            .await
+            .unwrap();
+            lines = page.lines.len();
+            if lines > 0 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(lines > 0, "the stream's error line is in its history");
+
+        let refused = read_log_spool(
+            "logs:test".into(),
+            u64::MAX,
+            10,
+            other,
+            app.state(),
+            app.state(),
+        )
+        .await
+        .unwrap_err();
+        assert!(refused.contains("not opened by this window"), "{refused}");
+        let ended = read_log_spool("logs:gone".into(), 10, 10, window, app.state(), app.state())
+            .await
+            .unwrap_err();
+        assert!(ended.contains("has ended"), "{ended}");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn export_to_writes_the_history_and_leaves_no_file_when_it_cannot() {
+        let tmp = tempfile::tempdir().unwrap();
+        let app = spooled_app(&tmp);
+        let window = crate::window_streams::tests::mock_window(&app, "main");
+        start_log_stream(
+            "no-such-context".into(),
+            "ns".into(),
+            target(),
+            "logs:test".into(),
+            None,
+            None,
+            None,
+            Some(64 << 20),
+            app.handle().clone(),
+            window,
+            app.state(),
+            app.state(),
+        )
+        .await
+        .unwrap();
+        let manager = app.state::<LogStreamManager>();
+        for _ in 0..300 {
+            if !manager
+                .read("logs:test", u64::MAX, 1)
+                .await
+                .unwrap()
+                .lines
+                .is_empty()
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let out = tempfile::tempdir().unwrap();
+        let saved = out.path().join("pod-0.log");
+        export_to(&manager, "logs:test", &saved, None)
+            .await
+            .unwrap();
+        assert!(std::fs::read_to_string(&saved)
+            .unwrap()
+            .starts_with("pod-0 | [error:"));
+
+        let failed = out.path().join("nothing.log");
+        assert!(export_to(&manager, "logs:none", &failed, None)
+            .await
+            .is_err());
+        assert!(!failed.exists(), "a half-written export is not left behind");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn quitting_removes_every_spool() {
+        let tmp = tempfile::tempdir().unwrap();
+        let app = spooled_app(&tmp);
+        let window = crate::window_streams::tests::mock_window(&app, "main");
+        start_log_stream(
+            "no-such-context".into(),
+            "ns".into(),
+            target(),
+            "logs:test".into(),
+            None,
+            None,
+            None,
+            Some(64 << 20),
+            app.handle().clone(),
+            window,
+            app.state(),
+            app.state(),
+        )
+        .await
+        .unwrap();
+        assert!(std::fs::read_dir(tmp.path()).unwrap().next().is_some());
+        quit(app.handle());
+        assert!(std::fs::read_dir(tmp.path()).unwrap().next().is_none());
     }
 }

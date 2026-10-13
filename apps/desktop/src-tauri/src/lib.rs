@@ -50,7 +50,7 @@ use external::open_external;
 use files::{pick_kubeconfig_files, save_pasted_kubeconfig, save_text_file};
 use forward::{list_forwards, start_port_forward, stop_port_forward};
 use helm::{helm_op_close, start_helm_op};
-use logs::{start_log_stream, stop_log_stream};
+use logs::{export_log_spool, quit as quit_logs, read_log_spool, start_log_stream, stop_log_stream};
 use mcp::{
     install_srelens_cli, mcp_audit_tail, mcp_confirm_pending, mcp_confirm_respond,
     mcp_http_start, mcp_http_status, mcp_http_stop, mcp_prompt_issues, mcp_token_get,
@@ -370,6 +370,9 @@ pub fn run() {
             // Best-effort: remove stale helm temp files (kubeconfig/values) left
             // behind by a crashed/killed prior run so they don't accumulate.
             srelens_kube::helm_cli::sweep_stale_temp_files();
+            // And log histories (#914) a crashed or killed run left behind;
+            // a running srelens holds its own, so they stay.
+            srelens_streams::log_spool::sweep_stale(&std::env::temp_dir());
 
             // Use Tauri's managed async runtime — `tokio::spawn` here panics
             // ("no reactor running") because `setup` runs before/outside a Tokio
@@ -484,7 +487,12 @@ pub fn run() {
         .manage(McpHttpManager::new(cache.clone()))
         .manage(assistant::ChatManager::default())
         .manage(llm_agent::NativeHistory::default())
-        .manage(LogStreamManager::new(cache))
+        .manage(LogStreamManager::new(cache).with_spools(
+            srelens_streams::log_spool::SpoolDirs::per_process(
+                std::env::temp_dir(),
+                srelens_streams::log_spool::DESKTOP_SPOOL_CEILING,
+            ),
+        ))
         .manage(TerminalManager::new())
         .manage(HelmManager::new())
         // Which helm operations are still running, so one whose window goes
@@ -534,6 +542,8 @@ pub fn run() {
             list_forwards,
             start_log_stream,
             stop_log_stream,
+            read_log_spool,
+            export_log_spool,
             save_text_file,
             open_external,
             pick_kubeconfig_files,
@@ -592,6 +602,7 @@ pub fn run() {
             // pods still on a node (#734). Bounded, so a cluster that does not
             // answer cannot hold the app open; what is left is in the log.
             if let tauri::RunEvent::Exit = event {
+                quit_logs(app);
                 let (done, finished) = std::sync::mpsc::channel();
                 let app = app.clone();
                 tauri::async_runtime::spawn(async move {
