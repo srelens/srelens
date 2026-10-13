@@ -1185,6 +1185,55 @@ function LogsStream({
     viewport.scrollTop = viewport.scrollHeight;
   }, [filtered, wrap]);
 
+  /**
+   * Where the selected line sat in the content as of the last commit: its place
+   * in `filtered`, and its top within the rows. The top is only read when lines
+   * wrap, the one time the rows differ in height and are all drawn.
+   */
+  const heldRef = useRef<{ row: Row; index: number; top: number | undefined; wrap: boolean } | null>(null);
+
+  /**
+   * Hold the selected line where it is on screen. Once the ring is full each
+   * batch drops lines from the front, and everything after them moves up under a
+   * `scrollTop` that has not changed: the line being read would slide out of
+   * view, and the panel opened on it would be left describing a line the
+   * reader can no longer see. So the view moves with the content, by how far the
+   * line moved: its place in `filtered` times the row height, or in a wrapped
+   * log, where rows differ in height, how far its drawn row moved.
+   *
+   * It acts on a change to the lines or the selection, never on a scroll: the
+   * reader's own scrolling is theirs. A line that is not in `filtered`, before
+   * or after, has nowhere to be held.
+   */
+  useLayoutEffect(() => {
+    const viewport = viewportRef.current;
+    const box = rowsRef.current;
+    const drawnRow = box?.querySelector<HTMLElement>('[aria-current="true"]');
+    const top = box && drawnRow ? drawnRow.getBoundingClientRect().top - box.getBoundingClientRect().top : undefined;
+    const held = heldRef.current;
+    if (
+      viewport !== null &&
+      held !== null &&
+      held.row === selected &&
+      held.wrap === wrap &&
+      held.index >= 0 &&
+      selectedIndex >= 0 &&
+      !stickRef.current
+    ) {
+      const moved = wrap
+        ? top !== undefined && held.top !== undefined
+          ? top - held.top
+          : 0
+        : (selectedIndex - held.index) * metrics.rowHeight;
+      if (moved !== 0) {
+        viewport.scrollTop += moved;
+        // The window was drawn from the scroll position before this; draw it again from the new one.
+        measure();
+      }
+    }
+    heldRef.current = selected === null ? null : { row: selected, index: selectedIndex, top, wrap };
+  }, [filtered, selected, selectedIndex, wrap, metrics.rowHeight, measure]);
+
   function trackScroll() {
     const viewport = viewportRef.current;
     if (!viewport) return;

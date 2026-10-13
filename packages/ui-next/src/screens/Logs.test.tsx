@@ -2735,6 +2735,113 @@ describe("the line detail (#898)", () => {
       expect(view.top).toBe(300);
     });
 
+    /**
+     * What the ring does once it is full: a batch drops `dropped` lines from the front and adds the same
+     * number at the end, so the buffer keeps its size and everything after the dropped lines moves up.
+     */
+    function ring(dropped: number, nextLine: number) {
+      act(() => {
+        h.state.lines = [...h.state.lines.slice(dropped), ...many(dropped, nextLine)];
+        h.state.dropped += dropped;
+        notify();
+      });
+    }
+    const indexOf = (n: number) => h.state.lines.findIndex((l) => l.text.endsWith(`line ${n}`));
+    const selectedRow = () => logRegion().querySelector('[aria-current="true"]');
+
+    it("holds the selected line where it is on screen while a full ring drops lines from the front", async () => {
+      const restore = measurableRows();
+      try {
+        const region = await (draw(), body());
+        const view = scrollable(region);
+        push(...many(300));
+        view.to(2000);
+        await userEvent.click(rows().find((r) => r.textContent?.includes("line 100")) as Element);
+        // Where the row sits in the viewport: its place in the buffer, 20px a row, less how far the view has scrolled.
+        const offset = () => indexOf(100) * 20 - view.top;
+        expect(offset()).toBe(0);
+        ring(30, 300);
+        expect(indexOf(100)).toBe(70);
+        expect(offset()).toBe(0);
+        expect(selectedRow()?.textContent).toContain("line 100");
+        // The reader's own scrolling is theirs: it is not undone, and the next batch holds the row wherever they left it.
+        view.to(1000);
+        expect(view.top).toBe(1000);
+        const left = offset();
+        ring(10, 330);
+        expect(indexOf(100)).toBe(60);
+        expect(offset()).toBe(left);
+      } finally {
+        restore();
+      }
+    });
+
+    it("holds the selected line by where its row is drawn when lines wrap and rows differ in height", async () => {
+      // jsdom lays nothing out: put each row of the wrapped log 30px below the one before it, and let no row
+      // have a measured height, so the 20px-a-row arithmetic of the unwrapped log has nothing to go on.
+      const proto = window.HTMLElement.prototype;
+      const original = proto.getBoundingClientRect;
+      proto.getBoundingClientRect = function (this: HTMLElement) {
+        const box = this.parentElement;
+        if (box?.parentElement?.getAttribute("role") === "log") {
+          return { top: Array.from(box.children).indexOf(this) * 30, height: 30 } as DOMRect;
+        }
+        return original.call(this);
+      };
+      try {
+        const region = await (draw(), body());
+        const view = scrollable(region);
+        // The ring is already full, so the earlier-lines banner is above the rows before and after the batch.
+        h.state.dropped = 100;
+        push(...many(30));
+        await userEvent.click(screen.getByRole("button", { name: "Wrap" }));
+        view.to(300);
+        await userEvent.click(rows().find((r) => r.textContent?.includes("line 20")) as Element);
+        ring(5, 30);
+        expect(indexOf(20)).toBe(15);
+        // Five rows of 30px left above it.
+        expect(view.top).toBe(150);
+      } finally {
+        proto.getBoundingClientRect = original;
+      }
+    });
+
+    it("leaves the view alone when the ring drops the selected line itself, and when lines only arrive", async () => {
+      const restore = measurableRows();
+      try {
+        const region = await (draw(), body());
+        const view = scrollable(region);
+        push(...many(300));
+        view.to(2000);
+        await userEvent.click(rows().find((r) => r.textContent?.includes("line 100")) as Element);
+        push(...many(10, 300));
+        expect(view.top).toBe(2000);
+        // Line 100 is among the first 150 lines, which this batch drops: it is no longer in the buffer.
+        ring(150, 310);
+        expect(indexOf(100)).toBe(-1);
+        expect(view.top).toBe(2000);
+      } finally {
+        restore();
+      }
+    });
+
+    it("does not take the selection moving to another line for the content moving", async () => {
+      const restore = measurableRows();
+      try {
+        const region = await (draw(), body());
+        const view = scrollable(region);
+        push(...many(300));
+        view.to(2000);
+        await userEvent.click(rows().find((r) => r.textContent?.includes("line 100")) as Element);
+        region.focus();
+        await userEvent.keyboard("{ArrowDown}{ArrowDown}");
+        expect(selectedRow()?.textContent).toContain("line 102");
+        expect(view.top).toBe(2000);
+      } finally {
+        restore();
+      }
+    });
+
     it("stops following the end once a line is selected", async () => {
       const restore = measurableRows();
       try {
