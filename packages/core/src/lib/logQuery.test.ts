@@ -285,6 +285,13 @@ describe("matchLine", () => {
     expect(matches("level:error", P, "info all good", C)).toEqual([P, C]);
   });
 
+  it("reads the level a pino line declares as a number", () => {
+    // `error pool timeout` is the message; the line itself says 30, which is info.
+    const pino = '{"level":30,"msg":"error pool timeout"}';
+    expect(matches("level:info", pino, C)).toEqual([pino]);
+    expect(matches("level:error", pino, C)).toEqual([C]);
+  });
+
   it("still finds core's severity word in free text, as the filter always has", () => {
     expect(matches("danger", "error pool timeout", "info fine")).toEqual(["error pool timeout"]);
   });
