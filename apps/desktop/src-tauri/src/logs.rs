@@ -7,7 +7,7 @@
 
 use std::fs::File;
 use std::io::BufWriter;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
@@ -132,21 +132,34 @@ fn owned_by(owned: &WindowStreams, window: &str, channel: &str) -> Result<(), St
     }
 }
 
-/// Write `channel`'s history to `path`. A file the export could not finish is
-/// removed rather than left looking whole.
+/// Write `channel`'s history to `path`, through a `.partial` file beside it that
+/// replaces `path` only once whole. An export that could not finish is never
+/// left looking whole, and a file already at `path` survives it. A
+/// `since_seconds` reaching back past the clock's start means every line.
 pub(crate) async fn export_to(
     manager: &LogStreamManager,
     channel: &str,
     path: &Path,
     since_seconds: Option<u64>,
 ) -> Result<(), String> {
-    let since = since_seconds.map(|s| SystemTime::now() - Duration::from_secs(s));
-    let file = File::create(path).map_err(|e| e.to_string())?;
+    let since = since_seconds.map(|s| {
+        SystemTime::now()
+            .checked_sub(Duration::from_secs(s))
+            .unwrap_or(SystemTime::UNIX_EPOCH)
+    });
+    let mut partial = path.as_os_str().to_owned();
+    partial.push(".partial");
+    let partial = PathBuf::from(partial);
+    let file = File::create(&partial).map_err(|e| e.to_string())?;
     let written = manager.export(channel, BufWriter::new(file), since).await;
-    if written.is_err() {
-        let _ = std::fs::remove_file(path);
+    let saved = match written {
+        Ok(_) => std::fs::rename(&partial, path).map_err(|e| e.to_string()),
+        Err(e) => Err(e),
+    };
+    if saved.is_err() {
+        let _ = std::fs::remove_file(&partial);
     }
-    written.map(|_| ())
+    saved
 }
 
 /// srelens is quitting: stop every log stream and remove the history it kept.
@@ -160,7 +173,7 @@ pub fn quit<R: Runtime>(app: &AppHandle<R>) {
 mod tests {
     use super::*;
     use srelens_kube::client_cache::ClientCache;
-    use tauri::Manager;
+    use srelens_streams::log_spool::{SpoolDirs, DESKTOP_SPOOL_CEILING};
 
     /// The empty-target refusal comes back synchronously; a real target is
     /// accepted (its follow task dies later on the unresolvable context) and
@@ -218,9 +231,6 @@ mod tests {
             .await
             .unwrap();
     }
-
-    use srelens_streams::log_spool::{SpoolDirs, DESKTOP_SPOOL_CEILING};
-    use std::time::Duration;
 
     fn spooled_app(tmp: &tempfile::TempDir) -> tauri::App<tauri::test::MockRuntime> {
         let app = tauri::test::mock_app();
@@ -301,11 +311,12 @@ mod tests {
         assert!(ended.contains("has ended"), "{ended}");
     }
 
-    #[tokio::test(flavor = "multi_thread")]
-    async fn export_to_writes_the_history_and_leaves_no_file_when_it_cannot() {
-        let tmp = tempfile::tempdir().unwrap();
-        let app = spooled_app(&tmp);
-        let window = crate::window_streams::tests::mock_window(&app, "main");
+    /// Start `logs:test` on a target that cannot connect, and wait until its
+    /// error line is in the history.
+    async fn stream_with_history(
+        app: &tauri::App<tauri::test::MockRuntime>,
+        window: &Window<tauri::test::MockRuntime>,
+    ) {
         start_log_stream(
             "no-such-context".into(),
             "ns".into(),
@@ -316,7 +327,7 @@ mod tests {
             None,
             Some(64 << 20),
             app.handle().clone(),
-            window,
+            window.clone(),
             app.state(),
             app.state(),
         )
@@ -335,6 +346,15 @@ mod tests {
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn export_to_writes_the_history_and_leaves_no_file_when_it_cannot() {
+        let tmp = tempfile::tempdir().unwrap();
+        let app = spooled_app(&tmp);
+        let window = crate::window_streams::tests::mock_window(&app, "main");
+        stream_with_history(&app, &window).await;
+        let manager = app.state::<LogStreamManager>();
         let out = tempfile::tempdir().unwrap();
         let saved = out.path().join("pod-0.log");
         export_to(&manager, "logs:test", &saved, None)
@@ -343,12 +363,102 @@ mod tests {
         assert!(std::fs::read_to_string(&saved)
             .unwrap()
             .starts_with("pod-0 | [error:"));
+        assert!(
+            !out.path().join("pod-0.log.partial").exists(),
+            "a finished export leaves no partial file"
+        );
 
         let failed = out.path().join("nothing.log");
         assert!(export_to(&manager, "logs:none", &failed, None)
             .await
             .is_err());
         assert!(!failed.exists(), "a half-written export is not left behind");
+        assert!(
+            !out.path().join("nothing.log.partial").exists(),
+            "a failed export removes its partial file"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_failed_export_leaves_the_file_already_at_the_path_as_it_was() {
+        let tmp = tempfile::tempdir().unwrap();
+        let app = spooled_app(&tmp);
+        let window = crate::window_streams::tests::mock_window(&app, "main");
+        stream_with_history(&app, &window).await;
+        let manager = app.state::<LogStreamManager>();
+        let out = tempfile::tempdir().unwrap();
+        let kept = out.path().join("kept.log");
+        std::fs::write(&kept, "an earlier export").unwrap();
+
+        assert!(export_to(&manager, "logs:none", &kept, None).await.is_err());
+        assert_eq!(
+            std::fs::read_to_string(&kept).unwrap(),
+            "an earlier export",
+            "the file the reader chose to replace survives an export that failed"
+        );
+        assert!(!out.path().join("kept.log.partial").exists());
+
+        export_to(&manager, "logs:test", &kept, None).await.unwrap();
+        assert!(
+            std::fs::read_to_string(&kept)
+                .unwrap()
+                .starts_with("pod-0 | [error:"),
+            "a finished export replaces it"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_export_since_more_seconds_than_there_have_been_keeps_every_line() {
+        let tmp = tempfile::tempdir().unwrap();
+        let app = spooled_app(&tmp);
+        let window = crate::window_streams::tests::mock_window(&app, "main");
+        stream_with_history(&app, &window).await;
+        let manager = app.state::<LogStreamManager>();
+        let out = tempfile::tempdir().unwrap();
+        let saved = out.path().join("pod-0.log");
+        // The webview sends this number, so no value of it may panic.
+        export_to(&manager, "logs:test", &saved, Some(u64::MAX))
+            .await
+            .unwrap();
+        assert!(std::fs::read_to_string(&saved)
+            .unwrap()
+            .starts_with("pod-0 | [error:"));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_refused_export_never_reaches_the_save_dialog() {
+        let tmp = tempfile::tempdir().unwrap();
+        // No dialog plugin is installed here, so reaching `app.dialog()` would
+        // panic: an error from each call shows the check ran before it.
+        let app = spooled_app(&tmp);
+        let window = crate::window_streams::tests::mock_window(&app, "main");
+        let other = crate::window_streams::tests::mock_window(&app, "other");
+        stream_with_history(&app, &window).await;
+
+        let refused = export_log_spool(
+            app.handle().clone(),
+            "logs:test".into(),
+            "x.log".into(),
+            None,
+            other,
+            app.state(),
+            app.state(),
+        )
+        .await
+        .unwrap_err();
+        assert!(refused.contains("not opened by this window"), "{refused}");
+        let ended = export_log_spool(
+            app.handle().clone(),
+            "logs:gone".into(),
+            "x.log".into(),
+            None,
+            window,
+            app.state(),
+            app.state(),
+        )
+        .await
+        .unwrap_err();
+        assert!(ended.contains("has ended"), "{ended}");
     }
 
     #[tokio::test(flavor = "multi_thread")]

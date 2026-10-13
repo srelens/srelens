@@ -602,13 +602,15 @@ pub fn run() {
             // pods still on a node (#734). Bounded, so a cluster that does not
             // answer cannot hold the app open; what is left is in the log.
             if let tauri::RunEvent::Exit = event {
-                quit_logs(app);
                 let (done, finished) = std::sync::mpsc::channel();
-                let app = app.clone();
+                let shells = app.clone();
                 tauri::async_runtime::spawn(async move {
-                    node_shells::delete_all(&app).await;
+                    node_shells::delete_all(&shells).await;
                     let _ = done.send(());
                 });
+                // The log histories go while the node pods are being deleted,
+                // so removing them can't delay or skip that (#734).
+                quit_logs(app);
                 let deadline =
                     node_shells::quit_deadline(srelens_kube::connect::request_timeout());
                 if finished.recv_timeout(deadline).is_err() {
