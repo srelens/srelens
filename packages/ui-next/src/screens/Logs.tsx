@@ -44,6 +44,7 @@ import {
   LiveSignal,
   LoadingState,
   LogLine,
+  Popover,
   Screen,
   Select,
   SideRail,
@@ -151,6 +152,18 @@ const SINCE: { value: string; seconds: number | undefined }[] = [
   { value: "all", seconds: undefined },
 ];
 const SINCE_OPTIONS = SINCE.map((s) => ({ value: s.value, label: s.value }));
+
+/**
+ * What Export offers beyond the view on screen (#915): a span of the cluster's
+ * history back from now, or all of it (`seconds` absent). `slug` names the file.
+ */
+const EXPORT_RANGES: { label: string; slug: string; seconds?: number }[] = [
+  { label: "Last 10 min", slug: "last-10m", seconds: 600 },
+  { label: "Last 1 h", slug: "last-1h", seconds: 3600 },
+  { label: "Last 6 h", slug: "last-6h", seconds: 6 * 3600 },
+  { label: "Last 24 h", slug: "last-24h", seconds: 24 * 3600 },
+  { label: "All", slug: "all" },
+];
 
 /**
  * How many trailing lines a connect asks for.
@@ -352,6 +365,14 @@ function sourceOf(row: Row, separator: string): string {
     : row.pod;
 }
 
+/** Rows as an export writes them: classic's `source | line`, each line raw, stamp and all. */
+function exportContent(rows: readonly Row[]): string {
+  return rows.map((row) => `${sourceOf(row, "/")} | ${row.raw}`).join("\n");
+}
+
+/** What heads an export the save itself refused. */
+const SAVE_FAILED = "Could not save this stream";
+
 /**
  * Every target under the label its lines arrive tagged with — the index
  * {@link toRow} recovers a line's pod and container through.
@@ -461,9 +482,52 @@ type Snapshot =
       failure?: { where: string; error: string };
     };
 
-/** `api-7 · api` — a target as this screen names one. */
-function whereOf(instance: PreviousInstance): string {
-  return `${instance.pod} · ${instance.container}`;
+/** `api-7 · api` — a target as this screen names one; the pod alone when it names no container. */
+function whereOf(instance: { pod: string; container?: string }): string {
+  return instance.container ? `${instance.pod} · ${instance.container}` : instance.pod;
+}
+
+/** A `podLogs` blob as stream lines under one target's label. A blob ends on a newline; a trailing empty row is not a log line. */
+function blobLines(source: string, blob: string): StreamLine[] {
+  return blob
+    .split("\n")
+    .filter((text) => text !== "")
+    .map((text) => ({ source, text }));
+}
+
+/**
+ * A span of the cluster's history for each target, tagged with the label the
+ * live stream gives that target's lines, so {@link toRow} reads them alike.
+ * One `podLogs` per target, in parallel, stamped and uncapped; no `seconds` is
+ * everything the container runtime still keeps.
+ *
+ * All or nothing: the first target that could not be read is reported instead
+ * of the lines, because an export missing one container's lines looks exactly
+ * like a container that had nothing to say.
+ *
+ * Only the cluster is read. The Logs history spool, once it lands, is where the
+ * part of a span it already holds would come from instead.
+ */
+async function readRange(
+  context: string,
+  namespace: string,
+  targets: readonly LogTarget[],
+  seconds: number | undefined,
+): Promise<{ lines: StreamLine[] } | { where: string; error: string }> {
+  const results = await Promise.all(
+    targets.map(async (target) => ({
+      target,
+      out: await podLogs(context, namespace, target.pod, undefined, {
+        container: target.container,
+        timestamps: true,
+        sinceSeconds: seconds,
+        allLines: true,
+      }),
+    })),
+  );
+  const failed = results.find((r) => r.out.error !== undefined);
+  if (failed) return { where: whereOf(failed.target), error: failed.out.error ?? "" };
+  return { lines: results.flatMap((r) => blobLines(r.target.label ?? "", r.out.logs ?? "")) };
 }
 
 /**
@@ -786,8 +850,10 @@ function LogsStream({
   const [previous, setPrevious] = useState(false);
   /** That instance's buffer. A one-shot fetch, not a subscription. */
   const [snapshot, setSnapshot] = useState<Snapshot>({ status: "idle" });
-  /** Why the last export did not land, if it did not. */
-  const [saveError, setSaveError] = useState<unknown>(undefined);
+  /** Why the last export did not land, if it did not: the sentence that heads it, over what went wrong. */
+  const [exportFailure, setExportFailure] = useState<{ title: string; error: unknown } | undefined>(undefined);
+  /** Whether a range is being read from the cluster for an export. */
+  const [exporting, setExporting] = useState(false);
   /** The line the detail panel is open on. The Row itself, so the panel outlives the line leaving the view. */
   const [selected, setSelected] = useState<Row | null>(null);
 
@@ -1018,10 +1084,7 @@ function LogsStream({
           targets.find(
             (t) => t.pod === instance.pod && t.container === instance.container,
           )?.label ?? "";
-        for (const text of (out.logs ?? "").split("\n")) {
-          // A blob ends on a newline; a trailing empty row is not a log line.
-          if (text !== "") lines.push({ source, text });
-        }
+        lines.push(...blobLines(source, out.logs ?? ""));
       }
       setSnapshot({
         status: "ready",
@@ -1244,18 +1307,55 @@ function LogsStream({
    * the nine hundred lines that arrived while I was reading it".
    */
   function exportView() {
-    setSaveError(undefined);
-    const content = filtered
-      .map((row) => `${sourceOf(row, "/")} | ${row.raw}`)
-      .join("\n");
+    setExportFailure(undefined);
     // The previous instance's buffer goes out under its own name. Two files of
     // the same workload's logs, one of them from an instance that no longer
     // exists, are not tellable apart afterwards if they are called the same
     // thing.
     void saveOrDownload(
       `${name}${previous ? "-previous" : ""}.log`,
-      content,
-    ).catch((e: unknown) => setSaveError(e));
+      exportContent(filtered),
+    ).catch((e: unknown) => setExportFailure({ title: SAVE_FAILED, error: e }));
+  }
+
+  /**
+   * Export a span of the cluster's history (#915), read fresh rather than cut
+   * from the buffer: the ring holds the last few thousand lines, which on a
+   * busy workload is minutes, not the hour asked for.
+   *
+   * Through the same scope and query as the view: the pods left ticked and the
+   * container chosen decide what is read, the query what is kept. Not through
+   * the histogram's window, which the range replaces — a window picked off the
+   * buffer's chart intersected with the last day is a surprise, not a filter.
+   * Each container arrives on its own, so the lines are merged by stamp.
+   */
+  async function exportRange(range: (typeof EXPORT_RANGES)[number]) {
+    setExportFailure(undefined);
+    setExporting(true);
+    try {
+      const read = await readRange(
+        context,
+        namespace,
+        targets.filter(
+          (t) => !hidden.includes(t.pod) && (container === ALL_CONTAINERS || (t.container ?? "") === container),
+        ),
+        range.seconds,
+      );
+      if ("error" in read) {
+        setExportFailure({ title: `Could not read the logs of ${read.where}`, error: read.error });
+        return;
+      }
+      const kept = read.lines
+        .map((l, i) => toRow(l, byLabel, i))
+        .filter((row) => clauses.length === 0 || matchLine(row, clauses))
+        // Stable, so lines of one container that share a stamp keep the order they were written in.
+        .sort((a, b) => (a.at ?? 0) - (b.at ?? 0));
+      await saveOrDownload(`${name}-${range.slug}.log`, exportContent(kept));
+    } catch (e) {
+      setExportFailure({ title: SAVE_FAILED, error: e });
+    } finally {
+      setExporting(false);
+    }
   }
 
   // Sample the viewport and one row so the render can window the list. Both
@@ -1541,18 +1641,65 @@ function LogsStream({
             )}
             {following ? "Pause" : "Follow"}
           </Button>
-          {/* Disabled on an empty view rather than hidden: a control that
-              vanishes leaves the reader wondering whether this screen exports
-              at all, where a greyed one says "yes, once there is something to
-              export". Classic disabled it on the same condition. */}
-          <Button
-            variant="secondary"
-            size="sm"
-            onClick={exportView}
-            disabled={filtered.length === 0}
-          >
-            Export
-          </Button>
+          {/* The view on screen, disabled on an empty view rather than hidden:
+              a control that vanishes leaves the reader wondering whether this
+              screen exports at all, where a greyed one says "yes, once there is
+              something to export". Classic disabled it on the same condition.
+              A range of the cluster's history is offered beside it (#915),
+              except over a provider's stream, which `podLogs` cannot read, and
+              a previous instance, whose last ten minutes before now are empty. */}
+          {previous || chosen ? (
+            <Button
+              variant="secondary"
+              size="sm"
+              onClick={exportView}
+              disabled={filtered.length === 0}
+            >
+              Export
+            </Button>
+          ) : (
+            <Popover
+              label="Export"
+              align="end"
+              disabled={exporting}
+              className="min-w-[9rem] p-[2px]"
+              trigger={
+                <span className="btn" data-variant="secondary" data-size="sm" aria-disabled={exporting || undefined}>
+                  {exporting ? "Exporting…" : "Export"}
+                </span>
+              }
+            >
+              {(close) => (
+                <div className="flex flex-col">
+                  <button
+                    type="button"
+                    className="ns-row rounded-[5px] disabled:cursor-not-allowed disabled:opacity-50"
+                    disabled={filtered.length === 0}
+                    onClick={() => {
+                      close();
+                      exportView();
+                    }}
+                  >
+                    Current view
+                  </button>
+                  <Eyebrow className="rule-t mt-[2px] px-2 pt-1.5 pb-0.5">from the cluster</Eyebrow>
+                  {EXPORT_RANGES.map((range) => (
+                    <button
+                      key={range.slug}
+                      type="button"
+                      className="ns-row rounded-[5px]"
+                      onClick={() => {
+                        close();
+                        void exportRange(range);
+                      }}
+                    >
+                      {range.label}
+                    </button>
+                  ))}
+                </div>
+              )}
+            </Popover>
+          )}
         </>
       }
     >
@@ -1807,10 +1954,10 @@ function LogsStream({
           </Alert>
         )}
 
-        {saveError !== undefined && (
+        {exportFailure !== undefined && (
           <FailureAlert
-            title="Could not save this stream"
-            error={saveError}
+            title={exportFailure.title}
+            error={exportFailure.error}
             className="mx-3 mt-3"
           />
         )}

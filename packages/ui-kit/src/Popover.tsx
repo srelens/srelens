@@ -14,6 +14,8 @@ export interface PopoverProps {
   side?: "top" | "right" | "bottom" | "left";
   /** Goes on the panel, which is the part a caller sizes. */
   className?: string;
+  /** Switches the trigger off, e.g. while the action it leads to is still running. */
+  disabled?: boolean;
 }
 
 /**
@@ -72,6 +74,7 @@ export function Popover({
   align = "start",
   side = "bottom",
   className,
+  disabled,
 }: PopoverProps) {
   // Held here rather than left to Radix, because `close` is the whole point of
   // the render prop and an uncontrolled root has nothing to hand out.
@@ -85,7 +88,7 @@ export function Popover({
           was meant to open the panel. `inline-flex` rather than the mock's
           `contents`, so the trigger has a box for the panel to be measured
           against. */}
-      <RadixPopover.Trigger type="button" className="inline-flex">
+      <RadixPopover.Trigger type="button" className="inline-flex" disabled={disabled}>
         {trigger}
       </RadixPopover.Trigger>
       <RadixPopover.Portal container={container}>

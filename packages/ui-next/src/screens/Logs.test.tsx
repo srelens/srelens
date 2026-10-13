@@ -1363,6 +1363,17 @@ describe("the Stream rail", () => {
   });
 });
 
+/** Export's menu (#915), opened: the panel its rows are read from. */
+async function exportMenu() {
+  await userEvent.click(screen.getByRole("button", { name: /export/i }));
+  return screen.findByRole("dialog", { name: "Export" });
+}
+
+/** Export → Current view: what the Export button did on its own before it had a menu (#915). */
+async function exportCurrentView() {
+  await userEvent.click(within(await exportMenu()).getByRole("button", { name: "Current view" }));
+}
+
 describe("exporting what is on screen", () => {
   const flatten = () => String(h.saved.mock.calls[0][1]).split("\n");
 
@@ -1378,7 +1389,7 @@ describe("exporting what is on screen", () => {
     draw();
     await body();
     push(...LINES);
-    await userEvent.click(screen.getByRole("button", { name: /export/i }));
+    await exportCurrentView();
     await waitFor(() => expect(h.saved).toHaveBeenCalledTimes(1));
     expect(h.saved.mock.calls[0][0]).toBe("checkout-api.log");
     expect(flatten()).toEqual([
@@ -1394,7 +1405,7 @@ describe("exporting what is on screen", () => {
     await body();
     push(...LINES);
     await userEvent.type(filterField(), "pool");
-    await userEvent.click(screen.getByRole("button", { name: /export/i }));
+    await exportCurrentView();
     await waitFor(() => expect(h.saved).toHaveBeenCalledTimes(1));
     expect(flatten()).toEqual([
       "api-8/api | 2026-08-24T14:07:43.900000000Z error pool timeout waited=30.0s in_use=5",
@@ -1427,7 +1438,7 @@ describe("exporting what is on screen", () => {
       expect(drawn).toBeGreaterThan(0);
       expect(drawn).toBeLessThan(150);
 
-      await userEvent.click(screen.getByRole("button", { name: /export/i }));
+      await exportCurrentView();
       await waitFor(() => expect(h.saved).toHaveBeenCalledTimes(1));
       const written = flatten();
       // Every matching line, not the `drawn` rows. How far someone happened to
@@ -1450,7 +1461,7 @@ describe("exporting what is on screen", () => {
       h.state.pending = 900;
       notify();
     });
-    await userEvent.click(screen.getByRole("button", { name: /export/i }));
+    await exportCurrentView();
     await waitFor(() => expect(h.saved).toHaveBeenCalledTimes(1));
     expect(flatten()).toHaveLength(4);
   });
@@ -1477,7 +1488,7 @@ describe("exporting what is on screen", () => {
       draw();
       await body();
       push(...LINES);
-      await userEvent.click(screen.getByRole("button", { name: /export/i }));
+      await exportCurrentView();
       await waitFor(() => expect(clicked).toEqual(["checkout-api.log"]));
       expect(h.saved).not.toHaveBeenCalled();
       expect(await readBlob(urls[0])).toContain("api-8/api | ");
@@ -1486,12 +1497,17 @@ describe("exporting what is on screen", () => {
     }
   });
 
-  it("offers nothing to export when there is nothing on screen", async () => {
+  it("offers the view only once there is something on screen, and the cluster's history either way", async () => {
     draw();
     await body();
-    expect(screen.getByRole("button", { name: /export/i })).toHaveProperty("disabled", true);
+    let panel = await exportMenu();
+    expect(within(panel).getByRole("button", { name: "Current view" })).toHaveProperty("disabled", true);
+    // A range reads the cluster, not this buffer: a quiet tail is no reason to refuse the last hour.
+    expect(within(panel).getByRole("button", { name: "Last 1 h" })).toHaveProperty("disabled", false);
+    await userEvent.keyboard("{Escape}");
     push(...LINES);
-    expect(screen.getByRole("button", { name: /export/i })).toHaveProperty("disabled", false);
+    panel = await exportMenu();
+    expect(within(panel).getByRole("button", { name: "Current view" })).toHaveProperty("disabled", false);
   });
 
   it("heads a failed save with the screen's own sentence, not the backend's", async () => {
@@ -1499,7 +1515,7 @@ describe("exporting what is on screen", () => {
     draw();
     await body();
     push(...LINES);
-    await userEvent.click(screen.getByRole("button", { name: /export/i }));
+    await exportCurrentView();
     const notice = await screen.findByText(/could not save this stream/i);
     // The headline says what failed. `describeError` has nothing to classify
     // in a local filesystem refusal, so the original is what sits underneath
@@ -1512,7 +1528,7 @@ describe("exporting what is on screen", () => {
     draw();
     await body();
     push(...LINES);
-    await userEvent.click(screen.getByRole("button", { name: /export/i }));
+    await exportCurrentView();
     const notice = await screen.findByText(/could not save this stream/i);
     const alert = notice.closest("[role=status]") as HTMLElement;
     expect(within(alert).getByText(/didn't respond in time/i)).toBeTruthy();
@@ -1528,12 +1544,149 @@ describe("exporting what is on screen", () => {
     draw();
     await body();
     push(...LINES);
-    await userEvent.click(screen.getByRole("button", { name: /export/i }));
+    await exportCurrentView();
     await screen.findByText(/could not save this stream/i);
 
     h.saved.mockResolvedValue("/home/u/checkout-api.log");
-    await userEvent.click(screen.getByRole("button", { name: /export/i }));
+    await exportCurrentView();
     await waitFor(() => expect(screen.queryByText(/could not save this stream/i)).toBeNull());
+  });
+});
+
+describe("exporting a time range (#915)", () => {
+  /**
+   * What the cluster still holds for each container, one stamped blob each as
+   * `podLogs` hands it back. Older than anything in the buffer, and out of
+   * order across pods on purpose: the export has to merge them.
+   */
+  const HISTORY: Record<string, string> = {
+    "api-7/api":
+      "2026-08-24T13:20:00.000000000Z info warmed the cache\n" +
+      "2026-08-24T14:07:41.208000000Z error pool timeout on api-7\n",
+    "api-7/otel-sidecar": "2026-08-24T13:30:00.000000000Z warn exporter queue is full\n",
+    "api-8/api": "2026-08-24T13:25:00.000000000Z error pool timeout on api-8\n",
+    "api-9/api": "2026-08-24T13:10:00.000000000Z GET /healthz 200 1ms\n",
+  };
+  const history = async (_context: string, _namespace: string, pod: string, _invoke: unknown, options: { container?: string }) => ({
+    logs: HISTORY[`${pod}/${options.container}`],
+  });
+  const written = () => String(h.saved.mock.calls[0][1]).split("\n");
+  const pick = async (range: string) =>
+    userEvent.click(within(await exportMenu()).getByRole("button", { name: range }));
+
+  beforeEach(() => {
+    h.fetched.mockImplementation(history);
+  });
+
+  it("offers the view on screen first, then spans of the cluster's history back from now", async () => {
+    draw();
+    await body();
+    push(...LINES);
+    const panel = await exportMenu();
+    expect(within(panel).getAllByRole("button").map((b) => b.textContent)).toEqual([
+      "Current view",
+      "Last 10 min",
+      "Last 1 h",
+      "Last 6 h",
+      "Last 24 h",
+      "All",
+    ]);
+  });
+
+  it("reads the range from the cluster, once for each container still in view", async () => {
+    draw();
+    await body();
+    push(...LINES);
+    await userEvent.click(screen.getByRole("checkbox", { name: "api-9" }));
+    await pick("Last 1 h");
+    await waitFor(() => expect(h.saved).toHaveBeenCalledTimes(1));
+    const asked = { timestamps: true, sinceSeconds: 3600, allLines: true };
+    expect(h.fetched.mock.calls.map(([context, namespace, pod, , options]) => [context, namespace, pod, options])).toEqual([
+      ["prod-eu", "checkout", "api-7", { container: "api", ...asked }],
+      ["prod-eu", "checkout", "api-7", { container: "otel-sidecar", ...asked }],
+      ["prod-eu", "checkout", "api-8", { container: "api", ...asked }],
+    ]);
+  });
+
+  it("writes the range merged by stamp and through the query, under the range's name", async () => {
+    draw();
+    await body();
+    push(...LINES);
+    await userEvent.type(filterField(), "pool");
+    await pick("Last 6 h");
+    await waitFor(() => expect(h.saved).toHaveBeenCalledTimes(1));
+    expect(h.saved.mock.calls[0][0]).toBe("checkout-api-last-6h.log");
+    expect(written()).toEqual([
+      "api-8/api | 2026-08-24T13:25:00.000000000Z error pool timeout on api-8",
+      "api-7/api | 2026-08-24T14:07:41.208000000Z error pool timeout on api-7",
+    ]);
+  });
+
+  it("exports the whole range, not the window picked off the histogram", async () => {
+    const { container } = draw();
+    await body();
+    push(...LINES);
+    const bar = container.querySelectorAll('[data-slot="bucket"]')[0];
+    fireEvent.pointerDown(bar);
+    fireEvent.pointerUp(bar);
+    await pick("Last 24 h");
+    await waitFor(() => expect(h.saved).toHaveBeenCalledTimes(1));
+    expect(written()).toHaveLength(5);
+  });
+
+  it("asks for everything the container runtime still keeps when the range is All", async () => {
+    draw();
+    await body();
+    push(...LINES);
+    await pick("All");
+    await waitFor(() => expect(h.saved).toHaveBeenCalledTimes(1));
+    expect(h.fetched.mock.calls[0][4]).toEqual({ container: "api", timestamps: true, allLines: true });
+    expect(h.saved.mock.calls[0][0]).toBe("checkout-api-all.log");
+  });
+
+  it("writes nothing when a container's history cannot be read, and says which", async () => {
+    h.fetched.mockImplementation(async (...a: Parameters<typeof history>) =>
+      a[2] === "api-8" ? { error: "k8s.podLogs failed: request timeout" } : history(...a),
+    );
+    draw();
+    await body();
+    push(...LINES);
+    await pick("Last 1 h");
+    const notice = await screen.findByText("Could not read the logs of api-8 · api");
+    expect(h.saved).not.toHaveBeenCalled();
+    expect(notice.closest("[role=status]")?.querySelector("details")?.textContent).toContain("request timeout");
+  });
+
+  it("says it is working, and takes no second export, while the history is read", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    h.fetched.mockImplementation(async (...a: Parameters<typeof history>) => {
+      await gate;
+      return history(...a);
+    });
+    draw();
+    await body();
+    push(...LINES);
+    await pick("Last 1 h");
+    expect(await screen.findByRole("button", { name: "Exporting…" })).toHaveProperty("disabled", true);
+    await act(async () => release());
+    await waitFor(() => expect(h.saved).toHaveBeenCalledTimes(1));
+    expect(screen.getByRole("button", { name: "Export" })).toHaveProperty("disabled", false);
+  });
+
+  it("exports a log provider's view straight away: the cluster's history is not the provider's", async () => {
+    h.plugins = [observability()];
+    draw();
+    fireEvent.change(await screen.findByRole("combobox", { name: "Logs from" }), {
+      target: { value: "org.example.observability/loki" },
+    });
+    await waitFor(() => expect(h.seen.at(-1)?.options.source).toBeDefined());
+    await body();
+    push(...LINES);
+    await userEvent.click(screen.getByRole("button", { name: "Export" }));
+    await waitFor(() => expect(h.saved).toHaveBeenCalledTimes(1));
+    expect(h.saved.mock.calls[0][0]).toBe("checkout-api.log");
+    expect(h.fetched).not.toHaveBeenCalled();
   });
 });
 
@@ -2323,7 +2476,7 @@ describe("the volume histogram (#898)", () => {
     fireEvent.pointerDown(bars[0]);
     fireEvent.pointerUp(bars[0]);
     expect(messages(region)).toEqual(["info starting checkout-api build=4f2a1c"]);
-    await userEvent.click(screen.getByRole("button", { name: "Export" }));
+    await exportCurrentView();
     await waitFor(() => expect(h.saved).toHaveBeenCalled());
     expect(String(h.saved.mock.calls[0][1]).split("\n")).toHaveLength(1);
     await userEvent.click(screen.getByRole("button", { name: "Remove the time window" }));
