@@ -50,4 +50,11 @@ describe("useThrottledValue", () => {
     rerender({ value: 3, wait: 250 });
     expect(result.current).toBe(3);
   });
+
+  it("hands back a function as the value it is, never calling it", () => {
+    const value = vi.fn(() => "called");
+    const { result } = renderHook(() => useThrottledValue(value, 250));
+    expect(result.current).toBe(value);
+    expect(value).not.toHaveBeenCalled();
+  });
 });

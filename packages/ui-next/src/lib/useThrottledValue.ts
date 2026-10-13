@@ -11,7 +11,8 @@ import { useEffect, useRef, useState } from "react";
  * `value` must keep its identity until it changes: a new object on every render is a change on every render.
  */
 export function useThrottledValue<T>(value: T, ms: number): T {
-  const [shown, setShown] = useState(value);
+  // A function, so a value that is itself one is not taken for an initialiser.
+  const [shown, setShown] = useState(() => value);
   /** When the last change landed, by `Date.now()`. */
   const landedRef = useRef(Number.NEGATIVE_INFINITY);
   useEffect(() => {
