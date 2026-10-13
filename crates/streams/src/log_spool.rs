@@ -12,6 +12,8 @@ use std::collections::VecDeque;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufRead, BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Mutex;
 use std::time::SystemTime;
 
 use chrono::{DateTime, Utc};
@@ -373,6 +375,146 @@ fn create_private_file(path: &Path) -> io::Result<File> {
         opts.mode(0o600);
     }
     opts.open(path)
+}
+
+/// The smallest spool a stream may ask for.
+pub const MIN_SPOOL_BYTES: u64 = 16 * 1024 * 1024;
+/// The desktop's ceiling: the largest size its setting offers.
+pub const DESKTOP_SPOOL_CEILING: u64 = 4 * 1024 * 1024 * 1024;
+const ROOT_PREFIX: &str = "srelens-logs-";
+const LOCK_FILE: &str = ".lock";
+
+enum Root {
+    /// Desktop: a private directory of this process's own under the OS temp dir.
+    PerProcess(PathBuf),
+    /// Web: a directory the server owns per user and wipes at start.
+    Fixed(PathBuf),
+}
+
+struct MadeRoot {
+    dir: PathBuf,
+    /// Held for the process's life, so a later launch's sweep can tell this
+    /// root from a dead process's.
+    _lock: Option<File>,
+}
+
+/// Where a stream manager's spools go and how big one may be. The root is made
+/// on first use, so a manager that never spools never touches the disk.
+pub struct SpoolDirs {
+    root: Root,
+    ceiling: u64,
+    made: Mutex<Option<MadeRoot>>,
+    next: AtomicU64,
+}
+
+impl SpoolDirs {
+    /// Desktop: one private root per process under `base`, locked while it lives.
+    pub fn per_process(base: PathBuf, ceiling: u64) -> Self {
+        Self::new(Root::PerProcess(base), ceiling)
+    }
+
+    /// Web: spools under `dir`, the user's runtime directory. A `ceiling` of 0
+    /// turns spooling off.
+    pub fn fixed(dir: PathBuf, ceiling: u64) -> Self {
+        Self::new(Root::Fixed(dir), ceiling)
+    }
+
+    fn new(root: Root, ceiling: u64) -> Self {
+        Self {
+            root,
+            ceiling,
+            made: Mutex::new(None),
+            next: AtomicU64::new(0),
+        }
+    }
+
+    /// The cap a stream gets for asking `requested` bytes, or `None` when
+    /// spooling is off.
+    pub fn cap(&self, requested: u64) -> Option<u64> {
+        (self.ceiling > 0).then(|| requested.clamp(MIN_SPOOL_BYTES.min(self.ceiling), self.ceiling))
+    }
+
+    /// A fresh path for one stream's spool, which [`LogSpool::create`] makes.
+    /// Named by a counter, never by anything a client sent.
+    pub fn next_stream_dir(&self) -> io::Result<PathBuf> {
+        let mut made = self.made.lock().unwrap();
+        if made.is_none() {
+            *made = Some(match &self.root {
+                Root::PerProcess(base) => make_process_root(base)?,
+                Root::Fixed(dir) => {
+                    fs::create_dir_all(dir)?;
+                    #[cfg(unix)]
+                    {
+                        use std::os::unix::fs::PermissionsExt;
+                        fs::set_permissions(dir, fs::Permissions::from_mode(0o700))?;
+                    }
+                    MadeRoot {
+                        dir: dir.clone(),
+                        _lock: None,
+                    }
+                }
+            });
+        }
+        let root = &made.as_ref().expect("made above").dir;
+        Ok(root.join(self.next.fetch_add(1, Ordering::Relaxed).to_string()))
+    }
+
+    /// Remove the root and everything under it. Best-effort: whatever is left
+    /// on the desktop, the next launch's [`sweep_stale`] removes.
+    pub fn remove_root(&self) {
+        if let Some(MadeRoot { dir, _lock }) = self.made.lock().unwrap().take() {
+            drop(_lock);
+            let _ = fs::remove_dir_all(dir);
+        }
+    }
+}
+
+fn make_process_root(base: &Path) -> io::Result<MadeRoot> {
+    for attempt in 0u32..8 {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.subsec_nanos())
+            ^ attempt;
+        let dir = base.join(format!("{ROOT_PREFIX}{}-{nonce:08x}", std::process::id()));
+        match make_private_dir(&dir) {
+            Ok(()) => {
+                let lock = create_private_file(&dir.join(LOCK_FILE))?;
+                lock.try_lock()
+                    .map_err(|e| io::Error::other(e.to_string()))?;
+                return Ok(MadeRoot {
+                    dir,
+                    _lock: Some(lock),
+                });
+            }
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e),
+        }
+    }
+    Err(io::Error::other(
+        "could not make a private directory for log history",
+    ))
+}
+
+/// Remove the spool roots under `base` whose process is gone: those whose lock
+/// this process can take, or that never got one. A running srelens holds its
+/// own lock, so its spools stay — dev builds with other identifiers included.
+pub fn sweep_stale(base: &Path) {
+    let Ok(entries) = fs::read_dir(base) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        if !entry.file_name().to_string_lossy().starts_with(ROOT_PREFIX) {
+            continue;
+        }
+        let dir = entry.path();
+        let stale = match OpenOptions::new().write(true).open(dir.join(LOCK_FILE)) {
+            Ok(lock) => lock.try_lock().is_ok(),
+            Err(e) => e.kind() == io::ErrorKind::NotFound,
+        };
+        if stale {
+            let _ = fs::remove_dir_all(&dir);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -773,5 +915,103 @@ mod tests {
             .export(&mut out, Some(since), &named)
             .expect_err("a segment read before the vanish leaves a hole");
         assert_eq!(err.kind(), io::ErrorKind::NotFound);
+    }
+
+    const MIB: u64 = 1024 * 1024;
+
+    fn only_root(base: &Path) -> PathBuf {
+        let mut roots: Vec<_> = fs::read_dir(base)
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .collect();
+        assert_eq!(roots.len(), 1, "{roots:?}");
+        roots.pop().unwrap()
+    }
+
+    #[test]
+    fn a_cap_is_clamped_to_the_ceiling_and_zero_turns_spooling_off() {
+        let desktop = SpoolDirs::per_process(PathBuf::from("unused"), DESKTOP_SPOOL_CEILING);
+        assert_eq!(desktop.cap(1), Some(MIN_SPOOL_BYTES));
+        assert_eq!(desktop.cap(256 * MIB), Some(256 * MIB));
+        assert_eq!(desktop.cap(10 * 1024 * MIB), Some(DESKTOP_SPOOL_CEILING));
+        assert_eq!(
+            SpoolDirs::fixed(PathBuf::from("unused"), 0).cap(256 * MIB),
+            None
+        );
+        let small = SpoolDirs::fixed(PathBuf::from("unused"), 8 * MIB);
+        assert_eq!(small.cap(256 * MIB), Some(8 * MIB));
+        assert_eq!(small.cap(1), Some(8 * MIB));
+    }
+
+    #[test]
+    fn a_process_gets_one_private_root_and_numbered_stream_dirs_in_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dirs = SpoolDirs::per_process(tmp.path().to_path_buf(), DESKTOP_SPOOL_CEILING);
+        let a = dirs.next_stream_dir().unwrap();
+        let b = dirs.next_stream_dir().unwrap();
+        let root = only_root(tmp.path());
+        let name = root.file_name().unwrap().to_string_lossy().into_owned();
+        assert!(
+            name.starts_with(&format!("srelens-logs-{}-", std::process::id())),
+            "{name}"
+        );
+        assert_eq!((a, b), (root.join("0"), root.join("1")));
+        assert!(
+            !root.join("0").exists(),
+            "the spool makes its own directory"
+        );
+        dirs.remove_root();
+        assert!(!root.exists());
+    }
+
+    #[test]
+    fn a_fixed_root_is_made_on_first_use() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dirs = SpoolDirs::fixed(tmp.path().join("logs"), 256 * MIB);
+        assert!(!tmp.path().join("logs").exists());
+        assert_eq!(
+            dirs.next_stream_dir().unwrap(),
+            tmp.path().join("logs").join("0")
+        );
+        assert!(tmp.path().join("logs").is_dir());
+    }
+
+    #[test]
+    fn the_sweep_removes_dead_roots_and_keeps_a_live_one() {
+        let tmp = tempfile::tempdir().unwrap();
+        let live = SpoolDirs::per_process(tmp.path().to_path_buf(), DESKTOP_SPOOL_CEILING);
+        live.next_stream_dir().unwrap();
+        let live_root = only_root(tmp.path());
+        // A dead process's root: its lock file is there, and nobody holds it.
+        let dead = tmp.path().join("srelens-logs-1-deadbeef");
+        fs::create_dir(&dead).unwrap();
+        fs::write(dead.join(".lock"), b"").unwrap();
+        // Killed between making the root and its lock.
+        let bare = tmp.path().join("srelens-logs-2-cafef00d");
+        fs::create_dir(&bare).unwrap();
+        let other = tmp.path().join("something-else");
+        fs::create_dir(&other).unwrap();
+
+        sweep_stale(tmp.path());
+
+        assert!(live_root.is_dir(), "a running process keeps its spools");
+        assert!(!dead.exists());
+        assert!(!bare.exists());
+        assert!(other.is_dir(), "only srelens-logs-* is ours to sweep");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_process_root_is_private() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let dirs = SpoolDirs::per_process(tmp.path().to_path_buf(), DESKTOP_SPOOL_CEILING);
+        dirs.next_stream_dir().unwrap();
+        let mode = fs::metadata(only_root(tmp.path()))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o700);
     }
 }
