@@ -258,6 +258,55 @@ describe("useLogStream", () => {
     });
   });
 
+  it("holds the view while the screen asks, counts what arrives, and lets it in on release, leaving pause alone", async () => {
+    const s = fakeStream();
+    const { result } = renderHook(() => useLogStream("kind-dev", "default", [target]));
+    await s.connect();
+    act(() => s.line("", "before"));
+    await waitFor(() => expect(result.current.lines).toHaveLength(1));
+
+    act(() => result.current.hold(true));
+    expect(result.current.held).toBe(true);
+    expect(result.current.paused).toBe(false);
+    act(() => {
+      s.line("", "a");
+      s.line("", "b");
+    });
+    await waitFor(() => expect(result.current.pendingWhilePaused).toBe(2));
+    expect(result.current.lines).toHaveLength(1);
+
+    act(() => result.current.hold(false));
+    expect(result.current.held).toBe(false);
+    expect(result.current.lines.map((l) => l.text)).toEqual(["before", "a", "b"]);
+    expect(result.current.pendingWhilePaused).toBe(0);
+  });
+
+  it("keeps the reader's pause and a hold apart: letting go of one does not let go of the other", async () => {
+    const s = fakeStream();
+    const { result } = renderHook(() => useLogStream("kind-dev", "default", [target]));
+    await s.connect();
+    const aFrame = () => act(() => new Promise((r) => setTimeout(r, 50)));
+
+    // Paused, then held and let go: still paused, and nothing let in.
+    act(() => result.current.togglePause());
+    act(() => result.current.hold(true));
+    act(() => s.line("", "a"));
+    act(() => result.current.hold(false));
+    await aFrame();
+    expect(result.current.paused).toBe(true);
+    expect(result.current.lines).toHaveLength(0);
+    expect(result.current.pendingWhilePaused).toBe(1);
+
+    // Held, then resumed: the reader is following again, but nothing is let in until the hold goes.
+    act(() => result.current.hold(true));
+    act(() => result.current.togglePause());
+    await aFrame();
+    expect(result.current.paused).toBe(false);
+    expect(result.current.lines).toHaveLength(0);
+    act(() => result.current.hold(false));
+    expect(result.current.lines.map((l) => l.text)).toEqual(["a"]);
+  });
+
   it("does not re-tail on resume, and folds in what arrived while paused", async () => {
     const s = fakeStream();
     const { result } = renderHook(() => useLogStream("kind-dev", "default", [target]));

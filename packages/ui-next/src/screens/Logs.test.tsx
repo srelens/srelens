@@ -30,6 +30,9 @@ const h = vi.hoisted(() => {
       error: undefined as { title: string; detail: string; raw: string } | undefined,
       paused: false,
       pending: 0,
+      /** Whether the screen holds the view, and the lines it holds it on: see `holdStream`. */
+      held: false,
+      heldLines: [] as { source: string; text: string }[],
       /** Per-target truth: how many are streaming, how many are down, of how
        *  many altogether. */
       live: 4,
@@ -97,11 +100,13 @@ vi.mock("../lib/logStream", async () => {
       );
       h.seen.push({ context, namespace, targets, options });
       return {
-        lines: h.state.lines,
+        lines: h.state.held ? h.state.heldLines : h.state.lines,
         dropped: h.state.dropped,
         status: h.state.status,
         error: h.state.error,
         paused: h.state.paused,
+        held: h.state.held,
+        hold: holdStream,
         pendingWhilePaused: h.state.pending,
         liveTargets: h.state.live,
         completedTargets: h.state.completed,
@@ -195,6 +200,17 @@ import * as store from "../lib/tabsStore";
 function notify() {
   h.version += 1;
   for (const listener of [...h.listeners]) listener();
+}
+
+/**
+ * The hook's `hold`, as its contract has it (`logStream.test.ts` pins the real one): while held, the screen is
+ * handed the lines it had when the hold began, whatever arrives; on release, the lines as they are now.
+ */
+function holdStream(on: boolean) {
+  if (h.state.held === on) return;
+  h.state.held = on;
+  h.state.heldLines = h.state.lines;
+  notify();
 }
 
 const CTX: ClusterContext = {
@@ -308,6 +324,8 @@ beforeEach(() => {
     error: undefined,
     paused: false,
     pending: 0,
+    held: false,
+    heldLines: [],
     live: 4,
     completed: 0,
     reconnecting: 0,
@@ -3039,6 +3057,96 @@ describe("under a busy stream (#898)", () => {
       expect(screen.getByRole("button", { name: "level = error, 2 lines" })).toBeTruthy();
       expect(screen.getByRole("button", { name: "error 2" })).toBeTruthy();
       expect(caption()).toMatch(/^5 lines · /);
+    });
+  });
+
+  describe("holding the view while the reader works in it", () => {
+    const heldNote = () => screen.queryByText(/^Held while you select/);
+    /** The task after a release, which is when the screen lets go of a press. */
+    const released = () => act(() => new Promise((r) => setTimeout(r, 0)));
+    /** Select `node`'s text, a caret at its start, or nothing, and say so the way the browser does. */
+    const select = (node: Node | null, caret = false) =>
+      act(() => {
+        const selection = document.getSelection() as Selection;
+        if (node === null) selection.removeAllRanges();
+        else if (caret) selection.collapse(node, 0);
+        else selection.selectAllChildren(node);
+        document.dispatchEvent(new Event("selectionchange"));
+      });
+
+    it("holds the view while the mouse is down in the log, and lets go when it comes up, leaving Pause alone", async () => {
+      const region = await (draw(), body());
+      push(...many(5));
+      fireEvent.mouseDown(lineRow(2));
+      push(...many(3, 5));
+      expect(rendered(region)).toHaveLength(5);
+      expect(heldNote()).toBeTruthy();
+      // The reader's own control still says what they chose.
+      expect(screen.getByRole("button", { name: "Pause" })).toBeTruthy();
+      fireEvent.mouseUp(lineRow(2));
+      await released();
+      expect(rendered(region)).toHaveLength(8);
+      expect(heldNote()).toBeNull();
+    });
+
+    it("holds the view while text is selected in the log, says what is waiting, and lets go when it is cleared", async () => {
+      const region = await (draw(), body());
+      push(...many(5));
+      // A selection elsewhere on the screen is not the log's.
+      select(screen.getByRole("button", { name: "Wrap" }));
+      push(...many(1, 5));
+      expect(rendered(region)).toHaveLength(6);
+      select(lineRow(2));
+      h.state.pending = 3;
+      push(...many(3, 6));
+      expect(rendered(region)).toHaveLength(6);
+      expect(heldNote()?.textContent).toBe("Held while you select · 3 new lines");
+      // A caret is no selection: it is where a click in the log leaves one.
+      select(lineRow(2), true);
+      expect(rendered(region)).toHaveLength(9);
+      expect(heldNote()).toBeNull();
+      select(lineRow(2));
+      push(...many(1, 9));
+      expect(rendered(region)).toHaveLength(9);
+      select(null);
+      expect(rendered(region)).toHaveLength(10);
+    });
+
+    it("opens the line detail on the line pressed, though lines arrive and the view follows them before the release", async () => {
+      // A following view moves on every batch: the release lands on another row, or on none, and is no click at all.
+      const restore = measurableRows();
+      try {
+        const region = await (draw(), body());
+        // jsdom lays nothing out: a viewport 100px tall over the lines the screen is handed, 20px each.
+        let top = 0;
+        const height = () => (h.state.held ? h.state.heldLines : h.state.lines).length * 20;
+        Object.defineProperty(region, "clientHeight", { configurable: true, get: () => 100 });
+        Object.defineProperty(region, "scrollHeight", { configurable: true, get: height });
+        Object.defineProperty(region, "scrollTop", {
+          configurable: true,
+          get: () => top,
+          set: (v: number) => {
+            top = Math.max(0, Math.min(v, height() - 100));
+          },
+        });
+        push(...many(300));
+        fireEvent.scroll(region);
+        const pressed = lineRow(297);
+        fireEvent.mouseDown(pressed);
+        push(...many(100, 300));
+        // The browser reports the scroll that following the end made.
+        fireEvent.scroll(region);
+        fireEvent.mouseUp(pressed);
+        fireEvent.click(pressed);
+        expect(screen.getByRole("region", { name: "Line detail" }).textContent).toContain("line 297");
+        // Then the lines that waited come in, under the panel still on that line.
+        expect(heldNote()).toBeTruthy();
+        await released();
+        expect(heldNote()).toBeNull();
+        expect(screen.getByRole("region", { name: "Line detail" }).textContent).toContain("line 297");
+      } finally {
+        restore();
+      }
     });
   });
 

@@ -864,6 +864,42 @@ function LogsStream({
   /** Whether new lines are arriving in THIS pane. A snapshot is not followed,
    *  however healthy the connection underneath it is. */
   const following = !previous && !stream.paused && !ended;
+
+  /**
+   * Hold the view while the reader works in it: from a press in the log to its release, and while a selection lies
+   * in it. A following view moves every frame, so a press and its release land on different lines, which is no
+   * click, and the text under a selection is rewritten before it can be copied. The reader's Pause is theirs and
+   * is left alone; see the hook's `hold`.
+   */
+  const pressedRef = useRef(false);
+  const selectingRef = useRef(false);
+  const { hold } = stream;
+  const syncHold = useCallback(() => hold(pressedRef.current || selectingRef.current), [hold]);
+  useEffect(() => {
+    const onSelection = () => {
+      const selection = document.getSelection();
+      const viewport = viewportRef.current;
+      selectingRef.current =
+        selection !== null &&
+        !selection.isCollapsed &&
+        viewport !== null &&
+        (viewport.contains(selection.anchorNode) || viewport.contains(selection.focusNode));
+      syncHold();
+    };
+    // On the document: a drag that started in the log can end anywhere. Let go a task later, after the click this
+    // release makes: let go at once, the lines that waited move the view first, and the pressed row is gone.
+    const onRelease = () => {
+      if (!pressedRef.current) return;
+      pressedRef.current = false;
+      setTimeout(syncHold, 0);
+    };
+    document.addEventListener("selectionchange", onSelection);
+    document.addEventListener("mouseup", onRelease);
+    return () => {
+      document.removeEventListener("selectionchange", onSelection);
+      document.removeEventListener("mouseup", onRelease);
+    };
+  }, [syncHold]);
   /**
    * The restarts the "Scrollback cleared" notice is not about. That notice says a
    * change of window reopened the stream and nothing already sent comes back. A change
@@ -1611,6 +1647,12 @@ function LogsStream({
               {groupNumber(stream.pendingWhilePaused)} new lines
             </Eyebrow>
           )}
+          {/* Why a following pane stopped moving under a press or a selection, and what waits for its release. */}
+          {!previous && !stream.paused && stream.held && (
+            <Eyebrow>
+              {`Held while you select${stream.pendingWhilePaused > 0 ? ` · ${groupNumber(stream.pendingWhilePaused)} new lines` : ""}`}
+            </Eyebrow>
+          )}
           {!previous && (
             <LiveSignal
               label={connectionLabel(
@@ -1745,6 +1787,10 @@ function LogsStream({
         <div
           ref={viewportRef}
           onScroll={trackScroll}
+          onMouseDown={() => {
+            pressedRef.current = true;
+            syncHold();
+          }}
           // A tab stop: the arrow keys move the selection, so the log has to be reachable without a pointer.
           tabIndex={0}
           onKeyDown={onLogKeyDown}

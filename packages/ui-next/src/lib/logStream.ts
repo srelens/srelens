@@ -49,7 +49,9 @@ import {
  * ring's own capacity — but the rendered `lines` snapshot is not refreshed
  * from it until resume, and `pendingWhilePaused` counts what arrived in the
  * meantime. Resume folds the buffer into view and resets that count; it
- * never touches the connection, so it can never cause a re-tail.
+ * never touches the connection, so it can never cause a re-tail. A `hold`
+ * from the screen freezes the view the same way, for as long as the reader
+ * presses or selects in it, without touching their pause.
  *
  * **The unmount race `startLogStream` opens.** `startLogStream` is async: it
  * awaits an `invokeCommand` before its promise resolves. If the component
@@ -160,9 +162,17 @@ export interface UseLogStreamResult {
   /** Set when `status` is `"error"` — why the stream could not be opened. */
   error?: FriendlyError;
   paused: boolean;
-  /** Lines that have arrived since pausing, not yet folded into `lines`. */
+  /** Whether the screen is holding the view; see `hold`. */
+  held: boolean;
+  /** Lines that have arrived since pausing or holding, not yet folded into `lines`. */
   pendingWhilePaused: number;
   togglePause: () => void;
+  /**
+   * Freeze the view (`true`) or let it go (`false`) while the reader presses or selects in the log, so the line
+   * under them is not moved or rewritten mid-click or mid-copy. Apart from `paused`, which is the reader's own
+   * choice and which this never changes: the view moves only while neither holds it.
+   */
+  hold: (on: boolean) => void;
   /** Empty the buffer and view without touching the connection. */
   clear: () => void;
   /**
@@ -216,12 +226,14 @@ export function useLogStream(
   /** Lines that arrived since the last fold, oldest first: the ring is copied once per batch, not once per line. */
   const batchRef = useRef<LogLine[]>([]);
   const pausedRef = useRef(false);
+  const heldRef = useRef(false);
   const pendingRef = useRef(0);
   const flushScheduledRef = useRef(false);
   const firstRunRef = useRef(true);
 
   const [view, setView] = useState(() => bufferRef.current);
   const [paused, setPaused] = useState(false);
+  const [held, setHeld] = useState(false);
   const [pendingWhilePaused, setPendingWhilePaused] = useState(0);
   const [counts, setCounts] = useState<LogTargetCounts>(NO_TARGETS);
   const [error, setError] = useState<FriendlyError | undefined>(undefined);
@@ -233,11 +245,19 @@ export function useLogStream(
     batchRef.current = [];
   }, []);
 
+  /** Fold what is waiting and show the whole ring: the end of the last pause or hold. */
+  const reveal = useCallback(() => {
+    fold();
+    pendingRef.current = 0;
+    setPendingWhilePaused(0);
+    setView(bufferRef.current);
+  }, [fold]);
+
   const commit = useCallback(() => {
     flushScheduledRef.current = false;
-    // Folded while paused too: pause freezes the view, not the ring.
+    // Folded while paused or held too: they freeze the view, not the ring.
     fold();
-    if (pausedRef.current) {
+    if (pausedRef.current || heldRef.current) {
       setPendingWhilePaused(pendingRef.current);
       return;
     }
@@ -256,7 +276,7 @@ export function useLogStream(
     (source: string, text: string, truncated = false) => {
       // Marked only when the host cut it (#747), so a whole line is `{source, text}`.
       const line = truncated ? { source, text, truncated: true as const } : { source, text };
-      if (pausedRef.current) pendingRef.current += 1;
+      if (pausedRef.current || heldRef.current) pendingRef.current += 1;
       batchRef.current.push(line);
       // A ring's worth waiting is folded now: whatever holds the commit back, the backlog stays bounded.
       if (batchRef.current.length >= bufferRef.current.capacity) fold();
@@ -269,15 +289,21 @@ export function useLogStream(
     const next = !pausedRef.current;
     pausedRef.current = next;
     setPaused(next);
-    if (!next) {
-      // Resuming folds the accumulated buffer into view in one step — never
-      // a re-tail, since the connection is untouched by this branch.
-      fold();
-      pendingRef.current = 0;
-      setPendingWhilePaused(0);
-      setView(bufferRef.current);
-    }
-  }, [fold]);
+    // Resuming folds the accumulated buffer into view in one step — never
+    // a re-tail, since the connection is untouched by this branch — unless
+    // the screen is holding the view, whose release does it instead.
+    if (!next && !heldRef.current) reveal();
+  }, [reveal]);
+
+  const hold = useCallback(
+    (on: boolean) => {
+      if (heldRef.current === on) return;
+      heldRef.current = on;
+      setHeld(on);
+      if (!on && !pausedRef.current) reveal();
+    },
+    [reveal],
+  );
 
   const clear = useCallback(() => {
     batchRef.current = [];
@@ -419,11 +445,13 @@ export function useLogStream(
       totalTargets: counts.total,
       error,
       paused,
+      held,
       pendingWhilePaused,
       togglePause,
+      hold,
       clear,
       restartCount,
     }),
-    [view, counts, error, paused, pendingWhilePaused, togglePause, clear, restartCount],
+    [view, counts, error, paused, held, pendingWhilePaused, togglePause, hold, clear, restartCount],
   );
 }
