@@ -293,7 +293,7 @@ impl SpoolSnapshot {
         since: Option<SystemTime>,
         name_of: &dyn Fn(&str) -> String,
     ) -> io::Result<u64> {
-        let cutoff = since.map(DateTime::<Utc>::from);
+        let since_utc = since.map(DateTime::<Utc>::from);
         let mut stamp: Option<DateTime<Utc>> = None;
         let mut written = 0;
         let mut started = false;
@@ -315,7 +315,7 @@ impl SpoolSnapshot {
                 if let Some(at) = stamp_of(&line.line) {
                     stamp = Some(at);
                 }
-                let keep = match (cutoff, stamp) {
+                let keep = match (since_utc, stamp) {
                     (Some(cut), Some(at)) => at >= cut,
                     _ => true,
                 };
@@ -329,12 +329,14 @@ impl SpoolSnapshot {
     }
 }
 
-/// The cutoff for "the last `seconds`": now minus them, floored at the epoch, so a client's
-/// oversized value means "everything" instead of an overflow panic.
+/// The cutoff for "the last `seconds`": now minus them, never earlier than the epoch, so a
+/// client's oversized value means "everything" instead of a panic. Flooring the subtraction
+/// alone is not enough: unix's clock can hold a time far before 1970, where chrono's
+/// conversion of it panics.
 pub fn cutoff(seconds: u64) -> SystemTime {
     SystemTime::now()
         .checked_sub(Duration::from_secs(seconds))
-        .unwrap_or(SystemTime::UNIX_EPOCH)
+        .map_or(SystemTime::UNIX_EPOCH, |t| t.max(SystemTime::UNIX_EPOCH))
 }
 
 /// A reader over `path` from `offset` up to `end`: whole lines only, whatever
@@ -872,6 +874,19 @@ mod tests {
             cutoff(3600) < cutoff(0),
             "a longer window reaches further back"
         );
+    }
+
+    /// A span that reaches back past 1970 but not past what the clock can hold
+    /// (Windows' goes to 1601, unix's far further): `checked_sub` succeeds there, and a
+    /// pre-1970 cutoff would still panic chrono's conversion, so it is the epoch too.
+    #[test]
+    fn a_cutoff_is_never_earlier_than_the_epoch_where_the_clock_could_hold_one() {
+        let now = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let past_epoch = now + 100 * 365 * 86_400;
+        assert_eq!(cutoff(past_epoch), SystemTime::UNIX_EPOCH);
     }
 
     #[test]

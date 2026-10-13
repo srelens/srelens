@@ -213,7 +213,9 @@ mod tests {
     async fn a_window_reaching_back_past_the_clocks_start_exports_every_line() {
         let state = AppState::for_tests(Arc::new(Registry::new())).await;
         let token = user_with_history(&state).await;
-        for seconds in ["1000000000000", "18446744073709551615"] {
+        // 1e12 overflows Windows' clock, 1e13 is past what chrono can hold on unix,
+        // and u64::MAX overflows both.
+        for seconds in ["1000000000000", "10000000000000", "18446744073709551615"] {
             let uri = format!("/api/logs/export?channel=logs:1&sinceSeconds={seconds}");
             let (status, body) = get(&state, &uri, &token, true).await;
             assert_eq!(status, StatusCode::OK, "{seconds}: {body}");
