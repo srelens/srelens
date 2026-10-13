@@ -120,6 +120,26 @@ describe("parseLogFields", () => {
     expect(parseLogFields('{"msg":"  ","message":"hi"}').message).toBe("hi");
   });
 
+  it("finds the message key whatever its case, as the inline fields hide it whatever its case", () => {
+    expect(parseLogFields('{"Message":"connection refused","app":"api"}')).toEqual({
+      message: "connection refused",
+      fields: { Message: "connection refused", app: "api" },
+      structured: true,
+    });
+    expect(parseLogFields('{"MSG":"x","app":"api"}').message).toBe("x");
+    expect(parseLogFields('time=1 Msg="Wrote batch" system=camlog')).toMatchObject({
+      message: "Wrote batch",
+      structured: true,
+    });
+  });
+
+  it("prefers msg over message in any case, then the key that came first", () => {
+    expect(parseLogFields('{"Message":"m","MSG":"s"}').message).toBe("s");
+    expect(parseLogFields('{"MSG":"x","msg":"y"}').message).toBe("x");
+    expect(parseLogFields('{"message":"a","Message":"b"}').message).toBe("a");
+    expect(parseLogFields('{"MSG":"  ","Message":"hi"}').message).toBe("hi");
+  });
+
   it("reads only the trailing run of pairs, so a pair before a word is not a field", () => {
     expect(parseLogFields("a=1 foo b=2")).toEqual({
       message: "a=1 foo b=2",

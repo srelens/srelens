@@ -110,10 +110,17 @@ function stringifyValue(value: unknown): string {
   }
 }
 
+/**
+ * The first non-blank `msg`, else `message`, in any case (`inlineFields` hides
+ * them in any case, so a message it hid must be one the row shows); among
+ * spellings of one name, the key that came first.
+ */
 function messageField(fields: Readonly<Record<string, string>>): string | undefined {
-  for (const key of MESSAGE_KEYS) {
-    const value = Object.hasOwn(fields, key) ? fields[key] : undefined;
-    if (value !== undefined && value.trim() !== "") return value;
+  const entries = Object.entries(fields);
+  for (const name of MESSAGE_KEYS) {
+    for (const [key, value] of entries) {
+      if (key.toLowerCase() === name && value.trim() !== "") return value;
+    }
   }
   return undefined;
 }
