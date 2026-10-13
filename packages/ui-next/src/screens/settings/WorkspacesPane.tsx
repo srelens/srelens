@@ -1,5 +1,5 @@
 import { useId, useState } from "react";
-import { describeError, plural } from "@srelens/core";
+import { describeError, plural, type ClusterContext } from "@srelens/core";
 import { Button, Combobox, ConfirmDialog, IconButton, TextInput } from "@srelens/ui-kit";
 import { useContexts, useContextsError, useContextsStatus } from "../../lib/clusters";
 import { useOrderedContexts } from "../../lib/contextOrder";
@@ -11,10 +11,9 @@ import { removeWorkspace, renameWorkspace, setWorkspaceClusters, setWorkspaceCol
 
 const COLOURS: ReadonlyArray<{ value: string | undefined; label: string }> = [{ value: undefined, label: "None" }, ...PALETTE];
 
-function WorkspaceRow({ workspace, current, lone, onDelete }: {
-  workspace: Workspace; current: boolean; lone: boolean; onDelete: () => void;
+function WorkspaceRow({ workspace, contexts, current, lone, onDelete }: {
+  workspace: Workspace; contexts: readonly ClusterContext[]; current: boolean; lone: boolean; onDelete: () => void;
 }) {
-  const contexts = useOrderedContexts(useContexts());
   const status = useContextsStatus();
   const listError = useContextsError();
   // A name being typed, committed on Enter or blur; null when not editing.
@@ -29,7 +28,8 @@ function WorkspaceRow({ workspace, current, lone, onDelete }: {
   return <li aria-label={workspace.name} aria-current={current || undefined} className="flex flex-col gap-2 border-b border-rule p-3">
     <div className="flex items-center gap-2">
       <div className="min-w-0 flex-1" onBlur={commit}>
-        <TextInput aria-label={`Name of ${workspace.name}`} value={draft ?? workspace.name} onValueChange={setDraft} onEnter={commit} />
+        <TextInput aria-label={`Name of ${workspace.name}`} value={draft ?? workspace.name} onValueChange={setDraft} onEnter={commit}
+          onEscape={() => setDraft(null)} />
       </div>
       {current && <span className="text-[0.6875rem] text-muted">Current</span>}
       <Button variant="danger" aria-label={`Delete ${workspace.name}`} disabled={lone}
@@ -38,7 +38,7 @@ function WorkspaceRow({ workspace, current, lone, onDelete }: {
     <div role="radiogroup" aria-label={`Colour of ${workspace.name}`} className="flex flex-wrap items-center gap-1">
       {COLOURS.map((swatch) => {
         const on = workspace.color === swatch.value;
-        return <input key={swatch.label} type="radio" name={group} aria-label={swatch.label} checked={on}
+        return <input key={swatch.label} type="radio" name={group} aria-label={swatch.label} title={swatch.label} checked={on}
           onChange={() => setWorkspaceColor(workspace.id, swatch.value)}
           // The radio is the swatch, as in the kit's CustomizeMark: native focus, arrows and role.
           className="h-[18px] w-[18px] cursor-pointer appearance-none rounded-[5px]"
@@ -84,22 +84,27 @@ function WorkspaceRow({ workspace, current, lone, onDelete }: {
  */
 export function WorkspacesPane() {
   const { workspaces, workspace: current } = useTabs();
+  const contexts = useOrderedContexts(useContexts());
   // Subscribe once so the cluster chips follow a renamed mark.
   useMark("", "");
   const [deleting, setDeleting] = useState<string | null>(null);
   // Found rather than held, so the counts in the dialog are the live ones.
   const target = workspaces.find((w) => w.id === deleting) ?? null;
+  // Deleting the one the reader is in moves them, and Settings with it: to the
+  // workspace `removeWorkspace` picks, the one at its index or else the last.
+  const rest = workspaces.filter((w) => w !== target);
+  const landing = target?.id === current.id ? rest[Math.min(workspaces.indexOf(target), rest.length - 1)] : undefined;
   return <div className="flex h-full min-h-0 flex-col">
     <header className="border-b border-rule px-3 py-2">
       <h2 className="text-[0.8125rem] font-semibold">Workspaces</h2>
       <p className="text-[0.75rem] text-muted">Each workspace has its own clusters and tabs. Switch between them from the title bar.</p>
     </header>
     <ul aria-label="Workspaces" className="scroll min-h-0 flex-1">
-      {workspaces.map((w) => <WorkspaceRow key={w.id} workspace={w} current={w.id === current.id}
+      {workspaces.map((w) => <WorkspaceRow key={w.id} workspace={w} contexts={contexts} current={w.id === current.id}
         lone={workspaces.length <= 1} onDelete={() => setDeleting(w.id)} />)}
     </ul>
     {target && <ConfirmDialog title={`Delete ${target.name}?`}
-      message={`${target.name} holds ${plural(target.clusters.length, "cluster")} and ${plural(workspaceTabCount(target), "open tab")}. The tabs close; the clusters stay in your kubeconfig.`}
+      message={`${target.name} holds ${plural(target.clusters.length, "cluster")} and ${plural(workspaceTabCount(target), "open tab")}. The tabs close; the clusters stay in your kubeconfig.${landing ? ` You will move to ${landing.name}.` : ""}`}
       confirmLabel="Delete workspace" danger
       onConfirm={() => { removeWorkspace(target.id); setDeleting(null); }}
       onCancel={() => setDeleting(null)} />}

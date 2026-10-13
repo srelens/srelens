@@ -73,7 +73,7 @@ function summarize({ clusters, tabs }: WorkspaceSummary): string {
  * Everything it knew, it now takes. The mock read `useTabs()` and called
  * `switchWorkspace`, `createWorkspace` and `removeWorkspace` straight out of a
  * click; the kit may not hold app state, and a summary of each workspace plus
- * three callbacks is all the panel ever needed.
+ * four callbacks (select, remove, create and manage) is all the panel needs.
  *
  * Removing a workspace is one click, has no undo, and takes every tab in it.
  * Whether to ask first is the caller's — a confirmation this component put up

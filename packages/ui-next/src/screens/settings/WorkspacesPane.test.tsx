@@ -1,9 +1,10 @@
-import { beforeEach, expect, it } from "vitest";
+import { beforeEach, describe, expect, it } from "vitest";
 import { act, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { ClusterContext } from "@srelens/core";
 import { resetContexts, setContexts } from "../../lib/clusters";
 import { loadMarks, setMark } from "../../lib/marks";
+import { PALETTE } from "../../lib/markSymbols";
 import { defaultState } from "../../lib/tabs";
 import { createWorkspace, getState, openTab, setActiveCluster, setState, setWorkspaceClusters, switchWorkspace } from "../../lib/tabsStore";
 import { WorkspacesPane } from "./WorkspacesPane";
@@ -79,6 +80,22 @@ it("keeps the old name when the new one is blank", async () => {
   await user.type(name, "   {Enter}");
   expect(stored(team)?.name).toBe("Team");
   expect(name.value).toBe("Team");
+});
+
+it("drops a name being typed on Escape, so the blur after it renames nothing", async () => {
+  const user = paint();
+  const name = screen.getByRole("textbox", { name: "Name of Team" }) as HTMLInputElement;
+  await user.clear(name);
+  await user.type(name, "Platform{Escape}");
+  await user.tab();
+  expect(stored(team)?.name).toBe("Team");
+  expect(name.value).toBe("Team");
+});
+
+it("names each colour swatch in its tooltip, None included", () => {
+  paint();
+  const swatches = within(screen.getByRole("radiogroup", { name: "Colour of Team" })).getAllByRole("radio");
+  expect(swatches.map((s) => s.getAttribute("title"))).toEqual(["None", ...PALETTE.map((p) => p.label)]);
 });
 
 it("sets and clears a workspace's colour", async () => {
@@ -185,8 +202,38 @@ it("deletes a workspace after saying what it holds", async () => {
   await user.click(screen.getByRole("button", { name: "Delete Team" }));
   const dialog = screen.getByRole("dialog", { name: "Delete Team?" });
   expect(dialog.textContent).toContain("1 cluster and 2 open tabs");
+  // Not the one the reader is in, so they stay where they are.
+  expect(dialog.textContent).not.toContain("You will move to");
   await user.click(within(dialog).getByRole("button", { name: "Delete workspace" }));
   expect(stored(team)).toBeUndefined();
+});
+
+/**
+ * Deleting the workspace the reader is in moves them, and Settings goes with it
+ * (its tab is that workspace's), so the dialog says where they land: the one
+ * that takes its place in the list, or the last when it was last. Checked
+ * against where `removeWorkspace` really puts them.
+ */
+describe("deleting the workspace the reader is in", () => {
+  const deleteCurrent = async (name: string, landsOn: string) => {
+    const user = paint();
+    await user.click(screen.getByRole("button", { name: `Delete ${name}` }));
+    const dialog = screen.getByRole("dialog", { name: `Delete ${name}?` });
+    expect(dialog.textContent).toContain(`You will move to ${landsOn}.`);
+    await user.click(within(dialog).getByRole("button", { name: "Delete workspace" }));
+    expect(getState().workspaces.find((w) => w.id === getState().currentId)?.name).toBe(landsOn);
+  };
+
+  it("names the one that takes its place", async () => {
+    createWorkspace("Ops", ["dev-id"]);
+    switchWorkspace(getState().workspaces[0].id); // Default (current), Team, Ops
+    await deleteCurrent("Default", "Team");
+  });
+
+  it("names the one before it when it was last", async () => {
+    createWorkspace("Ops", ["dev-id"]); // Default, Team, Ops (current)
+    await deleteCurrent("Ops", "Team");
+  });
 });
 
 it("counts the tabs of every cluster in the workspace, not only the one in focus", async () => {
