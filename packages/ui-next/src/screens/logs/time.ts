@@ -184,12 +184,16 @@ const startsDay = (ms: number) => dateOf(ms) !== dateOf(ms - 1);
  * The labels for `timeTicks`: a clock reading, with seconds when the ticks are
  * closer than a minute, and the date on a tick that starts a local day, where a
  * bare `00:00` would not say which. A day whose midnight the clocks skipped
- * starts at the hour they jumped to, and is dated all the same.
+ * starts at the hour they jumped to, and is dated all the same. A date reads
+ * `MM-DD` until the ticks run into a second year; then every one carries its
+ * year, or `01-01` and `07-01` would each appear twice and say nothing of which.
  */
 export function tickLabels(ticks: readonly number[]): string[] {
   const seconds = ticks.some((t) => new Date(t).getSeconds() !== 0);
+  const yearOf = (t: number) => new Date(t).getFullYear();
+  const withYear = yearOf(ticks[0]) !== yearOf(ticks[ticks.length - 1]);
   return ticks.map((t) => {
     const clock = seconds ? clockTime(t) : clockTime(t).slice(0, 5);
-    return startsDay(t) ? `${dateOf(t).slice(5)} ${clock}` : clock;
+    return startsDay(t) ? `${withYear ? dateOf(t) : dateOf(t).slice(5)} ${clock}` : clock;
   });
 }

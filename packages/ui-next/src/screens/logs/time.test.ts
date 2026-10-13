@@ -334,9 +334,9 @@ describe("timeTicks, past a day", () => {
   it("tells a Monday or a 1st by its date", () => {
     inZone("UTC", () => {
       const weeks = timeTicks(local(2026, 9, 2, 13), local(2026, 11, 11, 9));
-      expect(tickLabels(weeks)).toEqual(weeks.map((t) => `${dateTime(t).slice(5, 10)} 00:00`));
+      expect(tickLabels(weeks)).toEqual(["09-14 00:00", "09-28 00:00", "10-12 00:00", "10-26 00:00", "11-09 00:00"]);
       const months = timeTicks(local(2025, 3, 17, 8), local(2027, 3, 17, 8));
-      expect(tickLabels(months)).toEqual(months.map((t) => `${dateTime(t).slice(5, 10)} 00:00`));
+      expect(tickLabels(months)).toEqual(months.map((t) => `${dateTime(t).slice(0, 10)} 00:00`));
     });
   });
 
@@ -347,7 +347,45 @@ describe("timeTicks, past a day", () => {
       expect(new Date(oct).getHours()).toBe(1);
       const ticks = timeTicks(local(2023, 8, 1), local(2024, 8, 1), 4);
       expect(ticks).toEqual([oct, local(2024, 1, 1), local(2024, 4, 1), local(2024, 7, 1)]);
-      expect(tickLabels(ticks)).toEqual(["10-01 01:00", "01-01 00:00", "04-01 00:00", "07-01 00:00"]);
+      expect(tickLabels(ticks)).toEqual(["2023-10-01 01:00", "2024-01-01 00:00", "2024-04-01 00:00", "2024-07-01 00:00"]);
+    });
+  });
+
+  describe("the year on a date", () => {
+    it("is on every dated label once the ticks run into a second year, so no two read alike", () => {
+      for (const zone of ZONES) {
+        inZone(zone, () => {
+          // Six months a tick across two years: the same 01-01 and 07-01 twice over without it.
+          const labels = tickLabels(timeTicks(local(2025, 3, 17, 8), local(2027, 3, 17, 8)));
+          expect(labels, zone).toEqual([
+            "2025-07-01 00:00",
+            "2026-01-01 00:00",
+            "2026-07-01 00:00",
+            "2027-01-01 00:00",
+          ]);
+        });
+      }
+    });
+
+    it("dates an hourly axis's New Year midnight with its year, and leaves the other hours bare", () => {
+      for (const zone of ZONES) {
+        inZone(zone, () => {
+          const ticks = timeTicks(local(2026, 12, 31, 22), local(2027, 1, 1, 2));
+          expect(tickLabels(ticks), zone).toEqual(["22:00", "23:00", "2027-01-01 00:00", "01:00", "02:00"]);
+        });
+      }
+    });
+
+    it("is left off while the ticks stay within one year", () => {
+      for (const zone of ZONES) {
+        inZone(zone, () => {
+          // Weeks apart, and a New Year's Eve axis that has not reached the new year yet.
+          const weeks = tickLabels(timeTicks(local(2026, 9, 2, 13), local(2026, 11, 11, 9)));
+          expect(weeks.every((label) => /^\d\d-\d\d 00:00$/.test(label)), zone).toBe(true);
+          const evening = tickLabels(timeTicks(local(2026, 12, 30, 20), local(2026, 12, 31, 23)));
+          expect(evening, zone).toEqual(["12-31 00:00", "06:00", "12:00", "18:00"]);
+        });
+      }
     });
   });
 });
