@@ -460,6 +460,41 @@ describe("toggleClause", () => {
   it("appends to a query that does not parse rather than losing what was typed", () => {
     expect(toggleClause('"open', sys, "include")).toBe('"open system:camlog');
   });
+
+  describe("a clause typed more than once", () => {
+    const level = { field: "level", value: "error" };
+
+    it("takes every copy out on the click that matches them, so the facet does not stay lit", () => {
+      expect(toggleClause("level:error level:error", level, "include")).toBe("");
+      expect(toggleClause("a level:error b LEVEL:Error c", level, "include")).toBe("a b c");
+      expect(toggleClause("-level:error x -level:error", level, "exclude")).toBe("x");
+    });
+
+    it("rewrites the first copy to the other spelling and drops the rest", () => {
+      expect(toggleClause("a level:error b level:error", level, "exclude")).toBe("a -level:error b");
+      expect(toggleClause("-level:error a -level:error", level, "include")).toBe("level:error a");
+    });
+
+    it("goes by the first copy when an include and an exclude are both typed", () => {
+      expect(toggleClause("level:error -level:error", level, "include")).toBe("");
+      expect(toggleClause("level:error -level:error", level, "exclude")).toBe("-level:error");
+      expect(toggleClause("-level:error level:error", level, "exclude")).toBe("");
+      expect(toggleClause("-level:error level:error", level, "include")).toBe("level:error");
+    });
+
+    it("leaves the other clauses alone, whatever they are", () => {
+      expect(toggleClause('"a b" level:error -x level:error /c/', level, "include")).toBe('"a b" -x /c/');
+      expect(toggleClause("level:warn level:error level:warn level:error", level, "exclude")).toBe(
+        "level:warn -level:error level:warn",
+      );
+    });
+
+    it("changes a single copy as it always has", () => {
+      expect(toggleClause("a level:error b", level, "include")).toBe("a b");
+      expect(toggleClause("a level:error b", level, "exclude")).toBe("a -level:error b");
+      expect(toggleClause("a -level:error b", level, "include")).toBe("a level:error b");
+    });
+  });
 });
 
 describe("removeClause", () => {
