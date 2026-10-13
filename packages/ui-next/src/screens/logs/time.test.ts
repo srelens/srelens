@@ -328,8 +328,10 @@ describe("timeTicks, past a day", () => {
     inZone("UTC", () => {
       // Thirty days over five gaps is six days a tick; thirty-one is seven.
       const sixDays = timeTicks(local(2026, 10, 1), local(2026, 10, 31));
+      expect(sixDays.length).toBeGreaterThan(1);
       for (const t of sixDays) expect(wallClock(t) % (6 * DAY)).toBe(0);
       const sevenDays = timeTicks(local(2026, 10, 1), local(2026, 11, 1));
+      expect(sevenDays.length).toBeGreaterThan(1);
       for (const t of sevenDays) expect(new Date(t).getDay()).toBe(1);
     });
   });
