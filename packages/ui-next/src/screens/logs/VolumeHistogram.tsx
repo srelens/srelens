@@ -37,6 +37,27 @@ function stack(b: VolumeBucket, max: number): number[] {
   return heights;
 }
 
+/** The caption and the button that folds the chart to it. */
+function CaptionRow({ open, caption, onToggle }: { open: boolean; caption: string; onToggle: () => void }) {
+  return (
+    <div className={`${open ? "mt-0.5 " : ""}flex items-center justify-between gap-2`}>
+      <div data-slot="volume-caption" className="path min-w-0 text-faint">
+        {caption}
+      </div>
+      <button
+        type="button"
+        // The caption's size (.path is 0.75rem): a bare button would take the page's larger one.
+        className="text-btn shrink-0 text-[0.75rem]"
+        aria-expanded={open}
+        aria-label={open ? "Hide the volume chart" : "Show the volume chart"}
+        onClick={onToggle}
+      >
+        {open ? "Hide" : "Show"}
+      </button>
+    </div>
+  );
+}
+
 /**
  * The stream's volume over time, stacked by core's severity (#898). A click
  * on a bar, or a drag across several, picks the window the body narrows to.
@@ -81,6 +102,12 @@ export function VolumeHistogram({
     [buckets],
   );
   const groups = useMemo(() => tallyLegend(legendLines), [legendLines]);
+  // The query can leave the bars nothing while the legend still has levels to put back, and
+  // the legend is how the reader puts them back: it stays. Asked only when the bars are empty.
+  const legendOnly = useMemo(
+    () => buckets.length === 0 && legendLines !== lines && volumeBuckets(legendLines).buckets.length > 0,
+    [buckets, lines, legendLines],
+  );
   // Timed lines minus those inside, so a line whose time can't be placed (it is
   // in `untimed`) is never also counted as outside. Memoised: a pointer move or
   // an arrow re-renders this, and the pass is over every line.
@@ -121,7 +148,28 @@ export function VolumeHistogram({
     window.addEventListener("blur", drop);
     return () => window.removeEventListener("blur", drop);
   }, [dragging]);
-  if (view === null) return null;
+  if (view === null) {
+    if (!legendOnly) return null;
+    // No bars, so no span or step to name: just how many timed lines there are, and the stampless ones.
+    const untimedNote = volume.untimed > 0 ? [`${groupNumber(volume.untimed)} without a time`] : [];
+    return (
+      <div data-slot="volume" className="rule-b shrink-0 px-3 py-1.5">
+        {open && (
+          <>
+            <div data-slot="volume-empty" className="path text-muted">
+              No lines match
+            </div>
+            <VolumeLegend groups={groups} clauses={clauses} onToggleLevels={onToggleLevels} />
+          </>
+        )}
+        <CaptionRow
+          open={open}
+          caption={[lineCount(timed), ...untimedNote].join(" · ")}
+          onToggle={() => setSectionOpen("logs", "volume", !open, { defaultOpen: true })}
+        />
+      </div>
+    );
+  }
   const { from, to, edge, ticks, labels, bars } = view;
 
   const last = buckets.length - 1;
@@ -339,21 +387,7 @@ export function VolumeHistogram({
           </div>
         </>
       )}
-      <div className={`${open ? "mt-0.5 " : ""}flex items-center justify-between gap-2`}>
-        <div data-slot="volume-caption" className="path min-w-0 text-faint">
-          {caption}
-        </div>
-        <button
-          type="button"
-          // The caption's size (.path is 0.75rem): a bare button would take the page's larger one.
-          className="text-btn shrink-0 text-[0.75rem]"
-          aria-expanded={open}
-          aria-label={open ? "Hide the volume chart" : "Show the volume chart"}
-          onClick={toggleOpen}
-        >
-          {open ? "Hide" : "Show"}
-        </button>
-      </div>
+      <CaptionRow open={open} caption={caption} onToggle={toggleOpen} />
     </div>
   );
 }
