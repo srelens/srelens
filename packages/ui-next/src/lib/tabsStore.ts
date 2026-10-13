@@ -12,6 +12,7 @@ import {
   type TabsState,
   type Workspace,
 } from "./tabs";
+import { isPaletteColor } from "./markSymbols";
 
 /**
  * The tab store: module-level state, one hook, plain functions for actions.
@@ -394,8 +395,23 @@ export function createWorkspace(name: string, clusters: string[]): string {
   return w.id;
 }
 
+/** Trimmed; a blank name keeps the one it has, since a workspace with no name cannot be told apart. */
 export function renameWorkspace(id: string, name: string): void {
-  patchWorkspace(id, (w) => (w.name === name ? w : { ...w, name }));
+  const trimmed = name.trim();
+  if (!trimmed) return;
+  patchWorkspace(id, (w) => (w.name === trimmed ? w : { ...w, name: trimmed }));
+}
+
+/** `undefined` clears it. A colour outside the mark palette is refused, as the parser would drop it. */
+export function setWorkspaceColor(id: string, color: string | undefined): void {
+  if (color !== undefined && !isPaletteColor(color)) return;
+  patchWorkspace(id, (w) => {
+    if (w.color === color) return w;
+    const next: Workspace = { ...w };
+    if (color) next.color = color;
+    else delete next.color;
+    return next;
+  });
 }
 
 export function removeWorkspace(id: string): void {

@@ -34,6 +34,13 @@ export interface Tab {
 export interface Workspace {
   id: string;
   name: string;
+  /**
+   * A {@link PALETTE} value (`lib/markSymbols.ts`), drawn beside the name on
+   * the title-bar chip and the switcher. Absent means no colour. On the
+   * workspace rather than in a setting keyed by its id, so it is saved,
+   * restored and deleted with it.
+   */
+  color?: string;
   /** `ClusterContext.stableId`s. Never display names — see #265. */
   clusters: string[];
   /** Clusters the reader has paused without removing from this workspace. */

@@ -486,6 +486,29 @@ describe("workspaces", () => {
     expect(store.currentWorkspace().name).toBe("Renamed");
   });
 
+  it("trims a new name", () => {
+    const id = store.getState().currentId;
+    store.renameWorkspace(id, "  Production  ");
+    expect(store.currentWorkspace().name).toBe("Production");
+  });
+
+  it("sets, changes and clears a workspace's colour", () => {
+    const id = store.getState().currentId;
+    store.setWorkspaceColor(id, "var(--mark-teal)");
+    expect(store.currentWorkspace().color).toBe("var(--mark-teal)");
+    store.setWorkspaceColor(id, "var(--mark-red)");
+    expect(store.currentWorkspace().color).toBe("var(--mark-red)");
+    store.setWorkspaceColor(id, undefined);
+    expect(store.currentWorkspace()).not.toHaveProperty("color");
+  });
+
+  it("refuses a colour that is not in the mark palette", () => {
+    const id = store.getState().currentId;
+    store.setWorkspaceColor(id, "var(--mark-teal)");
+    store.setWorkspaceColor(id, "#ff0000");
+    expect(store.currentWorkspace().color).toBe("var(--mark-teal)");
+  });
+
   it("removes, moving to a neighbour, and refuses the last one", () => {
     const first = store.getState().currentId;
     const second = store.createWorkspace("Two", []);
@@ -820,6 +843,24 @@ describe("no-op actions do not notify", () => {
 
   silent("renameWorkspace to the name it already has", () => {}, () =>
     store.renameWorkspace(store.getState().currentId, "Default"),
+  );
+
+  silent("renameWorkspace to a blank name", () => {}, () =>
+    store.renameWorkspace(store.getState().currentId, "   "),
+  );
+
+  silent("setWorkspaceColor to a colour outside the palette", () => {}, () =>
+    store.setWorkspaceColor(store.getState().currentId, "#ff0000"),
+  );
+
+  silent(
+    "setWorkspaceColor to the colour it already has",
+    () => store.setWorkspaceColor(store.getState().currentId, "var(--mark-teal)"),
+    () => store.setWorkspaceColor(store.getState().currentId, "var(--mark-teal)"),
+  );
+
+  silent("clearing a colour the workspace does not have", () => {}, () =>
+    store.setWorkspaceColor(store.getState().currentId, undefined),
   );
 
   silent(
