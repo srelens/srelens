@@ -14,7 +14,7 @@ use std::io::{self, BufRead, BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 use chrono::{DateTime, Utc};
 use serde::Serialize;
@@ -469,9 +469,20 @@ impl SpoolDirs {
     /// [`SpoolDirs::next_stream_dir`] makes a fresh root, and the counter keeps
     /// counting, so names never collide.
     pub fn remove_root(&self) {
-        if let Some(MadeRoot { dir, _lock }) = self.made.lock().unwrap().take() {
+        // Out of the lock first, so the retries below don't hold it.
+        let made = self.made.lock().unwrap().take();
+        if let Some(MadeRoot { dir, _lock }) = made {
             drop(_lock);
-            let _ = fs::remove_dir_all(dir);
+            // ponytail: a stream's `LogSpool::drop` may be deleting its own directory
+            // as this runs, which can fail the sweep of the root half-way. Try again
+            // a few times (about 200 ms at the most) while the root is still there,
+            // then leave what is left to the next launch's `sweep_stale`.
+            for _ in 0..10 {
+                if fs::remove_dir_all(&dir).is_ok() || !dir.exists() {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
         }
     }
 }

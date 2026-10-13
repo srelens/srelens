@@ -170,6 +170,14 @@ struct Stream {
     lone_pod: Option<String>,
 }
 
+/// A stream's history as a read or an export holds it: the spool, kept alive
+/// until the read ends, a snapshot of it, and the lone target's pod.
+struct Held {
+    spool: Arc<Mutex<LogSpool>>,
+    snapshot: SpoolSnapshot,
+    lone_pod: Option<String>,
+}
+
 /// Owns running log-tail streams (keyed by channel).
 pub struct LogStreamManager {
     cache: Arc<ClientCache>,
@@ -324,7 +332,9 @@ impl LogStreamManager {
         before: u64,
         limit: usize,
     ) -> Result<SpoolPage, String> {
-        let (spool, snapshot) = self.snapshot(channel)?;
+        let Held {
+            spool, snapshot, ..
+        } = self.snapshot(channel)?;
         tokio::task::spawn_blocking(move || {
             let _keep = spool; // a stop mid-read waits for the read to finish
             snapshot.read(before, limit)
@@ -342,14 +352,12 @@ impl LogStreamManager {
         mut out: W,
         since: Option<SystemTime>,
     ) -> Result<u64, String> {
-        let (spool, snapshot) = self.snapshot(channel)?;
-        let lone = self
-            .streams
-            .lock()
-            .unwrap()
-            .get(channel)
-            .and_then(|s| s.lone_pod.clone())
-            .unwrap_or_default();
+        let Held {
+            spool,
+            snapshot,
+            lone_pod,
+        } = self.snapshot(channel)?;
+        let lone = lone_pod.unwrap_or_default();
         tokio::task::spawn_blocking(move || {
             let _keep = spool;
             let name_of = |source: &str| {
@@ -368,27 +376,36 @@ impl LogStreamManager {
         .map_err(|e| e.to_string())
     }
 
-    /// `channel`'s spool and a snapshot of it, taken under the spool's lock.
-    fn snapshot(&self, channel: &str) -> Result<(Arc<Mutex<LogSpool>>, SpoolSnapshot), String> {
-        let spool = self
+    /// What a read or an export needs of `channel`. The spool, the pod and so the
+    /// snapshot all come from one look at the map, so a `stop` between lookups
+    /// can't separate them.
+    fn snapshot(&self, channel: &str) -> Result<Held, String> {
+        let (spool, lone_pod) = self
             .streams
             .lock()
             .unwrap()
             .get(channel)
-            .and_then(|s| s.spool.clone())
+            .and_then(|s| Some((s.spool.clone()?, s.lone_pod.clone())))
             .ok_or_else(|| "this log stream keeps no history".to_string())?;
         let snapshot = spool
             .lock()
             .unwrap()
             .snapshot()
             .map_err(|e| e.to_string())?;
-        Ok((spool, snapshot))
+        Ok(Held {
+            spool,
+            snapshot,
+            lone_pod,
+        })
     }
 
     /// Stop a log-tail stream and abort all of its follow tasks. Its history
     /// goes when the last task holding it has dropped.
     pub fn stop(&self, channel: &str) {
-        if let Some(stream) = self.streams.lock().unwrap().remove(channel) {
+        // Out of the map in one statement: dropping the stream can delete its
+        // history, which must not happen under the map's lock.
+        let stream = self.streams.lock().unwrap().remove(channel);
+        if let Some(stream) = stream {
             for h in stream.handles {
                 h.abort();
             }
@@ -398,12 +415,25 @@ impl LogStreamManager {
     /// Abort every running log-tail stream and remove every spool (a user's
     /// environment dropped, or the app quitting).
     pub fn shutdown_all(&self) {
-        {
-            let mut streams = self.streams.lock().unwrap();
-            for (_, stream) in streams.drain() {
-                for h in stream.handles {
-                    h.abort();
-                }
+        let streams: Vec<Stream> = self
+            .streams
+            .lock()
+            .unwrap()
+            .drain()
+            .map(|(_, stream)| stream)
+            .collect();
+        for stream in streams {
+            for h in stream.handles {
+                h.abort();
+            }
+            // An aborted task may be mid-`push`, and a segment it opens after the
+            // root's removal began would keep the root from going. A failed spool
+            // has closed its file and takes no more lines, so none can.
+            if let Some(spool) = &stream.spool {
+                spool
+                    .lock()
+                    .unwrap()
+                    .fail("the stream was shut down".into());
             }
         }
         if let Some(dirs) = &self.spools {
@@ -735,6 +765,19 @@ mod tests {
             .path()
     }
 
+    /// An export target the test can read back after the manager has written it.
+    struct Shared(Arc<Mutex<Vec<u8>>>);
+
+    impl Write for Shared {
+        fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(b);
+            Ok(b.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
     /// Neither target can connect (the cache holds no kubeconfig), so each one
     /// pushes its `[error: …]` line straight away: two lines, framed.
     #[tokio::test(flavor = "multi_thread")]
@@ -767,20 +810,26 @@ mod tests {
             )
             .await
             .unwrap();
-        let mut framed = 0;
+        let mut sources = std::collections::BTreeSet::new();
         for _ in 0..300 {
-            framed = sink
+            sources = sink
                 .payloads_for("logs:1")
                 .iter()
-                .filter_map(|p| p.get("lines").and_then(|l| l.as_array()).map(Vec::len))
-                .sum();
-            if framed >= 2 {
+                .filter_map(|p| p.get("lines").and_then(|l| l.as_array()).cloned())
+                .flatten()
+                .map(|l| l["source"].as_str().unwrap_or("<missing>").to_string())
+                .collect();
+            if sources.len() >= 2 {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
         manager.stop("logs:1");
-        assert!(framed >= 2, "each target's line arrives in a frame");
+        assert_eq!(
+            sources.into_iter().collect::<Vec<_>>(),
+            ["web-1", "web-2"],
+            "each target's line arrives in a frame, tagged with its source"
+        );
         assert!(
             sink.payloads_for("logs:1")
                 .iter()
@@ -905,17 +954,7 @@ mod tests {
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
-        let out = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-        struct Shared(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
-        impl std::io::Write for Shared {
-            fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
-                self.0.lock().unwrap().extend_from_slice(b);
-                Ok(b.len())
-            }
-            fn flush(&mut self) -> std::io::Result<()> {
-                Ok(())
-            }
-        }
+        let out = Arc::new(Mutex::new(Vec::new()));
         let n = manager
             .export("logs:1", Shared(out.clone()), None)
             .await
@@ -990,14 +1029,136 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
         manager.stop("logs:1");
+        let notice = payloads
+            .iter()
+            .position(|p| p["spool"]["failed"].is_string())
+            .unwrap_or_else(|| panic!("a spool notice: {payloads:?}"));
+        let first_frame = payloads
+            .iter()
+            .position(|p| p.get("lines").is_some())
+            .unwrap_or_else(|| panic!("the live lines still go out: {payloads:?}"));
         assert!(
-            payloads.iter().any(|p| p["spool"]["failed"].is_string()),
-            "{payloads:?}"
+            notice < first_frame,
+            "the notice comes before the first frame: {payloads:?}"
         );
+    }
+
+    /// A manager with no spool directories has nowhere to keep history, so a
+    /// request for it is ignored: no history, and no notice either, because
+    /// nothing failed.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_manager_without_spools_ignores_a_request_for_history() {
+        let manager = LogStreamManager::new(ClientCache::new_many(vec![]));
+        let sink = Arc::new(TestSink::default());
+        manager
+            .start(
+                sink.clone(),
+                "ctx".into(),
+                "ns".into(),
+                one_target(),
+                "logs:1".into(),
+                None,
+                None,
+                None,
+                Some(64 << 20),
+            )
+            .await
+            .unwrap();
+        assert!(!manager.keeps_history("logs:1"));
+        let mut payloads = Vec::new();
+        for _ in 0..300 {
+            payloads = sink.payloads_for("logs:1");
+            if payloads.iter().any(|p| p.get("lines").is_some()) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        manager.stop("logs:1");
         assert!(
             payloads.iter().any(|p| p.get("lines").is_some()),
-            "the live lines still go out"
+            "the live lines go out: {payloads:?}"
         );
+        assert!(
+            payloads.iter().all(|p| p.get("spool").is_none()),
+            "no notice: {payloads:?}"
+        );
+    }
+
+    /// The spool belongs to the stream's entry, not to its writer: once every
+    /// task has ended, the history still reads back and exports, until `stop`.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_spool_stays_readable_after_its_writer_ends() {
+        let tmp = tempfile::tempdir().unwrap();
+        let manager = LogStreamManager::new(ClientCache::new_many(vec![])).with_spools(
+            SpoolDirs::per_process(tmp.path().to_path_buf(), DESKTOP_SPOOL_CEILING),
+        );
+        manager
+            .start(
+                Arc::new(TestSink::default()),
+                "ctx".into(),
+                "ns".into(),
+                one_target(),
+                "logs:1".into(),
+                None,
+                None,
+                None,
+                Some(64 << 20),
+            )
+            .await
+            .unwrap();
+        for _ in 0..300 {
+            if !manager
+                .read("logs:1", u64::MAX, 1)
+                .await
+                .unwrap()
+                .lines
+                .is_empty()
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        // End every task of the stream, which drops its writer and its Arc on
+        // the spool. The guard is gone by the end of the statement.
+        let handles = std::mem::take(
+            &mut manager
+                .streams
+                .lock()
+                .unwrap()
+                .get_mut("logs:1")
+                .expect("the stream is running")
+                .handles,
+        );
+        for h in handles {
+            h.abort();
+            let _ = h.await;
+        }
+
+        let stream_dir = only_root(tmp.path()).join("0");
+        assert!(stream_dir.is_dir(), "the history outlives its writer");
+        let page = manager.read("logs:1", u64::MAX, 10).await.unwrap();
+        assert!(
+            page.lines[0].line.starts_with("[error:"),
+            "{:?}",
+            page.lines
+        );
+        let out = Arc::new(Mutex::new(Vec::new()));
+        let n = manager
+            .export("logs:1", Shared(out.clone()), None)
+            .await
+            .unwrap();
+        assert!(n >= 1);
+        let text = String::from_utf8(out.lock().unwrap().clone()).unwrap();
+        assert!(text.starts_with("web-1 | [error:"), "{text}");
+
+        manager.stop("logs:1");
+        for _ in 0..300 {
+            if !stream_dir.exists() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(!stream_dir.exists(), "stop deletes it at last");
     }
 
     /// A frame goes out on each tick, and once every target has completed the
