@@ -134,13 +134,20 @@ pub fn analyze_service_health(
         }
     }
 
-    // Inspect Pods: extract declared container ports and names
+    // Inspect Pods: extract declared container ports and names (including native sidecars)
     let mut container_ports_set = BTreeSet::new();
     let mut container_port_names = BTreeSet::new();
 
     for pod in pods {
         if let Some(pspec) = &pod.spec {
-            for c in &pspec.containers {
+            let all_containers = pspec.containers.iter().chain(
+                pspec
+                    .init_containers
+                    .iter()
+                    .flatten()
+                    .filter(|c| c.restart_policy.as_deref() == Some("Always")),
+            );
+            for c in all_containers {
                 if let Some(ports) = &c.ports {
                     for cp in ports {
                         container_ports_set.insert(cp.container_port);
@@ -182,10 +189,7 @@ pub fn analyze_service_health(
                     }
                 }
                 IntOrString::String(name) => {
-                    if !pods.is_empty()
-                        && !container_port_names.is_empty()
-                        && !container_port_names.contains(&name)
-                    {
+                    if !pods.is_empty() && !container_port_names.contains(&name) {
                         port_mismatches.push(PortMismatchEvidence {
                             port_name: p.name.clone(),
                             service_port: p.port,
@@ -252,19 +256,26 @@ pub fn service_health_probe_capability(cache: Arc<ClientCache>) -> Capability {
                 let svc = tokio::time::timeout(request_timeout(), svc_api.get(&input.service))
                     .await
                     .map_err(|_| CapabilityError::Handler("fetch service timed out".into()))?
-                    .map_err(|e| CapabilityError::Handler(format!("Service {}/{} not found: {}", input.namespace, input.service, e)))?;
+                    .map_err(|e| match e {
+                        kube::Error::Api(ref ae) if ae.code == 404 => CapabilityError::Handler(format!(
+                            "Service {}/{} not found",
+                            input.namespace, input.service
+                        )),
+                        other => CapabilityError::Handler(format!(
+                            "Failed to fetch Service {}/{}: {}",
+                            input.namespace, input.service, other
+                        )),
+                    })?;
 
-                // Fetch EndpointSlices for this service
+                // Fetch EndpointSlices for this service using bounded list
                 let slice_api: Api<EndpointSlice> = Api::namespaced(client.clone(), &input.namespace);
                 let slice_params = ListParams::default()
                     .labels(&format!("kubernetes.io/service-name={}", input.service));
-                let slices = tokio::time::timeout(request_timeout(), slice_api.list(&slice_params))
+                let (slices, _) = crate::list_cap::list_capped(&slice_api, slice_params)
                     .await
-                    .map_err(|_| CapabilityError::Handler("fetch endpointslices timed out".into()))?
-                    .map_err(|e| CapabilityError::Handler(format!("Failed to list EndpointSlices: {}", e)))?
-                    .items;
+                    .map_err(|e| e.into_capability_error("list endpointslices"))?;
 
-                // If service defines a selector, query matching pods
+                // If service defines a selector, query matching pods using bounded list
                 let pods = if let Some(sel) = svc.spec.as_ref().and_then(|s| s.selector.as_ref()) {
                     if sel.is_empty() {
                         Vec::new()
@@ -276,11 +287,10 @@ pub fn service_health_probe_capability(cache: Arc<ClientCache>) -> Capability {
                             .join(",");
                         let pod_api: Api<Pod> = Api::namespaced(client.clone(), &input.namespace);
                         let pod_params = ListParams::default().labels(&selector_str);
-                        tokio::time::timeout(request_timeout(), pod_api.list(&pod_params))
+                        let (pod_items, _) = crate::list_cap::list_capped(&pod_api, pod_params)
                             .await
-                            .map_err(|_| CapabilityError::Handler("fetch matching pods timed out".into()))?
-                            .map_err(|e| CapabilityError::Handler(format!("Failed to list pods for service selector: {}", e)))?
-                            .items
+                            .map_err(|e| e.into_capability_error("list matching pods"))?;
+                        pod_items
                     }
                 } else {
                     Vec::new()
@@ -434,5 +444,99 @@ mod tests {
             .port_mismatches
             .iter()
             .any(|m| m.mismatch_kind == "NoMatchingPods"));
+    }
+
+    #[test]
+    fn detects_named_port_not_found_when_no_ports_are_named() {
+        let mut selector = BTreeMap::new();
+        selector.insert("app".to_string(), "api".to_string());
+
+        let svc = Service {
+            spec: Some(ServiceSpec {
+                selector: Some(selector),
+                ports: Some(vec![ServicePort {
+                    port: 80,
+                    target_port: Some(IntOrString::String("http".to_string())),
+                    ..Default::default()
+                }]),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        // Pod has containerPort 8080, but it is NOT named "http"
+        let pod = Pod {
+            spec: Some(PodSpec {
+                containers: vec![Container {
+                    name: "web".to_string(),
+                    ports: Some(vec![ContainerPort {
+                        container_port: 8080,
+                        name: None,
+                        ..Default::default()
+                    }]),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let report = analyze_service_health("default", "api", &svc, &[], &[pod]);
+        assert!(report
+            .port_mismatches
+            .iter()
+            .any(|m| m.mismatch_kind == "NamedPortNotFound" && m.target_port == "http"));
+    }
+
+    #[test]
+    fn recognizes_native_sidecar_ports() {
+        let mut selector = BTreeMap::new();
+        selector.insert("app".to_string(), "mesh".to_string());
+
+        let svc = Service {
+            spec: Some(ServiceSpec {
+                selector: Some(selector),
+                ports: Some(vec![ServicePort {
+                    port: 15021,
+                    target_port: Some(IntOrString::Int(15021)),
+                    ..Default::default()
+                }]),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        // 15021 is declared on a restartable init sidecar (restartPolicy: Always)
+        let pod = Pod {
+            spec: Some(PodSpec {
+                init_containers: Some(vec![Container {
+                    name: "istio-proxy".to_string(),
+                    restart_policy: Some("Always".to_string()),
+                    ports: Some(vec![ContainerPort {
+                        container_port: 15021,
+                        name: Some("status-port".to_string()),
+                        ..Default::default()
+                    }]),
+                    ..Default::default()
+                }]),
+                containers: vec![Container {
+                    name: "app".to_string(),
+                    ports: Some(vec![ContainerPort {
+                        container_port: 8080,
+                        ..Default::default()
+                    }]),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let report = analyze_service_health("default", "mesh", &svc, &[], &[pod]);
+        // TargetPortNotFound should NOT be reported because 15021 is on the sidecar!
+        assert!(!report
+            .port_mismatches
+            .iter()
+            .any(|m| m.mismatch_kind == "TargetPortNotFound"));
     }
 }

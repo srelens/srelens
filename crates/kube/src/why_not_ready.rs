@@ -44,6 +44,7 @@ pub struct WhyNotReadyOut {
     pub init_containers: Vec<ContainerEvidence>,
     pub app_containers: Vec<ContainerEvidence>,
     pub previous_logs_tail: Option<String>,
+    pub current_logs_tail: Option<String>,
     pub recent_warning_events: Vec<CompactEventSummary>,
 }
 
@@ -166,7 +167,7 @@ fn extract_container_evidence(
         .and_then(|s| s.last_state.as_ref())
         .and_then(|ls| ls.terminated.as_ref())
         .map(|t| {
-            let oom_killed = t.exit_code == 137 || t.reason.as_deref() == Some("OOMKilled");
+            let oom_killed = t.reason.as_deref() == Some("OOMKilled");
             TerminatedStateSummary {
                 exit_code: t.exit_code,
                 signal: t.signal,
@@ -191,14 +192,29 @@ fn extract_container_evidence(
         failing_probes_set.insert("Readiness".to_string());
     }
 
-    // 2. Scan events for probe failure indicators mentioning this container
+    // 2. Scan events for probe failure indicators targeting this container
     for ev in events {
         if ev.reason.as_deref() == Some("Unhealthy") {
             let msg = ev.message.as_deref().unwrap_or_default();
-            // Check if event belongs to this container or is generic for single-container pod
-            let applies_to_container = msg.contains(&format!("container {}", name))
-                || msg.contains(&format!("container \"{}\"", name))
-                || !msg.contains("container ");
+            // Check involved_object.field_path (e.g. spec.containers{web})
+            let matched_container = ev.involved_object.field_path.as_deref().and_then(|fp| {
+                if let Some(start) = fp.find('{') {
+                    if let Some(end) = fp.find('}') {
+                        if start < end {
+                            return Some(&fp[start + 1..end]);
+                        }
+                    }
+                }
+                None
+            });
+
+            let applies_to_container = match matched_container {
+                Some(c_name) => c_name == name,
+                None => {
+                    msg.contains(&format!("container {}", name))
+                        || msg.contains(&format!("container \"{}\"", name))
+                }
+            };
 
             if applies_to_container {
                 if msg.contains("Readiness probe failed") {
@@ -228,6 +244,7 @@ pub fn analyze_pod_readiness(
     pod: &Pod,
     events: &[Event],
     previous_logs_tail: Option<String>,
+    current_logs_tail: Option<String>,
 ) -> WhyNotReadyOut {
     let name = pod.metadata.name.clone().unwrap_or_default();
     let namespace = pod.metadata.namespace.clone().unwrap_or_default();
@@ -306,11 +323,13 @@ pub fn analyze_pod_readiness(
         init_containers,
         app_containers,
         previous_logs_tail,
+        current_logs_tail,
         recent_warning_events,
     }
 }
 
 /// Helper selecting candidate container for previous logs.
+/// Ranks currently failing containers ahead of historical restarts.
 pub fn select_target_container<'a>(pod: &'a Pod, explicit: Option<&'a str>) -> Option<String> {
     if let Some(name) = explicit {
         return Some(name.to_string());
@@ -319,40 +338,61 @@ pub fn select_target_container<'a>(pod: &'a Pod, explicit: Option<&'a str>) -> O
     let status = pod.status.as_ref();
     let spec = pod.spec.as_ref()?;
 
-    // Check app container statuses for restart_count > 0, terminated last_state, or waiting reason
+    // 1. Check for currently failing app containers (waiting with error or terminated non-zero)
     if let Some(cs) = status.and_then(|s| s.container_statuses.as_ref()) {
         if let Some(found) = cs.iter().find(|c| {
-            c.restart_count > 0
-                || c.last_state
-                    .as_ref()
-                    .and_then(|ls| ls.terminated.as_ref())
-                    .is_some()
+            c.state
+                .as_ref()
+                .and_then(|st| st.waiting.as_ref())
+                .is_some_and(|w| {
+                    w.reason.as_deref() == Some("CrashLoopBackOff")
+                        || w.reason.as_deref() == Some("Error")
+                        || w.reason.as_deref() == Some("ImagePullBackOff")
+                        || w.reason.as_deref() == Some("ErrImagePull")
+                })
                 || c.state
                     .as_ref()
-                    .and_then(|st| st.waiting.as_ref())
-                    .is_some_and(|w| {
-                        w.reason.as_deref() == Some("CrashLoopBackOff")
-                            || w.reason.as_deref() == Some("Error")
-                    })
+                    .and_then(|st| st.terminated.as_ref())
+                    .is_some_and(|t| t.exit_code != 0)
         }) {
             return Some(found.name.clone());
         }
     }
 
-    // Check init container statuses
+    // 2. Check for failing init containers
     if let Some(ics) = status.and_then(|s| s.init_container_statuses.as_ref()) {
         if let Some(found) = ics.iter().find(|c| {
-            c.restart_count > 0
-                || c.last_state
+            c.state
+                .as_ref()
+                .and_then(|st| st.waiting.as_ref())
+                .is_some_and(|w| {
+                    w.reason.as_deref() == Some("CrashLoopBackOff")
+                        || w.reason.as_deref() == Some("Error")
+                })
+                || c.state
                     .as_ref()
-                    .and_then(|ls| ls.terminated.as_ref())
-                    .is_some()
+                    .and_then(|st| st.terminated.as_ref())
+                    .is_some_and(|t| t.exit_code != 0)
         }) {
             return Some(found.name.clone());
         }
     }
 
-    // Default to the first app container in spec
+    // 3. Check for unready app containers
+    if let Some(cs) = status.and_then(|s| s.container_statuses.as_ref()) {
+        if let Some(found) = cs.iter().find(|c| !c.ready) {
+            return Some(found.name.clone());
+        }
+    }
+
+    // 4. Check for containers with restart history
+    if let Some(cs) = status.and_then(|s| s.container_statuses.as_ref()) {
+        if let Some(found) = cs.iter().find(|c| c.restart_count > 0) {
+            return Some(found.name.clone());
+        }
+    }
+
+    // 5. Default to the first container in spec
     spec.containers.first().map(|c| c.name.clone())
 }
 
@@ -374,25 +414,39 @@ pub fn why_not_ready_capability(cache: Arc<ClientCache>) -> Capability {
                 let pod = tokio::time::timeout(request_timeout(), pod_api.get(&input.pod))
                     .await
                     .map_err(|_| CapabilityError::Handler("fetch pod timed out".into()))?
-                    .map_err(|e| {
-                        CapabilityError::Handler(format!(
-                            "Pod {}/{} not found: {}",
-                            input.namespace, input.pod, e
-                        ))
+                    .map_err(|e| match e {
+                        kube::Error::Api(ref ae) if ae.code == 404 => CapabilityError::Handler(format!(
+                            "Pod {}/{} not found",
+                            input.namespace, input.pod
+                        )),
+                        other => CapabilityError::Handler(format!(
+                            "Failed to fetch Pod {}/{}: {}",
+                            input.namespace, input.pod, other
+                        )),
                     })?;
 
-                // Fetch events for this pod
+                // Fetch events for this pod, bounded and UID-filtered
                 let event_api: Api<Event> = Api::namespaced(client.clone(), &input.namespace);
+                let pod_uid = pod.metadata.uid.as_deref().unwrap_or_default();
                 let event_params = ListParams::default().fields(&format!(
                     "involvedObject.name={},involvedObject.kind=Pod",
                     input.pod
                 ));
-                let events = tokio::time::timeout(request_timeout(), event_api.list(&event_params))
+                let (raw_events, _) = crate::list_cap::list_capped(&event_api, event_params)
                     .await
-                    .ok()
-                    .and_then(|res| res.ok())
-                    .map(|l| l.items)
-                    .unwrap_or_default();
+                    .map_err(|e| e.into_capability_error("list events"))?;
+
+                let events: Vec<_> = raw_events
+                    .into_iter()
+                    .filter(|ev| {
+                        if !pod_uid.is_empty() {
+                            if let Some(ev_uid) = &ev.involved_object.uid {
+                                return ev_uid == pod_uid;
+                            }
+                        }
+                        true
+                    })
+                    .collect();
 
                 // Fetch previous or recent logs tail
                 let target_container =
@@ -402,10 +456,11 @@ pub fn why_not_ready_capability(cache: Arc<ClientCache>) -> Capability {
                     .unwrap_or(DEFAULT_TAIL_LINES)
                     .clamp(1, MAX_TAIL_LINES);
 
-                let previous_logs_tail = if let Some(c_name) = target_container {
+                let (previous_logs_tail, current_logs_tail) = if let Some(c_name) = target_container {
                     let log_params_prev = LogParams {
                         container: Some(c_name.clone()),
                         tail_lines: Some(tail_lines),
+                        limit_bytes: Some(MAX_LOG_TAIL_BYTES as i64),
                         previous: true,
                         ..Default::default()
                     };
@@ -415,17 +470,20 @@ pub fn why_not_ready_capability(cache: Arc<ClientCache>) -> Capability {
                     )
                     .await;
 
-                    let logs_str = match prev_res {
-                        Ok(Ok(text)) if !text.is_empty() => Some(text),
+                    match prev_res {
+                        Ok(Ok(text)) if !text.is_empty() => {
+                            (Some(cap_log_tail(&text, MAX_LOG_TAIL_BYTES)), None)
+                        }
                         _ => {
                             // If previous logs not found, try current logs
                             let log_params_curr = LogParams {
                                 container: Some(c_name),
                                 tail_lines: Some(tail_lines),
+                                limit_bytes: Some(MAX_LOG_TAIL_BYTES as i64),
                                 previous: false,
                                 ..Default::default()
                             };
-                            tokio::time::timeout(
+                            let curr = tokio::time::timeout(
                                 request_timeout(),
                                 pod_api.logs(&input.pod, &log_params_curr),
                             )
@@ -433,15 +491,15 @@ pub fn why_not_ready_capability(cache: Arc<ClientCache>) -> Capability {
                             .ok()
                             .and_then(|r| r.ok())
                             .filter(|text| !text.is_empty())
+                            .map(|raw| cap_log_tail(&raw, MAX_LOG_TAIL_BYTES));
+                            (None, curr)
                         }
-                    };
-
-                    logs_str.map(|raw| cap_log_tail(&raw, MAX_LOG_TAIL_BYTES))
+                    }
                 } else {
-                    None
+                    (None, None)
                 };
 
-                Ok(analyze_pod_readiness(&pod, &events, previous_logs_tail))
+                Ok(analyze_pod_readiness(&pod, &events, previous_logs_tail, current_logs_tail))
             }
         },
     )
@@ -575,6 +633,7 @@ mod tests {
             &pod,
             &events,
             Some("Fatal error: out of memory\nKilled".to_string()),
+            None,
         );
 
         assert_eq!(out.pod, "crash-pod");
@@ -613,6 +672,125 @@ mod tests {
             out.previous_logs_tail.as_deref(),
             Some("Fatal error: out of memory\nKilled")
         );
+        assert!(out.current_logs_tail.is_none());
+    }
+
+    #[test]
+    fn forced_sigkill_without_oom_reason_is_not_flagged_as_oom() {
+        let pod = Pod {
+            metadata: ObjectMeta {
+                name: Some("killed-pod".to_string()),
+                namespace: Some("default".to_string()),
+                ..Default::default()
+            },
+            spec: Some(PodSpec {
+                containers: vec![Container {
+                    name: "worker".to_string(),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }),
+            status: Some(PodStatus {
+                phase: Some("Running".to_string()),
+                container_statuses: Some(vec![ContainerStatus {
+                    name: "worker".to_string(),
+                    ready: true,
+                    restart_count: 1,
+                    last_state: Some(ContainerState {
+                        terminated: Some(ContainerStateTerminated {
+                            exit_code: 137,
+                            reason: Some("Error".to_string()), // Forced SIGKILL, not OOMKilled
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }]),
+                ..Default::default()
+            }),
+        };
+
+        let out = analyze_pod_readiness(&pod, &[], None, None);
+        let term = out.app_containers[0]
+            .last_terminated_state
+            .as_ref()
+            .unwrap();
+        assert_eq!(term.exit_code, 137);
+        assert!(
+            !term.oom_killed,
+            "forced SIGKILL without OOMKilled reason must not be oom_killed"
+        );
+    }
+
+    #[test]
+    fn probe_failure_targets_only_named_container_via_field_path() {
+        let pod = Pod {
+            metadata: ObjectMeta {
+                name: Some("multi-pod".to_string()),
+                namespace: Some("default".to_string()),
+                ..Default::default()
+            },
+            spec: Some(PodSpec {
+                containers: vec![
+                    Container {
+                        name: "app".to_string(),
+                        ..Default::default()
+                    },
+                    Container {
+                        name: "sidecar".to_string(),
+                        ..Default::default()
+                    },
+                ],
+                ..Default::default()
+            }),
+            status: Some(PodStatus {
+                phase: Some("Running".to_string()),
+                container_statuses: Some(vec![
+                    ContainerStatus {
+                        name: "app".to_string(),
+                        ready: false,
+                        restart_count: 0,
+                        ..Default::default()
+                    },
+                    ContainerStatus {
+                        name: "sidecar".to_string(),
+                        ready: true,
+                        restart_count: 0,
+                        ..Default::default()
+                    },
+                ]),
+                ..Default::default()
+            }),
+        };
+
+        let events = vec![Event {
+            metadata: ObjectMeta {
+                name: Some("unhealthy-app".to_string()),
+                ..Default::default()
+            },
+            type_: Some("Warning".to_string()),
+            reason: Some("Unhealthy".to_string()),
+            message: Some("Readiness probe failed: HTTP 500".to_string()),
+            count: Some(3),
+            involved_object: ObjectReference {
+                kind: Some("Pod".to_string()),
+                name: Some("multi-pod".to_string()),
+                field_path: Some("spec.containers{app}".to_string()),
+                ..Default::default()
+            },
+            ..Default::default()
+        }];
+
+        let out = analyze_pod_readiness(&pod, &events, None, None);
+        assert_eq!(out.app_containers[0].name, "app");
+        assert_eq!(
+            out.app_containers[0].failing_probes,
+            vec!["Readiness".to_string()]
+        );
+
+        // Sidecar must NOT inherit app probe failure
+        assert_eq!(out.app_containers[1].name, "sidecar");
+        assert!(out.app_containers[1].failing_probes.is_empty());
     }
 
     #[test]

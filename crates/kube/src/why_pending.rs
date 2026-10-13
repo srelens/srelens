@@ -127,13 +127,100 @@ pub fn parse_scheduler_rejections(message: &str) -> (usize, Vec<NodeRejectionRea
     (total_nodes, result)
 }
 
-/// Calculate resource requests summary for a Pod across its containers.
-pub fn calculate_pod_resource_requests(spec: Option<&PodSpec>) -> ResourceRequestsSummary {
-    let mut cpu_millicores: i64 = 0;
-    let mut memory_mib: i64 = 0;
-    let mut gpu_requests: i64 = 0;
-    let mut other_map: BTreeMap<String, i64> = BTreeMap::new();
+/// Parse a Kubernetes resource quantity into base unit (f64).
+pub fn parse_k8s_quantity(s: &str) -> f64 {
+    let s = s.trim();
+    const SUFFIXES: [(&str, f64); 16] = [
+        ("Ki", 1024.0),
+        ("Mi", 1024.0 * 1024.0),
+        ("Gi", 1024.0 * 1024.0 * 1024.0),
+        ("Ti", 1024.0 * 1024.0 * 1024.0 * 1024.0),
+        ("Pi", 1024.0 * 1024.0 * 1024.0 * 1024.0 * 1024.0),
+        ("Ei", 1024.0 * 1024.0 * 1024.0 * 1024.0 * 1024.0 * 1024.0),
+        ("k", 1e3),
+        ("M", 1e6),
+        ("G", 1e9),
+        ("T", 1e12),
+        ("P", 1e15),
+        ("E", 1e18),
+        ("m", 1e-3),
+        ("u", 1e-6),
+        ("n", 1e-9),
+        ("", 1.0),
+    ];
+    for (suffix, scale) in &SUFFIXES {
+        if !suffix.is_empty() && s.ends_with(suffix) {
+            let num_str = s[..s.len() - suffix.len()].trim();
+            if let Ok(num) = num_str.parse::<f64>() {
+                return num * scale;
+            }
+        }
+    }
+    s.parse::<f64>().unwrap_or(0.0)
+}
 
+/// Formats a base unit value back to a concise Kubernetes quantity string.
+pub fn format_k8s_quantity(val: f64) -> String {
+    if val <= 0.0 {
+        return "0".to_string();
+    }
+    const GI: f64 = 1024.0 * 1024.0 * 1024.0;
+    const MI: f64 = 1024.0 * 1024.0;
+    const KI: f64 = 1024.0;
+
+    if val >= GI && (val % GI).abs() < 1e-6 {
+        format!("{:.0}Gi", val / GI)
+    } else if val >= MI && (val % MI).abs() < 1e-6 {
+        format!("{:.0}Mi", val / MI)
+    } else if val >= KI && (val % KI).abs() < 1e-6 {
+        format!("{:.0}Ki", val / KI)
+    } else if val >= 1e9 && (val % 1e9).abs() < 1e-6 {
+        format!("{:.0}G", val / 1e9)
+    } else if val >= 1e6 && (val % 1e6).abs() < 1e-6 {
+        format!("{:.0}M", val / 1e6)
+    } else if val >= 1e3 && (val % 1e3).abs() < 1e-6 {
+        format!("{:.0}k", val / 1e3)
+    } else if val.fract().abs() < 1e-6 {
+        format!("{:.0}", val)
+    } else {
+        format!("{:.2}", val)
+            .trim_end_matches('0')
+            .trim_end_matches('.')
+            .to_string()
+    }
+}
+
+#[derive(Default, Clone, Debug)]
+struct ContainerDemands {
+    cpu_millicores: i64,
+    memory_mib: i64,
+    gpu_requests: i64,
+    other: BTreeMap<String, f64>,
+}
+
+impl ContainerDemands {
+    fn add(&mut self, other: &ContainerDemands) {
+        self.cpu_millicores += other.cpu_millicores;
+        self.memory_mib += other.memory_mib;
+        self.gpu_requests += other.gpu_requests;
+        for (k, v) in &other.other {
+            *self.other.entry(k.clone()).or_default() += v;
+        }
+    }
+
+    fn max_with(&mut self, other: &ContainerDemands) {
+        self.cpu_millicores = self.cpu_millicores.max(other.cpu_millicores);
+        self.memory_mib = self.memory_mib.max(other.memory_mib);
+        self.gpu_requests = self.gpu_requests.max(other.gpu_requests);
+        for (k, v) in &other.other {
+            let entry = self.other.entry(k.clone()).or_default();
+            *entry = entry.max(*v);
+        }
+    }
+}
+
+fn extract_container_demands(c: &k8s_openapi::api::core::v1::Container) -> ContainerDemands {
+    let mut d = ContainerDemands::default();
     let discrete_gpu_keys = [
         "nvidia.com/gpu",
         "amd.com/gpu",
@@ -141,44 +228,113 @@ pub fn calculate_pod_resource_requests(spec: Option<&PodSpec>) -> ResourceReques
         "nvidia.com/vgpu",
     ];
 
-    if let Some(spec) = spec {
-        for c in &spec.containers {
-            if let Some(res) = &c.resources {
-                if let Some(reqs) = &res.requests {
-                    for (k, v) in reqs {
-                        if k == "cpu" {
-                            cpu_millicores += crate::metrics::cpu_millicores(&v.0);
-                        } else if k == "memory" {
-                            memory_mib += crate::metrics::mem_mib(&v.0);
-                        } else if discrete_gpu_keys.contains(&k.as_str())
-                            || k.starts_with("nvidia.com/mig-")
-                        {
-                            if let Ok(count) = v.0.trim().parse::<i64>() {
-                                gpu_requests += count;
-                            }
-                        } else if let Ok(num) = v.0.trim().parse::<i64>() {
-                            *other_map.entry(k.clone()).or_default() += num;
-                        } else {
-                            *other_map.entry(k.clone()).or_default() += 1;
-                        }
-                    }
+    if let Some(reqs) = c.resources.as_ref().and_then(|r| r.requests.as_ref()) {
+        for (k, v) in reqs {
+            if k == "cpu" {
+                d.cpu_millicores += crate::metrics::cpu_millicores(&v.0);
+            } else if k == "memory" {
+                d.memory_mib += crate::metrics::mem_mib(&v.0);
+            } else if discrete_gpu_keys.contains(&k.as_str()) || k.starts_with("nvidia.com/mig-") {
+                if let Ok(count) = v.0.trim().parse::<i64>() {
+                    d.gpu_requests += count;
                 }
+            } else {
+                let parsed = parse_k8s_quantity(&v.0);
+                *d.other.entry(k.clone()).or_default() += parsed;
+            }
+        }
+    }
+    d
+}
+
+fn extract_overhead_demands(
+    overhead: &BTreeMap<String, k8s_openapi::apimachinery::pkg::api::resource::Quantity>,
+) -> ContainerDemands {
+    let mut d = ContainerDemands::default();
+    let discrete_gpu_keys = [
+        "nvidia.com/gpu",
+        "amd.com/gpu",
+        "google.com/tpu",
+        "nvidia.com/vgpu",
+    ];
+
+    for (k, v) in overhead {
+        if k == "cpu" {
+            d.cpu_millicores += crate::metrics::cpu_millicores(&v.0);
+        } else if k == "memory" {
+            d.memory_mib += crate::metrics::mem_mib(&v.0);
+        } else if discrete_gpu_keys.contains(&k.as_str()) || k.starts_with("nvidia.com/mig-") {
+            if let Ok(count) = v.0.trim().parse::<i64>() {
+                d.gpu_requests += count;
+            }
+        } else {
+            let parsed = parse_k8s_quantity(&v.0);
+            *d.other.entry(k.clone()).or_default() += parsed;
+        }
+    }
+    d
+}
+
+/// Calculate effective pod resource requests across init containers, native sidecars,
+/// app containers, and overhead according to Kubernetes scheduling rules:
+/// effective = max(peak_init_demand, sum(app_containers) + sum(sidecars)) + overhead.
+pub fn calculate_pod_resource_requests(spec: Option<&PodSpec>) -> ResourceRequestsSummary {
+    let Some(spec) = spec else {
+        return ResourceRequestsSummary {
+            cpu_millicores: 0,
+            memory_mib: 0,
+            gpu_requests: 0,
+            other_requests: Vec::new(),
+        };
+    };
+
+    // Track running sidecars and peak init phase demand
+    let mut running_sidecars = ContainerDemands::default();
+    let mut max_init_demand = ContainerDemands::default();
+
+    if let Some(init_containers) = &spec.init_containers {
+        for c in init_containers {
+            let c_demands = extract_container_demands(c);
+            let is_sidecar = c.restart_policy.as_deref() == Some("Always");
+            if is_sidecar {
+                running_sidecars.add(&c_demands);
+                max_init_demand.max_with(&running_sidecars);
+            } else {
+                let mut step_demand = running_sidecars.clone();
+                step_demand.add(&c_demands);
+                max_init_demand.max_with(&step_demand);
             }
         }
     }
 
-    let other_requests = other_map
+    // App phase: app containers + all sidecars concurrently running
+    let mut app_phase = running_sidecars;
+    for c in &spec.containers {
+        app_phase.add(&extract_container_demands(c));
+    }
+
+    // Effective demand before overhead: max(init_peak, app_phase)
+    let mut effective = app_phase;
+    effective.max_with(&max_init_demand);
+
+    // Add overhead if specified
+    if let Some(overhead) = &spec.overhead {
+        effective.add(&extract_overhead_demands(overhead));
+    }
+
+    let other_requests = effective
+        .other
         .into_iter()
         .map(|(name, val)| ResourceItem {
             name,
-            quantity: val.to_string(),
+            quantity: format_k8s_quantity(val),
         })
         .collect();
 
     ResourceRequestsSummary {
-        cpu_millicores,
-        memory_mib,
-        gpu_requests,
+        cpu_millicores: effective.cpu_millicores,
+        memory_mib: effective.memory_mib,
+        gpu_requests: effective.gpu_requests,
         other_requests,
     }
 }
@@ -187,14 +343,13 @@ pub fn calculate_pod_resource_requests(spec: Option<&PodSpec>) -> ResourceReques
 pub fn analyze_why_pending(
     pod: &Pod,
     events: &[Event],
-    pvcs: &[Result<PersistentVolumeClaim, String>],
+    pvcs: &[Result<PersistentVolumeClaim, (String, String)>],
 ) -> WhyPendingOut {
     let name = pod.metadata.name.clone().unwrap_or_default();
     let namespace = pod.metadata.namespace.clone().unwrap_or_default();
 
     // 1. Gather scheduler events
     let mut scheduler_events = Vec::new();
-    let mut latest_failed_scheduling_msg: Option<String> = None;
 
     for ev in events {
         let is_scheduler = ev
@@ -215,12 +370,6 @@ pub fn analyze_why_pending(
             let first_seen = event_first_timestamp(ev).map(|t| t.to_string());
             let last_seen = event_last_timestamp(ev).map(|t| t.to_string());
 
-            if ev.reason.as_deref() == Some("FailedScheduling")
-                && latest_failed_scheduling_msg.is_none()
-            {
-                latest_failed_scheduling_msg = ev.message.clone();
-            }
-
             scheduler_events.push(CompactEventSummary {
                 type_: ev.type_.clone().unwrap_or_else(|| "Warning".to_string()),
                 reason: ev.reason.clone().unwrap_or_default(),
@@ -232,8 +381,14 @@ pub fn analyze_why_pending(
         }
     }
 
-    // Sort scheduler events by last_seen descending
+    // Sort scheduler events by last_seen descending so newest events come first
     scheduler_events.sort_by(|a, b| b.last_seen.cmp(&a.last_seen));
+
+    // Find the latest FailedScheduling event message AFTER sorting by last_seen descending
+    let latest_failed_scheduling_msg = scheduler_events
+        .iter()
+        .find(|ev| ev.reason == "FailedScheduling")
+        .map(|ev| ev.message.clone());
 
     // 2. Parse scheduler node rejection counts from the latest FailedScheduling event
     let (total_nodes_evaluated, node_rejection_counts) =
@@ -243,7 +398,7 @@ pub fn analyze_why_pending(
             (0, Vec::new())
         };
 
-    // 3. Compute pod resource requests
+    // 3. Compute effective pod resource requests
     let pod_resource_requests = calculate_pod_resource_requests(pod.spec.as_ref());
 
     // 4. Examine unbound PVCs
@@ -277,10 +432,10 @@ pub fn analyze_why_pending(
                     });
                 }
             }
-            Err(missing_name) => {
+            Err((missing_name, failure_phase)) => {
                 unbound_pvcs.push(UnboundPvcEvidence {
                     pvc_name: missing_name.clone(),
-                    phase: "NotFound".to_string(),
+                    phase: failure_phase.clone(),
                     storage_class: None,
                     requested_storage: None,
                 });
@@ -320,25 +475,39 @@ pub fn why_pending_capability(cache: Arc<ClientCache>) -> Capability {
                 let pod = tokio::time::timeout(request_timeout(), pod_api.get(&input.pod))
                     .await
                     .map_err(|_| CapabilityError::Handler("fetch pod timed out".into()))?
-                    .map_err(|e| {
-                        CapabilityError::Handler(format!(
-                            "Pod {}/{} not found: {}",
-                            input.namespace, input.pod, e
-                        ))
+                    .map_err(|e| match e {
+                        kube::Error::Api(ref ae) if ae.code == 404 => CapabilityError::Handler(format!(
+                            "Pod {}/{} not found",
+                            input.namespace, input.pod
+                        )),
+                        other => CapabilityError::Handler(format!(
+                            "Failed to fetch Pod {}/{}: {}",
+                            input.namespace, input.pod, other
+                        )),
                     })?;
 
-                // Fetch events for this pod
+                // Fetch events for this pod, bounded and UID-filtered
                 let event_api: Api<Event> = Api::namespaced(client.clone(), &input.namespace);
+                let pod_uid = pod.metadata.uid.as_deref().unwrap_or_default();
                 let event_params = ListParams::default().fields(&format!(
                     "involvedObject.name={},involvedObject.kind=Pod",
                     input.pod
                 ));
-                let events = tokio::time::timeout(request_timeout(), event_api.list(&event_params))
+                let (raw_events, _) = crate::list_cap::list_capped(&event_api, event_params)
                     .await
-                    .ok()
-                    .and_then(|res| res.ok())
-                    .map(|l| l.items)
-                    .unwrap_or_default();
+                    .map_err(|e| e.into_capability_error("list events"))?;
+
+                let events: Vec<_> = raw_events
+                    .into_iter()
+                    .filter(|ev| {
+                        if !pod_uid.is_empty() {
+                            if let Some(ev_uid) = &ev.involved_object.uid {
+                                return ev_uid == pod_uid;
+                            }
+                        }
+                        true
+                    })
+                    .collect();
 
                 // Fetch referenced PVCs if any
                 let mut pvcs = Vec::new();
@@ -357,7 +526,15 @@ pub fn why_pending_capability(cache: Arc<ClientCache>) -> Capability {
                                 .await
                                 {
                                     Ok(Ok(pvc)) => pvcs.push(Ok(pvc)),
-                                    _ => pvcs.push(Err(claim_name.clone())),
+                                    Ok(Err(kube::Error::Api(ae))) if ae.code == 404 => {
+                                        pvcs.push(Err((claim_name.clone(), "NotFound".to_string())))
+                                    }
+                                    Ok(Err(_other)) => {
+                                        pvcs.push(Err((claim_name.clone(), "FetchFailed".to_string())))
+                                    }
+                                    Err(_) => {
+                                        pvcs.push(Err((claim_name.clone(), "FetchTimeout".to_string())))
+                                    }
                                 }
                             }
                         }
@@ -531,7 +708,10 @@ mod tests {
             }),
         };
 
-        let pvcs = vec![Ok(existing_pvc), Err("ghost-pvc".to_string())];
+        let pvcs = vec![
+            Ok(existing_pvc),
+            Err(("ghost-pvc".to_string(), "NotFound".to_string())),
+        ];
 
         let out = analyze_why_pending(&pod, &events, &pvcs);
 
@@ -563,5 +743,188 @@ mod tests {
 
         assert_eq!(out.unbound_pvcs[1].pvc_name, "ghost-pvc");
         assert_eq!(out.unbound_pvcs[1].phase, "NotFound");
+    }
+
+    #[test]
+    fn calculates_effective_demand_with_init_containers_sidecars_and_overhead() {
+        let pod = Pod {
+            metadata: ObjectMeta {
+                name: Some("heavy-pod".to_string()),
+                namespace: Some("default".to_string()),
+                ..Default::default()
+            },
+            spec: Some(PodSpec {
+                init_containers: Some(vec![
+                    // Native sidecar: runs alongside init containers and app containers
+                    Container {
+                        name: "vault-agent".to_string(),
+                        restart_policy: Some("Always".to_string()),
+                        resources: Some(ResourceRequirements {
+                            requests: Some({
+                                let mut req = BTreeMap::new();
+                                req.insert("cpu".to_string(), Quantity("500m".to_string()));
+                                req.insert("memory".to_string(), Quantity("512Mi".to_string()));
+                                req.insert(
+                                    "ephemeral-storage".to_string(),
+                                    Quantity("2Gi".to_string()),
+                                );
+                                req
+                            }),
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    },
+                    // Standard init: runs while vault-agent is running
+                    Container {
+                        name: "db-migrate".to_string(),
+                        resources: Some(ResourceRequirements {
+                            requests: Some({
+                                let mut req = BTreeMap::new();
+                                req.insert("cpu".to_string(), Quantity("2000m".to_string()));
+                                req.insert("memory".to_string(), Quantity("2Gi".to_string()));
+                                req
+                            }),
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    },
+                ]),
+                containers: vec![Container {
+                    name: "app".to_string(),
+                    resources: Some(ResourceRequirements {
+                        requests: Some({
+                            let mut req = BTreeMap::new();
+                            req.insert("cpu".to_string(), Quantity("1000m".to_string()));
+                            req.insert("memory".to_string(), Quantity("1Gi".to_string()));
+                            req.insert("nvidia.com/gpu".to_string(), Quantity("1".to_string()));
+                            req
+                        }),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }],
+                overhead: Some({
+                    let mut oh = BTreeMap::new();
+                    oh.insert("cpu".to_string(), Quantity("100m".to_string()));
+                    oh.insert("memory".to_string(), Quantity("128Mi".to_string()));
+                    oh
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let summary = calculate_pod_resource_requests(pod.spec.as_ref());
+
+        // Effective CPU:
+        // Init peak: db-migrate (2000m) + vault-agent sidecar (500m) = 2500m
+        // App phase: app (1000m) + vault-agent sidecar (500m) = 1500m
+        // Max(2500, 1500) = 2500m + 100m overhead = 2600m
+        assert_eq!(summary.cpu_millicores, 2600);
+
+        // Effective Memory:
+        // Init peak: db-migrate (2048 MiB) + vault-agent sidecar (512 MiB) = 2560 MiB
+        // App phase: app (1024 MiB) + vault-agent sidecar (512 MiB) = 1536 MiB
+        // Max(2560, 1536) = 2560 MiB + 128 MiB overhead = 2688 MiB
+        assert_eq!(summary.memory_mib, 2688);
+
+        // GPU:
+        assert_eq!(summary.gpu_requests, 1);
+
+        // Ephemeral storage preserved without falling back to "1":
+        let eph = summary
+            .other_requests
+            .iter()
+            .find(|r| r.name == "ephemeral-storage");
+        assert!(eph.is_some());
+        assert_eq!(eph.unwrap().quantity, "2Gi");
+    }
+
+    #[test]
+    fn picks_latest_failed_scheduling_event_by_timestamp() {
+        let pod = Pod {
+            metadata: ObjectMeta {
+                name: Some("test-pod".to_string()),
+                namespace: Some("default".to_string()),
+                ..Default::default()
+            },
+            spec: Some(PodSpec {
+                containers: vec![Container {
+                    name: "app".to_string(),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let t1 = Timestamp::now();
+        let t2 = Timestamp::from_second(t1.as_second() + 10).unwrap();
+
+        // Older event is placed FIRST in the array
+        let older_event = Event {
+            metadata: ObjectMeta {
+                name: Some("older-ev".to_string()),
+                ..Default::default()
+            },
+            reason: Some("FailedScheduling".to_string()),
+            message: Some("0/10 nodes are available: 10 Insufficient cpu.".to_string()),
+            last_timestamp: Some(Time(t1)),
+            ..Default::default()
+        };
+
+        // Newer event is placed SECOND in the array
+        let newer_event = Event {
+            metadata: ObjectMeta {
+                name: Some("newer-ev".to_string()),
+                ..Default::default()
+            },
+            reason: Some("FailedScheduling".to_string()),
+            message: Some("0/5 nodes are available: 5 node(s) had untolerated taint.".to_string()),
+            last_timestamp: Some(Time(t2)),
+            ..Default::default()
+        };
+
+        let events = vec![older_event, newer_event];
+        let out = analyze_why_pending(&pod, &events, &[]);
+
+        // Must pick the newer event's facts (5 nodes, taint) instead of older (10 nodes, cpu)
+        assert_eq!(out.total_nodes_evaluated, 5);
+        assert_eq!(out.node_rejection_counts.len(), 1);
+        assert_eq!(
+            out.node_rejection_counts[0].reason,
+            "node(s) had untolerated taint"
+        );
+        assert_eq!(out.node_rejection_counts[0].count, 5);
+    }
+
+    #[test]
+    fn truthfully_differentiates_pvc_errors() {
+        let pod = Pod {
+            metadata: ObjectMeta {
+                name: Some("test-pod".to_string()),
+                namespace: Some("default".to_string()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let pvcs = vec![
+            Err(("pvc-404".to_string(), "NotFound".to_string())),
+            Err(("pvc-timeout".to_string(), "FetchTimeout".to_string())),
+            Err(("pvc-forbidden".to_string(), "FetchFailed".to_string())),
+        ];
+
+        let out = analyze_why_pending(&pod, &[], &pvcs);
+
+        assert_eq!(out.unbound_pvcs.len(), 3);
+        assert_eq!(out.unbound_pvcs[0].pvc_name, "pvc-404");
+        assert_eq!(out.unbound_pvcs[0].phase, "NotFound");
+
+        assert_eq!(out.unbound_pvcs[1].pvc_name, "pvc-forbidden");
+        assert_eq!(out.unbound_pvcs[1].phase, "FetchFailed");
+
+        assert_eq!(out.unbound_pvcs[2].pvc_name, "pvc-timeout");
+        assert_eq!(out.unbound_pvcs[2].phase, "FetchTimeout");
     }
 }
