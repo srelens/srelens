@@ -218,13 +218,19 @@ function withNamed(values: FacetValue[], clauses: readonly QueryClause[], field:
 }
 
 /**
- * The values the query filters on first, so the cut to the top few cannot hide
- * a filter that is on. Not for Level, which is never cut and keeps its
- * worst-first order whatever is clicked.
+ * The values the query filters on first, and how many that is, so the cut to
+ * the top few can be made past them and never hide a filter that is on. Not
+ * for Level, which is never cut and keeps its worst-first order whatever is
+ * clicked.
  */
-function activeFirst(values: FacetValue[], clauses: readonly QueryClause[], field: string): FacetValue[] {
-  const active = (v: FacetValue) => clauseState(clauses, { field, value: v.value }) !== undefined;
-  return [...values.filter(active), ...values.filter((v) => !active(v))];
+function activeFirst(
+  values: FacetValue[],
+  clauses: readonly QueryClause[],
+  field: string,
+): { values: FacetValue[]; active: number } {
+  const isActive = (v: FacetValue) => clauseState(clauses, { field, value: v.value }) !== undefined;
+  const on = values.filter(isActive);
+  return { values: [...on, ...values.filter((v) => !isActive(v))], active: on.length };
 }
 
 /**
@@ -300,7 +306,7 @@ export function StreamRail({ pods, lines, onTogglePod, query }: StreamRailProps)
       query.fields
         .map((field) => ({
           field,
-          values: activeFirst(withNamed(facetCounts(query.lines, query.clauses, field), query.clauses, field), query.clauses, field),
+          ...activeFirst(withNamed(facetCounts(query.lines, query.clauses, field), query.clauses, field), query.clauses, field),
         }))
         .filter((f) => f.values.length > 0),
     [query.lines, query.clauses, query.fields],
@@ -372,11 +378,14 @@ export function StreamRail({ pods, lines, onTogglePod, query }: StreamRailProps)
           })}
         </Section>
       )}
-      {facets.map(({ field, values }) => {
+      {facets.map(({ field, values, active }) => {
         const open = expanded.has(field);
+        // Neither cut goes below the active values: they are still filtering, and nothing else on screen says so.
+        const collapsed = Math.max(TOP_VALUES, active);
+        const all = Math.min(values.length, Math.max(MAX_VALUES, active));
         return (
           <Section key={field} smallCaps padded={false} title={field}>
-            {values.slice(0, open ? MAX_VALUES : TOP_VALUES).map((v) => {
+            {values.slice(0, open ? all : collapsed).map((v) => {
               const target = { field, value: v.value };
               const label = v.value === "" ? "(empty)" : v.value;
               return (
@@ -392,13 +401,13 @@ export function StreamRail({ pods, lines, onTogglePod, query }: StreamRailProps)
                 />
               );
             })}
-            {values.length > TOP_VALUES && (
+            {all > collapsed && (
               <button
                 type="button"
                 aria-expanded={open}
                 // Named by its field: every section with more than five values
                 // says the same two visible words.
-                aria-label={open ? `Show fewer ${field} values` : `Show all ${Math.min(values.length, MAX_VALUES)} ${field} values`}
+                aria-label={open ? `Show fewer ${field} values` : `Show all ${all} ${field} values`}
                 className="px-3 py-[3px] text-left text-[0.75rem] text-muted hover:text-soft"
                 onClick={() =>
                   setExpanded((s) => {
@@ -408,7 +417,7 @@ export function StreamRail({ pods, lines, onTogglePod, query }: StreamRailProps)
                   })
                 }
               >
-                {open ? "Show fewer" : `Show all ${Math.min(values.length, MAX_VALUES)}`}
+                {open ? "Show fewer" : `Show all ${all}`}
               </button>
             )}
           </Section>

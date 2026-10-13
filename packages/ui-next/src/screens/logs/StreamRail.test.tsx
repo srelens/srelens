@@ -382,6 +382,42 @@ describe("the facets (#898)", () => {
     expect(facetLabels()).toEqual(["s1", "s2", "s3", "s4", "s5"]);
   });
 
+  describe("a collapsed list with more than five values filtered on", () => {
+    /** Seven systems, `s1` the busiest (7 lines) down to `s7` (1). */
+    const SEVEN_SYSTEMS = Array.from({ length: 7 }, (_, i) => Array.from({ length: 7 - i }, () => `s${i + 1}`))
+      .flat()
+      .map((system) => ql(`{"level":"info","msg":"m","system":"${system}"}`));
+    /** Three in and three out: every value but `s1`. */
+    const SIX_ACTIVE = "system:s7 system:s6 system:s5 -system:s4 -system:s3 -system:s2";
+
+    it("shows every one of them, since each is still filtering", () => {
+      facetRail(SIX_ACTIVE, SEVEN_SYSTEMS);
+      expect(facetLabels()).toEqual(["s2", "s3", "s4", "s5", "s6", "s7"]);
+      expect(screen.getByRole("button", { name: "Exclude system = s2" }).getAttribute("aria-pressed")).toBe("true");
+      expect(screen.getByRole("button", { name: "system = s7, 1 line" }).getAttribute("aria-pressed")).toBe("true");
+    });
+
+    it("offers Show all for the value it left out, and Show fewer to go back", async () => {
+      facetRail(SIX_ACTIVE, SEVEN_SYSTEMS);
+      await userEvent.click(screen.getByRole("button", { name: "Show all 7 system values" }));
+      expect(facetLabels()).toEqual(["s2", "s3", "s4", "s5", "s6", "s7", "s1"]);
+      await userEvent.click(screen.getByRole("button", { name: "Show fewer system values" }));
+      expect(facetLabels()).toEqual(["s2", "s3", "s4", "s5", "s6", "s7"]);
+    });
+
+    it("offers no Show all when the active values are every value there is", () => {
+      facetRail("system:s1 system:s2 -system:s3 -system:s4 system:s5 system:s6", SIX_SYSTEMS);
+      expect(facetLabels()).toEqual(["s1", "s2", "s3", "s4", "s5", "s6"]);
+      expect(screen.queryByRole("button", { name: /^Show (all|fewer)/ })).toBeNull();
+    });
+
+    it("still fills a list with fewer than five active to five", () => {
+      facetRail("system:s6 -system:s5", SIX_SYSTEMS);
+      expect(facetLabels()).toEqual(["s5", "s6", "s1", "s2", "s3"]);
+      expect(screen.getByRole("button", { name: "Show all 6 system values" })).toBeTruthy();
+    });
+  });
+
   it("keeps the levels worst first when one is filtered on, since that list is never cut", () => {
     facetRail("level:info");
     const levels = Array.from(document.querySelectorAll('[data-slot="level"] .status')).map((e) => e.textContent);
