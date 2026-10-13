@@ -2,7 +2,7 @@ import { beforeEach, expect, it } from "vitest";
 import { act, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { ClusterContext } from "@srelens/core";
-import { setContexts } from "../../lib/clusters";
+import { resetContexts, setContexts } from "../../lib/clusters";
 import { loadMarks, setMark } from "../../lib/marks";
 import { defaultState } from "../../lib/tabs";
 import { createWorkspace, getState, openTab, setActiveCluster, setState, setWorkspaceClusters, switchWorkspace } from "../../lib/tabsStore";
@@ -109,6 +109,49 @@ it("offers nothing to add when every cluster is already in", () => {
   paint();
   expect(within(row("Default")).queryByRole("combobox")).toBeNull();
   expect(within(row("Default")).getByText("Every cluster is in")).toBeTruthy();
+});
+
+/**
+ * What the picker says depends on what is known about the listing (AGENTS.md,
+ * "Say what you know"). While it loads or after it fails, `Window` keeps the
+ * saved workspaces over an empty contexts store, so "every cluster is in" would
+ * be a guess.
+ */
+it("says the clusters are loading while they are, and keeps the saved ones removable", () => {
+  resetContexts();
+  paint();
+  expect(within(row("Team")).getByText("Loading clusters…")).toBeTruthy();
+  expect(within(row("Team")).queryByRole("combobox")).toBeNull();
+  expect(screen.queryByText("Every cluster is in")).toBeNull();
+  expect(screen.queryByText("No contexts in your kubeconfig files")).toBeNull();
+  // No context and no mark to name it by: the id itself, which still says
+  // which cluster it is. Core does not split a stableId into a name, because
+  // a path and a context name can both hold its `#`.
+  expect(screen.getByRole("button", { name: "Remove prod-id from Team" })).toBeTruthy();
+});
+
+it("says the clusters could not be listed, and why, when the listing failed", () => {
+  setContexts([], "dial tcp 10.0.0.1:443: connect: connection refused");
+  paint();
+  expect(within(row("Team")).getByText(/Could not list clusters: .*connection refused/)).toBeTruthy();
+  expect(within(row("Team")).queryByRole("combobox")).toBeNull();
+  expect(screen.queryByText("Every cluster is in")).toBeNull();
+  expect(screen.queryByText("No contexts in your kubeconfig files")).toBeNull();
+});
+
+it("still offers what a partly failed listing found, beside why it is partial", async () => {
+  setContexts([contexts[1]], "/home/dana/.kube/broken: permission denied");
+  const user = paint();
+  expect(within(row("Team")).getByText(/Could not list clusters: .*permission denied/)).toBeTruthy();
+  await user.click(screen.getByRole("combobox", { name: "Add a cluster to Team" }));
+  expect(offered()).toEqual(["staging"]);
+});
+
+it("says the kubeconfig files hold no contexts when the listing found none", () => {
+  setContexts([]);
+  paint();
+  expect(within(row("Team")).getByText("No contexts in your kubeconfig files")).toBeTruthy();
+  expect(screen.queryByText("Every cluster is in")).toBeNull();
 });
 
 it("removes a cluster from a workspace", async () => {

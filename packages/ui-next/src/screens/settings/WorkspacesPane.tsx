@@ -1,7 +1,7 @@
 import { useId, useState } from "react";
-import { plural } from "@srelens/core";
+import { describeError, plural } from "@srelens/core";
 import { Button, Combobox, ConfirmDialog, IconButton, TextInput } from "@srelens/ui-kit";
-import { useContexts } from "../../lib/clusters";
+import { useContexts, useContextsError, useContextsStatus } from "../../lib/clusters";
 import { useOrderedContexts } from "../../lib/contextOrder";
 import { Icons } from "../../lib/icons";
 import { getMark, useMark } from "../../lib/marks";
@@ -15,6 +15,8 @@ function WorkspaceRow({ workspace, current, lone, onDelete }: {
   workspace: Workspace; current: boolean; lone: boolean; onDelete: () => void;
 }) {
   const contexts = useOrderedContexts(useContexts());
+  const status = useContextsStatus();
+  const listError = useContextsError();
   // A name being typed, committed on Enter or blur; null when not editing.
   const [draft, setDraft] = useState<string | null>(null);
   const group = useId();
@@ -56,13 +58,21 @@ function WorkspaceRow({ workspace, current, lone, onDelete }: {
         </li>)}
       </ul>
       {workspace.clusters.length === 0 && <span className="text-[0.75rem] text-muted">No clusters</span>}
-      {/* Searched rather than listed: a kubeconfig can hold hundreds of contexts.
-          Combobox has no disabled state, so it is drawn only when there is one to add. */}
-      {addable.length ? <Combobox ariaLabel={`Add a cluster to ${workspace.name}`} value=""
-        placeholder="Add cluster…" searchPlaceholder="Search clusters…"
-        options={addable.map((c) => ({ value: c.stableId, label: getMark(c.stableId, c.name).name }))}
-        onValueChange={(id) => setWorkspaceClusters(workspace.id, [...workspace.clusters, id])} />
-        : <span className="text-[0.75rem] text-muted">Every cluster is in</span>}
+      {/* Only what is known: until a listing answers, the contexts store is
+          empty and "every cluster is in" would be a guess. A partial failure
+          still offers what it found. */}
+      {status === "loading" ? <span className="text-[0.75rem] text-muted">Loading clusters…</span> : <>
+        {status === "failed" && <span className="text-[0.75rem]">Could not list clusters: {describeError(listError).raw}</span>}
+        {/* Searched rather than listed: a kubeconfig can hold hundreds of contexts.
+            Combobox has no disabled state, so it is drawn only when there is one to add. */}
+        {addable.length ? <Combobox ariaLabel={`Add a cluster to ${workspace.name}`} value=""
+          placeholder="Add cluster…" searchPlaceholder="Search clusters…"
+          options={addable.map((c) => ({ value: c.stableId, label: getMark(c.stableId, c.name).name }))}
+          onValueChange={(id) => setWorkspaceClusters(workspace.id, [...workspace.clusters, id])} />
+          : status === "loaded" && <span className="text-[0.75rem] text-muted">
+            {contexts.length ? "Every cluster is in" : "No contexts in your kubeconfig files"}
+          </span>}
+      </>}
     </div>
   </li>;
 }
