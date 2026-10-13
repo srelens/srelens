@@ -114,7 +114,7 @@ pub fn cap_log_tail(logs: &str, max_bytes: usize) -> String {
 fn extract_container_evidence(
     name: &str,
     status: Option<&ContainerStatus>,
-    has_readiness_probe: bool,
+    _has_readiness_probe: bool,
     events: &[Event],
 ) -> ContainerEvidence {
     let restart_count = status.map(|s| s.restart_count).unwrap_or(0);
@@ -179,18 +179,8 @@ fn extract_container_evidence(
             }
         });
 
-    // Detect failing probes
+    // Detect failing probes: scan events for explicit probe failure indicators targeting this container
     let mut failing_probes_set = BTreeSet::new();
-
-    // 1. If container is running or started, but not ready, and spec declares a readiness probe
-    let is_ready = status.map(|s| s.ready).unwrap_or(false);
-    let is_running_or_started = current_state.state == "running"
-        || status
-            .and_then(|s| s.started)
-            .unwrap_or(current_state.state == "running");
-    if has_readiness_probe && is_running_or_started && !is_ready {
-        failing_probes_set.insert("Readiness".to_string());
-    }
 
     // 2. Scan events for probe failure indicators targeting this container
     for ev in events {
@@ -946,6 +936,50 @@ mod tests {
             candidates,
             vec!["crash-loop".to_string(), "pull-fail".to_string()],
             "Container with crash history must be ranked ahead of ImagePullBackOff container"
+        );
+    }
+
+    #[test]
+    fn running_unready_container_without_probe_failure_events_is_not_flagged_as_failing_probes() {
+        let pod = Pod {
+            metadata: ObjectMeta {
+                name: Some("startup-pod".to_string()),
+                namespace: Some("default".to_string()),
+                ..Default::default()
+            },
+            spec: Some(PodSpec {
+                containers: vec![Container {
+                    name: "slow-app".to_string(),
+                    readiness_probe: Some(Probe::default()),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }),
+            status: Some(PodStatus {
+                phase: Some("Running".to_string()),
+                container_statuses: Some(vec![ContainerStatus {
+                    name: "slow-app".to_string(),
+                    ready: false,
+                    started: Some(false),
+                    restart_count: 0,
+                    state: Some(ContainerState {
+                        running: Some(k8s_openapi::api::core::v1::ContainerStateRunning {
+                            started_at: None,
+                        }),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }]),
+                ..Default::default()
+            }),
+        };
+
+        // No warning / unhealthy events exist (container is simply starting up)
+        let out = analyze_pod_readiness(&pod, &[], None, None);
+        assert_eq!(out.app_containers[0].name, "slow-app");
+        assert!(
+            out.app_containers[0].failing_probes.is_empty(),
+            "Container starting up without probe failure events must NOT be reported as failing probes"
         );
     }
 }

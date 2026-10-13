@@ -193,16 +193,18 @@ pub fn format_k8s_quantity(val: f64) -> String {
 #[derive(Default, Clone, Debug)]
 struct ContainerDemands {
     cpu_millicores: i64,
-    memory_mib: i64,
-    gpu_requests: i64,
+    memory_bytes: f64,
+    gpu_demands: BTreeMap<String, i64>,
     other: BTreeMap<String, f64>,
 }
 
 impl ContainerDemands {
     fn add(&mut self, other: &ContainerDemands) {
         self.cpu_millicores += other.cpu_millicores;
-        self.memory_mib += other.memory_mib;
-        self.gpu_requests += other.gpu_requests;
+        self.memory_bytes += other.memory_bytes;
+        for (k, v) in &other.gpu_demands {
+            *self.gpu_demands.entry(k.clone()).or_default() += v;
+        }
         for (k, v) in &other.other {
             *self.other.entry(k.clone()).or_default() += v;
         }
@@ -210,8 +212,11 @@ impl ContainerDemands {
 
     fn max_with(&mut self, other: &ContainerDemands) {
         self.cpu_millicores = self.cpu_millicores.max(other.cpu_millicores);
-        self.memory_mib = self.memory_mib.max(other.memory_mib);
-        self.gpu_requests = self.gpu_requests.max(other.gpu_requests);
+        self.memory_bytes = self.memory_bytes.max(other.memory_bytes);
+        for (k, v) in &other.gpu_demands {
+            let entry = self.gpu_demands.entry(k.clone()).or_default();
+            *entry = (*entry).max(*v);
+        }
         for (k, v) in &other.other {
             let entry = self.other.entry(k.clone()).or_default();
             *entry = entry.max(*v);
@@ -231,12 +236,13 @@ fn extract_container_demands(c: &k8s_openapi::api::core::v1::Container) -> Conta
     if let Some(reqs) = c.resources.as_ref().and_then(|r| r.requests.as_ref()) {
         for (k, v) in reqs {
             if k == "cpu" {
-                d.cpu_millicores += crate::metrics::cpu_millicores(&v.0);
+                let cores = parse_k8s_quantity(&v.0);
+                d.cpu_millicores += (cores * 1000.0).round() as i64;
             } else if k == "memory" {
-                d.memory_mib += crate::metrics::mem_mib(&v.0);
+                d.memory_bytes += parse_k8s_quantity(&v.0);
             } else if discrete_gpu_keys.contains(&k.as_str()) || k.starts_with("nvidia.com/mig-") {
                 if let Ok(count) = v.0.trim().parse::<i64>() {
-                    d.gpu_requests += count;
+                    *d.gpu_demands.entry(k.clone()).or_default() += count;
                 }
             } else {
                 let parsed = parse_k8s_quantity(&v.0);
@@ -260,12 +266,13 @@ fn extract_overhead_demands(
 
     for (k, v) in overhead {
         if k == "cpu" {
-            d.cpu_millicores += crate::metrics::cpu_millicores(&v.0);
+            let cores = parse_k8s_quantity(&v.0);
+            d.cpu_millicores += (cores * 1000.0).round() as i64;
         } else if k == "memory" {
-            d.memory_mib += crate::metrics::mem_mib(&v.0);
+            d.memory_bytes += parse_k8s_quantity(&v.0);
         } else if discrete_gpu_keys.contains(&k.as_str()) || k.starts_with("nvidia.com/mig-") {
             if let Ok(count) = v.0.trim().parse::<i64>() {
-                d.gpu_requests += count;
+                *d.gpu_demands.entry(k.clone()).or_default() += count;
             }
         } else {
             let parsed = parse_k8s_quantity(&v.0);
@@ -322,6 +329,15 @@ pub fn calculate_pod_resource_requests(spec: Option<&PodSpec>) -> ResourceReques
         effective.add(&extract_overhead_demands(overhead));
     }
 
+    let total_bytes = effective.memory_bytes.round();
+    let memory_mib = if total_bytes > 0.0 {
+        ((total_bytes / (1024.0 * 1024.0)).round() as i64).max(1)
+    } else {
+        0
+    };
+
+    let total_gpu_requests: i64 = effective.gpu_demands.values().sum();
+
     let other_requests = effective
         .other
         .into_iter()
@@ -333,8 +349,8 @@ pub fn calculate_pod_resource_requests(spec: Option<&PodSpec>) -> ResourceReques
 
     ResourceRequestsSummary {
         cpu_millicores: effective.cpu_millicores,
-        memory_mib: effective.memory_mib,
-        gpu_requests: effective.gpu_requests,
+        memory_mib,
+        gpu_requests: total_gpu_requests,
         other_requests,
     }
 }
@@ -932,5 +948,130 @@ mod tests {
 
         assert_eq!(out.unbound_pvcs[2].pvc_name, "pvc-timeout");
         assert_eq!(out.unbound_pvcs[2].phase, "FetchTimeout");
+    }
+
+    #[test]
+    fn handles_k_suffix_cpu_requests_and_overhead() {
+        let pod = Pod {
+            metadata: ObjectMeta {
+                name: Some("cpu-pod".to_string()),
+                namespace: Some("default".to_string()),
+                ..Default::default()
+            },
+            spec: Some(PodSpec {
+                containers: vec![Container {
+                    name: "main".to_string(),
+                    resources: Some(ResourceRequirements {
+                        requests: Some({
+                            let mut req = BTreeMap::new();
+                            req.insert("cpu".to_string(), Quantity("1k".to_string()));
+                            req
+                        }),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }],
+                overhead: Some({
+                    let mut oh = BTreeMap::new();
+                    oh.insert("cpu".to_string(), Quantity("500m".to_string()));
+                    oh
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let summary = calculate_pod_resource_requests(pod.spec.as_ref());
+        // 1k CPU = 1,000 cores = 1,000,000 millicores + 500m overhead = 1,000,500 millicores
+        assert_eq!(summary.cpu_millicores, 1_000_500);
+    }
+
+    #[test]
+    fn preserves_fractional_memory_across_multiple_containers() {
+        let pod = Pod {
+            metadata: ObjectMeta {
+                name: Some("mem-pod".to_string()),
+                namespace: Some("default".to_string()),
+                ..Default::default()
+            },
+            spec: Some(PodSpec {
+                containers: vec![
+                    Container {
+                        name: "app-1".to_string(),
+                        resources: Some(ResourceRequirements {
+                            requests: Some({
+                                let mut req = BTreeMap::new();
+                                req.insert("memory".to_string(), Quantity("768Ki".to_string()));
+                                req
+                            }),
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    },
+                    Container {
+                        name: "app-2".to_string(),
+                        resources: Some(ResourceRequirements {
+                            requests: Some({
+                                let mut req = BTreeMap::new();
+                                req.insert("memory".to_string(), Quantity("768Ki".to_string()));
+                                req
+                            }),
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    },
+                ],
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let summary = calculate_pod_resource_requests(pod.spec.as_ref());
+        // 768Ki + 768Ki = 1536Ki = 1.5 MiB -> rounds to 2 MiB, must NOT be 0!
+        assert_eq!(summary.memory_mib, 2);
+    }
+
+    #[test]
+    fn keeps_gpu_resource_names_distinct_when_calculating_max_demand() {
+        let pod = Pod {
+            metadata: ObjectMeta {
+                name: Some("gpu-pod".to_string()),
+                namespace: Some("default".to_string()),
+                ..Default::default()
+            },
+            spec: Some(PodSpec {
+                init_containers: Some(vec![Container {
+                    name: "init-amd".to_string(),
+                    resources: Some(ResourceRequirements {
+                        requests: Some({
+                            let mut req = BTreeMap::new();
+                            req.insert("amd.com/gpu".to_string(), Quantity("1".to_string()));
+                            req
+                        }),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }]),
+                containers: vec![Container {
+                    name: "app-nvidia".to_string(),
+                    resources: Some(ResourceRequirements {
+                        requests: Some({
+                            let mut req = BTreeMap::new();
+                            req.insert("nvidia.com/gpu".to_string(), Quantity("1".to_string()));
+                            req
+                        }),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let summary = calculate_pod_resource_requests(pod.spec.as_ref());
+        // 1 amd.com/gpu in init, 1 nvidia.com/gpu in app.
+        // Node needs 1 AMD GPU and 1 NVIDIA GPU available -> total 2 GPUs, must NOT collapse to 1!
+        assert_eq!(summary.gpu_requests, 2);
     }
 }
