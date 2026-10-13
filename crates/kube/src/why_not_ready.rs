@@ -52,6 +52,8 @@ pub struct WhyNotReadyOut {
 #[serde(rename_all = "camelCase")]
 pub struct ContainerEvidence {
     pub name: String,
+    pub ready: bool,
+    pub started: Option<bool>,
     pub restart_count: i32,
     pub current_state: ContainerStateSummary,
     pub last_terminated_state: Option<TerminatedStateSummary>,
@@ -220,8 +222,13 @@ fn extract_container_evidence(
         }
     }
 
+    let ready = status.map(|s| s.ready).unwrap_or(false);
+    let started = status.and_then(|s| s.started);
+
     ContainerEvidence {
         name: name.to_string(),
+        ready,
+        started,
         restart_count,
         current_state,
         last_terminated_state,
@@ -977,6 +984,8 @@ mod tests {
         // No warning / unhealthy events exist (container is simply starting up)
         let out = analyze_pod_readiness(&pod, &[], None, None);
         assert_eq!(out.app_containers[0].name, "slow-app");
+        assert_eq!(out.app_containers[0].ready, false);
+        assert_eq!(out.app_containers[0].started, Some(false));
         assert!(
             out.app_containers[0].failing_probes.is_empty(),
             "Container starting up without probe failure events must NOT be reported as failing probes"
