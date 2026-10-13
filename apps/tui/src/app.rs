@@ -14224,15 +14224,22 @@ impl App {
         if channel.starts_with("logs:") {
             if let ActiveView::Logs(logs) = &mut self.active_view {
                 if logs.channel == channel {
-                    let source = payload
-                        .get("source")
-                        .and_then(|v| v.as_str())
-                        .map(String::from);
-                    if let Some(line) = payload.get("line").and_then(|v| v.as_str()) {
-                        let truncated =
-                            payload.get("truncated").and_then(|v| v.as_bool()) == Some(true);
-                        logs.push_log_line(source, line.to_string(), truncated);
+                    if let Some(lines) = payload.get("lines").and_then(|v| v.as_array()) {
+                        // A frame (#914): every line since the last one, in order.
+                        for l in lines {
+                            let Some(text) = l.get("line").and_then(|v| v.as_str()) else {
+                                continue;
+                            };
+                            let source = l.get("source").and_then(|v| v.as_str()).map(String::from);
+                            let truncated =
+                                l.get("truncated").and_then(|v| v.as_bool()) == Some(true);
+                            logs.push_log_line(source, text.to_string(), truncated);
+                        }
                     } else if let Some(status) = payload.get("status").and_then(|v| v.as_str()) {
+                        let source = payload
+                            .get("source")
+                            .and_then(|v| v.as_str())
+                            .map(String::from);
                         logs.push_entry(source, format!("--- log status: {} ---", status));
                     }
                 }
