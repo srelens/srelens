@@ -96,6 +96,37 @@ describe("LineDetail", () => {
     expect(onToggle).toHaveBeenCalledWith({ field: "level", value: "warn" }, "include");
   });
 
+  describe("a field named level", () => {
+    // `level:` in the query means the line's level word, not a field of that name, so a button on the raw
+    // value would write a filter that matches nothing the row shows.
+    const lineWith = (text: string, level: string, fields: Record<string, string>): DetailLine => ({
+      raw: text,
+      text,
+      pod: "api-7",
+      container: "api",
+      level,
+      health: level === "" ? "neutral" : "danger",
+      fields,
+    });
+
+    it("filters on the level the line is read as, whatever spelling the field has", async () => {
+      const { onToggle } = detail({
+        line: lineWith('{"Level":30,"msg":"error pool timeout"}', "error", { Level: "30", msg: "error pool timeout" }),
+      });
+      expect(screen.getByText("30")).toBeTruthy();
+      await userEvent.click(screen.getByRole("button", { name: "Filter out level = error" }));
+      expect(onToggle).toHaveBeenCalledWith({ field: "level", value: "error" }, "exclude");
+    });
+
+    it("offers no filter when the line has no level word to filter on, as a numeric level has none", () => {
+      detail({ line: lineWith('{"level":30,"msg":"hello"}', "", { level: "30", msg: "hello" }) });
+      expect(screen.getByText("30")).toBeTruthy();
+      expect(screen.queryByRole("button", { name: /level/i })).toBeNull();
+      // The other fields are unaffected.
+      expect(screen.getByRole("button", { name: "Filter for msg = hello" })).toBeTruthy();
+    });
+  });
+
   it("says when the line has left the view", () => {
     detail({ inView: false });
     expect(screen.getByText("No longer in view")).toBeTruthy();

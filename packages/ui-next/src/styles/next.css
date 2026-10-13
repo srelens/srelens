@@ -216,3 +216,8 @@
 /* The log volume histogram is one tab stop. The kit switches a div's focus
    outline off; this div is a control, so it draws the ring a button does. */
 .volume-bars:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; border-radius: 3px; }
+
+/* The log is a tab stop too (the arrow keys select a line), and a scroll
+   container flush with its neighbours: the ring is drawn inside it, where an
+   outer one would be cut off. */
+.log-body:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }

@@ -51,13 +51,16 @@ export function LineDetail({
   const stamp = line.raw.slice(0, line.raw.length - line.text.length).trim();
   // The level as a row of its own only when no field already carries it.
   const levelRow = line.level !== "" && !Object.keys(line.fields).some((k) => k.toLowerCase() === "level");
-  const rows: { key: string; value: string; target?: ClauseTarget }[] = [
+  const rows: { key: string; value: string; target?: { field: string; value: string } }[] = [
     ...(levelRow ? [{ key: "level", value: line.level, target: { field: "level", value: line.level } }] : []),
-    ...Object.entries(line.fields).map(([key, value]) => ({
-      key,
-      value,
-      ...(isQueryableKey(key) ? { target: { field: key, value } } : {}),
-    })),
+    ...Object.entries(line.fields).map(([key, value]) => {
+      // `level:` in a query means the line's level word, which is what the filter must name: the field's own value
+      // may be a number, and a line with no level word has nothing to filter on.
+      if (key.toLowerCase() === "level") {
+        return { key, value, ...(line.level === "" ? {} : { target: { field: "level", value: line.level } }) };
+      }
+      return { key, value, ...(isQueryableKey(key) ? { target: { field: key, value } } : {}) };
+    }),
   ];
   const pretty = useMemo(() => prettyJson(line.text), [line.text]);
 
@@ -122,7 +125,7 @@ export function LineDetail({
                           type="button"
                           className="icon-btn"
                           aria-pressed={state === "include"}
-                          aria-label={`Filter for ${r.key} = ${r.value}`}
+                          aria-label={`Filter for ${target.field} = ${target.value}`}
                           onClick={() => onToggle(target, "include")}
                         >
                           <span aria-hidden="true">+</span>
@@ -131,7 +134,7 @@ export function LineDetail({
                           type="button"
                           className="icon-btn"
                           aria-pressed={state === "exclude"}
-                          aria-label={`Filter out ${r.key} = ${r.value}`}
+                          aria-label={`Filter out ${target.field} = ${target.value}`}
                           onClick={() => onToggle(target, "exclude")}
                         >
                           <span aria-hidden="true">−</span>

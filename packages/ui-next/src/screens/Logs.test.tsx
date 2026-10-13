@@ -1,4 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 
@@ -1594,6 +1596,22 @@ describe("the previous instance", () => {
     expect(rendered(region).join("\n")).not.toContain("exporter queue is full");
   });
 
+  it("takes the time window off with the buffer it was picked from, and draws the other buffer whole", async () => {
+    // A window is a stretch of one buffer's clock. Kept across the swap it
+    // would crop a different instance's lines to a minute they never ran in.
+    withCorpse();
+    const { container } = draw();
+    const region = await body();
+    push(...LINES);
+    const bar = container.querySelectorAll('[data-slot="bucket"]')[0];
+    fireEvent.pointerDown(bar);
+    fireEvent.pointerUp(bar);
+    expect(screen.getByRole("button", { name: "Remove the time window" })).toBeTruthy();
+    await press();
+    await waitFor(() => expect(rendered(region)).toHaveLength(4));
+    expect(screen.queryByRole("button", { name: "Remove the time window" })).toBeNull();
+  });
+
   it("tones the previous buffer through the kit, exactly as a live line is", async () => {
     withCorpse();
     const region = await (draw(), body());
@@ -1952,6 +1970,21 @@ describe("log sources (#569)", () => {
     await waitFor(() => expect(h.seen.at(-1)?.options.source).toBeUndefined());
     expect(h.seen.at(-1)!.targets).toEqual(TARGETS);
     expect(h.views[0].close).toHaveBeenCalled();
+  });
+
+  it("keeps the time window across a change of source, which is the same stretch of time", async () => {
+    h.plugins = [observability()];
+    const { container } = draw();
+    await body();
+    push(...LINES);
+    const bar = container.querySelectorAll('[data-slot="bucket"]')[0];
+    fireEvent.pointerDown(bar);
+    fireEvent.pointerUp(bar);
+    fireEvent.change(await screen.findByRole("combobox", { name: "Logs from" }), {
+      target: { value: "org.example.observability/loki" },
+    });
+    await waitFor(() => expect(h.seen.at(-1)?.options.source).toBeDefined());
+    expect(screen.getByRole("button", { name: "Remove the time window" })).toBeTruthy();
   });
 
   it("does not call a change of source a cleared scrollback: the new source sends its own history", async () => {
@@ -2380,6 +2413,17 @@ describe("the line detail (#898)", () => {
     }
   });
 
+  it("shows where focus is on the log, rather than leaving the tab stop without an outline", async () => {
+    await (draw(), body());
+    expect(logRegion().classList.contains("log-body")).toBe(true);
+    // jsdom draws no CSS; what can be held is that the rule the class names exists, in the accent. It is inset: the
+    // log is a scroll container flush with the rail, the filter bar and the panel, so an outer ring would be cut.
+    const css = readFileSync(join(__dirname, "../styles/next.css"), "utf8").replace(/\/\*[\s\S]*?\*\//g, "");
+    const rule = css.match(/\.log-body:focus-visible\s*\{([^}]*)\}/)?.[1];
+    expect(rule).toContain("outline: 2px solid var(--accent)");
+    expect(rule).toContain("outline-offset: -2px");
+  });
+
   it("starts from the end the key points to, and stops at the ends", async () => {
     await (draw(), body());
     push(...JSON_LINES);
@@ -2590,6 +2634,66 @@ describe("the line detail (#898)", () => {
         reveal.spy.mockRestore();
         restore();
       }
+    });
+
+    it("stays on the selected line when the reveal landed at the end and a new line arrives", async () => {
+      // A browser's scrollIntoView moves the viewport and then reports the scroll. That report is not the reader
+      // returning to the end: with a line selected the view is pinned to it.
+      const region = await (draw(), body());
+      const view = scrollable(region);
+      const reveal = vi.spyOn(HTMLElement.prototype, "scrollIntoView").mockImplementation(() => {
+        region.scrollTop = region.scrollHeight;
+      });
+      try {
+        push(...many(20));
+        view.to(0);
+        region.focus();
+        await userEvent.keyboard("{ArrowUp}");
+        expect(view.top).toBe(300);
+        fireEvent.scroll(region);
+        push(...many(5, 20));
+        expect(view.top).toBe(300);
+      } finally {
+        reveal.mockRestore();
+      }
+    });
+
+    it("follows the end again once the line is closed and the reader is back at it", async () => {
+      const region = await (draw(), body());
+      const view = scrollable(region);
+      push(...many(20));
+      region.focus();
+      await userEvent.keyboard("{ArrowUp}{Escape}");
+      view.to(300);
+      push(...many(5, 20));
+      expect(view.top).toBe(400);
+    });
+
+    it("reveals a clicked row, which the panel opening under it would otherwise cover", async () => {
+      const reveal = revealed();
+      try {
+        await (draw(), body());
+        push(...many(20));
+        await userEvent.click(rows()[19]);
+        expect(reveal.last).toBe(rows()[19].closest("[aria-current]"));
+        expect(reveal.spy).toHaveBeenLastCalledWith({ block: "nearest" });
+        // The same row again still asks, though no render is coming to do it.
+        reveal.spy.mockClear();
+        await userEvent.click(rows()[19]);
+        expect(reveal.spy).toHaveBeenCalledTimes(1);
+      } finally {
+        reveal.spy.mockRestore();
+      }
+    });
+
+    it("stops following the end once a row is clicked, so a new line cannot carry it away", async () => {
+      const region = await (draw(), body());
+      const view = scrollable(region);
+      push(...many(20));
+      expect(view.top).toBe(300);
+      await userEvent.click(rows()[19]);
+      push(...many(5, 20));
+      expect(view.top).toBe(300);
     });
 
     it("stops following the end once a line is selected", async () => {

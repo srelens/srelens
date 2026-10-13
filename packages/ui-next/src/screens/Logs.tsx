@@ -1182,9 +1182,12 @@ function LogsStream({
   function trackScroll() {
     const viewport = viewportRef.current;
     if (!viewport) return;
+    // A selected line pins the view: the scroll that reveals it can land within
+    // the slack of the end, and that is not the reader coming back to follow.
     stickRef.current =
+      selected === null &&
       viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight <
-      STICK_SLACK;
+        STICK_SLACK;
     measure();
   }
 
@@ -1451,8 +1454,10 @@ function LogsStream({
               aria-pressed={previous}
               onClick={() => {
                 setPrevious((p) => !p);
-                // A different buffer: the line the panel holds is not in it.
+                // A different buffer: the line the panel holds is not in it, and a time window is a stretch
+                // of this instance's clock. A change of source keeps the window: it is the same stretch of time.
                 setSelected(null);
+                setRange(undefined);
               }}
               style={
                 previous
@@ -1631,7 +1636,7 @@ function LogsStream({
           onKeyDown={onLogKeyDown}
           role="log"
           aria-label={`${name} logs`}
-          className={`scroll min-h-0 flex-1 py-1 font-mono text-[0.75rem] leading-[1.85] ${
+          className={`scroll log-body min-h-0 flex-1 py-1 font-mono text-[0.75rem] leading-[1.85] ${
             wrap ? "" : "whitespace-nowrap"
           }`}
         >
@@ -1701,7 +1706,13 @@ function LogsStream({
                   onClick={() => {
                     // A drag that selected text to copy is not a request for the panel.
                     if (window.getSelection()?.toString()) return;
+                    // Reading this line, not following: a new line must not carry it away, and the panel
+                    // opening takes the bottom of the pane, where this row may be.
+                    stickRef.current = false;
+                    revealRef.current = true;
                     setSelected(row);
+                    // Same row again: no render is coming to reveal it.
+                    if (row === selected) revealSelected();
                   }}
                   className="cursor-pointer"
                   style={row === selected ? { background: toneWash("accent") } : undefined}
