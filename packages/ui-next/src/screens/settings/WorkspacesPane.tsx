@@ -6,7 +6,7 @@ import { useOrderedContexts } from "../../lib/contextOrder";
 import { Icons } from "../../lib/icons";
 import { getMark, useMark } from "../../lib/marks";
 import { PALETTE } from "../../lib/markSymbols";
-import type { Workspace } from "../../lib/tabs";
+import { workspaceTabCount, type Workspace } from "../../lib/tabs";
 import { removeWorkspace, renameWorkspace, setWorkspaceClusters, setWorkspaceColor, useTabs } from "../../lib/tabsStore";
 
 const COLOURS: ReadonlyArray<{ value: string | undefined; label: string }> = [{ value: undefined, label: "None" }, ...PALETTE];
@@ -86,7 +86,7 @@ export function WorkspacesPane() {
         lone={workspaces.length <= 1} onDelete={() => setDeleting(w.id)} />)}
     </ul>
     {target && <ConfirmDialog title={`Delete ${target.name}?`}
-      message={`${target.name} holds ${plural(target.clusters.length, "cluster")} and ${plural(target.tabs.length, "open tab")}. The tabs close; the clusters stay in your kubeconfig.`}
+      message={`${target.name} holds ${plural(target.clusters.length, "cluster")} and ${plural(workspaceTabCount(target), "open tab")}. The tabs close; the clusters stay in your kubeconfig.`}
       confirmLabel="Delete workspace" danger
       onConfirm={() => { removeWorkspace(target.id); setDeleting(null); }}
       onCancel={() => setDeleting(null)} />}

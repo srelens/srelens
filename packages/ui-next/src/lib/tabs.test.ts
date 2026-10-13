@@ -2,7 +2,7 @@
 // `@xterm/addon-fit` — a UMD bundle that reads `self` as it evaluates.
 import { describe, it, expect, vi, afterEach } from "vitest";
 import type { ClusterContext } from "@srelens/core";
-import { CLOSED_CAP, defaultState, makeTab, newId, reconcile, type TabsState, type Workspace } from "./tabs";
+import { CLOSED_CAP, defaultState, focusStrip, makeTab, newId, reconcile, workspaceTabCount, type TabsState, type Workspace } from "./tabs";
 
 const ctx = (stableId: string, name = stableId): ClusterContext => ({
   name, stableId, key: stableId, cluster: name, server: `https://${name}`, isCurrent: false,
@@ -85,6 +85,18 @@ describe("defaultState", () => {
     const state = defaultState([]);
     expect(state.workspaces).toHaveLength(1);
     expect(state.workspaces[0].clusters).toEqual([]);
+  });
+});
+
+describe("workspaceTabCount", () => {
+  it("counts the strip on screen and the strips put away under other clusters, each tab once", () => {
+    // On a: Home and a's Pods. Focus moves to b, which has nothing yet: Pods is
+    // put away under a, and Home, app-wide, stays on screen and is not copied.
+    const away = focusStrip(ws({ activeCluster: "a" }), "b");
+    expect(away.tabs.map((t) => t.route)).toEqual(["/"]);
+    expect(away.shelved?.a.tabs.map((t) => t.route)).toEqual(["/k/pods"]);
+    expect(workspaceTabCount(away)).toBe(2);
+    expect(workspaceTabCount(ws())).toBe(2);
   });
 });
 

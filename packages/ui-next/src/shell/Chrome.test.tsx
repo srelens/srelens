@@ -4,10 +4,12 @@ import userEvent from "@testing-library/user-event";
 import { Chrome } from "./Chrome";
 import {
   activeRoute,
+  closeTab,
   createWorkspace,
   currentWorkspace,
   getState,
   openTab,
+  setActiveCluster,
   setState,
   setWorkspaceColor,
   switchWorkspace,
@@ -222,6 +224,34 @@ describe("Chrome", () => {
     await userEvent.click(screen.getByRole("button", { name: /Remove Team/ }));
     expect(screen.getByRole("dialog", { name: /Remove Team/ })).toBeDefined();
     expect(getState().workspaces.some((w) => w.id === id)).toBe(true);
+  });
+
+  /** Team, on stage with only its home tab on screen, and a Pods tab put away under prod (#908). */
+  const teamWithAShelvedTab = () => {
+    const id = createWorkspace("Team", ["prod", "stage"]);
+    openTab("/k/pods");
+    setActiveCluster("stage");
+    closeTab(currentWorkspace().activeId); // stage's overview
+    expect(currentWorkspace().tabs.map((t) => t.route)).toEqual(["/"]);
+    expect(currentWorkspace().shelved?.prod.tabs.map((t) => t.route)).toEqual(["/k/pods"]);
+    switchWorkspace(getState().workspaces[0].id);
+    return id;
+  };
+
+  it("asks before removing a workspace whose tabs are put away under another cluster", async () => {
+    const id = teamWithAShelvedTab();
+    chrome();
+    await openSwitcher();
+    await userEvent.click(screen.getByRole("button", { name: /Remove Team/ }));
+    expect(screen.getByRole("dialog", { name: /Remove Team/ }).textContent).toContain("2 open tabs");
+    expect(getState().workspaces.some((w) => w.id === id)).toBe(true);
+  });
+
+  it("counts the tabs put away under another cluster in the switcher", async () => {
+    teamWithAShelvedTab();
+    chrome();
+    await openSwitcher();
+    expect(screen.getByRole("button", { name: /^Team/ }).textContent).toContain("2 clusters · 2 tabs");
   });
 
   it("keeps the workspace when the confirmation is dismissed", async () => {

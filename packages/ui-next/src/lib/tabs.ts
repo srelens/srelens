@@ -302,6 +302,16 @@ export function withOverview(w: Workspace, clusterName?: string): Workspace {
   return { ...w, tabs: [...w.tabs, overview], activeId: overview.id };
 }
 
+/**
+ * Every tab open in a workspace: the strip on screen and the strips put away
+ * under its other clusters, which close with it too. A plain sum, because a
+ * strip is put away holding only its own cluster's tabs (see
+ * {@link focusStrip}): the app-wide ones stay on screen, so none is in two.
+ */
+export function workspaceTabCount(w: Workspace): number {
+  return Object.values(w.shelved ?? {}).reduce((n, strip) => n + strip.tabs.length, w.tabs.length);
+}
+
 /** A workspace's shelved strips, less those of clusters it no longer has. */
 function shelvedFor(w: Workspace, clusters: readonly string[]): Workspace {
   if (!w.shelved) return w;

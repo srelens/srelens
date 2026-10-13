@@ -5,7 +5,7 @@ import type { ClusterContext } from "@srelens/core";
 import { setContexts } from "../../lib/clusters";
 import { loadMarks, setMark } from "../../lib/marks";
 import { defaultState } from "../../lib/tabs";
-import { createWorkspace, getState, openTab, setState, switchWorkspace } from "../../lib/tabsStore";
+import { createWorkspace, getState, openTab, setActiveCluster, setState, setWorkspaceClusters, switchWorkspace } from "../../lib/tabsStore";
 import { WorkspacesPane } from "./WorkspacesPane";
 
 const contexts: ClusterContext[] = ["prod", "staging", "dev"].map((name) => ({
@@ -122,6 +122,19 @@ it("deletes a workspace after saying what it holds", async () => {
   expect(dialog.textContent).toContain("1 cluster and 2 open tabs");
   await user.click(within(dialog).getByRole("button", { name: "Delete workspace" }));
   expect(stored(team)).toBeUndefined();
+});
+
+it("counts the tabs of every cluster in the workspace, not only the one in focus", async () => {
+  // Team's Pods were opened on prod. Focusing staging puts them away and opens
+  // staging's overview: two tabs on screen, one put away, and all three go.
+  setWorkspaceClusters(team, ["prod-id", "staging-id"]);
+  switchWorkspace(team);
+  setActiveCluster("staging-id", "staging");
+  expect(stored(team)?.shelved?.["prod-id"].tabs).toHaveLength(1);
+  switchWorkspace(getState().workspaces[0].id);
+  const user = paint();
+  await user.click(screen.getByRole("button", { name: "Delete Team" }));
+  expect(screen.getByRole("dialog", { name: "Delete Team?" }).textContent).toContain("2 clusters and 3 open tabs");
 });
 
 it("keeps the workspace when the delete is cancelled", async () => {
