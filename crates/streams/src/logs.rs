@@ -65,6 +65,8 @@ pub const FRAME_MAX_BYTES: usize = 512 * 1024;
 /// One stream's lines between the target tasks that read them and the frames
 /// that send them: numbered, spooled, and held until the next frame.
 ///
+/// Lock order: the writer's mutex, then the spool's.
+///
 /// ponytail: one mutex per stream, taken per line; per-target buffers if a
 /// fan-out of hundreds of pods ever contends on it.
 pub(crate) struct LogWriter {
@@ -74,11 +76,14 @@ pub(crate) struct LogWriter {
     spool: Option<Arc<Mutex<LogSpool>>>,
     /// Why the spool stopped, until the next frame says so.
     pub(crate) notice: Option<String>,
-    /// Targets still following; a completed init container's ends.
+    /// Targets still following. One whose follow ends (a completed init container)
+    /// counts itself out, and frames stop once none are left.
     pub(crate) running: usize,
 }
 
 impl LogWriter {
+    /// A writer for a stream of `targets` targets. Each line goes to `spool` first
+    /// when there is one; `None` keeps only the live frames.
     pub(crate) fn new(spool: Option<Arc<Mutex<LogSpool>>>, targets: usize) -> Self {
         Self {
             next_seq: 1,
@@ -90,16 +95,26 @@ impl LogWriter {
         }
     }
 
+    /// Number `line` and hold it for the next frame, spooling it first when there
+    /// is a spool. Past either cap only the oldest pending lines are dropped, never
+    /// the line just pushed. A spool that fails to append is failed and dropped:
+    /// the next `take` sends its reason, and the line still goes out.
     pub(crate) fn push(&mut self, line: LogLine) {
         if let Some(spool) = &self.spool {
             let mut spool = spool.lock().unwrap();
-            if let Err(e) = spool.append(&line) {
-                // Losing the history never costs the live tail.
-                let reason = e.to_string();
-                spool.fail(reason.clone());
-                drop(spool);
-                self.spool = None;
-                self.notice = Some(reason);
+            match spool.append(&line) {
+                Ok(seq) => debug_assert_eq!(
+                    seq, self.next_seq,
+                    "the spool and the writer number a line alike"
+                ),
+                Err(e) => {
+                    // Losing the history never costs the live tail.
+                    let reason = e.to_string();
+                    spool.fail(reason.clone());
+                    drop(spool);
+                    self.spool = None;
+                    self.notice = Some(reason);
+                }
             }
         }
         self.next_seq += 1;
@@ -134,6 +149,10 @@ impl LogWriter {
 }
 
 /// A line's share of a frame: its text and tag, plus the JSON around them.
+///
+/// ponytail: this counts the raw text and a flat 32 bytes, not the serialized JSON.
+/// Quote- or ANSI-heavy lines escape to more bytes, so a real frame can exceed
+/// FRAME_MAX_BYTES; count the serialized size if that ever matters.
 fn weight(line: &LogLine) -> usize {
     line.source.len() + line.line.len() + 32
 }
@@ -259,6 +278,7 @@ impl LogStreamManager {
 mod tests {
     use super::*;
     use crate::test_util::TestSink;
+    use serde_json::json;
 
     #[tokio::test(flavor = "multi_thread")]
     async fn rejects_empty_targets() {
@@ -392,9 +412,6 @@ mod tests {
         manager.stop("logs:1");
     }
 
-    use crate::log_spool::LogSpool;
-    use serde_json::json;
-
     fn ll(n: usize) -> LogLine {
         LogLine {
             source: String::new(),
@@ -427,23 +444,35 @@ mod tests {
         }
         let frame = &w.take()[0];
         assert_eq!(frame["seq"], 251);
-        assert_eq!(frame["lines"].as_array().unwrap().len(), FRAME_MAX_LINES);
+        let lines = frame["lines"].as_array().unwrap();
+        assert_eq!(lines.len(), FRAME_MAX_LINES);
+        assert_eq!(lines[0]["line"], "l251");
+        assert_eq!(lines[FRAME_MAX_LINES - 1]["line"], "l5250");
     }
 
     #[test]
     fn a_frame_stays_within_its_byte_cap() {
         let mut w = LogWriter::new(None, 1);
         let big = "x".repeat(100 * 1024);
-        for _ in 0..10 {
+        for n in 1..=10 {
             w.push(LogLine {
                 source: String::new(),
-                line: big.clone(),
+                line: format!("{n} {big}"),
                 truncated: false,
             });
         }
         let frame = &w.take()[0];
-        assert_eq!(frame["lines"].as_array().unwrap().len(), 5);
+        let lines = frame["lines"].as_array().unwrap();
+        assert_eq!(lines.len(), 5);
         assert_eq!(frame["seq"], 6);
+        assert!(
+            lines[0]["line"].as_str().unwrap().starts_with("6 "),
+            "the oldest line kept is the 6th push"
+        );
+        assert!(
+            lines[4]["line"].as_str().unwrap().starts_with("10 "),
+            "and the newest is the 10th"
+        );
     }
 
     #[test]
@@ -456,7 +485,9 @@ mod tests {
         for n in 1..=3 {
             w.push(ll(n));
         }
-        assert_eq!(w.take()[0]["first"], 1);
+        let frame = w.take();
+        assert_eq!(frame[0]["seq"], 1);
+        assert_eq!(frame[0]["first"], 1);
         let page = spool
             .lock()
             .unwrap()
@@ -464,7 +495,12 @@ mod tests {
             .unwrap()
             .read(4, 10)
             .unwrap();
-        assert_eq!(page.lines.len(), 3);
+        assert_eq!(
+            page.seq, 1,
+            "the spool numbers its first line as the frame does"
+        );
+        let texts: Vec<&str> = page.lines.iter().map(|l| l.line.as_str()).collect();
+        assert_eq!(texts, ["l1", "l2", "l3"]);
     }
 
     #[test]
@@ -484,7 +520,36 @@ mod tests {
             "no history to point at any more"
         );
         w.push(ll(2));
-        assert_eq!(w.take().len(), 1, "the notice is sent once");
+        let next = w.take();
+        assert_eq!(next.len(), 1, "the notice is sent once");
+        assert_eq!(next[0]["seq"], 2);
         assert!(spool.lock().unwrap().failed().is_some(), "reads say why");
+    }
+
+    #[test]
+    fn a_spool_that_fails_mid_stream_keeps_the_seq_running_and_says_why() {
+        let tmp = tempfile::tempdir().unwrap();
+        let spool = Arc::new(Mutex::new(
+            LogSpool::create(tmp.path().join("s"), 64 << 20).unwrap(),
+        ));
+        let mut w = LogWriter::new(Some(spool.clone()), 1);
+        for n in 1..=3 {
+            w.push(ll(n));
+        }
+        assert_eq!(w.take()[0]["seq"], 1);
+        // Forced rather than by deleting the directory: an open segment's file cannot
+        // be removed on Windows, and a deleted directory only fails once a new segment opens.
+        spool.lock().unwrap().fail("disk full".into());
+        w.push(ll(4));
+        w.push(ll(5));
+        let out = w.take();
+        assert_eq!(out[0]["spool"]["failed"], "disk full");
+        assert_eq!(out[1]["seq"], 4, "the seq goes on from the last frame's");
+        assert_eq!(out[1]["lines"].as_array().unwrap().len(), 2);
+        assert!(
+            out[1].get("first").is_none(),
+            "no history to point at any more"
+        );
+        assert_eq!(spool.lock().unwrap().failed(), Some("disk full"));
     }
 }
