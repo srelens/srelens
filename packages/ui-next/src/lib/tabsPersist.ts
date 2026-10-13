@@ -3,6 +3,7 @@ import { detailRoute, parseDetailRoute } from "./detailRoute";
 import { loadRestoreSession, scopedSettingsKey, settingsStorage } from "@srelens/core";
 import type { TableSort } from "@srelens/ui-kit";
 import type { Tab, TabsState, Workspace } from "./tabs";
+import { isPaletteColor } from "./markSymbols";
 
 /**
  * Where the shell's tabs live between launches.
@@ -106,6 +107,10 @@ function parseWorkspace(v: unknown): Workspace | null {
   // Only a cluster the workspace actually has: the field is an index into
   // `clusters`, and `reconcile` would drop a dangling one anyway.
   if (isString(v.activeCluster) && clusters.includes(v.activeCluster)) ws.activeCluster = v.activeCluster;
+  // Only a palette colour: the chip paints whatever it is handed, and a value
+  // from a hand-edited file or another build's palette is not one this build
+  // can name.
+  if (isPaletteColor(v.color)) ws.color = v.color;
   return ws;
 }
 
