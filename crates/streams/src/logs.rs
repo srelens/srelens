@@ -30,11 +30,11 @@ pub struct LogTarget {
 /// A line emitted on the stream channel: its source tag and text, and whether
 /// the host cut it at [`srelens_kube::logs::MAX_LOG_LINE_BYTES`] (#747). The
 /// flag is sent only on a cut line, so every other line's payload is as it was.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LogLine {
     pub source: String,
     pub line: String,
-    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub truncated: bool,
 }
 

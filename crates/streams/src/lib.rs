@@ -6,6 +6,7 @@ pub mod app;
 pub mod exec;
 pub mod forward;
 pub mod helm;
+pub mod log_spool;
 pub mod logs;
 pub mod sink;
 pub mod terminal;
