@@ -588,20 +588,23 @@ describe("VolumeHistogram", () => {
         />,
       );
 
-    it("keeps the legend, and says nothing matches where the bars were", () => {
+    it("keeps the legend, and says there is nothing to chart where the bars were", () => {
       const { container } = drawWith([], offered);
       expect(texts(container, "legend-item")).toEqual(["error 2", "info 1"]);
-      expect(screen.getByText("No lines match")).toBeTruthy();
+      expect(screen.getByText("Nothing to chart")).toBeTruthy();
+      // The body's own empty state says "No lines match" right below: the chart must not say it a second time.
+      expect(screen.queryByText("No lines match")).toBeNull();
       expect(screen.queryByText("No timed lines match")).toBeNull();
       expect(container.querySelector('[data-slot="gridline"]')).toBeNull();
       expect(container.querySelector('[data-slot="bucket"]')).toBeNull();
     });
 
     it("says no timed lines match when lines did match but none of them has a time", () => {
-      // Matching lines the bars cannot place: "No lines match" would be untrue, and the caption still counts them.
+      // Matching lines the bars cannot place: "Nothing to chart" would hide that they matched, and the caption still counts them.
       const stampless = [ql("error x"), ql("error y")];
       const { container } = drawWith(stampless, [...offered, ...stampless]);
       expect(screen.getByText("No timed lines match")).toBeTruthy();
+      expect(screen.queryByText("Nothing to chart")).toBeNull();
       expect(screen.queryByText("No lines match")).toBeNull();
       expect(container.querySelector('[data-slot="volume-caption"]')?.textContent).toBe("0 lines · 2 without a time");
       expect(texts(container, "legend-item")).toEqual(["error 4", "info 1"]);
@@ -619,9 +622,9 @@ describe("VolumeHistogram", () => {
       expect(container.querySelector('[data-slot="volume-caption"]')?.textContent).toBe("0 lines");
       await userEvent.click(screen.getByRole("button", { name: "Hide the volume chart" }));
       expect(screen.queryByRole("button", { name: "error 2" })).toBeNull();
-      expect(screen.queryByText("No lines match")).toBeNull();
+      expect(screen.queryByText("Nothing to chart")).toBeNull();
       await userEvent.click(screen.getByRole("button", { name: "Show the volume chart" }));
-      expect(screen.getByText("No lines match")).toBeTruthy();
+      expect(screen.getByText("Nothing to chart")).toBeTruthy();
     });
 
     it("draws nothing for an empty buffer", () => {
