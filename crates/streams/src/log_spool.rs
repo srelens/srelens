@@ -108,7 +108,11 @@ impl LogSpool {
         }
         let mut record = serde_json::to_vec(line).map_err(io::Error::other)?;
         record.push(b'\n');
-        if self.segments.back().is_none_or(|s| s.bytes >= self.segment_bytes) {
+        if self
+            .segments
+            .back()
+            .is_none_or(|s| s.bytes >= self.segment_bytes)
+        {
             self.open_segment()?;
         }
         let segment = self.segments.back_mut().expect("a segment is open");
@@ -134,7 +138,13 @@ impl LogSpool {
         let path = self.dir.join(format!("{first:020}.jsonl"));
         let file = create_private_file(&path)?;
         self.writer = Some(BufWriter::with_capacity(64 * 1024, file));
-        self.segments.push_back(Segment { first, path, bytes: 0, lines: 0, index: Vec::new() });
+        self.segments.push_back(Segment {
+            first,
+            path,
+            bytes: 0,
+            lines: 0,
+            index: Vec::new(),
+        });
         Ok(())
     }
 
@@ -195,6 +205,8 @@ struct SegmentView {
 /// A spool as of one moment, readable without its lock. It holds paths, not open
 /// files: a segment the writer rotates out after the snapshot is skipped by
 /// [`SpoolSnapshot::read`], so a page that would have started in it starts after it.
+/// [`SpoolSnapshot::export`] skips such a segment too, but only before it has read
+/// any segment: after that, the history would have a hole, so it fails instead.
 pub struct SpoolSnapshot {
     pub first: u64,
     next: u64,
@@ -269,10 +281,10 @@ impl SpoolSnapshot {
     /// lines were written.
     ///
     /// Any line it could not write is an error, never a shorter export: a
-    /// segment that cannot be read whole, or one rotated out after lines were
-    /// written, fails the call, and the caller must not keep the file. A
-    /// segment rotated out before any line is written is skipped, since the
-    /// export then starts at the oldest segment still on disk.
+    /// segment that cannot be read whole, or one rotated out after the export
+    /// has read a segment, fails the call, and the caller must not keep the
+    /// file. A segment rotated out before any segment has been read is skipped,
+    /// since the export then starts at the oldest segment still on disk.
     pub fn export(
         &self,
         out: &mut dyn Write,
@@ -282,15 +294,17 @@ impl SpoolSnapshot {
         let cutoff = since.map(DateTime::<Utc>::from);
         let mut stamp: Option<DateTime<Utc>> = None;
         let mut written = 0;
+        let mut started = false;
         for segment in &self.segments {
             let mut reader = match open_at(&segment.path, 0, segment.bytes) {
                 Ok(reader) => reader,
-                // Rotated out since the snapshot. Before any line is written that is
-                // a clean trim of the export's start; after one, the lines already
-                // written would have a hole, so it fails.
-                Err(e) if e.kind() == io::ErrorKind::NotFound && written == 0 => continue,
+                // Rotated out since the snapshot. Before any segment has been read that
+                // is a clean trim of the export's start; after one, the history would
+                // have a hole, so it fails.
+                Err(e) if e.kind() == io::ErrorKind::NotFound && !started => continue,
                 Err(e) => return Err(e),
             };
+            started = true;
             let mut record = String::new();
             for seq in segment.first..segment.first + segment.lines {
                 read_record(&mut reader, &mut record, &segment.path, seq)?;
@@ -324,7 +338,12 @@ fn open_at(path: &Path, offset: u64, end: u64) -> io::Result<BufReader<io::Take<
 /// The next record of a segment, into `record`. A segment that ends before the
 /// line count it was recorded with is an error, not the end of the lines: its
 /// index and count promise more than the file holds.
-fn read_record(reader: &mut impl BufRead, record: &mut String, path: &Path, seq: u64) -> io::Result<()> {
+fn read_record(
+    reader: &mut impl BufRead,
+    record: &mut String,
+    path: &Path,
+    seq: u64,
+) -> io::Result<()> {
     record.clear();
     if reader.read_line(record)? == 0 {
         return Err(io::Error::new(
@@ -361,7 +380,11 @@ mod tests {
     use super::*;
 
     fn line(n: u64) -> LogLine {
-        LogLine { source: "web-1".into(), line: format!("line {n}"), truncated: false }
+        LogLine {
+            source: "web-1".into(),
+            line: format!("line {n}"),
+            truncated: false,
+        }
     }
 
     fn texts(page: &SpoolPage) -> Vec<String> {
@@ -393,7 +416,10 @@ mod tests {
         let none = snapshot.read(1, 10).unwrap();
         assert_eq!((none.seq, none.lines.len()), (1, 0));
         let newest = snapshot.read(u64::MAX, 2).unwrap();
-        assert_eq!((newest.seq, texts(&newest)), (9, vec!["line 9".to_string(), "line 10".to_string()]));
+        assert_eq!(
+            (newest.seq, texts(&newest)),
+            (9, vec!["line 9".to_string(), "line 10".to_string()])
+        );
     }
 
     #[test]
@@ -419,7 +445,10 @@ mod tests {
         }
         let first = spool.first();
         assert!(first > 1, "rotation moved first on, got {first}");
-        assert!(!dir.join(format!("{:020}.jsonl", 1)).exists(), "the oldest file is deleted");
+        assert!(
+            !dir.join(format!("{:020}.jsonl", 1)).exists(),
+            "the oldest file is deleted"
+        );
         let snapshot = spool.snapshot().unwrap();
         // Across segment boundaries (rotation leaves `first` near 142), contiguous
         // and ending at `before`.
@@ -439,11 +468,24 @@ mod tests {
         let mut spool = LogSpool::create(tmp.path().join("s"), 64 << 20).unwrap();
         let big = "x".repeat(64 * 1024);
         for n in 1..=130 {
-            spool.append(&LogLine { source: String::new(), line: format!("{n} {big}"), truncated: false }).unwrap();
+            spool
+                .append(&LogLine {
+                    source: String::new(),
+                    line: format!("{n} {big}"),
+                    truncated: false,
+                })
+                .unwrap();
         }
         let page = spool.snapshot().unwrap().read(131, 5000).unwrap();
-        assert!(page.lines.len() < 130, "the page was cut at {MAX_READ_BYTES} bytes");
-        assert_eq!(page.seq + page.lines.len() as u64, 131, "and still ends where it was asked to");
+        assert!(
+            page.lines.len() < 130,
+            "the page was cut at {MAX_READ_BYTES} bytes"
+        );
+        assert_eq!(
+            page.seq + page.lines.len() as u64,
+            131,
+            "and still ends where it was asked to"
+        );
         assert!(page.lines.last().unwrap().line.starts_with("130 "));
     }
 
@@ -455,7 +497,12 @@ mod tests {
         spool.fail("disk full".into());
         assert_eq!(spool.failed(), Some("disk full"));
         assert!(spool.append(&line(2)).is_err());
-        assert!(spool.snapshot().err().unwrap().to_string().contains("disk full"));
+        assert!(spool
+            .snapshot()
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("disk full"));
     }
 
     #[test]
@@ -490,13 +537,23 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let mut spool = spool_of_100_lines_in_small_segments(tmp.path().join("s"));
         let snapshot = spool.snapshot().unwrap();
-        assert!(snapshot.segments.len() > 2, "the test needs several segments");
+        assert!(
+            snapshot.segments.len() > 2,
+            "the test needs several segments"
+        );
         // The writer rotates the oldest segment out after the reader's snapshot.
         let second = snapshot.segments[1].first;
         fs::remove_file(&snapshot.segments[0].path).unwrap();
         let page = snapshot.read(101, 100).unwrap();
-        assert_eq!(page.seq, second, "the page starts where the rotated-out segment ended");
-        assert_eq!(page.seq + page.lines.len() as u64, 101, "and still ends where it was asked to");
+        assert_eq!(
+            page.seq, second,
+            "the page starts where the rotated-out segment ended"
+        );
+        assert_eq!(
+            page.seq + page.lines.len() as u64,
+            101,
+            "and still ends where it was asked to"
+        );
         assert_eq!(texts(&page).first().unwrap(), &format!("line {second}"));
         assert_eq!(texts(&page).last().unwrap(), "line 100");
     }
@@ -525,9 +582,21 @@ mod tests {
         // Something outside the spool (a temp cleaner) cuts the oldest segment
         // after its first record: the index and the line count now promise more.
         let path = &snapshot.segments[0].path;
-        let first_record = fs::read(path).unwrap().iter().position(|b| *b == b'\n').unwrap() as u64 + 1;
-        OpenOptions::new().write(true).open(path).unwrap().set_len(first_record).unwrap();
-        let err = snapshot.read(101, 100).expect_err("a short segment is an error");
+        let first_record = fs::read(path)
+            .unwrap()
+            .iter()
+            .position(|b| *b == b'\n')
+            .unwrap() as u64
+            + 1;
+        OpenOptions::new()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_len(first_record)
+            .unwrap();
+        let err = snapshot
+            .read(101, 100)
+            .expect_err("a short segment is an error");
         assert_eq!(err.kind(), io::ErrorKind::UnexpectedEof);
     }
 
@@ -547,25 +616,40 @@ mod tests {
     fn lines_of(spool: &mut LogSpool, lines: &[(&str, &str)]) {
         for (source, text) in lines {
             spool
-                .append(&LogLine { source: (*source).into(), line: (*text).into(), truncated: false })
+                .append(&LogLine {
+                    source: (*source).into(),
+                    line: (*text).into(),
+                    truncated: false,
+                })
                 .unwrap();
         }
     }
 
     fn named(source: &str) -> String {
-        if source.is_empty() { "web-1".into() } else { source.into() }
+        if source.is_empty() {
+            "web-1".into()
+        } else {
+            source.into()
+        }
     }
 
     #[test]
     fn an_export_writes_source_and_line_naming_an_untagged_source() {
         let tmp = tempfile::tempdir().unwrap();
         let mut spool = LogSpool::create(tmp.path().join("s"), 64 << 20).unwrap();
-        lines_of(&mut spool, &[
-            ("", "2026-10-13T10:00:00Z boot"),
-            ("web-2/app", "2026-10-13T10:05:00.5Z ready"),
-        ]);
+        lines_of(
+            &mut spool,
+            &[
+                ("", "2026-10-13T10:00:00Z boot"),
+                ("web-2/app", "2026-10-13T10:05:00.5Z ready"),
+            ],
+        );
         let mut out = Vec::new();
-        let n = spool.snapshot().unwrap().export(&mut out, None, &named).unwrap();
+        let n = spool
+            .snapshot()
+            .unwrap()
+            .export(&mut out, None, &named)
+            .unwrap();
         assert_eq!(n, 2);
         assert_eq!(
             String::from_utf8(out).unwrap(),
@@ -577,17 +661,26 @@ mod tests {
     fn an_export_since_a_time_keeps_lines_stamped_at_or_after_it() {
         let tmp = tempfile::tempdir().unwrap();
         let mut spool = LogSpool::create(tmp.path().join("s"), 64 << 20).unwrap();
-        lines_of(&mut spool, &[
-            ("", "[error: before any stamp]"),           // a leading run: kept
-            ("", "2026-10-13T10:00:00Z old"),            // before the cutoff
-            ("", "[error: after old]"),                  // inherits 10:00: dropped
-            ("", "2026-10-13T12:10:00+02:00 new"),       // 10:10 UTC: kept
-            ("", "[error: after new]"),                  // inherits 10:10: kept
-        ]);
+        lines_of(
+            &mut spool,
+            &[
+                ("", "[error: before any stamp]"),     // a leading run: kept
+                ("", "2026-10-13T10:00:00Z old"),      // before the cutoff
+                ("", "[error: after old]"),            // inherits 10:00: dropped
+                ("", "2026-10-13T12:10:00+02:00 new"), // 10:10 UTC: kept
+                ("", "[error: after new]"),            // inherits 10:10: kept
+            ],
+        );
         let since: std::time::SystemTime =
-            chrono::DateTime::parse_from_rfc3339("2026-10-13T10:05:00Z").unwrap().into();
+            chrono::DateTime::parse_from_rfc3339("2026-10-13T10:05:00Z")
+                .unwrap()
+                .into();
         let mut out = Vec::new();
-        spool.snapshot().unwrap().export(&mut out, Some(since), &named).unwrap();
+        spool
+            .snapshot()
+            .unwrap()
+            .export(&mut out, Some(since), &named)
+            .unwrap();
         assert_eq!(
             String::from_utf8(out).unwrap(),
             "web-1 | [error: before any stamp]\nweb-1 | 2026-10-13T12:10:00+02:00 new\nweb-1 | [error: after new]\n"
@@ -601,20 +694,32 @@ mod tests {
         let snapshot = spool.snapshot().unwrap();
         // The same cut as the read test: the oldest segment ends after its first record.
         let path = &snapshot.segments[0].path;
-        let first_record = fs::read(path).unwrap().iter().position(|b| *b == b'\n').unwrap() as u64 + 1;
-        OpenOptions::new().write(true).open(path).unwrap().set_len(first_record).unwrap();
+        let first_record = fs::read(path)
+            .unwrap()
+            .iter()
+            .position(|b| *b == b'\n')
+            .unwrap() as u64
+            + 1;
+        OpenOptions::new()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_len(first_record)
+            .unwrap();
         let mut out = Vec::new();
-        let err = snapshot.export(&mut out, None, &named).expect_err("a short segment is an error");
+        let err = snapshot
+            .export(&mut out, None, &named)
+            .expect_err("a short segment is an error");
         assert_eq!(err.kind(), io::ErrorKind::UnexpectedEof);
     }
 
     #[test]
-    fn an_export_skips_a_leading_segment_rotated_out_before_any_line() {
+    fn an_export_skips_a_leading_segment_rotated_out_before_any_segment_is_read() {
         let tmp = tempfile::tempdir().unwrap();
         let mut spool = spool_of_100_lines_in_small_segments(tmp.path().join("s"));
         let snapshot = spool.snapshot().unwrap();
-        // The writer rotates the oldest segment out after the snapshot. Nothing is
-        // written yet, so the export starts at the oldest segment still on disk.
+        // The writer rotates the oldest segment out after the snapshot. No segment
+        // has been read yet, so the export starts at the oldest segment still on disk.
         let second = snapshot.segments[1].first;
         fs::remove_file(&snapshot.segments[0].path).unwrap();
         let mut out = Vec::new();
@@ -626,15 +731,47 @@ mod tests {
     }
 
     #[test]
-    fn an_export_fails_when_a_segment_goes_after_lines_were_written() {
+    fn an_export_fails_when_a_segment_goes_after_a_segment_was_read() {
         let tmp = tempfile::tempdir().unwrap();
         let mut spool = spool_of_100_lines_in_small_segments(tmp.path().join("s"));
         let snapshot = spool.snapshot().unwrap();
         // Rotation evicts oldest-first, so segment 1 can only go once segment 0 is
-        // written: the lines already out would have a hole before segment 2.
+        // read: the export would then have a hole before segment 2.
         fs::remove_file(&snapshot.segments[1].path).unwrap();
         let mut out = Vec::new();
-        let err = snapshot.export(&mut out, None, &named).expect_err("a hole is an error");
+        let err = snapshot
+            .export(&mut out, None, &named)
+            .expect_err("a hole is an error");
+        assert_eq!(err.kind(), io::ErrorKind::NotFound);
+    }
+
+    #[test]
+    fn an_export_fails_when_a_segment_goes_after_a_read_that_wrote_nothing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut spool = LogSpool::create_sized(tmp.path().join("s"), 64 << 20, 1000).unwrap();
+        for n in 1..=40 {
+            spool
+                .append(&LogLine {
+                    source: "web-1".into(),
+                    line: format!("2026-10-13T10:00:{n:02}Z line {n}"),
+                    truncated: false,
+                })
+                .unwrap();
+        }
+        let snapshot = spool.snapshot().unwrap();
+        // Line n is stamped n seconds past 10:00. The cutoff falls inside segment 1,
+        // so segment 0 is read in full and every line of it is dropped: nothing is
+        // written before segment 1 goes.
+        let cut = snapshot.segments[1].first + 2;
+        let since: std::time::SystemTime =
+            chrono::DateTime::parse_from_rfc3339(&format!("2026-10-13T10:00:{cut:02}Z"))
+                .unwrap()
+                .into();
+        fs::remove_file(&snapshot.segments[1].path).unwrap();
+        let mut out = Vec::new();
+        let err = snapshot
+            .export(&mut out, Some(since), &named)
+            .expect_err("a segment read before the vanish leaves a hole");
         assert_eq!(err.kind(), io::ErrorKind::NotFound);
     }
 }
