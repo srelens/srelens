@@ -305,7 +305,7 @@ impl LogStreamManager {
             .collect();
         handles.push(tokio::spawn(send_frames(writer, sink, channel.clone())));
 
-        self.streams.lock().unwrap().insert(
+        self.adopt(
             channel,
             Stream {
                 handles,
@@ -314,6 +314,20 @@ impl LogStreamManager {
             },
         );
         Ok(())
+    }
+
+    /// Register a started stream under `channel`. One that a racing `start` put
+    /// there first is displaced, and stopped like any other: dropping it alone
+    /// would detach its tasks and leave them running, unowned, with their history.
+    fn adopt(&self, channel: String, stream: Stream) {
+        // The displaced stream leaves the map before it is touched: dropping it
+        // can delete its history, which must not happen under the map's lock.
+        let displaced = self.streams.lock().unwrap().insert(channel, stream);
+        if let Some(displaced) = displaced {
+            for h in displaced.handles {
+                h.abort();
+            }
+        }
     }
 
     /// Whether `channel` keeps its history on disk.
@@ -1159,6 +1173,66 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
         assert!(!stream_dir.exists(), "stop deletes it at last");
+    }
+
+    /// `start` stops the channel's old stream first, but two starts that race on one
+    /// channel both pass that and then register: the second finds the first's stream
+    /// in the map. (One `start` after another never gets there, as the first is
+    /// already stopped, so the registration is driven directly here.) The stream it
+    /// displaces must be stopped, not left running with nothing to stop it.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_stream_displaced_by_a_racing_start_is_stopped_and_its_history_removed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let manager = LogStreamManager::new(ClientCache::new_many(vec![])).with_spools(
+            SpoolDirs::per_process(tmp.path().to_path_buf(), DESKTOP_SPOOL_CEILING),
+        );
+        let sink = Arc::new(TestSink::default());
+        for channel in ["logs:1", "logs:2"] {
+            manager
+                .start(
+                    sink.clone(),
+                    "ctx".into(),
+                    "ns".into(),
+                    one_target(),
+                    channel.into(),
+                    None,
+                    None,
+                    None,
+                    Some(64 << 20),
+                )
+                .await
+                .unwrap();
+        }
+        let root = only_root(tmp.path());
+        let (displaced_dir, kept_dir) = (root.join("0"), root.join("1"));
+        assert!(displaced_dir.is_dir() && kept_dir.is_dir());
+        let tasks: Vec<_> = manager.streams.lock().unwrap()["logs:1"]
+            .handles
+            .iter()
+            .map(|h| h.abort_handle())
+            .collect();
+
+        // The second start's stream, registered where the first one's is.
+        let second = manager.streams.lock().unwrap().remove("logs:2").unwrap();
+        manager.adopt("logs:1".into(), second);
+
+        for _ in 0..300 {
+            if tasks.iter().all(|t| t.is_finished()) && !displaced_dir.exists() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(
+            tasks.iter().all(|t| t.is_finished()),
+            "the displaced stream's tasks end"
+        );
+        assert!(!displaced_dir.exists(), "and its history goes");
+        assert!(
+            kept_dir.is_dir(),
+            "the stream that displaced it keeps its own"
+        );
+        assert!(manager.keeps_history("logs:1"));
+        manager.stop("logs:1");
     }
 
     /// A frame goes out on each tick, and once every target has completed the
