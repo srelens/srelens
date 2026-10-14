@@ -124,6 +124,16 @@ export function createRegexOracle(
   }
 
   function send() {
+    // Everything asked while the last batch ran goes as one. A pattern that takes most of the budget per batch would
+    // otherwise never run past it on a busy stream, only fall further behind; one batch for the backlog does.
+    if (queue.length > 1) {
+      const backlog = queue.splice(0);
+      queue.push({
+        id: (ids += 1),
+        items: backlog.flatMap((b) => b.items),
+        done: () => backlog.forEach((b) => b.done()),
+      });
+    }
     const batch = queue[0];
     if (batch === undefined) return;
     try {

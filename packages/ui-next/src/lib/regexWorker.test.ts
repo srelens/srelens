@@ -91,6 +91,21 @@ describe("createRegexOracle", () => {
     expect(fake.posted).toHaveLength(2);
   });
 
+  it("sends what was asked while a batch ran as one batch, so a backlog it can't keep up with runs past the budget", async () => {
+    const fake = fakeWorker();
+    const oracle = createRegexOracle("a", "i", { worker: () => fake.worker });
+    void oracle.ask([{ test: "1" }]);
+    const later = [oracle.ask([{ test: "2" }]), oracle.ask([{ test: "3" }]), oracle.ask([{ test: "4" }])];
+    fake.start();
+    fake.finish();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(fake.posted.map((b) => b.items.map((i) => i.test))).toEqual([["1"], ["2", "3", "4"]]);
+    fake.start();
+    fake.finish();
+    for (const asked of later) expect(await settled(asked)).toBe(true);
+    expect(["2", "3", "4"].map((t) => oracle.get(t))).toEqual([{ hit: false }, { hit: false }, { hit: false }]);
+  });
+
   it("goes slow 500 ms after the worker starts a batch, ends the worker, and remembers the pattern", async () => {
     const fake = fakeWorker();
     const oracle = createRegexOracle("(a+)+$", "i", { worker: () => fake.worker });
