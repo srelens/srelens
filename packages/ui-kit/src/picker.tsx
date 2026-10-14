@@ -167,7 +167,7 @@ export function Picker({ summary, ariaLabel, ariaInvalid, ariaRequired, ariaDesc
             {filled(footer) && (
               // Ruled off above rather than below: it belongs to the list, and
               // the rule is what stops it reading as one more option.
-              <div className="rule-t flex items-center gap-1.5 px-2 py-1.5">{footer}</div>
+              <div className="rule-t flex flex-wrap items-center gap-1.5 px-2 py-1.5">{footer}</div>
             )}
           </Command>
         </Popover.Content>

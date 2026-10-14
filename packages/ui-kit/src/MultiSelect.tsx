@@ -30,8 +30,12 @@ export interface MultiSelectProps {
   summary?: string;
   /** Whether the "all" row is the current state; by default, an empty selection is. */
   allChecked?: boolean;
-  /** Footer controls of the caller's own, before Select all and Reset. */
-  footerStart?: ReactNode;
+  /**
+   * Footer controls of the caller's own, on a row of their own under the
+   * count, Select all and Reset: the popover is narrow, and one row of five
+   * controls wraps their labels and cuts the last one off.
+   */
+  footerExtra?: ReactNode;
 }
 
 /**
@@ -69,7 +73,7 @@ export function MultiSelect({
   heading,
   summary,
   allChecked,
-  footerStart,
+  footerExtra,
 }: MultiSelectProps) {
   // A Set, so a repeated value cannot produce two rows with the same key, and
   // iterating it still yields the caller's order.
@@ -121,7 +125,6 @@ export function MultiSelect({
       className={className}
       footer={
         <>
-          {footerStart}
           {/* What the list currently amounts to, in the design's label voice.
               "all" rather than "0 selected", because an empty selection is not
               an empty result — it is the filter switched off. */}
@@ -134,6 +137,9 @@ export function MultiSelect({
           <button type="button" className="btn !py-0" onClick={() => onChange([])}>
             Reset
           </button>
+          {footerExtra !== undefined && (
+            <div className="flex w-full basis-full items-center gap-1.5">{footerExtra}</div>
+          )}
         </>
       }
     >

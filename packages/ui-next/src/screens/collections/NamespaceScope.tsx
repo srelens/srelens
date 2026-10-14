@@ -71,10 +71,15 @@ export function NamespaceScopePicker({
     );
   }
 
-  // Scoped to collections that still exist: the namespace rows show nothing
-  // picked, because nothing was picked by hand.
   const scoped = scope !== null && scope.status !== "gone";
-  const manual = scoped ? [] : selection;
+  // What the namespace rows show as ticked. Scoped to collections, that is
+  // what they matched here — so the rows agree with the list under them —
+  // and nothing until that is known. Ticking or unticking one from there
+  // turns it into namespaces picked by hand, starting from the collection's:
+  // "this collection, less one" is a hand-picked set, and is saved as one.
+  const resolved = scoped && scope.status === "ready" && !selectsNothing(scope.selection) ? [...scope.selection] : [];
+  const ticked = scoped ? resolved : selection;
+  const handPicked = scoped ? [] : selection;
   const offered = byRecentUse(collections, "namespace");
   const active = new Set(scoped ? scope.collections.map((c) => c.name) : []);
 
@@ -89,10 +94,10 @@ export function NamespaceScopePicker({
     <>
       <MultiSelect
         options={namespaces.map((ns) => ({ value: ns }))}
-        selection={manual}
+        selection={ticked}
         onChange={(next) => setNamespaces(clusterId, next)}
         allLabel="All namespaces"
-        allChecked={!scoped && manual.length === 0}
+        allChecked={!scoped && handPicked.length === 0}
         ariaLabel="Namespaces"
         summary={summary}
         heading={offered.length > 0 ? "Namespaces" : undefined}
@@ -117,18 +122,30 @@ export function NamespaceScopePicker({
               )
             : undefined
         }
-        footerStart={
+        footerExtra={
           <>
             <button
               type="button"
-              className="btn !py-0"
-              disabled={manual.length === 0}
-              title={manual.length === 0 ? "Pick namespaces first, then save them as a collection" : undefined}
-              onClick={() => setSaving(manual)}
+              className="btn whitespace-nowrap !py-0"
+              disabled={handPicked.length === 0}
+              title={
+                handPicked.length > 0
+                  ? undefined
+                  : scoped
+                    ? "This is already a collection"
+                    : "Pick namespaces first, then save them as a collection"
+              }
+              onClick={() => setSaving(handPicked)}
             >
               Save as collection…
             </button>
-            <button type="button" className="btn !py-0" onClick={() => openSettings("collections")}>
+            <button
+              type="button"
+              className="btn ml-auto whitespace-nowrap !py-0"
+              aria-label="Manage collections…"
+              title="Manage collections in Settings"
+              onClick={() => openSettings("collections")}
+            >
               Manage…
             </button>
           </>

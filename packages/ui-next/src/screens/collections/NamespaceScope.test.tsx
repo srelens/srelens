@@ -122,20 +122,37 @@ describe("NamespaceScopePicker", () => {
       OPTIONS.items,
       true,
     );
-    // Nothing is picked by hand any more, and "All namespaces" is not the state.
+    // The namespaces it matched are ticked, first, and "All namespaces" is not the state.
     expect(screen.getByRole("option", { name: "All namespaces" }).getAttribute("aria-checked")).toBe("false");
-    expect(screen.getByRole("option", { name: "prod-eu" }).getAttribute("aria-checked")).toBe("false");
+    expect(screen.getByRole("option", { name: "prod-eu" }).getAttribute("aria-checked")).toBe("true");
+    expect(screen.getByRole("option", { name: "prod-us" }).getAttribute("aria-checked")).toBe("true");
+    expect(screen.getByRole("option", { name: "dev" }).getAttribute("aria-checked")).toBe("false");
+    expect(screen.getByText("2 selected")).toBeDefined();
+    expect(screen.getByRole("button", { name: "Save as collection…" }).hasAttribute("disabled")).toBe(true);
   });
 
-  it("goes back to namespaces picked by hand when one is picked", async () => {
+  /** "This collection, less one" is a hand-picked set, starting from the collection's. */
+  it("turns into namespaces picked by hand, starting from the collection's, when one is unticked", async () => {
     saveCollection({ name: "prod", type: "namespace", patterns: ["prod-*"] });
     paint();
     await userEvent.click(picker());
     await userEvent.click(screen.getByRole("option", { name: "prod" }));
-    await userEvent.click(screen.getByRole("option", { name: "dev" }));
+    await waitFor(() => expect(screen.getByRole("option", { name: "prod-us" }).getAttribute("aria-checked")).toBe("true"));
+    await userEvent.click(screen.getByRole("option", { name: "prod-us" }));
     expect(tabNamespaceCollections("tab-a", CONTEXT.stableId)).toBeUndefined();
-    expect(tab().namespaces).toEqual({ [CONTEXT.stableId]: ["dev"] });
-    expect(picker().textContent).toBe("dev");
+    expect(tab().namespaces).toEqual({ [CONTEXT.stableId]: ["prod-eu"] });
+    expect(picker().textContent).toBe("prod-eu");
+    expect(screen.getByRole("option", { name: "prod" }).getAttribute("aria-checked")).toBe("false");
+  });
+
+  it("goes back to every namespace on Reset, collection and all", async () => {
+    saveCollection({ name: "prod", type: "namespace", patterns: ["prod-*"] });
+    paint();
+    await userEvent.click(picker());
+    await userEvent.click(screen.getByRole("option", { name: "prod" }));
+    await userEvent.click(screen.getByRole("button", { name: "Reset" }));
+    expect(tabNamespaceCollections("tab-a", CONTEXT.stableId)).toBeUndefined();
+    expect(picker().textContent).toBe("All namespaces");
   });
 
   it("saves the namespaces picked by hand as a collection, named by the reader, and scopes the tab to it", async () => {
@@ -159,10 +176,10 @@ describe("NamespaceScopePicker", () => {
     expect(tabNamespaceCollections("tab-a", CONTEXT.stableId)).toEqual(["picked"]);
   });
 
-  it("opens Settings on Collections from Manage…", async () => {
+  it("opens Settings on Collections from Manage collections…", async () => {
     paint();
     await userEvent.click(picker());
-    await userEvent.click(screen.getByRole("button", { name: "Manage…" }));
+    await userEvent.click(screen.getByRole("button", { name: "Manage collections…" }));
     expect(openSettings).toHaveBeenCalledExactlyOnceWith("collections");
   });
 });

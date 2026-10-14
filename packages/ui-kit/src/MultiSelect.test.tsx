@@ -345,7 +345,7 @@ describe("MultiSelect, with a section of the caller's own", () => {
       heading: "Services",
       summary: "two picked elsewhere",
       leading: () => <button type="button" onClick={onExtra}>Extra row</button>,
-      footerStart: <button type="button">Save these</button>,
+      footerExtra: <button type="button">Save these</button>,
     });
     expect(trigger().textContent).toBe("two picked elsewhere");
     await userEvent.click(trigger());
