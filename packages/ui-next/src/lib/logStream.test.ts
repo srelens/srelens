@@ -1,24 +1,29 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, expectTypeOf, vi, beforeEach, afterEach } from "vitest";
 import { act, renderHook, waitFor } from "@testing-library/react";
 import type { LogStatus, LogStreamOptions, LogTarget, SpoolPage } from "@srelens/core";
+import type { UseLogStreamOptions } from "./logStream";
 
 const startLogStream = vi.fn();
 /** Calls through to the real ring; counts how often the hook folds lines into it. */
 const appendLogLines = vi.fn();
+/** Likewise for a page put in front of the ring (#914). */
+const prependLogLines = vi.fn();
 
 vi.mock("@srelens/core", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@srelens/core")>();
   appendLogLines.mockImplementation(actual.appendLogLines);
+  prependLogLines.mockImplementation(actual.prependLogLines);
   return {
     ...actual,
     startLogStream: (...args: unknown[]) => startLogStream(...args),
     appendLogLines: (...args: Parameters<typeof actual.appendLogLines>) => appendLogLines(...args),
+    prependLogLines: (...args: Parameters<typeof actual.prependLogLines>) => prependLogLines(...args),
   };
 });
 
 // Imported after the mock so the module under test picks up the mocked
 // `startLogStream` rather than the real Tauri-backed one.
-const { useLogStream } = await import("./logStream");
+const { useLogStream, EARLIER_PAGE, MAX_LOADED_LINES } = await import("./logStream");
 
 const target: LogTarget = { pod: "web-1", container: "app", label: "" };
 const otherTarget: LogTarget = { pod: "web-2", container: "app", label: "" };
@@ -759,6 +764,23 @@ function fakeSpooledStream() {
 }
 
 const texts = (r: { current: { lines: readonly { text: string }[] } }) => r.current.lines.map((l) => l.text);
+/** `n` line texts, `l<from>` onwards: the text of line `from` is `l<from>`. */
+const many = (from: number, n: number) => Array.from({ length: n }, (_, i) => `l${from + i}`);
+
+/** A hook on a stream that keeps history, once the stream is open. */
+async function openSpooled(options: UseLogStreamOptions = {}) {
+  const s = fakeSpooledStream();
+  const hook = renderHook(() => useLogStream("ctx", "ns", [target], { spoolMaxBytes: 1024, ...options }));
+  await waitFor(() => expect(startLogStream).toHaveBeenCalled());
+  return { s, ...hook };
+}
+
+/** The next read waits until the returned function gives it a page. */
+function holdRead(s: ReturnType<typeof fakeSpooledStream>) {
+  let arrive!: (page: SpoolPage) => void;
+  s.readEarlier.mockReturnValue(new Promise<SpoolPage>((resolve) => (arrive = resolve)));
+  return (page: SpoolPage) => arrive(page);
+}
 
 describe("useLogStream with history on disk (#914)", () => {
   it("asks for history and frames only when told to", async () => {
@@ -813,7 +835,6 @@ describe("useLogStream with history on disk (#914)", () => {
     const s = fakeSpooledStream();
     const { result } = renderHook(() => useLogStream("ctx", "ns", [target], { spoolMaxBytes: 1024 }));
     await waitFor(() => expect(startLogStream).toHaveBeenCalled());
-    const many = (from: number, n: number) => Array.from({ length: n }, (_, i) => `l${from + i}`);
     s.frame(5001, many(5001, 5000));
     await waitFor(() => expect(result.current.lines.length).toBe(5000));
     s.readEarlier.mockResolvedValueOnce(s.page(1, many(1, 5000)));
@@ -912,5 +933,169 @@ describe("useLogStream with history on disk (#914)", () => {
     s.frame(1, ["a"]);
     s.failed("No space left on device");
     await waitFor(() => expect(result.current.history).toEqual({ first: 1, failed: "No space left on device" }));
+  });
+
+  it("keeps the oldest line shown in a full ring while a page is read and lines arrive", async () => {
+    const { s, result } = await openSpooled();
+    s.frame(5001, many(5001, 5000));
+    await waitFor(() => expect(result.current.lines.length).toBe(5000));
+    const arrive = holdRead(s);
+    let load!: Promise<void>;
+    act(() => {
+      load = result.current.loadEarlier();
+    });
+    s.frame(10001, ["new"]);
+    await waitFor(() => expect(texts(result).at(-1)).toBe("new"));
+    await act(async () => {
+      arrive(s.page(1, many(1, 5000)));
+      await load;
+    });
+    expect(result.current.loadError).toBeUndefined();
+    expect(result.current.lines.length).toBe(10001);
+    expect(texts(result).slice(4999, 5002)).toEqual(["l5000", "l5001", "l5002"]);
+    expect(texts(result).at(-1)).toBe("new");
+    expect(result.current.dropped).toBe(0);
+  });
+
+  it("does not ask another source for history", async () => {
+    const open = vi.fn(async (_targets: LogTarget[], _line: unknown, _status: unknown, _options: LogStreamOptions) => ({
+      stop: vi.fn(),
+    }));
+    const { result } = renderHook(() =>
+      useLogStream("ctx", "ns", [target], { spoolMaxBytes: 1024, source: { key: "app:org.example/logs", open } }),
+    );
+    await waitFor(() => expect(open).toHaveBeenCalledTimes(1));
+    const given = open.mock.calls[0][3];
+    expect(given).not.toHaveProperty("spoolMaxBytes");
+    expect(given).not.toHaveProperty("onLines");
+    expect(given).not.toHaveProperty("onSpoolFailed");
+    expect(startLogStream).not.toHaveBeenCalled();
+    expect(result.current.history).toBeUndefined();
+    expect(result.current.exportSpool).toBeUndefined();
+  });
+
+  it("while held, loads into the frozen view just as when paused", async () => {
+    const { s, result } = await openSpooled();
+    s.frame(4, ["d", "e"]);
+    await waitFor(() => expect(texts(result)).toEqual(["d", "e"]));
+    act(() => result.current.hold(true));
+    s.frame(6, ["f"]);
+    await waitFor(() => expect(result.current.pendingWhilePaused).toBe(1));
+    s.readEarlier.mockResolvedValueOnce(s.page(1, ["a", "b", "c"]));
+    await act(() => result.current.loadEarlier());
+    expect(texts(result)).toEqual(["a", "b", "c", "d", "e"]);
+    expect(result.current.pendingWhilePaused).toBe(1);
+    act(() => result.current.hold(false));
+    expect(texts(result)).toEqual(["a", "b", "c", "d", "e", "f"]);
+    expect(result.current.pendingWhilePaused).toBe(0);
+  });
+
+  it("reads nothing once the view holds as many lines as it may", async () => {
+    const { s, result } = await openSpooled({ capacity: MAX_LOADED_LINES });
+    s.frame(1001, many(1001, MAX_LOADED_LINES));
+    await waitFor(() => expect(result.current.lines.length).toBe(MAX_LOADED_LINES));
+    expect(result.current.dropped).toBe(1000);
+    // Were it asked, the answer would be an empty page: what fails below is the read, not a crash.
+    s.readEarlier.mockResolvedValue(s.page(1, []));
+    await act(() => result.current.loadEarlier());
+    expect(s.readEarlier).not.toHaveBeenCalled();
+    expect(result.current.loadingEarlier).toBe(false);
+    expect(result.current.loadError).toBeUndefined();
+  });
+
+  it("asks only for as many earlier lines as still fit under that limit", async () => {
+    const { s, result } = await openSpooled({ capacity: MAX_LOADED_LINES });
+    s.frame(9001, many(9001, MAX_LOADED_LINES - 2000));
+    await waitFor(() => expect(result.current.lines.length).toBe(MAX_LOADED_LINES - 2000));
+    s.readEarlier.mockResolvedValueOnce(s.page(7001, many(7001, 2000)));
+    await act(() => result.current.loadEarlier());
+    expect(s.readEarlier).toHaveBeenCalledWith(9001, 2000);
+    expect(result.current.lines.length).toBe(MAX_LOADED_LINES);
+    expect(result.current.dropped).toBe(7000);
+  });
+
+  it("while paused, still shows a page in the view when the ring has moved on past the view's start", async () => {
+    const { s, result } = await openSpooled({ capacity: 10 });
+    s.frame(4, ["d", "e"]);
+    await waitFor(() => expect(texts(result)).toEqual(["d", "e"]));
+    act(() => result.current.togglePause());
+    // More than the ring holds: it keeps the last ten, and no longer starts where the view does.
+    s.frame(6, many(6, 15));
+    await waitFor(() => expect(result.current.pendingWhilePaused).toBe(15));
+    s.readEarlier.mockResolvedValueOnce(s.page(1, ["a", "b", "c"]));
+    await act(() => result.current.loadEarlier());
+    expect(texts(result)).toEqual(["a", "b", "c", "d", "e"]);
+    expect(result.current.pendingWhilePaused).toBe(15);
+    // The ring did not take the page: it would leave a hole between the page and its lines.
+    act(() => result.current.togglePause());
+    expect(texts(result)).toEqual(many(11, 10));
+    expect(result.current.dropped).toBe(10);
+  });
+
+  it("ignores a page that arrives after the screen has gone", async () => {
+    const { s, result, unmount } = await openSpooled();
+    s.frame(4, ["d", "e"]);
+    await waitFor(() => expect(texts(result)).toEqual(["d", "e"]));
+    const arrive = holdRead(s);
+    let load!: Promise<void>;
+    act(() => {
+      load = result.current.loadEarlier();
+    });
+    unmount();
+    prependLogLines.mockClear();
+    await act(async () => {
+      arrive(s.page(1, ["a", "b", "c"]));
+      await load;
+    });
+    expect(prependLogLines).not.toHaveBeenCalled();
+  });
+
+  it("keeps the same exportSpool while frames arrive", async () => {
+    const { s, result } = await openSpooled();
+    await waitFor(() => expect(result.current.exportSpool).toBeDefined());
+    const exportSpool = result.current.exportSpool;
+    s.frame(1, ["a"]);
+    await waitFor(() => expect(texts(result)).toEqual(["a"]));
+    s.frame(2, ["b"]);
+    await waitFor(() => expect(texts(result)).toEqual(["a", "b"]));
+    expect(result.current.exportSpool).toBe(exportSpool);
+  });
+
+  it("starts again at a gap without copying the ring for lines it is about to drop", async () => {
+    const { s, result } = await openSpooled();
+    appendLogLines.mockClear();
+    s.frame(1, ["a", "b"]);
+    s.frame(10, ["j"]);
+    await waitFor(() => expect(texts(result)).toEqual(["j"]));
+    expect(result.current.dropped).toBe(9);
+    // Only the frame that starts the ring again is folded in; the lines before the gap are on disk.
+    expect(appendLogLines).toHaveBeenCalledTimes(1);
+  });
+
+  it("ignores a second request for earlier lines while one is being read", async () => {
+    const { s, result } = await openSpooled();
+    s.frame(4, ["d", "e"]);
+    await waitFor(() => expect(texts(result)).toEqual(["d", "e"]));
+    const arrive = holdRead(s);
+    let first!: Promise<void>;
+    let second!: Promise<void>;
+    act(() => {
+      first = result.current.loadEarlier();
+      second = result.current.loadEarlier();
+    });
+    expect(s.readEarlier).toHaveBeenCalledTimes(1);
+    await act(async () => {
+      arrive(s.page(1, ["a", "b", "c"]));
+      await Promise.all([first, second]);
+    });
+    expect(texts(result)).toEqual(["a", "b", "c", "d", "e"]);
+    expect(result.current.loadError).toBeUndefined();
+    expect(result.current.loadingEarlier).toBe(false);
+  });
+
+  it("offers a caller only the options the hook uses", () => {
+    // Checked by `tsc`, not at run time: these two are set by the hook itself.
+    expectTypeOf<UseLogStreamOptions>().not.toHaveProperty("onLines");
+    expectTypeOf<UseLogStreamOptions>().not.toHaveProperty("onSpoolFailed");
   });
 });
