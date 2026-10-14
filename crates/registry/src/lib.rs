@@ -651,6 +651,11 @@ fn build_with(
         cache.clone(),
     ));
     reg.register(srelens_kube::access::can_i_capability(cache.clone()));
+    // Collections (#881, #885): pure matching over what the caller hands in.
+    // For srelens's own views only for now: the collections live in the UI's
+    // settings, so an agent has nothing to pass them.
+    reg.register(srelens_kube::collections::validate_capability().only_in_the_ui());
+    reg.register(srelens_kube::collections::resolve_namespaces_capability().only_in_the_ui());
     reg.register(srelens_kube::schema::open_api_schema_capability(
         cache.clone(),
     ));

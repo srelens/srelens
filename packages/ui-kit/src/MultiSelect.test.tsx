@@ -329,3 +329,31 @@ describe("MultiSelect matches the design's picker", () => {
     }
   });
 });
+
+/**
+ * The slots a caller uses to put a second kind of choice in the same picker —
+ * the namespace picker's collections (#881): rows above the options, the
+ * options under a heading, a summary of the caller's own, the "all" row's
+ * state decided by the caller, and controls in the footer.
+ */
+describe("MultiSelect, with a section of the caller's own", () => {
+  it("shows the caller's rows above the options, which sit under a heading", async () => {
+    const onExtra = vi.fn();
+    open({
+      allLabel: "Everything",
+      allChecked: false,
+      heading: "Services",
+      summary: "two picked elsewhere",
+      leading: () => <button type="button" onClick={onExtra}>Extra row</button>,
+      footerStart: <button type="button">Save these</button>,
+    });
+    expect(trigger().textContent).toBe("two picked elsewhere");
+    await userEvent.click(trigger());
+    expect(screen.getByText("Services")).toBeDefined();
+    expect(screen.getByRole("button", { name: "Save these" })).toBeDefined();
+    await userEvent.click(screen.getByRole("button", { name: "Extra row" }));
+    expect(onExtra).toHaveBeenCalledOnce();
+    // Empty selection, but the caller says "all" is not the state.
+    expect(screen.getByRole("option", { name: "Everything" }).getAttribute("aria-checked")).toBe("false");
+  });
+});

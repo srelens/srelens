@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { CollectionScopeNotice, NamespaceScopePicker } from "../screens/collections/NamespaceScope";
 import {
   describeError,
   extensionCardRoute,
@@ -8,6 +9,7 @@ import {
   type ExtensionDashboardCard,
   type InstalledExtension,
   type ResolvedDashboardCard,
+  selectsNothing,
 } from "@srelens/core";
 import { useNamespaceOptions } from "@srelens/core/react";
 import { Button, RawError, Section, Spinner } from "@srelens/ui-kit";
@@ -16,7 +18,7 @@ import { FailureAlert } from "../lib/errorCopy";
 import { openTab } from "../lib/tabsStore";
 import { useResource } from "../lib/useResource";
 import { useNamespaces, useSetNamespaces } from "../lib/workspace";
-import { NamespaceErrorAlert, NamespacePicker } from "../screens/resourceShell";
+import { NamespaceErrorAlert } from "../screens/resourceShell";
 import { ExtensionResults } from "./ExtensionResults";
 import { NO_PINNED_ID_MESSAGE } from "./contextIds";
 import { plainText } from "./displayText";
@@ -68,7 +70,8 @@ export function DashboardCards({ context }: { context: ClusterContext }) {
 function CardsBand({ context, apps }: { context: ClusterContext; apps: InstalledExtension[] }) {
   const selection = useNamespaces(context.stableId);
   const setNamespaces = useSetNamespaces();
-  const { namespaces, scope, error: namespaceError } = useNamespaceOptions(context.name, getKubeconfigFiles());
+  const namespaceOptions = useNamespaceOptions(context.name, getKubeconfigFiles());
+  const { namespaces, scope, error: namespaceError } = namespaceOptions;
   const [refresh, setRefresh] = useState(0);
   // A credential that may only read one namespace reads that one, whatever is selected.
   const effective = scope ? [scope] : selection;
@@ -95,17 +98,14 @@ function CardsBand({ context, apps }: { context: ClusterContext; apps: Installed
   return (
     <Section title="App cards" smallCaps padded={false} className="dashboard-cards-band">
       <div className="dashboard-cards-toolbar">
-        <NamespacePicker
-          namespaces={namespaces}
-          selection={selection}
-          onChange={(next) => setNamespaces(context.stableId, next)}
-        />
+        <NamespaceScopePicker context={context} options={namespaceOptions} />
         <LiveStatus live={live} />
         <Button variant="secondary" size="sm" aria-label="Refresh app cards" onClick={() => setRefresh((n) => n + 1)}>
           Refresh
         </Button>
       </div>
       <NamespaceErrorAlert error={namespaceError} />
+      <CollectionScopeNotice context={context} />
       <LiveNotice live={live} what="figures" />
       {!host ? (
         <p className="dashboard-cards-message">{NO_PINNED_ID_MESSAGE}</p>
@@ -165,7 +165,8 @@ export function AppCards({
 }) {
   const { id } = plugin.manifest;
   const answers = useResource(
-    () => resolveDashboardCards(id, plugin.revision, host, selection),
+    // A namespace collection that matches nothing (#881) has no figures to read.
+    async () => (selectsNothing(selection) ? { cards: [] } : resolveDashboardCards(id, plugin.revision, host, selection)),
     [id, plugin.revision, host, selection.join("\u0000"), refresh],
     () => false,
   );

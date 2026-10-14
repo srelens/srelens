@@ -59,6 +59,7 @@ export * from "./lib/mcp";
 export * from "./lib/mcpClients";
 export * from "./lib/mcpSecurity";
 export * from "./lib/namespaces";
+export * from "./lib/collections";
 export * from "./lib/network";
 export * from "./lib/notify";
 export * from "./lib/onboarding";

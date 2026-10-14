@@ -1,4 +1,5 @@
 import { ContextLabel } from "../lib/contextLabel";
+import { CollectionScopeNotice, NamespaceScopePicker } from "./collections/NamespaceScope";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   ageSortValue,
@@ -54,7 +55,6 @@ import { useNamespaces, useSetNamespaces } from "../lib/workspace";
 import { useRowMenu } from "./ResourceMenu";
 import {
   NamespaceErrorAlert,
-  NamespacePicker,
   NoClusterScreen,
   PausedClusterScreen,
   StaleSelectionAlert,
@@ -367,7 +367,8 @@ function WorkloadList({
 
   const selection = useNamespaces(context.stableId);
   const setNamespaces = useSetNamespaces();
-  const { namespaces, scope, error: namespaceError } = useNamespaceOptions(name, files);
+  const namespaceOptions = useNamespaceOptions(name, files);
+  const { namespaces, scope, error: namespaceError } = namespaceOptions;
   // Every workload kind here is namespaced, so the selection is handed to
   // the watches as it stands: each selected namespace is watched on its own
   // (#688), none is "all namespaces". No cluster-scoped branch to take
@@ -622,15 +623,12 @@ function WorkloadList({
         placeholder={`Filter ${lower}…`}
       >
         <Tabs tabs={SEGMENTS} active={segment} onChange={setSegment} label="Workload kind" />
-        <NamespacePicker
-          namespaces={namespaces}
-          selection={selection}
-          onChange={(next) => setNamespaces(context.stableId, next)}
-        />
+        <NamespaceScopePicker context={context} options={namespaceOptions} />
       </FilterBar>
 
       <NamespaceErrorAlert error={namespaceError} />
 
+      <CollectionScopeNotice context={context} />
       <StaleSelectionAlert
         selection={selection}
         namespaces={namespaces}

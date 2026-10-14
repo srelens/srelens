@@ -1,4 +1,5 @@
 import { ContextLabel } from "../lib/contextLabel";
+import { CollectionScopeNotice, NamespaceScopePicker } from "./collections/NamespaceScope";
 import { useEffect, useMemo, useState } from "react";
 import {
   eventVerdict,
@@ -44,7 +45,6 @@ import { useNamespaces, useSetNamespaces } from "../lib/workspace";
 import { ReasonRail } from "./events/ReasonRail";
 import {
   NamespaceErrorAlert,
-  NamespacePicker,
   NoClusterScreen,
   PausedClusterScreen,
   StaleSelectionAlert,
@@ -153,7 +153,8 @@ function EventList({
 
   const selection = useNamespaces(context.stableId);
   const setNamespaces = useSetNamespaces();
-  const { namespaces, scope, error: namespaceError } = useNamespaceOptions(name, files);
+  const namespaceOptions = useNamespaceOptions(name, files);
+  const { namespaces, scope, error: namespaceError } = namespaceOptions;
 
   // A namespace-restricted credential has one namespace and no way to ask for
   // another — written to the workspace store rather than held here, so every
@@ -343,15 +344,12 @@ function EventList({
           <Tabs tabs={SEGMENTS} active={segment} onChange={setSegment} label="Type" variant="segmented" />
           {/* Inherited, not grown here: the selection is the workspace's, shared
               by every list looking at this cluster. */}
-          <NamespacePicker
-            namespaces={namespaces}
-            selection={selection}
-            onChange={(next) => setNamespaces(context.stableId, next)}
-          />
+          <NamespaceScopePicker context={context} options={namespaceOptions} />
         </FilterBar>
 
         <NamespaceErrorAlert error={namespaceError} />
 
+        <CollectionScopeNotice context={context} />
         <StaleSelectionAlert
           selection={selection}
           namespaces={namespaces}

@@ -2,7 +2,17 @@ import { useCallback, useSyncExternalStore } from "react";
 import { getDefaultNamespace, setDefaultNamespace, settingsStorage } from "@srelens/core";
 import type { Tone } from "@srelens/ui-kit";
 import type { Storage } from "./tabsPersist";
-import { currentWorkspace, forgetClusterNamespaces, setTabNamespaces, subscribe as subscribeTabs, tabNamespaces } from "./tabsStore";
+import {
+  currentWorkspace,
+  forgetClusterNamespaces,
+  setTabNamespaceCollections,
+  setTabNamespaces,
+  subscribe as subscribeTabs,
+  tabNamespaceCollections,
+  tabNamespaces,
+} from "./tabsStore";
+import { collectionScope, subscribeScopes } from "./collectionScope";
+import { markCollectionsUsed } from "./collections";
 import { useTabScope } from "./tabScope";
 
 export type LinkState = "connected" | "connecting" | "disconnected" | "error";
@@ -187,10 +197,47 @@ export function setNamespaceDefault(namespace: string): void {
 function subscribeSelection(listener: () => void): () => void {
   const offTabs = subscribeTabs(listener);
   const offView = subscribe(listener);
+  const offScopes = subscribeScopes(listener);
   return () => {
     offTabs();
     offView();
+    offScopes();
   };
+}
+
+/**
+ * A tab's selection for a cluster: what its namespace collections resolve
+ * to, where it is scoped to any that still exist (#881), else the namespaces
+ * it picked, else the default.
+ *
+ * A collection that resolves to nothing — or has not resolved yet — is
+ * `SELECTS_NOTHING`, which lists nothing, never the empty selection, which
+ * lists everything. If every collection a tab named has been deleted, the
+ * tab falls back to the default namespace, as if it had never chosen.
+ */
+function selectionFor(tabId: string, clusterId: string): string[] {
+  const names = tabNamespaceCollections(tabId, clusterId);
+  if (names) {
+    const scope = collectionScope(clusterId, names);
+    if (scope.status !== "gone") return scope.selection as string[];
+  }
+  return tabNamespaces(tabId, clusterId) ?? defaultSelection;
+}
+
+/** This tab's namespace collections on a cluster, by name; `undefined` when it has none. */
+export function useNamespaceCollections(clusterId: string | undefined): string[] | undefined {
+  const scoped = useTabScope();
+  const read = () => (clusterId === undefined ? undefined : tabNamespaceCollections(scoped ?? currentWorkspace().activeId, clusterId));
+  return useSyncExternalStore(subscribeTabs, read, () => undefined);
+}
+
+/** The collections setter for the tab this component is mounted in. */
+export function useSetNamespaceCollections(): (clusterId: string, names: string[]) => void {
+  const tabId = useTabScope();
+  return useCallback((clusterId: string, names: string[]) => {
+    setTabNamespaceCollections(tabId ?? currentWorkspace().activeId, clusterId, names);
+    markCollectionsUsed("namespace", names);
+  }, [tabId]);
 }
 
 /**
@@ -202,7 +249,7 @@ export function useNamespaces(clusterId: string | undefined): string[] {
   const scoped = useTabScope();
   const read = () => {
     if (clusterId === undefined) return NO_NAMESPACES;
-    return tabNamespaces(scoped ?? currentWorkspace().activeId, clusterId) ?? defaultSelection;
+    return selectionFor(scoped ?? currentWorkspace().activeId, clusterId);
   };
   return useSyncExternalStore(subscribeSelection, read, () => NO_NAMESPACES);
 }

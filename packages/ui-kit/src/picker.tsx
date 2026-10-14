@@ -176,6 +176,19 @@ export function Picker({ summary, ariaLabel, ariaInvalid, ariaRequired, ariaDesc
   );
 }
 
+/**
+ * Rows under a heading — a picker that offers two kinds of thing, such as
+ * namespace collections above namespaces. A search that leaves a group no
+ * rows hides its heading with them.
+ */
+export function PickerGroup({ heading, children }: { heading: string; children: ReactNode }) {
+  return (
+    <Command.Group heading={heading} className="picker-group">
+      {children}
+    </Command.Group>
+  );
+}
+
 export interface PickerRowProps {
   /**
    * `check` for a list where one option wins, `box` for one where each is

@@ -1,4 +1,5 @@
 import { ContextLabel } from "../lib/contextLabel";
+import { CollectionScopeNotice, NamespaceScopePicker } from "./collections/NamespaceScope";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   describeError,
@@ -53,7 +54,6 @@ import { useRowMenu } from "./ResourceMenu";
 import { ListCount } from "./ListCount";
 import {
   NamespaceErrorAlert,
-  NamespacePicker,
   NoClusterScreen,
   PausedClusterScreen,
   StaleSelectionAlert,
@@ -170,7 +170,8 @@ function KindList({
 
   const selection = useNamespaces(context.stableId);
   const setNamespaces = useSetNamespaces();
-  const { namespaces, scope, error: namespaceError } = useNamespaceOptions(name, files);
+  const namespaceOptions = useNamespaceOptions(name, files);
+  const { namespaces, scope, error: namespaceError } = namespaceOptions;
 
   // A namespace-restricted credential has one namespace and no way to ask for
   // another. Written to this tab's selection, so the picker shows the scope.
@@ -592,11 +593,7 @@ function KindList({
         )}
       >
         {!clusterScoped && (
-          <NamespacePicker
-            namespaces={namespaces}
-            selection={selection}
-            onChange={(next) => setNamespaces(context.stableId, next)}
-          />
+          <NamespaceScopePicker context={context} options={namespaceOptions} />
         )}
       </FilterBar>
 
@@ -622,11 +619,14 @@ function KindList({
       )}
 
       {!clusterScoped && (
-        <StaleSelectionAlert
-          selection={selection}
-          namespaces={namespaces}
-          onReset={() => setNamespaces(context.stableId, [])}
-        />
+        <>
+          <CollectionScopeNotice context={context} />
+          <StaleSelectionAlert
+            selection={selection}
+            namespaces={namespaces}
+            onReset={() => setNamespaces(context.stableId, [])}
+          />
+        </>
       )}
 
       {showRows && !list.stale && (

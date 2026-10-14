@@ -131,6 +131,7 @@ pub mod cluster;
 pub mod cluster_synth;
 pub mod configmaps;
 pub mod connect;
+pub mod collections;
 pub mod connections;
 pub mod context_resolve;
 pub mod contexts;

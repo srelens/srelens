@@ -1,3 +1,4 @@
+import { CollectionScopeNotice, NamespaceScopePicker } from "./collections/NamespaceScope";
 import {
   useCallback,
   useEffect,
@@ -19,6 +20,7 @@ import {
   type ClusterContext,
   type HelmReleaseSummary,
   type HelmRevision,
+  selectsNothing,
 } from "@srelens/core";
 import { useNamespaceOptions } from "@srelens/core/react";
 import {
@@ -51,7 +53,6 @@ import { HelmOpDialog } from "./helm/HelmOpDialog";
 import { ReleasePane, type PaneRelease } from "./helm/ReleasePane";
 import {
   NamespaceErrorAlert,
-  NamespacePicker,
   NoClusterScreen,
   StaleSelectionAlert,
   emptyTableCopy,
@@ -319,7 +320,8 @@ function HelmReleases({
    */
   const selection = useNamespaces(context.stableId);
   const setNamespaces = useSetNamespaces();
-  const { namespaces, scope, error: namespaceError } = useNamespaceOptions(name, files);
+  const namespaceOptions = useNamespaceOptions(name, files);
+  const { namespaces, scope, error: namespaceError } = namespaceOptions;
 
   /**
    * What the BACKEND is asked for: every namespace for an empty selection,
@@ -361,7 +363,14 @@ function HelmReleases({
    */
   const reload = useCallback(async () => {
     const seq = ++listSeq.current;
-    const out = await listHelmReleasesIn(name, parseNamespaceSelection(listKey));
+    const asked = parseNamespaceSelection(listKey);
+    // A namespace collection that matches nothing here (#881): no releases,
+    // and helm is not asked about a namespace that cannot exist.
+    if (selectsNothing(asked)) {
+      setList({ status: "ready", releases: [], at: Date.now(), failures: [] });
+      return;
+    }
+    const out = await listHelmReleasesIn(name, asked);
     if (seq !== listSeq.current) return;
     if (out.error !== undefined || !out.releases) {
       setList({ status: "error", error: out.error ?? "helm returned no releases" });
@@ -903,11 +912,7 @@ function HelmReleases({
         label="Filter releases"
         placeholder="Filter releases…"
       >
-        <NamespacePicker
-          namespaces={namespaces}
-          selection={selection}
-          onChange={(next) => setNamespaces(context.stableId, next)}
-        />
+        <NamespaceScopePicker context={context} options={namespaceOptions} />
       </FilterBar>
 
       {/* Non-fatal: the picker keeps whatever namespaces it had, and the
@@ -915,6 +920,7 @@ function HelmReleases({
           control may be short. */}
       <NamespaceErrorAlert error={namespaceError} />
 
+      <CollectionScopeNotice context={context} />
       <StaleSelectionAlert
         selection={selection}
         namespaces={namespaces}

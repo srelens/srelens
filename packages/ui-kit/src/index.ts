@@ -66,6 +66,7 @@ export { Mark, type MarkProps, type MarkSize } from "./Mark";
 export { Meter } from "./Meter";
 export { MetricTile, type MetricTileProps } from "./MetricTile";
 export { MultiSelect, type MultiSelectProps } from "./MultiSelect";
+export { PickerGroup, PickerRow, type PickerRowProps } from "./picker";
 export { NavIcon, type NavIconProps } from "./NavIcon";
 export { PairList, type PairListProps } from "./PairList";
 export { Panel, type PanelProps } from "./Panel";

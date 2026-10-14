@@ -1,4 +1,5 @@
-import { Picker, PickerRow, optionLabel, type ComboboxOption } from "./picker";
+import type { ReactNode } from "react";
+import { Picker, PickerGroup, PickerRow, optionLabel, type ComboboxOption } from "./picker";
 import { filled } from "./slot";
 
 export interface MultiSelectProps {
@@ -14,6 +15,23 @@ export interface MultiSelectProps {
   searchPlaceholder?: string;
   ariaLabel?: string;
   className?: string;
+  /**
+   * Rows above the options — another kind of choice the caller makes in the
+   * same place, given a way to close the popover. With it, the options sit
+   * under `heading`.
+   */
+  leading?: (close: () => void) => ReactNode;
+  /** The options' group heading; used when there is a `leading` section. */
+  heading?: string;
+  /**
+   * What the trigger says, when the selection alone does not say it — the
+   * caller's other choice is in force.
+   */
+  summary?: string;
+  /** Whether the "all" row is the current state; by default, an empty selection is. */
+  allChecked?: boolean;
+  /** Footer controls of the caller's own, before Select all and Reset. */
+  footerStart?: ReactNode;
 }
 
 /**
@@ -47,6 +65,11 @@ export function MultiSelect({
   searchPlaceholder,
   ariaLabel,
   className,
+  leading,
+  heading,
+  summary,
+  allChecked,
+  footerStart,
 }: MultiSelectProps) {
   // A Set, so a repeated value cannot produce two rows with the same key, and
   // iterating it still yields the caller's order.
@@ -92,12 +115,13 @@ export function MultiSelect({
 
   return (
     <Picker
-      summary={summarize()}
+      summary={summary ?? summarize()}
       ariaLabel={ariaLabel}
       searchPlaceholder={searchPlaceholder}
       className={className}
       footer={
         <>
+          {footerStart}
           {/* What the list currently amounts to, in the design's label voice.
               "all" rather than "0 selected", because an empty selection is not
               an empty result — it is the filter switched off. */}
@@ -113,13 +137,14 @@ export function MultiSelect({
         </>
       }
     >
-      {(close) => (
+      {(close) => {
+        const rows = (
         <>
           {all !== undefined && (
             <PickerRow
               value={all}
               label={all}
-              checked={selection.length === 0}
+              checked={allChecked ?? selection.length === 0}
               onSelect={() => onChange([])}
               // A check, not a box: this is not one more thing to switch on
               // beside the others, it is the absence of any of them.
@@ -154,7 +179,15 @@ export function MultiSelect({
             />
           ))}
         </>
-      )}
+        );
+        if (!leading) return rows;
+        return (
+          <>
+            {leading(close)}
+            {heading ? <PickerGroup heading={heading}>{rows}</PickerGroup> : rows}
+          </>
+        );
+      }}
     </Picker>
   );
 }

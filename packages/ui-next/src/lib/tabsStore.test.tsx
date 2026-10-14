@@ -195,6 +195,27 @@ describe("openTab carries the namespace selection of the tab it was opened from 
     store.setTabNamespaces(active().id, cluster, namespaces);
   }
 
+  /** #881: a collection scope travels as a namespace selection does. */
+  it("gives a new tab the namespace collections the tab it was opened from is scoped to", () => {
+    store.openTab("/k/pods");
+    store.setTabNamespaceCollections(active().id, PROD, ["prod"]);
+    store.openTab("/k/deployments");
+    expect(store.tabNamespaceCollections(tabFor("/k/deployments").id, PROD)).toEqual(["prod"]);
+    // A copy, not the source's array.
+    store.setTabNamespaceCollections(tabFor("/k/pods").id, PROD, ["staging"]);
+    expect(store.tabNamespaceCollections(tabFor("/k/deployments").id, PROD)).toEqual(["prod"]);
+  });
+
+  it("leaves a tab's own choice for a cluster alone, either way it was made", () => {
+    store.openTab("/k/deployments");
+    store.setTabNamespaces(active().id, PROD, ["billing"]);
+    store.openTab("/k/pods");
+    store.setTabNamespaceCollections(active().id, PROD, ["prod"]);
+    store.openTab("/k/deployments");
+    expect(store.tabNamespaceCollections(tabFor("/k/deployments").id, PROD)).toBeUndefined();
+    expect(selection("/k/deployments")).toEqual(["billing"]);
+  });
+
   it("gives a new tab the namespaces selected on the tab it was opened from", () => {
     narrowedPods();
     store.openTab("/k/deployments");
@@ -1204,4 +1225,41 @@ it("round-trips the chosen document order through persisted state", async () => 
   const restored=parseStoredState(JSON.stringify({version:STORAGE_VERSION,...state}));
   expect(restored?.workspaces[0].tabs.map(t=>t.id)).toEqual(state.workspaces[0].tabs.map(t=>t.id));
   expect(restored?.workspaces[0].activeId).toBe(state.workspaces[0].activeId);
+});
+
+describe("namespace collections on a tab (#881)", () => {
+  const C = "cluster-id";
+  const tabNow = () => store.currentWorkspace().tabs.find((t) => t.id === store.currentWorkspace().activeId)!;
+
+  beforeEach(() => {
+    store.openTab("/k/pods");
+  });
+
+  it("are kept per cluster, and none means none", () => {
+    store.setTabNamespaceCollections(tabNow().id, C, ["prod", "staging"]);
+    store.setTabNamespaceCollections(tabNow().id, "other", ["dev"]);
+    expect(store.tabNamespaceCollections(tabNow().id, C)).toEqual(["prod", "staging"]);
+    store.setTabNamespaceCollections(tabNow().id, C, []);
+    expect(store.tabNamespaceCollections(tabNow().id, C)).toBeUndefined();
+    expect(tabNow().namespaceCollections).toEqual({ other: ["dev"] });
+    store.setTabNamespaceCollections(tabNow().id, "other", []);
+    expect(tabNow().namespaceCollections).toBeUndefined();
+  });
+
+  it("does not wake anyone when set to what they already are", () => {
+    store.setTabNamespaceCollections(tabNow().id, C, ["prod"]);
+    const heard = vi.fn();
+    const stop = store.subscribe(heard);
+    store.setTabNamespaceCollections(tabNow().id, C, ["prod"]);
+    stop();
+    expect(heard).not.toHaveBeenCalled();
+  });
+
+  it("are forgotten with a removed cluster, in open and closed tabs alike", () => {
+    store.setTabNamespaceCollections(tabNow().id, C, ["prod"]);
+    store.setTabNamespaces(tabNow().id, "other", ["a"]);
+    store.forgetClusterNamespaces(C);
+    expect(tabNow().namespaceCollections).toBeUndefined();
+    expect(tabNow().namespaces).toEqual({ other: ["a"] });
+  });
 });

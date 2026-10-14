@@ -129,6 +129,30 @@ The selection belongs to the tab. In the new design a tab opened from another, s
 as Deployments from the sidebar while you are on Pods, starts with that tab's
 selection and is independent from then on.
 
+**Namespace collections.** In the new design the namespace selector also offers
+*collections*: saved groups of namespaces, listed above the namespaces, most
+recently used first. A collection is any mix of:
+
+- **members**: namespaces that are always included;
+- **patterns**: names with `*` for any run of characters (`prod-*`, `*-canary`,
+  `team-*-staging`), case-sensitive;
+- **a label selector**, as `kubectl get -l` takes it (`env=prod`,
+  `team in (shop,data)`).
+
+A namespace is in the collection if it is a member, or if it matches the patterns
+and the selector (both, when both are set). Choosing one or more collections
+scopes the list to whatever they match on the cluster you are looking at — their
+union — so one collection works on every cluster; picking namespaces by hand
+replaces it again. If a collection matches nothing there, the list is empty and
+says so, rather than falling back to all namespaces.
+
+Pick namespaces and choose **Save as collection…** in the selector to save them
+as one, or manage them all in **Settings → Collections**, where the editor checks
+each pattern and selector as you type and previews what the collection matches on
+the cluster in focus, marking each member found or not found. Members can be
+pasted as a list separated by commas or new lines. Collections are kept with your
+settings, so they are the same in every window and survive a restart.
+
 **Bulk actions.** Select rows with their checkboxes to reveal a bar with **Delete**,
 **Evict** (Pods), and **Rollout restart** (Deployments, StatefulSets, DaemonSets).
 Each is confirmation-gated and reports partial failures.
