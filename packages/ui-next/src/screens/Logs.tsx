@@ -72,7 +72,7 @@ import {
 import { recentKey, rememberLogSubject, useOfferedRecents } from "../lib/logRecents";
 import { useMarkLogStream } from "../lib/liveLogStreams";
 import { useTabScope } from "../lib/tabScope";
-import { openTab } from "../lib/tabsStore";
+import { openTab, setTabView, useTabView } from "../lib/tabsStore";
 import { FilterPills } from "./logs/FilterPills";
 import { LineDetail } from "./logs/LineDetail";
 import { renderMessage } from "./logs/LogMessage";
@@ -82,6 +82,7 @@ import {
   type StreamPod,
 } from "./logs/StreamRail";
 import { clockTime } from "./logs/time";
+import { keepMatching, useRegexGate } from "./logs/useRegexGate";
 import { VolumeHistogram } from "./logs/VolumeHistogram";
 import { NoClusterScreen } from "./resourceShell";
 
@@ -840,7 +841,13 @@ function LogsStream({
   terminated: PreviousInstance[];
 }) {
   const { ask } = useConsole();
-  const [text, setText] = useState("");
+  const tabId = useTabScope();
+  // The box starts from what the tab was left with, read once: it is this
+  // screen's to edit after that, so a later change to the saved value does not
+  // reset it. Outside a tab there is no id, and `""` is one no tab has — the
+  // empty view comes back, as it does for `useResourceTabView`.
+  const savedQuery = useTabView(tabId ?? "").query;
+  const [text, setText] = useState(savedQuery ?? "");
   /** The window picked off the histogram, if any. The one filter that isn't query text. */
   const [range, setRange] = useState<TimeRange | undefined>(undefined);
   /** Where focus goes when a pill is removed: the × that had it is about to unmount. */
@@ -944,7 +951,7 @@ function LogsStream({
     source: provider.source,
   });
   // Home's "Live now" lists this tab only while the stream is actually running.
-  useMarkLogStream(useTabScope(), stream.status !== "error" && stream.status !== "completed");
+  useMarkLogStream(tabId, stream.status !== "error" && stream.status !== "completed");
   // A provider's stream that ended sends no more statuses, so the hook's last one
   // would go on saying it follows: the ending is what the readout says instead.
   const ended = chosen ? provider.end : null;
@@ -1150,7 +1157,21 @@ function LogsStream({
    */
   const deferredText = useDeferredValue(text);
   const applied = useMemo(() => parseLogQuery(deferredText), [deferredText]);
-  const clauses = applied.ok ? applied.clauses : NO_CLAUSES;
+  /**
+   * What the screen filters by, and the rows it may filter. A regex in the query is never run on this thread: a
+   * worker answers each row. A regex applies once its worker has answered the buffer, the query applying without it
+   * until then, and after that `answered` holds a later row back until it has. With no regex, `answered` is `rows`
+   * itself. A regex too slow on some line, or with no worker to run it, is left out the same way and named, for a
+   * typed query and for one restored with the tab alike. Every filter and count below reads `answered`, not `rows`.
+   */
+  const gate = useRegexGate(applied, rows);
+  const clauses = gate.clauses;
+  const answered = gate.rows;
+  // Saved from the deferred text, which lags the typed one by a render but does not wait for typing to stop, so this
+  // can run on many keystrokes in a row. tabsPersist's debounced save is what keeps that from being a file write each time.
+  useEffect(() => {
+    if (tabId !== null) setTabView(tabId, { query: deferredText });
+  }, [tabId, deferredText]);
 
   /** The pod boxes and the container select: the scope every view starts from. */
   const inScope = useCallback(
@@ -1160,13 +1181,13 @@ function LogsStream({
   /** Every filter applied: what the body draws, from every batch. */
   const filtered = useMemo(
     () =>
-      rows.filter(
+      answered.filter(
         (row) =>
           inScope(row) &&
           (clauses.length === 0 || matchLine(row, clauses)) &&
           (range === undefined || inRange(row, range)),
       ),
-    [rows, inScope, clauses, range],
+    [answered, inScope, clauses, range],
   );
   /**
    * The rows the rail, the facets and the histogram count. Each count is a pass over the whole buffer, and a busy
@@ -1175,7 +1196,7 @@ function LogsStream({
    * snapshot, nothing is arriving to hold back, and neither is an empty buffer (a restart or a clear): it has nothing
    * to count, and must not go on showing the old buffer's counts for the wait.
    */
-  const counted = useThrottledValue(rows, following && rows.length > 0 ? RECOUNT_MS : 0);
+  const counted = useThrottledValue(answered, following && rows.length > 0 ? RECOUNT_MS : 0);
   const scoped = useMemo(() => counted.filter(inScope), [counted, inScope]);
   /** The query applied, but not the window: what the histogram counts, so it can shade the window instead of cropping to it. */
   const queried = useMemo(
@@ -1355,6 +1376,12 @@ function LogsStream({
    */
   async function exportRange(range: (typeof EXPORT_RANGES)[number]) {
     setExportFailure(undefined);
+    // The screen has left that regex out, and the file must not quietly do the same under a box that still holds it.
+    if (gate.slow !== undefined || gate.unavailable) {
+      const said = gate.slow !== undefined ? `Too slow to run on these lines: ${gate.slow}` : "Regex search is unavailable here";
+      setExportFailure({ title: SAVE_FAILED, error: new Error(said) });
+      return;
+    }
     setExporting(true);
     try {
       const read = await readRange(
@@ -1369,9 +1396,10 @@ function LogsStream({
         setExportFailure({ title: `Could not read the logs of ${read.where}`, error: read.error });
         return;
       }
-      const kept = read.lines
-        .map((l, i) => toRow(l, byLabel, i))
-        .filter((row) => clauses.length === 0 || matchLine(row, clauses))
+      // The query as applied, not the screen's clauses, which leave out a regex still answering the buffer. These
+      // lines are not the buffer's anyway, so a regex is answered for them by workers of their own.
+      const query = applied.ok ? applied.clauses : NO_CLAUSES;
+      const kept = (await keepMatching(query, read.lines.map((l, i) => toRow(l, byLabel, i))))
         // Stable, so lines of one container that share a stamp keep the order they were written in.
         .sort((a, b) => (a.at ?? 0) - (b.at ?? 0) || subMillisecond(a.raw) - subMillisecond(b.raw));
       await saveOrDownload(`${name}-${range.slug}.log`, exportContent(kept));
@@ -1881,6 +1909,16 @@ function LogsStream({
             {typed.error}
           </div>
         )}
+        {typed.ok && gate.slow !== undefined && (
+          <div role="alert" className="mx-3 mt-2 text-[0.75rem]" style={{ color: toneColor("sev") }}>
+            Too slow to run on these lines: {gate.slow}
+          </div>
+        )}
+        {typed.ok && gate.unavailable && (
+          <div role="alert" className="mx-3 mt-2 text-[0.75rem]" style={{ color: toneColor("sev") }}>
+            Regex search is unavailable here
+          </div>
+        )}
         <FilterPills
           query={text}
           clauses={typed.ok ? typed.clauses : NO_CLAUSES}
@@ -2098,7 +2136,7 @@ function LogsStream({
                     // screen; an override belongs to a line singled out for some
                     // reason OTHER than its level, and none is.
                     level={row.level}
-                    message={renderMessage(row, clauses)}
+                    message={renderMessage(row, clauses, gate.rangesFor(row))}
                   />
                 </div>
               ))}

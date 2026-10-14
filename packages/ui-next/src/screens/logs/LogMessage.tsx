@@ -14,20 +14,37 @@ export interface MessageRow {
 const GAP = "  ";
 
 /**
+ * The text a row's message cell shows: the message, then (for a structured
+ * row) its other fields. A user regex's marks are worked out over this in the
+ * regex worker, so both build it here.
+ */
+export function shownText(row: MessageRow): string {
+  const inline = row.structured ? inlineFields(row.fields) : "";
+  const gap = row.message !== "" && inline !== "" ? GAP : "";
+  return `${row.message}${gap}${inline}`;
+}
+
+/**
  * A row's message cell: the message, then (for a structured row) its other
  * fields in faint `key=value`, with the query's matches marked across both.
+ * A regex's marks are `regexRanges`, the worker's answer for the row: the
+ * main thread never runs a user regex.
  *
  * `""` for a row with nothing to show, so the kit's `(no message)` says so.
  * A fragment would count as content and draw a blank cell.
  */
-export function renderMessage(row: MessageRow, clauses: readonly QueryClause[]): ReactNode {
-  const inline = row.structured ? inlineFields(row.fields) : "";
-  const gap = row.message !== "" && inline !== "" ? GAP : "";
-  const shown = `${row.message}${gap}${inline}`;
+export function renderMessage(
+  row: MessageRow,
+  clauses: readonly QueryClause[],
+  regexRanges?: readonly (readonly [number, number])[],
+): ReactNode {
+  const shown = shownText(row);
   if (shown === "" && !row.truncated) return "";
+  // The fields follow the message only after the gap.
+  const gap = row.message !== "" && shown.length > row.message.length ? GAP : "";
   // Where the faint part starts: after the message, or at 0 when there is none.
   const split = row.message === "" ? 0 : Math.min(row.message.length, shown.length);
-  const ranges = clauses.length === 0 ? [] : highlightRanges(shown, clauses);
+  const ranges = clauses.length === 0 ? [] : highlightRanges(shown, clauses, regexRanges);
   const rest = split + gap.length;
   return (
     <>

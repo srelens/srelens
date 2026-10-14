@@ -518,7 +518,10 @@ export function setTabView(tabId: string, patch: Partial<NonNullable<Tab["view"]
       sortEqual(current.sort, next.sort) &&
       current.filter === next.filter &&
       current.filterKey === next.filterKey &&
-      current.regex === next.regex
+      current.regex === next.regex &&
+      // An empty box and no query at all are the same query: a Logs tab writes
+      // its box when it opens, and that must not give it a view.
+      (current.query ?? "") === (next.query ?? "")
     ) {
       return w;
     }

@@ -1,8 +1,8 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { clauseState, discoverFields, facetCounts, highlightRanges, inlineFields, inRange, isQueryableKey, logLineWords, matchLine, parseLogFields, parseLogQuery, removeClause, toggleClause, VOLUME_STEPS, volumeBuckets, type QueryClause, type QueryLine } from "./logQuery";
+import { clauseState, discoverFields, facetCounts, highlightRanges, inlineFields, inRange, isQueryableKey, logLineWords, matchLine, parseLogFields, parseLogQuery, readMeasure, removeClause, toggleClause, VOLUME_STEPS, volumeBuckets, type QueryClause, type QueryLine } from "./logQuery";
 import { healthRank, logLineHealth, logLineLevel } from "./logTerms";
 
 describe("parseLogFields", () => {
@@ -258,6 +258,75 @@ describe("parseLogQuery", () => {
   });
 });
 
+describe("comparisons", () => {
+  it("reads a field compared with a number or a duration", () => {
+    expect(clauses("latency>500")[0]).toMatchObject({ match: "compare", field: "latency", op: ">", kind: "number", target: 500, value: "500", negated: false, span: [0, 11] });
+    expect(clauses("n>=-1.5e3")[0]).toMatchObject({ op: ">=", kind: "number", target: -1500 });
+    expect(clauses("-took<=1h2m3s")[0]).toMatchObject({ negated: true, op: "<=", kind: "duration", target: 3723 });
+    expect(clauses("t<350µs")[0]).toMatchObject({ kind: "duration", target: 0.00035 });
+    expect(clauses("t<350μs")[0]).toMatchObject({ kind: "duration", target: 0.00035 });
+    expect(clauses("t>.5s")[0]).toMatchObject({ kind: "duration", target: 0.5 });
+  });
+
+  it("leaves anything that is not a comparison as the text it was", () => {
+    for (const q of ["a->b", "x>y", "=>", "latency>", "latency>abc", "latency>5x"]) {
+      expect(clauses(q).every((c) => c.match === "text"), q).toBe(true);
+    }
+  });
+
+  // The box parses on every keystroke, so each half-typed shape must be a query, never an error.
+  it.each([
+    ["latency>", "text"],
+    ["latency>=", "text"],
+    ["latency>5", "number"],
+    ["latency>5s", "duration"],
+    ["latency>5s3", "text"],
+    ["latency>5s3m", "duration"],
+  ] as const)("reads %j as %s while it is being typed", (query, read) => {
+    const [clause] = clauses(query);
+    expect(clause.match === "compare" ? clause.kind : clause.match).toBe(read);
+  });
+});
+
+// `readMeasure` is exported and fed every line's field values, so a long hostile
+// value must cost a scan and no more (CodeQL js/polynomial-redos). A scan takes
+// a millisecond or two at this size; a regex that restarts at every digit takes
+// seconds. The budget is loose on purpose, as in redos.test.ts: it separates
+// linear from polynomial and does not flake on a busy runner.
+describe("readMeasure, on a hostile field value", () => {
+  const BUDGET_MS = 250;
+  const timed = <T>(run: () => T): T => {
+    const started = performance.now();
+    const result = run();
+    const elapsed = performance.now() - started;
+    expect(elapsed, `took ${elapsed.toFixed(0)}ms, budget ${BUDGET_MS}ms`).toBeLessThan(BUDGET_MS);
+    return result;
+  };
+
+  it("reads a long run of digits and no unit as nothing", () => {
+    expect(timed(() => readMeasure("1".repeat(100_000) + "x"))).toBeUndefined();
+  });
+
+  it("reads a long run of digits and a unit as a duration", () => {
+    expect(timed(() => readMeasure("1".repeat(100_000) + "s"))).toMatchObject({ kind: "duration" });
+  });
+
+  it("reads a long run of non-digits as nothing", () => {
+    expect(timed(() => readMeasure("@".repeat(100_000)))).toBeUndefined();
+  });
+
+  it("keeps reading what it read: every unit, a bare dot, and a number with no unit", () => {
+    expect(readMeasure("1ns")?.value).toBeCloseTo(1e-9, 15);
+    expect(readMeasure("2us")?.value).toBeCloseTo(2e-6, 15);
+    expect(readMeasure("3ms")?.value).toBeCloseTo(3e-3, 15);
+    expect(readMeasure("4m")?.value).toBe(240);
+    expect(readMeasure("5.s")?.value).toBe(5);
+    expect(readMeasure("-1m30s")?.value).toBe(-90);
+    expect(readMeasure("1500")).toEqual({ kind: "number", value: 1500 });
+    for (const bad of ["", "-", ".", ".s", "s", "1h ", "1h2", "1x", "1.2.3s"]) expect(readMeasure(bad), bad).toBeUndefined();
+  });
+});
+
 describe("matchLine", () => {
   const A = '{"level":"info","msg":"Wrote batch","system":"camlog"}';
   const B = '{"level":"warn","msg":"Skipping checkpoint","system":"schwarz"}';
@@ -326,6 +395,51 @@ describe("matchLine", () => {
 
   it("matches a free-text regex without regard to case, as the rest of the query does", () => {
     expect(matches("/WROTE/", A, B)).toEqual([A]);
+  });
+});
+
+describe("matching comparisons", () => {
+  // logfmt needs two pairs to count as fields; one is prose (see logfmtTail).
+  const at = (pair: string) => `svc=api ${pair}`;
+
+  it("compares numbers with numbers and durations with durations", () => {
+    expect(matches("latency>500", at("latency=900"), at("latency=100"), at("latency=30.1s"), "nothing")).toEqual([
+      at("latency=900"),
+    ]);
+    expect(matches("took>1s", at("took=1.2s"), at("took=1200ms"), at("took=900ms"), at("took=5"))).toEqual([
+      at("took=1.2s"),
+      at("took=1200ms"),
+    ]);
+    expect(matches("n>=1000", '{"n":-1.5e3}', '{"n":1e3}')).toEqual(['{"n":1e3}']);
+  });
+
+  it("ANDs comparisons on one field into a range, beside an OR of its plain values", () => {
+    expect(matches("latency>100 latency<500", at("latency=50"), at("latency=300"), at("latency=700"))).toEqual([
+      at("latency=300"),
+    ]);
+    expect(
+      matches("status:200 status:201 latency<500", "status=200 latency=100", "status=201 latency=900", "status=500 latency=1"),
+    ).toEqual(["status=200 latency=100"]);
+  });
+
+  it("keeps lines without the field under a negated comparison, as a negated value does", () => {
+    expect(matches("-latency>500", at("latency=900"), at("latency=100"), "no field")).toEqual([
+      at("latency=100"),
+      "no field",
+    ]);
+  });
+
+  it("never holds a comparison on the level word", () => {
+    expect(matches("level>1", "error boom", '{"level":50}')).toEqual([]);
+  });
+
+  it("is no facet's value and no row mark, and its pill removes it by span", () => {
+    const q = clauses("latency>500");
+    expect(clauseState(q, { field: "latency", value: "500" })).toBeUndefined();
+    expect(toggleClause("latency>500", { field: "latency", value: "500" }, "include")).toBe("latency>500 latency:500");
+    expect(highlightRanges(at("latency=500"), q)).toEqual([]);
+    const both = clauses("a latency>500 b");
+    expect(removeClause("a latency>500 b", both[1])).toBe("a b");
   });
 });
 
@@ -613,6 +727,14 @@ describe("facetCounts", () => {
 
   it("counts another field with every clause applied", () => {
     expect(facetCounts(lines, clauses("level:warn"), "system")).toEqual([{ value: "schwarz", count: 1 }]);
+  });
+
+  it("does not offer a value its own comparison already rules out", () => {
+    const codes = ['{"status":200}', '{"status":503}', '{"status":500}'].map((t) => ql(t));
+    expect(facetCounts(codes, clauses("status>=500"), "status")).toEqual([
+      { value: "500", count: 1 },
+      { value: "503", count: 1 },
+    ]);
   });
 
   it("orders equal counts alphabetically, whichever spelling arrived first", () => {
@@ -1003,10 +1125,36 @@ describe("volumeBuckets, zone pinning", () => {
 });
 
 describe("highlightRanges", () => {
-  it("marks free text, phrases and regex matches, case-insensitively", () => {
-    expect(highlightRanges("Pool timeout: pool saturated", clauses('pool "TIMEOUT" /sat\\w+/'))).toEqual([
+  it("marks free text and phrases case-insensitively, and a regex where the ranges it is given say", () => {
+    expect(highlightRanges("Pool timeout: pool saturated", clauses('pool "TIMEOUT" /sat\\w+/'), [[19, 28]])).toEqual([
       [0, 4],
       [5, 12],
+      [14, 18],
+      [19, 28],
+    ]);
+  });
+
+  it("never runs a user's regex: its marks are the ones it is given, worked out in the regex worker", () => {
+    const exec = vi.spyOn(RegExp.prototype, "exec");
+    const test = vi.spyOn(RegExp.prototype, "test");
+    try {
+      expect(highlightRanges("pool saturated", clauses("pool /sat\\w+/"))).toEqual([[0, 4]]);
+      const ran = [...exec.mock.contexts, ...test.mock.contexts].map((re) => (re as RegExp).source);
+      expect(ran.filter((source) => source.includes("sat"))).toEqual([]);
+    } finally {
+      exec.mockRestore();
+      test.mockRestore();
+    }
+  });
+
+  it("merges the ranges it is given with its own", () => {
+    expect(
+      highlightRanges("Pool timeout: pool saturated", clauses('pool "TIMEOUT"'), [
+        [19, 28],
+        [3, 6],
+      ]),
+    ).toEqual([
+      [0, 12],
       [14, 18],
       [19, 28],
     ]);
@@ -1023,10 +1171,6 @@ describe("highlightRanges", () => {
 
   it("merges overlaps, and marks nothing for a negation or the level", () => {
     expect(highlightRanges("abcdef level=info", clauses("abc bcd -ef level:info"))).toEqual([[0, 4]]);
-  });
-
-  it("survives a regex that matches the empty string", () => {
-    expect(highlightRanges("abc", clauses("/x*/"))).toEqual([]);
   });
 
   it("marks a field only as a whole key, never inside a longer key", () => {

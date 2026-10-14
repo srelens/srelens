@@ -1004,6 +1004,13 @@ describe("setTabView / useTabView", () => {
     store.setTabView("nope", { filter: "x" });
     expect(store.getState()).toBe(before);
   });
+
+  it("holds a Logs tab's query and tells the hook", () => {
+    const id = active().id;
+    const { result } = renderHook(() => store.useTabView(id));
+    act(() => store.setTabView(id, { query: "level:error" }));
+    expect(result.current.query).toBe("level:error");
+  });
 });
 
 describe("activeRoute", () => {
@@ -1130,6 +1137,24 @@ describe("no-op actions do not notify", () => {
     "setTabView with values it already holds",
     () => store.setTabView(activeId(), { filter: "abc", sort: { key: "name", direction: "asc" } }),
     () => store.setTabView(activeId(), { filter: "abc", sort: { key: "name", direction: "asc" } }),
+  );
+
+  silent(
+    "setTabView with a query it already holds",
+    () => {
+      store.setTabView(activeId(), { query: "level:error" });
+      // Without this the test would pass for a store that never kept the query at all.
+      expect(store.currentWorkspace().tabs.find((t) => t.id === activeId())?.view?.query).toBe("level:error");
+    },
+    () => store.setTabView(activeId(), { query: "level:error" }),
+  );
+
+  // A Logs tab writes its box on every mount, and an empty box is not a query:
+  // a tab that never had one must not gain a view for it.
+  silent(
+    "setTabView with an empty query on a tab that has none",
+    () => {},
+    () => store.setTabView(activeId(), { query: "" }),
   );
 
   it("but a real change still notifies exactly once", () => {
