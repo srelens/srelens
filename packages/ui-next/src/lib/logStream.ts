@@ -427,7 +427,9 @@ export function useLogStream(
    * Read the page before the oldest line shown and put it in front (#914).
    *
    * Following, the ring grows by a page first, so lines arriving during the
-   * read do not push the oldest line shown out from under it. While paused
+   * read do not push the oldest line shown out from under it, and takes that
+   * room back if the read fails or its page does not join, so a stream that
+   * keeps failing does not leave the ring at its ceiling. While paused
    * or held, the page goes into the frozen view, and into the ring too if
    * the ring still starts where the view does. On resume the view shows the
    * ring, as ever. A page that no longer ends where the lines in memory start
@@ -448,9 +450,21 @@ export function useLogStream(
     /** Room for `extra` more lines and a page above them, so live lines do not push a loaded page straight out. */
     const roomFor = (b: LogBuffer, extra: number) =>
       Math.min(MAX_LOADED_LINES, b.lines.length + extra + EARLIER_PAGE);
+    /** Takes the room back when the read comes to nothing, so failing reads cannot ratchet the ring up to its ceiling. */
+    let giveBackRoom = () => {};
     if (!isFrozen()) {
       const b = bufferRef.current;
-      bufferRef.current = { ...b, capacity: Math.max(b.capacity, roomFor(b, EARLIER_PAGE)) };
+      const raised = Math.max(b.capacity, roomFor(b, EARLIER_PAGE));
+      bufferRef.current = { ...b, capacity: raised };
+      giveBackRoom = () => {
+        if (generation !== generationRef.current) return;
+        fold();
+        const now = bufferRef.current;
+        // Only this read's own raise is undone: a clear, or a gap in the frames, has since set the ring afresh.
+        if (now.capacity !== raised) return;
+        // Never below what the ring holds now: the lines that came while the page was read stay.
+        bufferRef.current = { ...now, capacity: Math.max(b.capacity, now.lines.length) };
+      };
     }
     loadingRef.current = true;
     setLoadingEarlier(true);
@@ -462,6 +476,7 @@ export function useLogStream(
       // A read that outlived its stream leaves the flag to whoever reset it: it may be another stream's now.
       if (generation === generationRef.current) {
         loadingRef.current = false;
+        giveBackRoom();
         setLoadError(e);
         setLoadingEarlier(false);
       }
@@ -471,12 +486,16 @@ export function useLogStream(
     loadingRef.current = false;
     setLoadingEarlier(false);
     setHistory((h) => (h === undefined || h.first === page.first ? h : { ...h, first: page.first }));
-    if (page.lines.length === 0) return;
+    if (page.lines.length === 0) {
+      giveBackRoom();
+      return;
+    }
     const end = page.seq + page.lines.length;
     const joins = (b: LogBuffer) => b.dropped + 1 === end;
     // Asked again: the reader may have paused, or let go, while the page was read.
     if (isFrozen()) {
       if (!joins(shownRef.current)) {
+        giveBackRoom();
         setLoadError(new Error("Those lines moved on while they were read. Load them again."));
         return;
       }
@@ -486,6 +505,8 @@ export function useLogStream(
           page.lines,
           roomFor(bufferRef.current, page.lines.length),
         );
+      } else {
+        giveBackRoom();
       }
       shownRef.current = prependLogLines(shownRef.current, page.lines, shownRef.current.capacity);
       setView(shownRef.current);
@@ -493,6 +514,7 @@ export function useLogStream(
     }
     fold();
     if (!joins(bufferRef.current)) {
+      giveBackRoom();
       setLoadError(
         new Error("The stream moved past those lines while they were read. Pause it, then load them again."),
       );

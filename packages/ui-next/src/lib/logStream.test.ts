@@ -957,6 +957,94 @@ describe("useLogStream with history on disk (#914)", () => {
     expect(result.current.dropped).toBe(0);
   });
 
+  it("takes back the room it made for a page when the read fails, and loses no line doing so", async () => {
+    const { s, result } = await openSpooled();
+    s.frame(5001, many(5001, 5000));
+    await waitFor(() => expect(result.current.lines.length).toBe(5000));
+    let fail!: (e: unknown) => void;
+    s.readEarlier.mockReturnValueOnce(new Promise<SpoolPage>((_, reject) => (fail = reject)));
+    let load!: Promise<void>;
+    act(() => {
+      load = result.current.loadEarlier();
+    });
+    s.frame(10001, ["during"]);
+    await waitFor(() => expect(result.current.lines.length).toBe(5001));
+    await act(async () => {
+      fail(new Error("this log stream has ended"));
+      await load;
+    });
+    expect(result.current.loadError).toBeDefined();
+    // The line that came while the page was read is still there: the ring was not cut back to its old size.
+    expect(result.current.lines.length).toBe(5001);
+    // And the room is gone: another line pushes the oldest out, where a ring a page wider would just grow.
+    s.frame(10002, ["after"]);
+    await waitFor(() => expect(texts(result).at(-1)).toBe("after"));
+    expect(result.current.lines.length).toBe(5001);
+    expect(result.current.dropped).toBe(5001);
+  });
+
+  it("does not let repeated failed reads grow the ring", async () => {
+    const { s, result } = await openSpooled();
+    s.frame(5001, many(5001, 5000));
+    await waitFor(() => expect(result.current.lines.length).toBe(5000));
+    for (let i = 0; i < 12; i++) {
+      s.readEarlier.mockRejectedValueOnce(new Error("this log stream has ended"));
+      await act(() => result.current.loadEarlier());
+    }
+    // Twelve pre-raises of a page would have taken a ring of 5,000 to its 50,000 ceiling.
+    s.frame(10001, many(10001, 100));
+    await waitFor(() => expect(texts(result).at(-1)).toBe("l10100"));
+    expect(result.current.lines.length).toBe(5000);
+    expect(result.current.dropped).toBe(5100);
+  });
+
+  it("takes back the room it made when the page does not join the lines in memory", async () => {
+    const { s, result } = await openSpooled();
+    s.frame(5001, many(5001, 5000));
+    await waitFor(() => expect(result.current.lines.length).toBe(5000));
+    // Ends at 4,001, not at the 5,001 the ring starts from.
+    s.readEarlier.mockResolvedValueOnce(s.page(1, many(1, 4000)));
+    await act(() => result.current.loadEarlier());
+    expect(result.current.loadError).toBeInstanceOf(Error);
+    s.frame(10001, ["after"]);
+    await waitFor(() => expect(texts(result).at(-1)).toBe("after"));
+    expect(result.current.lines.length).toBe(5000);
+    expect(result.current.dropped).toBe(5001);
+  });
+
+  it("takes back the room it made when the page comes back empty", async () => {
+    const { s, result } = await openSpooled();
+    s.frame(5001, many(5001, 5000));
+    await waitFor(() => expect(result.current.lines.length).toBe(5000));
+    // The history had rotated past everything asked for.
+    s.readEarlier.mockResolvedValueOnce(s.page(5001, []));
+    await act(() => result.current.loadEarlier());
+    s.frame(10001, ["after"]);
+    await waitFor(() => expect(texts(result).at(-1)).toBe("after"));
+    expect(result.current.lines.length).toBe(5000);
+  });
+
+  it("takes back the room it made when the reader paused during the read and the page no longer joins the view", async () => {
+    const { s, result } = await openSpooled();
+    s.frame(5001, many(5001, 5000));
+    await waitFor(() => expect(result.current.lines.length).toBe(5000));
+    const arrive = holdRead(s);
+    let load!: Promise<void>;
+    act(() => {
+      load = result.current.loadEarlier();
+    });
+    act(() => result.current.togglePause());
+    await act(async () => {
+      arrive(s.page(1, many(1, 4000)));
+      await load;
+    });
+    expect(result.current.loadError).toBeInstanceOf(Error);
+    act(() => result.current.togglePause());
+    s.frame(10001, ["after"]);
+    await waitFor(() => expect(texts(result).at(-1)).toBe("after"));
+    expect(result.current.lines.length).toBe(5000);
+  });
+
   it("does not ask another source for history", async () => {
     const open = vi.fn(async (_targets: LogTarget[], _line: unknown, _status: unknown, _options: LogStreamOptions) => ({
       stop: vi.fn(),
