@@ -944,4 +944,27 @@ describe("Forwards — a new forward on a protected cluster (#101)", () => {
     await userEvent.click(screen.getByRole("button", { name: "Start forward" }));
     await waitFor(() => expect(core.startPortForward).toHaveBeenCalledTimes(1));
   });
+
+  it("keeps asking for the name when the rail loses its selection under the dialog", async () => {
+    await fillOnProtectedProd();
+    expect(screen.getByText("prod-eu is protected (workspace Default).")).toBeTruthy();
+
+    // The rail has nothing selected now; the forward still runs on prod-eu,
+    // which is what the dialog was pinned to, and prod-eu is still protected.
+    // (`setActiveCluster(null)`, not `resetContexts()`: the latter removes the
+    // cluster from the contexts store, and a cluster nobody declares has no
+    // protection to look up.)
+    act(() => setActiveCluster(null));
+
+    expect(screen.queryByText(/This still runs against/)).toBeNull();
+    expect(screen.getByText("prod-eu is protected (workspace Default).")).toBeTruthy();
+    await userEvent.click(screen.getByRole("button", { name: "Start forward" }));
+    expect(core.startPortForward).not.toHaveBeenCalled();
+    expect(screen.getByText("Type prod-eu to confirm.")).toBeTruthy();
+
+    await userEvent.type(screen.getByRole("textbox", { name: "Type prod-eu to confirm" }), "prod-eu");
+    await userEvent.click(screen.getByRole("button", { name: "Start forward" }));
+    await waitFor(() => expect(core.startPortForward).toHaveBeenCalledTimes(1));
+    expect(core.startPortForward).toHaveBeenCalledWith(expect.objectContaining({ context: "prod-eu" }));
+  });
 });

@@ -287,10 +287,16 @@ export function Forwards(_props: { route: string }) {
     // ends are legitimate states of this screen — it lists every cluster's
     // forwards, so it is reachable with nothing in focus — and neither is a
     // divergence. A dialog opened with no cluster says so itself, at the top
-    // (see `NewForwardDialog`); a rail that later loses its selection changes
-    // nothing about the cluster the forward was pinned to.
-    pinned: cluster && newForward?.context ? newForward.context : null,
-    live: cluster?.name ?? "",
+    // (see `NewForwardDialog`).
+    //
+    // A rail that later loses its selection changes nothing about the cluster
+    // the forward was pinned to, so the pin outlives it: on a protected
+    // cluster (#101) the gate asks for the name of the cluster the forward
+    // RUNS on, and a pin that dropped with the selection would stop asking
+    // while the forward still went ahead. Nothing in focus is not a rail that
+    // moved, though, so the pin stands in for `live` there.
+    pinned: newForward?.context ? newForward.context : null,
+    live: cluster?.name ?? newForward?.context ?? "",
     verb: "forward",
   });
 
