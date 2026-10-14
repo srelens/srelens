@@ -324,4 +324,25 @@ describe("startLogStream frames (#914)", () => {
     fetchMock.mockResolvedValueOnce(refuse(""));
     await expect(stream.exportSpool!("web-1.log")).rejects.toThrow("HTTP 502");
   });
+
+  it("says the server could not finish, and saves nothing, when the body fails halfway", async () => {
+    // The server ends the body with an error when the spool cannot be read to the end, so the 200 has already gone.
+    platform.tauri = false;
+    const { stream } = await open({ spoolMaxBytes: 1 << 20 });
+    const cut = new TypeError("network error");
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => ({ ok: true, status: 200, statusText: "OK", blob: async () => Promise.reject(cut), text: async () => "" })),
+    );
+    const created = vi.fn(() => "blob:x");
+    URL.createObjectURL = created;
+    const click = vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => {});
+
+    const failure = await stream.exportSpool!("web-1.log").catch((e: unknown) => e);
+    expect(failure).toBeInstanceOf(Error);
+    expect((failure as Error).message).toBe("The server could not finish the export");
+    expect((failure as Error).cause).toBe(cut);
+    expect(created).not.toHaveBeenCalled();
+    expect(click).not.toHaveBeenCalled();
+  });
 });

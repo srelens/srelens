@@ -189,7 +189,12 @@ async function downloadSpool(channel: string, filename: string, sinceSeconds?: n
     }
     throw new Error(message);
   }
-  const url = URL.createObjectURL(await res.blob());
+  // The server ends the body with an error when the spool cannot be read to the end, after the 200 has gone: the
+  // browser's own message for that ("network error") says nothing of why a save did not happen.
+  const blob = await res.blob().catch((cause: unknown) => {
+    throw new Error("The server could not finish the export", { cause });
+  });
+  const url = URL.createObjectURL(blob);
   const anchor = document.createElement("a");
   anchor.href = url;
   anchor.download = filename;
