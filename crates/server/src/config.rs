@@ -93,6 +93,16 @@ mod tests {
             .contains("SRELENS_LOG_SPOOL_MB"));
     }
 
+    /// The operator's docs name every knob `serve()` reads (#914).
+    #[test]
+    fn the_web_docs_name_the_log_spool_size() {
+        let web = include_str!("../../../docs/WEB.md");
+        assert!(
+            web.contains("`SRELENS_LOG_SPOOL_MB`"),
+            "docs/WEB.md does not document SRELENS_LOG_SPOOL_MB"
+        );
+    }
+
     #[test]
     fn ensure_creates_dir_with_owner_only_perms() {
         let tmp = tempfile::tempdir().unwrap();
