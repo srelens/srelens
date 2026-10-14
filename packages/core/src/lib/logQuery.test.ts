@@ -2,7 +2,7 @@ import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { clauseState, discoverFields, facetCounts, highlightRanges, inlineFields, inRange, isQueryableKey, logLineWords, matchLine, parseLogFields, parseLogQuery, removeClause, toggleClause, VOLUME_STEPS, volumeBuckets, type QueryClause, type QueryLine } from "./logQuery";
+import { clauseState, discoverFields, facetCounts, highlightRanges, inlineFields, inRange, isQueryableKey, logLineWords, matchLine, parseLogFields, parseLogQuery, readMeasure, removeClause, toggleClause, VOLUME_STEPS, volumeBuckets, type QueryClause, type QueryLine } from "./logQuery";
 import { healthRank, logLineHealth, logLineLevel } from "./logTerms";
 
 describe("parseLogFields", () => {
@@ -285,6 +285,45 @@ describe("comparisons", () => {
   ] as const)("reads %j as %s while it is being typed", (query, read) => {
     const [clause] = clauses(query);
     expect(clause.match === "compare" ? clause.kind : clause.match).toBe(read);
+  });
+});
+
+// `readMeasure` is exported and fed every line's field values, so a long hostile
+// value must cost a scan and no more (CodeQL js/polynomial-redos). A scan takes
+// a millisecond or two at this size; a regex that restarts at every digit takes
+// seconds. The budget is loose on purpose, as in redos.test.ts: it separates
+// linear from polynomial and does not flake on a busy runner.
+describe("readMeasure, on a hostile field value", () => {
+  const BUDGET_MS = 250;
+  const timed = <T>(run: () => T): T => {
+    const started = performance.now();
+    const result = run();
+    const elapsed = performance.now() - started;
+    expect(elapsed, `took ${elapsed.toFixed(0)}ms, budget ${BUDGET_MS}ms`).toBeLessThan(BUDGET_MS);
+    return result;
+  };
+
+  it("reads a long run of digits and no unit as nothing", () => {
+    expect(timed(() => readMeasure("1".repeat(100_000) + "x"))).toBeUndefined();
+  });
+
+  it("reads a long run of digits and a unit as a duration", () => {
+    expect(timed(() => readMeasure("1".repeat(100_000) + "s"))).toMatchObject({ kind: "duration" });
+  });
+
+  it("reads a long run of non-digits as nothing", () => {
+    expect(timed(() => readMeasure("@".repeat(100_000)))).toBeUndefined();
+  });
+
+  it("keeps reading what it read: every unit, a bare dot, and a number with no unit", () => {
+    expect(readMeasure("1ns")?.value).toBeCloseTo(1e-9, 15);
+    expect(readMeasure("2us")?.value).toBeCloseTo(2e-6, 15);
+    expect(readMeasure("3ms")?.value).toBeCloseTo(3e-3, 15);
+    expect(readMeasure("4m")?.value).toBe(240);
+    expect(readMeasure("5.s")?.value).toBe(5);
+    expect(readMeasure("-1m30s")?.value).toBe(-90);
+    expect(readMeasure("1500")).toEqual({ kind: "number", value: 1500 });
+    for (const bad of ["", "-", ".", ".s", "s", "1h ", "1h2", "1x", "1.2.3s"]) expect(readMeasure(bad), bad).toBeUndefined();
   });
 });
 

@@ -255,12 +255,10 @@ const isSpace = (ch: string) => /\s/.test(ch);
 
 const NUMBER = /^[+-]?(\d+(\.\d*)?|\.\d+)([eE][+-]?\d+)?$/;
 /**
- * One `<number><unit>` part of a Go duration. Sticky, so `readMeasure` walks the
- * string by index and no start position is rescanned; the unit list is a flat
- * alternation, so a run of digits cannot backtrack against itself. Go spells
- * micro with U+00B5 or U+03BC, and a logger can use either.
+ * Go spells micro with U+00B5 or U+03BC, and a logger can use either. The
+ * order matters to `readMeasure`: `ms` has to come before `m`, which it starts
+ * with, so `Object.keys` (insertion order for these keys) is also the search order.
  */
-const DURATION_PART = /(\d+(?:\.\d*)?|\.\d+)(ns|us|µs|μs|ms|s|m|h)/y;
 const UNIT_SECONDS: Readonly<Record<string, number>> = {
   ns: 1e-9,
   us: 1e-6,
@@ -271,6 +269,29 @@ const UNIT_SECONDS: Readonly<Record<string, number>> = {
   m: 60,
   h: 3600,
 };
+const UNITS = Object.keys(UNIT_SECONDS);
+
+const isDigit = (ch: string) => ch >= "0" && ch <= "9";
+
+/** Index just past the run of digits that starts at `from`. */
+function digitsEnd(s: string, from: number): number {
+  let j = from;
+  while (j < s.length && isDigit(s[j])) j += 1;
+  return j;
+}
+
+/**
+ * Index just past the `12`, `1.5`, `1.` or `.5` that starts at `from`, or `from`
+ * when no number does. Scanned by index, not by a regex, which CodeQL reads as
+ * polynomial on a long run of digits (js/polynomial-redos, as for `keyEnd`);
+ * `readMeasure` is exported and fed every line's field values.
+ */
+function partEnd(s: string, from: number): number {
+  const whole = digitsEnd(s, from);
+  if (s[whole] !== ".") return whole;
+  const end = digitsEnd(s, whole + 1);
+  return whole > from || end > whole + 1 ? end : from;
+}
 
 /**
  * A number, or a Go-style duration in seconds (`350ms`, `1h2m3s`), or undefined
@@ -284,11 +305,11 @@ export function readMeasure(s: string): { kind: "number" | "duration"; value: nu
   if (i >= s.length) return undefined;
   let total = 0;
   while (i < s.length) {
-    DURATION_PART.lastIndex = i;
-    const m = DURATION_PART.exec(s);
-    if (m === null) return undefined;
-    total += Number(m[1]) * UNIT_SECONDS[m[2]];
-    i = DURATION_PART.lastIndex;
+    const end = partEnd(s, i);
+    const unit = end > i ? UNITS.find((u) => s.startsWith(u, end)) : undefined;
+    if (unit === undefined) return undefined;
+    total += Number(s.slice(i, end)) * UNIT_SECONDS[unit];
+    i = end + unit.length;
   }
   return { kind: "duration", value: sign * total };
 }
