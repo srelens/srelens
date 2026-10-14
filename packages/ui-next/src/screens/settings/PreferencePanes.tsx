@@ -3,8 +3,9 @@ import {
   DEFAULT_WORKSPACE_LAYOUT, getDefaultNamespace, getRequestTimeoutSecs, isTauri, loadRestoreSession,
   openExternal, REQUEST_TIMEOUT, saveRestoreSession, updateRequestTimeout,
 } from "@srelens/core";
-import { Button, Field, Panel, Switch, TextInput } from "@srelens/ui-kit";
+import { Button, Field, Panel, Select, Switch, TextInput } from "@srelens/ui-kit";
 import { FailureAlert } from "../../lib/errorCopy";
+import { LOG_HISTORY_CHOICES, logHistoryMb, saveLogHistoryMb } from "../../lib/logHistory";
 import { DEFAULT_PEEK_WIDTH, MIN_PEEK_WIDTH, MAX_PEEK_WIDTH, savePeekWidth, usePeekWidth } from "../../lib/peekWidth";
 import { MIN_NAVIGATION_WIDTH, MAX_NAVIGATION_WIDTH, saveNavigationWidth, useNavigationWidth } from "../../lib/navigationWidth";
 import { visitedRepository, ISSUES_URL, REPO_URL, setShowStarButton, useStarState } from "../../lib/starOnGitHub";
@@ -60,6 +61,7 @@ export function KubernetesPane() {
   const [savedTimeout, setSavedTimeout] = useState(getRequestTimeoutSecs);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<unknown>(null);
+  const [historyMb, setHistoryMb] = useState(() => logHistoryMb());
   const seconds = Number(timeout);
   const valid = timeout.trim() !== "" && Number.isInteger(seconds) && seconds >= REQUEST_TIMEOUT.MIN && seconds <= REQUEST_TIMEOUT.MAX;
   const validNamespace = namespace === "" || (namespace.length <= 63 && /^[a-z0-9]([-a-z0-9]*[a-z0-9])?$/.test(namespace));
@@ -90,6 +92,14 @@ export function KubernetesPane() {
         </Button>
         {error !== null && <FailureAlert tone="sev" title="Could not save request timeout" error={error} />}
       </Panel>}
+      <Panel title="Pod logs" description="While a log stream is open, srelens keeps its lines on disk, so you can load earlier ones and export all of them.">
+        <Field label="History kept per log stream"
+          hint={isTauri() ? "Applies to log streams opened from now on." : "Applies to log streams opened from now on. Your server may set a lower limit."}>
+          <Select aria-label="History kept per log stream" value={String(historyMb)}
+            onValueChange={(value) => { const mb = Number(value); setHistoryMb(mb); saveLogHistoryMb(mb); }}
+            options={LOG_HISTORY_CHOICES.map((mb) => ({ value: String(mb), label: mb >= 1024 ? `${mb / 1024} GB` : `${mb} MB` }))} />
+        </Field>
+      </Panel>
     </div>
   );
 }

@@ -84,6 +84,14 @@ it("keeps desktop timeout controls off the web", () => {
   core.isTauri.mockReturnValue(false); render(<KubernetesPane />);
   expect(screen.queryByLabelText("Request timeout (seconds)")).toBeNull();
 });
+it("keeps the chosen log history size for new log streams", async () => {
+  render(<KubernetesPane />);
+  const size = screen.getByRole("combobox", { name: "History kept per log stream" }) as HTMLSelectElement;
+  expect(size.value).toBe("256");
+  fireEvent.change(size, { target: { value: "1024" } });
+  expect(settingsStorage.getItem("srelens.next.logHistoryMb")).toBe("1024");
+  expect(screen.getByText(/opened from now on/)).toBeTruthy();
+});
 it("opens the existing application log screen", async () => {
   render(<ApplicationLogsPane />); await userEvent.click(screen.getByRole("button", { name: "Open application logs" }));
   expect(openTab).toHaveBeenCalledWith("/applog");
