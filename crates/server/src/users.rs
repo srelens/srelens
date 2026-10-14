@@ -350,15 +350,27 @@ impl UserEnvs {
 /// external tool. Such forwards are kept alive by their own traffic via the
 /// idle eviction that `env_for` bumps on each `/pf` request; keeping the rest
 /// of the (small) env cached alongside them is an acceptable trade.
-pub async fn teardown_streams_if_disconnected(
+///
+/// A reconnect is any connection registered since this was called, not just one
+/// still live when the grace ends: the hub removes a connection that overflows
+/// at once, so the count can read 0 while the browser is mid-reconnect (#914).
+/// The epoch is read here, when the teardown is scheduled, not when the
+/// returned future first runs.
+pub fn teardown_streams_if_disconnected(
     hub: Arc<crate::ws::hub::WsHub>,
     user_envs: Arc<UserEnvs>,
     user_id: i64,
     grace: Duration,
-) {
-    tokio::time::sleep(grace).await;
-    if hub.user_connection_count(user_id) == 0 && !user_envs.has_active_forwards(user_id) {
-        user_envs.invalidate(user_id);
+) -> impl std::future::Future<Output = ()> {
+    let epoch = hub.connect_epoch(user_id);
+    async move {
+        tokio::time::sleep(grace).await;
+        if hub.connect_epoch(user_id) == epoch
+            && hub.user_connection_count(user_id) == 0
+            && !user_envs.has_active_forwards(user_id)
+        {
+            user_envs.invalidate(user_id);
+        }
     }
 }
 
@@ -625,6 +637,95 @@ mod tests {
         // Teardown was skipped: the env is still cached as the same Arc.
         let env_again = envs.env_for(&db, &k, user.id).await.unwrap();
         assert!(Arc::ptr_eq(&env, &env_again));
+
+        let _ = std::fs::remove_dir_all(&data_dir);
+    }
+
+    /// #914: a socket the hub dropped on overflow closes, and its client
+    /// reconnects at once. If that new socket overflows too, the hub removes it
+    /// before its route has run, so the user's connection count reads 0 although
+    /// the browser is mid-reconnect. The first socket's pending grace teardown
+    /// must not fire on that count and stop every stream the user has.
+    #[tokio::test]
+    async fn teardown_is_cancelled_by_a_reconnect_even_if_the_new_connection_was_dropped() {
+        let db = Db::open_in_memory().await.unwrap();
+        let k = key();
+        let data_dir = test_data_dir();
+        let user = db.upsert_user("i", "u", "", "", 1).await.unwrap();
+        db.put_kubeconfig(user.id, "kc", &k, "apiVersion: v1", 1)
+            .await
+            .unwrap();
+        let envs = Arc::new(UserEnvs::new(
+            factory(),
+            data_dir.clone(),
+            "http://127.0.0.1:8080".into(),
+            Default::default(),
+        ));
+        let hub = Arc::new(crate::ws::hub::WsHub::new());
+        let env = envs.env_for(&db, &k, user.id).await.unwrap();
+
+        // The first socket closes, and its route schedules the grace teardown.
+        let (first, _rx1) = hub.register(user.id);
+        hub.unregister(first);
+        let teardown = teardown_streams_if_disconnected(
+            hub.clone(),
+            envs.clone(),
+            user.id,
+            Duration::from_millis(20),
+        );
+
+        // The client reconnects within the grace, and that socket overflows
+        // before its route runs: the hub removes it, though it is still open.
+        let (second, _rx2) = hub.register(user.id);
+        for _ in 0..=crate::ws::hub::WS_CONN_QUEUE {
+            hub.deliver_direct(second, "frame".into());
+        }
+        assert_eq!(hub.user_connection_count(user.id), 0);
+
+        teardown.await;
+
+        let env_again = envs.env_for(&db, &k, user.id).await.unwrap();
+        assert!(
+            Arc::ptr_eq(&env, &env_again),
+            "the teardown stopped the streams of a user who had reconnected"
+        );
+
+        let _ = std::fs::remove_dir_all(&data_dir);
+    }
+
+    /// The control for the test above: with no reconnect, the pending teardown
+    /// still stops the user's streams once the grace is up.
+    #[tokio::test]
+    async fn teardown_still_stops_streams_when_the_user_never_reconnects() {
+        let db = Db::open_in_memory().await.unwrap();
+        let k = key();
+        let data_dir = test_data_dir();
+        let user = db.upsert_user("i", "u", "", "", 1).await.unwrap();
+        db.put_kubeconfig(user.id, "kc", &k, "apiVersion: v1", 1)
+            .await
+            .unwrap();
+        let envs = Arc::new(UserEnvs::new(
+            factory(),
+            data_dir.clone(),
+            "http://127.0.0.1:8080".into(),
+            Default::default(),
+        ));
+        let hub = Arc::new(crate::ws::hub::WsHub::new());
+        let env = envs.env_for(&db, &k, user.id).await.unwrap();
+
+        let (first, _rx1) = hub.register(user.id);
+        hub.unregister(first);
+        teardown_streams_if_disconnected(
+            hub.clone(),
+            envs.clone(),
+            user.id,
+            Duration::from_millis(20),
+        )
+        .await;
+
+        assert!(!env.paths[0].exists());
+        let env_rebuilt = envs.env_for(&db, &k, user.id).await.unwrap();
+        assert!(!Arc::ptr_eq(&env, &env_rebuilt));
 
         let _ = std::fs::remove_dir_all(&data_dir);
     }

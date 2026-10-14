@@ -26,6 +26,9 @@ struct Conn {
 pub struct WsHub {
     next_id: AtomicU64,
     conns: Mutex<HashMap<u64, Arc<Conn>>>,
+    /// Each user's connect epoch: the id of the newest connection they have
+    /// registered. Never removed, one `u64` per user who has ever connected.
+    last_connect: Mutex<HashMap<i64, u64>>,
 }
 
 impl Default for WsHub {
@@ -49,6 +52,7 @@ impl WsHub {
         Self {
             next_id: AtomicU64::new(1),
             conns: Mutex::new(HashMap::new()),
+            last_connect: Mutex::new(HashMap::new()),
         }
     }
 
@@ -65,7 +69,21 @@ impl WsHub {
                 subs: Mutex::new(HashSet::new()),
             }),
         );
+        self.last_connect.lock().unwrap().insert(user_id, id);
         (id, rx)
+    }
+
+    /// Changes whenever `user_id` registers a connection, and only then (0 until
+    /// their first). A reconnect moves it even when the hub dropped the new
+    /// connection again, which the connection count alone cannot show, so a
+    /// scheduled teardown reads it when scheduled and when it fires.
+    pub fn connect_epoch(&self, user_id: i64) -> u64 {
+        self.last_connect
+            .lock()
+            .unwrap()
+            .get(&user_id)
+            .copied()
+            .unwrap_or(0)
     }
 
     pub fn unregister(&self, conn_id: u64) {
@@ -245,6 +263,25 @@ mod tests {
 
         hub.unregister(a2);
         assert_eq!(hub.user_connection_count(1), 0);
+    }
+
+    #[test]
+    fn connect_epoch_moves_only_when_that_user_connects() {
+        let hub = WsHub::new();
+        let never = hub.connect_epoch(1);
+
+        let (a, _rx_a) = hub.register(1);
+        let first = hub.connect_epoch(1);
+        assert_ne!(first, never);
+
+        // Closing the connection, or another user connecting, leaves it alone.
+        hub.unregister(a);
+        let (_b, _rx_b) = hub.register(2);
+        assert_eq!(hub.connect_epoch(1), first);
+
+        // A reconnect moves it, even though the count is back to what it was.
+        let (_c, _rx_c) = hub.register(1);
+        assert_ne!(hub.connect_epoch(1), first);
     }
 
     #[test]
