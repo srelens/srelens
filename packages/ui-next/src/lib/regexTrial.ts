@@ -19,8 +19,15 @@ export interface WorkerLike {
 
 export type Verdict = "ok" | "slow";
 
-/** Half a second, worker start-up included: past it a filter is a freeze, not a wait. */
+/** Half a second of the pattern running, from the worker's "started": past it a filter is a freeze, not a wait. */
 const BUDGET_MS = 500;
+
+/**
+ * How long a worker may take to say "started". The budget does not run until it does, so a slow start-up (a cold
+ * machine, a busy one) is not taken for a slow pattern, and a "slow" is not remembered for the session on that account.
+ * A worker that has not started by now is as good as one that cannot: the query is let through.
+ */
+const STARTUP_MS = 5000;
 
 /** What the pattern was told, by `${flags}/${source}`. A verdict holds for the session. */
 const verdicts = new Map<string, Verdict>();
@@ -36,9 +43,11 @@ export function runTrial(source: string, flags: string, texts: readonly string[]
 }
 
 /**
- * Whether the pattern finishes over `texts` within the budget. The worker is
- * ended however the trial goes. A worker that cannot start, or that fails, is
- * "ok": the guard must not hold a query back in a host with no workers.
+ * Whether the pattern finishes over `texts` within the budget, counted from the
+ * worker's "started" (it posts that when it has the job, before it runs the
+ * pattern, and "done" after). The worker is ended however the trial goes. A
+ * worker that cannot start, that does not start in time, or that fails, is "ok":
+ * the guard must not hold a query back in a host with no working workers.
  */
 export function trialRegex(
   source: string,
@@ -51,19 +60,27 @@ export function trialRegex(
   return new Promise((resolve) => {
     let w: WorkerLike | undefined;
     let settled = false;
+    let budget: ReturnType<typeof setTimeout> | undefined;
     const settle = (verdict: Verdict) => {
       // Once: an answer that lands after the budget must not turn "slow" into "ok" in the memory.
       if (settled) return;
       settled = true;
-      clearTimeout(timer);
+      clearTimeout(startup);
+      clearTimeout(budget);
       w?.terminate();
       verdicts.set(keyOf(source, flags), verdict);
       resolve(verdict);
     };
-    const timer = setTimeout(() => settle("slow"), budgetMs);
+    const startup = setTimeout(() => settle("ok"), STARTUP_MS);
     try {
       w = worker();
-      w.onmessage = () => settle("ok");
+      w.onmessage = ({ data }) => {
+        if (settled) return;
+        if (data !== "started") return settle("ok");
+        // From here it is the pattern being timed, not the worker coming up.
+        clearTimeout(startup);
+        budget ??= setTimeout(() => settle("slow"), budgetMs);
+      };
       w.onerror = () => settle("ok");
       w.postMessage({ source, flags, texts });
     } catch {

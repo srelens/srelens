@@ -9,6 +9,8 @@ const scope = self as unknown as {
 
 scope.onmessage = (event) => {
   const { source, flags, texts } = event.data as { source: string; flags: string; texts: string[] };
+  // First, so the host times the pattern and not this worker's start-up (see `trialRegex`).
+  scope.postMessage("started");
   runTrial(source, flags, texts);
   scope.postMessage("done");
 };
