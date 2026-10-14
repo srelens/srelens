@@ -51,6 +51,10 @@ const h = vi.hoisted(() => {
     listed: vi.fn(),
     /** The field of every `facetCounts` pass the rail has run: one entry per recount. */
     facetPasses: [] as string[],
+    /** What the regex trial has told this screen so far, as its memory holds it: see the `regexTrial` mock. */
+    verdicts: new Map<string, "ok" | "slow">(),
+    /** Every regex trial the screen has started, each waiting on the test to settle it. */
+    trials: [] as { source: string; texts: readonly string[]; settle: (verdict: "ok" | "slow") => void }[],
     /** Every call the screen has made into the hook, in order. */
     seen: [] as {
       context: string;
@@ -166,6 +170,25 @@ vi.mock("@srelens/core", async (orig) => {
     },
   };
 });
+
+/**
+ * The regex trial runs in a worker, and jsdom has none. Here it is a promise the test settles, and settling writes
+ * the verdict to the memory the screen reads, as the real module does.
+ */
+vi.mock("../lib/regexTrial", () => ({
+  cachedVerdict: (source: string, flags: string) => h.verdicts.get(`${flags}/${source}`),
+  trialRegex: (source: string, flags: string, texts: readonly string[]) =>
+    new Promise((resolve) => {
+      h.trials.push({
+        source,
+        texts,
+        settle: (verdict) => {
+          h.verdicts.set(`${flags}/${source}`, verdict);
+          resolve(verdict);
+        },
+      });
+    }),
+}));
 
 vi.mock("../extensions/inventoryStore", async (orig) => ({
   ...(await orig<typeof import("../extensions/inventoryStore")>()),
@@ -317,6 +340,8 @@ beforeEach(() => {
   h.plugins = [];
   h.inventoryError = undefined;
   h.views = [];
+  h.verdicts.clear();
+  h.trials = [];
   h.state = {
     lines: [],
     dropped: 0,
@@ -2430,6 +2455,59 @@ describe("a Logs tab's saved query (#898)", () => {
     await waitFor(() => expect(messages(region)).toEqual(["error pool timeout waited=30.0s in_use=5"]));
     expect(store.getState()).toBe(before);
     expect(tabView(id)?.query).toBe("level:error");
+  });
+
+  it("puts a saved regex through its trial like a typed one: a slow one opens with the alert and the body unfiltered", async () => {
+    const id = tabLeftWith("/(a+)+$/");
+    drawInTab(id);
+    const region = await body();
+    push(...LINES);
+    // The box holds the saved query, and the body is not yet filtered by it: it waits on the trial.
+    expect(filterField()).toHaveProperty("value", "/(a+)+$/");
+    await waitFor(() => expect(h.trials).toHaveLength(1));
+    expect(rendered(region)).toHaveLength(4);
+    await act(async () => h.trials[0].settle("slow"));
+    expect(screen.getByText("Too slow to run on these lines: /(a+)+$/").closest('[role="alert"]')).not.toBeNull();
+    expect(rendered(region)).toHaveLength(4);
+  });
+});
+
+describe("a regex in the query (#898)", () => {
+  /** Type `query` and wait for the screen to ask for its trial. */
+  async function typeRegex(query: string) {
+    await userEvent.type(filterField(), query);
+    await waitFor(() => expect(h.trials).toHaveLength(1));
+  }
+
+  it("filters by a regex once its trial says ok", async () => {
+    const region = await (draw(), body());
+    push(...LINES);
+    await typeRegex("/po+l/");
+    // Still on trial: the body keeps the lines it had.
+    expect(rendered(region)).toHaveLength(4);
+    await act(async () => h.trials[0].settle("ok"));
+    expect(messages(region)).toEqual(["error pool timeout waited=30.0s in_use=5"]);
+    expect(screen.queryByText(/Too slow to run/)).toBeNull();
+  });
+
+  it("says a regex is too slow, applies nothing, and drops the alert once the box is cleared", async () => {
+    const region = await (draw(), body());
+    push(...LINES);
+    await typeRegex("/(a+)+$/");
+    await act(async () => h.trials[0].settle("slow"));
+    const alert = screen.getByText("Too slow to run on these lines: /(a+)+$/");
+    expect(alert.closest('[role="alert"]')).not.toBeNull();
+    expect(rendered(region)).toHaveLength(4);
+    await userEvent.clear(filterField());
+    await waitFor(() => expect(screen.queryByText(/Too slow to run/)).toBeNull());
+  });
+
+  it("starts no trial for a query that holds no regex, and filters by it at once", async () => {
+    const region = await (draw(), body());
+    push(...LINES);
+    await userEvent.type(filterField(), "level:error pool");
+    await waitFor(() => expect(messages(region)).toEqual(["error pool timeout waited=30.0s in_use=5"]));
+    expect(h.trials).toHaveLength(0);
   });
 });
 

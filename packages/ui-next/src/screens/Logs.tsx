@@ -82,6 +82,7 @@ import {
   type StreamPod,
 } from "./logs/StreamRail";
 import { clockTime } from "./logs/time";
+import { useRegexGate } from "./logs/useRegexGate";
 import { VolumeHistogram } from "./logs/VolumeHistogram";
 import { NoClusterScreen } from "./resourceShell";
 
@@ -1156,7 +1157,13 @@ function LogsStream({
    */
   const deferredText = useDeferredValue(text);
   const applied = useMemo(() => parseLogQuery(deferredText), [deferredText]);
-  const clauses = applied.ok ? applied.clauses : NO_CLAUSES;
+  /**
+   * What the body may be filtered by. A regex in the query is trial-run in a worker first, and the screen keeps
+   * the filter it had until the trial passes: one that is too slow is never applied, for a typed query and for
+   * one restored with the tab alike.
+   */
+  const gate = useRegexGate(applied, rows);
+  const clauses = gate.clauses;
   // Saved with the applied text, not the typed one: the store writes a file,
   // and a write per keystroke is what the deferral is there to avoid.
   useEffect(() => {
@@ -1890,6 +1897,11 @@ function LogsStream({
           // problem an invalid regular expression. An unclosed quote is not one.
           <div role="alert" className="mx-3 mt-2 text-[0.75rem]" style={{ color: toneColor("sev") }}>
             {typed.error}
+          </div>
+        )}
+        {typed.ok && gate.slow !== undefined && (
+          <div role="alert" className="mx-3 mt-2 text-[0.75rem]" style={{ color: toneColor("sev") }}>
+            Too slow to run on these lines: {gate.slow}
           </div>
         )}
         <FilterPills
