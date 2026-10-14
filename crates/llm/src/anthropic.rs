@@ -20,6 +20,7 @@ pub fn build_request(
     tools: &[ToolDef],
 ) -> Value {
     let tool_count = tools.len();
+    let last_turn_idx = turns.len().saturating_sub(1);
     json!({
         "model": model,
         "max_tokens": max_tokens,
@@ -31,7 +32,10 @@ pub fn build_request(
                 "cache_control": { "type": "ephemeral" }
             }
         ],
-        "messages": turns.iter().map(message_for_turn).collect::<Vec<_>>(),
+        "messages": turns.iter().enumerate().map(|(idx, turn)| {
+            let is_last = idx == last_turn_idx && !turns.is_empty();
+            message_for_turn(turn, is_last)
+        }).collect::<Vec<_>>(),
         "tools": tools.iter().enumerate().map(|(i, t)| {
             let mut obj = json!({
                 "name": t.name,
@@ -46,12 +50,18 @@ pub fn build_request(
     })
 }
 
-fn message_for_turn(turn: &Turn) -> Value {
+fn message_for_turn(turn: &Turn, is_last: bool) -> Value {
     match turn {
-        Turn::User(text) => json!({
-            "role": "user",
-            "content": [{ "type": "text", "text": text }],
-        }),
+        Turn::User(text) => {
+            let mut block = json!({ "type": "text", "text": text });
+            if is_last {
+                block["cache_control"] = json!({ "type": "ephemeral" });
+            }
+            json!({
+                "role": "user",
+                "content": [block],
+            })
+        }
         Turn::Assistant { text, tool_calls } => {
             let mut content: Vec<Value> = Vec::new();
             if !text.is_empty() {
@@ -65,17 +75,36 @@ fn message_for_turn(turn: &Turn) -> Value {
                     "input": call.arguments,
                 }));
             }
+            if is_last {
+                if let Some(last_block) = content.last_mut() {
+                    last_block["cache_control"] = json!({ "type": "ephemeral" });
+                }
+            }
             json!({ "role": "assistant", "content": content })
         }
-        Turn::ToolResults(outcomes) => json!({
-            "role": "user",
-            "content": outcomes.iter().map(|o| json!({
-                "type": "tool_result",
-                "tool_use_id": o.id,
-                "content": o.content,
-                "is_error": o.is_error,
-            })).collect::<Vec<_>>(),
-        }),
+        Turn::ToolResults(outcomes) => {
+            let total = outcomes.len();
+            let content = outcomes
+                .iter()
+                .enumerate()
+                .map(|(i, o)| {
+                    let mut block = json!({
+                        "type": "tool_result",
+                        "tool_use_id": o.id,
+                        "content": o.content,
+                        "is_error": o.is_error,
+                    });
+                    if is_last && i == total.saturating_sub(1) && total > 0 {
+                        block["cache_control"] = json!({ "type": "ephemeral" });
+                    }
+                    block
+                })
+                .collect::<Vec<_>>();
+            json!({
+                "role": "user",
+                "content": content,
+            })
+        }
     }
 }
 
@@ -347,6 +376,10 @@ mod tests {
             req["messages"][0]["content"][0]["text"],
             "why is web-0 down?"
         );
+        assert_eq!(
+            req["messages"][0]["content"][0]["cache_control"]["type"],
+            "ephemeral"
+        );
         assert_eq!(req["tools"][0]["name"], "k8s_listPods");
         assert_eq!(req["tools"][0].get("cache_control"), None);
         assert_eq!(req["tools"][1]["name"], "k8s_scale");
@@ -375,15 +408,20 @@ mod tests {
         ];
         let req = build_request("m", 1, "sys", &turns, &[]);
         let msgs = &req["messages"];
+        // Prior turn must NOT carry cache_control
+        assert_eq!(msgs[0]["content"][0].get("cache_control"), None);
         assert_eq!(msgs[1]["role"], "assistant");
         assert_eq!(msgs[1]["content"][0]["type"], "text");
         assert_eq!(msgs[1]["content"][1]["type"], "tool_use");
         assert_eq!(msgs[1]["content"][1]["id"], "call_1");
         assert_eq!(msgs[1]["content"][1]["input"]["replicas"], 3);
+        assert_eq!(msgs[1]["content"][1].get("cache_control"), None);
+        // Latest turn MUST carry cache_control on its final content block
         assert_eq!(msgs[2]["role"], "user");
         assert_eq!(msgs[2]["content"][0]["type"], "tool_result");
         assert_eq!(msgs[2]["content"][0]["tool_use_id"], "call_1");
         assert_eq!(msgs[2]["content"][0]["is_error"], false);
+        assert_eq!(msgs[2]["content"][0]["cache_control"]["type"], "ephemeral");
     }
 
     #[test]

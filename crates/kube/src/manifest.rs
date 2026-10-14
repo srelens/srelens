@@ -183,6 +183,7 @@ pub fn api_resource_for_api_version(api_version: &str, kind: &str) -> Option<Api
 
 /// Resolve the (ApiResource, namespaced) for a request: a dynamic CRD GVK if
 /// group/version/plural are supplied, else the static `gvk_for` table.
+#[allow(dead_code)]
 fn resolve_api_resource(input: &ManifestIn) -> Result<(ApiResource, bool), CapabilityError> {
     if let (Some(g), Some(v), Some(p)) = (
         input.group.as_deref(),
@@ -203,6 +204,23 @@ fn resolve_api_resource(input: &ManifestIn) -> Result<(ApiResource, bool), Capab
             .ok_or_else(|| CapabilityError::Handler(format!("unsupported kind: {}", input.kind)))?;
         Ok((ApiResource::from_gvk(&gvk), namespaced))
     }
+}
+
+/// Resolve the (ApiResource, namespaced) dynamically using ClientCache, with fallback to discovery.
+async fn resolve_manifest_in(
+    cache: &ClientCache,
+    input: &ManifestIn,
+) -> Result<(ApiResource, bool), CapabilityError> {
+    cache
+        .resolve_resource(
+            &input.context,
+            &input.kind,
+            input.group.as_deref(),
+            input.version.as_deref(),
+            input.plural.as_deref(),
+        )
+        .await
+        .map_err(CapabilityError::Handler)
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -338,11 +356,14 @@ pub fn get_object_capability(cache: Arc<ClientCache>) -> Capability {
          path, with null where the object has none. To read a field across many objects, use \
          k8s.listResource with `fields` instead of calling this once per object.",
         Annotations::READ_ONLY,
-        move |GetObjectIn { target: input, fields }: GetObjectIn| {
+        move |GetObjectIn {
+                  target: input,
+                  fields,
+              }: GetObjectIn| {
             let cache = cache.clone();
             async move {
                 check_fields(&fields)?;
-                let (ar, namespaced) = resolve_api_resource(&input)?;
+                let (ar, namespaced) = resolve_manifest_in(&cache, &input).await?;
                 let client = cache
                     .get(&input.context)
                     .await
@@ -553,7 +574,7 @@ pub fn get_manifest_capability(cache: Arc<ClientCache>) -> Capability {
         move |input: ManifestIn| {
             let cache = cache.clone();
             async move {
-                let (ar, namespaced) = resolve_api_resource(&input)?;
+                let (ar, namespaced) = resolve_manifest_in(&cache, &input).await?;
                 let client = cache
                     .get(&input.context)
                     .await
@@ -589,6 +610,15 @@ pub struct ListResourceIn {
     pub kind: String,
     #[serde(default)]
     pub namespace: Option<String>,
+    /// Optional API group override / hint for disambiguation
+    #[serde(default)]
+    pub group: Option<String>,
+    /// Optional API version override / hint
+    #[serde(default)]
+    pub version: Option<String>,
+    /// Optional plural name override / hint
+    #[serde(default)]
+    pub plural: Option<String>,
     /// Label selector the API server filters by, as `kubectl get -l` takes
     /// it, e.g. `app=web,tier!=cache`.
     #[serde(default, rename = "labelSelector")]
@@ -681,14 +711,20 @@ pub fn list_resource_capability(cache: Arc<ClientCache>) -> Capability {
             async move {
                 check_fields(&input.fields)?;
                 check_selectors(&input)?;
-                let (gvk, namespaced) = gvk_for(&input.kind).ok_or_else(|| {
-                    CapabilityError::Handler(format!("unsupported kind: {}", input.kind))
-                })?;
+                let (ar, namespaced) = cache
+                    .resolve_resource(
+                        &input.context,
+                        &input.kind,
+                        input.group.as_deref(),
+                        input.version.as_deref(),
+                        input.plural.as_deref(),
+                    )
+                    .await
+                    .map_err(CapabilityError::Handler)?;
                 let client = cache
                     .get(&input.context)
                     .await
                     .map_err(CapabilityError::Handler)?;
-                let ar = ApiResource::from_gvk(&gvk);
                 let ns = input.namespace.as_deref().unwrap_or("");
                 // Empty namespace on a namespaced kind => all namespaces.
                 let api: Api<DynamicObject> = if namespaced && !ns.is_empty() {
@@ -2747,7 +2783,10 @@ metadata:
         }))
         .unwrap();
         assert_eq!(input.label_selector.as_deref(), Some("app=web"));
-        assert_eq!(input.field_selector.as_deref(), Some("spec.nodeName=worker-1"));
+        assert_eq!(
+            input.field_selector.as_deref(),
+            Some("spec.nodeName=worker-1")
+        );
         assert_eq!(input.fields, [".spec.nodeName", ".status.phase"]);
 
         let snake: ListResourceIn = serde_json::from_value(serde_json::json!({
@@ -2756,6 +2795,66 @@ metadata:
         .unwrap();
         assert_eq!(snake.label_selector, None);
         assert!(snake.fields.is_empty());
+    }
+
+    #[test]
+    fn list_resource_in_reads_dynamic_gvk_hints() {
+        let input: ListResourceIn = serde_json::from_value(serde_json::json!({
+            "context": "c",
+            "kind": "VirtualMachine",
+            "group": "kubevirt.io",
+            "version": "v1",
+            "plural": "virtualmachines",
+            "namespace": "vms",
+        }))
+        .unwrap();
+        assert_eq!(input.group.as_deref(), Some("kubevirt.io"));
+        assert_eq!(input.version.as_deref(), Some("v1"));
+        assert_eq!(input.plural.as_deref(), Some("virtualmachines"));
+    }
+
+    #[tokio::test]
+    async fn resolve_manifest_in_resolves_via_preloaded_discovery() {
+        let cache = ClientCache::new(std::path::PathBuf::from("/nonexistent"));
+        let mut index = crate::client_cache::DiscoveryIndex::new();
+        let crd_res = crate::client_cache::DiscoveredResource {
+            ar: crate::crds::custom_api_resource(
+                "cert-manager.io",
+                "v1",
+                "Certificate",
+                "certificates",
+            ),
+            namespaced: true,
+        };
+        index.insert(crd_res.clone());
+        index.insert_alias("cert", &crd_res);
+        cache.preload_discovery("ctx", index).await;
+
+        let input = ManifestIn {
+            context: "ctx".into(),
+            kind: "Certificate".into(),
+            namespace: Some("default".into()),
+            name: "my-cert".into(),
+            group: None,
+            version: None,
+            plural: None,
+        };
+        let (ar, ns) = resolve_manifest_in(&cache, &input).await.unwrap();
+        assert_eq!(ar.kind, "Certificate");
+        assert_eq!(ar.group, "cert-manager.io");
+        assert!(ns);
+
+        let input_alias = ManifestIn {
+            context: "ctx".into(),
+            kind: "cert".into(),
+            namespace: Some("default".into()),
+            name: "my-cert".into(),
+            group: None,
+            version: None,
+            plural: None,
+        };
+        let (ar_alias, _) = resolve_manifest_in(&cache, &input_alias).await.unwrap();
+        assert_eq!(ar_alias.kind, "Certificate");
     }
 
     #[test]
@@ -2787,7 +2886,10 @@ metadata:
             ".status.conditions[?(@.type==\"Ready\"&&@.status==\"True\")].status",
         ] {
             assert!(
-                matches!(check_fields(&[bad.to_string()]), Err(CapabilityError::InvalidInput(_))),
+                matches!(
+                    check_fields(&[bad.to_string()]),
+                    Err(CapabilityError::InvalidInput(_))
+                ),
                 "{bad:?} must be refused"
             );
         }
@@ -2808,9 +2910,15 @@ metadata:
         let at_limit: Vec<String> = (0..MAX_FIELDS).map(|i| format!(".a{i}")).collect();
         assert!(check_fields(&at_limit).is_ok());
         let over: Vec<String> = (0..=MAX_FIELDS).map(|i| format!(".a{i}")).collect();
-        assert!(matches!(check_fields(&over), Err(CapabilityError::InvalidInput(_))));
+        assert!(matches!(
+            check_fields(&over),
+            Err(CapabilityError::InvalidInput(_))
+        ));
         let long = format!(".{}", "a".repeat(MAX_FIELD_CHARS));
-        assert!(matches!(check_fields(&[long]), Err(CapabilityError::InvalidInput(_))));
+        assert!(matches!(
+            check_fields(&[long]),
+            Err(CapabilityError::InvalidInput(_))
+        ));
     }
 
     #[test]
@@ -2838,21 +2946,25 @@ metadata:
             serde_json::to_value(schemars::schema_for!(ListResourceIn)).unwrap(),
             serde_json::to_value(schemars::schema_for!(GetObjectIn)).unwrap(),
         ] {
-            let text = schema["properties"]["fields"]["description"].as_str().unwrap();
+            let text = schema["properties"]["fields"]["description"]
+                .as_str()
+                .unwrap();
             assert!(text.contains(".status.allocatable"), "{text}");
             assert!(text.contains("[?(@.type"), "{text}");
-            assert!(text.contains("[*]"), "says wildcards are unsupported: {text}");
+            assert!(
+                text.contains("[*]"),
+                "says wildcards are unsupported: {text}"
+            );
             assert!(!text.contains("FIELDS_HELP"), "{text}");
         }
     }
 
     fn node_object() -> DynamicObject {
         let (gvk, _) = gvk_for("Node").unwrap();
-        let mut node = DynamicObject::new("worker-1", &ApiResource::from_gvk(&gvk)).data(
-            serde_json::json!({
+        let mut node =
+            DynamicObject::new("worker-1", &ApiResource::from_gvk(&gvk)).data(serde_json::json!({
                 "status": { "allocatable": { "cpu": "4", "example.com/fpga": "2" } },
-            }),
-        );
+            }));
         node.metadata.managed_fields = Some(vec![Default::default()]);
         node
     }
@@ -2896,7 +3008,9 @@ metadata:
             .within("prod")
             .data(serde_json::json!({ "data": { "password": "aHVudGVyMg==" } }));
         secret.metadata.annotations = Some(
-            [("note".to_string(), "hunter2".to_string())].into_iter().collect(),
+            [("note".to_string(), "hunter2".to_string())]
+                .into_iter()
+                .collect(),
         );
         (secret, ar)
     }
@@ -2911,7 +3025,10 @@ metadata:
         let row = serde_json::to_string(&resource_row(secret, &ar, &fields).unwrap()).unwrap();
         assert!(!row.contains("aHVudGVyMg=="), "{row}");
         assert!(!row.contains("hunter2"), "{row}");
-        assert!(row.contains("password"), "the key stays, only the value goes: {row}");
+        assert!(
+            row.contains("password"),
+            "the key stays, only the value goes: {row}"
+        );
     }
 
     #[test]
@@ -2923,7 +3040,10 @@ metadata:
 
         let (secret, ar) = secret_object();
         let whole = serde_json::to_string(&object_out(secret, &ar, &[]).unwrap()).unwrap();
-        assert!(!whole.contains("aHVudGVyMg==") && !whole.contains("hunter2"), "{whole}");
+        assert!(
+            !whole.contains("aHVudGVyMg==") && !whole.contains("hunter2"),
+            "{whole}"
+        );
     }
 
     #[test]
@@ -2963,7 +3083,10 @@ metadata:
             .iter()
             .filter_map(|v| v.as_str())
             .collect();
-        assert!(required.contains(&"context") && required.contains(&"name"), "{schema}");
+        assert!(
+            required.contains(&"context") && required.contains(&"name"),
+            "{schema}"
+        );
         assert!(!required.contains(&"fields"), "{schema}");
     }
 

@@ -5,15 +5,79 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use kube::api::{Api, DynamicObject, ListParams};
+use kube::core::{ApiResource, GroupVersionKind};
+use kube::discovery::{Discovery, Scope};
 use kube::Client;
 use tokio::sync::{Mutex, RwLock};
 
 use crate::auth_resolver::AuthResolver;
 use crate::connect::build_client;
 
+/// A discovered Kubernetes API resource, including its scope.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiscoveredResource {
+    pub ar: ApiResource,
+    pub namespaced: bool,
+}
+
+/// Fast lookup index for discovered API resources in a cluster.
+#[derive(Debug, Default, Clone)]
+pub struct DiscoveryIndex {
+    by_name: HashMap<String, DiscoveredResource>,
+    by_group_and_name: HashMap<(String, String), DiscoveredResource>,
+}
+
+impl DiscoveryIndex {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn insert(&mut self, res: DiscoveredResource) {
+        let kind_lower = res.ar.kind.to_lowercase();
+        let plural_lower = res.ar.plural.to_lowercase();
+        let group_lower = res.ar.group.to_lowercase();
+
+        self.by_group_and_name
+            .insert((group_lower.clone(), kind_lower.clone()), res.clone());
+        self.by_group_and_name
+            .insert((group_lower.clone(), plural_lower.clone()), res.clone());
+
+        self.by_name
+            .entry(kind_lower)
+            .or_insert_with(|| res.clone());
+        self.by_name.entry(plural_lower).or_insert_with(|| res);
+    }
+
+    pub fn insert_alias(&mut self, alias: &str, res: &DiscoveredResource) {
+        let alias_lower = alias.trim().to_lowercase();
+        if alias_lower.is_empty() {
+            return;
+        }
+        let group_lower = res.ar.group.to_lowercase();
+        self.by_group_and_name
+            .insert((group_lower, alias_lower.clone()), res.clone());
+        self.by_name
+            .entry(alias_lower)
+            .or_insert_with(|| res.clone());
+    }
+
+    pub fn find(&self, kind_or_plural: &str, group: Option<&str>) -> Option<DiscoveredResource> {
+        let normalized = kind_or_plural.trim().to_lowercase();
+        if let Some(grp) = group {
+            let grp_lower = grp.trim().to_lowercase();
+            if let Some(found) = self.by_group_and_name.get(&(grp_lower, normalized.clone())) {
+                return Some(found.clone());
+            }
+        }
+        self.by_name.get(&normalized).cloned()
+    }
+}
+
 pub struct ClientCache {
     paths: RwLock<Vec<PathBuf>>,
     clients: Mutex<HashMap<String, (Client, Option<String>)>>,
+    discovery: Mutex<HashMap<String, Arc<DiscoveryIndex>>>,
     auth_resolver: RwLock<Option<Arc<dyn AuthResolver>>>,
 }
 
@@ -26,6 +90,7 @@ impl ClientCache {
         Arc::new(Self {
             paths: RwLock::new(paths),
             clients: Mutex::new(HashMap::new()),
+            discovery: Mutex::new(HashMap::new()),
             auth_resolver: RwLock::new(None),
         })
     }
@@ -43,6 +108,7 @@ impl ClientCache {
         *current = paths;
         drop(current);
         self.clients.lock().await.clear();
+        self.discovery.lock().await.clear();
     }
 
     /// Add any kubeconfig paths not already present, WITHOUT clearing cached
@@ -120,14 +186,169 @@ impl ClientCache {
             .insert(context.to_string(), (client, None));
     }
 
-    /// Drop any cached client for a context (e.g. after a connection failure).
-    pub async fn invalidate(&self, context: &str) {
-        self.clients.lock().await.remove(context);
+    /// Test-only: hand the cache a ready-made discovery index for `context`.
+    #[cfg(any(test, feature = "test-support"))]
+    pub async fn preload_discovery(&self, context: &str, index: DiscoveryIndex) {
+        self.discovery
+            .lock()
+            .await
+            .insert(context.to_string(), Arc::new(index));
     }
 
-    /// Clear all cached clients (e.g. after a kubeconfig change).
+    /// Drop any cached client or discovery for a context (e.g. after a connection failure).
+    pub async fn invalidate(&self, context: &str) {
+        self.clients.lock().await.remove(context);
+        self.discovery.lock().await.remove(context);
+    }
+
+    /// Clear all cached clients and discovery (e.g. after a kubeconfig change).
     pub async fn clear(&self) {
         self.clients.lock().await.clear();
+        self.discovery.lock().await.clear();
+    }
+
+    /// Discover all available API resources in the cluster (aggregated discovery
+    /// with fallback to standard discovery, plus CRD inspection for aliases and short names).
+    async fn discover_cluster(&self, context: &str) -> Result<Arc<DiscoveryIndex>, String> {
+        let client = self.get(context).await?;
+        let mut index = DiscoveryIndex::new();
+
+        // 1. Try aggregated discovery, fallback to regular discovery
+        let disc_result = Discovery::new(client.clone()).run_aggregated().await;
+        let disc = match disc_result {
+            Ok(d) => Some(d),
+            Err(_) => Discovery::new(client.clone()).run().await.ok(),
+        };
+
+        let mut discovered_any = false;
+        if let Some(disc) = disc {
+            for group in disc.groups() {
+                for (ar, caps) in group.recommended_resources() {
+                    let namespaced = caps.scope == Scope::Namespaced;
+                    index.insert(DiscoveredResource {
+                        ar: ar.clone(),
+                        namespaced,
+                    });
+                    discovered_any = true;
+                }
+            }
+        }
+
+        // 2. Discover CRDs to enrich with shortNames, singular names, and custom resources
+        let crd_gvk =
+            GroupVersionKind::gvk("apiextensions.k8s.io", "v1", "CustomResourceDefinition");
+        let crd_ar = ApiResource::from_gvk(&crd_gvk);
+        let crd_api: Api<DynamicObject> = Api::all_with(client.clone(), &crd_ar);
+        if let Ok(Ok(crd_list)) = tokio::time::timeout(
+            crate::connect::request_timeout(),
+            crd_api.list(&ListParams::default()),
+        )
+        .await
+        {
+            for o in crd_list.items {
+                let spec = &o.data["spec"];
+                let group = spec["group"].as_str().unwrap_or_default().to_string();
+                let kind = spec["names"]["kind"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_string();
+                let plural = spec["names"]["plural"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_string();
+                let singular = spec["names"]["singular"].as_str().unwrap_or_default();
+                let namespaced = spec["scope"].as_str().unwrap_or("Namespaced") == "Namespaced";
+                let version = crate::crds::pick_version(spec);
+                if group.is_empty() || kind.is_empty() || plural.is_empty() || version.is_empty() {
+                    continue;
+                }
+                let res = DiscoveredResource {
+                    ar: crate::crds::custom_api_resource(&group, &version, &kind, &plural),
+                    namespaced,
+                };
+                index.insert(res.clone());
+                if !singular.is_empty() {
+                    index.insert_alias(singular, &res);
+                }
+                if let Some(short_names) = spec["names"]["shortNames"].as_array() {
+                    for sn in short_names.iter().filter_map(|s| s.as_str()) {
+                        index.insert_alias(sn, &res);
+                    }
+                }
+                discovered_any = true;
+            }
+        }
+
+        if !discovered_any {
+            return Err(format!(
+                "failed to discover API resources from cluster for context '{context}'"
+            ));
+        }
+
+        let arc_index = Arc::new(index);
+        self.discovery
+            .lock()
+            .await
+            .insert(context.to_string(), arc_index.clone());
+        Ok(arc_index)
+    }
+
+    /// Resolve an arbitrary Kubernetes kind/plural/alias to its `(ApiResource, namespaced)`.
+    /// 1. If explicit group, version, and plural are provided, build custom ApiResource directly.
+    /// 2. If group/version/plural are omitted and kind matches built-in static table, resolve via `gvk_for`.
+    /// 3. Otherwise, look up in cached discovery index for `context`.
+    /// 4. On cache miss, run dynamic discovery against the cluster and populate the cache.
+    pub async fn resolve_resource(
+        &self,
+        context: &str,
+        kind: &str,
+        group: Option<&str>,
+        version: Option<&str>,
+        plural: Option<&str>,
+    ) -> Result<(ApiResource, bool), String> {
+        // Tier 1: Caller provided explicit GVK + plural hints
+        if let (Some(g), Some(v), Some(p)) = (group, version, plural) {
+            let namespaced = {
+                let lock = self.discovery.lock().await;
+                if let Some(idx) = lock.get(context) {
+                    idx.find(kind, Some(g))
+                        .map(|r| r.namespaced)
+                        .unwrap_or(true)
+                } else {
+                    true
+                }
+            };
+            return Ok((crate::crds::custom_api_resource(g, v, kind, p), namespaced));
+        }
+
+        // Tier 2: Static built-ins when group/version are omitted or match
+        if version.is_none() && plural.is_none() {
+            if let Some((gvk, namespaced)) = crate::manifest::gvk_for(kind) {
+                if group.map_or(true, |g| g.is_empty() || g == gvk.group) {
+                    return Ok((ApiResource::from_gvk(&gvk), namespaced));
+                }
+            }
+        }
+
+        // Tier 3: Check cached discovery index
+        {
+            let lock = self.discovery.lock().await;
+            if let Some(idx) = lock.get(context) {
+                if let Some(res) = idx.find(kind, group) {
+                    return Ok((res.ar, res.namespaced));
+                }
+            }
+        }
+
+        // Tier 4: Cache miss -> query discovery from the cluster
+        let idx = self.discover_cluster(context).await?;
+        if let Some(res) = idx.find(kind, group) {
+            Ok((res.ar, res.namespaced))
+        } else {
+            Err(format!(
+                "resource kind '{kind}' is not served by cluster '{context}'"
+            ))
+        }
     }
 }
 
@@ -351,5 +572,140 @@ mod tests {
         // Ensuring an already-present set is a no-op on order/contents.
         cache.ensure_paths(vec![a.clone(), b.clone()]).await;
         assert_eq!(cache.paths().await, vec![a, b]);
+    }
+
+    #[tokio::test]
+    async fn resolve_resource_fast_path_built_in() {
+        let cache = ClientCache::new(PathBuf::from("/nonexistent"));
+        let (ar, namespaced) = cache
+            .resolve_resource("ctx", "Pod", None, None, None)
+            .await
+            .expect("resolves built-in Pod");
+        assert_eq!(ar.kind, "Pod");
+        assert_eq!(ar.group, "");
+        assert_eq!(ar.version, "v1");
+        assert!(namespaced);
+
+        let (node_ar, node_ns) = cache
+            .resolve_resource("ctx", "Node", None, None, None)
+            .await
+            .expect("resolves built-in Node");
+        assert_eq!(node_ar.kind, "Node");
+        assert!(!node_ns);
+    }
+
+    #[tokio::test]
+    async fn resolve_resource_with_explicit_hints() {
+        let cache = ClientCache::new(PathBuf::from("/nonexistent"));
+        let (ar, namespaced) = cache
+            .resolve_resource(
+                "ctx",
+                "CustomWidget",
+                Some("widgets.io"),
+                Some("v1"),
+                Some("customwidgets"),
+            )
+            .await
+            .expect("resolves with explicit hints");
+        assert_eq!(ar.kind, "CustomWidget");
+        assert_eq!(ar.group, "widgets.io");
+        assert_eq!(ar.version, "v1");
+        assert_eq!(ar.plural, "customwidgets");
+        assert!(namespaced);
+    }
+
+    #[tokio::test]
+    async fn resolve_resource_from_preloaded_discovery_index() {
+        let cache = ClientCache::new(PathBuf::from("/nonexistent"));
+        let mut index = DiscoveryIndex::new();
+
+        let vm_res = DiscoveredResource {
+            ar: crate::crds::custom_api_resource(
+                "kubevirt.io",
+                "v1",
+                "VirtualMachine",
+                "virtualmachines",
+            ),
+            namespaced: true,
+        };
+        index.insert(vm_res.clone());
+        index.insert_alias("vm", &vm_res);
+        index.insert_alias("vms", &vm_res);
+
+        cache.preload_discovery("cluster-a", index).await;
+
+        // 1. By exact Kind
+        let (ar1, ns1) = cache
+            .resolve_resource("cluster-a", "VirtualMachine", None, None, None)
+            .await
+            .expect("resolves exact Kind");
+        assert_eq!(ar1.kind, "VirtualMachine");
+        assert_eq!(ar1.group, "kubevirt.io");
+        assert!(ns1);
+
+        // 2. By lowercase plural
+        let (ar2, _) = cache
+            .resolve_resource("cluster-a", "virtualmachines", None, None, None)
+            .await
+            .expect("resolves plural");
+        assert_eq!(ar2.kind, "VirtualMachine");
+
+        // 3. By short name alias
+        let (ar3, _) = cache
+            .resolve_resource("cluster-a", "vm", None, None, None)
+            .await
+            .expect("resolves short name");
+        assert_eq!(ar3.kind, "VirtualMachine");
+
+        // 4. Case-insensitivity check
+        let (ar4, _) = cache
+            .resolve_resource("cluster-a", "VM", None, None, None)
+            .await
+            .expect("resolves case-insensitively");
+        assert_eq!(ar4.kind, "VirtualMachine");
+    }
+
+    #[tokio::test]
+    async fn resolve_resource_group_disambiguation() {
+        let cache = ClientCache::new(PathBuf::from("/nonexistent"));
+        let mut index = DiscoveryIndex::new();
+
+        let calico_bgp = DiscoveredResource {
+            ar: crate::crds::custom_api_resource(
+                "crd.projectcalico.org",
+                "v1",
+                "BGPPeer",
+                "bgppeers",
+            ),
+            namespaced: false,
+        };
+        let metallb_bgp = DiscoveredResource {
+            ar: crate::crds::custom_api_resource("metallb.io", "v1beta2", "BGPPeer", "bgppeers"),
+            namespaced: true,
+        };
+        index.insert(calico_bgp);
+        index.insert(metallb_bgp);
+
+        cache.preload_discovery("cluster-a", index).await;
+
+        let (ar_calico, ns_calico) = cache
+            .resolve_resource(
+                "cluster-a",
+                "BGPPeer",
+                Some("crd.projectcalico.org"),
+                None,
+                None,
+            )
+            .await
+            .expect("resolves Calico BGPPeer");
+        assert_eq!(ar_calico.group, "crd.projectcalico.org");
+        assert!(!ns_calico);
+
+        let (ar_metallb, ns_metallb) = cache
+            .resolve_resource("cluster-a", "BGPPeer", Some("metallb.io"), None, None)
+            .await
+            .expect("resolves MetalLB BGPPeer");
+        assert_eq!(ar_metallb.group, "metallb.io");
+        assert!(ns_metallb);
     }
 }

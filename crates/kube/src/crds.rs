@@ -76,7 +76,7 @@ fn chosen_version(spec: &serde_json::Value) -> Option<&serde_json::Value> {
 }
 
 /// Choose the storage version, else the first served version, else the first.
-fn pick_version(spec: &serde_json::Value) -> String {
+pub(crate) fn pick_version(spec: &serde_json::Value) -> String {
     chosen_version(spec)
         .and_then(|v| v["name"].as_str())
         .unwrap_or_default()
@@ -1104,7 +1104,10 @@ mod tests {
             { "name": "trainer", "resources": { "limits": { "nvidia.com/gpu": "1" } } },
         ]}});
         let path = r#".spec.containers[?(@.resources.limits.nvidia\.com/gpu=="1")].name"#;
-        assert_eq!(json_path_value(&pod, path), Some(&serde_json::json!("trainer")));
+        assert_eq!(
+            json_path_value(&pod, path),
+            Some(&serde_json::json!("trainer"))
+        );
         assert_eq!(json_path_problem(path), None);
     }
 
