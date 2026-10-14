@@ -1,5 +1,5 @@
 //! GET /api/logs/export — a log stream's history as a download (#914). It is
-//! streamed from the spool in chunks, so a 256 MB history never sits whole in
+//! streamed from the spool in chunks, so a large history never sits whole in
 //! server memory.
 
 use std::io::{self, Write};
@@ -64,7 +64,20 @@ pub async fn export(
     let body = Body::from_stream(futures::stream::unfold(rx, |mut rx| async move {
         rx.recv().await.map(|item| (item, rx))
     }));
-    ([(header::CONTENT_TYPE, "text/plain; charset=utf-8")], body).into_response()
+    (
+        [
+            (header::CONTENT_TYPE, "text/plain; charset=utf-8"),
+            // A download for the browser to save, whatever the page does with it, and a user's
+            // logs that no cache in between may keep.
+            (
+                header::CONTENT_DISPOSITION,
+                "attachment; filename=\"logs.log\"",
+            ),
+            (header::CACHE_CONTROL, "no-store"),
+        ],
+        body,
+    )
+        .into_response()
 }
 
 /// The export's `Write`: what is written goes to the response body in
@@ -100,7 +113,7 @@ mod tests {
     use super::{ChunkSender, CHUNK};
     use crate::{router, AppState};
     use axum::body::Body;
-    use axum::http::{Request, StatusCode};
+    use axum::http::{header, HeaderMap, Request, StatusCode};
     use srelens_capability::Registry;
     use srelens_streams::logs::LogTarget;
     use std::io::{ErrorKind, Write};
@@ -180,7 +193,12 @@ mod tests {
         token
     }
 
-    async fn get(state: &AppState, uri: &str, token: &str, csrf: bool) -> (StatusCode, String) {
+    async fn get_response(
+        state: &AppState,
+        uri: &str,
+        token: &str,
+        csrf: bool,
+    ) -> (StatusCode, HeaderMap, String) {
         let mut req = Request::builder()
             .uri(uri)
             .header("cookie", format!("srelens_session={token}"));
@@ -192,19 +210,36 @@ mod tests {
             .await
             .unwrap();
         let status = resp.status();
+        let headers = resp.headers().clone();
         let bytes = axum::body::to_bytes(resp.into_body(), 1 << 20)
             .await
             .unwrap();
-        (status, String::from_utf8_lossy(&bytes).into_owned())
+        (
+            status,
+            headers,
+            String::from_utf8_lossy(&bytes).into_owned(),
+        )
+    }
+
+    async fn get(state: &AppState, uri: &str, token: &str, csrf: bool) -> (StatusCode, String) {
+        let (status, _, body) = get_response(state, uri, token, csrf).await;
+        (status, body)
     }
 
     #[tokio::test]
-    async fn the_export_streams_the_history_as_text() {
+    async fn the_export_streams_the_history_as_an_uncached_text_download() {
         let state = AppState::for_tests(Arc::new(Registry::new())).await;
         let token = user_with_history(&state).await;
-        let (status, body) = get(&state, "/api/logs/export?channel=logs:1", &token, true).await;
+        let (status, headers, body) =
+            get_response(&state, "/api/logs/export?channel=logs:1", &token, true).await;
         assert_eq!(status, StatusCode::OK, "{body}");
         assert!(body.starts_with("web-1 | [error:"), "{body}");
+        // A download, not a page to show, and not one for a cache to keep: it is a user's logs.
+        assert_eq!(
+            headers[header::CONTENT_DISPOSITION],
+            "attachment; filename=\"logs.log\""
+        );
+        assert_eq!(headers[header::CACHE_CONTROL], "no-store");
     }
 
     /// The browser sends `sinceSeconds`, so no value of it may panic the handler: one
