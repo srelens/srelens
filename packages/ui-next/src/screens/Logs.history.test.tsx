@@ -131,7 +131,10 @@ const released = () => act(() => new Promise((r) => setTimeout(r, 0)));
 const frame = () => act(() => new Promise((r) => setTimeout(r, 40)));
 
 describe("loading earlier lines by mouse on a busy, followed stream (#914)", () => {
-  it("joins the page to the lines in memory, though the stream ran on while it was read", async () => {
+  // A followed view moves every frame. Loading into one raced the stream: at tens of thousands of lines a second the
+  // page was pushed back out of the ring within half a second, and near the limit on loaded lines, where the ring has
+  // no room to widen for it, it was refused about half the time. So the click pauses the view, and the page joins that.
+  it("pauses the view and joins the page to it, though the stream ran on while it was read", async () => {
     const restore = measurableRows();
     try {
       const s = spooledStream();
@@ -151,6 +154,8 @@ describe("loading earlier lines by mouse on a busy, followed stream (#914)", () 
       fireEvent.pointerUp(load);
       fireEvent.click(load);
       expect(s.readEarlier).toHaveBeenCalledWith(5001, 5000);
+      // The click paused the view: the control now offers to follow again.
+      expect(screen.getByRole("button", { name: "Follow" })).toBeTruthy();
       // The release lets go of the view a task later; the stream has not stopped, and writes on while the page is read.
       await released();
       s.frame(10001, 300);
@@ -162,11 +167,13 @@ describe("loading earlier lines by mouse on a busy, followed stream (#914)", () 
       });
       await frame();
 
-      // The page was refused when the press had held the view: "The stream moved past those lines while they were read".
+      // Never refused: "The stream moved past those lines while they were read".
       expect(screen.queryByText(/moved past those lines/)).toBeNull();
       expect(screen.queryByText("Could not load earlier lines")).toBeNull();
-      // All 5,000 lines before the ring are in memory now, so nothing is left on disk to offer.
+      // All 5,000 lines before the ring are in the view now, so nothing is left on disk to offer.
       expect(screen.queryByText(/earlier lines on disk/)).toBeNull();
+      // And the lines the stream wrote meanwhile wait, as they do in any paused view, for the reader to follow again.
+      expect(screen.getByText("300 new lines")).toBeTruthy();
     } finally {
       restore();
     }

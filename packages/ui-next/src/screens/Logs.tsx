@@ -1922,9 +1922,7 @@ function LogsStream({
                   return (
                     <div
                       data-slot="dropped-banner"
-                      // Its button is no press "in the log": holding the view for one would load the page frozen,
-                      // without the room the ring makes for it, and the release would then show the ring, which has
-                      // run on, before the page arrives, so a busy stream would refuse every page.
+                      // Its button is no press "in the log" to hold the view for: its click pauses the view itself.
                       onPointerDown={(e) => e.stopPropagation()}
                       className="flex flex-wrap items-center gap-x-2 px-2.5 py-1 text-muted"
                     >
@@ -1941,7 +1939,12 @@ function LogsStream({
                             aria-disabled={stream.loadingEarlier || undefined}
                             className="aria-disabled:cursor-not-allowed aria-disabled:opacity-50"
                             onClick={() => {
-                              if (!stream.loadingEarlier) void stream.loadEarlier();
+                              if (stream.loadingEarlier) return;
+                              // A following view moves every frame, and a busy stream pushes the page it is reading
+                              // straight back out of it (or past the lines it must join), so the page goes into a view
+                              // that holds still. Following again is the reader's to ask for.
+                              if (!stream.paused) stream.togglePause();
+                              void stream.loadEarlier();
                             }}
                           >
                             {stream.loadingEarlier ? "Loading…" : `Load ${groupNumber(EARLIER_PAGE)} earlier`}

@@ -53,6 +53,8 @@ const h = vi.hoisted(() => {
     cap: 300,
     /** Every "Load earlier" the screen has asked the hook for (#914). */
     loadEarlier: vi.fn(),
+    /** The pause toggles and loads the screen asked the hook for, in the order it asked (#914). */
+    calls: [] as ("togglePause" | "loadEarlier")[],
     /** Every export of the history on disk the screen has asked the hook for (#914). */
     exportSpool: vi.fn(),
     /** Every one-shot `podLogs` fetch the previous-instance toggle has made. */
@@ -129,6 +131,7 @@ vi.mock("../lib/logStream", async (orig) => {
         reconnectingTargets: h.state.reconnecting,
         totalTargets: h.state.total,
         togglePause: () => {
+          h.calls.push("togglePause");
           h.state.paused = !h.state.paused;
           h.state.pending = 0;
           notify();
@@ -337,6 +340,7 @@ beforeEach(() => {
   h.listeners.clear();
   h.version = 0;
   h.seen = [];
+  h.calls = [];
   h.plugins = [];
   h.inventoryError = undefined;
   h.views = [];
@@ -360,7 +364,9 @@ beforeEach(() => {
   };
   h.tauri = true;
   h.saved.mockResolvedValue("/home/u/checkout-api.log");
-  h.loadEarlier.mockResolvedValue(undefined);
+  h.loadEarlier.mockImplementation(async () => {
+    h.calls.push("loadEarlier");
+  });
   h.exportSpool.mockResolvedValue("/home/u/checkout-api.log");
   h.fetched.mockResolvedValue({ logs: PREVIOUS_BLOB });
   // Everything the recents name is still there unless a test says otherwise.
@@ -3351,6 +3357,31 @@ describe("history on disk (#914)", () => {
     expect(h.loadEarlier).toHaveBeenCalledTimes(1);
   });
 
+  it("pauses a followed view before loading earlier lines, so the page is not pushed out of it as it lands", async () => {
+    draw();
+    await body();
+    keepHistory({ first: 1 }, 182_340);
+    push(...LINES);
+    expect(h.state.paused).toBe(false);
+    await userEvent.click(screen.getByRole("button", { name: /Load 5\s?000 earlier/ }));
+    // In this order: the load reads the view it finds, and a view that is still moving is one the page leaves.
+    expect(h.calls).toEqual(["togglePause", "loadEarlier"]);
+    expect(h.state.paused).toBe(true);
+  });
+
+  it("loads into a view the reader has already paused, and leaves it paused", async () => {
+    draw();
+    await body();
+    keepHistory({ first: 1 }, 182_340);
+    push(...LINES);
+    await userEvent.click(screen.getByRole("button", { name: "Pause" }));
+    h.calls = [];
+    await userEvent.click(screen.getByRole("button", { name: /Load 5\s?000 earlier/ }));
+    // A second toggle would resume it, and let the stream run on over the page.
+    expect(h.calls).toEqual(["loadEarlier"]);
+    expect(h.state.paused).toBe(true);
+  });
+
   it("does not offer a second load while one is under way", async () => {
     draw();
     await body();
@@ -3365,6 +3396,8 @@ describe("history on disk (#914)", () => {
     loading.focus();
     await userEvent.click(loading);
     expect(h.loadEarlier).not.toHaveBeenCalled();
+    // And no pause for a load that is not made.
+    expect(h.calls).toEqual([]);
     expect(document.activeElement).toBe(loading);
   });
 

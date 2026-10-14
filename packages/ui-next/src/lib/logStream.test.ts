@@ -1217,6 +1217,31 @@ describe("useLogStream with history on disk (#914)", () => {
     expect(result.current.dropped).toBe(7000);
   });
 
+  it("loads the last page under the limit into a view paused first, though the stream floods the ring past its start", async () => {
+    // The screen's Load pauses the view, then loads. A following ring that is already as wide as it may get has no
+    // room to widen for the page, so a stream that runs on while it is read moves the lines the page must join.
+    const { s, result } = await openSpooled({ capacity: MAX_LOADED_LINES });
+    s.frame(9001, many(9001, MAX_LOADED_LINES - 2000));
+    await waitFor(() => expect(result.current.lines.length).toBe(MAX_LOADED_LINES - 2000));
+    act(() => result.current.togglePause());
+    const arrive = holdRead(s);
+    let load!: Promise<void>;
+    act(() => {
+      load = result.current.loadEarlier();
+    });
+    // 3,000 more than the ring has room for: its oldest 1,000 go while the page is out.
+    s.frame(9001 + MAX_LOADED_LINES - 2000, many(9001 + MAX_LOADED_LINES - 2000, 3000));
+    await waitFor(() => expect(result.current.pendingWhilePaused).toBe(3000));
+    await act(async () => {
+      arrive(s.page(7001, many(7001, 2000)));
+      await load;
+    });
+    expect(result.current.loadError).toBeUndefined();
+    expect(result.current.lines.length).toBe(MAX_LOADED_LINES);
+    expect(texts(result)[0]).toBe("l7001");
+    expect(result.current.dropped).toBe(7000);
+  });
+
   it("while paused, still shows a page in the view when the ring has moved on past the view's start", async () => {
     const { s, result } = await openSpooled({ capacity: 10 });
     s.frame(4, ["d", "e"]);
