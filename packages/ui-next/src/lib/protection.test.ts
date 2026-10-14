@@ -190,12 +190,26 @@ describe("followMainProtection", () => {
     expect(refreshSetting).not.toHaveBeenCalled();
   });
 
-  it("keeps this window's copy when main's save cannot be read again", async () => {
+  it("keeps this window's copy, and says so, when main's save cannot be read again", async () => {
     onTestFinished(followMainProtection("ctx-prod"));
-    refreshSetting.mockRejectedValue(new Error("backend gone"));
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    onTestFinished(() => warn.mockRestore());
+    const failure = new Error("backend gone");
+    refreshSetting.mockRejectedValue(failure);
+    // This window's own store protects prod-eu: that is what must survive a
+    // refresh that fails. An unprotected window would read null before and after.
+    protect("Production", [prod.stableId]);
+    const production = { name: "prod-eu", workspace: "Production" };
     const { result } = renderHook(() => useProtection("prod-eu"));
+    expect(result.current).toEqual(production);
+
     await act(async () => focus());
+
     expect(refreshSetting).toHaveBeenCalledTimes(1);
-    expect(result.current).toBeNull();
+    expect(result.current).toEqual(production);
+    expect(protectionFor("prod-eu")).toEqual(production);
+    // The one place protection can fail open: the reader is told why it may be stale.
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(warn).toHaveBeenCalledWith("could not re-read main's protection", failure);
   });
 });

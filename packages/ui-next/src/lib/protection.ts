@@ -83,8 +83,8 @@ const mainSaveReadCount = () => mainSaveReads;
  * window is focused, then redraw what `useProtection` drew. A window reads its
  * settings once, at boot, so protection turned on in main afterwards would
  * otherwise not reach a window that is already open. A read that fails leaves
- * this window's copy in use. The main window holds the workspaces itself and
- * listens to nothing. Returns the release.
+ * this window's copy in use, and is logged. The main window holds the
+ * workspaces itself and listens to nothing. Returns the release.
  */
 export function followMainProtection(windowLabel: string): () => void {
   if (windowLabel === "main") return () => {};
@@ -94,8 +94,10 @@ export function followMainProtection(windowLabel: string): () => void {
         mainSaveReads += 1;
         for (const listener of mainSaveListeners) listener();
       },
-      // Not readable again: this window's copy is the best there is.
-      () => {},
+      // Not readable again: this window's copy is the best there is. Said, not
+      // swallowed, since it is the one way protection main set can miss this
+      // window; the sibling read in `loadTabsState` logs the same way.
+      (error) => console.warn("could not re-read main's protection", error),
     );
   };
   window.addEventListener("focus", onFocus);
