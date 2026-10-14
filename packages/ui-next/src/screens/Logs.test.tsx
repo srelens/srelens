@@ -49,6 +49,8 @@ const h = vi.hoisted(() => {
     tauri: true,
     /** Every `saveTextFile` the screen has asked for. */
     saved: vi.fn(),
+    /** The most lines the mocked module says the view holds (#914): small, so the cap is reached in milliseconds. */
+    cap: 300,
     /** Every "Load earlier" the screen has asked the hook for (#914). */
     loadEarlier: vi.fn(),
     /** Every export of the history on disk the screen has asked the hook for (#914). */
@@ -94,11 +96,13 @@ vi.mock("../lib/logSubject", async (orig) => ({
 }));
 
 vi.mock("../lib/logStream", async (orig) => {
-  // The real module's constants (`EARLIER_PAGE`, `MAX_LOADED_LINES`) are what the screen reads; only the hook is replaced.
+  // Every export is the real module's but the hook, and the cap on loaded lines: the screen reads it, and the real
+  // fifty thousand would make the test that reaches it build fifty thousand rows.
   const actual = await orig<typeof import("../lib/logStream")>();
   const { useSyncExternalStore } = await import("react");
   return {
     ...actual,
+    MAX_LOADED_LINES: h.cap,
     useLogStream: (
       context: string,
       namespace: string,
@@ -3360,22 +3364,22 @@ describe("history on disk (#914)", () => {
     expect(h.loadEarlier).not.toHaveBeenCalled();
   });
 
-  // Building the rows for the real cap takes seconds, and more with the whole suite running: hence the long timeout.
   it("sends the reader to Export once the screen holds as many lines as it will", async () => {
     draw();
     await body();
-    const restore = measurableRows();
-    try {
-      // Only the rows in view are drawn, so fifty thousand lines cost what a screenful does.
-      keepHistory({ first: 1 }, 60_000);
-      push(...Array.from({ length: 50_000 }, (_, i) => line("api-7/api", "14:07:41.208000000", `info line ${i}`)));
-      expect(screen.getByText(/50\s?000 lines loaded · Export for the rest/)).toBeTruthy();
-      expect(screen.getByText(/60\s?000 earlier lines on disk/)).toBeTruthy();
-      expect(screen.queryByRole("button", { name: /Load 5\s?000 earlier/ })).toBeNull();
-    } finally {
-      restore();
-    }
-  }, 60_000);
+    const lines = (count: number) =>
+      Array.from({ length: count }, (_, i) => line("api-7/api", "14:07:41.208000000", `info line ${i}`));
+    keepHistory({ first: 1 }, 60_000);
+    // One short of the cap, there is still room for a page.
+    push(...lines(h.cap - 1));
+    expect(screen.getByRole("button", { name: /Load 5\s?000 earlier/ })).toBeTruthy();
+    expect(screen.queryByText(/lines loaded/)).toBeNull();
+    // At the cap there is not, and the cap is the module's, not a number of the screen's own.
+    push(...lines(1));
+    expect(screen.getByText(`${h.cap} lines loaded · Export for the rest`)).toBeTruthy();
+    expect(screen.getByText(/60\s?000 earlier lines on disk/)).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /Load 5\s?000 earlier/ })).toBeNull();
+  });
 
   it("says how many of the oldest lines passed the history limit", async () => {
     draw();
@@ -3419,6 +3423,50 @@ describe("history on disk (#914)", () => {
     });
     push(...LINES);
     expect(screen.getByText("Could not load earlier lines")).toBeTruthy();
+    // The button stays: trying again is how the reader recovers.
+    expect(screen.getByRole("button", { name: /Load 5\s?000 earlier/ })).toBeTruthy();
+  });
+
+  it("shows no load error over the previous instance, whose lines never came from the disk", async () => {
+    h.resolve.mockResolvedValue({ status: "resolved", targets: TARGETS, pods: PODS, previous: TERMINATED });
+    const region = await (draw(), body());
+    act(() => {
+      h.state.history = { first: 1 };
+      h.state.dropped = 10;
+      h.state.loadError = new Error("this log stream has ended");
+      notify();
+    });
+    push(...LINES);
+    expect(screen.getByText("Could not load earlier lines")).toBeTruthy();
+    await userEvent.click(screen.getByRole("button", { name: /previous instance/i }));
+    await waitFor(() => expect(rendered(region)).toHaveLength(4));
+    expect(screen.queryByText("Could not load earlier lines")).toBeNull();
+  });
+
+  it("shows no load error once history stops, as there is nothing left to load from", async () => {
+    draw();
+    await body();
+    act(() => {
+      h.state.history = { first: 1 };
+      h.state.dropped = 10;
+      h.state.loadError = new Error("this log stream has ended");
+      notify();
+    });
+    push(...LINES);
+    expect(screen.getByText("Could not load earlier lines")).toBeTruthy();
+    keepHistory({ first: 1, failed: "No space left on device" }, 10);
+    expect(screen.queryByText("Could not load earlier lines")).toBeNull();
+  });
+
+  it("never draws a negative count when more lines passed the limit than are in memory", async () => {
+    draw();
+    await body();
+    // `dropped` is 500 but the oldest line kept is the 1001st: none of the lines before the first shown is on disk.
+    keepHistory({ first: 1001 }, 500);
+    push(...LINES);
+    expect(document.querySelector('[data-slot="dropped-banner"]')?.textContent).toMatch(
+      /^1\s?000 oldest lines passed the history limit$/,
+    );
   });
 
   it("exports the history the reader picks, and the view by default", async () => {
@@ -3489,6 +3537,45 @@ describe("history on disk (#914)", () => {
     fireEvent.change(scopePicker(), { target: { value: "all" } });
     await userEvent.click(exportButton());
     expect((await screen.findByText(/could not save this stream/i)).textContent).toBe("Could not save this stream");
+  });
+
+  it("writes the view once history stops, whatever the picker was left on", async () => {
+    draw();
+    await body();
+    keepHistory({ first: 1 }, 0);
+    push(...LINES);
+    fireEvent.change(scopePicker(), { target: { value: "all" } });
+    // The hook goes on offering an export of a history that is no longer whole; the screen must not take it up.
+    keepHistory({ first: 1, failed: "No space left on device" }, 0);
+    expect(screen.queryByRole("combobox", { name: "What to export" })).toBeNull();
+    await userEvent.click(exportButton());
+    await waitFor(() => expect(h.saved).toHaveBeenCalledTimes(1));
+    expect(h.saved.mock.calls[0][0]).toBe("checkout-api.log");
+    expect(h.exportSpool).not.toHaveBeenCalled();
+  });
+
+  it("writes the previous instance, not the live spool, whatever the picker was left on", async () => {
+    h.resolve.mockResolvedValue({ status: "resolved", targets: TARGETS, pods: PODS, previous: TERMINATED });
+    const region = await (draw(), body());
+    keepHistory({ first: 1 }, 0);
+    push(...LINES);
+    fireEvent.change(scopePicker(), { target: { value: "all" } });
+    await userEvent.click(screen.getByRole("button", { name: /previous instance/i }));
+    await waitFor(() => expect(rendered(region)).toHaveLength(4));
+    await userEvent.click(exportButton());
+    await waitFor(() => expect(h.saved).toHaveBeenCalledTimes(1));
+    expect(h.saved.mock.calls[0][0]).toBe("checkout-api-previous.log");
+    expect(h.exportSpool).not.toHaveBeenCalled();
+  });
+
+  it("has nothing to export from an empty view once history stops, whatever the picker was left on", async () => {
+    draw();
+    await body();
+    keepHistory({ first: 1 }, 0);
+    fireEvent.change(scopePicker(), { target: { value: "all" } });
+    expect(exportButton()).toHaveProperty("disabled", false);
+    keepHistory({ first: 1, failed: "No space left on device" }, 0);
+    expect(exportButton()).toHaveProperty("disabled", true);
   });
 
   it("keeps the plain Export and the dropped-lines banner when history stopped", async () => {

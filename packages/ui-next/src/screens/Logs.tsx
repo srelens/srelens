@@ -1570,15 +1570,15 @@ function LogsStream({
             )}
             {following ? "Pause" : "Follow"}
           </Button>
+          {spooled && (
+            <Select aria-label="What to export" value={exportScope}
+              onValueChange={(value) => setExportScope(value as ExportScope)} options={EXPORT_SCOPES} />
+          )}
           {/* Disabled on an empty view rather than hidden: a control that
               vanishes leaves the reader wondering whether this screen exports
               at all, where a greyed one says "yes, once there is something to
               export". Classic disabled it on the same condition. A history
               on disk is something to export even when the view is empty. */}
-          {spooled && (
-            <Select aria-label="What to export" value={exportScope}
-              onValueChange={(value) => setExportScope(value as ExportScope)} options={EXPORT_SCOPES} />
-          )}
           <Button
             variant="secondary"
             size="sm"
@@ -1849,7 +1849,9 @@ function LogsStream({
           />
         )}
 
-        {stream.loadError !== undefined && (
+        {/* Only while the history is in play: over the previous instance, or once the history stopped, the
+            error belongs to a load the reader can no longer retry. */}
+        {spooled && stream.loadError !== undefined && (
           <FailureAlert title="Could not load earlier lines" error={stream.loadError} className="mx-3 mt-3" />
         )}
 
