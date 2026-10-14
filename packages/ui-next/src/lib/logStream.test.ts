@@ -445,6 +445,43 @@ describe("useLogStream", () => {
         expect(texts(result)).toEqual(["a", "b"]);
       });
 
+      it("keeps a history that stopped stopped when the document is shown again, whatever first a frame parked meanwhile", async () => {
+        // The parked `first` was applied as `{ first }`, which drops `failed`: Load and Export came back for a history
+        // that was no longer whole.
+        const doc = visibility(false);
+        const { s, result } = await spooledTab(true);
+        s.frame(1, ["a"], 1);
+        await waitFor(() => expect(result.current.history).toEqual({ first: 1 }));
+        doc.hide();
+        s.frame(2, ["b"], 3);
+        s.failed("No space left on device");
+        await aFrame();
+        expect(result.current.history).toEqual({ first: 1, failed: "No space left on device" });
+        doc.show();
+        expect(result.current.history).toEqual({ first: 1, failed: "No space left on device" });
+      });
+
+      it("does not let a first parked while hidden overwrite the one a page read since then says", async () => {
+        const doc = visibility(false);
+        const { s, result } = await spooledTab(true);
+        s.frame(4, ["d", "e"], 1);
+        await waitFor(() => expect(result.current.history).toEqual({ first: 1 }));
+        const arrive = holdRead(s);
+        let load!: Promise<void>;
+        act(() => {
+          load = result.current.loadEarlier();
+        });
+        doc.hide();
+        s.frame(6, ["f"], 2);
+        await act(async () => {
+          arrive(s.page(1, ["a", "b", "c"], 3));
+          await load;
+        });
+        expect(result.current.history).toEqual({ first: 3 });
+        doc.show();
+        expect(result.current.history).toEqual({ first: 3 });
+      });
+
       it("does not listen for the document being shown once the screen has gone", async () => {
         const added = vi.spyOn(document, "addEventListener");
         const removed = vi.spyOn(document, "removeEventListener");
@@ -565,6 +602,18 @@ describe("useLogStream", () => {
         act(() => setShowing(true));
         expect(result.current.history).toEqual({ first: 3 });
         expect(texts(result)).toEqual(["a", "b"]);
+      });
+
+      it("keeps a history that stopped stopped when the tab is showing again, whatever first a frame parked meanwhile", async () => {
+        const { s, result, setShowing } = await spooledTab(true);
+        s.frame(1, ["a"], 1);
+        await waitFor(() => expect(result.current.history).toEqual({ first: 1 }));
+        act(() => setShowing(false));
+        s.frame(2, ["b"], 3);
+        s.failed("No space left on device");
+        await aFrame();
+        act(() => setShowing(true));
+        expect(result.current.history).toEqual({ first: 1, failed: "No space left on device" });
       });
 
       it("does not restart the stream when the tab is shown or hidden", async () => {

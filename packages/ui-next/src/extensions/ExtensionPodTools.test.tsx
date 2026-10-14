@@ -23,6 +23,7 @@ import {
   type ExtensionView,
   type InstalledExtension,
 } from "@srelens/core";
+import { PortalScopeProvider } from "@srelens/ui-kit";
 import { useExtensions } from "./inventoryStore";
 import { ExtensionPodSlot, podBindingsFor } from "./ExtensionPodTools";
 
@@ -175,6 +176,33 @@ describe("the pod tools on a Deployment (#567)", () => {
     // A failure reads as one.
     act(() => stream.opened[0].handlers.onEnd?.({ type: "error", code: "source", message: "pods \"web-1\" is forbidden" }));
     expect(await within(tools).findByText(/The stream failed: pods "web-1" is forbidden/)).toBeTruthy();
+  });
+
+  it("draws no lines while its tab is not the one showing, and draws them once it is", async () => {
+    // An inactive app tab stays mounted under `display: none`: it would draw up to 5,000 rows a frame for nobody.
+    const inTab = (visible: boolean) => (
+      <PortalScopeProvider scope={{ container: undefined, visible, hold: () => () => {} }}>
+        <ExtensionPodSlot context="kind-dev" resource={deployment} />
+      </PortalScopeProvider>
+    );
+    const view = render(inTab(false));
+    const tools = await screen.findByRole("region", { name: "cert-manager pod tools" });
+    fireEvent.click(await within(tools).findByRole("button", { name: "Logs · Controller logs (web-1)" }));
+    await waitFor(() => expect(stream.opened).toHaveLength(1));
+    act(() => {
+      stream.opened[0].handlers.onData({ event: "status", source: "web-1/controller", status: "live" }, 1);
+      stream.opened[0].handlers.onData(
+        { event: "lines", lines: [{ source: "web-1/controller", line: "certificate issued" }] },
+        2,
+      );
+    });
+    // Long enough for the frame the lines asked for.
+    await act(() => new Promise((r) => setTimeout(r, 50)));
+    const log = within(tools).getByRole("log", { name: "Logs of web-1/controller" });
+    expect(log.textContent).not.toContain("certificate issued");
+
+    view.rerender(inTab(true));
+    await waitFor(() => expect(log.textContent).toContain("certificate issued"));
   });
 
   it("runs nothing until the host confirmation naming the pod, container and exact command is approved", async () => {

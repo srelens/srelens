@@ -560,6 +560,8 @@ export function useLogStream(
     if (generation !== generationRef.current) return;
     loadingRef.current = false;
     setLoadingEarlier(false);
+    // The page's is the later word on where history starts: a `first` parked while unseen must not undo it.
+    pendingFirstRef.current = undefined;
     setHistory((h) => (h === undefined || h.first === page.first ? h : { ...h, first: page.first }));
     if (page.lines.length === 0) {
       giveBackRoom();
@@ -685,7 +687,10 @@ export function useLogStream(
         if (!cancelled) onLines(lines, frame);
       };
       streamOptions.onSpoolFailed = (reason) => {
-        if (!cancelled) setHistory((h) => ({ first: h?.first ?? 1, failed: reason }));
+        if (cancelled) return;
+        // A `first` parked while unseen is older than this: applied by the next commit it would drop `failed`.
+        pendingFirstRef.current = undefined;
+        setHistory((h) => ({ first: h?.first ?? 1, failed: reason }));
       };
     }
 

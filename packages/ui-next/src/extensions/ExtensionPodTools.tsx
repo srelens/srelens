@@ -34,7 +34,7 @@ import {
   type InstalledExtension,
   type LogTarget,
 } from "@srelens/core";
-import { Button, Combobox } from "@srelens/ui-kit";
+import { Button, Combobox, usePortalShowing } from "@srelens/ui-kit";
 import { HostConfirmation } from "../confirm/HostConfirmation";
 import { useConfirmationApp } from "../confirm/confirmationApp";
 import { confirmFields } from "../confirm/confirmRequest";
@@ -563,7 +563,10 @@ function LogsSession({
       { onDropped: (count) => setDropped((all) => all + count), onEnd: setEnd },
       options,
     );
+  // An inactive app tab stays mounted under `display: none`: its up to 5,000 rows are not drawn until it is showing.
+  const showing = usePortalShowing();
   const stream = useLogStream(request.context, request.namespace, targets, {
+    visible: showing,
     tailLines: 200,
     source: { key: `app:${request.id}#${request.revision}/${session.binding.name}/${label}`, open },
   });
