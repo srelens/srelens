@@ -34,8 +34,11 @@ pub fn ensure_data_dir(dir: &Path) -> std::io::Result<()> {
 
 /// How large one log stream's history may grow on the server, in megabytes,
 /// unless `SRELENS_LOG_SPOOL_MB` says otherwise (#914). The per-user runtime
-/// directory it lives in is often tmpfs, which is RAM.
-pub const DEFAULT_LOG_SPOOL_MB: u64 = 256;
+/// directory it lives in is tmpfs in the shipped compose file, which is RAM, and
+/// the limit is per open log stream, not per user: so the default is a quarter
+/// of the desktop's 256 MB, and an operator who wants more sizes the container's
+/// memory for it.
+pub const DEFAULT_LOG_SPOOL_MB: u64 = 64;
 
 /// Read `SRELENS_LOG_SPOOL_MB`. Unset or empty means the default, and 0 turns
 /// spooling off; anything else must be a whole number of megabytes. Pure: the
@@ -84,8 +87,10 @@ mod tests {
 
     #[test]
     fn log_spool_size_defaults_parses_and_refuses_junk() {
-        assert_eq!(log_spool_mb(None), Ok(DEFAULT_LOG_SPOOL_MB));
-        assert_eq!(log_spool_mb(Some("")), Ok(DEFAULT_LOG_SPOOL_MB));
+        // 64, not the desktop's 256: on the web this is RAM (see the constant).
+        assert_eq!(DEFAULT_LOG_SPOOL_MB, 64);
+        assert_eq!(log_spool_mb(None), Ok(64));
+        assert_eq!(log_spool_mb(Some("")), Ok(64));
         assert_eq!(log_spool_mb(Some("0")), Ok(0));
         assert_eq!(log_spool_mb(Some(" 64 ")), Ok(64));
         assert!(log_spool_mb(Some("lots"))
@@ -93,13 +98,23 @@ mod tests {
             .contains("SRELENS_LOG_SPOOL_MB"));
     }
 
-    /// The operator's docs name every knob `serve()` reads (#914).
+    /// The operator's docs name every knob `serve()` reads (#914), and say what
+    /// it costs: the history is RAM on the shipped tmpfs runtime directory.
     #[test]
     fn the_web_docs_name_the_log_spool_size() {
         let web = include_str!("../../../docs/WEB.md");
         assert!(
             web.contains("`SRELENS_LOG_SPOOL_MB`"),
             "docs/WEB.md does not document SRELENS_LOG_SPOOL_MB"
+        );
+        assert!(
+            web.contains(&format!("(default `{DEFAULT_LOG_SPOOL_MB}`)")),
+            "docs/WEB.md does not state the default {DEFAULT_LOG_SPOOL_MB}"
+        );
+        let compose = include_str!("../../../docker-compose.yml");
+        assert!(
+            compose.contains("SRELENS_LOG_SPOOL_MB"),
+            "docker-compose.yml does not warn that log history is held in its tmpfs"
         );
     }
 
