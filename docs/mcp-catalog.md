@@ -7,11 +7,11 @@ Everything this server exposes over MCP, generated from the live registry so it 
 
 ## Tools
 
-135 tools, grouped by area and then by how a call is gated. Argument schemas are not reproduced here — call `tools/list` for those, which cannot go stale.
+136 tools, grouped by area and then by how a call is gated. Argument schemas are not reproduced here — call `tools/list` for those, which cannot go stale.
 
 **Impact** is how much a successful call disturbs — `low`, `medium` or `high` — and is a different question from the section heading, which is how the call is gated. A capability that accepts several named operations carries the highest level any of them reaches; the per-operation level travels with the resource.
 
-### Kubernetes — read-only (63)
+### Kubernetes — read-only (64)
 
 | Tool | Impact | Summary |
 | --- | --- | --- |
@@ -47,7 +47,7 @@ Everything this server exposes over MCP, generated from the live registry so it 
 | `k8s.listPersistentVolumes` | low | list PersistentVolumes of a connected kube context (cluster-scoped) |
 | `k8s.listPods` | low | list pods in a namespace of a connected kube context |
 | `k8s.listReplicaSets` | low | list the ReplicaSets owned by a Deployment (its rollout revisions) |
-| `k8s.listResource` | low | list any supported resource kind (name + namespace), optionally filtered by `labelSelector`/`fieldSelector`. Pass `fields` (kubectl-style JSONPath such as .status.allocatable or .spec.taints) to get those paths for every item in one call, keyed by path in each row's `fields`, with null where an item has none. Prefer this over one getObject call per item when a summary tool lacks a field you need. |
+| `k8s.listResource` | low | list any supported resource kind (name + namespace), optionally filtered by `labelSelector`/`fieldSelector` or client-side `fieldFilter` (e.g. {"status.nodeName": "node-1"}). Pass `fields` (kubectl-style JSONPath such as .status.allocatable or .spec.taints) to get those paths for every item in one call, keyed by path in each row's `fields`, with null where an item has none. Prefer this over one getObject call per item when a summary tool lacks a field you need. |
 | `k8s.listResourceQuotas` | low | list ResourceQuotas in a namespace of a connected kube context |
 | `k8s.listRoleBindings` | low | list RoleBindings in a namespace of a connected kube context |
 | `k8s.listRoles` | low | list Roles in a namespace of a connected kube context |
@@ -57,6 +57,7 @@ Everything this server exposes over MCP, generated from the live registry so it 
 | `k8s.listStatefulSets` | low | list StatefulSets in a namespace of a connected kube context |
 | `k8s.listStorageClasses` | low | list StorageClasses of a connected kube context (cluster-scoped) |
 | `k8s.listWorkloadImages` | low | List regular and init-container images from a fixed workload kind |
+| `k8s.nodeCapacityOverview` | low | cluster-wide node capacity overview: reports allocatable, requested, and remaining CPU (millicores) and Memory (MiB), usage percentages, and pod / VM counts for every node. Fast single-call alternative to listing all pods per node for capacity planning and VM/workload migration. |
 | `k8s.nodeInspect` | low | comprehensive inspection of a node allocatable, requests, GPU, taints, conditions, and pods |
 | `k8s.nodeMetrics` | low | node CPU/memory usage (requires metrics-server) |
 | `k8s.openApiSchema` | low | fetch the OpenAPI schema for a resource kind (for field autocomplete) |

@@ -21,7 +21,7 @@ use crate::client_cache::ClientCache;
 use crate::context_resolve::{is_pinned_context, resolve_context};
 
 /// Default per-request timeout budget (connect + list/get/apply), in seconds.
-pub const DEFAULT_TIMEOUT_SECS: u64 = 8;
+pub const DEFAULT_TIMEOUT_SECS: u64 = 30;
 /// Smallest timeout a user may configure, in seconds.
 pub const MIN_TIMEOUT_SECS: u64 = 1;
 /// Largest timeout a user may configure, in seconds. Raised from 30 for
@@ -1168,7 +1168,12 @@ mod tests {
         .unwrap();
         let namespace_of = |yaml: &str| {
             let config = Kubeconfig::from_yaml(yaml).unwrap();
-            config.contexts[0].context.as_ref().unwrap().namespace.clone()
+            config.contexts[0]
+                .context
+                .as_ref()
+                .unwrap()
+                .namespace
+                .clone()
         };
 
         let given =

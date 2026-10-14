@@ -1,13 +1,14 @@
 //! The `k8s.listNodes` capability (cluster-scoped).
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
-use srelens_capability::{Annotations, Capability, CapabilityError};
-use k8s_openapi::api::core::v1::Node;
+use k8s_openapi::api::core::v1::{Node, Pod};
 use kube::api::ListParams;
 use kube::Api;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use srelens_capability::{Annotations, Capability, CapabilityError};
 
 use crate::client_cache::ClientCache;
 use crate::connect::request_timeout;
@@ -95,7 +96,13 @@ pub fn summarise(node: Node) -> NodeSummary {
         .as_ref()
         .and_then(|s| s.conditions.as_ref())
         .and_then(|conds| conds.iter().find(|c| c.type_ == "Ready"))
-        .map(|c| if c.status == "True" { "Ready" } else { "NotReady" })
+        .map(|c| {
+            if c.status == "True" {
+                "Ready"
+            } else {
+                "NotReady"
+            }
+        })
         .unwrap_or("Unknown")
         .to_string();
     let version = node
@@ -174,10 +181,16 @@ pub fn summarise(node: Node) -> NodeSummary {
         .unwrap_or_default();
     let addresses = node.status.as_ref().and_then(|s| s.addresses.as_ref());
     let internal_ip = addresses.and_then(|addrs| {
-        addrs.iter().find(|a| a.type_ == "InternalIP").map(|a| a.address.clone())
+        addrs
+            .iter()
+            .find(|a| a.type_ == "InternalIP")
+            .map(|a| a.address.clone())
     });
     let external_ip = addresses.and_then(|addrs| {
-        addrs.iter().find(|a| a.type_ == "ExternalIP").map(|a| a.address.clone())
+        addrs
+            .iter()
+            .find(|a| a.type_ == "ExternalIP")
+            .map(|a| a.address.clone())
     });
 
     NodeSummary {
@@ -214,13 +227,184 @@ pub fn list_nodes_capability(cache: Arc<ClientCache>) -> Capability {
                     .await
                     .map_err(CapabilityError::Handler)?;
                 let api: Api<Node> = Api::all(client);
-                let list = tokio::time::timeout(request_timeout(), api.list(&ListParams::default()))
-                    .await
-                    .map_err(|_| CapabilityError::Handler("list nodes timed out".into()))?
-                    .map_err(|e| CapabilityError::Handler(e.to_string()))?;
+                let list =
+                    tokio::time::timeout(request_timeout(), api.list(&ListParams::default()))
+                        .await
+                        .map_err(|_| CapabilityError::Handler("list nodes timed out".into()))?
+                        .map_err(|e| CapabilityError::Handler(e.to_string()))?;
                 Ok(ListNodesOut {
                     nodes: list.items.into_iter().map(summarise).collect(),
                 })
+            }
+        },
+    )
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct NodeCapacityOverviewIn {
+    pub context: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
+pub struct NodeCapacityItem {
+    pub name: String,
+    pub status: String,
+    pub unschedulable: bool,
+    pub roles: String,
+    #[serde(rename = "allocatableCpuMillicores")]
+    pub allocatable_cpu_millicores: i64,
+    #[serde(rename = "requestedCpuMillicores")]
+    pub requested_cpu_millicores: i64,
+    #[serde(rename = "remainingCpuMillicores")]
+    pub remaining_cpu_millicores: i64,
+    #[serde(rename = "cpuUsagePercent")]
+    pub cpu_usage_percent: f64,
+    #[serde(rename = "allocatableMemoryMiB")]
+    pub allocatable_memory_mib: i64,
+    #[serde(rename = "requestedMemoryMiB")]
+    pub requested_memory_mib: i64,
+    #[serde(rename = "remainingMemoryMiB")]
+    pub remaining_memory_mib: i64,
+    #[serde(rename = "memoryUsagePercent")]
+    pub memory_usage_percent: f64,
+    #[serde(rename = "podCount")]
+    pub pod_count: usize,
+    #[serde(rename = "vmCount")]
+    pub vm_count: usize,
+    #[serde(rename = "allocatablePods")]
+    pub allocatable_pods: i64,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct NodeCapacityOverviewOut {
+    pub nodes: Vec<NodeCapacityItem>,
+}
+
+#[derive(Default)]
+struct NodeUsageAcc {
+    requested_cpu_millicores: i64,
+    requested_memory_mib: i64,
+    pod_count: usize,
+    vm_count: usize,
+}
+
+/// Calculate aggregated capacity and allocated requests per node from raw Node and Pod lists.
+pub fn calculate_node_capacities(nodes: Vec<Node>, pods: Vec<Pod>) -> Vec<NodeCapacityItem> {
+    let mut usage_by_node: HashMap<String, NodeUsageAcc> = HashMap::new();
+    for pod in pods {
+        let phase = pod
+            .status
+            .as_ref()
+            .and_then(|s| s.phase.as_deref())
+            .unwrap_or("");
+        if phase == "Succeeded" || phase == "Failed" {
+            continue;
+        }
+        let node_name = match pod.spec.as_ref().and_then(|s| s.node_name.as_deref()) {
+            Some(n) if !n.is_empty() => n,
+            _ => continue,
+        };
+        let acc = usage_by_node.entry(node_name.to_string()).or_default();
+        acc.pod_count += 1;
+        let is_vm = pod
+            .metadata
+            .labels
+            .as_ref()
+            .map(|l| {
+                l.contains_key("kubevirt.io/domain")
+                    || l.get("kubevirt.io").map(|v| v.as_str()) == Some("virt-launcher")
+            })
+            .unwrap_or(false);
+        if is_vm {
+            acc.vm_count += 1;
+        }
+        if let Some(spec) = &pod.spec {
+            for c in &spec.containers {
+                if let Some(res) = &c.resources {
+                    if let Some(reqs) = &res.requests {
+                        if let Some(cpu) = reqs.get("cpu") {
+                            acc.requested_cpu_millicores += crate::metrics::cpu_millicores(&cpu.0);
+                        }
+                        if let Some(mem) = reqs.get("memory") {
+                            acc.requested_memory_mib += crate::metrics::mem_mib(&mem.0);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    nodes
+        .into_iter()
+        .map(|node| {
+            let s = summarise(node);
+            let usage = usage_by_node.remove(&s.name).unwrap_or_default();
+            let remaining_cpu =
+                (s.allocatable_cpu_millicores - usage.requested_cpu_millicores).max(0);
+            let cpu_pct = if s.allocatable_cpu_millicores > 0 {
+                ((usage.requested_cpu_millicores as f64 / s.allocatable_cpu_millicores as f64)
+                    * 100.0)
+                    .round()
+            } else {
+                0.0
+            };
+            let remaining_mem = (s.allocatable_memory_mib - usage.requested_memory_mib).max(0);
+            let mem_pct = if s.allocatable_memory_mib > 0 {
+                ((usage.requested_memory_mib as f64 / s.allocatable_memory_mib as f64) * 100.0)
+                    .round()
+            } else {
+                0.0
+            };
+            NodeCapacityItem {
+                name: s.name,
+                status: s.status,
+                unschedulable: s.unschedulable,
+                roles: s.roles,
+                allocatable_cpu_millicores: s.allocatable_cpu_millicores,
+                requested_cpu_millicores: usage.requested_cpu_millicores,
+                remaining_cpu_millicores: remaining_cpu,
+                cpu_usage_percent: cpu_pct,
+                allocatable_memory_mib: s.allocatable_memory_mib,
+                requested_memory_mib: usage.requested_memory_mib,
+                remaining_memory_mib: remaining_mem,
+                memory_usage_percent: mem_pct,
+                pod_count: usage.pod_count,
+                vm_count: usage.vm_count,
+                allocatable_pods: s.allocatable_pods,
+            }
+        })
+        .collect()
+}
+
+/// `k8s.nodeCapacityOverview` — cluster-wide node capacity, requested allocations, remaining headroom, and VM counts.
+pub fn node_capacity_overview_capability(cache: Arc<ClientCache>) -> Capability {
+    Capability::typed::<NodeCapacityOverviewIn, NodeCapacityOverviewOut, _, _>(
+        "k8s.nodeCapacityOverview",
+        "cluster-wide node capacity overview: reports allocatable, requested, and remaining CPU (millicores) and Memory (MiB), usage percentages, and pod / VM counts for every node. Fast single-call alternative to listing all pods per node for capacity planning and VM/workload migration.",
+        Annotations::READ_ONLY,
+        move |input: NodeCapacityOverviewIn| {
+            let cache = cache.clone();
+            async move {
+                let client = cache
+                    .get(&input.context)
+                    .await
+                    .map_err(CapabilityError::Handler)?;
+                let node_api: Api<Node> = Api::all(client.clone());
+                let pod_api: Api<Pod> = Api::all(client);
+                let node_lp = ListParams::default();
+                let pod_lp = ListParams::default();
+                let (nodes_res, pods_res) = tokio::join!(
+                    tokio::time::timeout(request_timeout(), node_api.list(&node_lp)),
+                    tokio::time::timeout(request_timeout(), pod_api.list(&pod_lp)),
+                );
+                let node_list = nodes_res
+                    .map_err(|_| CapabilityError::Handler("list nodes timed out".into()))?
+                    .map_err(|e| CapabilityError::Handler(e.to_string()))?;
+                let pod_list = pods_res
+                    .map_err(|_| CapabilityError::Handler("list pods timed out".into()))?
+                    .map_err(|e| CapabilityError::Handler(e.to_string()))?;
+                let nodes = calculate_node_capacities(node_list.items, pod_list.items);
+                Ok(NodeCapacityOverviewOut { nodes })
             }
         },
     )
@@ -240,9 +424,73 @@ mod tests {
     }
 
     #[test]
+    fn node_capacity_overview_capability_has_expected_id() {
+        let cap = node_capacity_overview_capability(ClientCache::new(PathBuf::from("/x")));
+        assert_eq!(cap.id, "k8s.nodeCapacityOverview");
+    }
+
+    #[test]
+    fn test_calculate_node_capacities_aggregates_pods_and_vms() {
+        use k8s_openapi::api::core::v1::{Container, PodSpec, PodStatus, ResourceRequirements};
+        use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
+
+        let mut node = node_with_allocatable("4", "16Gi", "110");
+        node.metadata.name = Some("node-1".into());
+
+        let mut reqs = BTreeMap::new();
+        reqs.insert("cpu".to_string(), Quantity("1000m".into()));
+        reqs.insert("memory".to_string(), Quantity("4Gi".into()));
+
+        let mut vm_labels = BTreeMap::new();
+        vm_labels.insert("kubevirt.io".to_string(), "virt-launcher".to_string());
+
+        let vm_pod = Pod {
+            metadata: kube::core::ObjectMeta {
+                name: Some("virt-launcher-test-vm".into()),
+                labels: Some(vm_labels),
+                ..Default::default()
+            },
+            spec: Some(PodSpec {
+                node_name: Some("node-1".into()),
+                containers: vec![Container {
+                    name: "compute".into(),
+                    resources: Some(ResourceRequirements {
+                        requests: Some(reqs),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }),
+            status: Some(PodStatus {
+                phase: Some("Running".into()),
+                ..Default::default()
+            }),
+        };
+
+        let res = calculate_node_capacities(vec![node], vec![vm_pod]);
+        assert_eq!(res.len(), 1);
+        let n = &res[0];
+        assert_eq!(n.name, "node-1");
+        assert_eq!(n.allocatable_cpu_millicores, 4000);
+        assert_eq!(n.requested_cpu_millicores, 1000);
+        assert_eq!(n.remaining_cpu_millicores, 3000);
+        assert_eq!(n.cpu_usage_percent, 25.0);
+        assert_eq!(n.allocatable_memory_mib, 16384);
+        assert_eq!(n.requested_memory_mib, 4096);
+        assert_eq!(n.remaining_memory_mib, 12288);
+        assert_eq!(n.memory_usage_percent, 25.0);
+        assert_eq!(n.pod_count, 1);
+        assert_eq!(n.vm_count, 1);
+    }
+
+    #[test]
     fn summarises_ready_version_and_roles() {
         let mut labels = BTreeMap::new();
-        labels.insert("node-role.kubernetes.io/control-plane".to_string(), "".to_string());
+        labels.insert(
+            "node-role.kubernetes.io/control-plane".to_string(),
+            "".to_string(),
+        );
         let node = Node {
             metadata: kube::core::ObjectMeta {
                 name: Some("cp-1".into()),
@@ -311,12 +559,18 @@ mod tests {
 
     #[test]
     fn reads_a_whole_core_as_millicores() {
-        assert_eq!(summarise(node_with_allocatable("4", "0", "0")).allocatable_cpu_millicores, 4000);
+        assert_eq!(
+            summarise(node_with_allocatable("4", "0", "0")).allocatable_cpu_millicores,
+            4000
+        );
     }
 
     #[test]
     fn a_node_that_reports_no_allocatable_reports_zero_not_a_guess() {
-        assert_eq!(summarise(node_with_no_status()).allocatable_cpu_millicores, 0);
+        assert_eq!(
+            summarise(node_with_no_status()).allocatable_cpu_millicores,
+            0
+        );
         assert_eq!(summarise(node_with_no_status()).allocatable_memory_mib, 0);
         assert_eq!(summarise(node_with_no_status()).allocatable_pods, 0);
     }

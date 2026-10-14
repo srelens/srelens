@@ -283,6 +283,14 @@ fn check_selectors(input: &ListResourceIn) -> Result<(), CapabilityError> {
             )));
         }
     }
+    if let Some(ref filter) = input.field_filter {
+        if filter.len() > MAX_FIELDS {
+            return Err(CapabilityError::InvalidInput(format!(
+                "fieldFilter: {} filters requested, at most {MAX_FIELDS}",
+                filter.len()
+            )));
+        }
+    }
     Ok(())
 }
 
@@ -603,6 +611,49 @@ pub fn get_manifest_capability(cache: Arc<ClientCache>) -> Capability {
     )
 }
 
+fn field_value_as_str(val: Option<&serde_json::Value>) -> Option<String> {
+    match val {
+        Some(serde_json::Value::String(s)) => Some(s.clone()),
+        Some(serde_json::Value::Bool(b)) => Some(b.to_string()),
+        Some(serde_json::Value::Number(n)) => Some(n.to_string()),
+        Some(serde_json::Value::Null) | None => None,
+        Some(other) => Some(other.to_string()),
+    }
+}
+
+/// Match a Kubernetes JSON object against a comma-separated fieldSelector expression
+/// (e.g. `status.nodeName=worker-1,status.phase!=Failed`).
+pub fn matches_field_selector(obj_val: &serde_json::Value, selector: &str) -> bool {
+    for clause in selector.split(',') {
+        let clause = clause.trim();
+        if clause.is_empty() {
+            continue;
+        }
+        let (key, val, equals) = if let Some((k, v)) = clause.split_once("!=") {
+            (k.trim(), v.trim(), false)
+        } else if let Some((k, v)) = clause.split_once("==") {
+            (k.trim(), v.trim(), true)
+        } else if let Some((k, v)) = clause.split_once('=') {
+            (k.trim(), v.trim(), true)
+        } else {
+            return false;
+        };
+
+        let actual = field_value_as_str(crate::crds::json_path_value(obj_val, key));
+        let actual_str = actual.as_deref().unwrap_or("");
+        if equals {
+            if actual_str != val {
+                return false;
+            }
+        } else {
+            if actual_str == val {
+                return false;
+            }
+        }
+    }
+    true
+}
+
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct ListResourceIn {
     pub context: String,
@@ -627,6 +678,10 @@ pub struct ListResourceIn {
     /// --field-selector` takes it, e.g. `spec.nodeName=worker-1`.
     #[serde(default, rename = "fieldSelector")]
     pub field_selector: Option<String>,
+    /// Optional client-side field filters, e.g. `{"status.nodeName": "worker-1"}`.
+    /// Evaluated in-memory when the API server rejects server-side field selectors on CRDs.
+    #[serde(default, rename = "fieldFilter")]
+    pub field_filter: Option<BTreeMap<String, String>>,
     /// Paths to return for every item, in its row's `fields`: kubectl-style
     /// JSONPath, each starting with '.', e.g. `.status.allocatable`,
     /// `.metadata.labels['app.kubernetes.io/name']`, `.spec.containers[0].image`
@@ -701,7 +756,8 @@ pub fn list_resource_capability(cache: Arc<ClientCache>) -> Capability {
     Capability::typed::<ListResourceIn, ListResourceOut, _, _>(
         "k8s.listResource",
         "list any supported resource kind (name + namespace), optionally filtered by \
-         `labelSelector`/`fieldSelector`. Pass `fields` (kubectl-style JSONPath such as \
+         `labelSelector`/`fieldSelector` or client-side `fieldFilter` (e.g. {\"status.nodeName\": \"node-1\"}). \
+         Pass `fields` (kubectl-style JSONPath such as \
          .status.allocatable or .spec.taints) to get those paths for every item in one call, \
          keyed by path in each row's `fields`, with null where an item has none. Prefer this \
          over one getObject call per item when a summary tool lacks a field you need.",
@@ -732,15 +788,50 @@ pub fn list_resource_capability(cache: Arc<ClientCache>) -> Capability {
                 } else {
                     Api::all_with(client, &ar)
                 };
-                let list = tokio::time::timeout(request_timeout(), api.list(&list_params(&input)))
-                    .await
-                    .map_err(|_| CapabilityError::Handler("list resource timed out".into()))?
-                    .map_err(|e| CapabilityError::Handler(e.to_string()))?;
-                let items = list
-                    .items
-                    .into_iter()
-                    .map(|o| resource_row(o, &ar, &input.fields))
-                    .collect::<Result<_, _>>()?;
+                let mut params = list_params(&input);
+                let list_res = tokio::time::timeout(request_timeout(), api.list(&params)).await;
+                let list = match list_res {
+                    Ok(Ok(l)) => l,
+                    Ok(Err(e)) => {
+                        let err_str = e.to_string();
+                        if input.field_selector.is_some()
+                            && (err_str.contains("field label not supported")
+                                || err_str.contains("fieldSelector")
+                                || err_str.contains("field selector"))
+                        {
+                            params.field_selector = None;
+                            tokio::time::timeout(request_timeout(), api.list(&params))
+                                .await
+                                .map_err(|_| CapabilityError::Handler("list resource timed out".into()))?
+                                .map_err(|e| CapabilityError::Handler(e.to_string()))?
+                        } else {
+                            return Err(CapabilityError::Handler(err_str));
+                        }
+                    }
+                    Err(_) => return Err(CapabilityError::Handler("list resource timed out".into())),
+                };
+                let mut items = Vec::new();
+                for o in list.items {
+                    if let Some(ref sel) = input.field_selector {
+                        if let Ok(obj_val) = serde_json::to_value(&o) {
+                            if !matches_field_selector(&obj_val, sel) {
+                                continue;
+                            }
+                        }
+                    }
+                    if let Some(ref filter) = input.field_filter {
+                        if let Ok(obj_val) = serde_json::to_value(&o) {
+                            let matches = filter.iter().all(|(path, val)| {
+                                let actual = field_value_as_str(crate::crds::json_path_value(&obj_val, path));
+                                actual.as_deref().unwrap_or("") == val.as_str()
+                            });
+                            if !matches {
+                                continue;
+                            }
+                        }
+                    }
+                    items.push(resource_row(o, &ar, &input.fields)?);
+                }
                 Ok(ListResourceOut { items })
             }
         },
@@ -3289,5 +3380,84 @@ metadata:
         assert_eq!(gvk.version, "v2");
         assert_eq!(gvk.kind, "CiliumNetworkPolicy");
         assert!(namespaced, "CiliumNetworkPolicy must be namespaced");
+    }
+
+    #[test]
+    fn test_matches_field_selector_equality_and_inequality() {
+        let obj = serde_json::json!({
+            "metadata": {
+                "name": "vm-production-1",
+                "namespace": "default"
+            },
+            "status": {
+                "nodeName": "harvester-amd008-eu-dus1",
+                "phase": "Running"
+            }
+        });
+
+        // Exact match
+        assert!(matches_field_selector(
+            &obj,
+            "status.nodeName=harvester-amd008-eu-dus1"
+        ));
+        assert!(matches_field_selector(
+            &obj,
+            "status.nodeName==harvester-amd008-eu-dus1"
+        ));
+        assert!(!matches_field_selector(
+            &obj,
+            "status.nodeName=harvester-amd009-eu-dus1"
+        ));
+
+        // Inequality
+        assert!(matches_field_selector(
+            &obj,
+            "status.nodeName!=harvester-amd009-eu-dus1"
+        ));
+        assert!(!matches_field_selector(
+            &obj,
+            "status.nodeName!=harvester-amd008-eu-dus1"
+        ));
+
+        // Multi-clause
+        assert!(matches_field_selector(
+            &obj,
+            "status.nodeName=harvester-amd008-eu-dus1,status.phase=Running"
+        ));
+        assert!(!matches_field_selector(
+            &obj,
+            "status.nodeName=harvester-amd008-eu-dus1,status.phase=Failed"
+        ));
+
+        // Missing field
+        assert!(!matches_field_selector(
+            &obj,
+            "spec.nodeName=harvester-amd008-eu-dus1"
+        ));
+        assert!(matches_field_selector(
+            &obj,
+            "spec.nodeName!=harvester-amd008-eu-dus1"
+        ));
+    }
+
+    #[test]
+    fn test_list_resource_in_deserializes_camel_case_field_filter() {
+        let json = serde_json::json!({
+            "context": "c1",
+            "kind": "VirtualMachineInstance",
+            "fieldFilter": {
+                "status.nodeName": "harvester-amd008-eu-dus1"
+            }
+        });
+        let parsed: ListResourceIn = serde_json::from_value(json).unwrap();
+        assert_eq!(
+            parsed
+                .field_filter
+                .as_ref()
+                .unwrap()
+                .get("status.nodeName")
+                .unwrap(),
+            "harvester-amd008-eu-dus1"
+        );
     }
 }

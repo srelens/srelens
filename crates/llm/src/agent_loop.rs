@@ -98,6 +98,23 @@ pub async fn run(
                         .into(),
             });
             on_event(AgentEvent::TurnDone);
+            // If prior tool rounds completed successfully in this turn, keep them
+            // so earlier work is not lost, and record whatever text the assistant
+            // generated (closing the turn cleanly with an Assistant turn).
+            // If the cutoff happened on the very first round of this turn, discard
+            // the whole turn so history stays clean.
+            if turns.len() > history.len() + 1 {
+                turns.push(Turn::Assistant {
+                    text: if text.is_empty() {
+                        "The assistant's reply was cut off at the output-token limit mid-tool-call."
+                            .into()
+                    } else {
+                        text
+                    },
+                    tool_calls: Vec::new(),
+                });
+                return Ok(turns);
+            }
             return Ok(history);
         }
 
@@ -531,6 +548,66 @@ mod tests {
         assert!(matches!(events.last(), Some(AgentEvent::TurnDone)));
         // The failed turn is discarded — the next request starts from the prior history.
         assert_eq!(history, prior);
+    }
+
+    #[test]
+    fn a_truncated_round_with_tool_calls_after_successful_rounds_preserves_prior_work() {
+        let provider = ScriptedProvider::new(vec![
+            vec![
+                StreamItem::ToolCall(ToolCall {
+                    id: "c1".into(),
+                    name: "k8s_listPods".into(),
+                    arguments: json!({}),
+                    thought_signature: None,
+                }),
+                StreamItem::Done(StopReason::ToolUse),
+            ],
+            vec![
+                StreamItem::Text("Partial analysis before cutting off".into()),
+                StreamItem::ToolCall(ToolCall {
+                    id: "c2".into(),
+                    name: "k8s_scale".into(),
+                    arguments: json!({}),
+                    thought_signature: None,
+                }),
+                StreamItem::Done(StopReason::MaxTokens),
+            ],
+        ]);
+        let invoker = StubInvoker {
+            result: ToolCallResult {
+                content: "pod-1".into(),
+                is_error: false,
+                denied: false,
+            },
+            calls: Mutex::new(Vec::new()),
+        };
+        let prior = vec![Turn::User("earlier".into())];
+        let (events, history) = drive_from(&provider, &invoker, prior.clone(), "inspect and fix");
+        // Only the first round's tool executed
+        assert_eq!(invoker.calls.lock().unwrap().len(), 1);
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, AgentEvent::Error { message } if message.contains("cut off"))),
+            "expected a truncation error event, got {events:?}"
+        );
+        assert!(matches!(events.last(), Some(AgentEvent::TurnDone)));
+        // Prior work and current turn's successful tool round are preserved,
+        // ending with an Assistant turn containing the text fragment.
+        assert_eq!(history.len(), 5);
+        assert_eq!(history[0], Turn::User("earlier".into()));
+        assert_eq!(history[1], Turn::User("inspect and fix".into()));
+        assert!(
+            matches!(history[2], Turn::Assistant { ref tool_calls, .. } if tool_calls.len() == 1)
+        );
+        assert!(matches!(history[3], Turn::ToolResults(ref res) if res.len() == 1));
+        assert_eq!(
+            history[4],
+            Turn::Assistant {
+                text: "Partial analysis before cutting off".into(),
+                tool_calls: Vec::new(),
+            }
+        );
     }
 
     #[test]
