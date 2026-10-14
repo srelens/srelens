@@ -5,9 +5,8 @@
 //! them through `tauri::test::MockRuntime`, so this surface counts toward
 //! coverage instead of hiding behind the ignore-regex.
 
-use std::fs::File;
 use std::io::BufWriter;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 
 use srelens_streams::log_spool::SpoolPage;
@@ -131,10 +130,12 @@ fn owned_by(owned: &WindowStreams, window: &str, channel: &str) -> Result<(), St
     }
 }
 
-/// Write `channel`'s history to `path`, through a `.partial` file beside it that
+/// Write `channel`'s history to `path`, through a partial file beside it that
 /// replaces `path` only once whole. An export that could not finish is never
-/// left looking whole, and a file already at `path` survives it. A
-/// `since_seconds` reaching back past the clock's start means every line.
+/// left looking whole, and a file already at `path` survives it. The partial
+/// file is new, under a random name, so no name planted beside `path` (a link
+/// to a file elsewhere) can redirect the write. A `since_seconds` reaching
+/// back past the clock's start means every line.
 pub(crate) async fn export_to(
     manager: &LogStreamManager,
     channel: &str,
@@ -142,19 +143,18 @@ pub(crate) async fn export_to(
     since_seconds: Option<u64>,
 ) -> Result<(), String> {
     let since = since_seconds.map(srelens_streams::log_spool::cutoff);
-    let mut partial = path.as_os_str().to_owned();
-    partial.push(".partial");
-    let partial = PathBuf::from(partial);
-    let file = File::create(&partial).map_err(|e| e.to_string())?;
-    let written = manager.export(channel, BufWriter::new(file), since).await;
-    let saved = match written {
-        Ok(_) => std::fs::rename(&partial, path).map_err(|e| e.to_string()),
-        Err(e) => Err(e),
-    };
-    if saved.is_err() {
-        let _ = std::fs::remove_file(&partial);
-    }
-    saved
+    let dir = path.parent().ok_or("invalid save path")?;
+    // Dropped (and removed) unless it is persisted below.
+    let partial = tempfile::Builder::new()
+        .suffix(".partial")
+        .tempfile_in(dir)
+        .map_err(|e| e.to_string())?;
+    let file = partial.reopen().map_err(|e| e.to_string())?;
+    manager.export(channel, BufWriter::new(file), since).await?;
+    partial
+        .persist(path)
+        .map(|_| ())
+        .map_err(|e| e.error.to_string())
 }
 
 /// srelens is quitting: stop every log stream and remove the history it kept.
@@ -344,6 +344,16 @@ mod tests {
         }
     }
 
+    /// The names in `dir`, sorted.
+    fn names_in(dir: &Path) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn export_to_writes_the_history_and_leaves_no_file_when_it_cannot() {
         let tmp = tempfile::tempdir().unwrap();
@@ -359,20 +369,14 @@ mod tests {
         assert!(std::fs::read_to_string(&saved)
             .unwrap()
             .starts_with("pod-0 | [error:"));
-        assert!(
-            !out.path().join("pod-0.log.partial").exists(),
-            "a finished export leaves no partial file"
-        );
+        assert_eq!(names_in(out.path()), ["pod-0.log"], "a finished export leaves no partial file");
 
         let failed = out.path().join("nothing.log");
         assert!(export_to(&manager, "logs:none", &failed, None)
             .await
             .is_err());
         assert!(!failed.exists(), "a half-written export is not left behind");
-        assert!(
-            !out.path().join("nothing.log.partial").exists(),
-            "a failed export removes its partial file"
-        );
+        assert_eq!(names_in(out.path()), ["pod-0.log"], "a failed export removes its partial file");
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -392,7 +396,7 @@ mod tests {
             "an earlier export",
             "the file the reader chose to replace survives an export that failed"
         );
-        assert!(!out.path().join("kept.log.partial").exists());
+        assert_eq!(names_in(out.path()), ["kept.log"]);
 
         export_to(&manager, "logs:test", &kept, None).await.unwrap();
         assert!(
@@ -401,6 +405,34 @@ mod tests {
                 .starts_with("pod-0 | [error:"),
             "a finished export replaces it"
         );
+    }
+
+    /// A name planted beside the destination must not redirect the export (#933
+    /// review). A hard link stands in for a symlink: through either, a fixed
+    /// `<dest>.partial` would write into a file outside the one the reader chose.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_export_never_writes_through_a_name_planted_beside_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let app = spooled_app(&tmp);
+        let window = crate::window_streams::tests::mock_window(&app, "main");
+        stream_with_history(&app, &window).await;
+        let manager = app.state::<LogStreamManager>();
+        let elsewhere = tempfile::tempdir().unwrap();
+        let victim = elsewhere.path().join("victim.txt");
+        std::fs::write(&victim, "not the export's to touch").unwrap();
+        let out = tempfile::tempdir().unwrap();
+        let saved = out.path().join("pod-0.log");
+        std::fs::hard_link(&victim, out.path().join("pod-0.log.partial")).unwrap();
+
+        export_to(&manager, "logs:test", &saved, None).await.unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(&victim).unwrap(),
+            "not the export's to touch"
+        );
+        assert!(std::fs::read_to_string(&saved)
+            .unwrap()
+            .starts_with("pod-0 | [error:"));
     }
 
     #[tokio::test(flavor = "multi_thread")]

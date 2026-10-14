@@ -79,6 +79,9 @@ getrandom = "0.2"
 tauri-plugin-biometry = "0.2"
 # Master-password key derivation for the vault (issue #208 follow-up).
 argon2 = "0.5"
+# A log export's fresh partial file (logs.rs), and throwaway inventories in the
+# app-stream command tests (extension_streams.rs).
+tempfile = "3"
 tokio = { version = "1", features = ["rt-multi-thread", "io-std", "io-util", "macros", "process"] }
 uuid = { version = "1", features = ["v4"] }
 async-trait = "0.1"
@@ -127,5 +130,3 @@ futures = "0.3"
 # issue #30) — drives the real built app through tauri-driver. Dev-only; the
 # shipping binary never links it.
 thirtyfour = "0.32"
-# Throwaway inventories for the app-stream command tests (extension_streams.rs).
-tempfile = "3"
