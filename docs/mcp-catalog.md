@@ -57,7 +57,7 @@ Everything this server exposes over MCP, generated from the live registry so it 
 | `k8s.listStatefulSets` | low | list StatefulSets in a namespace of a connected kube context |
 | `k8s.listStorageClasses` | low | list StorageClasses of a connected kube context (cluster-scoped) |
 | `k8s.listWorkloadImages` | low | List regular and init-container images from a fixed workload kind |
-| `k8s.nodeCapacityOverview` | low | cluster-wide node capacity overview: reports allocatable, requested, and remaining CPU (millicores) and Memory (MiB), usage percentages, and pod / VM counts for every node. Fast single-call alternative to listing all pods per node for capacity planning and VM/workload migration. |
+| `k8s.nodeCapacityOverview` | low | cluster-wide node capacity overview: reports allocatable, requested, and remaining CPU (millicores) and Memory (MiB), usage percentages, and pod / VM counts (including individual VM resource allocations) for nodes. Fast single-call alternative to listing all pods per node for capacity planning and VM/workload migration. Pass optional `node` to filter to a specific node. |
 | `k8s.nodeInspect` | low | comprehensive inspection of a node allocatable, requests, GPU, taints, conditions, and pods |
 | `k8s.nodeMetrics` | low | node CPU/memory usage (requires metrics-server) |
 | `k8s.openApiSchema` | low | fetch the OpenAPI schema for a resource kind (for field autocomplete) |

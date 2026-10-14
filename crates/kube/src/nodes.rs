@@ -243,6 +243,19 @@ pub fn list_nodes_capability(cache: Arc<ClientCache>) -> Capability {
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct NodeCapacityOverviewIn {
     pub context: String,
+    /// Optional node name to inspect specifically (returns only this node with its capacity and VMs)
+    #[serde(default)]
+    pub node: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
+pub struct VmSummaryItem {
+    pub name: String,
+    pub namespace: String,
+    #[serde(rename = "cpuMillicores")]
+    pub cpu_millicores: i64,
+    #[serde(rename = "memoryMiB")]
+    pub memory_mib: i64,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
@@ -273,6 +286,8 @@ pub struct NodeCapacityItem {
     pub vm_count: usize,
     #[serde(rename = "allocatablePods")]
     pub allocatable_pods: i64,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub vms: Vec<VmSummaryItem>,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -286,6 +301,7 @@ struct NodeUsageAcc {
     requested_memory_mib: i64,
     pod_count: usize,
     vm_count: usize,
+    vms: Vec<VmSummaryItem>,
 }
 
 /// Calculate aggregated capacity and allocated requests per node from raw Node and Pod lists.
@@ -315,22 +331,55 @@ pub fn calculate_node_capacities(nodes: Vec<Node>, pods: Vec<Pod>) -> Vec<NodeCa
                     || l.get("kubevirt.io").map(|v| v.as_str()) == Some("virt-launcher")
             })
             .unwrap_or(false);
-        if is_vm {
-            acc.vm_count += 1;
-        }
+
+        let mut pod_cpu_req = 0;
+        let mut pod_mem_req = 0;
         if let Some(spec) = &pod.spec {
             for c in &spec.containers {
                 if let Some(res) = &c.resources {
                     if let Some(reqs) = &res.requests {
                         if let Some(cpu) = reqs.get("cpu") {
-                            acc.requested_cpu_millicores += crate::metrics::cpu_millicores(&cpu.0);
+                            pod_cpu_req += crate::metrics::cpu_millicores(&cpu.0);
                         }
                         if let Some(mem) = reqs.get("memory") {
-                            acc.requested_memory_mib += crate::metrics::mem_mib(&mem.0);
+                            pod_mem_req += crate::metrics::mem_mib(&mem.0);
                         }
                     }
                 }
             }
+        }
+        acc.requested_cpu_millicores += pod_cpu_req;
+        acc.requested_memory_mib += pod_mem_req;
+
+        if is_vm {
+            acc.vm_count += 1;
+            let vm_name = pod
+                .metadata
+                .labels
+                .as_ref()
+                .and_then(|l| {
+                    l.get("harvesterhci.io/vmName")
+                        .or_else(|| l.get("kubevirt.io/domain"))
+                        .cloned()
+                })
+                .or_else(|| {
+                    pod.metadata.owner_references.as_ref().and_then(|owners| {
+                        owners
+                            .iter()
+                            .find(|o| {
+                                o.kind == "VirtualMachine" || o.kind == "VirtualMachineInstance"
+                            })
+                            .map(|o| o.name.clone())
+                    })
+                })
+                .unwrap_or_else(|| pod.metadata.name.clone().unwrap_or_default());
+            let ns = pod.metadata.namespace.clone().unwrap_or_default();
+            acc.vms.push(VmSummaryItem {
+                name: vm_name,
+                namespace: ns,
+                cpu_millicores: pod_cpu_req,
+                memory_mib: pod_mem_req,
+            });
         }
     }
 
@@ -371,6 +420,7 @@ pub fn calculate_node_capacities(nodes: Vec<Node>, pods: Vec<Pod>) -> Vec<NodeCa
                 pod_count: usage.pod_count,
                 vm_count: usage.vm_count,
                 allocatable_pods: s.allocatable_pods,
+                vms: usage.vms,
             }
         })
         .collect()
@@ -380,7 +430,7 @@ pub fn calculate_node_capacities(nodes: Vec<Node>, pods: Vec<Pod>) -> Vec<NodeCa
 pub fn node_capacity_overview_capability(cache: Arc<ClientCache>) -> Capability {
     Capability::typed::<NodeCapacityOverviewIn, NodeCapacityOverviewOut, _, _>(
         "k8s.nodeCapacityOverview",
-        "cluster-wide node capacity overview: reports allocatable, requested, and remaining CPU (millicores) and Memory (MiB), usage percentages, and pod / VM counts for every node. Fast single-call alternative to listing all pods per node for capacity planning and VM/workload migration.",
+        "cluster-wide node capacity overview: reports allocatable, requested, and remaining CPU (millicores) and Memory (MiB), usage percentages, and pod / VM counts (including individual VM resource allocations) for nodes. Fast single-call alternative to listing all pods per node for capacity planning and VM/workload migration. Pass optional `node` to filter to a specific node.",
         Annotations::READ_ONLY,
         move |input: NodeCapacityOverviewIn| {
             let cache = cache.clone();
@@ -403,7 +453,10 @@ pub fn node_capacity_overview_capability(cache: Arc<ClientCache>) -> Capability 
                 let pod_list = pods_res
                     .map_err(|_| CapabilityError::Handler("list pods timed out".into()))?
                     .map_err(|e| CapabilityError::Handler(e.to_string()))?;
-                let nodes = calculate_node_capacities(node_list.items, pod_list.items);
+                let mut nodes = calculate_node_capacities(node_list.items, pod_list.items);
+                if let Some(target_node) = input.node.as_deref().filter(|s| !s.trim().is_empty()) {
+                    nodes.retain(|n| n.name == target_node);
+                }
                 Ok(NodeCapacityOverviewOut { nodes })
             }
         },
@@ -482,6 +535,10 @@ mod tests {
         assert_eq!(n.memory_usage_percent, 25.0);
         assert_eq!(n.pod_count, 1);
         assert_eq!(n.vm_count, 1);
+        assert_eq!(n.vms.len(), 1);
+        assert_eq!(n.vms[0].name, "virt-launcher-test-vm");
+        assert_eq!(n.vms[0].cpu_millicores, 1000);
+        assert_eq!(n.vms[0].memory_mib, 4096);
     }
 
     #[test]

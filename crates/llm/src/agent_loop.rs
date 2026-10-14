@@ -285,12 +285,13 @@ pub fn cap_tool_result_content(tool_name: &str, content: &str) -> String {
 /// Compact earlier intermediate tool results when sending requests to the provider
 /// in multi-round execution.
 ///
-/// Uses an in-turn sliding window (W = 2):
-/// - Tool results in the most recent 2 rounds of the active user turn are preserved
-///   in full fidelity so the model can cross-reference immediate facts (e.g. node capacity
-///   and workload requests).
-/// - Tool results older than 2 rounds (either from previous user turns or from rounds > 2
-///   ago in the active turn) are condensed if their content exceeds 600 bytes.
+/// Compact prior completed user turns for sending to the model:
+/// - The active user turn (`idx >= current_turn_start`) is ALWAYS preserved in full fidelity.
+///   This prevents in-turn amnesia loops (where earlier tool outputs disappear, causing
+///   the model to repeatedly re-query) and ensures Anthropic prompt caching prefixes remain
+///   100% stable across all rounds of the active turn.
+/// - Tool results from previous user turns (`idx < current_turn_start`) are condensed if
+///   their content exceeds 600 bytes.
 /// - Canonical conversation history (`turns`) remains immutable and untouched.
 pub fn compact_request_turns_for_round(turns: &[Turn]) -> Vec<Turn> {
     let current_turn_start = turns
@@ -298,51 +299,31 @@ pub fn compact_request_turns_for_round(turns: &[Turn]) -> Vec<Turn> {
         .rposition(|t| matches!(t, Turn::User(_)))
         .unwrap_or(0);
 
-    // Identify all ToolResults turns within the active user turn
-    let active_tool_indices: Vec<usize> = turns
-        .iter()
-        .enumerate()
-        .skip(current_turn_start)
-        .filter_map(|(idx, t)| matches!(t, Turn::ToolResults(_)).then_some(idx))
-        .collect();
-
-    let active_count = active_tool_indices.len();
-    // Sliding window W = 2: preserve the last 2 ToolResults in full fidelity.
-    let keep_full_from_idx = if active_count > 2 {
-        active_tool_indices[active_count - 2]
-    } else {
-        current_turn_start
-    };
-
     turns
         .iter()
         .enumerate()
         .map(|(idx, turn)| match turn {
-            Turn::ToolResults(outcomes) => {
-                if idx >= keep_full_from_idx {
-                    turn.clone()
-                } else {
-                    let compacted = outcomes
-                        .iter()
-                        .map(|o| {
-                            let mut copy = o.clone();
-                            if copy.content.len() > 600 {
-                                let snippet: String = copy
-                                    .content
-                                    .char_indices()
-                                    .take_while(|(byte_idx, ch)| *byte_idx + ch.len_utf8() <= 250)
-                                    .map(|(_, ch)| ch)
-                                    .collect();
-                                copy.content = format!(
-                                    "{}... [Output condensed for subsequent round]",
-                                    snippet.trim_end()
-                                );
-                            }
-                            copy
-                        })
-                        .collect();
-                    Turn::ToolResults(compacted)
-                }
+            Turn::ToolResults(outcomes) if idx < current_turn_start => {
+                let compacted = outcomes
+                    .iter()
+                    .map(|o| {
+                        let mut copy = o.clone();
+                        if copy.content.len() > 600 {
+                            let snippet: String = copy
+                                .content
+                                .char_indices()
+                                .take_while(|(byte_idx, ch)| *byte_idx + ch.len_utf8() <= 250)
+                                .map(|(_, ch)| ch)
+                                .collect();
+                            copy.content = format!(
+                                "{}... [Output condensed for subsequent round]",
+                                snippet.trim_end()
+                            );
+                        }
+                        copy
+                    })
+                    .collect();
+                Turn::ToolResults(compacted)
             }
             _ => turn.clone(),
         })
@@ -1129,7 +1110,7 @@ mod tests {
     }
 
     #[test]
-    fn test_compact_request_turns_sliding_window_condenses_older_than_two_in_active_turn() {
+    fn test_compact_request_turns_preserves_all_rounds_in_active_turn() {
         let heavy = "x".repeat(1500);
         let turns = vec![
             Turn::User("active question".into()),
@@ -1178,36 +1159,14 @@ mod tests {
         let compacted = compact_request_turns_for_round(&turns);
         assert_eq!(compacted.len(), 9);
 
-        // Active turn rounds 1 & 2 (indices 2 and 4) must be condensed (>2 rounds old)
-        if let Turn::ToolResults(outcomes) = &compacted[2] {
-            assert!(outcomes[0]
-                .content
-                .contains("... [Output condensed for subsequent round]"));
-            assert!(outcomes[0].content.len() < 400);
-        } else {
-            panic!("Expected ToolResults at index 2");
-        }
-        if let Turn::ToolResults(outcomes) = &compacted[4] {
-            assert!(outcomes[0]
-                .content
-                .contains("... [Output condensed for subsequent round]"));
-            assert!(outcomes[0].content.len() < 400);
-        } else {
-            panic!("Expected ToolResults at index 4");
-        }
-
-        // Active turn rounds 3 & 4 (indices 6 and 8, the last 2 rounds) must remain full
-        if let Turn::ToolResults(outcomes) = &compacted[6] {
-            assert_eq!(outcomes[0].content.len(), 1500);
-            assert!(!outcomes[0].content.contains("[Output condensed"));
-        } else {
-            panic!("Expected ToolResults at index 6");
-        }
-        if let Turn::ToolResults(outcomes) = &compacted[8] {
-            assert_eq!(outcomes[0].content.len(), 1500);
-            assert!(!outcomes[0].content.contains("[Output condensed"));
-        } else {
-            panic!("Expected ToolResults at index 8");
+        // All rounds in the active turn (indices 2, 4, 6, 8) must remain full
+        for idx in [2, 4, 6, 8] {
+            if let Turn::ToolResults(outcomes) = &compacted[idx] {
+                assert_eq!(outcomes[0].content.len(), 1500);
+                assert!(!outcomes[0].content.contains("[Output condensed"));
+            } else {
+                panic!("Expected ToolResults at index {idx}");
+            }
         }
     }
 
