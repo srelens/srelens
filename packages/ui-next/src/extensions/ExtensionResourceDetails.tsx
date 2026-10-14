@@ -11,6 +11,7 @@ import { Icons } from "../lib/icons";
 import { ErrorNotice } from "./ExtensionResults";
 import { useResource } from "../lib/useResource";
 import { HostConfirmation } from "../confirm/HostConfirmation";
+import { useProtectedConfirm } from "../lib/protectedConfirm";
 import { useConfirmationApp } from "../confirm/confirmationApp";
 import { confirmFields } from "../confirm/confirmRequest";
 import { onExtensionActionRequested, takeExtensionAction } from "./actionRequests";
@@ -109,6 +110,14 @@ export function ExtensionResourceDetails({selection,onClose,fullPage=false}:{sel
   const [busy,setBusy]=useState(false);
   const [error,setError]=useState("");
   const [message,setMessage]=useState("");
+  // On a protected cluster Confirm waits for the cluster's name, typed (#101).
+  const typed=useProtectedConfirm(selection.context);
+  // Each review is its own question: a name typed for one answers nothing else.
+  // Cleared DURING render when the review changes, not in an effect, so no
+  // render of the next review is ever committed with the last one's name typed
+  // and Confirm live (see AgentConsent). `pending` is a new object per review.
+  const [typedFor,setTypedFor]=useState(pending);
+  if(typedFor!==pending){setTypedFor(pending);typed.reset();}
   const alive=useRef(true);
   const heading=useRef<HTMLDivElement>(null);
   const review=useRef<HTMLDivElement>(null);
@@ -223,8 +232,9 @@ export function ExtensionResourceDetails({selection,onClose,fullPage=false}:{sel
           cluster={selection.context}
           subject={{kind:"object",namespace:selection.namespace||null,name:selection.name}}
           app={app}
+          details={typed.field}
           actions={<>
-            <Button disabled={busy} onClick={()=>void confirm()}>{busy?"Requesting…":`Confirm ${label(pending.action)}`}</Button>
+            <Button disabled={busy||!typed.ready} onClick={()=>void confirm()}>{busy?"Requesting…":`Confirm ${label(pending.action)}`}</Button>
             <Button variant="outline" disabled={busy} onClick={cancel}>Cancel</Button>
           </>}
         />

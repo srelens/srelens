@@ -10,6 +10,7 @@ import {
 } from "@srelens/core";
 import { Button } from "@srelens/ui-kit";
 import { HostConfirmation, boundedPlainText } from "../confirm/HostConfirmation";
+import { useProtectedConfirm } from "../lib/protectedConfirm";
 import { useConfirmationApp } from "../confirm/confirmationApp";
 import { confirmFields } from "../confirm/confirmRequest";
 import { useResource } from "../lib/useResource";
@@ -152,6 +153,17 @@ export function ExtensionBulkActions({ target, selection, onClear, available }: 
   const [progress, setProgress] = useState<readonly BulkProgress<BulkResource>[] | null>(null);
   const [result, setResult] = useState<BulkActionResult | null>(null);
   const [busy, setBusy] = useState(false);
+  // On a protected cluster the run waits for the cluster's name, typed (#101).
+  const typed = useProtectedConfirm(target.context);
+  // Each review is its own question: a name typed for one answers nothing else.
+  // Cleared DURING render when the action under review changes, not in an
+  // effect, so no render of the next review is committed with the last one's
+  // name typed and the run live (see AgentConsent).
+  const [typedFor, setTypedFor] = useState(pending);
+  if (typedFor !== pending) {
+    setTypedFor(pending);
+    typed.reset();
+  }
   const abort = useRef<AbortController | null>(null);
   const alive = useRef(true);
   const review = useRef<HTMLDivElement>(null);
@@ -305,6 +317,7 @@ export function ExtensionBulkActions({ target, selection, onClear, available }: 
             app={app}
             details={
               <>
+                {typed.field}
                 {applicability.note && (
                   <p className="extension-bulk-applies" data-testid="bulk-applies">
                     {applicability.note}
@@ -322,7 +335,7 @@ export function ExtensionBulkActions({ target, selection, onClear, available }: 
             actions={
               <>
                 <Button
-                  disabled={applicability.applicable.length === 0 || menu.status !== "ready"}
+                  disabled={applicability.applicable.length === 0 || menu.status !== "ready" || !typed.ready}
                   onClick={() => void start(pending)}
                 >
                   {`${label} ${resources(applicability.applicable.length)}`}

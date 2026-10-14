@@ -3,7 +3,7 @@ import argoManifest from "../../../../examples/extensions/argocd.json";
 const declaredMeta = Object.fromEntries([...fluxManifest.actions.filter(action=>action.resource==="helmreleases").map(action=>({...action,name:action.name.replace("helmreleases-","")})),...argoManifest.actions].map(action=>[action.name,{title:action.title,availableWhen:("availableWhen" in action?action.availableWhen:[]) as import("@srelens/core").ActionPredicate[],impact:"medium" as const,confirm:null}]));
 import { act, render, screen, fireEvent, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 vi.mock("@srelens/core", async (original) => ({
   ...(await original<typeof import("@srelens/core")>()),
   inspectExtensionResource: vi.fn(),
@@ -13,6 +13,10 @@ vi.mock("@srelens/core", async (original) => ({
 import { actOnExtensionResource, inspectExtensionResource, listExtensions } from "@srelens/core";
 import { ExtensionBulkActions } from "./ExtensionBulkActions";
 import type { BulkResource } from "./bulkActions";
+import type { ClusterContext } from "@srelens/core";
+import { resetContexts, setContexts } from "../lib/clusters";
+import { defaultState } from "../lib/tabs";
+import { getState, setState, setWorkspaceProtected } from "../lib/tabsStore";
 
 const target = {
   id: "org.srelens.flux",
@@ -357,4 +361,40 @@ it("reveals distinct full escaped identities on focus and hover throughout a bul
     expect(field.textContent).toBe(field.getAttribute("title"));
     expect(field.textContent!.length).toBeGreaterThan(100);
   }
+});
+
+/** #101: on a protected cluster the run waits for the cluster's name, typed. */
+describe("bulk actions on a protected cluster (#101)", () => {
+  const ctx: ClusterContext = { name: "cluster/a", stableId: "a", key: "a", cluster: "a", server: "", isCurrent: true, sourceFile: "", authKind: "token" };
+
+  beforeEach(() => {
+    setContexts([ctx]);
+    setState(defaultState([ctx]));
+    setWorkspaceProtected(getState().currentId, true);
+  });
+  afterEach(() => {
+    resetContexts();
+    setState(defaultState([]));
+  });
+
+  it("holds the run until the cluster's name is typed, and forgets it with the review", async () => {
+    render(<ExtensionBulkActions target={target} selection={rows(3)} onClear={vi.fn()} />);
+    await openConfirmation();
+    const run = () => screen.getByRole("button", { name: "Reconcile 3 resources" }) as HTMLButtonElement;
+    const typed = () => screen.getByRole("textbox", { name: "Type cluster/a to confirm" }) as HTMLInputElement;
+    expect(screen.getByText("cluster/a is protected (workspace Default).")).toBeTruthy();
+    expect(run().disabled).toBe(true);
+
+    fireEvent.change(typed(), { target: { value: "cluster/a" } });
+    expect(run().disabled).toBe(false);
+
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    await openConfirmation();
+    expect(typed().value).toBe("");
+    expect(run().disabled).toBe(true);
+
+    fireEvent.change(typed(), { target: { value: "cluster/a" } });
+    fireEvent.click(run());
+    await waitFor(() => expect(actOnExtensionResource).toHaveBeenCalledTimes(3));
+  });
 });
