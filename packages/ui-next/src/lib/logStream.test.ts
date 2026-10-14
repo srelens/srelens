@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { act, renderHook, waitFor } from "@testing-library/react";
-import type { LogStatus, LogTarget } from "@srelens/core";
+import type { LogStatus, LogStreamOptions, LogTarget, SpoolPage } from "@srelens/core";
 
 const startLogStream = vi.fn();
 /** Calls through to the real ring; counts how often the hook folds lines into it. */
@@ -732,5 +732,185 @@ describe("useLogStream with another log source", () => {
     expect(result.current.status).toBe("live");
     unmount();
     expect(stop).toHaveBeenCalled();
+  });
+});
+
+/** A stream that keeps history: the caller fires frames and decides what a read returns. */
+function fakeSpooledStream() {
+  let options!: LogStreamOptions;
+  const stop = vi.fn();
+  const readEarlier = vi.fn<(before: number, limit: number) => Promise<SpoolPage>>();
+  const exportSpool = vi.fn(async () => "/home/u/web.log");
+  startLogStream.mockImplementation(
+    (_c: string, _n: string, _t: LogTarget[], _line: unknown, _status: unknown, opts: LogStreamOptions) => {
+      options = opts;
+      return Promise.resolve({ stop, readEarlier, exportSpool });
+    },
+  );
+  const lines = (texts: string[]) => texts.map((text) => ({ source: "", text }));
+  return {
+    readEarlier,
+    exportSpool,
+    options: () => options,
+    frame: (seq: number, texts: string[], first = 1) => act(() => options.onLines!(lines(texts), { seq, first })),
+    page: (seq: number, texts: string[], first = 1): SpoolPage => ({ first, seq, lines: lines(texts) }),
+    failed: (reason: string) => act(() => options.onSpoolFailed!(reason)),
+  };
+}
+
+const texts = (r: { current: { lines: readonly { text: string }[] } }) => r.current.lines.map((l) => l.text);
+
+describe("useLogStream with history on disk (#914)", () => {
+  it("asks for history and frames only when told to", async () => {
+    const s = fakeSpooledStream();
+    renderHook(() => useLogStream("ctx", "ns", [target], { spoolMaxBytes: 1024 }));
+    await waitFor(() => expect(startLogStream).toHaveBeenCalled());
+    expect(s.options().spoolMaxBytes).toBe(1024);
+    expect(typeof s.options().onLines).toBe("function");
+
+    startLogStream.mockReset();
+    const t = fakeSpooledStream();
+    renderHook(() => useLogStream("ctx", "ns", [target]));
+    await waitFor(() => expect(startLogStream).toHaveBeenCalled());
+    expect(t.options().spoolMaxBytes).toBeUndefined();
+    expect(t.options().onLines).toBeUndefined();
+  });
+
+  it("shows a frame's lines and where history starts", async () => {
+    const s = fakeSpooledStream();
+    const { result } = renderHook(() => useLogStream("ctx", "ns", [target], { spoolMaxBytes: 1024 }));
+    await waitFor(() => expect(startLogStream).toHaveBeenCalled());
+    s.frame(1, ["a", "b"]);
+    await waitFor(() => expect(texts(result)).toEqual(["a", "b"]));
+    expect(result.current.history).toEqual({ first: 1 });
+    expect(result.current.dropped).toBe(0);
+  });
+
+  it("counts the lines a frame skipped as dropped and starts again at the frame", async () => {
+    const s = fakeSpooledStream();
+    const { result } = renderHook(() => useLogStream("ctx", "ns", [target], { spoolMaxBytes: 1024 }));
+    await waitFor(() => expect(startLogStream).toHaveBeenCalled());
+    s.frame(1, ["a", "b"]);
+    s.frame(10, ["j"]);
+    await waitFor(() => expect(texts(result)).toEqual(["j"]));
+    expect(result.current.dropped).toBe(9);
+  });
+
+  it("loads the page before the oldest line shown and lowers dropped by as many", async () => {
+    const s = fakeSpooledStream();
+    const { result } = renderHook(() => useLogStream("ctx", "ns", [target], { spoolMaxBytes: 1024 }));
+    await waitFor(() => expect(startLogStream).toHaveBeenCalled());
+    s.frame(4, ["d", "e"]);
+    await waitFor(() => expect(texts(result)).toEqual(["d", "e"]));
+    s.readEarlier.mockResolvedValueOnce(s.page(1, ["a", "b", "c"]));
+    await act(() => result.current.loadEarlier());
+    expect(s.readEarlier).toHaveBeenCalledWith(4, 5000);
+    expect(texts(result)).toEqual(["a", "b", "c", "d", "e"]);
+    expect(result.current.dropped).toBe(0);
+  });
+
+  it("keeps loaded lines while new ones arrive: a load leaves a page of room above them", async () => {
+    const s = fakeSpooledStream();
+    const { result } = renderHook(() => useLogStream("ctx", "ns", [target], { spoolMaxBytes: 1024 }));
+    await waitFor(() => expect(startLogStream).toHaveBeenCalled());
+    const many = (from: number, n: number) => Array.from({ length: n }, (_, i) => `l${from + i}`);
+    s.frame(5001, many(5001, 5000));
+    await waitFor(() => expect(result.current.lines.length).toBe(5000));
+    s.readEarlier.mockResolvedValueOnce(s.page(1, many(1, 5000)));
+    await act(() => result.current.loadEarlier());
+    expect(result.current.lines.length).toBe(10000);
+    s.frame(10001, ["new"]);
+    await waitFor(() => expect(result.current.lines.length).toBe(10001));
+    expect(result.current.lines[0].text).toBe("l1");
+  });
+
+  it("while paused, loads into the frozen view and leaves the pending count alone", async () => {
+    const s = fakeSpooledStream();
+    const { result } = renderHook(() => useLogStream("ctx", "ns", [target], { spoolMaxBytes: 1024 }));
+    await waitFor(() => expect(startLogStream).toHaveBeenCalled());
+    s.frame(4, ["d", "e"]);
+    await waitFor(() => expect(texts(result)).toEqual(["d", "e"]));
+    act(() => result.current.togglePause());
+    s.frame(6, ["f"]);
+    await waitFor(() => expect(result.current.pendingWhilePaused).toBe(1));
+    s.readEarlier.mockResolvedValueOnce(s.page(1, ["a", "b", "c"]));
+    await act(() => result.current.loadEarlier());
+    expect(texts(result)).toEqual(["a", "b", "c", "d", "e"]);
+    expect(result.current.pendingWhilePaused).toBe(1);
+    act(() => result.current.togglePause());
+    expect(texts(result)).toEqual(["a", "b", "c", "d", "e", "f"]);
+  });
+
+  it("keeps the view frozen when the reader pauses while a page is being read", async () => {
+    const s = fakeSpooledStream();
+    const { result } = renderHook(() => useLogStream("ctx", "ns", [target], { spoolMaxBytes: 1024 }));
+    await waitFor(() => expect(startLogStream).toHaveBeenCalled());
+    s.frame(4, ["d", "e"]);
+    await waitFor(() => expect(texts(result)).toEqual(["d", "e"]));
+    let arrive!: (page: SpoolPage) => void;
+    s.readEarlier.mockReturnValueOnce(new Promise<SpoolPage>((resolve) => (arrive = resolve)));
+    let load!: Promise<void>;
+    act(() => {
+      load = result.current.loadEarlier();
+    });
+    act(() => result.current.togglePause());
+    s.frame(6, ["f"]);
+    await waitFor(() => expect(result.current.pendingWhilePaused).toBe(1));
+    await act(async () => {
+      arrive(s.page(1, ["a", "b", "c"]));
+      await load;
+    });
+    // The page joins the frozen view, but the line that came in during the pause stays out of it.
+    expect(texts(result)).toEqual(["a", "b", "c", "d", "e"]);
+    expect(result.current.pendingWhilePaused).toBe(1);
+    act(() => result.current.togglePause());
+    expect(texts(result)).toEqual(["a", "b", "c", "d", "e", "f"]);
+  });
+
+  it("does not show a page that no longer joins the lines shown, and says why", async () => {
+    const s = fakeSpooledStream();
+    const { result } = renderHook(() => useLogStream("ctx", "ns", [target], { spoolMaxBytes: 1024 }));
+    await waitFor(() => expect(startLogStream).toHaveBeenCalled());
+    s.frame(4, ["d"]);
+    await waitFor(() => expect(texts(result)).toEqual(["d"]));
+    s.readEarlier.mockResolvedValueOnce(s.page(1, ["a", "b"])); // ends at 3, not 4
+    await act(() => result.current.loadEarlier());
+    expect(texts(result)).toEqual(["d"]);
+    expect(result.current.loadError).toBeInstanceOf(Error);
+  });
+
+  it("reports a failed read and keeps the lines", async () => {
+    const s = fakeSpooledStream();
+    const { result } = renderHook(() => useLogStream("ctx", "ns", [target], { spoolMaxBytes: 1024 }));
+    await waitFor(() => expect(startLogStream).toHaveBeenCalled());
+    s.frame(4, ["d"]);
+    await waitFor(() => expect(texts(result)).toEqual(["d"]));
+    s.readEarlier.mockRejectedValueOnce(new Error("this log stream has ended"));
+    await act(() => result.current.loadEarlier());
+    expect(texts(result)).toEqual(["d"]);
+    expect(String(result.current.loadError)).toContain("has ended");
+    expect(result.current.loadingEarlier).toBe(false);
+  });
+
+  it("clear counts the cleared lines as on disk", async () => {
+    const s = fakeSpooledStream();
+    const { result } = renderHook(() => useLogStream("ctx", "ns", [target], { spoolMaxBytes: 1024 }));
+    await waitFor(() => expect(startLogStream).toHaveBeenCalled());
+    s.frame(1, ["a", "b", "c"]);
+    await waitFor(() => expect(texts(result)).toEqual(["a", "b", "c"]));
+    act(() => result.current.clear());
+    expect(texts(result)).toEqual([]);
+    expect(result.current.dropped).toBe(3);
+  });
+
+  it("reports when history stopped, and exports through the stream", async () => {
+    const s = fakeSpooledStream();
+    const { result } = renderHook(() => useLogStream("ctx", "ns", [target], { spoolMaxBytes: 1024 }));
+    await waitFor(() => expect(result.current.exportSpool).toBeDefined());
+    await expect(result.current.exportSpool!("web.log", 600)).resolves.toBe("/home/u/web.log");
+    expect(s.exportSpool).toHaveBeenCalledWith("web.log", 600);
+    s.frame(1, ["a"]);
+    s.failed("No space left on device");
+    await waitFor(() => expect(result.current.history).toEqual({ first: 1, failed: "No space left on device" }));
   });
 });

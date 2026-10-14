@@ -4,14 +4,17 @@ import {
   clearLogBuffer,
   createLogBuffer,
   describeError,
+  prependLogLines,
   startLogStream,
   type FriendlyError,
   type LogBuffer,
+  type LogFrame,
   type LogLine,
   type LogStatus,
   type LogStream,
   type LogStreamOptions,
   type LogTarget,
+  type SpoolPage,
 } from "@srelens/core";
 
 /**
@@ -83,6 +86,12 @@ import {
  * two questions — a blip, or the whole tail — they are looking at. Pair the
  * word with `logConnectionStatus` from `@srelens/core` for its label and
  * tone; this module deliberately owns no vocabulary of its own.
+ *
+ * **History on disk (#914).** With `spoolMaxBytes` the cluster's stream keeps
+ * every line on disk and sends them in frames that say which line each starts
+ * at. The ring then holds one unbroken run of lines, and `dropped` is the
+ * number of lines before it, so `loadEarlier` can read the page that ends where
+ * the run starts and put it in front: see `onLines` and `loadEarlier`.
  */
 
 /**
@@ -106,6 +115,11 @@ export interface UseLogStreamOptions extends LogStreamOptions {
    * when the key changes, never because a new `open` function arrived.
    */
   source?: { key: string; open: LogSourceOpener };
+  /**
+   * Keep the stream's history on disk, up to this many bytes (#914). Only the
+   * cluster's own stream can; another `source` ignores it.
+   */
+  spoolMaxBytes?: number;
 }
 
 /** Connection health, plus the states `startLogStream` itself can't report:
@@ -182,9 +196,30 @@ export interface UseLogStreamResult {
    * scrollback was cleared, rather than the clear passing unremarked.
    */
   restartCount: number;
+  /**
+   * The stream's history on disk, once its first frame says where it starts:
+   * `first` is the oldest line still there, and `failed` why it stopped. With
+   * history, `dropped` counts every line before the first one in memory, so
+   * `dropped + 1 - first` are on disk and loadable.
+   */
+  history?: { first: number; failed?: string };
+  /** Read the page before the oldest line shown, from the history on disk. */
+  loadEarlier: () => Promise<void>;
+  loadingEarlier: boolean;
+  /** Why the last `loadEarlier` showed nothing, if it did not. */
+  loadError?: unknown;
+  /** Save the stream's history: all, or the last `sinceSeconds`. Only with history. */
+  exportSpool?: (filename: string, sinceSeconds?: number) => Promise<string | null>;
 }
 
 const DEFAULT_CAPACITY = 5000;
+/** How many earlier lines one "Load earlier" reads back (#914). */
+export const EARLIER_PAGE = 5000;
+/**
+ * The most lines the view holds once earlier pages are loaded.
+ * ponytail: a fixed ceiling; raise it once the throttled facets are measured over 50k.
+ */
+export const MAX_LOADED_LINES = 50_000;
 
 /**
  * Run `fn` before the next frame is drawn: a commit is a render of the whole screen, and the backend can deliver a
@@ -221,6 +256,7 @@ export function useLogStream(
   const timestamps = options.timestamps ?? false;
   const sinceSeconds = options.sinceSeconds;
   const tailLines = options.tailLines;
+  const spoolMaxBytes = options.spoolMaxBytes;
   const key = targetsKey(targets);
   const sourceKey = options.source?.key ?? "";
   // Read at connect time, so a caller that passes a fresh function each render
@@ -236,6 +272,10 @@ export function useLogStream(
   /** Takes back the commit asked for, while one is. */
   const cancelCommitRef = useRef<(() => void) | undefined>(undefined);
   const firstRunRef = useRef(true);
+  /** The open stream, for reading and exporting its history. */
+  const streamRef = useRef<LogStream | undefined>(undefined);
+  /** Bumped on every (re)connect, so a read that outlives its stream is ignored. */
+  const generationRef = useRef(0);
 
   const [view, setView] = useState(() => bufferRef.current);
   /** The ring as last shown, for counting what has come since: what a commit reads, `view` may not be yet. */
@@ -246,6 +286,10 @@ export function useLogStream(
   const [counts, setCounts] = useState<LogTargetCounts>(NO_TARGETS);
   const [error, setError] = useState<FriendlyError | undefined>(undefined);
   const [restartCount, setRestartCount] = useState(0);
+  const [history, setHistory] = useState<{ first: number; failed?: string } | undefined>(undefined);
+  const [loadingEarlier, setLoadingEarlier] = useState(false);
+  const [loadError, setLoadError] = useState<unknown>(undefined);
+  const [canExport, setCanExport] = useState(false);
 
   const fold = useCallback(() => {
     if (batchRef.current.length === 0) return;
@@ -306,6 +350,32 @@ export function useLogStream(
     [fold, scheduleCommit],
   );
 
+  /**
+   * A frame from a stream with history (#914). The ring always holds one
+   * unbroken run of lines, and `dropped` counts every line before it, which
+   * is what `loadEarlier` and the banner read. So a frame that starts past the
+   * next line expected (the backend kept the ones between only on disk)
+   * starts the ring again at the frame.
+   */
+  const onLines = useCallback(
+    (lines: LogLine[], frame: LogFrame) => {
+      const buffer = bufferRef.current;
+      const expected = buffer.dropped + buffer.lines.length + batchRef.current.length + 1;
+      if (frame.seq > expected) {
+        fold();
+        bufferRef.current = { capacity: bufferRef.current.capacity, lines: [], dropped: frame.seq - 1 };
+      }
+      const first = frame.first;
+      if (first !== undefined) {
+        setHistory((h) => (h !== undefined && h.first === first && h.failed === undefined ? h : { first }));
+      }
+      batchRef.current.push(...lines);
+      if (batchRef.current.length >= bufferRef.current.capacity) fold();
+      scheduleCommit();
+    },
+    [fold, scheduleCommit],
+  );
+
   const togglePause = useCallback(() => {
     const next = !pausedRef.current;
     pausedRef.current = next;
@@ -327,10 +397,89 @@ export function useLogStream(
   );
 
   const clear = useCallback(() => {
+    const buffer = bufferRef.current;
+    // With history the cleared lines are on disk, not gone (#914): they move
+    // into `dropped`, so the banner can still offer them.
+    const kept = streamRef.current?.readEarlier !== undefined;
+    bufferRef.current = kept
+      ? { capacity, lines: [], dropped: buffer.dropped + buffer.lines.length + batchRef.current.length }
+      : clearLogBuffer(buffer);
     batchRef.current = [];
-    bufferRef.current = clearLogBuffer(bufferRef.current);
     show(bufferRef.current);
-  }, [show]);
+  }, [show, capacity]);
+
+  /**
+   * Read the page before the oldest line shown and put it in front (#914).
+   *
+   * Following, the ring grows by a page first, so lines arriving during the
+   * read do not push the oldest line shown out from under it. While paused
+   * or held, the page goes into the frozen view, and into the ring too if
+   * the ring still starts where the view does. On resume the view shows the
+   * ring, as ever. A page that no longer ends where the lines in memory start
+   * would leave a hole, so it is not shown, and `loadError` says why.
+   */
+  const loadEarlier = useCallback(async () => {
+    const stream = streamRef.current;
+    if (!stream?.readEarlier) return;
+    fold();
+    const isFrozen = () => pausedRef.current || heldRef.current;
+    const from = isFrozen() ? shownRef.current : bufferRef.current;
+    const before = from.dropped + 1;
+    const room = MAX_LOADED_LINES - from.lines.length;
+    if (room <= 0) return;
+    const generation = generationRef.current;
+    /** Room for `extra` more lines and a page above them, so live lines do not push a loaded page straight out. */
+    const roomFor = (b: LogBuffer, extra: number) =>
+      Math.min(MAX_LOADED_LINES, b.lines.length + extra + EARLIER_PAGE);
+    if (!isFrozen()) {
+      const b = bufferRef.current;
+      bufferRef.current = { ...b, capacity: Math.max(b.capacity, roomFor(b, EARLIER_PAGE)) };
+    }
+    setLoadingEarlier(true);
+    setLoadError(undefined);
+    let page: SpoolPage;
+    try {
+      page = await stream.readEarlier(before, Math.min(EARLIER_PAGE, room));
+    } catch (e) {
+      if (generation === generationRef.current) {
+        setLoadError(e);
+        setLoadingEarlier(false);
+      }
+      return;
+    }
+    if (generation !== generationRef.current) return;
+    setLoadingEarlier(false);
+    setHistory((h) => (h === undefined || h.first === page.first ? h : { ...h, first: page.first }));
+    if (page.lines.length === 0) return;
+    const end = page.seq + page.lines.length;
+    const joins = (b: LogBuffer) => b.dropped + 1 === end;
+    // Asked again: the reader may have paused, or let go, while the page was read.
+    if (isFrozen()) {
+      if (!joins(shownRef.current)) {
+        setLoadError(new Error("Those lines moved on while they were read. Load them again."));
+        return;
+      }
+      if (joins(bufferRef.current)) {
+        bufferRef.current = prependLogLines(
+          bufferRef.current,
+          page.lines,
+          roomFor(bufferRef.current, page.lines.length),
+        );
+      }
+      shownRef.current = prependLogLines(shownRef.current, page.lines, shownRef.current.capacity);
+      setView(shownRef.current);
+      return;
+    }
+    fold();
+    if (!joins(bufferRef.current)) {
+      setLoadError(
+        new Error("The stream moved past those lines while they were read. Pause it, then load them again."),
+      );
+      return;
+    }
+    bufferRef.current = prependLogLines(bufferRef.current, page.lines, roomFor(bufferRef.current, page.lines.length));
+    show(bufferRef.current);
+  }, [fold, show]);
 
   useEffect(() => {
     let cancelled = false;
@@ -344,6 +493,12 @@ export function useLogStream(
     const sources = new Set(targets.map((t) => t.label ?? ""));
     setCounts({ live: 0, reconnecting: 0, total: sources.size });
     setError(undefined);
+    generationRef.current += 1;
+    streamRef.current = undefined;
+    setHistory(undefined);
+    setLoadError(undefined);
+    setLoadingEarlier(false);
+    setCanExport(false);
 
     if (targets.length === 0) {
       // F1: a quiet not-yet, not a failure. `startLogStream` throws on an
@@ -403,6 +558,19 @@ export function useLogStream(
       onLine(source, text, truncated);
     };
 
+    // History is the cluster's own stream's to keep (#914); another source
+    // ignores the request, so it is not made.
+    const streamOptions: LogStreamOptions = { timestamps, sinceSeconds, tailLines };
+    if (spoolMaxBytes !== undefined && !openRef.current) {
+      streamOptions.spoolMaxBytes = spoolMaxBytes;
+      streamOptions.onLines = (lines, frame) => {
+        if (!cancelled) onLines(lines, frame);
+      };
+      streamOptions.onSpoolFailed = (reason) => {
+        if (!cancelled) setHistory((h) => ({ first: h?.first ?? 1, failed: reason }));
+      };
+    }
+
     const open: LogSourceOpener =
       openRef.current ??
       ((targets, line, status, options) => startLogStream(context, namespace, targets, line, status, options));
@@ -422,7 +590,7 @@ export function useLogStream(
         }
         setCounts({ live, reconnecting, completed, total });
       },
-      { timestamps, sinceSeconds, tailLines },
+      streamOptions,
     ).then(
       (stream) => {
         // The dangerous window: this component (or this connection's
@@ -435,6 +603,8 @@ export function useLogStream(
           return;
         }
         stopFn = stream.stop;
+        streamRef.current = stream;
+        setCanExport(stream.exportSpool !== undefined);
       },
       (e: unknown) => {
         if (cancelled) return;
@@ -444,10 +614,24 @@ export function useLogStream(
 
     return () => {
       cancelled = true;
+      streamRef.current = undefined;
       stopFn?.();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [context, namespace, key, sourceKey, sinceSeconds, tailLines, timestamps, capacity, onLine, show]);
+  }, [
+    context,
+    namespace,
+    key,
+    sourceKey,
+    sinceSeconds,
+    tailLines,
+    timestamps,
+    capacity,
+    spoolMaxBytes,
+    onLine,
+    onLines,
+    show,
+  ]);
 
   return useMemo(
     () => ({
@@ -468,7 +652,31 @@ export function useLogStream(
       hold,
       clear,
       restartCount,
+      history,
+      loadEarlier,
+      loadingEarlier,
+      loadError,
+      exportSpool: canExport
+        ? (filename: string, sinceSeconds?: number) =>
+            streamRef.current?.exportSpool?.(filename, sinceSeconds) ?? Promise.resolve(null)
+        : undefined,
     }),
-    [view, counts, error, paused, held, pendingWhilePaused, togglePause, hold, clear, restartCount],
+    [
+      view,
+      counts,
+      error,
+      paused,
+      held,
+      pendingWhilePaused,
+      togglePause,
+      hold,
+      clear,
+      restartCount,
+      history,
+      loadEarlier,
+      loadingEarlier,
+      loadError,
+      canExport,
+    ],
   );
 }
