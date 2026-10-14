@@ -41,6 +41,7 @@ import { LogLine } from "../LogLine";
 import { Mark } from "../Mark";
 import { Meter } from "../Meter";
 import { MultiSelect } from "../MultiSelect";
+import { PickerGroup, PickerRow } from "../picker";
 import { MetricTile } from "../MetricTile";
 import { NavIcon } from "../NavIcon";
 import { PairList } from "../PairList";
@@ -749,6 +750,21 @@ export function Gallery() {
         <p className="text-[0.75rem] text-muted">
           selected: {picked.length === 0 ? "(all)" : picked.join(", ")}
         </p>
+      </section>
+
+      <section>
+        <h2>PickerGroup</h2>
+        {/* A second kind of choice in the same picker, under its own heading:
+            the namespace picker's collections above its namespaces (#881). */}
+        <SectionedPicker grouped />
+      </section>
+
+      <section>
+        <h2>PickerRow</h2>
+        {/* The row every picker draws, for a caller's own rows in a picker's
+            leading section. A box for an independent choice, a check for one
+            that wins. */}
+        <SectionedPicker grouped={false} />
       </section>
 
       <section>
@@ -2058,5 +2074,40 @@ export function Gallery() {
         <TabStrip tabs={[]} activeId="" onSelect={() => {}} onNew={() => {}} />
       </section>
     </div>
+  );
+}
+
+/** A namespace picker with saved groups above the namespaces, for the two entries above. */
+function SectionedPicker({ grouped }: { grouped: boolean }) {
+  const [groups, setGroups] = useState<string[]>([]);
+  const [picked, setPicked] = useState<string[]>([]);
+  const rows = ["prod", "staging"].map((name) => (
+    <PickerRow
+      key={name}
+      value={`group:${name}`}
+      label={name}
+      checked={groups.includes(name)}
+      onSelect={() => {
+        setPicked([]);
+        setGroups((current) => (current.includes(name) ? current.filter((g) => g !== name) : [...current, name]));
+      }}
+      mark="box"
+    />
+  ));
+  return (
+    <MultiSelect
+      options={[{ value: "prod-eu" }, { value: "staging-eu" }, { value: "dev" }]}
+      selection={picked}
+      onChange={(next) => {
+        setGroups([]);
+        setPicked(next);
+      }}
+      allLabel="All namespaces"
+      allChecked={groups.length === 0 && picked.length === 0}
+      summary={groups.length > 0 ? groups.join(", ") : undefined}
+      heading={grouped ? "Namespaces" : undefined}
+      leading={() => (grouped ? <PickerGroup heading="Collections">{rows}</PickerGroup> : rows)}
+      ariaLabel={grouped ? "Namespaces, with collections" : "Namespaces, with extra rows"}
+    />
   );
 }

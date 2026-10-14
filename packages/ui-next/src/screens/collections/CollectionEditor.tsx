@@ -7,7 +7,7 @@ import {
   type CollectionProblem,
   type NamespaceResolution,
 } from "@srelens/core";
-import { Badge, Button, Dialog, Field, TextInput } from "@srelens/ui-kit";
+import { Button, Dialog, Field, TextInput } from "@srelens/ui-kit";
 import { useCollections, saveCollection } from "../../lib/collections";
 import { useListing } from "../../lib/collectionScope";
 
@@ -135,19 +135,19 @@ export function CollectionDialog({ editing, members, clusterId, clusterName, onC
     <Dialog
       title={editing ? `Edit ${editing.name}` : "New namespace collection"}
       onClose={onClose}
-      maxWidth={620}
+      maxWidth={560}
       footer={
         <>
-          <Button variant="secondary" onClick={onClose}>
+          <Button variant="secondary" size="sm" onClick={onClose}>
             Cancel
           </Button>
-          <Button variant="primary" onClick={save} disabled={problems === null || (!canSave && touchedName)}>
+          <Button variant="primary" size="sm" onClick={save} disabled={problems === null || (!canSave && touchedName)}>
             {editing ? "Save" : "Save collection"}
           </Button>
         </>
       }
     >
-      <div className="flex flex-col gap-3 text-[0.8125rem]">
+      <div className="flex flex-col gap-3 p-3 text-[0.8125rem]">
         <Field label="Name" error={problemText(shown, "name")}>
           <TextInput
             value={draft.name}
@@ -160,12 +160,12 @@ export function CollectionDialog({ editing, members, clusterId, clusterName, onC
            
           />
         </Field>
-        <Field label="Description" hint="Optional." error={problemText(shown, "description")}>
+        <Field label="Description (optional)" error={problemText(shown, "description")}>
           <TextInput value={draft.description} onValueChange={set("description")} />
         </Field>
         <Field
           label="Members"
-          hint="Namespaces that are always in, whatever the rules below say. One per line, or paste a list separated by commas."
+          hint="Always included. One per line, or paste a comma-separated list."
           error={problemText(shown, "members")}
         >
           <textarea
@@ -173,14 +173,14 @@ export function CollectionDialog({ editing, members, clusterId, clusterName, onC
             aria-label="Members"
             value={draft.members}
             onChange={(e) => set("members")(e.target.value)}
-            rows={4}
+            rows={3}
             className={TEXTAREA}
             placeholder={"payments\ncheckout"}
           />
         </Field>
         <Field
           label="Patterns"
-          hint="Names to match, * for any run of characters: prod-*, *-canary, team-*-staging. Case-sensitive."
+          hint="One per line; * matches any characters, e.g. prod-*, *-canary."
           error={problemText(shown, "patterns")}
         >
           <textarea
@@ -195,7 +195,7 @@ export function CollectionDialog({ editing, members, clusterId, clusterName, onC
         </Field>
         <Field
           label="Label selector"
-          hint="As kubectl get -l takes it: env=prod,team in (shop,data). With patterns, a namespace has to match both."
+          hint="As kubectl get -l takes it. With patterns, a namespace must match both."
           error={problemText(shown, "labelSelector")}
         >
           <TextInput
@@ -271,19 +271,24 @@ function Preview({
           {result.partial && " These credentials cannot list every namespace, so this may be partial."}
         </p>
         {matched.length > 0 && (
-          <p className="path mt-1 text-muted" data-slot="preview-matched">
+          <p className="mt-1 text-[0.75rem] text-muted" data-slot="preview-matched">
             {matched.slice(0, PREVIEW_SHOWN).join(", ")}
             {matched.length > PREVIEW_SHOWN && ` and ${matched.length - PREVIEW_SHOWN} more`}
           </p>
         )}
         {match && match.members.length > 0 && (
-          <ul className="mt-2 flex flex-wrap gap-1.5" aria-label="Members">
+          // A word beside each member, and the colour on that word: never the
+          // colour alone. Only the ones that need looking at are toned.
+          <ul className="mt-1.5 flex flex-col gap-0.5" aria-label="Members">
             {match.members.map((m) => (
-              <li key={m.name} className="flex items-center gap-1" data-member={m.name}>
-                <span className="font-mono text-[0.75rem]">{m.name}</span>
-                <Badge tone={m.status === "found" ? "ok" : m.status === "missing" ? "warn" : "muted"}>
+              <li key={m.name} className="flex items-baseline gap-2 text-[0.75rem]" data-member={m.name}>
+                <span className="min-w-0 truncate font-mono">{m.name}</span>
+                <span
+                  className="shrink-0"
+                  style={{ color: m.status === "missing" ? "var(--warn)" : "var(--ink-muted)" }}
+                >
                   {m.status === "found" ? "found" : m.status === "missing" ? "not found" : "unknown"}
-                </Badge>
+                </span>
               </li>
             ))}
           </ul>
@@ -293,7 +298,9 @@ function Preview({
   }
 
   return (
-    <section aria-label="Preview" className="rounded-md border border-rule px-3 py-2">
+    // Ruled off from the form, not boxed: a card inside the dialog's card is
+    // one frame too many.
+    <section aria-label="Preview" className="rule-t -mx-3 px-3 pt-3">
       <p className="eyebrow mb-1">Preview</p>
       {body}
     </section>
