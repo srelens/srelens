@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach, type Mock } from "vitest";
+import { Profiler } from "react";
 import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 
@@ -1408,5 +1409,83 @@ describe("on a protected cluster (#101)", () => {
     expect(approve().disabled).toBe(false);
     await userEvent.click(approve());
     await waitFor(() => expect(core.respondToConfirm).toHaveBeenCalledWith("p5", true));
+  });
+
+  /**
+   * What each COMMIT put on screen, not what the screen settled to. `act` and
+   * `waitFor` both look after React has flushed its effects, so a render that
+   * showed the next request beside the last one's typed name — with Approve
+   * live — has already been corrected by the time a test can look. `Profiler`'s
+   * `onRender` runs in the layout phase of every commit: after the DOM is
+   * mutated, before a passive effect can clear anything. Each sample is the
+   * dialog exactly as a reader (or a click) could have met it.
+   */
+  describe("between one request and the next", () => {
+    const commits: Array<{ question: string | null; approveDisabled: boolean | null }> = [];
+    const NEXT = "Drain node-8 in cluster prod?";
+
+    beforeEach(() => {
+      commits.length = 0;
+    });
+
+    const sample = () => {
+      const question = document.querySelector('[data-testid="host-confirm-question"]')?.textContent ?? null;
+      const confirm = document.querySelector<HTMLButtonElement>('[data-slot="dialog-content"] [data-variant="danger"]');
+      commits.push({ question, approveDisabled: confirm ? confirm.disabled : null });
+    };
+
+    async function mountProbed(): Promise<void> {
+      render(
+        <Profiler id="consent" onRender={sample}>
+          <AgentConsent />
+        </Profiler>,
+      );
+      await settleAll();
+    }
+
+    /**
+     * Every commit that showed the next request. The probe must have seen at
+     * least one, and found Approve in each: a selector that matched nothing
+     * would read `null` and let the checks below pass for nothing.
+     */
+    function commitsShowingNext() {
+      const next = commits.filter((c) => c.question === NEXT);
+      expect(next.length).toBeGreaterThan(0);
+      expect(next.every((c) => c.approveDisabled !== null)).toBe(true);
+      return next;
+    }
+
+    it("never commits the next request with the last one's name typed and Approve live", async () => {
+      await mountProbed();
+      drain("p3");
+      drain("p4", "node-8");
+      await screen.findByText("prod is protected (workspace Default).");
+      await userEvent.type(typed(), "prod");
+      expect(approve().disabled).toBe(false);
+
+      commits.length = 0;
+      await userEvent.click(approve());
+      expect(await screen.findByText(NEXT)).toBeTruthy();
+      await waitFor(() => expect(typed().value).toBe(""));
+
+      expect(commitsShowingNext().filter((c) => c.approveDisabled === false)).toEqual([]);
+    });
+
+    it("never commits the next request with the last one's name typed when the host settles the one on screen", async () => {
+      await mountProbed();
+      drain("p3");
+      drain("p4", "node-8");
+      await screen.findByText("prod is protected (workspace Default).");
+      await userEvent.type(typed(), "prod");
+      expect(approve().disabled).toBe(false);
+
+      commits.length = 0;
+      // Timed out, or answered elsewhere: p4 is the question now.
+      emit(RESOLVED, { id: "p3" });
+      expect(await screen.findByText(NEXT)).toBeTruthy();
+      await waitFor(() => expect(typed().value).toBe(""));
+
+      expect(commitsShowingNext().filter((c) => c.approveDisabled === false)).toEqual([]);
+    });
   });
 });

@@ -281,11 +281,19 @@ export function AgentConsent() {
    * seconds still run.
    */
   const typed = useProtectedConfirm(current?.target?.cluster);
-  const resetTyped = typed.reset;
   // Each request is its own question: a name typed for one answers nothing else.
-  useEffect(() => {
-    resetTyped();
-  }, [current?.id, resetTyped]);
+  // Cleared DURING render, by React's adjust-state-on-prop-change pattern, and
+  // not in an effect. `answer()` shifts the queue and clears `busy` in one
+  // batch, and the host settling the request on screen shifts it too; an effect
+  // runs only after that render has been committed, so the next request would
+  // be on screen for a frame with the last one's name typed and Approve live.
+  // A state write during render makes React render again before it commits,
+  // so no render with the stale name is ever committed.
+  const [typedFor, setTypedFor] = useState(current?.id);
+  if (typedFor !== current?.id) {
+    setTypedFor(current?.id);
+    typed.reset();
+  }
 
   useEffect(() => {
     // Every vault command and `mcp_confirm_respond` alike are Tauri commands,
