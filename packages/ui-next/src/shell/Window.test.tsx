@@ -3,7 +3,7 @@ import { cleanup, render, screen, waitFor, act, within } from "@testing-library/
 import userEvent from "@testing-library/user-event";
 import { fireEvent } from "@testing-library/react";
 import type { HostNotice } from "@srelens/core";
-import { notify, saveUpdateChannel, setNotifier } from "@srelens/core";
+import { extensionClusterRoute, notify, saveUpdateChannel, setNotifier } from "@srelens/core";
 
 // `vi.hoisted` because `vi.mock` is hoisted above every declaration in the
 // file, and the tabsPersist factory reads these the moment `./Window` imports
@@ -864,6 +864,34 @@ describe("Window strip", () => {
 
     // An app route, with the rail still on the protected cluster.
     act(() => { store.activateTab(store.currentWorkspace().tabs.find((t) => t.route === "/")!.id); });
+    expect(note()).toBeNull();
+  });
+
+  /**
+   * #101. An app's page names its cluster in its route, independent of the
+   * rail (`ExtensionPage`), by a context key that is not the name. The strip
+   * follows the route, which `Window` can only do by handing the strip the
+   * contexts to resolve the key against.
+   */
+  it("says it over an app tab for the cluster the tab names, not the rail's", async () => {
+    listContexts.mockResolvedValue({ contexts: [ctx("prod"), { ...ctx("stage"), key: "stage-key" }] });
+    const saved = defaultState([ctx("prod"), ctx("stage")]);
+    const production = defaultState([ctx("stage")]).workspaces[0];
+    production.name = "Production";
+    production.protected = true;
+    saved.workspaces.push(production);
+    loadTabsState.mockReturnValue(saved);
+    await booted();
+    const note = () => screen.queryByRole("note");
+    const copy = "stage is protected (workspace Production). Changes ask you to type its name.";
+
+    // The protected cluster's page, with the rail on prod.
+    act(() => { store.openTab(extensionClusterRoute("stage-key", "ext", "overview"), { clusterName: "stage" }); });
+    expect(note()?.textContent).toBe(copy);
+
+    // The reverse: the rail on the protected cluster, an app tab for the other.
+    act(() => { store.setActiveCluster("stage", "stage"); });
+    act(() => { store.openTab(extensionClusterRoute("prod", "ext", "overview"), { clusterName: "prod" }); });
     expect(note()).toBeNull();
   });
 });

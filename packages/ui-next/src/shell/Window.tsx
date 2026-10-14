@@ -929,7 +929,7 @@ export function Window({
           />
         )}
         {/* #101: between the strip and the tab, about the active tab's own cluster. */}
-        {active && <ProtectedStrip contextName={protectedStripCluster(activeTabRoute, activeCtx?.name ?? null)} />}
+        {active && <ProtectedStrip contextName={protectedStripCluster(activeTabRoute, activeCtx?.name ?? null, contexts)} />}
         <div className="relative min-h-0 flex-1">
           {tabs.map((tab) => {
             // An editor's target is pinned in its route. Its tab label follows
