@@ -328,7 +328,7 @@ describe("readMeasure, on a hostile field value", () => {
 });
 
 describe("matchLine", () => {
-  const A ='{"level":"info","msg":"Wrote batch","system":"camlog"}';
+  const A = '{"level":"info","msg":"Wrote batch","system":"camlog"}';
   const B = '{"level":"warn","msg":"Skipping checkpoint","system":"schwarz"}';
   const C = '{"level":"error","msg":"Write failed: timeout","system":"camlog"}';
   const D = "GET /healthz 200 1ms";

@@ -1164,8 +1164,8 @@ function LogsStream({
    */
   const gate = useRegexGate(applied, rows);
   const clauses = gate.clauses;
-  // Saved with the applied text, not the typed one: the store writes a file,
-  // and a write per keystroke is what the deferral is there to avoid.
+  // Saved from the deferred text, which lags the typed one by a render but does not wait for typing to stop, so this
+  // can run on many keystrokes in a row. tabsPersist's debounced save is what keeps that from being a file write each time.
   useEffect(() => {
     if (tabId !== null) setTabView(tabId, { query: deferredText });
   }, [tabId, deferredText]);

@@ -30,7 +30,11 @@ export interface Storage {
 const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
 const isString = (v: unknown): v is string => typeof v === "string";
 
-/** The longest Logs query a tab saves. A paste of a whole stack trace is not worth the settings file. */
+/**
+ * The longest Logs query a tab restores. A longer one is still written with the tab, because the save does not look
+ * inside a view; it is dropped on load, so a pasted stack trace is not worth restoring but does sit in the settings
+ * file until the query changes.
+ */
 export const MAX_SAVED_QUERY = 2000;
 
 const isTableSort = (v: unknown): v is TableSort =>
