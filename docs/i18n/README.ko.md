@@ -40,6 +40,7 @@
 <p align="center">
   <a href="https://github.com/srelens/srelens/stargazers"><img alt="GitHub stars" src="https://img.shields.io/github/stars/srelens/srelens?logo=github&color=eab308"></a>
   <a href="https://www.reddit.com/r/srelens/"><img alt="Reddit: r/srelens" src="https://img.shields.io/reddit/subreddit-subscribers/srelens?label=r%2Fsrelens&logo=reddit&logoColor=white&color=FF4500"></a>
+  <a href="https://join.slack.com/t/srelens/shared_invite/zt-4cu0tzuzo-Ktei1KsVlqPi2XY~irTDAg"><img alt="Slack: srelens" src="https://img.shields.io/badge/Slack-srelens-4A154B?logo=slack&logoColor=white"></a>
   <a href="https://deepwiki.com/srelens/srelens"><img alt="Ask DeepWiki" src="https://img.shields.io/badge/Ask-DeepWiki-2563eb"></a>
 </p>
 
@@ -388,6 +389,7 @@ srelens는 **안정 버전이며 활발히 개발 중**이고, macOS, Linux, Win
 ## 커뮤니티
 
 - [Reddit의 r/srelens](https://www.reddit.com/r/srelens/) — 공지, 질문, 피드백
+- [Slack의 srelens](https://join.slack.com/t/srelens/shared_invite/zt-4cu0tzuzo-Ktei1KsVlqPi2XY~irTDAg) — 메인테이너 및 다른 사용자와의 채팅
 - [이슈](https://github.com/srelens/srelens/issues) — 버그 제보 및 기능 요청
 - [웹사이트](https://srelens.com)
 
