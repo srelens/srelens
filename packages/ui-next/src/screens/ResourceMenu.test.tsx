@@ -1459,3 +1459,30 @@ describe("useRowMenu — on a protected cluster (#101)", () => {
     await waitFor(() => expect(cronjobTriggerNow).toHaveBeenCalledWith("prod", "ops", "nightly"));
   });
 });
+
+/** The row menu's door into the forward dialog, on a protected cluster (#101). */
+describe("useRowMenu — a forward on a protected cluster (#101)", () => {
+  beforeEach(() => {
+    const contexts = ["prod"].map((name) => ({ name, stableId: `id-${name}`, key: `id-${name}`, cluster: name, server: "", isCurrent: false, sourceFile: "", authKind: "token" }));
+    setContexts(contexts);
+    store.setState(defaultState(contexts));
+    store.setWorkspaceProtected(store.getState().currentId, true);
+  });
+
+  it("starts no forward until the cluster's name is typed", async () => {
+    render(<Harness args={POD_ARGS} row={POD_ROW} />);
+    await userEvent.click(screen.getByRole("button", { name: "Port forward" }));
+    await screen.findByRole("dialog");
+    await waitFor(() => expect((screen.getByLabelText("Target") as HTMLSelectElement).value).toBe("pod/web-0"));
+    await userEvent.type(screen.getByLabelText("Remote port"), "8080");
+    expect(screen.getByText("prod is protected (workspace Default).")).toBeTruthy();
+
+    await userEvent.click(screen.getByRole("button", { name: "Start forward" }));
+    expect(forwardCore.startPortForward).not.toHaveBeenCalled();
+    expect(screen.getByText("Type prod to confirm.")).toBeTruthy();
+
+    await userEvent.type(screen.getByRole("textbox", { name: "Type prod to confirm" }), "prod");
+    await userEvent.click(screen.getByRole("button", { name: "Start forward" }));
+    await waitFor(() => expect(forwardCore.startPortForward).toHaveBeenCalledTimes(1));
+  });
+});

@@ -29,6 +29,7 @@ import {
 import { useConsole } from "../console";
 import { getKubeconfigFiles, useActiveContext } from "../lib/clusters";
 import { useClusterGate } from "../lib/clusterMoved";
+import { useProtection } from "../lib/protection";
 import { SLUG_BY_K8S_KIND, isBuiltInKind, resolveCrdGvk } from "../lib/crdGvk";
 import { parseEditRoute, parseNewRoute, type EditRouteParts } from "../lib/detailRoute";
 import { FailureAlert } from "../lib/errorCopy";
@@ -155,6 +156,13 @@ function useApply({
   const [conflict, setConflict] = useState<{ docs: ApplyDoc[]; yaml: string } | null>(null);
   const conflicts = conflict !== null && conflict.yaml === yaml ? conflict.docs : [];
   const [applied, setApplied] = useState<{ kind: string; name: string } | null>(null);
+  /**
+   * On a protected cluster (#101), the two writes here with no confirm of
+   * their own — Force apply, and Create — get one, carrying the gate. `force`
+   * is what that confirm will send. Elsewhere each stays the one click it was.
+   */
+  const protection = useProtection(pinned);
+  const [asking, setAsking] = useState<{ force: boolean } | null>(null);
 
   async function apply(yaml: string, force: boolean) {
     // Asked before anything else: it is the only question whose answer changes
@@ -200,7 +208,46 @@ function useApply({
     return true;
   }
 
-  return { gate, busy, error, setError, conflicts, applied, apply };
+  /** Apply what the editor holds now — or, on a protected cluster, ask first. */
+  function request(force: boolean) {
+    if (!protection) {
+      void apply(yaml, force);
+      return;
+    }
+    setError("");
+    gate.reset();
+    setAsking({ force });
+  }
+
+  const dialog = asking && (
+    <ConfirmDialog
+      title={asking.force ? "Force apply?" : "Create resource?"}
+      confirmLabel={asking.force ? "Force apply" : "Create"}
+      danger={asking.force}
+      busy={busy}
+      // As the Apply confirm does: closed on any answer the server gave, kept
+      // open on the gate's own refusal, which is this dialog's question.
+      onConfirm={() =>
+        void apply(yaml, asking.force).then((ok) => {
+          if (ok || !gate.refusal) setAsking(null);
+        })
+      }
+      onCancel={() => setAsking(null)}
+      message={
+        <>
+          <p>
+            {asking.force ? "Force-apply the manifest on " : "Create what the manifest describes on "}
+            <code>{pinned}</code>
+            {asking.force ? ", taking over the fields another manager owns." : "."}
+          </p>
+          {gate.alert}
+          {error && <p className="mt-2 text-sev">{error}</p>}
+        </>
+      }
+    />
+  );
+
+  return { gate, busy, error, setError, conflicts, applied, apply, request, dialog, protection };
 }
 
 /** The dry-run validation the editor lints with: strict, against the API server. */
@@ -686,9 +733,9 @@ function EditExisting({ context, parts }: { context: ClusterContext; parts: Edit
           <Conflicts
             conflicts={editor.conflicts}
             busy={editor.busy}
-            onForce={() => void editor.apply(yaml, true)}
+            onForce={() => editor.request(true)}
           />
-          {editor.error && !confirming && (
+          {editor.error && !confirming && !editor.dialog && (
             <FailureAlert title={`Could not apply ${name}`} error={editor.error} />
           )}
           {editor.applied && !dirty && (
@@ -786,6 +833,7 @@ function EditExisting({ context, parts }: { context: ClusterContext; parts: Edit
           }
         />
       )}
+      {editor.dialog}
       {deleting && (
         <ConfirmDialog
           title={`Delete ${kind} ${name}?`}
@@ -978,7 +1026,7 @@ function NewResource({ context, cluster }: { context: ClusterContext; cluster?: 
             disabled={!yaml.trim() || editor.busy}
             onClick={() => {
               editor.setError("");
-              void editor.apply(yaml, false);
+              editor.request(false);
             }}
           >
             {editor.busy ? "Creating…" : "Create"}
@@ -989,13 +1037,16 @@ function NewResource({ context, cluster }: { context: ClusterContext; cluster?: 
     >
       <div className="flex h-full min-h-0 flex-col">
         <div className="flex flex-col gap-2 px-4 pt-3 empty:hidden">
-          {editor.gate.alert}
+          {/* On a protected cluster the gate is asked in Create's own confirm
+              instead; drawn here too it would be a second field for one
+              question. */}
+          {editor.protection ? null : editor.gate.alert}
           <Conflicts
             conflicts={editor.conflicts}
             busy={editor.busy}
-            onForce={() => void editor.apply(yaml, true)}
+            onForce={() => editor.request(true)}
           />
-          {editor.error && <FailureAlert title="Could not create the resource" error={editor.error} />}
+          {editor.error && !editor.dialog && <FailureAlert title="Could not create the resource" error={editor.error} />}
           {editor.applied && (
             <p className="text-sm text-ok" role="status">
               Created {editor.applied.kind} {editor.applied.name}.{" "}
@@ -1032,6 +1083,7 @@ function NewResource({ context, cluster }: { context: ClusterContext; cluster?: 
           />
         </div>
       </div>
+      {editor.dialog}
     </Screen>
   );
 }
