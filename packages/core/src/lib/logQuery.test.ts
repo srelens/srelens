@@ -690,6 +690,14 @@ describe("facetCounts", () => {
     expect(facetCounts(lines, clauses("level:warn"), "system")).toEqual([{ value: "schwarz", count: 1 }]);
   });
 
+  it("does not offer a value its own comparison already rules out", () => {
+    const codes = ['{"status":200}', '{"status":503}', '{"status":500}'].map((t) => ql(t));
+    expect(facetCounts(codes, clauses("status>=500"), "status")).toEqual([
+      { value: "500", count: 1 },
+      { value: "503", count: 1 },
+    ]);
+  });
+
   it("orders equal counts alphabetically, whichever spelling arrived first", () => {
     const tied = ['{"k":"Beta"}', '{"k":"alpha"}'].map((t) => ql(t));
     expect(facetCounts(tied, clauses(""), "k")).toEqual([

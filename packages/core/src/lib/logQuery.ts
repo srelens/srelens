@@ -421,14 +421,16 @@ function toClause(
  * clicks on the Level facet show both levels — and everything else ANDs,
  * comparisons included, so `latency>100 latency<500` is a range.
  * `ignoreField` skips that field's clauses, which is how a facet counts its
- * own values without filtering itself down to the one already picked.
+ * own values without filtering itself down to the one already picked. A
+ * comparison is no pick, it is a bound, so it is never skipped: under
+ * `status>=500` the status facet must not offer a `200` that would show nothing.
  */
 export function matchLine(line: QueryLine, clauses: readonly QueryClause[], ignoreField?: string): boolean {
   const ignored = ignoreField?.toLowerCase();
   let anyOf: Map<string, boolean> | undefined;
   for (const clause of clauses) {
     const field = clause.field?.toLowerCase();
-    if (field !== undefined && field === ignored) continue;
+    if (field !== undefined && field === ignored && clause.match !== "compare") continue;
     const hit = hits(line, clause);
     if (clause.negated) {
       if (hit) return false;
