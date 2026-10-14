@@ -10,6 +10,7 @@ import { getRun, noteGate, noteGateIn, runKeyHoldingGate, type GateRecord } from
 import { Alert, ConfirmDialog } from "@srelens/ui-kit";
 import { FailureLine } from "../lib/errorCopy";
 import { useProtectedConfirm } from "../lib/protectedConfirm";
+import { protectionFor } from "../lib/protection";
 import { useWorkspaceSealed } from "./LockGate";
 import { RequestConfirmation } from "../confirm/RequestConfirmation";
 import { asConfirmRequest } from "../confirm/confirmRequest";
@@ -261,6 +262,28 @@ function hostWords(request: ConfirmRequest): Pick<GateRecord, "prompt" | "impact
   };
 }
 
+/**
+ * The name of the call's cluster that is protected, if any (#101).
+ *
+ * The value the host executes on comes first: `args.context`, then
+ * `args.resource.context` — the same fixed path `confirm_fields` reads
+ * (`crates/capability/src/annotations.rs`). `target.cluster` is last, for an
+ * app's call that carries its cluster outside its arguments: it is the host's
+ * display copy, escaped and cut at 80 characters, so a long pinned ID or EKS
+ * ARN in it matches nothing. If ANY of them is protected, that one is asked
+ * about; checking more names can only ask more.
+ */
+function askedCluster(request: ConfirmRequest | undefined): string | undefined {
+  if (!request) return undefined;
+  const { context, resource } = request.args;
+  const named = [
+    context,
+    typeof resource === "object" && resource !== null ? (resource as { context?: unknown }).context : undefined,
+    request.target?.cluster,
+  ];
+  return named.find((n): n is string => typeof n === "string" && protectionFor(n) !== null);
+}
+
 export function AgentConsent() {
   const [queue, setQueue] = useState<ConfirmRequest[]>([]);
   const [busy, setBusy] = useState(false);
@@ -273,14 +296,12 @@ export function AgentConsent() {
   const covered = useWorkspaceSealed();
   const current = queue[0];
   /**
-   * On a protected cluster, its name, typed, before an Approve (#101). Asked
-   * of the host's own reading of the call — `target.cluster` — which every
-   * cluster write carries (`context` is required on each one,
-   * `crates/kube/src/actions.rs`). A request that names no cluster is not
-   * cluster-scoped and asks nothing more. Deny never waits; the host's sixty
-   * seconds still run.
+   * On a protected cluster, its name, typed, before an Approve (#101). See
+   * {@link askedCluster} for which of the call's names is asked about. A
+   * request that names no cluster is not cluster-scoped and asks nothing
+   * more. Deny never waits; the host's sixty seconds still run.
    */
-  const typed = useProtectedConfirm(current?.target?.cluster);
+  const typed = useProtectedConfirm(askedCluster(current));
   // Each request is its own question: a name typed for one answers nothing else.
   // Cleared DURING render, by React's adjust-state-on-prop-change pattern, and
   // not in an effect. `answer()` shifts the queue and clears `busy` in one

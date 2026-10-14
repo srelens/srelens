@@ -94,11 +94,11 @@ describe("protectionFor", () => {
     expect(protectionFor("prod-eu")).toEqual({ name: "Production EU", workspace: "Production" });
   });
 
-  it("is null for an unprotected cluster, an unknown name, a stableId, or no name", () => {
+  it("is null for an unprotected cluster, its stableId, an unknown name, or no name", () => {
     protect("Production", [prod.stableId]);
     expect(protectionFor("staging")).toBeNull();
+    expect(protectionFor(staging.stableId)).toBeNull();
     expect(protectionFor("nope")).toBeNull();
-    expect(protectionFor(prod.stableId)).toBeNull();
     expect(protectionFor("")).toBeNull();
     expect(protectionFor(null)).toBeNull();
     expect(protectionFor(undefined)).toBeNull();
@@ -119,6 +119,25 @@ describe("protectionFor", () => {
     protect("Production", [prod.stableId]);
     expect(protectionFor("srelens-context:/config#prod-eu")).toEqual({ name: "prod-eu", workspace: "Production" });
     expect(protectionFor("srelens-context:/config#staging")).toBeNull();
+  });
+
+  /**
+   * The host resolves a call's cluster by stableId, pinned ID, display name or
+   * the kubeconfig's own context name (`find_context`, `crates/kube/src/
+   * context_resolve.rs`), so an agent can name prod any of those ways. Here
+   * all four differ: the name holds a `#`, which `key` encodes, and a second
+   * file has put a `config/` prefix on the display name.
+   */
+  it("reads a context named by its stableId, its key, or its kubeconfig's own name", () => {
+    const renamed: ClusterContext = {
+      ...prod, name: "config/prod#eu", stableId: "/config#prod#eu", key: "/config#prod%23eu", sourceFile: "/config",
+    };
+    setContexts([renamed, staging]);
+    protect("Production", [renamed.stableId]);
+    const production = { name: "config/prod#eu", workspace: "Production" };
+    expect(protectionFor("/config#prod#eu")).toEqual(production);
+    expect(protectionFor("/config#prod%23eu")).toEqual(production);
+    expect(protectionFor("prod#eu")).toEqual(production);
   });
 });
 

@@ -11,8 +11,9 @@ import { useProtection, type Protection } from "./protection";
  * and agent consent call it directly. A second copy of this check is the one
  * that would drift: a different trim, a looser compare, a different sentence.
  *
- * `contextName` is whatever `protectionFor` reads: a context's name, or the
- * pinned ID an app surface or a sidecar's request names it by.
+ * `contextName` is whatever `protectionFor` reads: a context's name, the
+ * pinned ID an app surface or a sidecar's request names it by, its stableId,
+ * its key, or the kubeconfig's own name for it.
  *
  * The text is trimmed — a paste leaves spaces — and otherwise compared
  * exactly, case included.

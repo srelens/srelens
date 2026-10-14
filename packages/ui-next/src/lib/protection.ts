@@ -47,9 +47,13 @@ export function isClusterProtected(stableId: string): boolean {
 }
 
 /**
- * A context NAME, or a context's pinned ID (`srelens-context:…`, which app
- * surfaces and a sidecar's consent request name their cluster by) →
- * Protection, or null when unknown or not protected.
+ * A cluster, named any way the host resolves one (`find_context`,
+ * `crates/kube/src/context_resolve.rs`) → Protection, or null when unknown or
+ * not protected. Accepted: the context's name, its pinned ID
+ * (`srelens-context:…`, which app surfaces and a sidecar's consent request
+ * name their cluster by), its stableId, its key, and the kubeconfig's own
+ * name for it (`stableId` past `sourceFile#`; the display name may have
+ * gained a `file/` prefix). Matching more can only ask more.
  *
  * Every context that matches is tried, not the first: two kubeconfig files
  * can name two clusters alike, and an unprotected one must not hide a
@@ -58,7 +62,10 @@ export function isClusterProtected(stableId: string): boolean {
 export function protectionFor(contextName: string | null | undefined): Protection | null {
   if (!contextName) return null;
   for (const context of getContexts()) {
-    if (context.name !== contextName && context.pinnedId !== contextName) continue;
+    const file = `${context.sourceFile}#`;
+    const original = context.stableId.startsWith(file) ? context.stableId.slice(file.length) : undefined;
+    const named = [context.name, context.pinnedId, context.stableId, context.key, original];
+    if (!named.includes(contextName)) continue;
     const workspace = protectingWorkspace(context.stableId);
     if (workspace !== undefined) return { name: getMark(context.stableId, context.name).name, workspace };
   }

@@ -1309,8 +1309,9 @@ describe("the host's own words", () => {
 
 /**
  * On a protected cluster (#101) Approve waits for the cluster's name, typed.
- * The cluster is the host's reading of the call — `target.cluster` — never
- * something dug out of `args`. Deny never waits.
+ * The cluster is what the call runs on — `args.context`, or
+ * `args.resource.context` — and then the host's `target.cluster`; any of
+ * them protected asks. Deny never waits.
  */
 describe("on a protected cluster (#101)", () => {
   const PROD: ClusterContext = { name: "prod", stableId: "prod", key: "prod", cluster: "prod", server: "", isCurrent: true, sourceFile: "", authKind: "token" };
@@ -1390,6 +1391,56 @@ describe("on a protected cluster (#101)", () => {
     });
     expect(await screen.findByText("prod is protected (workspace Default).")).toBeTruthy();
     expect(approve().disabled).toBe(true);
+  });
+
+  /**
+   * `target.cluster` is for reading, not matching: the host escapes it and
+   * cuts it at 80 characters (`for_confirmation`), and a sidecar's pinned ID
+   * on a Windows kubeconfig with an EKS ARN is always longer. The call runs on
+   * `args.context` (or `args.resource.context`, the one level down the host
+   * reads), so that is what is asked about.
+   */
+  describe("however the call names the cluster", () => {
+    const ARN = "arn:aws:eks:eu-west-1:123456789012:cluster/production";
+    const FILE = String.raw`C:\Users\dana\.kube\config`;
+    const EKS: ClusterContext = {
+      name: ARN, stableId: `${FILE}#${ARN}`, key: `${FILE}#${ARN}`, pinnedId: `srelens-context:${FILE}#${ARN}`,
+      cluster: ARN, server: "", isCurrent: false, sourceFile: FILE, authKind: "exec",
+    };
+    const pinned = EKS.pinnedId as string;
+    const cut = `${pinned.slice(0, 79)}…`;
+
+    beforeEach(() => {
+      setContexts([PROD, EKS]);
+      setState(defaultState([PROD, EKS]));
+      setWorkspaceProtected(getState().currentId, true);
+    });
+
+    async function asksForTheArn(): Promise<void> {
+      expect(await screen.findByText(`${ARN} is protected (workspace Default).`)).toBeTruthy();
+      expect(approve().disabled).toBe(true);
+      await userEvent.type(screen.getByRole("textbox", { name: `Type ${ARN} to confirm` }), ARN);
+      expect(approve().disabled).toBe(false);
+    }
+
+    it.each([
+      ["args.context", { context: pinned, name: "node-7" }],
+      ["args.resource.context", { resource: { context: pinned, kind: "Deployment", name: "api" } }],
+    ])("asks of a long pinned ID in %s, which target.cluster carries cut", async (_, args) => {
+      expect(pinned.length).toBeGreaterThan(80);
+      await mount();
+      emit(REQUEST, { id: "p7", tool: "extensions.action", args, prompt: "Run the declared action?", impact: "high", target: { cluster: cut } });
+      await asksForTheArn();
+    });
+
+    it("asks of a cluster named by its stableId", async () => {
+      await mount();
+      emit(REQUEST, {
+        id: "p8", tool: "k8s.drainNode", args: { context: EKS.stableId, name: "node-7" },
+        prompt: "Drain node-7?", impact: "high", target: { cluster: EKS.stableId, name: "node-7" },
+      });
+      await asksForTheArn();
+    });
   });
 
   it.each([
