@@ -821,9 +821,17 @@ export function inRange(line: QueryLine, range: TimeRange): boolean {
  * (`f:/re/`, and the exact-regex form a quote-containing facet value is written
  * in) are not marked either: their regex tests the value, not the text a row
  * shows. A field clause marks its whole `key=value` token.
+ *
+ * A free-text regex is the user's own pattern, and one that backtracks
+ * catastrophically would freeze the thread it runs on, so it is never run
+ * here: its marks are worked out in the regex worker and come in as `extra`.
  */
-export function highlightRanges(text: string, clauses: readonly QueryClause[]): [number, number][] {
-  const found: [number, number][] = [];
+export function highlightRanges(
+  text: string,
+  clauses: readonly QueryClause[],
+  extra: readonly (readonly [number, number])[] = [],
+): [number, number][] {
+  const found: [number, number][] = extra.map(([start, end]) => [start, end]);
   for (const clause of clauses) {
     if (clause.negated) continue;
     const mark = highlightPattern(clause);
@@ -861,8 +869,9 @@ interface Mark {
 }
 
 function highlightPattern(clause: QueryClause): Mark | undefined {
+  // A regex is the user's, and is never run on the main thread (see `highlightRanges`).
+  if (clause.match === "regex") return undefined;
   if (clause.field === undefined) {
-    if (clause.match === "regex") return { pattern: clause.regex.source, prefixed: false };
     if (clause.match === "phrase") return phrasePattern(clause.value, clause.words);
     return { pattern: escapeRegex(clause.value), prefixed: false };
   }

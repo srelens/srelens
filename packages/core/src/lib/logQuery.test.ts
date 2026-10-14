@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -1125,10 +1125,36 @@ describe("volumeBuckets, zone pinning", () => {
 });
 
 describe("highlightRanges", () => {
-  it("marks free text, phrases and regex matches, case-insensitively", () => {
-    expect(highlightRanges("Pool timeout: pool saturated", clauses('pool "TIMEOUT" /sat\\w+/'))).toEqual([
+  it("marks free text and phrases case-insensitively, and a regex where the ranges it is given say", () => {
+    expect(highlightRanges("Pool timeout: pool saturated", clauses('pool "TIMEOUT" /sat\\w+/'), [[19, 28]])).toEqual([
       [0, 4],
       [5, 12],
+      [14, 18],
+      [19, 28],
+    ]);
+  });
+
+  it("never runs a user's regex: its marks are the ones it is given, worked out in the regex worker", () => {
+    const exec = vi.spyOn(RegExp.prototype, "exec");
+    const test = vi.spyOn(RegExp.prototype, "test");
+    try {
+      expect(highlightRanges("pool saturated", clauses("pool /sat\\w+/"))).toEqual([[0, 4]]);
+      const ran = [...exec.mock.contexts, ...test.mock.contexts].map((re) => (re as RegExp).source);
+      expect(ran.filter((source) => source.includes("sat"))).toEqual([]);
+    } finally {
+      exec.mockRestore();
+      test.mockRestore();
+    }
+  });
+
+  it("merges the ranges it is given with its own", () => {
+    expect(
+      highlightRanges("Pool timeout: pool saturated", clauses('pool "TIMEOUT"'), [
+        [19, 28],
+        [3, 6],
+      ]),
+    ).toEqual([
+      [0, 12],
       [14, 18],
       [19, 28],
     ]);
@@ -1145,10 +1171,6 @@ describe("highlightRanges", () => {
 
   it("merges overlaps, and marks nothing for a negation or the level", () => {
     expect(highlightRanges("abcdef level=info", clauses("abc bcd -ef level:info"))).toEqual([[0, 4]]);
-  });
-
-  it("survives a regex that matches the empty string", () => {
-    expect(highlightRanges("abc", clauses("/x*/"))).toEqual([]);
   });
 
   it("marks a field only as a whole key, never inside a longer key", () => {
