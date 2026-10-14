@@ -1,7 +1,7 @@
 name: Publish winget
 
-# Opens a pull request against microsoft/winget-pkgs adding srelens-tui at a
-# published version. Called by the release workflow after a stable release goes
+# Opens pull requests against microsoft/winget-pkgs adding srelens.srectl (the
+# CLI) and srelens.srelens (the desktop app) at a published version. Called by the release workflow after a stable release goes
 # public, and runnable BY HAND for any already published version.
 #
 # Split out for the same reason `homebrew-publish.yml` and `aur-publish.yml`
@@ -19,24 +19,35 @@ on:
         description: 'Version to publish, without a leading v (e.g. 1.2.3)'
         required: true
         type: string
+      package:
+        description: 'srectl, srelens, or both'
+        required: false
+        type: string
+        default: both
   workflow_dispatch:
     inputs:
       version:
         description: 'Published version to submit, without a leading v. Defaults to the newest stable release.'
         required: false
         type: string
+      package:
+        description: 'Which package to submit. Pick one to retry a submission that failed without opening a second pull request for the one that did not.'
+        required: false
+        type: choice
+        options: [both, srectl, srelens]
+        default: both
 
 permissions:
   contents: read
 
-# Two runs would open two pull requests for the same package.
+# Two runs would open two pull requests for the same package version.
 concurrency:
   group: winget-publish
   cancel-in-progress: false
 
 jobs:
   publish:
-    name: publish winget (srelens-tui)
+    name: publish winget
     # Windows because wingetcreate is a Windows binary, and because the
     # validation it runs is the same code path the winget client uses.
     runs-on: windows-latest
@@ -76,6 +87,7 @@ jobs:
         shell: bash
         env:
           INPUT_VERSION: ${{ inputs.version }}
+          INPUT_PACKAGE: ${{ inputs.package }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
@@ -91,22 +103,31 @@ jobs:
             exit 1
           fi
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
-          echo "Submitting srelens-tui ${VERSION}"
+          # The release workflow passes no package: it wants both.
+          case "${INPUT_PACKAGE:-both}" in
+            both) PACKAGES="srectl srelens" ;;
+            srectl|srelens) PACKAGES="$INPUT_PACKAGE" ;;
+            *) echo "::error::unknown package '${INPUT_PACKAGE}'"; exit 1 ;;
+          esac
+          echo "packages=${PACKAGES}" >> "$GITHUB_OUTPUT"
+          echo "Submitting ${PACKAGES} ${VERSION}"
 
-      # Rendering reads the release's own SHA256SUMS, so a release missing the
-      # Windows archive fails here with that said plainly, rather than
-      # producing a manifest that 404s on a stranger's machine after
-      # moderation has already approved it.
+      # Rendering reads the digest GitHub records for each release asset, so a
+      # release missing the srectl archive or the desktop installer fails here
+      # with that said plainly, rather than producing a manifest that 404s on a
+      # stranger's machine after moderation has already approved it.
       - name: Render the manifests
         if: steps.gate.outputs.publish == 'true'
         shell: bash
         env:
           VERSION: ${{ steps.resolve.outputs.version }}
+          # Read access to a public release; it only lifts the API rate limit.
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
           node packaging/winget/render.mjs "$VERSION" --out winget-out
           echo "--- rendered manifests ---"
-          for f in winget-out/manifests/s/srelens/srelens-tui/"$VERSION"/*; do
+          for f in winget-out/manifests/s/srelens/*/"$VERSION"/*; do
             echo "=== $f"
             cat "$f"
           done
@@ -128,50 +149,67 @@ jobs:
       # packaging/winget/README.md for a human to run.
       #
       # What is left here is the cheap half worth catching before a submission:
-      # that all three files exist and the checksum really is a checksum.
+      # that each package has all three files and its checksum really is one.
       - name: Check the rendered files
         if: steps.gate.outputs.publish == 'true'
         shell: bash
         env:
           VERSION: ${{ steps.resolve.outputs.version }}
+          PACKAGES: ${{ steps.resolve.outputs.packages }}
         run: |
           set -euo pipefail
-          dir="winget-out/manifests/s/srelens/srelens-tui/${VERSION}"
-          for f in srelens.srelens-tui.yaml \
-                   srelens.srelens-tui.locale.en-US.yaml \
-                   srelens.srelens-tui.installer.yaml; do
-            [ -f "$dir/$f" ] || { echo "::error::render produced no $f"; exit 1; }
+          for p in $PACKAGES; do
+            dir="winget-out/manifests/s/srelens/${p}/${VERSION}"
+            for f in "srelens.${p}.yaml" \
+                     "srelens.${p}.locale.en-US.yaml" \
+                     "srelens.${p}.installer.yaml"; do
+              [ -f "$dir/$f" ] || { echo "::error::render produced no $f"; exit 1; }
+            done
+            # `|| true`: under pipefail a grep that finds nothing would end the
+            # script here, before the error below could say why.
+            sha=$(grep -oE "InstallerSha256: [0-9A-Fa-f]{64}" "$dir/srelens.${p}.installer.yaml" | head -n 1 | cut -d" " -f2 || true)
+            if [ -z "$sha" ]; then
+              echo "::error::srelens.${p}.installer.yaml carries no 64-character InstallerSha256"
+              cat "$dir/srelens.${p}.installer.yaml"
+              exit 1
+            fi
+            echo "srelens.${p}: three manifests, InstallerSha256 ${sha}"
           done
-          sha=$(grep -oE "InstallerSha256: [0-9A-Fa-f]{64}" "$dir/srelens.srelens-tui.installer.yaml" | head -n 1 | cut -d" " -f2)
-          if [ -z "$sha" ]; then
-            echo "::error::the installer manifest carries no 64-character InstallerSha256"
-            cat "$dir/srelens.srelens-tui.installer.yaml"
-            exit 1
-          fi
-          echo "three manifests, InstallerSha256 ${sha}"
 
       - name: Submit to microsoft/winget-pkgs
         if: steps.gate.outputs.publish == 'true'
         shell: pwsh
         env:
           VERSION: ${{ steps.resolve.outputs.version }}
+          PACKAGES: ${{ steps.resolve.outputs.packages }}
           WINGET_TOKEN: ${{ secrets.WINGET_TOKEN }}
         run: |
-          $dir = "winget-out/manifests/s/srelens/srelens-tui/$env:VERSION"
-          # --prtitle so the pull request says what it is in winget-pkgs's
-          # very long list. The token forks winget-pkgs into its owner's
-          # account and pushes a branch there; nothing is written to this
-          # repository.
-          ./wingetcreate.exe submit `
-            --token $env:WINGET_TOKEN `
-            --prtitle "New version: srelens.srelens-tui version $env:VERSION" `
-            $dir
-          if ($LASTEXITCODE -ne 0) { throw "wingetcreate submit failed" }
+          # One pull request per package. A failure does not stop the other:
+          # the run fails at the end naming what was not submitted, and a
+          # manual run with that `package` retries it alone.
+          $failed = @()
+          foreach ($p in $env:PACKAGES.Split(' ')) {
+            $dir = "winget-out/manifests/s/srelens/$p/$env:VERSION"
+            # --prtitle so the pull request says what it is in winget-pkgs's
+            # very long list. The token forks winget-pkgs into its owner's
+            # account and pushes a branch there; nothing is written to this
+            # repository.
+            ./wingetcreate.exe submit `
+              --token $env:WINGET_TOKEN `
+              --prtitle "New version: srelens.$p version $env:VERSION" `
+              $dir
+            if ($LASTEXITCODE -ne 0) {
+              Write-Output "::error::wingetcreate submit failed for srelens.$p"
+              $failed += $p
+            }
+          }
+          if ($failed) { throw "not submitted: $($failed -join ', ')" }
 
       - name: Say what happens next
         if: steps.gate.outputs.publish == 'true'
         shell: bash
         env:
           VERSION: ${{ steps.resolve.outputs.version }}
+          PACKAGES: ${{ steps.resolve.outputs.packages }}
         run: |
-          echo "::notice::Submitted srelens-tui ${VERSION} to microsoft/winget-pkgs. It is a pull request there: automated validation runs first, then a human moderates it, so publication lags this run by hours or more. Watch https://github.com/microsoft/winget-pkgs/pulls?q=srelens-tui"
+          echo "::notice::Submitted ${PACKAGES} ${VERSION} to microsoft/winget-pkgs. Each is a pull request there: automated validation runs first, then a human moderates it, so publication lags this run by hours or more. Watch https://github.com/microsoft/winget-pkgs/pulls?q=srelens"

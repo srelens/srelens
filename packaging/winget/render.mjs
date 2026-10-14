@@ -1,25 +1,30 @@
 #!/usr/bin/env node
 // Render the winget manifests for a published release.
 //
-//   node packaging/winget/render.mjs 1.2.3 [--out <dir>] [--sums <path>]
+//   node packaging/winget/render.mjs 1.2.3 [--out <dir>] [--release <path>]
 //
-// Writes the three files winget wants — version, defaultLocale, installer —
-// into `<out>/manifests/s/srelens/srelens-tui/<version>/`, which is the path
-// they must occupy inside a microsoft/winget-pkgs checkout. Defaults to
-// `./winget-out`.
+// Writes two packages, three files each -- version, defaultLocale, installer
+// -- into the paths they must occupy inside a microsoft/winget-pkgs checkout:
 //
-// `--sums` reads the checksums from a file instead of the release, for an
+//   <out>/manifests/s/srelens/srectl/<version>/    srelens.srectl, the CLI
+//   <out>/manifests/s/srelens/srelens/<version>/   srelens.srelens, the desktop app
+//
+// `<out>` defaults to `./winget-out`.
+//
+// The checksums are the SHA-256 GitHub records for each release asset, read
+// from the release API, rather than re-downloading and hashing here -- which
+// would only prove that whatever this machine received hashes to itself.
+// Not the release's SHA256SUMS: that file lists the srectl archives only, and
+// the desktop installer is in none.
+//
+// `--release` reads the release from a file instead -- the JSON
+// `gh api repos/<repo>/releases/tags/srelens-v<version>` prints -- for an
 // offline render or to try one before the release is public.
 //
-// The checksum comes from the release's own SHA256SUMS rather than from
-// re-downloading and hashing here, for the same reason the Homebrew renderer
-// does it that way: re-hashing a download would only prove that whatever this
-// machine received hashes to itself.
-//
-// Fails rather than guesses. A missing archive, a checksum file that does not
-// list it, or a surviving placeholder all stop the render — a manifest with a
-// wrong hash fails on a stranger's machine at install time, after moderation
-// has already waved it through.
+// Fails rather than guesses, and writes nothing unless both packages render.
+// A missing asset, an asset without a digest, or a surviving placeholder all
+// stop the render -- a manifest with a wrong hash fails on a stranger's
+// machine at install time, after moderation has already waved it through.
 
 import { writeFileSync, readFileSync, mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -27,11 +32,13 @@ import { fileURLToPath } from "node:url";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO = process.env.GITHUB_REPOSITORY || "srelens/srelens";
-const ID = "srelens.srelens-tui";
 
-// The one Windows archive the release builds. Adding an arm64 Windows target
-// means adding it here and in the installer template together.
-const TARGET = "x86_64-pc-windows-msvc";
+// The one Windows build of each the release makes. Adding an arm64 Windows
+// target means adding it here and in the installer templates together.
+const PACKAGES = [
+  { name: "srectl", asset: (v) => `srectl-${v}-x86_64-pc-windows-msvc.zip` },
+  { name: "srelens", asset: (v) => `srelens_${v}_x64-setup.exe` },
+];
 
 const PLACEHOLDER_SHA = "0".repeat(64);
 
@@ -51,7 +58,7 @@ async function main() {
   // named a release `--out`. Saying so beats "'--out' is not a stable X.Y.Z
   // version", which reads as though the flag itself were the problem.
   if (!version || version.startsWith("-")) {
-    die("usage: render.mjs <version> [--out <dir>] [--sums <path>]");
+    die("usage: render.mjs <version> [--out <dir>] [--release <path>]");
   }
   if (!/^\d+\.\d+\.\d+$/.test(version)) {
     // winget is a public catalogue of stable software. A dev pre-release
@@ -65,41 +72,41 @@ async function main() {
     return at === -1 ? null : process.argv[at + 1];
   };
   const outRoot = flag("--out") || "winget-out";
-  const sumsFile = flag("--sums");
+  const releaseFile = flag("--release");
 
-  const base = `https://github.com/${REPO}/releases/download/srelens-v${version}`;
-  const archive = `srelens-tui-${version}-${TARGET}.zip`;
-  const sumsUrl = `${base}/srelens-tui-${version}-SHA256SUMS.txt`;
+  const tag = `srelens-v${version}`;
+  const base = `https://github.com/${REPO}/releases/download/${tag}`;
+  const releaseUrl = `https://api.github.com/repos/${REPO}/releases/tags/${tag}`;
 
-  let sums;
-  if (sumsFile) {
-    sums = readFileSync(sumsFile, "utf8");
+  let release;
+  if (releaseFile) {
+    release = JSON.parse(readFileSync(releaseFile, "utf8"));
   } else {
-    const response = await fetch(sumsUrl);
+    // A token only lifts the rate limit -- the release is public. Shared CI
+    // runners exhaust the anonymous 60 an hour between them.
+    const token = process.env.GH_TOKEN || process.env.GITHUB_TOKEN;
+    const response = await fetch(releaseUrl, {
+      headers: {
+        accept: "application/vnd.github+json",
+        ...(token ? { authorization: `Bearer ${token}` } : {}),
+      },
+    });
     if (!response.ok) {
-      die(
-        `${response.status} fetching ${sumsUrl} — is srelens-v${version} published, and does it carry the TUI archives?`
-      );
+      die(`${response.status} fetching ${releaseUrl} -- is ${tag} published?`);
     }
-    sums = await response.text();
+    release = await response.json();
   }
 
-  /** The hash `sha256sum` recorded for one file, in either output format. */
+  /** The sha256 GitHub recorded when the asset was uploaded. */
   function checksumFor(file) {
-    for (const line of sums.split("\n")) {
-      const [hash, ...rest] = line.trim().split(/\s+/);
-      if (rest.length === 0) continue;
-      const name = rest.join(" ").replace(/^\*/, "");
-      if (name !== file) continue;
-      if (!/^[0-9a-f]{64}$/i.test(hash)) {
-        die(`the checksum listed for ${file} is not a sha256: ${hash}`);
-      }
-      // Uppercase is what wingetcreate writes and what every manifest in
-      // winget-pkgs carries. The schema accepts either; matching the corpus
-      // keeps our diffs from looking like a hand edit.
-      return hash.toUpperCase();
-    }
-    die(`${sumsUrl} does not list ${file}`);
+    const asset = (release.assets || []).find((a) => a.name === file);
+    if (!asset) die(`${tag} has no ${file}`);
+    const hex = /^sha256:([0-9a-f]{64})$/i.exec(asset.digest || "")?.[1];
+    if (!hex) die(`GitHub records no sha256 for ${file}: ${asset.digest}`);
+    // Uppercase is what wingetcreate writes and what every manifest in
+    // winget-pkgs carries. The schema accepts either; matching the corpus
+    // keeps our diffs from looking like a hand edit.
+    return hex.toUpperCase();
   }
 
   // Normalised to LF on read: a checkout on Windows gives the templates CRLF,
@@ -111,11 +118,11 @@ async function main() {
   // The committed files say they are templates; the rendered ones say where
   // they came from, since a reviewer in winget-pkgs sees only the result.
   const GENERATED =
-    `# GENERATED for srelens-v${version} -- do not edit by hand.\n` +
+    `# GENERATED for ${tag} -- do not edit by hand.\n` +
     `# Rendered from packaging/winget/ in ${REPO} by packaging/winget/render.mjs,\n` +
-    `# using that release's published SHA256SUMS.\n`;
+    `# using the SHA-256 GitHub records for that release's assets.\n`;
 
-  function render(name) {
+  function render(name, asset) {
     let text = readTemplate(name);
 
     // Strip the template banner (every leading comment line) and replace it.
@@ -125,13 +132,13 @@ async function main() {
     text = text.split("0.0.0").join(version);
     if (text === before) die(`${name} contains no version placeholder`);
 
-    if (name.includes("installer")) {
+    if (name.endsWith(".installer.yaml")) {
       if (!text.includes(PLACEHOLDER_SHA)) {
-        die("the installer template no longer contains a checksum placeholder");
+        die(`${name} no longer contains a checksum placeholder`);
       }
-      text = text.replace(PLACEHOLDER_SHA, checksumFor(archive));
-      if (!text.includes(`${base}/${archive}`)) {
-        die(`the installer template does not point at ${archive}`);
+      text = text.replace(PLACEHOLDER_SHA, checksumFor(asset));
+      if (!text.includes(`${base}/${asset}`)) {
+        die(`${name} does not point at ${asset}`);
       }
     }
 
@@ -141,22 +148,26 @@ async function main() {
     return text;
   }
 
-  // s/srelens/srelens-tui/<version> — winget-pkgs partitions by the publisher's
-  // first letter, then identifier, then version.
-  const outDir = join(outRoot, "manifests", "s", "srelens", "srelens-tui", version);
-  mkdirSync(outDir, { recursive: true });
-
-  for (const name of [
-    `${ID}.yaml`,
-    `${ID}.locale.en-US.yaml`,
-    `${ID}.installer.yaml`,
-  ]) {
-    const path = join(outDir, name);
-    writeFileSync(path, render(name));
-    console.error(`wrote ${path}`);
+  // Every file rendered before any is written: half a render on disk is half
+  // a submission waiting to happen.
+  const files = [];
+  for (const { name, asset } of PACKAGES) {
+    const id = `srelens.${name}`;
+    // s/srelens/<name>/<version> -- winget-pkgs partitions by the publisher's
+    // first letter, then identifier, then version.
+    const dir = join(outRoot, "manifests", "s", "srelens", name, version);
+    for (const file of [`${id}.yaml`, `${id}.locale.en-US.yaml`, `${id}.installer.yaml`]) {
+      files.push([dir, file, render(file, asset(version))]);
+    }
   }
 
-  console.error(`\n${outDir} is ready to submit for ${version}`);
+  for (const [dir, file, text] of files) {
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, file), text);
+    console.error(`wrote ${join(dir, file)}`);
+  }
+
+  console.error(`\nsrelens.srectl and srelens.srelens ${version} are ready to submit`);
 }
 
 try {
