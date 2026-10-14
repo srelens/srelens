@@ -53,8 +53,8 @@ const h = vi.hoisted(() => {
     cap: 300,
     /** Every "Load earlier" the screen has asked the hook for (#914). */
     loadEarlier: vi.fn(),
-    /** The pause toggles and loads the screen asked the hook for, in the order it asked (#914). */
-    calls: [] as ("togglePause" | "loadEarlier")[],
+    /** The pauses and loads the screen asked the hook for, in the order it asked (#914). */
+    calls: [] as ("togglePause" | "pause" | "loadEarlier")[],
     /** Every export of the history on disk the screen has asked the hook for (#914). */
     exportSpool: vi.fn(),
     /** Every one-shot `podLogs` fetch the previous-instance toggle has made. */
@@ -73,6 +73,7 @@ const h = vi.hoisted(() => {
         tailLines?: number;
         timestamps?: boolean;
         spoolMaxBytes?: number;
+        visible?: boolean;
         source?: { key: string; open: (...a: never[]) => Promise<unknown> };
       };
     }[],
@@ -109,7 +110,7 @@ vi.mock("../lib/logStream", async (orig) => {
       context: string,
       namespace: string,
       targets: { pod: string; container?: string; label?: string }[],
-      options: { sinceSeconds?: number; tailLines?: number; timestamps?: boolean; spoolMaxBytes?: number; source?: never } = {},
+      options: { sinceSeconds?: number; tailLines?: number; timestamps?: boolean; spoolMaxBytes?: number; visible?: boolean; source?: never } = {},
     ) => {
       useSyncExternalStore(
         h.subscribe,
@@ -133,6 +134,14 @@ vi.mock("../lib/logStream", async (orig) => {
         togglePause: () => {
           h.calls.push("togglePause");
           h.state.paused = !h.state.paused;
+          h.state.pending = 0;
+          notify();
+        },
+        // As the real hook has it: pauses a following view, and leaves one that is paused as it is.
+        pause: () => {
+          h.calls.push("pause");
+          if (h.state.paused) return;
+          h.state.paused = true;
           h.state.pending = 0;
           notify();
         },
@@ -212,7 +221,7 @@ if (!("ResizeObserver" in globalThis)) {
 import type { ClusterContext, LogTarget } from "@srelens/core";
 import type { LogSubjectPod, PreviousInstance } from "../lib/logSubject";
 import { absoluteTimestamp, describeError } from "@srelens/core";
-import { toneColor } from "@srelens/ui-kit";
+import { PortalScopeProvider, toneColor } from "@srelens/ui-kit";
 import { Logs, logsRoute, parseLogsRoute } from "./Logs";
 import { ConsoleProvider, useConsole } from "../console";
 import { resetContexts, setContexts, setKubeconfigFiles } from "../lib/clusters";
@@ -3365,7 +3374,7 @@ describe("history on disk (#914)", () => {
     expect(h.state.paused).toBe(false);
     await userEvent.click(screen.getByRole("button", { name: /Load 5\s?000 earlier/ }));
     // In this order: the load reads the view it finds, and a view that is still moving is one the page leaves.
-    expect(h.calls).toEqual(["togglePause", "loadEarlier"]);
+    expect(h.calls).toEqual(["pause", "loadEarlier"]);
     expect(h.state.paused).toBe(true);
   });
 
@@ -3377,9 +3386,31 @@ describe("history on disk (#914)", () => {
     await userEvent.click(screen.getByRole("button", { name: "Pause" }));
     h.calls = [];
     await userEvent.click(screen.getByRole("button", { name: /Load 5\s?000 earlier/ }));
-    // A second toggle would resume it, and let the stream run on over the page.
-    expect(h.calls).toEqual(["loadEarlier"]);
+    // A toggle here would resume it, and let the stream run on over the page.
+    expect(h.calls).toEqual(["pause", "loadEarlier"]);
     expect(h.state.paused).toBe(true);
+  });
+
+  it("tells the stream whether its tab is the one showing, so a tab behind another draws nothing", async () => {
+    // Inactive tabs stay mounted under `display: none` while the document is visible: only the surface knows.
+    const inTab = (visible: boolean) => (
+      <PortalScopeProvider scope={{ container: undefined, visible, hold: () => () => {} }}>
+        <ConsoleProvider>
+          <AskSpy />
+          <Logs route={ROUTE} />
+        </ConsoleProvider>
+      </PortalScopeProvider>
+    );
+    const view = render(inTab(false));
+    await body();
+    expect(lastOptions().visible).toBe(false);
+    view.rerender(inTab(true));
+    await waitFor(() => expect(lastOptions().visible).toBe(true));
+    view.unmount();
+    // And outside any tab surface the screen is showing.
+    draw();
+    await body();
+    expect(lastOptions().visible).toBe(true);
   });
 
   it("does not offer a second load while one is under way", async () => {

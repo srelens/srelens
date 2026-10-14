@@ -54,12 +54,17 @@ import {
  * from it until resume, and `pendingWhilePaused` counts what arrived in the
  * meantime. Resume folds the buffer into view and resets that count; it
  * never touches the connection, so it can never cause a re-tail. (With history
- * on disk it also gives back any room a loaded page made: see `loadEarlier`.) A `hold`
- * from the screen freezes the view the same way, for as long as the reader
- * presses or selects in it, without touching their pause. A hidden document is
- * held too, in the one respect that matters there: lines still fold into the
- * ring (so it stays bounded) but nothing is shown, not even the pending count,
- * until the document is visible again.
+ * on disk it also gives back any room a loaded page made: see `loadEarlier`.)
+ * A `hold` from the screen freezes the view the same way, for as long as the
+ * reader presses or selects in it, without touching their pause.
+ *
+ * **A screen nobody sees draws nothing.** A hidden document, or a tab behind
+ * another (the `visible` option: such a tab stays mounted under `display:
+ * none`), measures its viewport at 0px, and the screen then draws every row of
+ * the ring on each commit. So while unseen, lines still fold into the ring (it
+ * stays bounded) but nothing is shown or set, not even the pending count or
+ * where history starts: those are read off the ring, or kept, and brought up
+ * to date the moment the screen is seen again.
  *
  * **The unmount race `startLogStream` opens.** `startLogStream` is async: it
  * awaits an `invokeCommand` before its promise resolves. If the component
@@ -128,6 +133,12 @@ export interface UseLogStreamOptions extends Omit<LogStreamOptions, "onLines" | 
    * cluster's own stream can; another `source` ignores it.
    */
   spoolMaxBytes?: number;
+  /**
+   * Whether the screen is the one being looked at. An inactive app tab stays mounted under `display: none` while the
+   * document is visible, which the hook cannot tell from its own, so the screen says (default: it is). While neither
+   * the document nor the screen is showing, lines go on folding into the ring but nothing is shown.
+   */
+  visible?: boolean;
 }
 
 /** Connection health, plus the states `startLogStream` itself can't report:
@@ -190,6 +201,8 @@ export interface UseLogStreamResult {
   /** Lines the frozen view is not showing: those since the pause or hold froze it, and any that came just before. */
   pendingWhilePaused: number;
   togglePause: () => void;
+  /** Pause a following view, and leave one that is paused as it is: for a control that must have the view still. */
+  pause: () => void;
   /**
    * Freeze the view (`true`) or let it go (`false`) while the reader presses or selects in the log, so the line
    * under them is not moved or rewritten mid-click or mid-copy. Apart from `paused`, which is the reader's own
@@ -233,7 +246,7 @@ export const MAX_LOADED_LINES = 50_000;
  * Run `fn` before the next frame is drawn: a commit is a render of the whole screen, and the backend can deliver a
  * line per IPC event, many times between two frames. A hidden document draws no frames and would hold every line
  * back, unfolded, until it is shown again, so it, and a host without frames, get a timer of about one frame instead
- * (the hidden one's commit only folds: see `commit`). Returns what takes the request back.
+ * (an unseen screen's commit only folds: see `commit`). Returns what takes the request back.
  */
 function nextFrame(fn: () => void): () => void {
   if (typeof requestAnimationFrame === "function" && !document.hidden) {
@@ -265,12 +278,16 @@ export function useLogStream(
   const sinceSeconds = options.sinceSeconds;
   const tailLines = options.tailLines;
   const spoolMaxBytes = options.spoolMaxBytes;
+  const visible = options.visible ?? true;
   const key = targetsKey(targets);
   const sourceKey = options.source?.key ?? "";
   // Read at connect time, so a caller that passes a fresh function each render
   // does not restart the stream; the key does.
   const openRef = useRef(options.source?.open);
   openRef.current = options.source?.open;
+  // Read when a frame commits, like `openRef`, so showing or hiding the screen never restarts the stream.
+  const visibleRef = useRef(visible);
+  visibleRef.current = visible;
 
   const bufferRef = useRef(createLogBuffer(capacity));
   /** Lines that arrived since the last fold, oldest first: the ring is copied once per batch, not once per line. */
@@ -280,6 +297,8 @@ export function useLogStream(
   /** Takes back the commit asked for, while one is. */
   const cancelCommitRef = useRef<(() => void) | undefined>(undefined);
   const firstRunRef = useRef(true);
+  /** Where history starts, as last said by a frame that arrived while nobody was looking: shown with the next commit. */
+  const pendingFirstRef = useRef<number | undefined>(undefined);
   /** The open stream, for reading and exporting its history. */
   const streamRef = useRef<LogStream | undefined>(undefined);
   /** Bumped whenever a stream goes (a reconnect, or the screen), so a read that outlives its stream is ignored. */
@@ -313,22 +332,31 @@ export function useLogStream(
     setView(buffer);
   }, []);
 
+  /** Whether nobody is looking: the document is hidden, or the screen is a tab behind another (`visible`). */
+  const unseen = useCallback(() => document.hidden || !visibleRef.current, []);
+
   /** Fold what is waiting and show the whole ring: the end of the last pause or hold. */
   const reveal = useCallback(() => {
     fold();
-    // Nobody is looking: the document being shown again is what shows it (below).
-    if (document.hidden) return;
+    // Nobody is looking: being seen again is what shows it (below).
+    if (unseen()) return;
     show(bufferRef.current);
-  }, [fold, show]);
+  }, [fold, show, unseen]);
 
   const commit = useCallback(() => {
     cancelCommitRef.current = undefined;
-    // Folded while paused, held or hidden too: they freeze the view, not the ring.
+    // Folded while paused, held or unseen too: they freeze the view, not the ring.
     fold();
-    // A hidden document measures its viewport at 0px, so the screen draws every row of the ring: 50,000 rows a frame
-    // for nobody starved the browser until the stream's socket queue overflowed. Nothing is set either, not even the
-    // count of what waits: that is a render too, and it is read off the ring when the document is shown again.
-    if (document.hidden) return;
+    // An unseen screen measures its viewport at 0px, so it draws every row of the ring: 50,000 rows a frame for
+    // nobody starved the browser until the stream's socket queue overflowed. Nothing is set either, not even the
+    // count of what waits or where history starts: that is a render too, and both are read off the ring, or kept
+    // (`pendingFirstRef`), until the screen is seen again.
+    if (unseen()) return;
+    const first = pendingFirstRef.current;
+    if (first !== undefined) {
+      pendingFirstRef.current = undefined;
+      setHistory((h) => (h !== undefined && h.first === first && h.failed === undefined ? h : { first }));
+    }
     if (pausedRef.current || heldRef.current) {
       // Every line the ring has taken since the view froze, those it has since dropped among them, and those that
       // came before the freeze but were not shown yet: counted off the ring, not as they arrive.
@@ -337,7 +365,7 @@ export function useLogStream(
       return;
     }
     show(bufferRef.current);
-  }, [fold, show]);
+  }, [fold, show, unseen]);
 
   const scheduleCommit = useCallback(() => {
     cancelCommitRef.current ??= nextFrame(commit);
@@ -352,17 +380,21 @@ export function useLogStream(
     [],
   );
 
-  // The document is shown again: bring the view up to date at once, rather than wait out a frame that a hidden
-  // document may have kept from running. Paused or held, `commit` leaves the view as it is and counts what waits.
+  // Seen again, by the document being shown or the screen's tab being switched to: bring the view up to date at once,
+  // rather than wait out a frame that a hidden document may have kept from running. Paused or held, `commit` leaves
+  // the view as it is and counts what waits.
+  const catchUp = useCallback(() => {
+    if (unseen()) return;
+    cancelCommitRef.current?.();
+    commit();
+  }, [commit, unseen]);
   useEffect(() => {
-    const onVisibility = () => {
-      if (document.hidden) return;
-      cancelCommitRef.current?.();
-      commit();
-    };
-    document.addEventListener("visibilitychange", onVisibility);
-    return () => document.removeEventListener("visibilitychange", onVisibility);
-  }, [commit]);
+    document.addEventListener("visibilitychange", catchUp);
+    return () => document.removeEventListener("visibilitychange", catchUp);
+  }, [catchUp]);
+  useEffect(() => {
+    if (visible) catchUp();
+  }, [visible, catchUp]);
 
   // Stable across restarts: the same ref keeps accumulating, so a target
   // change doesn't need a new callback, only a fresh buffer (below).
@@ -397,13 +429,16 @@ export function useLogStream(
       }
       const first = frame.first;
       if (first !== undefined) {
-        setHistory((h) => (h !== undefined && h.first === first && h.failed === undefined ? h : { first }));
+        // Where history starts moves about once a second under a flood at the ring's size: a render each, so an
+        // unseen screen is told with the next commit it is seen for.
+        if (unseen()) pendingFirstRef.current = first;
+        else setHistory((h) => (h !== undefined && h.first === first && h.failed === undefined ? h : { first }));
       }
       batchRef.current.push(...lines);
       if (batchRef.current.length >= bufferRef.current.capacity) fold();
       scheduleCommit();
     },
-    [fold, scheduleCommit],
+    [fold, scheduleCommit, unseen],
   );
 
   /** Save the open stream's history. One function for the hook's life, so a frame never hands the screen a new one. */
@@ -418,13 +453,15 @@ export function useLogStream(
     pausedRef.current = next;
     setPaused(next);
     if (!next) {
-      // Pages loaded while paused (#914) took the ring past its capacity, and left there it would stay that big at
-      // frame rate. Resuming is the reader going back to the live tail, so the ring is as wide as asked again: the
-      // newest lines stay, and the ones let go are on disk, which `dropped` says. A hold's release is no resume.
+      // Pages loaded while paused (#914) took the ring past its capacity, and left there it would stay that big
+      // at frame rate. Resuming is the reader going back to the live tail, so the ring is as wide as asked
+      // again: the newest lines stay, and the ones let go are on disk, which `dropped` says. A hold's release
+      // is no resume.
       const b = bufferRef.current;
       if (b.capacity > capacity) {
         const extra = Math.max(0, b.lines.length - capacity);
-        bufferRef.current = { capacity, lines: extra > 0 ? b.lines.slice(extra) : b.lines, dropped: b.dropped + extra };
+        const lines = extra > 0 ? b.lines.slice(extra) : b.lines;
+        bufferRef.current = { capacity, lines, dropped: b.dropped + extra };
       }
     }
     // Resuming folds the accumulated buffer into view in one step — never
@@ -432,6 +469,11 @@ export function useLogStream(
     // the screen is holding the view, whose release does it instead.
     if (!next && !heldRef.current) reveal();
   }, [reveal, capacity]);
+
+  /** `togglePause`, but only ever to paused: for a control that needs the view still and cannot know it is not. */
+  const pause = useCallback(() => {
+    if (!pausedRef.current) togglePause();
+  }, [togglePause]);
 
   const hold = useCallback(
     (on: boolean) => {
@@ -465,10 +507,10 @@ export function useLogStream(
    * or held, the page goes into the frozen view, and into the ring too if
    * the ring still starts where the view does. On resume the ring goes back to
    * its capacity (the oldest lines it let go are on disk again, in `dropped`)
-   * and the view shows it, as ever; a hold's release shrinks nothing. A page that no longer ends where the lines in memory start
-   * would leave a hole, so it is not shown, and `loadError` says why. Asked
-   * again while a read is out, it does nothing: the same page would come back
-   * and no longer join.
+   * and the view shows it, as ever; a hold's release shrinks nothing. A page
+   * that no longer ends where the lines in memory start would leave a hole, so
+   * it is not shown, and `loadError` says why. Asked again while a read is
+   * out, it does nothing: the same page would come back and no longer join.
    */
   const loadEarlier = useCallback(async () => {
     const stream = streamRef.current;
@@ -549,7 +591,7 @@ export function useLogStream(
     if (!joins(bufferRef.current)) {
       giveBackRoom();
       setLoadError(
-        new Error("The stream moved past those lines while they were read. Pause it, then load them again."),
+        new Error("The stream moved past those lines while they were read. Load them again."),
       );
       return;
     }
@@ -563,6 +605,7 @@ export function useLogStream(
 
     bufferRef.current = createLogBuffer(capacity);
     batchRef.current = [];
+    pendingFirstRef.current = undefined;
     show(bufferRef.current);
     // A restart knows nothing about the new targets until they report; the
     // old targets' states are not evidence about these ones.
@@ -727,6 +770,7 @@ export function useLogStream(
       held,
       pendingWhilePaused,
       togglePause,
+      pause,
       hold,
       clear,
       restartCount,
@@ -744,6 +788,7 @@ export function useLogStream(
       held,
       pendingWhilePaused,
       togglePause,
+      pause,
       hold,
       clear,
       restartCount,

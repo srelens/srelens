@@ -51,6 +51,7 @@ import {
   statusTone,
   toneColor,
   toneWash,
+  usePortalShowing,
 } from "@srelens/ui-kit";
 import { useConsole } from "../console";
 import { useLogProviderSource, useLogProviders } from "../extensions/logProviders";
@@ -865,7 +866,11 @@ function LogsStream({
   );
 
   const sinceSeconds = SINCE.find((s) => s.value === since)?.seconds;
+  // A tab behind another stays mounted under `display: none` while the document is visible; its screen draws every
+  // row at 0px, so the stream is told not to give it any to draw until it is the tab on screen.
+  const showing = usePortalShowing();
   const stream = useLogStream(context, namespace, provider.targets ?? targets, {
+    visible: showing,
     // Always on: the design gives the time its own column, so the stamp is not
     // an option the reader turns on — it is where the first column comes from.
     timestamps: true,
@@ -1943,7 +1948,7 @@ function LogsStream({
                               // A following view moves every frame, and a busy stream pushes the page it is reading
                               // straight back out of it (or past the lines it must join), so the page goes into a view
                               // that holds still. Following again is the reader's to ask for.
-                              if (!stream.paused) stream.togglePause();
+                              stream.pause();
                               void stream.loadEarlier();
                             }}
                           >

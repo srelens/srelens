@@ -309,25 +309,41 @@ describe("useLogStream", () => {
       await waitFor(() => expect(result.current.lines).toHaveLength(1));
     });
 
-    describe("in a document nobody is looking at", () => {
-      /** `document.hidden`, as the test says it is. The enclosing `afterEach` puts the real one back. */
-      function visibility(initiallyHidden: boolean) {
-        let hidden = initiallyHidden;
-        Object.defineProperty(document, "hidden", { configurable: true, get: () => hidden });
-        return {
-          hide: () => {
-            hidden = true;
-            act(() => void document.dispatchEvent(new Event("visibilitychange")));
-          },
-          show: () => {
-            hidden = false;
-            act(() => void document.dispatchEvent(new Event("visibilitychange")));
-          },
-        };
-      }
-      /** A hidden document gets a timer of about a frame, so wait a few of them. */
-      const aFrame = () => act(() => new Promise((r) => setTimeout(r, 50)));
+    /** `document.hidden`, as the test says it is. The enclosing `afterEach` puts the real one back. */
+    function visibility(initiallyHidden: boolean) {
+      let hidden = initiallyHidden;
+      Object.defineProperty(document, "hidden", { configurable: true, get: () => hidden });
+      return {
+        hide: () => {
+          hidden = true;
+          act(() => void document.dispatchEvent(new Event("visibilitychange")));
+        },
+        show: () => {
+          hidden = false;
+          act(() => void document.dispatchEvent(new Event("visibilitychange")));
+        },
+      };
+    }
+    /** A hidden document gets a timer of about a frame, so wait a few of them. */
+    const aFrame = () => act(() => new Promise((r) => setTimeout(r, 50)));
+    type Hook = ReturnType<typeof useLogStream>;
+    /** A hook on a stream with history, whose `visible` option the test turns with `setShowing`. */
+    async function spooledTab(initiallyShowing: boolean) {
+      const s = fakeSpooledStream();
+      let showing = initiallyShowing;
+      const hook = renderHook(() => useLogStream("ctx", "ns", [target], { spoolMaxBytes: 1024, visible: showing }));
+      await waitFor(() => expect(startLogStream).toHaveBeenCalled());
+      return {
+        s,
+        ...hook,
+        setShowing: (on: boolean) => {
+          showing = on;
+          hook.rerender();
+        },
+      };
+    }
 
+    describe("in a document nobody is looking at", () => {
       it("takes lines into the ring but does not show them: drawing 50,000 rows for nobody starved the browser", async () => {
         visibility(true);
         const s = fakeStream();
@@ -386,7 +402,6 @@ describe("useLogStream", () => {
         expect(frame.queued.size).toBe(0);
       });
 
-      type Hook = ReturnType<typeof useLogStream>;
       it.each([
         ["paused", (h: Hook) => h.togglePause(), (h: Hook) => h.togglePause()],
         ["held", (h: Hook) => h.hold(true), (h: Hook) => h.hold(false)],
@@ -415,6 +430,21 @@ describe("useLogStream", () => {
         expect(result.current.lines.map((l) => l.text)).toEqual(["before", "a", "b", "c"]);
       });
 
+      it("does not re-render the screen for where history starts: that waits for the document to be shown", async () => {
+        // Where history starts moves about once a second under a flood at the ring's size: a render each, for nobody.
+        const doc = visibility(false);
+        const { s, result } = await spooledTab(true);
+        s.frame(1, ["a"], 1);
+        await waitFor(() => expect(result.current.history).toEqual({ first: 1 }));
+        doc.hide();
+        s.frame(2, ["b"], 3);
+        await aFrame();
+        expect(result.current.history).toEqual({ first: 1 });
+        doc.show();
+        expect(result.current.history).toEqual({ first: 3 });
+        expect(texts(result)).toEqual(["a", "b"]);
+      });
+
       it("does not listen for the document being shown once the screen has gone", async () => {
         const added = vi.spyOn(document, "addEventListener");
         const removed = vi.spyOn(document, "removeEventListener");
@@ -430,6 +460,119 @@ describe("useLogStream", () => {
           added.mockRestore();
           removed.mockRestore();
         }
+      });
+    });
+
+    // An inactive app tab is mounted under `display: none` while the document is visible, so `document.hidden` is false
+    // and frames run: the screen tells the hook it is not showing, with `visible: false`.
+    describe("in a tab that is not showing, though the document is", () => {
+      /** The hook, rendered with a `visible` the test changes and then re-renders with. */
+      async function tab(initiallyShowing: boolean, options: UseLogStreamOptions = {}) {
+        let showing = initiallyShowing;
+        const s = fakeStream();
+        const hook = renderHook(() => useLogStream("kind-dev", "default", [target], { ...options, visible: showing }));
+        await s.connect();
+        return {
+          s,
+          ...hook,
+          setShowing: (on: boolean) => {
+            showing = on;
+            hook.rerender();
+          },
+        };
+      }
+
+      it("takes lines into the ring but does not show them", async () => {
+        const { s, result } = await tab(false);
+        appendLogLines.mockClear();
+        act(() => {
+          s.line("", "one");
+          s.line("", "two");
+        });
+        await aFrame();
+        // The frame still folds, so the ring holds them and no backlog grows...
+        expect(appendLogLines).toHaveBeenCalledTimes(1);
+        // ...but a render of the screen draws every row of it, for a tab nobody can see.
+        expect(result.current.lines).toHaveLength(0);
+        act(() => s.line("", "three"));
+        await aFrame();
+        expect(result.current.lines).toHaveLength(0);
+        expect(result.current.pendingWhilePaused).toBe(0);
+      });
+
+      it("shows what it took as soon as the tab is showing again, and follows from there", async () => {
+        const { s, result, setShowing } = await tab(false);
+        act(() => {
+          s.line("", "one");
+          s.line("", "two");
+        });
+        await aFrame();
+        act(() => setShowing(true));
+        expect(result.current.lines.map((l) => l.text)).toEqual(["one", "two"]);
+        act(() => s.line("", "three"));
+        await waitFor(() => expect(result.current.lines).toHaveLength(3));
+      });
+
+      it("shows nothing for the document being visible alone, nor for the tab alone while the document is hidden", async () => {
+        const doc = visibility(true);
+        const { s, result, setShowing } = await tab(false);
+        act(() => s.line("", "one"));
+        await aFrame();
+        // The document comes back; the tab is still not the one on screen.
+        doc.show();
+        expect(result.current.lines).toHaveLength(0);
+        // The tab is showing, but the document goes away again.
+        doc.hide();
+        act(() => setShowing(true));
+        expect(result.current.lines).toHaveLength(0);
+        doc.show();
+        expect(result.current.lines.map((l) => l.text)).toEqual(["one"]);
+      });
+
+      it.each([
+        ["paused", (h: Hook) => h.togglePause(), (h: Hook) => h.togglePause()],
+        ["held", (h: Hook) => h.hold(true), (h: Hook) => h.hold(false)],
+      ])("leaves a %s view as it was when the tab is showing again, and counts what waited", async (_, freeze, release) => {
+        const { s, result, setShowing } = await tab(true);
+        act(() => s.line("", "before"));
+        await waitFor(() => expect(result.current.lines).toHaveLength(1));
+        act(() => freeze(result.current));
+        act(() => setShowing(false));
+        act(() => {
+          s.line("", "a");
+          s.line("", "b");
+          s.line("", "c");
+        });
+        await aFrame();
+        // Not even the count: that is a state change, and a render.
+        expect(result.current.pendingWhilePaused).toBe(0);
+
+        act(() => setShowing(true));
+        expect(result.current.lines.map((l) => l.text)).toEqual(["before"]);
+        expect(result.current.pendingWhilePaused).toBe(3);
+        act(() => release(result.current));
+        expect(result.current.lines.map((l) => l.text)).toEqual(["before", "a", "b", "c"]);
+      });
+
+      it("does not re-render the screen for where history starts until the tab is showing", async () => {
+        const { s, result, setShowing } = await spooledTab(true);
+        s.frame(1, ["a"], 1);
+        await waitFor(() => expect(result.current.history).toEqual({ first: 1 }));
+        act(() => setShowing(false));
+        s.frame(2, ["b"], 3);
+        await aFrame();
+        expect(result.current.history).toEqual({ first: 1 });
+        act(() => setShowing(true));
+        expect(result.current.history).toEqual({ first: 3 });
+        expect(texts(result)).toEqual(["a", "b"]);
+      });
+
+      it("does not restart the stream when the tab is shown or hidden", async () => {
+        const { setShowing } = await tab(true);
+        expect(startLogStream).toHaveBeenCalledTimes(1);
+        act(() => setShowing(false));
+        act(() => setShowing(true));
+        expect(startLogStream).toHaveBeenCalledTimes(1);
       });
     });
   });
@@ -501,6 +644,26 @@ describe("useLogStream", () => {
     expect(startLogStream).toHaveBeenCalledTimes(1);
     await waitFor(() => expect(result.current.lines).toHaveLength(2));
     expect(result.current.pendingWhilePaused).toBe(0);
+  });
+
+  it("pauses on request, and leaves a view that is already paused paused", async () => {
+    // What a control that must have the view still asks for: `togglePause` would resume one that is.
+    const s = fakeStream();
+    const { result } = renderHook(() => useLogStream("kind-dev", "default", [target]));
+    await s.connect();
+
+    act(() => result.current.pause());
+    expect(result.current.paused).toBe(true);
+    act(() => s.line("", "a"));
+    await waitFor(() => expect(result.current.pendingWhilePaused).toBe(1));
+    expect(result.current.lines).toHaveLength(0);
+
+    act(() => result.current.pause());
+    expect(result.current.paused).toBe(true);
+    expect(result.current.pendingWhilePaused).toBe(1);
+    act(() => result.current.togglePause());
+    expect(result.current.paused).toBe(false);
+    await waitFor(() => expect(result.current.lines).toHaveLength(1));
   });
 
   it("stops the stream on unmount", async () => {
@@ -1125,6 +1288,18 @@ describe("useLogStream with history on disk (#914)", () => {
     await waitFor(() => expect(texts(result).at(-1)).toBe("after"));
     expect(result.current.lines.length).toBe(5000);
     expect(result.current.dropped).toBe(5001);
+  });
+
+  it("tells the reader to load again, not to pause first, when the stream moved past the page", async () => {
+    // Load pauses the view itself now, so "Pause it" is no advice.
+    const { s, result } = await openSpooled();
+    s.frame(5001, many(5001, 5000));
+    await waitFor(() => expect(result.current.lines.length).toBe(5000));
+    s.readEarlier.mockResolvedValueOnce(s.page(1, many(1, 4000)));
+    await act(() => result.current.loadEarlier());
+    expect(String(result.current.loadError)).toBe(
+      "Error: The stream moved past those lines while they were read. Load them again.",
+    );
   });
 
   it("takes back the room it made when the page comes back empty", async () => {
