@@ -203,7 +203,7 @@ impl LogStreamManager {
 
     /// Start following the given targets. Their lines go out on `channel` as
     /// frames (`{seq, first?, lines}`) every [`FRAME_EVERY`]; each target's
-    /// status changes go out at once. The subscriber attaches to `channel`
+    /// status changes go out at once, after the lines sent before them. The subscriber attaches to `channel`
     /// first, then calls this, so the initial tail can't race the listener.
     /// `spool_max_bytes` keeps the stream's history on disk, capped by the
     /// manager's [`SpoolDirs`].
@@ -268,7 +268,7 @@ impl LogStreamManager {
                 let writer = writer.clone();
                 tokio::spawn(async move {
                     let status_source = source.clone();
-                    let lines = writer.clone();
+                    let (lines, before_status) = (writer.clone(), writer.clone());
                     stream_pod_logs_resilient(
                         cache,
                         context,
@@ -293,6 +293,12 @@ impl LogStreamManager {
                                 source: status_source.clone(),
                                 status: status.to_string(),
                             }) {
+                                // The lines sent before the status go out first, or a
+                                // "reconnecting" would read as coming before its error.
+                                let mut writer = before_status.lock().unwrap();
+                                for payload in writer.take() {
+                                    status_sink.emit(&status_channel, payload);
+                                }
                                 status_sink.emit(&status_channel, v);
                             }
                         },
@@ -467,14 +473,17 @@ async fn send_frames(writer: Arc<Mutex<LogWriter>>, sink: Arc<dyn EventSink>, ch
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
         tick.tick().await;
-        let (out, done) = {
+        // Emitted under the writer's lock, as a status flushing the lines before
+        // it is, so a frame taken here can never go out after that status.
+        // ponytail: target tasks wait on `push` while a frame is emitted; take
+        // and emit under a separate ordering lock if that ever shows up.
+        let done = {
             let mut writer = writer.lock().unwrap();
-            let out = writer.take();
-            (out, writer.running == 0)
+            for payload in writer.take() {
+                sink.emit(&channel, payload);
+            }
+            writer.running == 0
         };
-        for payload in out {
-            sink.emit(&channel, payload);
-        }
         if done {
             return;
         }
@@ -566,6 +575,57 @@ mod tests {
         for p in &status_payloads {
             assert_eq!(p["status"], "reconnecting");
         }
+    }
+
+    /// A status follows the lines its target sent before it (#933 review). A
+    /// target that cannot connect sends its `[error: …]` line, then
+    /// "reconnecting": the line waits for a frame, and the status must not
+    /// overtake it, or the marker reads as coming before its cause.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_status_goes_out_after_the_lines_sent_before_it() {
+        let manager = LogStreamManager::new(ClientCache::new_many(vec![]));
+        let sink = Arc::new(TestSink::default());
+        manager
+            .start(
+                sink.clone(),
+                "ctx".into(),
+                "ns".into(),
+                vec![LogTarget {
+                    pod: "web-1".into(),
+                    container: Some("app".into()),
+                    label: "web-1".into(),
+                }],
+                "logs:1".into(),
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        let is_error = |p: &serde_json::Value| {
+            p["lines"].as_array().is_some_and(|lines| {
+                lines
+                    .iter()
+                    .any(|l| l["line"].as_str().is_some_and(|t| t.starts_with("[error:")))
+            })
+        };
+        let mut payloads = Vec::new();
+        for _ in 0..200 {
+            payloads = sink.payloads_for("logs:1");
+            if payloads.iter().any(is_error) && payloads.iter().any(|p| p["status"] == "reconnecting") {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        manager.stop("logs:1");
+
+        let error_at = payloads.iter().position(is_error).expect("the error line went out");
+        let status_at = payloads
+            .iter()
+            .position(|p| p["status"] == "reconnecting")
+            .expect("the status went out");
+        assert!(error_at < status_at, "{payloads:?}");
     }
 
     /// The payload the frontend reads: `truncated` only on a cut line, so a
