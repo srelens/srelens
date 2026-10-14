@@ -824,6 +824,48 @@ describe("Window strip", () => {
     await userEvent.click(screen.getByRole("button", { name: /open in classic/i }));
     expect(onOpenInClassic).toHaveBeenCalledWith("/incidents", "prod");
   });
+
+  /**
+   * #101. The strip is about the ACTIVE TAB's cluster: the one pinned in a
+   * detail route, else the rail's for a cluster-scoped route, else none.
+   * `loadTabsState` is this file's spy, so protection's read of main's save
+   * gets the same document boot did.
+   */
+  it("says above the tab when the tab's own cluster is protected", async () => {
+    listContexts.mockResolvedValue({ contexts: [ctx("prod"), ctx("stage")] });
+    const saved = defaultState([ctx("prod"), ctx("stage")]);
+    const production = defaultState([ctx("stage")]).workspaces[0];
+    production.name = "Production";
+    production.protected = true;
+    saved.workspaces.push(production);
+    loadTabsState.mockReturnValue(saved);
+    await booted();
+    const note = () => screen.queryByRole("note");
+    const copy = "stage is protected (workspace Production). Changes ask you to type its name.";
+
+    // A detail tab pinned to the protected cluster, with the rail on prod.
+    act(() => { store.openTab("/k/stage/Node/-/worker-1", { clusterName: "stage" }); });
+    expect(note()?.textContent).toBe(copy);
+    // Between the tab strip and the tab bodies.
+    const tablist = screen.getByRole("tablist", { name: "Open tabs" });
+    const home = screen.getByRole("heading", { level: 1, name: "Home", hidden: true });
+    expect(tablist.compareDocumentPosition(note()!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(note()!.compareDocumentPosition(home) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+
+    // A cluster-scoped tab on the rail's cluster, which is not protected.
+    act(() => { store.openTab("/overview", { clusterName: "prod" }); });
+    expect(note()).toBeNull();
+
+    // The reverse: the rail on the protected cluster, a detail tab pinned to the other.
+    act(() => { store.setActiveCluster("stage", "stage"); });
+    expect(note()?.textContent).toBe(copy);
+    act(() => { store.openTab("/k/prod/Node/-/worker-2", { clusterName: "prod" }); });
+    expect(note()).toBeNull();
+
+    // An app route, with the rail still on the protected cluster.
+    act(() => { store.activateTab(store.currentWorkspace().tabs.find((t) => t.route === "/")!.id); });
+    expect(note()).toBeNull();
+  });
 });
 
 describe("Window — each tab's namespace selection", () => {

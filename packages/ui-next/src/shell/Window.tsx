@@ -114,6 +114,7 @@ import { Chrome, zoom } from "./Chrome";
 import { Console } from "./Console";
 import { isWorkspaceSealed, LockGate, lockWorkspace, useWorkspaceSealed } from "./LockGate";
 import { Nav } from "./Nav";
+import { ProtectedStrip, protectedStripCluster } from "./ProtectedStrip";
 import { Rail } from "./Rail";
 import { Status } from "./Status";
 import { TabSurface } from "./TabSurface";
@@ -927,6 +928,8 @@ export function Window({
             label="Open tabs"
           />
         )}
+        {/* #101: between the strip and the tab, about the active tab's own cluster. */}
+        {active && <ProtectedStrip contextName={protectedStripCluster(activeTabRoute, activeCtx?.name ?? null)} />}
         <div className="relative min-h-0 flex-1">
           {tabs.map((tab) => {
             // An editor's target is pinned in its route. Its tab label follows
