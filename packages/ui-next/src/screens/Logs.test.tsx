@@ -3358,10 +3358,14 @@ describe("history on disk (#914)", () => {
     h.state.loadingEarlier = true;
     push(...LINES);
     const loading = screen.getByRole("button", { name: "Loading…" });
-    expect(loading).toHaveProperty("disabled", true);
+    // Not `disabled`: a disabled button drops keyboard focus, and the reader presses it again from where they are.
+    expect(loading.getAttribute("aria-disabled")).toBe("true");
+    expect(loading).toHaveProperty("disabled", false);
     expect(screen.queryByRole("button", { name: /Load 5\s?000 earlier/ })).toBeNull();
+    loading.focus();
     await userEvent.click(loading);
     expect(h.loadEarlier).not.toHaveBeenCalled();
+    expect(document.activeElement).toBe(loading);
   });
 
   it("sends the reader to Export once the screen holds as many lines as it will", async () => {

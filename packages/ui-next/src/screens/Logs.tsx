@@ -1920,14 +1920,30 @@ function LogsStream({
                   // The lines before the first one shown are on disk, not gone (#914):
                   // the banner says how many and fetches them a page at a time.
                   return (
-                    <div data-slot="dropped-banner" className="flex flex-wrap items-center gap-x-2 px-2.5 py-1 text-muted">
+                    <div
+                      data-slot="dropped-banner"
+                      // Its button is no press "in the log": holding the view for one would load the page frozen,
+                      // without the room the ring makes for it, and the release would then show the ring, which has
+                      // run on, before the page arrives, so a busy stream would refuse every page.
+                      onPointerDown={(e) => e.stopPropagation()}
+                      className="flex flex-wrap items-center gap-x-2 px-2.5 py-1 text-muted"
+                    >
                       {onDisk > 0 && <span>{groupNumber(onDisk)} earlier lines on disk</span>}
                       {onDisk > 0 &&
                         (stream.lines.length >= MAX_LOADED_LINES ? (
                           <span>{groupNumber(MAX_LOADED_LINES)} lines loaded · Export for the rest</span>
                         ) : (
-                          <Button variant="secondary" size="sm" disabled={stream.loadingEarlier}
-                            onClick={() => void stream.loadEarlier()}>
+                          // `aria-disabled`, not `disabled`: a disabled button drops the keyboard focus it has, and
+                          // the reader would have to find the button again for the next page.
+                          <Button
+                            variant="secondary"
+                            size="sm"
+                            aria-disabled={stream.loadingEarlier || undefined}
+                            className="aria-disabled:cursor-not-allowed aria-disabled:opacity-50"
+                            onClick={() => {
+                              if (!stream.loadingEarlier) void stream.loadEarlier();
+                            }}
+                          >
                             {stream.loadingEarlier ? "Loading…" : `Load ${groupNumber(EARLIER_PAGE)} earlier`}
                           </Button>
                         ))}
