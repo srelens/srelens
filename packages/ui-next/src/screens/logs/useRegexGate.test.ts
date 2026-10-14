@@ -75,9 +75,19 @@ describe("useRegexGate", () => {
     expect(oracles).toHaveLength(0);
   });
 
-  it("holds every row back until the worker has answered it, then gives them in order", async () => {
+  it("keeps the previous clauses and rows, not an empty list, until a new regex has answered the buffer", async () => {
+    const { result, rerender } = gate("level:error");
+    const before = result.current.clauses;
+    rerender({ applied: parse("level:error /a+/"), rows: LINES });
+    expect(result.current.clauses).toBe(before);
+    expect(result.current.rows).toBe(LINES);
+    await reply("a+");
+    expect(result.current.clauses.map((c) => c.value)).toEqual(["error", "a+"]);
+    expect(texts(result.current.rows)).toEqual(texts(LINES));
+  });
+
+  it("applies a regex once the worker has answered the buffer, giving the rows in order", async () => {
     const { result } = gate("/a+/");
-    expect(result.current.rows).toEqual([]);
     await reply("a+");
     expect(texts(result.current.rows)).toEqual(texts(LINES));
     // The clauses read the answers: `starting` and `aaaaaaaa` match, `error pool timeout` does not.
@@ -176,6 +186,40 @@ describe("useRegexGate", () => {
     expect(result.current.rows).toBe(rows);
     expect(result.current.slow).toBe("/(a+)+$/");
     expect(result.current.unavailable).toBe(false);
+  });
+
+  it("keeps the regex it goes back to answering, on the worker it already had", async () => {
+    const { result, rerender } = gate("/a/");
+    await reply("a");
+    const first = oracleFor("a");
+    rerender({ applied: parse("/a/ /(a+)+$/"), rows: LINES });
+    await act(async () => oracleFor("(a+)+$").fail("slow"));
+    expect(result.current.clauses.map((c) => c.value)).toEqual(["a"]);
+    // A line that lands after the fall-back is asked of the same worker, and shown once it is answered.
+    const rows = [...LINES, row("a new line")];
+    rerender({ applied: parse("/a/ /(a+)+$/"), rows });
+    expect(first.asks.at(-1)?.map((item) => item.test)).toEqual(["a new line"]);
+    expect(texts(result.current.rows)).toEqual(texts(LINES));
+    await act(async () => first.reply());
+    expect(texts(result.current.rows)).toEqual(texts(rows));
+    expect(first.disposed).toBe(false);
+    expect(oracles.filter((o) => o.source === "a")).toHaveLength(1);
+  });
+
+  it("keeps the previous query's regex answering while a new one applies, in case the new one goes slow later", async () => {
+    const { result, rerender } = gate("/a/");
+    await reply("a");
+    const first = oracleFor("a");
+    rerender({ applied: parse("/b/"), rows: LINES });
+    await reply("b");
+    expect(result.current.clauses.map((c) => c.value)).toEqual(["b"]);
+    const rows = [...LINES, row("a later line")];
+    rerender({ applied: parse("/b/"), rows });
+    await act(async () => oracleFor("b").fail("slow"));
+    expect(result.current.clauses.map((c) => c.value)).toEqual(["a"]);
+    await act(async () => first.reply());
+    expect(texts(result.current.rows)).toEqual(texts(rows));
+    expect(first.disposed).toBe(false);
   });
 
   it("goes back past the half-typed queries that did not parse on the way to the regex", async () => {

@@ -2475,7 +2475,7 @@ describe("a Logs tab's saved query (#898)", () => {
       push(...LINES);
       expect(filterField()).toHaveProperty("value", "/(a+)+$/");
       await waitFor(() => expect(oracleFor("(a+)+$").asks).toHaveLength(1));
-      // Held back while the worker has them.
+      // The regex met an empty buffer, so it applied at once: these lines came after, and wait on the worker.
       expect(rendered(region)).toHaveLength(0);
       await act(async () => oracleFor("(a+)+$").fail("slow"));
       expect(screen.getByText("Too slow to run on these lines: /(a+)+$/").closest('[role="alert"]')).not.toBeNull();
@@ -2523,11 +2523,12 @@ describe("a regex in the query (#898)", () => {
   /** The worker for `source` answers what it has been asked: with its own code, or with `given` for every line. */
   const reply = (source: string, given?: RegexAnswer) => act(async () => oracleFor(source).reply(given));
 
-  it("filters by what the worker answers, holding each line back until it has", async () => {
+  it("filters by what the worker answers, holding each later line back until it has", async () => {
     const region = await (draw(), body());
     push(...LINES);
     await typeRegex("/po+l/", "po+l");
-    expect(rendered(region)).toEqual([]);
+    // Not an empty body while the worker has the buffer: the lines it had stay.
+    expect(rendered(region)).toHaveLength(4);
     await reply("po+l");
     expect(messages(region)).toEqual(["error pool timeout waited=30.0s in_use=5"]);
     expect(screen.queryByText(/Too slow to run/)).toBeNull();

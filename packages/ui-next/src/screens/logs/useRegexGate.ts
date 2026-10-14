@@ -7,11 +7,18 @@ import { shownText, type MessageRow } from "./LogMessage";
 type RegexClause = Extract<QueryClause, { match: "regex" }>;
 type Ranges = readonly (readonly [number, number])[];
 
-/** One regex clause of the applied query, the worker that answers it, and the rows it has been asked about. */
+/**
+ * One pattern and target, the worker that answers it, and the rows it has been asked about. One regex has one,
+ * shared by every query that holds it, so going back to an earlier query reuses its worker and its answers.
+ */
 interface Entry {
   readonly clause: RegexClause;
   readonly oracle: RegexOracle;
   readonly asked: WeakSet<object>;
+  /** Its first batch, the buffer as it stood when the regex came, has been sent. */
+  begun: boolean;
+  /** And answered. Until then the regex isn't applied, and the screen keeps what it had. */
+  primed: boolean;
 }
 
 /** Clauses the screen can filter by, and the workers their regexes read. */
@@ -78,10 +85,13 @@ function answered(entries: readonly Entry[], row: QueryLine): boolean {
  * clauses returned read those answers.
  *
  * - With no regex, the rows and the applied clauses come back as they are.
- * - With one, `rows` is the rows answered for every regex, in order. A row is
- *   held back until it is, typically a frame.
+ * - A new regex applies once its worker has answered the buffer as it stood.
+ *   Until then the screen keeps the clauses and rows it had, not an empty list.
+ * - From then on, `rows` is the rows answered for every regex, in order: a line
+ *   that lands later is held back until it is, typically a frame.
  * - A regex too slow on some batch, or with no worker to run it, sends the
- *   screen back to the clauses it last applied in full, and says which.
+ *   screen back to the clauses it had before, and says which. Their regexes'
+ *   workers are still running, so lines that land after that are answered too.
  */
 export function useRegexGate<R extends QueryLine & MessageRow>(
   applied: ParsedQuery,
@@ -97,35 +107,64 @@ export function useRegexGate<R extends QueryLine & MessageRow>(
   const [answers, answeredSome] = useReducer((n: number) => n + 1, 0);
   /** Bumped to try again a regex no worker could run. */
   const [tries, retry] = useReducer((n: number) => n + 1, 0);
-  /** The last clauses applied with every row answered: what a regex that can't run goes back to. */
-  const settled = useRef<View>(NO_VIEW);
+  /** Every worker the gate holds, by pattern and target. */
+  const pool = useRef(new Map<string, Entry>());
+  /** The view last given out for a query that parsed: what a new regex is held back on, and goes back to. */
+  const shown = useRef<View>(NO_VIEW);
 
   const regexes = useMemo(() => (applied.ok ? applied.clauses.filter(isRegex) : []), [applied]);
   const key = regexes.map(keyOf).join("\n");
 
-  // Made in render, for a worker starts only when the first batch is sent, from an effect.
+  // Made in render, for a worker starts only when its first batch is sent, from the effect below.
   const generation = useMemo<Generation | undefined>(
     () =>
       regexes.length === 0
         ? undefined
         : {
-            entries: regexes.map((clause) => ({
-              clause,
-              oracle: createRegexOracle(clause.value, clause.regex.flags),
-              asked: new WeakSet<object>(),
-            })),
-            fallback: settled.current,
+            entries: regexes.map((clause) => {
+              const had = pool.current.get(keyOf(clause));
+              // One that couldn't run is not kept: a new query is its next try.
+              if (had !== undefined && had.oracle.state !== "unavailable") return had;
+              had?.oracle.dispose();
+              const made: Entry = {
+                clause,
+                oracle: createRegexOracle(clause.value, clause.regex.flags),
+                asked: new WeakSet<object>(),
+                begun: false,
+                primed: false,
+              };
+              pool.current.set(keyOf(clause), made);
+              return made;
+            }),
+            fallback: shown.current,
           },
-    // A new set of workers for a new set of regexes only: the rest of the query and the rows don't touch them.
+    // New workers for a new set of regexes only: the rest of the query and the rows don't touch them.
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [key, tries],
   );
-  useEffect(() => () => generation?.entries.forEach((e) => e.oracle.dispose()), [generation]);
 
-  // Ask each worker about the rows it hasn't been asked about. The first batch is the buffer; a commit brings the rest.
+  const current = useMemo<View>(() => {
+    if (!applied.ok) return NO_VIEW;
+    if (generation === undefined) return { clauses: applied.clauses, entries: [] };
+    return { clauses: withLookups(applied.clauses, generation.entries), entries: generation.entries };
+  }, [applied, generation]);
+  const usable = (v: View) => v.entries.every((e) => e.primed && e.oracle.state === "ready");
+  // The fallback's own regex can go slow on a later line too; with nothing left to go back to, nothing is filtered.
+  const view =
+    generation === undefined || usable(current) ? current : usable(generation.fallback) ? generation.fallback : NO_VIEW;
+
   useEffect(() => {
-    if (generation === undefined) return;
-    for (const entry of generation.entries) {
+    // Not a query that does not parse: typing passes through those on the way to a regex, and none is a filter to go back to.
+    if (applied.ok) shown.current = view;
+    // A worker lives while the applied query, the view it would go back to, or the view on screen uses it.
+    const live = new Set([...(generation?.entries ?? []), ...(generation?.fallback.entries ?? []), ...shown.current.entries]);
+    for (const [k, entry] of pool.current) {
+      if (live.has(entry)) continue;
+      entry.oracle.dispose();
+      pool.current.delete(k);
+    }
+    // Ask each about the rows it hasn't been asked about. The first batch is the buffer; a commit brings the rest.
+    for (const entry of live) {
       if (entry.oracle.state !== "ready") continue;
       const items: RegexItem[] = [];
       for (const row of rows) {
@@ -136,7 +175,14 @@ export function useRegexGate<R extends QueryLine & MessageRow>(
         // A free-text regex marks the row as it is shown, so the worker works the marks out too.
         items.push(entry.clause.field === undefined ? { test, shown: shownText(row) } : { test });
       }
-      if (items.length > 0) void entry.oracle.ask(items).then(answeredSome);
+      const asked = items.length > 0 ? entry.oracle.ask(items) : undefined;
+      if (!entry.begun) {
+        entry.begun = true;
+        void (asked ?? Promise.resolve()).then(() => {
+          entry.primed = true;
+          answeredSome();
+        });
+      } else if (asked !== undefined) void asked.then(answeredSome);
       // A live buffer drops its oldest lines as new ones come: the answers for them go once they are the bulk.
       if (entry.oracle.size > 2 * rows.length) {
         const keep = new Set<string>();
@@ -147,24 +193,17 @@ export function useRegexGate<R extends QueryLine & MessageRow>(
         entry.oracle.prune(keep);
       }
     }
-  }, [generation, rows]);
+  }, [applied, generation, view, rows]);
+  useEffect(() => () => pool.current.forEach((entry) => entry.oracle.dispose()), []);
 
   const slow = generation?.entries.find((e) => e.oracle.state === "slow");
   const unavailable = generation?.entries.some((e) => e.oracle.state === "unavailable") ?? false;
-  const failed = slow !== undefined || unavailable;
   // A worker that couldn't run isn't held against the pattern: the next change to the query tries again.
   useEffect(() => {
     if (unavailable) retry();
     // On a change to the query only, not on the render that found it unavailable.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [applied]);
-
-  const current = useMemo<View>(() => {
-    if (!applied.ok) return NO_VIEW;
-    if (generation === undefined) return { clauses: applied.clauses, entries: [] };
-    return { clauses: withLookups(applied.clauses, generation.entries), entries: generation.entries };
-  }, [applied, generation]);
-  const view = failed && generation !== undefined ? generation.fallback : current;
 
   const shownRows = useMemo(
     () => (view.entries.length === 0 ? rows : rows.filter((row) => answered(view.entries, row))),
@@ -178,12 +217,6 @@ export function useRegexGate<R extends QueryLine & MessageRow>(
     if (marking.length === 0) return noRanges;
     return (row: R): Ranges => marking.flatMap((e) => e.oracle.get(row.text)?.ranges ?? NO_RANGES);
   }, [view]);
-
-  // Not a query that does not parse: typing passes through those on the way to a regex, and none is a filter to go back to.
-  const allIn = applied.ok && !failed && shownRows.length === rows.length;
-  useEffect(() => {
-    if (allIn) settled.current = view;
-  });
 
   return {
     clauses: view.clauses,

@@ -1159,8 +1159,9 @@ function LogsStream({
   const applied = useMemo(() => parseLogQuery(deferredText), [deferredText]);
   /**
    * What the screen filters by, and the rows it may filter. A regex in the query is never run on this thread: a
-   * worker answers each row, and `answered` holds a row back until it has. With no regex, `answered` is `rows`
-   * itself. A regex too slow on some line, or with no worker to run it, sends the screen back to the filter it had,
+   * worker answers each row. A new regex applies once its worker has answered the buffer, the screen keeping the
+   * filter it had until then, and after that `answered` holds a later row back until it has. With no regex,
+   * `answered` is `rows` itself. A regex too slow on some line, or with no worker to run it, sends the screen back to the filter it had,
    * for a typed query and for one restored with the tab alike. Everything below reads `answered`, not `rows`: the
    * body, the rail, the facets, the histogram, the legend and the export.
    */
