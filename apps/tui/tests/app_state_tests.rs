@@ -10,32 +10,35 @@ use std::time::Duration;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEventKind};
 use ratatui::layout::Rect;
 use serde_json::{json, Value};
+use srelens_kube::k8s_openapi::api::core::v1::Pod;
 use srelens_kube::lineage::{LineageNode, LineageRelation};
 use srelens_kube::metrics::MetricSample;
 use srelens_kube::node_inspector::{
     NodeConditionInfo, NodeInspectorDetails, NodePodItem, NodeTaintInfo,
 };
-use srelens_tui::ai_skills::CavemanLevel;
-use srelens_tui::app::{
+use srelens_kube::workloads::summarise_pod;
+use srectl::ai_skills::CavemanLevel;
+use srectl::app::{
     extract_tool_call_completed_info, extract_tool_call_start_info, format_event_summary,
     get_clipboard_text, parse_involved_object, parse_ready_ratio, ActiveView, App, SuspendAction,
 };
-use srelens_tui::commands::{CommandTarget, CrdMeta, PrinterColumn, ResourceKind};
-use srelens_tui::event::AppEvent;
-use srelens_tui::ui::dialogs::{QuickActionId, QuickActionItem};
-use srelens_tui::ui::{ContainerAction, InputMode, Modal};
-use srelens_tui::views::describe_view::DescribeViewState;
-use srelens_tui::views::helm_view::{HelmReleaseItem, HelmViewState};
-use srelens_tui::views::logs_view::LogsViewState;
-use srelens_tui::views::metrics_panel_view::MetricsPanelState;
-use srelens_tui::views::node_inspector_view::NodeInspectorState;
-use srelens_tui::views::overview_view::{ClusterOverviewData, OverviewViewState};
-use srelens_tui::views::port_forward_view::{PortForwardEntry, PortForwardViewState};
-use srelens_tui::views::resource_table::ResourceTableState;
-use srelens_tui::views::toolbox_view::{ToolStatusItem, ToolboxViewState};
-use srelens_tui::views::tree_view::TreeViewState;
-use srelens_tui::views::yaml_view::YamlViewState;
-use srelens_tui::{AiProvider, AiSettings, DeepLink};
+use srectl::commands::{CommandTarget, CrdMeta, PrinterColumn, ResourceKind};
+use srectl::event::AppEvent;
+use srectl::theme::Theme;
+use srectl::ui::dialogs::{QuickActionId, QuickActionItem};
+use srectl::ui::{ContainerAction, InputMode, Modal};
+use srectl::views::describe_view::DescribeViewState;
+use srectl::views::helm_view::{HelmReleaseItem, HelmViewState};
+use srectl::views::logs_view::LogsViewState;
+use srectl::views::metrics_panel_view::MetricsPanelState;
+use srectl::views::node_inspector_view::NodeInspectorState;
+use srectl::views::overview_view::{ClusterOverviewData, OverviewViewState};
+use srectl::views::port_forward_view::{PortForwardEntry, PortForwardViewState};
+use srectl::views::resource_table::ResourceTableState;
+use srectl::views::toolbox_view::{ToolStatusItem, ToolboxViewState};
+use srectl::views::tree_view::TreeViewState;
+use srectl::views::yaml_view::YamlViewState;
+use srectl::{AiProvider, AiSettings, DeepLink};
 use tokio::sync::mpsc::UnboundedReceiver;
 
 // ---------------------------------------------------------------------------
@@ -58,43 +61,26 @@ const NARROW: (u16, u16) = (80, 24);
 /// the assertion reads `valuesk-test` instead of `sk-test`. A fresh directory
 /// per test cannot do that.
 fn isolate_ai_settings() -> SettingsGuard {
-    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    // A test that panics while holding the lock poisons it; the next test
-    // still wants the lock, not the panic.
-    let lock = LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut env = common::env::lock();
     let dir = tempfile::tempdir().expect("a scratch directory for AI settings");
-    let previous = std::env::var("SRELENS_AI_SETTINGS_PATH").ok();
-    std::env::set_var(
+    env.set(
         "SRELENS_AI_SETTINGS_PATH",
         dir.path().join("ai_settings.json"),
     );
-    SettingsGuard {
-        _lock: lock,
-        _dir: dir,
-        previous,
-    }
+    SettingsGuard { env, _dir: dir }
 }
 
 struct SettingsGuard {
-    _lock: std::sync::MutexGuard<'static, ()>,
+    /// The binary's environment lock. Write any other variable through it.
+    env: common::env::EnvGuard,
     /// Held, not used: dropping it deletes the scratch directory.
     _dir: tempfile::TempDir,
-    previous: Option<String>,
-}
-
-impl Drop for SettingsGuard {
-    fn drop(&mut self) {
-        match &self.previous {
-            Some(value) => std::env::set_var("SRELENS_AI_SETTINGS_PATH", value),
-            None => std::env::remove_var("SRELENS_AI_SETTINGS_PATH"),
-        }
-    }
 }
 
 /// An assistant configuration that can never reach a provider: Gemini with no
 /// key anywhere, so a submitted query is answered by the "No API key" reply.
-fn keyless_assistant(app: &mut App) {
-    std::env::remove_var("GEMINI_API_KEY");
+fn keyless_assistant(app: &mut App, env: &mut common::env::EnvGuard) {
+    env.remove("GEMINI_API_KEY");
     let mut settings = AiSettings::default();
     settings.default_provider = AiProvider::Gemini;
     settings.api_keys.clear();
@@ -305,6 +291,11 @@ fn node_details(name: &str, unschedulable: bool) -> NodeInspectorDetails {
         gpu_requests_count: 0,
         gpu_memory_total_mib: Some(24_576),
         gpu_memory_requests_mib: 0,
+        is_virtual_gpu: false,
+        physical_gpu_count: 0,
+        physical_gpu_memory_total_mib: None,
+        virtual_gpu_count: None,
+        virtual_gpu_memory_total_mib: None,
         conditions: vec![NodeConditionInfo {
             type_: "Ready".into(),
             status: "True".into(),
@@ -380,15 +371,9 @@ fn alt(c: char) -> KeyEvent {
     KeyEvent::new(KeyCode::Char(c), KeyModifiers::ALT)
 }
 
-/// Type into the assistant composer. A leading `c` on an empty input is the
-/// "copy the last answer" shortcut rather than a character, so the first
-/// character is seeded directly when it would be swallowed.
+/// Type into the assistant composer.
 async fn compose(app: &mut App, text: &str) {
-    for (i, c) in text.chars().enumerate() {
-        if i == 0 && c == 'c' && app.assistant_state.input.is_empty() {
-            app.assistant_state.input.push('c');
-            continue;
-        }
+    for c in text.chars() {
         app.handle_key_event(common::ch(c)).await;
     }
 }
@@ -615,6 +600,7 @@ fn a_ready_ratio_parses_leniently() {
 
 #[tokio::test]
 async fn a_pods_watch_for_the_current_channel_keeps_previous_metrics_and_fills_the_cache() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app().await;
     let mut table = table_with(ResourceKind::Pods, vec![pod("web-0", "default")]);
     table.raw_items[0]["cpu"] = json!("5m");
@@ -646,8 +632,89 @@ async fn a_pods_watch_for_the_current_channel_keeps_previous_metrics_and_fills_t
     assert!(t.raw_items[1].get("cpu").is_none());
 }
 
+/// A crash-looping pod as the API server returns it (`kubectl get pod -o
+/// json`, trimmed): its only container has exited 1 six times and sits in
+/// `CrashLoopBackOff`, and the phase still says `Running`.
+fn crash_looping_pod() -> Value {
+    json!({
+        "apiVersion": "v1",
+        "kind": "Pod",
+        "metadata": {
+            "name": "crasher-6d8f9b7c4-x2x9k",
+            "namespace": "default",
+            "creationTimestamp": "2026-10-03T10:00:00Z"
+        },
+        "spec": {
+            "nodeName": "kind-control-plane",
+            "containers": [{ "name": "crasher", "image": "busybox:1.36" }]
+        },
+        "status": {
+            "phase": "Running",
+            "conditions": [
+                { "type": "Ready", "status": "False", "reason": "ContainersNotReady" },
+                { "type": "ContainersReady", "status": "False", "reason": "ContainersNotReady" }
+            ],
+            "containerStatuses": [{
+                "name": "crasher",
+                "image": "docker.io/library/busybox:1.36",
+                "imageID": "",
+                "ready": false,
+                "started": false,
+                "restartCount": 6,
+                "state": { "waiting": {
+                    "reason": "CrashLoopBackOff",
+                    "message": "back-off 2m40s restarting failed container=crasher"
+                } },
+                "lastState": { "terminated": {
+                    "exitCode": 1,
+                    "reason": "Error",
+                    "startedAt": "2026-10-03T10:04:00Z",
+                    "finishedAt": "2026-10-03T10:04:01Z"
+                } }
+            }]
+        }
+    })
+}
+
+#[tokio::test]
+async fn a_crash_looping_pod_reads_crash_loop_back_off_in_red_not_running_in_green() {
+    let _settings = common::env::isolate_settings();
+    let (mut app, _rx) = common::app().await;
+    app.active_view = ActiveView::Table(table_with(ResourceKind::Pods, vec![]));
+    let channel = "watch:test-cluster:default:pods".to_string();
+    app.current_watch_channel = Some(channel.clone());
+
+    // Exactly what the pods watch emits: the pod through the backend's own
+    // summariser, serialised.
+    let pod: Pod = serde_json::from_value(crash_looping_pod()).expect("a valid Pod");
+    let summary = serde_json::to_value(summarise_pod(pod)).expect("a summary serialises");
+    app.handle_stream_event(channel, json!([summary]));
+
+    let _theme = common::theme::lock();
+    let buf = common::render_app_buffer(&mut app, WIDE.0, WIDE.1);
+    let lines = common::buffer_lines(&buf);
+    let (y, row) = lines
+        .iter()
+        .enumerate()
+        .find(|(_, l)| l.contains("crasher-6d8f9b7c4-x2x9k"))
+        .unwrap_or_else(|| panic!("the pod's row is on screen:\n{}", lines.join("\n")));
+    assert!(
+        row.contains("CrashLoopBackOff"),
+        "STATUS shows what kubectl shows, not the phase: {row}"
+    );
+    assert!(!row.contains("Running"), "the phase does not show: {row}");
+    let byte = row.find("CrashLoopBackOff").unwrap();
+    let x = row[..byte].chars().count() as u16;
+    assert_eq!(
+        buf[(x, y as u16)].style().fg,
+        Theme::status_error().fg,
+        "a crash loop is drawn in the error colour, not the healthy green: {row}"
+    );
+}
+
 #[tokio::test]
 async fn a_watch_for_another_channel_only_updates_the_cache() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app().await;
     app.active_view = ActiveView::Table(table_with(ResourceKind::Deployments, vec![]));
     app.current_watch_channel = Some("watch:test-cluster:default:deployments".into());
@@ -670,6 +737,7 @@ async fn a_watch_for_another_channel_only_updates_the_cache() {
 
 #[tokio::test]
 async fn a_non_pod_watch_for_the_current_channel_replaces_the_rows() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app().await;
     app.active_view = ActiveView::Table(table_with(ResourceKind::Services, vec![]));
     let channel = "watch:test-cluster:default:services".to_string();
@@ -686,6 +754,7 @@ async fn a_non_pod_watch_for_the_current_channel_replaces_the_rows() {
 
 #[tokio::test]
 async fn a_workloads_table_is_rebuilt_when_a_constituent_kind_arrives() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app().await;
     app.active_view = ActiveView::Table(table_with(ResourceKind::Workloads, vec![]));
 
@@ -707,6 +776,7 @@ async fn a_workloads_table_is_rebuilt_when_a_constituent_kind_arrives() {
 
 #[tokio::test]
 async fn a_namespaces_watch_replaces_the_sorted_namespace_list() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app().await;
     app.handle_stream_event(
         "watch:test-cluster::namespaces".into(),
@@ -724,6 +794,7 @@ async fn a_namespaces_watch_replaces_the_sorted_namespace_list() {
 
 #[tokio::test]
 async fn log_lines_and_status_markers_for_the_open_log_stream_are_appended() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app().await;
     let logs = LogsViewState::new(
         "web-0".into(),
@@ -749,6 +820,7 @@ async fn log_lines_and_status_markers_for_the_open_log_stream_are_appended() {
 
 #[tokio::test]
 async fn every_table_kind_renders_its_own_key_hints() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app().await;
     app.pod_count = 7;
     let secret_store_crd = ResourceKind::CustomResource(CrdMeta {
@@ -761,6 +833,7 @@ async fn every_table_kind_renders_its_own_key_hints() {
         namespaced: true,
         short_names: vec![],
         printer_columns: vec![],
+        created_at: None,
     });
     let cases: Vec<(ResourceKind, &str)> = vec![
         (ResourceKind::Workloads, "Segment"),
@@ -780,7 +853,8 @@ async fn every_table_kind_renders_its_own_key_hints() {
     ];
     for (kind, hint) in cases {
         let title = kind.display_name().to_string();
-        app.active_view = ActiveView::Table(table_with(kind.clone(), vec![pod("web-0", "default")]));
+        app.active_view =
+            ActiveView::Table(table_with(kind.clone(), vec![pod("web-0", "default")]));
         let screen = wide(&mut app);
         assert!(
             screen.contains(&title),
@@ -792,7 +866,10 @@ async fn every_table_kind_renders_its_own_key_hints() {
         );
 
         // Non-pod/non-workload resources must not advertise pod or workload actions
-        if matches!(kind, ResourceKind::ConfigMaps | ResourceKind::CustomResource(_)) {
+        if matches!(
+            kind,
+            ResourceKind::ConfigMaps | ResourceKind::CustomResource(_)
+        ) {
             for excluded in ["PortForward", "Shell", "Restart", "Scale"] {
                 assert!(
                     !screen.contains(excluded),
@@ -811,6 +888,7 @@ async fn every_table_kind_renders_its_own_key_hints() {
 
 #[tokio::test]
 async fn an_unreachable_cluster_with_no_rows_renders_the_cracked_lens() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app().await;
     app.cluster_unreachable = true;
     app.active_view = ActiveView::Table(table_with(ResourceKind::Pods, vec![]));
@@ -829,6 +907,7 @@ async fn an_unreachable_cluster_with_no_rows_renders_the_cracked_lens() {
 
 #[tokio::test]
 async fn text_views_render_their_titles_search_counts_and_hints() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app().await;
 
     let mut yaml = YamlViewState::new(
@@ -885,6 +964,7 @@ async fn text_views_render_their_titles_search_counts_and_hints() {
 
 #[tokio::test]
 async fn list_views_render_their_rows_and_hints() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app().await;
 
     app.active_view = ActiveView::PortForwards(port_forwards());
@@ -913,6 +993,7 @@ async fn list_views_render_their_rows_and_hints() {
 
 #[tokio::test]
 async fn the_overview_renders_cluster_health_with_gauges_and_hints() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app().await;
     app.active_view = ActiveView::Overview(OverviewViewState::with_data(overview_data()));
 
@@ -972,6 +1053,7 @@ async fn the_assistant_settings_and_tree_views_render_with_their_hints() {
 
 #[tokio::test]
 async fn the_node_inspector_renders_loading_error_and_detail_states() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app().await;
 
     app.active_view = ActiveView::NodeInspector(NodeInspectorState::new("gpu-1".into()));
@@ -1007,6 +1089,7 @@ async fn the_node_inspector_renders_loading_error_and_detail_states() {
 
 #[tokio::test]
 async fn every_modal_variant_renders_over_the_view() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app().await;
     app.active_view = ActiveView::Table(table_with(
         ResourceKind::Pods,
@@ -1081,7 +1164,7 @@ async fn every_modal_variant_renders_over_the_view() {
         json!({ "reason": "Pulled", "type": "Normal" }),
     ];
     app.modal = Some(Modal::ReasonRail {
-        tallies: srelens_tui::views::reason_rail::tally_event_reasons(&events),
+        tallies: srectl::views::reason_rail::tally_event_reasons(&events),
         selected_idx: 0,
         active_filter: Some("BackOff".into()),
     });
@@ -1095,6 +1178,7 @@ async fn every_modal_variant_renders_over_the_view() {
 
 #[tokio::test]
 async fn the_status_bar_reflects_input_mode_toast_and_filter() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app().await;
     app.active_view = ActiveView::Table(table_with(
         ResourceKind::Pods,
@@ -1127,6 +1211,7 @@ async fn the_status_bar_reflects_input_mode_toast_and_filter() {
 
 #[tokio::test]
 async fn rendering_with_a_screen_selection_captures_the_highlighted_text() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app().await;
     app.active_view = ActiveView::Table(table_with(
         ResourceKind::Pods,
@@ -1151,6 +1236,7 @@ async fn rendering_with_a_screen_selection_captures_the_highlighted_text() {
 
 #[tokio::test]
 async fn clicking_and_scrolling_a_table_moves_the_selection() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app().await;
     let items: Vec<Value> = (0..6)
         .map(|i| pod(&format!("pod-{i}"), "default"))
@@ -1197,6 +1283,7 @@ async fn clicking_and_scrolling_a_table_moves_the_selection() {
 
 #[tokio::test]
 async fn dragging_in_the_yaml_view_copies_the_selected_lines() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app().await;
     let content: String = (0..12).map(|i| format!("line-{i}\n")).collect();
     app.active_view = ActiveView::Yaml(YamlViewState::new(
@@ -1257,6 +1344,7 @@ async fn dragging_in_the_yaml_view_copies_the_selected_lines() {
 
 #[tokio::test]
 async fn mouse_in_the_assistant_toggles_tool_chips_and_selects_text() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app().await;
     app.assistant_state
         .add_assistant_message("alpha beta gamma".into());
@@ -1303,7 +1391,7 @@ async fn mouse_in_the_assistant_toggles_tool_chips_and_selects_text() {
         "assistant keeps its own selection"
     );
 
-    app.handle_key_event(common::ch('c')).await;
+    app.handle_key_event(common::ctrl('c')).await;
     assert_eq!(toast(&app), "✓ Copied selection to clipboard");
 
     // Re-select, then click outside the viewport to clear.
@@ -1321,6 +1409,7 @@ async fn mouse_in_the_assistant_toggles_tool_chips_and_selects_text() {
 
 #[tokio::test]
 async fn mouse_in_the_node_inspector_pod_table_selects_and_scrolls_pods() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app().await;
     app.active_view = ActiveView::NodeInspector(inspector_with_details("gpu-1", false));
     wide(&mut app);
@@ -1358,6 +1447,7 @@ async fn mouse_in_the_node_inspector_pod_table_selects_and_scrolls_pods() {
 
 #[tokio::test]
 async fn scroll_wheel_moves_tree_logs_and_describe_views() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app().await;
 
     app.active_view = ActiveView::Tree(tree_view());
@@ -1417,6 +1507,7 @@ async fn scroll_wheel_moves_tree_logs_and_describe_views() {
 
 #[tokio::test]
 async fn a_drag_over_visible_text_copies_it_and_an_empty_drag_is_dropped() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app().await;
     app.active_view = ActiveView::Table(table_with(
         ResourceKind::Pods,
@@ -1491,6 +1582,7 @@ async fn a_drag_over_visible_text_copies_it_and_an_empty_drag_is_dropped() {
 
 #[tokio::test]
 async fn clicking_a_context_chip_opens_the_picker_or_switches_context() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app().await;
     *app.context_chip_rects.borrow_mut() = vec![
         (Rect::new(0, 1, 10, 1), ":ctx".into()),
@@ -1520,6 +1612,7 @@ async fn clicking_a_context_chip_opens_the_picker_or_switches_context() {
 
 #[tokio::test]
 async fn yaml_view_keys_scroll_copy_edit_and_share() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app().await;
     let content: String = (0..40).map(|i| format!("k{i}: v\n")).collect();
     app.active_view = ActiveView::Yaml(YamlViewState::new(
@@ -1578,6 +1671,7 @@ async fn yaml_view_keys_scroll_copy_edit_and_share() {
 
 #[tokio::test]
 async fn describe_view_keys_scroll_copy_and_share() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app().await;
     let content: String = (0..40).map(|i| format!("Line {i}\n")).collect();
     app.active_view = ActiveView::Describe(DescribeViewState::new(
@@ -1621,6 +1715,7 @@ async fn describe_view_keys_scroll_copy_and_share() {
 
 #[tokio::test]
 async fn logs_view_keys_toggle_flags_scroll_save_copy_and_share() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app().await;
     let mut logs = LogsViewState::new(
         "web-0".into(),
@@ -1678,6 +1773,7 @@ async fn logs_view_keys_toggle_flags_scroll_save_copy_and_share() {
 
 #[tokio::test]
 async fn port_forward_view_keys_copy_share_and_stop_a_forward() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app().await;
     app.active_view = ActiveView::PortForwards(port_forwards());
 
@@ -1725,6 +1821,7 @@ async fn port_forward_view_keys_copy_share_and_stop_a_forward() {
 
 #[tokio::test]
 async fn helm_view_keys_navigate_and_copy_release_links() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app().await;
     app.active_view = ActiveView::Helm(helm_releases());
 
@@ -1755,6 +1852,7 @@ async fn helm_view_keys_navigate_and_copy_release_links() {
 
 #[tokio::test]
 async fn toolbox_keys_copy_the_tool_path_or_name() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app().await;
     app.active_view = ActiveView::Toolbox(toolbox());
 
@@ -1774,8 +1872,9 @@ async fn toolbox_keys_copy_the_tool_path_or_name() {
 
 #[tokio::test]
 async fn overview_keys_refresh_copy_share_and_summarise() {
+    let mut env = common::env::lock();
     let (mut app, _rx) = common::app().await;
-    keyless_assistant(&mut app);
+    keyless_assistant(&mut app, &mut env);
     app.active_view = ActiveView::Overview(OverviewViewState::with_data(overview_data()));
 
     app.handle_key_event(common::ch('r')).await;
@@ -1812,6 +1911,7 @@ async fn overview_keys_refresh_copy_share_and_summarise() {
 
 #[tokio::test]
 async fn assistant_editing_keys_shape_the_input_buffer() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app().await;
     app.active_view = ActiveView::Assistant;
 
@@ -1827,10 +1927,12 @@ async fn assistant_editing_keys_shape_the_input_buffer() {
     app.handle_key_event(alt('u')).await;
     assert_eq!(app.assistant_state.input, "");
 
-    // Ctrl+v appends the clipboard when there is one; either way the buffer
-    // stays a single line.
+    // Ctrl+v inserts the clipboard when there is one. The composer is
+    // multi-line, so its lines are kept; normalized, there is never a `\r`.
+    // (The system clipboard's content is the machine's, so only that is
+    // asserted here; line handling is tested with handle_paste below.)
     app.handle_key_event(common::ctrl('v')).await;
-    assert!(!app.assistant_state.input.contains('\n'));
+    assert!(!app.assistant_state.input.contains('\r'));
     app.assistant_state.input.clear();
 
     // 'c' with no assistant answer at all is plain typing.
@@ -1840,18 +1942,38 @@ async fn assistant_editing_keys_shape_the_input_buffer() {
     app.handle_key_event(common::ch('c')).await;
     assert_eq!(app.assistant_state.input, "cc");
 
-    // 'c' on an empty input copies the last assistant answer.
+    // 'c' on an empty input types 'c' even when an assistant message exists (no accidental copy).
     app.assistant_state.input.clear();
     app.assistant_state
         .add_assistant_message("the answer".into());
     app.handle_key_event(common::ch('c')).await;
+    assert_eq!(app.assistant_state.input, "c");
+
+    // Ctrl+c copies the last assistant answer.
+    app.assistant_state.input.clear();
+    app.handle_key_event(common::ctrl('c')).await;
     assert_eq!(toast(&app), "✓ Copied assistant answer to clipboard");
     assert_eq!(app.assistant_state.input, "");
 
-    // ... but with text in the buffer it is still typing.
+    // Typing and cursor navigation (Left, Right, Home, End, Delete)
     common::type_str(&mut app, "ab").await;
     app.handle_key_event(common::ch('c')).await;
     assert_eq!(app.assistant_state.input, "abc");
+    // Left arrow moves cursor before 'c'
+    app.handle_key_event(common::key(KeyCode::Left)).await;
+    app.handle_key_event(common::ch('X')).await;
+    assert_eq!(app.assistant_state.input, "abXc");
+    // Home moves to start
+    app.handle_key_event(common::key(KeyCode::Home)).await;
+    app.handle_key_event(common::ch('Z')).await;
+    assert_eq!(app.assistant_state.input, "ZabXc");
+    // Delete removes 'a' (the character at cursor)
+    app.handle_key_event(common::key(KeyCode::Delete)).await;
+    assert_eq!(app.assistant_state.input, "ZbXc");
+    // End moves to end
+    app.handle_key_event(common::key(KeyCode::End)).await;
+    app.handle_key_event(common::ch('!')).await;
+    assert_eq!(app.assistant_state.input, "ZbXc!");
 
     // Ctrl+t toggles the tool chip expansion, Ctrl+l clears the conversation.
     let expanded = app.assistant_state.expand_tools;
@@ -1864,6 +1986,7 @@ async fn assistant_editing_keys_shape_the_input_buffer() {
 
 #[tokio::test]
 async fn assistant_history_and_slash_suggestions_drive_the_arrow_keys() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app().await;
     app.active_view = ActiveView::Assistant;
     app.assistant_state.prompt_history = vec!["first".into(), "second".into()];
@@ -1910,7 +2033,110 @@ async fn assistant_history_and_slash_suggestions_drive_the_arrow_keys() {
 }
 
 #[tokio::test]
+async fn assistant_busy_turn_survives_esc_and_is_cancelled_with_ctrl_c() {
+    let _settings = common::env::isolate_settings();
+    let (mut app, _rx) = common::app().await;
+    let previous = std::mem::replace(&mut app.active_view, ActiveView::Assistant);
+    app.nav_stack.push(previous);
+
+    // 1. Esc leaves the Assistant; the turn keeps running in the background.
+    app.assistant_state.is_busy = true;
+    let task1 = tokio::spawn(async {
+        tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+    });
+    app.assistant_state.task = Some(task1.abort_handle());
+
+    app.handle_key_event(common::key(KeyCode::Esc)).await;
+    assert!(
+        !matches!(app.active_view, ActiveView::Assistant),
+        "Esc goes back"
+    );
+    assert!(app.assistant_state.is_busy, "Esc does not cancel the turn");
+    assert!(app.assistant_state.task.is_some(), "the task is kept");
+    assert!(!task1.is_finished(), "task1 is still running");
+    task1.abort();
+
+    // 2. Cancel via Ctrl+c when busy and no selection, and verify running tool call is closed
+    app.active_view = ActiveView::Assistant;
+    app.assistant_state.is_busy = true;
+    let task2 = tokio::spawn(async {
+        tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+    });
+    app.assistant_state.task = Some(task2.abort_handle());
+    app.assistant_state.add_tool_call_start(
+        "call_1".to_string(),
+        "k8s.listPods".to_string(),
+        "namespace: default".to_string(),
+    );
+
+    app.handle_key_event(common::ctrl('c')).await;
+    assert!(
+        !app.assistant_state.is_busy,
+        "Ctrl+c cancels busy assistant state"
+    );
+    assert!(app.assistant_state.task.is_none());
+    assert_eq!(toast(&app), "✓ Assistant generation cancelled");
+    let res2 = tokio::time::timeout(std::time::Duration::from_millis(500), task2).await;
+    assert!(
+        res2.is_ok() && res2.unwrap().unwrap_err().is_cancelled(),
+        "task2 was aborted"
+    );
+    let last_msg = app.assistant_state.messages.last().unwrap();
+    assert_eq!(
+        last_msg.tool_calls.first().unwrap().status,
+        srectl::views::assistant_view::ToolCallStatus::Error("Cancelled by user".to_string())
+    );
+
+    // 3. Ctrl+l aborts task while clearing conversation
+    app.assistant_state.is_busy = true;
+    let task3 = tokio::spawn(async {
+        tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+    });
+    let abort3 = task3.abort_handle();
+    app.assistant_state.task = Some(abort3);
+
+    app.handle_key_event(common::ctrl('l')).await;
+    assert!(!app.assistant_state.is_busy);
+    assert!(app.assistant_state.task.is_none());
+    assert_eq!(toast(&app), "✓ Conversation cleared");
+    let res3 = tokio::time::timeout(std::time::Duration::from_millis(500), task3).await;
+    assert!(
+        res3.is_ok() && res3.unwrap().unwrap_err().is_cancelled(),
+        "task3 was aborted"
+    );
+}
+
+#[tokio::test]
+async fn submitting_second_query_after_completed_turn_does_not_mark_prior_cancelled() {
+    let _settings = common::env::isolate_settings();
+    let (mut app, _rx) = common::app().await;
+    app.active_view = ActiveView::Assistant;
+
+    // Simulate completed first query and answer
+    app.assistant_state.start_turn("First query".to_string());
+    app.assistant_state
+        .append_stream_chunk("First answer complete.");
+    app.assistant_state.finish_turn();
+
+    assert!(!app.assistant_state.is_busy);
+    assert!(app.assistant_state.task.is_none());
+
+    // Submit second query via submit_assistant_query
+    app.submit_assistant_query("Second query".to_string(), "Second query".to_string());
+
+    // Verify first answer in history was NOT modified to include [Cancelled by user]
+    let first_answer = &app.assistant_state.messages[2]; // 0: welcome, 1: user first, 2: assistant first
+    assert_eq!(first_answer.role, "assistant");
+    assert_eq!(first_answer.content, "First answer complete.");
+    assert!(
+        !first_answer.content.contains("Cancelled"),
+        "completed turn must not be marked cancelled on next query"
+    );
+}
+
+#[tokio::test]
 async fn assistant_scroll_keys_move_the_viewport() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app().await;
     app.active_view = ActiveView::Assistant;
     for i in 0..80 {
@@ -1942,8 +2168,9 @@ async fn assistant_scroll_keys_move_the_viewport() {
 
 #[tokio::test]
 async fn submitting_a_query_without_an_api_key_answers_with_setup_guidance() {
+    let mut env = common::env::lock();
     let (mut app, _rx) = common::app().await;
-    keyless_assistant(&mut app);
+    keyless_assistant(&mut app, &mut env);
     app.active_view = ActiveView::Assistant;
 
     // Empty input submits nothing: the seeded greeting is all there is.
@@ -1972,6 +2199,7 @@ async fn submitting_a_query_without_an_api_key_answers_with_setup_guidance() {
 
 #[tokio::test]
 async fn a_configured_provider_starts_a_native_agent_turn() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app().await;
     let mut settings = AiSettings::default();
     settings.default_provider = AiProvider::OpenAiCompatible;
@@ -2004,9 +2232,9 @@ async fn a_configured_provider_starts_a_native_agent_turn() {
 
 #[tokio::test]
 async fn caveman_phrases_and_slash_commands_switch_the_terse_mode() {
-    let _settings = isolate_ai_settings();
+    let mut settings = isolate_ai_settings();
     let (mut app, _rx) = common::app().await;
-    keyless_assistant(&mut app);
+    keyless_assistant(&mut app, &mut settings.env);
     app.active_view = ActiveView::Assistant;
 
     compose(&mut app, "caveman mode").await;
@@ -2051,9 +2279,9 @@ async fn caveman_phrases_and_slash_commands_switch_the_terse_mode() {
 
 #[tokio::test]
 async fn utility_slash_commands_clear_open_settings_and_expand_playbooks() {
-    let _settings = isolate_ai_settings();
+    let mut settings = isolate_ai_settings();
     let (mut app, _rx) = common::app().await;
-    keyless_assistant(&mut app);
+    keyless_assistant(&mut app, &mut settings.env);
     app.active_view = ActiveView::Assistant;
     app.assistant_state.add_assistant_message("old".into());
 
@@ -2175,7 +2403,7 @@ async fn settings_keys_navigate_toggle_edit_and_save() {
     app.handle_key_event(common::ch('q')).await;
     assert!(matches!(app.active_view, ActiveView::Table(_)));
     app.active_view =
-        ActiveView::Settings(srelens_tui::views::settings_view::SettingsViewState::new());
+        ActiveView::Settings(srectl::views::settings_view::SettingsViewState::new());
     app.nav_stack.clear();
     app.handle_key_event(common::key(KeyCode::Esc)).await;
     assert!(matches!(&app.active_view, ActiveView::Table(t) if t.kind == ResourceKind::Pods));
@@ -2183,6 +2411,7 @@ async fn settings_keys_navigate_toggle_edit_and_save() {
 
 #[tokio::test]
 async fn tree_keys_move_copy_and_open_logs_or_actions() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app().await;
     app.active_view = ActiveView::Tree(tree_view());
 
@@ -2244,6 +2473,7 @@ async fn tree_keys_move_copy_and_open_logs_or_actions() {
 
 #[tokio::test]
 async fn node_inspector_keys_navigate_pods_and_offer_node_actions() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app().await;
     app.nav_stack
         .push(ActiveView::Table(table_with(ResourceKind::Nodes, vec![])));
@@ -2258,15 +2488,10 @@ async fn node_inspector_keys_navigate_pods_and_offer_node_actions() {
     assert_eq!(ni.selected_pod_idx, 1);
     app.handle_key_event(common::ch('g')).await;
     app.handle_key_event(common::ctrl('d')).await;
-    let ActiveView::NodeInspector(ni) = &app.active_view else {
-        panic!()
-    };
-    assert_eq!(ni.selected_pod_idx, 1);
-    app.handle_key_event(common::ctrl('u')).await;
-    let ActiveView::NodeInspector(ni) = &app.active_view else {
-        panic!()
-    };
-    assert_eq!(ni.selected_pod_idx, 0);
+    assert!(
+        matches!(&app.modal, Some(Modal::Confirm { action_name, .. }) if action_name == "delete:Pod:default:api-0")
+    );
+    app.modal = None;
 
     app.handle_key_event(common::ch('s')).await;
     assert!(matches!(
@@ -2284,7 +2509,8 @@ async fn node_inspector_keys_navigate_pods_and_offer_node_actions() {
 
     app.handle_key_event(common::ch('c')).await;
     common::type_str(&mut app, "confirm").await;
-    app.handle_key_event(common::key(crossterm::event::KeyCode::Enter)).await;
+    app.handle_key_event(common::key(crossterm::event::KeyCode::Enter))
+        .await;
     assert_eq!(toast(&app), "Cordoning node 'gpu-1'...");
 
     app.handle_key_event(common::ch('x')).await;
@@ -2328,6 +2554,7 @@ async fn node_inspector_keys_navigate_pods_and_offer_node_actions() {
 
 #[tokio::test]
 async fn node_inspector_without_pods_targets_the_node_and_toggles_uncordon() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app().await;
     let mut details = node_details("gpu-1", true);
     details.pods.clear();
@@ -2337,7 +2564,8 @@ async fn node_inspector_without_pods_targets_the_node_and_toggles_uncordon() {
 
     app.handle_key_event(common::ch('c')).await;
     common::type_str(&mut app, "confirm").await;
-    app.handle_key_event(common::key(crossterm::event::KeyCode::Enter)).await;
+    app.handle_key_event(common::key(crossterm::event::KeyCode::Enter))
+        .await;
     assert_eq!(toast(&app), "Uncordoning node 'gpu-1'...");
 
     app.handle_key_event(common::ch('x')).await;
@@ -2364,6 +2592,7 @@ async fn node_inspector_without_pods_targets_the_node_and_toggles_uncordon() {
 
 #[tokio::test]
 async fn node_inspector_enter_and_l_jump_to_the_highlighted_pod() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app().await;
     app.active_view = ActiveView::NodeInspector(inspector_with_details("gpu-1", false));
     app.handle_key_event(common::ch('j')).await;
@@ -2392,6 +2621,7 @@ async fn node_inspector_enter_and_l_jump_to_the_highlighted_pod() {
 
 #[tokio::test]
 async fn filters_apply_and_clear_in_every_text_view() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app().await;
 
     app.active_view = ActiveView::Describe(DescribeViewState::new(
@@ -2457,6 +2687,7 @@ async fn filters_apply_and_clear_in_every_text_view() {
 
 #[tokio::test]
 async fn pasted_text_lands_in_the_active_input() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app().await;
 
     app.input_mode = InputMode::Command;
@@ -2479,10 +2710,13 @@ async fn pasted_text_lands_in_the_active_input() {
 
     app.input_mode = InputMode::Normal;
     app.active_view = ActiveView::Assistant;
-    app.handle_paste("multi\nline".into());
-    assert_eq!(app.assistant_state.input, "multi line");
+    app.handle_paste("multi\r\nline".into());
+    assert_eq!(
+        app.assistant_state.input, "multi\nline",
+        "the Assistant composer is multi-line: a paste keeps its lines"
+    );
 
-    let mut settings = srelens_tui::views::settings_view::SettingsViewState::new();
+    let mut settings = srectl::views::settings_view::SettingsViewState::new();
     settings.is_editing = true;
     app.active_view = ActiveView::Settings(settings);
     app.handle_paste("sk-\nabc".into());
@@ -2525,6 +2759,7 @@ async fn pasted_text_lands_in_the_active_input() {
 
 #[tokio::test]
 async fn colon_commands_open_tree_actions_and_metrics_for_the_selected_row() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app().await;
 
     app.active_view = ActiveView::Table(table_with(
@@ -2604,6 +2839,7 @@ async fn colon_commands_open_tree_actions_and_metrics_for_the_selected_row() {
 
 #[tokio::test]
 async fn colon_commands_open_the_reason_rail_clear_ai_and_fall_back_to_fuzzy_matches() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app().await;
 
     app.active_view = ActiveView::Table(table_with(
@@ -2646,6 +2882,7 @@ async fn colon_commands_open_the_reason_rail_clear_ai_and_fall_back_to_fuzzy_mat
 
 #[tokio::test]
 async fn view_targets_open_pickers_help_quit_and_deep_links() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app().await;
     app.namespaces = vec!["default".into(), "kube-system".into()];
     app.active_namespace = "kube-system".into();
@@ -2700,6 +2937,7 @@ async fn view_targets_open_pickers_help_quit_and_deep_links() {
 
 #[tokio::test]
 async fn deep_links_switch_namespace_select_rows_or_filter_for_missing_rows() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app().await;
     app.resource_cache.insert(
         ("test-cluster".into(), "prod".into(), "pods".into()),
@@ -2767,6 +3005,7 @@ async fn deep_links_switch_namespace_select_rows_or_filter_for_missing_rows() {
 
 #[tokio::test]
 async fn switching_to_a_crd_uses_cached_instances_and_discovered_columns() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app().await;
     let mut discovered = CrdMeta {
         crd_name: "widgets.example.io".into(),
@@ -2784,6 +3023,7 @@ async fn switching_to_a_crd_uses_cached_instances_and_discovered_columns() {
             priority: 0,
             description: None,
         }],
+        created_at: None,
     };
     app.crds.push(discovered.clone());
     app.resource_cache.insert(
@@ -2823,6 +3063,7 @@ async fn switching_to_a_crd_uses_cached_instances_and_discovered_columns() {
 
 #[tokio::test]
 async fn crd_live_watch_channel_management_and_stream_updates() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app().await;
     app.active_context = "test-cluster".into();
     app.active_namespace = "default".into();
@@ -2836,15 +3077,14 @@ async fn crd_live_watch_channel_management_and_stream_updates() {
         singular: "secretstore".into(),
         namespaced: true,
         short_names: vec!["ss".into()],
-        printer_columns: vec![
-            PrinterColumn {
-                name: "READY".into(),
-                json_path: ".status.conditions[?(@.type==\"Ready\")].status".into(),
-                col_type: "string".into(),
-                priority: 0,
-                description: None,
-            },
-        ],
+        printer_columns: vec![PrinterColumn {
+            name: "READY".into(),
+            json_path: ".status.conditions[?(@.type==\"Ready\")].status".into(),
+            col_type: "string".into(),
+            priority: 0,
+            description: None,
+        }],
+        created_at: None,
     };
     app.crds.push(crd.clone());
 
@@ -2868,14 +3108,23 @@ async fn crd_live_watch_channel_management_and_stream_updates() {
     ]);
     app.handle_stream_event(expected_ch.to_string(), payload);
 
-    let ActiveView::Table(t) = &app.active_view else { panic!("expected table") };
+    let ActiveView::Table(t) = &app.active_view else {
+        panic!("expected table")
+    };
     assert!(!t.is_loading);
     assert_eq!(t.raw_items.len(), 1);
     assert_eq!(t.raw_items[0]["name"], "vault");
 
     // Informer cache also updated
     assert_eq!(
-        app.resource_cache.get(&("test-cluster".into(), "default".into(), "secretstores.external-secrets.io".into())).unwrap().len(),
+        app.resource_cache
+            .get(&(
+                "test-cluster".into(),
+                "default".into(),
+                "secretstores.external-secrets.io".into()
+            ))
+            .unwrap()
+            .len(),
         1
     );
 
@@ -2915,6 +3164,7 @@ fn cached_pod_spec(name: &str) -> Value {
 
 #[tokio::test]
 async fn a_multi_container_pod_prompts_for_the_container_before_logs_or_shell() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app().await;
     app.resource_cache.insert(
         ("test-cluster".into(), "default".into(), "Pods".into()),
@@ -2954,6 +3204,7 @@ async fn a_multi_container_pod_prompts_for_the_container_before_logs_or_shell() 
 
 #[tokio::test]
 async fn a_single_or_unknown_container_pod_goes_straight_to_logs_or_shell() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app().await;
     app.resource_cache.insert(
         ("test-cluster".into(), "default".into(), "Pods".into()),
@@ -3020,6 +3271,7 @@ async fn a_single_or_unknown_container_pod_goes_straight_to_logs_or_shell() {
 
 #[tokio::test]
 async fn opening_a_resource_tree_without_a_cluster_reports_the_error_through_the_event_loop() {
+    let _settings = common::env::isolate_settings();
     let (mut app, mut rx) = common::app().await;
     app.open_resource_tree("Deployment".into(), "web".into(), Some("default".into()));
     assert!(matches!(&app.active_view, ActiveView::Tree(t) if t.is_loading));
@@ -3053,6 +3305,7 @@ async fn opening_a_resource_tree_without_a_cluster_reports_the_error_through_the
 
 #[tokio::test]
 async fn opening_the_node_inspector_seeds_history_and_reports_the_connection_error() {
+    let _settings = common::env::isolate_settings();
     let (mut app, mut rx) = common::app().await;
     app.node_metrics_history.insert(
         "gpu-1".into(),
@@ -3101,6 +3354,7 @@ async fn opening_the_node_inspector_seeds_history_and_reports_the_connection_err
 
 #[tokio::test]
 async fn ai_palette_actions_prefill_the_assistant_prompt() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app().await;
     let cases = [
         (
@@ -3131,6 +3385,7 @@ async fn ai_palette_actions_prefill_the_assistant_prompt() {
 
 #[tokio::test]
 async fn navigation_palette_actions_open_the_matching_view_or_modal() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app().await;
 
     app.modal = Some(palette(
@@ -3240,6 +3495,7 @@ async fn navigation_palette_actions_open_the_matching_view_or_modal() {
 
 #[tokio::test]
 async fn the_palette_filter_narrows_what_enter_runs() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app().await;
     app.active_view = ActiveView::Table(ResourceTableState::new(ResourceKind::Nodes));
     let make = |filter: &str, selected_idx: usize| Modal::ActionPalette {
@@ -3277,6 +3533,7 @@ async fn the_palette_filter_narrows_what_enter_runs() {
 
 #[tokio::test]
 async fn confirmed_actions_without_a_cluster_report_a_connection_error() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app().await;
     app.active_view = ActiveView::Table(table_with(
         ResourceKind::Pods,
@@ -3336,6 +3593,7 @@ async fn confirmed_actions_without_a_cluster_report_a_connection_error() {
 
 #[tokio::test]
 async fn scale_and_port_forward_modals_run_on_enter() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app().await;
     app.active_view = ActiveView::Table(table_with(
         ResourceKind::Deployments,
@@ -3393,6 +3651,7 @@ async fn scale_and_port_forward_modals_run_on_enter() {
 
 #[tokio::test]
 async fn the_overview_starts_from_cached_data_and_live_updates_replace_it() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app().await;
     app.cluster_overview_data = Some(overview_data());
     app.cluster_version = "v1.31.0".into();
@@ -3429,6 +3688,7 @@ async fn the_overview_starts_from_cached_data_and_live_updates_replace_it() {
 
 #[tokio::test]
 async fn the_overview_falls_back_to_header_counts_without_cached_data() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app().await;
     app.cluster_overview_data = None;
     app.node_count = 4;
@@ -3441,4 +3701,392 @@ async fn the_overview_falls_back_to_header_counts_without_cached_data() {
     assert_eq!(ov.data.total_pods, 12);
     assert_eq!(ov.data.context_name, "test-cluster");
     assert!(!ov.data.is_reachable);
+}
+
+#[tokio::test]
+async fn node_ssh_opens_modal_and_executes_suspend_action() {
+    let _settings = common::env::isolate_settings();
+    let (mut app, _rx) = common::app().await;
+
+    app.active_view = ActiveView::Table(table_with(
+        ResourceKind::Nodes,
+        vec![
+            serde_json::json!({ "name": "worker-1", "status": "Ready", "internalIp": "10.0.1.20" }),
+        ],
+    ));
+
+    // 'S' opens NodeSsh modal prefilled with internal IP
+    app.handle_key_event(common::ch('S')).await;
+    match &app.modal {
+        Some(Modal::NodeSsh {
+            node_name,
+            destination_input,
+            cursor_pos,
+        }) => {
+            assert_eq!(node_name, "worker-1");
+            assert_eq!(destination_input, "10.0.1.20");
+            assert_eq!(*cursor_pos, 9);
+        }
+        _ => panic!("expected Modal::NodeSsh"),
+    }
+
+    // Pressing Enter in the modal triggers terminal suspend with NodeSsh action
+    app.handle_key_event(common::key(crossterm::event::KeyCode::Enter))
+        .await;
+    assert!(app.modal.is_none());
+    assert!(matches!(
+        &app.requires_terminal_suspend,
+        Some(SuspendAction::NodeSsh { destination }) if destination == "10.0.1.20"
+    ));
+}
+
+#[tokio::test]
+async fn test_node_ssh_modal_cursor_navigation() {
+    let _settings = common::env::isolate_settings();
+    let (mut app, _) = common::app().await;
+
+    // Open NodeSsh modal with "worker-1" and "10.0.1.20"
+    app.modal = Some(Modal::NodeSsh {
+        node_name: "worker-1".to_string(),
+        destination_input: "10.0.1.20".to_string(),
+        cursor_pos: 9,
+    });
+
+    // 1. Left moves cursor left
+    app.handle_key_event(common::key(KeyCode::Left)).await;
+    match &app.modal {
+        Some(Modal::NodeSsh { cursor_pos, .. }) => assert_eq!(*cursor_pos, 8),
+        _ => panic!("expected Modal::NodeSsh"),
+    }
+
+    // 2. Right moves cursor right
+    app.handle_key_event(common::key(KeyCode::Right)).await;
+    match &app.modal {
+        Some(Modal::NodeSsh { cursor_pos, .. }) => assert_eq!(*cursor_pos, 9),
+        _ => panic!("expected Modal::NodeSsh"),
+    }
+
+    // 3. Ctrl+A moves cursor to start (0)
+    app.handle_key_event(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL))
+        .await;
+    match &app.modal {
+        Some(Modal::NodeSsh {
+            cursor_pos,
+            destination_input,
+            ..
+        }) => {
+            assert_eq!(*cursor_pos, 0);
+            assert_eq!(destination_input, "10.0.1.20");
+        }
+        _ => panic!("expected Modal::NodeSsh"),
+    }
+
+    // 4. Typing at cursor 0 inserts at beginning
+    app.handle_key_event(common::ch('x')).await;
+    match &app.modal {
+        Some(Modal::NodeSsh {
+            cursor_pos,
+            destination_input,
+            ..
+        }) => {
+            assert_eq!(*cursor_pos, 1);
+            assert_eq!(destination_input, "x10.0.1.20");
+        }
+        _ => panic!("expected Modal::NodeSsh"),
+    }
+
+    // 5. Ctrl+E jumps to end
+    app.handle_key_event(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::CONTROL))
+        .await;
+    match &app.modal {
+        Some(Modal::NodeSsh {
+            cursor_pos,
+            destination_input,
+            ..
+        }) => {
+            assert_eq!(*cursor_pos, 10);
+            assert_eq!(destination_input, "x10.0.1.20");
+        }
+        _ => panic!("expected Modal::NodeSsh"),
+    }
+
+    // 6. Backspace at end removes last char
+    app.handle_key_event(common::key(KeyCode::Backspace)).await;
+    match &app.modal {
+        Some(Modal::NodeSsh {
+            cursor_pos,
+            destination_input,
+            ..
+        }) => {
+            assert_eq!(*cursor_pos, 9);
+            assert_eq!(destination_input, "x10.0.1.2");
+        }
+        _ => panic!("expected Modal::NodeSsh"),
+    }
+
+    // 7. Home jumps to 0
+    app.handle_key_event(common::key(KeyCode::Home)).await;
+    match &app.modal {
+        Some(Modal::NodeSsh { cursor_pos, .. }) => assert_eq!(*cursor_pos, 0),
+        _ => panic!("expected Modal::NodeSsh"),
+    }
+
+    // 8. Delete at 0 removes first char ('x')
+    app.handle_key_event(common::key(KeyCode::Delete)).await;
+    match &app.modal {
+        Some(Modal::NodeSsh {
+            cursor_pos,
+            destination_input,
+            ..
+        }) => {
+            assert_eq!(*cursor_pos, 0);
+            assert_eq!(destination_input, "10.0.1.2");
+        }
+        _ => panic!("expected Modal::NodeSsh"),
+    }
+
+    // 9. End jumps to end
+    app.handle_key_event(common::key(KeyCode::End)).await;
+    match &app.modal {
+        Some(Modal::NodeSsh { cursor_pos, .. }) => assert_eq!(*cursor_pos, 8),
+        _ => panic!("expected Modal::NodeSsh"),
+    }
+
+    // 10. Cmd+Left (Super+Left) jumps to start
+    app.handle_key_event(KeyEvent::new(KeyCode::Left, KeyModifiers::SUPER))
+        .await;
+    match &app.modal {
+        Some(Modal::NodeSsh { cursor_pos, .. }) => assert_eq!(*cursor_pos, 0),
+        _ => panic!("expected Modal::NodeSsh"),
+    }
+
+    // 11. Cmd+Right (Super+Right) jumps to end
+    app.handle_key_event(KeyEvent::new(KeyCode::Right, KeyModifiers::SUPER))
+        .await;
+    match &app.modal {
+        Some(Modal::NodeSsh { cursor_pos, .. }) => assert_eq!(*cursor_pos, 8),
+        _ => panic!("expected Modal::NodeSsh"),
+    }
+
+    // 12. Alt+Left and Alt+Right word skipping with multiple words
+    app.modal = Some(Modal::NodeSsh {
+        node_name: "worker-1".to_string(),
+        destination_input: "-p 2222 root@10.0.1.2".to_string(),
+        cursor_pos: 21,
+    });
+    app.handle_key_event(KeyEvent::new(KeyCode::Left, KeyModifiers::ALT))
+        .await;
+    match &app.modal {
+        Some(Modal::NodeSsh { cursor_pos, .. }) => assert_eq!(*cursor_pos, 8), // before root@10.0.1.2
+        _ => panic!("expected Modal::NodeSsh"),
+    }
+    app.handle_key_event(KeyEvent::new(KeyCode::Left, KeyModifiers::ALT))
+        .await;
+    match &app.modal {
+        Some(Modal::NodeSsh { cursor_pos, .. }) => assert_eq!(*cursor_pos, 3), // before 2222
+        _ => panic!("expected Modal::NodeSsh"),
+    }
+    app.handle_key_event(KeyEvent::new(KeyCode::Right, KeyModifiers::ALT))
+        .await;
+    match &app.modal {
+        Some(Modal::NodeSsh { cursor_pos, .. }) => assert_eq!(*cursor_pos, 8), // after 2222 and space
+        _ => panic!("expected Modal::NodeSsh"),
+    }
+
+    // 13. Ctrl+W deletes previous word
+    app.handle_key_event(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::CONTROL))
+        .await;
+    match &app.modal {
+        Some(Modal::NodeSsh {
+            destination_input,
+            cursor_pos,
+            ..
+        }) => {
+            assert_eq!(destination_input, "-p root@10.0.1.2");
+            assert_eq!(*cursor_pos, 3);
+        }
+        _ => panic!("expected Modal::NodeSsh"),
+    }
+}
+
+#[tokio::test]
+async fn crd_table_view_renders_without_loading_and_updates_live() {
+    let _settings = common::env::isolate_settings();
+    let (mut app, _rx) = common::app().await;
+    app.crds = vec![
+        CrdMeta {
+            crd_name: "virtualmachines.kubevirt.io".into(),
+            group: "kubevirt.io".into(),
+            version: "v1".into(),
+            kind: "VirtualMachine".into(),
+            plural: "virtualmachines".into(),
+            singular: "virtualmachine".into(),
+            namespaced: true,
+            short_names: vec!["vm".into()],
+            printer_columns: vec![],
+            created_at: Some("2026-01-01T00:00:00Z".into()),
+        },
+        CrdMeta {
+            crd_name: "ciliumloadbalancerippools.cilium.io".into(),
+            group: "cilium.io".into(),
+            version: "v2".into(),
+            kind: "CiliumLoadBalancerIPPool".into(),
+            plural: "ciliumloadbalancerippools".into(),
+            singular: "ciliumloadbalancerippool".into(),
+            namespaced: false,
+            short_names: vec!["ippool".into()],
+            printer_columns: vec![],
+            created_at: None,
+        },
+    ];
+
+    // 1. Switch to CRD view: rows populated immediately from self.crds, is_loading = false
+    app.switch_view_to_kind(ResourceKind::CustomResourceDefinitions)
+        .await;
+    let ActiveView::Table(t) = &app.active_view else {
+        panic!("expected table")
+    };
+    assert!(!t.is_loading, "crd table must not hang in loading");
+    assert_eq!(t.raw_items.len(), 2);
+    assert_eq!(t.filtered_indices.len(), 2);
+
+    // 2. Table rows carry NAME, GROUP, VERSION, SCOPE, AGE
+    assert_eq!(t.raw_items[0]["name"], "virtualmachines.kubevirt.io");
+    assert_eq!(t.raw_items[0]["group"], "kubevirt.io");
+    assert_eq!(t.raw_items[0]["version"], "v1");
+    assert_eq!(t.raw_items[0]["scope"], "Namespaced");
+    assert!(!t.raw_items[0]["age"].as_str().unwrap().is_empty()); // humanized age from created_at
+    assert_eq!(t.raw_items[1]["scope"], "Cluster");
+    assert_eq!(t.raw_items[1]["age"], "");
+
+    // 3. Render screen: headers and CRD names appear
+    let screen = wide(&mut app);
+    assert!(
+        screen.contains("CustomResourceDefinitions"),
+        "header in screen:\n{screen}"
+    );
+    assert!(
+        screen.contains("virtualmachines.kubevirt.io"),
+        "vm in screen:\n{screen}"
+    );
+    assert!(
+        screen.contains("ciliumloadbalancerippools.cilium.io"),
+        "cilium in screen:\n{screen}"
+    );
+
+    // 4. Live update via handle_crds_update updates active table view
+    let update_payload = serde_json::to_string(&vec![CrdMeta {
+        crd_name: "prometheuses.monitoring.coreos.com".into(),
+        group: "monitoring.coreos.com".into(),
+        version: "v1".into(),
+        kind: "Prometheus".into(),
+        plural: "prometheuses".into(),
+        singular: "prometheus".into(),
+        namespaced: true,
+        short_names: vec!["prom".into()],
+        printer_columns: vec![],
+        created_at: None,
+    }])
+    .unwrap();
+    app.handle_crds_update(&update_payload);
+    let ActiveView::Table(t) = &app.active_view else {
+        panic!("expected table")
+    };
+    assert_eq!(t.raw_items.len(), 1);
+    assert_eq!(t.raw_items[0]["name"], "prometheuses.monitoring.coreos.com");
+    assert!(!t.is_loading);
+
+    // 5. Failure via handle_crds_failed clears loading and sets error toast
+    let ActiveView::Table(ref mut t) = app.active_view else {
+        panic!("expected table")
+    };
+    t.is_loading = true;
+    app.handle_crds_failed("connection refused");
+    let ActiveView::Table(t) = &app.active_view else {
+        panic!("expected table")
+    };
+    assert!(!t.is_loading, "failure must clear loading");
+    assert!(toast(&app).contains("Failed to load CRDs: connection refused"));
+}
+
+#[tokio::test]
+async fn crd_table_drilldown_switches_view_and_triggers_fetch() {
+    let _settings = common::env::isolate_settings();
+    let (mut app, _rx) = common::app().await;
+    let vm_crd = CrdMeta {
+        crd_name: "virtualmachines.kubevirt.io".into(),
+        group: "kubevirt.io".into(),
+        version: "v1".into(),
+        kind: "VirtualMachine".into(),
+        plural: "virtualmachines".into(),
+        singular: "virtualmachine".into(),
+        namespaced: true,
+        short_names: vec!["vm".into()],
+        printer_columns: vec![],
+        created_at: None,
+    };
+    app.crds = vec![vm_crd.clone()];
+
+    // Start in CRD table
+    app.switch_view_to_kind(ResourceKind::CustomResourceDefinitions)
+        .await;
+
+    // Press Enter to drill down into the selected CRD
+    app.handle_key_event(common::key(KeyCode::Enter)).await;
+
+    // Active view must now be CustomResource(vm_crd)
+    let ActiveView::Table(t) = &app.active_view else {
+        panic!("expected table")
+    };
+    assert_eq!(t.kind, ResourceKind::CustomResource(vm_crd));
+    assert_eq!(
+        app.current_watch_channel.as_deref(),
+        Some("watch:test-cluster:default:virtualmachines.kubevirt.io")
+    );
+}
+
+#[tokio::test]
+async fn crd_stream_error_payload_and_instances_failed_clears_loading() {
+    let _settings = common::env::isolate_settings();
+    let (mut app, _rx) = common::app().await;
+    let vm_crd = CrdMeta {
+        crd_name: "virtualmachines.kubevirt.io".into(),
+        group: "kubevirt.io".into(),
+        version: "v1".into(),
+        kind: "VirtualMachine".into(),
+        plural: "virtualmachines".into(),
+        singular: "virtualmachine".into(),
+        namespaced: true,
+        short_names: vec!["vm".into()],
+        printer_columns: vec![],
+        created_at: None,
+    };
+    app.crds = vec![vm_crd.clone()];
+    app.switch_view_to_crd(vm_crd.clone()).await;
+
+    let ch = "watch:test-cluster:default:virtualmachines.kubevirt.io".to_string();
+    assert_eq!(app.current_watch_channel.as_deref(), Some(ch.as_str()));
+
+    // 1. Stream event with error payload (e.g. 404 Not Found from permanent watch error)
+    app.handle_stream_event(
+        ch,
+        json!({ "error": "the server could not find the requested resource (get virtualmachines.kubevirt.io)" }),
+    );
+    let ActiveView::Table(t) = &app.active_view else {
+        panic!("expected table")
+    };
+    assert!(!t.is_loading, "stream error payload must clear is_loading");
+    assert!(toast(&app).contains("the server could not find the requested resource"));
+
+    // 2. Direct REST list failure via handle_crd_instances_failed clears is_loading
+    let ActiveView::Table(ref mut t) = app.active_view else {
+        panic!("expected table")
+    };
+    t.is_loading = true;
+    app.handle_crd_instances_failed("VirtualMachine", "connection timeout");
+    let ActiveView::Table(t) = &app.active_view else {
+        panic!("expected table")
+    };
+    assert!(!t.is_loading, "instance fetch error must clear is_loading");
+    assert!(toast(&app).contains("Failed to list VirtualMachine: connection timeout"));
 }

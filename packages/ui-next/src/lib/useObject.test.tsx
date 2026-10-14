@@ -87,6 +87,82 @@ describe("useObject", () => {
   // whatever was committed, and what gets committed is decided during render,
   // before any effect runs. So this observes the hook's return value AT RENDER
   // TIME instead.
+  describe("refresh()", () => {
+    const before: K8sObject = { kind: "Node", metadata: { name: "worker-1" }, spec: {} };
+    const after: K8sObject = { kind: "Node", metadata: { name: "worker-1" }, spec: { unschedulable: true } };
+
+    it("reads again without going back to loading, then shows the new object", async () => {
+      mockedGetObject.mockResolvedValueOnce({ object: before });
+      const statuses: string[] = [];
+      const { result } = renderHook(() => {
+        const resource = useObject("ctx", "Node", null, "worker-1");
+        statuses.push(resource.status);
+        return resource;
+      });
+      await waitFor(() => expect(result.current.status).toBe("ready"));
+
+      let land!: (value: { object: K8sObject }) => void;
+      mockedGetObject.mockReturnValueOnce(new Promise((resolve) => (land = resolve)));
+      statuses.length = 0;
+      act(() => result.current.refresh());
+
+      // Mid-flight: the pane a write was just made from is not blanked.
+      expect(mockedGetObject).toHaveBeenCalledTimes(2);
+      expect(result.current.status).toBe("ready");
+      expect(result.current.object).toEqual(before);
+
+      await act(async () => land({ object: after }));
+      expect(result.current.object).toEqual(after);
+      expect(statuses).not.toContain("loading");
+    });
+
+    it("leaves what is shown as it was when the refresh fails, either way a read can fail", async () => {
+      mockedGetObject.mockResolvedValueOnce({ object: before });
+      const { result } = renderHook(() => useObject("ctx", "Node", null, "worker-1"));
+      await waitFor(() => expect(result.current.status).toBe("ready"));
+
+      mockedGetObject.mockResolvedValueOnce({ error: "timed out" });
+      act(() => result.current.refresh());
+      await waitFor(() => expect(mockedGetObject).toHaveBeenCalledTimes(2));
+      await act(async () => {});
+      expect(result.current.status).toBe("ready");
+      expect(result.current.object).toEqual(before);
+
+      mockedGetObject.mockRejectedValueOnce(new Error("boom"));
+      act(() => result.current.refresh());
+      await waitFor(() => expect(mockedGetObject).toHaveBeenCalledTimes(3));
+      await act(async () => {});
+      expect(result.current.status).toBe("ready");
+      expect(result.current.object).toEqual(before);
+    });
+
+    it("is quiet for the one read it causes: a reload afterwards says loading again", async () => {
+      mockedGetObject.mockResolvedValue({ object: before });
+      const { result } = renderHook(() => useObject("ctx", "Node", null, "worker-1"));
+      await waitFor(() => expect(result.current.status).toBe("ready"));
+
+      act(() => result.current.refresh());
+      await waitFor(() => expect(mockedGetObject).toHaveBeenCalledTimes(2));
+      await act(async () => {});
+
+      mockedGetObject.mockReturnValueOnce(new Promise(() => {}));
+      act(() => result.current.reload());
+      expect(result.current.status).toBe("loading");
+    });
+
+    it("does not hide a failure behind an error already on screen", async () => {
+      // Nothing readable is being protected, so this read reports like any other.
+      mockedGetObject.mockResolvedValueOnce({ error: "forbidden" });
+      const { result } = renderHook(() => useObject("ctx", "Node", null, "worker-1"));
+      await waitFor(() => expect(result.current.status).toBe("error"));
+
+      mockedGetObject.mockResolvedValueOnce({ object: before });
+      act(() => result.current.refresh());
+      await waitFor(() => expect(result.current.status).toBe("ready"));
+      expect(result.current.object).toEqual(before);
+    });
+  });
+
   it("reports loading, never the previous target's object, on the render the target changes", async () => {
     const first: K8sObject = { kind: "Pod", metadata: { name: "web-1" } };
     const second: K8sObject = { kind: "Pod", metadata: { name: "web-2" } };

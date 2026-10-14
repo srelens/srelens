@@ -17,6 +17,7 @@
  */
 import { phaseKind, waitingKind, type HealthKind } from "./k8sHealth";
 import { asArray, asRecord, str } from "./k8sRaw";
+import { kubectlPodStatus } from "./kubectlPodStatus";
 import type { K8sObject } from "./manifest";
 
 /** A status word with the tone and the dot that go with it. */
@@ -153,10 +154,7 @@ const TERMINAL_POD_PHASES = ["Succeeded", "Failed"];
  * Taken as a record rather than as positional arguments because a
  * `PodSummary` — and every row type built on one — is already this shape, so
  * every call site hands over the whole row and CANNOT omit a field it does
- * not happen to be thinking about. That is not a style preference: the
- * flicker below existed because the two facts that were passed were the only
- * two the signature asked for, and the fact that would have settled it was
- * sitting unread on the same row.
+ * not happen to be thinking about.
  */
 export interface PodVitals {
   /** `status.phase` — "Running", "Pending", "Succeeded", "Failed", "Unknown". */
@@ -164,28 +162,12 @@ export interface PodVitals {
   /** Why the first waiting container is waiting; `""` or absent when none is. */
   waitingReason?: string;
   /**
-   * Ready containers out of reported ones, exactly as a row prints it and
-   * kubectl's READY column shows it: `"1/1"`, `"0/2"`. `"0/0"` means the
-   * kubelet has reported no containers, which is an absence and not a
-   * reading.
+   * The word `kubectl get pods` prints for the pod: `PodSummary.status` on a
+   * row, `kubectlPodStatus` off a fetched Pod. Absent only on rows written
+   * before the backend sent it (fixtures), which fall back to the phase and
+   * the waiting reason.
    */
-  ready: string;
-  /** Restarts summed across the pod's containers, as `summarise_pod` sums them. */
-  restarts: number;
-}
-
-/**
- * Whether a READY cell says a container is short of ready.
- *
- * Anything that does not parse as two numbers is NOT short: `"0/0"` (nothing
- * reported), `""` (a fixture), a dash. Reading an absence as a failure is how
- * a healthy pod gets a red dot, and the backend's own `short_of_ready` errs
- * the other way for the opposite reason — there, a cell it cannot read is
- * worth one extra fetch; here, it would be worth a wrong verdict.
- */
-function shortOfReady(cell: string): boolean {
-  const [have, want] = cell.split("/").map(Number);
-  return have < want;
+  status?: string;
 }
 
 /**
@@ -201,74 +183,91 @@ function phaseVerdict(phase: string): Verdict {
 }
 
 /**
- * A pod's status word, tone and dot, from the facts a list row and a fetched
- * object can both supply — see {@link PodVitals}.
- *
- * `status.phase` alone is not enough, and this is not a nicety: a pod whose
- * only container sits in `CrashLoopBackOff` still reports phase `Running`, so
- * anything reading the phase by itself draws a crash-looping pod green and
- * healthy. kubectl shows the waiting reason for exactly this reason, and so do
- * we — in the list and in the detail header, through this one function, so the
- * two can never say different things about the same pod.
- *
- * **The waiting reason is not enough either, because a crash-looping pod is
- * not always waiting.** Between restarts the container is genuinely up: phase
- * `Running`, no waiting reason, nothing to read — and the pod fell out of
- * every unhealthy list for that instant and came back when the container
- * failed again. On a real cluster two of four consecutive screenshots of the
- * overview showed the same pod in `NOT READY` and two did not, with nothing
- * changed but the moment of the capture. The waiting reason names a state the
- * pod is only intermittently in; the READY ratio names the state it is
- * actually in, and does not move between the two moments.
- *
- * So a pod that is up, short of ready, AND has restarted is `NotReady`. The
- * restart count is doing real work in that sentence and is not belt-and-
- * braces: a container that has been up for two seconds and has not yet passed
- * its readiness probe is a NORMAL pod mid-rollout, and the ratio alone cannot
- * tell it from a crash-looper — a row carries no clock, so "not ready yet"
- * and "not ready for an hour" are the same row. Having died at least once is
- * the only evidence in the snapshot that this is failure rather than
- * start-up. (A pod that has never restarted and never becomes ready — a
- * readiness probe that never passes — is therefore still read as healthy
- * here. That is a different bug with a different signal, and guessing at it
- * from these fields would cost every rolling update a red dot.)
- *
- * `NotReady` is not a word invented beside a colour: it is the word
- * {@link nodeStatus} already uses for the same fact, and `phaseKind` already
- * tones it, so the branch below picks a verdict by name like every other one
- * in this file.
- *
- * A terminal pod is left alone, and the ratio must not reach it. Its
- * containers are TERMINATED, so a `Succeeded` pod reports `0/1` forever —
- * reading that as "not ready" would flag every finished pod in the cluster,
- * and put a green pill beside a red dot on each of them, which is the exact
- * bug this file's `Verdict` union exists to prevent.
+ * kubectl words for a container that has failed, or a pod that has: always
+ * red. `ExitCode:<n>` and `Signal:<n>` are kubectl's words for a terminated
+ * container that gave no reason.
  */
-export function podStatus(pod: PodVitals): StatusVerdict {
-  const word = pod.phase || "Unknown";
-  if (TERMINAL_POD_PHASES.includes(word)) return verdict(word, phaseVerdict(word));
-  if (pod.waitingReason) {
-    return verdict(pod.waitingReason, waitingKind(pod.waitingReason) === "danger" ? BROKEN : UNSETTLED);
+const FAILURE_WORDS = new Set([
+  "Error",
+  "OOMKilled",
+  "ContainerCannotRun",
+  "DeadlineExceeded",
+  "ContainerStatusUnknown",
+  "StartError",
+  "Evicted",
+]);
+const isFailureWord = (word: string) => FAILURE_WORDS.has(word) || /^(ExitCode|Signal):/.test(word);
+
+/**
+ * kubectl words for a pod on its way somewhere: amber, and worth a look.
+ * `Completed` is only reached here on a pod that is not finished, which is a
+ * container that exited 0 and is about to be restarted.
+ */
+const PROGRESS_WORDS = new Set([
+  "Pending",
+  "PodInitializing",
+  "SchedulingGated",
+  "Terminating",
+  "ContainerCreating",
+  "Completed",
+]);
+
+/** A waiting container's verdict, on `waitingKind`'s back-off rule. */
+const waitingVerdict = (reason: string): Verdict => (waitingKind(reason) === "danger" ? BROKEN : UNSETTLED);
+
+/**
+ * The verdict for one of kubectl's words, first rule that matches. A finished
+ * pod keeps its phase's colours whatever its word, so a `Succeeded` pod is
+ * never given a dot.
+ */
+function wordVerdict(word: string, phase: string, waitingReason: string): Verdict {
+  if (phase === "Succeeded") return WELL;
+  if (phase === "Failed") return BROKEN;
+  if (word === "Running") return WELL;
+  if (waitingReason !== "" && word === waitingReason) return waitingVerdict(word);
+  // A back-off is a failure whichever container it came from. kubectl's word
+  // can name a later container than the row's waiting reason does.
+  if (waitingKind(word) === "danger") return BROKEN;
+  if (word.startsWith("Init:")) {
+    const rest = word.slice("Init:".length);
+    if (/^\d+\/\d+$/.test(rest)) return UNSETTLED;
+    return isFailureWord(rest) ? BROKEN : waitingVerdict(rest);
   }
-  // Only where the phase would otherwise say the pod is well. A Pending pod is
-  // already amber and already flagged, and an unrecognised word already earns
-  // its dot; overriding either with the ratio would lose the reader the more
-  // specific fact for no gain in the verdict.
-  //
-  // Compared on the tone rather than on {@link WELL}'s identity, for the same
-  // reason {@link nodeStatus} is: everything else in this file is safe by
-  // construction, and an identity check would be safe only by coincidence.
-  if (phaseVerdict(word).health === "success" && shortOfReady(pod.ready) && pod.restarts > 0) {
-    return verdict("NotReady", phaseVerdict("NotReady"));
-  }
-  return verdict(word, phaseVerdict(word));
+  if (isFailureWord(word)) return BROKEN;
+  if (PROGRESS_WORDS.has(word)) return UNSETTLED;
+  return phaseVerdict(word);
 }
 
 /**
- * The same reading, off a fetched Pod: pull the phase, the first waiting
- * reason, the ready ratio and the restart total out of the object — the four
- * fields `summarise_pod` puts on a `PodSummary` — and hand them to
- * `podStatus`, then add the ready phrase only a detail header shows.
+ * A pod's status word, tone and dot, from the facts a list row and a fetched
+ * object can both supply — see {@link PodVitals}.
+ *
+ * The word is kubectl's: what `kubectl get pods` prints in its STATUS column,
+ * which the backend puts on every row as `status` and `kubectlPodStatus`
+ * derives from a fetched Pod. `status.phase` alone is not enough: a pod whose
+ * only container sits in `CrashLoopBackOff` still reports phase `Running`, so
+ * anything reading the phase by itself draws a crash-looping pod green. The
+ * list and the detail header both come through this one function, so the two
+ * can never say different things about the same pod.
+ *
+ * kubectl's word exactly, including the one moment it calls a crash-looper
+ * `Running`: while its container is up between restarts. That moment reads
+ * green here too, by decision. An earlier rule called it `NotReady` from the
+ * ready ratio and the restart count, so the pod never dropped out of the
+ * Overview's unhealthy list; matching kubectl was chosen over it.
+ */
+export function podStatus(pod: PodVitals): StatusVerdict {
+  const phase = pod.phase || "Unknown";
+  const waitingReason = pod.waitingReason ?? "";
+  const word = pod.status || (TERMINAL_POD_PHASES.includes(phase) ? phase : waitingReason || phase);
+  return verdict(word, wordVerdict(word, phase, waitingReason));
+}
+
+/**
+ * The same reading, off a fetched Pod: the phase, the first waiting reason and
+ * kubectl's word, which `kubectlPodStatus` derives from the object by the rules
+ * the backend's `kubectl_status` puts on a `PodSummary` as `status`. They go
+ * to `podStatus`, and the ready phrase only a detail header shows is added.
  */
 function podStatusLine(object: K8sObject): ResourceStatusLine {
   const status = asRecord(object.status);
@@ -282,15 +281,7 @@ function podStatusLine(object: K8sObject): ResourceStatusLine {
   const waitingReason = statuses
     .map((c) => str(asRecord(asRecord(c.state).waiting).reason))
     .find((reason) => reason !== "");
-  const vitals: PodVitals = {
-    phase: str(status.phase),
-    waitingReason,
-    ready: `${ready}/${statuses.length}`,
-    // Summed across containers, as `summarise_pod` sums `restart_count`: a
-    // header that read only the first container would disagree with its own
-    // row on a sidecar pod.
-    restarts: statuses.reduce((total, c) => total + count(c.restartCount), 0),
-  };
+  const vitals: PodVitals = { phase: str(status.phase), waitingReason, status: kubectlPodStatus(object) };
   return { ...podStatus(vitals), readyText };
 }
 

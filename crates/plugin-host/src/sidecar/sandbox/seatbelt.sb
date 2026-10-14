@@ -1,0 +1,83 @@
+(version 1)
+;; srelens #572: the Seatbelt (SBPL) profile a sidecar runs under on macOS.
+;;
+;; The #571 spike's profile (spikes/sidecar-sandbox/src/seatbelt.sb), with its
+;; parameters renamed: PROBE is PROGRAM and SCRATCH is DATA. Under it, on macOS
+;; 27.0 arm64 only, the spike's checks 1 to 4 and 7 passed: file reads and writes
+;; outside DATA, TCP, DNS and starting a process were denied, and JSON-RPC over
+;; stdio worked. Intel Macs and macOS before 27 are unverified. Change it only
+;; with the narrowest rule, and never one that re-opens a denial those checks
+;; rely on: ~/.kube and anything outside DATA, the network (including the
+;; mDNSResponder socket, which is how DNS is denied), and starting any process
+;; but PROGRAM. It runs under `sandbox-exec`, which Apple documents as
+;; deprecated.
+;;
+;; Parameters, passed by srelens-sandbox-launch with `sandbox-exec -D KEY=VALUE`:
+;;   PROGRAM  the sidecar binary
+;;   DATA     the one directory the sidecar may read and write
+;; Both must be real paths (canonicalized): Seatbelt matches the resolved path,
+;; and on macOS /tmp and /var are symlinks into /private.
+;;
+;; Memory and CPU are not Seatbelt's job, and macOS has no kernel facility for
+;; them: the host's watchdog (`watchdog.rs`, #713) limits sustained use.
+;; A burst between its readings can exceed a limit.
+
+(deny default)
+
+;; Start the program, and nothing else. There is no process-fork rule, so the sidecar may not
+;; create processes (check 4).
+(allow process-exec (literal (param "PROGRAM")))
+
+;; What dyld and libSystem read to load a binary: the binary itself, the system
+;; libraries and the dyld shared cache (inside a cryptex on macOS 13 and later).
+(allow file-read* (literal (param "PROGRAM")))
+(allow file-read*
+  (subpath "/usr/lib")
+  (subpath "/System/Library")
+  (subpath "/System/Cryptexes")
+  (subpath "/System/Volumes/Preboot/Cryptexes")
+  (subpath "/Library/Apple/System/Library")
+  (subpath "/private/var/db/dyld")
+  (literal "/dev/null")
+  (literal "/dev/urandom")
+  (literal "/dev/random"))
+
+;; Mapping code as executable is checked apart from reading it (file-map-executable): the
+;; program itself, and the system libraries and shared cache dyld maps.
+(allow file-map-executable
+  (literal (param "PROGRAM"))
+  (subpath "/usr/lib")
+  (subpath "/System/Library")
+  (subpath "/System/Cryptexes")
+  (subpath "/System/Volumes/Preboot/Cryptexes")
+  (subpath "/Library/Apple/System/Library"))
+
+;; The root directory itself. The first Mac run showed process startup reading it, and
+;; aborting when it could not: `deny(1) file-read-data /`. This is a listing of the
+;; top-level names, not the contents of any file under them.
+(allow file-read-data (literal "/"))
+
+;; Logging preferences libSystem reads at startup. System configuration, nothing of the
+;; user's.
+(allow file-read* (subpath "/Library/Preferences/Logging"))
+
+;; Resolving a path stats every directory on the way, so metadata reads are allowed
+;; everywhere. This lets the sidecar learn that ~/.kube/config EXISTS (and its size and
+;; times), but not read it. Whether this can be narrowed is still open: it was not tried.
+(allow file-read-metadata)
+(allow sysctl-read)
+(allow signal (target self))
+
+;; The granted data directory, read and write (check 2).
+(allow file-read* file-write* (subpath (param "DATA")))
+
+;; Everything else is denied by (deny default): other file reads and writes (checks 1 and
+;; 2), all network operations (check 3) and every mach-lookup. On the verified run, DNS
+;; failed at `network-outbound /private/var/run/mDNSResponder`, the resolver's Unix
+;; socket, and TCP at `network-outbound remote:*:<port>`. The trace also showed startup
+;; denials that turned out harmless (dtracehelper, the syslog socket, /etc/hosts, the
+;; networkd preferences, the notification_center and logd lookups); they stay denied.
+;;
+;; stdin and stdout are pipes the host created and passed in. Seatbelt checks access when a
+;; file is opened, not on each read or write of a descriptor already open, and check 7 (50
+;; JSON-RPC round trips) passed on the verified run.

@@ -1,4 +1,4 @@
-import { isMap, isScalar, parse, parseDocument, visit } from "yaml";
+import { isMap, isScalar, parse, parseDocument, stringify, visit } from "yaml";
 import { invokeCapability, type Invoker } from "../transport/transport";
 import type { NodeTaint } from "./taints";
 
@@ -18,6 +18,9 @@ export interface NodeSummary {
   taintDetails: NodeTaint[];
   version: string;
   roles: string;
+  /** `creationTimestamp` (RFC 3339), for a LIVE age. Prefer over `age`, which
+   *  the backend renders once and which freezes (#405). */
+  created?: string | null;
   age: string;
   /** `status.allocatable.cpu`, in millicores — the unit metrics-server uses. */
   allocatableCpuMillicores: number;
@@ -82,13 +85,14 @@ const REDACTION_FAILED = "This Secret's manifest is not shown, because it could 
  * Blank the values of a Secret manifest's top-level `data` and `stringData`
  * maps and of its `metadata.annotations`, keeping every key.
  *
- * `k8s.getObject` redacts Secret values in the backend; `k8s.getManifest`
- * deliberately does NOT (see `crates/kube/src/manifest.rs`) — it is the raw
- * serialisation of the object, and classic's YAML view shows it unredacted.
- * The new design's Secret Details pane gates its values behind an explicit
- * reveal, so the YAML pane beside it runs the manifest through here first;
- * otherwise the gate would be worth nothing to anyone who clicks one tab
- * over. This is a deliberate divergence from classic, not an oversight.
+ * The backend blanks Secret values on every ungated read, `k8s.getManifest`
+ * included since #661 (see `crates/kube/src/manifest.rs`). This is the
+ * frontend's second pass on top of that, run on arrival rather than trusting
+ * the host alone: the new design's Secret Details pane gates its values
+ * behind an explicit reveal, so the YAML pane beside it runs the manifest
+ * through here first — otherwise the gate would be worth nothing to anyone
+ * who clicks one tab over — and classic's drawer YAML view does the same
+ * (#659).
  *
  * Only the two top-level keys, and only at the top level: a `data` nested
  * under `spec`, or one that happens to be an annotation's name, belongs to
@@ -399,6 +403,9 @@ export async function validateManifest(
 export interface ResourceRow {
   name: string;
   namespace: string;
+  /** `creationTimestamp` (RFC 3339), for a LIVE age. Prefer over `age`, which
+   *  the backend renders once and which freezes (#405). */
+  created?: string | null;
   age: string;
 }
 
@@ -414,7 +421,15 @@ export interface EventSummary {
   type: string;
   reason: string;
   object: string;
+  firstAge?: string;
+  /** Raw first occurrence, falling back to the Event creation timestamp. */
+  firstCreated?: string | null;
+  objectApiVersion?: string;
+  source?: string;
   message: string;
+  /** Last-occurrence timestamp (RFC 3339), for a LIVE age. Prefer over `age`, which
+   *  the backend renders once and which freezes (#405). */
+  created?: string | null;
   age: string;
   /** How many times this event has fired. The backend sends 1 when absent. */
   count: number;
@@ -431,15 +446,15 @@ export async function listEvents(
   namespace: string | null,
   object?: EventObjectFilter,
   invoke: Invoker = invokeCapability,
-): Promise<{ events?: EventSummary[]; error?: string }> {
+): Promise<{ events?: EventSummary[]; truncated?: boolean; error?: string }> {
   try {
-    const out = await invoke<{ events: EventSummary[] }>("k8s.listEvents", {
+    const out = await invoke<{ events: EventSummary[]; truncated?: boolean }>("k8s.listEvents", {
       context,
       namespace: namespace ?? "",
       objectKind: object?.kind ?? "",
       objectName: object?.name ?? "",
     });
-    return { events: out.events };
+    return { events: out.events, truncated: out.truncated };
   } catch (e) {
     return { error: String(e) };
   }
@@ -494,4 +509,9 @@ export async function listNodes(
   } catch (e) {
     return { error: String(e) };
   }
+}
+
+/** Serialize an already authorized resource read for the shared YAML viewer. */
+export function formatResourceManifest(resource: Record<string, unknown>): string {
+  return stringify(resource, { lineWidth: 0 });
 }

@@ -1,3 +1,5 @@
+import { appNavigation } from "../extensions/appNavigation";
+import { useExtensions } from "../extensions/Extensions";
 import { symbolFor } from "../lib/markSymbols";
 import { useMemo, useState } from "react";
 import { listCrds, type ClusterContext, type CrdRef } from "@srelens/core";
@@ -5,6 +7,7 @@ import { Mark, ResourceTree, Sidebar, StatusPill, type ResourceNode, type Status
 import { saveNavigationWidth, setNavigationWidth, useNavigationWidth } from "../lib/navigationWidth";
 import { Icons } from "../lib/icons";
 import { useMark } from "../lib/marks";
+import { resolveContext } from "../lib/clusters";
 import { openTab, useActiveCluster, useTabs } from "../lib/tabsStore";
 import { crdNodes, glyph, INVESTIGATE, kindNodes, routeForNode } from "../lib/tree";
 import { useResource } from "../lib/useResource";
@@ -68,28 +71,30 @@ function nodeForRoute(nodes: ResourceNode[], crds: CrdRef[], route: string): str
  * so switching contexts or restarting restores that cluster's own choices.
  */
 export function Nav({ contexts }: NavProps) {
+  const extensions = useExtensions();
   const activeCluster = useActiveCluster();
-  const ctx = contexts.find((c) => c.stableId === activeCluster) ?? null;
+  const ctx = resolveContext(contexts, activeCluster) ?? null;
   const view = useWorkspaceView();
   const [query, setQuery] = useState("");
   const mark = useMark(ctx?.stableId ?? "", ctx?.name ?? "");
 
   // Subscribes the sidebar to the strip: which row is highlighted is a fact
   // about the active tab, and that changes from a dozen places that are not here.
-  const { tabs, activeId } = useTabs();
+  const { tabs, activeId, workspace } = useTabs();
   const route = tabs.find((t) => t.id === activeId)?.route ?? "/";
 
   const name = ctx?.name;
+  const paused = ctx !== null && (workspace.pausedClusters ?? []).includes(ctx.stableId);
   const discovery = useResource<CrdRef[]>(
     async () => {
-      if (!name) return [];
+      if (!name || paused) return [];
       const out = await listCrds(name);
       // `listCrds` reports failure in the result rather than by rejecting, and
       // an empty tree is not the same news as "we were not allowed to look".
       if (out.error) throw new Error(out.error);
       return out.crds ?? [];
     },
-    [name],
+    [name, paused],
   );
   const crds = useMemo(() => discovery.data ?? [], [discovery.data]);
 
@@ -104,9 +109,14 @@ export function Nav({ contexts }: NavProps) {
       ? [{ id: CRD_ERROR_ID, label: "Custom resources unavailable — retry", icon: Icons.warn }]
       : crdNodes(crds);
 
-  const nodes = useMemo<ResourceNode[]>(
-    () => [
-      ...kindNodes(),
+  const nodes = useMemo<ResourceNode[]>(() => {
+    // App routes and app scope both name the cluster by its key, which no two contexts share
+    // (#623, #695); a window opened for one of two sharing a stable ID pins its key.
+    const apps = ctx && extensions.data ? appNavigation(extensions.data.plugins, ctx.key) : null;
+    return [
+      ...kindNodes().slice(0, 1),
+      ...(apps ? [apps] : []),
+      ...kindNodes().slice(1),
       { id: "crds", label: "Custom resources", icon: Icons.crds, defaultExpanded: false, children: crdChildren },
       {
         id: "investigate",
@@ -114,11 +124,12 @@ export function Nav({ contexts }: NavProps) {
         icon: Icons.investigate,
         children: INVESTIGATE.map((i) => ({ id: `route:${i.route}`, label: i.label, icon: glyph(i.id) })),
       },
-    ],
-    [crds, crdChildren],
-  );
+    ];
+  }, [crds, crdChildren, ctx, extensions.data]);
 
-  const link = ctx ? (view.links[ctx.stableId] ? LINK[view.links[ctx.stableId].state] : UNKNOWN) : UNKNOWN;
+  const link = ctx
+    ? (paused ? { word: "Paused", kind: "neutral" as const } : view.links[ctx.stableId] ? LINK[view.links[ctx.stableId].state] : UNKNOWN)
+    : UNKNOWN;
 
   const navigationWidth = useNavigationWidth();
 

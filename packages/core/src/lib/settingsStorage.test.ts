@@ -140,6 +140,60 @@ describe("desktop settings storage", () => {
     });
   });
 
+  /**
+   * A window loads settings once. Another window that changes a key since
+   * then is invisible to this one unless it looks again — and for a list two
+   * windows both add to, writing without looking drops the other's entry.
+   */
+  it("reads one key again from the backend, after this window's own writes have landed", async () => {
+    const calls: string[] = [];
+    let kept: Record<string, unknown> = { "srelens.recents": ["a"], "srelens.uiScale": 100 };
+    invokeCapability.mockImplementation(async (id: string, input: { values?: Record<string, unknown> }) => {
+      calls.push(id);
+      if (id === "settings.set") kept = { ...kept, ...input.values };
+      return { schemaVersion: 1, localStorageMigrated: true, values: kept };
+    });
+    const { initializeSettingsStorage, refreshSetting, settingsStorage } = await import("./settingsStorage");
+    await initializeSettingsStorage();
+
+    settingsStorage.setItem("srelens.uiScale", "120");
+    // Another window, meanwhile.
+    kept = { ...kept, "srelens.recents": ["a", "b"] };
+    calls.length = 0;
+    await refreshSetting("srelens.recents");
+
+    expect(calls).toEqual(["settings.set", "settings.get"]);
+    expect(settingsStorage.getItem("srelens.recents")).toBe('["a","b"]');
+    // Only the key asked for: this window's other values stay as it has them.
+    expect(settingsStorage.getItem("srelens.uiScale")).toBe("120");
+  });
+
+  it("forgets a key the backend no longer has when it is read again", async () => {
+    invokeCapability
+      .mockResolvedValueOnce({ schemaVersion: 1, localStorageMigrated: true, values: { "srelens.recents": ["a"] } })
+      .mockResolvedValueOnce({ schemaVersion: 1, localStorageMigrated: true, values: {} });
+    const { initializeSettingsStorage, refreshSetting, settingsStorage } = await import("./settingsStorage");
+    await initializeSettingsStorage();
+    await refreshSetting("srelens.recents");
+    expect(settingsStorage.getItem("srelens.recents")).toBeNull();
+  });
+
+  it("rejects a re-read the backend refuses, and keeps what it had", async () => {
+    invokeCapability
+      .mockResolvedValueOnce({ schemaVersion: 1, localStorageMigrated: true, values: { "srelens.recents": ["a"] } })
+      .mockRejectedValueOnce(new Error("backend gone"));
+    const { initializeSettingsStorage, refreshSetting, settingsStorage } = await import("./settingsStorage");
+    await initializeSettingsStorage();
+    await expect(refreshSetting("srelens.recents")).rejects.toThrow("backend gone");
+    expect(settingsStorage.getItem("srelens.recents")).toBe('["a"]');
+  });
+
+  it("has nothing to read again before the backend is in use", async () => {
+    const { refreshSetting } = await import("./settingsStorage");
+    await expect(refreshSetting("srelens.recents")).resolves.toBeUndefined();
+    expect(invokeCapability).not.toHaveBeenCalled();
+  });
+
   it("retains localStorage when migration cannot be committed", async () => {
     const error = vi.spyOn(console, "error").mockImplementation(() => {});
     localStorage.setItem("srelens.uiScale", "125");
@@ -285,4 +339,26 @@ it("reports a rejected backend save to callers that must wait before reloading",
   await expect(flushSettingsWrites({throwOnError:true})).rejects.toThrow("disk full");
   expect(localStorage.getItem("srelens.design")).toBeNull();
   error.mockRestore(); Reflect.deleteProperty(window, "__TAURI_INTERNALS__");
+});
+
+describe("scopedSettingsKey", () => {
+  it("keeps short window labels in the key so existing per-window saves still load", async () => {
+    const { scopedSettingsKey } = await import("./settingsStorage");
+    expect(scopedSettingsKey("srelens.next.workspaces", "ctx-6b696e642d646576")).toBe(
+      "srelens.next.workspaces-ctx-6b696e642d646576",
+    );
+    expect(scopedSettingsKey("srelens.openTabs")).toBe("srelens.openTabs");
+    expect(scopedSettingsKey("srelens.openTabs", "main")).toBe("srelens.openTabs");
+  });
+
+  it("digests a window label that would exceed the settings key limit", async () => {
+    const { scopedSettingsKey } = await import("./settingsStorage");
+    // Hex of a stableId over 114 bytes pushes `base-ctx-<hex>` past 256.
+    const label = `ctx-${"61".repeat(120)}`;
+    const key = scopedSettingsKey("srelens.next.workspaces", label);
+    expect(key.length).toBeLessThanOrEqual(256);
+    expect(key.startsWith("srelens.next.workspaces-h")).toBe(true);
+    expect(key).toBe(scopedSettingsKey("srelens.next.workspaces", label));
+    expect(key).not.toBe(scopedSettingsKey("srelens.next.workspaces", `${label}x`));
+  });
 });

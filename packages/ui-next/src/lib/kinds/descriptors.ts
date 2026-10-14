@@ -1,4 +1,5 @@
-import { K8S_KIND, WATCHABLE_KINDS, listNodes, listResource, nodeMetrics, podMetrics, type ResourceKind } from "@srelens/core";
+import { K8S_KIND, WATCHABLE_KINDS, listNamespaces, listNodes, listResource, nodeMetrics, podMetrics, type ResourceKind } from "@srelens/core";
+import { recordUsage } from "../usageHistory";
 import type { Column } from "@srelens/ui-kit";
 import {
   clusterRoleBindingColumns,
@@ -15,6 +16,7 @@ import {
   jobFlagged,
   limitRangeColumns,
   networkPolicyColumns,
+  namespaceColumns,
   nodeColumns,
   nodeFlagged,
   podColumns,
@@ -76,6 +78,11 @@ const loadNodes = async (context: string) => {
   return { rows, error: list.error };
 };
 
+const loadNamespaces = async (context: string) => {
+  const list = await listNamespaces(context);
+  return { rows: list.summaries, error: list.error };
+};
+
 /**
  * CPU/memory for the pods list, on its own `enrichMs` cadence (Task 8) —
  * best-effort: a cluster with no metrics-server makes `podMetrics` fail, and
@@ -89,11 +96,17 @@ const podEnrich = async (context: string, namespace: string): Promise<Map<RowKey
   // an `api-0` are two readings. Keyed by name, the second overwrote the
   // first and the table then showed — and sorted on — one pod's CPU and
   // memory against the other's row.
+  const readings = (out.metrics ?? []).map((m) => ({
+    key: rowKey({ name: m.name, namespace: m.namespace }),
+    cpu: m.cpuMillicores,
+    memory: m.memoryMiB,
+  }));
+  // Each reading is also kept, so the row can draw where the figure has been
+  // (#864). metrics-server has no past of its own; this window's is the
+  // readings it has been handed, per cluster — see `lib/usageHistory`.
+  const past = recordUsage(context, readings);
   return new Map(
-    (out.metrics ?? []).map((m) => [
-      rowKey({ name: m.name, namespace: m.namespace }),
-      { cpu: m.cpuMillicores, memory: m.memoryMiB },
-    ]),
+    readings.map(({ key, cpu, memory }) => [key, { cpu, memory, usageHistory: past.get(key) ?? [] }]),
   );
 };
 
@@ -133,7 +146,7 @@ const TYPED: Partial<Record<ResourceKind, KindDescriptor<ListRow>>> = {
     columns: deploymentColumns as Column<ListRow>[],
     source: "watch",
     scope: "namespaced",
-    actions: { logs: true, scale: true, restart: true },
+    actions: { logs: true, scale: true, restart: true, rollback: true },
     flagged: deploymentFlagged as (row: ListRow) => boolean,
   },
   statefulsets: {
@@ -177,12 +190,25 @@ const TYPED: Partial<Record<ResourceKind, KindDescriptor<ListRow>>> = {
     source: "poll",
     scope: "cluster",
     load: loadNodes,
-    actions: {},
+    // The two actions only a node has (#820). Overview's node rows offered
+    // them and this list, which is where a reader comes to work on nodes, did
+    // not.
+    actions: { cordon: true, drain: true },
     // Same variance cast every function on this table already needs:
     // `flagged` only reads `status`/`unschedulable`, fields `ListRow` does not
     // promise. Present so a NotReady or cordoned node's row asks the same
     // question its detail pane asks — both read core's `nodeStatus`.
     flagged: nodeFlagged as (row: ListRow) => boolean,
+  },
+  namespaces: {
+    k8sKind: "Namespace",
+    columns: namespaceColumns as Column<ListRow>[],
+    // Keep polling: Age is humanised server-side and must keep moving. A
+    // cached watch summary would freeze it until #405's client-side clock fix.
+    source: "poll",
+    scope: "cluster",
+    load: loadNamespaces,
+    actions: {},
   },
   configmaps: {
     k8sKind: "ConfigMap",

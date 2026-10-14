@@ -31,9 +31,23 @@ describe("the / palette", () => {
     expect(onSettings.some((c) => c.group === "Go")).toBe(false);
   });
 
-  it("does not offer a rollback, because nothing behind it exists", () => {
-    const all = commandsFor({ ...base, route: "/k/Deployment/checkout/api" });
-    expect(all.some((c) => /roll ?back/i.test(c.label))).toBe(false);
+  it("offers a rollback on a Deployment, as the navigation it performs, and on no other kind (#389)", () => {
+    const openAction = vi.fn();
+    const onDeployment = commandsFor({ ...base, route: "/k/Deployment/checkout/api", openAction });
+    const rollback = onDeployment.find((c) => c.id === "rollback");
+    expect(rollback?.group).toBe("Action");
+    expect(rollback?.label).toBe("Open Deployment/api to roll it back");
+    expect(rollback?.hint).toBe("rollout undo lives on the resource");
+    // A navigation, like Restart and Scale: the confirm it lands on is where
+    // the danger is.
+    expect(rollback?.danger).toBeUndefined();
+    rollback?.run();
+    expect(openAction).toHaveBeenCalledWith(
+      expect.objectContaining({ action: "rollback", kind: "Deployment", name: "api", namespace: "checkout", context: "prod-eu" }),
+    );
+    for (const route of ["/k/StatefulSet/checkout/db", "/k/DaemonSet/kube-system/agent", "/k/Pod/checkout/api-0"]) {
+      expect(commandsFor({ ...base, route }).some((c) => c.id === "rollback")).toBe(false);
+    }
   });
 
   it("gates Go commands by the kind's own KindActions, not by kind name alone", () => {
@@ -123,6 +137,16 @@ describe("the / palette", () => {
     commandsFor({ ...base, route: "/k/Deployment/checkout/api", context: "staging", openAction });
     first.find((c) => c.id === "restart")?.run();
     expect(openAction).toHaveBeenCalledWith(expect.objectContaining({ context: "prod-eu" }));
+  });
+
+  it("runs a resource command on a pinned detail tab's own cluster, not the rail's (#834)", () => {
+    // The tab shows stage-eu's api while the rail is on prod-eu: Restart must
+    // land on the Deployment the reader is looking at.
+    const openAction = vi.fn();
+    const openResource = vi.fn();
+    const all = commandsFor({ ...base, route: "/k/stage-eu/Deployment/checkout/api", openAction, openResource });
+    all.find((c) => c.id === "restart")?.run();
+    expect(openAction).toHaveBeenCalledWith(expect.objectContaining({ name: "api", context: "stage-eu" }));
   });
 
   it("still offers Cluster, Workspace and Toggle theme with no resource in view", () => {

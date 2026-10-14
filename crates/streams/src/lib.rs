@@ -2,12 +2,14 @@
 //! server: each manager drives srelens-kube streams and emits events into an
 //! [`EventSink`] implemented by the host (Tauri events, WebSocket frames).
 
+pub mod app;
 pub mod exec;
 pub mod forward;
 pub mod helm;
 pub mod logs;
 pub mod sink;
 pub mod terminal;
+mod terminal_scope;
 pub mod test_util;
 pub mod watch;
 

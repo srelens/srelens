@@ -25,6 +25,7 @@ import {
   TextInput,
 } from "@srelens/ui-kit";
 import { LOADING, type Read } from "../../lib/read";
+import { invalidateAgentInventory } from "../../lib/agentInventory";
 
 /**
  * §23's Settings pane for the agent's own credentials: an API key per LLM
@@ -262,6 +263,9 @@ export function AgentPane() {
     setKeyActionError((m) => ({ ...m, [provider]: null }));
     try {
       await llmSetKey(provider, draft);
+      // A key on the default provider is what makes the native agent
+      // available, and the dock's picker re-reads only when told (#396).
+      invalidateAgentInventory();
       // Cleared, not kept: the field never holds what was just sent, and
       // nothing here reconstructs the stored value to show in its place.
       //
@@ -289,6 +293,7 @@ export function AgentPane() {
     setKeyActionError((m) => ({ ...m, [provider]: null }));
     try {
       await llmClearKey(provider);
+      invalidateAgentInventory();
       await refreshKeyStatus();
     } catch (e) {
       setKeyActionError((m) => ({ ...m, [provider]: e }));
@@ -326,6 +331,9 @@ export function AgentPane() {
     const submitted = settings;
     try {
       await llmSetSettings(submitted);
+      // The default provider decides WHICH key the native agent needs, so a
+      // switch can make it available or not without any key changing.
+      invalidateAgentInventory();
       // Only if the draft on screen is still the one that was saved.
       setSettings((current) => {
         setSaved(sameSettings(current, submitted));

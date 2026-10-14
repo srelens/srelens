@@ -33,9 +33,15 @@ srelens speaks MCP over two transports:
     prompt a click in the UI would, in whichever srelens window is open.
     This is the mode with a human in the loop.
   - **`srelens --mcp-http <addr>`** spawns a **separate, headless** process.
-    It does not attach to a running GUI — if the GUI's own toggle already
-    holds the port, this second process fails to bind rather than sharing
-    it. There is no window and therefore no dialog: a gated call is refused
+    `<addr>` must be a loopback address — `127.0.0.1:8765` (the default) or
+    `[::1]:8765`; anything else, such as `0.0.0.0:8765`, is refused at
+    startup with an error naming the address, and nothing listens, unless
+    you also pass `--mcp-expose-http` (see [Security model](#security-model)
+    before you do). The startup message reports the address actually bound
+    and whether it is loopback or exposed. It does not attach to a running
+    GUI — if the GUI's own toggle already holds the port, this second
+    process fails to bind rather than sharing it. There is no window and
+    therefore no dialog: a gated call is refused
     unless the process was started with `--mcp-allow-destructive` /
     `--mcp-allow-sensitive-reads` and the individual call carries
     `"_confirm": true`. Once a call is pre-authorised that way, it proceeds
@@ -51,6 +57,34 @@ automation where you deliberately pre-authorise gated calls with the flags
 above; it is not a way to reach a human reviewer, since headless means
 exactly that.
 
+### Request size limits
+
+Both transports refuse a request over **4 MiB** (4,194,304 bytes,
+`MAX_REQUEST_BYTES` in `crates/mcp/src/lib.rs`) before handing it to a tool:
+
+- **stdio** counts the bytes of one line, without its `\n` or `\r\n` ending. A longer line
+  is read and dropped as it arrives, never buffered whole, and answered with
+  a JSON-RPC error whose `id` is `null`, since the request was never parsed:
+  `{"code": -32600, "message": "request exceeds the 4194304-byte limit on one
+  stdio line", "data": {"field": "request", "limit": 4194304}}`. The session
+  carries on with the next line.
+- **HTTP** counts the request body. A larger body is refused with
+  `413 Payload Too Large` before the JSON-RPC handler runs.
+
+Within that, some tool arguments have limits of their own, checked while the
+arguments are decoded and refused as invalid input naming the field and its
+limit. On `extensions.validate` and `extensions.configure`, a `signature` must
+be exactly 64 bytes, a `manifest` at most 256 KiB, and a `settings` object at
+most 64 KiB as compact JSON. An [installed app's tool](#installed-apps-tools)
+takes strings of at most 1,024 bytes for a reader or an action, and a sidecar
+operation's inputs are held to what it declares: a string to its `maxLength`
+(1,024 bytes unless it says otherwise, 64 KiB at most), and the whole call to
+256 KiB.
+
+The desktop app's own WebView calls capabilities through a Tauri command, not
+through MCP, so the 4 MiB transport limit does not apply there; the per-field
+limits do.
+
 ## Security model
 
 - **HTTP requires a bearer token.** The transport never serves
@@ -62,12 +96,43 @@ exactly that.
   while the server is stopped just replaces the stored token; it does not
   start the server.) Revoking also stops the server — it must never run
   without a valid token.
+- **The HTTP transport binds loopback only.** The in-app server always binds
+  `127.0.0.1`. Headless `srelens --mcp-http <addr>` refuses any address
+  that is not loopback (`127.0.0.0/8` or `::1`) with an error naming it,
+  and exits without listening. This is the network boundary; the Host check
+  below is not one, because a non-browser client can send any `Host` it
+  likes.
 - A **Host header check** rejects requests whose `Host` isn't a loopback
-  value (`127.0.0.1`, `::1`, or `localhost`). Binding loopback alone doesn't
+  value (a loopback IP such as `127.0.0.1` or `::1`, or `localhost`) —
+  every address the bind rule above accepts. Binding loopback alone doesn't
   stop a page on another domain from resolving to 127.0.0.1 and posting to
   the port; the Host check does. It applies to every route, including the
   unauthenticated `/healthz`, so nothing here answers a caller that isn't
   genuinely local.
+- **`--mcp-expose-http` exposes the headless server beyond loopback.** Pass
+  it with `--mcp-http` to bind a non-loopback address, such as
+  `0.0.0.0:8765` or a LAN interface. Understand the risk before you do:
+  - The server speaks **plain HTTP**. There is no TLS in srelens and the
+    flag does not require any, so the bearer token and every tool result —
+    cluster data included — cross the network in the clear. Anyone who can
+    observe the traffic can read them and replay the token; anyone who can
+    reach the address and holds the token can call every tool the process
+    allows. `/healthz` answers anyone who can reach it.
+  - The Host check widens to fit: an exposed server also accepts a `Host`
+    that is an IP literal (`192.168.1.5:8765`, `[fd00::5]:8765`), because
+    that is what a client that connected by IP sends. A hostname other than
+    `localhost` is still refused, since DNS rebinding always presents a
+    hostname. Connect to an exposed server by IP.
+  - Gated tools still need the process flags and `"_confirm": true`; the
+    flag changes where the server listens, nothing else.
+
+  Use it only on a network you trust end to end — a private lab network,
+  a VPN, a container network you control. To reach the server from
+  elsewhere, do not expose it: keep the loopback bind and put an SSH tunnel
+  or a TLS-terminating reverse proxy in front. A proxy that forwards to
+  `http://127.0.0.1:8765` with `Host: 127.0.0.1:8765` (nginx's default for
+  `proxy_pass`) passes the Host check without any flag, and TLS then covers
+  the token on the wire.
 - **stdio needs no token** — the client spawned the `srelens --mcp-stdio`
   process itself and already holds your privileges.
 - **To supply your own token**, set `SRELENS_MCP_TOKEN` to 64 hex
@@ -80,6 +145,12 @@ exactly that.
   approve or deny the dialog that pops up. Letting it time out, dismissing
   it, or having no srelens window open at all count as **deny**. Confirmation
   requests from concurrent calls queue rather than colliding.
+- **The assistant's own agents are told apart from other clients.** When the
+  assistant launches Claude, Codex or Cursor for a turn, it hands that CLI a
+  token minted for the turn — not the token from Settings — and revokes it
+  when the turn ends, or as soon as you revoke or rotate the Settings token. A confirmation raised under that token is recorded in
+  that conversation's transcript. One raised with the Settings token, by any
+  other MCP client, is still put to you, and is recorded in no conversation.
 - **Headless use** (`--mcp-stdio` / `--mcp-http` with no GUI to show a
   dialog) needs an explicit opt-in instead: a process-level flag *and*
   `"_confirm": true` on the individual tool call. Neither alone is enough —
@@ -90,7 +161,7 @@ exactly that.
   | Flag | Authorizes |
   | --- | --- |
   | `--mcp-allow-destructive` | anything that changes state — delete, drain, scale, apply, helm install, installing local tooling |
-  | `--mcp-allow-sensitive-reads` | reads that return secret material, i.e. `k8s.getSecret` |
+  | `--mcp-allow-sensitive-reads` | reads that return secret material — `k8s.getSecret`, or the SSH node diagnostics, whose host logs and process arguments can carry credentials (the full set is under "sensitive read" in [mcp-catalog.md](mcp-catalog.md)) |
 
   So an agent allowed to read a Secret still cannot drain a node, and an
   agent allowed to drain nodes cannot read your Secrets. Both flags apply to
@@ -100,9 +171,51 @@ exactly that.
   surface.
 - Every call is recorded to an **audit log** at
   `<app config dir>/mcp/audit.jsonl` (mode `0600`, rotated once to `.1` past
-  5 MB), viewable in Settings → MCP under recent agent activity. Argument
-  values are redacted before they're written, so the log records the shape
-  of a call without its contents:
+  5 MB), viewable in Settings → MCP under recent capability activity.
+
+  **It is not only MCP's log.** A capability invoked from srelens's own
+  windows is recorded in the same file, in the same format — an Argo CD sync
+  or a Flux reconcile you click leaves a record, not just the identical call
+  made by an agent. The sink sits beside the capability registry
+  (`crates/capability/src/audit.rs`), which is the one place the two callers
+  meet, so `Registry::invoke_audited` writes the record whichever side asked.
+  Each line carries the time, the `source` (`ui` or `mcp`) and the
+  `transport` under it (`ui`, `stdio`, `http`), the capability, the app `id`
+  and `revision` when the call went through an installed app, the `cluster`
+  and `resource` it named, the consent `decision`, an `outcome` of `ok`,
+  `rejected` (it never ran — consent refused, arguments refused, no such
+  capability) or `failed` (it ran and did not finish), and `resultBytes`: the
+  size of the JSON the capability answered with, so the tools that fill an
+  agent's context can be found from real use, in the Size column of the same
+  pane. For a `tools/call` it is exactly the text the agent received. A
+  `resources/read` of a manifest or logs hands over the unwrapped document
+  instead, so there the figure also counts the wrapper and the JSON escaping
+  of the text. It is `null` when the call did not answer, and for a sensitive
+  capability, whose answer's length is a fact about a secret.
+
+  **Records written by an older srelens are still readable.** Lines from
+  before these fields existed carry no `source` and an `outcome` of `error`;
+  they are upgraded as the log is read — `source` becomes `mcp`, since
+  nothing else could have written them, and `error` becomes `rejected` or
+  `failed` according to the decision beside it. `app`, `cluster` and
+  `resource` read as absent on those rows, which is what they are, and so
+  does `resultBytes` on any line written before sizes were kept.
+
+  **What is recorded differs by source, on purpose.** MCP records every call
+  an agent makes, reads included, because that is the question the trail
+  answers about a third party. From srelens itself only mutating and
+  sensitive capabilities are recorded — the safety classes below, minus plain
+  read-only — because a single screen makes dozens of reads a minute and
+  burying the writes under them would cost the log its use. Your own reads
+  are therefore absent from the trail; their absence is not evidence.
+
+  **The log never leaves your machine.** It is a file in your app config
+  directory, read by the Settings pane on the same host. Nothing uploads it,
+  and there is no export yet
+  ([#371](https://github.com/srelens/srelens/issues/371)).
+
+  Argument values are redacted before they're written, so the log records the
+  shape of a call without its contents:
   - sensitive capabilities redact every value;
   - keys that look like credentials (`token`, `secret`, `password`, `key`)
     are redacted at any nesting depth;
@@ -110,10 +223,30 @@ exactly that.
     write, `yaml` on `k8s.applyManifest`, and `values` on the helm
     capabilities. These carry secret material under key names that look
     perfectly ordinary (`username`, `ca.crt`), so matching key names alone
-    would miss them.
+    would miss them;
+  - `settings` on `extensions.configure` keeps its setting names but loses
+    every value. A denied call is recorded before its values are checked
+    against the app's typed settings (#542), so a value under `credential` or
+    `certificate` would otherwise be written verbatim;
+  - a URL loses its credentials and keeps the rest. `helm repo add` documents
+    `https://user:token@host/charts` for a private repository, and
+    `k8s.helmRepoAdd` is audited because it mutates, so the userinfo and any
+    credential-bearing query parameter (`token`, `sig`, `access_key`, …) are
+    blanked while the scheme, host and path stay — the record still says
+    which repository was added. Parameter names are matched after decoding,
+    so `?to%6ben=` is caught as `token`, and the fragment is dropped whole:
+    it never reaches the server, so it names no repository, and `#hunter2`
+    has no `name=value` shape for a credential rule to read. This follows the
+    value, not the key name, so an `oci://user:pass@registry/chart` passed as
+    `chart` to `k8s.helmInstall` is scrubbed too. A value under a field that
+    promises a URL and does not parse as one is dropped whole;
+  - a recorded error message is scrubbed of every value the rules above
+    removed, because a capability that refuses an argument tends to echo it
+    (`invalid type: string "…", expected a map`).
 
   Identifying fields like `context`, `namespace`, `name` and `kind` survive,
-  so you can still see which cluster and object an agent touched.
+  so you can still see which cluster and object an agent touched, and the
+  `action` and app `id` of an `extensions.configure` call survive with them.
 - The bearer token lives in your **OS keychain** where one is available,
   falling back to a `0600` file otherwise (headless Linux, minimal window
   managers). Settings → MCP only speaks up about this when it has fallen
@@ -135,7 +268,16 @@ critical clusters.
 
 [mcp-catalog.md](mcp-catalog.md) enumerates every tool, the built-in prompts,
 and every resource URI, grouped by area (Kubernetes, Helm, Toolbox, Server)
-and, for tools, by **safety class**. There are exactly four:
+and, for tools, by **safety class**.
+
+Every capability is a tool except the **UI-only** ones (`Capability::ui_only`).
+Those are `extensions.inspect` and `extensions.logs`, an app's runtime metrics
+and its log ([extensions/inspector.md](extensions/inspector.md)).
+`McpServer::new` drops them, so no MCP path can list or call them. An agent's
+context goes to its LLM provider, and a sidecar's log is text a third party
+wrote.
+
+There are exactly four safety classes:
 
 | Class | Confirm gate? | Headless flag needed |
 | --- | --- | --- |
@@ -162,7 +304,13 @@ has both combinations, on purpose:
 - `k8s.diffManifest` is sensitive (it can echo back manifest content, so its
   arguments are redacted in the audit log) but is **not** confirm-gated —
   it changes nothing on the cluster, so it's classed plain **read-only**.
-  You can call it headlessly with no flag at all.
+  You can call it headlessly with no flag at all. What keeps that safe is
+  redaction rather than consent: for a `Secret`, the host blanks `data`,
+  `stringData` **and every `metadata.annotations` value** on both sides
+  before rendering the diff, so the base64 map an `apply`-managed Secret
+  carries in `kubectl.kubernetes.io/last-applied-configuration` never
+  reaches the response. `k8s.getManifest` runs the same redactor for the
+  same reason.
 - `k8s.getSecret` is sensitive **and** confirm-gated, because unlike a diff
   it returns actual secret values. That combination is its own class,
   **sensitive read**, gated behind `--mcp-allow-sensitive-reads` rather than
@@ -173,6 +321,149 @@ has both combinations, on purpose:
 If you only remember one thing from this section: don't infer whether a
 tool needs confirmation from whether the catalog marked it `sensitive` — go
 look up its actual safety class.
+
+### Impact is a third axis
+
+The catalog's tool tables also carry an **impact** level — `low`, `medium` or
+`high` — which answers a different question again: not *whether* a call is
+gated, but how much it disturbs if it runs.
+
+| Level | What it covers |
+| --- | --- |
+| `low` | A read, or a write whose only effect is to make a controller look again. |
+| `medium` | Changes cluster or host state but leaves workloads running: a scale, a suspend, a tool install, a Secret returned to the caller. |
+| `high` | Destroys, disrupts or replaces something running: a delete, a drain, a sync that applies manifests and runs hooks. |
+
+It cannot contradict the safety class — anything destructive is `high`,
+anything gated is at least `medium`, an ungated read is `low` — but it
+separates tools the class puts together. Two "needs confirmation" tools are
+not equally alarming.
+
+A headless denial now names the level and, where the host has authored one,
+the host's own sentence for the call, so an agent asked to re-send with
+`"_confirm": true` is told what it is confirming rather than only that the
+tool "mutates the cluster".
+
+One caveat, for a tool that takes a named operation: the published level is
+the **highest** any operation it accepts can reach, because `tools/list`
+carries one row per tool. `extensions.action` is `high` because a declared
+merge-patch action can apply an Argo CD sync. The selected primitive's level
+comes back with the resource on `extensions.resource`.
+
+The host action primitives an extension binds as declared actions —
+`k8s.annotate`, `k8s.setFields`, `k8s.setStatusCondition`,
+`k8s.mergePatch`, `k8s.requestRolloutRestart` and `k8s.requestCordonNode` —
+publish one row each, and an app's bound action inherits its primitive's row
+and can only be raised above it. `k8s.mergePatch` is `high` because it is the
+one that can express an Argo CD sync, and `k8s.requestRolloutRestart` is
+`high` because it replaces a workload's running pods; the other four are
+`medium`.
+
+### What a tool's answer looks like to an agent
+
+Every successful `tools/call` result, on either transport and for the in-process agent,
+becomes text in one place (`crates/mcp/src/agent_text.rs`). The desktop UI
+calls capabilities through Tauri, not MCP, and sees the untrimmed answer.
+
+**Trimmed.** Three kinds of noise are replaced before the answer is sent,
+anywhere in it, and the text stays valid JSON:
+
+- `metadata.managedFields` is dropped.
+- The `kubectl.kubernetes.io/last-applied-configuration` annotation in
+  `metadata.annotations` keeps its key; its value becomes `<omitted by
+  srelens: N-byte copy of the manifest as last applied with kubectl>`. The
+  other annotations are untouched, and so is the same key anywhere outside
+  `metadata`.
+- On a core Node (`"apiVersion": "v1"`, `"kind": "Node"`), `status.images`
+  becomes `<omitted by srelens: N cached container images; k8s.getManifest
+  returns them>`. Any other kind's `status.images` is left alone, including a
+  custom resource's that is also called `Node`.
+
+Each rule matches only where Kubernetes puts that field, so a custom
+resource's or an app's own data that happens to share a name is sent as it is.
+
+**Size limit.** After trimming, a **read-only** tool's answer over **50,000
+bytes** of compact JSON (`MAX_RESULT_BYTES`) is not sent. The call returns
+`isError: true` with a one-line message giving the size and the limit, saying
+the call itself succeeded and nothing about the cluster follows from the
+refusal, and asking the agent to narrow the call — a namespace, a label or
+field selector, fewer fields or lines where the tool takes them — and call
+again. The number follows Claude Code's threshold for saving an MCP result to
+a file instead of showing it to the model ([MCP output limits and
+warnings](https://code.claude.com/docs/en/mcp.md)); srelens' agent cannot read
+files, so a larger answer was lost to it. A tool that is not read-only always
+has its answer sent, at any size: refusing the output of a change that
+happened would tell the agent it did not, and invite it to make the change
+again.
+
+Not covered: `resources/read`, which renders its text separately, and the
+YAML string `k8s.getManifest` returns, which is sent as it is (the size limit
+still applies to it). The audit log's `resultBytes`, where it records one, is the
+answer's size before trimming.
+
+## Installed apps' tools
+
+Each app installed in the desktop app, and on, adds its operations as tools named
+`plugin/<app id>/<operation>` ([#574](https://github.com/srelens/srelens/issues/574)):
+
+- each **reader** binding, which takes `context` and, when the binding takes one,
+  `namespace`;
+- each **declared action**, which takes `context`, `namespace`, `name`, `uid` and
+  `resourceVersion` — the object and the version of it that was reviewed;
+- for an [executable app](extensions/manifest.md#executable-apps), each **operation**
+  its sidecar answers, which takes the typed inputs it declares.
+
+A pod binding (logs, exec, a port-forward) is a session an app's view opens, not a
+call, and is not a tool. Every srelens MCP server over the desktop's apps serves
+them: the in-app server, the assistant's, and headless `--mcp-stdio` and
+`--mcp-http`. The web host runs no MCP server, and its capability route refuses a
+`plugin/…` id outright.
+
+**Discovery.** Which tools there are depends on what is installed, so a server with
+app tools says `"tools": {"listChanged": true}` in its `initialize` answer and sends
+`notifications/tools/list_changed` — on stdio, and on the HTTP transport's `GET /mcp`
+stream — whenever an app is installed, updated, rolled back, enabled, disabled,
+blocked by policy, quarantined or removed. A change made in the same process is sent
+at once, after the answer to the request that made it. One made by another srelens
+process (the GUI, while a client holds a headless `--mcp-stdio` open) is found the
+next time the tools are listed or called, or by a push session's poll, every two
+seconds. A client on POST-only HTTP gets no notifications and lists the tools again
+when it wants to know.
+
+**The host's schema and gate, never the app's.** A reader or an action runs under its
+host capability's row through the same rule every binding does, so it can be raised
+above that row and never lowered: a reader is read-only and ungated, and an action
+is gated at its primitive's impact, in its primitive's own confirmation sentence. The
+[catalog](mcp-catalog.md#app-tools) lists which row each kind inherits. A sidecar
+has no kubeconfig, no network and no path but its own data directory, and reaches the
+host only through the broker ([#573](https://github.com/srelens/srelens/issues/573)):
+what its app's readers read, and its app's declared actions. So an operation of an
+app that declares no action is read-only and not gated; one of an app that declares
+actions is gated as the strongest of them, in the host's own sentence for an
+operation. Either way it is **sensitive**: its arguments are the app's own
+vocabulary, so the audit log redacts them whole.
+
+**A sidecar's writes are asked about again, naming the app.** Every write a sidecar
+asks the broker for is put to a person before it runs. In the app that is the same
+host confirmation an agent's gated call gets (#552), with "Requested by app …" read
+from the app's own inventory, since the host started that process and knows which app
+asked. Headless (`--mcp-stdio`, `--mcp-http`) nobody can be asked, so a sidecar's
+writes are refused there, whatever flags the process was started with; the refusal is
+recorded in the audit log.
+
+**The same checks as the app's own screens.** A reader runs through
+`extensions.read`'s path and an action through `extensions.action`'s: the app still
+installed and on at the revision the tool was listed for, the cluster one it is
+enabled for, the kind one the cluster serves, the app's settings as saved now. A
+gated app tool goes through the same consent as every other gated tool: the host
+confirmation in the app, or the matching flag plus `"_confirm": true` headlessly,
+and denied where there is nobody to ask.
+
+**Withdrawn when the app changes.** A call is decided and run against one snapshot of
+the app tools. When the apps change, the snapshot it came from is revoked: a caller
+that listed the tools earlier, or a call whose confirmation was still open when the
+app was updated or disabled, is refused with "This tool was withdrawn…" rather than
+run as a version of the tool nobody was asked about.
 
 ## Client configuration
 

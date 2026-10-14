@@ -14,8 +14,8 @@ const WIDGETS: CrdRef = {
   storageVersion: "v1",
 };
 
-function about(crd: CrdRef, objects = 3) {
-  const { container } = render(<AboutKind crd={crd} context="prod-eu" objects={objects} />);
+function about(crd: CrdRef) {
+  const { container } = render(<AboutKind crd={crd} context="prod-eu" />);
   return container;
 }
 
@@ -33,15 +33,14 @@ const valueOf = (container: HTMLElement, key: string) =>
 
 describe("AboutKind", () => {
   it("reads a kind's definition off the CRD, in the design's own order", () => {
-    const container = about(WIDGETS, 12);
+    const container = about(WIDGETS);
 
-    expect(keys(container)).toEqual(["Kind", "Scope", "Served versions", "Storage version", "Objects"]);
+    expect(keys(container)).toEqual(["Kind", "Scope", "Served versions", "Storage version"]);
     expect(definition(container)).toEqual([
       ["Kind", "Widget"],
       ["Scope", "Namespaced"],
       ["Served versions", "v1, v1beta1"],
       ["Storage version", "v1"],
-      ["Objects", "12"],
     ]);
   });
 
@@ -56,7 +55,7 @@ describe("AboutKind", () => {
     // ref in a test alike arrive without them.
     const container = about({ ...WIDGETS, versions: undefined, storageVersion: undefined });
 
-    expect(keys(container)).toEqual(["Kind", "Scope", "Objects"]);
+    expect(keys(container)).toEqual(["Kind", "Scope"]);
     expect(container.textContent).not.toContain("Served versions");
     expect(container.textContent).not.toContain("Storage version");
   });
@@ -64,27 +63,18 @@ describe("AboutKind", () => {
   it("keeps the served versions when only the storage version is missing", () => {
     const container = about({ ...WIDGETS, storageVersion: undefined });
 
-    expect(keys(container)).toEqual(["Kind", "Scope", "Served versions", "Objects"]);
+    expect(keys(container)).toEqual(["Kind", "Scope", "Served versions"]);
   });
 
   it("drops a served-versions row for a CRD that serves an empty list", () => {
-    expect(keys(about({ ...WIDGETS, versions: [] }))).toEqual(["Kind", "Scope", "Storage version", "Objects"]);
+    expect(keys(about({ ...WIDGETS, versions: [] }))).toEqual(["Kind", "Scope", "Storage version"]);
   });
 
-  it("leaves the count out entirely while the list has none to give", () => {
-    // `Objects 0` is not a small number, it is a WRONG one, and it is the
-    // number a reader glances at and believes. The same rule the version rows
-    // already follow: nothing behind it, nothing drawn.
-    const { container } = render(<AboutKind crd={WIDGETS} context="prod-eu" />);
-
-    expect(keys(container)).toEqual(["Kind", "Scope", "Served versions", "Storage version"]);
-    expect(container.textContent).not.toContain("Objects");
-  });
-
-  it("still says nought for a kind this cluster genuinely has none of", () => {
-    // A real zero is news — it is the answer to "is the operator doing
-    // anything?" — and must not be confused with not knowing yet.
-    expect(valueOf(about(WIDGETS, 0), "Objects")).toBe("0");
+  it("says nothing about how many objects there are — that is the list header's (#402)", () => {
+    // It was here, for custom resources alone. The count is in the header
+    // now, for every kind, and the same figure in two places on one screen is
+    // two things to keep agreeing.
+    expect(about(WIDGETS).textContent).not.toContain("Objects");
   });
 
   it("names the real kind, not the slug with its first letter upper-cased", () => {

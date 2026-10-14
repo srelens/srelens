@@ -59,6 +59,10 @@ silently focuses the first:
 - `/edit/<cluster>/<kind>/<namespace>/<name>` — the cluster is in it because
   the editor pins the cluster it opened on. Without it, Edit on staging's
   `default/web` focused prod's draft and staging's could not be opened at all.
+- `/k/<cluster>/<kind>/<namespace>/<name>` — a detail tab pins its cluster the
+  same way (#834), and reads it from the route, not the rail. Without it, prod's
+  and staging's `worker-1` were one tab that followed the rail. Anything drawn
+  inside it that would read the rail reads `useScreenContext()` instead.
 - A custom kind carries its group (`acme.io%2FDeployment`), because a CRD may
   legally reuse a built-in kind's name and resolving by name alone lands on
   the built-in — including for delete.
@@ -75,11 +79,21 @@ button anywhere for weeks.
 
 ## Secrets
 
-`k8s.getManifest` returns a Secret's values in the clear. Redact on arrival
-with `redactSecretManifest`, fail closed, and keep the editor read-only until
-the reader reveals — through `k8s.getSecret`, the consent-gated read. Apply
-stays off while placeholders are shown, or applying writes the placeholders
-over the values.
+The host blanks a Secret's `data`, `stringData` and every annotation value on
+every ungated read — `k8s.getObject`, `k8s.getManifest`, `k8s.diffManifest` —
+through `redact_secret_data`. The frontend redacts again on arrival with
+`redactSecretManifest` and fails closed; keep the editor read-only until the
+reader reveals through `k8s.getSecret`, the consent-gated read. Apply stays off
+while placeholders are shown, or applying writes the placeholders over the
+values.
+
+**Add the redaction to the path, not to the file.** `k8s.getManifest` was left
+returning Secrets in the clear for two rounds because the fix went in beside
+it — in `k8s.getObject`, ten lines up — and the YAML path serialized the
+fetched object straight out. Two doc comments and `docs/MCP.md` all said the
+redactor ran there. A claim in prose is not a caller: a new ungated reader of
+a Secret needs a test that asserts the plaintext is absent from what it
+returns.
 
 ## UI
 
@@ -197,5 +211,7 @@ docker build .                     # and the Rust half, much longer
 
 Three suites fail on Windows only and are unrelated to your change:
 `SmallPanes.test.tsx` (ShortcutsPane) and `tailwind-sources.test.ts` (two
-cases). `crates/kube/src/toolbox.rs` has a Unix-symlink test that will not
-compile there. Do not "fix" them by changing what they assert; CI runs Linux.
+cases), and in `srelens-kube`,
+`context_resolve::tests::a_pinned_id_finds_its_own_context_whatever_it_is_displayed_as`,
+whose context IDs carry a `\` path there. Do not "fix" them by changing what
+they assert; CI runs Linux.

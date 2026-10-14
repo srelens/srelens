@@ -2,6 +2,7 @@ import { Terminal } from "@xterm/xterm";
 import {
   deletePod,
   describeError,
+  isTauri,
   notify,
   startLocalTerminal,
   startPodExec,
@@ -37,10 +38,10 @@ import {
  */
 
 /** What kind of shell a session is. `node` is a pod exec into the privileged
- *  debug pod srelens created for a node — the store deletes that pod as soon
- *  as the session is over, whether the far end went on its own or the reader
- *  dismissed the row (see {@link takeDebugPod}), which is the cleanup a pod
- *  exec and a local shell have nothing to do. */
+ *  debug pod srelens created for a node — on the web the store deletes that
+ *  pod as soon as the session is over, whether the far end went on its own or
+ *  the reader dismissed the row (see {@link takeDebugPod}); on desktop the
+ *  host does (#734). A pod exec and a local shell have nothing to clean up. */
 export type SessionKind = "pod" | "node" | "local";
 
 /**
@@ -117,7 +118,35 @@ export interface LocalSessionRequest {
   /** Extra kubeconfigs to put on the shell's KUBECONFIG. */
   extraKubeconfigs?: string[];
   title?: string;
+  /**
+   * A command to run first, with the shell following it — a `kubectl drain`
+   * the reader has just confirmed, run where they can watch it (#820).
+   *
+   * Handed to the host, which starts it as the terminal's first process. It is
+   * NOT typed into the shell from here: nothing on this side of a PTY can tell
+   * when a shell has finished its rc files and is the one reading, and a
+   * confirmed command typed too early is swallowed — the node silently never
+   * drained. The shell the reader is left in afterwards is their own.
+   *
+   * The caller has already asked. Nothing here confirms anything.
+   */
+  command?: string;
+  /**
+   * The namespace `kubectl` uses by default in this shell — the one the tab it
+   * was opened from is looking at (#846). Left out, the kubeconfig's own
+   * default stands. A starting point, not an identity: the reader can change
+   * it from inside the shell, which is why the row below still records none.
+   */
+  namespace?: string;
 }
+
+/**
+ * How long a session's output must have stopped before {@link
+ * onSessionSettled}'s listeners are told. Long enough that a command still
+ * printing is not reported between two of its lines; short enough that a
+ * cordon's one line is followed promptly.
+ */
+export const SESSION_SETTLE_MS = 1_000;
 
 let sessions: TerminalSessionRow[] = [];
 const listeners = new Set<() => void>();
@@ -129,6 +158,12 @@ const handles = new Map<number, TerminalConnection>();
 /** Everything wired to a session's emulator, unwired when the row goes. */
 const unwires = new Map<number, () => void>();
 const idleTimers = new Map<number, ReturnType<typeof setTimeout>>();
+/**
+ * Who asked to hear when a session's output settles, and the clock each
+ * session's quiet is measured on. See {@link onSessionSettled}.
+ */
+const settleListeners = new Map<number, Set<() => void>>();
+const settleTimers = new Map<number, ReturnType<typeof setTimeout>>();
 /**
  * The privileged debug pod a `kind: "node"` session is exec'd into — the
  * object `k8s.createNodeDebugPod` left on the cluster, and the store's own to
@@ -192,10 +227,14 @@ export async function startPodSession(req: PodSessionRequest): Promise<number> {
     namespace: req.namespace,
   });
   // `req.pod` for a node session IS the debug pod: `k8s.createNodeDebugPod`
-  // made it, this exec runs `nsenter` inside it, and nothing else knows its
-  // name. Recorded before the connect, same as the row itself, so a session
-  // the reader ends while it is still opening (see `connect`) still cleans up.
-  if (kind === "node") {
+  // made it, and this exec runs `nsenter` inside it. Recorded before the
+  // connect, same as the row itself, so a session the reader ends while it is
+  // still opening (see `connect`) still cleans up.
+  //
+  // On the web only. The desktop host deletes it itself (#734) — however the
+  // shell ends, and when its window closes or reloads, which this store never
+  // hears of — and a delete from here as well would race it.
+  if (kind === "node" && !isTauri()) {
     nodeDebugPods.set(id, { context: req.context, namespace: req.namespace, pod: req.pod });
   }
   await connect(id, (onData, onExit, size) =>
@@ -224,10 +263,78 @@ export async function startLocalSession(req: LocalSessionRequest): Promise<numbe
     // is honest where naming the cluster's current one would not be.
     namespace: "",
   });
+  // The host runs the command without a shell to echo it, so the line that
+  // says what is running is written here — first, before anything the far
+  // end can say, so the output under it is read as that command's.
+  if (req.command) emulators.get(id)?.write(`\x1b[2m$ ${req.command}\x1b[0m\r\n`);
   await connect(id, (onData, onExit, size) =>
-    startLocalTerminal(req.context, req.extraKubeconfigs ?? [], onData, () => onExit(null), size),
+    startLocalTerminal(
+      req.context,
+      req.extraKubeconfigs ?? [],
+      onData,
+      () => onExit(null),
+      size,
+      req.command,
+      req.namespace,
+    ),
   );
   return id;
+}
+
+/**
+ * Hear when this session's output settles: {@link SESSION_SETTLE_MS} after it
+ * last printed, each time, and once more when its far end goes.
+ *
+ * For a caller that started a command here and holds something the command
+ * changes — the node detail whose Cordon/Uncordon label a `kubectl cordon`
+ * has just made wrong. There is no "the command finished" to report from
+ * outside a shell; output that has stopped is the nearest thing, and a
+ * listener that re-reads on it is right whether it was the command or the
+ * reader's own next line that stopped.
+ *
+ * Returns the release. A session the reader dismisses releases its listeners
+ * itself, and listening to an id that names no session is a no-op.
+ */
+export function onSessionSettled(id: number, listener: () => void): () => void {
+  if (!emulators.has(id)) return () => {};
+  // A session can be over before its starter gets as far as listening — one
+  // that failed to open closes inside `startLocalSession`'s own await. Its
+  // one report has already gone out to nobody, so it is given again here
+  // rather than leaving this listener waiting on a quiet that cannot come.
+  if (sessions.some((s) => s.id === id && s.state === "closed")) {
+    listener();
+    return () => {};
+  }
+  let set = settleListeners.get(id);
+  if (!set) settleListeners.set(id, (set = new Set()));
+  set.add(listener);
+  return () => {
+    set.delete(listener);
+  };
+}
+
+/** Tell this session's listeners its output has settled. */
+function settled(id: number) {
+  clearTimeout(settleTimers.get(id));
+  settleTimers.delete(id);
+  for (const listener of [...(settleListeners.get(id) ?? [])]) listener();
+}
+
+/**
+ * Give this session the name the reader wants to know it by.
+ *
+ * Three local shells opened from the status bar are all "Local shell", and the
+ * only thing telling them apart is what the reader remembers typing in each.
+ * The name is the row's and nothing else's: the far end never hears it, and it
+ * lasts as long as the session does.
+ *
+ * A blank name is not a name. It is ignored rather than stored, so a row can
+ * never be left with nothing to be picked by.
+ */
+export function renameSession(id: number, title: string): void {
+  const next = title.trim();
+  if (next === "") return;
+  commit(sessions.map((s) => (s.id === id && s.title !== next ? { ...s, title: next } : s)));
 }
 
 /**
@@ -241,6 +348,7 @@ export async function startLocalSession(req: LocalSessionRequest): Promise<numbe
  */
 export function endSession(id: number): void {
   disconnect(id);
+  settleListeners.delete(id);
   emulators.get(id)?.dispose();
   emulators.delete(id);
   const debugPod = takeDebugPod(id);
@@ -290,6 +398,9 @@ export function __resetSessionsForTests(): void {
   for (const id of [...emulators.keys()]) endSession(id);
   for (const id of [...handles.keys()]) disconnect(id);
   nodeDebugPods.clear();
+  for (const timer of settleTimers.values()) clearTimeout(timer);
+  settleTimers.clear();
+  settleListeners.clear();
   sessions = [];
   listeners.clear();
   seq = 0;
@@ -315,7 +426,10 @@ function register(row: Pick<TerminalSessionRow, "kind" | "title" | "context" | "
   // where there is a DOM to read them from. `convertEol` matches the classic
   // pane — a backend that sends a bare newline still starts the next line at
   // column zero.
-  emulators.set(id, new Terminal({ convertEol: true, scrollback: 10_000 }));
+  // `allowTransparency` because the pane clears the emulator's background for a
+  // see-through window (`terminalDress`), and xterm only honours an alpha in
+  // its background when it was built with this.
+  emulators.set(id, new Terminal({ convertEol: true, scrollback: 10_000, allowTransparency: true }));
   sessions = [
     ...sessions,
     { id, ...row, state: "attached", startedAt: now, lastOutputAt: stamp },
@@ -383,6 +497,13 @@ async function connect(
 function receive(id: number, chunk: string) {
   emulators.get(id)?.write(chunk);
   markActive(id);
+  if (settleListeners.get(id)?.size) {
+    clearTimeout(settleTimers.get(id));
+    settleTimers.set(
+      id,
+      setTimeout(() => settled(id), SESSION_SETTLE_MS),
+    );
+  }
 }
 
 /**
@@ -445,6 +566,9 @@ function close(id: number, reason: unknown) {
   // delete between here and `endSession`, either order.
   const debugPod = takeDebugPod(id);
   if (debugPod) void deleteDebugPod(debugPod);
+  // Whatever the session was running has stopped with it; there will be no
+  // later quiet to report this on.
+  settled(id);
   const error = describedReason(reason);
   commit(
     sessions.map((s) => {
@@ -462,6 +586,8 @@ function close(id: number, reason: unknown) {
 function disconnect(id: number) {
   clearTimeout(idleTimers.get(id));
   idleTimers.delete(id);
+  clearTimeout(settleTimers.get(id));
+  settleTimers.delete(id);
   unwires.get(id)?.();
   unwires.delete(id);
   handles.get(id)?.close();

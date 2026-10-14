@@ -96,6 +96,12 @@ export interface DetailActionsProps {
   /** CronJob only: `spec.suspend`, so Suspend/Resume is labelled the right way
    *  round. `useRowMenu` reads it off the row, as it does for a list. */
   suspended?: boolean;
+  /** Node only: `spec.unschedulable`, so Cordon/Uncordon is labelled the right
+   *  way round, for the same reason and by the same route. */
+  unschedulable?: boolean;
+  /** A write made from this bar went through: read the subject again, so
+   *  the two fields above are the object's as it now is. */
+  onChanged?: () => void;
   /**
    * Which host is drawing the row. The peek's footer gives `Ask` whatever the
    * kind's own actions leave and keeps two of them on the bar; the full tab's
@@ -144,18 +150,22 @@ export function DetailActions({
   actions,
   flagged,
   suspended,
+  unschedulable,
+  onChanged,
   host = "peek",
 }: DetailActionsProps) {
   const { ask } = useConsole();
-  const { items, dialog } = useRowMenu({ context, kind, actions });
+  const { items, dialog } = useRowMenu({ context, kind, actions, onChanged });
 
   // What a table would have handed the hook. `suspended` is not on `ListRow`
   // — `useRowMenu` reads it off the row with the same cast a `CronJobSummary`
-  // needs — so it rides along the same way.
-  const row: ListRow & { suspended?: boolean } = {
+  // needs — so it rides along the same way, and so does a Node's
+  // `unschedulable`.
+  const row: ListRow & { suspended?: boolean; unschedulable?: boolean } = {
     name,
     ...(namespace === null ? {} : { namespace }),
     ...(suspended === undefined ? {} : { suspended }),
+    ...(unschedulable === undefined ? {} : { unschedulable }),
   };
   const question = askQuestion(name, flagged);
   const Sparkle = Icons.ask;

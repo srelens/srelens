@@ -29,6 +29,7 @@ describe("checkForUpdate", () => {
       current_version: "0.1.0",
       notes: "### Features\n- things",
       external: false,
+      nix_managed: true,
       elevates: true,
     });
     const meta = await checkForUpdate("dev");
@@ -38,6 +39,7 @@ describe("checkForUpdate", () => {
       currentVersion: "0.1.0",
       notes: "### Features\n- things",
       external: false,
+      nixManaged: true,
       elevates: true,
     });
   });
@@ -46,6 +48,7 @@ describe("checkForUpdate", () => {
     // Defaulting the other way would warn about a password prompt on macOS.
     invokeCommandMock.mockResolvedValue({ version: "0.2.0", current_version: "0.1.0", notes: null });
     expect((await checkForUpdate("stable"))?.elevates).toBe(false);
+    expect((await checkForUpdate("stable"))?.nixManaged).toBe(false);
   });
 
   it("defaults notes to an empty string", async () => {

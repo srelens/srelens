@@ -78,17 +78,39 @@ fn item_completed(item: &serde_json::Value) -> Vec<AgentEvent> {
             } else {
                 ToolStatus::Error
             };
-            vec![AgentEvent::ToolResult { id: str_field(item, "id").to_string(), status }]
+            let failed = status != ToolStatus::Ok;
+            let summary = crate::event::summarize_result(&mcp_result_text(item, failed), failed);
+            vec![AgentEvent::ToolResult { id: str_field(item, "id").to_string(), status, summary }]
         }
         Some("command_execution") => {
             let ok = item.get("exit_code").and_then(|c| c.as_i64()) == Some(0);
             vec![AgentEvent::ToolResult {
                 id: str_field(item, "id").to_string(),
                 status: if ok { ToolStatus::Ok } else { ToolStatus::Error },
+                summary: crate::event::summarize_result(str_field(item, "aggregated_output"), !ok),
             }]
         }
         _ => Vec::new(),
     }
+}
+
+/// An `mcp_tool_call`'s result as text, for its summary (#385): the result's
+/// text parts, or the error's message (else the error itself). A failed call
+/// reads its error first — the error is what decided its status — and its
+/// content only when there is no error to read (PR #806 review).
+fn mcp_result_text(item: &serde_json::Value, failed: bool) -> String {
+    let content = item.get("result").and_then(|r| r.get("content")).and_then(|c| c.as_array()).and_then(|parts| {
+        let text: Vec<&str> = parts.iter().filter_map(|p| p.get("text").and_then(|t| t.as_str())).collect();
+        (!text.is_empty()).then(|| text.join("\n"))
+    });
+    // An error with no text says nothing, and must not hide content that does.
+    let error = match item.get("error") {
+        Some(serde_json::Value::Null) | None => None,
+        Some(e) => Some(e.get("message").and_then(|m| m.as_str()).map(str::to_string).unwrap_or_else(|| e.to_string())),
+    }
+    .filter(|s| !s.trim().is_empty());
+    let (first, then) = if failed { (error, content) } else { (content, error) };
+    first.or(then).unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -155,7 +177,26 @@ mod tests {
         let out = parse_line(
             r#"{"type":"item.completed","item":{"id":"item_1","type":"mcp_tool_call","server":"everything","tool":"echo","arguments":{"message":"srelens-mcp-probe"},"result":{"content":[{"type":"text","text":"Echo: srelens-mcp-probe"}],"structured_content":null},"error":null,"status":"completed"}}"#,
         );
-        assert_eq!(out, vec![AgentEvent::ToolResult { id: "item_1".into(), status: ToolStatus::Ok }]);
+        assert_eq!(out, vec![AgentEvent::ToolResult { id: "item_1".into(), status: ToolStatus::Ok, summary: Some("Echo: srelens-mcp-probe".into()) }]);
+    }
+
+    /// PR #806 review: a failed call is summarised by the error that decided
+    /// its status, not by whatever partial content came with it.
+    #[test]
+    fn a_failed_mcp_tool_call_is_summarised_by_its_error_not_its_partial_content() {
+        let out = parse_line(
+            r#"{"type":"item.completed","item":{"id":"item_1","type":"mcp_tool_call","server":"everything","tool":"echo","arguments":{},"result":{"content":[{"type":"text","text":"partial output"}]},"error":{"message":"boom"},"status":"failed"}}"#,
+        );
+        assert_eq!(out, vec![AgentEvent::ToolResult { id: "item_1".into(), status: ToolStatus::Error, summary: Some("boom".into()) }]);
+    }
+
+    /// PR #806 review: an error with no text says nothing, so the content does.
+    #[test]
+    fn a_failed_mcp_tool_call_with_an_empty_error_is_summarised_by_its_content() {
+        let out = parse_line(
+            r#"{"type":"item.completed","item":{"id":"item_1","type":"mcp_tool_call","server":"everything","tool":"echo","arguments":{},"result":{"content":[{"type":"text","text":"partial output"}]},"error":{"message":""},"status":"failed"}}"#,
+        );
+        assert_eq!(out, vec![AgentEvent::ToolResult { id: "item_1".into(), status: ToolStatus::Error, summary: Some("partial output".into()) }]);
     }
 
     #[test]
@@ -163,7 +204,7 @@ mod tests {
         let out = parse_line(
             r#"{"type":"item.completed","item":{"id":"item_1","type":"mcp_tool_call","server":"everything","tool":"echo","arguments":{},"result":null,"error":{"message":"boom"},"status":"completed"}}"#,
         );
-        assert_eq!(out, vec![AgentEvent::ToolResult { id: "item_1".into(), status: ToolStatus::Error }]);
+        assert_eq!(out, vec![AgentEvent::ToolResult { id: "item_1".into(), status: ToolStatus::Error, summary: Some("boom".into()) }]);
     }
 
     #[test]
@@ -171,7 +212,7 @@ mod tests {
         let out = parse_line(
             r#"{"type":"item.completed","item":{"id":"item_1","type":"mcp_tool_call","server":"srelens","tool":"k8s_deletePod","arguments":{},"result":null,"error":{"message":"consent denied: user declined `k8s.deletePod`"},"status":"completed"}}"#,
         );
-        assert_eq!(out, vec![AgentEvent::ToolResult { id: "item_1".into(), status: ToolStatus::Denied }]);
+        assert_eq!(out, vec![AgentEvent::ToolResult { id: "item_1".into(), status: ToolStatus::Denied, summary: Some("consent denied: user declined `k8s.deletePod`".into()) }]);
     }
 
     #[test]
@@ -179,7 +220,7 @@ mod tests {
         let out = parse_line(
             r#"{"type":"item.completed","item":{"id":"item_1","type":"mcp_tool_call","server":"everything","tool":"echo","arguments":{},"result":null,"error":null,"status":"failed"}}"#,
         );
-        assert_eq!(out, vec![AgentEvent::ToolResult { id: "item_1".into(), status: ToolStatus::Error }]);
+        assert_eq!(out, vec![AgentEvent::ToolResult { id: "item_1".into(), status: ToolStatus::Error, summary: None }]);
     }
 
     #[test]
@@ -202,7 +243,7 @@ mod tests {
         let out = parse_line(
             r#"{"type":"item.completed","item":{"id":"item_1","type":"command_execution","command":"/bin/zsh -lc 'echo srelens-probe'","aggregated_output":"srelens-probe\n","exit_code":0,"status":"completed"}}"#,
         );
-        assert_eq!(out, vec![AgentEvent::ToolResult { id: "item_1".into(), status: ToolStatus::Ok }]);
+        assert_eq!(out, vec![AgentEvent::ToolResult { id: "item_1".into(), status: ToolStatus::Ok, summary: Some("srelens-probe".into()) }]);
     }
 
     #[test]
@@ -210,7 +251,7 @@ mod tests {
         let out = parse_line(
             r#"{"type":"item.completed","item":{"id":"item_1","type":"command_execution","command":"false","aggregated_output":"","exit_code":1,"status":"completed"}}"#,
         );
-        assert_eq!(out, vec![AgentEvent::ToolResult { id: "item_1".into(), status: ToolStatus::Error }]);
+        assert_eq!(out, vec![AgentEvent::ToolResult { id: "item_1".into(), status: ToolStatus::Error, summary: None }]);
     }
 
     #[test]
@@ -244,7 +285,7 @@ mod tests {
             events.iter().filter(|e| matches!(e, AgentEvent::ToolCallStart { .. })).count(),
             1
         );
-        assert!(events.contains(&AgentEvent::ToolResult { id: "item_1".into(), status: ToolStatus::Ok }));
+        assert!(events.contains(&AgentEvent::ToolResult { id: "item_1".into(), status: ToolStatus::Ok, summary: Some("Echo: srelens-mcp-probe".into()) }));
         assert_eq!(
             events.iter().filter(|e| matches!(e, AgentEvent::TextDelta { .. })).count(),
             2
@@ -263,7 +304,7 @@ mod tests {
             tool: "shell".into(),
             args: serde_json::json!({ "command": "/bin/zsh -lc 'echo srelens-probe'" }),
         }));
-        assert!(events.contains(&AgentEvent::ToolResult { id: "item_1".into(), status: ToolStatus::Ok }));
+        assert!(events.contains(&AgentEvent::ToolResult { id: "item_1".into(), status: ToolStatus::Ok, summary: Some("srelens-probe".into()) }));
         assert!(events.contains(&AgentEvent::TurnDone));
     }
 }

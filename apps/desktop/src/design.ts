@@ -1,4 +1,4 @@
-import { settingsStorage, flushSettingsWrites, isApplePlatform, isTauri, K8S_KIND, type ResourceKind } from "@srelens/core";
+import { settingsStorage, flushSettingsWrites, applyWindowBlur, isApplePlatform, isTauri, K8S_KIND, type ResourceKind } from "@srelens/core";
 // theme.ts imports only settingsStorage, so this does not drag the classic
 // stylesheet into the new design's chunk.
 import { applyTheme, getInitialTheme, resolvedThemeMode } from "./ui/theme";
@@ -20,14 +20,14 @@ export type Design = "classic" | "next";
 
 export function loadDesign(): Design {
   try {
-    // Anything unrecognised means classic. A preference written by a future
-    // version must never leave someone on a design that does not exist, since
-    // a blank window has no way back to Settings.
-    return settingsStorage.getItem(DESIGN_KEY) === "next" ? "next" : "classic";
+    // Classic is deprecated: only someone who explicitly chose it stays on it.
+    // Anything else — no preference, or one written by a future version —
+    // means the new design, so nobody lands on a design that does not exist.
+    return settingsStorage.getItem(DESIGN_KEY) === "classic" ? "classic" : "next";
   } catch {
     // Storage throws in some privacy modes; a preference is not worth failing
     // to boot over.
-    return "classic";
+    return "next";
   }
 }
 
@@ -99,8 +99,8 @@ export async function switchDesign(design: Design): Promise<SwitchResult> {
     // old design — and on desktop it could do so with the chrome already
     // changed. Leave everything alone and report it.
     //
-    // Reported to the caller rather than raised as a toast: the toast host
-    // lives in the classic tree, so a failure while leaving the new design
+    // Reported to the caller rather than raised as a toast: the toast host lived
+    // only in the classic tree then (#374), so a failure while leaving the new design
     // would have been invisible, and the button would have looked inert.
     return { ok: false, reason: "This device would not let srelens save the preference." };
   }
@@ -110,6 +110,12 @@ export async function switchDesign(design: Design): Promise<SwitchResult> {
     return { ok: false, reason: "The settings backend could not save the design preference." };
   }
   if (design === "classic" && isTauri() && drawsOwnChrome()) {
+    // The blur behind a see-through window goes too: the native window keeps
+    // it across the reload, and classic paints an opaque page and never syncs
+    // it, so it would run unseen for as long as classic stays up. Awaited so
+    // the reload does not race the host. It never rejects, and a refusal is
+    // logged there and does not stop the switch. (#855 review)
+    await applyWindowBlur(false);
     try {
       // Leaving the new design means handing the system titlebar back: classic
       // renders under the real decorations, and an overlay left behind would
@@ -182,7 +188,7 @@ function applyNextThemeAttribute(): void {
  * and the stylesheet ever disagree. A theme added to `tokens.css` fails that
  * test rather than quietly being treated as light here.
  */
-export const DARK_NEXT_THEMES: ReadonlySet<string> = new Set(["dark", "midnight"]);
+export const DARK_NEXT_THEMES: ReadonlySet<string> = new Set(["dark", "midnight", "glass"]);
 
 /**
  * The lightness of the theme the reader can actually SEE.
@@ -291,6 +297,7 @@ export function toggleNextDesignTheme(): void {
  * so they cannot drift. A screen is added here in the PR that ports it.
  */
 export const PORTED_SCREENS: ReadonlyArray<{ route: string; name: string }> = [
+  { route: "/", name: "Home" },
   { route: "/applog", name: "Application log" },
   { route: "/notes", name: "Release notes" },
   // The full view of the one agent run this window holds — the transcript,

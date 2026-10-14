@@ -13,6 +13,12 @@ export interface SessionMeta {
   title: string;
   createdAt: number;
   updatedAt: number;
+  /** How many tool calls the conversation made (#386). Absent for sessions
+   *  saved before it was kept, and for classic's. */
+  calls?: number;
+  /** How long srelens spent answering, in ms (#386). Absent when nothing
+   *  could be measured, and for sessions saved before it was kept. */
+  durationMs?: number;
 }
 
 /**

@@ -14,6 +14,12 @@ use std::sync::Arc;
 #[global_allocator]
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
+/// The frontend this binary serves. A release build embeds `apps/desktop/dist`,
+/// so `pnpm build` runs first; a debug build reads the folder at runtime.
+#[derive(rust_embed::RustEmbed)]
+#[folder = "../../apps/desktop/dist"]
+struct Frontend;
+
 fn main() {
     // Honor SRELENS_TIMEOUT_SECS for kube request timeouts, like the desktop.
     srelens_kube::connect::init_timeout_from_env();
@@ -67,12 +73,17 @@ fn main() {
         .expect("build tokio runtime");
     runtime.block_on(async {
         let factory: srelens_server::RegistryFactory =
-            Arc::new(|cache, paths| srelens_registry::build_registry_with_paths(cache, paths));
+            Arc::new(srelens_registry::build_registry_for_user);
         eprintln!("srelens web server listening on http://{addr}");
         eprintln!("srelens data directory: {}", data_dir.display());
-        if let Err(e) =
-            srelens_server::serve(factory, srelens_server::ServerConfig { addr, data_dir }).await
-        {
+        let assets: srelens_server::assets::AssetSource =
+            Arc::new(|path| Frontend::get(path).map(|file| file.data));
+        let config = srelens_server::ServerConfig {
+            addr,
+            data_dir,
+            assets,
+        };
+        if let Err(e) = srelens_server::serve(factory, config).await {
             eprintln!("web server error: {e}");
             std::process::exit(1);
         }

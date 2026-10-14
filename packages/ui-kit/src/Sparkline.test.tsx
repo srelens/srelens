@@ -50,6 +50,61 @@ describe("Sparkline", () => {
     expect(labelled.querySelector("svg")?.getAttribute("role")).toBe("img");
   });
 
+  /** The y of each point on the line, top of the box being 0. */
+  const heights = (ui: Parameters<typeof render>[0]) => {
+    const d = render(ui).container.querySelector("path")?.getAttribute("d") ?? "";
+    return [...d.matchAll(/[ML][\d.]+,([\d.]+)/g)].map((m) => Number(m[1]));
+  };
+
+  it("draws against a ceiling when given one, so a small series stays small", () => {
+    // 30 and 40 of a limit of 400: low in the box, not stretched to fill it.
+    const ys = heights(<Sparkline points={[30, 40]} fill={false} ceiling={400} />);
+    expect(Math.min(...ys)).toBeGreaterThan(34 * 0.75);
+    // The same series with no ceiling fills the box, as it always has.
+    const free = heights(<Sparkline points={[30, 40]} fill={false} />);
+    expect(Math.min(...free)).toBeLessThan(34 * 0.25);
+  });
+
+  it("grows past the ceiling rather than clipping a peak above it", () => {
+    const ys = heights(<Sparkline points={[100, 600]} fill={false} ceiling={400} />);
+    // Every point is inside the box: nothing drawn above its top edge.
+    expect(Math.min(...ys)).toBeGreaterThanOrEqual(0);
+    expect(ys[1]).toBeLessThan(ys[0]);
+  });
+
+  it("ignores a ceiling of nothing", () => {
+    expect(heights(<Sparkline points={[30, 40]} fill={false} ceiling={0} />)).toEqual(
+      heights(<Sparkline points={[30, 40]} fill={false} />),
+    );
+  });
+
+  /** The x of each point on the line. */
+  const places = (ui: Parameters<typeof render>[0]) => {
+    const d = render(ui).container.querySelector("path")?.getAttribute("d") ?? "";
+    return [...d.matchAll(/[ML]([\d.]+),[\d.]+/g)].map((m) => Number(m[1]));
+  };
+
+  it("places points by when they were taken, so a gap is as wide as it lasted", () => {
+    // Readings at 0s, 10s, then nothing for five minutes, then 320s.
+    const xs = places(<Sparkline points={[1, 2, 3]} at={[0, 10, 320]} fill={false} />);
+    expect(xs[0]).toBe(0);
+    expect(xs[2]).toBe(100);
+    // The second is a thirty-second of the way along, not half.
+    expect(xs[1]).toBeCloseTo(3.125, 3);
+  });
+
+  it("spaces points evenly when given no times, or not one for each point", () => {
+    const even = places(<Sparkline points={[1, 2, 3]} fill={false} />);
+    expect(even).toEqual([0, 50, 100]);
+    expect(places(<Sparkline points={[1, 2, 3]} at={[0, 10]} fill={false} />)).toEqual(even);
+  });
+
+  it("spaces points evenly when their times span nothing", () => {
+    const d = render(<Sparkline points={[1, 2]} at={[5, 5]} fill={false} />).container.querySelector("path")?.getAttribute("d");
+    expect(d).not.toContain("NaN");
+    expect(places(<Sparkline points={[1, 2]} at={[5, 5]} fill={false} />)).toEqual([0, 100]);
+  });
+
   it("anchors to zero rather than to the samples' own range", () => {
     // Deliberate, and inherited from the mock: [90, 95] reads as high and
     // steady rather than as a climb, and two sparklines side by side share a

@@ -1,7 +1,16 @@
 import { describe, it, expect, vi } from "vitest";
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import type { LogLine } from "@srelens/core";
+import {
+  logLineHealth,
+  logLineLevel,
+  logLineWords,
+  parseLogFields,
+  parseLogQuery,
+  type LogLine,
+  type QueryLine,
+} from "@srelens/core";
+import { toneWash } from "@srelens/ui-kit";
 import { StreamRail, STREAM_RAIL_WIDTH, type StreamPod } from "./StreamRail";
 
 /**
@@ -33,12 +42,32 @@ const BUFFER: LogLine[] = [
   line("mk3wl", "info liveness deadline extended for the shutdown"),
 ];
 
+/** A QueryLine as the Logs screen builds one. */
+function ql(text: string): QueryLine {
+  const { message, fields } = parseLogFields(text);
+  const health = logLineHealth(text);
+  return { text, haystack: `${text} ${health}`.toLowerCase(), words: logLineWords(message), fields, level: logLineLevel(text) ?? "", health };
+}
+
+const FACET_LINES = [
+  '{"level":"info","msg":"a","system":"camlog"}',
+  '{"level":"info","msg":"b","system":"camlog"}',
+  '{"level":"warn","msg":"c","system":"schwarz"}',
+].map(ql);
+
 function rail(props: Partial<Parameters<typeof StreamRail>[0]> = {}) {
   const onTogglePod = vi.fn();
+  const onToggle = vi.fn();
   const { container } = render(
-    <StreamRail pods={PODS} lines={BUFFER} onTogglePod={onTogglePod} {...props} />,
+    <StreamRail
+      pods={PODS}
+      lines={BUFFER}
+      onTogglePod={onTogglePod}
+      query={{ lines: [], clauses: [], fields: [], onToggle }}
+      {...props}
+    />,
   );
-  return { container, onTogglePod };
+  return { container, onTogglePod, onToggle };
 }
 
 /** Every Sources row, as `[pod name, revision]`. */
@@ -72,6 +101,13 @@ const box = (pod: string) => screen.getByRole("checkbox", { name: pod }) as HTML
 describe("StreamRail", () => {
   it("pins the design's rail width so the screen has one place to read it from", () => {
     expect(STREAM_RAIL_WIDTH).toBe(272);
+  });
+
+  it("draws Sources and Top terms as flush section bands", () => {
+    const { container } = rail();
+    const sections = [...container.querySelectorAll("section")];
+    expect(sections.length).toBe(2);
+    expect(sections.every(section => section.hasAttribute("data-band"))).toBe(true);
   });
 
   describe("Sources", () => {
@@ -156,6 +192,18 @@ describe("StreamRail", () => {
       expect(container.querySelector(".badge")?.textContent).toBe("1 error");
     });
 
+    it("counts a line by the severity it arrives with, rather than reading its text again", () => {
+      const { container } = rail({
+        lines: [
+          { ...line("a", "disk gone"), health: "danger" },
+          { ...line("a", "disk still gone"), health: "danger" },
+          { ...line("a", "error is only a word in this one"), health: "neutral" },
+        ],
+      });
+
+      expect(container.querySelector(".badge")?.textContent).toBe("2 errors");
+    });
+
     it("says nothing at all rather than badging a zero", () => {
       const { container } = rail({ lines: [line("mk3wl", "info all quiet"), line("mk3wl", "info still quiet")] });
 
@@ -180,6 +228,19 @@ describe("StreamRail", () => {
       const rows = Array.from(container.querySelectorAll('[data-slot="term"]'));
 
       expect(rows.map(toneOf)).toEqual(["danger", "warning", "info"]);
+    });
+
+    it("tallies the message a line arrives with, and tones it by the severity it arrives with", () => {
+      // A logfmt line opens with its own time, which ends a term before any word of the message.
+      const logfmt = (n: number) => ({
+        ...line("a", `time=2026-10-12T10:33:0${n}Z level=error msg="Write failed: timeout" system=x`),
+        message: "Write failed: timeout",
+        health: "danger" as const,
+      });
+      const { container } = rail({ lines: [1, 2, 3].map(logfmt) });
+
+      expect(termRows(container)).toEqual([["Write failed timeout", "3"]]);
+      expect(Array.from(container.querySelectorAll('[data-slot="term"]')).map(toneOf)).toEqual(["danger"]);
     });
 
     it("tallies the lines in view, so the terms cannot disagree with the badge", () => {
@@ -236,5 +297,140 @@ describe("StreamRail", () => {
     const { container } = rail();
 
     expect(container.querySelectorAll("[title]")).toHaveLength(0);
+  });
+});
+
+describe("the facets (#898)", () => {
+  const facetRail = (clauses = "", lines: readonly QueryLine[] = FACET_LINES) => {
+    const parsed = parseLogQuery(clauses);
+    const onToggle = vi.fn();
+    const view = render(
+      <StreamRail
+        pods={PODS}
+        lines={BUFFER}
+        onTogglePod={vi.fn()}
+        query={{ lines, clauses: parsed.ok ? parsed.clauses : [], fields: ["system"], onToggle }}
+      />,
+    );
+    return { ...view, onToggle };
+  };
+
+  /** Six systems, `s1` the busiest and `s6` the quietest, so `s6` ranks past the collapsed five. */
+  const SIX_SYSTEMS = ["s1", "s1", "s1", "s1", "s1", "s1", "s2", "s2", "s2", "s2", "s2", "s3", "s3", "s3", "s3", "s4", "s4", "s4", "s5", "s5", "s6"].map(
+    (system) => ql(`{"level":"info","msg":"m","system":"${system}"}`),
+  );
+  const facetLabels = () => Array.from(document.querySelectorAll('[data-slot="facet"] .status')).map((e) => e.textContent);
+
+  it("lists the levels worst first, and each discovered field's values, with counts", () => {
+    facetRail();
+    expect(screen.getByRole("button", { name: "level = warn, 1 line" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "level = info, 2 lines" })).toBeTruthy();
+    const levels = Array.from(document.querySelectorAll('[data-slot="level"] .status')).map((e) => e.textContent);
+    expect(levels).toEqual(["warn", "info"]);
+    expect(screen.getByRole("button", { name: "system = camlog, 2 lines" })).toBeTruthy();
+  });
+
+  it("filters a value in with a click and out with its exclude button", async () => {
+    const { onToggle } = facetRail();
+    await userEvent.click(screen.getByRole("button", { name: "system = camlog, 2 lines" }));
+    expect(onToggle).toHaveBeenLastCalledWith({ field: "system", value: "camlog" }, "include");
+    await userEvent.click(screen.getByRole("button", { name: "Exclude system = camlog" }));
+    expect(onToggle).toHaveBeenLastCalledWith({ field: "system", value: "camlog" }, "exclude");
+  });
+
+  it("presses what the query already filters on, and keeps an excluded value reachable at zero", () => {
+    facetRail("level:info -system:schwarz");
+    expect(screen.getByRole("button", { name: "level = info, 2 lines" }).getAttribute("aria-pressed")).toBe("true");
+    expect(screen.getByRole("button", { name: "Exclude system = schwarz" }).getAttribute("aria-pressed")).toBe("true");
+  });
+
+  it("filters on a Top term as a phrase", async () => {
+    const { onToggle } = rail();
+    await userEvent.click(screen.getByRole("button", { name: /^pool timeout, 3 lines$/ }));
+    expect(onToggle).toHaveBeenLastCalledWith({ phrase: "pool timeout" }, "include");
+  });
+
+  it("draws a value the query names twice, and no line has, as one row", () => {
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      facetRail("system:zzz -system:zzz system:ZZZ");
+      expect(error.mock.calls.some((call) => String(call[0]).includes("same key"))).toBe(false);
+      expect(screen.getAllByRole("button", { name: "system = zzz, 0 lines" })).toHaveLength(1);
+    } finally {
+      error.mockRestore();
+    }
+  });
+
+  it("keeps a value the query names at zero lines in the collapsed list", () => {
+    facetRail("system:zzz", SIX_SYSTEMS);
+    expect(facetLabels()).toEqual(["zzz", "s1", "s2", "s3", "s4"]);
+    expect(screen.getByRole("button", { name: "system = zzz, 0 lines" })).toBeTruthy();
+  });
+
+  it("keeps an included value that ranks past the collapsed five in the list", () => {
+    facetRail("system:s6", SIX_SYSTEMS);
+    expect(facetLabels()).toEqual(["s6", "s1", "s2", "s3", "s4"]);
+    expect(screen.getByRole("button", { name: "system = s6, 1 line" }).getAttribute("aria-pressed")).toBe("true");
+  });
+
+  it("names the field on Show all, and shows the rest when it is pressed", async () => {
+    facetRail("", SIX_SYSTEMS);
+    expect(facetLabels()).toEqual(["s1", "s2", "s3", "s4", "s5"]);
+    await userEvent.click(screen.getByRole("button", { name: "Show all 6 system values" }));
+    expect(facetLabels()).toEqual(["s1", "s2", "s3", "s4", "s5", "s6"]);
+    await userEvent.click(screen.getByRole("button", { name: "Show fewer system values" }));
+    expect(facetLabels()).toEqual(["s1", "s2", "s3", "s4", "s5"]);
+  });
+
+  describe("a collapsed list with more than five values filtered on", () => {
+    /** Seven systems, `s1` the busiest (7 lines) down to `s7` (1). */
+    const SEVEN_SYSTEMS = Array.from({ length: 7 }, (_, i) => Array.from({ length: 7 - i }, () => `s${i + 1}`))
+      .flat()
+      .map((system) => ql(`{"level":"info","msg":"m","system":"${system}"}`));
+    /** Three in and three out: every value but `s1`. */
+    const SIX_ACTIVE = "system:s7 system:s6 system:s5 -system:s4 -system:s3 -system:s2";
+
+    it("shows every one of them, since each is still filtering", () => {
+      facetRail(SIX_ACTIVE, SEVEN_SYSTEMS);
+      expect(facetLabels()).toEqual(["s2", "s3", "s4", "s5", "s6", "s7"]);
+      expect(screen.getByRole("button", { name: "Exclude system = s2" }).getAttribute("aria-pressed")).toBe("true");
+      expect(screen.getByRole("button", { name: "system = s7, 1 line" }).getAttribute("aria-pressed")).toBe("true");
+    });
+
+    it("offers Show all for the value it left out, and Show fewer to go back", async () => {
+      facetRail(SIX_ACTIVE, SEVEN_SYSTEMS);
+      await userEvent.click(screen.getByRole("button", { name: "Show all 7 system values" }));
+      expect(facetLabels()).toEqual(["s2", "s3", "s4", "s5", "s6", "s7", "s1"]);
+      await userEvent.click(screen.getByRole("button", { name: "Show fewer system values" }));
+      expect(facetLabels()).toEqual(["s2", "s3", "s4", "s5", "s6", "s7"]);
+    });
+
+    it("offers no Show all when the active values are every value there is", () => {
+      facetRail("system:s1 system:s2 -system:s3 -system:s4 system:s5 system:s6", SIX_SYSTEMS);
+      expect(facetLabels()).toEqual(["s1", "s2", "s3", "s4", "s5", "s6"]);
+      expect(screen.queryByRole("button", { name: /^Show (all|fewer)/ })).toBeNull();
+    });
+
+    it("still fills a list with fewer than five active to five", () => {
+      facetRail("system:s6 -system:s5", SIX_SYSTEMS);
+      expect(facetLabels()).toEqual(["s5", "s6", "s1", "s2", "s3"]);
+      expect(screen.getByRole("button", { name: "Show all 6 system values" })).toBeTruthy();
+    });
+  });
+
+  it("keeps the levels worst first when one is filtered on, since that list is never cut", () => {
+    facetRail("level:info");
+    const levels = Array.from(document.querySelectorAll('[data-slot="level"] .status')).map((e) => e.textContent);
+    expect(levels).toEqual(["warn", "info"]);
+  });
+
+  it("tints the rows the query filters in, and only those", () => {
+    facetRail("level:info");
+    const row = (level: string) =>
+      Array.from(document.querySelectorAll<HTMLElement>('[data-slot="level"]')).find(
+        (r) => r.querySelector(".status")?.textContent === level,
+      )!;
+    expect(row("info").style.background).toBe(toneWash("accent"));
+    expect(row("warn").getAttribute("style")).toBeNull();
   });
 });

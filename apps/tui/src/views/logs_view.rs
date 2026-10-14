@@ -13,6 +13,8 @@ use crate::theme::Theme;
 pub struct LogEntry {
     pub source: Option<String>,
     pub line: String,
+    /// The host cut the line at its limit (#747); drawn with a note after it.
+    pub truncated: bool,
 }
 
 pub struct LogsViewState {
@@ -51,13 +53,8 @@ impl LogsViewState {
             follow: true,
             timestamps: false,
             previous: false,
-            // Off by default. A pod that logs one long JSON entry gets a
-            // paragraph-shaped block that pushes the short lines around it
-            // out of view -- and the wrapped renderer scrolls by entry, so
-            // an entry taller than the viewport has middle rows nothing can
-            // reach. Machine text runs on one row and scrolls sideways;
-            // `w` turns wrapping on for anyone reading prose.
-            wrap: false,
+            // On by default. `w` toggles wrapping for unwrapped horizontal scrolling.
+            wrap: true,
             search_query: String::new(),
             search_matches: Vec::new(),
             current_match_idx: None,
@@ -79,13 +76,8 @@ impl LogsViewState {
             follow: true,
             timestamps: false,
             previous: false,
-            // Off by default. A pod that logs one long JSON entry gets a
-            // paragraph-shaped block that pushes the short lines around it
-            // out of view -- and the wrapped renderer scrolls by entry, so
-            // an entry taller than the viewport has middle rows nothing can
-            // reach. Machine text runs on one row and scrolls sideways;
-            // `w` turns wrapping on for anyone reading prose.
-            wrap: false,
+            // On by default. `w` toggles wrapping for unwrapped horizontal scrolling.
+            wrap: true,
             search_query: String::new(),
             search_matches: Vec::new(),
             current_match_idx: None,
@@ -154,6 +146,11 @@ impl LogsViewState {
     }
 
     pub fn push_entry(&mut self, source: Option<String>, line: String) {
+        self.push_log_line(source, line, false);
+    }
+
+    /// A line of the stream, `truncated` when the host cut it (#747).
+    pub fn push_log_line(&mut self, source: Option<String>, line: String, truncated: bool) {
         let clean = sanitize_log_line(&line);
         if let Some(src) = &source {
             if !src.is_empty() && !self.known_sources.contains(src) {
@@ -161,7 +158,7 @@ impl LogsViewState {
             }
         }
         self.lines.push(clean.clone());
-        self.entries.push(LogEntry { source, line: clean });
+        self.entries.push(LogEntry { source, line: clean, truncated });
         if self.follow {
             self.scroll_to_bottom();
         }
@@ -436,6 +433,15 @@ fn wrap_spans_to_visual_lines<'a>(
     result
 }
 
+/// The note after a line the host cut (#747). Not part of the line: search and
+/// copy read the line as the container wrote it, up to the cut.
+fn cut_note() -> Span<'static> {
+    Span::styled(
+        format!(" [line cut at {} KiB]", srelens_kube::logs::MAX_LOG_LINE_BYTES / 1024),
+        Style::default().fg(Theme::DIM),
+    )
+}
+
 fn format_entry_wrapped(
     i: usize,
     state: &LogsViewState,
@@ -451,7 +457,7 @@ fn format_entry_wrapped(
         Style::default().fg(Theme::DIM),
     );
 
-    let (source_span, source_w, content_spans) = if state.is_multi_pod {
+    let (source_span, source_w, mut content_spans) = if state.is_multi_pod {
         if let Some(entry) = state.entries.get(i) {
             let (src_span, src_w) = if let Some(src) = &entry.source {
                 let color = source_color(src);
@@ -471,6 +477,9 @@ fn format_entry_wrapped(
     } else {
         (None, 0, Vec::new())
     };
+    if state.entries.get(i).is_some_and(|entry| entry.truncated) {
+        content_spans.push(cut_note());
+    }
 
     let first_max_w = cont_max_w.saturating_sub(source_w).max(5);
     let chunks = wrap_spans_to_visual_lines(content_spans, first_max_w, cont_max_w);
@@ -622,6 +631,9 @@ pub fn render_logs_view(f: &mut Frame, area: Rect, state: &LogsViewState) {
             } else if let Some(line) = state.lines.get(i) {
                 content_spans.extend(style_log_content(line, &state.search_query, match_style));
             }
+            if state.entries.get(i).is_some_and(|entry| entry.truncated) {
+                content_spans.push(cut_note());
+            }
 
             let scrolled_content = horizontal_slice_spans(content_spans, state.horizontal_scroll);
             let mut spans = Vec::with_capacity(scrolled_content.len() + 1);
@@ -753,6 +765,39 @@ mod tests {
         assert!(rendered.contains("[api-2]"));
         assert!(rendered.contains("GET /health 200"));
         assert!(rendered.contains("POST /login 200"));
+    }
+
+    fn render(state: &LogsViewState) -> String {
+        let mut terminal = Terminal::new(TestBackend::new(80, 10)).unwrap();
+        terminal
+            .draw(|f| {
+                let area = f.area();
+                render_logs_view(f, area, state);
+            })
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        (0..buffer.area.height)
+            .map(|y| (0..buffer.area.width).map(|x| buffer[(x, y)].symbol()).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// A line the host cut says so after it, wrapped or not, and a whole
+    /// line does not (#747).
+    #[test]
+    fn a_cut_line_says_so() {
+        let mut state =
+            LogsViewState::new("web-1".to_string(), "default".to_string(), None, "chan-747".to_string());
+        state.push_log_line(None, "the start of it".to_string(), true);
+        state.push_entry(None, "whole".to_string());
+        for wrap in [true, false] {
+            state.wrap = wrap;
+            let rendered = render(&state);
+            assert_eq!(rendered.matches("[line cut at 64 KiB]").count(), 1, "wrap {wrap}:\n{rendered}");
+            assert!(rendered.contains("the start of it [line cut at 64 KiB]"));
+        }
+        assert!(state.entries[0].truncated && !state.entries[1].truncated);
+        assert_eq!(state.lines[0], "the start of it", "the note is not part of the line");
     }
 }
 

@@ -8,6 +8,7 @@ export type WindowAction =
   | { type: "next-tab" }
   | { type: "select-tab"; index: number }
   | { type: "console" }
+  | { type: "terminal" }
   | { type: "lock" }
   | { type: "zoom-in" }
   | { type: "zoom-out" }
@@ -33,6 +34,8 @@ const BINDINGS: Binding[] = [
     action: { type: "select-tab", index: i } as WindowAction,
   })),
   { chord: ["Mod", "K"], action: { type: "console" }, whileTyping: true },
+  // Not ⌘`: macOS already answers that one, with the app's next window.
+  { chord: ["Mod", "J"], action: { type: "terminal" } },
   // §23 draws this beside `Lock now` and §25 names it. `whileTyping`, unlike
   // every other chord here: a reader who reaches for the lock with the caret
   // in a filter box, a YAML editor or a terminal is asking for the vault to be

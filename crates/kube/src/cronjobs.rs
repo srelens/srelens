@@ -74,6 +74,10 @@ pub struct CronJobSummary {
     /// Humanized age of the last scheduled run, or "" if never scheduled.
     #[serde(rename = "lastSchedule")]
     pub last_schedule: String,
+    /// `creationTimestamp` (RFC 3339), so the frontend can derive a LIVE age.
+    /// `age` below is rendered once, when this summary is built, and only
+    /// rebuilt when a watch event arrives — so it goes stale (#405).
+    pub created: Option<String>,
     pub age: String,
     /// Raw ISO 8601 timestamp `age` derives from, so UIs can recompute the
     /// age live at render time. Empty when the resource carries none.
@@ -100,6 +104,7 @@ pub(crate) fn summarise(cj: CronJob) -> CronJobSummary {
         suspended: spec.and_then(|s| s.suspend).unwrap_or(false),
         active: status.map(|s| s.active.as_ref().map_or(0, |a| a.len() as i32)).unwrap_or(0),
         last_schedule,
+        created: crate::creation_rfc3339(cj.metadata.creation_timestamp.as_ref()),
         age: crate::humanize_age(cj.metadata.creation_timestamp.as_ref()),
         created_at: crate::creation_timestamp_iso(cj.metadata.creation_timestamp.as_ref()),
     }
@@ -152,12 +157,8 @@ pub fn cronjob_set_suspend_capability(cache: Arc<ClientCache>) -> Capability {
     Capability::typed::<SetSuspendIn, CronJobActionOut, _, _>(
         "k8s.cronjobSetSuspend",
         "suspend or resume a CronJob (set spec.suspend)",
-        Annotations {
-            read_only: false,
-            destructive: false,
-            requires_confirm: true,
-            sensitive: false,
-        },
+        Annotations::MUTATING
+            .with_confirm("Change the suspended state[ of {resource}][ in cluster {cluster}]?"),
         move |input: SetSuspendIn| {
             let cache = cache.clone();
             async move {
@@ -202,12 +203,7 @@ pub fn cronjob_trigger_now_capability(cache: Arc<ClientCache>) -> Capability {
     Capability::typed::<TriggerNowIn, TriggerNowOut, _, _>(
         "k8s.cronjobTriggerNow",
         "run a CronJob immediately by creating a Job from its jobTemplate",
-        Annotations {
-            read_only: false,
-            destructive: false,
-            requires_confirm: true,
-            sensitive: false,
-        },
+        Annotations::MUTATING.with_confirm("Run[ {resource}] now[ in cluster {cluster}]?"),
         move |input: TriggerNowIn| {
             let cache = cache.clone();
             async move {

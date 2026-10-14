@@ -2,11 +2,48 @@
    adds only what belongs to its shell and screens. Re-exported under ui-next's
    own "./styles" so the app entry keeps importing exactly one stylesheet. */
 @import "@srelens/ui-kit/styles";
+@import "../extensions/extensions.css";
+@import "../confirm/hostConfirmation.css";
 
 /* ui-next's own components sit outside the app's source tree too, so they need
    the same declaration; the kit's `@source` covers only the kit. (#317 review) */
 @source "../**/*.tsx";
 @source not "../**/*.test.tsx";
+
+/* App result panes keep dense report evidence readable without stretching rows. */
+.app-results .tbl thead th { text-transform: none; letter-spacing: 0; font-size: 12px; padding-block: 9px; }
+.app-image-reference, .app-resource-reference { display: block; max-width: 340px; overflow-x: auto; white-space: nowrap; }
+.app-resource-reference { max-width: 220px; }
+.app-results .app-row-actions { flex-wrap: nowrap; }
+.app-results .badge { text-transform: none; letter-spacing: 0; font-family: var(--font-sans); padding: 2px 6px; border-radius: 4px; }
+.app-report-intro { padding: 16px 16px 12px; border-bottom: 1px solid var(--rule); }
+.app-report-intro h2 { display: flex; align-items: center; gap: 8px; font-size: 17px; font-weight: 600; letter-spacing: -.02em; }
+.app-report-intro h2 > span { font-size: 12px; font-weight: 500; padding: 2px 7px; background: var(--surface-sunk); border-radius: 4px; color: var(--ink-muted); }
+.app-report-intro p { margin-top: 4px; font-size: 12px; color: var(--ink-muted); }
+.app-result-filters { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; padding: 10px 12px; border-bottom: 1px solid var(--rule); }
+.app-result-filters > :first-child { max-width: 360px; flex: 1 1 240px; }
+.app-source-filters { display: flex; gap: 3px; margin-left: auto; }
+.app-source-filters button[aria-pressed="true"] { font-weight: 600; text-decoration: underline; text-underline-offset: 3px; background: var(--accent-wash); color: var(--accent); border-color: var(--accent-line); }
+.app-report-subject, .app-report-time, .app-report-source { display: flex; flex-direction: column; gap: 3px; }
+.app-report-subject strong { max-width: 260px; overflow-x: auto; white-space: nowrap; font-weight: 500; }
+.app-report-subject > span { max-width: 260px; overflow-x: auto; white-space: nowrap; }
+.app-report-subject > span, .app-report-time > span:last-child { font-size: 11px; color: var(--ink-muted); }
+.app-report-source .badge { align-self: flex-start; }
+.app-report-findings { display: flex; align-items: center; gap: 10px; }
+.app-report-findings > strong { min-width: 22px; font-size: 16px; font-weight: 600; }
+.app-report-findings .badge { font-size: 11px; }
+.app-report-findings > div { flex-wrap: nowrap; }
+.app-report-actions { display: flex; align-items: center; justify-content: flex-end; gap: 10px; }
+.app-report-actions .btn { font-size: 11px; padding: 4px 8px; }
+.app-report-more { display: block; padding: 3px 8px; color: var(--ink-muted); letter-spacing: 2px; }
+.app-report-menu-action { display: block; width: 100%; text-align: left; }
+.app-report-inspector { width: min(400px, 90vw); max-height: 65vh; overflow: auto; }
+.app-report-inspector dl > div { padding-block: 8px; border-bottom: 1px solid var(--rule); }
+.app-report-inspector dt { font-size: 11px; color: var(--ink-muted); margin-bottom: 3px; }
+.app-report-inspector dd { font-size: 12px; overflow: auto; }
+.app-operation-error { padding: 20px; border-bottom: 1px solid var(--rule); background: var(--surface); }
+.app-operation-error strong { display: block; font-size: 14px; color: var(--sev); }
+.app-operation-error p { max-width: 80ch; margin-block: 6px 12px; font-size: 13px; line-height: 1.6; overflow-wrap: anywhere; color: var(--ink-muted); }
 
 /* Settings can be narrow even in a wide window, beside both navigation rails. */
 .context-management { container-type: inline-size; }
@@ -32,3 +69,155 @@
   border-width: 0 0 1px;
   box-shadow: none;
 }
+
+/* Home is an app-wide region: flush panes, compact rows, and room for prose. */
+.home-page { display: flex; flex-direction: column; container-type: inline-size; overflow: hidden; }
+.home-intro { display: flex; align-items: center; justify-content: space-between; gap: 24px; padding: 20px 28px; border-bottom: 1px solid var(--rule); }
+.home-eyebrow { color: var(--accent); font-size: 11px; letter-spacing: .08em; text-transform: uppercase; }
+.home-intro h2 { margin-top: 4px; font-size: 21px; line-height: 1.3; font-weight: 600; letter-spacing: -.025em; }
+.home-intro p { margin-top: 3px; max-width: 56ch; font-size: 13px; line-height: 1.5; color: var(--ink-muted); }
+.home-intro > button { flex-shrink: 0; }
+.home-layout { display: grid; grid-template-columns: minmax(0, 1fr) 280px; flex: 1; min-height: 0; }
+/* The main column scrolls as one region, its sections divided by hairlines. */
+.home-main { display: flex; flex-direction: column; min-width: 0; min-height: 0; overflow: auto; scrollbar-gutter: stable; }
+.home-section { border-bottom: 1px solid var(--rule); }
+.home-section-alert { margin: 12px 20px; }
+.home-section-foot { padding: 8px 20px; }
+.home-note { padding: 8px 20px; font-size: 12px; color: var(--ink-muted); }
+.home-attention-row { display: flex; align-items: center; gap: 8px; padding-right: 20px; border-bottom: 1px solid var(--rule); }
+.home-attention-row:last-child { border-bottom: 0; }
+.home-attention-row:hover { background: var(--surface-sunk); }
+.home-attention-open { display: flex; flex-wrap: wrap; align-items: center; column-gap: 12px; flex: 1; min-width: 0; min-height: 44px; padding: 8px 0 8px 20px; font-size: 13px; text-align: left; }
+.home-clusters { display: flex; flex-direction: column; min-width: 0; border-bottom: 1px solid var(--rule); }
+.home-pickup { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 12px 24px; padding: 12px 20px; }
+.home-pick-list { margin-top: 4px; }
+.home-pick-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; width: 100%; min-height: 36px; padding: 6px 8px; margin: 0 -8px; border-radius: var(--radius-tile); font-size: 13px; text-align: left; }
+.home-pick-row:hover:not(:disabled) { background: var(--surface-sunk); }
+.home-pick-row:disabled { color: var(--ink-muted); cursor: default; }
+.home-pick-pending { padding: 6px 0; }
+.home-section-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 20px; border-bottom: 1px solid var(--rule); font-size: 12px; font-weight: 600; }
+.home-section-heading input { max-width: 230px; }
+.home-section-heading h2 { flex-shrink: 0; }
+.home-section-heading h2 > span { margin-left: 6px; font-weight: 400; }
+.home-cluster-row { display: flex; align-items: center; gap: 12px; width: 100%; min-height: 56px; padding: 8px 20px; font-size: 13px; }
+.home-cluster-row:hover, .home-action:hover { background: var(--surface-sunk); }
+.home-start { overflow: auto; border-left: 1px solid var(--rule); }
+.home-side-section { border-bottom: 1px solid var(--rule); }
+.home-side-group { padding: 10px 20px; }
+.home-side-group + .home-side-group { padding-top: 0; }
+.home-live-row { display: flex; align-items: center; gap: 6px; min-height: 40px; }
+.home-live-go { flex: 1; min-width: 0; padding: 4px 0; font-size: 13px; text-align: left; }
+.home-live-go:hover { color: var(--accent); }
+.home-app-go { display: flex; align-items: center; gap: 10px; }
+.home-ask-row { display: flex; align-items: center; gap: 6px; }
+.home-ask-row > :first-child { flex: 1; min-width: 0; }
+.home-check { display: inline-grid; place-items: center; flex-shrink: 0; width: 16px; height: 16px; border: 1px solid var(--rule-strong); border-radius: 4px; font-size: 11px; line-height: 1; }
+.home-check-done { border-color: var(--accent); background: var(--accent); color: var(--surface); }
+.home-action { display: grid; grid-template-columns: 18px minmax(0, 1fr) 12px; align-items: center; gap: 12px; width: 100%; min-height: 52px; padding: 10px 20px; border-bottom: 1px solid var(--rule); font-size: 13px; }
+@container (max-width: 720px) {
+  .home-intro { align-items: flex-start; flex-direction: column; padding: 24px 20px; gap: 18px; }
+  .home-layout { display: block; overflow: auto; }
+  .home-main { overflow: visible; }
+  .home-start { overflow: visible; border-left: 0; border-top: 1px solid var(--rule); }
+}
+
+/* The top bar's Star on GitHub pill (#850). The one control in the bar that is
+   meant to stand out: a pill in GitHub's own palette — the `--gh-*` tokens,
+   declared with the rest in the kit's `tokens.css` and held to the same
+   contrast floors — so it is recognisably "that is GitHub" on every theme
+   where a pill that took the theme's colours would be one more grey control. */
+.gh-star {
+  display: inline-flex; align-items: center; gap: 6px; height: 22px; padding: 0 9px 0 7px; margin-right: 6px;
+  border-radius: 999px; border: 1px solid var(--gh-line); background: var(--gh-surface); color: var(--gh-ink);
+  font-size: 11px; font-weight: 600; line-height: 1; white-space: nowrap;
+  transition: background 120ms ease, box-shadow 160ms ease, transform 120ms ease;
+}
+.gh-star:hover { background: var(--gh-surface-hover); box-shadow: 0 0 0 3px color-mix(in srgb, var(--gh-star) 32%, transparent); }
+.gh-star:active { transform: scale(.97); }
+.gh-star:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.gh-star-mark { flex-shrink: 0; }
+.gh-star-count { display: inline-flex; align-items: center; gap: 4px; padding-left: 7px; border-left: 1px solid color-mix(in srgb, var(--gh-ink) 38%, transparent); font-variant-numeric: tabular-nums; }
+/* The star is outlined at rest and fills as the pointer arrives: the button
+   shows what pressing it will do on the page it opens. */
+.gh-star-glyph { color: var(--gh-star); fill: transparent; transition: fill 180ms ease, transform 240ms cubic-bezier(.3, 1.6, .5, 1); }
+.gh-star:hover .gh-star-glyph, .gh-star:focus-visible .gh-star-glyph { fill: var(--gh-star); transform: rotate(72deg) scale(1.2); }
+/* While the one-time question is on screen the pill breathes, so the callout
+   under it reads as belonging to it. It stops with the answer. */
+.gh-star[data-asking="true"] { animation: gh-star-pulse 2.4s ease-out infinite; }
+@keyframes gh-star-pulse {
+  0% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--gh-star) 60%, transparent); }
+  70%, 100% { box-shadow: 0 0 0 7px color-mix(in srgb, var(--gh-star) 0%, transparent); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .gh-star, .gh-star-glyph { transition: none; }
+  .gh-star[data-asking="true"] { animation: none; box-shadow: 0 0 0 3px color-mix(in srgb, var(--gh-star) 45%, transparent); }
+  .gh-star:hover .gh-star-glyph, .gh-star:focus-visible .gh-star-glyph { transform: none; }
+}
+/* A narrow window keeps the mark in a circle and lets the words go, so the
+   pill never crowds the title or the tabs' controls. */
+@media (max-width: 860px) {
+  .gh-star { width: 22px; padding: 0; justify-content: center; }
+  .gh-star-label, .gh-star-count { display: none; }
+}
+
+/* A pod's containers in the Pods list, one square each (#878). The state is
+   `data-state`, from core's `containerVerdict`; the colours are the status
+   tokens every pill already uses. Shape says the same as colour — filled,
+   outlined, dashed — so the column reads without it. */
+.ctr-blocks { display: inline-flex; align-items: center; gap: 3px; vertical-align: middle; }
+.ctr-blocks-init { display: inline-flex; align-items: center; gap: 2px; margin-left: 3px; }
+.ctr-block {
+  --ctr: var(--ink-faint);
+  position: relative; display: inline-block; box-sizing: border-box; flex-shrink: 0;
+  width: 10px; height: 10px; border-radius: 2px;
+  border: 1.5px solid var(--ctr); background: transparent;
+}
+/* Not what the pod runs, and usually long finished: a size smaller. */
+.ctr-block[data-kind="init"] { width: 7px; height: 7px; border-width: 1px; border-radius: 1.5px; }
+/* Running and ready: the ordinary case, solid. */
+.ctr-block[data-state="ready"] { --ctr: var(--ok); background: var(--ctr); }
+/* Running, not ready: the same colour, hollow. */
+.ctr-block[data-state="unready"] { --ctr: var(--ok); }
+/* On its way up: hollow and breathing, so it reads as not settled yet. */
+.ctr-block[data-state="starting"] { --ctr: var(--ink-muted); animation: pulse-dot 2.2s ease-in-out infinite; }
+/* A back-off, or an error waiting will not fix. */
+.ctr-block[data-state="stuck"] { --ctr: var(--warn); background: var(--ctr); }
+/* Exited 0: finished, not failed. The body alone, no colour. */
+.ctr-block[data-state="completed"] { --ctr: var(--ink-faint); }
+/* Exited with anything else. */
+.ctr-block[data-state="failed"] { --ctr: var(--sev); background: var(--ctr); }
+/* The kubelet has said nothing yet. */
+.ctr-block[data-state="unknown"] { --ctr: var(--ink-faint); border-style: dashed; }
+/* Has restarted, whatever it is doing now: a dot on the corner, ringed in the
+   row's own ground so it stays a dot on a filled square as on a hollow one. */
+.ctr-block[data-restarted]::after {
+  content: ""; position: absolute; top: -3.5px; right: -3.5px; width: 5px; height: 5px; border-radius: 99px;
+  background: var(--ink); box-shadow: 0 0 0 1px var(--surface);
+}
+.ctr-block[data-kind="init"][data-restarted]::after { top: -3px; right: -3px; width: 4px; height: 4px; }
+/* The two that mean trouble are filled, as the ordinary one is, and would
+   differ from it by colour alone. Each carries a mark cut out of the fill:
+   `!` for a container that is stuck, `×` for one that failed. */
+.ctr-block[data-state="stuck"]::before, .ctr-block[data-state="failed"]::before {
+  position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+  color: var(--surface); font: 700 8px/1 var(--font-sans, system-ui, sans-serif);
+}
+.ctr-block[data-state="stuck"]::before { content: "!"; }
+.ctr-block[data-state="failed"]::before { content: "×"; }
+.ctr-block[data-kind="init"]::before { font-size: 6px; }
+.ctr-more { margin-left: 1px; border-radius: 3px; font-size: 0.6875rem; color: var(--ink-muted); font-variant-numeric: tabular-nums; }
+.ctr-more:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+/* The word for whatever is not ordinary, beside the squares. */
+.ctr-word { margin-left: 4px; max-width: 12rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 0.6875rem; color: var(--ink-muted); }
+@media (prefers-reduced-motion: reduce) {
+  .ctr-block[data-state="starting"] { animation: none; }
+}
+
+/* The log volume histogram is one tab stop. The kit switches a div's focus
+   outline off; this div is a control, so it draws the ring a button does. */
+.volume-bars:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; border-radius: 3px; }
+
+/* The log is a tab stop too (the arrow keys select a line), and a scroll
+   container flush with its neighbours: the ring is drawn inside it, where an
+   outer one would be cut off. */
+.log-body:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }

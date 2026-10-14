@@ -35,11 +35,11 @@ const SERVICE: &str = "srelens";
 const MASTER_KEY_ACCOUNT: &str = "master-key";
 const FORMAT_VERSION: u8 = 1;
 const NONCE_LEN: usize = 24;
-const KEY_LEN: usize = 32;
+pub(crate) const KEY_LEN: usize = 32;
 
 /// Everything the vault holds. New fields must be `#[serde(default)]` so a
 /// vault written by an older build still decodes.
-#[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Default, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Secrets {
     /// The MCP HTTP bearer token (64 hex chars), if one has been minted.
     #[serde(default)]
@@ -47,6 +47,26 @@ pub struct Secrets {
     /// Provider API keys, keyed by provider slug (`llm_config::slug`).
     #[serde(default)]
     pub llm_keys: BTreeMap<String, String>,
+    /// Apps' `secret-reference` settings (#543), keyed by the host-minted
+    /// `<app id>/<setting id>` the inventory references. Written and deleted
+    /// only through `extension_secrets::VaultSecretStore`.
+    #[serde(default)]
+    pub extension_secrets: BTreeMap<String, String>,
+}
+
+/// Names what is held, never a value, so a `{:?}` in a log line, an
+/// assertion or a panic message cannot print a secret (#543).
+impl std::fmt::Debug for Secrets {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Secrets")
+            .field("mcp_token", &self.mcp_token.as_ref().map(|_| "<redacted>"))
+            .field("llm_keys", &self.llm_keys.keys().collect::<Vec<_>>())
+            .field(
+                "extension_secrets",
+                &self.extension_secrets.keys().collect::<Vec<_>>(),
+            )
+            .finish()
+    }
 }
 
 /// The raw master-key keychain operations, factored out so tests can inject a
@@ -766,7 +786,7 @@ fn write_sealed(key: &[u8; KEY_LEN], path: &Path, secrets: &Secrets) -> std::io:
 }
 
 /// Seal arbitrary bytes as `[version][nonce][ciphertext]` under `key`.
-fn seal_bytes(key: &[u8; KEY_LEN], plaintext: &[u8]) -> std::io::Result<Vec<u8>> {
+pub(crate) fn seal_bytes(key: &[u8; KEY_LEN], plaintext: &[u8]) -> std::io::Result<Vec<u8>> {
     let mut nonce = [0u8; NONCE_LEN];
     getrandom::getrandom(&mut nonce).map_err(|e| std::io::Error::other(e.to_string()))?;
     let cipher = XChaCha20Poly1305::new(key.into());
@@ -780,7 +800,7 @@ fn seal_bytes(key: &[u8; KEY_LEN], plaintext: &[u8]) -> std::io::Result<Vec<u8>>
     Ok(out)
 }
 
-fn open_bytes(key: &[u8; KEY_LEN], bytes: &[u8]) -> Option<Vec<u8>> {
+pub(crate) fn open_bytes(key: &[u8; KEY_LEN], bytes: &[u8]) -> Option<Vec<u8>> {
     // The Poly1305 tag alone is 16 bytes, so anything shorter is garbage.
     if bytes.len() < 1 + NONCE_LEN + 16 || bytes[0] != FORMAT_VERSION {
         return None;

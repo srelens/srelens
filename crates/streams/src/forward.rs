@@ -86,13 +86,24 @@ impl Forward {
 /// after ANY successful establish always reports `attempt:1`, never a
 /// continuation of whatever count came before that establish.
 ///
-/// 5 (not 4) so `MAX_BACKOFF_MS`'s cap is actually reachable: sleeps only
-/// happen for attempts before the last one (1..=MAX_ATTEMPTS-1), and
-/// `backoff_for(4)` is the first attempt whose uncapped value (240ms)
-/// exceeds the 150ms cap.
+/// Those five attempts are spent in under half a second, which is right for
+/// a target that never worked. A forward that DID work and lost its target
+/// keeps going past them for `RECOVERY_WINDOW`, and only that path backs off
+/// far enough to reach the `MAX_BACKOFF_MS` cap.
 const MAX_ATTEMPTS: u32 = 5;
 const BASE_BACKOFF_MS: u64 = 15;
-const MAX_BACKOFF_MS: u64 = 150;
+const MAX_BACKOFF_MS: u64 = 2_000;
+
+/// How long a forward that was active keeps retrying after its session ends,
+/// whatever `MAX_ATTEMPTS` says: a Service's replacement pod has to be
+/// scheduled, maybe pulled, and started before there is anything to reach.
+/// Without it the forward gave up beside a replacement that was seconds
+/// away (#172). Counted from the end of the last session that reached its
+/// target.
+///
+/// ponytail: one fixed window; make it a per-forward setting if slow image
+/// pulls outlast it.
+const RECOVERY_WINDOW: Duration = Duration::from_secs(60);
 
 /// How often a forward reports its byte total. A per-packet event would
 /// flood the channel on a busy tunnel — the same reasoning that made the log
@@ -301,6 +312,8 @@ async fn reconnect_loop(
     mut attempt: Attempt,
 ) -> Option<String> {
     let mut consecutive_failures: u32 = 0;
+    // When the last session that reached its target ended. See `RECOVERY_WINDOW`.
+    let mut lost_at: Option<tokio::time::Instant> = None;
     loop {
         let outcome = attempt(traffic.clone()).await;
 
@@ -312,10 +325,14 @@ async fn reconnect_loop(
             Err(e) => e,
         };
 
+        if outcome.established {
+            lost_at = Some(tokio::time::Instant::now());
+        }
         let decision = next_reconnect_state(outcome.established, consecutive_failures);
         consecutive_failures = decision.attempt;
+        let awaiting_replacement = lost_at.is_some_and(|at| at.elapsed() < RECOVERY_WINDOW);
 
-        if decision.give_up {
+        if decision.give_up && !awaiting_replacement {
             sink.emit(
                 status_channel,
                 status_payload("failed", decision.attempt, Some(&err)),
@@ -678,20 +695,12 @@ mod tests {
         assert!(next_reconnect_state(false, MAX_ATTEMPTS - 1).give_up);
     }
 
-    // NOTE on coverage: the tests above exhaustively prove the pure
-    // transition (`next_reconnect_state`) that the loop relies on, but not
-    // the full end-to-end path — "forward is active against a real pod,
-    // that pod is deleted, the streams loop reconnects, emits active again,
-    // then a later failure streak counts 1..MAX_ATTEMPTS instead of
-    // continuing from whatever count preceded the successful establish".
-    // Driving that deterministically would need `connect_pod_api` /
-    // `serve_pod_forward` to succeed without a real cluster, which needs a
-    // fake kube apiserver (e.g. a mock HTTP service behind
-    // `kube::Client::new`) — no such test harness exists in this repo today
-    // and building one would pull in a new dev-dependency (tower/hyper test
-    // helpers), which is out of scope here. A separate follow-up issue
-    // tracks building that cluster harness. See the task report for this
-    // gap.
+    // NOTE on coverage: the tests above prove the pure transition
+    // (`next_reconnect_state`) and drive `reconnect_loop` with stand-in
+    // attempts. The real path — a Service forward active against a pod, the
+    // pod deleted, `reconnecting`, then `active` again on its replacement —
+    // runs against kind in `service_forward_recovers_after_its_pod_is_deleted`
+    // (apps/desktop/src-tauri/tests/e2e.rs, #172).
     //
     // The traffic reporting has the same seam. `reconnect_loop` and
     // `report_traffic` are driven directly below, which is what proves the
@@ -936,6 +945,76 @@ mod tests {
         );
     }
 
+    /// An attempt that establishes and drops on its first call, then fails
+    /// without establishing on the next `misses`, then (when `recovers`)
+    /// establishes and ends cleanly: a forward whose pod was deleted, and the
+    /// time its replacement takes to be ready.
+    fn lost_pod(misses: u64, recovers: bool) -> Attempt {
+        let calls = Arc::new(AtomicU64::new(0));
+        Box::new(move |_traffic| {
+            let call = calls.fetch_add(1, Ordering::SeqCst);
+            Box::pin(async move {
+                let replaced = recovers && call > misses;
+                AttemptOutcome {
+                    established: call == 0 || replaced,
+                    result: if replaced {
+                        Ok(())
+                    } else {
+                        Err(format!("attempt {call} failed"))
+                    },
+                }
+            })
+        })
+    }
+
+    fn states(sink: &TestSink, channel: &str) -> Vec<String> {
+        sink.payloads_for(channel)
+            .iter()
+            .map(|p| p["state"].as_str().unwrap_or_default().to_owned())
+            .collect()
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_forward_that_lost_its_pod_waits_past_max_attempts_for_a_replacement() {
+        // #172: the five quick attempts that are right for a target that never
+        // worked ran out in well under a second after a Service's pod was
+        // deleted, long before any replacement could be scheduled and started.
+        let sink = Arc::new(TestSink::default());
+        let traffic = Arc::new(forward::TrafficCounter::default());
+        let attempt = lost_pod(u64::from(MAX_ATTEMPTS) + 3, true);
+        let final_error = reconnect_loop(sink.as_ref(), "forward:status:8", traffic, attempt).await;
+        assert_eq!(final_error, None, "the replacement was reached");
+        assert!(
+            !states(&sink, "forward:status:8").contains(&"failed".to_owned()),
+            "{:?}",
+            sink.payloads_for("forward:status:8")
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_forward_that_lost_its_pod_still_gives_up_when_no_replacement_comes() {
+        let sink = Arc::new(TestSink::default());
+        let traffic = Arc::new(forward::TrafficCounter::default());
+        let started = tokio::time::Instant::now();
+        let final_error = reconnect_loop(
+            sink.as_ref(),
+            "forward:status:9",
+            traffic,
+            lost_pod(u64::MAX, false),
+        )
+        .await;
+        assert!(final_error.is_some());
+        assert_eq!(
+            states(&sink, "forward:status:9").last().map(String::as_str),
+            Some("failed")
+        );
+        assert!(
+            started.elapsed() >= RECOVERY_WINDOW,
+            "gave up after {:?}, before the replacement had its window",
+            started.elapsed()
+        );
+    }
+
     #[test]
     fn traffic_is_reported_on_the_forwards_own_channel() {
         // The name the frontend store subscribes to, spelled out here rather
@@ -985,11 +1064,17 @@ mod tests {
         );
     }
 
-    #[tokio::test(flavor = "multi_thread")]
+    #[tokio::test(start_paused = true)]
     async fn a_busy_tunnel_reports_on_the_tick_not_on_every_packet() {
         // A per-packet event would flood the channel; the timer is the whole
         // point. 40 writes spread over roughly two ticks must coalesce into
         // roughly two reports.
+        //
+        // The clock is paused so "roughly two ticks" is what the writes
+        // actually span. On the wall clock a 1 ms sleep costs 2 ms or more,
+        // and under a loaded workspace run 40 of them stretched past five
+        // ticks — one report per tick they covered — and failed the bound
+        // below. Paused, each sleep advances exactly 1 ms.
         let sink = Arc::new(TestSink::default());
         let traffic = Arc::new(forward::TrafficCounter::default());
         let reporter = spawn_reporter(sink.clone(), "forward:traffic:3", traffic.clone());

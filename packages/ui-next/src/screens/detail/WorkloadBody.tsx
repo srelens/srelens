@@ -22,6 +22,7 @@ import {
 } from "./sections";
 import { SELF_DESCRIBING_KINDS } from "./GenericBody";
 import { hasSelector, requirementText, selectorOf, type WorkloadSelector } from "../../lib/workloadSelector";
+import { AgeCell } from "../../lib/ageCell";
 
 /** The annotation a Deployment records its current rollout number in. */
 const REVISION_ANNOTATION = "deployment.kubernetes.io/revision";
@@ -83,8 +84,16 @@ function templateImages(spec: Record<string, unknown>): string[] {
 const DEPLOY_REVISION_COLUMNS: Column<ReplicaSetSummary>[] = [
   { key: "revision", header: "#", render: (r) => <span className="font-mono">{r.revision || "—"}</span> },
   { key: "name", header: "Name", render: (r) => <span className="font-mono">{r.name}</span> },
+  // What the revision ran and why (#389) — the same words the Roll back
+  // dialog chooses between, so a revision reads the same in both places.
+  {
+    key: "images",
+    header: "Image",
+    render: (r) => <span className="font-mono">{r.images?.length ? r.images.join(", ") : "—"}</span>,
+  },
+  { key: "changeCause", header: "Change cause", render: (r) => r.changeCause ?? "—" },
   { key: "pods", header: "Pods", render: (r) => `${r.ready}/${r.desired}` },
-  { key: "age", header: "Age", getSortValue: ageSortValue, render: (r) => r.age },
+  { key: "age", header: "Age", getSortValue: ageSortValue, render: (r) => <AgeCell created={r.created} age={r.age} /> },
 ];
 
 /** A Deployment's rolled-out ReplicaSets, as {@link useSectionList} holds any

@@ -76,6 +76,14 @@ describe("kubectlMapper", () => {
     });
   });
 
+  describe("rollout undo (#389)", () => {
+    it("rolls a deployment back to a named revision", () => {
+      expect(
+        toKubectl({ action: "rollout-undo", kind: "Deployment", namespace: "default", name: "web", context: "prod", revision: 2 }),
+      ).toBe("kubectl rollout undo deployments/web --to-revision=2 -n default --context prod");
+    });
+  });
+
   describe("node operations", () => {
     it("cordon a node", () => {
       expect(
@@ -93,6 +101,34 @@ describe("kubectlMapper", () => {
       expect(
         toKubectl({ action: "drain", kind: "Node", name: "node-1", context: "prod" }),
       ).toBe("kubectl drain node-1 --ignore-daemonsets --delete-emptydir-data --force --context prod");
+    });
+
+    it("leaves --context off a command run in a terminal already scoped to the cluster", () => {
+      // The app's name for a duplicate-named context is not the name that
+      // shell's kubeconfig holds it under, so naming it there would fail.
+      expect(
+        toKubectl({ action: "drain", kind: "Node", name: "node-1", context: "prod", scoped: true }),
+      ).toBe("kubectl drain node-1 --ignore-daemonsets --delete-emptydir-data --force");
+      expect(
+        toKubectl({ action: "uncordon", kind: "Node", name: "node-1", context: "prod", scoped: true }),
+      ).toBe("kubectl uncordon node-1");
+    });
+
+    it("keeps the namespace on a scoped command, and drops only the context from a port-forward", () => {
+      expect(
+        toKubectl({ action: "delete", kind: "Pod", name: "web-0", namespace: "shop", context: "prod", scoped: true }),
+      ).toBe("kubectl delete pods web-0 -n shop");
+      expect(
+        toKubectl({
+          action: "port-forward",
+          kind: "Service",
+          name: "web",
+          namespace: "shop",
+          context: "prod",
+          remotePort: 80,
+          scoped: true,
+        }),
+      ).toBe("kubectl -n shop port-forward svc/web :80");
     });
   });
 

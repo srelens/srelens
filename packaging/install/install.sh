@@ -1,5 +1,5 @@
 #!/bin/sh
-# Install srelens-tui on Linux.
+# Install srectl on Linux.
 #
 #   ( f="$(mktemp)" && trap 'rm -f "$f"' EXIT &&
 #     curl -fsSL https://raw.githubusercontent.com/srelens/srelens/main/packaging/install/install.sh -o "$f" &&
@@ -24,7 +24,7 @@
 set -eu
 
 REPO="srelens/srelens"
-BIN="srelens-tui"
+BIN="srectl"
 
 main() {
     version=""
@@ -136,9 +136,19 @@ main() {
 
     archive="$BIN-$version-$target.tar.gz"
     base="https://github.com/$REPO/releases/download/srelens-v$version"
+    sums="$BIN-$version-SHA256SUMS.txt"
 
-    download "$base/$archive" "$tmp/$archive"
-    download "$base/$BIN-$version-SHA256SUMS.txt" "$tmp/SHA256SUMS.txt"
+    # Releases cut before the rename only publish srelens-tui assets. Until
+    # one exists under the new name, take that archive and install its
+    # binary as srectl. A published srectl asset is used as-is.
+    if ! curl -fsSL --proto '=https' --tlsv1.2 -o "$tmp/$archive" "$base/$archive" 2>/dev/null; then
+        rm -f "$tmp/$archive"
+        archive="srelens-tui-$version-$target.tar.gz"
+        sums="srelens-tui-$version-SHA256SUMS.txt"
+        download "$base/$archive" "$tmp/$archive"
+        say "Note: this release still publishes srelens-tui. It will be installed as $BIN."
+    fi
+    download "$base/$sums" "$tmp/SHA256SUMS.txt"
     verify_checksum "$tmp" "$archive"
 
     # Into a subdirectory, never into $tmp itself. The archive contains a
@@ -152,6 +162,9 @@ main() {
     # through it whatever the archive claims about its own directory.
     mkdir "$tmp/unpack" || die "cannot prepare a private directory to unpack into"
     tar -xzf "$tmp/$archive" -C "$tmp/unpack"
+    if [ ! -f "$tmp/unpack/$BIN" ] && [ -f "$tmp/unpack/srelens-tui" ]; then
+        mv "$tmp/unpack/srelens-tui" "$tmp/unpack/$BIN"
+    fi
     [ -f "$tmp/unpack/$BIN" ] || die "the archive did not contain $BIN"
     chmod 0755 "$tmp/unpack/$BIN"
 
@@ -195,9 +208,10 @@ main() {
         #
         # The whole token, not a substring. `1.2.30` contains `1.2.3`, so a
         # match on containment accepts precisely the stale build this is
-        # meant to catch. The output is `srelens-tui <version>`; the second
-        # field is compared, so the program renaming itself would not quietly
-        # turn this check off either.
+        # meant to catch. The second field is the version. A binary published
+        # under the previous name still prints that name first; comparing
+        # the field keeps the check, instead of treating the name as part of
+        # the version.
         reported="$(printf %s "$installed_version" | awk '{print $2}')"
         if [ "$reported" != "$version" ]; then
             problem="reports \"$installed_version\", not the $version that was asked for"
@@ -245,6 +259,10 @@ main() {
     say "Installed: $install_dir/$BIN"
     say "  $installed_version"
     warn_if_not_on_path "$install_dir"
+    if [ -e "$install_dir/srelens-tui" ]; then
+        say ""
+        say "Note: $install_dir/srelens-tui has been replaced by $BIN. You can remove the old binary or use $BIN directly."
+    fi
     say ""
     say "Next: $BIN            # browse the cluster in your current context"
     say "      $BIN toolbox    # what it found on your PATH (kubectl, helm)"
@@ -253,7 +271,7 @@ main() {
 
 usage() {
     cat <<EOF
-Install $BIN, the srelens terminal UI, on Linux.
+Install $BIN, the terminal UI, on Linux.
 
 Usage:
   install.sh [--version <x.y.z>]
@@ -489,7 +507,7 @@ prepare_install_dir() {
 #   * not group-writable at all, unless sticky. Who is really in a group
 #     cannot be established from a shell -- see the note at that check.
 #
-# The same rule srelens-tui's own `update` applies to the binary it replaces.
+# The same rule srectl's own `update` applies to the binary it replaces.
 #
 # The last component is the destination unless the caller says `parent`:
 # prepare_install_dir walks the nearest EXISTING ancestor before creating
@@ -604,7 +622,7 @@ assert_component() {
     # refuse every install whose path runs through it.
     #
     # It settles nothing for the DESTINATION. Sticky stops another user
-    # removing OUR files; it does not stop them creating `srelens-tui` there
+    # removing OUR files; it does not stop them creating `srectl` there
     # first and owning it. Everything that then happens to that entry
     # happens to a file they control: its mode is read and reapplied to the
     # rollback copy, so a planted 4755 becomes a root-owned setuid binary;
@@ -873,7 +891,7 @@ install_binary() {
     dir="$INSTALL_DIR"
 
     # mktemp, not a name built from the pid. Installing as root into a directory
-    # someone else can write to, the old `.srelens-tui.install.<pid>` was
+    # someone else can write to, the old `.srectl.install.<pid>` was
     # predictable enough to pre-create as a symlink -- and `cp` follows a
     # destination symlink, so the copy would have written through it as root,
     # to a file of the attacker's choosing. mktemp creates the file itself,

@@ -20,7 +20,9 @@
 //!
 //! Override the context with `SRELENS_E2E_CONTEXT` (default
 //! `kind-srelens-helm-e2e`). The suite creates and tears down a `srelens-e2e`
-//! namespace plus one CRD; it never touches the real `~/.kube/config` (the
+//! namespace, one CRD of its own, and the minimal Flux and Argo CD CRDs in
+//! `tests/fixtures/gitops-crds.yaml`, which it refuses to apply over a
+//! cluster's real ones; it never touches the real `~/.kube/config` (the
 //! `k8s.deleteContext` case operates on a throwaway copy). It cordons and
 //! drains the (single) node near the end and always uncordons it again, even
 //! on panic, so the cluster is left usable and the suite is re-runnable
@@ -35,9 +37,7 @@ use base64::Engine;
 use futures::FutureExt;
 use serde_json::{json, Value};
 use srelens_capability::Registry;
-use srelens_desktop_lib::capabilities::{
-    build_registry_with, build_registry_with_paths_and_settings,
-};
+use srelens_desktop_lib::capabilities::build_registry_with;
 use srelens_kube::client_cache::ClientCache;
 
 const NS: &str = "srelens-e2e";
@@ -72,6 +72,36 @@ const WIDGET: &str = "e2e-widget";
 
 const HELM_RELEASE: &str = "e2e-cap-suite";
 
+// Extension apps and host GitOps actions (#536). The CRDs are a pinned fixture the
+// suite applies itself; the manifests are the examples app authors start from.
+const GITOPS_CRDS: &str = include_str!("fixtures/gitops-crds.yaml");
+/// Every fixture CRD carries this label. Teardown deletes by it, never by name.
+const GITOPS_CRD_SELECTOR: &str = "srelens-e2e-fixture=gitops";
+const GITOPS_CRD_NAMES: [&str; 2] = [
+    "kustomizations.kustomize.toolkit.fluxcd.io",
+    "applications.argoproj.io",
+];
+const KUSTOMIZATION: &str = "e2e-kustomization";
+const ARGO_APP: &str = "e2e-application";
+const FLUX_EXAMPLE: &str = include_str!("../../../../examples/extensions/flux.json");
+const ARGOCD_EXAMPLE: &str = include_str!("../../../../examples/extensions/argocd.json");
+/// The published Argo CD release bytes and their publisher signature. The signature
+/// covers these exact bytes, which `.gitattributes` keeps from line-ending conversion.
+const SIGNED_ARGOCD: &str =
+    include_str!("../../../../crates/registry/tests/fixtures/argocd-manifest.json");
+const SIGNED_ARGOCD_SIG: &[u8] =
+    include_bytes!("../../../../crates/registry/tests/fixtures/argocd-manifest.sig");
+/// A catalog that lists that release by its checksum, signed by the test root's catalog key
+/// (#559). The suite's registry trusts that root instead of the one a release pins.
+const CATALOG: &str =
+    include_str!("../../../../crates/registry/tests/fixtures/extension-catalog.signed.json");
+const TEST_ROOT: &[u8] =
+    include_bytes!("../../../../crates/registry/tests/fixtures/trust/root.json");
+/// The delegations the test root ships, as a build ships its own: srelens's among them, so
+/// `org.srelens.` is reserved before any catalog is read.
+const TEST_PUBLISHERS: &[u8] =
+    include_bytes!("../../../../crates/registry/tests/fixtures/trust/publishers.json");
+
 fn context() -> String {
     std::env::var("SRELENS_E2E_CONTEXT").unwrap_or_else(|_| "kind-srelens-helm-e2e".to_string())
 }
@@ -88,22 +118,37 @@ fn cache() -> Arc<ClientCache> {
     ClientCache::new_many(kubeconfig_paths())
 }
 
-/// Keeps the settings capability e2e isolated from a developer's real app
-/// preferences, including when the suite unwinds after a failed assertion.
+/// Keeps the settings and extension capabilities isolated from a developer's
+/// real app data, including when the suite unwinds after a failed assertion.
+/// The host keeps the extension inventory, its catalog cache and their lock
+/// files beside the settings file, so the whole directory is the suite's own.
 struct TempSettings(PathBuf);
 
 impl TempSettings {
     fn new() -> Self {
-        Self(std::env::temp_dir().join(format!(
-            "srelens-e2e-settings-{}.json",
-            uuid::Uuid::new_v4()
-        )))
+        let dir = std::env::temp_dir().join(format!("srelens-e2e-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).expect("create the e2e settings directory");
+        Self(dir.join("settings.json"))
+    }
+
+    /// Where the host caches the extension catalog for this settings file:
+    /// `crates/registry` puts the inventory at `<settings>.extensions.json` and
+    /// the cache beside it as `<settings>.extensions.catalog.json`.
+    fn catalog_cache(&self) -> PathBuf {
+        self.0.with_extension("extensions.catalog.json")
+    }
+
+    /// Where installed packages are unpacked (#562), beside the inventory.
+    fn packages(&self) -> PathBuf {
+        self.0.with_extension("extensions.packages")
     }
 }
 
 impl Drop for TempSettings {
     fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.0);
+        if let Some(dir) = self.0.parent() {
+            let _ = std::fs::remove_dir_all(dir);
+        }
     }
 }
 
@@ -147,6 +192,48 @@ impl Harness {
         }
     }
 
+    /// Controllers and node heartbeats can invalidate a review between the GET
+    /// and PATCH. Only this live-test helper re-reads and reviews on an explicit
+    /// stale-review refusal or API conflict. Production still refuses the write.
+    /// Return the accepted payload so the old review can be checked afterwards.
+    async fn reviewed_request(
+        &mut self,
+        id: &str,
+        mut input: Value,
+    ) -> Result<(Value, Value), srelens_capability::CapabilityError> {
+        for attempt in 0..8 {
+            let current = self
+                .reg
+                .invoke(
+                    "k8s.getObject",
+                    json!({
+                        "context":input["context"],"kind":input["kind"],
+                        "namespace":input["namespace"],"name":input["name"]
+                    }),
+                )
+                .await?;
+            input["uid"] = current["object"]["metadata"]["uid"].clone();
+            input["resourceVersion"] = current["object"]["metadata"]["resourceVersion"].clone();
+            match self.reg.invoke(id, input.clone()).await {
+                Ok(out) => {
+                    self.mark(id);
+                    return Ok((out, input));
+                }
+                Err(error) => {
+                    let review_race = matches!(&error, srelens_capability::CapabilityError::Handler(message)
+                        if message == "Resource changed or was replaced; refresh and review the action again"
+                            || (message.starts_with("ApiError:") && message.contains(": Conflict (Status {")
+                                && message.contains("code: 409,")));
+                    if !review_race || attempt == 7 {
+                        return Err(error);
+                    }
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
+            }
+        }
+        unreachable!("the final attempt returns its result")
+    }
+
     /// Invoke `id`, recording it covered; asserts the call returns Err (for
     /// negative paths) and returns the error message.
     async fn err(&mut self, id: &str, input: Value) -> String {
@@ -175,6 +262,23 @@ impl Harness {
 /// A capability registered later with no case here fails the coverage
 /// assertion at the end of `full_capability_suite`.
 const EXCLUDED: &[(&str, &str)] = &[
+    ("k8s.runJob", "broker-only declaration stub; scoped Job authorization, results and cleanup are exercised in registry lifecycle tests"),
+    (
+        "k8s.nodeJournalLogs",
+        "requires SSH access to the node host; exercised via unit tests with mocked sessions",
+    ),
+    (
+        "k8s.nodeRuntimeDiagnostics",
+        "requires host-level runtime CLI (crictl/containerd) via SSH; exercised via unit tests",
+    ),
+    (
+        "k8s.nodeServiceRestart",
+        "requires node host systemd access via SSH; exercised via unit tests",
+    ),
+    (
+        "k8s.nodeServiceStatus",
+        "requires node host systemctl access via SSH; exercised via unit tests",
+    ),
     (
         "toolbox.installKubectl",
         "downloads a real ~50MB binary from dl.k8s.io; kubectl is already provided by the \
@@ -184,6 +288,11 @@ const EXCLUDED: &[(&str, &str)] = &[
         "toolbox.installHelm",
         "downloads a real release tarball from get.helm.sh; helm is already provided by the CI \
          image, so this is covered by unit tests with an injected fetch rather than the network",
+    ),
+    (
+        "github.rolloutCause",
+        "calls api.github.com, not the cluster; covered by unit tests in \
+         crates/registry/src/github.rs against a local server",
     ),
     (
         "toolbox.upgradePlugin",
@@ -523,6 +632,64 @@ fn widget_yaml() -> String {
     )
 }
 
+/// One object of each fixture GitOps kind. Nothing reconciles them; the suite
+/// only reads them and requests actions on them.
+fn gitops_resources_yaml() -> String {
+    format!(
+        r#"apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: {KUSTOMIZATION}
+  namespace: {NS}
+spec:
+  interval: 10m
+  path: ./deploy
+  prune: true
+  sourceRef:
+    kind: GitRepository
+    name: e2e-source
+---
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: {ARGO_APP}
+  namespace: {NS}
+spec:
+  project: default
+  source:
+    repoURL: https://example.com/e2e.git
+    path: deploy
+    targetRevision: HEAD
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: {NS}
+"#
+    )
+}
+
+/// Applies custom resources whose CRDs were just created. A new CRD's REST
+/// endpoint is not served the instant the CRD exists, so retry until the
+/// apiserver has established it.
+async fn apply_once_served(h: &Harness, ctx: &str, yaml: &str, what: &str) {
+    let dl = deadline(60);
+    loop {
+        match h
+            .reg
+            .invoke("k8s.applyManifest", json!({ "context": ctx, "yaml": yaml }))
+            .await
+        {
+            Ok(v) if v["applied"] == true => break,
+            Ok(v) if Instant::now() > dl => {
+                panic!("timed out waiting for {what} to become available: {v}")
+            }
+            Err(e) if Instant::now() > dl => {
+                panic!("timed out waiting for {what} to become available: {e:?}")
+            }
+            _ => poll_sleep().await,
+        }
+    }
+}
+
 /// A self-contained chart whose rendered ConfigMap echoes `.Values.message`,
 /// so we can prove values actually reach helm (mirrors
 /// `crates/kube/tests/helm_lifecycle.rs`).
@@ -564,10 +731,12 @@ async fn full_capability_suite() {
 async fn run_suite() {
     let ctx = context();
     let settings = TempSettings::new();
-    let reg = build_registry_with_paths_and_settings(
+    let reg = srelens_registry::build_registry_with_paths_settings_and_trust(
         cache(),
         kubeconfig_paths(),
-        Some(settings.0.clone()),
+        settings.0.clone(),
+        srelens_registry::TrustRoot::from_signed_documents(TEST_ROOT, TEST_PUBLISHERS)
+            .expect("the test root verifies"),
     );
     let mut h = Harness::new(reg);
 
@@ -591,11 +760,8 @@ async fn run_suite() {
         json!({ "theme": "dark", "scale": 120 })
     );
     assert_eq!(loaded["localStorageMigrated"], true);
-    h.ok(
-        "settings.set",
-        json!({ "remove": ["e2e.roundTrip"] }),
-    )
-    .await;
+    h.ok("settings.set", json!({ "remove": ["e2e.roundTrip"] }))
+        .await;
 
     // === Fixtures: dogfood k8s.applyManifest to seed the namespace =========
     println!("=== fixtures ===");
@@ -610,30 +776,9 @@ async fn run_suite() {
         "fixture apply must fully succeed: {out}"
     );
 
-    // The CRD's REST endpoint isn't live the instant the CRD object is
-    // created — retry the widget instance apply until the apiserver has
-    // finished establishing it.
-    let dl = deadline(60);
-    loop {
-        match h
-            .reg
-            .invoke(
-                "k8s.applyManifest",
-                json!({ "context": ctx, "yaml": widget_yaml() }),
-            )
-            .await
-        {
-            Ok(v) if v["applied"] == true => break,
-            Ok(v) if Instant::now() > dl => {
-                panic!("timed out waiting for CRD {CRD_NAME} to become available: {v}")
-            }
-            Err(e) if Instant::now() > dl => {
-                panic!("timed out waiting for CRD {CRD_NAME} to become available: {e:?}")
-            }
-            _ => poll_sleep().await,
-        }
-    }
+    apply_once_served(&h, &ctx, &widget_yaml(), &format!("CRD {CRD_NAME}")).await;
     println!("fixtures applied: namespace, CRD, workloads, widget instance");
+    apply_gitops_fixtures(&mut h, &ctx).await;
 
     // Wait for the Deployment's pods to be Running before pod-dependent
     // assertions — poll listPods with a timeout, never a blind sleep.
@@ -733,7 +878,9 @@ async fn run_suite() {
 
     // The kind context authenticates with a client cert (no exec-auth), so it
     // has no external tool requirements — a healthy, empty diagnosis.
-    let out = h.ok("toolbox.diagnoseContext", json!({ "context": ctx })).await;
+    let out = h
+        .ok("toolbox.diagnoseContext", json!({ "context": ctx }))
+        .await;
     assert_eq!(out["context"], ctx);
     assert!(
         out["items"].as_array().unwrap().is_empty(),
@@ -746,8 +893,14 @@ async fn run_suite() {
     let tools = out["tools"].as_array().unwrap();
     assert_eq!(tools.len(), 3, "kubectl/krew/helm: {out}");
     let kubectl = tools.iter().find(|t| t["name"] == "kubectl").unwrap();
-    assert_eq!(kubectl["installed"], true, "kubectl must be on PATH here: {out}");
-    assert!(kubectl["version"].as_str().is_some(), "kubectl version should resolve: {out}");
+    assert_eq!(
+        kubectl["installed"], true,
+        "kubectl must be on PATH here: {out}"
+    );
+    assert!(
+        kubectl["version"].as_str().is_some(),
+        "kubectl version should resolve: {out}"
+    );
 
     toolbox_krew_lifecycle(&mut h).await;
 
@@ -788,7 +941,10 @@ async fn run_suite() {
     // Succeeded) and numerator (Running only) — matched here, not
     // re-derived, so the test fails if either capability's counting ever
     // drifts from what a plain list of the same pods shows.
-    let plain_still_running = all_pods.iter().filter(|p| p["phase"] != "Succeeded").count() as i64;
+    let plain_still_running = all_pods
+        .iter()
+        .filter(|p| p["phase"] != "Succeeded")
+        .count() as i64;
     let plain_running = all_pods.iter().filter(|p| p["phase"] == "Running").count() as i64;
 
     let pod_count_out = h.ok("k8s.podCount", json!({ "context": ctx })).await;
@@ -846,7 +1002,12 @@ async fn run_suite() {
         .as_array()
         .unwrap()
         .iter()
-        .map(|n| (n["node"].as_str().unwrap().to_string(), n["pods"].as_i64().unwrap()))
+        .map(|n| {
+            (
+                n["node"].as_str().unwrap().to_string(),
+                n["pods"].as_i64().unwrap(),
+            )
+        })
         .collect();
     assert_eq!(
         actual_by_node, expected_by_node,
@@ -855,7 +1016,9 @@ async fn run_suite() {
 
     let expected_unsettled: HashSet<(String, String)> = all_pods
         .iter()
-        .filter(|p| p["phase"] != "Running" || ready_cell_is_short(p["ready"].as_str().unwrap_or_default()))
+        .filter(|p| {
+            p["phase"] != "Running" || ready_cell_is_short(p["ready"].as_str().unwrap_or_default())
+        })
         .map(|p| {
             (
                 p["namespace"].as_str().unwrap_or_default().to_string(),
@@ -881,7 +1044,10 @@ async fn run_suite() {
 
     // #17: attach an ephemeral debug container to a fixture pod. It can't be
     // removed once added, but the whole namespace is torn down after the suite.
-    let debug_pod = out["pods"].as_array().unwrap()[0]["name"].as_str().unwrap().to_string();
+    let debug_pod = out["pods"].as_array().unwrap()[0]["name"]
+        .as_str()
+        .unwrap()
+        .to_string();
     let dbg = h
         .ok(
             "k8s.debugPod",
@@ -892,6 +1058,26 @@ async fn run_suite() {
         dbg["container"].as_str().unwrap().starts_with("debugger-"),
         "debug container name: {dbg}",
     );
+
+    let wnr = h
+        .ok(
+            "k8s.whyNotReady",
+            json!({ "context": ctx, "namespace": NS, "pod": debug_pod }),
+        )
+        .await;
+    assert_eq!(wnr["pod"].as_str().unwrap(), debug_pod);
+    assert_eq!(wnr["namespace"].as_str().unwrap(), NS);
+    assert!(wnr["appContainers"].as_array().is_some());
+
+    let wp = h
+        .ok(
+            "k8s.whyPending",
+            json!({ "context": ctx, "namespace": NS, "pod": debug_pod }),
+        )
+        .await;
+    assert_eq!(wp["pod"].as_str().unwrap(), debug_pod);
+    assert_eq!(wp["namespace"].as_str().unwrap(), NS);
+    assert!(wp["podResourceRequests"].as_object().is_some());
 
     let out = h
         .ok(
@@ -904,6 +1090,27 @@ async fn run_suite() {
         .unwrap()
         .iter()
         .any(|d| d["name"] == DEPLOY));
+
+    let images = h
+        .ok(
+            "k8s.listWorkloadImages",
+            json!({"context":ctx,"namespace":NS,"kind":"Deployment"}),
+        )
+        .await;
+    let workload = images["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["name"] == DEPLOY)
+        .expect("deployment image identity");
+    assert_eq!(workload["namespace"], NS);
+    assert!(workload["uid"].as_str().is_some_and(|uid| !uid.is_empty()));
+    assert!(workload["containers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|row| row["type"] == "regular"
+            && row["image"].as_str().is_some_and(|image| !image.is_empty())));
 
     let out = h
         .ok(
@@ -938,6 +1145,18 @@ async fn run_suite() {
     assert!(
         !out["replicasets"].as_array().unwrap().is_empty(),
         "the Deployment must own a ReplicaSet: {out}"
+    );
+
+    let out = h
+        .ok(
+            "k8s.listChanges",
+            json!({ "context": ctx, "namespace": NS, "since": "1h" }),
+        )
+        .await;
+    assert!(out["deployments"].is_array());
+    assert!(
+        out["argo"]["state"].is_string(),
+        "the report says how much of Argo it saw: {out}"
     );
 
     let out = h
@@ -1008,6 +1227,31 @@ async fn run_suite() {
             .any(|e| e["service"] == SVC),
         "expected an EndpointSlice for {SVC}: {out}"
     );
+
+    let out = h
+        .ok(
+            "k8s.listEndpoints",
+            json!({ "context": ctx, "namespace": NS }),
+        )
+        .await;
+    assert!(
+        out["endpoints"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|e| e["name"] == SVC),
+        "expected an Endpoint for {SVC}: {out}"
+    );
+
+    let shp = h
+        .ok(
+            "k8s.serviceHealthProbe",
+            json!({ "context": ctx, "namespace": NS, "service": SVC }),
+        )
+        .await;
+    assert_eq!(shp["service"].as_str().unwrap(), SVC);
+    assert_eq!(shp["namespace"].as_str().unwrap(), NS);
+    assert!(shp["portMappings"].as_array().is_some());
 
     let out = h
         .ok(
@@ -1098,7 +1342,26 @@ async fn run_suite() {
     assert!(!out["nodes"].as_array().unwrap().is_empty());
 
     // #17: create a privileged node debug pod, then tear it down immediately.
-    let node_name = out["nodes"].as_array().unwrap()[0]["name"].as_str().unwrap().to_string();
+    let node_name = out["nodes"].as_array().unwrap()[0]["name"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let node_details = h
+        .ok(
+            "k8s.nodeInspect",
+            json!({ "context": ctx, "node": node_name }),
+        )
+        .await;
+    assert_eq!(node_details["name"], node_name);
+
+    let gpu_inv = h
+        .ok(
+            "k8s.gpuInventory",
+            json!({ "context": ctx }),
+        )
+        .await;
+    assert!(gpu_inv["total_gpu_nodes"].is_number() || gpu_inv["nodes"].is_array());
     let nd = h
         .ok(
             "k8s.createNodeDebugPod",
@@ -1107,7 +1370,10 @@ async fn run_suite() {
         .await;
     assert_eq!(nd["namespace"], NS);
     let node_debug_pod = nd["pod"].as_str().unwrap().to_string();
-    assert!(node_debug_pod.starts_with("srelens-node-debug-"), "generated name: {nd}");
+    assert!(
+        node_debug_pod.starts_with("srelens-node-debug-"),
+        "generated name: {nd}"
+    );
     h.ok(
         "k8s.deletePod",
         json!({ "context": ctx, "namespace": NS, "pod": node_debug_pod }),
@@ -1202,6 +1468,9 @@ async fn run_suite() {
         .iter()
         .any(|i| i["name"] == WIDGET));
 
+    extensions_and_gitops(&mut h, &ctx, &settings).await;
+    app_pod_streams(&mut h, &ctx, &settings).await;
+
     let out = h
         .ok(
             "k8s.listResource",
@@ -1213,6 +1482,89 @@ async fn run_suite() {
         .unwrap()
         .iter()
         .any(|i| i["name"] == CM));
+
+    // Selectors the API server applies and fields projected per item — the
+    // one-call answer to a question no summary tool covers, spelled the way
+    // the tool schema advertises it to an MCP client.
+    let out = h
+        .ok(
+            "k8s.listResource",
+            json!({
+                "context": ctx, "kind": "Pod", "namespace": NS,
+                "labelSelector": format!("app={DEPLOY}"),
+                "fields": [".spec.nodeName", ".spec.nonexistent"],
+            }),
+        )
+        .await;
+    let pods = out["items"].as_array().unwrap();
+    assert!(
+        !pods.is_empty(),
+        "the Deployment's pods are Running by now: {out}"
+    );
+    for pod in pods {
+        assert!(
+            pod["name"]
+                .as_str()
+                .unwrap()
+                .starts_with(&format!("{DEPLOY}-")),
+            "{out}"
+        );
+        assert!(pod["fields"][".spec.nodeName"].is_string(), "{out}");
+        assert_eq!(pod["fields"][".spec.nonexistent"], Value::Null, "{out}");
+    }
+    let out = h
+        .ok(
+            "k8s.listResource",
+            json!({
+                "context": ctx, "kind": "ConfigMap", "namespace": NS,
+                "fieldSelector": format!("metadata.name={CM}"),
+                "fields": [".data.greeting"],
+            }),
+        )
+        .await;
+    let only = out["items"].as_array().unwrap();
+    assert_eq!(only.len(), 1, "the field selector narrows to one: {out}");
+    assert_eq!(only[0]["fields"][".data.greeting"], "hello");
+    let out = h
+        .ok(
+            "k8s.listResource",
+            json!({ "context": ctx, "kind": "Node", "fields": [".status.allocatable"] }),
+        )
+        .await;
+    let nodes = out["items"].as_array().unwrap();
+    assert!(!nodes.is_empty(), "a cluster has at least one Node: {out}");
+    assert!(
+        nodes
+            .iter()
+            .all(|n| n["fields"][".status.allocatable"]["cpu"].is_string()),
+        "{out}"
+    );
+    // listResource reads Secrets without consent: a projected value arrives
+    // blank, and the consent-gated k8s.getSecret stays the only way to it.
+    let out = h
+        .ok(
+            "k8s.listResource",
+            json!({
+                "context": ctx, "kind": "Secret", "namespace": NS,
+                "fieldSelector": format!("metadata.name={SECRET}"),
+                "fields": [".data", ".data.password"],
+            }),
+        )
+        .await;
+    let text = out.to_string();
+    assert!(text.contains("password"), "{text}");
+    assert!(
+        !text.contains("aHVudGVyMg==") && !text.contains("hunter2"),
+        "{text}"
+    );
+    // A JSON Pointer would come back null on every item; refused instead.
+    let err = h
+        .err(
+            "k8s.listResource",
+            json!({ "context": ctx, "kind": "Node", "fields": ["/status/allocatable"] }),
+        )
+        .await;
+    assert!(err.contains("not a supported path"), "{err}");
 
     // === 2. Object / manifest ================================================
     println!("=== object/manifest ===");
@@ -1232,6 +1584,19 @@ async fn run_suite() {
         )
         .await;
     assert_eq!(out["object"]["metadata"]["name"], DEPLOY);
+    let out = h
+        .ok(
+            "k8s.getObject",
+            json!({
+                "context": ctx, "kind": "Deployment", "namespace": NS, "name": DEPLOY,
+                "fields": [".spec.template.spec.containers[0].image"],
+            }),
+        )
+        .await;
+    assert_eq!(
+        out["object"],
+        json!({ ".spec.template.spec.containers[0].image": "busybox:1.36" })
+    );
 
     // validateManifest: this capability never propagates a raw Result::Err
     // for a well-formed-but-invalid document — it always returns
@@ -1430,9 +1795,9 @@ async fn run_suite() {
     // Service -> workload, which is the selector subset test against labels a
     // real controller wrote.
     assert!(
-        edges
-            .iter()
-            .any(|e| e["from"] == json!(svc_id) && e["to"] == json!(deploy_id) && e["kind"] == json!("routes")),
+        edges.iter().any(|e| e["from"] == json!(svc_id)
+            && e["to"] == json!(deploy_id)
+            && e["kind"] == json!("routes")),
         "the Service must route to the Deployment it selects: {out}"
     );
     // Deployment -> ReplicaSet, from the ownerReference. The ReplicaSet's name
@@ -1442,7 +1807,9 @@ async fn run_suite() {
         edges.iter().any(|e| {
             e["from"] == json!(deploy_id)
                 && e["kind"] == json!("owns")
-                && e["to"].as_str().is_some_and(|to| to.starts_with(&node_id("ReplicaSet", DEPLOY)))
+                && e["to"]
+                    .as_str()
+                    .is_some_and(|to| to.starts_with(&node_id("ReplicaSet", DEPLOY)))
         }),
         "the Deployment must own a ReplicaSet: {out}"
     );
@@ -1457,11 +1824,21 @@ async fn run_suite() {
     // capability of its own so the consent layer can gate it. On the fixture
     // pods (busybox) it reads, and it always answers with its report.
     let out = h
-        .ok("k8s.topologyProbe", json!({ "context": ctx, "namespaces": [NS], "prometheus": [] }))
+        .ok(
+            "k8s.topologyProbe",
+            json!({ "context": ctx, "namespaces": [NS], "prometheus": [] }),
+        )
         .await;
-    assert!(out["probe"].is_object(), "the probe must report on itself: {out}");
     assert!(
-        out["nodes"].as_array().unwrap().iter().any(|n| n["id"] == json!(deploy_id)),
+        out["probe"].is_object(),
+        "the probe must report on itself: {out}"
+    );
+    assert!(
+        out["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|n| n["id"] == json!(deploy_id)),
         "{out}"
     );
 
@@ -1470,7 +1847,9 @@ async fn run_suite() {
     // the capability is written for: discovery answers an empty list, not an
     // error. Nothing the fixtures made looks like a query API, so it must not
     // be listed either.
-    let out = h.ok("k8s.prometheusDiscover", json!({ "context": ctx })).await;
+    let out = h
+        .ok("k8s.prometheusDiscover", json!({ "context": ctx }))
+        .await;
     let candidates = out["candidates"].as_array().unwrap();
     assert!(
         candidates.iter().all(|c| c["namespace"] != json!(NS)),
@@ -1503,7 +1882,9 @@ async fn run_suite() {
         .as_array()
         .unwrap()
         .iter()
-        .find(|p| p["phase"] == "Running" && p["name"].as_str().is_some_and(|n| n.starts_with(DEPLOY)))
+        .find(|p| {
+            p["phase"] == "Running" && p["name"].as_str().is_some_and(|n| n.starts_with(DEPLOY))
+        })
         .map(|p| p["name"].as_str().unwrap().to_string())
         .expect("a running fixture pod");
     let out = h
@@ -1746,8 +2127,14 @@ async fn run_suite() {
     println!("=== cluster facts ===");
     let out = h.ok("k8s.clusterFacts", json!({ "context": ctx })).await;
     assert_eq!(out["context"], ctx);
-    assert!(out["provider"].is_string(), "provider must be reported, possibly empty: {out}");
-    assert!(out["region"].is_string(), "region must be reported, possibly empty: {out}");
+    assert!(
+        out["provider"].is_string(),
+        "provider must be reported, possibly empty: {out}"
+    );
+    assert!(
+        out["region"].is_string(),
+        "region must be reported, possibly empty: {out}"
+    );
     let state = out["metricsServer"]["state"].as_str().unwrap();
     assert!(
         ["present", "absent", "unknown"].contains(&state),
@@ -1759,7 +2146,10 @@ async fn run_suite() {
             "k8s.nodeMetrics served readings above, so clusterFacts must see metrics-server too: {out}"
         );
         assert!(
-            !out["metricsServer"]["version"].as_str().unwrap_or_default().is_empty(),
+            !out["metricsServer"]["version"]
+                .as_str()
+                .unwrap_or_default()
+                .is_empty(),
             "a present metrics-server must report a version: {out}"
         );
     } else {
@@ -1832,6 +2222,94 @@ async fn run_suite() {
         )
         .await;
     assert_eq!(out["ok"], true);
+
+    // #389: roll the restart back. Wait for the restart's ReplicaSet (revision
+    // 2) first: rolled back before the controller made it, the original
+    // template would be re-adopted as revision 2, not 3.
+    let dl = deadline(120);
+    let original = loop {
+        let out = h
+            .ok(
+                "k8s.listReplicaSets",
+                json!({ "context": ctx, "namespace": NS, "ownerName": DEPLOY }),
+            )
+            .await;
+        let rows = out["replicasets"].as_array().cloned().unwrap_or_default();
+        let named = |rev: &str| {
+            rows.iter()
+                .find(|r| r["revision"] == rev)
+                .and_then(|r| r["name"].as_str())
+                .map(str::to_string)
+        };
+        if let (Some(first), Some(_)) = (named("1"), named("2")) {
+            break first;
+        }
+        if Instant::now() > dl {
+            panic!("timed out waiting for {DEPLOY}'s second revision: {out}");
+        }
+        poll_sleep().await;
+    };
+    let refused = h
+        .err(
+            "k8s.rolloutUndo",
+            json!({ "context": ctx, "namespace": NS, "name": DEPLOY, "revision": 99 }),
+        )
+        .await;
+    assert!(refused.contains("has no revision 99"), "{refused}");
+    let out = h
+        .ok(
+            "k8s.rolloutUndo",
+            json!({ "context": ctx, "namespace": NS, "name": DEPLOY, "revision": 1 }),
+        )
+        .await;
+    assert_eq!(out["revision"], 1);
+    let dl = deadline(120);
+    loop {
+        let out = h
+            .ok(
+                "k8s.listReplicaSets",
+                json!({ "context": ctx, "namespace": NS, "ownerName": DEPLOY }),
+            )
+            .await;
+        if out["replicasets"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r["name"] == original.as_str() && r["revision"] == "3")
+        {
+            break;
+        }
+        if Instant::now() > dl {
+            panic!("timed out waiting for {original} to come back as revision 3: {out}");
+        }
+        poll_sleep().await;
+    }
+    let refused = h
+        .err(
+            "k8s.rolloutUndo",
+            json!({ "context": ctx, "namespace": NS, "name": DEPLOY, "revision": 3 }),
+        )
+        .await;
+    assert!(refused.contains("already runs revision 3"), "{refused}");
+    println!("{DEPLOY}: rolled back to revision 1 (now revision 3)");
+
+    // Review afresh only if a controller races this live fixture's pinned write.
+    let (out, reviewed) = h
+        .reviewed_request(
+            "k8s.requestRolloutRestart",
+            json!({
+                "context":ctx,"group":"apps","version":"v1","kind":"Deployment",
+                "plural":"deployments","namespaced":true,"namespace":NS,"name":DEPLOY
+            }),
+        )
+        .await
+        .expect("reviewed rollout restart");
+    assert_eq!(out["requested"], true);
+    let stale = h.err("k8s.requestRolloutRestart", reviewed).await;
+    assert!(
+        stale.contains("Resource changed or was replaced"),
+        "{stale}"
+    );
 
     let out = h
         .ok(
@@ -2176,6 +2654,27 @@ async fn run_suite() {
         .unwrap()
         .to_string();
 
+    // Both scheduling directions are reviewed and never evict pods. A heartbeat
+    // can invalidate either review, just as a workload controller can above.
+    for unschedulable in [true, false] {
+        let (out, reviewed) = h
+            .reviewed_request(
+                "k8s.requestCordonNode",
+                json!({
+                    "context":ctx,"group":"","version":"v1","kind":"Node","plural":"nodes",
+                    "namespaced":false,"namespace":"","name":node_name,"unschedulable":unschedulable
+                }),
+            )
+            .await
+            .expect("reviewed node scheduling request");
+        assert_eq!(out["requested"], true);
+        let stale = h.err("k8s.requestCordonNode", reviewed).await;
+        assert!(
+            stale.contains("Resource changed or was replaced"),
+            "{stale}"
+        );
+    }
+
     let out = h
         .ok(
             "k8s.cordonNode",
@@ -2256,7 +2755,11 @@ async fn run_suite() {
     println!("=== testClusterConnection ===");
     let kube_yaml = kubeconfig_paths()
         .iter()
-        .find_map(|p| std::fs::read_to_string(p).ok().filter(|c| c.contains(ctx.as_str())))
+        .find_map(|p| {
+            std::fs::read_to_string(p)
+                .ok()
+                .filter(|c| c.contains(ctx.as_str()))
+        })
         .expect("no kubeconfig file declares the e2e context");
     let probe = h
         .ok(
@@ -2298,6 +2801,1471 @@ async fn run_suite() {
     );
 }
 
+// ---------------------------------------------------------------------------
+// Extension apps and host GitOps actions, issue #536
+// ---------------------------------------------------------------------------
+
+/// Refuses a cluster whose Flux or Argo CD CRDs are real. Applying the fixtures
+/// would replace their schemas, and teardown deletes the fixture CRDs, which
+/// deletes every object of that kind: for Argo CD, every Application.
+async fn refuse_real_gitops_crds(ctx: &str) {
+    let kubectl = |args: &[&str]| {
+        let mut command = tokio::process::Command::new("kubectl");
+        command.arg("--context").arg(ctx).args(args);
+        async move {
+            let out = command.output().await.expect("run kubectl");
+            assert!(
+                out.status.success(),
+                "kubectl failed: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            String::from_utf8_lossy(&out.stdout).into_owned()
+        }
+    };
+    let fixtures = kubectl(&["get", "crd", "-l", GITOPS_CRD_SELECTOR, "-o", "name"]).await;
+    for name in GITOPS_CRD_NAMES {
+        let present = kubectl(&["get", "crd", name, "--ignore-not-found", "-o", "name"]).await;
+        assert!(
+            present.trim().is_empty() || fixtures.contains(name),
+            "{ctx} already has a real {name} CRD. This suite would replace it and then delete \
+             it, which deletes every object of that kind; run it against a throwaway cluster"
+        );
+    }
+}
+
+/// The Flux and Argo CD fixture CRDs, and one object of each kind.
+async fn apply_gitops_fixtures(h: &mut Harness, ctx: &str) {
+    refuse_real_gitops_crds(ctx).await;
+    let out = h
+        .ok(
+            "k8s.applyManifest",
+            json!({ "context": ctx, "yaml": GITOPS_CRDS }),
+        )
+        .await;
+    assert_eq!(
+        out["applied"], true,
+        "GitOps fixture CRDs must apply: {out}"
+    );
+    apply_once_served(h, ctx, &gitops_resources_yaml(), "the GitOps fixture CRDs").await;
+    println!("fixtures applied: Flux Kustomization and Argo CD Application CRDs and objects");
+}
+
+/// Logs, exec and port-forwards for apps (#567), against the fixture Deployments:
+/// `extensions.pods` lists the pods a binding may reach, a `logs` stream follows one,
+/// an `exec` runs only once confirmed and reports its exit, a pod the Deployment does
+/// not select is refused, and a `portForward` reaches the HTTP fixture through a port
+/// the host picked, which stops listening when the view closes.
+async fn app_pod_streams(h: &mut Harness, ctx: &str, settings: &TempSettings) {
+    println!("=== extensions: pod logs, exec and port-forwards ===");
+    let id = "org.example.pods";
+    let manifest = json!({
+        "id": id, "name": "Pods", "version": "0.1.0", "srelensApiVersion": "^0.5",
+        "kind": "declarative",
+        "permissions": ["k8s.listDeployments", "k8s.streamLogs", "k8s.exec", "k8s.portForward"],
+        "capabilities": [
+            {"name": "workloads", "title": "Workloads", "target": "k8s.listDeployments",
+             "inputs": ["context", "namespace"], "arguments": {}},
+            {"name": "logs", "title": "Logs", "target": "k8s.streamLogs", "inputs": [],
+             "arguments": {"resource": "workloads", "container": "app"}},
+            {"name": "echo", "title": "Echo", "target": "k8s.exec", "inputs": [],
+             "arguments": {"resource": "workloads", "container": "app", "command": ["echo", "e2e-exec"]}},
+            {"name": "http", "title": "HTTP", "target": "k8s.portForward", "inputs": [],
+             "arguments": {"resource": "workloads", "port": 8080}}
+        ],
+        "contributions": {"pages": [], "detailTabs": [], "detailLinks": []}
+    })
+    .to_string();
+    // An exec binding runs code in the cluster, so an unsigned one needs the policy.
+    h.ok(
+        "extensions.configure",
+        json!({"action":"unsignedApps","allowUnsignedApps":true}),
+    )
+    .await;
+    let grants = declared_permissions(&manifest);
+    let out = h
+        .ok(
+            "extensions.validate",
+            json!({"manifest": manifest, "grants": grants}),
+        )
+        .await;
+    assert_eq!(out["errors"], json!([]), "must validate: {out}");
+    let installed = h
+        .ok(
+            "extensions.configure",
+            json!({"action": "install", "manifest": manifest, "grants": grants}),
+        )
+        .await;
+    let revision = installed["plugins"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["manifest"]["id"] == id)
+        .and_then(|p| p["revision"].as_u64())
+        .unwrap_or_else(|| panic!("{id} is installed: {installed}"));
+
+    let web = running_pod(h, ctx, id, revision, DEPLOY, "logs").await;
+    let http = running_pod(h, ctx, id, revision, HTTP_DEPLOY, "http").await;
+
+    let (_, streams) = srelens_desktop_lib::capabilities::build_registry_and_app_streams(
+        cache(),
+        kubeconfig_paths(),
+        Some(settings.0.clone()),
+    );
+    let streams = streams.expect("a build with settings has app streams");
+    let sink = Arc::new(srelens_streams::test_util::TestSink::default());
+    // Exec and port-forward sessions go to an audit trail; this one is the suite's own.
+    let trail = Arc::new(Trail::default());
+    let request = |view: &str, channel: &str, workload: &str, mut source: Value| {
+        source["name"] = json!(workload);
+        json!({"id": id, "revision": revision, "view": view, "channel": channel,
+               "context": ctx, "namespace": NS, "source": source})
+    };
+    let data = |channel: &str| -> Vec<Value> {
+        sink.payloads_for(channel)
+            .into_iter()
+            .filter(|f| f["type"] == "data")
+            .map(|f| f["data"].clone())
+            .collect()
+    };
+
+    // Logs: the fixture echoes "hello" every five seconds.
+    streams
+        .open(
+            sink.clone(),
+            request(
+                "e2e/pods#1",
+                "extstream:e2e-logs",
+                DEPLOY,
+                json!({"kind": "logs", "capability": "logs", "pod": web, "tailLines": 20}),
+            ),
+        )
+        .await
+        .expect("the logs stream opens");
+    let saw_hello = |frames: &[Value]| {
+        frames.iter().any(|f| {
+            f["data"]["event"] == "lines"
+                && f["data"]["lines"]
+                    .as_array()
+                    .is_some_and(|l| l.iter().any(|l| l["line"] == "hello"))
+        })
+    };
+    frames_until(&sink, "extstream:e2e-logs", "a hello line", &saw_hello).await;
+    assert!(
+        data("extstream:e2e-logs")
+            .iter()
+            .any(|d| d["event"] == "status" && d["status"] == "live"),
+        "{:?}",
+        data("extstream:e2e-logs")
+    );
+
+    // Exec: refused unconfirmed, then run once confirmed.
+    let echo = |confirmed: Option<Value>| {
+        let mut source =
+            json!({"kind": "exec", "capability": "echo", "pod": web, "container": "app"});
+        if let Some(confirmed) = confirmed {
+            source["confirmed"] = confirmed;
+        }
+        source
+    };
+    let refused = streams
+        .open_in_window(
+            sink.clone(),
+            "e2e",
+            trail.clone(),
+            request("e2e/pods#1", "extstream:e2e-noexec", DEPLOY, echo(None)),
+        )
+        .await
+        .unwrap_err();
+    assert!(refused.contains("needs the host confirmation"), "{refused}");
+    streams
+        .open_in_window(
+            sink.clone(),
+            "e2e",
+            trail.clone(),
+            request(
+                "e2e/pods#1",
+                "extstream:e2e-exec",
+                DEPLOY,
+                echo(Some(
+                    json!({"pod": web, "container": "app", "command": ["echo", "e2e-exec"]}),
+                )),
+            ),
+        )
+        .await
+        .expect("a confirmed exec opens");
+    let frames = frames_until(
+        &sink,
+        "extstream:e2e-exec",
+        "the command's end",
+        &|frames: &[Value]| {
+            frames
+                .iter()
+                .any(|f| f["type"] == "close" || f["type"] == "error")
+        },
+    )
+    .await;
+    assert_eq!(frames.last().unwrap()["reason"], "completed", "{frames:?}");
+    let exec = data("extstream:e2e-exec");
+    assert!(
+        exec.iter().any(|d| d["event"] == "output"
+            && d["chunks"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|c| c["text"].as_str().unwrap_or_default().contains("e2e-exec"))),
+        "{exec:?}"
+    );
+    assert_eq!(
+        exec.last().unwrap(),
+        &json!({"event": "exit", "code": 0}),
+        "{exec:?}"
+    );
+
+    // A pod the Deployment does not select is refused, whoever confirmed it.
+    let refused = streams
+        .open_in_window(
+            sink.clone(),
+            "e2e",
+            trail.clone(),
+            request("e2e/pods#1", "extstream:e2e-out", DEPLOY,
+                json!({"kind": "exec", "capability": "echo", "pod": http, "container": "app",
+                       "confirmed": {"pod": http, "container": "app", "command": ["echo", "e2e-exec"]}})),
+        )
+        .await
+        .unwrap_err();
+    assert!(refused.contains("not selected by Deployment"), "{refused}");
+
+    // Port-forward: the host picks the port, and the fixture answers through it.
+    streams
+        .open_in_window(
+            sink.clone(),
+            "e2e",
+            trail.clone(),
+            request(
+                "e2e/pods#2",
+                "extstream:e2e-fwd",
+                HTTP_DEPLOY,
+                json!({"kind": "portForward", "capability": "http", "pod": http}),
+            ),
+        )
+        .await
+        .expect("the forward opens");
+    let frames = frames_until(
+        &sink,
+        "extstream:e2e-fwd",
+        "ready",
+        &|frames: &[Value]| frames.iter().any(|f| f["data"]["event"] == "ready"),
+    )
+    .await;
+    let local = frames
+        .iter()
+        .find(|f| f["data"]["event"] == "ready")
+        .and_then(|f| f["data"]["localPort"].as_u64())
+        .expect("a local port") as u16;
+    let mut body = String::new();
+    for attempt in 0.. {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let mut socket = tokio::net::TcpStream::connect(("127.0.0.1", local))
+            .await
+            .expect("the port listens");
+        socket
+            .write_all(b"GET /index.html HTTP/1.0\r\nHost: e2e\r\n\r\n")
+            .await
+            .unwrap();
+        body.clear();
+        let _ =
+            tokio::time::timeout(Duration::from_secs(10), socket.read_to_string(&mut body)).await;
+        if body.contains("ok") || attempt >= 5 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+    assert!(body.starts_with("HTTP/1.") && body.contains("ok"), "{body}");
+    assert_eq!(streams.close_view("e2e/pods#2"), 1);
+    assert_eq!(
+        sink.payloads_for("extstream:e2e-fwd").last().unwrap()["reason"],
+        "viewClosed"
+    );
+    let mut closed = false;
+    for _ in 0..50 {
+        if std::net::TcpStream::connect(("127.0.0.1", local)).is_err() {
+            closed = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(closed, "the forward's port stops listening with its view");
+    assert_eq!(
+        streams.close_view("e2e/pods#1"),
+        1,
+        "the log stream was still open"
+    );
+    // Each exec and forward session was recorded, the refused ones with why.
+    let recorded: Vec<(String, &str)> = trail
+        .0
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|r| (r.tool.clone(), r.outcome))
+        .collect();
+    assert_eq!(
+        recorded,
+        [
+            ("k8s.exec".to_owned(), "rejected"),
+            ("k8s.exec".to_owned(), "ok"),
+            ("k8s.exec".to_owned(), "rejected"),
+            ("k8s.portForward".to_owned(), "ok"),
+        ],
+        "{recorded:?}"
+    );
+
+    h.ok(
+        "extensions.configure",
+        json!({"action": "remove", "id": id}),
+    )
+    .await;
+}
+
+/// An audit sink that keeps what it is given, for the suite to read back.
+#[derive(Default)]
+struct Trail(std::sync::Mutex<Vec<srelens_capability::audit::AuditRecord>>);
+
+impl srelens_capability::audit::AuditSink for Trail {
+    fn record(&self, rec: srelens_capability::audit::AuditRecord) {
+        self.0.lock().unwrap().push(rec);
+    }
+}
+
+/// The first running, ready pod the Deployment `workload` selects, as `extensions.pods`
+/// lists it for the app's `capability`: only that Deployment's pods, in the host's words.
+async fn running_pod(
+    h: &mut Harness,
+    ctx: &str,
+    id: &str,
+    revision: u64,
+    workload: &str,
+    capability: &str,
+) -> String {
+    let deadline = Instant::now() + Duration::from_secs(90);
+    loop {
+        let out = h
+            .ok(
+                "extensions.pods",
+                json!({"id": id, "revision": revision, "capability": capability,
+                       "context": ctx, "namespace": NS, "name": workload}),
+            )
+            .await;
+        assert_eq!(
+            out["scope"],
+            json!(format!("pods selected by Deployment {workload}")),
+            "{out}"
+        );
+        let pods = out["pods"].as_array().cloned().unwrap_or_default();
+        assert!(
+            pods.iter().all(|p| p["name"]
+                .as_str()
+                .unwrap_or_default()
+                .starts_with(&format!("{workload}-"))),
+            "only {workload}'s pods: {out}"
+        );
+        if let Some(pod) = pods
+            .iter()
+            .find(|p| p["phase"] == "Running" && p["ready"] == true)
+        {
+            return pod["name"].as_str().unwrap().to_owned();
+        }
+        assert!(
+            Instant::now() < deadline,
+            "no running {workload} pod: {out}"
+        );
+        tokio::time::sleep(Duration::from_secs(2)).await;
+    }
+}
+
+/// The frames on `channel` once `done` holds for them, within thirty seconds.
+async fn frames_until(
+    sink: &srelens_streams::test_util::TestSink,
+    channel: &str,
+    what: &str,
+    done: &dyn Fn(&[Value]) -> bool,
+) -> Vec<Value> {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let frames = sink.payloads_for(channel);
+        if done(&frames) {
+            return frames;
+        }
+        assert!(Instant::now() < deadline, "{what}: {frames:?}");
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+}
+
+/// An example manifest under a local ID. `org.srelens.` IDs install only with the
+/// publisher's signature, and no signature covers the examples' bytes.
+fn local_copy(manifest: &str) -> String {
+    let copy = manifest.replacen("\"id\": \"org.srelens.", "\"id\": \"org.example.", 1);
+    assert_ne!(
+        copy, manifest,
+        "the example no longer declares an org.srelens. ID"
+    );
+    copy
+}
+
+/// What the install review grants: exactly the permissions the manifest declares.
+fn declared_permissions(manifest: &str) -> Value {
+    serde_json::from_str::<Value>(manifest).expect("manifest JSON")["permissions"].clone()
+}
+
+fn resource_version(inspected: &Value) -> String {
+    inspected["resource"]["metadata"]["resourceVersion"]
+        .as_str()
+        .unwrap_or_else(|| panic!("no resourceVersion in {inspected}"))
+        .to_owned()
+}
+
+fn item_names(list: &Value) -> Vec<&str> {
+    list["items"]
+        .as_array()
+        .unwrap_or_else(|| panic!("no items in {list}"))
+        .iter()
+        .map(|i| i["name"].as_str().unwrap_or_default())
+        .collect()
+}
+
+/// Every extension capability, and the host GitOps capabilities beneath them,
+/// against the fixture CRDs. Each payload is the one
+/// `packages/core/src/lib/extensions.ts` sends, spelled as it spells it, so a
+/// renamed field fails here instead of in the app (AGENTS.md).
+/// App streams (#565) against the live cluster: a `read` stream on the Flux
+/// app's Kustomization reader delivers the reader's rows, `extensions.streams`
+/// counts it, and closing the view ends it with `viewClosed`.
+///
+/// The host's handle comes from a second build over the same settings path:
+/// the streams are shared per inventory in a process, which is also what lets
+/// a lifecycle change made through any registry end them.
+async fn app_stream(h: &mut Harness, ctx: &str, settings: &TempSettings, flux_revision: u64) {
+    println!("=== extensions: app streams ===");
+    let (_, streams) = srelens_desktop_lib::capabilities::build_registry_and_app_streams(
+        cache(),
+        kubeconfig_paths(),
+        Some(settings.0.clone()),
+    );
+    let streams = streams.expect("a build with settings has app streams");
+    let sink = Arc::new(srelens_streams::test_util::TestSink::default());
+    let channel = "extstream:e2e-1";
+    let opened = streams
+        .open(
+            sink.clone(),
+            json!({
+                "id": "org.example.flux", "revision": flux_revision, "view": "e2e/page#1",
+                "channel": channel, "context": ctx, "namespace": NS,
+                "source": {"kind": "read", "capability": "kustomizations", "intervalSeconds": 5},
+            }),
+        )
+        .await
+        .expect("the stream opens");
+    let mut data = None;
+    for _ in 0..100 {
+        if let Some(frame) = sink
+            .payloads_for(channel)
+            .into_iter()
+            .find(|f| f["type"] != "open")
+        {
+            data = Some(frame);
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    let data = data.expect("a first frame within ten seconds");
+    assert_eq!(
+        data["type"], "data",
+        "the first tick must be data, not a failure: {data}"
+    );
+    assert!(
+        data["data"]["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item["name"] == KUSTOMIZATION),
+        "{data}"
+    );
+    let metrics = h.ok("extensions.streams", json!({})).await;
+    let flux = metrics["apps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|app| app["app"] == "org.example.flux")
+        .unwrap_or_else(|| panic!("the harness registry sees the stream: {metrics}"))
+        .clone();
+    assert_eq!(flux["openStreams"], 1, "{metrics}");
+    assert_eq!(
+        flux["streams"][0]["stream"],
+        json!(opened.stream),
+        "{metrics}"
+    );
+
+    // The Inspector (#575) sees the live stream, and a declarative app has no
+    // process and nothing in its log. The payloads are the ones
+    // `inspectExtension` and `extensionLogs` send.
+    let inspected = h
+        .ok("extensions.inspect", json!({"id": "org.example.flux"}))
+        .await;
+    assert_eq!(inspected["runtime"], "declarative", "{inspected}");
+    assert_eq!(inspected["process"], Value::Null, "{inspected}");
+    let open = inspected["streams"]["open"].as_array().unwrap();
+    assert!(
+        open.iter()
+            .any(|s| s["stream"] == json!(opened.stream) && s["source"] == "read"),
+        "{inspected}"
+    );
+    assert_eq!(inspected["streams"]["watches"], json!([]), "{inspected}");
+    assert_eq!(inspected["recentErrors"], json!([]), "{inspected}");
+    let logs = h
+        .ok(
+            "extensions.logs",
+            json!({"id": "org.example.flux", "after": 0, "minLevel": "trace"}),
+        )
+        .await;
+    assert_eq!(
+        logs,
+        json!({"runtime": "declarative", "lines": [], "capacity": 1000, "dropped": 0})
+    );
+
+    assert_eq!(streams.close_view("e2e/page#1"), 1);
+    let last = sink.payloads_for(channel).pop().unwrap();
+    assert_eq!(
+        last,
+        json!({"type": "close", "stream": opened.stream, "reason": "viewClosed"})
+    );
+    let inspected = h
+        .ok("extensions.inspect", json!({"id": "org.example.flux"}))
+        .await;
+    assert_eq!(
+        inspected["streams"]["open"],
+        json!([]),
+        "a closed view's stream is gone: {inspected}"
+    );
+}
+
+/// #566: a `watch` stream on the Flux app's Kustomization reader lists the
+/// kind, then reports a change to the fixture Kustomization — and nothing of
+/// the object itself. Run after the actions, whose reviews hold the object's
+/// `resourceVersion`: the annotation here moves it.
+async fn app_watch_stream(ctx: &str, settings: &TempSettings, flux_revision: u64) {
+    println!("=== extensions: watch stream ===");
+    let (_, streams) = srelens_desktop_lib::capabilities::build_registry_and_app_streams(
+        cache(),
+        kubeconfig_paths(),
+        Some(settings.0.clone()),
+    );
+    let streams = streams.expect("a build with settings has app streams");
+    let sink = Arc::new(srelens_streams::test_util::TestSink::default());
+    let channel = "extstream:e2e-watch";
+    let watch = streams
+        .open(
+            sink.clone(),
+            json!({
+                "id": "org.example.flux", "revision": flux_revision, "view": "e2e/page#2",
+                "channel": channel, "context": ctx, "namespace": NS,
+                "source": {"kind": "watch", "capability": "kustomizations"},
+            }),
+        )
+        .await
+        .expect("the watch opens");
+    let events = |sink: &srelens_streams::test_util::TestSink| -> Vec<Value> {
+        sink.payloads_for(channel)
+            .into_iter()
+            .filter(|f| f["type"] == "data")
+            .map(|f| f["data"].clone())
+            .collect()
+    };
+    let wait_for = |event: &'static str, count: usize| {
+        let sink = sink.clone();
+        async move {
+            for _ in 0..200 {
+                if events(&sink).iter().filter(|e| e["event"] == event).count() >= count {
+                    return;
+                }
+                assert!(
+                    !sink
+                        .payloads_for(channel)
+                        .iter()
+                        .any(|f| f["type"] == "error"),
+                    "the watch failed: {:?}",
+                    sink.payloads_for(channel)
+                );
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            }
+            panic!(
+                "no {event} within twenty seconds: {:?}",
+                sink.payloads_for(channel)
+            );
+        }
+    };
+    wait_for("synced", 1).await;
+    let annotated = tokio::process::Command::new("kubectl")
+        .args(["--context", ctx, "-n", NS, "annotate", "--overwrite"])
+        .arg(format!(
+            "kustomizations.kustomize.toolkit.fluxcd.io/{KUSTOMIZATION}"
+        ))
+        .arg("srelens.io/e2e-watch=1")
+        .output()
+        .await
+        .expect("run kubectl");
+    assert!(
+        annotated.status.success(),
+        "{}",
+        String::from_utf8_lossy(&annotated.stderr)
+    );
+    wait_for("changed", 1).await;
+    let wire = serde_json::to_string(&sink.payloads_for(channel)).unwrap();
+    assert!(
+        !wire.contains(KUSTOMIZATION),
+        "a watch frame names no object: {wire}"
+    );
+    assert_eq!(streams.close_view("e2e/page#2"), 1);
+    let last = sink.payloads_for(channel).pop().unwrap();
+    assert_eq!(
+        last,
+        json!({"type": "close", "stream": watch.stream, "reason": "viewClosed"})
+    );
+}
+
+async fn extensions_and_gitops(h: &mut Harness, ctx: &str, settings: &TempSettings) {
+    println!("=== extensions: validate, catalog, install ===");
+    // As shipped, the examples carry reserved IDs. Unsigned, that is refused, and
+    // the refusal names the field.
+    let out = h
+        .ok(
+            "extensions.validate",
+            json!({ "manifest": FLUX_EXAMPLE, "grants": declared_permissions(FLUX_EXAMPLE) }),
+        )
+        .await;
+    assert!(
+        out["errors"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|e| e["code"] == "EXTENSION_RESERVED_ID" && e["path"] == "id"),
+        "an unsigned org.srelens. manifest must be refused for its ID: {out}"
+    );
+    let flux = local_copy(FLUX_EXAMPLE);
+    let argocd = local_copy(ARGOCD_EXAMPLE);
+    let apps = [
+        json!({ "manifest": flux, "grants": declared_permissions(&flux) }),
+        json!({ "manifest": argocd, "grants": declared_permissions(&argocd) }),
+    ];
+    // The local examples declare writes, so permission grants also need the
+    // explicit unsigned-app policy. Read-only apps do not need this setting.
+    h.ok(
+        "extensions.configure",
+        json!({"action":"unsignedApps","allowUnsignedApps":true}),
+    )
+    .await;
+    for app in &apps {
+        let out = h.ok("extensions.validate", app.clone()).await;
+        assert_eq!(out["errors"], json!([]), "must validate: {out}");
+    }
+
+    // The catalog is a cache seeded with the committed fixture, so this suite never
+    // depends on the public catalog. extension-catalog.yml checks the live one. The cache
+    // holds the signed catalog as fetched, and the host verifies it again on reading it.
+    let fetched_at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let snapshot = json!({
+        "signedCatalog": serde_json::from_str::<Value>(CATALOG).unwrap(),
+        "fetchedAt": fetched_at,
+    });
+    std::fs::write(
+        settings.catalog_cache(),
+        serde_json::to_vec(&snapshot).unwrap(),
+    )
+    .unwrap();
+    let catalog = h
+        .ok("extensions.catalog", json!({ "refresh": false }))
+        .await;
+    assert_eq!(
+        catalog["fetchedAt"], fetched_at,
+        "the seeded cache must be what was read: {catalog}"
+    );
+    assert_eq!(catalog["stale"], false, "{catalog}");
+    let sha256 = catalog["catalog"]["extensions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["id"] == "org.srelens.argocd")
+        .unwrap_or_else(|| panic!("the catalog lists Argo CD: {catalog}"))["release"]["sha256"]
+        .clone();
+    // A release the catalog does not list is refused before anything downloads.
+    let err = h
+        .err(
+            "extensions.catalogManifest",
+            json!({ "id": "org.srelens.argocd", "sha256": "0".repeat(64) }),
+        )
+        .await;
+    assert!(err.contains("Catalog release changed"), "{err}");
+    // Authentic historical bytes still verify cryptographically, but API 0.1
+    // cannot be installed on this API 0.3 host.
+    let old = h.ok("extensions.validate", json!({"manifest":SIGNED_ARGOCD,"grants":declared_permissions(SIGNED_ARGOCD),"signature":SIGNED_ARGOCD_SIG})).await;
+    assert!(
+        old["errors"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|e| e["code"] == "EXTENSION_API_INCOMPATIBLE"),
+        "{old}"
+    );
+    let err = h
+        .err(
+            "extensions.catalogManifest",
+            json!({"id":"org.srelens.argocd","sha256":sha256}),
+        )
+        .await;
+    assert!(err.contains("different host API version"), "{err}");
+
+    for app in &apps {
+        let mut install = app.clone();
+        install["action"] = json!("install");
+        h.ok("extensions.configure", install).await;
+    }
+    let listed = h.ok("extensions.list", json!({})).await;
+    let installed = |id: &str| {
+        listed["plugins"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["manifest"]["id"] == id)
+            .cloned()
+            .unwrap_or_else(|| panic!("{id} is not installed: {listed}"))
+    };
+    let flux_app = installed("org.example.flux");
+    let argocd_app = installed("org.example.argocd");
+    for app in [&flux_app, &argocd_app] {
+        assert_eq!(app["enabled"], true, "{app}");
+        assert_eq!(app["source"], "local", "{app}");
+    }
+    let revision = |app: &Value| app["revision"].as_u64().expect("revision");
+
+    // #543. This registry is built with no secret store (the desktop hands
+    // its vault to the GUI's): clearing is always allowed, and a set is
+    // refused — here because the app declares no secret setting — never kept
+    // anywhere else, and the refusal does not repeat the value.
+    println!("=== extensions: secret store ===");
+    let cleared = h
+        .ok(
+            "extension.secretStore",
+            json!({"action": "clear", "id": "org.example.flux"}),
+        )
+        .await;
+    assert_eq!(cleared, json!({"set": false}), "{cleared}");
+    let err = h
+        .err(
+            "extension.secretStore",
+            json!({"action": "set", "id": "org.example.flux", "setting": "token", "secret": "e2e-secret-value"}),
+        )
+        .await;
+    // Absence first, with a message that prints nothing of the refusal; then
+    // the cause, which the refusal may be printed for once the value is known
+    // not to be in it.
+    assert!(
+        !err.contains("e2e-secret-value"),
+        "the refusal repeated the secret"
+    );
+    assert!(
+        err.contains("declares no secret setting"),
+        "refused for another reason than an undeclared secret setting: {err}"
+    );
+
+    // #568. A network.http app reaching a one-request HTTP server on this
+    // machine's loopback: the per-app switch as `@srelens/core` sends it, and the
+    // request through `extensions.read`, the one path that sends one.
+    println!("=== extensions: network.http ===");
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+    let port = listener.local_addr().unwrap().port();
+    let served = std::thread::spawn(move || {
+        use std::io::{BufRead, BufReader, Write};
+        let (stream, _) = listener.accept().expect("accept");
+        let mut reader = BufReader::new(stream);
+        let mut request_line = String::new();
+        reader.read_line(&mut request_line).unwrap();
+        loop {
+            let mut header = String::new();
+            if reader.read_line(&mut header).unwrap() == 0 || header.trim().is_empty() {
+                break;
+            }
+        }
+        let body = r#"{"status":"success"}"#;
+        write!(
+            reader.get_mut(),
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        )
+        .unwrap();
+        request_line
+    });
+    let metrics = json!({
+        "id": "org.example.metrics", "name": "Metrics", "version": "0.1.0",
+        "srelensApiVersion": "^0.4", "kind": "declarative",
+        "permissions": [{"capability": "network.http", "hosts": ["${settings.prometheusUrl}"]}],
+        "settings": [{"id": "prometheusUrl", "type": "url", "title": "Prometheus URL", "required": true}],
+        "capabilities": [{"name": "up", "title": "Targets up", "target": "network.http", "inputs": [],
+            "arguments": {"url": "${settings.prometheusUrl}", "path": "/api/v1/query", "query": {"query": "up"}}}],
+        "contributions": {"pages": [], "detailTabs": [], "detailLinks": []}
+    });
+    h.ok(
+        "extensions.configure",
+        json!({"action": "install", "manifest": metrics.to_string(), "grants": ["network.http"]}),
+    )
+    .await;
+    h.ok(
+        "extensions.configure",
+        json!({"action": "settings", "id": "org.example.metrics",
+               "settings": {"prometheusUrl": format!("http://127.0.0.1:{port}")}}),
+    )
+    .await;
+    let listed = h.ok("extensions.list", json!({})).await;
+    let metrics_revision = listed["plugins"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["manifest"]["id"] == "org.example.metrics")
+        .and_then(|p| p["revision"].as_u64())
+        .unwrap_or_else(|| panic!("the metrics app is installed: {listed}"));
+    let request = json!({"id": "org.example.metrics", "revision": metrics_revision,
+                         "capability": "up", "context": ctx});
+    // Plain HTTP to this computer is off until a person turns it on for the app.
+    let err = h.err("extensions.read", request.clone()).await;
+    assert!(err.contains("Allow plain HTTP"), "{err}");
+    // The wrapper's camelCase is what the host reads; the Rust spelling is refused.
+    let snake = h
+        .err(
+            "extensions.configure",
+            json!({"action": "loopbackHttp", "id": "org.example.metrics", "allow_loopback_http": true}),
+        )
+        .await;
+    assert!(snake.contains("allow_loopback_http"), "{snake}");
+    h.ok(
+        "extensions.configure",
+        json!({"action": "loopbackHttp", "id": "org.example.metrics", "allowLoopbackHttp": true}),
+    )
+    .await;
+    let out = h.ok("extensions.read", request).await;
+    assert_eq!(
+        out,
+        json!({"status": 200, "contentType": "application/json", "body": {"status": "success"}}),
+        "{out}"
+    );
+    let request_line = served.join().expect("the server thread");
+    assert!(
+        request_line.starts_with("GET /api/v1/query?query=up "),
+        "{request_line}"
+    );
+    h.ok(
+        "extensions.configure",
+        json!({"action": "remove", "id": "org.example.metrics"}),
+    )
+    .await;
+
+    // #569. A metric provider's PromQL template, bound for a Deployment and sent
+    // through its network.http binding to a one-request Prometheus stand-in on
+    // loopback, with the payload `@srelens/core`'s wrapper sends; the answer is
+    // the chart the host draws.
+    println!("=== extensions: metric provider ===");
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+    let port = listener.local_addr().unwrap().port();
+    let served = std::thread::spawn(move || {
+        use std::io::{BufRead, BufReader, Write};
+        let (stream, _) = listener.accept().expect("accept");
+        let mut reader = BufReader::new(stream);
+        let mut request_line = String::new();
+        reader.read_line(&mut request_line).unwrap();
+        loop {
+            let mut header = String::new();
+            if reader.read_line(&mut header).unwrap() == 0 || header.trim().is_empty() {
+                break;
+            }
+        }
+        // One sample at the first step of the range the host asked for.
+        let target = request_line.split(' ').nth(1).unwrap_or_default();
+        let start = target
+            .split(['?', '&'])
+            .find_map(|pair| pair.strip_prefix("start="))
+            .unwrap_or("0")
+            .to_owned();
+        let body = format!(
+            r#"{{"status":"success","data":{{"resultType":"matrix","result":[{{"metric":{{"pod":"web-1"}},"values":[[{start},"0.5"]]}}]}}}}"#
+        );
+        write!(
+            reader.get_mut(),
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        )
+        .unwrap();
+        request_line
+    });
+    let observability = json!({
+        "id": "org.example.observability", "name": "Observability", "version": "0.1.0",
+        "srelensApiVersion": "^0.7", "kind": "declarative",
+        "permissions": [{"capability": "network.http", "hosts": ["${settings.prometheusUrl}"]}],
+        "settings": [{"id": "prometheusUrl", "type": "url", "title": "Prometheus URL", "required": true}],
+        "capabilities": [{"name": "prom", "title": "Prometheus range query", "target": "network.http",
+            "inputs": [], "arguments": {"url": "${settings.prometheusUrl}", "path": "/api/v1/query_range"}}],
+        "contributions": {"pages": [], "detailTabs": [], "detailLinks": [],
+            "metricProviders": [{"id": "cpu", "title": "CPU", "capability": "prom", "language": "promql",
+                "forKinds": ["apps/Deployment"], "unit": "cores",
+                "query": "sum(rate(container_cpu_usage_seconds_total{namespace=\"${namespace}\",pod=~\"${workload:regex}-.*\"}[${step}]))"}]}
+    });
+    h.ok(
+        "extensions.configure",
+        json!({"action": "install", "manifest": observability.to_string(), "grants": ["network.http"]}),
+    )
+    .await;
+    h.ok(
+        "extensions.configure",
+        json!({"action": "settings", "id": "org.example.observability",
+               "settings": {"prometheusUrl": format!("http://127.0.0.1:{port}")}}),
+    )
+    .await;
+    h.ok(
+        "extensions.configure",
+        json!({"action": "loopbackHttp", "id": "org.example.observability", "allowLoopbackHttp": true}),
+    )
+    .await;
+    let listed = h.ok("extensions.list", json!({})).await;
+    let observability_revision = listed["plugins"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["manifest"]["id"] == "org.example.observability")
+        .and_then(|p| p["revision"].as_u64())
+        .unwrap_or_else(|| panic!("the observability app is installed: {listed}"));
+    let query = json!({"id": "org.example.observability", "revision": observability_revision,
+        "provider": "cpu", "context": ctx, "namespace": NS, "resourceKind": "apps/Deployment",
+        "name": "web", "rangeSeconds": 3600});
+    // The Rust spelling is refused: the wrapper's camelCase is the contract.
+    let mut snake = query.clone();
+    snake["resource_kind"] = snake["resourceKind"].take();
+    snake.as_object_mut().unwrap().remove("resourceKind");
+    let err = h.err("extensions.queryProvider", snake).await;
+    assert!(err.contains("resource_kind"), "{err}");
+    let answer = h.ok("extensions.queryProvider", query).await;
+    assert_eq!(answer["kind"], "metrics", "{answer}");
+    assert_eq!(answer["chart"]["unit"], "cores", "{answer}");
+    assert_eq!(
+        answer["chart"]["series"][0]["name"], "pod=\"web-1\"",
+        "{answer}"
+    );
+    assert_eq!(
+        answer["chart"]["series"][0]["values"][0],
+        json!(0.5),
+        "{answer}"
+    );
+    let request_line = served.join().expect("the server thread");
+    assert!(
+        request_line.starts_with("GET /api/v1/query_range?query=sum%28rate%28container_cpu_usage_seconds_total%7Bnamespace%3D%22"),
+        "{request_line}"
+    );
+    h.ok(
+        "extensions.configure",
+        json!({"action": "remove", "id": "org.example.observability"}),
+    )
+    .await;
+
+    // #562. A package file, reviewed and installed as Settings → Apps sends it: the
+    // manifest, signature and digest list the review returns are checked together, then
+    // the bytes are installed, unpacked into the app's own directory, and its logo listed.
+    println!("=== extensions: package ===");
+    let package = base64::engine::general_purpose::STANDARD.encode(
+        srelens_registry::extension_package::pack(&PathBuf::from(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../../crates/registry/tests/fixtures/packages/example"
+        )))
+        .expect("pack the example package"),
+    );
+    let review = h
+        .ok("extensions.packageManifest", json!({ "package": package }))
+        .await;
+    let grants = declared_permissions(review["manifest"].as_str().expect("a manifest"));
+    let checked = h
+        .ok(
+            "extensions.validate",
+            json!({"manifest": review["manifest"], "grants": grants,
+                   "digests": review["package"]["digests"]}),
+        )
+        .await;
+    assert_eq!(checked["errors"], json!([]), "{checked}");
+    h.ok(
+        "extensions.configure",
+        json!({"action": "installPackage", "package": package, "grants": grants}),
+    )
+    .await;
+    let listed = h.ok("extensions.list", json!({})).await;
+    let packaged = listed["plugins"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["manifest"]["id"] == "org.example.packaged")
+        .cloned()
+        .unwrap_or_else(|| panic!("the package is installed: {listed}"));
+    assert!(
+        packaged["icon"]
+            .as_str()
+            .is_some_and(|icon| icon.starts_with("data:image/svg+xml;base64,")),
+        "{packaged}"
+    );
+    let unpacked = settings
+        .packages()
+        .join("org.example.packaged")
+        .join(packaged["package"].as_str().expect("a package digest"));
+    assert!(
+        unpacked.join("extension.json").is_file(),
+        "{}",
+        unpacked.display()
+    );
+    h.ok(
+        "extensions.configure",
+        json!({"action": "remove", "id": "org.example.packaged"}),
+    )
+    .await;
+    assert!(!settings.packages().join("org.example.packaged").exists());
+
+    println!("=== extensions: read ===");
+    let out = h
+        .ok(
+            "extensions.read",
+            json!({
+                "id": "org.example.flux", "revision": revision(&flux_app),
+                "capability": "kustomizations", "context": ctx, "namespace": NS
+            }),
+        )
+        .await;
+    assert!(item_names(&out).contains(&KUSTOMIZATION), "{out}");
+    let available = h.ok("extensions.bindingAvailability", json!({"id":"org.example.flux","revision":revision(&flux_app),"context":ctx,"namespace":NS,"bindings":["kustomizations"]})).await;
+    assert_eq!(available["bindings"][0]["state"], "served", "{available}");
+    // A reader app cannot acquire container execution through the Job facade.
+    // Constrained Job lifecycle and cancellation are exercised by registry tests.
+    h.err("extensions.runJob", json!({"id":"org.example.flux","revision":revision(&flux_app),"context":ctx,"namespace":NS,"capability":"undeclared-job","inputs":{}})).await;
+    h.err("extensions.callOperation", json!({"id":"org.example.flux","revision":revision(&flux_app),"context":ctx,"operation":"undeclared","params":{}})).await;
+    let columns = h
+        .ok(
+            "extensions.resolveColumns",
+            json!({
+                "id": "org.example.flux", "revision": revision(&flux_app),
+                "context": ctx, "namespace": NS,
+                "kind": "kustomize.toolkit.fluxcd.io/Kustomization",
+                "uids": [{ "name": KUSTOMIZATION, "namespace": NS,
+                    "row": { "name": KUSTOMIZATION } }],
+            }),
+        )
+        .await;
+    assert_eq!(columns["columns"], json!([]), "{columns}");
+    assert_eq!(columns["cells"][0]["name"], KUSTOMIZATION, "{columns}");
+    // The dashboard card and its target page answer from one snapshot, so the
+    // page shows exactly as many rows as the card counted, whatever it counted.
+    let cards = h
+        .ok(
+            "extensions.resolveCards",
+            json!({
+                "id": "org.example.flux", "revision": revision(&flux_app),
+                "context": ctx, "namespaces": [NS],
+            }),
+        )
+        .await;
+    let suspended = cards["cards"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|card| card["id"] == "suspended-kustomizations")
+        .unwrap_or_else(|| panic!("the Flux example declares its card: {cards}"))
+        .clone();
+    assert_eq!(suspended["state"], "count", "{cards}");
+    // Counted by the example's own status resolver (#541): every object once.
+    let by_status = cards["cards"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|card| card["id"] == "kustomizations-by-status")
+        .unwrap_or_else(|| panic!("the Flux example declares its status card: {cards}"))
+        .clone();
+    assert_eq!(by_status["state"], "countByStatus", "{cards}");
+    let per_status: u64 = by_status["statuses"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| s["count"].as_u64().unwrap())
+        .sum();
+    assert_eq!(per_status, by_status["total"].as_u64().unwrap(), "{cards}");
+    assert!(by_status["total"].as_u64().unwrap() >= 1, "{cards}");
+    let counted = h
+        .ok(
+            "extensions.read",
+            json!({
+                "id": "org.example.flux", "revision": revision(&flux_app),
+                "capability": "kustomizations", "context": ctx, "namespace": NS,
+                "card": "suspended-kustomizations",
+            }),
+        )
+        .await;
+    assert_eq!(
+        counted["items"].as_array().unwrap().len() as u64,
+        suspended["count"].as_u64().unwrap(),
+        "{counted}"
+    );
+    for app in [&argocd_app] {
+        let out = h
+            .ok(
+                "extensions.read",
+                json!({
+                    "id": app["manifest"]["id"], "revision": revision(app),
+                    "capability": "applications", "context": ctx, "namespace": NS
+                }),
+            )
+            .await;
+        assert!(item_names(&out).contains(&ARGO_APP), "{out}");
+    }
+
+    println!("=== extensions: inspect, suspend and resume (Flux) ===");
+    let flux_selection = json!({
+        "id": "org.example.flux", "revision": revision(&flux_app),
+        "capability": "kustomizations", "context": ctx, "namespace": NS, "name": KUSTOMIZATION
+    });
+    let detail = h.ok("extensions.resource", flux_selection.clone()).await;
+    assert_eq!(
+        detail["resource"]["metadata"]["name"], KUSTOMIZATION,
+        "{detail}"
+    );
+    let panels = h
+        .ok(
+            "extensions.resolvePanels",
+            json!({
+                "id": "org.example.flux", "revision": revision(&flux_app),
+                "context": ctx, "namespace": NS,
+                "kind": "kustomize.toolkit.fluxcd.io/Kustomization",
+                "resource": detail["resource"],
+            }),
+        )
+        .await;
+    assert_eq!(
+        panels["panels"][0]["id"], "kustomization-summary",
+        "{panels}"
+    );
+    assert_eq!(
+        panels["panels"][0]["sections"][0]["fields"][0]["label"], "Source reference",
+        "{panels}"
+    );
+    // A Deployment Flux applied carries the Kustomization's name and
+    // namespace as labels; the link finds that Kustomization in the granted
+    // list (#545). The Deployment is the caller's, as the Inspector's is.
+    let links = h
+        .ok(
+            "extensions.resolveLinks",
+            json!({
+                "id": "org.example.flux", "revision": revision(&flux_app),
+                "context": ctx, "namespace": NS, "kind": "apps/Deployment",
+                "resource": {"apiVersion": "apps/v1", "kind": "Deployment",
+                    "metadata": {"name": "e2e-flux-managed", "namespace": NS, "labels": {
+                        "kustomize.toolkit.fluxcd.io/name": KUSTOMIZATION,
+                        "kustomize.toolkit.fluxcd.io/namespace": NS}}},
+            }),
+        )
+        .await;
+    let kustomization = links["links"]
+        .as_array()
+        .and_then(|links| links.iter().find(|link| link["id"] == "kustomization"))
+        .unwrap_or_else(|| panic!("no kustomization link: {links}"));
+    assert_eq!(
+        kustomization["targets"],
+        json!([{"namespace": NS, "name": KUSTOMIZATION, "exists": true}]),
+        "{links}"
+    );
+    // Read the other way round (#728): the fixture Kustomization's `spec.sourceRef` names
+    // the GitRepository `e2e-source`, so that GitRepository's Inspector lists it. The host
+    // reads the Kustomization's spec through the app's own reader; the caller sends only
+    // the GitRepository's identity, and it need not exist for its referrers to be found.
+    let reverse = h
+        .ok(
+            "extensions.resolveReverseLinks",
+            json!({
+                "id": "org.example.flux", "revision": revision(&flux_app),
+                "context": ctx, "namespace": NS, "kind": "source.toolkit.fluxcd.io/GitRepository",
+                "resource": {"apiVersion": "source.toolkit.fluxcd.io/v1", "kind": "GitRepository",
+                    "metadata": {"name": "e2e-source", "namespace": NS}},
+            }),
+        )
+        .await;
+    let source = reverse["links"]
+        .as_array()
+        .and_then(|links| {
+            links
+                .iter()
+                .find(|link| link["id"] == "kustomization-git-source")
+        })
+        .unwrap_or_else(|| panic!("no kustomization-git-source link: {reverse}"));
+    assert_eq!(source["truncated"], false, "{reverse}");
+    assert_eq!(
+        source["sources"],
+        json!([{"namespace": NS, "name": KUSTOMIZATION, "exists": true}]),
+        "{reverse}"
+    );
+    app_stream(h, ctx, settings, revision(&flux_app)).await;
+    assert_eq!(
+        detail["actions"],
+        json!([
+            "kustomizations-suspend",
+            "kustomizations-resume",
+            "kustomizations-reconcile"
+        ]),
+        "{detail}"
+    );
+    assert!(
+        detail["eventsError"].is_null(),
+        "the object's events must be readable: {detail}"
+    );
+    let uid = detail["resource"]["metadata"]["uid"]
+        .as_str()
+        .expect("uid")
+        .to_owned();
+    let reviewed = resource_version(&detail);
+    let act = |action: &str, version: &str| json!({ "resource": flux_selection, "action": format!("kustomizations-{action}"), "uid": uid, "resourceVersion": version });
+    let out = h.ok("extensions.action", act("suspend", &reviewed)).await;
+    assert_eq!(out, json!({ "requested": true }));
+    // Read back through the host capability itself, not the app, to see what landed.
+    let flux_object = json!({
+        "context": ctx, "group": "kustomize.toolkit.fluxcd.io", "version": "v1",
+        "plural": "kustomizations", "kind": "Kustomization", "namespaced": true,
+        "namespace": NS, "name": KUSTOMIZATION
+    });
+    let suspended = h.ok("k8s.getCustomResource", flux_object.clone()).await;
+    assert_eq!(
+        suspended["resource"]["spec"]["suspend"], true,
+        "{suspended}"
+    );
+    let current = resource_version(&suspended);
+    assert_ne!(
+        current, reviewed,
+        "the suspend patch must have written the object"
+    );
+    // The field is `resourceVersion`, as the wrapper sends it. The struct's own
+    // spelling is refused, not silently ignored.
+    let mut misspelled = act("resume", &current);
+    let version = misspelled
+        .as_object_mut()
+        .unwrap()
+        .remove("resourceVersion")
+        .unwrap();
+    misspelled["resource_version"] = version;
+    let err = h.err("extensions.action", misspelled).await;
+    assert!(err.contains("resource_version"), "{err}");
+    // An action reviewed against a version that is no longer current is refused,
+    // and nothing is written.
+    let err = h.err("extensions.action", act("resume", &reviewed)).await;
+    assert!(err.contains("Resource changed or was replaced"), "{err}");
+    let unchanged = h.ok("k8s.getCustomResource", flux_object.clone()).await;
+    assert_eq!(
+        unchanged["resource"]["spec"]["suspend"], true,
+        "{unchanged}"
+    );
+    assert_eq!(
+        resource_version(&unchanged),
+        current,
+        "a refused action must not write"
+    );
+    let out = h.ok("extensions.action", act("resume", &current)).await;
+    assert_eq!(out, json!({ "requested": true }));
+    let resumed = h.ok("k8s.getCustomResource", flux_object).await;
+    assert_eq!(resumed["resource"]["spec"]["suspend"], false, "{resumed}");
+
+    println!("=== GitOps: inspect and refresh (Argo CD) ===");
+    let argo_detail = h
+        .ok(
+            "extensions.resource",
+            json!({
+                "id": "org.example.argocd", "revision": revision(&argocd_app),
+                "capability": "applications", "context": ctx, "namespace": NS, "name": ARGO_APP
+            }),
+        )
+        .await;
+    assert_eq!(
+        argo_detail["actions"],
+        json!(["refresh", "hard-refresh", "sync"]),
+        "{argo_detail}"
+    );
+    // The same object through the host capabilities, the identity spelled out.
+    let argo_object = json!({
+        "context": ctx, "group": "argoproj.io", "version": "v1alpha1",
+        "plural": "applications", "kind": "Application", "namespaced": true,
+        "namespace": NS, "name": ARGO_APP
+    });
+    let before = h.ok("k8s.getCustomResource", argo_object.clone()).await;
+    assert!(
+        before.get("actions").is_none(),
+        "Ungated readers never invent actions: {before}"
+    );
+    let argo_uid = before["resource"]["metadata"]["uid"]
+        .as_str()
+        .expect("uid")
+        .to_owned();
+    let reviewed = resource_version(&before);
+    let out = h
+        .ok(
+            "extensions.action",
+            json!({ "resource": {"id":"org.example.argocd","revision":revision(&argocd_app),"capability":"applications","context":ctx,"namespace":NS,"name":ARGO_APP}, "action": "refresh", "uid": argo_uid, "resourceVersion": reviewed }),
+        )
+        .await;
+    assert_eq!(out, json!({ "requested": true }));
+    let refreshed = h.ok("k8s.getCustomResource", argo_object.clone()).await;
+    assert_eq!(
+        refreshed["resource"]["metadata"]["annotations"]["argocd.argoproj.io/refresh"], "normal",
+        "{refreshed}"
+    );
+    let err = h
+        .err(
+            "extensions.action",
+            json!({ "resource": {"id":"org.example.argocd","revision":revision(&argocd_app),"capability":"applications","context":ctx,"namespace":NS,"name":ARGO_APP}, "action": "hard-refresh", "uid": argo_uid, "resourceVersion": reviewed }),
+        )
+        .await;
+    assert!(err.contains("Resource changed or was replaced"), "{err}");
+    let unchanged = h.ok("k8s.getCustomResource", argo_object).await;
+    assert_eq!(
+        unchanged["resource"]["metadata"]["annotations"]["argocd.argoproj.io/refresh"], "normal",
+        "a refused hard refresh must not write: {unchanged}"
+    );
+    assert_eq!(resource_version(&unchanged), resource_version(&refreshed));
+
+    println!("=== host action primitives (#549) ===");
+    // The writes an app's declared action makes, against the same live CRD.
+    // Each one re-reads first: every primitive pins the patch to the UID and
+    // resourceVersion it was handed, so the previous write invalidates them.
+    let ks_object = json!({
+        "context": ctx, "group": "kustomize.toolkit.fluxcd.io", "version": "v1",
+        "plural": "kustomizations", "kind": "Kustomization", "namespaced": true,
+        "namespace": NS, "name": KUSTOMIZATION
+    });
+    let reviewed = |inspected: &Value| {
+        let mut input = ks_object.clone();
+        input["uid"] = inspected["resource"]["metadata"]["uid"].clone();
+        input["resourceVersion"] = json!(resource_version(inspected));
+        input
+    };
+
+    let before = h.ok("k8s.getCustomResource", ks_object.clone()).await;
+    let mut input = reviewed(&before);
+    input["key"] = json!("reconcile.fluxcd.io/requestedAt");
+    input["value"] = json!("$now");
+    assert_eq!(
+        h.ok("k8s.annotate", input).await,
+        json!({"requested": true})
+    );
+    let annotated = h.ok("k8s.getCustomResource", ks_object.clone()).await;
+    let requested_at = annotated["resource"]["metadata"]["annotations"]
+        ["reconcile.fluxcd.io/requestedAt"]
+        .as_str()
+        .unwrap_or_else(|| panic!("no requestedAt annotation: {annotated}"));
+    assert!(
+        requested_at.ends_with('Z') && requested_at.contains('.'),
+        "$now is RFC 3339 nanoseconds in UTC: {requested_at}"
+    );
+    // The review is spent: the same UID and resourceVersion cannot write twice.
+    let mut stale = reviewed(&before);
+    stale["key"] = json!("reconcile.fluxcd.io/requestedAt");
+    stale["value"] = json!("$now");
+    let err = h.err("k8s.annotate", stale).await;
+    assert!(err.contains("Resource changed or was replaced"), "{err}");
+
+    let mut input = reviewed(&annotated);
+    input["fields"] = json!({"/spec/suspend": true});
+    h.ok("k8s.setFields", input).await;
+    let suspended = h.ok("k8s.getCustomResource", ks_object.clone()).await;
+    assert_eq!(
+        suspended["resource"]["spec"]["suspend"], true,
+        "{suspended}"
+    );
+    // And back, so the object is left as the rest of the suite found it.
+    // A declared precondition (#550), against the object as it now is. The
+    // host reads it fresh and refuses before any patch, with the app's reason.
+    let reconcile_unless_suspended = |inspected: &Value| {
+        let mut input = reviewed(inspected);
+        input["key"] = json!("reconcile.fluxcd.io/requestedAt");
+        input["value"] = json!("$now");
+        input["preconditions"] = json!([{
+            "jsonPath": ".spec.suspend", "notEquals": true,
+            "reason": "Resume this resource before requesting reconciliation"
+        }]);
+        input
+    };
+    let err = h
+        .err("k8s.annotate", reconcile_unless_suspended(&suspended))
+        .await;
+    assert!(
+        err.contains("Resume this resource before requesting reconciliation"),
+        "{err}"
+    );
+
+    let mut input = reviewed(&suspended);
+    input["fields"] = json!({"/spec/suspend": false});
+    h.ok("k8s.setFields", input).await;
+    let resumed = h.ok("k8s.getCustomResource", ks_object.clone()).await;
+    assert_eq!(resumed["resource"]["spec"]["suspend"], false, "{resumed}");
+    // The same action, the same predicate, on a resource it now admits.
+    assert_eq!(
+        h.ok("k8s.annotate", reconcile_unless_suspended(&resumed))
+            .await,
+        json!({"requested": true})
+    );
+    let resumed = h.ok("k8s.getCustomResource", ks_object.clone()).await;
+
+    let mut input = reviewed(&resumed);
+    input["patch"] = json!({"spec": {"prune": false}});
+    h.ok("k8s.mergePatch", input).await;
+    let patched = h.ok("k8s.getCustomResource", ks_object.clone()).await;
+    assert_eq!(patched["resource"]["spec"]["prune"], false, "{patched}");
+    assert_eq!(
+        patched["resource"]["spec"]["path"], "./deploy",
+        "a merge patch leaves the fields it does not name: {patched}"
+    );
+
+    let mut input = reviewed(&patched);
+    input["conditionType"] = json!("Issuing");
+    input["conditionStatus"] = json!("True");
+    input["reason"] = json!("ManuallyTriggered");
+    input["message"] = json!("Requested from the srelens e2e suite");
+    h.ok("k8s.setStatusCondition", input).await;
+    let conditioned = h.ok("k8s.getCustomResource", ks_object.clone()).await;
+    let conditions = conditioned["resource"]["status"]["conditions"]
+        .as_array()
+        .unwrap_or_else(|| panic!("no conditions: {conditioned}"));
+    let issuing = conditions
+        .iter()
+        .find(|c| c["type"] == "Issuing")
+        .unwrap_or_else(|| panic!("no Issuing condition: {conditioned}"));
+    assert_eq!(issuing["status"], "True", "{issuing}");
+    assert_eq!(issuing["reason"], "ManuallyTriggered", "{issuing}");
+    assert!(issuing["lastTransitionTime"].is_string(), "{issuing}");
+
+    app_watch_stream(ctx, settings, revision(&flux_app)).await;
+
+    println!("=== extensions: disable and remove ===");
+    // A disabled app's views stop reading, and say why.
+    h.ok(
+        "extensions.configure",
+        json!({ "action": "enable", "id": "org.example.flux", "enabled": false }),
+    )
+    .await;
+    let err = h.err("extensions.resource", flux_selection).await;
+    assert!(err.contains("disabled"), "{err}");
+    for id in ["org.example.flux", "org.example.argocd"] {
+        h.ok(
+            "extensions.configure",
+            json!({ "action": "remove", "id": id }),
+        )
+        .await;
+    }
+    let listed = h.ok("extensions.list", json!({})).await;
+    assert_eq!(listed["plugins"], json!([]), "{listed}");
+}
+
 /// `k8s.deleteContext` REMOVES A CONTEXT FROM THE KUBECONFIG ON DISK. Never
 /// run it against the real kubeconfig: copy the file that declares `ctx` to a
 /// private temp file, build a SEPARATE `ClientCache`/registry pointing only at
@@ -2314,24 +4282,46 @@ async fn toolbox_krew_lifecycle(h: &mut Harness) {
     // Real bootstrap: download krew and run `krew install krew` into ~/.krew.
     let out = h.ok("toolbox.installKrew", json!({})).await;
     assert_eq!(out["tool"], "krew");
-    assert!(out["version"].as_str().is_some(), "krew version should resolve: {out}");
-    assert!(krew_home.join("kubectl-krew").exists(), "krew shim should be installed");
+    assert!(
+        out["version"].as_str().is_some(),
+        "krew version should resolve: {out}"
+    );
+    assert!(
+        krew_home.join("kubectl-krew").exists(),
+        "krew shim should be installed"
+    );
 
     // The index lists `ns` (kubens) — a small, stable plugin.
-    let out = h.ok("toolbox.searchPlugins", json!({ "query": "ns" })).await;
+    let out = h
+        .ok("toolbox.searchPlugins", json!({ "query": "ns" }))
+        .await;
     assert!(
-        out["plugins"].as_array().unwrap().iter().any(|p| p["name"] == "ns"),
+        out["plugins"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|p| p["name"] == "ns"),
         "krew index should list ns: {out}",
     );
 
     // Install it (its binary lands in ~/.krew/bin), then remove it.
-    let out = h.ok("toolbox.installPlugin", json!({ "plugin": "ns" })).await;
+    let out = h
+        .ok("toolbox.installPlugin", json!({ "plugin": "ns" }))
+        .await;
     assert_eq!(out["plugin"], "ns");
-    assert!(krew_home.join("kubectl-ns").exists(), "kubectl-ns should be installed");
+    assert!(
+        krew_home.join("kubectl-ns").exists(),
+        "kubectl-ns should be installed"
+    );
 
-    let out = h.ok("toolbox.removePlugin", json!({ "plugin": "ns" })).await;
+    let out = h
+        .ok("toolbox.removePlugin", json!({ "plugin": "ns" }))
+        .await;
     assert_eq!(out["plugin"], "ns");
-    assert!(!krew_home.join("kubectl-ns").exists(), "kubectl-ns should be removed");
+    assert!(
+        !krew_home.join("kubectl-ns").exists(),
+        "kubectl-ns should be removed"
+    );
     println!("krew lifecycle OK");
 }
 
@@ -2465,8 +4455,8 @@ async fn mcp_resource_subscription(ctx: &str, pod: &str) {
             cache(),
         )));
 
-    let uri = srelens_mcp::resources::ResourceUri::parse(&format!("k8s://{ctx}/{NS}/Pod/{pod}"))
-        .unwrap();
+    let uri =
+        srelens_mcp::resources::ResourceUri::parse(&format!("k8s://{ctx}/{NS}/Pod/{pod}")).unwrap();
 
     let hits = Arc::new(std::sync::Mutex::new(0usize));
     let counter = hits.clone();
@@ -2574,6 +4564,31 @@ async fn teardown() {
         Err(e) => println!("teardown: failed to run kubectl to delete CRD: {e}"),
     }
 
+    // Only the GitOps CRDs the suite applied, by their fixture label. A real Flux
+    // or Argo CD CRD never matches, and the suite refuses to run over one.
+    let gitops_out = tokio::process::Command::new("kubectl")
+        .args([
+            "--context",
+            &ctx,
+            "delete",
+            "crd",
+            "-l",
+            GITOPS_CRD_SELECTOR,
+            "--ignore-not-found",
+            "--wait=true",
+            "--timeout=60s",
+        ])
+        .output()
+        .await;
+    match gitops_out {
+        Ok(o) if o.status.success() => println!("teardown: GitOps fixture CRDs deleted"),
+        Ok(o) => println!(
+            "teardown: GitOps fixture CRD delete non-zero exit: {}",
+            String::from_utf8_lossy(&o.stderr)
+        ),
+        Err(e) => println!("teardown: failed to run kubectl to delete GitOps fixture CRDs: {e}"),
+    }
+
     // Belt-and-suspenders: make sure every node ends up uncordoned even if
     // the node-ops section panicked before reaching its own uncordon call.
     if let Ok(out) = tokio::process::Command::new("kubectl")
@@ -2601,6 +4616,285 @@ async fn teardown() {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Port-forward recovery, issue #172 (#21's acceptance)
+// ---------------------------------------------------------------------------
+/// Its own namespace, so the suite's teardown and this test's never delete
+/// each other's fixtures.
+const FWD_NS: &str = "srelens-e2e-forward";
+const FWD_APP: &str = "e2e-fwd";
+
+/// One pod behind a Service, serving its own name, so a request through the
+/// tunnel says which pod it reached.
+fn forward_fixture_yaml() -> String {
+    format!(
+        r#"apiVersion: v1
+kind: Namespace
+metadata:
+  name: {FWD_NS}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {FWD_APP}
+  namespace: {FWD_NS}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: {FWD_APP}
+  template:
+    metadata:
+      labels:
+        app: {FWD_APP}
+    spec:
+      containers:
+      - name: app
+        image: busybox:1.36
+        command: ["sh", "-c", "mkdir -p /www && hostname > /www/index.html && exec httpd -f -p 8080 -h /www"]
+        ports:
+        - name: http
+          containerPort: 8080
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {FWD_APP}
+  namespace: {FWD_NS}
+spec:
+  selector:
+    app: {FWD_APP}
+  ports:
+  - port: 80
+    targetPort: http
+"#
+    )
+}
+
+async fn kubectl_ok(ctx: &str, args: &[&str], stdin: Option<&str>) -> String {
+    use tokio::io::AsyncWriteExt;
+    let mut child = tokio::process::Command::new("kubectl")
+        .arg("--context")
+        .arg(ctx)
+        .args(args)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        // The timeout below drops the wait; without this the kubectl it gave up
+        // on would keep running past the test.
+        .kill_on_drop(true)
+        .spawn()
+        .expect("run kubectl");
+    let mut input = child.stdin.take().expect("kubectl stdin");
+    if let Some(text) = stdin {
+        input
+            .write_all(text.as_bytes())
+            .await
+            .expect("write kubectl stdin");
+    }
+    drop(input);
+    let out = tokio::time::timeout(Duration::from_secs(150), child.wait_with_output())
+        .await
+        .unwrap_or_else(|_| panic!("kubectl {args:?} timed out"))
+        .expect("kubectl output");
+    assert!(
+        out.status.success(),
+        "kubectl {args:?} failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stdout).into_owned()
+}
+
+/// The body of `GET /` through the forward's local port, or None when the
+/// tunnel does not answer within a few seconds.
+async fn get_through(port: u16) -> Option<String> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let exchange = async {
+        let mut socket = tokio::net::TcpStream::connect(("127.0.0.1", port))
+            .await
+            .ok()?;
+        socket
+            .write_all(b"GET /index.html HTTP/1.0\r\nHost: e2e\r\n\r\n")
+            .await
+            .ok()?;
+        let mut response = String::new();
+        socket.read_to_string(&mut response).await.ok()?;
+        let (head, body) = response.split_once("\r\n\r\n")?;
+        head.starts_with("HTTP/1.").then(|| body.trim().to_owned())
+    };
+    tokio::time::timeout(Duration::from_secs(10), exchange)
+        .await
+        .ok()
+        .flatten()
+}
+
+/// The pod the tunnel reaches, asked until it answers or 30 seconds pass.
+async fn pod_behind(port: u16) -> String {
+    let dl = deadline(30);
+    loop {
+        if let Some(body) = get_through(port).await.filter(|b| !b.is_empty()) {
+            return body;
+        }
+        assert!(Instant::now() < dl, "the forward on {port} never answered");
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+}
+
+/// Every `state` `forward:status:<id>` has reported, in order.
+fn forward_states(sink: &srelens_streams::test_util::TestSink, channel: &str) -> Vec<String> {
+    sink.payloads_for(channel)
+        .iter()
+        .map(|p| p["state"].as_str().unwrap_or_default().to_owned())
+        .collect()
+}
+
+/// #21's acceptance, end to end: deleting the target pod of an active Service
+/// forward recovers without user action once a replacement pod is ready. The
+/// forward must report `reconnecting`, then `active` again, and carry traffic
+/// to the replacement on the same local port.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs a live cluster and kubectl on PATH"]
+async fn service_forward_recovers_after_its_pod_is_deleted() {
+    let result = std::panic::AssertUnwindSafe(forward_recovery())
+        .catch_unwind()
+        .await;
+    // `--timeout` bounds only Kubernetes's wait for the deletion; a stuck
+    // credential helper or request would hold the process, and every live
+    // test after this one, with it. So the whole call has a deadline, and a
+    // kubectl it gives up on is killed rather than left running.
+    let ns = tokio::time::timeout(
+        Duration::from_secs(150),
+        tokio::process::Command::new("kubectl")
+            .args(["--context", &context(), "delete", "namespace", FWD_NS])
+            .args(["--ignore-not-found", "--wait=true", "--timeout=120s"])
+            .kill_on_drop(true)
+            .output(),
+    )
+    .await;
+    match ns {
+        Ok(Ok(o)) if o.status.success() => println!("teardown: namespace {FWD_NS} deleted"),
+        Ok(Ok(o)) => println!(
+            "teardown: namespace {FWD_NS} delete failed: {}",
+            String::from_utf8_lossy(&o.stderr)
+        ),
+        Ok(Err(e)) => println!("teardown: could not run kubectl: {e}"),
+        Err(_) => println!("teardown: deleting namespace {FWD_NS} did not finish within 150s"),
+    }
+    if let Err(e) = result {
+        std::panic::resume_unwind(e);
+    }
+}
+
+async fn forward_recovery() {
+    let ctx = context();
+    kubectl_ok(&ctx, &["apply", "-f", "-"], Some(&forward_fixture_yaml())).await;
+    let selector = format!("app={FWD_APP}");
+    kubectl_ok(
+        &ctx,
+        &[
+            "-n",
+            FWD_NS,
+            "rollout",
+            "status",
+            "deployment",
+            FWD_APP,
+            "--timeout=120s",
+        ],
+        None,
+    )
+    .await;
+    kubectl_ok(
+        &ctx,
+        &[
+            "-n",
+            FWD_NS,
+            "wait",
+            "--for=condition=Ready",
+            "pod",
+            "-l",
+            &selector,
+            "--timeout=120s",
+        ],
+        None,
+    )
+    .await;
+
+    let manager = srelens_streams::forward::ForwardManager::new(cache());
+    let sink = Arc::new(srelens_streams::test_util::TestSink::default());
+    let info = manager
+        .start(
+            sink.clone(),
+            ctx.clone(),
+            FWD_NS.into(),
+            "Service".into(),
+            FWD_APP.into(),
+            80,
+            None,
+        )
+        .await
+        .expect("the forward binds");
+    let status = format!("forward:status:{}", info.id);
+
+    let dl = deadline(60);
+    while !forward_states(&sink, &status).iter().any(|s| s == "active") {
+        let states = forward_states(&sink, &status);
+        assert!(
+            Instant::now() < dl && !states.iter().any(|s| s == "failed"),
+            "the forward never became active: {states:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    let first = pod_behind(info.local_port).await;
+    assert!(
+        first.starts_with(&format!("{FWD_APP}-")),
+        "the tunnel reaches the Service's pod: {first:?}"
+    );
+    println!(
+        "forward {} active on :{} -> {first}",
+        info.id, info.local_port
+    );
+
+    let before = forward_states(&sink, &status).len();
+    kubectl_ok(
+        &ctx,
+        &["-n", FWD_NS, "delete", "pod", &first, "--wait=false"],
+        None,
+    )
+    .await;
+    println!("deleted {first}");
+
+    // `reconnecting`, then `active` again, among what was reported after the
+    // delete. A `failed` means it gave up before the replacement was ready.
+    let dl = deadline(120);
+    loop {
+        let states = forward_states(&sink, &status);
+        let after = &states[before..];
+        let reconnected = after
+            .iter()
+            .position(|s| s == "reconnecting")
+            .is_some_and(|r| after[r..].iter().any(|s| s == "active"));
+        if reconnected {
+            break;
+        }
+        assert!(
+            Instant::now() < dl && !after.iter().any(|s| s == "failed"),
+            "the forward did not recover after {first} was deleted: {:?}",
+            sink.payloads_for(&status)
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+
+    let second = pod_behind(info.local_port).await;
+    assert!(
+        second.starts_with(&format!("{FWD_APP}-")) && second != first,
+        "after recovery the same local port reaches the replacement pod, not {first}: {second:?}"
+    );
+    println!(
+        "forward {} recovered on :{} -> {second}",
+        info.id, info.local_port
+    );
+    manager.stop(info.id);
+}
 // ---------------------------------------------------------------------------
 // MCP prompts, issue #25
 // ---------------------------------------------------------------------------
@@ -2643,7 +4937,10 @@ async fn mcp_prompts_name_only_real_capabilities() {
         .iter()
         .map(|p| p["name"].as_str().unwrap().to_string())
         .collect();
-    assert!(names.contains(&"pod-crashloop".to_string()), "got {names:?}");
+    assert!(
+        names.contains(&"pod-crashloop".to_string()),
+        "got {names:?}"
+    );
 
     for name in &names {
         for arguments in [
@@ -2680,6 +4977,73 @@ async fn mcp_prompts_name_only_real_capabilities() {
                     );
                 }
             }
+        }
+    }
+}
+
+#[tokio::test]
+async fn reviewed_request_refreshes_only_explicit_review_races_and_bounds_retries() {
+    use srelens_capability::{Annotations, Capability, CapabilityError};
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Mutex,
+    };
+    const STALE: &str = "Resource changed or was replaced; refresh and review the action again";
+    const CONFLICT: &str = "ApiError: the object has been modified: Conflict (Status { status: Some(Failure), code: 409, message: modified })";
+    for (errors, expected_reads, succeeds) in [
+        (vec![STALE, CONFLICT], 3, true),
+        (vec!["Resource is being deleted"], 1, false),
+        (vec!["Action request timed out"], 1, false),
+        (vec!["Forbidden"], 1, false),
+        (vec!["This action is not available: wait"], 1, false),
+        (vec!["409 unrelated error"], 1, false),
+        (vec![STALE; 20], 8, false),
+    ] {
+        let reads = Arc::new(AtomicUsize::new(0));
+        let seen = Arc::new(Mutex::new(Vec::<Value>::new()));
+        let mut reg = Registry::new();
+        let count = reads.clone();
+        reg.register(Capability::typed::<Value, Value, _, _>("k8s.getObject", "read", Annotations::READ_ONLY, move |_| {
+            let version = count.fetch_add(1, Ordering::SeqCst) + 1;
+            async move {Ok(json!({"object":{"metadata":{"uid":"u","resourceVersion":version.to_string()}}}))}
+        }));
+        let captured = seen.clone();
+        reg.register(Capability::typed::<Value, Value, _, _>(
+            "reviewed",
+            "write",
+            Annotations::MUTATING,
+            move |input| {
+                let mut seen = captured.lock().unwrap();
+                let error = errors.get(seen.len()).copied();
+                seen.push(input);
+                async move {
+                    match error {
+                        Some(error) => Err(CapabilityError::Handler(error.into())),
+                        None => Ok(json!({"requested":true})),
+                    }
+                }
+            },
+        ));
+        let mut h = Harness::new(reg);
+        let result = h
+            .reviewed_request(
+                "reviewed",
+                json!({"context":"c","kind":"Node","namespace":"","name":"n","unschedulable":true}),
+            )
+            .await;
+        assert_eq!(result.is_ok(), succeeds, "{result:?}");
+        assert_eq!(reads.load(Ordering::SeqCst), expected_reads);
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen.len(), expected_reads);
+        for (index, input) in seen.iter().enumerate() {
+            assert_eq!(input["resourceVersion"], (index + 1).to_string());
+            assert_eq!(input["uid"], "u");
+            assert_eq!(input["unschedulable"], true);
+        }
+        assert_eq!(h.covered.contains("reviewed"), succeeds);
+        if let Ok((out, review)) = result {
+            assert_eq!(out["requested"], true);
+            assert_eq!(review, *seen.last().unwrap());
         }
     }
 }

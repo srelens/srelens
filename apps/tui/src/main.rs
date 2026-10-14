@@ -1,14 +1,15 @@
 #![allow(dead_code, unused_imports)]
 
-use std::io::{self, stdout};
+use std::io::{self, stdout, Write};
 use std::path::PathBuf;
 use std::time::Duration;
 
 use clap::{Parser, Subcommand, ValueEnum};
 use crossterm::{
-    cursor::MoveTo,
+    cursor::{MoveTo, Show},
     event::{
         DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+        KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
     },
     execute,
     style::ResetColor,
@@ -20,88 +21,106 @@ use crossterm::{
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
 
+/// Whether the enhanced keyboard protocol is on, so every exit path (normal,
+/// the `$EDITOR` suspend, a panic) turns it off exactly when it turned on.
+static KEY_ENHANCEMENT_ON: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Cache whether keyboard enhancement is supported so subsequent returns
+/// (such as resuming from `$EDITOR`) do not poll stdin for 2 seconds.
+static KEYBOARD_ENHANCEMENT_SUPPORTED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+
+/// Ask the terminal to report modified keys distinctly (kitty's protocol, as
+/// crossterm's disambiguate flag). Without it Ctrl+Enter arrives as plain
+/// Enter and the Assistant cannot tell a line break from a send. Only the
+/// disambiguate flag: no release or repeat events, so every other binding
+/// sees the same presses as before. Terminals without it are left alone.
+fn push_key_enhancement(out: &mut impl std::io::Write) {
+    let supported = *KEYBOARD_ENHANCEMENT_SUPPORTED
+        .get_or_init(|| matches!(crossterm::terminal::supports_keyboard_enhancement(), Ok(true)));
+    if supported
+        && execute!(
+            out,
+            PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
+        )
+        .is_ok()
+    {
+        KEY_ENHANCEMENT_ON.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+/// Undo [`push_key_enhancement`], if it took effect.
+fn pop_key_enhancement(out: &mut impl std::io::Write) {
+    if KEY_ENHANCEMENT_ON.swap(false, std::sync::atomic::Ordering::Relaxed) {
+        let _ = execute!(out, PopKeyboardEnhancementFlags);
+    }
+}
+
+/// RAII guard that restores raw mode, alternate screen, mouse capture,
+/// bracketed paste, and keyboard enhancement if `main` returns early via `?`.
+struct TerminalCleanupGuard {
+    defused: bool,
+}
+
+impl Drop for TerminalCleanupGuard {
+    fn drop(&mut self) {
+        if !self.defused {
+            pop_key_enhancement(&mut std::io::stdout());
+            let _ = crossterm::terminal::disable_raw_mode();
+            let _ = execute!(
+                std::io::stdout(),
+                LeaveAlternateScreen,
+                DisableMouseCapture,
+                DisableBracketedPaste,
+                crossterm::cursor::Show
+            );
+        }
+    }
+}
+
 mod agent;
 mod ai_config;
 mod ai_skills;
 mod app;
+mod cli;
 mod commands;
 mod deep_link;
 mod event;
+mod mcp_server;
 mod sink;
 mod theme;
+mod tui_config;
 mod ui;
+mod quick_rca;
 mod views;
 
+use srectl::self_update;
+
 use app::{App, SuspendAction};
+use cli::{Cli, CliCommand};
 use commands::ResourceKind;
 use deep_link::DeepLink;
 use event::{AppEvent, EventHandler};
 use srelens_kube::kube;
 
-#[derive(Parser, Debug)]
-#[command(
-    name = "srelens-tui",
-    version,
-    about = "Kubernetes control room in your terminal — built in Rust with k9s navigation"
-)]
-pub struct Cli {
-    /// Kubernetes namespace to scope the initial view
-    #[arg(short, long)]
-    pub namespace: Option<String>,
-
-    /// Scope to all namespaces on launch
-    #[arg(short = 'A', long)]
-    pub all_namespaces: bool,
-
-    /// Kubernetes context to activate
-    #[arg(short, long)]
-    pub context: Option<String>,
-
-    /// Custom kubeconfig path
-    #[arg(short, long)]
-    pub kubeconfig: Option<PathBuf>,
-
-    /// Deep link URL (srelens://...) or resource target (e.g. pods, nodes, pods/my-pod)
-    pub target: Option<String>,
-
-    #[command(subcommand)]
-    pub command: Option<CliCommand>,
-}
-
-#[derive(Subcommand, Debug)]
-pub enum CliCommand {
-    /// Print cluster overview & reachability information
-    Info,
-    /// Check toolbox diagnostics (kubectl, helm, krew)
-    Toolbox,
-    /// Print version information
-    Version,
-    /// Update srelens-tui to the latest release
-    Update {
-        /// Report what an update would do, without changing anything
-        #[arg(long)]
-        check: bool,
-        /// Which releases to consider: stable, or the rolling dev
-        /// pre-releases. Defaults to the channel this binary came from.
-        #[arg(long, value_parser = ["stable", "dev"])]
-        channel: Option<String>,
-    },
-}
-
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Install rustls crypto provider immediately so any reqwest client (e.g. update check)
+    // has a provider available without panicking.
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
     // BEFORE parsing: clap exits during `--version` and `--help`, which is
     // exactly what someone whose binary vanished is likely to type first.
     //
     // An update interrupted between its two renames leaves this binary at
-    // `.srelens-tui.exe.srelens-update.old` with nothing at the real name — and no
+    // `.srectl.exe.srelens-update.old` with nothing at the real name — and no
     // run `update` to repair it, since there is nothing left to run. If
     // this process IS that displaced file, put it back. A no-op anywhere
     // else, and off Windows entirely.
     if let Ok(exe) = std::env::current_exe() {
-        match srelens_tui::self_update::recover_interrupted_update(&exe) {
+        match srectl::self_update::recover_interrupted_update(&exe) {
             Ok(Some(restored)) => eprintln!(
-                "srelens-tui: an interrupted update left this binary beside its own name; restored it to {}",
+                "srectl: an interrupted update left this binary beside its own name; restored it to {}",
                 restored.display()
             ),
             Ok(None) => {}
@@ -109,9 +128,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             // The command path is still missing, so say so rather than
             // letting someone rediscover it later.
             Err(why) => eprintln!(
-                "srelens-tui: an interrupted update left this binary at {}, and it could not be moved back: {why}. Rename it yourself to restore the command.",
+                "srectl: an interrupted update left this binary at {}, and it could not be moved back: {why}. Rename it yourself to restore the command.",
                 exe.display()
             ),
+        }
+        // This build is the last one published as srelens-tui. Running it
+        // from that name installs srectl beside it and continues as srectl,
+        // so the next update can fetch srectl archives.
+        if srectl::rebrand::should_rebrand(&exe) {
+            match srectl::rebrand::apply_rebrand(&exe, env!("CARGO_PKG_VERSION")) {
+                Ok(next) => {
+                    use std::io::IsTerminal;
+                    if std::io::stderr().is_terminal() {
+                        eprintln!("{}", srectl::rebrand::notice());
+                    }
+                    let why = srectl::rebrand::exec_next(&next);
+                    eprintln!(
+                        "srelens-tui: could not start {}: {why}",
+                        next.display()
+                    );
+                    std::process::exit(1);
+                }
+                Err(why) => eprintln!("srelens-tui: {why}"),
+            }
         }
     }
 
@@ -127,15 +166,38 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         None => srelens_registry::all_kubeconfig_paths(),
     };
 
+    // Run headless Model Context Protocol (MCP) server over stdio if requested via --mcp-stdio flag
+    if cli.mcp_stdio {
+        let server = mcp_server::build_stdio_mcp_server(
+            kubeconfig_paths,
+            cli.mcp_allow_destructive,
+            cli.mcp_allow_sensitive_reads,
+        );
+        mcp_server::run_mcp_stdio(server, tokio::io::stdin(), tokio::io::stdout()).await?;
+        return Ok(());
+    }
+
     // Handle non-interactive CLI subcommands if requested
     if let Some(cmd) = cli.command {
         match cmd {
+            CliCommand::Mcp {
+                allow_destructive,
+                allow_sensitive_reads,
+            } => {
+                let server = mcp_server::build_stdio_mcp_server(
+                    kubeconfig_paths,
+                    allow_destructive,
+                    allow_sensitive_reads,
+                );
+                mcp_server::run_mcp_stdio(server, tokio::io::stdin(), tokio::io::stdout()).await?;
+                return Ok(());
+            }
             CliCommand::Version => {
-                println!("srelens-tui v{}", env!("CARGO_PKG_VERSION"));
+                println!("srectl v{}", env!("CARGO_PKG_VERSION"));
                 return Ok(());
             }
             CliCommand::Info => {
-                println!("SRElens Kubernetes TUI (srelens-tui)");
+                println!("srectl");
                 let contexts = srelens_kube::context_resolve::resolve_contexts(&kubeconfig_paths);
                 println!("Found {} contexts across kubeconfigs:", contexts.len());
                 for ctx in contexts {
@@ -169,6 +231,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Install panic hook to restore terminal on panic
     let default_panic = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |panic_info| {
+        pop_key_enhancement(&mut stdout());
         let _ = disable_raw_mode();
         let _ = execute!(stdout(), LeaveAlternateScreen, DisableMouseCapture);
         default_panic(panic_info);
@@ -178,6 +241,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     enable_raw_mode()?;
     let mut stdout = stdout();
     execute!(stdout, EnterAlternateScreen, EnableMouseCapture, EnableBracketedPaste)?;
+    push_key_enhancement(&mut stdout);
+    let mut cleanup_guard = TerminalCleanupGuard { defused: false };
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
@@ -231,6 +296,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     .await
     .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
 
+    if parsed_target.is_none() && app.tui_config.show_feature_banner {
+        app.modal = Some(ui::Modal::FeatureBanner {
+            show_on_startup: true,
+            update_available: app.tui_config.update_available.clone(),
+        });
+    }
+
+    if app.tui_config.check_updates {
+        app.spawn_update_check();
+    }
+
     if let Some(link) = parsed_target {
         let _ = app.navigate_deep_link(&link).await;
     }
@@ -239,8 +315,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     while app.is_running {
         terminal.draw(|f| app.render(f))?;
 
-        if let Some(event) = events.recv().await {
-            match event {
+        if let Some(first_event) = events.recv().await {
+            let mut current_event = Some(first_event);
+            let mut batch_count = 0;
+
+            while let Some(event) = current_event {
+                match event {
                 AppEvent::Key(key) => {
                     app.handle_key_event(key).await;
                 }
@@ -321,6 +401,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 app.handle_cluster_overview_update(&msg);
                             } else if title == "crds_updated" {
                                 app.handle_crds_update(&msg);
+                            } else if title == "update_available" {
+                                app.handle_update_available(&msg);
                             } else if title.starts_with("crd_instances:") {
                                 app.handle_crd_instances_update(&title, &msg);
                             } else if action.starts_with("ai_") {
@@ -375,6 +457,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 app.handle_pod_metrics_update(&msg);
                             } else if title == "node_metrics_updated" {
                                 app.handle_node_metrics_update(&msg);
+                            } else if title.starts_with("yaml_applied") {
+                                app.handle_yaml_applied(&title, &msg);
                             } else {
                                 if title.starts_with("helm_rollback:") || title.starts_with("helm_uninstall:") {
                                     app.refresh_helm_releases();
@@ -390,6 +474,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         Err(err) => {
                             if title == "cluster_info_updated" || title == "cluster_info_failed" {
                                 app.handle_cluster_info_failure(&err);
+                            } else if title == "crds_updated" || title == "crds_failed" {
+                                app.handle_crds_failed(&err);
+                            } else if title.starts_with("crd_instances:") || title.starts_with("crd_instances_failed:") {
+                                app.handle_crd_instances_failed(&title, &err);
                             } else if title == "cluster_overview_updated" {
                                 // Best-effort: ignore if cluster overview cannot connect
                             } else if title == "pod_metrics_updated" || title == "node_metrics_updated" {
@@ -403,6 +491,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 target_state.append_stream_chunk(&format!("\n[Error: {}]", err));
                                 target_state.finish_turn();
                                 app.set_toast(err, theme::Theme::status_error());
+                            } else if title.starts_with("yaml_error") {
+                                app.handle_yaml_error(&err);
                             } else {
                                 app.set_toast(err, theme::Theme::status_error());
                             }
@@ -427,138 +517,178 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 AppEvent::HelmDetailResult { context, namespace, name, revision, result } => {
                     app.handle_helm_detail_result(&context, &namespace, &name, revision, result);
                 }
+                AppEvent::ArgoApplicationsChunk { context, is_remote_hub, hub_context, chunk } => {
+                    app.handle_argo_applications_chunk(&context, is_remote_hub, hub_context, chunk);
+                }
+                AppEvent::ArgoDiskSnapshot { context, result, written_at, hub_context } => {
+                    app.handle_argo_disk_snapshot(&context, result, written_at, hub_context);
+                }
+                AppEvent::ArgoApplicationsResult { context, is_remote_hub, hub_context, result } => {
+                    app.handle_argo_applications_result(&context, is_remote_hub, hub_context, result);
+                }
+                AppEvent::ArgoDetailResult { context, namespace, name, result } => {
+                    app.handle_argo_detail_result(&context, &namespace, &name, result);
+                }
+                AppEvent::ArgoActionResult { action, result } => {
+                    app.handle_argo_action_result(&action, result);
+                }
+                AppEvent::BgpResult { context, result } => {
+                    app.handle_bgp_result(&context, result);
+                }
+                AppEvent::ChangedTriageResult { context, namespace, result } => {
+                    app.handle_changed_triage_result(&context, namespace.as_deref(), result);
+                }
+                AppEvent::ChangedQuickRcaResult { key, result } => {
+                    app.handle_changed_quick_rca_result(&key, result);
+                }
+                AppEvent::ChangedCauseResult { key, result } => {
+                    app.handle_changed_cause_result(&key, result);
+                }
             }
+
+            if !app.is_running {
+                break;
+            }
+
+            batch_count += 1;
+            if batch_count >= 256 {
+                break;
+            }
+
+            current_event = events.try_recv().ok();
         }
+    }
+
+        // The selected `:changed` row's GitHub cause, asked once per rollout.
+        app.ensure_changed_cause();
 
         // Handle external tool suspend actions ($EDITOR, Pod shell, etc.)
+        // Refuse an edit with nothing to edit before leaving the screen, so a
+        // failed fetch reads as its reason, not a flash and "No YAML documents".
+        if matches!(app.requires_terminal_suspend, Some(SuspendAction::EditYaml))
+            && app.refuse_edit_without_manifest()
+        {
+            app.requires_terminal_suspend = None;
+        }
         if let Some(action) = app.requires_terminal_suspend.take() {
             // 1. Pause background event listener and wait for it to release stdin
             events.pause();
             tokio::time::sleep(Duration::from_millis(20)).await;
             while events.try_recv().is_ok() {}
 
-            // Temporarily restore terminal for external interactive session in alternate screen
+            // Temporarily restore terminal for external interactive session on primary screen
+            pop_key_enhancement(terminal.backend_mut());
             disable_raw_mode()?;
             execute!(
                 terminal.backend_mut(),
-                Clear(ClearType::All),
-                MoveTo(0, 0),
-                ResetColor,
+                LeaveAlternateScreen,
                 DisableMouseCapture,
                 DisableBracketedPaste
             )?;
-            terminal.show_cursor()?;
+            execute!(std::io::stdout(), Show)?;
             let _ = terminal.flush();
+            let _ = std::io::stdout().flush();
 
             // 2. Run external action
             match action {
                 SuspendAction::EditYaml => {
-                    if let app::ActiveView::Yaml(yaml) = &mut app.active_view {
-                        match yaml.spawn_editor() {
-                            Ok(Some(new_yaml)) => {
-                                yaml.update_content(new_yaml.clone());
+                    let (editor_res, res_kind, res_ns) = if let app::ActiveView::Yaml(yaml) = &mut app.active_view {
+                        (yaml.spawn_editor(), yaml.resource_kind.clone(), yaml.namespace.clone())
+                    } else {
+                        (Ok(None), String::new(), None)
+                    };
 
-                                let ctx = app.active_context.clone();
-                                let active_ns = app.active_namespace.clone();
-                                let cache = app.client_cache.clone();
-                                let ny = new_yaml.clone();
-                                let event_tx = app.event_tx.clone();
-                                tokio::spawn(async move {
-                                    let client = match cache.get(&ctx).await {
-                                        Ok(c) => c,
-                                        Err(e) => {
-                                            let _ = event_tx.send(AppEvent::ActionResult {
-                                                title: "yaml_error".to_string(),
-                                                result: Err(format!("Cluster connect error: {}", e)),
-                                            });
-                                            return;
-                                        }
-                                    };
+                    match editor_res {
+                        Ok(Some(new_yaml)) => {
+                            let ctx = app.active_context.clone();
+                            let active_ns = app.active_namespace.clone();
+                            let fallback_ns = res_ns.as_deref().or_else(|| {
+                                if active_ns.is_empty() || active_ns == "all" {
+                                    None
+                                } else {
+                                    Some(active_ns.as_str())
+                                }
+                            });
 
-                                    let docs = match srelens_kube::manifest::split_documents(&ny) {
-                                        Ok(d) if !d.is_empty() => d,
-                                        Ok(_) => {
-                                            let _ = event_tx.send(AppEvent::ActionResult {
-                                                title: "yaml_error".to_string(),
-                                                result: Err("No YAML documents found in file".to_string()),
-                                            });
-                                            return;
-                                        }
-                                        Err(e) => {
-                                            let _ = event_tx.send(AppEvent::ActionResult {
-                                                title: "yaml_error".to_string(),
-                                                result: Err(format!("YAML parse error: {}", e)),
-                                            });
-                                            return;
-                                        }
-                                    };
+                            let client = match app.client_cache.get(&ctx).await {
+                                Ok(c) => Some(c),
+                                Err(e) => {
+                                    app.handle_yaml_error(&format!("Cluster connect error: {}", e));
+                                    None
+                                }
+                            };
 
-                                    for mut doc in docs {
-                                        let r = match srelens_kube::manifest::resource_ref(&doc) {
-                                            Some(r) => r,
-                                            None => {
-                                                let _ = event_tx.send(AppEvent::ActionResult {
-                                                    title: "yaml_error".to_string(),
-                                                    result: Err("Document missing apiVersion, kind, or metadata.name".to_string()),
-                                                });
-                                                continue;
+                            if let Some(client) = client {
+                                match srelens_kube::manifest::split_documents(&new_yaml) {
+                                    Ok(docs) if !docs.is_empty() => {
+                                        // The documents are consumed by the apply, so the
+                                        // copy the invalidation reads is taken first. One
+                                        // result comes back per document, in order.
+                                        let applied_from = docs.clone();
+                                        let results = srelens_kube::manifest::apply_documents(&client, docs, fallback_ns, true).await;
+                                        let applied_docs: Vec<_> = results.iter().filter(|d| d.applied).collect();
+                                        let failed_docs: Vec<_> = results.iter().filter(|d| !d.applied).collect();
+
+                                        // Every applied document, in ITS namespace — not the
+                                        // view's (`app::applied_document_scopes`).
+                                        app.invalidate_applied_documents(&applied_from, fallback_ns, &results);
+
+                                        if failed_docs.is_empty() && !applied_docs.is_empty() {
+                                            let updated_names: Vec<String> = applied_docs.iter().map(|d| format!("{}/{}", d.kind, d.name)).collect();
+                                            let msg = format!("Updated {} in cluster", updated_names.join(", "));
+                                            if let app::ActiveView::Yaml(yaml) = &mut app.active_view {
+                                                yaml.commit_content(new_yaml);
                                             }
-                                        };
-
-                                        // Strip server-managed status and metadata noise before applying
-                                        if let Some(obj) = doc.as_object_mut() {
-                                            obj.remove("status");
-                                            if let Some(meta) = obj.get_mut("metadata").and_then(|m| m.as_object_mut()) {
-                                                meta.remove("managedFields");
-                                                meta.remove("resourceVersion");
-                                                meta.remove("generation");
-                                                meta.remove("uid");
-                                                meta.remove("creationTimestamp");
+                                            app.handle_yaml_applied(
+                                                &format!("yaml_applied:{}:{}", res_kind, res_ns.as_deref().unwrap_or("")),
+                                                &msg,
+                                            );
+                                        } else if !applied_docs.is_empty() {
+                                            let applied_names: Vec<String> = applied_docs.iter().map(|d| format!("{}/{}", d.kind, d.name)).collect();
+                                            let error_msgs: Vec<String> = failed_docs
+                                                .iter()
+                                                .map(|d| {
+                                                    let err = d.error.as_deref().unwrap_or("unknown apply error");
+                                                    if !d.kind.is_empty() && !d.name.is_empty() {
+                                                        format!("{}/{}: {}", d.kind, d.name, err)
+                                                    } else {
+                                                        err.to_string()
+                                                    }
+                                                })
+                                                .collect();
+                                            if let app::ActiveView::Yaml(yaml) = &mut app.active_view {
+                                                yaml.commit_content(new_yaml);
                                             }
-                                        }
-
-                                        let (group, version) = srelens_kube::manifest::parse_api_version(&r.api_version);
-                                        let gvk_info = srelens_kube::manifest::gvk_for(&r.kind);
-                                        let is_namespaced = gvk_info.map(|(_, ns)| ns).unwrap_or_else(|| {
-                                            r.namespace.as_ref().map(|s| !s.is_empty()).unwrap_or(true)
-                                        });
-
-                                        let ar = kube::core::ApiResource::from_gvk(&kube::core::GroupVersionKind::gvk(&group, &version, &r.kind));
-                                        let api: kube::Api<kube::core::DynamicObject> = if is_namespaced {
-                                            let target_ns = r.namespace.as_deref()
-                                                .filter(|s| !s.is_empty())
-                                                .unwrap_or(if active_ns.is_empty() || active_ns == "all" { "default" } else { &active_ns });
-                                            kube::Api::namespaced_with(client.clone(), target_ns, &ar)
+                                            app.handle_yaml_partial_applied(&applied_names.join(", "), &error_msgs.join("; "));
                                         } else {
-                                            kube::Api::all_with(client.clone(), &ar)
-                                        };
-
-                                        let params = kube::api::PatchParams::apply("srelens").force();
-                                        match api.patch(&r.name, &params, &kube::api::Patch::Apply(&doc)).await {
-                                            Ok(_) => {
-                                                let _ = event_tx.send(AppEvent::ActionResult {
-                                                    title: "yaml_applied".to_string(),
-                                                    result: Ok(format!("Updated {}/{} in cluster", r.kind, r.name)),
-                                                });
-                                            }
-                                            Err(e) => {
-                                                let clean_err = srelens_kube::manifest::clean_kube_error(e);
-                                                let _ = event_tx.send(AppEvent::ActionResult {
-                                                    title: "yaml_error".to_string(),
-                                                    result: Err(format!("Apply error: {}", clean_err)),
-                                                });
-                                            }
+                                            let errors: Vec<String> = failed_docs
+                                                .iter()
+                                                .map(|d| {
+                                                    let err = d.error.as_deref().unwrap_or("unknown apply error");
+                                                    if !d.kind.is_empty() && !d.name.is_empty() {
+                                                        format!("{}/{}: {}", d.kind, d.name, err)
+                                                    } else {
+                                                        err.to_string()
+                                                    }
+                                                })
+                                                .collect();
+                                            app.handle_yaml_error(&errors.join("; "));
                                         }
                                     }
-                                });
-                                app.set_toast("Applying changes to cluster...".to_string(), theme::Theme::status_ok());
+                                    Ok(_) => {
+                                        app.handle_yaml_error("No YAML documents found in file");
+                                    }
+                                    Err(e) => {
+                                        app.handle_yaml_error(&format!("YAML parse error: {}", e));
+                                    }
+                                }
                             }
-                            Ok(None) => {
-                                app.set_toast("No changes made in $EDITOR".to_string(), theme::Theme::status_dim());
-                            }
-                            Err(e) => {
-                                app.set_toast(format!("Editor error: {}", e), theme::Theme::status_error());
-                            }
+                        }
+                        Ok(None) => {
+                            app.set_toast("No changes made in $EDITOR".to_string(), theme::Theme::status_dim());
+                        }
+                        Err(e) => {
+                            app.set_toast(format!("Editor error: {}", e), theme::Theme::status_error());
                         }
                     }
                 }
@@ -590,6 +720,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         app.set_toast(e, theme::Theme::status_error());
                     }
                 }
+                SuspendAction::NodeSsh { destination } => {
+                    if let Err(e) = views::ExecRunner::run_node_ssh(&destination) {
+                        app.set_toast(e, theme::Theme::status_error());
+                    }
+                }
             }
 
             // 3. Flush any leftover leaked sequences from child process (e.g. vim OSC queries)
@@ -607,6 +742,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 EnableMouseCapture,
                 EnableBracketedPaste
             )?;
+            push_key_enhancement(terminal.backend_mut());
             terminal.hide_cursor()?;
             terminal.clear()?;
             let _ = terminal.flush();
@@ -623,6 +759,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // Clean exit
+    cleanup_guard.defused = true;
+    pop_key_enhancement(terminal.backend_mut());
     disable_raw_mode()?;
     execute!(terminal.backend_mut(), LeaveAlternateScreen, DisableMouseCapture, DisableBracketedPaste)?;
     terminal.show_cursor()?;
@@ -630,7 +768,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// `srelens-tui update` — see `self_update` for why each step is where it is.
+/// `srectl update` — see `self_update` for why each step is where it is.
 ///
 /// Written as a plain synchronous function: it runs before the terminal is
 /// touched and exits, so there is nothing to interleave with.
@@ -656,7 +794,7 @@ fn run_update(
 }
 
 fn update_off_the_runtime(check_only: bool, channel: Option<String>) -> Result<(), String> {
-    use srelens_tui::self_update::{self, Channel, Check, UpdateError};
+    use srectl::self_update::{self, Channel, Check, UpdateError};
 
     // reqwest is built with `rustls-no-provider`, which does NOT pick a
     // provider on its own: building a client without one panics inside
@@ -688,7 +826,7 @@ fn update_off_the_runtime(check_only: bool, channel: Option<String>) -> Result<(
 
     let fetch = |url: &str| -> Result<Vec<u8>, UpdateError> {
         let client = reqwest::blocking::Client::builder()
-            .user_agent(concat!("srelens-tui/", env!("CARGO_PKG_VERSION")))
+            .user_agent(concat!("srectl/", env!("CARGO_PKG_VERSION")))
             .timeout(std::time::Duration::from_secs(120))
             .build()
             .map_err(|e| UpdateError::Download(e.to_string()))?;
@@ -717,7 +855,7 @@ fn update_off_the_runtime(check_only: bool, channel: Option<String>) -> Result<(
         Ok(Check::Available(plan)) => *plan,
         Ok(Check::UpToDate { channel, .. }) => {
             println!(
-                "srelens-tui {current} is the latest {} release.",
+                "srectl {current} is the latest {} release.",
                 channel.as_str()
             );
             return Ok(());
@@ -726,12 +864,12 @@ fn update_off_the_runtime(check_only: bool, channel: Option<String>) -> Result<(
             // Only this channel was consulted, so that is all that can be
             // claimed. Naming the other one turns a dead end into a next step.
             print!(
-                "srelens-tui {current} is ahead of the latest {} release ({latest}); there is no {} update to install.",
+                "srectl {current} is ahead of the latest {} release ({latest}); there is no {} update to install.",
                 channel.as_str(),
                 channel.as_str()
             );
             match channel {
-                Channel::Stable => println!(" Try `srelens-tui update --channel dev`."),
+                Channel::Stable => println!(" Try `srectl update --channel dev`."),
                 Channel::Dev => println!(),
             }
             return Ok(());
@@ -749,7 +887,7 @@ fn update_off_the_runtime(check_only: bool, channel: Option<String>) -> Result<(
             format!(" --channel {}", channel.as_str())
         };
         println!(
-            "srelens-tui {} is available (you have {}).\n  {}\nRun `srelens-tui update{}` to install it.",
+            "srectl {} is available (you have {}).\n  {}\nRun `srectl update{}` to install it.",
             plan.latest, plan.current, plan.archive_url, flag
         );
         return Ok(());
@@ -761,22 +899,26 @@ fn update_off_the_runtime(check_only: bool, channel: Option<String>) -> Result<(
         "Switching"
     };
     println!(
-        "{verb} srelens-tui {} -> {} ({} channel)…",
+        "{verb} srectl {} -> {} ({} channel)…",
         plan.current,
         plan.latest,
         channel.as_str()
     );
-    if let Err(error) = self_update::apply(&plan, &fetch) {
-        fail(error);
-    }
+    let signer = match self_update::apply(&plan, &fetch) {
+        Ok(signer) => signer,
+        Err(error) => fail(error),
+    };
     println!("Installed {} to {}", plan.latest, exe.display());
+    // What was proved, in the terms the install guide uses to check a
+    // download by hand: the key's full fingerprint.
+    println!("Verified: its checksums are signed by srelens release key {signer}.");
     Ok(())
 }
 
 /// Report an update failure the way a command-line tool should: the sentence
 /// the error carries, on stderr, and a non-zero status so a script wrapping
 /// this can tell.
-fn fail(error: srelens_tui::self_update::UpdateError) -> ! {
-    eprintln!("srelens-tui: {error}");
+fn fail(error: srectl::self_update::UpdateError) -> ! {
+    eprintln!("srectl: {error}");
     std::process::exit(1);
 }

@@ -1,53 +1,57 @@
-//! Embedded frontend assets: serves the Vite build of `apps/desktop/dist`
-//! with an SPA fallback to index.html for client-side routes. In debug builds
-//! rust-embed reads the folder from disk at runtime; release builds embed the
-//! files into the binary.
+//! The frontend: serves the Vite build of `apps/desktop/dist` with an SPA
+//! fallback to index.html for client-side routes. This crate embeds no copy of
+//! it. Each binary hands in the one it carries: `srelens-server` embeds its own,
+//! and the desktop app's `serve` mode reads the copy Tauri embedded, so the
+//! desktop does not ship the bundle twice.
 
+use std::borrow::Cow;
+use std::sync::Arc;
+
+use axum::extract::State;
 use axum::http::{header, StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
-use rust_embed::RustEmbed;
 
-#[derive(RustEmbed)]
-#[folder = "../../apps/desktop/dist"]
-struct Assets;
+use crate::AppState;
 
-/// Decide which embedded file a GET path resolves to: the file itself when it
-/// exists, `index.html` for extension-less SPA routes, `None` when neither
-/// exists (frontend not built, or a real missing asset like `/app.js`).
-fn resolve(path: &str, exists: impl Fn(&str) -> bool) -> Option<String> {
+/// A frontend file by its path under the bundle root (`index.html`,
+/// `assets/app.js`), or `None` when the bundle has no such file.
+pub type AssetSource = Arc<dyn Fn(&str) -> Option<Cow<'static, [u8]>> + Send + Sync>;
+
+/// Decide which file a GET path resolves to, and fetch it: the file itself when
+/// it exists, `index.html` for extension-less SPA routes, `None` when neither
+/// exists (frontend not built, or a real missing asset like `/app.js`). Each
+/// file is fetched once, because the desktop's are decompressed on every fetch.
+fn resolve<T>(path: &str, get: impl Fn(&str) -> Option<T>) -> Option<(&str, T)> {
     let trimmed = path.trim_start_matches('/');
     let candidate = if trimmed.is_empty() {
         "index.html"
     } else {
         trimmed
     };
-    if exists(candidate) {
-        return Some(candidate.to_string());
+    if let Some(data) = get(candidate) {
+        return Some((candidate, data));
     }
-    if !candidate.contains('.') && exists("index.html") {
-        return Some("index.html".to_string());
+    if candidate.contains('.') {
+        return None;
     }
-    None
+    get("index.html").map(|data| ("index.html", data))
 }
 
-/// Router fallback handler: serve the embedded frontend.
-pub async fn serve_asset(uri: Uri) -> Response {
-    match resolve(uri.path(), |p| Assets::get(p).is_some()) {
-        Some(path) => {
-            let file = Assets::get(&path).expect("resolved asset exists");
-            let mime = mime_guess::from_path(&path).first_or_octet_stream();
+/// Router fallback handler: serve the frontend the binary handed in.
+pub async fn serve_asset(State(state): State<AppState>, uri: Uri) -> Response {
+    match resolve(uri.path(), |p| (state.assets)(p)) {
+        Some((path, data)) => {
+            let mime = mime_guess::from_path(path).first_or_octet_stream();
             (
                 StatusCode::OK,
                 [(header::CONTENT_TYPE, mime.as_ref().to_string())],
-                file.data.into_owned(),
+                data,
             )
                 .into_response()
         }
-        None => (
-            StatusCode::NOT_FOUND,
-            "frontend not built — run `pnpm --filter @srelens/desktop build`",
-        )
-            .into_response(),
+        // A missing file, an unbuilt bundle and a desktop built without
+        // `custom-protocol` all look the same from here, so no build advice.
+        None => (StatusCode::NOT_FOUND, "not found").into_response(),
     }
 }
 
@@ -55,42 +59,49 @@ pub async fn serve_asset(uri: Uri) -> Response {
 mod tests {
     use super::resolve;
 
-    fn dist<'a>(files: &'a [&'a str]) -> impl Fn(&str) -> bool + 'a {
-        move |p: &str| files.contains(&p)
+    /// A bundle of `files`, each holding its own path, so a test sees which
+    /// file was fetched as well as which path it resolved to.
+    fn dist<'a>(files: &'a [&'a str]) -> impl Fn(&str) -> Option<String> + 'a {
+        move |p: &str| files.contains(&p).then(|| p.to_owned())
+    }
+
+    fn resolved(path: &str, files: &[&str]) -> Option<(String, String)> {
+        resolve(path, dist(files)).map(|(at, data)| (at.to_owned(), data))
+    }
+
+    fn file(path: &str) -> Option<(String, String)> {
+        Some((path.to_owned(), path.to_owned()))
     }
 
     #[test]
     fn root_serves_index() {
-        assert_eq!(
-            resolve("/", dist(&["index.html"])),
-            Some("index.html".to_string())
-        );
+        assert_eq!(resolved("/", &["index.html"]), file("index.html"));
     }
 
     #[test]
     fn existing_file_is_served_directly() {
         assert_eq!(
-            resolve("/assets/app.js", dist(&["index.html", "assets/app.js"])),
-            Some("assets/app.js".to_string())
+            resolved("/assets/app.js", &["index.html", "assets/app.js"]),
+            file("assets/app.js")
         );
     }
 
     #[test]
     fn spa_route_falls_back_to_index() {
         assert_eq!(
-            resolve("/settings/clusters", dist(&["index.html"])),
-            Some("index.html".to_string())
+            resolved("/settings/clusters", &["index.html"]),
+            file("index.html")
         );
     }
 
     #[test]
     fn missing_file_with_extension_is_none() {
-        assert_eq!(resolve("/missing.js", dist(&["index.html"])), None);
+        assert_eq!(resolved("/missing.js", &["index.html"]), None);
     }
 
     #[test]
     fn unbuilt_frontend_is_none() {
-        assert_eq!(resolve("/", dist(&[])), None);
-        assert_eq!(resolve("/settings", dist(&[])), None);
+        assert_eq!(resolved("/", &[]), None);
+        assert_eq!(resolved("/settings", &[]), None);
     }
 }

@@ -21,6 +21,13 @@ export interface InspectorFact {
 export interface InspectorProps {
   /** The subject's name — the heading of the peek, and the panel's own name. */
   name: ReactNode;
+  /**
+   * A small control that acts on the name itself, drawn directly after it —
+   * a copy button. Shown when the name's row is hovered or holds keyboard
+   * focus (see `.name-row` in kit.css), so the heading reads as a heading
+   * until the reader reaches for it.
+   */
+  nameAction?: ReactNode;
   /** The line beneath it, saying what the subject is (e.g. "Deployment · checkout"). */
   subtitle?: ReactNode;
   /**
@@ -119,6 +126,7 @@ export interface InspectorProps {
  */
 export function Inspector({
   name,
+  nameAction,
   subtitle,
   flagged = false,
   flaggedLabel = "Needs attention",
@@ -168,7 +176,7 @@ export function Inspector({
       <header className="rule-b px-3 py-2">
         <div className="flex items-start justify-between gap-2">
           <div className="min-w-0">
-            <div className="flex items-center gap-1.5">
+            <div className="name-row flex items-center gap-1.5">
               {flagged && (
                 <>
                   {/* THE RULE: `flagged` decides WHETHER there is a dot;
@@ -210,6 +218,11 @@ export function Inspector({
               <h2 id={headingId} className="truncate text-[1.25rem] font-semibold">
                 {name}
               </h2>
+              {filled(nameAction) && (
+                <span data-slot="inspector-name-action" className="name-action">
+                  {nameAction}
+                </span>
+              )}
             </div>
             {filled(subtitle) && <p className="path mt-px truncate">{subtitle}</p>}
           </div>

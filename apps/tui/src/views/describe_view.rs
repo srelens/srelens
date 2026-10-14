@@ -12,6 +12,10 @@ pub struct DescribeViewState {
     pub resource_name: String,
     pub resource_kind: String,
     pub namespace: Option<String>,
+    /// The `apiVersion` this view was pinned to by the row that opened it,
+    /// when the row knew which CRD it came from. `None` is a view that
+    /// resolved its kind by name.
+    pub pinned_api_version: Option<String>,
     pub content: String,
     pub lines: Vec<String>,
     pub scroll_offset: usize,
@@ -29,6 +33,7 @@ impl DescribeViewState {
             resource_name: name,
             resource_kind: kind,
             namespace,
+            pinned_api_version: None,
             content,
             lines,
             scroll_offset: 0,

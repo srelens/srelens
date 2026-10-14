@@ -1,0 +1,3523 @@
+//! ArgoCD application capabilities and data models.
+//!
+//! Handles both in-cluster ArgoCD deployments and Hub-and-Spoke topologies
+//! where a management cluster (with arbitrary name) manages workloads
+//! deployed to remote spoke clusters.
+
+use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, RwLock};
+use std::time::{Duration, Instant};
+
+use k8s_openapi::api::core::v1::Secret;
+use kube::api::{Api, ApiResource, DynamicObject, ListParams, Patch, PatchParams};
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+
+use crate::client_cache::ClientCache;
+use crate::connect::{request_timeout, MAX_TIMEOUT_SECS, MIN_TIMEOUT_SECS};
+
+/// Timeout for ArgoCD reads, in seconds; 0 means "follow the process-wide
+/// request timeout". A remote hub with thousands of Applications can need far
+/// longer than one list of Pods, so it is settable on its own (the TUI's
+/// `:config`) without slowing every other call. Kept as an atomic, like the
+/// request timeout, so a change applies to the next fetch with no threading.
+static ARGO_TIMEOUT_SECS: AtomicU64 = AtomicU64::new(0);
+
+/// The budget for one ArgoCD read: the Application list (local and hub) and
+/// the Application detail. The cluster-secret lookups keep their own 2s fast
+/// path, and writes (sync, auto-sync, hard refresh) are not bounded by it,
+/// because timing out a write does not cancel it on the server.
+pub fn argo_timeout() -> Duration {
+    match ARGO_TIMEOUT_SECS.load(Ordering::Relaxed) {
+        0 => request_timeout(),
+        secs => Duration::from_secs(secs),
+    }
+}
+
+/// Set the ArgoCD read timeout, clamped to the request-timeout bounds, or
+/// `None` to follow the request timeout. Returns the value applied.
+pub fn set_argo_timeout_secs(secs: Option<u64>) -> Option<u64> {
+    let applied = secs.map(|s| s.clamp(MIN_TIMEOUT_SECS, MAX_TIMEOUT_SECS));
+    ARGO_TIMEOUT_SECS.store(applied.unwrap_or(0), Ordering::Relaxed);
+    applied
+}
+
+pub fn argo_application_resource() -> ApiResource {
+    ApiResource {
+        group: "argoproj.io".to_string(),
+        version: "v1alpha1".to_string(),
+        api_version: "argoproj.io/v1alpha1".to_string(),
+        kind: "Application".to_string(),
+        plural: "applications".to_string(),
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArgoResourceItem {
+    pub group: String,
+    pub version: String,
+    pub kind: String,
+    pub namespace: String,
+    pub name: String,
+    pub status: String,
+    pub health: String,
+    pub message: String,
+    pub hook: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArgoSyncHistoryItem {
+    pub id: i64,
+    pub revision: String,
+    pub deployed_at: String,
+    pub repo_url: String,
+    pub path: String,
+    /// When the sync began; empty when Argo did not record it. With
+    /// `deployed_at` it bounds the window in which the sync created objects.
+    #[serde(default)]
+    pub deploy_started_at: String,
+    /// `initiatedBy.username`, or `"automated"` for an auto-sync. `None` on
+    /// Argo versions that do not record the initiator in history.
+    #[serde(default)]
+    pub initiated_by: Option<String>,
+    /// The source is a Helm chart repository: `revision` is a chart
+    /// version, not a git commit, and has no git history to look up.
+    #[serde(default)]
+    pub is_chart: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArgoApplication {
+    pub name: String,
+    pub namespace: String,
+    /// `metadata.uid` of the object as listed: which Application this is, as
+    /// opposed to another later created under the same namespace and name.
+    pub uid: String,
+    /// `metadata.resourceVersion` of the object as listed: the version the
+    /// operator is looking at when they confirm a write.
+    pub resource_version: String,
+    pub project: String,
+    pub destination_server: String,
+    pub destination_name: String,
+    pub destination_namespace: String,
+    pub repo_url: String,
+    pub target_revision: String,
+    pub path: String,
+    pub sync_status: String,
+    pub health_status: String,
+    pub health_message: String,
+    pub sync_revision: String,
+    pub operation_phase: String,
+    pub operation_message: String,
+    pub auto_sync_enabled: bool,
+    pub self_heal_enabled: bool,
+    pub prune_enabled: bool,
+    pub last_sync_time: String,
+    pub created_at: String,
+    pub resources: Vec<ArgoResourceItem>,
+    pub sync_history: Vec<ArgoSyncHistoryItem>,
+}
+
+/// The revision and source of one `status.history` entry. A multi-source
+/// entry leaves `revision` and `source` empty and lists `revisions[i]` for
+/// `sources[i]`; the first git source is the one whose commits can explain a
+/// rollout, so it wins over a chart listed before it.
+fn history_source(h: &Value) -> (String, Option<&Value>) {
+    let single = h.get("revision").and_then(|v| v.as_str()).unwrap_or("");
+    if !single.is_empty() || h.get("sources").is_none() {
+        return (single.to_string(), h.get("source"));
+    }
+    let sources = h
+        .get("sources")
+        .and_then(|s| s.as_array())
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+    let revisions = h
+        .get("revisions")
+        .and_then(|r| r.as_array())
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+    let idx = sources
+        .iter()
+        .position(|s| s.get("chart").is_none())
+        .unwrap_or(0);
+    let rev = revisions
+        .get(idx)
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    (rev, sources.get(idx))
+}
+
+impl ArgoApplication {
+    pub fn from_json(val: &Value) -> Self {
+        let meta = val.get("metadata");
+        let name = meta
+            .and_then(|m| m.get("name"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let namespace = meta
+            .and_then(|m| m.get("namespace"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("argocd")
+            .to_string();
+        let uid = meta
+            .and_then(|m| m.get("uid"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let resource_version = meta
+            .and_then(|m| m.get("resourceVersion"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let created_at = meta
+            .and_then(|m| m.get("creationTimestamp"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+
+        let spec = val.get("spec");
+        let project = spec
+            .and_then(|s| s.get("project"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("default")
+            .to_string();
+
+        let source = spec.and_then(|s| s.get("source"));
+        let repo_url = source
+            .and_then(|s| s.get("repoURL"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let target_revision = source
+            .and_then(|s| s.get("targetRevision"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("HEAD")
+            .to_string();
+        let path = source
+            .and_then(|s| s.get("path"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+
+        let dest = spec.and_then(|s| s.get("destination"));
+        let destination_server = dest
+            .and_then(|d| d.get("server"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let destination_name = dest
+            .and_then(|d| d.get("name"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let destination_namespace = dest
+            .and_then(|d| d.get("namespace"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+
+        let sync_policy = spec.and_then(|s| s.get("syncPolicy"));
+        let automated = sync_policy.and_then(|p| p.get("automated"));
+        let auto_sync_enabled = automated.is_some() && !automated.unwrap().is_null();
+        let self_heal_enabled = automated
+            .and_then(|a| a.get("selfHeal"))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let prune_enabled = automated
+            .and_then(|a| a.get("prune"))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+
+        let status = val.get("status");
+        let sync = status.and_then(|s| s.get("sync"));
+        let sync_status = sync
+            .and_then(|s| s.get("status"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let sync_revision = sync
+            .and_then(|s| s.get("revision"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+
+        let health = status.and_then(|s| s.get("health"));
+        let health_status = health
+            .and_then(|h| h.get("status"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("Unknown")
+            .to_string();
+        let health_message = health
+            .and_then(|h| h.get("message"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+
+        let op_state = status.and_then(|s| s.get("operationState"));
+        let operation_phase = op_state
+            .and_then(|o| o.get("phase"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let operation_message = op_state
+            .and_then(|o| o.get("message"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let last_sync_time = op_state
+            .and_then(|o| o.get("finishedAt"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+
+        let mut resources = Vec::new();
+        if let Some(res_arr) = status
+            .and_then(|s| s.get("resources"))
+            .and_then(|r| r.as_array())
+        {
+            for r in res_arr {
+                let group = r
+                    .get("group")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let version = r
+                    .get("version")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let kind = r
+                    .get("kind")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let ns = r
+                    .get("namespace")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let r_name = r
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let r_status = r
+                    .get("status")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("Synced")
+                    .to_string();
+                let r_health = r
+                    .get("health")
+                    .and_then(|h| h.get("status"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("Healthy")
+                    .to_string();
+                let r_msg = r
+                    .get("health")
+                    .and_then(|h| h.get("message"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let hook = r
+                    .get("hook")
+                    .and_then(|v| v.as_str())
+                    .map(ToString::to_string);
+
+                resources.push(ArgoResourceItem {
+                    group,
+                    version,
+                    kind,
+                    namespace: ns,
+                    name: r_name,
+                    status: r_status,
+                    health: r_health,
+                    message: r_msg,
+                    hook,
+                });
+            }
+        }
+
+        let mut sync_history = Vec::new();
+        if let Some(hist_arr) = status
+            .and_then(|s| s.get("history"))
+            .and_then(|h| h.as_array())
+        {
+            for h in hist_arr {
+                let id = h.get("id").and_then(|v| v.as_i64()).unwrap_or(0);
+                let str_at = |key: &str| {
+                    h.get(key)
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string()
+                };
+                let deployed_at = str_at("deployedAt");
+                let deploy_started_at = str_at("deployStartedAt");
+                let (rev, h_src) = history_source(h);
+                let h_url = h_src
+                    .and_then(|s| s.get("repoURL"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let h_path = h_src
+                    .and_then(|s| s.get("path"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let is_chart = h_src.is_some_and(|s| s.get("chart").is_some());
+                let initiated_by = h.get("initiatedBy").and_then(|i| {
+                    if i.get("automated").and_then(|v| v.as_bool()) == Some(true) {
+                        Some("automated".to_string())
+                    } else {
+                        i.get("username")
+                            .and_then(|v| v.as_str())
+                            .filter(|s| !s.is_empty())
+                            .map(ToString::to_string)
+                    }
+                });
+
+                sync_history.push(ArgoSyncHistoryItem {
+                    id,
+                    revision: rev,
+                    deployed_at,
+                    repo_url: h_url,
+                    path: h_path,
+                    deploy_started_at,
+                    initiated_by,
+                    is_chart,
+                });
+            }
+        }
+
+        Self {
+            name,
+            namespace,
+            uid,
+            resource_version,
+            project,
+            destination_server,
+            destination_name,
+            destination_namespace,
+            repo_url,
+            target_revision,
+            path,
+            sync_status,
+            health_status,
+            health_message,
+            sync_revision,
+            operation_phase,
+            operation_message,
+            auto_sync_enabled,
+            self_heal_enabled,
+            prune_enabled,
+            last_sync_time,
+            created_at,
+            resources,
+            sync_history,
+        }
+    }
+}
+
+/// The Application an operator reviewed before confirming a write: where it
+/// lives, which object it was, and the version they saw. A sync or auto-sync
+/// toggle is pinned to all four, so it cannot land on a replacement created
+/// under the same namespace and name while the confirmation was open (#620).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReviewedApplication {
+    pub namespace: String,
+    pub name: String,
+    pub uid: String,
+    pub resource_version: String,
+}
+
+impl ArgoApplication {
+    /// This Application's identity and version, as listed.
+    pub fn reviewed(&self) -> ReviewedApplication {
+        ReviewedApplication {
+            namespace: self.namespace.clone(),
+            name: self.name.clone(),
+            uid: self.uid.clone(),
+            resource_version: self.resource_version.clone(),
+        }
+    }
+}
+
+/// What a pinned write reports when the Application it was pinned to has been
+/// replaced or has changed since the operator reviewed it.
+pub const APPLICATION_CHANGED: &str =
+    "the Application changed since you reviewed it; refresh and try again";
+
+/// What a pinned write reports when the Application it was pinned to has been
+/// deleted since the operator reviewed it.
+pub const APPLICATION_GONE: &str =
+    "the Application you reviewed no longer exists; refresh and try again";
+
+/// Whether a write's error means what the operator reviewed is out of date —
+/// the Application changed, was replaced, or is gone — so the caller can reload
+/// what it shows before they try again. Only a refusal the API server itself
+/// wrote is mapped to these messages, so an endpoint failure with the same
+/// HTTP code (a proxy's plain-text 404) is never read as one.
+pub fn is_stale_review(err: &str) -> bool {
+    err.contains(APPLICATION_CHANGED) || err.contains(APPLICATION_GONE)
+}
+
+pub fn normalize_server_url(url: &str) -> String {
+    url.trim().trim_end_matches('/').to_lowercase()
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ArgoClusterMapping {
+    /// Maps cluster name (lowercase) -> normalized server URL
+    pub name_to_server: HashMap<String, String>,
+    /// Maps normalized server URL -> cluster name (lowercase)
+    pub server_to_name: HashMap<String, String>,
+}
+
+impl ArgoClusterMapping {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn insert(&mut self, name: &str, server: &str) {
+        let n = name.trim().to_lowercase();
+        let s = normalize_server_url(server);
+        if !n.is_empty() && !s.is_empty() {
+            self.name_to_server.insert(n.clone(), s.clone());
+            self.server_to_name.insert(s, n);
+        }
+    }
+
+    pub fn server_for_name(&self, name: &str) -> Option<&str> {
+        self.name_to_server
+            .get(&name.trim().to_lowercase())
+            .map(|s| s.as_str())
+    }
+
+    pub fn name_for_server(&self, server: &str) -> Option<&str> {
+        let norm = normalize_server_url(server);
+        self.server_to_name.get(&norm).map(|s| s.as_str())
+    }
+}
+
+fn extract_secret_str(secret: &Secret, key: &str) -> Option<String> {
+    if let Some(ref data) = secret.data {
+        if let Some(bs) = data.get(key) {
+            if let Ok(s) = String::from_utf8(bs.0.clone()) {
+                let trimmed = s.trim().to_string();
+                if !trimmed.is_empty() {
+                    return Some(trimmed);
+                }
+            }
+        }
+    }
+    if let Some(ref string_data) = secret.string_data {
+        if let Some(s) = string_data.get(key) {
+            let trimmed = s.trim().to_string();
+            if !trimmed.is_empty() {
+                return Some(trimmed);
+            }
+        }
+    }
+    None
+}
+
+static CLUSTER_MAPPING_CACHE: RwLock<Option<HashMap<String, (Instant, ArgoClusterMapping)>>> =
+    RwLock::new(None);
+const CLUSTER_MAPPING_TTL: Duration = Duration::from_secs(300);
+
+pub fn invalidate_argo_cluster_mapping_cache() {
+    if let Ok(mut guard) = CLUSTER_MAPPING_CACHE.write() {
+        *guard = None;
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct ArgoAppsCacheKey {
+    current_context: String,
+    hub_context: Option<String>,
+    current_cluster_name: Option<String>,
+    current_server_url: Option<String>,
+    target_namespace: Option<String>,
+}
+
+pub const ARGO_FRESH_FOR: Duration = Duration::from_secs(600);
+pub const ARGO_APPS_CACHE_TTL: Duration = ARGO_FRESH_FOR;
+
+#[derive(Debug, Clone)]
+pub struct ArgoHubCacheEntry {
+    pub fetched_at: Instant,
+    pub fetched_at_unix: u64,
+    pub all_apps: Vec<ArgoApplication>,
+    pub truncated: bool,
+}
+
+static ARGO_APPS_CACHE: RwLock<
+    Option<HashMap<ArgoAppsCacheKey, (Instant, ArgoApplicationsFetchResult)>>,
+> = RwLock::new(None);
+static ARGO_HUB_CACHE: RwLock<Option<HashMap<String, ArgoHubCacheEntry>>> = RwLock::new(None);
+static ARGO_SPOKE_PROBE_CACHE: RwLock<Option<HashSet<String>>> = RwLock::new(None);
+
+pub fn invalidate_argo_applications_cache() {
+    if let Ok(mut guard) = ARGO_APPS_CACHE.write() {
+        *guard = None;
+    }
+    if let Ok(mut guard) = ARGO_HUB_CACHE.write() {
+        *guard = None;
+    }
+    if let Ok(mut guard) = ARGO_SPOKE_PROBE_CACHE.write() {
+        *guard = None;
+    }
+}
+
+pub fn argo_disk_cache_path(context: &str) -> Option<std::path::PathBuf> {
+    let base = if let Ok(custom) = std::env::var("SRELENS_CACHE_DIR") {
+        if custom.trim().is_empty() {
+            dirs::cache_dir()
+                .map(|p| p.join("srelens"))
+                .or_else(|| dirs::home_dir().map(|h| h.join(".cache").join("srelens")))?
+        } else {
+            std::path::PathBuf::from(custom)
+        }
+    } else {
+        dirs::cache_dir()
+            .map(|p| p.join("srelens"))
+            .or_else(|| dirs::home_dir().map(|h| h.join(".cache").join("srelens")))?
+    };
+    let dir = base.join("argo");
+    let safe_name: String = context
+        .chars()
+        .map(|c| {
+            if c.is_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    Some(dir.join(format!("{}.json", safe_name)))
+}
+
+#[derive(Serialize, Deserialize)]
+struct ArgoDiskCacheEnvelope {
+    timestamp: u64,
+    data: ArgoApplicationsFetchResult,
+}
+
+pub fn load_argo_apps_disk_cache(context: &str) -> Option<ArgoApplicationsFetchResult> {
+    load_argo_apps_disk_cache_with_age(context).map(|(data, _)| data)
+}
+
+/// [`load_argo_apps_disk_cache`], with when the snapshot was written, in Unix
+/// seconds, so a reader can say how old it is.
+pub fn load_argo_apps_disk_cache_with_age(
+    context: &str,
+) -> Option<(ArgoApplicationsFetchResult, u64)> {
+    let path = argo_disk_cache_path(context)?;
+    let content = std::fs::read_to_string(path).ok()?;
+    let envelope: ArgoDiskCacheEnvelope = serde_json::from_str(&content).ok()?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_secs();
+    if now.saturating_sub(envelope.timestamp) < 7 * 86400 {
+        Some((envelope.data, envelope.timestamp))
+    } else {
+        None
+    }
+}
+
+pub fn save_argo_apps_disk_cache(context: &str, data: &ArgoApplicationsFetchResult) {
+    if let Some(path) = argo_disk_cache_path(context) {
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let envelope = ArgoDiskCacheEnvelope {
+            timestamp: data.fetched_at.unwrap_or(now),
+            data: data.clone(),
+        };
+        if let Ok(json) = serde_json::to_string(&envelope) {
+            let unique_id = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0);
+            let tmp_path = path.with_extension(format!("tmp.{}.{}", std::process::id(), unique_id));
+            if std::fs::write(&tmp_path, json).is_ok() {
+                if std::fs::rename(&tmp_path, path).is_err() {
+                    let _ = std::fs::remove_file(&tmp_path);
+                }
+            }
+        }
+    }
+}
+
+pub fn invalidate_argo_disk_cache(context: &str) {
+    if let Some(path) = argo_disk_cache_path(context) {
+        let _ = std::fs::remove_file(path);
+    }
+}
+
+pub fn load_argo_hub_disk_cache_with_age(hub: &str) -> Option<(ArgoApplicationsFetchResult, u64)> {
+    load_argo_apps_disk_cache_with_age(&format!("hub-{}", hub))
+}
+
+pub fn save_argo_hub_disk_cache(hub: &str, result: &ArgoApplicationsFetchResult) {
+    save_argo_apps_disk_cache(&format!("hub-{}", hub), result);
+}
+
+pub fn filter_hub_apps_for_spoke(
+    all_apps: &[ArgoApplication],
+    current_context: &str,
+    current_cluster_name: Option<&str>,
+    current_server_url: Option<&str>,
+    cluster_mapping: Option<&ArgoClusterMapping>,
+    target_namespace: Option<&str>,
+    match_by_name: bool,
+) -> Vec<ArgoApplication> {
+    all_apps
+        .iter()
+        .filter(|app| {
+            if !matches_destination(
+                app,
+                current_context,
+                current_cluster_name,
+                current_server_url,
+                cluster_mapping,
+                match_by_name,
+            ) {
+                return false;
+            }
+            if let Some(ns) = target_namespace {
+                if !ns.is_empty() && app.destination_namespace != ns && app.namespace != ns {
+                    return false;
+                }
+            }
+            true
+        })
+        .cloned()
+        .collect()
+}
+
+pub fn filter_hub_apps_for_spoke_context(
+    all_apps: &[ArgoApplication],
+    current_context: &str,
+    hub: Option<&str>,
+) -> Vec<ArgoApplication> {
+    let mapping = hub.and_then(|h| {
+        CLUSTER_MAPPING_CACHE.read().ok().and_then(|m| {
+            m.as_ref()
+                .and_then(|map| map.get(h).map(|(_, m)| m.clone()))
+        })
+    });
+    filter_hub_apps_for_spoke(
+        all_apps,
+        current_context,
+        None,
+        None,
+        mapping.as_ref(),
+        None,
+        true,
+    )
+}
+
+pub async fn get_or_fetch_argo_cluster_mapping(
+    client: &kube::Client,
+    hub_context: &str,
+) -> ArgoClusterMapping {
+    if let Ok(guard) = CLUSTER_MAPPING_CACHE.read() {
+        if let Some(ref map) = *guard {
+            if let Some((fetched_at, mapping)) = map.get(hub_context) {
+                if fetched_at.elapsed() < CLUSTER_MAPPING_TTL {
+                    return mapping.clone();
+                }
+            }
+        }
+    }
+
+    let mapping = fetch_argo_cluster_mapping(client).await;
+    if let Ok(mut guard) = CLUSTER_MAPPING_CACHE.write() {
+        let map = guard.get_or_insert_with(HashMap::new);
+        map.insert(hub_context.to_string(), (Instant::now(), mapping.clone()));
+    }
+    mapping
+}
+
+pub async fn fetch_argo_cluster_mapping(client: &kube::Client) -> ArgoClusterMapping {
+    let mut mapping = ArgoClusterMapping::new();
+    mapping.insert("in-cluster", "https://kubernetes.default.svc");
+
+    let lp = ListParams::default().labels("argocd.argoproj.io/secret-type=cluster");
+
+    // 1. Fast path: check standard "argocd" namespace first with a 2-second timeout.
+    // In standard ArgoCD deployments, all cluster secrets live in the ArgoCD control-plane namespace.
+    // Querying this single namespace takes ~50ms and avoids scanning all namespaces in the cluster
+    // or failing on lack of cluster-scoped Secret RBAC permissions.
+    let argocd_api: Api<Secret> = Api::namespaced(client.clone(), "argocd");
+    if let Ok(Ok(list)) = tokio::time::timeout(Duration::from_secs(2), argocd_api.list(&lp)).await {
+        if !list.items.is_empty() {
+            for secret in list.items {
+                let name_opt = extract_secret_str(&secret, "name");
+                let server_opt = extract_secret_str(&secret, "server");
+                if let (Some(name), Some(server)) = (name_opt, server_opt) {
+                    mapping.insert(&name, &server);
+                }
+            }
+            return mapping;
+        }
+    }
+
+    // 2. Fallback: if not in "argocd" namespace, query cluster-wide with a strict 2-second timeout.
+    let api_all: Api<Secret> = Api::all(client.clone());
+    if let Ok(Ok(list)) = tokio::time::timeout(Duration::from_secs(2), api_all.list(&lp)).await {
+        for secret in list.items {
+            let name_opt = extract_secret_str(&secret, "name");
+            let server_opt = extract_secret_str(&secret, "server");
+            if let (Some(name), Some(server)) = (name_opt, server_opt) {
+                mapping.insert(&name, &server);
+            }
+        }
+    }
+    mapping
+}
+
+pub fn matches_destination(
+    app: &ArgoApplication,
+    current_context: &str,
+    current_cluster_name: Option<&str>,
+    current_server_url: Option<&str>,
+    cluster_mapping: Option<&ArgoClusterMapping>,
+    match_by_name: bool,
+) -> bool {
+    let name_matches = |candidate: &str, dest_name: &str| -> bool {
+        if candidate.is_empty() || dest_name.is_empty() {
+            return false;
+        }
+        let c_lower = candidate.to_lowercase();
+        let d_lower = dest_name.to_lowercase();
+        c_lower == d_lower
+            || c_lower.ends_with(&format!("_{}", d_lower))
+            || c_lower.ends_with(&format!("-{}", d_lower))
+            || c_lower.ends_with(&format!("/{}", d_lower))
+            || d_lower.ends_with(&format!("_{}", c_lower))
+            || d_lower.ends_with(&format!("-{}", c_lower))
+            || d_lower.ends_with(&format!("/{}", c_lower))
+    };
+
+    let app_dest_name = &app.destination_name;
+
+    // The explicit opt-in: match on names alone, whatever the servers say.
+    let name_fallback = || {
+        match_by_name
+            && !app_dest_name.is_empty()
+            && (name_matches(current_context, app_dest_name)
+                || current_cluster_name.is_some_and(|c| name_matches(c, app_dest_name)))
+    };
+
+    // Server identity outranks names, `match_by_name` included. The app's
+    // server is its own destination.server, or what Argo's cluster secrets
+    // register for its destination.name. When that and the current server are
+    // both known and differ, this is another cluster however alike the names
+    // read — context `prod` passes `name_matches` against destination
+    // `team-prod` — and listing it would let a sync land on the wrong spoke
+    // (#615). The flag cannot override this: the only production caller
+    // (`apps/tui`, the applications fetch) hardcodes it to `true`, so an
+    // override would leave that wrong-spoke listing exactly as it was.
+    //
+    // The cost is that a cluster Argo registers under a different URL than the
+    // local kubeconfig no longer matches by name. Two known, differing servers
+    // are the one signal here that cannot be a coincidence, and acting on the
+    // wrong cluster is worse than not listing its apps.
+    let app_server = if !app.destination_server.trim().is_empty() {
+        Some(app.destination_server.as_str())
+    } else if !app_dest_name.is_empty() {
+        cluster_mapping.and_then(|mapping| mapping.server_for_name(app_dest_name))
+    } else {
+        None
+    };
+    if let (Some(current), Some(app_server)) = (
+        current_server_url.filter(|s| !s.trim().is_empty()),
+        app_server,
+    ) {
+        if normalize_server_url(current) != normalize_server_url(app_server) {
+            return false;
+        }
+    }
+
+    // 1. Direct match by destination_name against context or cluster name
+    if !app_dest_name.is_empty() {
+        if name_matches(current_context, app_dest_name) {
+            return true;
+        }
+        if let Some(c_cluster) = current_cluster_name {
+            if name_matches(c_cluster, app_dest_name) {
+                return true;
+            }
+        }
+    }
+
+    // 2. Correlate with ArgoCD cluster secrets mapping
+    if let Some(mapping) = cluster_mapping {
+        if let Some(curr_server) = current_server_url {
+            let norm_curr = normalize_server_url(curr_server);
+            if !app_dest_name.is_empty() {
+                // If app targets cluster by name, check if that name maps to current_server_url
+                if let Some(mapped_server) = mapping.server_for_name(app_dest_name) {
+                    if normalize_server_url(mapped_server) == norm_curr {
+                        return true;
+                    }
+                }
+            }
+            // If current_server_url is registered under a cluster name in ArgoCD, check if app targets that name
+            if let Some(mapped_name) = mapping.name_for_server(curr_server) {
+                if !app_dest_name.is_empty() && name_matches(mapped_name, app_dest_name) {
+                    return true;
+                }
+            }
+        }
+        // If app targets cluster by destination_server, check if that server maps to active context/cluster
+        if !app.destination_server.is_empty() {
+            if let Some(mapped_cluster_name) = mapping.name_for_server(&app.destination_server) {
+                if name_matches(mapped_cluster_name, current_context) {
+                    return true;
+                }
+                if let Some(c_cluster) = current_cluster_name {
+                    if name_matches(mapped_cluster_name, c_cluster) {
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+
+    // 3. Direct match by destination_server URL
+    if let Some(server) = current_server_url {
+        let norm_current = normalize_server_url(server);
+        let norm_dest = normalize_server_url(&app.destination_server);
+        if !norm_dest.is_empty() && norm_dest == norm_current {
+            return true;
+        }
+    }
+
+    // 4. Fallback match_by_name if enabled
+    name_fallback()
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct ArgoApplicationsFetchResult {
+    /// All applications fetched from the cluster.
+    pub all_apps: Vec<ArgoApplication>,
+    /// Applications filtered for the active spoke cluster / namespace.
+    pub filtered_apps: Vec<ArgoApplication>,
+    /// Whether the result was fetched from a remote Hub cluster.
+    pub is_remote_hub: bool,
+    /// A page stopped arriving after others had: the lists hold what came
+    /// back, not every Application. A caller must not read an app's absence
+    /// from them as "not managed by Argo". Absent in older disk caches,
+    /// which were only ever written complete.
+    #[serde(default)]
+    pub truncated: bool,
+    /// Timestamp (Unix seconds) when this data was fetched from the cluster or saved to disk.
+    #[serde(default)]
+    pub fetched_at: Option<u64>,
+}
+
+/// Fetch applications for the given context.
+///
+/// If `current_context` has ArgoCD installed (`applications.argoproj.io` CRD exists),
+/// applications from `current_context` are returned directly with priority (`is_remote_hub = false`).
+/// If ArgoCD is NOT installed on `current_context` and a remote `hub_context` is configured,
+/// SRElens falls back to querying the Hub cluster (`is_remote_hub = true`) and filters
+/// applications targeting `current_context` / `current_server_url`.
+pub async fn fetch_argo_applications(
+    cache: &Arc<ClientCache>,
+    current_context: &str,
+    current_cluster_name: Option<&str>,
+    current_server_url: Option<&str>,
+    hub_context: Option<&str>,
+    target_namespace: Option<&str>,
+    match_by_name: bool,
+) -> Result<ArgoApplicationsFetchResult, String> {
+    fetch_argo_applications_cached(
+        cache,
+        current_context,
+        current_cluster_name,
+        current_server_url,
+        hub_context,
+        target_namespace,
+        match_by_name,
+        false,
+    )
+    .await
+}
+
+/// The error [`fetch_argo_applications_cached`] returns when the cluster has
+/// no Argo CD and no hub is configured: an answer, not a failure.
+pub const NO_ARGO: &str =
+    "No ArgoCD deployment in this cluster AND no kubeconfig set to point to the ArgoCD cluster.";
+
+#[derive(Debug)]
+enum ArgoListError {
+    NotFound,
+    Other(String),
+}
+
+const ARGO_PAGE_LIMIT: u32 = 250;
+
+/// Every Application `api` lists, a page at a time, and whether the listing
+/// stopped early: a later page timed out, or the server repeated a continue
+/// token. The first page timing out is an error, since nothing arrived.
+async fn list_argo_applications_paginated<F>(
+    api: &Api<DynamicObject>,
+    per_page_timeout: Duration,
+    mut on_chunk: F,
+) -> Result<(Vec<DynamicObject>, bool), ArgoListError>
+where
+    F: FnMut(&[DynamicObject]),
+{
+    let mut all_items = Vec::new();
+    let mut token: Option<String> = None;
+    let mut followed = std::collections::HashSet::new();
+    let mut truncated = false;
+
+    loop {
+        let mut lp = ListParams::default().limit(ARGO_PAGE_LIMIT);
+        if let Some(ref t) = token {
+            lp = lp.continue_token(t);
+        }
+
+        let page_fut = api.list(&lp);
+        let page_res = match tokio::time::timeout(per_page_timeout, page_fut).await {
+            Ok(Ok(res)) => res,
+            Ok(Err(e)) => {
+                let err_str = e.to_string();
+                let is_not_found = match &e {
+                    kube::Error::Api(resp) => resp.code == 404 || resp.reason == "NotFound",
+                    _ => {
+                        err_str.contains("404")
+                            || err_str.to_lowercase().contains("not found")
+                            || err_str.to_lowercase().contains("notfound")
+                    }
+                };
+                if is_not_found {
+                    return Err(ArgoListError::NotFound);
+                } else {
+                    return Err(ArgoListError::Other(e.to_string()));
+                }
+            }
+            Err(_) => {
+                if all_items.is_empty() {
+                    return Err(ArgoListError::Other(format!(
+                        "Timed out after {}s waiting for ArgoCD Applications",
+                        per_page_timeout.as_secs()
+                    )));
+                } else {
+                    truncated = true;
+                    break;
+                }
+            }
+        };
+
+        let chunk = page_res.items;
+        if !chunk.is_empty() {
+            on_chunk(&chunk);
+            all_items.extend(chunk);
+        }
+
+        let next = page_res.metadata.continue_.filter(|t| !t.is_empty());
+        if let Some(ref repeat) = next {
+            if !followed.insert(repeat.clone()) {
+                truncated = true;
+                break;
+            }
+        }
+        token = next;
+        if token.is_none() {
+            break;
+        }
+    }
+
+    Ok((all_items, truncated))
+}
+
+/// Keep a finished listing: in memory for [`ARGO_APPS_CACHE_TTL`] either way,
+/// on disk only when complete, so a truncated list is never shown on a later
+/// start as though it were the whole set.
+fn store_argo_apps(
+    key: ArgoAppsCacheKey,
+    context: &str,
+    result: &mut ArgoApplicationsFetchResult,
+    hub_context: Option<&str>,
+) {
+    let is_cluster_wide = key.target_namespace.as_deref().unwrap_or("").is_empty();
+    let now_unix = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    if result.fetched_at.is_none() {
+        result.fetched_at = Some(now_unix);
+    }
+    let entry_unix = result.fetched_at.unwrap_or(now_unix);
+
+    if let Ok(mut guard) = ARGO_APPS_CACHE.write() {
+        let map = guard.get_or_insert_with(HashMap::new);
+        map.insert(key, (Instant::now(), result.clone()));
+    }
+    if result.is_remote_hub {
+        if let Some(hub) = hub_context {
+            if is_cluster_wide {
+                if let Ok(mut guard) = ARGO_HUB_CACHE.write() {
+                    let map = guard.get_or_insert_with(HashMap::new);
+                    map.insert(
+                        hub.to_string(),
+                        ArgoHubCacheEntry {
+                            fetched_at: Instant::now(),
+                            fetched_at_unix: entry_unix,
+                            all_apps: result.all_apps.clone(),
+                            truncated: result.truncated,
+                        },
+                    );
+                }
+                if !result.truncated {
+                    save_argo_hub_disk_cache(hub, result);
+                }
+            }
+        }
+    } else {
+        if let Some(hub) = hub_context {
+            if context == hub && is_cluster_wide {
+                if let Ok(mut guard) = ARGO_HUB_CACHE.write() {
+                    let map = guard.get_or_insert_with(HashMap::new);
+                    map.insert(
+                        hub.to_string(),
+                        ArgoHubCacheEntry {
+                            fetched_at: Instant::now(),
+                            fetched_at_unix: entry_unix,
+                            all_apps: result.all_apps.clone(),
+                            truncated: result.truncated,
+                        },
+                    );
+                }
+                if !result.truncated {
+                    save_argo_hub_disk_cache(hub, result);
+                }
+            }
+        }
+        if is_cluster_wide && !result.truncated {
+            save_argo_apps_disk_cache(context, result);
+        }
+    }
+}
+
+pub async fn fetch_argo_applications_cached(
+    cache: &Arc<ClientCache>,
+    current_context: &str,
+    current_cluster_name: Option<&str>,
+    current_server_url: Option<&str>,
+    hub_context: Option<&str>,
+    target_namespace: Option<&str>,
+    match_by_name: bool,
+    force_refresh: bool,
+) -> Result<ArgoApplicationsFetchResult, String> {
+    fetch_argo_applications_cached_stream(
+        cache,
+        current_context,
+        current_cluster_name,
+        current_server_url,
+        hub_context,
+        target_namespace,
+        match_by_name,
+        force_refresh,
+        None,
+    )
+    .await
+}
+
+fn resolve_from_hub_cache(
+    hub: &str,
+    current_context: &str,
+    current_cluster_name: Option<&str>,
+    current_server_url: Option<&str>,
+    target_namespace: Option<&str>,
+    match_by_name: bool,
+    chunk_sender: Option<&tokio::sync::mpsc::UnboundedSender<ArgoApplicationsFetchResult>>,
+) -> Option<ArgoApplicationsFetchResult> {
+    // 1. Hub in-memory cache
+    if let Ok(guard) = ARGO_HUB_CACHE.read() {
+        if let Some(ref map) = *guard {
+            if let Some(entry) = map.get(hub) {
+                if entry.fetched_at.elapsed() < ARGO_FRESH_FOR {
+                    let mapping = if let Ok(m_guard) = CLUSTER_MAPPING_CACHE.read() {
+                        m_guard
+                            .as_ref()
+                            .and_then(|m| m.get(hub).map(|(_, mapping)| mapping.clone()))
+                    } else {
+                        None
+                    };
+                    let filtered = filter_hub_apps_for_spoke(
+                        &entry.all_apps,
+                        current_context,
+                        current_cluster_name,
+                        current_server_url,
+                        mapping.as_ref(),
+                        target_namespace,
+                        match_by_name,
+                    );
+                    let res = ArgoApplicationsFetchResult {
+                        all_apps: entry.all_apps.clone(),
+                        filtered_apps: filtered,
+                        is_remote_hub: true,
+                        truncated: entry.truncated,
+                        fetched_at: Some(entry.fetched_at_unix),
+                    };
+                    if let Some(tx) = chunk_sender {
+                        let _ = tx.send(res.clone());
+                    }
+                    return Some(res);
+                }
+            }
+        }
+    }
+
+    // 2. Hub disk cache
+    if let Some((hub_disk_res, written_at)) = load_argo_hub_disk_cache_with_age(hub) {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let age = now.saturating_sub(written_at);
+        let mapping = if let Ok(m_guard) = CLUSTER_MAPPING_CACHE.read() {
+            m_guard
+                .as_ref()
+                .and_then(|m| m.get(hub).map(|(_, mapping)| mapping.clone()))
+        } else {
+            None
+        };
+        let filtered = filter_hub_apps_for_spoke(
+            &hub_disk_res.all_apps,
+            current_context,
+            current_cluster_name,
+            current_server_url,
+            mapping.as_ref(),
+            target_namespace,
+            match_by_name,
+        );
+        let res = ArgoApplicationsFetchResult {
+            all_apps: hub_disk_res.all_apps.clone(),
+            filtered_apps: filtered,
+            is_remote_hub: true,
+            truncated: hub_disk_res.truncated,
+            fetched_at: Some(written_at),
+        };
+        if age < ARGO_FRESH_FOR.as_secs() {
+            if let Ok(mut guard) = ARGO_HUB_CACHE.write() {
+                let map = guard.get_or_insert_with(HashMap::new);
+                map.insert(
+                    hub.to_string(),
+                    ArgoHubCacheEntry {
+                        fetched_at: Instant::now()
+                            .checked_sub(Duration::from_secs(age))
+                            .unwrap_or_else(Instant::now),
+                        fetched_at_unix: written_at,
+                        all_apps: hub_disk_res.all_apps,
+                        truncated: hub_disk_res.truncated,
+                    },
+                );
+            }
+            if let Some(tx) = chunk_sender {
+                let _ = tx.send(res.clone());
+            }
+            return Some(res);
+        } else if let Some(tx) = chunk_sender {
+            let _ = tx.send(res);
+        }
+    }
+
+    None
+}
+
+pub async fn fetch_argo_applications_cached_stream(
+    cache: &Arc<ClientCache>,
+    current_context: &str,
+    current_cluster_name: Option<&str>,
+    current_server_url: Option<&str>,
+    hub_context: Option<&str>,
+    target_namespace: Option<&str>,
+    match_by_name: bool,
+    force_refresh: bool,
+    chunk_sender: Option<tokio::sync::mpsc::UnboundedSender<ArgoApplicationsFetchResult>>,
+) -> Result<ArgoApplicationsFetchResult, String> {
+    let cache_key = ArgoAppsCacheKey {
+        current_context: current_context.to_string(),
+        hub_context: hub_context.map(|s| s.to_string()),
+        current_cluster_name: current_cluster_name.map(|s| s.to_string()),
+        current_server_url: current_server_url.map(|s| s.to_string()),
+        target_namespace: target_namespace.map(|s| s.to_string()),
+    };
+
+    let is_cluster_wide = target_namespace.as_deref().unwrap_or("").is_empty();
+    let is_known_spoke = if !force_refresh {
+        if let Ok(guard) = ARGO_SPOKE_PROBE_CACHE.read() {
+            guard
+                .as_ref()
+                .map(|s| s.contains(current_context))
+                .unwrap_or(false)
+        } else {
+            false
+        }
+    } else {
+        false
+    };
+
+    if !force_refresh {
+        if let Ok(guard) = ARGO_APPS_CACHE.read() {
+            if let Some(ref map) = *guard {
+                if let Some((fetched_at, cached_res)) = map.get(&cache_key) {
+                    if fetched_at.elapsed() < ARGO_APPS_CACHE_TTL {
+                        if let Some(ref tx) = chunk_sender {
+                            let _ = tx.send(cached_res.clone());
+                        }
+                        return Ok(cached_res.clone());
+                    }
+                }
+            }
+        }
+
+        // 1. Local disk cache (only if cluster-wide)
+        if is_cluster_wide {
+            if let Some((mut disk_res, written_at)) =
+                load_argo_apps_disk_cache_with_age(current_context)
+            {
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0);
+                let age = now.saturating_sub(written_at);
+                disk_res.fetched_at = Some(written_at);
+                if age < ARGO_FRESH_FOR.as_secs() {
+                    if let Ok(mut guard) = ARGO_APPS_CACHE.write() {
+                        let map = guard.get_or_insert_with(HashMap::new);
+                        map.insert(
+                            cache_key.clone(),
+                            (
+                                Instant::now()
+                                    .checked_sub(Duration::from_secs(age))
+                                    .unwrap_or_else(Instant::now),
+                                disk_res.clone(),
+                            ),
+                        );
+                    }
+                    if let Some(hub) = hub_context {
+                        if current_context == hub {
+                            if let Ok(mut guard) = ARGO_HUB_CACHE.write() {
+                                let map = guard.get_or_insert_with(HashMap::new);
+                                map.insert(
+                                    hub.to_string(),
+                                    ArgoHubCacheEntry {
+                                        fetched_at: Instant::now()
+                                            .checked_sub(Duration::from_secs(age))
+                                            .unwrap_or_else(Instant::now),
+                                        fetched_at_unix: written_at,
+                                        all_apps: disk_res.all_apps.clone(),
+                                        truncated: disk_res.truncated,
+                                    },
+                                );
+                            }
+                        }
+                    }
+                    if let Some(ref tx) = chunk_sender {
+                        let _ = tx.send(disk_res.clone());
+                    }
+                    return Ok(disk_res);
+                } else if let Some(ref tx) = chunk_sender {
+                    let _ = tx.send(disk_res);
+                }
+            }
+        }
+
+        // 2. Hub cache: only when this cluster is already known to be a spoke
+        if is_known_spoke {
+            if let Some(hub) = hub_context {
+                if hub != current_context {
+                    if let Some(res) = resolve_from_hub_cache(
+                        hub,
+                        current_context,
+                        current_cluster_name,
+                        current_server_url,
+                        target_namespace,
+                        match_by_name,
+                        chunk_sender.as_ref(),
+                    ) {
+                        return Ok(res);
+                    }
+                }
+            }
+        }
+    }
+
+    let ar = argo_application_resource();
+    let per_page_timeout = argo_timeout().max(Duration::from_secs(15));
+
+    let local_res: Result<(), ArgoListError> =
+        if is_known_spoke && hub_context.is_some() && hub_context != Some(current_context) {
+            Err(ArgoListError::NotFound)
+        } else {
+            let local_client = cache.get(current_context).await.map_err(|e| {
+                format!("Failed to connect to cluster '{}': {}", current_context, e)
+            })?;
+
+            let local_api: Api<DynamicObject> = match target_namespace {
+                Some(ns) if !ns.is_empty() => Api::namespaced_with(local_client.clone(), ns, &ar),
+                _ => Api::all_with(local_client.clone(), &ar),
+            };
+
+            let mut local_all_apps = Vec::new();
+            let mut local_filtered_apps = Vec::new();
+
+            let l_res = list_argo_applications_paginated(&local_api, per_page_timeout, |chunk| {
+                let chunk_apps: Vec<ArgoApplication> = chunk
+                    .iter()
+                    .map(|item| {
+                        let val = serde_json::to_value(item).unwrap_or_default();
+                        ArgoApplication::from_json(&val)
+                    })
+                    .collect();
+                local_all_apps.extend(chunk_apps.clone());
+                local_filtered_apps.extend(chunk_apps);
+                if let Some(ref tx) = chunk_sender {
+                    let _ = tx.send(ArgoApplicationsFetchResult {
+                        all_apps: local_all_apps.clone(),
+                        filtered_apps: local_filtered_apps.clone(),
+                        is_remote_hub: false,
+                        truncated: false,
+                        fetched_at: None,
+                    });
+                }
+            })
+            .await;
+
+            match l_res {
+                Ok((_, truncated)) => {
+                    let mut result = ArgoApplicationsFetchResult {
+                        all_apps: local_all_apps.clone(),
+                        filtered_apps: local_filtered_apps,
+                        is_remote_hub: false,
+                        truncated,
+                        fetched_at: None,
+                    };
+                    store_argo_apps(cache_key, current_context, &mut result, hub_context);
+                    return Ok(result);
+                }
+                Err(e) => Err(e),
+            }
+        };
+
+    match local_res {
+        Ok(_) => unreachable!(),
+        Err(ArgoListError::Other(e)) => Err(format!(
+            "Failed to list ArgoCD Applications on '{}': {}",
+            current_context, e
+        )),
+        Err(ArgoListError::NotFound) => {
+            if let Ok(mut guard) = ARGO_SPOKE_PROBE_CACHE.write() {
+                guard
+                    .get_or_insert_with(HashSet::new)
+                    .insert(current_context.to_string());
+            }
+
+            // CRD is not installed on the selected cluster.
+            // Check if a remote hub cluster is configured.
+            let hub = match hub_context {
+                Some(h) if h != current_context => h,
+                _ => {
+                    return Err(NO_ARGO.to_string());
+                }
+            };
+
+            // Spoke cluster: check if hub cache is fresh before querying hub over network.
+            if !force_refresh && !is_known_spoke {
+                if let Some(res) = resolve_from_hub_cache(
+                    hub,
+                    current_context,
+                    current_cluster_name,
+                    current_server_url,
+                    target_namespace,
+                    match_by_name,
+                    chunk_sender.as_ref(),
+                ) {
+                    return Ok(res);
+                }
+            }
+
+            // Spoke cluster: fall back to the remote Hub cluster.
+            let hub_client = cache
+                .get(hub)
+                .await
+                .map_err(|e| format!("Failed to connect to cluster '{}': {}", hub, e))?;
+
+            let hub_api: Api<DynamicObject> = Api::all_with(hub_client.clone(), &ar);
+
+            let cluster_mapping = get_or_fetch_argo_cluster_mapping(&hub_client, hub).await;
+
+            let mut hub_all_apps = Vec::new();
+            let mut hub_filtered_apps = Vec::new();
+
+            let hub_res = list_argo_applications_paginated(&hub_api, per_page_timeout, |chunk| {
+                let chunk_apps: Vec<ArgoApplication> = chunk
+                    .iter()
+                    .map(|item| {
+                        let val = serde_json::to_value(item).unwrap_or_default();
+                        ArgoApplication::from_json(&val)
+                    })
+                    .collect();
+
+                let chunk_filtered = filter_hub_apps_for_spoke(
+                    &chunk_apps,
+                    current_context,
+                    current_cluster_name,
+                    current_server_url,
+                    Some(&cluster_mapping),
+                    target_namespace,
+                    match_by_name,
+                );
+
+                hub_all_apps.extend(chunk_apps);
+                hub_filtered_apps.extend(chunk_filtered);
+
+                if let Some(ref tx) = chunk_sender {
+                    let _ = tx.send(ArgoApplicationsFetchResult {
+                        all_apps: hub_all_apps.clone(),
+                        filtered_apps: hub_filtered_apps.clone(),
+                        is_remote_hub: true,
+                        truncated: false,
+                        fetched_at: None,
+                    });
+                }
+            })
+            .await;
+
+            match hub_res {
+                Ok((_, truncated)) => {
+                    let mut result = ArgoApplicationsFetchResult {
+                        all_apps: hub_all_apps,
+                        filtered_apps: hub_filtered_apps,
+                        is_remote_hub: true,
+                        truncated,
+                        fetched_at: None,
+                    };
+                    store_argo_apps(cache_key, current_context, &mut result, Some(hub));
+                    Ok(result)
+                }
+                Err(ArgoListError::NotFound) => {
+                    Err(format!(
+                        "Failed to list ArgoCD Applications on hub '{}': ArgoCD CRD (applications.argoproj.io) is not installed on the Hub cluster.",
+                        hub
+                    ))
+                }
+                Err(ArgoListError::Other(e)) => {
+                    Err(format!(
+                        "Failed to list ArgoCD Applications on hub '{}': {}",
+                        hub, e
+                    ))
+                }
+            }
+        }
+    }
+}
+
+pub async fn fetch_argo_application_detail(
+    cache: &Arc<ClientCache>,
+    context: &str,
+    name: &str,
+    namespace: &str,
+) -> Result<ArgoApplication, String> {
+    let client = cache
+        .get(context)
+        .await
+        .map_err(|e| format!("Failed to connect to cluster '{}': {}", context, e))?;
+
+    let ar = argo_application_resource();
+    let api: Api<DynamicObject> = Api::namespaced_with(client, namespace, &ar);
+
+    let timeout_dur = argo_timeout();
+    let obj = tokio::time::timeout(timeout_dur, api.get(name))
+        .await
+        .map_err(|_| {
+            format!(
+                "Timed out after {}s getting ArgoCD Application '{}/{}'.",
+                timeout_dur.as_secs(),
+                namespace,
+                name
+            )
+        })?
+        .map_err(|e| {
+            format!(
+                "Failed to get ArgoCD Application '{}/{}': {}",
+                namespace, name, e
+            )
+        })?;
+
+    let val = serde_json::to_value(&obj).unwrap_or_default();
+    Ok(ArgoApplication::from_json(&val))
+}
+
+/// Sends `patch` to the Application the operator reviewed, and nowhere else.
+///
+/// The patch carries the reviewed `uid` and `resourceVersion` through the same
+/// precondition the GitOps action path uses (`gitops::pin_to_reviewed`), so
+/// the API server refuses it when the object was replaced under the same name
+/// or has moved on since it was listed. A write with no reviewed identity is
+/// refused here rather than sent unpinned.
+async fn patch_reviewed_application(
+    client: kube::Client,
+    app: &ReviewedApplication,
+    mut patch: Value,
+    failed: &str,
+) -> Result<(), String> {
+    let target = format!("{}/{}", app.namespace, app.name);
+    if app.uid.is_empty() || app.resource_version.is_empty() {
+        return Err(format!(
+            "{failed} '{target}': the Application's reviewed identity is unknown; refresh and try again"
+        ));
+    }
+    crate::gitops::pin_to_reviewed(&mut patch, &app.uid, &app.resource_version);
+
+    let ar = argo_application_resource();
+    let api: Api<DynamicObject> = Api::namespaced_with(client, &app.namespace, &ar);
+    api.patch(
+        &app.name,
+        &PatchParams::apply("srelens"),
+        &Patch::Merge(&patch),
+    )
+    .await
+    .map_err(|e| match e {
+        // Each arm also requires the reason the API server itself writes. A
+        // proxy or router in front of it can answer with the same HTTP code and
+        // a plain-text body, which kube-client wraps as `Error::Api` with the
+        // reason "Failed to parse error data": that is an endpoint failure, not
+        // a fact about the Application, so it falls through as itself.
+        //
+        // resourceVersion moved on (or the object was replaced, which always
+        // moves it): the optimistic-concurrency precondition failed.
+        kube::Error::Api(ref s) if s.code == 409 && s.reason == "Conflict" => {
+            format!("{failed} '{target}': {APPLICATION_CHANGED}")
+        }
+        // A uid that no longer matches is rejected as an immutable-field change.
+        kube::Error::Api(ref s)
+            if s.code == 422 && s.reason == "Invalid" && s.message.contains("uid") =>
+        {
+            format!("{failed} '{target}': {APPLICATION_CHANGED}")
+        }
+        kube::Error::Api(ref s) if s.code == 404 && s.reason == "NotFound" => {
+            format!("{failed} '{target}': {APPLICATION_GONE}")
+        }
+        e => format!("{failed} '{target}': {e}"),
+    })?;
+    Ok(())
+}
+
+/// The merge patch that requests a sync operation.
+fn sync_patch(prune: bool, dry_run: bool) -> Value {
+    serde_json::json!({
+        "operation": {
+            "sync": {
+                "prune": prune,
+                "dryRun": dry_run,
+                "strategy": {
+                    "hook": {}
+                }
+            }
+        }
+    })
+}
+
+/// Requests a sync of the Application the operator reviewed. Refused by the API
+/// server if that Application was replaced or changed after it was listed.
+pub async fn trigger_argo_sync(
+    cache: &Arc<ClientCache>,
+    context: &str,
+    app: &ReviewedApplication,
+    prune: bool,
+    dry_run: bool,
+) -> Result<(), String> {
+    let client = cache
+        .get(context)
+        .await
+        .map_err(|e| format!("Failed to connect to cluster '{}': {}", context, e))?;
+    sync_with_client(client, app, prune, dry_run).await
+}
+
+async fn sync_with_client(
+    client: kube::Client,
+    app: &ReviewedApplication,
+    prune: bool,
+    dry_run: bool,
+) -> Result<(), String> {
+    patch_reviewed_application(
+        client,
+        app,
+        sync_patch(prune, dry_run),
+        "Failed to trigger sync for",
+    )
+    .await
+}
+
+/// The merge patch that turns auto-sync on or off.
+///
+/// Enabling sends `automated: {}` and nothing more. Under JSON merge patch
+/// (RFC 7386, what `Patch::Merge` sends for a custom resource) an empty object
+/// creates `automated` when the Application has none — auto-sync starts with
+/// Argo's defaults, prune and self-heal off — and leaves every key already
+/// there untouched when it has one. The confirmation says only "Enable
+/// Auto-Sync", so enabling must not switch pruning or self-heal on (#615). Nor
+/// may it read the policy first and write it back: a change made between the
+/// read and the write would be overwritten with the stale value, and a role
+/// allowed to patch Applications but not get them could no longer toggle.
+pub fn auto_sync_patch(enable: bool) -> Value {
+    let automated = if enable {
+        serde_json::json!({})
+    } else {
+        Value::Null
+    };
+    serde_json::json!({ "spec": { "syncPolicy": { "automated": automated } } })
+}
+
+/// Turns auto-sync on or off for the Application the operator reviewed.
+/// Refused by the API server if that Application was replaced or changed after
+/// it was listed. The pin needs no read first, so a role that may patch but
+/// not get Applications can still toggle.
+pub async fn toggle_argo_auto_sync(
+    cache: &Arc<ClientCache>,
+    context: &str,
+    app: &ReviewedApplication,
+    enable: bool,
+) -> Result<bool, String> {
+    let client = cache
+        .get(context)
+        .await
+        .map_err(|e| format!("Failed to connect to cluster '{}': {}", context, e))?;
+    toggle_auto_sync_with_client(client, app, enable).await
+}
+
+async fn toggle_auto_sync_with_client(
+    client: kube::Client,
+    app: &ReviewedApplication,
+    enable: bool,
+) -> Result<bool, String> {
+    patch_reviewed_application(
+        client,
+        app,
+        auto_sync_patch(enable),
+        "Failed to update auto-sync for",
+    )
+    .await?;
+    Ok(enable)
+}
+
+pub async fn trigger_argo_hard_refresh(
+    cache: &Arc<ClientCache>,
+    context: &str,
+    name: &str,
+    namespace: &str,
+) -> Result<(), String> {
+    let client = cache
+        .get(context)
+        .await
+        .map_err(|e| format!("Failed to connect to cluster '{}': {}", context, e))?;
+
+    let ar = argo_application_resource();
+    let api: Api<DynamicObject> = Api::namespaced_with(client, namespace, &ar);
+
+    let patch = serde_json::json!({
+        "metadata": {
+            "annotations": {
+                "argocd.argoproj.io/refresh": "hard"
+            }
+        }
+    });
+
+    api.patch(name, &PatchParams::apply("srelens"), &Patch::Merge(&patch))
+        .await
+        .map_err(|e| format!("Failed to trigger hard refresh for '{name}': {e}"))?;
+
+    Ok(())
+}
+
+#[cfg(test)]
+pub(crate) static CACHE_TEST_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+#[cfg(test)]
+mod tests {
+    use super::CACHE_TEST_MUTEX;
+
+    /// Serialises the tests that move the process-wide ArgoCD timeout.
+    static ARGO_TIMEOUT_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn argo_timeout_follows_the_request_timeout_until_set() {
+        let _argo = ARGO_TIMEOUT_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _request = crate::list_cap::test_support::hold_request_timeout(8);
+
+        assert_eq!(set_argo_timeout_secs(None), None);
+        assert_eq!(
+            argo_timeout(),
+            Duration::from_secs(8),
+            "inherits the request timeout"
+        );
+
+        assert_eq!(set_argo_timeout_secs(Some(30)), Some(30));
+        assert_eq!(argo_timeout(), Duration::from_secs(30));
+
+        // Clamped to the same bounds as the request timeout.
+        assert_eq!(set_argo_timeout_secs(Some(0)), Some(MIN_TIMEOUT_SECS));
+        assert_eq!(set_argo_timeout_secs(Some(10_000)), Some(MAX_TIMEOUT_SECS));
+        assert_eq!(argo_timeout(), Duration::from_secs(MAX_TIMEOUT_SECS));
+
+        // Clearing goes back to following it.
+        set_argo_timeout_secs(None);
+        assert_eq!(argo_timeout(), Duration::from_secs(8));
+    }
+
+    use super::*;
+
+    #[test]
+    fn parses_argo_application_json() {
+        let raw = serde_json::json!({
+            "apiVersion": "argoproj.io/v1alpha1",
+            "kind": "Application",
+            "metadata": {
+                "name": "payments-api",
+                "namespace": "argocd",
+                "creationTimestamp": "2026-03-01T12:00:00Z"
+            },
+            "spec": {
+                "project": "core",
+                "source": {
+                    "repoURL": "https://github.com/acme/infra",
+                    "targetRevision": "main",
+                    "path": "apps/payments"
+                },
+                "destination": {
+                    "server": "https://api.prod-us-east.corp.internal:6443",
+                    "name": "prod-us-east",
+                    "namespace": "payments"
+                },
+                "syncPolicy": {
+                    "automated": {
+                        "prune": true,
+                        "selfHeal": true
+                    }
+                }
+            },
+            "status": {
+                "sync": {
+                    "status": "OutOfSync",
+                    "revision": "8f3b12a"
+                },
+                "health": {
+                    "status": "Degraded",
+                    "message": "Deployment/payments-api has 0 available replicas"
+                },
+                "operationState": {
+                    "phase": "Failed",
+                    "message": "one or more synchronization tasks completed with a status of 'Failed'",
+                    "finishedAt": "2026-03-01T12:05:00Z"
+                },
+                "resources": [
+                    {
+                        "group": "apps",
+                        "version": "v1",
+                        "kind": "Deployment",
+                        "namespace": "payments",
+                        "name": "payments-api",
+                        "status": "OutOfSync",
+                        "health": {
+                            "status": "Degraded",
+                            "message": "ReplicaFailure"
+                        }
+                    }
+                ],
+                "history": [
+                    {
+                        "id": 12,
+                        "revision": "8f3b12a",
+                        "deployedAt": "2026-03-01T12:00:00Z",
+                        "source": {
+                            "repoURL": "https://github.com/acme/infra",
+                            "targetRevision": "main",
+                            "path": "apps/payments"
+                        }
+                    }
+                ]
+            }
+        });
+
+        let app = ArgoApplication::from_json(&raw);
+        assert_eq!(app.name, "payments-api");
+        assert_eq!(app.namespace, "argocd");
+        assert_eq!(app.project, "core");
+        assert_eq!(app.destination_name, "prod-us-east");
+        assert_eq!(
+            app.destination_server,
+            "https://api.prod-us-east.corp.internal:6443"
+        );
+        assert_eq!(app.destination_namespace, "payments");
+        assert_eq!(app.repo_url, "https://github.com/acme/infra");
+        assert_eq!(app.target_revision, "main");
+        assert_eq!(app.path, "apps/payments");
+        assert_eq!(app.sync_status, "OutOfSync");
+        assert_eq!(app.health_status, "Degraded");
+        assert_eq!(
+            app.health_message,
+            "Deployment/payments-api has 0 available replicas"
+        );
+        assert_eq!(app.sync_revision, "8f3b12a");
+        assert_eq!(app.operation_phase, "Failed");
+        assert!(app.auto_sync_enabled);
+        assert!(app.self_heal_enabled);
+        assert!(app.prune_enabled);
+        assert_eq!(app.resources.len(), 1);
+        assert_eq!(app.resources[0].name, "payments-api");
+        assert_eq!(app.resources[0].health, "Degraded");
+        assert_eq!(app.sync_history.len(), 1);
+        assert_eq!(app.sync_history[0].id, 12);
+    }
+
+    #[test]
+    fn test_parse_argo_application_cluster_scoped_and_missing_sync_status() {
+        let raw = serde_json::json!({
+            "metadata": {
+                "name": "cluster-roles-app",
+                "namespace": "argocd"
+            },
+            "spec": {
+                "destination": {
+                    "server": "https://kubernetes.default.svc"
+                }
+            },
+            "status": {}
+        });
+
+        let app = ArgoApplication::from_json(&raw);
+        assert_eq!(app.name, "cluster-roles-app");
+        assert_eq!(app.destination_namespace, "");
+        assert_eq!(app.sync_status, "");
+    }
+
+    #[test]
+    fn correlation_matches_by_server_url_and_cluster_name() {
+        let app = ArgoApplication {
+            name: "test-app".into(),
+            namespace: "argocd".into(),
+            uid: String::new(),
+            resource_version: String::new(),
+            project: "default".into(),
+            destination_server: "https://api.prod.example.com:6443/".into(),
+            destination_name: "prod-cluster".into(),
+            destination_namespace: "default".into(),
+            repo_url: "".into(),
+            target_revision: "".into(),
+            path: "".into(),
+            sync_status: "Synced".into(),
+            health_status: "Healthy".into(),
+            health_message: "".into(),
+            sync_revision: "".into(),
+            operation_phase: "".into(),
+            operation_message: "".into(),
+            auto_sync_enabled: true,
+            self_heal_enabled: false,
+            prune_enabled: false,
+            last_sync_time: "".into(),
+            created_at: "".into(),
+            resources: vec![],
+            sync_history: vec![],
+        };
+
+        // Match by server URL (with trailing slash differences)
+        assert!(matches_destination(
+            &app,
+            "any-context",
+            None,
+            Some("https://api.prod.example.com:6443"),
+            None,
+            false
+        ));
+        assert!(matches_destination(
+            &app,
+            "any-context",
+            None,
+            Some("https://api.prod.example.com:6443/"),
+            None,
+            false
+        ));
+
+        // Match by cluster name and suffix (e.g. GKE / EKS context name)
+        assert!(matches_destination(
+            &app,
+            "prod-cluster",
+            None,
+            None,
+            None,
+            true
+        ));
+        // ...but not once the servers are known to differ: this app targets
+        // api.prod.example.com and the reader is on other-url.com, so the
+        // matching name is a coincidence, and `match_by_name` does not override
+        // it (#615). This asserted a match until that change.
+        assert!(!matches_destination(
+            &app,
+            "prod-cluster",
+            None,
+            Some("https://other-url.com"),
+            None,
+            true
+        ));
+        assert!(matches_destination(
+            &app,
+            "gke_org-prod_us-east1_prod-cluster",
+            None,
+            None,
+            None,
+            true
+        ));
+        assert!(matches_destination(
+            &app,
+            "arn:aws:eks:us-east-1:123456789012:cluster/prod-cluster",
+            None,
+            None,
+            None,
+            true
+        ));
+
+        // Match by explicit cluster name
+        assert!(matches_destination(
+            &app,
+            "some-generic-context",
+            Some("prod-cluster"),
+            None,
+            None,
+            false
+        ));
+
+        // Mismatches
+        assert!(!matches_destination(
+            &app,
+            "staging",
+            None,
+            Some("https://api.staging.example.com:6443"),
+            None,
+            false
+        ));
+        assert!(!matches_destination(
+            &app,
+            "gke_org-prod_us-east1_staging-cluster",
+            None,
+            None,
+            None,
+            true
+        ));
+    }
+
+    #[test]
+    fn correlation_matches_via_cluster_mapping() {
+        // Application has empty destination_server, only destination_name
+        let app = ArgoApplication {
+            name: "backend-service".into(),
+            namespace: "argocd".into(),
+            uid: String::new(),
+            resource_version: String::new(),
+            project: "default".into(),
+            destination_server: "".into(),
+            destination_name: "search-backend-prod0-eu-w4".into(),
+            destination_namespace: "default".into(),
+            repo_url: "".into(),
+            target_revision: "".into(),
+            path: "".into(),
+            sync_status: "Synced".into(),
+            health_status: "Healthy".into(),
+            health_message: "".into(),
+            sync_revision: "".into(),
+            operation_phase: "".into(),
+            operation_message: "".into(),
+            auto_sync_enabled: true,
+            self_heal_enabled: false,
+            prune_enabled: false,
+            last_sync_time: "".into(),
+            created_at: "".into(),
+            resources: vec![],
+            sync_history: vec![],
+        };
+
+        let mut mapping = ArgoClusterMapping::new();
+        mapping.insert("search-backend-prod0-eu-w4", "https://10.245.248.2");
+
+        // When current_context is arbitrary, but server matches registered cluster secret server URL
+        assert!(matches_destination(
+            &app,
+            "arbitrary-context-name",
+            None,
+            Some("https://10.245.248.2"),
+            Some(&mapping),
+            false,
+        ));
+
+        // When server has trailing slash
+        assert!(matches_destination(
+            &app,
+            "arbitrary-context-name",
+            None,
+            Some("https://10.245.248.2/"),
+            Some(&mapping),
+            false,
+        ));
+
+        // When cluster secret name matches the active cluster name
+        assert!(matches_destination(
+            &app,
+            "some-ctx",
+            Some("search-backend-prod0-eu-w4"),
+            None,
+            Some(&mapping),
+            false,
+        ));
+
+        // Non-matching server URL
+        assert!(!matches_destination(
+            &app,
+            "arbitrary-context-name",
+            None,
+            Some("https://10.245.248.99"),
+            Some(&mapping),
+            false,
+        ));
+    }
+
+    #[test]
+    fn spoke_filter_excludes_apps_targeting_other_spokes_even_with_cluster_mapping() {
+        let mut mapping = ArgoClusterMapping::new();
+        mapping.insert("data-processing-stage-eu-dus1", "https://10.200.1.1:6443");
+        mapping.insert("advertiser-service-prod0-as-se1", "https://10.200.2.1:6443");
+
+        // App targeting another spoke cluster (advertiser-service-prod0-as-se1)
+        let other_app = ArgoApplication {
+            name: "abreuv2-prod-as-se1".into(),
+            namespace: "argocd".into(),
+            uid: String::new(),
+            resource_version: String::new(),
+            project: "default".into(),
+            destination_server: "".into(),
+            destination_name: "advertiser-service-prod0-as-se1".into(),
+            destination_namespace: "connector".into(),
+            repo_url: "".into(),
+            target_revision: "".into(),
+            path: "".into(),
+            sync_status: "Synced".into(),
+            health_status: "Healthy".into(),
+            health_message: "".into(),
+            sync_revision: "".into(),
+            operation_phase: "".into(),
+            operation_message: "".into(),
+            auto_sync_enabled: true,
+            self_heal_enabled: false,
+            prune_enabled: false,
+            last_sync_time: "".into(),
+            created_at: "".into(),
+            resources: vec![],
+            sync_history: vec![],
+        };
+
+        // Current active context is data-processing-stage-eu-dus1
+        assert!(!matches_destination(
+            &other_app,
+            "data-processing-stage-eu-dus1",
+            Some("data-processing-stage-eu-dus1"),
+            Some("https://10.200.1.1:6443"),
+            Some(&mapping),
+            false,
+        ), "App targeting advertiser-service-prod0-as-se1 must NOT match active cluster data-processing-stage-eu-dus1");
+
+        // App targeting active cluster by destination_server URL registered in mapping
+        let spoke_server_app = ArgoApplication {
+            name: "stage-data-pipeline".into(),
+            namespace: "argocd".into(),
+            uid: String::new(),
+            resource_version: String::new(),
+            project: "default".into(),
+            destination_server: "https://10.200.1.1:6443".into(),
+            destination_name: "".into(),
+            destination_namespace: "pipeline".into(),
+            repo_url: "".into(),
+            target_revision: "".into(),
+            path: "".into(),
+            sync_status: "Synced".into(),
+            health_status: "Healthy".into(),
+            health_message: "".into(),
+            sync_revision: "".into(),
+            operation_phase: "".into(),
+            operation_message: "".into(),
+            auto_sync_enabled: true,
+            self_heal_enabled: false,
+            prune_enabled: false,
+            last_sync_time: "".into(),
+            created_at: "".into(),
+            resources: vec![],
+            sync_history: vec![],
+        };
+
+        assert!(
+            matches_destination(
+                &spoke_server_app,
+                "data-processing-stage-eu-dus1",
+                Some("data-processing-stage-eu-dus1"),
+                Some("https://10.200.1.1:6443"),
+                Some(&mapping),
+                false,
+            ),
+            "App targeting active cluster via registered destination_server must match"
+        );
+    }
+
+    #[test]
+    fn a_known_different_server_outranks_a_similar_name() {
+        // #615: context `prod` passes `name_matches` against destination
+        // `team-prod`. Once both servers are known and differ, that app belongs
+        // to another spoke and must not be listed, or synced, from this one.
+        let mut mapping = ArgoClusterMapping::new();
+        mapping.insert("prod", "https://10.0.0.1:6443");
+        mapping.insert("team-prod", "https://10.0.0.2:6443");
+        let mut by_name = ArgoApplication::from_json(&serde_json::json!({}));
+        by_name.destination_name = "team-prod".to_string();
+        let mut by_server = ArgoApplication::from_json(&serde_json::json!({}));
+        by_server.destination_server = "https://10.0.0.2:6443".to_string();
+
+        for app in [&by_name, &by_server] {
+            assert!(!matches_destination(
+                app,
+                "prod",
+                Some("prod"),
+                Some("https://10.0.0.1:6443"),
+                Some(&mapping),
+                false,
+            ));
+        }
+
+        // `match_by_name` does not override it. The only production caller
+        // hardcodes the flag to `true`, so an override would leave the
+        // wrong-spoke listing exactly as it was.
+        assert!(!matches_destination(
+            &by_name,
+            "prod",
+            None,
+            Some("https://10.0.0.1:6443"),
+            Some(&mapping),
+            true,
+        ));
+
+        // With no server known on one side, the name is the only signal there
+        // is, and fuzzy matching still applies.
+        assert!(matches_destination(
+            &by_name,
+            "prod",
+            None,
+            None,
+            Some(&mapping),
+            false
+        ));
+        assert!(matches_destination(
+            &by_name,
+            "prod",
+            None,
+            Some("https://10.0.0.1:6443"),
+            Some(&ArgoClusterMapping::new()),
+            false,
+        ));
+    }
+
+    #[test]
+    fn enabling_auto_sync_sets_no_policy_flags_of_its_own() {
+        // #615: enabling once patched prune and selfHeal to true whatever the
+        // Application declared, so a toggle labelled "Enable Auto-Sync" also
+        // opted it into deleting resources and reverting live changes. An empty
+        // `automated` under merge patch creates the policy with Argo's defaults
+        // when absent and leaves an existing one's keys untouched, without a
+        // read that could write back a stale policy.
+        assert_eq!(
+            auto_sync_patch(true),
+            serde_json::json!({"spec": {"syncPolicy": {"automated": {}}}})
+        );
+        assert_eq!(
+            auto_sync_patch(false),
+            serde_json::json!({"spec": {"syncPolicy": {"automated": null}}})
+        );
+    }
+
+    fn reviewed(uid: &str, resource_version: &str) -> ReviewedApplication {
+        ReviewedApplication {
+            namespace: "team".into(),
+            name: "apps".into(),
+            uid: uid.into(),
+            resource_version: resource_version.into(),
+        }
+    }
+
+    type Requests = Arc<std::sync::Mutex<Vec<(String, Value)>>>;
+
+    /// A client whose every request is recorded and answered with `status`
+    /// (a `Status` body carrying `message` when it is an error).
+    fn mock_client(status: u16, message: &'static str) -> (kube::Client, Requests) {
+        // The reason the API server itself gives for each status.
+        let reason = match status {
+            403 => "Forbidden",
+            404 => "NotFound",
+            409 => "Conflict",
+            422 => "Invalid",
+            _ => "",
+        };
+        mock_client_with_error_body(
+            status,
+            serde_json::json!({"apiVersion":"v1","kind":"Status","status":"Failure","code":status,"reason":reason,"message":message})
+                .to_string(),
+        )
+    }
+
+    /// A client answering every request with `status`, and, when that is an
+    /// error, with `error_body` verbatim — which need not be a `Status`.
+    fn mock_client_with_error_body(status: u16, error_body: String) -> (kube::Client, Requests) {
+        let error_body = Arc::new(error_body);
+        let requests: Requests = Arc::new(std::sync::Mutex::new(vec![]));
+        let captured = requests.clone();
+        let service = tower::service_fn(move |request: http::Request<kube::client::Body>| {
+            let captured = captured.clone();
+            let error_body = error_body.clone();
+            async move {
+                let line = format!("{} {}", request.method(), request.uri());
+                let body = request.into_body().collect_bytes().await.unwrap();
+                let value = if body.is_empty() {
+                    Value::Null
+                } else {
+                    serde_json::from_slice(&body).unwrap()
+                };
+                captured.lock().unwrap().push((line, value));
+                let body = if status >= 400 {
+                    error_body.to_string()
+                } else {
+                    serde_json::json!({"apiVersion":"argoproj.io/v1alpha1","kind":"Application","metadata":{"name":"apps","namespace":"team","uid":"u","resourceVersion":"3"}}).to_string()
+                };
+                Ok::<_, std::convert::Infallible>(
+                    http::Response::builder()
+                        .status(status)
+                        .header("content-type", "application/json")
+                        .body(kube::client::Body::from(body.into_bytes()))
+                        .unwrap(),
+                )
+            }
+        });
+        (kube::Client::new(service, "default"), requests)
+    }
+
+    #[test]
+    fn a_listed_application_carries_its_uid_and_resource_version() {
+        let app = ArgoApplication::from_json(&serde_json::json!({
+            "metadata": {"name": "apps", "namespace": "team", "uid": "u-1", "resourceVersion": "42"}
+        }));
+        assert_eq!(app.uid, "u-1");
+        assert_eq!(app.resource_version, "42");
+        assert_eq!(
+            app.reviewed(),
+            ReviewedApplication {
+                namespace: "team".into(),
+                name: "apps".into(),
+                uid: "u-1".into(),
+                resource_version: "42".into(),
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn sync_and_toggle_are_pinned_to_the_reviewed_uid_and_resource_version() {
+        // #620: the patch once named only namespace/name, so an Application
+        // deleted and recreated while the confirmation was open received the
+        // confirmed sync — prune included.
+        let (client, requests) = mock_client(200, "");
+        sync_with_client(client, &reviewed("u", "2"), true, false)
+            .await
+            .unwrap();
+        let (client, toggles) = mock_client(200, "");
+        assert!(
+            toggle_auto_sync_with_client(client, &reviewed("u", "2"), true)
+                .await
+                .unwrap()
+        );
+
+        for (requests, what) in [(requests, "sync"), (toggles, "toggle")] {
+            let requests = requests.lock().unwrap();
+            assert_eq!(requests.len(), 1, "{what}: one write and no read");
+            assert!(
+                requests[0].0.starts_with(
+                    "PATCH /apis/argoproj.io/v1alpha1/namespaces/team/applications/apps?"
+                ),
+                "{what}: {}",
+                requests[0].0
+            );
+            assert_eq!(
+                requests[0].1["metadata"],
+                serde_json::json!({"uid": "u", "resourceVersion": "2"}),
+                "{what}"
+            );
+            if what == "sync" {
+                assert_eq!(requests[0].1["operation"]["sync"]["prune"], true);
+            } else {
+                assert_eq!(
+                    requests[0].1["spec"],
+                    serde_json::json!({"syncPolicy": {"automated": {}}})
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn a_failed_precondition_is_reported_as_a_changed_application() {
+        let cases: [(u16, &'static str, &str); 3] = [
+            // resourceVersion moved on, or the object was replaced.
+            (
+                409,
+                "Operation cannot be fulfilled on applications.argoproj.io \"apps\": the object has been modified",
+                APPLICATION_CHANGED,
+            ),
+            // uid differs from the stored object's.
+            (
+                422,
+                "Application.argoproj.io \"apps\" is invalid: metadata.uid: Invalid value: \"u\": field is immutable",
+                APPLICATION_CHANGED,
+            ),
+            (404, "applications.argoproj.io \"apps\" not found", APPLICATION_GONE),
+        ];
+        for (status, message, expected) in cases {
+            let (client, _) = mock_client(status, message);
+            let err = sync_with_client(client, &reviewed("u", "2"), true, false)
+                .await
+                .unwrap_err();
+            assert_eq!(
+                err,
+                format!("Failed to trigger sync for 'team/apps': {expected}")
+            );
+            assert!(is_stale_review(&err));
+
+            let (client, _) = mock_client(status, message);
+            let err = toggle_auto_sync_with_client(client, &reviewed("u", "2"), false)
+                .await
+                .unwrap_err();
+            assert_eq!(
+                err,
+                format!("Failed to update auto-sync for 'team/apps': {expected}")
+            );
+            assert!(is_stale_review(&err));
+        }
+
+        // Any other refusal says what the cluster said, not that the object changed.
+        let (client, _) = mock_client(403, "applications.argoproj.io \"apps\" is forbidden");
+        let err = sync_with_client(client, &reviewed("u", "2"), false, false)
+            .await
+            .unwrap_err();
+        assert!(err.contains("forbidden"), "{err}");
+        assert!(!is_stale_review(&err));
+    }
+
+    #[tokio::test]
+    async fn an_error_the_api_server_did_not_write_is_not_a_stale_review() {
+        // A router or proxy in front of the API server answers with plain text;
+        // kube-client wraps it as `Error::Api` with the HTTP code and the reason
+        // "Failed to parse error data". That says the endpoint failed, not that
+        // the Application is gone or changed, so it must not claim either or
+        // make the TUI reload.
+        for status in [404, 409, 422] {
+            let (client, requests) =
+                mock_client_with_error_body(status, format!("{status} page not found uid"));
+            let err = sync_with_client(client, &reviewed("u", "2"), true, false)
+                .await
+                .unwrap_err();
+            assert!(!is_stale_review(&err), "{status}: {err}");
+            assert!(err.contains("page not found"), "{status}: {err}");
+            assert_eq!(requests.lock().unwrap().len(), 1);
+
+            let (client, _) =
+                mock_client_with_error_body(status, format!("{status} page not found uid"));
+            let err = toggle_auto_sync_with_client(client, &reviewed("u", "2"), true)
+                .await
+                .unwrap_err();
+            assert!(!is_stale_review(&err), "{status}: {err}");
+            assert!(err.contains("page not found"), "{status}: {err}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_write_with_no_reviewed_identity_is_refused_before_any_request() {
+        for app in [reviewed("", "2"), reviewed("u", "")] {
+            let (client, requests) = mock_client(200, "");
+            let err = sync_with_client(client, &app, true, false)
+                .await
+                .unwrap_err();
+            assert!(err.contains("reviewed identity is unknown"), "{err}");
+            let (client, toggles) = mock_client(200, "");
+            let err = toggle_auto_sync_with_client(client, &app, false)
+                .await
+                .unwrap_err();
+            assert!(err.contains("reviewed identity is unknown"), "{err}");
+            assert!(requests.lock().unwrap().is_empty());
+            assert!(toggles.lock().unwrap().is_empty());
+        }
+    }
+
+    #[test]
+    fn test_argo_application_resource() {
+        let res = argo_application_resource();
+        assert_eq!(res.group, "argoproj.io");
+        assert_eq!(res.version, "v1alpha1");
+        assert_eq!(res.api_version, "argoproj.io/v1alpha1");
+        assert_eq!(res.kind, "Application");
+        assert_eq!(res.plural, "applications");
+    }
+
+    #[test]
+    fn test_normalize_server_url() {
+        assert_eq!(
+            normalize_server_url("https://10.0.0.1:6443/"),
+            "https://10.0.0.1:6443"
+        );
+        assert_eq!(
+            normalize_server_url("  https://KUBERNETES.default.svc/  "),
+            "https://kubernetes.default.svc"
+        );
+        assert_eq!(normalize_server_url(""), "");
+        assert_eq!(normalize_server_url("///"), "");
+    }
+
+    #[test]
+    fn test_argo_cluster_mapping_methods() {
+        let mut mapping = ArgoClusterMapping::new();
+        assert_eq!(mapping.server_for_name("cluster-a"), None);
+        assert_eq!(mapping.name_for_server("https://10.0.0.1"), None);
+
+        // Insertion ignores empty name or server
+        mapping.insert("", "https://10.0.0.1");
+        mapping.insert("cluster-b", "");
+        assert_eq!(mapping.server_for_name(""), None);
+
+        mapping.insert(" Cluster-PROD ", "https://api.prod.local:6443/ ");
+        assert_eq!(
+            mapping.server_for_name("cluster-prod"),
+            Some("https://api.prod.local:6443")
+        );
+        assert_eq!(
+            mapping.server_for_name("CLUSTER-PROD"),
+            Some("https://api.prod.local:6443")
+        );
+        assert_eq!(
+            mapping.name_for_server("https://api.prod.local:6443/"),
+            Some("cluster-prod")
+        );
+        assert_eq!(
+            mapping.name_for_server("https://api.prod.local:6443"),
+            Some("cluster-prod")
+        );
+    }
+
+    #[test]
+    fn test_argo_application_from_json_minimal_and_edge_cases() {
+        // 1. Completely empty JSON
+        let app = ArgoApplication::from_json(&serde_json::json!({}));
+        assert_eq!(app.name, "");
+        assert_eq!(app.namespace, "argocd");
+        assert_eq!(app.project, "default");
+        assert_eq!(app.target_revision, "HEAD");
+        assert_eq!(app.destination_server, "");
+        assert_eq!(app.destination_name, "");
+        assert_eq!(app.destination_namespace, "");
+        assert_eq!(app.sync_status, "");
+        assert_eq!(app.health_status, "Unknown");
+        assert!(!app.auto_sync_enabled);
+        assert!(!app.self_heal_enabled);
+        assert!(!app.prune_enabled);
+        assert!(app.resources.is_empty());
+        assert!(app.sync_history.is_empty());
+
+        // 2. Partial JSON with nulls and arrays containing missing fields
+        let partial = serde_json::json!({
+            "metadata": {
+                "name": "edge-app",
+                "namespace": null
+            },
+            "spec": {
+                "destination": null,
+                "syncPolicy": {
+                    "automated": null
+                }
+            },
+            "status": {
+                "resources": [
+                    {
+                        "name": "pod-1"
+                    },
+                    null
+                ],
+                "history": [
+                    {
+                        "id": "not-a-number",
+                        "revision": "abc"
+                    },
+                    null
+                ]
+            }
+        });
+        let app2 = ArgoApplication::from_json(&partial);
+        assert_eq!(app2.name, "edge-app");
+        assert_eq!(app2.namespace, "argocd");
+        assert_eq!(app2.resources.len(), 2);
+        assert_eq!(app2.resources[0].name, "pod-1");
+        assert_eq!(app2.resources[0].status, "Synced");
+        assert_eq!(app2.resources[0].health, "Healthy");
+        assert_eq!(app2.sync_history.len(), 2);
+        assert_eq!(app2.sync_history[0].id, 0);
+        assert_eq!(app2.sync_history[0].revision, "abc");
+    }
+
+    #[test]
+    fn history_entries_carry_the_sync_window_initiator_and_source_kind() {
+        let raw = serde_json::json!({
+            "metadata": { "name": "shop", "namespace": "argocd" },
+            "status": { "history": [
+                {
+                    "id": 1,
+                    "revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    "deployStartedAt": "2026-09-01T10:00:00Z",
+                    "deployedAt": "2026-09-01T10:01:00Z",
+                    "initiatedBy": { "username": "alice" },
+                    "source": { "repoURL": "https://github.com/acme/deploy.git", "path": "apps/shop" }
+                },
+                {
+                    "id": 2,
+                    "revision": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                    "deployedAt": "2026-09-02T10:01:00Z",
+                    "initiatedBy": { "automated": true },
+                    "source": { "repoURL": "https://github.com/acme/deploy.git", "path": "apps/shop" }
+                },
+                {
+                    "id": 3,
+                    "revision": "1.4.3",
+                    "deployedAt": "2026-09-03T10:01:00Z",
+                    "source": { "repoURL": "https://charts.acme.io", "chart": "shop" }
+                },
+                {
+                    "id": 4,
+                    "deployedAt": "2026-09-04T10:01:00Z",
+                    "revisions": ["2.0.0", "cccccccccccccccccccccccccccccccccccccccc"],
+                    "sources": [
+                        { "repoURL": "https://charts.acme.io", "chart": "shop" },
+                        { "repoURL": "git@github.com:acme/values.git", "path": "shop" }
+                    ]
+                },
+                {
+                    "id": 5,
+                    "deployedAt": "2026-09-05T10:01:00Z",
+                    "revisions": ["3.0.0"],
+                    "sources": [{ "repoURL": "https://charts.acme.io", "chart": "shop" }]
+                }
+            ]}
+        });
+        let h = ArgoApplication::from_json(&raw).sync_history;
+        assert_eq!(h.len(), 5);
+
+        assert_eq!(h[0].deploy_started_at, "2026-09-01T10:00:00Z");
+        assert_eq!(h[0].initiated_by.as_deref(), Some("alice"));
+        assert!(!h[0].is_chart);
+
+        assert_eq!(h[1].deploy_started_at, "");
+        assert_eq!(h[1].initiated_by.as_deref(), Some("automated"));
+
+        assert!(
+            h[2].is_chart,
+            "a chart source's revision is a chart version"
+        );
+        assert_eq!(h[2].initiated_by, None, "older Argo records no initiator");
+
+        // Multi-source: the git source and its revision, not the chart's.
+        assert_eq!(h[3].revision, "cccccccccccccccccccccccccccccccccccccccc");
+        assert_eq!(h[3].repo_url, "git@github.com:acme/values.git");
+        assert_eq!(h[3].path, "shop");
+        assert!(!h[3].is_chart);
+
+        // Multi-source with only charts: the first, marked as a chart.
+        assert_eq!(h[4].revision, "3.0.0");
+        assert!(h[4].is_chart);
+    }
+
+    #[test]
+    fn argo_applications_cache_stores_and_invalidates() {
+        let _lock = CACHE_TEST_MUTEX.lock().unwrap();
+        invalidate_argo_applications_cache();
+        let key = ArgoAppsCacheKey {
+            current_context: "spoke-cluster".to_string(),
+            hub_context: Some("hub-cluster".to_string()),
+            current_cluster_name: Some("spoke-cluster".to_string()),
+            current_server_url: Some("https://10.0.0.1:6443".to_string()),
+            target_namespace: None,
+        };
+
+        let result = ArgoApplicationsFetchResult {
+            all_apps: vec![],
+            filtered_apps: vec![],
+            is_remote_hub: true,
+            truncated: false,
+            fetched_at: None,
+        };
+
+        // Cache insert
+        if let Ok(mut guard) = ARGO_APPS_CACHE.write() {
+            let map = guard.get_or_insert_with(HashMap::new);
+            map.insert(key.clone(), (Instant::now(), result.clone()));
+        }
+
+        // Cache hit
+        {
+            let guard = ARGO_APPS_CACHE.read().unwrap();
+            let map = guard.as_ref().unwrap();
+            let (fetched_at, cached) = map.get(&key).unwrap();
+            assert_eq!(cached, &result);
+            assert!(fetched_at.elapsed() < Duration::from_secs(10));
+        }
+
+        // Invalidation clears cache
+        invalidate_argo_applications_cache();
+        {
+            let guard = ARGO_APPS_CACHE.read().unwrap();
+            assert!(guard.is_none());
+        }
+    }
+
+    #[test]
+    fn cluster_mapping_cache_stores_and_invalidates() {
+        let _lock = CACHE_TEST_MUTEX.lock().unwrap();
+        invalidate_argo_cluster_mapping_cache();
+        let mut mapping = ArgoClusterMapping::new();
+        mapping.insert("spoke-cluster", "https://10.0.0.1:6443");
+
+        // Cache insert
+        if let Ok(mut guard) = CLUSTER_MAPPING_CACHE.write() {
+            let map = guard.get_or_insert_with(HashMap::new);
+            map.insert("hub-cluster".to_string(), (Instant::now(), mapping.clone()));
+        }
+
+        // Cache hit
+        {
+            let guard = CLUSTER_MAPPING_CACHE.read().unwrap();
+            let map = guard.as_ref().unwrap();
+            let (fetched_at, cached) = map.get("hub-cluster").unwrap();
+            assert_eq!(cached, &mapping);
+            assert!(fetched_at.elapsed() < Duration::from_secs(10));
+        }
+
+        // Invalidation clears cache
+        invalidate_argo_cluster_mapping_cache();
+        {
+            let guard = CLUSTER_MAPPING_CACHE.read().unwrap();
+            assert!(guard.is_none());
+        }
+    }
+
+    #[test]
+    fn extract_secret_str_reads_byte_data_then_string_data_then_none() {
+        use k8s_openapi::api::core::v1::Secret;
+        use std::collections::BTreeMap;
+
+        // Byte `data` takes priority when present and valid UTF-8.
+        let mut data = BTreeMap::new();
+        data.insert(
+            "server".to_string(),
+            k8s_openapi::ByteString(b"https://10.0.0.1:6443".to_vec()),
+        );
+        let secret = Secret {
+            data: Some(data),
+            ..Default::default()
+        };
+        assert_eq!(
+            extract_secret_str(&secret, "server"),
+            Some("https://10.0.0.1:6443".to_string())
+        );
+
+        // Falls back to `string_data` when `data` doesn't have the key.
+        let mut string_data = BTreeMap::new();
+        string_data.insert("name".to_string(), "  spoke-cluster  ".to_string());
+        let secret = Secret {
+            data: None,
+            string_data: Some(string_data),
+            ..Default::default()
+        };
+        assert_eq!(
+            extract_secret_str(&secret, "name"),
+            Some("spoke-cluster".to_string())
+        );
+
+        // Empty/whitespace-only values and missing keys yield None.
+        let secret = Secret::default();
+        assert_eq!(extract_secret_str(&secret, "server"), None);
+
+        let mut blank_string_data = BTreeMap::new();
+        blank_string_data.insert("server".to_string(), "   ".to_string());
+        let secret = Secret {
+            string_data: Some(blank_string_data),
+            ..Default::default()
+        };
+        assert_eq!(extract_secret_str(&secret, "server"), None);
+    }
+
+    #[tokio::test]
+    async fn fetch_argo_applications_cached_returns_cache_hit_without_contacting_cluster() {
+        let _lock = CACHE_TEST_MUTEX.lock().unwrap();
+        invalidate_argo_applications_cache();
+        let cache = ClientCache::new(std::path::PathBuf::from("/dev/null"));
+
+        let key = ArgoAppsCacheKey {
+            current_context: "cache-hit-ctx".to_string(),
+            hub_context: None,
+            current_cluster_name: None,
+            current_server_url: None,
+            target_namespace: None,
+        };
+        let cached_result = ArgoApplicationsFetchResult {
+            all_apps: vec![],
+            filtered_apps: vec![],
+            is_remote_hub: false,
+            truncated: false,
+            fetched_at: None,
+        };
+        if let Ok(mut guard) = ARGO_APPS_CACHE.write() {
+            let map = guard.get_or_insert_with(HashMap::new);
+            map.insert(key, (Instant::now(), cached_result.clone()));
+        }
+
+        // No client is configured on this cache, so a non-error result here
+        // proves the cache-hit fast path returned before any cluster contact.
+        let result = fetch_argo_applications_cached(
+            &cache,
+            "cache-hit-ctx",
+            None,
+            None,
+            None,
+            None,
+            false,
+            false,
+        )
+        .await
+        .unwrap();
+        assert_eq!(result, cached_result);
+
+        invalidate_argo_applications_cache();
+    }
+
+    #[tokio::test]
+    async fn fetch_argo_applications_cached_reports_connect_failure_on_cache_miss() {
+        let _lock = CACHE_TEST_MUTEX.lock().unwrap();
+        invalidate_argo_applications_cache();
+        let cache = ClientCache::new(std::path::PathBuf::from("/dev/null"));
+
+        let err = fetch_argo_applications_cached(
+            &cache,
+            "nonexistent-ctx-for-test",
+            None,
+            None,
+            None,
+            None,
+            false,
+            false,
+        )
+        .await
+        .unwrap_err();
+        assert!(err.contains("Failed to connect to cluster"));
+    }
+
+    #[tokio::test]
+    async fn fetch_argo_applications_passthrough_and_actions_connect_failures() {
+        let _lock = CACHE_TEST_MUTEX.lock().unwrap();
+        invalidate_argo_applications_cache();
+        let cache = ClientCache::new(std::path::PathBuf::from("/dev/null"));
+
+        // 1. fetch_argo_applications wrapper calls cached with false
+        let err = fetch_argo_applications(&cache, "nonexistent-ctx", None, None, None, None, false)
+            .await
+            .unwrap_err();
+        assert!(err.contains("Failed to connect to cluster"));
+
+        // 2. fetch_argo_application_detail reports connect error
+        let err = fetch_argo_application_detail(&cache, "nonexistent-ctx", "my-app", "argocd")
+            .await
+            .unwrap_err();
+        assert!(err.contains("Failed to connect to cluster"));
+
+        // 3. trigger_argo_sync reports connect error
+        let app = reviewed("u", "2");
+        let err = trigger_argo_sync(&cache, "nonexistent-ctx", &app, false, false)
+            .await
+            .unwrap_err();
+        assert!(err.contains("Failed to connect to cluster"));
+
+        // 4. toggle_argo_auto_sync reports connect error (enable true and false)
+        let err = toggle_argo_auto_sync(&cache, "nonexistent-ctx", &app, true)
+            .await
+            .unwrap_err();
+        assert!(err.contains("Failed to connect to cluster"));
+
+        let err = toggle_argo_auto_sync(&cache, "nonexistent-ctx", &app, false)
+            .await
+            .unwrap_err();
+        assert!(err.contains("Failed to connect to cluster"));
+
+        // 5. trigger_argo_hard_refresh reports connect error
+        let err = trigger_argo_hard_refresh(&cache, "nonexistent-ctx", "my-app", "argocd")
+            .await
+            .unwrap_err();
+        assert!(err.contains("Failed to connect to cluster"));
+    }
+
+    #[test]
+    fn matches_destination_name_delimiters_and_mapping_edges() {
+        let mut app = ArgoApplication::from_json(&serde_json::json!({}));
+        app.destination_name = "prod-cluster".to_string();
+
+        // Delimiter matching (_ / -)
+        assert!(matches_destination(
+            &app,
+            "gke_prod-cluster",
+            None,
+            None,
+            None,
+            false
+        ));
+        assert!(matches_destination(
+            &app,
+            "my-org/prod-cluster",
+            None,
+            None,
+            None,
+            false
+        ));
+        assert!(matches_destination(
+            &app,
+            "east-prod-cluster",
+            None,
+            None,
+            None,
+            false
+        ));
+
+        // Mapping with server URL matching
+        let mut mapping = ArgoClusterMapping::new();
+        mapping.insert("staging-cluster", "https://k8s.staging.example.com:6443");
+        app.destination_name = "staging-cluster".to_string();
+
+        assert!(matches_destination(
+            &app,
+            "arbitrary-ctx",
+            None,
+            Some("https://k8s.staging.example.com:6443/"),
+            Some(&mapping),
+            false,
+        ));
+
+        // App destination_server matching mapped cluster
+        app.destination_name = String::new();
+        app.destination_server = "https://k8s.staging.example.com:6443".to_string();
+        assert!(matches_destination(
+            &app,
+            "staging-cluster",
+            None,
+            None,
+            Some(&mapping),
+            false,
+        ));
+    }
+
+    #[test]
+    fn argo_disk_cache_round_trip() {
+        let _lock = CACHE_TEST_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let temp_dir = tempfile::tempdir().unwrap();
+        std::env::set_var("SRELENS_CACHE_DIR", temp_dir.path());
+
+        let ctx = "test-round-trip-ctx";
+        let dummy = ArgoApplicationsFetchResult {
+            all_apps: vec![ArgoApplication::from_json(&serde_json::json!({
+                "metadata": { "name": "app1", "namespace": "argocd" }
+            }))],
+            filtered_apps: vec![],
+            is_remote_hub: true,
+            truncated: false,
+            fetched_at: None,
+        };
+
+        assert_eq!(load_argo_apps_disk_cache(ctx), None);
+        save_argo_apps_disk_cache(ctx, &dummy);
+
+        let loaded = load_argo_apps_disk_cache(ctx).expect("must load from disk");
+        assert_eq!(loaded.all_apps.len(), 1);
+        assert_eq!(loaded.all_apps[0].name, "app1");
+        assert!(loaded.is_remote_hub);
+
+        invalidate_argo_disk_cache(ctx);
+        assert_eq!(load_argo_apps_disk_cache(ctx), None);
+
+        std::env::remove_var("SRELENS_CACHE_DIR");
+    }
+
+    #[test]
+    fn argo_disk_cache_rejects_corrupted_and_expired_content() {
+        let _lock = CACHE_TEST_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var("SRELENS_CACHE_DIR", dir.path());
+        let ctx = "bad-cache-ctx";
+
+        let path = argo_disk_cache_path(ctx).unwrap();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+
+        // 1. Corrupted content
+        std::fs::write(&path, b"not valid json").unwrap();
+        assert_eq!(load_argo_apps_disk_cache(ctx), None);
+        assert_eq!(load_argo_apps_disk_cache_with_age(ctx), None);
+
+        // 2. Expired content (> 7 days)
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let eight_days_ago = now - (8 * 86400);
+        let expired_envelope = serde_json::json!({
+            "timestamp": eight_days_ago,
+            "data": ArgoApplicationsFetchResult::default(),
+        });
+        std::fs::write(&path, serde_json::to_string(&expired_envelope).unwrap()).unwrap();
+        assert_eq!(load_argo_apps_disk_cache(ctx), None);
+        assert_eq!(load_argo_apps_disk_cache_with_age(ctx), None);
+
+        // 3. Valid recent content
+        let one_hour_ago = now - 3600;
+        let valid_envelope = serde_json::json!({
+            "timestamp": one_hour_ago,
+            "data": ArgoApplicationsFetchResult {
+                all_apps: vec![],
+                filtered_apps: vec![],
+                is_remote_hub: false,
+                truncated: false,
+                fetched_at: Some(one_hour_ago),
+            },
+        });
+        std::fs::write(&path, serde_json::to_string(&valid_envelope).unwrap()).unwrap();
+        assert!(load_argo_apps_disk_cache_with_age(ctx).is_some());
+
+        invalidate_argo_disk_cache(ctx);
+        std::env::remove_var("SRELENS_CACHE_DIR");
+    }
+
+    /// An Application list served one app per page, following continue
+    /// tokens `p1`, `p2`, ...; the page numbered `stall` never answers.
+    fn paged_client(pages: usize, stall: Option<usize>) -> kube::Client {
+        let service = tower::service_fn(
+            move |request: http::Request<kube::client::Body>| async move {
+                let query = request.uri().query().unwrap_or_default().to_string();
+                let page = query
+                    .split('&')
+                    .find_map(|kv| kv.strip_prefix("continue="))
+                    .and_then(|t| t.trim_start_matches('p').parse::<usize>().ok())
+                    .unwrap_or(0);
+                if Some(page) == stall {
+                    tokio::time::sleep(Duration::from_secs(3600)).await;
+                }
+                let next = if page + 1 < pages {
+                    format!("p{}", page + 1)
+                } else {
+                    String::new()
+                };
+                let body = serde_json::json!({
+                    "apiVersion": "argoproj.io/v1alpha1",
+                    "kind": "ApplicationList",
+                    "metadata": {"continue": next, "resourceVersion": "1"},
+                    "items": [{
+                        "apiVersion": "argoproj.io/v1alpha1",
+                        "kind": "Application",
+                        "metadata": {"name": format!("app-{page}"), "namespace": "argocd"}
+                    }]
+                });
+                Ok::<_, std::convert::Infallible>(
+                    http::Response::builder()
+                        .status(200)
+                        .header("content-type", "application/json")
+                        .body(kube::client::Body::from(body.to_string().into_bytes()))
+                        .unwrap(),
+                )
+            },
+        );
+        kube::Client::new(service, "default")
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_page_that_stops_arriving_after_others_marks_the_listing_truncated() {
+        let ar = argo_application_resource();
+        let api = |client| Api::<DynamicObject>::all_with(client, &ar);
+        let per_page = Duration::from_secs(15);
+
+        let (items, truncated) =
+            list_argo_applications_paginated(&api(paged_client(3, None)), per_page, |_| {})
+                .await
+                .unwrap();
+        assert_eq!((items.len(), truncated), (3, false));
+
+        let mut chunks = 0;
+        let (items, truncated) =
+            list_argo_applications_paginated(&api(paged_client(3, Some(2))), per_page, |_| {
+                chunks += 1
+            })
+            .await
+            .unwrap();
+        assert_eq!((items.len(), truncated, chunks), (2, true, 2));
+
+        let first =
+            list_argo_applications_paginated(&api(paged_client(3, Some(0))), per_page, |_| {})
+                .await;
+        assert!(
+            matches!(first, Err(ArgoListError::Other(_))),
+            "nothing arrived: an error, not an empty list"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_truncated_listing_is_kept_in_memory_but_never_written_to_disk() {
+        let _lock = CACHE_TEST_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var("SRELENS_CACHE_DIR", dir.path());
+        let ctx = "truncated-listing-ctx";
+        let cache = ClientCache::new_many(vec![]);
+
+        cache.preload(ctx, paged_client(3, Some(2))).await;
+        let partial =
+            fetch_argo_applications_cached(&cache, ctx, None, None, None, None, true, true)
+                .await
+                .unwrap();
+        assert!(partial.truncated);
+        assert_eq!(partial.all_apps.len(), 2);
+        assert_eq!(
+            load_argo_apps_disk_cache(ctx),
+            None,
+            "a partial list is not kept for the next start"
+        );
+
+        cache.preload(ctx, paged_client(3, None)).await;
+        let whole = fetch_argo_applications_cached(&cache, ctx, None, None, None, None, true, true)
+            .await
+            .unwrap();
+        assert!(!whole.truncated);
+        assert_eq!(
+            load_argo_apps_disk_cache(ctx).map(|r| r.all_apps.len()),
+            Some(3)
+        );
+
+        invalidate_argo_disk_cache(ctx);
+        std::env::remove_var("SRELENS_CACHE_DIR");
+    }
+
+    fn not_found_client() -> kube::Client {
+        let service = tower::service_fn(|_| async move {
+            Ok::<_, std::convert::Infallible>(
+                http::Response::builder()
+                    .status(404)
+                    .body(kube::client::Body::from(
+                        serde_json::json!({
+                            "apiVersion": "v1",
+                            "kind": "Status",
+                            "status": "Failure",
+                            "message": "the server could not find the requested resource",
+                            "reason": "NotFound",
+                            "code": 404
+                        })
+                        .to_string()
+                        .into_bytes(),
+                    ))
+                    .unwrap(),
+            )
+        });
+        kube::Client::new(service, "default")
+    }
+
+    fn hub_client_with_apps(apps: &[(&str, &str)]) -> (kube::Client, Arc<AtomicU64>) {
+        let calls = Arc::new(AtomicU64::new(0));
+        let calls_clone = calls.clone();
+        let items: Vec<serde_json::Value> = apps
+            .iter()
+            .map(|(name, dest)| {
+                serde_json::json!({
+                    "apiVersion": "argoproj.io/v1alpha1",
+                    "kind": "Application",
+                    "metadata": {"name": name, "namespace": "argocd"},
+                    "spec": {
+                        "destination": {"name": dest, "namespace": "default"}
+                    }
+                })
+            })
+            .collect();
+        let body = serde_json::json!({
+            "apiVersion": "argoproj.io/v1alpha1",
+            "kind": "ApplicationList",
+            "metadata": {"resourceVersion": "1"},
+            "items": items,
+        });
+        let service = tower::service_fn(move |req: http::Request<kube::client::Body>| {
+            let path = req.uri().path().to_string();
+            let body_bytes = if path.contains("secrets") {
+                serde_json::json!({
+                    "apiVersion": "v1",
+                    "kind": "SecretList",
+                    "items": []
+                })
+                .to_string()
+                .into_bytes()
+            } else {
+                calls_clone.fetch_add(1, Ordering::SeqCst);
+                body.to_string().into_bytes()
+            };
+            async move {
+                Ok::<_, std::convert::Infallible>(
+                    http::Response::builder()
+                        .status(200)
+                        .header("content-type", "application/json")
+                        .body(kube::client::Body::from(body_bytes))
+                        .unwrap(),
+                )
+            }
+        });
+        (kube::Client::new(service, "default"), calls)
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn two_spokes_of_one_hub_give_one_listing_and_filtered_apps() {
+        let _lock = CACHE_TEST_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var("SRELENS_CACHE_DIR", dir.path());
+        invalidate_argo_applications_cache();
+
+        let hub = "hub-cluster";
+        let spoke1 = "spoke1";
+        let spoke2 = "spoke2";
+
+        let (client, calls) =
+            hub_client_with_apps(&[("app-spoke1", "spoke1"), ("app-spoke2", "spoke2")]);
+
+        let cache = ClientCache::new_many(vec![]);
+        cache.preload(hub, client).await;
+        cache.preload(spoke1, not_found_client()).await;
+        cache.preload(spoke2, not_found_client()).await;
+
+        let res1 = fetch_argo_applications_cached(
+            &cache,
+            spoke1,
+            Some("spoke1"),
+            None,
+            Some(hub),
+            None,
+            true,
+            false,
+        )
+        .await
+        .unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(res1.all_apps.len(), 2);
+        assert_eq!(res1.filtered_apps.len(), 1);
+        assert_eq!(res1.filtered_apps[0].name, "app-spoke1");
+
+        let res2 = fetch_argo_applications_cached(
+            &cache,
+            spoke2,
+            Some("spoke2"),
+            None,
+            Some(hub),
+            None,
+            true,
+            false,
+        )
+        .await
+        .unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 1, "hub was not called again");
+        assert_eq!(res2.all_apps.len(), 2);
+        assert_eq!(res2.filtered_apps.len(), 1);
+        assert_eq!(res2.filtered_apps[0].name, "app-spoke2");
+
+        assert!(load_argo_hub_disk_cache_with_age(hub).is_some());
+        assert_eq!(load_argo_apps_disk_cache(spoke1), None);
+        assert_eq!(load_argo_apps_disk_cache(spoke2), None);
+
+        invalidate_argo_applications_cache();
+        invalidate_argo_disk_cache(&format!("hub-{}", hub));
+        std::env::remove_var("SRELENS_CACHE_DIR");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn fresh_disk_data_skips_request_and_stale_triggers_refresh() {
+        let _lock = CACHE_TEST_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var("SRELENS_CACHE_DIR", dir.path());
+        invalidate_argo_applications_cache();
+
+        let hub = "hub-test-fresh";
+        let spoke = "spoke-test-fresh";
+        let (client, calls) = hub_client_with_apps(&[("app1", "spoke-test-fresh")]);
+
+        let cache = ClientCache::new_many(vec![]);
+        cache.preload(hub, client).await;
+        cache.preload(spoke, not_found_client()).await;
+
+        let fresh_result = ArgoApplicationsFetchResult {
+            all_apps: vec![ArgoApplication::from_json(&serde_json::json!({
+                "metadata": {"name": "app1", "namespace": "argocd"},
+                "spec": {"destination": {"name": "spoke-test-fresh"}}
+            }))],
+            filtered_apps: vec![],
+            is_remote_hub: true,
+            truncated: false,
+            fetched_at: None,
+        };
+        save_argo_hub_disk_cache(hub, &fresh_result);
+
+        let res = fetch_argo_applications_cached(
+            &cache,
+            spoke,
+            Some(spoke),
+            None,
+            Some(hub),
+            None,
+            true,
+            false,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            0,
+            "fresh disk cache skipped network"
+        );
+        assert_eq!(res.filtered_apps.len(), 1);
+
+        let _ = fetch_argo_applications_cached(
+            &cache,
+            spoke,
+            Some(spoke),
+            None,
+            Some(hub),
+            None,
+            true,
+            true,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "force refresh fetched from hub"
+        );
+
+        invalidate_argo_applications_cache();
+        invalidate_argo_disk_cache(&format!("hub-{}", hub));
+        std::env::remove_var("SRELENS_CACHE_DIR");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn fresh_local_disk_cache_skips_request_and_force_refresh_fetches() {
+        let _lock = CACHE_TEST_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var("SRELENS_CACHE_DIR", dir.path());
+        invalidate_argo_applications_cache();
+
+        let ctx = "local-cluster";
+        let (client, calls) = hub_client_with_apps(&[("local-app", "local-cluster")]);
+
+        let cache = ClientCache::new_many(vec![]);
+        cache.preload(ctx, client).await;
+
+        let fresh_result = ArgoApplicationsFetchResult {
+            all_apps: vec![ArgoApplication::from_json(&serde_json::json!({
+                "metadata": {"name": "local-app", "namespace": "argocd"},
+                "spec": {"destination": {"name": "local-cluster"}}
+            }))],
+            filtered_apps: vec![ArgoApplication::from_json(&serde_json::json!({
+                "metadata": {"name": "local-app", "namespace": "argocd"},
+                "spec": {"destination": {"name": "local-cluster"}}
+            }))],
+            is_remote_hub: false,
+            truncated: false,
+            fetched_at: None,
+        };
+        save_argo_apps_disk_cache(ctx, &fresh_result);
+
+        // First call with fresh disk cache and force_refresh=false
+        let res =
+            fetch_argo_applications_cached(&cache, ctx, Some(ctx), None, None, None, true, false)
+                .await
+                .unwrap();
+
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            0,
+            "fresh local disk cache must skip network request"
+        );
+        assert_eq!(res.all_apps.len(), 1);
+        assert_eq!(res.all_apps[0].name, "local-app");
+
+        // Force refresh must bypass disk cache and hit network
+        let res2 =
+            fetch_argo_applications_cached(&cache, ctx, Some(ctx), None, None, None, true, true)
+                .await
+                .unwrap();
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "force refresh must hit the network"
+        );
+        assert_eq!(res2.all_apps.len(), 1);
+
+        invalidate_argo_applications_cache();
+        invalidate_argo_disk_cache(ctx);
+        std::env::remove_var("SRELENS_CACHE_DIR");
+    }
+
+    #[test]
+    fn store_argo_apps_skips_disk_cache_when_namespaced() {
+        let _lock = CACHE_TEST_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let temp_dir =
+            std::env::temp_dir().join(format!("srelens-cache-ns-{}", std::process::id()));
+        std::env::set_var("SRELENS_CACHE_DIR", temp_dir.to_str().unwrap());
+        let ctx = "test-ns-cache";
+        invalidate_argo_disk_cache(ctx);
+
+        let key = ArgoAppsCacheKey {
+            current_context: ctx.to_string(),
+            hub_context: None,
+            current_cluster_name: None,
+            current_server_url: None,
+            target_namespace: Some("custom-ns".to_string()),
+        };
+        let mut result = ArgoApplicationsFetchResult {
+            all_apps: vec![],
+            filtered_apps: vec![],
+            is_remote_hub: false,
+            truncated: false,
+            fetched_at: None,
+        };
+
+        store_argo_apps(key, ctx, &mut result, Some(ctx));
+        assert!(
+            load_argo_apps_disk_cache_with_age(ctx).is_none(),
+            "namespaced fetch must not write cluster-wide disk cache"
+        );
+        let in_hub_cache = ARGO_HUB_CACHE
+            .read()
+            .ok()
+            .map(|g| g.as_ref().map(|m| m.contains_key(ctx)).unwrap_or(false))
+            .unwrap_or(false);
+        assert!(
+            !in_hub_cache,
+            "namespaced fetch must not populate ARGO_HUB_CACHE"
+        );
+
+        std::env::remove_var("SRELENS_CACHE_DIR");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn hub_cache_does_not_shadow_unprobed_local_cluster() {
+        let _lock = CACHE_TEST_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var("SRELENS_CACHE_DIR", dir.path());
+        invalidate_argo_applications_cache();
+
+        let hub = "hub-shadow-test";
+        let local = "local-with-argo";
+        let (local_client, _calls) = hub_client_with_apps(&[("local-app", "local-with-argo")]);
+
+        let cache = ClientCache::new_many(vec![]);
+        cache.preload(local, local_client).await;
+
+        let hub_result = ArgoApplicationsFetchResult {
+            all_apps: vec![ArgoApplication::from_json(&serde_json::json!({
+                "metadata": {"name": "hub-app", "namespace": "argocd"},
+                "spec": {"destination": {"name": "local-with-argo"}}
+            }))],
+            filtered_apps: vec![],
+            is_remote_hub: true,
+            truncated: false,
+            fetched_at: None,
+        };
+        save_argo_hub_disk_cache(hub, &hub_result);
+
+        // Fetching local cluster without it being in spoke probe cache must find local apps, not hub cache!
+        let res = fetch_argo_applications_cached(
+            &cache,
+            local,
+            Some(local),
+            None,
+            Some(hub),
+            None,
+            true,
+            false,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            res.is_remote_hub, false,
+            "unprobed cluster with local Argo must not be shadowed by hub cache"
+        );
+        assert_eq!(res.all_apps.len(), 1);
+        assert_eq!(res.all_apps[0].name, "local-app");
+
+        invalidate_argo_applications_cache();
+        invalidate_argo_disk_cache(&format!("hub-{}", hub));
+        invalidate_argo_disk_cache(local);
+        std::env::remove_var("SRELENS_CACHE_DIR");
+    }
+
+    #[test]
+    fn save_argo_apps_disk_cache_atomic_roundtrip() {
+        let _lock = CACHE_TEST_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let temp_dir =
+            std::env::temp_dir().join(format!("srelens-atomic-test-{}", std::process::id()));
+        std::env::set_var("SRELENS_CACHE_DIR", temp_dir.to_str().unwrap());
+        let ctx = "test-atomic";
+        invalidate_argo_disk_cache(ctx);
+
+        let app = ArgoApplication::from_json(&serde_json::json!({
+            "metadata": {"name": "app1", "namespace": "argocd"},
+            "spec": {"destination": {"name": "c1"}}
+        }));
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let expected_ts = now - 100;
+        let result = ArgoApplicationsFetchResult {
+            all_apps: vec![app.clone()],
+            filtered_apps: vec![app],
+            is_remote_hub: false,
+            truncated: false,
+            fetched_at: Some(expected_ts),
+        };
+
+        save_argo_apps_disk_cache(ctx, &result);
+        let loaded = load_argo_apps_disk_cache_with_age(ctx);
+        assert!(loaded.is_some());
+        let (res, ts) = loaded.unwrap();
+        assert_eq!(ts, expected_ts);
+        assert_eq!(res.all_apps.len(), 1);
+        assert_eq!(res.all_apps[0].name, "app1");
+
+        invalidate_argo_disk_cache(ctx);
+        std::env::remove_var("SRELENS_CACHE_DIR");
+    }
+}

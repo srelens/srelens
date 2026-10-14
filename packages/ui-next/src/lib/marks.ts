@@ -169,6 +169,13 @@ export function getMark(stableId: string, name: string): MarkAppearance {
   return readMark(stableId, name, false);
 }
 
+/** Prefer an explicitly configured short name; otherwise retain the display name. */
+export function getContextLabel(stableId: string, name: string): string {
+  const profile = profiles[stableId] ?? (profileInventoryComplete && !ambiguousProfileKeys.has(name) ? profiles[name] : undefined);
+  const short = profile?.shortName ?? marks[stableId]?.short;
+  return (typeof short === "string" && short.trim()) || getMark(stableId, name).name;
+}
+
 function readMark(stableId: string, name: string, editing: boolean): MarkAppearance {
   // Raw editor values and display labels each need a stable snapshot. The
   // fallback also depends on the current kubeconfig name.

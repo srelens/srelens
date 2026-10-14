@@ -53,6 +53,26 @@ export function rolloutRestart(
 }
 
 /**
+ * Roll a Deployment back to `revision` via `k8s.rolloutUndo` (#389). Not
+ * through `run`: the capability answers with the revision it rolled back to,
+ * not an `ok` flag, so success is that it answered at all.
+ */
+export async function rolloutUndo(
+  context: string,
+  namespace: string,
+  name: string,
+  revision: number,
+  invoke: Invoker = invokeCapability,
+): Promise<ActionResult> {
+  try {
+    await invoke("k8s.rolloutUndo", { context, namespace, name, revision });
+    return { ok: true };
+  } catch (e) {
+    return { error: String(e) };
+  }
+}
+
+/**
  * Update ConfigMap/Secret values in place via `k8s.updateConfigData`. `data`
  * holds plaintext values for the keys being changed; other keys are untouched.
  * For Secrets the backend writes via `stringData`, so the caller passes

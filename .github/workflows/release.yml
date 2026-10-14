@@ -8,7 +8,8 @@ name: Release
 #                 binary. A manual run can override that with `force`.
 # main branch  -> the version is derived AUTOMATICALLY from Conventional Commits
 #                 since the last stable tag (feat -> minor, fix/perf -> patch,
-#                 BREAKING CHANGE or `!` -> major). The version files are bumped +
+#                 BREAKING CHANGE or `!` -> major, or minor while still on 0.x).
+#                 The version files are bumped +
 #                 committed back to main with [skip ci], then a stable
 #                 `srelens-v<version>` release is built. No manual bump needed; if
 #                 there are no releasable commits the release is skipped.
@@ -55,9 +56,9 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: 22
+          node-version-file: .nvmrc
       - name: Compute + commit next version
         id: compute
         shell: bash
@@ -109,9 +110,23 @@ jobs:
           # the entire release (desktop, docker, AUR) silently skips. The
           # documented path is still a plain merge commit; this is the
           # backstop for the wrong button.
+          CUR=$(node -p "require('./apps/desktop/src-tauri/tauri.conf.json').version")
+          # A stable run that pushed its bump and then failed leaves main at a
+          # version no release was published for, so no tag names it. Release
+          # that version again instead of bumping past it: v0.16.0 failed that
+          # way, and merging its fix bumped main to 0.17.0, a release nobody
+          # got. The notes still cover everything since the last published tag.
+          RETRY=""
+          if [ -n "$LAST_TAG" ] && ! git rev-parse -q --verify "refs/tags/srelens-v$CUR" >/dev/null; then
+            RETRY=yes
+          fi
           if echo "$SUBJECTS" | grep -qiE '(^|[[:space:]])BREAKING[ -]CHANGE' \
              || echo "$SUBJECTS" | grep -qE '^(\* )?[a-z]+(\([^)]*\))?!:'; then
-            BUMP=major
+            # Semver treats 0.x as unstable, so a breaking change there is a
+            # minor bump. Without this the first `!` subject on a 0.x line
+            # silently cuts 1.0.0 (#613): going 1.0 is a decision, not a side
+            # effect of a commit subject.
+            if [ "${CUR%%.*}" = "0" ]; then BUMP=minor; else BUMP=major; fi
           elif echo "$SUBJECTS" | grep -qE '^(\* )?feat(\([^)]*\))?:'; then
             BUMP=minor
           elif echo "$SUBJECTS" | grep -qE '^(\* )?(fix|perf)(\([^)]*\))?:'; then
@@ -120,25 +135,44 @@ jobs:
             BUMP=none
           fi
           echo "Detected bump since ${LAST_TAG:-<start>}: $BUMP"
-          if [ "$BUMP" = "none" ]; then
+          # Retried only when that version is at least the step the commits
+          # since the last release need: a breaking change that landed after a
+          # failed patch release must not ship as that patch.
+          if [ -n "$RETRY" ] && [ "$BUMP" != "none" ] && ! node -e '
+              const [last, cur, kind] = process.argv.slice(1);
+              const need = last.split(".").map(Number);
+              if (kind === "major") { need[0]++; need[1] = 0; need[2] = 0; }
+              else if (kind === "minor") { need[1]++; need[2] = 0; }
+              else { need[2]++; }
+              const have = cur.split(".").map(Number);
+              const i = [0, 1, 2].find((k) => have[k] !== need[k]);
+              process.exit(i === undefined || have[i] > need[i] ? 0 : 1);
+            ' "${LAST_TAG#srelens-v}" "$CUR" "$BUMP"; then
+            RETRY=""
+          fi
+          if [ "$BUMP" = "none" ] && [ -z "$RETRY" ]; then
             echo "release=false" >> "$GITHUB_OUTPUT"
             echo "No releasable (feat/fix/perf/breaking) commits — skipping release."
             exit 0
           fi
-          CUR=$(node -p "require('./apps/desktop/src-tauri/tauri.conf.json').version")
-          NEW=$(node -e 'const p=process.argv[1].split(".").map(Number);const k=process.argv[2];if(k==="major"){p[0]++;p[1]=0;p[2]=0}else if(k==="minor"){p[1]++;p[2]=0}else{p[2]++}process.stdout.write(p.join("."))' "$CUR" "$BUMP")
-          echo "Releasing $CUR -> $NEW"
-          node -e '
-            const fs=require("fs");const v=process.argv[1];
-            const sub=(p,re,to)=>{const s=fs.readFileSync(p,"utf8");const n=s.replace(re,to);if(n===s)throw new Error("no version match in "+p);fs.writeFileSync(p,n)};
-            sub("apps/desktop/src-tauri/tauri.conf.json",/("version":\s*)"[^"]+"/,`$1"${v}"`);
-            // Every crate inherits [workspace.package].version from the root
-            // Cargo.toml (src-tauri included), so ONE Cargo bump versions the
-            // whole workspace — the server binary, the MCP serverInfo, all of
-            // it — and the lock updates every srelens-* member to match.
-            sub("Cargo.toml",/^version = "[^"]+"/m,`version = "${v}"`);
-            sub("Cargo.lock",/(name = "srelens-[a-z-]+"\r?\nversion = ")[^"]+(")/g,`$1${v}$2`);
-          ' "$NEW"
+          if [ -n "$RETRY" ]; then
+            NEW="$CUR"
+            echo "srelens-v$CUR was bumped to but never published — releasing it again, unbumped."
+          else
+            NEW=$(node -e 'const p=process.argv[1].split(".").map(Number);const k=process.argv[2];if(k==="major"){p[0]++;p[1]=0;p[2]=0}else if(k==="minor"){p[1]++;p[2]=0}else{p[2]++}process.stdout.write(p.join("."))' "$CUR" "$BUMP")
+            echo "Releasing $CUR -> $NEW"
+            node -e '
+              const fs=require("fs");const v=process.argv[1];
+              const sub=(p,re,to)=>{const s=fs.readFileSync(p,"utf8");const n=s.replace(re,to);if(n===s)throw new Error("no version match in "+p);fs.writeFileSync(p,n)};
+              sub("apps/desktop/src-tauri/tauri.conf.json",/("version":\s*)"[^"]+"/,`$1"${v}"`);
+              // Every crate inherits [workspace.package].version from the root
+              // Cargo.toml (src-tauri included), so ONE Cargo bump versions the
+              // whole workspace — the server binary, the MCP serverInfo, all of
+              // it — and the lock updates every srelens-* member, and srectl, to match.
+              sub("Cargo.toml",/^version = "[^"]+"/m,`version = "${v}"`);
+              sub("Cargo.lock",/(name = "(?:srelens-[a-z-]+|srectl)"\r?\nversion = ")[^"]+(")/g,`$1${v}$2`);
+            ' "$NEW"
+          fi
           # Grouped changelog for the release body. The Conventional Commit type
           # is dropped (the section heading already says Features / Fixes) but
           # the SCOPE is kept as a bold lead-in: without it, subjects written to
@@ -163,10 +197,12 @@ jobs:
             [ -n "$FIXES" ] && printf '### Fixes\n%s\n\n' "$FIXES"
             echo "__NOTES_EOF__"
           } >> "$GITHUB_OUTPUT"
-          git config user.name "release-bot"
-          git config user.email "release-bot@users.noreply.github.com"
-          git commit -am "chore(release): srelens-v${NEW} [skip ci]"
-          git push origin HEAD:main
+          if [ -z "$RETRY" ]; then
+            git config user.name "release-bot"
+            git config user.email "release-bot@users.noreply.github.com"
+            git commit -am "chore(release): srelens-v${NEW} [skip ci]"
+            git push origin HEAD:main
+          fi
           echo "version=$NEW" >> "$GITHUB_OUTPUT"
           echo "release=true" >> "$GITHUB_OUTPUT"
 
@@ -205,6 +241,11 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install Linux dependencies
         run: |
+          # Third-party repos the runner image ships, dropped for the reason
+          # in ci.yml's backend job: an outage in one of them fails
+          # `apt-get update` for everyone, and this build uses none of them.
+          sudo rm -f /etc/apt/sources.list.d/google-chrome.* \
+                     /etc/apt/sources.list.d/microsoft-prod.*
           sudo apt-get update
           sudo apt-get install -y \
             libwebkit2gtk-4.1-dev \
@@ -221,14 +262,14 @@ jobs:
       # package.json. One source of truth: a second one here is how local
       # ended up on pnpm 11 while CI ran 9, which silently dropped the CVE
       # overrides from the lockfile on every local install.
-      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: 22
+          node-version-file: .nvmrc
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - run: pnpm build
-      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
+      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # v1
         with:
           toolchain: stable
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
@@ -241,7 +282,7 @@ jobs:
       - name: Build the app binary
         run: cargo build -p srelens-desktop --features custom-protocol --profile ci-smoke
       - name: Create kind cluster
-        uses: helm/kind-action@06c1ae10762d3b9c1644e7fe69596ae519e015a2 # v1.15.0
+        uses: helm/kind-action@1544676c07bb3570fcb70166beaa07c4528fd4aa # v1.15.1
         with:
           cluster_name: srelens-e2e
       - name: Full smoke suite through the real app
@@ -250,12 +291,13 @@ jobs:
           SRELENS_SMOKE_FULL: "1"
           SRELENS_SMOKE_APP: ${{ github.workspace }}/target/ci-smoke/srelens
           SRELENS_SMOKE_ARTIFACTS: ${{ runner.temp }}/smoke-artifacts
+        # A screen the 1440x900 window fits on; see the same step in ci.yml.
         run: |
-          xvfb-run --auto-servernum \
+          xvfb-run --auto-servernum --server-args="-screen 0 1920x1080x24" \
             cargo test -p srelens-desktop --features custom-protocol --profile ci-smoke --test webdriver_smoke -- --ignored --nocapture
       - name: Upload failure artifacts (screenshot + app logs)
         if: failure()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: smoke-full-failure-artifacts
           path: ${{ runner.temp }}/smoke-artifacts
@@ -295,11 +337,11 @@ jobs:
             const fs=require("fs");const v=process.argv[1];
             const sub=(p,re,to)=>{const s=fs.readFileSync(p,"utf8");if(!re.test(s))throw new Error("no version field in "+p);fs.writeFileSync(p,s.replace(re,to))};
             sub("Cargo.toml",/^version = "[^"]+"/m,`version = "${v}"`);
-            sub("Cargo.lock",/(name = "srelens-[a-z-]+"\r?\nversion = ")[^"]+(")/g,`$1${v}$2`);
+            sub("Cargo.lock",/(name = "(?:srelens-[a-z-]+|srectl)"\r?\nversion = ")[^"]+(")/g,`$1${v}$2`);
           ' "$V"
           echo "Docker build version: $V"
       - name: Set up Buildx
-        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
       - name: Log in to GHCR
         uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
@@ -308,7 +350,7 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
       - name: Build and push by digest
         id: build
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
           platforms: ${{ matrix.platform }}
@@ -329,7 +371,7 @@ jobs:
           fi
           touch "/tmp/digests/${digest#sha256:}"
       - name: Upload digest
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: docker-digest-${{ matrix.arch }}
           path: /tmp/digests/*
@@ -349,13 +391,13 @@ jobs:
       packages: write
     steps:
       - name: Download digests
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           path: /tmp/digests
           pattern: docker-digest-*
           merge-multiple: true
       - name: Set up Buildx
-        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
       - name: Log in to GHCR
         uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
@@ -397,6 +439,9 @@ jobs:
       # Apple secret set is present; with anything less the build stays
       # unsigned rather than failing on a partial configuration.
       ENABLE_MAC_SIGNING: ${{ secrets.APPLE_CERTIFICATE != '' && secrets.APPLE_CERTIFICATE_PASSWORD != '' && secrets.APPLE_SIGNING_IDENTITY != '' }}
+      # The profile behind Touch ID's App ID entitlement (#819); see the
+      # signing step below.
+      HAS_MAC_PROFILE: ${{ secrets.APPLE_PROVISIONING_PROFILE != '' }}
       # Libraries the AppImage must NOT bundle (#111) — see the seed step below.
       # Single source of truth: the build passes this to linuxdeploy, and the
       # post-build assert greps for the same pattern. Keep them in lockstep.
@@ -417,10 +462,10 @@ jobs:
         include:
           - platform: macos-latest      # Apple Silicon
             target: aarch64-apple-darwin
-            args: --target aarch64-apple-darwin
+            args: --target aarch64-apple-darwin --config src-tauri/macos-launcher.conf.json
           - platform: macos-latest      # Intel
             target: x86_64-apple-darwin
-            args: --target x86_64-apple-darwin
+            args: --target x86_64-apple-darwin --config src-tauri/macos-launcher.conf.json
           - platform: ubuntu-22.04      # Linux
             target: ''
             args: ''
@@ -439,6 +484,11 @@ jobs:
       - name: Install Linux dependencies
         if: runner.os == 'Linux'
         run: |
+          # Third-party repos the runner image ships, dropped for the reason
+          # in ci.yml's backend job: an outage in one of them fails
+          # `apt-get update` for everyone, and this build uses none of them.
+          sudo rm -f /etc/apt/sources.list.d/google-chrome.* \
+                     /etc/apt/sources.list.d/microsoft-prod.*
           sudo apt-get update
           sudo apt-get install -y \
             libwebkit2gtk-4.1-dev \
@@ -486,14 +536,14 @@ jobs:
       # package.json. One source of truth: a second one here is how local
       # ended up on pnpm 11 while CI ran 9, which silently dropped the CVE
       # overrides from the lockfile on every local install.
-      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
 
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: 22
+          node-version-file: .nvmrc
           cache: pnpm
 
-      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
+      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # v1
         with:
           toolchain: stable
           targets: ${{ matrix.target }}
@@ -514,9 +564,19 @@ jobs:
             const sub=(p,re,to)=>{const s=fs.readFileSync(p,"utf8");if(!re.test(s))throw new Error("no version field in "+p);fs.writeFileSync(p,s.replace(re,to))};
             sub("apps/desktop/src-tauri/tauri.conf.json",/("version":\s*)"[^"]+"/,`$1"${v}"`);
             sub("Cargo.toml",/^version = "[^"]+"/m,`version = "${v}"`);
-            sub("Cargo.lock",/(name = "srelens-[a-z-]+"\r?\nversion = ")[^"]+(")/g,`$1${v}$2`);
+            sub("Cargo.lock",/(name = "(?:srelens-[a-z-]+|srectl)"\r?\nversion = ")[^"]+(")/g,`$1${v}$2`);
           ' "$V"
           echo "Built version: $V"
+
+      # Touch ID unlock (#819) works only in a build signed with the App ID
+      # entitlement. Once a release has shipped it, a stable build without it
+      # (unsigned, or signed without the profile) locks out everyone who
+      # turned Touch ID on, so stable refuses both. Dev still builds, warned.
+      - name: Require signing and the provisioning profile for stable macOS releases
+        if: matrix.platform == 'macos-latest' && github.ref_name == 'main' && (env.ENABLE_MAC_SIGNING != 'true' || env.HAS_MAC_PROFILE != 'true')
+        run: |
+          echo "::error::A stable macOS build needs APPLE_CERTIFICATE, APPLE_CERTIFICATE_PASSWORD, APPLE_SIGNING_IDENTITY and APPLE_PROVISIONING_PROFILE: without the App ID entitlement it breaks Touch ID unlock for everyone who enabled it."
+          exit 1
 
       # Export the Apple signing env ONLY when the full secret set exists.
       # Tauri treats a *defined but empty* APPLE_CERTIFICATE as "please sign"
@@ -524,6 +584,8 @@ jobs:
       # absent (not empty) on unsigned builds.
       - name: Enable macOS signing (when secrets are configured)
         if: matrix.platform == 'macos-latest' && env.ENABLE_MAC_SIGNING == 'true'
+        env:
+          APPLE_PROVISIONING_PROFILE: ${{ secrets.APPLE_PROVISIONING_PROFILE }}
         run: |
           {
             echo "APPLE_CERTIFICATE<<__EOF__";          echo "${{ secrets.APPLE_CERTIFICATE }}";          echo "__EOF__"
@@ -536,6 +598,22 @@ jobs:
           # to a file; tauri-action reads APPLE_API_KEY_PATH from there.
           echo "${{ secrets.APPLE_API_KEY_P8 }}" | base64 --decode > "$RUNNER_TEMP/apple_api_key.p8"
           echo "APPLE_API_KEY_PATH=$RUNNER_TEMP/apple_api_key.p8" >> "$GITHUB_ENV"
+          # Touch ID unlock (#819) keeps its key in the data-protection
+          # keychain, which answers only an app holding its App ID entitlement,
+          # and a Developer ID app may claim that only with an embedded
+          # provisioning profile. Signed builds only: an unsigned build that
+          # claims it is killed at launch. Without the profile a dev build
+          # stays signed but unentitled, and Settings hides the Touch ID
+          # switch; a stable one was refused by the step above. The profile
+          # names the APPLE_CERTIFICATE certificate: renewing that certificate
+          # means regenerating the profile with the new one, or macOS refuses
+          # to launch the signed app.
+          if [ -n "$APPLE_PROVISIONING_PROFILE" ]; then
+            printf '%s' "$APPLE_PROVISIONING_PROFILE" | base64 --decode > "$GITHUB_WORKSPACE/apps/desktop/src-tauri/embedded.provisionprofile"
+            echo "MAC_SIGNED_CONFIG=--config $GITHUB_WORKSPACE/apps/desktop/src-tauri/macos-signing.conf.json" >> "$GITHUB_ENV"
+          else
+            echo "::warning::APPLE_PROVISIONING_PROFILE is not set — this macOS build has no App ID entitlement, so Touch ID unlock stays unavailable."
+          fi
 
       # Stable -> srelens-v<version>. Dev -> a unique semver pre-release
       # (srelens-vX.Y.Z-<run>) so every dev build gets its own tag.
@@ -544,6 +622,15 @@ jobs:
         run: |
           echo "REL_TAG=srelens-v${{ needs.version.outputs.version }}" >> "$GITHUB_ENV"
           echo "REL_NAME=srelens v${{ needs.version.outputs.version }}" >> "$GITHUB_ENV"
+
+      # Sign the non-bundle launcher without the desktop's restricted App ID
+      # entitlements. Tauri copies it unchanged beside srelens before signing
+      # and notarizing the app itself.
+      - name: Prepare the macOS sandbox launcher
+        if: runner.os == 'macOS'
+        env:
+          SRELENS_BUNDLE_TARGET: ${{ matrix.target }}
+        run: sh packaging/macos/prepare-launcher.sh "$SRELENS_BUNDLE_TARGET"
 
       - name: Build app & publish release
         uses: tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f # v1.0.0
@@ -580,11 +667,40 @@ jobs:
           # `releases/latest`, and the dev-channel manifest published by
           # updater-manifest must point at assets that are live immediately.
           releaseDraft: ${{ github.ref_name == 'main' }}
-          args: ${{ matrix.args }}
+          # MAC_SIGNED_CONFIG is set only by the macOS signing step above.
+          args: ${{ matrix.args }} ${{ env.MAC_SIGNED_CONFIG }}
           # Each matrix job uploads its own binaries + signatures, but NOT
           # latest.json — parallel jobs would race on that single asset. The
           # updater-manifest job assembles it once, after all builds.
           includeUpdaterJson: false
+
+      - name: Assert the macOS sandbox launcher is bundled and signed
+        if: runner.os == 'macOS'
+        env:
+          SRELENS_BUNDLE_TARGET: ${{ matrix.target }}
+        run: |
+          LAUNCHER="target/$SRELENS_BUNDLE_TARGET/release/bundle/macos/srelens.app/Contents/MacOS/srelens-sandbox-launch"
+          test -x "$LAUNCHER"
+          if [ "$ENABLE_MAC_SIGNING" = 'true' ]; then
+            codesign --verify --strict --verbose=2 "$LAUNCHER"
+          fi
+          # Valid signatures can still be killed for invalid entitlements.
+          # No arguments must reach the launcher's own error path (exit 125).
+          set +e
+          "$LAUNCHER" > "$RUNNER_TEMP/launcher-check.log" 2>&1
+          STATUS=$?
+          set -e
+          test "$STATUS" -eq 125
+          grep -q 'missing --data DIR' "$RUNNER_TEMP/launcher-check.log"
+
+      # macOS launches an app claiming the App ID entitlement (#819) only if
+      # its embedded profile grants it, names its signing certificate and
+      # hasn't expired; notarization checks none of that. Fail on main before
+      # the draft is published, and on both channels before updater-manifest
+      # points any install at an app that would not open.
+      - name: Assert the macOS app's profile covers its signature
+        if: runner.os == 'macOS' && env.MAC_SIGNED_CONFIG != ''
+        run: sh packaging/macos/check-profile.sh "target/${{ matrix.target }}/release/bundle/macos/srelens.app"
 
       # Regression tripwire for #111: fail the build if the AppImage bundles
       # host-ABI Wayland libs. The release is still a draft at this point, so
@@ -607,6 +723,17 @@ jobs:
             exit 1
           fi
           echo "OK: no $APPIMAGE_EXCLUDED_LIBS in the AppImage"
+
+      # Executable apps on Linux need the sandbox launcher beside srelens
+      # (tauri.linux.conf.json). Fail if a bundle lacks it, ships it without its
+      # execute bit, or ships something else: on main before the draft is
+      # published; on dev the pre-release's assets are already up, and this
+      # flags them.
+      - name: Assert the Linux bundles ship the sandbox launcher
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get install -y rpm
+          sh packaging/linux/check-launcher.sh target/release/bundle
 
   # The terminal UI (#443). `apps/tui` shipped in #433 but nothing released it:
   # wanting the TUI meant cloning the repo and building it. It rides the SAME
@@ -676,10 +803,15 @@ jobs:
       - name: Install musl tooling
         if: ${{ endsWith(matrix.target, '-musl') }}
         run: |
+          # Third-party repos the runner image ships, dropped for the reason
+          # in ci.yml's backend job: an outage in one of them fails
+          # `apt-get update` for everyone, and this build uses none of them.
+          sudo rm -f /etc/apt/sources.list.d/google-chrome.* \
+                     /etc/apt/sources.list.d/microsoft-prod.*
           sudo apt-get update
           sudo apt-get install -y musl-tools
 
-      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
+      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # v1
         with:
           toolchain: stable
           targets: ${{ matrix.target }}
@@ -689,7 +821,7 @@ jobs:
 
       # Every crate inherits [workspace.package].version, so without this the
       # binary reports the committed placeholder: on dev the pre-release
-      # version is never committed at all, and `srelens-tui --version` would
+      # version is never committed at all, and `srectl --version` would
       # disagree with the release it was downloaded from. The smoke step below
       # asserts they match, so a drift here fails the leg rather than shipping.
       - name: Set build version
@@ -700,7 +832,7 @@ jobs:
             const fs=require("fs");const v=process.argv[1];
             const sub=(p,re,to)=>{const s=fs.readFileSync(p,"utf8");if(!re.test(s))throw new Error("no version field in "+p);fs.writeFileSync(p,s.replace(re,to))};
             sub("Cargo.toml",/^version = "[^"]+"/m,`version = "${v}"`);
-            sub("Cargo.lock",/(name = "srelens-[a-z-]+"\r?\nversion = ")[^"]+(")/g,`$1${v}$2`);
+            sub("Cargo.lock",/(name = "(?:srelens-[a-z-]+|srectl)"\r?\nversion = ")[^"]+(")/g,`$1${v}$2`);
           ' "$V"
           echo "TUI build version: $V"
 
@@ -709,16 +841,13 @@ jobs:
         env:
           CC_x86_64_unknown_linux_musl: musl-gcc
           CC_aarch64_unknown_linux_musl: musl-gcc
-          # Debug symbols are most of an unstripped Linux/macOS binary and
-          # nothing here symbolicates a user crash dump, so they are pure
-          # download weight. No-op on Windows, where MSVC keeps debug info in a
-          # separate .pdb that is never packaged.
-          RUSTFLAGS: "-C strip=symbols"
+        # [profile.release] in the root Cargo.toml strips the binary.
+        #
         # --locked because the version stamp above rewrites Cargo.toml AND the
         # matching Cargo.lock entries together; if it ever stops doing that,
         # failing here is better than resolving a different dependency set into
         # a release binary.
-        run: cargo build --release --locked -p srelens-tui --target ${{ matrix.target }}
+        run: cargo build --release --locked -p srectl --target ${{ matrix.target }}
 
       # A stable release REQUIRES signing; only dev may fall open. This
       # mirrors sign-artifacts, which refuses to cut a stable release without a
@@ -759,7 +888,7 @@ jobs:
           APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
         run: |
           set -euo pipefail
-          BIN="target/${{ matrix.target }}/release/srelens-tui"
+          BIN="target/${{ matrix.target }}/release/srectl"
 
           # A dedicated keychain, deleted at the end of the step: importing into
           # the login keychain would leave the certificate on a runner image
@@ -819,7 +948,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          BIN="target/${{ matrix.target }}/release/srelens-tui"
+          BIN="target/${{ matrix.target }}/release/srectl"
           [ "${{ runner.os }}" = "Windows" ] && BIN="$BIN.exe"
           OUT="$("$BIN" --version)"
           echo "$OUT"
@@ -842,7 +971,7 @@ jobs:
       - name: Assert the musl build is static
         if: ${{ endsWith(matrix.target, '-musl') }}
         run: |
-          BIN="target/${{ matrix.target }}/release/srelens-tui"
+          BIN="target/${{ matrix.target }}/release/srectl"
           if file "$BIN" | grep -q "dynamically linked"; then
             echo "::error::the musl build is dynamically linked, which defeats the target"
             file "$BIN"
@@ -850,7 +979,7 @@ jobs:
           fi
           file "$BIN"
 
-      # Files sit at the archive root, so `tar xzf` drops `srelens-tui` straight
+      # Files sit at the archive root, so `tar xzf` drops `srectl` straight
       # into the working directory and the user can move it onto PATH without
       # navigating a wrapper folder.
       - name: Package (unix)
@@ -858,12 +987,24 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          NAME="srelens-tui-${{ needs.version.outputs.version }}-${{ matrix.target }}"
+          # Primary srectl archive
+          NAME="srectl-${{ needs.version.outputs.version }}-${{ matrix.target }}"
           mkdir -p "dist/$NAME"
-          cp "target/${{ matrix.target }}/release/srelens-tui" "dist/$NAME/"
+          cp "target/${{ matrix.target }}/release/srectl" "dist/$NAME/"
           cp LICENSE "dist/$NAME/"
           tar -czf "dist/$NAME.tar.gz" -C "dist/$NAME" .
           rm -rf "dist/$NAME"
+
+          # Legacy compatibility archive for <=0.15.0 updaters.
+          # Contains both srelens-tui and srectl so legacy extractors find "srelens-tui"
+          # and rebrand seamlessly on first execution.
+          LEGACY_NAME="srelens-tui-${{ needs.version.outputs.version }}-${{ matrix.target }}"
+          mkdir -p "dist/$LEGACY_NAME"
+          cp "target/${{ matrix.target }}/release/srectl" "dist/$LEGACY_NAME/srelens-tui"
+          cp "target/${{ matrix.target }}/release/srectl" "dist/$LEGACY_NAME/srectl"
+          cp LICENSE "dist/$LEGACY_NAME/"
+          tar -czf "dist/$LEGACY_NAME.tar.gz" -C "dist/$LEGACY_NAME" .
+          rm -rf "dist/$LEGACY_NAME"
           ls -l dist
 
       # Windows ships a .zip, never a bare .exe: scripts/perf/size-baseline.mjs
@@ -874,16 +1015,25 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          $name = "srelens-tui-${{ needs.version.outputs.version }}-${{ matrix.target }}"
+          $name = "srectl-${{ needs.version.outputs.version }}-${{ matrix.target }}"
           New-Item -ItemType Directory -Force -Path "dist/$name" | Out-Null
-          Copy-Item "target/${{ matrix.target }}/release/srelens-tui.exe" "dist/$name/"
+          Copy-Item "target/${{ matrix.target }}/release/srectl.exe" "dist/$name/"
           Copy-Item LICENSE "dist/$name/"
           Compress-Archive -Path "dist/$name/*" -DestinationPath "dist/$name.zip"
           Remove-Item -Recurse -Force "dist/$name"
+
+          # Legacy compatibility archive for Windows
+          $legacy_name = "srelens-tui-${{ needs.version.outputs.version }}-${{ matrix.target }}"
+          New-Item -ItemType Directory -Force -Path "dist/$legacy_name" | Out-Null
+          Copy-Item "target/${{ matrix.target }}/release/srectl.exe" "dist/$legacy_name/srelens-tui.exe"
+          Copy-Item "target/${{ matrix.target }}/release/srectl.exe" "dist/$legacy_name/srectl.exe"
+          Copy-Item LICENSE "dist/$legacy_name/"
+          Compress-Archive -Path "dist/$legacy_name/*" -DestinationPath "dist/$legacy_name.zip"
+          Remove-Item -Recurse -Force "dist/$legacy_name"
           Get-ChildItem dist
 
       - name: Upload the archive
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: tui-${{ matrix.target }}
           path: dist/*
@@ -902,7 +1052,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           pattern: tui-*
           merge-multiple: true
@@ -913,23 +1063,33 @@ jobs:
         run: |
           set -euo pipefail
           TAG="srelens-v${{ needs.version.outputs.version }}"
-          SUMS="srelens-tui-${{ needs.version.outputs.version }}-SHA256SUMS.txt"
+          SUMS="srectl-${{ needs.version.outputs.version }}-SHA256SUMS.txt"
+          LEGACY_SUMS="srelens-tui-${{ needs.version.outputs.version }}-SHA256SUMS.txt"
           cd dist
           # Every leg is required, so count the archives rather than trusting
           # that six jobs each uploaded one: a silently missing target is the
           # failure this is here to catch.
-          count=$(ls -1 srelens-tui-*.tar.gz srelens-tui-*.zip 2>/dev/null | wc -l)
+          count=$(ls -1 srectl-*.tar.gz srectl-*.zip 2>/dev/null | wc -l)
           if [ "$count" -ne 7 ]; then
-            echo "::error::expected 7 TUI archives, found $count"
+            echo "::error::expected 7 srectl archives, found $count"
+            ls -l
+            exit 1
+          fi
+          count_legacy=$(ls -1 srelens-tui-*.tar.gz srelens-tui-*.zip 2>/dev/null | wc -l)
+          if [ "$count_legacy" -ne 7 ]; then
+            echo "::error::expected 7 legacy srelens-tui archives, found $count_legacy"
             ls -l
             exit 1
           fi
           # Named for the release so it cannot collide with a checksum file for
           # the desktop installers if one is ever added to the same tag.
-          sha256sum srelens-tui-*.tar.gz srelens-tui-*.zip > "$SUMS"
+          sha256sum srectl-*.tar.gz srectl-*.zip > "$SUMS"
+          sha256sum srelens-tui-*.tar.gz srelens-tui-*.zip > "$LEGACY_SUMS"
           cat "$SUMS"
+          cat "$LEGACY_SUMS"
           gh release upload "$TAG" --repo "${{ github.repository }}" \
-            srelens-tui-*.tar.gz srelens-tui-*.zip "$SUMS" --clobber
+            srectl-*.tar.gz srectl-*.zip "$SUMS" \
+            srelens-tui-*.tar.gz srelens-tui-*.zip "$LEGACY_SUMS" --clobber
 
   # Dev only: fill the pre-release body with a recent-commit list and keep the
   # Releases page tidy. Stable (main) notes come from the version job.
@@ -1024,10 +1184,11 @@ jobs:
           fi
 
   # Download-size baseline (issue #31). Runs after the artifacts are published
-  # so it measures exactly what users download, and flags a release whose
-  # installers grew more than 15% over the previous stable one — the size
-  # advantage over an Electron client is a stated reason for the Tauri port,
-  # so a silent regression should not reach a release unnoticed.
+  # so it measures exactly what users download, and writes how each installer
+  # compares with the previous stable release into the run summary. It used to
+  # hold back any release whose installers grew more than 15%; v0.16.0 built
+  # and signed everything and then stayed a draft on that alone, so the sizes
+  # are now reported and never gate publishing.
   size-baseline:
     needs: [version, build]
     if: ${{ always() && needs.build.result == 'success' && github.ref_name == 'main' && needs.version.outputs.release == 'true' }}
@@ -1040,40 +1201,33 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: 22
+          node-version-file: .nvmrc
       - name: Compare installer sizes against the previous release
         env:
           # Authenticates the Releases API reads (the anonymous rate limit is
           # low enough for a runner pool to hit it).
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # Capture the verdict rather than piping it: a `| tee` would mask the
-          # check's exit code and a regression would pass silently. The
-          # comparison table is still published either way.
-          # --tag pins the comparison to the release just built. On main that
-          # release is still a DRAFT until publish-release flips it, and drafts
-          # are excluded from the stable list — without this the check would
-          # compare the two PREVIOUS published releases and never see these
-          # artifacts at all.
-          status=0
-          node scripts/perf/size-baseline.mjs --check-regression --max-growth 15 \
-            --tag "srelens-v${{ needs.version.outputs.version }}" > check.txt || status=$?
+          # Reported, not enforced. --tag pins both reports to the release just
+          # built: on main it is still a DRAFT until publish-release flips it,
+          # and drafts are excluded from the stable list, so without it they
+          # would describe the previous published release.
+          tag="srelens-v${{ needs.version.outputs.version }}"
+          # The growth against the previous stable release. Only stdout: the
+          # old budget's verdict (stderr, and the exit status) no longer
+          # decides anything. A report that cannot be made says so.
+          growth="$(node scripts/perf/size-baseline.mjs --check-regression --tag "$tag" 2>/dev/null || true)"
           {
             echo '### Installer sizes'
             echo
             echo '```'
-            cat check.txt
+            printf '%s\n' "${growth:-The comparison with the previous stable release could not be produced.}"
             echo '```'
             echo
-            # --tag here too: without it the table would describe the
-            # previous PUBLISHED release, not the draft just built.
-            node scripts/perf/size-baseline.mjs \
-              --tag "srelens-v${{ needs.version.outputs.version }}" || true
+            node scripts/perf/size-baseline.mjs --tag "$tag" || echo "The comparison with the reference client could not be produced."
           } >> "$GITHUB_STEP_SUMMARY"
-          cat check.txt
-          exit "$status"
 
   # Attach detached GPG signatures (.asc) to every release asset so users can
   # verify authenticity (`gpg --verify file.asc file`). Activates automatically
@@ -1103,6 +1257,12 @@ jobs:
     # tui-publish included so the TUI archives are already attached to the tag
     # when this runs. Without it the two race, and whether the TUI downloads
     # carry a .asc comes down to which job finished first.
+    #
+    # `srectl update` depends on one of these signatures: it installs a
+    # release only once srectl-<version>-SHA256SUMS.txt.asc verifies
+    # against the keys in KEYS (#448). Skipping .txt files here would leave
+    # every TUI unable to update. A stable release without it is refused, and
+    # the dev channel passes over a pre-release without it.
     needs: [version, build, updater-manifest, tui-publish]
     if: ${{ always() && needs.build.result == 'success' && needs.updater-manifest.result == 'success' && needs.tui-publish.result == 'success' && (github.ref_name != 'main' || needs.version.outputs.release == 'true') }}
     runs-on: ubuntu-22.04
@@ -1248,11 +1408,11 @@ jobs:
   # run leaves an invisible draft to delete instead of a public, `latest`-
   # resolving release with no manifest behind it.
   publish-release:
-    # size-baseline included so an over-budget installer never goes public: a
-    # failed check leaves the release as an invisible draft to inspect, exactly
-    # like a failed build or a missing updater manifest. tui-publish likewise:
-    # a stable release missing a platform's TUI archive, or whose checksum
-    # file does not cover all six, stays a draft.
+    # A failed build, a missing updater manifest, failed signing, or a
+    # tui-publish that is missing a platform's archive (or whose checksum file
+    # does not cover all six) leaves the release as an invisible draft to
+    # inspect. size-baseline only reports installer sizes and cannot fail on
+    # them, so it holds a release back only if the job itself breaks.
     needs: [version, build, updater-manifest, sign-artifacts, size-baseline, tui-publish]
     if: ${{ always() && github.ref_name == 'main' && needs.build.result == 'success' && needs.updater-manifest.result == 'success' && needs.sign-artifacts.result == 'success' && needs.size-baseline.result == 'success' && needs.tui-publish.result == 'success' && needs.version.outputs.release == 'true' }}
     runs-on: ubuntu-22.04
@@ -1262,10 +1422,15 @@ jobs:
       - name: Publish the release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NOTES: ${{ needs.version.outputs.notes }}
         run: |
           set -euo pipefail
+          # This run's notes, set as the draft is published: a retry of a
+          # failed release finds that run's draft, and tauri-action leaves an
+          # existing draft's body as it was.
+          printf '%s\n' "$NOTES" > notes.md
           gh release edit "srelens-v${{ needs.version.outputs.version }}" \
-            --repo "${{ github.repository }}" --draft=false
+            --repo "${{ github.repository }}" --notes-file notes.md --draft=false
 
   # Arch / CachyOS / Manjaro install path. Deliberately STABLE-ONLY: AUR users
   # expect released versions, and an Arch `pkgver` cannot carry the `-<run>`
@@ -1290,7 +1455,13 @@ jobs:
   # archives are attached.
   homebrew:
     needs: [version, tui-publish, publish-release]
-    if: ${{ github.ref_name == 'main' && needs.publish-release.result == 'success' && needs.version.outputs.release == 'true' }}
+    # `!cancelled()` first, and it is load-bearing. Without a status function
+    # GitHub applies an implicit `success()`, which is false whenever ANY job in
+    # the transitive `needs` chain was skipped -- and release-notes, upstream of
+    # updater-manifest and publish-release, is skipped on main by design. v0.11.0
+    # published and neither the tap nor AUR heard about it. The conditions that
+    # follow are the ones that actually decide.
+    if: ${{ !cancelled() && github.ref_name == 'main' && needs.publish-release.result == 'success' && needs.version.outputs.release == 'true' }}
     permissions:
       contents: read
     uses: ./.github/workflows/homebrew-publish.yml
@@ -1321,7 +1492,13 @@ jobs:
     # Also needs publish-release: updpkgsums fetches the release assets over
     # plain HTTPS, which only works once the release is out of draft.
     needs: [version, build, publish-release]
-    if: ${{ github.ref_name == 'main' && needs.publish-release.result == 'success' && needs.version.outputs.release == 'true' }}
+    # `!cancelled()` first, and it is load-bearing. Without a status function
+    # GitHub applies an implicit `success()`, which is false whenever ANY job in
+    # the transitive `needs` chain was skipped -- and release-notes, upstream of
+    # updater-manifest and publish-release, is skipped on main by design. v0.11.0
+    # published and neither the tap nor AUR heard about it. The conditions that
+    # follow are the ones that actually decide.
+    if: ${{ !cancelled() && github.ref_name == 'main' && needs.publish-release.result == 'success' && needs.version.outputs.release == 'true' }}
     # The called workflow declares `contents: read` for itself; the AUR push
     # authenticates with its own SSH deploy key, not GITHUB_TOKEN. Repeated
     # here because a reusable workflow cannot be granted more than its caller

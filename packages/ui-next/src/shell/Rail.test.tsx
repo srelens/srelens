@@ -1,13 +1,27 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { act, render, screen, fireEvent, waitFor, within } from "@testing-library/react";
+import { act, createEvent, render, screen, fireEvent, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { ClusterContext } from "@srelens/core";
+import { notify } from "@srelens/core";
+
+const coreMock = vi.hoisted(() => ({
+  invokeCommand: vi.fn(),
+}));
+
+vi.mock("@srelens/core", async (orig) => {
+  const actual = await orig<typeof import("@srelens/core")>();
+  return {
+    ...actual,
+    invokeCommand: coreMock.invokeCommand,
+  };
+});
 import { Rail } from "./Rail";
-import { activeCluster, currentWorkspace, openTab, setState } from "../lib/tabsStore";
+import { activeCluster, activeRoute, currentWorkspace, openTab, setState } from "../lib/tabsStore";
 import { defaultState } from "../lib/tabs";
 import { resetView, setLink } from "../lib/workspace";
 import { defaultMark, getMark, loadMarks, setMark } from "../lib/marks";
 import { probeCluster, resetProbes } from "../lib/probe";
+import { pinContextKey } from "../lib/clusters";
 
 // jsdom has no ResizeObserver and Radix's popper — which the kit's Tooltip, and
 // so every rail button, sits on — watches its trigger with one. The same stub
@@ -22,7 +36,7 @@ if (!("ResizeObserver" in globalThis)) {
 
 const ctx = (name: string): ClusterContext => ({
   name,
-  stableId: name,
+  stableId: name, key: name,
   cluster: name,
   server: `https://${name}.example`,
   isCurrent: false,
@@ -49,8 +63,8 @@ function setup(props: Partial<Parameters<typeof Rail>[0]> = {}) {
 }
 
 /** Right-click a mark and wait for the menu that names it. */
-async function openMenu(cluster: string) {
-  fireEvent.contextMenu(screen.getByRole("button", { name: cluster }));
+async function openMenu(cluster: string, buttonName = cluster) {
+  fireEvent.contextMenu(screen.getByRole("button", { name: buttonName }));
   return screen.findByRole("menu", { name: `${cluster} actions` });
 }
 
@@ -70,6 +84,7 @@ describe("Rail", () => {
 
     await userEvent.click(screen.getByRole("button", { name: "staging" }));
     expect(activeCluster()).toBe("staging");
+    expect(activeRoute()).toBe("/overview");
   });
 
   it("says why a cluster is out of reach in its name, classified rather than quoted", () => {
@@ -107,7 +122,21 @@ describe("Rail", () => {
     const items = within(menu)
       .getAllByRole("menuitem")
       .map((item) => item.getAttribute("aria-label"));
-    expect(items).toEqual(["Open prod-eu", "Customise…", "Connection details", "Remove from workspace"]);
+    // `Move down` and no `Move up`: prod-eu is first of two (#829).
+    expect(items).toEqual([
+      "Open prod-eu",
+      "Customise…",
+      "Disconnect",
+      "Connection details",
+      "Move down",
+      "Remove from workspace",
+    ]);
+    const remove = within(menu).getByRole("menuitem", { name: "Remove from workspace" });
+    expect(remove.previousElementSibling?.getAttribute("role")).toBe("separator");
+    // The moves are a group of their own, ruled off from the connection entries.
+    const moveDown = within(menu).getByRole("menuitem", { name: "Move down" });
+    expect(moveDown.previousElementSibling?.getAttribute("role")).toBe("separator");
+    expect(moveDown.previousElementSibling?.previousElementSibling?.getAttribute("aria-label")).toBe("Connection details");
     expect(screen.queryByRole("complementary", { name: "Details" })).toBeNull();
   });
 
@@ -115,25 +144,23 @@ describe("Rail", () => {
     setup();
     await pick("staging", "Open staging");
     expect(activeCluster()).toBe("staging");
+    expect(activeRoute()).toBe("/overview");
   });
 
   /**
-   * **Switching cluster in the rail relabels the strip.**
+   * **Switching cluster in the rail switches the strip (#908).**
    *
-   * Nothing pins a tab to a cluster: every cluster-scoped screen reads
-   * `useActiveContext()`, so the moment the rail switches, the mounted screen
-   * is showing the new cluster. `makeTab` spent `clusterName` on the tab's
-   * `sub` when the tab was created, so the strip went on naming the old one —
-   * an action run from that tab ran against one cluster under a tab labelled
-   * another, which is the same hole `openTab`'s relabel closed for the tab it
-   * activates.
+   * Each cluster keeps its own tabs. The strip used to follow the rail, every
+   * tab relabelled for the cluster switched to, so the tabs opened on one
+   * cluster were still open on the next. Now the cluster left takes its tabs
+   * with it, and one looked at for the first time opens on its overview.
    *
    * STAGING's stableId is deliberately not its name: the workspace holds
    * stableIds (#265) and the strip shows names, so the last assertion is what
-   * tells a relabel from an id written onto the tab.
+   * tells a label from an id written onto the tab.
    */
-  it("leaves no tab labelled with the cluster it switched away from", async () => {
-    const STAGING = { ...ctx("staging-eu"), stableId: "id-stage" };
+  it("leaves no tab of the cluster it switched away from, and brings them back with it", async () => {
+    const STAGING = { ...ctx("staging-eu"), stableId: "id-stage", key: "id-stage" };
     const contexts = [ctx("prod-eu"), STAGING];
     setState(defaultState(contexts));
     openTab("/overview", { clusterName: "prod-eu" });
@@ -143,15 +170,22 @@ describe("Rail", () => {
     await userEvent.click(screen.getByRole("button", { name: "staging-eu" }));
 
     expect(activeCluster()).toBe("id-stage");
+    expect(currentWorkspace().tabs.map((t) => t.route)).toEqual(["/", "/overview"]);
     const subs = currentWorkspace().tabs.map((t) => t.sub);
-    expect(subs).toEqual(["staging-eu", "staging-eu", "staging-eu"]);
+    expect(subs).toEqual([undefined, "staging-eu"]);
     expect(subs).not.toContain("id-stage");
+
+    await userEvent.click(screen.getByRole("button", { name: "prod-eu" }));
+    expect(currentWorkspace().tabs.map((t) => t.route)).toEqual(["/", "/overview", "/k/pods"]);
+    expect(currentWorkspace().tabs.map((t) => t.sub)).toEqual([undefined, "prod-eu", "prod-eu"]);
+    // The tab the reader left it on, not its overview again.
+    expect(currentWorkspace().tabs.find((t) => t.id === currentWorkspace().activeId)?.route).toBe("/k/pods");
   });
 
   /** The menu's `Open` is the same gesture by another route, and had the same
    *  hole — fixing one and leaving the other is how the two disagree. */
   it("leaves no tab labelled with the previous cluster from the menu either", async () => {
-    const STAGING = { ...ctx("staging-eu"), stableId: "id-stage" };
+    const STAGING = { ...ctx("staging-eu"), stableId: "id-stage", key: "id-stage" };
     const contexts = [ctx("prod-eu"), STAGING];
     setState(defaultState(contexts));
     openTab("/overview", { clusterName: "prod-eu" });
@@ -160,13 +194,32 @@ describe("Rail", () => {
     await pick("staging-eu", "Open staging-eu");
 
     expect(activeCluster()).toBe("id-stage");
-    expect(currentWorkspace().tabs.map((t) => t.sub)).toEqual(["staging-eu", "staging-eu"]);
+    expect(currentWorkspace().tabs.map((t) => t.sub)).toEqual([undefined, "staging-eu"]);
   });
 
   it("opens the Connections tab", async () => {
     setup();
     await pick("prod-eu", "Connection details");
     expect(currentWorkspace().tabs.map((t) => t.route)).toContain("/connections");
+  });
+
+  it("pauses a cluster in place and offers Reconnect from the same menu", async () => {
+    setup();
+    await pick("prod-eu", "Disconnect");
+    expect(currentWorkspace().clusters).toContain("prod-eu");
+    expect(currentWorkspace().pausedClusters).toEqual(["prod-eu"]);
+    expect(screen.getByRole("button", { name: "prod-eu, Paused" })).toBeDefined();
+    const menu = await openMenu("prod-eu", "prod-eu, Paused");
+    expect(within(menu).getByRole("menuitem", { name: "Reconnect" })).toBeDefined();
+  });
+
+  it("does not describe a paused cluster as connecting", async () => {
+    setLink("prod-eu", "connecting");
+    setup();
+    const menu = await openMenu("prod-eu", "prod-eu, Connecting");
+    fireEvent.click(within(menu).getByRole("menuitem", { name: "Disconnect" }));
+    expect(screen.getByRole("button", { name: "prod-eu, Paused" })).toBeDefined();
+    expect(screen.queryByRole("button", { name: /Connecting/ })).toBeNull();
   });
 
   it("removes the cluster from the workspace", async () => {
@@ -282,6 +335,118 @@ describe("Rail draws a symbol mark", () => {
     expect(container.querySelector('[data-slot="chip-mark"] svg')).toBeNull();
     expect(screen.getByText("PE")).toBeDefined();
   });
+
+  it("opens context window from the menu in desktop mode and notifies on failure", async () => {
+    (window as unknown as { __TAURI_INTERNALS__: unknown }).__TAURI_INTERNALS__ = {};
+    const errorSpy = vi.spyOn(notify, "error").mockImplementation(() => {});
+    coreMock.invokeCommand.mockRejectedValueOnce(new Error("OS refused window"));
+
+    try {
+      setup();
+      await pick("prod-eu", "Open in new window");
+
+      expect(coreMock.invokeCommand).toHaveBeenCalledWith("open_context_window", {
+        contextId: "prod-eu",
+        name: "prod-eu",
+      });
+      await waitFor(() => {
+        expect(errorSpy).toHaveBeenCalledWith("Couldn't open window for prod-eu", "OS refused window");
+      });
+    } finally {
+      delete (window as unknown as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__;
+      errorSpy.mockRestore();
+    }
+  });
+
+  // The window is titled with the name the rail shows (#150): a mark can
+  // rename a cluster, and only the page knows it.
+  it("names a renamed cluster's window the way the rail does", async () => {
+    (window as unknown as { __TAURI_INTERNALS__: unknown }).__TAURI_INTERNALS__ = {};
+    getMark("prod-eu", "prod-eu");
+    setMark("prod-eu", { ...defaultMark("prod-eu"), name: "Production EU" });
+    coreMock.invokeCommand.mockResolvedValueOnce(undefined);
+
+    try {
+      setup();
+      await pick("Production EU", "Open in new window");
+
+      expect(coreMock.invokeCommand).toHaveBeenCalledWith("open_context_window", {
+        contextId: "prod-eu",
+        name: "Production EU",
+      });
+    } finally {
+      delete (window as unknown as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__;
+    }
+  });
+
+  /**
+   * The window is opened under the context's `key`, never its `stableId`.
+   *
+   * A kubeconfig `a` declaring `b#c` and a kubeconfig `a#b` declaring `c` share
+   * a stable id, so a window keyed on it focused the first cluster's window
+   * when the reader asked for the second, and the second could never be opened
+   * (#623). The rail still keys marks and workspaces on `stableId` — that one
+   * is persisted and must not move.
+   */
+  it("opens the window under the context key rather than the colliding stable id", async () => {
+    (window as unknown as { __TAURI_INTERNALS__: unknown }).__TAURI_INTERNALS__ = {};
+    const colliding = {
+      ...ctx("prod-eu"),
+      stableId: "/k/a#b#c",
+      key: "/k/a#b%23c",
+    };
+    const contexts = [colliding];
+    setState(defaultState(contexts));
+    // The shared mock returns undefined unless a test says otherwise, and the
+    // rail attaches a rejection handler to what it gets back.
+    coreMock.invokeCommand.mockResolvedValueOnce(undefined);
+
+    try {
+      render(<Rail contexts={contexts} onConnect={vi.fn()} />);
+      await pick("prod-eu", "Open in new window");
+
+      expect(coreMock.invokeCommand).toHaveBeenCalledWith("open_context_window", {
+        contextId: "/k/a#b%23c",
+        name: "prod-eu",
+      });
+    } finally {
+      delete (window as unknown as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__;
+    }
+  });
+
+  /**
+   * Two contexts can share a stable id (see above). A window opened for one
+   * of them pins that context's key, and every lookup by stable id in that
+   * window resolves to it (`resolveContext`, #648) — the rail's included.
+   * A rail keyed by a `Map` of stable ids answered with whichever of the
+   * pair came last, so "Open in new window" from the first cluster's own
+   * window sent the second cluster's key.
+   */
+  it("opens the window for the context this window is pinned to, not the other of a colliding pair", async () => {
+    (window as unknown as { __TAURI_INTERNALS__: unknown }).__TAURI_INTERNALS__ = {};
+    // Kubeconfig `/k/a#b` declaring `c`, and kubeconfig `/k/a` declaring `b#c`.
+    const first = { ...ctx("prod-eu"), stableId: "/k/a#b#c", key: "/k/a%23b#c" };
+    const second = { ...ctx("prod-eu"), stableId: "/k/a#b#c", key: "/k/a#b%23c" };
+    const contexts = [first, second];
+    // The workspace names the stable id once; it is the kubeconfig listing
+    // that carries two contexts for it.
+    setState(defaultState([first]));
+    pinContextKey(first.key);
+    coreMock.invokeCommand.mockResolvedValueOnce(undefined);
+
+    try {
+      render(<Rail contexts={contexts} onConnect={vi.fn()} />);
+      await pick("prod-eu", "Open in new window");
+
+      expect(coreMock.invokeCommand).toHaveBeenCalledWith("open_context_window", {
+        contextId: "/k/a%23b#c",
+        name: "prod-eu",
+      });
+    } finally {
+      pinContextKey(null);
+      delete (window as unknown as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__;
+    }
+  });
 });
 
 it("uses classic context order for the workspace rail", async () => {
@@ -304,4 +469,184 @@ it("keeps blank names editable while the rail retains its context label", async 
   expect(input.value).toBe("  Production Europe  ");
   await user.click(within(panel).getByRole("button", { name: "Done" }));
   expect(screen.getByRole("button", { name: "Production Europe" })).toBeTruthy();
+});
+
+/**
+ * #829: the rail's order was editable only from Settings → Clusters. The rail
+ * now asks for the same order to change, through the same `moveContext`.
+ */
+describe("rearranging clusters in the rail (#829)", () => {
+  const THREE = [ctx("prod-eu"), ctx("staging"), ctx("dev")];
+  const order = () =>
+    screen
+      .getAllByRole("button")
+      .map((b) => b.getAttribute("aria-label") ?? "")
+      .filter((name) => THREE.some((c) => c.name === name));
+
+  function setupThree() {
+    setState(defaultState(THREE));
+    return render(<Rail contexts={THREE} onConnect={vi.fn()} />);
+  }
+
+  /** Drag one mark and drop it on the upper or lower half of another. */
+  function drag(source: string, target: string, half: "upper" | "lower") {
+    const from = screen.getByRole("button", { name: source });
+    const to = screen.getByRole("button", { name: target });
+    // jsdom lays nothing out, and the rail reads the pointer against every
+    // mark's box: stack them, 30px tall with the rail's 6px gap, in the order
+    // they are on screen now.
+    const marks = order().map((name) => screen.getByRole("button", { name }));
+    marks.forEach((mark, i) => {
+      const top = i * 36;
+      mark.getBoundingClientRect = () => ({ top, bottom: top + 30, height: 30, left: 0, right: 30, width: 30, x: 0, y: top, toJSON: () => ({}) });
+    });
+    const dataTransfer = { effectAllowed: "", dropEffect: "", setData: vi.fn(), getData: vi.fn() };
+    const top = marks.indexOf(to) * 36;
+    const clientY = half === "upper" ? top + 5 : top + 25;
+    // jsdom has no DragEvent, so the pointer's position does not survive an
+    // init dictionary; it is put on the event by hand.
+    const at = (event: Event) => {
+      Object.defineProperty(event, "clientY", { value: clientY });
+      Object.defineProperty(event, "dataTransfer", { value: dataTransfer });
+      return event;
+    };
+    fireEvent.pointerDown(from);
+    fireEvent.dragStart(from, { dataTransfer });
+    fireEvent(to, at(createEvent.dragOver(to)));
+    fireEvent(to, at(createEvent.drop(to)));
+    fireEvent.dragEnd(from, { dataTransfer });
+  }
+
+  it("moves a dragged cluster to where it was dropped, and keeps it there", async () => {
+    const { loadContextOrder } = await import("@srelens/core");
+    setupThree();
+    expect(order()).toEqual(["prod-eu", "staging", "dev"]);
+
+    // dev, from the bottom, onto the upper half of prod-eu: to the top.
+    act(() => drag("dev", "prod-eu", "upper"));
+
+    expect(order()).toEqual(["dev", "prod-eu", "staging"]);
+    // Saved: it is the shared order, which is what survives a restart and what
+    // Settings → Clusters shows.
+    const saved = loadContextOrder();
+    expect(saved.indexOf("dev")).toBeLessThan(saved.indexOf("prod-eu"));
+    expect(saved.indexOf("prod-eu")).toBeLessThan(saved.indexOf("staging"));
+  });
+
+  it("drops after a cluster when released on its lower half, including at the end", () => {
+    setupThree();
+    act(() => drag("prod-eu", "staging", "lower"));
+    expect(order()).toEqual(["staging", "prod-eu", "dev"]);
+
+    act(() => drag("staging", "dev", "lower"));
+    expect(order()).toEqual(["prod-eu", "dev", "staging"]);
+  });
+
+  it("does not switch cluster when a mark is dragged", () => {
+    setupThree();
+    const before = activeCluster();
+    act(() => drag("dev", "prod-eu", "upper"));
+    // Some hosts fire a click at the end of a drag; it must not select.
+    fireEvent.click(screen.getByRole("button", { name: "dev" }), { detail: 1 });
+    expect(activeCluster()).toBe(before);
+  });
+
+  it("still selects a cluster on a plain click after a drag has finished", () => {
+    setupThree();
+    act(() => drag("dev", "prod-eu", "upper"));
+    const staging = screen.getByRole("button", { name: "staging" });
+    fireEvent.pointerDown(staging);
+    fireEvent.click(staging, { detail: 1 });
+    expect(activeCluster()).toBe("staging");
+  });
+
+  it("moves the focused cluster with Ctrl+Shift+Arrow, keeps focus on it, and says where it went", async () => {
+    setupThree();
+    const staging = () => screen.getByRole("button", { name: "staging" });
+    staging().focus();
+
+    fireEvent.keyDown(staging(), { key: "ArrowUp", ctrlKey: true, shiftKey: true });
+    expect(order()).toEqual(["staging", "prod-eu", "dev"]);
+    expect(document.activeElement).toBe(staging());
+    expect(screen.getByRole("status").textContent).toBe("staging moved to position 1 of 3");
+
+    // Already first: nothing to do, and no wrap to the bottom.
+    fireEvent.keyDown(staging(), { key: "ArrowUp", metaKey: true, shiftKey: true });
+    expect(order()).toEqual(["staging", "prod-eu", "dev"]);
+
+    fireEvent.keyDown(staging(), { key: "ArrowDown", metaKey: true, shiftKey: true });
+    expect(order()).toEqual(["prod-eu", "staging", "dev"]);
+  });
+
+  it("offers Move up and Move down in the menu, each only where there is somewhere to go", async () => {
+    setupThree();
+    const names = async (cluster: string) => {
+      const menu = await openMenu(cluster);
+      const labels = within(menu).getAllByRole("menuitem").map((item) => item.getAttribute("aria-label"));
+      await userEvent.keyboard("{Escape}");
+      return labels;
+    };
+    expect(await names("prod-eu")).not.toContain("Move up");
+    expect(await names("prod-eu")).toContain("Move down");
+    expect(await names("staging")).toEqual(expect.arrayContaining(["Move up", "Move down"]));
+    expect(await names("dev")).toContain("Move up");
+    expect(await names("dev")).not.toContain("Move down");
+  });
+
+  it("moves a cluster one place from the menu", async () => {
+    setupThree();
+    await pick("dev", "Move up");
+    await waitFor(() => expect(order()).toEqual(["prod-eu", "dev", "staging"]));
+    // Announced, like a drag or a key press: it is the rail's own move, not a
+    // reorder made behind its back (PR #838 review).
+    expect(screen.getByRole("status").textContent).toBe("dev moved to position 2 of 3");
+    await pick("prod-eu", "Move down");
+    await waitFor(() => expect(order()).toEqual(["dev", "prod-eu", "staging"]));
+  });
+
+  it("offers no moves for the only cluster in a workspace", async () => {
+    const one = [ctx("prod-eu")];
+    setState(defaultState(one));
+    render(<Rail contexts={one} onConnect={vi.fn()} />);
+    const menu = await openMenu("prod-eu");
+    const labels = within(menu).getAllByRole("menuitem").map((item) => item.getAttribute("aria-label"));
+    expect(labels).not.toContain("Move up");
+    expect(labels).not.toContain("Move down");
+  });
+
+  it("rearranges this workspace's clusters without disturbing one that is not in it", async () => {
+    const { loadContextOrder, saveContextOrder } = await import("@srelens/core");
+    const FOUR = [...THREE, ctx("other")];
+    // `other` sits between the workspace's clusters in the shared order, and
+    // is not in this workspace.
+    saveContextOrder(["prod-eu", "other", "staging", "dev"]);
+    setState(defaultState(THREE));
+    render(<Rail contexts={FOUR} onConnect={vi.fn()} />);
+    expect(order()).toEqual(["prod-eu", "staging", "dev"]);
+
+    act(() => drag("dev", "prod-eu", "upper"));
+
+    expect(order()).toEqual(["dev", "prod-eu", "staging"]);
+    // `other` is still second. Only the three slots this workspace's clusters
+    // held were rewritten; it was not taken for offline and sent to the end.
+    expect(loadContextOrder()).toEqual(["dev", "other", "prod-eu", "staging"]);
+  });
+
+  it("leaves that outside cluster in place for a menu move and a keyboard move too (PR #838 review)", async () => {
+    const { loadContextOrder, saveContextOrder } = await import("@srelens/core");
+    const FOUR = [...THREE, ctx("other")];
+    saveContextOrder(["prod-eu", "other", "staging", "dev"]);
+    setState(defaultState(THREE));
+    render(<Rail contexts={FOUR} onConnect={vi.fn()} />);
+
+    await pick("dev", "Move up");
+    await waitFor(() => expect(order()).toEqual(["prod-eu", "dev", "staging"]));
+    expect(loadContextOrder()).toEqual(["prod-eu", "other", "dev", "staging"]);
+
+    const dev = screen.getByRole("button", { name: "dev" });
+    dev.focus();
+    fireEvent.keyDown(dev, { key: "ArrowUp", ctrlKey: true, shiftKey: true });
+    expect(order()).toEqual(["dev", "prod-eu", "staging"]);
+    expect(loadContextOrder()).toEqual(["dev", "other", "prod-eu", "staging"]);
+  });
 });

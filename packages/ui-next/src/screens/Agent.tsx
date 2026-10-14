@@ -12,6 +12,7 @@ import {
 } from "../lib/agentRun";
 import { pad2 } from "../lib/numbers";
 import { titleFromQuestion } from "../lib/runTitle";
+import { formatAnswering, runFigures } from "../lib/runFigures";
 import { Transcript, transcriptText } from "./agent/Transcript";
 import { AGENT_RAIL_WIDTH, RunsRail } from "./agent/RunsRail";
 
@@ -46,13 +47,11 @@ function startedLabel(turns: readonly Turn[]): string | undefined {
 
 /**
  * `<n> calls`, off `Turn.calls[]` across every turn in the run — the OTHER
- * figure the store actually observes. #386's exclusion is scoped to
- * `RunsRail`'s `Recent runs` list (`SessionMeta` genuinely carries no
- * counts); THIS pane describes the live run pane 1 is heading, and the store
- * counts every tool call an agent has made in it. Dropping this alongside
- * duration was over-applying #386 to a figure it does not cover — the one
- * genuinely unknowable figure here is `duration` (a conversation has no
- * single well-defined one), which stays out.
+ * figure the store actually observes. Beside it, the time srelens spent
+ * answering (#386, `lib/runFigures.ts`): each question to its settled answer,
+ * summed — the one duration a conversation does have a single meaning for,
+ * since the time between questions is the reader's, not the agent's. Left
+ * out when nothing could be measured, rather than drawn as zero.
  *
  * `0` renders nothing: a run with no tool calls yet is not the same fact as
  * "zero calls" worth reading out, so an absent reading renders no reading.
@@ -77,7 +76,7 @@ function callCount(turns: readonly Turn[]): number {
  * screen is `Composer`'s only caller, and it renders with nothing shrunk.
  */
 export function Agent(_props: { route: string }) {
-  const { turns, gates, error } = useAgentRun();
+  const { turns, gates, error, busy } = useAgentRun();
   const activeCtx = useActiveContext();
   const context = activeCtx?.name ?? "";
   // Whether this tab is the one on screen — see the dock's own note below.
@@ -87,7 +86,16 @@ export function Agent(_props: { route: string }) {
   const runCluster = subject?.about.cluster ?? context;
   const started = startedLabel(turns);
   const calls = callCount(turns);
-  const head = started && calls > 0 ? `${started} · ${calls} call${calls === 1 ? "" : "s"}` : started;
+  const { answeringMs } = runFigures(turns, busy);
+  const head = started
+    ? [
+        started,
+        calls > 0 ? `${calls} call${calls === 1 ? "" : "s"}` : null,
+        answeringMs !== null ? formatAnswering(answeringMs) : null,
+      ]
+        .filter(Boolean)
+        .join(" · ")
+    : undefined;
   // The whole conversation, for the clipboard. Per-exchange copy is beside
   // each answer; this is the one for taking the lot into a ticket. Empty until
   // something has been said, so the control is not offered over nothing.
@@ -196,7 +204,7 @@ export function Agent(_props: { route: string }) {
               now — `bg-surface` inside a thin border — and a card on the same
               colour as its own ground is not a card. This is the pairing the
               mock uses: light ground, white exchanges. */}
-          <div className="scroll min-h-0 min-w-0 flex-1 bg-canvas px-3 py-3">
+          <div className="scroll min-h-0 min-w-0 flex-1 bg-[var(--ground-canvas)] px-3 py-3">
             {turns.length === 0 ? (
               /* An empty screen said nothing at all — reported as "page looks
                  empty". What it says is what this agent can actually do,

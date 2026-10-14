@@ -1,6 +1,20 @@
-import { useMemo, type ReactNode } from "react";
-import { logLineHealth, tallyLogTerms, type HealthKind, type LogLine } from "@srelens/core";
-import { Badge, Checkbox, Section, StatusPill } from "@srelens/ui-kit";
+import { useMemo, useState, type ReactNode } from "react";
+import {
+  clauseState,
+  facetCounts,
+  healthRank,
+  logLineHealth,
+  tallyLogTerms,
+  type ClauseMode,
+  type ClauseTarget,
+  type FacetValue,
+  type HealthKind,
+  type QueryClause,
+  type QueryLine,
+  type TermLine,
+} from "@srelens/core";
+import { Badge, Checkbox, Section, StatusPill, toneWash } from "@srelens/ui-kit";
+import { groupNumber } from "../../lib/numbers";
 
 /**
  * §15's rail width, and this screen's alone — see `SideRail`'s note on why the
@@ -38,25 +52,46 @@ export interface StreamPod {
   tone: HealthKind;
 }
 
+/** What the facets count over, and how a click reaches the query (#898). */
+export interface RailQuery {
+  /**
+   * The rows in scope: pod boxes, container and time window applied, but
+   * NOT the query. Each facet applies the query itself, minus its own field,
+   * so the values not yet picked stay countable and clickable.
+   */
+  lines: readonly QueryLine[];
+  clauses: readonly QueryClause[];
+  /** `discoverFields` over the whole buffer. */
+  fields: readonly string[];
+  onToggle: (target: ClauseTarget, mode: ClauseMode) => void;
+}
+
 export interface StreamRailProps {
   /** The pods the stream is following, in the order the screen wants them. */
   pods: readonly StreamPod[];
   /**
    * **The lines the body is drawing** — every filter applied, the pod
-   * checkboxes among them, and each line's RFC3339 stamp already stripped so
-   * `text` is the message.
+   * checkboxes among them, and each line's RFC3339 stamp already stripped from
+   * `text`.
    *
    * The stamp matters: it opens with a digit, which the tally reads as a
    * value and stops the term run on, so a buffer handed over still stamped
    * tallies to nothing at all.
    *
+   * A line that has been read already brings its `message` and `health`,
+   * which the tally and the badge use instead of reading `text` again. They
+   * are not optional for a logfmt line: it opens with a `time=…` no other
+   * line repeats, and read as text it ends the term before its first word.
+   *
    * One input drives the badge and the terms both, so the two cannot be
    * counted over different sets — which is precisely what a separate `terms`
    * prop would allow.
    */
-  lines: readonly LogLine[];
+  lines: readonly TermLine[];
   /** Given the pod and the state its box is moving to, not the event. */
   onTogglePod: (pod: string, checked: boolean) => void;
+  /** The level and field facets, and the query a click on any facet or term edits. */
+  query: RailQuery;
 }
 
 /** `1 error`, `12 errors` — never `0 errors`; see {@link StreamRail}. */
@@ -65,8 +100,8 @@ function errorLabel(n: number): string {
 }
 
 /**
- * A term or a pod name with its tone beside it, and a figure right-aligned
- * after it — the one row shape both sections of this rail are made of.
+ * A pod name with its tone beside it, and a figure right-aligned after it —
+ * the Sources row. {@link FacetRow} is the same shape made clickable.
  *
  * `StatusPill` rather than a coloured word: §15 tints the term text and draws
  * a bare dot on the source rows, and each of those tells a colour-blind reader
@@ -89,7 +124,7 @@ function ToneRow({
   lead?: ReactNode;
 }) {
   return (
-    <div data-slot={slot} className="flex items-center gap-2 px-0.5 py-[3px]">
+    <div data-slot={slot} className="flex items-center gap-2 px-3 py-[3px]">
       {lead}
       <span className="flex min-w-0 flex-1">
         {/* `min-w-0` as well as `truncate`: the label is itself a flex item of
@@ -104,17 +139,119 @@ function ToneRow({
   );
 }
 
+const TOP_VALUES = 5;
+const MAX_VALUES = 50;
+
+/**
+ * A value the reader can filter on: the row filters it IN, the trailing
+ * button filters it OUT, and each says which it is through `aria-pressed`.
+ * The figure keeps `.path` and the pill keeps `.status`, the same anatomy as
+ * `ToneRow`, so a row reads the same whether or not it can be clicked. A value
+ * filtered in gets the accent wash and one filtered out is struck through, so
+ * the state is on the row and not only in `aria-pressed`.
+ */
+function FacetRow({
+  slot,
+  tone,
+  label,
+  count,
+  name,
+  state,
+  onToggle,
+}: {
+  slot: string;
+  tone: HealthKind;
+  label: string;
+  count: number;
+  /** The row's accessible name before its count: `system = camlog`. */
+  name: string;
+  state: ClauseMode | undefined;
+  onToggle: (mode: ClauseMode) => void;
+}) {
+  const lines = `${groupNumber(count)} ${count === 1 ? "line" : "lines"}`;
+  return (
+    <div
+      data-slot={slot}
+      data-state={state}
+      style={state === "include" ? { background: toneWash("accent") } : undefined}
+      className="group flex items-center gap-1 px-3 py-[3px]"
+    >
+      <button
+        type="button"
+        aria-pressed={state === "include"}
+        aria-label={`${name}, ${lines}`}
+        onClick={() => onToggle("include")}
+        className="flex min-w-0 flex-1 items-center gap-2 text-left"
+      >
+        <span className={`flex min-w-0 flex-1 ${state === "exclude" ? "line-through opacity-60" : ""}`}>
+          <StatusPill status={<span className="min-w-0 truncate">{label}</span>} kind={tone} tinted />
+        </span>
+        <span className="path shrink-0 text-faint">{groupNumber(count)}</span>
+      </button>
+      <button
+        type="button"
+        aria-pressed={state === "exclude"}
+        aria-label={`Exclude ${name}`}
+        onClick={() => onToggle("exclude")}
+        className="icon-btn shrink-0 opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 focus-visible:opacity-100 aria-pressed:opacity-100"
+      >
+        <span aria-hidden="true">−</span>
+      </button>
+    </div>
+  );
+}
+
+/**
+ * The counts plus any value the query names that no line in scope has, at 0,
+ * once however many clauses name it — otherwise a filter that emptied its own
+ * facet could not be clicked off.
+ */
+function withNamed(values: FacetValue[], clauses: readonly QueryClause[], field: string): FacetValue[] {
+  const known = new Set(values.map((v) => v.value.toLowerCase()));
+  const all = [...values];
+  for (const c of clauses) {
+    if (c.field?.toLowerCase() !== field.toLowerCase() || c.match !== "equals" || known.has(c.value)) continue;
+    known.add(c.value);
+    all.push({ value: c.value, count: 0 });
+  }
+  return all;
+}
+
+/**
+ * The values the query filters on first, and how many that is, so the cut to
+ * the top few can be made past them and never hide a filter that is on. Not
+ * for Level, which is never cut and keeps its worst-first order whatever is
+ * clicked.
+ */
+function activeFirst(
+  values: FacetValue[],
+  clauses: readonly QueryClause[],
+  field: string,
+): { values: FacetValue[]; active: number } {
+  const isActive = (v: FacetValue) => clauseState(clauses, { field, value: v.value }) !== undefined;
+  const on = values.filter(isActive);
+  return { values: [...on, ...values.filter((v) => !isActive(v))], active: on.length };
+}
+
 /**
  * The Logs screen's right rail (§15): who is talking, and what they keep
  * saying.
  *
- * Two sections, and **no agent prose**. §15 heads the rail with an `Agent read`
+ * **No agent prose.** §15 heads the rail with an `Agent read`
  * paragraph; the agent is a Tauri command in the desktop shell rather than a
  * capability, so `ui-next` cannot reach it and web mode has no agent at all. A
  * section scaffolded now would be a box that never fills, which is worse than
  * one that arrives with the thing it holds. The four term rows §15 tucks under
  * that paragraph are the real content of it, so they get their own heading —
  * `Top terms` — instead of being orphaned by its removal.
+ *
+ * **The levels, fields and terms are filters.** A row filters its value in and
+ * its trailing button filters it out; both edit the search box, the one place
+ * a filter lives. A facet counts with its own field's clauses ignored, so
+ * picking `system:camlog` leaves `schwarz` on the rail to be picked next, and
+ * a value the query names that no line has stays at 0 so it can be clicked
+ * off. The facets count `query.lines` rather than `lines` for that reason: the
+ * set the query has already narrowed would take the other values away.
  *
  * **The checkboxes drive the filter.** §15's are `defaultChecked` with no
  * handler, so its own pod filter exists in the screen and nothing reaches it.
@@ -143,30 +280,50 @@ function ToneRow({
  * the reader has to look at and dismiss. The one exception is a Sources
  * section whose view is empty *because a box was ticked off* — hiding it then
  * would take away the only control that can undo it, and the reader would be
- * stuck looking at a blank stream with no way back.
+ * stuck looking at a blank stream with no way back. A value the query names
+ * keeps its section drawn on an empty view for the same reason.
  *
  * It renders its `Section`s and nothing around them: `SideRail` drops what it
  * is handed straight into one box and `.section + .section` is what rules
  * between them, so a wrapper per child would break that adjacency. The screen
  * supplies the frame — `SideRail` at {@link STREAM_RAIL_WIDTH}, head `Stream`.
  */
-export function StreamRail({ pods, lines, onTogglePod }: StreamRailProps) {
+export function StreamRail({ pods, lines, onTogglePod, query }: StreamRailProps) {
   const terms = useMemo(() => tallyLogTerms(lines), [lines]);
   const errors = useMemo(
-    () => lines.reduce((n, l) => (logLineHealth(l.text) === "danger" ? n + 1 : n), 0),
+    () => lines.reduce((n, l) => ((l.health ?? logLineHealth(l.text)) === "danger" ? n + 1 : n), 0),
     [lines],
   );
+  const levels = useMemo(
+    () =>
+      withNamed(facetCounts(query.lines, query.clauses, "level"), query.clauses, "level").sort(
+        (a, b) => healthRank(logLineHealth(b.value)) - healthRank(logLineHealth(a.value)) || b.count - a.count,
+      ),
+    [query.lines, query.clauses],
+  );
+  const facets = useMemo(
+    () =>
+      query.fields
+        .map((field) => ({
+          field,
+          ...activeFirst(withNamed(facetCounts(query.lines, query.clauses, field), query.clauses, field), query.clauses, field),
+        }))
+        .filter((f) => f.values.length > 0),
+    [query.lines, query.clauses, query.fields],
+  );
+  const [expanded, setExpanded] = useState<ReadonlySet<string>>(() => new Set());
 
   const filtered = pods.some((pod) => !pod.checked);
   const showSources = pods.length > 0 && (lines.length > 0 || filtered);
 
-  if (!showSources && terms.length === 0) return null;
+  if (!showSources && terms.length === 0 && levels.length === 0 && facets.length === 0) return null;
 
   return (
     <>
       {showSources && (
         <Section
           smallCaps
+          padded={false}
           title={
             <span className="flex items-center justify-between gap-2">
               <span>Sources</span>
@@ -202,17 +359,87 @@ export function StreamRail({ pods, lines, onTogglePod }: StreamRailProps) {
           ))}
         </Section>
       )}
+      {levels.length > 0 && (
+        <Section smallCaps padded={false} title="Level">
+          {levels.map((v) => {
+            const target = { field: "level", value: v.value };
+            return (
+              <FacetRow
+                key={v.value}
+                slot="level"
+                tone={logLineHealth(v.value)}
+                label={v.value}
+                count={v.count}
+                name={`level = ${v.value}`}
+                state={clauseState(query.clauses, target)}
+                onToggle={(mode) => query.onToggle(target, mode)}
+              />
+            );
+          })}
+        </Section>
+      )}
+      {facets.map(({ field, values, active }) => {
+        const open = expanded.has(field);
+        // Neither cut goes below the active values: they are still filtering, and nothing else on screen says so.
+        const collapsed = Math.max(TOP_VALUES, active);
+        const all = Math.min(values.length, Math.max(MAX_VALUES, active));
+        return (
+          <Section key={field} smallCaps padded={false} title={field}>
+            {values.slice(0, open ? all : collapsed).map((v) => {
+              const target = { field, value: v.value };
+              const label = v.value === "" ? "(empty)" : v.value;
+              return (
+                <FacetRow
+                  key={v.value}
+                  slot="facet"
+                  tone="neutral"
+                  label={label}
+                  count={v.count}
+                  name={`${field} = ${label}`}
+                  state={clauseState(query.clauses, target)}
+                  onToggle={(mode) => query.onToggle(target, mode)}
+                />
+              );
+            })}
+            {all > collapsed && (
+              <button
+                type="button"
+                aria-expanded={open}
+                // Named by its field: every section with more than five values
+                // says the same two visible words.
+                aria-label={open ? `Show fewer ${field} values` : `Show all ${all} ${field} values`}
+                className="px-3 py-[3px] text-left text-[0.75rem] text-muted hover:text-soft"
+                onClick={() =>
+                  setExpanded((s) => {
+                    const next = new Set(s);
+                    if (!next.delete(field)) next.add(field);
+                    return next;
+                  })
+                }
+              >
+                {open ? "Show fewer" : `Show all ${all}`}
+              </button>
+            )}
+          </Section>
+        );
+      })}
       {terms.length > 0 && (
-        <Section smallCaps title="Top terms">
-          {terms.map((term) => (
-            <ToneRow
-              key={term.term}
-              slot="term"
-              tone={term.tone}
-              label={term.term}
-              figure={String(term.count)}
-            />
-          ))}
+        <Section smallCaps padded={false} title="Top terms">
+          {terms.map((term) => {
+            const target = { phrase: term.term };
+            return (
+              <FacetRow
+                key={term.term}
+                slot="term"
+                tone={term.tone}
+                label={term.term}
+                count={term.count}
+                name={term.term}
+                state={clauseState(query.clauses, target)}
+                onToggle={(mode) => query.onToggle(target, mode)}
+              />
+            );
+          })}
         </Section>
       )}
     </>

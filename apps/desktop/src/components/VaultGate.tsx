@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { Lock } from "lucide-react";
 import { Button, TextInput } from "../ui";
 import {
+  on,
   vaultBiometricUnlock,
   vaultRecoverPassword,
   vaultSetupPassword,
@@ -20,7 +21,7 @@ import {
  *
  * Renders nothing outside a Tauri window (web mode has no vault commands).
  */
-export function VaultGate({ onReady }: { onReady?: () => void }) {
+export function VaultGate({ onReady, onLocked }: { onReady?: () => void; onLocked?: () => void }) {
   const [status, setStatus] = useState<VaultStatus | null>(null);
   const [password, setPassword] = useState("");
   const [confirm, setConfirm] = useState("");
@@ -35,6 +36,16 @@ export function VaultGate({ onReady }: { onReady?: () => void }) {
   // `onReady` fires exactly once, when the vault becomes usable — consumers
   // (the MCP auto-start) must not run against a locked vault.
   const readyNotified = useRef(false);
+  // Read at event time, not closed over by the subscription. App passes an
+  // inline `onLocked={() => setVaultReady(false)}`; putting that identity in
+  // the effect deps would tear the listener down on every re-render and leave
+  // a gap where a `vault-locked` broadcast is missed.
+  const onLockedRef = useRef(onLocked);
+  onLockedRef.current = onLocked;
+  // Bumped before each refresh kicked off by a lock/unlock broadcast so a
+  // slower earlier `vaultStatus` cannot overwrite newer state or call
+  // `notifyReady` over a vault that has since locked.
+  const statusGeneration = useRef(0);
 
   function notifyReady() {
     if (!readyNotified.current) {
@@ -48,13 +59,16 @@ export function VaultGate({ onReady }: { onReady?: () => void }) {
   }
 
   async function refresh(): Promise<VaultStatus | null> {
+    const generation = statusGeneration.current;
     try {
       const s = await vaultStatus();
+      if (generation !== statusGeneration.current) return null;
       setStatus(s);
       setStatusFailed(false);
       if (s.mode === "unlocked") notifyReady();
       return s;
     } catch {
+      if (generation !== statusGeneration.current) return null;
       // Only reachable in a Tauri window (the mount effect never calls this
       // in web mode): the backend genuinely failed — e.g. the config dir
       // didn't resolve and the vault state was never managed. The gate must
@@ -77,6 +91,37 @@ export function VaultGate({ onReady }: { onReady?: () => void }) {
           .then(() => refresh())
           .catch(() => {});
       }
+    });
+  }, []);
+
+  useEffect(() => {
+    if (!("__TAURI_INTERNALS__" in window)) return;
+    const off = on("vault-locked", () => {
+      statusGeneration.current += 1;
+      readyNotified.current = false;
+      setPassword("");
+      setConfirm("");
+      setError("");
+      setBusy(false);
+      setRecovered(null);
+      setStatus((prev) =>
+        prev
+          ? { ...prev, mode: "locked" }
+          : { mode: "locked", keySource: "password", biometricAvailable: false, biometricEnrolled: false },
+      );
+      onLockedRef.current?.();
+      void refresh();
+    });
+    return () => off();
+  }, []);
+
+  // Another window unlocked the shared vault — refresh so this gate lowers
+  // without asking for the passphrase again.
+  useEffect(() => {
+    if (!("__TAURI_INTERNALS__" in window)) return;
+    return on("vault-unlocked", () => {
+      statusGeneration.current += 1;
+      void refresh();
     });
   }, []);
 

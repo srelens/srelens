@@ -1,12 +1,12 @@
-use std::cell::Cell;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear, Gauge, Paragraph};
+use ratatui::widgets::{Block, Borders, Clear, Gauge, Paragraph, Wrap};
 use ratatui::Frame;
+use std::cell::Cell;
 
-use srelens_kube::gpu_info::{format_vram_mib, GpuClusterInfo, GpuNodeInfo, GpuPodItem};
 use crate::theme::Theme;
+use srelens_kube::gpu_info::{format_vram_mib, GpuClusterInfo, GpuNodeInfo, GpuPodItem};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GpuPane {
@@ -84,7 +84,8 @@ impl GpuViewState {
     }
 
     pub fn selected_pod(&self) -> Option<&GpuPodItem> {
-        self.selected_node().and_then(|n| n.pods.get(self.selected_pod_idx))
+        self.selected_node()
+            .and_then(|n| n.pods.get(self.selected_pod_idx))
     }
 
     pub fn select_next_node(&mut self) {
@@ -173,20 +174,14 @@ pub fn render(f: &mut Frame, area: Rect, state: &GpuViewState) {
     let max_node_name_len = state
         .cluster_info
         .as_ref()
-        .map(|ci| {
-            ci.nodes
-                .iter()
-                .map(|n| n.name.len())
-                .max()
-                .unwrap_or(18)
-        })
+        .map(|ci| ci.nodes.iter().map(|n| n.name.len()).max().unwrap_or(18))
         .unwrap_or(18)
         .max("NODE".len());
 
     // Left pane needs:
     // border (2) + prefix (1) + node_name (max_node_name_len) + space (1) +
-    // status (10) + gpus (8) + vram (8) = max_node_name_len + 30
-    let needed_left_width = (max_node_name_len + 30) as u16;
+    // status (10) + gpus (8) + vram (11) = max_node_name_len + 33
+    let needed_left_width = (max_node_name_len + 33) as u16;
     let left_width = if area.width > 90 {
         // Reserve at least 48 cols for right details pane if space allows
         needed_left_width.min(area.width.saturating_sub(48)).max(44)
@@ -210,7 +205,11 @@ pub fn render(f: &mut Frame, area: Rect, state: &GpuViewState) {
 
 fn render_nodes_list(f: &mut Frame, area: Rect, state: &GpuViewState, max_node_name_len: usize) {
     let is_focused = state.focused_pane == GpuPane::Nodes;
-    let node_count = state.cluster_info.as_ref().map(|ci| ci.nodes.len()).unwrap_or(0);
+    let node_count = state
+        .cluster_info
+        .as_ref()
+        .map(|ci| ci.nodes.len())
+        .unwrap_or(0);
 
     let border_color = if is_focused {
         Theme::ACCENT
@@ -219,15 +218,41 @@ fn render_nodes_list(f: &mut Frame, area: Rect, state: &GpuViewState, max_node_n
     };
 
     let title_style = if is_focused {
-        Style::default().fg(Theme::ACCENT).add_modifier(Modifier::BOLD)
+        Style::default()
+            .fg(Theme::ACCENT)
+            .add_modifier(Modifier::BOLD)
     } else {
-        Style::default().fg(Theme::fg()).add_modifier(Modifier::BOLD)
+        Style::default()
+            .fg(Theme::fg())
+            .add_modifier(Modifier::BOLD)
     };
 
-    let block = Block::default()
+    let nodes = state
+        .cluster_info
+        .as_ref()
+        .map(|ci| &ci.nodes[..])
+        .unwrap_or(&[]);
+    let has_virtual_gpus = nodes.iter().any(|n| n.is_virtual_gpu);
+
+    let mut block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(border_color))
-        .title(Span::styled(format!(" ⚡ GPU NODES ({}) ", node_count), title_style));
+        .title(Span::styled(
+            format!(" ⚡ GPU NODES ({}) ", node_count),
+            title_style,
+        ));
+
+    if has_virtual_gpus {
+        let legend_text = if area.width >= 42 {
+            " v: Virtual GPUs detected (HAMi) "
+        } else {
+            " v: Virtual GPUs (HAMi) "
+        };
+        block = block.title_bottom(Span::styled(
+            legend_text,
+            Style::default().fg(Theme::CYAN).add_modifier(Modifier::DIM),
+        ));
+    }
 
     let inner = block.inner(area);
     f.render_widget(block, area);
@@ -235,8 +260,12 @@ fn render_nodes_list(f: &mut Frame, area: Rect, state: &GpuViewState, max_node_n
     if state.is_loading {
         let p = Paragraph::new(vec![
             Line::from(""),
-            Line::from(Span::styled("  ⚡ Querying cluster GPU nodes...", Style::default().fg(Theme::CYAN))),
-        ]);
+            Line::from(Span::styled(
+                "  ⚡ Querying cluster GPU nodes...",
+                Style::default().fg(Theme::CYAN),
+            )),
+        ])
+        .wrap(Wrap { trim: false });
         f.render_widget(p, inner);
         return;
     }
@@ -244,23 +273,42 @@ fn render_nodes_list(f: &mut Frame, area: Rect, state: &GpuViewState, max_node_n
     if let Some(err) = &state.error {
         let p = Paragraph::new(vec![
             Line::from(""),
-            Line::from(Span::styled(format!("  ✖ Error: {}", err), Style::default().fg(Theme::RED))),
-            Line::from(Span::styled("  Press 'r' to retry.", Style::default().fg(Theme::DIM))),
-        ]);
+            Line::from(Span::styled(
+                format!("  ✖ Error: {}", err),
+                Style::default().fg(Theme::RED),
+            )),
+            Line::from(Span::styled(
+                "  Press 'r' to retry.",
+                Style::default().fg(Theme::DIM),
+            )),
+        ])
+        .wrap(Wrap { trim: false });
         f.render_widget(p, inner);
         return;
     }
 
-    let nodes = state.cluster_info.as_ref().map(|ci| &ci.nodes[..]).unwrap_or(&[]);
     if nodes.is_empty() {
         let p = Paragraph::new(vec![
             Line::from(""),
-            Line::from(Span::styled("  ⊘ No GPU nodes detected.", Style::default().fg(Theme::YELLOW))),
+            Line::from(Span::styled(
+                "  ⊘ No GPU nodes detected.",
+                Style::default().fg(Theme::YELLOW),
+            )),
             Line::from(""),
-            Line::from(Span::styled("  No nodes in this cluster report", Style::default().fg(Theme::DIM))),
-            Line::from(Span::styled("  nvidia.com/gpu, amd.com/gpu, or", Style::default().fg(Theme::DIM))),
-            Line::from(Span::styled("  accelerator device labels.", Style::default().fg(Theme::DIM))),
-        ]);
+            Line::from(Span::styled(
+                "  No nodes in this cluster report",
+                Style::default().fg(Theme::DIM),
+            )),
+            Line::from(Span::styled(
+                "  nvidia.com/gpu, amd.com/gpu, or",
+                Style::default().fg(Theme::DIM),
+            )),
+            Line::from(Span::styled(
+                "  accelerator device labels.",
+                Style::default().fg(Theme::DIM),
+            )),
+        ])
+        .wrap(Wrap { trim: false });
         f.render_widget(p, inner);
         return;
     }
@@ -286,12 +334,18 @@ fn render_nodes_list(f: &mut Frame, area: Rect, state: &GpuViewState, max_node_n
 
     // Header row
     lines.push(Line::from(vec![
-        Span::styled(format!(" {:<width$} ", "NODE", width = node_col_width), Theme::table_header()),
+        Span::styled(
+            format!(" {:<width$} ", "NODE", width = node_col_width),
+            Theme::table_header(),
+        ),
         Span::styled(format!("{:<9} ", "STATUS"), Theme::table_header()),
         Span::styled(format!("{:<7} ", "GPUS"), Theme::table_header()),
-        Span::styled(format!("{:<8}", "VRAM"), Theme::table_header()),
+        Span::styled(format!("{:<11}", "VRAM"), Theme::table_header()),
     ]));
-    lines.push(Line::from(Span::styled("─".repeat(inner.width as usize), Style::default().fg(Theme::BORDER))));
+    lines.push(Line::from(Span::styled(
+        "─".repeat(inner.width as usize),
+        Style::default().fg(Theme::BORDER),
+    )));
 
     let end_idx = (start_idx + visible_rows).min(nodes.len());
     for i in start_idx..end_idx {
@@ -306,18 +360,32 @@ fn render_nodes_list(f: &mut Frame, area: Rect, state: &GpuViewState, max_node_n
             Span::styled("✖ NotRdy ", Style::default().fg(Theme::RED))
         };
 
-        let gpus_str = format!("{}/{}", node.gpu_requests, node.gpu_capacity);
+        let gpus_str = if node.is_virtual_gpu {
+            format!("{}/{}v", node.gpu_requests, node.gpu_capacity)
+        } else {
+            format!("{}/{}", node.gpu_requests, node.gpu_capacity)
+        };
         let vram_str = if let Some(tot) = node.vram_capacity_total_mib {
-            format!("{}/{}G", node.vram_requests_total_mib / 1024, tot / 1024)
+            if node.is_virtual_gpu {
+                format!("{}/{}G(v)", node.vram_requests_total_mib / 1024, tot / 1024)
+            } else {
+                format!("{}/{}G", node.vram_requests_total_mib / 1024, tot / 1024)
+            }
         } else {
             "-".to_string()
         };
 
         let row_style = if is_sel {
             if is_focused {
-                Style::default().bg(Theme::SEL_BG).fg(Theme::SEL_FG).add_modifier(Modifier::BOLD)
+                Style::default()
+                    .bg(Theme::SEL_BG)
+                    .fg(Theme::SEL_FG)
+                    .add_modifier(Modifier::BOLD)
             } else {
-                Style::default().bg(Color::Rgb(30, 41, 59)).fg(Theme::SEL_FG).add_modifier(Modifier::BOLD)
+                Style::default()
+                    .bg(Color::Rgb(30, 41, 59))
+                    .fg(Theme::SEL_FG)
+                    .add_modifier(Modifier::BOLD)
             }
         } else {
             Style::default().fg(Theme::fg())
@@ -326,10 +394,13 @@ fn render_nodes_list(f: &mut Frame, area: Rect, state: &GpuViewState, max_node_n
         let prefix = if is_sel { ">" } else { " " };
 
         lines.push(Line::from(vec![
-            Span::styled(format!("{}{:<width$} ", prefix, node.name, width = node_col_width), row_style),
+            Span::styled(
+                format!("{}{:<width$} ", prefix, node.name, width = node_col_width),
+                row_style,
+            ),
             status_span,
             Span::styled(format!(" {:<6} ", gpus_str), row_style),
-            Span::styled(format!("{:<8}", vram_str), row_style),
+            Span::styled(format!("{:<11}", vram_str), row_style),
         ]));
     }
 
@@ -343,14 +414,21 @@ fn render_details_pane(f: &mut Frame, area: Rect, state: &GpuViewState) {
         let block = Block::default()
             .borders(Borders::ALL)
             .border_style(Style::default().fg(Theme::BORDER))
-            .title(Span::styled(" GPU CONSUMPTION & WORKLOADS ", Style::default().fg(Theme::BORDER)));
+            .title(Span::styled(
+                " GPU CONSUMPTION & WORKLOADS ",
+                Style::default().fg(Theme::BORDER),
+            ));
         let inner = block.inner(area);
         f.render_widget(block, area);
 
         let p = Paragraph::new(vec![
             Line::from(""),
-            Line::from(Span::styled("  Select a GPU node on the left to inspect its GPU & VRAM allocation.", Style::default().fg(Theme::DIM))),
-        ]);
+            Line::from(Span::styled(
+                "  Select a GPU node on the left to inspect its GPU & VRAM allocation.",
+                Style::default().fg(Theme::DIM),
+            )),
+        ])
+        .wrap(Wrap { trim: false });
         f.render_widget(p, inner);
         return;
     }
@@ -360,7 +438,7 @@ fn render_details_pane(f: &mut Frame, area: Rect, state: &GpuViewState) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(8), // Top: Node GPU metrics & allocation gauges
+            Constraint::Length(9), // Top: Node GPU metrics & allocation gauges
             Constraint::Min(6),    // Bottom: Pods requesting GPU table
         ])
         .split(area);
@@ -369,40 +447,72 @@ fn render_details_pane(f: &mut Frame, area: Rect, state: &GpuViewState) {
     render_node_pods_table(f, chunks[1], state, node);
 }
 
+fn format_compact_gib_val(mib: i64) -> String {
+    if mib <= 0 {
+        "0".to_string()
+    } else if mib % 1024 == 0 {
+        format!("{}", mib / 1024)
+    } else {
+        let gib = mib as f64 / 1024.0;
+        if gib < 0.1 {
+            format!("{:.2}", gib)
+        } else {
+            format!("{:.1}", gib)
+        }
+    }
+}
+
 fn render_node_gpu_summary(f: &mut Frame, area: Rect, node: &GpuNodeInfo) {
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Theme::BORDER))
         .title(Span::styled(
             format!(" 🖥️  NODE GPU CONSUMPTION: {} ", node.name),
-            Style::default().fg(Theme::ACCENT).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(Theme::ACCENT)
+                .add_modifier(Modifier::BOLD),
         ));
 
     let inner = block.inner(area);
     f.render_widget(block, area);
 
-    // Inner layout: Line 1 info, Row 2/3 Gauges, Row 4 summary
+    // Info, VRAM and the summary get two rows so a long model, driver or
+    // capacity note wraps instead of being clipped. The GPU gauge stays one row.
     let inner_chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(1), // Hardware details
-            Constraint::Length(1), // Spacing
-            Constraint::Length(1), // GPU count gauge
-            Constraint::Length(1), // VRAM gauge
-            Constraint::Length(1), // Summary footer
-            Constraint::Min(0),
+            Constraint::Length(2),
+            Constraint::Length(1),
+            Constraint::Length(2),
+            Constraint::Length(2),
         ])
         .split(inner);
 
     // 1. Hardware details line
-    let model = node.gpu_model.as_deref().unwrap_or("Unknown GPU");
-    let driver = node.gpu_driver_version.as_deref().unwrap_or("-");
-    let cuda = node.gpu_cuda_version.as_deref().unwrap_or("-");
-    let itype = &node.instance_type;
+    let raw_model = node.gpu_model.as_deref().unwrap_or("Unknown GPU");
+    let model = crate::views::sanitize_span_text(raw_model);
+    let model_display = if node.is_virtual_gpu {
+        let phys_prefix = if node.physical_gpu_count > 0 {
+            format!("{}x ", node.physical_gpu_count)
+        } else {
+            String::new()
+        };
+        format!(
+            "{}{} (HAMi {} vGPUs)",
+            phys_prefix, model, node.gpu_capacity
+        )
+    } else {
+        model
+    };
+    let raw_driver = node.gpu_driver_version.as_deref().unwrap_or("-");
+    let driver = crate::views::sanitize_span_text(raw_driver);
+    let raw_cuda = node.gpu_cuda_version.as_deref().unwrap_or("-");
+    let cuda = crate::views::sanitize_span_text(raw_cuda);
+    let itype = crate::views::sanitize_span_text(&node.instance_type);
 
     let info_line = Line::from(vec![
         Span::styled("Model: ", Theme::header_label()),
-        Span::styled(format!("{}  ", model), Theme::header_val()),
+        Span::styled(format!("{}  ", model_display), Theme::header_val()),
         Span::styled("Driver: ", Theme::header_label()),
         Span::styled(format!("{}  ", driver), Theme::header_val()),
         Span::styled("CUDA: ", Theme::header_label()),
@@ -410,7 +520,10 @@ fn render_node_gpu_summary(f: &mut Frame, area: Rect, node: &GpuNodeInfo) {
         Span::styled("Instance: ", Theme::header_label()),
         Span::styled(itype, Theme::header_val()),
     ]);
-    f.render_widget(Paragraph::new(info_line), inner_chunks[0]);
+    f.render_widget(
+        Paragraph::new(info_line).wrap(Wrap { trim: true }),
+        inner_chunks[0],
+    );
 
     // 2. GPU Count Allocation Gauge
     let gpu_cap = node.gpu_capacity.max(1);
@@ -423,17 +536,99 @@ fn render_node_gpu_summary(f: &mut Frame, area: Rect, node: &GpuNodeInfo) {
         Theme::GREEN
     };
 
-    let gpu_gauge_label = format!("GPUs Allocated: {} / {} ({:.0}%)", node.gpu_requests, node.gpu_capacity, gpu_pct);
+    let gpu_gauge_label = if node.is_virtual_gpu {
+        format!(
+            "vGPUs (Alloc): {} / {} ({:.0}%)",
+            node.gpu_requests, node.gpu_capacity, gpu_pct
+        )
+    } else {
+        format!(
+            "GPUs (Alloc): {} / {} ({:.0}%)",
+            node.gpu_requests, node.gpu_capacity, gpu_pct
+        )
+    };
     let gpu_gauge = Gauge::default()
         .gauge_style(Style::default().fg(gpu_color))
-        .label(Span::styled(gpu_gauge_label, Style::default().fg(Theme::SEL_FG).add_modifier(Modifier::BOLD)))
+        .label(Span::styled(
+            gpu_gauge_label,
+            Style::default()
+                .fg(Theme::SEL_FG)
+                .add_modifier(Modifier::BOLD),
+        ))
         .percent(gpu_pct.min(100));
-    f.render_widget(gpu_gauge, inner_chunks[2]);
+    f.render_widget(gpu_gauge, inner_chunks[1]);
 
     // 3. VRAM Allocation Gauge
     if let Some(tot_vram) = node.vram_capacity_total_mib {
         let vram_cap = tot_vram.max(1);
-        let vram_pct = ((node.vram_requests_total_mib as f64 / vram_cap as f64) * 100.0).round() as u16;
+        let virt_pct =
+            ((node.vram_requests_total_mib as f64 / vram_cap as f64) * 100.0).round() as u16;
+
+        let (vram_gauge_label, vram_pct) = if node.is_virtual_gpu {
+            if let Some(phys_vram) = node.physical_vram_total_mib {
+                let phys_pct = ((node.vram_requests_total_mib as f64 / phys_vram.max(1) as f64)
+                    * 100.0)
+                    .round() as u16;
+                let label = if inner_chunks[2].width < 50 {
+                    let req_str = format_compact_gib_val(node.vram_requests_total_mib);
+                    let phys_g = phys_vram / 1024;
+                    let tot_g = tot_vram / 1024;
+                    format!(
+                        "Phys: {}/{}G ({:.0}%) • vPool: {}/{}G",
+                        req_str,
+                        phys_g,
+                        (node.vram_requests_total_mib as f64 / phys_vram.max(1) as f64) * 100.0,
+                        req_str,
+                        tot_g
+                    )
+                } else if inner_chunks[2].width < 70 {
+                    format!(
+                        "Phys: {}/{} ({:.0}%) • vPool: {}/{}",
+                        format_vram_mib(node.vram_requests_total_mib),
+                        format_vram_mib(phys_vram),
+                        (node.vram_requests_total_mib as f64 / phys_vram.max(1) as f64) * 100.0,
+                        format_vram_mib(node.vram_requests_total_mib),
+                        format_vram_mib(tot_vram),
+                    )
+                } else {
+                    format!(
+                        "Physical VRAM (Alloc): {} / {} ({:.1}%) • Virtual Pool: {} / {} vVRAM",
+                        format_vram_mib(node.vram_requests_total_mib),
+                        format_vram_mib(phys_vram),
+                        (node.vram_requests_total_mib as f64 / phys_vram.max(1) as f64) * 100.0,
+                        format_vram_mib(node.vram_requests_total_mib),
+                        format_vram_mib(tot_vram),
+                    )
+                };
+                (label, phys_pct)
+            } else {
+                let label = if inner_chunks[2].width < 45 {
+                    format!(
+                        "vVRAM: {}/{} ({:.0}%)",
+                        format_vram_mib(node.vram_requests_total_mib),
+                        format_vram_mib(tot_vram),
+                        (node.vram_requests_total_mib as f64 / vram_cap as f64) * 100.0
+                    )
+                } else {
+                    format!(
+                        "vVRAM (Alloc): {} / {} ({:.1}%)",
+                        format_vram_mib(node.vram_requests_total_mib),
+                        format_vram_mib(tot_vram),
+                        (node.vram_requests_total_mib as f64 / vram_cap as f64) * 100.0
+                    )
+                };
+                (label, virt_pct)
+            }
+        } else {
+            let label = format!(
+                "VRAM (Alloc): {} / {} ({:.1}%)",
+                format_vram_mib(node.vram_requests_total_mib),
+                format_vram_mib(tot_vram),
+                (node.vram_requests_total_mib as f64 / vram_cap as f64) * 100.0
+            );
+            (label, virt_pct)
+        };
+
         let vram_color = if vram_pct >= 90 {
             Theme::RED
         } else if vram_pct >= 70 {
@@ -442,24 +637,28 @@ fn render_node_gpu_summary(f: &mut Frame, area: Rect, node: &GpuNodeInfo) {
             Theme::CYAN
         };
 
-        let vram_gauge_label = format!(
-            "VRAM Allocated: {} / {} ({:.1}%)",
-            format_vram_mib(node.vram_requests_total_mib),
-            format_vram_mib(tot_vram),
-            (node.vram_requests_total_mib as f64 / vram_cap as f64) * 100.0
-        );
-
         let vram_gauge = Gauge::default()
             .gauge_style(Style::default().fg(vram_color))
-            .label(Span::styled(vram_gauge_label, Style::default().fg(Theme::SEL_FG).add_modifier(Modifier::BOLD)))
+            .label(Span::styled(
+                vram_gauge_label,
+                Style::default()
+                    .fg(Theme::SEL_FG)
+                    .add_modifier(Modifier::BOLD),
+            ))
             .percent(vram_pct.min(100));
-        f.render_widget(vram_gauge, inner_chunks[3]);
+        f.render_widget(vram_gauge, inner_chunks[2]);
     } else {
         let vram_label = Line::from(Span::styled(
-            format!("VRAM Requested: {} (Total capacity not reported by node labels)", format_vram_mib(node.vram_requests_total_mib)),
+            format!(
+                "VRAM Requested: {} (Total capacity not reported by node labels)",
+                format_vram_mib(node.vram_requests_total_mib)
+            ),
             Style::default().fg(Theme::YELLOW),
         ));
-        f.render_widget(Paragraph::new(vram_label), inner_chunks[3]);
+        f.render_widget(
+            Paragraph::new(vram_label).wrap(Wrap { trim: true }),
+            inner_chunks[2],
+        );
     }
 
     // 4. Summary footer stats
@@ -470,15 +669,49 @@ fn render_node_gpu_summary(f: &mut Frame, area: Rect, node: &GpuNodeInfo) {
         "-".to_string()
     };
 
-    let summary_line = Line::from(vec![
-        Span::styled("Pods on GPU: ", Theme::header_label()),
-        Span::styled(format!("{}   ", node.pods.len()), Theme::header_val()),
-        Span::styled("Available GPUs: ", Theme::header_label()),
-        Span::styled(format!("{}   ", free_gpus), Style::default().fg(Theme::GREEN).add_modifier(Modifier::BOLD)),
-        Span::styled("Available VRAM: ", Theme::header_label()),
-        Span::styled(free_vram_str, Style::default().fg(Theme::CYAN).add_modifier(Modifier::BOLD)),
-    ]);
-    f.render_widget(Paragraph::new(summary_line), inner_chunks[4]);
+    let summary_line = if node.is_virtual_gpu {
+        Line::from(vec![
+            Span::styled("Pods on GPU: ", Theme::header_label()),
+            Span::styled(format!("{}   ", node.pods.len()), Theme::header_val()),
+            Span::styled("Available vGPUs: ", Theme::header_label()),
+            Span::styled(
+                format!("{}   ", free_gpus),
+                Style::default()
+                    .fg(Theme::GREEN)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("Available vVRAM: ", Theme::header_label()),
+            Span::styled(
+                free_vram_str,
+                Style::default()
+                    .fg(Theme::CYAN)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ])
+    } else {
+        Line::from(vec![
+            Span::styled("Pods on GPU: ", Theme::header_label()),
+            Span::styled(format!("{}   ", node.pods.len()), Theme::header_val()),
+            Span::styled("Available GPUs: ", Theme::header_label()),
+            Span::styled(
+                format!("{}   ", free_gpus),
+                Style::default()
+                    .fg(Theme::GREEN)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("Available VRAM: ", Theme::header_label()),
+            Span::styled(
+                free_vram_str,
+                Style::default()
+                    .fg(Theme::CYAN)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ])
+    };
+    f.render_widget(
+        Paragraph::new(summary_line).wrap(Wrap { trim: true }),
+        inner_chunks[3],
+    );
 }
 
 fn render_node_pods_table(f: &mut Frame, area: Rect, state: &GpuViewState, node: &GpuNodeInfo) {
@@ -490,9 +723,13 @@ fn render_node_pods_table(f: &mut Frame, area: Rect, state: &GpuViewState, node:
     };
 
     let title_style = if is_focused {
-        Style::default().fg(Theme::ACCENT).add_modifier(Modifier::BOLD)
+        Style::default()
+            .fg(Theme::ACCENT)
+            .add_modifier(Modifier::BOLD)
     } else {
-        Style::default().fg(Theme::fg()).add_modifier(Modifier::BOLD)
+        Style::default()
+            .fg(Theme::fg())
+            .add_modifier(Modifier::BOLD)
     };
 
     let block = Block::default()
@@ -509,18 +746,34 @@ fn render_node_pods_table(f: &mut Frame, area: Rect, state: &GpuViewState, node:
     state.last_pods_pane_rect.set(inner);
 
     if node.pods.is_empty() {
+        let free_msg = if node.is_virtual_gpu {
+            let vram_cap = node
+                .vram_capacity_total_mib
+                .map(|m| format!("{} vVRAM", format_vram_mib(m)))
+                .unwrap_or_else(|| "-".to_string());
+            format!(
+                "  All {} vGPUs ({}) are free and ready to accept workloads.",
+                node.gpu_capacity, vram_cap
+            )
+        } else {
+            format!(
+                "  All {} GPUs ({}) are free and ready to accept workloads.",
+                node.gpu_capacity,
+                node.vram_capacity_total_mib
+                    .map(format_vram_mib)
+                    .unwrap_or_else(|| "-".to_string())
+            )
+        };
         let p = Paragraph::new(vec![
             Line::from(""),
-            Line::from(Span::styled("  ✓ No pods currently requesting GPU on this node.", Style::default().fg(Theme::GREEN))),
-            Line::from(""),
             Line::from(Span::styled(
-                format!("  All {} GPUs ({}) are free and ready to accept workloads.",
-                    node.gpu_capacity,
-                    node.vram_capacity_total_mib.map(format_vram_mib).unwrap_or_else(|| "-".to_string())
-                ),
-                Style::default().fg(Theme::DIM)
+                "  ✓ No pods currently requesting GPU on this node.",
+                Style::default().fg(Theme::GREEN),
             )),
-        ]);
+            Line::from(""),
+            Line::from(Span::styled(free_msg, Style::default().fg(Theme::DIM))),
+        ])
+        .wrap(Wrap { trim: false });
         f.render_widget(p, inner);
         return;
     }
@@ -572,16 +825,43 @@ fn render_node_pods_table(f: &mut Frame, area: Rect, state: &GpuViewState, node:
 
     // Table Header
     lines.push(Line::from(vec![
-        Span::styled(format!(" {:<width$}", "NAMESPACE", width = ns_col_width), Theme::table_header()),
-        Span::styled(format!("{:<width$}", "POD NAME", width = pod_col_width), Theme::table_header()),
-        Span::styled(format!("{:<width$}", "STATUS", width = status_col_width), Theme::table_header()),
-        Span::styled(format!("{:<width$}", "GPUS", width = gpus_col_width), Theme::table_header()),
-        Span::styled(format!("{:<width$}", "VRAM REQ", width = vram_col_width), Theme::table_header()),
-        Span::styled(format!("{:<width$}", "READY", width = ready_col_width), Theme::table_header()),
-        Span::styled(format!("{:<width$}", "RESTARTS", width = restarts_col_width), Theme::table_header()),
-        Span::styled(format!("{:<width$}", "AGE", width = age_col_width), Theme::table_header()),
+        Span::styled(
+            format!(" {:<width$}", "NAMESPACE", width = ns_col_width),
+            Theme::table_header(),
+        ),
+        Span::styled(
+            format!("{:<width$}", "POD NAME", width = pod_col_width),
+            Theme::table_header(),
+        ),
+        Span::styled(
+            format!("{:<width$}", "STATUS", width = status_col_width),
+            Theme::table_header(),
+        ),
+        Span::styled(
+            format!("{:<width$}", "GPUS", width = gpus_col_width),
+            Theme::table_header(),
+        ),
+        Span::styled(
+            format!("{:<width$}", "VRAM REQ", width = vram_col_width),
+            Theme::table_header(),
+        ),
+        Span::styled(
+            format!("{:<width$}", "READY", width = ready_col_width),
+            Theme::table_header(),
+        ),
+        Span::styled(
+            format!("{:<width$}", "RESTARTS", width = restarts_col_width),
+            Theme::table_header(),
+        ),
+        Span::styled(
+            format!("{:<width$}", "AGE", width = age_col_width),
+            Theme::table_header(),
+        ),
     ]));
-    lines.push(Line::from(Span::styled("─".repeat(inner.width as usize), Style::default().fg(Theme::BORDER))));
+    lines.push(Line::from(Span::styled(
+        "─".repeat(inner.width as usize),
+        Style::default().fg(Theme::BORDER),
+    )));
 
     let end_idx = (start_idx + visible_rows).min(node.pods.len());
     for i in start_idx..end_idx {
@@ -590,9 +870,15 @@ fn render_node_pods_table(f: &mut Frame, area: Rect, state: &GpuViewState, node:
 
         let row_style = if is_sel {
             if is_focused {
-                Style::default().bg(Theme::SEL_BG).fg(Theme::SEL_FG).add_modifier(Modifier::BOLD)
+                Style::default()
+                    .bg(Theme::SEL_BG)
+                    .fg(Theme::SEL_FG)
+                    .add_modifier(Modifier::BOLD)
             } else {
-                Style::default().bg(Color::Rgb(30, 41, 59)).fg(Theme::SEL_FG).add_modifier(Modifier::BOLD)
+                Style::default()
+                    .bg(Color::Rgb(30, 41, 59))
+                    .fg(Theme::SEL_FG)
+                    .add_modifier(Modifier::BOLD)
             }
         } else {
             Style::default().fg(Theme::fg())
@@ -610,14 +896,40 @@ fn render_node_pods_table(f: &mut Frame, area: Rect, state: &GpuViewState, node:
         let vram_str = format_vram_mib(pod.vram_requests_mib);
 
         lines.push(Line::from(vec![
-            Span::styled(format!("{}{:<width$}", prefix, pod.namespace, width = ns_col_width), row_style),
-            Span::styled(format!("{:<width$}", pod.name, width = pod_col_width), row_style),
-            Span::styled(format!("{:<width$}", pod.phase, width = status_col_width), Style::default().fg(status_color)),
-            Span::styled(format!("{:<width$}", pod.gpu_requests, width = gpus_col_width), row_style),
-            Span::styled(format!("{:<width$}", vram_str, width = vram_col_width), Style::default().fg(Theme::CYAN).add_modifier(Modifier::BOLD)),
-            Span::styled(format!("{:<width$}", pod.ready_containers, width = ready_col_width), row_style),
-            Span::styled(format!("{:<width$}", pod.restarts, width = restarts_col_width), row_style),
-            Span::styled(format!("{:<width$}", pod.age, width = age_col_width), Style::default().fg(Theme::DIM)),
+            Span::styled(
+                format!("{}{:<width$}", prefix, pod.namespace, width = ns_col_width),
+                row_style,
+            ),
+            Span::styled(
+                format!("{:<width$}", pod.name, width = pod_col_width),
+                row_style,
+            ),
+            Span::styled(
+                format!("{:<width$}", pod.phase, width = status_col_width),
+                Style::default().fg(status_color),
+            ),
+            Span::styled(
+                format!("{:<width$}", pod.gpu_requests, width = gpus_col_width),
+                row_style,
+            ),
+            Span::styled(
+                format!("{:<width$}", vram_str, width = vram_col_width),
+                Style::default()
+                    .fg(Theme::CYAN)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!("{:<width$}", pod.ready_containers, width = ready_col_width),
+                row_style,
+            ),
+            Span::styled(
+                format!("{:<width$}", pod.restarts, width = restarts_col_width),
+                row_style,
+            ),
+            Span::styled(
+                format!("{:<width$}", pod.age, width = age_col_width),
+                Style::default().fg(Theme::DIM),
+            ),
         ]));
     }
 
@@ -662,6 +974,9 @@ mod tests {
             vram_capacity_total_mib: Some(655360),
             vram_requests_total_mib: 327680,
             pods: vec![pod.clone()],
+            is_virtual_gpu: false,
+            physical_gpu_count: 8,
+            physical_vram_total_mib: Some(655360),
         };
 
         let node2 = GpuNodeInfo {
@@ -680,6 +995,9 @@ mod tests {
             vram_capacity_total_mib: Some(15360),
             vram_requests_total_mib: 0,
             pods: vec![],
+            is_virtual_gpu: false,
+            physical_gpu_count: 1,
+            physical_vram_total_mib: Some(15360),
         };
 
         let info = GpuClusterInfo {
@@ -736,6 +1054,9 @@ mod tests {
             vram_capacity_total_mib: Some(655360),
             vram_requests_total_mib: 0,
             pods: vec![],
+            is_virtual_gpu: false,
+            physical_gpu_count: 8,
+            physical_vram_total_mib: Some(655360),
         };
 
         let info = GpuClusterInfo {
@@ -766,7 +1087,10 @@ mod tests {
             .join("\n");
 
         // The full long node name must be rendered without being cut/truncated with '…'
-        assert!(content.contains("data-processing-stage-gpu-s79cj"), "Rendered output should contain full node name without truncation");
+        assert!(
+            content.contains("data-processing-stage-gpu-s79cj"),
+            "Rendered output should contain full node name without truncation"
+        );
         assert!(!content.contains("data-processing-st…"));
     }
 
@@ -841,6 +1165,9 @@ mod tests {
             vram_capacity_total_mib: Some(65536),
             vram_requests_total_mib: 60000, // > 90% -> Red
             pods: vec![pod1.clone(), pod2.clone()],
+            is_virtual_gpu: false,
+            physical_gpu_count: 4,
+            physical_vram_total_mib: Some(65536),
         };
 
         let node_notready = GpuNodeInfo {
@@ -859,6 +1186,9 @@ mod tests {
             vram_capacity_total_mib: None,
             vram_requests_total_mib: 0,
             pods: vec![],
+            is_virtual_gpu: false,
+            physical_gpu_count: 2,
+            physical_vram_total_mib: None,
         };
 
         let populated_info = GpuClusterInfo {
@@ -900,6 +1230,8 @@ mod tests {
         // Render with narrow width to exercise responsive sizing (< 90 width)
         let narrow_backend = TestBackend::new(80, 25);
         let mut narrow_terminal = Terminal::new(narrow_backend).unwrap();
-        narrow_terminal.draw(|f| render(f, f.area(), &state)).unwrap();
+        narrow_terminal
+            .draw(|f| render(f, f.area(), &state))
+            .unwrap();
     }
 }

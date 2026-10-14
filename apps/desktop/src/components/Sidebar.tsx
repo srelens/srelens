@@ -1,11 +1,12 @@
 import React, { useEffect, useRef, useState } from "react";
-import { ChevronRight } from "lucide-react";
+import { ChevronRight, ExternalLink } from "lucide-react";
 import { RESOURCE_LABELS, type ResourceKind } from "@srelens/core";
+import { ClassicAppsNav } from "./Extensions";
 import { CustomResourceGroup } from "./CustomResourceGroup";
 import { iconForResourceKind, NavIcon } from "../ui/NavIcon";
 import { cn } from "@/ui/utils";
 import type { CrdRef } from "@srelens/core";
-import { contextDisplayName, type ContextProfiles } from "@srelens/core";
+import { contextDisplayName, describeError, invokeCommand, isTauri, notify, type ContextProfiles } from "@srelens/core";
 
 const NAV_SECTIONS: Array<{ heading: string; kinds: ResourceKind[] }> = [
   { heading: "Cluster", kinds: ["overview", "nodes", "namespaces", "events"] },
@@ -93,19 +94,30 @@ export function Sidebar({
   activeCrd,
   onSelect,
   onSelectCrd,
+  onOpenApp,
   width = 200,
   onResize,
   contextProfiles = {},
+  contextKey,
 }: {
   clusters: string[];
   activeCluster?: string | null;
-  activeKind: ResourceKind;
+  activeKind?: ResourceKind;
   activeCrd?: CrdRef | null;
   onSelect: (cluster: string, kind: ResourceKind) => void;
   onSelectCrd: (cluster: string, crd: CrdRef) => void;
+  onOpenApp?: (context:string,id:string,page:string) => void;
   width?: number;
   onResize?: (width: number) => void;
   contextProfiles?: ContextProfiles;
+  /**
+   * Display name → the context's collision-free `key`. Window labels and
+   * `?context=` key on THAT, not on `stableId`: a path `a` with context `b#c`
+   * and a path `a#b` with context `c` share a stable ID, so the second
+   * cluster's window focused the first's and could never be opened (#623).
+   * `stableId` remains the persisted identity everywhere else.
+   */
+  contextKey?: (name: string) => string | undefined;
 }) {
   const handleRef = useRef<HTMLDivElement>(null);
   const startX = useRef(0);
@@ -157,25 +169,52 @@ export function Sidebar({
     // nothing about which of the app's two navigation regions they are in.
     <aside className="fl-sidebar" aria-label="Cluster resources">
       <div className="flex flex-col p-1 text-sm">
-        {clusters.map((cluster) => (
-          <React.Fragment key={cluster}>
+        {clusters.map((cluster) => {
+          const contextId = contextKey?.(cluster);
+          return (
+          <div key={cluster}>
             {/* Cluster (level 0) */}
-            <TreeRow
-              open={clusterOpen(cluster)}
-              onToggle={() => toggleCluster(cluster)}
-              className="fl-sidebar__cluster-row pl-1.5 font-medium"
-            >
-              <span className="size-2 shrink-0 rounded-full bg-emerald-500" />
-              <span className="truncate" title={cluster}>
-                {contextDisplayName(cluster, contextProfiles[cluster])}
-              </span>
-            </TreeRow>
+            <div className="relative group">
+              <TreeRow
+                open={clusterOpen(cluster)}
+                onToggle={() => toggleCluster(cluster)}
+                className="fl-sidebar__cluster-row pl-1.5 font-medium"
+              >
+                <span className="size-2 shrink-0 rounded-full bg-emerald-500" />
+                <span className="truncate flex-1" title={cluster}>
+                  {contextDisplayName(cluster, contextProfiles[cluster])}
+                </span>
+              </TreeRow>
+              {isTauri() && (
+                <button
+                  type="button"
+                  disabled={!contextId}
+                  className="absolute right-1 top-1/2 -translate-y-1/2 opacity-0 group-hover:opacity-100 focus-visible:opacity-100 p-1 hover:bg-muted-foreground/20 rounded transition-opacity disabled:opacity-40 disabled:pointer-events-none"
+                  title={contextId ? "Open in new window" : "Open in new window once this cluster's identity is known"}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    // Same key Rail writes. Withhold until the context key is
+                    // known — a display-name fallback opens a window whose
+                    // `?context=` can never match after a later successful
+                    // listing.
+                    if (!contextId) return;
+                    // Titles the window with the name this row shows.
+                    const name = contextDisplayName(cluster, contextProfiles[cluster]);
+                    void invokeCommand("open_context_window", { contextId, name }).catch((err) => {
+                      notify.error(`Couldn't open window for ${cluster}`, describeError(err).detail);
+                    });
+                  }}
+                >
+                  <ExternalLink className="size-3.5 text-muted-foreground" />
+                </button>
+              )}
+            </div>
 
             {clusterOpen(cluster) &&
               NAV_SECTIONS.map((section) => {
                 const gkey = `${cluster}|${section.heading}`;
                 const openByDefault =
-                  cluster === activeCluster && section.kinds.includes(activeKind);
+                  cluster === activeCluster && activeKind !== undefined && section.kinds.includes(activeKind);
                 const open = groupOpen(gkey, openByDefault);
                 return (
                   <React.Fragment key={section.heading}>
@@ -210,6 +249,7 @@ export function Sidebar({
                           </button>
                         );
                       })}
+                    {section.heading === "Cluster" && onOpenApp && <ClassicAppsNav context={cluster} onOpen={onOpenApp}/>}
                   </React.Fragment>
                 );
               })}
@@ -228,8 +268,9 @@ export function Sidebar({
                 )}
               />
             )}
-          </React.Fragment>
-        ))}
+          </div>
+          );
+        })}
       </div>
       <div className="fl-sidebar__resize" ref={handleRef} aria-hidden="true" />
     </aside>

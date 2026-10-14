@@ -9,15 +9,21 @@ use std::sync::Arc;
 
 use serde::Serialize;
 use srelens_streams::forward::{ForwardEntry, ForwardInfo, ForwardManager};
-use tauri::{AppHandle, Runtime, State};
+use tauri::{AppHandle, Runtime, State, Window};
 
 use crate::sink::TauriSink;
+use crate::window_streams::{Stream, WindowStreams};
 
 /// Start forwarding a local port to a Pod or Service. `kind` is "Pod" or
 /// "Service"; a Service is resolved to a backing pod and target port first.
 /// Returns the id + bound local port; a `forward:closed:<id>` event fires
 /// (with an optional error string) if the forward loop ends on its own.
+///
+/// The forward belongs to the calling window and stops when it closes or
+/// reloads, freeing its local port (#735). One whose window reloaded while it
+/// was starting is stopped at once and refused.
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub async fn start_port_forward<R: Runtime>(
     context: String,
     namespace: String,
@@ -26,9 +32,12 @@ pub async fn start_port_forward<R: Runtime>(
     remote_port: u16,
     local_port: Option<u16>,
     app: AppHandle<R>,
+    window: Window<R>,
     manager: State<'_, ForwardManager>,
+    owned: State<'_, WindowStreams>,
 ) -> Result<ForwardInfo, String> {
-    manager
+    let epoch = owned.epoch(window.label());
+    let info = manager
         .start(
             Arc::new(TauriSink(app)),
             context,
@@ -38,13 +47,26 @@ pub async fn start_port_forward<R: Runtime>(
             remote_port,
             local_port,
         )
-        .await
+        .await?;
+    owned.keep(window.label(), epoch, Stream::Forward(info.id), || {
+        manager.stop(info.id)
+    })?;
+    Ok(info)
 }
 
-/// Stop a port-forward and abort its task.
+/// Stop a port-forward and abort its task. Any window may: each window's
+/// Forwards screen lists every forward ([`list_forwards`]) and offers to stop
+/// it. The window that started it then no longer holds it.
 #[tauri::command]
-pub async fn stop_port_forward(id: u64, manager: State<'_, ForwardManager>) -> Result<(), String> {
+pub async fn stop_port_forward<R: Runtime>(
+    id: u64,
+    window: Window<R>,
+    manager: State<'_, ForwardManager>,
+    owned: State<'_, WindowStreams>,
+) -> Result<(), String> {
+    let _ = window;
     manager.stop(id);
+    owned.disown_everywhere(&Stream::Forward(id));
     Ok(())
 }
 
@@ -80,6 +102,8 @@ mod tests {
     async fn commands_run_against_a_mock_runtime() {
         let app = tauri::test::mock_app();
         app.manage(ForwardManager::new(ClientCache::new_many(vec![])));
+        app.manage(WindowStreams::default());
+        let window = crate::window_streams::tests::mock_window(&app, "main");
 
         let info = start_port_forward(
             "no-such-context".into(),
@@ -89,6 +113,8 @@ mod tests {
             8080,
             None,
             app.handle().clone(),
+            window.clone(),
+            app.state(),
             app.state(),
         )
         .await
@@ -96,8 +122,12 @@ mod tests {
         assert_ne!(info.local_port, 0, "an ephemeral port must have been bound");
         assert!(info.started_at > 0, "the start response must carry its stamp");
 
-        stop_port_forward(info.id, app.state()).await.unwrap();
-        stop_port_forward(info.id + 1, app.state()).await.unwrap();
+        stop_port_forward(info.id, window.clone(), app.state(), app.state())
+            .await
+            .unwrap();
+        stop_port_forward(info.id + 1, window, app.state(), app.state())
+            .await
+            .unwrap();
     }
 
     /// list_forwards is what the frontend store rehydrates from, so it must

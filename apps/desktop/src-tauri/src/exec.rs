@@ -7,17 +7,30 @@
 
 use std::sync::Arc;
 
+use serde_json::Value;
 use srelens_streams::exec::{ExecManager, ExecOpts};
-use tauri::{AppHandle, Runtime, State};
+use tauri::ipc::Channel;
+use tauri::{AppHandle, Runtime, State, Window};
 
-use crate::sink::TauriSink;
+use crate::node_shells::{self, NodeShells, ShellEnd, ShellSink};
+use crate::sink::ChannelSink;
+use crate::window_streams::{Stream, WindowStreams};
 
 /// Open an interactive shell into a pod. Returns the session id; stdout streams
 /// on `exec:out:<channel>` and an `exec:exit:<channel>` event fires (with an
 /// optional error string) when the session ends, where `channel` is the
 /// caller-supplied subscription token — the WebView subscribes to it before
 /// this call, so an exec that dies in the same tick it spawns cannot outrun
-/// the listener.
+/// the listener. Both travel on `on_event`, the page's own channel, so no
+/// other window receives them (#733).
+///
+/// The session belongs to the calling window and is closed when it closes or
+/// reloads (#700). One whose window reloaded while it was starting is closed
+/// at once and refused.
+///
+/// A node shell — an exec into a debug pod this window created — owns that
+/// pod from here, and it is deleted when the session ends however it ends,
+/// including when it fails to start (#734; see `crate::node_shells`).
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
 pub async fn start_pod_exec<R: Runtime>(
@@ -30,15 +43,27 @@ pub async fn start_pod_exec<R: Runtime>(
     channel: String,
     cols: Option<u16>,
     rows: Option<u16>,
+    on_event: Channel<Value>,
+    window: Window<R>,
     app: AppHandle<R>,
     manager: State<'_, ExecManager>,
+    owned: State<'_, WindowStreams>,
+    shells: State<'_, NodeShells>,
 ) -> Result<u64, String> {
-    manager
+    let epoch = owned.epoch(window.label());
+    let end = Arc::new(ShellEnd::default());
+    let sink = ShellSink {
+        inner: ChannelSink(on_event),
+        exit: format!("exec:exit:{channel}"),
+        end: end.clone(),
+        app: app.clone(),
+    };
+    let started = manager
         .start(
-            Arc::new(TauriSink(app)),
-            context,
-            namespace,
-            pod,
+            Arc::new(sink),
+            context.clone(),
+            namespace.clone(),
+            pod.clone(),
             channel,
             ExecOpts {
                 container,
@@ -48,36 +73,82 @@ pub async fn start_pod_exec<R: Runtime>(
                 rows,
             },
         )
-        .await
+        .await;
+    let debug_pod = owned.take_debug_pod(window.label(), &context, &namespace, &pod);
+    let kept = started.and_then(|session| {
+        owned
+            .keep(window.label(), epoch, Stream::Exec(session), || {
+                manager.close(session)
+            })
+            .map(|()| session)
+    });
+    match (kept, debug_pod) {
+        (Ok(session), Some(debug_pod)) => {
+            shells.attach(&app, &owned, window.label(), session, debug_pod);
+            end.started(&app, session);
+            Ok(session)
+        }
+        (Ok(session), None) => Ok(session),
+        // No shell will run in it now.
+        (Err(e), Some(debug_pod)) => {
+            node_shells::delete_soon(&app, debug_pod);
+            Err(e)
+        }
+        (Err(e), None) => Err(e),
+    }
 }
 
-/// Forward a keystroke / input string to an exec session's stdin.
+/// Forward a keystroke / input string to an exec session's stdin. Only the
+/// window that opened the session may type into it (#733); a session no
+/// window holds has ended, and this is a no-op.
 #[tauri::command]
-pub async fn exec_input(
+pub async fn exec_input<R: Runtime>(
     session: u64,
     data: String,
+    window: Window<R>,
     manager: State<'_, ExecManager>,
+    owned: State<'_, WindowStreams>,
 ) -> Result<(), String> {
-    manager.input(session, data).await;
+    if owned.check(window.label(), &Stream::Exec(session))? {
+        manager.input(session, data).await;
+    }
     Ok(())
 }
 
-/// Resize an exec session's remote PTY to `cols` x `rows`.
+/// Resize an exec session's remote PTY to `cols` x `rows`; as [`exec_input`].
 #[tauri::command]
-pub async fn exec_resize(
+pub async fn exec_resize<R: Runtime>(
     session: u64,
     cols: u16,
     rows: u16,
+    window: Window<R>,
     manager: State<'_, ExecManager>,
+    owned: State<'_, WindowStreams>,
 ) -> Result<(), String> {
-    manager.resize(session, cols, rows).await;
+    if owned.check(window.label(), &Stream::Exec(session))? {
+        manager.resize(session, cols, rows).await;
+    }
     Ok(())
 }
 
-/// Close an exec session and abort its task.
+/// Close an exec session and abort its task; as [`exec_input`].
 #[tauri::command]
-pub async fn exec_close(session: u64, manager: State<'_, ExecManager>) -> Result<(), String> {
-    manager.close(session);
+pub async fn exec_close<R: Runtime>(
+    session: u64,
+    window: Window<R>,
+    app: AppHandle<R>,
+    manager: State<'_, ExecManager>,
+    owned: State<'_, WindowStreams>,
+    shells: State<'_, NodeShells>,
+) -> Result<(), String> {
+    let stream = Stream::Exec(session);
+    if owned.check(window.label(), &stream)? {
+        manager.close(session);
+        owned.disown(window.label(), &stream);
+        if let Some(debug_pod) = shells.release(session) {
+            node_shells::delete_soon(&app, debug_pod);
+        }
+    }
     Ok(())
 }
 
@@ -95,6 +166,9 @@ mod tests {
     async fn commands_run_against_a_mock_runtime() {
         let app = tauri::test::mock_app();
         app.manage(ExecManager::new(ClientCache::new_many(vec![])));
+        app.manage(WindowStreams::default());
+        app.manage(NodeShells::default());
+        let window = crate::window_streams::tests::mock_window(&app, "main");
 
         let id = start_pod_exec(
             "no-such-context".into(),
@@ -106,18 +180,48 @@ mod tests {
             "exec-0-abcd".into(),
             Some(80),
             Some(24),
+            crate::sink::tests::recording().0,
+            window.clone(),
             app.handle().clone(),
+            app.state(),
+            app.state(),
             app.state(),
         )
         .await
         .unwrap();
 
-        exec_input(id, "ls\n".into(), app.state()).await.unwrap();
-        exec_resize(id, 120, 40, app.state()).await.unwrap();
-        exec_close(id, app.state()).await.unwrap();
+        exec_input(id, "ls\n".into(), window.clone(), app.state(), app.state())
+            .await
+            .unwrap();
+        exec_resize(id, 120, 40, window.clone(), app.state(), app.state())
+            .await
+            .unwrap();
+        exec_close(
+            id,
+            window.clone(),
+            app.handle().clone(),
+            app.state(),
+            app.state(),
+            app.state(),
+        )
+        .await
+        .unwrap();
         // Unknown session: every command stays a quiet no-op.
-        exec_input(id + 1, "x".into(), app.state()).await.unwrap();
-        exec_resize(id + 1, 80, 24, app.state()).await.unwrap();
-        exec_close(id + 1, app.state()).await.unwrap();
+        exec_input(id + 1, "x".into(), window.clone(), app.state(), app.state())
+            .await
+            .unwrap();
+        exec_resize(id + 1, 80, 24, window.clone(), app.state(), app.state())
+            .await
+            .unwrap();
+        exec_close(
+            id + 1,
+            window,
+            app.handle().clone(),
+            app.state(),
+            app.state(),
+            app.state(),
+        )
+        .await
+        .unwrap();
     }
 }

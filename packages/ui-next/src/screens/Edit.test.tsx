@@ -2,6 +2,7 @@ import { createElement } from "react";
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, waitFor, within, act } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { Body } from "../shell/Body";
 
 /**
  * The manifest, the apply, the diff and the delete are all supplied at core's
@@ -31,7 +32,7 @@ vi.mock("@srelens/core/react", async (orig) => ({
 }));
 // The rail's cluster, mutable so a test can move it out from under an open
 // editor the way a reader would.
-const { active } = vi.hoisted(() => ({ active: { name: "prod-eu", stableId: "prod-eu" } }));
+const { active } = vi.hoisted(() => ({ active: { name: "prod-eu", stableId: "prod-eu", key: "prod-eu" } }));
 // The console the Review button hands the draft to.
 const { ask } = vi.hoisted(() => ({ ask: vi.fn() }));
 vi.mock("../console", () => ({ useConsole: () => ({ ask }) }));
@@ -88,9 +89,11 @@ function latestEditor() {
     onChange: (v: string) => void;
     ariaLabel: string;
     readOnly?: boolean;
+    copy?: boolean;
     completions?: unknown;
     onCursorChange?: (pos: number) => void;
     onDiagnostics?: (diagnostics: unknown[]) => void;
+    schemaValidate?: (yaml: string) => Promise<unknown[]>;
   };
   return props;
 }
@@ -154,6 +157,31 @@ data:
 `;
 
 describe("EditResource", () => {
+  it.each([ROUTE, "/new/prod-eu"])("keeps the validator stable when lint results rerender the screen: %s", async route => {
+    render(<EditResource route={route} />);
+    await waitFor(() => expect(latestEditor()?.schemaValidate).toBeDefined());
+    const validate = latestEditor().schemaValidate;
+
+    act(() => latestEditor().onDiagnostics!([
+      { from: 0, to: 1, line: 1, severity: "error", message: "invalid YAML" },
+    ]));
+
+    expect(screen.getByTestId("manifest-status").textContent).toContain("1 problem");
+    expect(latestEditor().schemaValidate).toBe(validate);
+  });
+
+  it.each([ROUTE, "/new/prod-eu"])("keeps unsaved YAML across a router pause: %s", async route => {
+    const props = { route, ported: [], onOpenInClassic: () => {}, onLocked: () => {} };
+    const { rerender } = render(<Body {...props} />);
+    await waitFor(() => expect(latestEditor()?.value).toBeTruthy());
+    act(() => latestEditor().onChange(EDITED));
+    rerender(<Body {...props} pausedContext={{ name: "prod-eu", stableId: "prod-eu", key: "prod-eu", cluster: "prod", server: "", isCurrent: false, sourceFile: "", authKind: "token" }} />);
+    expect(screen.getByText("prod-eu is paused")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Apply" })).toBeNull();
+    rerender(<Body {...props} />);
+    await waitFor(() => expect(latestEditor()?.value).toBe(EDITED));
+  });
+
   it("opens on the live manifest, read from the cluster the tab is on", async () => {
     render(<EditResource route={ROUTE} />);
     await waitFor(() => expect(latestEditor()?.value).toBe(LIVE));
@@ -163,6 +191,15 @@ describe("EditResource", () => {
     expect(latestEditor().ariaLabel).toBe("web manifest");
     // Nothing typed yet, so there is nothing to apply.
     expect(screen.getByRole("button", { name: "Apply" })).toHaveProperty("disabled", true);
+  });
+
+  it("offers a Copy control over the manifest", async () => {
+    // Asserted at the CALL site, not only in the kit: the prop is this
+    // screen's, and dropping it would leave every editor test green. (#656)
+    render(<EditResource route={ROUTE} />);
+    await waitFor(() => expect(latestEditor()?.value).toBe(LIVE));
+    expect(latestEditor().copy).toBe(true);
+    expect(screen.getByRole("button", { name: "Copy" })).toBeDefined();
   });
 
   it("applies an edited draft only after the reader confirms, and reloads on success", async () => {
@@ -406,7 +443,8 @@ describe("EditResource", () => {
   it("says what the schema allows where the cursor is, and completes from the same schema", async () => {
     render(<EditResource route={ROUTE} />);
     await waitFor(() => expect(latestEditor()?.value).toBe(LIVE));
-    expect(core.openApiSchema).toHaveBeenCalledWith("prod-eu", "v1", "ConfigMap");
+    // Schema loading follows the manifest update in a separate effect.
+    await waitFor(() => expect(core.openApiSchema).toHaveBeenCalledWith("prod-eu", "v1", "ConfigMap"));
     const sidebar = screen.getByRole("complementary", { name: "Analysis" });
     // Cursor at the top: the top-level keys, with type and description.
     expect(await within(sidebar).findByText("immutable")).toBeDefined();
@@ -585,6 +623,13 @@ describe("EditResource on /new", () => {
       expect(core.applyManifest).toHaveBeenCalledWith("prod-eu", TEMPLATES.Deployment("default"), false),
     );
     expect((await screen.findByRole("status")).textContent).toContain("Created ConfigMap web");
+  });
+
+  it("offers a Copy control over the draft", async () => {
+    render(<EditResource route="/new" />);
+    await waitFor(() => expect(latestEditor()?.value).toBe(TEMPLATES.Deployment("default")));
+    expect(latestEditor().copy).toBe(true);
+    expect(screen.getByRole("button", { name: "Copy" })).toBeDefined();
   });
 
   it("swaps the draft when a different template is picked", async () => {

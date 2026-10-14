@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach } from "vitest";
+import { describe, it, expect, beforeEach, vi } from "vitest";
 import {
   loadClusterNamespaces,
   removeClusterNamespace,
@@ -11,6 +11,7 @@ import {
   contextDisplayName,
   loadContextProfiles,
   saveContextProfiles,
+  KUBECONFIG_FILES_CHANGED,
   loadKubeconfigFiles,
   saveKubeconfigFiles,
   loadContextOrder,
@@ -106,6 +107,29 @@ describe("settings persistence", () => {
   it("persists and deduplicates additional kubeconfig files", () => {
     saveKubeconfigFiles(["/tmp/a", "/tmp/b", "/tmp/a"]);
     expect(loadKubeconfigFiles()).toEqual(["/tmp/a", "/tmp/b"]);
+  });
+
+  it("tells listeners the kubeconfig files in use, even when saving them fails", () => {
+    const heard: string[][] = [];
+    const listener = (event: Event) => heard.push((event as CustomEvent<string[]>).detail);
+    window.addEventListener(KUBECONFIG_FILES_CHANGED, listener);
+    try {
+      saveKubeconfigFiles(["/tmp/edge.yaml", "/tmp/edge.yaml"]);
+      // The caller keeps using the new files whether or not storage took them, so
+      // listeners must hear the live list, not what storage still holds.
+      const setItem = vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => {
+        throw new Error("quota exceeded");
+      });
+      try {
+        saveKubeconfigFiles(["/tmp/edge.yaml", "/tmp/core.yaml"]);
+      } finally {
+        setItem.mockRestore();
+      }
+    } finally {
+      window.removeEventListener(KUBECONFIG_FILES_CHANGED, listener);
+    }
+    expect(heard).toEqual([["/tmp/edge.yaml"], ["/tmp/edge.yaml", "/tmp/core.yaml"]]);
+    expect(loadKubeconfigFiles()).toEqual(["/tmp/edge.yaml"]);
   });
 
   it("persists hidden columns per view independently", () => {

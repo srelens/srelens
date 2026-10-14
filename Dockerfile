@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1
 
 # ---- Stage 1: build the frontend bundle -------------------------------------
-FROM node:26-slim@sha256:c0753125a3789977aefe869cbebccf70e3cfd7ea84ca48547458f02e4f1d7146 AS frontend
+FROM node:26-slim@sha256:193fe51b64e77981119c98c2002c9e32a70e2f006fb4d25068ce0558998917f0 AS frontend
 WORKDIR /src
 # package.json alone, ahead of the lockfile: it names the pnpm version, and
 # copying it by itself keeps the pnpm install layer cached when only the
@@ -28,11 +28,13 @@ RUN pnpm install --frozen-lockfile
 COPY packages/core packages/core
 COPY packages/ui-kit packages/ui-kit
 COPY packages/ui-next packages/ui-next
+# Core validates native components against the canonical schema at build/runtime.
+COPY schemas schemas
 COPY apps/desktop apps/desktop
 RUN pnpm --filter @srelens/desktop build
 
 # ---- Stage 2: build the headless server binary ------------------------------
-FROM rust:1-slim-bookworm@sha256:1469a27c125cb5a3aebfa4f4e4665d935b02fb72cc093b2c974b3d740e43f157 AS backend
+FROM rust:1-slim-bookworm@sha256:2c3a22f0a5533ea2dd5a16627bc841228151faa2d4de2644ac9987e4a2f1f2fa AS backend
 WORKDIR /src
 # Only C toolchain + perl are needed (no GTK/webkit — this binary isn't Tauri).
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -47,13 +49,18 @@ COPY apps/desktop/src-tauri apps/desktop/src-tauri
 # this the server build stops at "failed to load manifest for workspace
 # member /src/apps/tui".
 COPY apps/tui apps/tui
+# The sidecar protocol crate (#576) is a workspace member and a dependency of
+# srelens-plugin-host, so the build needs it as well as the whole workspace.
+COPY sdk/protocol sdk/protocol
+COPY sdk/rust sdk/rust
+COPY sdk/examples/hello-world/rust sdk/examples/hello-world/rust
 # rust-embed reads apps/desktop/dist at compile time; copy the built bundle in.
 COPY --from=frontend /src/apps/desktop/dist apps/desktop/dist
+# Stripped by [profile.release] in the root Cargo.toml.
 RUN cargo build --release -p srelens-server --bin srelens-server
-RUN strip target/release/srelens-server
 
 # ---- Stage 3: slim runtime --------------------------------------------------
-FROM debian:bookworm-slim@sha256:88200866dfff7ea7f5cbcb6ec7c8a701889efe6fe859fe64d6990e4b07ea4171 AS runtime
+FROM debian:bookworm-slim@sha256:7c7b2c966bc9ee8cedfeef67e0e279108992c77681fa595db4a9d65c06ccc587 AS runtime
 ARG KUBECTL_VERSION=v1.36.3
 # Helm is pinned to the 3.x line on purpose: Helm 4 has breaking CLI/behavior
 # changes the helm capabilities aren't validated against yet.

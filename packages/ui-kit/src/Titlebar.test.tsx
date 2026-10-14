@@ -73,20 +73,23 @@ describe("Titlebar's drag region", () => {
   it("carries the attribute tauri's drag handling listens for on the header and its structural columns, but not on the interactive slots", () => {
     // The stylesheet's app-region rule is honoured by WebView2 and ignored by
     // macOS's WKWebView — under an overlay titlebar there, only elements with
-    // `data-tauri-drag-region` start a native drag. The header and its two
-    // bare columns (the leading row and the centre drag region) carry it; the
-    // slots holding what the caller passed must not, or a click there would
-    // start a window move instead of reaching the control.
+    // `data-tauri-drag-region` start a native drag. The header and all three
+    // structural columns carry it, so the empty space around either control
+    // slot moves the window. The slots holding what the caller passed must
+    // not, or a click there would start a window move instead of reaching the
+    // control.
     setup();
     const header = bar();
     const leadingSlot = header.querySelector('[data-slot="leading"]') as HTMLElement;
     const actionsSlot = header.querySelector('[data-slot="actions"]') as HTMLElement;
     const leadingColumn = leadingSlot.parentElement as HTMLElement;
     const titleColumn = header.querySelector("[data-drag-region]") as HTMLElement;
+    const actionsColumn = actionsSlot.parentElement as HTMLElement;
 
     expect(header.hasAttribute("data-tauri-drag-region")).toBe(true);
     expect(leadingColumn.hasAttribute("data-tauri-drag-region")).toBe(true);
     expect(titleColumn.hasAttribute("data-tauri-drag-region")).toBe(true);
+    expect(actionsColumn.hasAttribute("data-tauri-drag-region")).toBe(true);
 
     expect(leadingSlot.hasAttribute("data-tauri-drag-region")).toBe(false);
     expect(actionsSlot.hasAttribute("data-tauri-drag-region")).toBe(false);

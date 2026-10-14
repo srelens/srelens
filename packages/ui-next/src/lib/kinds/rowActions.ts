@@ -29,8 +29,12 @@ export const ROW_ACTION_LABEL = {
   suspend: "Suspend",
   resume: "Resume",
   trigger: "Run now",
+  cordon: "Cordon",
+  uncordon: "Uncordon",
+  drain: "Drain",
   scale: "Scale",
   restart: "Restart rollout",
+  rollback: "Roll back",
   evict: "Evict",
   delete: "Delete",
 } as const;

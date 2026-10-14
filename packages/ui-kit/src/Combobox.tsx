@@ -12,6 +12,10 @@ export interface ComboboxProps {
   placeholder?: string;
   searchPlaceholder?: string;
   ariaLabel?: string;
+  /** Form-field state, for a picker that is a form field: announced like an input's. */
+  ariaInvalid?: boolean;
+  ariaRequired?: boolean;
+  ariaDescribedBy?: string;
   className?: string;
 }
 
@@ -41,6 +45,9 @@ export function Combobox({
   placeholder = "Select…",
   searchPlaceholder,
   ariaLabel,
+  ariaInvalid,
+  ariaRequired,
+  ariaDescribedBy,
   className,
 }: ComboboxProps) {
   const selected = options.find((option) => option.value === value);
@@ -49,6 +56,9 @@ export function Combobox({
     <Picker
       summary={selected ? optionLabel(selected) : placeholder}
       ariaLabel={ariaLabel}
+      ariaInvalid={ariaInvalid}
+      ariaRequired={ariaRequired}
+      ariaDescribedBy={ariaDescribedBy}
       searchPlaceholder={searchPlaceholder}
       className={className}
     >

@@ -2,9 +2,10 @@
 //!
 //! Downloads a managed tool from its official source, verifies it against the
 //! vendor's published SHA-256, and places it in `~/.srelens/bin` — writing to a
-//! temp file and renaming only after verification, so a partial or tampered
-//! download never lands as the real binary. This slice covers kubectl (a single
-//! binary from dl.k8s.io); krew and helm (tarballs) reuse these primitives.
+//! unique temp sibling and renaming only after verification, so a partial or
+//! tampered download never lands as the real binary. This slice covers kubectl
+//! (a single binary from dl.k8s.io); krew and helm (tarballs) reuse these
+//! primitives.
 //!
 //! The network is injected as a `fetch` closure, so the planning, checksum
 //! parsing/verification, and temp-then-rename are all unit-tested without a
@@ -138,13 +139,26 @@ pub fn install_binary(
 }
 
 /// Atomically place `bytes` as an executable at `target`: create the parent dir,
-/// write a `.partial` sibling, set the exec bit, then rename in. The rename is
-/// the last step, so a caller never observes a half-written binary.
+/// write a unique `.partial.*` sibling, set the exec bit, then rename in. The
+/// rename is the last step, so a caller never observes a half-written binary.
+/// The suffix is writer-unique so two concurrent installs of the same tool
+/// (two webviews) cannot share one `.partial` path and lose a rename.
 fn write_binary(target: &Path, bytes: &[u8]) -> Result<PathBuf, InstallError> {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static PARTIAL_SEQ: AtomicU64 = AtomicU64::new(0);
+
     if let Some(dir) = target.parent() {
         std::fs::create_dir_all(dir).map_err(io)?;
     }
-    let tmp = target.with_extension("partial");
+    let name = target
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("bin");
+    let seq = PARTIAL_SEQ.fetch_add(1, Ordering::Relaxed);
+    let tmp = target.with_file_name(format!(
+        "{name}.partial.{}-{seq}",
+        std::process::id()
+    ));
     std::fs::write(&tmp, bytes).map_err(io)?;
     set_executable(&tmp)?;
     std::fs::rename(&tmp, target).map_err(io)?;
@@ -414,7 +428,12 @@ mod tests {
 
         let path = install_binary(&plan, &fetch).unwrap();
         assert_eq!(std::fs::read(&path).unwrap(), payload);
-        assert!(!dir.path().join("bin/kubectl.partial").exists(), "temp file left behind");
+        let leftovers: Vec<_> = std::fs::read_dir(dir.path().join("bin"))
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().contains(".partial."))
+            .collect();
+        assert!(leftovers.is_empty(), "temp file left behind: {leftovers:?}");
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -442,7 +461,12 @@ mod tests {
             Err(InstallError::ChecksumMismatch { .. })
         ));
         assert!(!plan.target.exists(), "a mismatched binary must not be installed");
-        assert!(!plan.target.with_extension("partial").exists(), "temp file left behind");
+        let leftovers: Vec<_> = std::fs::read_dir(plan.target.parent().unwrap())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().contains(".partial."))
+            .collect();
+        assert!(leftovers.is_empty(), "temp file left behind: {leftovers:?}");
     }
 
     #[test]

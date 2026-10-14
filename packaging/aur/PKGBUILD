@@ -52,7 +52,8 @@ source=(
 sha256sums=('SKIP' 'SKIP')
 
 package() {
-  # The .deb payload is exactly usr/bin/srelens + a .desktop entry + hicolor icons.
+  # The .deb payload is exactly usr/bin/srelens, the sandbox launcher executable apps
+  # need beside it (usr/bin/srelens-sandbox-launch), a .desktop entry and hicolor icons.
   bsdtar -O -xf "$_pkgname-$pkgver.deb" data.tar.gz | bsdtar -xf - -C "$pkgdir"
 
   # Upstream's generated .desktop ships an empty `Categories=`, which can hide the

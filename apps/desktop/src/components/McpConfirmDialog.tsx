@@ -1,7 +1,8 @@
 import { useEffect, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
-import { respondToConfirm, type ConfirmRequest } from "@srelens/core";
+import { isTauri, respondToConfirm, type ConfirmRequest } from "@srelens/core";
 import { notify } from "@srelens/core";
+import { asConfirmRequest, RequestConfirmation } from "@srelens/ui-next/confirm";
 import { ConfirmDialog } from "../ui";
 
 /**
@@ -18,8 +19,22 @@ export function McpConfirmDialog() {
   const current = queue[0];
 
   useEffect(() => {
-    const unlisten = listen<ConfirmRequest>("mcp://confirm-request", (event) => {
-      setQueue((q) => [...q, event.payload]);
+    // Desktop only. On the web, AppGate renders classic App after sign-in and
+    // App mounts this dialog unconditionally -- and `listen()` from
+    // @tauri-apps/api reaches for `window.__TAURI_INTERNALS__` and throws in
+    // a browser. Two unguarded calls here were two uncaught rejections on
+    // every web page load (#512). There is no consent flow to subscribe to on
+    // the web anyway: the server denies every capability that would need one.
+    if (!isTauri()) return;
+    // Narrowed, not cast. `listen<ConfirmRequest>` is an annotation: the
+    // payload crosses a process boundary and is `unknown` at runtime, and a
+    // `target.cluster` arriving as a number used to reach the text helpers and
+    // throw — a blank screen in place of the confirmation the backend is
+    // blocking on. One parser for this event, shared with the other two
+    // listeners (#552).
+    const unlisten = listen<unknown>("mcp://confirm-request", (event) => {
+      const request = asConfirmRequest(event.payload);
+      if (request) setQueue((q) => [...q, request]);
     });
     // The backend announces every resolution (answered here, answered on the
     // assistant's inline card, or timed out) — drop the request however it
@@ -62,19 +77,31 @@ export function McpConfirmDialog() {
     <ConfirmDialog
       title="An agent wants to run a cluster action"
       message={
-        <div className="flex flex-col gap-2">
-          <p className="m-0">
-            Tool: <code>{current.tool}</code>
-          </p>
-          <pre className="max-h-64 overflow-auto rounded-md border border-border bg-muted/40 p-3 text-xs">
-            <code>{JSON.stringify(current.args, null, 2)}</code>
-          </pre>
-          {queue.length > 1 && (
-            <p className="m-0 text-xs text-muted-foreground">
-              {queue.length - 1} more request{queue.length - 1 === 1 ? "" : "s"} waiting
-            </p>
-          )}
-        </div>
+        /*
+          The ONE host confirmation (#552). This modal's own rendering of the
+          sentence and the level is gone: it was a third copy of the question,
+          and a third copy is a third chance for two of them to disagree. What
+          stays here is this frame's own detail — the tool id, the argument
+          payload and the queue count.
+        */
+        <RequestConfirmation
+          request={current}
+          details={
+            <div className="flex flex-col gap-2">
+              <p className="m-0">
+                Tool: <code>{current.tool}</code>
+              </p>
+              <pre className="max-h-64 overflow-auto rounded-md border border-border bg-muted/40 p-3 text-xs">
+                <code>{JSON.stringify(current.args, null, 2)}</code>
+              </pre>
+              {queue.length > 1 && (
+                <p className="m-0 text-xs text-muted-foreground">
+                  {queue.length - 1} more request{queue.length - 1 === 1 ? "" : "s"} waiting
+                </p>
+              )}
+            </div>
+          }
+        />
       }
       confirmLabel="Approve"
       cancelLabel="Deny"

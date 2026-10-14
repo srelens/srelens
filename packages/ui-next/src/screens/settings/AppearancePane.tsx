@@ -5,24 +5,34 @@ import {
   getUiScale,
   isApplePlatform,
   isTauri,
+  settingsStorage,
   setUiScale,
+  uiScaleFactor,
 } from "@srelens/core";
-import { Button, Panel } from "@srelens/ui-kit";
+import { Button, Checkbox, Panel } from "@srelens/ui-kit";
 import {
   ACCENTS,
   APPEARANCE_KEY,
   BARE,
   DENSITIES,
+  GLASS_OPACITY,
+  OPACITY,
   THEMES,
+  TRANSLUCENT_THEMES,
   ZOOM_STEPS,
   applyStoredAppearance,
   hasChosenTheme,
   readRootAccent,
   readRootDensity,
+  readRootOpacity,
   readRootTheme,
+  readStored,
   remember,
   subscribeToRoot,
+  supportsWindowOpacity,
+  syncWindowBlur,
   writeAxis,
+  writeOpacity,
   type AccentId,
   type DensityId,
   type ThemeId,
@@ -123,6 +133,8 @@ export {
   APPEARANCE_KEY,
   ACCENTS,
   DENSITIES,
+  GLASS_OPACITY,
+  OPACITY,
   THEMES,
   ZOOM_STEPS,
   applyStoredAppearance,
@@ -138,7 +150,7 @@ export type { AccentId, DensityId, ThemeId };
  * Native webview zoom does not change a computed CSS pixel, so the effective
  * size on screen is the computed one scaled by the percentage.
  */
-function bodyPixels(percent: number): number {
+function bodyPixels(percent: number, nativeZoom = true): number {
   let base = 16;
   try {
     const computed = Number.parseFloat(getComputedStyle(document.documentElement).fontSize);
@@ -146,7 +158,7 @@ function bodyPixels(percent: number): number {
   } catch {
     // No stylesheet attached — a unit test, or a first paint.
   }
-  return Math.round((base * percent) / 100);
+  return Math.round(base * (nativeZoom ? uiScaleFactor(percent, "next") : percent / 100));
 }
 
 /** The current row height, when a stylesheet is attached to say. */
@@ -181,7 +193,7 @@ export interface AppearancePaneProps {
    * and it must stay one: switching back has to work when this screen is the
    * thing being left. `NextApp`'s `leave` is what this is for — it saves the
    * handoff, calls `switchDesign`, and renders a refusal at the window root,
-   * because the classic toast host is not in this tree.
+   * because the toast host was not in this tree when it was written (#374).
    */
   onSwitchToClassic: () => void;
 }
@@ -190,14 +202,19 @@ export function AppearancePane({ ported, onSwitchToClassic }: AppearancePaneProp
   const theme = useSyncExternalStore(subscribeToRoot, readRootTheme);
   const accent = useSyncExternalStore(subscribeToRoot, readRootAccent);
   const density = useSyncExternalStore(subscribeToRoot, readRootDensity);
+  const opacity = useSyncExternalStore(subscribeToRoot, readRootOpacity);
+  // The blur has no attribute of its own — it is a native effect, and nothing
+  // in the stylesheet keys on it — so the stored record is the only place to
+  // read it from. On unless the reader turned it off.
+  const [blur, setBlur] = useState(() => readStored(settingsStorage).blur ?? true);
 
   // Zoom has no change notification: the Cmd/Ctrl chords and the titlebar's
   // three buttons both go through `Chrome`'s `zoom`, which writes core's
   // setting and asks the webview to scale. Native zoom does move the layout
   // viewport, though, so a resize is the one signal that reaches here.
-  const [scale, setScale] = useState(getUiScale);
+  const [scale, setScale] = useState(() => getUiScale("next"));
   useEffect(() => {
-    const reread = () => setScale(getUiScale());
+    const reread = () => setScale(getUiScale("next"));
     window.addEventListener("resize", reread);
     return () => window.removeEventListener("resize", reread);
   }, []);
@@ -209,10 +226,18 @@ export function AppearancePane({ ported, onSwitchToClassic }: AppearancePaneProp
   const desktop = isTauri();
   const apple = isApplePlatform();
   const rows = rowHeight();
+  const seeThrough = supportsWindowOpacity();
+  const translucentTheme = TRANSLUCENT_THEMES.includes(theme);
 
   function pickTheme(id: ThemeId) {
     writeAxis("data-theme", id, BARE.theme);
     remember({ theme: id });
+    // See `GLASS_OPACITY`: a solid window is the one case where picking Glass
+    // has to move a second axis, or the theme arrives with no glass in it.
+    if (id === "glass" && seeThrough && opacity === BARE.opacity) pickOpacity(GLASS_OPACITY);
+    // A light theme paints the page solid whatever the opacity says, and a
+    // dark one shows through again: the blur follows the theme as well.
+    else syncWindowBlur();
   }
 
   function pickAccent(id: AccentId) {
@@ -225,12 +250,25 @@ export function AppearancePane({ ported, onSwitchToClassic }: AppearancePaneProp
     remember({ density: id });
   }
 
+  function pickOpacity(percent: number) {
+    writeOpacity(percent);
+    remember({ opacity: percent });
+  }
+
+  function pickBlur(on: boolean) {
+    setBlur(on);
+    // Remembered first: the stored record is one of the things the blur is
+    // derived from.
+    remember({ blur: on });
+    syncWindowBlur();
+  }
+
   function pickScale(percent: number) {
     // `setUiScale` clamps and returns what it stored, so what is applied and
     // what is shown are both the stored value rather than the asked-for one.
-    const stored = setUiScale(percent);
+    const stored = setUiScale(percent, "next");
     setScale(stored);
-    applyUiScale(stored);
+    applyUiScale(stored, "next");
   }
 
   return (
@@ -370,7 +408,7 @@ export function AppearancePane({ ported, onSwitchToClassic }: AppearancePaneProp
           <p className="text-[0.75rem] leading-relaxed text-muted">
             Your browser&apos;s own zoom scales srelens here, so there is nothing for this pane to
             set — {chordHint("zoom-in", apple)} and {chordHint("zoom-out", apple)} work as they do on
-            any page. Currently {bodyPixels(UI_SCALE.DEFAULT)}px body text at the browser&apos;s
+            any page. Currently {bodyPixels(UI_SCALE.DEFAULT, false)}px body text at the browser&apos;s
             default zoom.
           </p>
         )}
@@ -418,6 +456,76 @@ export function AppearancePane({ ported, onSwitchToClassic }: AppearancePaneProp
       </Panel>
 
       {/*
+        Not in §23, which draws a window that is always solid. Offered only
+        where the native window is created see-through — see
+        `supportsWindowOpacity` — and left out entirely elsewhere rather than
+        shown disabled: a control that can never work on this machine is not a
+        setting, and unlike zoom there is no browser equivalent to point at.
+      */}
+      {seeThrough && (
+        <Panel title="Window">
+          <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+            <span className="min-w-0 flex-1 basis-40">
+              <span className="block text-[0.75rem] font-medium text-ink">Window opacity</span>
+              <span data-testid="opacity-hint" className="block text-[0.6875rem] leading-snug text-muted">
+                {translucentTheme
+                  ? "How much of what is behind the window shows through its background. Menus, dialogs and table headers stay solid."
+                  : "Works on the Dark, Midnight or Glass theme. Pick one of those above to see through the window."}
+              </span>
+              {/* What is known, said where it applies: below this mark the
+                  smaller text fails contrast over a white desktop, and over a
+                  dark one it does not. A word, not only a colour. */}
+              {translucentTheme && opacity < OPACITY.LEGIBLE && (
+                <span data-testid="opacity-warning" className="mt-0.5 block text-[0.6875rem] leading-snug text-warn">
+                  Heads up: below {OPACITY.LEGIBLE}%, smaller text can be hard to read over a bright desktop.
+                </span>
+              )}
+            </span>
+            {/*
+              A native range, as the kit's Checkbox is a native checkbox and
+              for the same reason: the element already carries the arrow keys,
+              Home and End, focus and the slider semantics, and `accent-color`
+              themes it. Unlike zoom, the amount here is continuous — there is
+              no set of steps the stylesheet has to carry — so a segmented
+              control would only have been a slider with most of its positions
+              removed.
+            */}
+            <span className="flex shrink-0 items-center gap-2">
+              <input
+                type="range"
+                aria-label="Window opacity"
+                aria-valuetext={`${opacity}%`}
+                className="w-44 accent-[var(--accent)] disabled:cursor-not-allowed disabled:opacity-50"
+                min={OPACITY.MIN}
+                max={OPACITY.MAX}
+                step={OPACITY.STEP}
+                value={opacity}
+                disabled={!translucentTheme}
+                onChange={(event) => pickOpacity(Number(event.target.value))}
+              />
+              <span
+                data-testid="opacity-value"
+                className="w-9 text-right font-mono text-[0.75rem] tabular-nums text-soft"
+              >
+                {opacity}%
+              </span>
+            </span>
+          </div>
+          <div className="mt-3">
+            {/* Disabled at 100% as well as on a light theme: with nothing
+                showing through there is nothing for it to blur, and a box
+                that toggles with no visible effect reads as broken. */}
+            <Checkbox
+              checked={blur}
+              onChange={pickBlur}
+              disabled={!translucentTheme || opacity === BARE.opacity}
+              label="Blur what is behind the window"
+            />
+          </div>
+        </Panel>
+      )}
+
+      {/*
         ─────────────────────────────────────────────────────────────────
         STEP-11 SCAFFOLDING. §23 draws no `Design` panel; see the note at
         the top of this file for why that is not an omission to correct.
@@ -427,9 +535,12 @@ export function AppearancePane({ ported, onSwitchToClassic }: AppearancePaneProp
       */}
       <Panel title="Design">
         <p className="text-[0.75rem] leading-relaxed text-muted">
-          You are in the new design. It is <strong className="text-ink">in progress</strong>: some
-          screens are not there yet, and the ones that are may still change. Switching reloads the
-          window, and the classic design has this same choice in the same place.
+          You are in the new design, the default. A few classic features have not reached it yet.
+          Switching reloads the window, and the classic design has this same choice in the same
+          place.
+        </p>
+        <p className="mt-2 text-[0.75rem] text-muted">
+          The classic design is deprecated and will be removed in a future version.
         </p>
         {ported.length > 0 && (
           <>
@@ -445,7 +556,7 @@ export function AppearancePane({ ported, onSwitchToClassic }: AppearancePaneProp
         )}
         <div className="mt-3 flex flex-wrap items-center gap-2">
           <Button variant="secondary" onClick={onSwitchToClassic}>
-            Switch to the classic design
+            Switch to Classic (deprecated)
           </Button>
         </div>
       </Panel>

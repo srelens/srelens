@@ -162,8 +162,51 @@ export const settingsStorage = {
   },
 };
 
+/**
+ * Read one key again from the backend, after this window's own writes have
+ * landed.
+ *
+ * A window loads its settings once and writes whole values. For a value that
+ * is a list two windows both add to, that loses whichever wrote first: the
+ * second window writes the list it loaded, without the first one's entry. A
+ * writer that must not do that looks again before it writes. Rejects when the
+ * backend cannot be read; before the backend is in use there is nothing to
+ * look at again, and it does nothing.
+ */
+export async function refreshSetting(key: string): Promise<void> {
+  if (!initializationAttempted || !backendReady) return;
+  await writes;
+  const loaded = await readBackendSettings();
+  if (Object.prototype.hasOwnProperty.call(loaded.values, key)) values.set(key, loaded.values[key]);
+  else values.delete(key);
+}
+
 /** Test seam for callers that need to observe queued write completion. */
 export async function flushSettingsWrites(options: { throwOnError?: boolean } = {}): Promise<void> {
   await writes;
   if (options.throwOnError && lastWriteError) throw lastWriteError;
+}
+
+/**
+ * Settings backend keys are capped at 256 bytes (`crates/registry/src/settings.rs`).
+ * Context windows label themselves `ctx-` plus hex of the stable id, which doubles
+ * every path byte and can blow that limit. Short labels stay in the key so
+ * existing per-window saves still load; only the over-long case digests.
+ */
+const SETTINGS_KEY_MAX = 256;
+
+function fnv1a64Hex(input: string): string {
+  let hash = 0xcbf29ce484222325n;
+  for (let i = 0; i < input.length; i++) {
+    hash ^= BigInt(input.charCodeAt(i));
+    hash = BigInt.asUintN(64, hash * 0x100000001b3n);
+  }
+  return hash.toString(16).padStart(16, "0");
+}
+
+export function scopedSettingsKey(base: string, windowLabel?: string): string {
+  if (!windowLabel || windowLabel === "main") return base;
+  const direct = `${base}-${windowLabel}`;
+  if (direct.length <= SETTINGS_KEY_MAX) return direct;
+  return `${base}-h${fnv1a64Hex(windowLabel)}`;
 }

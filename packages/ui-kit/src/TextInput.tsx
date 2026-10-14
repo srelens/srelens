@@ -61,10 +61,10 @@ export function TextInput({
       aria-label={ariaLabel}
       aria-describedby={ariaDescribedBy}
       aria-invalid={invalid ? true : undefined}
-      className={cx("w-full rounded-md border px-2 py-1 text-[0.8125rem] outline-none", className)}
+      className={cx("w-full rounded-md border px-2 py-1 text-[0.8125rem] placeholder:text-faint", className)}
       style={{
         background: "var(--surface-sunk)",
-        borderColor: invalid ? "var(--sev)" : "var(--rule)",
+        borderColor: invalid ? "var(--sev)" : "var(--control-line)",
       }}
     />
   );

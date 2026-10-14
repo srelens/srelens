@@ -2,7 +2,7 @@ use ratatui::{
     layout::{Constraint, Rect},
     style::{Color, Modifier, Style},
     text::Span,
-    widgets::{Block, Borders, Cell, Paragraph, Row, Table},
+    widgets::{Block, Borders, Cell, Paragraph, Row, Table, Wrap},
     Frame,
 };
 use serde::{Deserialize, Serialize};
@@ -77,6 +77,7 @@ pub fn render_port_forward_view(f: &mut Frame, area: Rect, state: &PortForwardVi
         let empty_msg = Paragraph::new(
             "No active port forwards. Select a Pod or Service and press <shift-f> to start a port forward.",
         )
+        .wrap(Wrap { trim: true })
         .style(Style::default().fg(Theme::dim()));
         f.render_widget(empty_msg, inner);
         return;

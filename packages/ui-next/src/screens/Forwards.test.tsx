@@ -53,7 +53,7 @@ vi.mock("@srelens/core", async (orig) => ({
 import { type ActiveForward, type ClusterContext, kindToForwardTarget, toKubectl } from "@srelens/core";
 import { Forwards } from "./Forwards";
 import { resetContexts, setContexts } from "../lib/clusters";
-import { setActiveCluster, setState } from "../lib/tabsStore";
+import { currentWorkspace, setClusterPaused, setActiveCluster, setState } from "../lib/tabsStore";
 import { defaultState } from "../lib/tabs";
 
 const ROUTE = "/forwards";
@@ -132,14 +132,14 @@ function fixture(now: number): ActiveForward[] {
  */
 const PROD: ClusterContext = {
   name: "prod-eu",
-  stableId: "prod",
+  stableId: "prod", key: "prod",
   cluster: "prod",
   server: "https://prod",
   isCurrent: true,
   sourceFile: "/home/dana/.kube/config",
   authKind: "client certificate",
 };
-const STAGE: ClusterContext = { ...PROD, name: "stage-eu", stableId: "stage", cluster: "stage", server: "https://stage", isCurrent: false };
+const STAGE: ClusterContext = { ...PROD, name: "stage-eu", stableId: "stage", key: "stage", cluster: "stage", server: "https://stage", isCurrent: false };
 
 /** Both clusters in the workspace, with `PROD` in focus — the rail's start. */
 function withClusters() {
@@ -603,6 +603,12 @@ describe("Forwards — the row's actions", () => {
 });
 
 describe("Forwards — the screen around the table", () => {
+  it("closes creation when its captured cluster is paused after a rail switch", async () => {
+    await fillNewForwardThenMove();
+    act(() => setClusterPaused(currentWorkspace().id, PROD.stableId, true));
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(core.startPortForward).not.toHaveBeenCalled();
+  });
   it("adopts the forwards the backend is still running, once, on mount", async () => {
     open();
     // The web-mode leak this screen exists to close: the store is module-level

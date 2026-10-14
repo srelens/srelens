@@ -1,5 +1,5 @@
-import { describe, it, expect } from "vitest";
-import { printerColumnKeys, printerSortValue } from "./crds";
+import { describe, it, expect, vi } from "vitest";
+import { listCustomResource, printerColumnKeys, printerSortValue } from "./crds";
 import { ageSeconds } from "./age";
 
 const col = (name: string, jsonPath: string, type = "string") => ({ name, jsonPath, type });
@@ -89,5 +89,23 @@ describe("printerSortValue", () => {
 
   it("leaves string columns as text", () => {
     expect(printerSortValue("string", "GREEN")).toBe("GREEN");
+  });
+});
+
+describe("listCustomResource", () => {
+  const crd = {
+    name: "widgets.example.com",
+    group: "example.com",
+    version: "v1",
+    kind: "Widget",
+    plural: "widgets",
+    namespaced: true,
+  };
+
+  it("preserves a truncation marker from the backend", async () => {
+    const invoke = vi.fn().mockResolvedValue({ items: [], truncated: true });
+    const out = await listCustomResource("ctx", crd, "ns", invoke);
+    expect(out.truncated).toBe(true);
+    expect(out.items).toEqual([]);
   });
 });

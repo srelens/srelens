@@ -2,8 +2,12 @@
 //! `GET /mcp` for the server→client SSE stream that carries
 //! `notifications/resources/updated` — the channel that makes
 //! `resources/subscribe` real on this transport. A networked transport for
-//! MCP clients that can't spawn the stdio binary. Binds loopback-only;
-//! destructive tools are consent-gated in the shared request handler.
+//! MCP clients that can't spawn the stdio binary. Binds loopback only unless
+//! the host explicitly exposes it (`HttpListener::bind` with
+//! `Exposure::Network`, which the headless CLI reaches through
+//! `--mcp-expose-http`); an exposed server speaks plain HTTP with the bearer
+//! token as its only barrier (#607). Destructive tools are consent-gated in
+//! the shared request handler.
 
 use std::collections::{BTreeSet, VecDeque};
 use std::net::SocketAddr;
@@ -12,7 +16,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 
-use axum::extract::{Request, State};
+use axum::extract::{DefaultBodyLimit, Request, State};
 use axum::http::{HeaderName, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::sse::{Event, KeepAlive, Sse};
@@ -21,7 +25,7 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde_json::{json, Value};
 
-use crate::stdio::{handle_request, handle_subscription, subscription_notification};
+use crate::stdio::{handle_request_as, handle_subscription, subscription_notification};
 use crate::subscriptions::SubscriptionRegistry;
 use crate::McpServer;
 
@@ -123,6 +127,8 @@ struct StreamGuard {
     subs: Arc<SubscriptionRegistry>,
     session: String,
     id: u64,
+    /// Follows the app tools for this stream (#574); ends with it.
+    tools: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl Drop for StreamGuard {
@@ -145,6 +151,9 @@ impl Drop for StreamGuard {
             }
         }
         self.subs.abort_all();
+        if let Some(tools) = &self.tools {
+            tools.abort();
+        }
     }
 }
 
@@ -163,7 +172,9 @@ struct PushStream {
     /// because live watches hold wake-sender clones (see `PushChannels`).
     closed: tokio::sync::oneshot::Receiver<()>,
     dirty: Arc<Mutex<BTreeSet<String>>>,
-    pending: VecDeque<String>,
+    /// Set when the app tools changed since this stream last said so (#574).
+    tools_changed: Arc<std::sync::atomic::AtomicBool>,
+    pending: VecDeque<Value>,
     _guard: StreamGuard,
 }
 
@@ -183,19 +194,25 @@ impl futures_core::Stream for PushStream {
             if std::future::Future::poll(Pin::new(&mut this.closed), cx).is_ready() {
                 return Poll::Ready(None);
             }
-            if let Some(uri) = this.pending.pop_front() {
-                let msg = subscription_notification(&uri);
+            if let Some(msg) = this.pending.pop_front() {
                 return Poll::Ready(Some(Ok(Event::default().data(msg.to_string()))));
             }
             match this.wake.poll_recv(cx) {
                 Poll::Ready(Some(())) => {
+                    // However often the tools changed while unread, the client
+                    // is told once: it lists them again either way.
+                    if this.tools_changed.swap(false, Ordering::SeqCst) {
+                        this.pending
+                            .push_back(crate::tools_list_changed_notification());
+                    }
                     let uris = {
                         let mut guard = this.dirty.lock().unwrap_or_else(|e| e.into_inner());
                         std::mem::take(&mut *guard)
                     };
-                    // Loop: emit the first drained URI, or wait again on a
+                    // Loop: emit the first drained message, or wait again on a
                     // spurious wake that raced an earlier drain.
-                    this.pending.extend(uris);
+                    this.pending
+                        .extend(uris.iter().map(|uri| subscription_notification(uri)));
                 }
                 Poll::Ready(None) => return Poll::Ready(None),
                 Poll::Pending => return Poll::Pending,
@@ -269,6 +286,13 @@ async fn sse(State(st): State<AppState>, headers: axum::http::HeaderMap) -> Resp
     let session = presented_session(&headers).unwrap_or_else(|| DEFAULT_SESSION.to_string());
     let (wake_tx, wake_rx) = tokio::sync::mpsc::channel(1);
     let (close_tx, close_rx) = tokio::sync::oneshot::channel();
+    let tools_changed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    // Subscribed here, not in the task: a change made before the task first runs
+    // must still count as one this stream has not told its client about.
+    let tools = st.server.app_tools().cloned().map(|source| {
+        let changes = source.changes();
+        tokio::spawn(follow_app_tools(source, changes, tools_changed.clone(), wake_tx.clone()))
+    });
     let chans = PushChannels {
         id: st.push.next_id.fetch_add(1, Ordering::Relaxed),
         subs: Arc::new(SubscriptionRegistry::new()),
@@ -280,12 +304,14 @@ async fn sse(State(st): State<AppState>, headers: axum::http::HeaderMap) -> Resp
         wake: wake_rx,
         closed: close_rx,
         dirty: chans.dirty.clone(),
+        tools_changed,
         pending: VecDeque::new(),
         _guard: StreamGuard {
             push: st.push.clone(),
             subs: chans.subs.clone(),
             session: session.clone(),
             id: chans.id,
+            tools,
         },
     };
     // Install as this session's stream (see `PushState::install` for
@@ -305,6 +331,35 @@ async fn sse(State(st): State<AppState>, headers: axum::http::HeaderMap) -> Resp
         ),
     )
         .into_response()
+}
+
+/// Follows the app tools for one stream (#574): marks the stream when they change and
+/// wakes it, and asks the source to catch up every poll interval, so a change another
+/// process made reaches this client too. Aborted when the stream ends.
+async fn follow_app_tools(
+    source: Arc<dyn crate::ToolSource>,
+    mut changes: tokio::sync::watch::Receiver<u64>,
+    changed: Arc<std::sync::atomic::AtomicBool>,
+    wake: tokio::sync::mpsc::Sender<()>,
+) {
+    let period = source.poll_interval();
+    let mut poll = tokio::time::interval_at(tokio::time::Instant::now() + period, period);
+    poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    loop {
+        tokio::select! {
+            result = changes.changed() => {
+                if result.is_err() {
+                    return;
+                }
+                changed.store(true, Ordering::SeqCst);
+                // A full channel already holds a wakeup, which will see the flag.
+                let _ = wake.try_send(());
+            }
+            _ = poll.tick() => {
+                source.tools().await;
+            }
+        }
+    }
 }
 
 /// The `Mcp-Session-Id` header name, surfaced on every `/mcp` response.
@@ -338,6 +393,8 @@ const DEFAULT_SESSION: &str = "default";
 async fn rpc(
     State(st): State<AppState>,
     headers: axum::http::HeaderMap,
+    // Put there by `token_guard` from the token it authenticated (#393).
+    caller: Option<axum::Extension<crate::policy::Caller>>,
     Json(req): Json<Value>,
 ) -> Response {
     let method = req.get("method").and_then(Value::as_str).unwrap_or("");
@@ -374,7 +431,8 @@ async fn rpc(
             }),
         }
     } else {
-        handle_request(&st.server, &req, crate::Transport::Http).await
+        let caller = caller.map(|axum::Extension(caller)| caller);
+        handle_request_as(&st.server, &req, crate::Transport::Http, caller).await
     };
     // Streamable-HTTP session id: `initialize` MINTS a fresh one (each client
     // then presents the id it was given, which is what keeps clients'
@@ -394,8 +452,9 @@ async fn rpc(
     }
 }
 
-/// True for `127.0.0.1[:port]`, `[::1]`, `[::1]:port`, bare `::1`, and
-/// `localhost[:port]` (case-insensitively). Host header hostnames are
+/// True for any loopback IP literal — `127.0.0.1[:port]` and the rest of
+/// `127.0.0.0/8`, `[::1]`, `[::1]:port`, bare `::1`, an IPv4-mapped
+/// loopback — and `localhost[:port]` (case-insensitively). Host header hostnames are
 /// case-insensitive per HTTP semantics, and IPv6 needs care: a bracketed
 /// address may carry a `:port` suffix outside the brackets, but the colons
 /// *inside* the brackets are part of the address, not port separators, and
@@ -432,7 +491,47 @@ fn host_is_loopback(host: &str) -> bool {
             _ => host,
         }
     };
-    h.eq_ignore_ascii_case("127.0.0.1") || h == "::1" || h.eq_ignore_ascii_case("localhost")
+    // Any loopback IP, not just `127.0.0.1` and `::1`: `check_bind_addr`
+    // lets a host bind `127.0.0.2` or `[::ffff:127.0.0.1]`, and a client of
+    // that server sends the address it connected to as `Host`. The same
+    // canonical-loopback test on both sides keeps them in step.
+    h.eq_ignore_ascii_case("localhost")
+        || h.parse::<std::net::IpAddr>()
+            .map(|ip| ip.to_canonical().is_loopback())
+            .unwrap_or(false)
+}
+
+/// True when the host part of a `Host` header is an IP literal — a dotted
+/// IPv4 address or a bracketed IPv6 address — with or without a numeric
+/// `:port`. Used only for an exposed listener: a client that reaches the
+/// server over the network sends the address it connected to as `Host`, and
+/// an IP literal cannot be pointed at this port by DNS rebinding, which
+/// always presents a hostname. Same authority grammar as `host_is_loopback`.
+fn host_is_ip_literal(host: &str) -> bool {
+    let port_ok = |tail: &str| {
+        tail.is_empty()
+            || tail
+                .strip_prefix(':')
+                .map(|port| !port.is_empty() && port.bytes().all(|b| b.is_ascii_digit()))
+                .unwrap_or(false)
+    };
+    if let Some(rest) = host.strip_prefix('[') {
+        let Some((inside, tail)) = rest.split_once(']') else {
+            return false;
+        };
+        return port_ok(tail) && inside.parse::<std::net::Ipv6Addr>().is_ok();
+    }
+    let h = match host.rsplit_once(':') {
+        Some((h, port)) if !port.is_empty() && port.bytes().all(|b| b.is_ascii_digit()) => h,
+        _ => host,
+    };
+    h.parse::<std::net::Ipv4Addr>().is_ok()
+}
+
+/// Whether a `Host` header may reach this server. Loopback forms always may;
+/// an exposed listener also answers to the IP it was reached at.
+fn host_allowed(host: &str, exposure: Exposure) -> bool {
+    host_is_loopback(host) || (exposure == Exposure::Network && host_is_ip_literal(host))
 }
 
 /// Strip a leading `Bearer ` auth scheme from an `Authorization` header value.
@@ -450,12 +549,15 @@ fn strip_bearer_prefix(header: &str) -> Option<&str> {
 /// evil.com can resolve to 127.0.0.1 and reach this port. Binding loopback does
 /// not stop it; checking Host does. An unauthenticated route is still a signal
 /// — "something is listening here" — so the Host check has to cover it too.
-async fn host_guard(req: Request, next: Next) -> Response {
+/// This is a browser defence, not a network boundary: any non-browser client
+/// can send `Host: localhost`, which is why where the listener binds is
+/// decided separately, by `check_bind_addr`.
+async fn host_guard(State(exposure): State<Exposure>, req: Request, next: Next) -> Response {
     let host_ok = req
         .headers()
         .get(axum::http::header::HOST)
         .and_then(|v| v.to_str().ok())
-        .map(host_is_loopback)
+        .map(|host| host_allowed(host, exposure))
         .unwrap_or(false);
     if !host_ok {
         return (StatusCode::FORBIDDEN, "non-loopback Host rejected").into_response();
@@ -463,21 +565,33 @@ async fn host_guard(req: Request, next: Next) -> Response {
     next.run(req).await
 }
 
+/// What `/mcp` accepts: the Settings token, naming nobody, or a live token
+/// srelens minted for one of its own chats, naming that chat (#393).
+#[derive(Clone)]
+struct TokenAuth {
+    token: Option<crate::auth::Token>,
+    callers: crate::auth::CallerTokens,
+}
+
 /// Applied to `/mcp` only: `/healthz` is deliberately reachable without a
 /// token so a client can probe liveness before it has been configured.
-async fn token_guard(
-    State(token): State<Option<crate::auth::Token>>,
-    req: Request,
-    next: Next,
-) -> Response {
-    if let Some(expected) = token {
+///
+/// A chat token is how a gated call proves it is srelens's own agent's, so
+/// the caller is put on the request HERE, from what was authenticated, and
+/// nothing downstream reads one from the body.
+async fn token_guard(State(auth): State<TokenAuth>, mut req: Request, next: Next) -> Response {
+    if let Some(expected) = auth.token {
         let presented = req
             .headers()
             .get(axum::http::header::AUTHORIZATION)
             .and_then(|v| v.to_str().ok())
             .and_then(strip_bearer_prefix)
             .unwrap_or("");
-        if !expected.matches(presented) {
+        if expected.matches(presented) {
+            // The Settings token: a client, and nobody srelens can name.
+        } else if let Some(caller) = auth.callers.caller_for(presented) {
+            req.extensions_mut().insert(caller);
+        } else {
             // No detail in the body: do not reveal whether a token is set.
             return (
                 StatusCode::UNAUTHORIZED,
@@ -494,15 +608,25 @@ async fn token_guard(
 /// push stream, GET /healthz). Requires a
 /// token: there is no way to ask this crate for an unauthenticated production
 /// server, because an `Option` here is an invitation to pass `None` by accident.
-pub fn router_with_auth(server: McpServer, token: crate::auth::Token) -> Router {
-    router_inner(server, Some(token))
+/// `exposure` says which `Host` values the router answers to (see
+/// `host_allowed`); it must match how the listener was bound.
+pub fn router_with_auth(
+    server: McpServer,
+    token: crate::auth::Token,
+    exposure: Exposure,
+) -> Router {
+    router_inner(server, Some(token), exposure)
 }
 
 /// Layering: the token check is a `route_layer` on `/mcp` alone, while the Host
 /// check is an outer `layer` covering every route (and unmatched paths), so
 /// nothing this server exposes answers a non-loopback caller.
-fn router_inner(server: McpServer, token: Option<crate::auth::Token>) -> Router {
-    router_inner_with_push(server, token).0
+fn router_inner(
+    server: McpServer,
+    token: Option<crate::auth::Token>,
+    exposure: Exposure,
+) -> Router {
+    router_inner_with_push(server, token, exposure).0
 }
 
 /// Like `router_inner`, also handing back the push state so a graceful
@@ -510,7 +634,11 @@ fn router_inner(server: McpServer, token: Option<crate::auth::Token>) -> Router 
 fn router_inner_with_push(
     server: McpServer,
     token: Option<crate::auth::Token>,
+    exposure: Exposure,
 ) -> (Router, Arc<PushState>) {
+    // Read off the server before it moves into the state: the tokens a host
+    // mints for its chats are the ones the server it built was given.
+    let auth = TokenAuth { token, callers: server.caller_tokens().clone() };
     let push = Arc::new(PushState::default());
     let state = AppState { server: Arc::new(server), push: push.clone() };
     let router = Router::new()
@@ -518,9 +646,13 @@ fn router_inner_with_push(
         // covers the SSE stream exactly like the JSON-RPC endpoint — a
         // long-lived stream is established under the same bearer check.
         .route("/mcp", post(rpc).get(sse))
-        .route_layer(middleware::from_fn_with_state(token, token_guard))
+        .route_layer(middleware::from_fn_with_state(auth, token_guard))
         .route("/healthz", get(|| async { "ok" }))
-        .layer(middleware::from_fn(host_guard))
+        // Set rather than inherited from axum's default, so the documented
+        // limit is the one in force: a larger body is refused with 413 before
+        // it is buffered past the limit.
+        .layer(DefaultBodyLimit::max(crate::MAX_REQUEST_BYTES))
+        .layer(middleware::from_fn_with_state(exposure, host_guard))
         .with_state(state);
     (router, push)
 }
@@ -530,17 +662,95 @@ fn router_inner_with_push(
 /// the kind of thing that gets called by accident later.
 #[cfg(test)]
 pub(crate) fn router(server: McpServer) -> Router {
-    router_inner(server, None)
+    router_inner(server, None, Exposure::Loopback)
 }
 
-/// Serve the MCP HTTP transport on `addr` (use a loopback address).
+/// Where the HTTP transport may bind (#607).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Exposure {
+    /// Loopback addresses only — `127.0.0.0/8` or `::1`. The default, and
+    /// the only mode the desktop's in-app server and the TUI ever use.
+    Loopback,
+    /// Any address, including `0.0.0.0` and a LAN interface. The transport
+    /// is plain HTTP, so the bearer token travels in the clear and is the
+    /// only barrier; a host must ask for this explicitly, and the headless
+    /// CLI does so only for `--mcp-expose-http`.
+    Network,
+}
+
+/// `check_bind_addr` refused `addr`: it is not loopback and the caller did
+/// not ask for `Exposure::Network`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NotLoopback {
+    pub addr: SocketAddr,
+}
+
+impl std::fmt::Display for NotLoopback {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "refusing to bind {}: not a loopback address (127.0.0.1 or [::1]), and the MCP HTTP \
+             transport is loopback-only unless explicitly exposed",
+            self.addr
+        )
+    }
+}
+
+impl std::error::Error for NotLoopback {}
+
+/// The bind decision: is `addr` one the transport may listen on under
+/// `exposure`? Pure, so a host can ask before it does anything else (mint a
+/// token, open a vault) and fail fast with an error that names the address.
+/// An IPv4-mapped loopback (`::ffff:127.0.0.1`) counts as loopback.
+pub fn check_bind_addr(addr: SocketAddr, exposure: Exposure) -> Result<(), NotLoopback> {
+    match exposure {
+        Exposure::Network => Ok(()),
+        Exposure::Loopback if addr.ip().to_canonical().is_loopback() => Ok(()),
+        Exposure::Loopback => Err(NotLoopback { addr }),
+    }
+}
+
+/// A listener the bind policy has passed. The only way to get one is
+/// `HttpListener::bind`, so `serve_http` cannot be handed a socket on an
+/// address nobody checked, and the router it builds answers to exactly the
+/// `Host` values the bind allowed.
+#[derive(Debug)]
+pub struct HttpListener {
+    listener: tokio::net::TcpListener,
+    exposure: Exposure,
+}
+
+impl HttpListener {
+    /// Check `addr` against `exposure` (see `check_bind_addr`), then bind it.
+    /// A refused address is `ErrorKind::InvalidInput` carrying `NotLoopback`,
+    /// and nothing is listening when it returns.
+    pub async fn bind(addr: SocketAddr, exposure: Exposure) -> std::io::Result<Self> {
+        check_bind_addr(addr, exposure)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
+        let listener = tokio::net::TcpListener::bind(addr).await?;
+        Ok(Self { listener, exposure })
+    }
+
+    /// The address actually bound — the one to report, since a port of `0`
+    /// resolves only here.
+    pub fn local_addr(&self) -> std::io::Result<SocketAddr> {
+        self.listener.local_addr()
+    }
+
+    pub fn exposure(&self) -> Exposure {
+        self.exposure
+    }
+}
+
+/// Serve the MCP HTTP transport on a listener `HttpListener::bind` accepted,
+/// until the process ends.
 pub async fn serve_http(
     server: McpServer,
-    addr: SocketAddr,
+    listener: HttpListener,
     token: crate::auth::Token,
 ) -> std::io::Result<()> {
-    let listener = tokio::net::TcpListener::bind(addr).await?;
-    axum::serve(listener, router_with_auth(server, token)).await
+    let HttpListener { listener, exposure } = listener;
+    axum::serve(listener, router_with_auth(server, token, exposure)).await
 }
 
 /// Serve on an already-bound `listener` until `shutdown` resolves. Lets a host
@@ -556,7 +766,7 @@ pub async fn serve_http_with_shutdown<F>(
 where
     F: std::future::Future<Output = ()> + Send + 'static,
 {
-    let (router, push) = router_inner_with_push(server, Some(token));
+    let (router, push) = router_inner_with_push(server, Some(token), Exposure::Loopback);
     // End the live SSE stream BEFORE axum starts waiting on in-flight
     // bodies, or an idle connected client would hold the shutdown open
     // forever (see `PushState::end_streams`).
@@ -654,7 +864,11 @@ mod tests {
 
     #[tokio::test]
     async fn the_sse_route_sits_behind_the_same_token_check() {
-        let app = router_inner(test_server(), Some(crate::auth::Token::generate()));
+        let app = router_inner(
+            test_server(),
+            Some(crate::auth::Token::generate()),
+            Exposure::Loopback,
+        );
         let resp = app.oneshot(sse_get()).await.unwrap();
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
     }
@@ -678,10 +892,10 @@ mod tests {
         // The audit log is how an operator attributes an action to a caller, so
         // a networked subscribe recorded as stdio is worse than not logging it.
         #[derive(Default)]
-        struct Spy(Mutex<Vec<(String, crate::Transport)>>);
+        struct Spy(Mutex<Vec<(String, crate::audit::Source)>>);
         impl crate::audit::AuditSink for Spy {
             fn record(&self, rec: crate::audit::AuditRecord) {
-                self.0.lock().unwrap().push((rec.tool, rec.transport));
+                self.0.lock().unwrap().push((rec.tool, rec.source));
             }
         }
         let spy = Arc::new(Spy::default());
@@ -697,8 +911,12 @@ mod tests {
         let subscribes: Vec<_> =
             seen.iter().filter(|(tool, _)| tool == "resources/subscribe").collect();
         assert!(!subscribes.is_empty(), "the subscribe must be audited: {seen:?}");
-        for (tool, transport) in subscribes {
-            assert_eq!(*transport, crate::Transport::Http, "{tool} attributed to the wrong transport");
+        for (tool, source) in subscribes {
+            assert_eq!(
+                *source,
+                crate::audit::Source::McpHttp,
+                "{tool} attributed to the wrong transport"
+            );
         }
     }
 
@@ -927,7 +1145,8 @@ mod tests {
     #[tokio::test]
     async fn graceful_shutdown_ends_the_live_stream_instead_of_waiting_on_it() {
         let joins = Arc::new(Mutex::new(Vec::new()));
-        let (app, push) = router_inner_with_push(subscribable_server(joins.clone()), None);
+        let (app, push) =
+            router_inner_with_push(subscribable_server(joins.clone()), None, Exposure::Loopback);
 
         let stream_resp = app.clone().oneshot(sse_get()).await.unwrap();
         let sub = app.clone().oneshot(subscribe_post("k8s://c/ns/Pod/web-0")).await.unwrap();
@@ -999,6 +1218,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn the_request_body_limit_is_the_documented_one() {
+        // Padded beside the arguments, not in them: `ping` echoes its
+        // arguments, and an echo this size is over the result limit.
+        let post = |padding: usize| {
+            let body = json!({"jsonrpc":"2.0","id":1,"method":"tools/call",
+                "params":{"name":"ping","arguments":{},"padding":"x".repeat(padding)}})
+            .to_string();
+            let request = Request::builder()
+                .method("POST")
+                .uri("/mcp")
+                .header("host", "127.0.0.1:8765")
+                .header("content-type", "application/json")
+                .body(Body::from(body))
+                .unwrap();
+            router(test_server()).oneshot(request)
+        };
+        // Over axum's 2 MiB default, within ours: answered.
+        let resp = post(3 * 1024 * 1024).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let v: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(v["result"]["isError"], false);
+        // Over ours: refused before the handler runs.
+        let resp = post(crate::MAX_REQUEST_BYTES).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    }
+
+    #[tokio::test]
     async fn http_handles_tools_call() {
         let app = router(test_server());
         let body = json!({"jsonrpc":"2.0","id":1,"method":"tools/call",
@@ -1066,7 +1315,7 @@ mod tests {
     #[tokio::test]
     async fn rejects_a_request_with_no_token() {
         let token = crate::auth::Token::generate();
-        let app = router_with_auth(test_server(), token);
+        let app = router_with_auth(test_server(), token, Exposure::Loopback);
         let resp = app
             .oneshot(
                 Request::post("/mcp")
@@ -1083,7 +1332,11 @@ mod tests {
 
     #[tokio::test]
     async fn rejects_a_wrong_token() {
-        let app = router_with_auth(test_server(), crate::auth::Token::generate());
+        let app = router_with_auth(
+            test_server(),
+            crate::auth::Token::generate(),
+            Exposure::Loopback,
+        );
         let resp = app
             .oneshot(
                 Request::post("/mcp")
@@ -1098,13 +1351,79 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
     }
 
+    /// A server with one gated tool and a policy that records the caller it
+    /// was told about, and approves.
+    #[allow(clippy::type_complexity)]
+    fn gated_server_recording_caller() -> (McpServer, Arc<Mutex<Option<Option<crate::policy::Caller>>>>) {
+        struct Saw(Arc<Mutex<Option<Option<crate::policy::Caller>>>>);
+        #[async_trait::async_trait]
+        impl crate::policy::ConfirmPolicy for Saw {
+            async fn confirm(&self, request: &crate::policy::ConsentRequest) -> crate::policy::Decision {
+                *self.0.lock().unwrap() = Some(request.caller.clone());
+                crate::policy::Decision::Approved
+            }
+        }
+        let saw = Arc::new(Mutex::new(None));
+        let mut reg = Registry::new();
+        let mut cap = Capability::read_only("danger", "destructive", |_| async { Ok(json!({})) });
+        cap.annotations = srelens_capability::Annotations::MUTATING;
+        reg.register(cap);
+        (McpServer::new(Arc::new(reg)).with_policy(Arc::new(Saw(saw.clone()))), saw)
+    }
+
+    fn post_gated_call(bearer: &str) -> Request<Body> {
+        Request::post("/mcp")
+            .header("host", "127.0.0.1:8765")
+            .header("authorization", format!("Bearer {bearer}"))
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::to_vec(&json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                    "params": {"name": "danger", "arguments": {}}}))
+                .unwrap(),
+            ))
+            .unwrap()
+    }
+
+    /// #393: a token srelens minted for one chat authenticates, and the call
+    /// it makes reaches the consent policy as that chat's.
+    #[tokio::test]
+    async fn a_minted_token_authenticates_as_its_chat() {
+        let (server, saw) = gated_server_recording_caller();
+        let guard = server.caller_tokens().mint("sess-7");
+        let app = router_with_auth(server, crate::auth::Token::generate(), Exposure::Loopback);
+        let resp = app.oneshot(post_gated_call(guard.token())).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(*saw.lock().unwrap(), Some(Some(crate::policy::Caller::Chat("sess-7".into()))));
+    }
+
+    /// The Settings token still authenticates — and names nobody.
+    #[tokio::test]
+    async fn the_settings_token_names_no_caller() {
+        let (server, saw) = gated_server_recording_caller();
+        let token = crate::auth::Token::generate();
+        let app = router_with_auth(server, token.clone(), Exposure::Loopback);
+        let resp = app.oneshot(post_gated_call(token.as_str())).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(*saw.lock().unwrap(), Some(None));
+    }
+
+    /// A turn's token dies with the turn.
+    #[tokio::test]
+    async fn a_revoked_chat_token_is_refused() {
+        let (server, _) = gated_server_recording_caller();
+        let presented = server.caller_tokens().mint("sess-7").token().to_string();
+        let app = router_with_auth(server, crate::auth::Token::generate(), Exposure::Loopback);
+        let resp = app.oneshot(post_gated_call(&presented)).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
     /// RFC 7235 §2.1: the auth scheme name is case-insensitive, so a client
     /// sending `bearer <token>` (lowercase) must still authenticate — not get
     /// a 401 that reads as a wrong token.
     #[tokio::test]
     async fn accepts_a_lowercase_bearer_scheme() {
         let token = crate::auth::Token::generate();
-        let app = router_with_auth(test_server(), token.clone());
+        let app = router_with_auth(test_server(), token.clone(), Exposure::Loopback);
         let resp = app
             .oneshot(
                 Request::post("/mcp")
@@ -1122,7 +1441,7 @@ mod tests {
     #[tokio::test]
     async fn accepts_the_right_token() {
         let token = crate::auth::Token::generate();
-        let app = router_with_auth(test_server(), token.clone());
+        let app = router_with_auth(test_server(), token.clone(), Exposure::Loopback);
         let resp = app
             .oneshot(
                 Request::post("/mcp")
@@ -1142,7 +1461,7 @@ mod tests {
     #[tokio::test]
     async fn rejects_a_non_loopback_host_header() {
         let token = crate::auth::Token::generate();
-        let app = router_with_auth(test_server(), token.clone());
+        let app = router_with_auth(test_server(), token.clone(), Exposure::Loopback);
         let resp = app
             .oneshot(
                 Request::post("/mcp")
@@ -1159,7 +1478,11 @@ mod tests {
 
     #[tokio::test]
     async fn healthz_needs_no_token() {
-        let app = router_with_auth(test_server(), crate::auth::Token::generate());
+        let app = router_with_auth(
+            test_server(),
+            crate::auth::Token::generate(),
+            Exposure::Loopback,
+        );
         let resp = app
             .oneshot(
                 Request::get("/healthz")
@@ -1179,7 +1502,11 @@ mod tests {
     /// every route, not just `/mcp`.
     #[tokio::test]
     async fn healthz_rejects_a_non_loopback_host() {
-        let app = router_with_auth(test_server(), crate::auth::Token::generate());
+        let app = router_with_auth(
+            test_server(),
+            crate::auth::Token::generate(),
+            Exposure::Loopback,
+        );
         let resp = app
             .oneshot(
                 Request::get("/healthz")
@@ -1207,6 +1534,40 @@ mod tests {
         }
     }
 
+    /// Every loopback address `check_bind_addr` lets a host bind must also
+    /// pass the Host guard, or a client of `--mcp-http 127.0.0.2:8765` sends
+    /// `Host: 127.0.0.2:8765` and gets 403 from a server that just reported
+    /// itself up.
+    #[test]
+    fn host_is_loopback_accepts_every_loopback_address_the_bind_accepts() {
+        for host in [
+            "127.0.0.2:8765",
+            "127.255.255.254",
+            "[::ffff:127.0.0.1]:8765",
+            "[::ffff:127.0.0.1]",
+        ] {
+            assert!(host_is_loopback(host), "expected {host:?} to be accepted");
+        }
+    }
+
+    #[tokio::test]
+    async fn loopback_router_answers_the_address_it_was_bound_on() {
+        let token = crate::auth::Token::generate();
+        for host in ["127.0.0.2:8765", "[::ffff:127.0.0.1]:8765"] {
+            let app = router_with_auth(test_server(), token.clone(), Exposure::Loopback);
+            let resp = app
+                .oneshot(
+                    Request::get("/healthz")
+                        .header("host", host)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::OK, "Host {host:?}");
+        }
+    }
+
     #[test]
     fn host_is_loopback_rejects_non_loopback_forms() {
         for host in [
@@ -1231,7 +1592,7 @@ mod tests {
     #[tokio::test]
     async fn rejects_a_missing_host_header() {
         let token = crate::auth::Token::generate();
-        let app = router_with_auth(test_server(), token.clone());
+        let app = router_with_auth(test_server(), token.clone(), Exposure::Loopback);
         let resp = app
             .oneshot(
                 Request::post("/mcp")
@@ -1243,5 +1604,169 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    }
+
+    // -- Bind policy (#607) ---------------------------------------------------
+
+    fn sa(s: &str) -> SocketAddr {
+        s.parse().unwrap()
+    }
+
+    /// The default refuses every address that is not loopback, and the error
+    /// names the address it refused, so the operator sees what they typed.
+    #[test]
+    fn check_bind_addr_refuses_non_loopback_addresses_by_default() {
+        for addr in [
+            "0.0.0.0:8765",
+            "[::]:8765",
+            "192.168.1.10:8765",
+            "10.0.0.1:1",
+        ] {
+            let err = check_bind_addr(sa(addr), Exposure::Loopback)
+                .expect_err(&format!("expected {addr} to be refused"));
+            assert_eq!(err.addr, sa(addr));
+            assert!(err.to_string().contains(addr), "{err} should name {addr}");
+        }
+    }
+
+    #[test]
+    fn check_bind_addr_accepts_loopback_addresses() {
+        for addr in [
+            "127.0.0.1:8765",
+            "[::1]:8765",
+            "127.0.0.5:1",
+            "[::ffff:127.0.0.1]:1",
+        ] {
+            check_bind_addr(sa(addr), Exposure::Loopback)
+                .unwrap_or_else(|e| panic!("expected {addr} to be accepted: {e}"));
+        }
+    }
+
+    #[test]
+    fn check_bind_addr_exposed_accepts_any_address() {
+        for addr in [
+            "0.0.0.0:8765",
+            "[::]:8765",
+            "192.168.1.10:8765",
+            "127.0.0.1:8765",
+        ] {
+            check_bind_addr(sa(addr), Exposure::Network)
+                .unwrap_or_else(|e| panic!("expected {addr} to be accepted: {e}"));
+        }
+    }
+
+    /// `--mcp-http 0.0.0.0:8765` without the opt-in: an error, and nothing
+    /// listening — `bind` hands back no listener at all.
+    #[tokio::test]
+    async fn bind_refuses_a_non_loopback_address_without_exposure() {
+        let err = HttpListener::bind(sa("0.0.0.0:0"), Exposure::Loopback)
+            .await
+            .expect_err("0.0.0.0 must be refused");
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+        assert!(err.to_string().contains("0.0.0.0:0"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn bind_accepts_loopback_v4_and_v6() {
+        let v4 = HttpListener::bind(sa("127.0.0.1:0"), Exposure::Loopback)
+            .await
+            .expect("127.0.0.1 binds");
+        assert!(v4.local_addr().unwrap().ip().is_loopback());
+        assert_eq!(v4.exposure(), Exposure::Loopback);
+        let v6 = HttpListener::bind(sa("[::1]:0"), Exposure::Loopback)
+            .await
+            .expect("[::1] binds");
+        assert!(v6.local_addr().unwrap().ip().is_loopback());
+    }
+
+    #[tokio::test]
+    async fn bind_exposed_binds_a_non_loopback_address() {
+        let l = HttpListener::bind(sa("0.0.0.0:0"), Exposure::Network)
+            .await
+            .expect("exposed 0.0.0.0 binds");
+        assert!(l.local_addr().unwrap().ip().is_unspecified());
+        assert_eq!(l.exposure(), Exposure::Network);
+    }
+
+    /// An exposed server is reached by IP, so its clients send that IP as
+    /// `Host`. An IP literal cannot be rebound by DNS, so accepting it keeps
+    /// the rebinding defence intact; a hostname is still refused.
+    #[tokio::test]
+    async fn exposed_router_accepts_ip_literal_hosts_and_still_rejects_hostnames() {
+        let token = crate::auth::Token::generate();
+        for (host, expected) in [
+            ("192.168.1.5:8765", StatusCode::OK),
+            ("192.168.1.5", StatusCode::OK),
+            ("[fe80::1]:8765", StatusCode::OK),
+            ("[fe80::1]", StatusCode::OK),
+            ("localhost:8765", StatusCode::OK),
+            ("[::1]:8765", StatusCode::OK),
+            ("evil.com", StatusCode::FORBIDDEN),
+            ("evil.com:8765", StatusCode::FORBIDDEN),
+            ("192.168.1.5.evil.com", StatusCode::FORBIDDEN),
+            ("[fe80::1]evil.com", StatusCode::FORBIDDEN),
+            ("999.1.1.1", StatusCode::FORBIDDEN),
+            ("", StatusCode::FORBIDDEN),
+        ] {
+            let app = router_with_auth(test_server(), token.clone(), Exposure::Network);
+            let resp = app
+                .oneshot(
+                    Request::get("/healthz")
+                        .header("host", host)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), expected, "Host {host:?}");
+        }
+    }
+
+    /// Exposure is a property of the listener, not something a client can
+    /// talk its way into: the loopback router keeps refusing IP-literal hosts.
+    #[tokio::test]
+    async fn loopback_router_still_rejects_ip_literal_hosts() {
+        let token = crate::auth::Token::generate();
+        for host in ["192.168.1.5:8765", "[fe80::1]:8765", "10.0.0.1"] {
+            let app = router_with_auth(test_server(), token.clone(), Exposure::Loopback);
+            let resp = app
+                .oneshot(
+                    Request::get("/healthz")
+                        .header("host", host)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::FORBIDDEN, "Host {host:?}");
+        }
+    }
+
+    /// End to end: the listener `bind` hands back is what `serve_http`
+    /// answers on, at the address it reports.
+    #[tokio::test]
+    async fn serve_http_answers_on_the_bound_listener() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = HttpListener::bind(sa("127.0.0.1:0"), Exposure::Loopback)
+            .await
+            .unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(serve_http(
+            test_server(),
+            listener,
+            crate::auth::Token::generate(),
+        ));
+        let mut conn = tokio::net::TcpStream::connect(addr).await.unwrap();
+        conn.write_all(
+            format!("GET /healthz HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n")
+                .as_bytes(),
+        )
+        .await
+        .unwrap();
+        let mut reply = String::new();
+        conn.read_to_string(&mut reply).await.unwrap();
+        assert!(reply.starts_with("HTTP/1.1 200"), "{reply}");
+        assert!(reply.ends_with("ok"), "{reply}");
+        server.abort();
     }
 }

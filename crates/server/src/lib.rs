@@ -15,6 +15,7 @@ pub mod api_clusters;
 pub mod api_command;
 pub mod api_kubeconfigs;
 pub mod api_settings;
+pub mod app_inventory;
 pub mod assets;
 pub mod auth;
 pub mod cluster_auth_resolver;
@@ -24,6 +25,7 @@ pub mod cluster_tokens;
 pub mod config;
 pub mod crypto;
 pub mod db;
+pub mod extension_policy;
 pub mod oidc_provider;
 pub mod pf_proxy;
 pub mod stores;
@@ -31,11 +33,16 @@ pub mod streams;
 pub mod users;
 pub mod ws;
 
-/// Builds a full capability registry for a (cache, kubeconfig-paths) pair.
-/// The desktop binary supplies this from its capability assembly, keeping
-/// this crate assembly-agnostic.
-pub type RegistryFactory =
-    Arc<dyn Fn(Arc<ClientCache>, Vec<std::path::PathBuf>) -> Registry + Send + Sync>;
+/// Builds one user's full capability registry from their client cache, their
+/// kubeconfig paths and their apps (their own inventory and the shared catalog,
+/// #515). The binaries supply this from their capability assembly
+/// (`srelens_registry::build_registry_for_user`), keeping this crate
+/// assembly-agnostic.
+pub type RegistryFactory = Arc<
+    dyn Fn(Arc<ClientCache>, Vec<std::path::PathBuf>, srelens_registry::Apps) -> Registry
+        + Send
+        + Sync,
+>;
 
 /// The HTTP client every OIDC flow (app login and per-cluster sign-in) uses.
 ///
@@ -71,25 +78,44 @@ pub struct AppState {
     pub pending_cluster: Arc<auth::cluster_routes::PendingClusterLogins>,
     pub ws_hub: Arc<ws::hub::WsHub>,
     pub pf_client: pf_proxy::HttpProxyClient,
+    /// The frontend served to the browser.
+    pub assets: assets::AssetSource,
 }
 
 impl AppState {
     /// Test-only convenience: in-memory database, fixed master key, dev auth.
-    /// The factory ignores the (cache, paths) it's given and always returns a
-    /// clone of `registry` — tests don't materialize real kubeconfigs.
+    /// The factory ignores the (cache, paths, apps) it's given and always
+    /// returns a clone of `registry` — tests don't materialize real kubeconfigs.
     pub async fn for_tests(registry: Arc<Registry>) -> AppState {
-        let factory: RegistryFactory = Arc::new(move |_cache, _paths| (*registry).clone());
+        Self::for_tests_with(Arc::new(move |_cache, _paths, _apps| (*registry).clone())).await
+    }
+
+    /// [`AppState::for_tests`] with each user's registry built by `factory`.
+    pub async fn for_tests_with(factory: RegistryFactory) -> AppState {
+        Self::for_tests_with_catalog_trust(factory, srelens_registry::TrustRoot::pinned()).await
+    }
+
+    /// [`AppState::for_tests_with`], with the shared app catalog and users' app signatures
+    /// verified against `trust`: a test's root, whose catalog the test can sign (#559).
+    pub async fn for_tests_with_catalog_trust(
+        factory: RegistryFactory,
+        trust: srelens_registry::TrustRoot,
+    ) -> AppState {
         let mut bytes = [0u8; 8];
         getrandom::getrandom(&mut bytes).expect("random");
         let data_dir =
             std::env::temp_dir().join(format!("srelens-state-test-{}", hex::encode(bytes)));
         std::fs::create_dir_all(&data_dir).expect("test data dir");
         AppState {
-            user_envs: Arc::new(users::UserEnvs::new(
-                factory,
-                data_dir,
-                "http://127.0.0.1:8080".into(),
-            )),
+            user_envs: Arc::new(
+                users::UserEnvs::new(
+                    factory,
+                    data_dir,
+                    "http://127.0.0.1:8080".into(),
+                    Default::default(),
+                )
+                .with_catalog_trust(trust),
+            ),
             db: db::Db::open_in_memory().await.expect("in-memory db"),
             master_key: Arc::new(crypto::MasterKey::from_hex(&"ab".repeat(32)).expect("test key")),
             auth: Arc::new(auth::AuthConfig {
@@ -103,15 +129,19 @@ impl AppState {
             pending_cluster: Arc::new(auth::cluster_routes::PendingClusterLogins::default()),
             ws_hub: Arc::new(ws::hub::WsHub::new()),
             pf_client: pf_proxy::client(),
+            assets: Arc::new(|_| None),
         }
     }
 }
 
 /// Server launch configuration.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ServerConfig {
     pub addr: SocketAddr,
     pub data_dir: std::path::PathBuf,
+    /// The frontend to serve. This crate embeds none: each binary hands in the
+    /// copy it already carries, so the desktop app does not carry two.
+    pub assets: assets::AssetSource,
 }
 
 /// Build the full application router. `/api/*` requires a session + CSRF
@@ -144,6 +174,7 @@ pub fn router(state: AppState) -> Router {
             "/api/command/:command",
             axum::routing::post(api_command::dispatch),
         )
+        .route("/api/extension-policy", get(extension_policy::get))
         .route("/api/settings", get(api_settings::list))
         .route(
             "/api/settings/:key",
@@ -218,6 +249,10 @@ pub async fn serve(factory: RegistryFactory, config: ServerConfig) -> Result<(),
     let env_key = std::env::var("SRELENS_MASTER_KEY").ok();
     let master_key = crypto::MasterKey::require_env(env_key.as_deref())?;
     let db = db::Db::open(&config.data_dir.join("srelens.db")).await?;
+    // Read once and checked whole before anything is served: a policy the server
+    // could not read never leaves it running with none (#578).
+    let (policy, source) = extension_policy::from_env(std::env::var(extension_policy::POLICY_ENV))?;
+    eprintln!("srelens extension policy: {source}");
     let idp: Arc<dyn auth::idp::IdentityProvider> = match &auth_config.oidc {
         Some(settings) => {
             Arc::new(auth::oidc::OidcProvider::discover(settings, &auth_config.public_url).await?)
@@ -232,6 +267,7 @@ pub async fn serve(factory: RegistryFactory, config: ServerConfig) -> Result<(),
             factory,
             config.data_dir.clone(),
             auth_config.public_url.clone(),
+            srelens_registry::SharedPolicy::new(policy),
         )),
         db,
         master_key: Arc::new(master_key),
@@ -241,6 +277,7 @@ pub async fn serve(factory: RegistryFactory, config: ServerConfig) -> Result<(),
         pending_cluster: Arc::new(auth::cluster_routes::PendingClusterLogins::default()),
         ws_hub: Arc::new(ws::hub::WsHub::new()),
         pf_client: pf_proxy::client(),
+        assets: config.assets,
     };
     {
         let db = state.db.clone();
@@ -250,6 +287,25 @@ pub async fn serve(factory: RegistryFactory, config: ServerConfig) -> Result<(),
                 tick.tick().await;
                 if let Err(e) = db.purge_expired_sessions(unix_now()).await {
                     eprintln!("session purge failed: {e}");
+                }
+            }
+        });
+    }
+    {
+        // The one app catalog every user reads (#515), refreshed here and only
+        // here: users' capabilities read it and never fetch into it. Checked
+        // hourly and fetched once it is a day old, as a desktop does; a failed
+        // fetch keeps the cached copy and is retried at the next check.
+        let catalog = state.user_envs.catalog().clone();
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(std::time::Duration::from_secs(3600));
+            loop {
+                tick.tick().await;
+                let catalog = catalog.clone();
+                match tokio::task::spawn_blocking(move || catalog.refresh_if_stale()).await {
+                    Ok(Ok(())) => {}
+                    Ok(Err(e)) => eprintln!("app catalog refresh failed: {e}"),
+                    Err(e) => eprintln!("app catalog refresh failed: {e}"),
                 }
             }
         });
@@ -336,6 +392,77 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let bytes = axum::body::to_bytes(resp.into_body(), 1024).await.unwrap();
         assert_eq!(&bytes[..], b"ok");
+    }
+
+    /// GET `uri`: the status, the content type and the body.
+    async fn get(state: AppState, uri: &str) -> (StatusCode, Option<String>, Vec<u8>) {
+        let resp = router(state)
+            .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let status = resp.status();
+        let mime = resp
+            .headers()
+            .get(axum::http::header::CONTENT_TYPE)
+            .map(|v| v.to_str().unwrap().to_owned());
+        let body = axum::body::to_bytes(resp.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        (status, mime, body.to_vec())
+    }
+
+    #[tokio::test]
+    async fn the_library_embeds_no_frontend_of_its_own() {
+        // The test state is given no frontend. A library that served a copy of its
+        // own here (`apps/desktop/dist`, once built) would carry that copy into every
+        // binary that links it, the desktop app beside Tauri's included.
+        let (status, _, _) = get(state().await, "/").await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn the_frontend_is_the_one_the_binary_hands_in() {
+        let mut state = state().await;
+        state.assets = Arc::new(|path| match path {
+            "index.html" => Some(b"<p>shell</p>".as_slice().into()),
+            "assets/app.js" => Some(b"app();".as_slice().into()),
+            _ => None,
+        });
+        let html = Some("text/html".to_owned());
+        let js = Some("text/javascript".to_owned());
+        assert_eq!(
+            get(state.clone(), "/").await,
+            (StatusCode::OK, html.clone(), b"<p>shell</p>".to_vec())
+        );
+        assert_eq!(
+            get(state.clone(), "/assets/app.js").await,
+            (StatusCode::OK, js, b"app();".to_vec())
+        );
+        // A client-side route gets the app shell; a missing file does not.
+        assert_eq!(
+            get(state.clone(), "/settings/clusters").await,
+            (StatusCode::OK, html, b"<p>shell</p>".to_vec())
+        );
+        assert_eq!(
+            get(state, "/assets/missing.js").await.0,
+            StatusCode::NOT_FOUND
+        );
+    }
+
+    #[tokio::test]
+    async fn a_missing_file_is_not_found_and_says_nothing_about_the_build() {
+        // The source cannot tell a missing file from an unbuilt bundle, nor a
+        // desktop built without `custom-protocol` from either, so the 404 only
+        // says what it knows.
+        let mut state = state().await;
+        state.assets =
+            Arc::new(|path| (path == "index.html").then(|| b"<p>shell</p>".as_slice().into()));
+        let not_found = (StatusCode::NOT_FOUND, b"not found".to_vec());
+        let (status, _, body) = get(state.clone(), "/assets/missing.js").await;
+        assert_eq!((status, body), not_found);
+        state.assets = Arc::new(|_| None);
+        let (status, _, body) = get(state, "/").await;
+        assert_eq!((status, body), not_found);
     }
 
     #[tokio::test]

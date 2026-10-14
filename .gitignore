@@ -23,6 +23,7 @@ srelens-signing-key.asc
 srelens-revoke.asc
 *.private.asc
 *-secret.asc
+*.provisionprofile
 
 # Coverage reports (root workspace run and per-package runs)
 coverage/
@@ -30,3 +31,6 @@ coverage/
 
 # Local webdriver smoke host (macOS cannot run tauri-driver; see .smoke/Dockerfile)
 .smoke/
+
+# Prepared by the macOS release bundle hook.
+/apps/desktop/src-tauri/sidecars/

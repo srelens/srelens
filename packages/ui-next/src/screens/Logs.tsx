@@ -1,25 +1,38 @@
 import {
   useCallback,
+  useDeferredValue,
   useEffect,
   useLayoutEffect,
   useMemo,
   useRef,
   useState,
+  type KeyboardEvent,
   type ReactNode,
 } from "react";
 import {
   absoluteTimestamp,
-  isTauri,
+  describeStreamEnd,
+  clauseState,
+  discoverFields,
+  inRange,
   logConnectionStatus,
   logLineHealth,
-  listResource,
   logLineLevel,
+  logLineWords,
+  matchLine,
+  parseLogFields,
+  parseLogQuery,
   podLogs,
-  saveTextFile,
-  type HealthKind,
+  toggleClause,
+  type ClauseMode,
+  type ClauseTarget,
   type LogConnectionVerdict,
   type LogLine as StreamLine,
   type LogTarget,
+  type QueryClause,
+  type QueryLine,
+  type TermLine,
+  type TimeRange,
 } from "@srelens/core";
 import {
   Alert,
@@ -31,6 +44,7 @@ import {
   LiveSignal,
   LoadingState,
   LogLine,
+  Popover,
   Screen,
   Select,
   SideRail,
@@ -40,11 +54,14 @@ import {
   toneWash,
 } from "@srelens/ui-kit";
 import { useConsole } from "../console";
+import { useLogProviderSource, useLogProviders } from "../extensions/logProviders";
 import { useActiveContext } from "../lib/clusters";
 import { FailureAlert, FailureState } from "../lib/errorCopy";
 import { Icons } from "../lib/icons";
 import { useLogStream, type LogStreamStatus } from "../lib/logStream";
+import { useThrottledValue } from "../lib/useThrottledValue";
 import { groupNumber } from "../lib/numbers";
+import { saveOrDownload } from "../lib/saveOrDownload";
 import {
   resolveLogSubject,
   type LogSubject,
@@ -52,21 +69,20 @@ import {
   type LogSubjectResolution,
   type PreviousInstance,
 } from "../lib/logSubject";
-import {
-  forgetLogSubjects,
-  recentKey,
-  rememberLogSubject,
-  reviewRecents,
-  scanKey,
-  useRecentLogSubjects,
-  type SubjectScan,
-} from "../lib/logRecents";
+import { recentKey, rememberLogSubject, useOfferedRecents } from "../lib/logRecents";
+import { useMarkLogStream } from "../lib/liveLogStreams";
+import { useTabScope } from "../lib/tabScope";
 import { openTab } from "../lib/tabsStore";
+import { FilterPills } from "./logs/FilterPills";
+import { LineDetail } from "./logs/LineDetail";
+import { renderMessage } from "./logs/LogMessage";
 import {
   StreamRail,
   STREAM_RAIL_WIDTH,
   type StreamPod,
 } from "./logs/StreamRail";
+import { clockTime } from "./logs/time";
+import { VolumeHistogram } from "./logs/VolumeHistogram";
 import { NoClusterScreen } from "./resourceShell";
 
 /**
@@ -138,6 +154,18 @@ const SINCE: { value: string; seconds: number | undefined }[] = [
 const SINCE_OPTIONS = SINCE.map((s) => ({ value: s.value, label: s.value }));
 
 /**
+ * What Export offers beyond the view on screen (#915): a span of the cluster's
+ * history back from now, or all of it (`seconds` absent). `slug` names the file.
+ */
+const EXPORT_RANGES: { label: string; slug: string; seconds?: number }[] = [
+  { label: "Last 10 min", slug: "last-10m", seconds: 600 },
+  { label: "Last 1 h", slug: "last-1h", seconds: 3600 },
+  { label: "Last 6 h", slug: "last-6h", seconds: 6 * 3600 },
+  { label: "Last 24 h", slug: "last-24h", seconds: 24 * 3600 },
+  { label: "All", slug: "all" },
+];
+
+/**
  * How many trailing lines a connect asks for.
  *
  * A ceiling rather than a preference. `since=all` on a container that has been
@@ -150,8 +178,43 @@ const TAIL_LINES = 1000;
 /** Stands for "every container", as a select value that cannot be a name. */
 const ALL_CONTAINERS = "";
 
+/** The source picker's value for the cluster's own logs; a provider's is `<app>/<provider>`, which has a dot. */
+const KUBERNETES_SOURCE = "kubernetes";
+
+/**
+ * How far back "all" reaches for a log provider (#569): the longest history the host
+ * asks one for. The cluster keeps what a container still has; a log backend keeps far
+ * more, so "all" of it is not a query anyone could wait for.
+ */
+const PROVIDER_ALL_SECONDS = 7 * 24 * 3600;
+
+/** The qualified kind a log provider is declared for (#569), from the route's kind. */
+function providerKind(kind: string): string | undefined {
+  return (
+    {
+      pod: "/Pod",
+      deployment: "apps/Deployment",
+      statefulset: "apps/StatefulSet",
+      daemonset: "apps/DaemonSet",
+    } as Record<string, string>
+  )[kind.toLowerCase()];
+}
+
 /** How near the bottom still counts as being at it, in pixels. Classic's 48. */
 const STICK_SLACK = 48;
+
+/** How often, at most, a busy stream's lines reach the counts: four times a second. */
+const RECOUNT_MS = 250;
+
+/** How long the view must be held before the filter bar says so: longer than a click's press. */
+const HELD_NOTE_MS = 300;
+
+/**
+ * The next row's id, for the life of the module. A row's id is its element's key, so it must never be given to a
+ * second line: numbered again from 0 whenever the rows are rebuilt, a line would take the id of one the ring
+ * has since dropped, and with it that line's element, under the reader's pointer or selection.
+ */
+let nextRowId = 0;
 
 /**
  * The one state this readout can be in that the CONNECTION is not.
@@ -207,36 +270,9 @@ function connectionLabel(
   verdict: LogConnectionVerdict,
   live: number,
   total: number,
+  completed = 0,
 ): string {
-  return `${verdict.label} — ${live} of ${total} streaming`;
-}
-
-/**
- * Save `content` to `filename`: through the native save dialog in the desktop
- * shell, and as a browser download in web mode.
- *
- * Both halves are needed, and neither works in the other's place — a Tauri
- * webview does not prompt on `<a download>`, and a browser has no
- * `save_text_file` command to invoke. Classic reached the same conclusion
- * (`apps/desktop/src/components/LogsView.tsx`); this is that decision written
- * where the new screen can use it, not a second policy.
- */
-async function saveOrDownload(
-  filename: string,
-  content: string,
-): Promise<void> {
-  if (isTauri()) {
-    await saveTextFile(filename, content);
-    return;
-  }
-  const url = URL.createObjectURL(new Blob([content], { type: "text/plain" }));
-  const anchor = document.createElement("a");
-  anchor.href = url;
-  anchor.download = filename;
-  document.body.appendChild(anchor);
-  anchor.click();
-  anchor.remove();
-  URL.revokeObjectURL(url);
+  return `${verdict.label} — ${live} of ${total} streaming${completed > 0 ? `, ${completed} completed` : ""}`;
 }
 
 /**
@@ -244,11 +280,48 @@ async function saveOrDownload(
  * when a stream is opened with `timestamps: true`, which this screen always is
  * because the design gives the time its own column.
  */
-const RFC3339 = /^\d{4}-\d{2}-\d{2}T(\d{2}:\d{2}:\d{2})(\.\d+)?(?:Z|[+-]\d{2}:?\d{2})? ?/;
+const RFC3339 = /^(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2}:\d{2})(\.\d+)?(Z|[+-]\d{2}:?\d{2})? ?/;
+
+/**
+ * The stamp as epoch ms, for the histogram and the time window. Rebuilt at
+ * millisecond precision rather than handed to `Date.parse` whole, because
+ * the parse is only specified for three fraction digits and the backend
+ * sends nine.
+ */
+function stampTime(stamp: RegExpMatchArray): number | undefined {
+  const [, date, time, fraction = "", zone] = stamp;
+  const offset = zone === undefined ? "" : zone.length === 5 ? `${zone.slice(0, 3)}:${zone.slice(3)}` : zone;
+  const ms = Date.parse(`${date}T${time}${fraction.slice(0, 4)}${offset}`);
+  return Number.isNaN(ms) ? undefined : ms;
+}
+
+/**
+ * The stamp's fraction below the millisecond {@link stampTime} keeps, in
+ * nanoseconds: what orders two containers' lines inside one millisecond. Read
+ * from the digits rather than compared as text, because RFC3339Nano trims
+ * trailing zeros (`.2089Z` is later than `.208100000Z`).
+ */
+function subMillisecond(raw: string): number {
+  const fraction = raw.match(RFC3339)?.[3] ?? "";
+  return Number(fraction.slice(4, 10).padEnd(6, "0"));
+}
+
+/** No clauses: the query is empty, or it does not parse and so is not applied. */
+const NO_CLAUSES: readonly QueryClause[] = [];
 
 /** One line as the body draws it: the four columns, plus what a filter reads. */
-interface Row {
-  /** `14:07:41.208`, or `""` for a line that arrived without a stamp. */
+interface Row extends QueryLine {
+  /**
+   * Which row this is, for as long as its line is in the buffer: the key it is drawn under. Nothing in a line can be
+   * (two identical lines a second apart are ordinary), and its place cannot: a full ring moves every line up each
+   * batch, and a row keyed by its place hands its element to the next line, under the reader's pointer or selection.
+   */
+  readonly id: number;
+  /**
+   * The line's instant on the reader's clock, `HH:MM:SS.mmm`, or `""` for a
+   * line without a parseable stamp. Derived from `at`, so the two cannot
+   * disagree about when the line happened.
+   */
   ts: string;
   /** Which pod wrote the line. DATA — read off the target, not the label. */
   pod: string;
@@ -285,19 +358,21 @@ interface Row {
    * it: a call site that maps "error" to red itself is how the same word ends
    * up red on one screen and grey on the next.
    */
-  level: string;
-  /**
-   * Core's severity for the line, from {@link logLineHealth} — a text-scan
-   * heuristic over the same one rule the level word comes from. Not drawn;
-   * it is here so the filter can match `danger` and `warning` as well as the
-   * literal word the line used.
-   */
-  health: HealthKind;
-  message: string;
+  readonly level: string;
+  /** The line with its stamp off — what the term tally and a regex clause read. An export writes {@link Row.raw}. */
+  readonly text: string;
+  /** What the message column leads with: a JSON or logfmt `msg`, else `text`. */
+  readonly message: string;
+  /** Whether `message` came out of a field, so the row appends the rest inline. */
+  readonly structured: boolean;
   /** The line exactly as it arrived, stamp and all — what an export writes. */
   raw: string;
-  /** Lower-cased message + severity word, which is what the filter matches. */
-  haystack: string;
+  /**
+   * The host cut the line at its limit and `raw` is its start (#747). Said
+   * beside the line, never written into it, so the filter and an export read
+   * what the container wrote.
+   */
+  truncated: boolean;
 }
 
 /** The line's origin as one string: `api-7 · api` on screen, `api-7/api` in a
@@ -307,6 +382,14 @@ function sourceOf(row: Row, separator: string): string {
     ? `${row.pod}${separator}${row.container}`
     : row.pod;
 }
+
+/** Rows as an export writes them: classic's `source | line`, each line raw, stamp and all. */
+function exportContent(rows: readonly Row[]): string {
+  return rows.map((row) => `${sourceOf(row, "/")} | ${row.raw}`).join("\n");
+}
+
+/** What heads an export the save itself refused. */
+const SAVE_FAILED = "Could not save this stream";
 
 /**
  * Every target under the label its lines arrive tagged with — the index
@@ -332,10 +415,14 @@ function indexTargets(targets: readonly LogTarget[]): ReadonlyMap<string, LogTar
  * line the screen did not ask for; naming it from its own string beats drawing
  * it nameless.
  */
-function toRow(line: StreamLine, byLabel: ReadonlyMap<string, LogTarget>): Row {
+function toRow(line: StreamLine, byLabel: ReadonlyMap<string, LogTarget>, id: number): Row {
   const stamp = line.text.match(RFC3339);
-  const ts = stamp ? `${stamp[1]}${(stamp[2] ?? "").slice(0, 4)}` : "";
-  const message = stamp ? line.text.slice(stamp[0].length) : line.text;
+  const at = stamp ? stampTime(stamp) : undefined;
+  // The reader's clock, like the histogram's axis and the window pill beside
+  // it, rather than the stamp's own wall time (UTC from the backend): two
+  // clocks on one screen put every line a zone's offset from the axis.
+  const ts = at === undefined ? "" : `${clockTime(at)}.${String(new Date(at).getMilliseconds()).padStart(3, "0")}`;
+  const text = stamp ? line.text.slice(stamp[0].length) : line.text;
   const slash = line.source.indexOf("/");
   const target = byLabel.get(line.source);
   const pod =
@@ -350,8 +437,10 @@ function toRow(line: StreamLine, byLabel: ReadonlyMap<string, LogTarget>): Row {
       : slash < 0
         ? ""
         : line.source.slice(slash + 1);
-  const health = logLineHealth(message);
+  const health = logLineHealth(text);
+  const parsed = parseLogFields(text);
   return {
+    id,
     ts,
     pod,
     container,
@@ -359,11 +448,17 @@ function toRow(line: StreamLine, byLabel: ReadonlyMap<string, LogTarget>): Row {
     // otherwise be blank; a labelled one shows the container exactly when its
     // label carried it.
     namesContainer: line.source === "" || slash >= 0,
-    level: logLineLevel(message) ?? "",
+    level: logLineLevel(text) ?? "",
     health,
-    message,
+    text,
+    message: parsed.message,
+    structured: parsed.structured,
+    fields: parsed.fields,
+    words: logLineWords(parsed.message),
+    ...(at === undefined ? {} : { at }),
     raw: line.text,
-    haystack: `${message} ${health}`.toLowerCase(),
+    truncated: line.truncated === true,
+    haystack: `${text} ${health}`.toLowerCase(),
   };
 }
 
@@ -405,9 +500,52 @@ type Snapshot =
       failure?: { where: string; error: string };
     };
 
-/** `api-7 · api` — a target as this screen names one. */
-function whereOf(instance: PreviousInstance): string {
-  return `${instance.pod} · ${instance.container}`;
+/** `api-7 · api` — a target as this screen names one; the pod alone when it names no container. */
+function whereOf(instance: { pod: string; container?: string }): string {
+  return instance.container ? `${instance.pod} · ${instance.container}` : instance.pod;
+}
+
+/** A `podLogs` blob as stream lines under one target's label. A blob ends on a newline; a trailing empty row is not a log line. */
+function blobLines(source: string, blob: string): StreamLine[] {
+  return blob
+    .split("\n")
+    .filter((text) => text !== "")
+    .map((text) => ({ source, text }));
+}
+
+/**
+ * A span of the cluster's history for each target, tagged with the label the
+ * live stream gives that target's lines, so {@link toRow} reads them alike.
+ * One `podLogs` per target, in parallel, stamped and uncapped; no `seconds` is
+ * everything the container runtime still keeps.
+ *
+ * All or nothing: the first target that could not be read is reported instead
+ * of the lines, because an export missing one container's lines looks exactly
+ * like a container that had nothing to say.
+ *
+ * Only the cluster is read. The Logs history spool, once it lands, is where the
+ * part of a span it already holds would come from instead.
+ */
+async function readRange(
+  context: string,
+  namespace: string,
+  targets: readonly LogTarget[],
+  seconds: number | undefined,
+): Promise<{ lines: StreamLine[] } | { where: string; error: string }> {
+  const results = await Promise.all(
+    targets.map(async (target) => ({
+      target,
+      out: await podLogs(context, namespace, target.pod, undefined, {
+        container: target.container,
+        timestamps: true,
+        sinceSeconds: seconds,
+        allLines: true,
+      }),
+    })),
+  );
+  const failed = results.find((r) => r.out.error !== undefined);
+  if (failed) return { where: whereOf(failed.target), error: failed.out.error ?? "" };
+  return { lines: results.flatMap((r) => blobLines(r.target.label ?? "", r.out.logs ?? "")) };
 }
 
 /**
@@ -518,65 +656,11 @@ export function Logs({ route }: { route: string }) {
  * remembered subject in it, so the check costs a call per pair rather than one
  * per name, and `reviewRecents` decides what each answer means — including the
  * asymmetry between a pod, whose exact name never comes back, and a workload,
- * whose name outlives its pods.
+ * whose name outlives its pods. The check is `useOfferedRecents`, which Home's
+ * "Pick up where you left off" runs too.
  */
 function RecentSubjects({ context, clusterId }: { context: string; clusterId: string }) {
-  const entries = useRecentLogSubjects(clusterId);
-  const [scans, setScans] = useState<ReadonlyMap<string, SubjectScan>>(
-    () => new Map(),
-  );
-  /**
-   * Which lists have already been asked for. A ref, not state: it exists to
-   * stop the effect below asking twice, and putting it in `scans` would mean
-   * depending on `scans` in the effect that sets it — which is a fetch per
-   * answer, forever.
-   */
-  const asked = useRef(new Set<string>());
-
-  // A string, because the dependency is the SET of lists to fetch: `entries`
-  // changes identity whenever any subject is remembered or forgotten, and
-  // re-running on that would re-ask for lists already in hand.
-  const scanKeys = useMemo(
-    () => [...new Set(entries.map(scanKey))].sort().join("\n"),
-    [entries],
-  );
-
-  useEffect(() => {
-    let alive = true;
-    for (const key of scanKeys === "" ? [] : scanKeys.split("\n")) {
-      if (asked.current.has(key)) continue;
-      asked.current.add(key);
-      const [kind, namespace] = key.split("\u0000");
-      // `listResource` reports failure by returning `{ error }` rather than
-      // throwing, so this reads the field — and keeps the failure AS a
-      // failure: see `SubjectScan` for why an empty list is not the same
-      // answer as an unanswered one.
-      void listResource(context, kind, namespace).then((out) => {
-        if (!alive) return;
-        const scan: SubjectScan =
-          out.error !== undefined
-            ? { error: true }
-            : { names: (out.items ?? []).map((item) => item.name) };
-        setScans((current) => new Map(current).set(key, scan));
-      });
-    }
-    return () => {
-      alive = false;
-    };
-  }, [context, scanKeys]);
-
-  const { offered, forget } = useMemo(
-    () => reviewRecents(entries, scans),
-    [entries, scans],
-  );
-
-  // A pod the cluster has replaced is not coming back under that name, and
-  // leaving it in would push a live workload off the end of the cap. Settles
-  // in one pass: the forgotten entries leave `entries`, and the next review
-  // has nothing left to forget.
-  useEffect(() => {
-    forgetLogSubjects(forget.map(recentKey));
-  }, [forget]);
+  const offered = useOfferedRecents(context, clusterId);
 
   if (offered.length === 0) return null;
 
@@ -720,6 +804,7 @@ function LogsSubject({
     <LogsStream
       context={context}
       clusterName={clusterName}
+      kind={kind}
       namespace={namespace}
       name={name}
       targets={resolution.targets}
@@ -738,6 +823,7 @@ function LogsSubject({
 function LogsStream({
   context,
   clusterName,
+  kind,
   namespace,
   name,
   targets,
@@ -746,6 +832,7 @@ function LogsStream({
 }: {
   context: string;
   clusterName: string;
+  kind: string;
   namespace: string;
   name: string;
   targets: LogTarget[];
@@ -754,6 +841,10 @@ function LogsStream({
 }) {
   const { ask } = useConsole();
   const [text, setText] = useState("");
+  /** The window picked off the histogram, if any. The one filter that isn't query text. */
+  const [range, setRange] = useState<TimeRange | undefined>(undefined);
+  /** Where focus goes when a pill is removed: the × that had it is about to unmount. */
+  const searchRef = useRef<HTMLInputElement>(null);
   // `all`, as classic has always defaulted, and not the design's drawn `5m`.
   // A mock is drawn against a fixture that never stops talking; a real
   // workload that has been quiet for six minutes renders "Nothing has been
@@ -777,8 +868,12 @@ function LogsStream({
   const [previous, setPrevious] = useState(false);
   /** That instance's buffer. A one-shot fetch, not a subscription. */
   const [snapshot, setSnapshot] = useState<Snapshot>({ status: "idle" });
-  /** Why the last export did not land, if it did not. */
-  const [saveError, setSaveError] = useState<unknown>(undefined);
+  /** Why the last export did not land, if it did not: the sentence that heads it, over what went wrong. */
+  const [exportFailure, setExportFailure] = useState<{ title: string; error: unknown } | undefined>(undefined);
+  /** Whether a range is being read from the cluster for an export. */
+  const [exporting, setExporting] = useState(false);
+  /** The line the detail panel is open on. The Row itself, so the panel outlives the line leaving the view. */
+  const [selected, setSelected] = useState<Row | null>(null);
 
   const viewportRef = useRef<HTMLDivElement>(null);
   const rowsRef = useRef<HTMLDivElement>(null);
@@ -789,21 +884,177 @@ function LogsStream({
    * scroll that just happened, not from the render before it.
    */
   const stickRef = useRef(true);
+  /** An arrow key moved the selection and its row is still to be scrolled into view; see {@link revealSelected}. */
+  const revealRef = useRef(false);
+  /**
+   * The selected line as of the last commit or scroll, for the effect that holds it in place: its place in
+   * `filtered`, where its row is drawn within the rows (when it is drawn), how tall the earlier-lines banner
+   * was, and the scroll position.
+   */
+  const heldRef = useRef<{
+    row: Row;
+    index: number;
+    top: number | undefined;
+    banner: number;
+    scroll: number;
+    wrap: boolean;
+  } | null>(null);
+
+  /**
+   * Where the lines come from (#569): the cluster, or one of the installed apps'
+   * log providers for this kind. The picker is drawn only when there is a choice.
+   * A provider's lines carry `pod/container` from its own labels, so the rail and
+   * the container filter read them as they read the cluster's.
+   */
+  const resourceKind = providerKind(kind);
+  const offered = useLogProviders(context, resourceKind);
+  const providers = offered.choices;
+  const [picked, setPicked] = useState<{ key: string; label: string } | null>(null);
+  /** The provider that stopped being offered while followed, named until the next choice. */
+  const [lost, setLost] = useState<string | null>(null);
+  const chosen = picked ? providers.find((p) => p.key === picked.key) : undefined;
+  // Only a current list says a provider is gone; until one answers, the last list is
+  // followed. A gone provider is let go of, so it does not come back unasked.
+  if (picked && !chosen && offered.status === "ready") {
+    setPicked(null);
+    setLost(picked.label);
+    setSelected(null);
+  }
+  const provider = useLogProviderSource(chosen, { context, namespace, resourceKind: resourceKind ?? "", name });
+  const chooseSource = useCallback(
+    (key: string) => {
+      const next = providers.find((p) => p.key === key);
+      setPicked(next ? { key: next.key, label: next.label } : null);
+      setLost(null);
+      // A different source is a different buffer: the line the panel holds is not in it.
+      setSelected(null);
+      // A previous instance is the cluster's to hand back, never a provider's.
+      if (next) setPrevious(false);
+    },
+    [providers],
+  );
 
   const sinceSeconds = SINCE.find((s) => s.value === since)?.seconds;
-  const stream = useLogStream(context, namespace, targets, {
+  const stream = useLogStream(context, namespace, provider.targets ?? targets, {
     // Always on: the design gives the time its own column, so the stamp is not
     // an option the reader turns on — it is where the first column comes from.
     timestamps: true,
-    sinceSeconds,
+    sinceSeconds: chosen ? (sinceSeconds ?? PROVIDER_ALL_SECONDS) : sinceSeconds,
     tailLines: TAIL_LINES,
+    source: provider.source,
   });
+  // Home's "Live now" lists this tab only while the stream is actually running.
+  useMarkLogStream(useTabScope(), stream.status !== "error" && stream.status !== "completed");
+  // A provider's stream that ended sends no more statuses, so the hook's last one
+  // would go on saying it follows: the ending is what the readout says instead.
+  const ended = chosen ? provider.end : null;
+  /** Whether new lines are arriving in THIS pane. A snapshot is not followed,
+   *  however healthy the connection underneath it is. */
+  const following = !previous && !stream.paused && !ended;
+
+  /**
+   * Hold the view while the reader works in it: from a press in the log to its release, and while a selection lies
+   * in it. A following view moves every frame, so a press and its release land on different lines, which is no
+   * click, and the text under a selection is rewritten before it can be copied. The reader's Pause is theirs and
+   * is left alone; see the hook's `hold`.
+   */
+  const pressedRef = useRef(false);
+  const selectingRef = useRef(false);
+  const { hold } = stream;
+  const syncHold = useCallback(() => hold(pressedRef.current || selectingRef.current), [hold]);
+  useEffect(() => {
+    const onSelection = () => {
+      const selection = document.getSelection();
+      const viewport = viewportRef.current;
+      selectingRef.current =
+        selection !== null &&
+        !selection.isCollapsed &&
+        viewport !== null &&
+        // Either end in the log, or the log inside it: Ctrl+A, or a drag from the filter bar past the whole log. A
+        // selection that only reaches into the log has an end in it, so the whole log is all there is left to ask.
+        (viewport.contains(selection.anchorNode) ||
+          viewport.contains(selection.focusNode) ||
+          selection.containsNode(viewport));
+      syncHold();
+    };
+    // Anywhere on the window: a drag that started in the log can end anywhere, and a press the browser takes back,
+    // or whose release never reaches the page (the window loses focus or is hidden), must not leave the view held.
+    // Let go a task later, after the click a release makes: let go at once, the lines that waited move the view
+    // first, and the pressed row is gone. A selection is not let go of here; only collapsing or leaving the log does.
+    // A release is heard on its way down, so nothing on the page that stops it on its way up keeps it from the
+    // window. Not `blur`: on the way down that is every field losing focus, as one does to the press itself; on
+    // the way up, where none of those bubble, it is the window's own.
+    let letGo: ReturnType<typeof setTimeout> | undefined;
+    const onRelease = () => {
+      if (!pressedRef.current) return;
+      pressedRef.current = false;
+      letGo = setTimeout(syncHold, 0);
+    };
+    const onVisibility = () => {
+      if (document.hidden) onRelease();
+    };
+    const releases = ["pointerup", "pointercancel"] as const;
+    document.addEventListener("selectionchange", onSelection);
+    document.addEventListener("visibilitychange", onVisibility);
+    window.addEventListener("blur", onRelease);
+    for (const type of releases) window.addEventListener(type, onRelease, true);
+    return () => {
+      clearTimeout(letGo);
+      document.removeEventListener("selectionchange", onSelection);
+      document.removeEventListener("visibilitychange", onVisibility);
+      window.removeEventListener("blur", onRelease);
+      for (const type of releases) window.removeEventListener(type, onRelease, true);
+    };
+  }, [syncHold]);
+  /**
+   * Whether the hold has lasted long enough to name. Every click holds the view for as long as the button is down,
+   * and a note that flashed on each one would be noise; a press kept, or a selection, is worth the words.
+   */
+  const [heldLong, setHeldLong] = useState(false);
+  useEffect(() => {
+    if (!stream.held) {
+      setHeldLong(false);
+      return;
+    }
+    const timer = setTimeout(() => setHeldLong(true), HELD_NOTE_MS);
+    return () => clearTimeout(timer);
+  }, [stream.held]);
+  /** Whether the filter bar says the view is held: a following pane, held long enough to name. */
+  const heldNoted = !previous && !stream.paused && stream.held && heldLong;
+  /**
+   * The restarts the "Scrollback cleared" notice is not about. That notice says a
+   * change of window reopened the stream and nothing already sent comes back. A change
+   * of source (a choice, a provider no longer offered, Follow again) reopens it with
+   * the new source's own history, so the restart it causes is marked as seen.
+   */
+  const sourceKey = provider.source?.key;
+  const [sourceSeen, setSourceSeen] = useState(sourceKey);
+  if (sourceSeen !== sourceKey) {
+    setSourceSeen(sourceKey);
+    setSeenRestart(stream.restartCount + 1);
+  }
 
   const byLabel = useMemo(() => indexTargets(targets), [targets]);
-  const liveRows = useMemo(
-    () => stream.lines.map((l) => toRow(l, byLabel)),
-    [stream.lines, byLabel],
-  );
+  /**
+   * Each line made into a row ONCE. The ring hands back the same line objects
+   * on every commit (`appendLogLines` concatenates), so a cache keyed on the
+   * object turns "re-split every buffered line per arriving line" into one
+   * parse per line. That matters now that a row is a JSON parse and a logfmt
+   * scan, not one regex. Rebuilt with `byLabel`, which a row's pod and
+   * container are read through.
+   */
+  const rowOf = useMemo(() => {
+    const cache = new WeakMap<StreamLine, Row>();
+    return (line: StreamLine): Row => {
+      let row = cache.get(line);
+      if (row === undefined) {
+        row = toRow(line, byLabel, nextRowId++);
+        cache.set(line, row);
+      }
+      return row;
+    };
+  }, [byLabel]);
+  const liveRows = useMemo(() => stream.lines.map((l) => rowOf(l)), [stream.lines, rowOf]);
 
   /**
    * Fetch the terminated containers' buffers.
@@ -856,10 +1107,7 @@ function LogsStream({
           targets.find(
             (t) => t.pod === instance.pod && t.container === instance.container,
           )?.label ?? "";
-        for (const text of (out.logs ?? "").split("\n")) {
-          // A blob ends on a newline; a trailing empty row is not a log line.
-          if (text !== "") lines.push({ source, text });
-        }
+        lines.push(...blobLines(source, out.logs ?? ""));
       }
       setSnapshot({
         status: "ready",
@@ -873,8 +1121,8 @@ function LogsStream({
   }, [previous, terminated, context, namespace, targets]);
 
   const previousRows = useMemo(
-    () => (snapshot.status === "ready" ? snapshot.lines.map((l) => toRow(l, byLabel)) : []),
-    [snapshot, byLabel],
+    () => (snapshot.status === "ready" ? snapshot.lines.map((l) => rowOf(l)) : []),
+    [snapshot, rowOf],
   );
 
   /**
@@ -894,18 +1142,115 @@ function LogsStream({
     [targets],
   );
 
-  const query = text.trim().toLowerCase();
+  /** The query as typed: the pills and facet toggles edit this text by the spans it reports. */
+  const typed = useMemo(() => parseLogQuery(text), [text]);
+  /**
+   * The query as applied, a beat behind the keystroke: React renders the box
+   * first and the pass over the buffer after, so typing never waits on it.
+   */
+  const deferredText = useDeferredValue(text);
+  const applied = useMemo(() => parseLogQuery(deferredText), [deferredText]);
+  const clauses = applied.ok ? applied.clauses : NO_CLAUSES;
+
+  /** The pod boxes and the container select: the scope every view starts from. */
+  const inScope = useCallback(
+    (row: Row) => !hidden.includes(row.pod) && (container === ALL_CONTAINERS || row.container === container),
+    [hidden, container],
+  );
+  /** Every filter applied: what the body draws, from every batch. */
   const filtered = useMemo(
     () =>
-      rows.filter((row) => {
-        if (hidden.includes(row.pod)) return false;
-        if (container !== ALL_CONTAINERS && row.container !== container)
-          return false;
-        if (query !== "" && !row.haystack.includes(query)) return false;
-        return true;
-      }),
-    [rows, hidden, container, query],
+      rows.filter(
+        (row) =>
+          inScope(row) &&
+          (clauses.length === 0 || matchLine(row, clauses)) &&
+          (range === undefined || inRange(row, range)),
+      ),
+    [rows, inScope, clauses, range],
   );
+  /**
+   * The rows the rail, the facets and the histogram count. Each count is a pass over the whole buffer, and a busy
+   * stream commits every frame: while lines are arriving these take the stream's rows at most four times a second,
+   * the last batch always landing. A filter still applies at once, over the rows they have. Paused or reading a
+   * snapshot, nothing is arriving to hold back, and neither is an empty buffer (a restart or a clear): it has nothing
+   * to count, and must not go on showing the old buffer's counts for the wait.
+   */
+  const counted = useThrottledValue(rows, following && rows.length > 0 ? RECOUNT_MS : 0);
+  const scoped = useMemo(() => counted.filter(inScope), [counted, inScope]);
+  /** The query applied, but not the window: what the histogram counts, so it can shade the window instead of cropping to it. */
+  const queried = useMemo(
+    () => (clauses.length === 0 ? scoped : scoped.filter((row) => matchLine(row, clauses))),
+    [scoped, clauses],
+  );
+  /** The body's lines as of the last recount: what the rail tallies. */
+  const countedFiltered = useMemo(
+    () => (range === undefined ? queried : queried.filter((row) => inRange(row, range))),
+    [queried, range],
+  );
+  /** In scope and in the window, but not queried: what the facets count over. */
+  const windowed = useMemo(
+    () => (range === undefined ? scoped : scoped.filter((row) => inRange(row, range))),
+    [scoped, range],
+  );
+  /**
+   * The buffer's facet fields, from every row: sections must not come and go as
+   * the reader filters. Found over the deferred rows and handed on as the SAME
+   * array while the names are unchanged — a new array on every batch would
+   * recount every facet in the urgent render, ahead of the deferral below.
+   */
+  const deferredRows = useDeferredValue(counted);
+  const fieldsRef = useRef<string[]>([]);
+  const fields = useMemo(() => {
+    const next = discoverFields(deferredRows);
+    const last = fieldsRef.current;
+    if (next.length === last.length && next.every((f, i) => f === last[i])) return last;
+    return (fieldsRef.current = next);
+  }, [deferredRows]);
+  /** The facets recount a beat behind, like the query, so a busy stream never starves the box. */
+  const facetLines = useDeferredValue(windowed);
+  /** The histogram counts the queried lines, not the windowed ones, and recounts a beat behind too. */
+  const volumeLines = useDeferredValue(queried);
+  /**
+   * What the legend offers: the query minus its level clauses, as the rail's
+   * Level facet counts, so picking a level leaves the others on offer. Not the
+   * window, for the legend describes the chart. With no level clause that is
+   * `queried` itself, and the pass over the buffer is not made twice.
+   */
+  const legendRows = useMemo(
+    () =>
+      clauses.some((c) => c.field?.toLowerCase() === "level")
+        ? scoped.filter((row) => matchLine(row, clauses, "level"))
+        : queried,
+    [scoped, clauses, queried],
+  );
+  const legendLines = useDeferredValue(legendRows);
+  /** A facet click: rewrites the search box, the one place filters live. */
+  const toggleFilter = useCallback(
+    (target: ClauseTarget, mode: ClauseMode) => setText((q) => toggleClause(q, target, mode)),
+    [],
+  );
+  /**
+   * A legend click: every level word of a group in (`include`) or out, in one
+   * update. `toggleClause` flips what is there, so only the words that are not
+   * already where the click wants them are flipped: with `level:error` typed,
+   * "put the group in" adds `fatal` and leaves `error` be. Each word is read
+   * off the text being edited, not off what the legend was drawn from, and a
+   * word that is excluded is not included, so it flips in place.
+   */
+  const toggleLevels = useCallback(
+    (words: string[], include: boolean) =>
+      setText((q) => {
+        const parsed = parseLogQuery(q);
+        const included = (value: string) =>
+          parsed.ok && clauseState(parsed.clauses, { field: "level", value }) === "include";
+        return words
+          .filter((value) => included(value) !== include)
+          .reduce((query, value) => toggleClause(query, { field: "level", value }, "include"), q);
+      }),
+    [],
+  );
+
+  const selectedIndex = selected === null ? -1 : filtered.indexOf(selected);
 
   const togglePod = useCallback((pod: string, checked: boolean) => {
     setHidden((current) =>
@@ -921,6 +1266,7 @@ function LogsStream({
    *  that reports "no lines match" cannot undo the tick that caused it. */
   const clearFilters = useCallback(() => {
     setText("");
+    setRange(undefined);
     setContainer(ALL_CONTAINERS);
     setHidden([]);
   }, []);
@@ -945,17 +1291,21 @@ function LogsStream({
 
   /**
    * What the rail tallies: THE LINES THE BODY IS DRAWING, with every filter
-   * applied — and each one's RFC3339 stamp already off.
+   * applied, as of the last recount — and each one's RFC3339 stamp already off.
    *
    * The stamp is the trap. A stamped line opens with a digit, `tallyLogTerms`
    * reads a leading digit as a value and ends the term run there, so a stamped
    * buffer tallies to NOTHING — no error, no warning, just an empty rail that
-   * looks exactly like a quiet log. `row.message` is the stripped text; the
+   * looks exactly like a quiet log. `row.text` is the stripped text; the
    * raw line never goes near this.
+   *
+   * The row's message and severity go with it. The tally reads a JSON `msg`
+   * from the text, but not a logfmt one: a logfmt line opens with its own
+   * `time=…`, and the tally would end the term there and show nothing.
    */
-  const railLines = useMemo<StreamLine[]>(
-    () => filtered.map((row) => ({ source: row.pod, text: row.message })),
-    [filtered],
+  const railLines = useMemo<TermLine[]>(
+    () => countedFiltered.map((row) => ({ source: row.pod, text: row.text, message: row.message, health: row.health })),
+    [countedFiltered],
   );
 
   /**
@@ -968,9 +1318,10 @@ function LogsStream({
    * far they happen to have scrolled, not of what they chose to look at.
    *
    * Each line goes out RAW, stamp and all, in classic's `source | line`
-   * shape. The column on screen truncates the stamp to `14:07:41.208` because
-   * a reader watching a live tail knows what day it is; a file read tomorrow
-   * does not, and the full RFC3339 is what makes an exported line greppable
+   * shape. The column on screen shows the time on the reader's clock, to the
+   * millisecond (`14:07:41.208`), because a reader watching a live tail knows
+   * what day it is; a file read tomorrow does not, and the full RFC3339, in
+   * the zone the cluster sent it, is what makes an exported line greppable
    * against anything else. Which lines are exported is what "on screen"
    * governs — not how much of each one an 86px gutter had room for.
    *
@@ -980,18 +1331,55 @@ function LogsStream({
    * the nine hundred lines that arrived while I was reading it".
    */
   function exportView() {
-    setSaveError(undefined);
-    const content = filtered
-      .map((row) => `${sourceOf(row, "/")} | ${row.raw}`)
-      .join("\n");
+    setExportFailure(undefined);
     // The previous instance's buffer goes out under its own name. Two files of
     // the same workload's logs, one of them from an instance that no longer
     // exists, are not tellable apart afterwards if they are called the same
     // thing.
     void saveOrDownload(
       `${name}${previous ? "-previous" : ""}.log`,
-      content,
-    ).catch((e: unknown) => setSaveError(e));
+      exportContent(filtered),
+    ).catch((e: unknown) => setExportFailure({ title: SAVE_FAILED, error: e }));
+  }
+
+  /**
+   * Export a span of the cluster's history (#915), read fresh rather than cut
+   * from the buffer: the ring holds the last few thousand lines, which on a
+   * busy workload is minutes, not the hour asked for.
+   *
+   * Through the same scope and query as the view: the pods left ticked and the
+   * container chosen decide what is read, the query what is kept. Not through
+   * the histogram's window, which the range replaces — a window picked off the
+   * buffer's chart intersected with the last day is a surprise, not a filter.
+   * Each container arrives on its own, so the lines are merged by stamp.
+   */
+  async function exportRange(range: (typeof EXPORT_RANGES)[number]) {
+    setExportFailure(undefined);
+    setExporting(true);
+    try {
+      const read = await readRange(
+        context,
+        namespace,
+        targets.filter(
+          (t) => !hidden.includes(t.pod) && (container === ALL_CONTAINERS || (t.container ?? "") === container),
+        ),
+        range.seconds,
+      );
+      if ("error" in read) {
+        setExportFailure({ title: `Could not read the logs of ${read.where}`, error: read.error });
+        return;
+      }
+      const kept = read.lines
+        .map((l, i) => toRow(l, byLabel, i))
+        .filter((row) => clauses.length === 0 || matchLine(row, clauses))
+        // Stable, so lines of one container that share a stamp keep the order they were written in.
+        .sort((a, b) => (a.at ?? 0) - (b.at ?? 0) || subMillisecond(a.raw) - subMillisecond(b.raw));
+      await saveOrDownload(`${name}-${range.slug}.log`, exportContent(kept));
+    } catch (e) {
+      setExportFailure({ title: SAVE_FAILED, error: e });
+    } finally {
+      setExporting(false);
+    }
   }
 
   // Sample the viewport and one row so the render can window the list. Both
@@ -1042,17 +1430,23 @@ function LogsStream({
   function trackScroll() {
     const viewport = viewportRef.current;
     if (!viewport) return;
+    // A selected line pins the view: the scroll that reveals it can land within
+    // the slack of the end, and that is not the reader coming back to follow.
     stickRef.current =
+      selected === null &&
       viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight <
-      STICK_SLACK;
+        STICK_SLACK;
+    // The reader moved, or the browser did: either way the next shift is measured from here.
+    if (heldRef.current !== null) heldRef.current.scroll = viewport.scrollTop;
     measure();
   }
 
-  const signal = connectionSignal(stream.status, stream.paused);
-  /** Whether new lines are arriving in THIS pane. A snapshot is not followed,
-   *  however healthy the connection underneath it is. */
-  const following = !previous && !stream.paused;
-  const restarted = stream.restartCount > seenRestart;
+  const signal = ended
+    ? logConnectionStatus(ended.type === "error" ? "error" : "completed")
+    : connectionSignal(stream.status, stream.paused);
+  // A provider sends its history again on every restart, so none of its restarts
+  // cleared anything; the notice is about the cluster's own stream alone.
+  const restarted = !chosen && stream.restartCount > seenRestart;
   const window_ = computeLogWindow({
     total: filtered.length,
     scrollTop: metrics.scrollTop,
@@ -1063,7 +1457,126 @@ function LogsStream({
   const drawn = window_.virtualized
     ? filtered.slice(window_.start, window_.end)
     : filtered;
-  const windowLabel = since === "all" ? "" : ` in the last ${since}`;
+
+  /**
+   * Hold the selected line where it is on screen. Once the ring is full each
+   * batch drops lines from the front, and everything after them moves up under a
+   * `scrollTop` that has not changed: the line being read would slide out of
+   * view, and the panel opened on it would be left describing a line the
+   * reader can no longer see. So the view moves with the content, by how far the
+   * line's row moved.
+   *
+   * That is measured where the row is drawn, which counts everything above it
+   * that moved, the earlier-lines banner that the first drop brings in among it.
+   * A row outside the drawn slice has no element, and is placed by arithmetic
+   * instead: its place in `filtered` times the row height, and the banner. The
+   * new position is the last known one plus that shift, not the browser's
+   * current one plus it: a batch that shortens the content gets the scroll
+   * position clamped by the layout this effect has just forced, and a shift
+   * added on top of that would correct twice.
+   *
+   * It acts on a change to the lines or the selection, never on a scroll: the
+   * reader's own scrolling is theirs, and only moves where the shift is
+   * measured from. A line that is not in `filtered`, before or after, has
+   * nowhere to be held.
+   */
+  useLayoutEffect(() => {
+    const viewport = viewportRef.current;
+    const box = rowsRef.current;
+    const row = box?.querySelector<HTMLElement>('[aria-current="true"]');
+    // Within the rows, which scrolling does not change.
+    const top = box && row ? row.getBoundingClientRect().top - box.getBoundingClientRect().top : undefined;
+    const banner = box?.querySelector('[data-slot="dropped-banner"]')?.getBoundingClientRect().height ?? 0;
+    const held = heldRef.current;
+    if (
+      viewport !== null &&
+      held !== null &&
+      held.row === selected &&
+      held.wrap === wrap &&
+      held.index >= 0 &&
+      selectedIndex >= 0 &&
+      !stickRef.current
+    ) {
+      const moved =
+        top !== undefined && held.top !== undefined
+          ? top - held.top
+          : wrap
+            ? 0
+            : (selectedIndex - held.index) * metrics.rowHeight + banner - held.banner;
+      if (moved !== 0) {
+        viewport.scrollTop = held.scroll + moved;
+        // The window was drawn from the scroll position before this; draw it again from the new one.
+        measure();
+      }
+    }
+    heldRef.current =
+      selected === null || viewport === null
+        ? null
+        : { row: selected, index: selectedIndex, top, banner, scroll: viewport.scrollTop, wrap };
+  }, [filtered, selected, selectedIndex, wrap, metrics.rowHeight, window_.start, window_.end, measure]);
+
+  function moveSelection(step: 1 | -1) {
+    if (filtered.length === 0) return;
+    const next =
+      selectedIndex < 0
+        ? step > 0
+          ? 0
+          : filtered.length - 1
+        : Math.min(filtered.length - 1, Math.max(0, selectedIndex + step));
+    setSelected(filtered[next]);
+    // Reading, not following: a new line must not yank the view off the selection.
+    stickRef.current = false;
+    revealRef.current = true;
+    // A row outside the drawn slice has no element to scroll to. Fixed-height arithmetic gets the view near
+    // enough to draw it; it leaves out the scroller's padding and the dropped-lines banner, so it is only
+    // that close, and the reveal below settles the pixels.
+    const viewport = viewportRef.current;
+    if (viewport !== null && window_.virtualized && (next < window_.start || next >= window_.end)) {
+      viewport.scrollTop = next * metrics.rowHeight;
+    }
+    // Same row again (an arrow at the end of the buffer): no render is coming to reveal it.
+    if (next === selectedIndex) revealSelected();
+  }
+
+  /**
+   * Scroll the row an arrow key selected into view, once it has an element.
+   * The browser does the pixels: rows do not start at the top of the scroller
+   * (its padding, the dropped-lines banner), and wrapped rows differ in height,
+   * so no sum over a row height can say where one is. A row outside the slice
+   * is not there yet; the scroll that draws it comes back here through the effect.
+   * Only a key asks for it, so a reader who scrolls away is left where they are.
+   */
+  function revealSelected() {
+    if (!revealRef.current) return;
+    const row = rowsRef.current?.querySelector<HTMLElement>('[aria-current="true"]');
+    if (row === null || row === undefined) return;
+    revealRef.current = false;
+    row.scrollIntoView({ block: "nearest" });
+    // The view has moved, and the scroll event that says so only arrives at the next rendering step. A batch that
+    // lands before it is held from here, not from where the view was.
+    const viewport = viewportRef.current;
+    if (heldRef.current !== null && viewport !== null) heldRef.current.scroll = viewport.scrollTop;
+  }
+  useLayoutEffect(revealSelected, [selected, window_.start, window_.end]);
+
+  function closeDetail() {
+    setSelected(null);
+    // The × and Esc in the panel unmount the control that had focus; the log is where the reader was.
+    viewportRef.current?.focus();
+  }
+
+  function onLogKeyDown(e: KeyboardEvent) {
+    // A modified arrow is the browser's or the OS's (selection, word jumps, history).
+    if (e.altKey || e.ctrlKey || e.metaKey || e.shiftKey) return;
+    if (e.key === "ArrowDown") moveSelection(1);
+    else if (e.key === "ArrowUp") moveSelection(-1);
+    else if (e.key === "Escape" && selected !== null) closeDetail();
+    else return;
+    e.preventDefault();
+    e.stopPropagation();
+  }
+
+  const windowLabel = since !== "all" ? ` in the last ${since}` : chosen ? " in the last 7 days" : "";
 
   /** A corpse that refused, while others answered — a banner over lines that
    *  are still there, rather than a card in place of them. */
@@ -1141,7 +1654,8 @@ function LogsStream({
             variant="secondary"
             size="sm"
             onClick={stream.togglePause}
-            disabled={previous}
+            // An ended stream has nothing to pause; Follow again, by its notice, opens it.
+            disabled={previous || ended !== null}
             aria-label={previous ? `Follow — ${NO_FOLLOWING.toLowerCase()}` : undefined}
           >
             {following ? (
@@ -1151,18 +1665,67 @@ function LogsStream({
             )}
             {following ? "Pause" : "Follow"}
           </Button>
-          {/* Disabled on an empty view rather than hidden: a control that
-              vanishes leaves the reader wondering whether this screen exports
-              at all, where a greyed one says "yes, once there is something to
-              export". Classic disabled it on the same condition. */}
-          <Button
-            variant="secondary"
-            size="sm"
-            onClick={exportView}
-            disabled={filtered.length === 0}
-          >
-            Export
-          </Button>
+          {/* The view on screen, disabled on an empty view rather than hidden:
+              a control that vanishes leaves the reader wondering whether this
+              screen exports at all, where a greyed one says "yes, once there is
+              something to export". Classic disabled it on the same condition.
+              A range of the cluster's history is offered beside it (#915),
+              except over a provider's stream, which `podLogs` cannot read, and
+              a previous instance, whose last ten minutes before now are empty.
+              A range still being read keeps either one busy: switching source
+              does not stop it, and its save is still to come. */}
+          {previous || chosen ? (
+            <Button
+              variant="secondary"
+              size="sm"
+              onClick={exportView}
+              disabled={filtered.length === 0 || exporting}
+            >
+              {exporting ? "Exporting…" : "Export"}
+            </Button>
+          ) : (
+            <Popover
+              label="Export"
+              align="end"
+              disabled={exporting}
+              className="min-w-[9rem] p-[2px]"
+              trigger={
+                <span className="btn" data-variant="secondary" data-size="sm" aria-disabled={exporting || undefined}>
+                  {exporting ? "Exporting…" : "Export"}
+                </span>
+              }
+            >
+              {(close) => (
+                <div className="flex flex-col">
+                  <button
+                    type="button"
+                    className="ns-row rounded-[5px] disabled:cursor-not-allowed disabled:opacity-50"
+                    disabled={filtered.length === 0}
+                    onClick={() => {
+                      close();
+                      exportView();
+                    }}
+                  >
+                    Current view
+                  </button>
+                  <Eyebrow className="rule-t mt-[2px] px-2 pt-1.5 pb-0.5">from the cluster</Eyebrow>
+                  {EXPORT_RANGES.map((range) => (
+                    <button
+                      key={range.slug}
+                      type="button"
+                      className="ns-row rounded-[5px]"
+                      onClick={() => {
+                        close();
+                        void exportRange(range);
+                      }}
+                    >
+                      {range.label}
+                    </button>
+                  ))}
+                </div>
+              )}
+            </Popover>
+          )}
         </>
       }
     >
@@ -1174,6 +1737,7 @@ function LogsStream({
             pods={railPods}
             lines={railLines}
             onTogglePod={togglePod}
+            query={{ lines: facetLines, clauses, fields, onToggle: toggleFilter }}
           />
         }
       >
@@ -1182,7 +1746,27 @@ function LogsStream({
           onValueChange={setText}
           label="Filter lines"
           placeholder="Filter lines"
+          inputRef={searchRef}
         >
+          {providers.length > 0 && (
+            <div className="flex items-center gap-1.5">
+              {/* "from", not "source": the rail's Sources are the pods, and one
+                  word must not name two things on one screen. */}
+              <Eyebrow>from</Eyebrow>
+              <Select
+                value={chosen ? chosen.key : KUBERNETES_SOURCE}
+                onValueChange={chooseSource}
+                options={[
+                  { value: KUBERNETES_SOURCE, label: "Kubernetes" },
+                  ...providers.map((p) => ({ value: p.key, label: p.label })),
+                ]}
+                // The snapshot of a terminated container is the cluster's; a
+                // provider is a source of the live tail.
+                disabled={previous}
+                aria-label="Logs from"
+              />
+            </div>
+          )}
           <div className="flex items-center gap-1.5">
             <Eyebrow>since</Eyebrow>
             <Select
@@ -1214,25 +1798,35 @@ function LogsStream({
           )}
           {/* The design's rotate-ccw toggle. Warn-tinted while on, from the
               same tokens the banner under it uses — a pane showing something
-              other than the live stream must not look like one that is. */}
-          <Button
-            variant="secondary"
-            size="xs"
-            aria-pressed={previous}
-            onClick={() => setPrevious((p) => !p)}
-            style={
-              previous
-                ? {
-                    borderColor: toneColor("warn"),
-                    color: toneColor("warn"),
-                    background: toneWash("warn"),
-                  }
-                : undefined
-            }
-          >
-            <Icons.revert size={12} aria-hidden="true" />
-            Previous instance
-          </Button>
+              other than the live stream must not look like one that is. Not
+              drawn for a provider: a terminated container's buffer is the
+              cluster's, and a log backend has no "previous instance". */}
+          {!chosen && (
+            <Button
+              variant="secondary"
+              size="xs"
+              aria-pressed={previous}
+              onClick={() => {
+                setPrevious((p) => !p);
+                // A different buffer: the line the panel holds is not in it, and a time window is a stretch
+                // of this instance's clock. A change of source keeps the window: it is the same stretch of time.
+                setSelected(null);
+                setRange(undefined);
+              }}
+              style={
+                previous
+                  ? {
+                      borderColor: toneColor("warn"),
+                      color: toneColor("warn"),
+                      background: toneWash("warn"),
+                    }
+                  : undefined
+              }
+            >
+              <Icons.revert size={12} aria-hidden="true" />
+              Previous instance
+            </Button>
+          )}
           <Button
             variant="secondary"
             size="xs"
@@ -1257,18 +1851,93 @@ function LogsStream({
               {groupNumber(stream.pendingWhilePaused)} new lines
             </Eyebrow>
           )}
+          {/* Why a following pane stopped moving under a press or a selection, and what waits for its release. */}
+          {heldNoted && (
+            <Eyebrow>
+              {`Held while you select${stream.pendingWhilePaused > 0 ? ` · ${groupNumber(stream.pendingWhilePaused)} new lines` : ""}`}
+            </Eyebrow>
+          )}
+          {/* The same for a screen reader, which the note's coming and going does not reach. Always mounted, so the
+              words are a change to a region it already has, and without the count: that moves with every batch. */}
+          <span className="sr-only" role="status" aria-live="polite" aria-atomic="true" data-slot="held-live">
+            {heldNoted ? "View held while you select" : ""}
+          </span>
           {!previous && (
             <LiveSignal
               label={connectionLabel(
                 signal,
-                stream.liveTargets,
+                ended ? 0 : stream.liveTargets,
                 stream.totalTargets,
+                stream.completedTargets,
               )}
               tone={statusTone(signal.health)}
             />
           )}
         </FilterBar>
+        {!typed.ok && (
+          // Not FilterBar's `invalid`, whose screen-reader text calls every
+          // problem an invalid regular expression. An unclosed quote is not one.
+          <div role="alert" className="mx-3 mt-2 text-[0.75rem]" style={{ color: toneColor("sev") }}>
+            {typed.error}
+          </div>
+        )}
+        <FilterPills
+          query={text}
+          clauses={typed.ok ? typed.clauses : NO_CLAUSES}
+          range={range}
+          onQueryChange={setText}
+          onRangeChange={setRange}
+          onRemoved={() => searchRef.current?.focus()}
+        />
+        <VolumeHistogram
+          lines={volumeLines}
+          legendLines={legendLines}
+          range={range}
+          onRangeChange={setRange}
+          clauses={typed.ok ? typed.clauses : NO_CLAUSES}
+          onToggleLevels={toggleLevels}
+        />
 
+        {offered.status === "error" && (
+          // The list the picker is drawn from could not be read again: what it
+          // offers may be out of date, and an app that stopped providing logs
+          // is not known to have.
+          <FailureAlert
+            title="Could not check which apps provide logs here"
+            error={offered.error}
+            domain="local"
+            className="mx-3 mt-3"
+          />
+        )}
+        {lost && !chosen && (
+          // The choice was made from a list that has since changed: say so
+          // rather than quietly draw the cluster's lines under the old name.
+          <Alert
+            tone="warn"
+            title={`${lost} is no longer offered for this ${kind}`}
+            className="mx-3 mt-3"
+          >
+            The app that provides it was disabled or removed, or is no longer
+            enabled for this cluster. Following Kubernetes instead.
+          </Alert>
+        )}
+        {chosen && provider.end && (
+          // A provider's stream ends only with a reason, and a failure is not
+          // an ending: `describeStreamEnd` words the two differently.
+          <Alert
+            tone={provider.end.type === "error" ? "sev" : "info"}
+            title={describeStreamEnd(provider.end)}
+            className="mx-3 mt-3"
+          >
+            <Button
+              variant="secondary"
+              size="xs"
+              onClick={provider.retry}
+            >
+              Follow again
+            </Button>
+          </Alert>
+        )}
         {previous && terminated.length > 0 && (
           // Directly under the filter bar, as the design places it: what is
           // being read, and why nothing is arriving.
@@ -1316,10 +1985,10 @@ function LogsStream({
           </Alert>
         )}
 
-        {saveError !== undefined && (
+        {exportFailure !== undefined && (
           <FailureAlert
-            title="Could not save this stream"
-            error={saveError}
+            title={exportFailure.title}
+            error={exportFailure.error}
             className="mx-3 mt-3"
           />
         )}
@@ -1327,9 +1996,16 @@ function LogsStream({
         <div
           ref={viewportRef}
           onScroll={trackScroll}
+          onPointerDown={() => {
+            pressedRef.current = true;
+            syncHold();
+          }}
+          // A tab stop: the arrow keys move the selection, so the log has to be reachable without a pointer.
+          tabIndex={0}
+          onKeyDown={onLogKeyDown}
           role="log"
           aria-label={`${name} logs`}
-          className={`scroll min-h-0 flex-1 py-1 font-mono text-[0.75rem] leading-[1.85] ${
+          className={`scroll log-body min-h-0 flex-1 py-1 font-mono text-[0.75rem] leading-[1.85] ${
             wrap ? "" : "whitespace-nowrap"
           }`}
         >
@@ -1349,7 +2025,13 @@ function LogsStream({
               // and under the rail on a real cluster.
               className="whitespace-normal"
               title="Nothing has been logged yet"
-              hint={`srelens is following ${targets.length} container${targets.length === 1 ? "" : "s"} across ${podCount(targets)}; none of them has written a line${windowLabel}.`}
+              hint={
+                chosen && ended
+                  ? `${chosen.label} sent no line${windowLabel} before its stream ended.`
+                  : chosen
+                    ? `srelens is following ${name} through ${chosen.label}; it has sent no line${windowLabel}.`
+                    : `srelens is following ${targets.length} container${targets.length === 1 ? "" : "s"} across ${podCount(targets)}; none of them has written a line${windowLabel}.`
+              }
             />
           ) : filtered.length === 0 ? (
             // Deliberately not the sentence above it. "Nothing yet" and "nothing
@@ -1374,7 +2056,7 @@ function LogsStream({
                 // would let them believe they are. It is a fact about the LIVE
                 // ring, though: the previous instance's buffer arrived whole,
                 // in one fetch, and nothing has pushed anything out of it.
-                <div className="px-2.5 py-1 text-muted">
+                <div data-slot="dropped-banner" className="px-2.5 py-1 text-muted">
                   Showing the newest {groupNumber(filtered.length)} lines ·{" "}
                   {groupNumber(stream.dropped)} earlier lines dropped
                 </div>
@@ -1382,24 +2064,43 @@ function LogsStream({
               {window_.topPad > 0 && (
                 <div style={{ height: window_.topPad }} aria-hidden="true" />
               )}
-              {drawn.map((row, i) => (
-                // The index is the key: two identical lines a second apart are
-                // ordinary in a log, so nothing in a line is a stable identity.
-                <LogLine
-                  key={window_.start + i}
-                  ts={row.ts}
-                  source={sourceOf(row, " · ")}
-                  // The word the LINE used, from core's one level scan — never
-                  // the severity vocabulary's name for it, which appears nowhere
-                  // in the log the reader is grepping against.
-                  //
-                  // And no `tone` beside it. The kit owns level→tone precisely
-                  // so the same word is not red here and grey on the next
-                  // screen; an override belongs to a line singled out for some
-                  // reason OTHER than its level, and none is.
-                  level={row.level}
-                  message={row.message}
-                />
+              {drawn.map((row) => (
+                // The row's own id is the key, so a drawn line keeps its element
+                // while the batches move it (see `Row.id`). It sits on the wrapper,
+                // which is the click target and carries the selection; `.logline`
+                // inside it is what `measure` reads.
+                <div
+                  key={row.id}
+                  aria-current={row === selected ? "true" : undefined}
+                  onClick={() => {
+                    // A drag that selected text to copy is not a request for the panel.
+                    if (window.getSelection()?.toString()) return;
+                    // Reading this line, not following: a new line must not carry it away, and the panel
+                    // opening takes the bottom of the pane, where this row may be.
+                    stickRef.current = false;
+                    revealRef.current = true;
+                    setSelected(row);
+                    // Same row again: no render is coming to reveal it.
+                    if (row === selected) revealSelected();
+                  }}
+                  className="cursor-pointer"
+                  style={row === selected ? { background: toneWash("accent") } : undefined}
+                >
+                  <LogLine
+                    ts={row.ts}
+                    source={sourceOf(row, " · ")}
+                    // The word the LINE used, from core's one level scan — never
+                    // the severity vocabulary's name for it, which appears nowhere
+                    // in the log the reader is grepping against.
+                    //
+                    // And no `tone` beside it. The kit owns level→tone precisely
+                    // so the same word is not red here and grey on the next
+                    // screen; an override belongs to a line singled out for some
+                    // reason OTHER than its level, and none is.
+                    level={row.level}
+                    message={renderMessage(row, clauses)}
+                  />
+                </div>
               ))}
               {window_.bottomPad > 0 && (
                 <div style={{ height: window_.bottomPad }} aria-hidden="true" />
@@ -1407,6 +2108,15 @@ function LogsStream({
             </div>
           )}
         </div>
+        {selected !== null && (
+          <LineDetail
+            line={selected}
+            inView={selectedIndex >= 0}
+            clauses={clauses}
+            onToggle={toggleFilter}
+            onClose={closeDetail}
+          />
+        )}
       </SideRail>
     </LogsScreen>
   );

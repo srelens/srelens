@@ -354,9 +354,11 @@ export function McpSettingsSection() {
         />
       )}
 
-      {/* Recent agent activity */}
+      {/* Recent capability activity — an agent's calls AND this app's own
+          changes share one trail since #555, so a heading naming only agents
+          would have a reader attribute their own Sync to something else. */}
       <section className="flex flex-col gap-2">
-        <h4 className="text-sm font-medium">Recent agent activity</h4>
+        <h4 className="text-sm font-medium">Recent capability activity</h4>
         <McpPromptIssues nonce={promptIssuesNonce} />
         <McpAuditList onRefresh={() => setPromptIssuesNonce((n) => n + 1)} />
       </section>

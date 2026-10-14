@@ -1,4 +1,6 @@
-import { describe, it, expect, vi } from "vitest";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+import { afterEach, describe, it, expect, vi } from "vitest";
 import { useState, type FormEvent } from "react";
 import { render, screen, fireEvent } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
@@ -426,5 +428,378 @@ describe("TabStrip with nothing open", () => {
     // must still have a tab stop, or it drops out of the tab order entirely.
     render(<TabStrip tabs={TABS} activeId="gone" onSelect={() => {}} />);
     expect(tab("Pods").getAttribute("tabindex")).toBe("0");
+  });
+});
+
+describe("tab navigation enhancements", () => {
+  it("does not open a neighbour's tooltip when a pointer close transfers focus", async () => {
+    function Harness() {
+      const [tabs, setTabs] = useState<StripTab[]>([{ id: "home", title: "Home", pinned: true }, { id: "pods", title: "Pods" }]);
+      return <TabStrip tabs={tabs} activeId="pods" onSelect={() => {}} onClose={id => setTabs(rest => rest.filter(t => t.id !== id))} />;
+    }
+    render(<Harness />);
+    await userEvent.click(screen.getByRole("button", { name: "Close Pods" }));
+    expect(document.activeElement).toBe(tab("Home"));
+    expect(screen.queryByRole("tooltip")).toBeNull();
+    await userEvent.hover(tab("Home"));
+    expect(await screen.findByRole("tooltip")).toBeDefined();
+  });
+  it("shows full identity on keyboard focus and dismisses it with Escape", async () => {
+    const title = "production-monitoring-collector-configuration";
+    setup({ tabs: [{ id: "one", title, sub: "short", context: "long-cluster-context", detail: "ConfigMap · monitoring" }] });
+    await userEvent.tab();
+    expect((await screen.findByRole("tooltip")).textContent).toContain("long-cluster-context");
+    expect(screen.getByRole("tooltip").textContent).toContain("ConfigMap · monitoring");
+    expect(screen.getByRole("tooltip").textContent).toContain(title);
+    await userEvent.keyboard("{Escape}");
+    expect(screen.queryByRole("tooltip")).toBeNull();
+  });
+  it("requests a keyboard reorder without activating a tab", () => {
+    const onMove = vi.fn(); const {onSelect}=setup({onMove});
+    fireEvent.keyDown(tab("checkout-api"),{key:"ArrowLeft",ctrlKey:true,shiftKey:true});
+    expect(onMove).toHaveBeenCalledWith("logs",0);
+    expect(onSelect).not.toHaveBeenCalled();
+  });
+  it("keeps edge controls visible and out of the tab order when nothing overflows", () => {
+    setup();
+    for(const label of ["Scroll tabs left","Scroll tabs right"]){
+      const button=screen.getByRole("button",{name:label});
+      expect(button).toHaveProperty("disabled",true);
+      expect(button.tabIndex).toBe(-1);
+    }
+  });
+  it("does not select or reorder a tab dropped back in its own position", () => {
+    const onMove=vi.fn();const {onSelect}=setup({onMove});
+    const node=tab("checkout-api");
+    fireEvent.dragStart(node,{dataTransfer:{setData:vi.fn()}});
+    fireEvent.dragOver(node,{clientX:0});
+    fireEvent.drop(node,{clientX:0});
+    fireEvent.dragEnd(node);
+    fireEvent.click(node);
+    expect(onMove).not.toHaveBeenCalled();expect(onSelect).not.toHaveBeenCalled();
+  });
+});
+
+it("announces a completed keyboard move and keeps focus and selection separate", async () => {
+  function Reorderable() {
+    const [tabs,setTabs]=useState(TABS);
+    return <TabStrip tabs={tabs} activeId="pods" onSelect={()=>{}} onMove={(id,to)=>setTabs(old=>{
+      const next=[...old]; const [moved]=next.splice(next.findIndex(t=>t.id===id),1);next.splice(to,0,moved);return next;
+    })}/>;
+  }
+  render(<Reorderable/>);
+  tab("checkout-api").focus();
+  fireEvent.keyDown(tab("checkout-api"),{key:"ArrowLeft",metaKey:true,shiftKey:true});
+  expect(screen.getAllByRole("tab")[0]).toBe(tab("checkout-api"));
+  expect(document.activeElement).toBe(tab("checkout-api"));
+  expect(tab("Pods").getAttribute("aria-selected")).toBe("true");
+  expect(screen.getByRole("status").textContent).toBe("checkout-api moved to position 1 of 3");
+});
+
+it("shows an insertion marker and requests a drop without selecting", () => {
+  const onMove=vi.fn();const {onSelect}=setup({onMove});
+  fireEvent.dragStart(tab("nginx-7d4b"),{dataTransfer:{setData:vi.fn()}});
+  fireEvent.dragOver(tab("Pods"),{clientX:0});
+  expect(tab("Pods").getAttribute("data-drop")).toBe("before");
+  fireEvent.drop(tab("Pods"),{clientX:0});
+  expect(onMove).toHaveBeenCalledWith("shell",0);
+  expect(onSelect).not.toHaveBeenCalled();
+});
+
+
+it("rejects a tab drag that began on its close button and permits the next body drag", () => {
+  const onMove = vi.fn();
+  const onClose = vi.fn();
+  const { onSelect } = setup({ onMove, onClose });
+  const source = tab("nginx-7d4b");
+  const close = screen.getByRole("button", { name: "Close nginx-7d4b" });
+  const dataTransfer = { setData: vi.fn() };
+  fireEvent.pointerDown(close.querySelector("svg") ?? close);
+  // Native dragstart targets the draggable ancestor, not the pressed button.
+  expect(fireEvent.dragStart(source, { dataTransfer })).toBe(false);
+  fireEvent.dragOver(tab("Pods"), { clientX: 0 });
+  fireEvent.drop(tab("Pods"), { clientX: 0 });
+  expect(onMove).not.toHaveBeenCalled();
+  expect(dataTransfer.setData).not.toHaveBeenCalled();
+  expect(onSelect).not.toHaveBeenCalled();
+  fireEvent.click(close);
+  expect(onClose).toHaveBeenCalledWith("shell");
+
+  fireEvent.pointerDown(source);
+  expect(fireEvent.dragStart(source, { dataTransfer })).toBe(true);
+  fireEvent.drop(tab("Pods"), { clientX: 0 });
+  expect(onMove).toHaveBeenCalledWith("shell", 0);
+});
+
+
+it("keeps long tooltip identifiers on one horizontally scrollable line", () => {
+  const css = readFileSync(join(__dirname, "styles/kit.css"), "utf8");
+  const rule = css.match(/\.tab-tooltip\s*\{([^}]+)\}/)?.[1] ?? "";
+  expect(rule).toMatch(/white-space:\s*nowrap/);
+  expect(rule).toMatch(/overflow-x:\s*auto/);
+  expect(rule).not.toMatch(/overflow-wrap:\s*anywhere/);
+});
+
+/**
+ * #828: thirteen tabs fitted their bar exactly at the 108px minimum, so the
+ * scroll controls had nothing to scroll — and each tab's title had been cut to
+ * a letter beside a legible cluster name, so the tabs could not be told apart.
+ */
+describe("a narrow tab", () => {
+  const css = readFileSync(join(__dirname, "styles/kit.css"), "utf8");
+  const rule = (selector: string) =>
+    css.match(new RegExp(`\\n\\s*${selector.replace(".", "\\.")}\\s*\\{([^}]+)\\}`))?.[1] ?? "";
+
+  it("marks the title and the cluster as the two parts that share the row", () => {
+    setup();
+    const title = tab("Pods").querySelector(".tab-title");
+    expect(title?.textContent).toBe("Pods");
+    expect(tab("Pods").querySelector(".tab-sub")?.textContent).toBe("prod-eu");
+    // Still truncating, both of them: neither may push the tab past its width.
+    expect(title?.className).toContain("truncate");
+    expect(tab("Pods").querySelector(".tab-sub")?.className).toContain("truncate");
+  });
+
+  it("gives the cluster only what the title leaves, so the cluster is what goes first", () => {
+    // The title sizes to its own text and shrinks only when it alone will not
+    // fit. The cluster starts from nothing and takes the leftover — the
+    // opposite of two items shrinking in proportion, where the longer cluster
+    // name kept the row and the title lost it.
+    expect(rule(".tab-title")).toMatch(/flex:\s*0 1 auto/);
+    expect(rule(".tab-title")).toMatch(/min-width:\s*0/);
+    expect(rule(".tab-sub")).toMatch(/flex:\s*1 1 0/);
+    expect(rule(".tab-sub")).toMatch(/min-width:\s*0/);
+  });
+
+  it("keeps the 108px floor that makes a full strip overflow and scroll", () => {
+    expect(rule(".tab")).toMatch(/min-width:\s*108px/);
+  });
+});
+
+describe("keeping the active tab on screen", () => {
+  const MANY: StripTab[] = Array.from({ length: 14 }, (_, i) => ({ id: `t${i}`, title: `Tab ${i}`, sub: "prod-eu" }));
+
+  /** jsdom has no layout and no `scrollIntoView`; stand one in and watch it. */
+  function watchScroll() {
+    const calls: { title: string | null; options: unknown }[] = [];
+    const proto = window.HTMLElement.prototype as unknown as { scrollIntoView?: (options?: unknown) => void };
+    const original = proto.scrollIntoView;
+    proto.scrollIntoView = function (this: HTMLElement, options?: unknown) {
+      calls.push({ title: this.querySelector(".tab-title")?.textContent ?? null, options });
+    };
+    return {
+      calls,
+      restore: () => {
+        if (original) proto.scrollIntoView = original;
+        else delete proto.scrollIntoView;
+      },
+    };
+  }
+
+  it("scrolls a newly activated tab into view — the one just opened at the far end", () => {
+    const scroll = watchScroll();
+    try {
+      const view = render(<TabStrip tabs={MANY.slice(0, 13)} activeId="t0" onSelect={() => {}} />);
+      scroll.calls.length = 0;
+
+      // What opening a tab does: append it, and make it the active one.
+      view.rerender(<TabStrip tabs={MANY} activeId="t13" onSelect={() => {}} />);
+
+      expect(scroll.calls.at(-1)?.title).toBe("Tab 13");
+      // Only as far as the edge that cut it off; a tab already in view stays put.
+      expect(scroll.calls.at(-1)?.options).toEqual({ block: "nearest", inline: "nearest" });
+    } finally {
+      scroll.restore();
+    }
+  });
+
+  it("brings the active tab into view when the strip first appears", () => {
+    const scroll = watchScroll();
+    try {
+      render(<TabStrip tabs={MANY} activeId="t13" onSelect={() => {}} />);
+      expect(scroll.calls.some((c) => c.title === "Tab 13")).toBe(true);
+    } finally {
+      scroll.restore();
+    }
+  });
+
+  it("does not scroll on a render that changes neither the active tab nor the number of tabs", () => {
+    const scroll = watchScroll();
+    try {
+      const view = render(<TabStrip tabs={MANY} activeId="t3" onSelect={() => {}} />);
+      scroll.calls.length = 0;
+      // A retitled tab, as a route change makes: same tabs, same active one.
+      view.rerender(
+        <TabStrip tabs={MANY.map((t) => (t.id === "t5" ? { ...t, title: "Renamed" } : t))} activeId="t3" onSelect={() => {}} />,
+      );
+      expect(scroll.calls).toEqual([]);
+    } finally {
+      scroll.restore();
+    }
+  });
+
+  it("checks again when a tab closes, since the strip under the active tab has changed length", () => {
+    const scroll = watchScroll();
+    try {
+      const view = render(<TabStrip tabs={MANY} activeId="t13" onSelect={() => {}} />);
+      scroll.calls.length = 0;
+      view.rerender(<TabStrip tabs={MANY.filter((t) => t.id !== "t2")} activeId="t13" onSelect={() => {}} />);
+      expect(scroll.calls.at(-1)?.title).toBe("Tab 13");
+    } finally {
+      scroll.restore();
+    }
+  });
+
+  describe("when the strip itself is resized (PR #837 review)", () => {
+    /** The observers the strip created, so a test can fire the one on the tab list. */
+    function watchResize() {
+      const observers: { callback: () => void; targets: Element[]; disconnected: boolean }[] = [];
+      const holder = window as unknown as { ResizeObserver?: unknown };
+      const original = holder.ResizeObserver;
+      holder.ResizeObserver = class {
+        private entry: (typeof observers)[number];
+        constructor(callback: () => void) {
+          this.entry = { callback, targets: [], disconnected: false };
+          observers.push(this.entry);
+        }
+        observe(target: Element) {
+          this.entry.targets.push(target);
+        }
+        unobserve() {}
+        disconnect() {
+          this.entry.disconnected = true;
+        }
+      };
+      return {
+        /** Fire every live observer watching the tab list, as a resize does. */
+        resize: () => {
+          const list = screen.getByRole("tablist");
+          for (const o of observers) if (!o.disconnected && o.targets.includes(list)) o.callback();
+        },
+        observers,
+        restore: () => {
+          holder.ResizeObserver = original;
+        },
+      };
+    }
+
+    /** jsdom reports 0 for every width; give the tab list one a test can change. */
+    function setListWidth(width: number) {
+      Object.defineProperty(screen.getByRole("tablist"), "clientWidth", { value: width, configurable: true });
+    }
+
+    /** The width every element reports at mount, which is when the strip takes
+     *  its first reading. Put back after each test. */
+    let restoreWidth: (() => void) | undefined;
+    function setInitialWidth(width: number) {
+      const proto = window.HTMLElement.prototype;
+      const original = Object.getOwnPropertyDescriptor(proto, "clientWidth");
+      Object.defineProperty(proto, "clientWidth", { get: () => width, configurable: true });
+      restoreWidth = () => {
+        if (original) Object.defineProperty(proto, "clientWidth", original);
+        else delete (proto as unknown as { clientWidth?: number }).clientWidth;
+      };
+    }
+    afterEach(() => {
+      restoreWidth?.();
+      restoreWidth = undefined;
+    });
+
+    it("brings the active tab back into view when the strip gets narrower", () => {
+      const resize = watchResize();
+      const scroll = watchScroll();
+      try {
+        setInitialWidth(1300);
+        render(<TabStrip tabs={MANY} activeId="t13" onSelect={() => {}} />);
+        scroll.calls.length = 0;
+
+        // The window narrowed, or the sidebar widened: same tabs, same active one.
+        setListWidth(900);
+        resize.resize();
+
+        expect(scroll.calls.at(-1)?.title).toBe("Tab 13");
+        expect(scroll.calls.at(-1)?.options).toEqual({ block: "nearest", inline: "nearest" });
+      } finally {
+        scroll.restore();
+        resize.restore();
+      }
+    });
+
+    it("follows the tab that is active now, not the one that was when the strip mounted", () => {
+      const resize = watchResize();
+      const scroll = watchScroll();
+      try {
+        setInitialWidth(1300);
+        const view = render(<TabStrip tabs={MANY} activeId="t13" onSelect={() => {}} />);
+        view.rerender(<TabStrip tabs={MANY} activeId="t2" onSelect={() => {}} />);
+        scroll.calls.length = 0;
+
+        setListWidth(900);
+        resize.resize();
+
+        expect(scroll.calls.at(-1)?.title).toBe("Tab 2");
+      } finally {
+        scroll.restore();
+        resize.restore();
+      }
+    });
+
+    it("leaves the strip where the reader scrolled it when the strip gets wider", () => {
+      // Scrolled away to look at other tabs, then the window widened or the
+      // sidebar collapsed: nothing was cut off, so nothing is theirs to lose.
+      const resize = watchResize();
+      const scroll = watchScroll();
+      try {
+        setInitialWidth(900);
+        render(<TabStrip tabs={MANY} activeId="t13" onSelect={() => {}} />);
+        scroll.calls.length = 0;
+
+        setListWidth(1300);
+        resize.resize();
+        expect(scroll.calls).toEqual([]);
+
+        // And narrowing again from there still acts: the width it compares
+        // against is the last one seen, not the one at mount.
+        setListWidth(1000);
+        resize.resize();
+        expect(scroll.calls.at(-1)?.title).toBe("Tab 13");
+      } finally {
+        scroll.restore();
+        resize.restore();
+      }
+    });
+
+    it("does nothing when the observer reports and the width has not changed", () => {
+      // First observe, and a change of height alone, both arrive here.
+      const resize = watchResize();
+      const scroll = watchScroll();
+      try {
+        render(<TabStrip tabs={MANY} activeId="t13" onSelect={() => {}} />);
+        scroll.calls.length = 0;
+        resize.resize();
+        expect(scroll.calls).toEqual([]);
+      } finally {
+        scroll.restore();
+        resize.restore();
+      }
+    });
+
+    it("stops watching when the strip goes away", () => {
+      const resize = watchResize();
+      try {
+        const view = render(<TabStrip tabs={MANY} activeId="t13" onSelect={() => {}} />);
+        const list = screen.getByRole("tablist");
+        const watching = resize.observers.filter((o) => o.targets.includes(list));
+        expect(watching.length).toBeGreaterThan(0);
+        view.unmount();
+        expect(watching.every((o) => o.disconnected)).toBe(true);
+      } finally {
+        resize.restore();
+      }
+    });
+  });
+
+  it("does not fail where there is no scrollIntoView at all", () => {
+    expect(() => render(<TabStrip tabs={MANY} activeId="t13" onSelect={() => {}} />)).not.toThrow();
   });
 });

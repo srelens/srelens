@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
-const { isTauriMock, isApplePlatformMock, setTitleBarStyleMock, setTitleMock, notifyErrorMock, flushMock } = vi.hoisted(() => ({
+const { isTauriMock, isApplePlatformMock, setTitleBarStyleMock, setTitleMock, notifyErrorMock, flushMock, applyWindowBlurMock } = vi.hoisted(() => ({
+  applyWindowBlurMock: vi.fn(),
   flushMock: vi.fn(),
   isTauriMock: vi.fn(),
   isApplePlatformMock: vi.fn(),
@@ -11,6 +12,7 @@ const { isTauriMock, isApplePlatformMock, setTitleBarStyleMock, setTitleMock, no
 vi.mock("@srelens/core", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@srelens/core")>()),
   flushSettingsWrites: (options: unknown) => flushMock(options),
+  applyWindowBlur: (on: boolean) => applyWindowBlurMock(on),
   isTauri: () => isTauriMock(),
   isApplePlatform: (platform?: string) => isApplePlatformMock(platform),
   notify: { error: notifyErrorMock, success: vi.fn(), info: vi.fn() },
@@ -30,6 +32,7 @@ beforeEach(() => {
   flushMock.mockReset().mockResolvedValue(undefined);
   setTitleBarStyleMock.mockReset().mockResolvedValue(undefined);
   setTitleMock.mockReset().mockResolvedValue(undefined);
+  applyWindowBlurMock.mockReset().mockResolvedValue(true);
   isApplePlatformMock.mockReset().mockReturnValue(true);
   notifyErrorMock.mockClear();
   isTauriMock.mockReturnValue(true);
@@ -67,6 +70,28 @@ describe("switchDesign", () => {
     await switchDesign("classic");
     expect(setTitleBarStyleMock).toHaveBeenCalledWith("visible");
     expect(setTitleMock).toHaveBeenCalledWith("srelens");
+    expect(reload).toHaveBeenCalledTimes(1);
+  });
+
+  it("drops the blur behind the window before reloading into classic", async () => {
+    // The native window outlives the page, and classic never syncs the blur,
+    // so one left on here would run behind classic's opaque page for good.
+    // Awaited: the reload must not race the host turning it off.
+    let answer!: (done: boolean) => void;
+    applyWindowBlurMock.mockReturnValueOnce(new Promise<boolean>((resolve) => { answer = resolve; }));
+    const switching = switchDesign("classic");
+    await vi.waitFor(() => expect(applyWindowBlurMock).toHaveBeenCalledWith(false));
+    expect(reload).not.toHaveBeenCalled();
+    answer(true);
+    expect((await switching).ok).toBe(true);
+    expect(reload).toHaveBeenCalledTimes(1);
+  });
+
+  it("still reloads when the window will not drop the blur", async () => {
+    // A blur left running unseen is a blemish; a switch that does not happen
+    // is a broken setting. `applyWindowBlur` reports a refusal as `false`.
+    applyWindowBlurMock.mockResolvedValue(false);
+    expect((await switchDesign("classic")).ok).toBe(true);
     expect(reload).toHaveBeenCalledTimes(1);
   });
 

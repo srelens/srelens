@@ -7,12 +7,6 @@ export interface AboutKindProps {
   crd: CrdRef;
   /** The cluster context name, for the command a reader can take away. */
   context: string;
-  /**
-   * How many objects of this kind the list is showing, or `undefined` when
-   * there is no count yet. Optional for the same reason the version fields
-   * are: a row nothing is known for is left out, never drawn as a zero.
-   */
-  objects?: number;
 }
 
 /**
@@ -37,12 +31,14 @@ export interface AboutKindProps {
  *
  * **A ROW WITH NOTHING BEHIND IT IS LEFT OUT, NOT DRAWN EMPTY OR ZEROED.**
  * `versions` and `storageVersion` are both optional on `CrdRef` (an older
- * backend, or a ref hand-built in a test, arrives without them), and `objects`
- * is absent until the list has answered. A key with an empty value invites the
- * reader to conclude the CRD serves no versions, which is not a thing a CRD
- * can do; `Objects 0` on a kind with forty of them is worse still, because
- * zero is a number a reader will believe. An absent row asks a question. A
- * wrong one answers it.
+ * backend, or a ref hand-built in a test, arrives without them). A key with an
+ * empty value invites the reader to conclude the CRD serves no versions, which
+ * is not a thing a CRD can do. An absent row asks a question. A wrong one
+ * answers it.
+ *
+ * How many objects there are is NOT here. It was, for custom resources alone;
+ * it is in the list's header now, for every kind (`ListCount`, #402), and one
+ * figure belongs in one place.
  *
  * The title comes from `crd.kind`. The design derives it from the slug by
  * upper-casing the first letter, which renders `servicemonitors` as
@@ -54,7 +50,7 @@ export interface AboutKindProps {
  * between them. A wrapper here would break that adjacency and the rail would
  * read as one undivided block.
  */
-export function AboutKind({ crd, context, objects }: AboutKindProps) {
+export function AboutKind({ crd, context }: AboutKindProps) {
   const rows: Array<[key: string, value: ReactNode]> = [
     ["Kind", crd.kind],
     // Read, not assumed — see the note above.
@@ -62,7 +58,6 @@ export function AboutKind({ crd, context, objects }: AboutKindProps) {
   ];
   if (crd.versions?.length) rows.push(["Served versions", crd.versions.join(", ")]);
   if (crd.storageVersion) rows.push(["Storage version", crd.storageVersion]);
-  if (objects !== undefined) rows.push(["Objects", String(objects)]);
 
   return (
     <>

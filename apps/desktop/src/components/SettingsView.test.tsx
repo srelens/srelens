@@ -41,8 +41,8 @@ vi.mock("@srelens/core/lib/clusters", () => ({
   listContexts: () =>
     Promise.resolve({
       contexts: [
-        { name: "prod-eu", stableId: "/k/prod-eu.yaml#prod-eu", cluster: "production", server: "https://prod.example", isCurrent: true },
-        { name: "staging", stableId: "/k/staging.yaml#staging", cluster: "staging", server: "https://staging.example", isCurrent: false },
+        { name: "prod-eu", stableId: "/k/prod-eu.yaml#prod-eu", key: "/k/prod-eu.yaml#prod-eu", cluster: "production", server: "https://prod.example", isCurrent: true },
+        { name: "staging", stableId: "/k/staging.yaml#staging", key: "/k/staging.yaml#staging", cluster: "staging", server: "https://staging.example", isCurrent: false },
       ],
     }),
 }));
@@ -543,6 +543,39 @@ describe("SettingsView", () => {
     expect(screen.queryByRole("button", { name: /Download & install/ })).toBeNull();
   });
 
+  it("offers Nix profile guidance instead of install for Nix installs", async () => {
+    updaterMocks.checkForUpdate.mockResolvedValue({
+      version: "0.2.0",
+      currentVersion: "0.1.0",
+      notes: "New things",
+      external: true,
+      nixManaged: true,
+    });
+    render(
+      <SettingsView
+        theme={{ name: "slate", mode: "dark" }}
+        onThemeNameChange={() => {}}
+        onThemeModeChange={() => {}}
+        defaultNamespace=""
+        onDefaultNamespaceChange={() => {}}
+        layout={DEFAULT_WORKSPACE_LAYOUT}
+        onLayoutChange={() => {}}
+        contextProfiles={{}}
+        onContextProfilesChange={() => {}}
+        kubeconfigFiles={[]}
+        onKubeconfigFilesChange={() => {}}
+        contextOrder={[]}
+        onContextOrderChange={() => {}}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: /Updates/ }));
+    fireEvent.click(await screen.findByRole("button", { name: "Check for updates" }));
+    expect(await screen.findByText(/0\.2\.0/)).toBeDefined();
+    expect(screen.getByText(/managed by Nix/)).toBeDefined();
+    expect(screen.getByText(/nix profile upgrade/)).toBeDefined();
+    expect(screen.queryByRole("button", { name: /Download & install/ })).toBeNull();
+  });
+
   it("warns before a .deb/.rpm update asks for a password (#35)", async () => {
     updaterMocks.checkForUpdate.mockResolvedValue({
       version: "0.2.0",
@@ -695,11 +728,69 @@ describe("SettingsView", () => {
     // The desktop-only nav entries are gone entirely (not just empty panes).
     expect(screen.queryByRole("button", { name: /Updates/ })).toBeNull();
     expect(screen.queryByRole("button", { name: /^MCP/ })).toBeNull();
+    // Backup is desktop-only too: a bundle is built from the desktop config
+    // directory and local kubeconfig files, so on the web the entry would
+    // open a pane whose every button fails.
+    expect(screen.queryByRole("button", { name: /Backup/ })).toBeNull();
+    // Apps stays: the web server keeps each signed-in user's own apps (#515).
+    expect(screen.getByRole("button", { name: /Apps/ })).toBeDefined();
 
     // The request-timeout slider is a no-op on the web (set_request_timeout
     // isn't a web command), so it's hidden rather than shown-but-broken.
     fireEvent.click(screen.getByRole("button", { name: /Kubernetes/ }));
     expect(await screen.findByLabelText("Default namespace")).toBeDefined();
     expect(screen.queryByLabelText("Cluster request timeout in seconds")).toBeNull();
+  });
+
+  it("opens Backup from the nav, so the section is actually reachable", async () => {
+    // A section with no way into it renders nowhere. `BackupSettingsSection`
+    // has its own suite; what is only checkable here is that the nav entry
+    // exists and that clicking it lands on that pane rather than a blank one.
+    render(
+      <SettingsView
+        theme={{ name: "slate", mode: "dark" }}
+        onThemeNameChange={() => {}}
+        onThemeModeChange={() => {}}
+        defaultNamespace=""
+        onDefaultNamespaceChange={() => {}}
+        layout={DEFAULT_WORKSPACE_LAYOUT}
+        onLayoutChange={() => {}}
+        contextProfiles={{}}
+        onContextProfilesChange={() => {}}
+        kubeconfigFiles={[]}
+        onKubeconfigFilesChange={() => {}}
+        contextOrder={[]}
+        onContextOrderChange={() => {}}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: /Backup/ }));
+    expect(await screen.findByRole("button", { name: /Export setup/i })).toBeDefined();
+    expect(screen.getByRole("button", { name: /Choose file/i })).toBeDefined();
+  });
+
+  it("can be deep-linked straight to Backup", async () => {
+    // `initialSection` is how the rest of the app opens a specific pane; a
+    // new section that is not a valid value for it is only half-wired.
+    render(
+      <SettingsView
+        initialSection="backup"
+        theme={{ name: "slate", mode: "dark" }}
+        onThemeNameChange={() => {}}
+        onThemeModeChange={() => {}}
+        defaultNamespace=""
+        onDefaultNamespaceChange={() => {}}
+        layout={DEFAULT_WORKSPACE_LAYOUT}
+        onLayoutChange={() => {}}
+        contextProfiles={{}}
+        onContextProfilesChange={() => {}}
+        kubeconfigFiles={[]}
+        onKubeconfigFilesChange={() => {}}
+        contextOrder={[]}
+        onContextOrderChange={() => {}}
+      />,
+    );
+
+    expect(await screen.findByRole("button", { name: /Export setup/i })).toBeDefined();
   });
 });

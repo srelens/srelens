@@ -36,7 +36,8 @@ vi.mock("../lib/workloads", async (importOriginal) => {
   return { ...actual, deletePod: deletePodMock, evictPod: evictPodMock };
 });
 
-import { PALETTE_ACTIONS, actionsForKind, paletteActionCapabilityIds, type PaletteActionCtx } from "./paletteActions";
+import { PALETTE_ACTIONS, actionsForKind, appPaletteCommands, paletteActionCapabilityIds, type PaletteActionCtx } from "./paletteActions";
+import type { ExtensionManifest } from "./extensions";
 
 function ctx(overrides: Partial<PaletteActionCtx> = {}): PaletteActionCtx {
   return {
@@ -181,5 +182,58 @@ describe("paletteActions", () => {
     const debugNode = actionByCapability("k8s.createNodeDebugPod");
     await debugNode.run!(ctx({ kind: "nodes", namespace: null, name: "node-a" }));
     expect(createNodeDebugPodMock).toHaveBeenCalledWith("kind-dev", "node-a");
+  });
+});
+
+describe("appPaletteCommands (#544)", () => {
+  const manifest = {
+    id: "org.example.gitops", name: "GitOps", version: "0.1.0", srelensApiVersion: "^0.4", kind: "declarative",
+    permissions: [],
+    capabilities: [
+      { name: "apps", title: "Apps", target: "k8s.listCustomResource", arguments: { group: "argoproj.io", kind: "Application" }, inputs: [] },
+      { name: "projects", title: "Projects", target: "k8s.listCustomResource", arguments: { group: "argoproj.io", kind: "AppProject" }, inputs: [] },
+    ],
+    actions: [
+      { name: "sync", title: "Sync", target: "k8s.mergePatch", resource: "apps", arguments: {} },
+      { name: "touch", title: "Touch", target: "k8s.annotate", resource: "projects", arguments: {} },
+    ],
+    contributions: {
+      pages: [{ id: "apps", title: "Applications", capability: "apps" }, { id: "projects", title: "Projects", capability: "projects" }],
+      detailTabs: [], detailLinks: [],
+      commands: [
+        { id: "open", title: "Open applications", target: { page: "apps" } },
+        { id: "sync", title: "Sync application", target: { action: "sync" }, forKinds: ["argoproj.io/Application"] },
+      ],
+    },
+  } as ExtensionManifest;
+  const app = { id: manifest.id, name: "Argo CD", manifest };
+  const withCommands = (commands: NonNullable<ExtensionManifest["contributions"]["commands"]>) =>
+    ({ ...app, manifest: { ...manifest, contributions: { ...manifest.contributions, commands } } });
+
+  it("offers page commands with no resource open, under the host's name for the app", () => {
+    const [open, ...rest] = appPaletteCommands(app, null);
+    expect(rest).toEqual([]);
+    expect(open).toEqual({ id: "org.example.gitops/open", label: "Argo CD: Open applications", target: { kind: "page", page: "apps" } });
+  });
+
+  it("offers an action command only on a resource of the kind its action acts on", () => {
+    expect(appPaletteCommands(app, { capability: "projects" }).map((c) => c.target.kind)).toEqual(["page"]);
+    expect(appPaletteCommands(app, { capability: "apps" })[1]).toEqual({
+      id: "org.example.gitops/sync", label: "Argo CD: Sync application",
+      target: { kind: "action", action: "sync" }, capabilityId: "extensions.action",
+    });
+  });
+
+  it("refuses an action command whose forKinds do not name that kind", () => {
+    const wrong = withCommands([{ id: "sync", title: "Sync", target: { action: "sync" }, forKinds: ["argoproj.io/AppProject"] }]);
+    expect(appPaletteCommands(wrong, { capability: "apps" })).toEqual([]);
+  });
+
+  it("draws nothing for a command naming an undeclared page or action", () => {
+    const broken = withCommands([
+      { id: "a", title: "A", target: { page: "gone" } },
+      { id: "b", title: "B", target: { action: "gone" }, forKinds: ["argoproj.io/Application"] },
+    ]);
+    expect(appPaletteCommands(broken, { capability: "apps" })).toEqual([]);
   });
 });

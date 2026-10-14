@@ -1,3 +1,4 @@
+import { ClassicAppPage } from "./components/Extensions";
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
@@ -25,14 +26,10 @@ import { Toaster } from "./components/ui/sonner";
 import { Dock, type DockSession, type DockKind } from "./components/Dock";
 import { StatusBar } from "./components/StatusBar";
 import { LandingPage } from "./components/LandingPage";
+import { ClassicDeprecationBanner } from "./components/ClassicDeprecationBanner";
 import { getInitialTheme, applyTheme, type Theme, type ThemeMode, type ThemeName } from "./ui";
 import { listCrds, type CrdRef } from "@srelens/core";
-import {
-  isClusterScopedKind,
-  isNavigableResourceKind,
-  targetNamespace,
-  type ResourceTarget,
-} from "@srelens/core";
+import { targetNamespace, type ResourceTarget } from "@srelens/core";
 import {
   loadClusterNamespaces,
   saveClusterNamespaces,
@@ -54,7 +51,13 @@ import {
   loadMcpSettings,
 } from "@srelens/core";
 import { applyUiScale, getUiScale, setUiScale, stepUiScale, uiScaleShortcut } from "@srelens/core";
-import { dedupeDeepLinkTargets, parseDeepLink, type DeepLinkTarget } from "@srelens/core";
+import {
+  checkDeepLink,
+  dedupeDeepLinkTargets,
+  deepLinkHeldNotice,
+  DEEP_LINK_REFUSED,
+  type DeepLinkTarget,
+} from "@srelens/core";
 import { applyViewPatch, type TabViewState } from "@srelens/core";
 import {
   remapTabsToContexts,
@@ -79,7 +82,10 @@ import {
 import { flushSettingsWrites } from "@srelens/core";
 import { startMcpHttp } from "@srelens/core";
 import { checkForUpdateAndNotify } from "@srelens/core";
+import { currentWindowLabel } from "@srelens/core";
 import { notify } from "@srelens/core";
+import { listenForHostNotices } from "@srelens/core";
+import { describeError } from "@srelens/core";
 import { isTauri, isWeb } from "@srelens/core/platform";
 import type { SettingsSection } from "./components/SettingsView";
 import { listContexts, deleteContext, type ClusterContext } from "@srelens/core";
@@ -96,7 +102,12 @@ export function App() {
   // the open tabs are restored from a prior session (a browser reload otherwise
   // wipes them); desktop starts empty. Computed once so tabs/activeTabId/the id
   // counter all agree on the same restored snapshot.
-  const [restored] = useState(loadOpenTabs);
+  const windowLabel = useMemo(() => currentWindowLabel(), []);
+  const [restored] = useState(() => loadOpenTabs(windowLabel));
+  // A context window's `?context=` is NOT a tab yet: it becomes one once the
+  // contexts are listed, in the effect beside the design handoff below. What is
+  // in the query is not necessarily a name this design can use, and seeding a
+  // tab from it here would be seeding one before that can be known.
   const [tabs, setTabs] = useState<ViewTab[]>(() => restored?.tabs ?? []);
   const [activeTabId, setActiveTabId] = useState<number | null>(
     () => restored?.activeTabId ?? null,
@@ -151,8 +162,23 @@ export function App() {
   // Durable per-context state lives under stable ids; everything below this
   // line works in display names, which is what the UI shows (#265).
   const knownContexts = contexts ?? [];
+  // Prefer the live listing; when it fails entirely classic keeps restored
+  // tabs, so fall back to each tab's stored `clusterId` rather than sending a
+  // display name into `?context=` (boot resolves that strictly as a stable id).
   const stableIdOf = (cluster: string) =>
-    knownContexts.find((context) => context.name === cluster)?.stableId;
+    knownContexts.find((context) => context.name === cluster)?.stableId
+    ?? tabs.find((tab) => tab.cluster === cluster)?.clusterId;
+  // A window's identity, which is NOT the persisted one. `stableId` joins the
+  // kubeconfig path and the context name with a bare `#`, so a path `a` with
+  // context `b#c` and a path `a#b` with context `c` produce the same string:
+  // one window label and one `?context=` for two clusters, so the second
+  // focused the first's window and this resolver could answer with either
+  // (#623). `key` encodes `#` and `%` in each part, so it names exactly one
+  // context. No fallback to a restored tab's `clusterId` — that is a stable
+  // id, and sending one into `?context=` would never match the key a later
+  // listing offers. The button stays disabled until the listing answers.
+  const contextKeyOf = (cluster: string) =>
+    knownContexts.find((context) => context.name === cluster)?.key;
   const contextProfiles = projectToNames(contextProfilesById, knownContexts);
   const contextOrder = projectOrderToNames(contextOrderById, knownContexts);
   const clusterNs = projectToNames(clusterNsById, knownContexts);
@@ -210,7 +236,11 @@ export function App() {
         // Computed from the ref rather than inside the updater: the active id
         // has to be reconciled alongside, and state updaters must stay free
         // of side effects (React re-invokes them in development).
-        const { tabs: kept, dropped } = pruneMissingContexts(remapped, names);
+        // Pruned only on a listing that answered: one that failed, even with
+        // a partial list, has not said a missing context is gone (#855).
+        const { tabs: kept, dropped } = o.error
+          ? { tabs: remapped, dropped: 0 }
+          : pruneMissingContexts(remapped, names);
         const renamed = remapped.some((tab, i) => tab !== tabsRef.current[i]);
         if (renamed && dropped === 0) setTabs(remapped);
         if (dropped > 0) {
@@ -228,7 +258,9 @@ export function App() {
             );
           }
         }
-        sessionPruneReported.current = true;
+        // Not after a failed listing, which judged nothing: the restored
+        // session's tabs are still to be checked, and still owed the notice.
+        if (!o.error) sessionPruneReported.current = true;
       }
     });
   };
@@ -242,7 +274,7 @@ export function App() {
   // paths DRAIN the same slot, so a link is acted on exactly once.
   const [pendingLinks, setPendingLinks] = useState<string[]>([]);
   useEffect(() => {
-    if (!isTauri()) return;
+    if (!isTauri() || windowLabel !== "main") return;
     const drain = () => {
       void invokeCommand<string[]>("take_pending_deep_links")
         .then((urls) => {
@@ -276,60 +308,109 @@ export function App() {
   // about where it was. Consumed once the contexts are known — same gate as
   // the deep links below, for the same reason — and consumed exactly once:
   // takeHandoff clears as it reads, so a later launch starts at home.
+  const handoffOpened = useRef(false);
   useEffect(() => {
     if (!contexts) return;
     const handoff = takeHandoff();
     if (!handoff) return;
     if (contexts.some((c) => c.name === handoff.context)) {
       openView(handoff.context, handoff.kind);
+      handoffOpened.current = true;
     }
   }, [contexts]);
+
+  // A context window's first tab, from the `?context=` in its URL. Both
+  // designs write a context `key` into that query: matching by display name as
+  // well would collide when one cluster's name equals another's id, and open
+  // the wrong overview. The key rather than the `stableId` because two
+  // different contexts can share a stable ID — see `contextKeyOf` above.
+  const contextParam = useMemo(
+    () => new URLSearchParams(window.location.search).get("context"),
+    [],
+  );
+  const contextParamConsumed = useRef(false);
+  const contextParamListFailedNotified = useRef(false);
+  useEffect(() => {
+    if (!contexts || contextParamConsumed.current) return;
+    // A design switch that has already picked this window's first view
+    // outranks the query. A restored session does NOT — the query is the
+    // window's identity, and reconciling a save whose target is gone would
+    // silently promote another surviving cluster (ClusterHotbar can open
+    // others into this window).
+    if (!contextParam || handoffOpened.current) {
+      contextParamConsumed.current = true;
+      return;
+    }
+    // Partial listings can return readable contexts alongside an unrelated
+    // kubeconfig error. Resolve a present match first — treating any error as
+    // "keep waiting" left a valid target unopened forever.
+    const match = contexts.find((c) => c.key === contextParam);
+    if (match) {
+      contextParamConsumed.current = true;
+      if (!restored?.tabs?.length) openView(match.name, "overview");
+      return;
+    }
+    // Target absent. Listing failed: keep the request (and any restored tabs)
+    // for a later refresh. Listing answered: it is gone — clear the save so
+    // prune cannot leave another cluster active in this dedicated window.
+    if (contextsError) {
+      if (!contextParamListFailedNotified.current) {
+        contextParamListFailedNotified.current = true;
+        notify.error(
+          "Couldn't open that cluster",
+          describeError(contextsError).detail || "The kube contexts could not be listed.",
+        );
+      }
+      return;
+    }
+    contextParamConsumed.current = true;
+    setTabs([]);
+    setActiveTabId(null);
+    notify.error(
+      "Couldn't open that cluster",
+      "It is not among the listed kube contexts.",
+    );
+  }, [contexts, contextsError]);
 
   // Routed only once the contexts are known: a link that arrives during a cold
   // start would otherwise be judged against an empty context list and
   // rejected as pointing at a cluster that "doesn't exist".
+  //
+  // A listing that FAILED is no answer either (#855): a link naming a context
+  // it did not return stays queued, one notice says why, and the re-list that
+  // follows (`kubeconfig-changed`, a file added) judges it again.
+  const heldLinksNotified = useRef(false);
   useEffect(() => {
+    if (!contextsError) heldLinksNotified.current = false;
     if (pendingLinks.length === 0 || !contexts) return;
     // Drain the whole queue: several links can arrive while the contexts are
     // still loading, and routing only the newest would silently swallow the
     // rest. They open in order, so the last one ends up in front.
     const queued = pendingLinks;
-    setPendingLinks([]);
 
     // Validate first, then route: a batch is applied against ONE render's
     // `tabs`, so links sharing a view have to be collapsed before any of them
-    // appends a tab (see dedupeDeepLinkTargets).
+    // appends a tab (see dedupeDeepLinkTargets). The rules are core's, shared
+    // with the new design, so a link refused here is refused there too.
+    const names = contexts.map((c) => c.name);
     const valid: DeepLinkTarget[] = [];
+    const held: string[] = [];
     for (const url of queued) {
-      const target = parseDeepLink(url);
-      if (!target) {
-        notify.error("Couldn't open that link", "It isn't a link srelens understands.");
-        continue;
-      }
-      if (!contexts.some((c) => c.name === target.context)) {
-        notify.error("Couldn't open that link", `No kube context named "${target.context}".`);
-        continue;
-      }
-      if (target.route === "resource") {
-        // K8S_KIND alone is too permissive: Events have a list view but no
-        // detail, so such a link would quietly land on the list instead of
-        // the object it named.
-        if (!isNavigableResourceKind(target.kind)) {
-          notify.error("Couldn't open that link", `srelens can't open a ${target.kind} directly.`);
-          continue;
-        }
-        // "-" means cluster-scoped. Allowing it for a namespaced kind would
-        // search every namespace and focus whichever matching name came back
-        // first — a link that silently opens the wrong object.
-        if (!isClusterScopedKind(target.kind) && target.namespace === null) {
-          notify.error(
-            "Couldn't open that link",
-            `${target.kind} is namespaced, so the link needs a namespace.`,
-          );
-          continue;
-        }
-      }
-      valid.push(target);
+      const check = checkDeepLink(url, names, { listingFailed: contextsError !== "" });
+      if (check.ok) valid.push(check.target);
+      else if (check.held) held.push(url);
+      else notify.error(DEEP_LINK_REFUSED, check.reason);
+    }
+    if (held.length > 0 && !heldLinksNotified.current) {
+      heldLinksNotified.current = true;
+      const notice = deepLinkHeldNotice(contextsError);
+      notify.error(notice.title, notice.detail);
+    }
+    // Only when something left the queue: re-queuing the held links unchanged
+    // would wake this effect again for nothing. What is taken off the front is
+    // exactly `queued`, so links a drain appended meanwhile are kept.
+    if (held.length < queued.length) {
+      setPendingLinks((current) => [...held, ...current.slice(queued.length)]);
     }
 
     for (const target of dedupeDeepLinkTargets(valid)) {
@@ -346,7 +427,7 @@ export function App() {
         target.name,
       );
     }
-  }, [pendingLinks, contexts]);
+  }, [pendingLinks, contexts, contextsError]);
 
   // Restored CRD tabs carry a CrdRef captured in a previous session (#159).
   // The CRD may since have been deleted, or may now serve a different version,
@@ -407,6 +488,13 @@ export function App() {
     };
   }, []);
 
+  // A helm operation outlives the window that started it, and the host
+  // reports how it ended to every window as a toast (#735).
+  useEffect(() => {
+    if (!("__TAURI_INTERNALS__" in window)) return;
+    return listenForHostNotices();
+  }, []);
+
   // The master-password gate (issue #208) mounts as a blocking overlay via
   // <VaultGate /> below — setup at first launch, unlock (password or the
   // enrolled biometric skip) on later ones.
@@ -455,8 +543,8 @@ export function App() {
   // mutate their transient tab, but must not queue the same fsync every 400ms.
   useEffect(() => {
     const snapshot = openTabsForSave.current;
-    scheduleSaveOpenTabs(snapshot.tabs, snapshot.activeTabId);
-  }, [openTabsSaveKey]);
+    scheduleSaveOpenTabs(snapshot.tabs, snapshot.activeTabId, windowLabel);
+  }, [openTabsSaveKey, windowLabel]);
 
   // Web: localStorage writes are synchronous, so unload handlers suffice.
   useEffect(() => {
@@ -645,7 +733,7 @@ export function App() {
         // persistence effect. Without queueing the post-close snapshot here,
         // the close-request flush would write the pre-close one and the tab
         // the user just closed would come back on the next launch.
-        scheduleSaveOpenTabs(remaining, remaining.at(-1)?.id ?? null);
+        scheduleSaveOpenTabs(remaining, remaining.at(-1)?.id ?? null, windowLabel);
         if (closingLastTab) void getCurrentWindow().close();
       } else {
         void getCurrentWindow().close();
@@ -698,13 +786,21 @@ export function App() {
       openAssistant();
       return;
     }
-    const existing = tabs.find((t) => t.cluster === cluster && t.kind === kind && !t.crd);
+    const existing = tabs.find((t) => t.cluster === cluster && t.kind === kind && !t.crd && !t.app);
     if (existing) {
       setActiveTabId(existing.id);
       return;
     }
     const id = tabIdRef.current++;
     setTabs((ts) => [...ts, { id, cluster, clusterId: stableIdOf(cluster), kind, namespace: namespaceFor(cluster) }]);
+    setActiveTabId(id);
+  }
+
+  function openAppPage(cluster:string, appId:string, page:string, namespace="", resourceName?:string) {
+    const existing=tabs.find(t=>t.cluster===cluster && t.app?.id===appId && t.app.page===page && (t.namespace??"")===namespace && t.app.resourceName===resourceName);
+    if(existing){setActiveTabId(existing.id);return;}
+    const id=tabIdRef.current++;
+    setTabs(ts=>[...ts,{id,cluster,clusterId:stableIdOf(cluster),kind:"overview",namespace,app:{id:appId,page,resourceName}}]);
     setActiveTabId(id);
   }
 
@@ -794,12 +890,13 @@ export function App() {
   const [vaultReady, setVaultReady] = useState(false);
 
   // Start the in-app MCP HTTP server once the vault is ready if the user left
-  // it enabled, so agents can connect without opening Settings first.
+  // it enabled, so agents can connect without opening Settings first. Restrict
+  // auto-start to the main window so opening a context window does not restart it.
   useEffect(() => {
-    if (!isTauri() || !vaultReady) return;
+    if (!isTauri() || !vaultReady || windowLabel !== "main") return;
     const mcp = loadMcpSettings();
     if (mcp.enabled) void startMcpHttp(mcp.port).catch(() => {});
-  }, [vaultReady]);
+  }, [vaultReady, windowLabel]);
 
   /** Open a resource's kind view in a NAMED cluster and focus its detail.
    *  Takes the cluster explicitly because a deep link can target a context
@@ -813,7 +910,7 @@ export function App() {
     const focus = { name, namespace, nonce: ++focusNonce.current };
     // Filter the list to the resource's namespace so its row is present to focus.
     const ns = namespace ?? "";
-    const existing = tabs.find((t) => t.cluster === cluster && t.kind === kind && !t.crd);
+    const existing = tabs.find((t) => t.cluster === cluster && t.kind === kind && !t.crd && !t.app);
     if (existing) {
       setTabs((ts) =>
         ts.map((t) =>
@@ -858,7 +955,16 @@ export function App() {
   function openNewResource(initialKind?: string) {
     if (!activeCluster) return;
     const id = tabIdRef.current++;
-    setTabs((ts) => [...ts, { id, cluster: activeCluster, kind: "newresource", create: { initialKind } }]);
+    setTabs((ts) => [
+      ...ts,
+      {
+        id,
+        cluster: activeCluster,
+        kind: "newresource",
+        create: { initialKind },
+        namespace: activeTab?.namespace ?? namespaceFor(activeCluster),
+      },
+    ]);
     setActiveTabId(id);
   }
 
@@ -877,6 +983,15 @@ export function App() {
     setTabs((current) =>
       current.map((tab) =>
         tab.id === tabId && tab.edit ? { ...tab, edit: { ...tab.edit, draft } } : tab,
+      ),
+    );
+  }
+
+  /** A fetched manifest: the working copy, and what it is compared against. */
+  function setEditResourceLoaded(tabId: number, yaml: string) {
+    setTabs((current) =>
+      current.map((tab) =>
+        tab.id === tabId && tab.edit ? { ...tab, edit: { ...tab.edit, draft: yaml, loaded: yaml } } : tab,
       ),
     );
   }
@@ -965,8 +1080,13 @@ export function App() {
     setDockSessions((t) => [...t, { id, kind, ...s }]);
     setActiveDock(id);
   }
-  /** Tear down any pod tied to a closing dock session (e.g. node debug shell). */
+  /**
+   * Tear down any pod tied to a closing dock session (e.g. node debug shell).
+   * On desktop the host deletes a node shell's debug pod itself, however the
+   * shell ends (#734), so only the web page still does it.
+   */
   function teardownDock(sessions: DockSession[]) {
+    if (isTauri()) return;
     for (const s of sessions) {
       if (s.deleteOnClose) {
         void deletePod(s.deleteOnClose.context, s.deleteOnClose.namespace, s.deleteOnClose.pod);
@@ -1005,7 +1125,7 @@ export function App() {
     label: t.edit
       ? `edit: ${t.edit.kind}/${t.edit.name}`
       : t.cluster
-        ? `${t.crd ? t.crd.kind : RESOURCE_LABELS[t.kind]} · ${contextDisplayName(t.cluster, contextProfiles[t.cluster])}`
+        ? `${t.app ? (t.app.resourceName ?? t.app.page) : t.crd ? t.crd.kind : RESOURCE_LABELS[t.kind]} · ${contextDisplayName(t.cluster, contextProfiles[t.cluster])}`
         : RESOURCE_LABELS[t.kind],
   }));
 
@@ -1031,16 +1151,27 @@ export function App() {
         <Sidebar
           clusters={clusters}
           activeCluster={activeCluster}
-          activeKind={activeKind}
+          activeKind={activeTab?.app ? undefined : activeKind}
           activeCrd={activeCrd}
           onSelect={(c, k) => openView(c, k)}
           onSelectCrd={(c, crd) => openCrdView(c, crd)}
+          onOpenApp={openAppPage}
           contextProfiles={contextProfiles}
+          contextKey={contextKeyOf}
           width={sidebarWidth}
           onResize={setSidebarWidth}
         />
       )}
       <div className="fl-main">
+        <ClassicDeprecationBanner
+          unsavedDrafts={
+            tabs.filter(
+              (tab) =>
+                tab.create?.draft !== undefined ||
+                (tab.edit?.draft !== undefined && tab.edit.draft !== tab.edit.loaded),
+            ).length
+          }
+        />
         {tabs.length > 0 ? (
           <>
             <ResourceTabs
@@ -1055,7 +1186,7 @@ export function App() {
             {activeTab && (
               <>
                 <div className="flex min-h-0 flex-1 flex-col overflow-hidden bg-background">
-                  {activeKind === "settings" ? (
+                  {activeTab.app && activeCluster ? <ClassicAppPage key={activeTab.id} context={activeCluster} id={activeTab.app.id} page={activeTab.app.page} namespace={activeTab.namespace} onNamespace={namespace=>setTabs(ts=>ts.map(t=>t.id===activeTab.id?{...t,namespace}:t))} resourceName={activeTab.app.resourceName} onOpenResource={(name,namespace)=>openAppPage(activeCluster,activeTab.app!.id,activeTab.app!.page,namespace,name)} onPage={(page,namespace)=>openAppPage(activeCluster,activeTab.app!.id,page,namespace)}/> : activeKind === "settings" ? (
                     <SettingsView
                       key={`${activeTab.id}:${settingsSectionNonce}`}
                       initialSection={settingsInitialSection}
@@ -1126,6 +1257,7 @@ export function App() {
                     <NewResourceEditor
                       key={activeTab.id}
                       context={activeCluster}
+                      namespace={activeTab.namespace ?? "default"}
                       initialKind={activeTab.create?.initialKind}
                       draft={activeTab.create?.draft}
                       onDraftChange={(draft) => setNewResourceDraft(activeTab.id, draft)}
@@ -1140,6 +1272,7 @@ export function App() {
                       name={activeTab.edit.name}
                       draft={activeTab.edit.draft ?? null}
                       onDraftChange={(yaml) => setEditResourceDraft(activeTab.id, yaml)}
+                      onLoaded={(yaml) => setEditResourceLoaded(activeTab.id, yaml)}
                       onEdited={() => setEditResourceDraft(activeTab.id, undefined)}
                     />
                   ) : activeCluster ? (
@@ -1231,7 +1364,7 @@ export function App() {
       <StatusBar
         activeCluster={activeCluster}
         activeLabel={
-          activeTab ? (activeTab.crd ? activeTab.crd.kind : RESOURCE_LABELS[activeKind]) : undefined
+          activeTab ? (activeTab.app ? (activeTab.app.resourceName ?? activeTab.app.page) : activeTab.crd ? activeTab.crd.kind : RESOURCE_LABELS[activeKind]) : undefined
         }
         tabCount={tabs.length}
         // Every configured context, not just the active tab's: a shell for a
@@ -1267,8 +1400,8 @@ export function App() {
       />
       <ShortcutCheatSheet open={cheatSheetOpen} onOpenChange={setCheatSheetOpen} desktop={!isWeb} />
       <Toaster position="top-right" richColors closeButton />
-      <McpConfirmDialog />
-      <VaultGate onReady={() => setVaultReady(true)} />
+      {windowLabel === "main" && <McpConfirmDialog />}
+      <VaultGate onReady={() => setVaultReady(true)} onLocked={() => setVaultReady(false)} />
     </div>
   );
 }

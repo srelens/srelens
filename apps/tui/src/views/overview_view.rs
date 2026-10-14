@@ -2,7 +2,7 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Gauge, Paragraph, Row, Table, Cell},
+    widgets::{Block, Borders, Cell, Gauge, Paragraph, Row, Table, Wrap},
     Frame,
 };
 
@@ -344,5 +344,8 @@ pub fn render_overview_view(f: &mut Frame, area: Rect, state: &OverviewViewState
         ]));
     }
 
-    f.render_widget(Paragraph::new(dist_lines), pod_dist_inner);
+    f.render_widget(
+        Paragraph::new(dist_lines).wrap(Wrap { trim: true }),
+        pod_dist_inner,
+    );
 }

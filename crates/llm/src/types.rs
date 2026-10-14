@@ -65,7 +65,10 @@ pub enum Turn {
     /// A user message (the visible prompt, already prefaced/guided upstream).
     User(String),
     /// An assistant turn: any text it produced plus the tool calls it requested.
-    Assistant { text: String, tool_calls: Vec<ToolCall> },
+    Assistant {
+        text: String,
+        tool_calls: Vec<ToolCall>,
+    },
     /// The results of the tool calls from the immediately preceding assistant
     /// turn, in the same order.
     ToolResults(Vec<ToolOutcome>),
@@ -99,6 +102,23 @@ pub enum StreamItem {
     Done(StopReason),
     /// A provider-reported error (auth/quota/rate-limit/overloaded/…).
     Error(String),
+    /// Token usage reported by the provider for this streamed round.
+    Usage(TokenUsage),
+}
+
+/// Token usage reported by a provider for an API turn or tool round.
+/// Semantics are normalized across all providers:
+/// - `prompt_tokens`: Total input tokens in the prompt (including cached prompt tokens).
+/// - `completion_tokens`: Generated output tokens.
+/// - `cached_tokens`: Subset of `prompt_tokens` that were read from prompt cache.
+/// - `total_tokens`: Total tokens (`prompt_tokens + completion_tokens`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TokenUsage {
+    pub prompt_tokens: usize,
+    pub completion_tokens: usize,
+    pub cached_tokens: usize,
+    pub total_tokens: usize,
 }
 
 /// A model offered by a provider, as returned by its models endpoint and shown
@@ -121,7 +141,10 @@ mod tests {
     /// serialization renders every model option with a blank label.
     #[test]
     fn model_info_crosses_the_ipc_boundary_in_camel_case() {
-        let m = ModelInfo { id: "deepseek-chat".into(), display_name: "DeepSeek Chat".into() };
+        let m = ModelInfo {
+            id: "deepseek-chat".into(),
+            display_name: "DeepSeek Chat".into(),
+        };
         let v = serde_json::to_value(&m).unwrap();
         assert_eq!(v["id"], "deepseek-chat");
         assert_eq!(v["displayName"], "DeepSeek Chat");

@@ -11,14 +11,15 @@ use futures::StreamExt;
 use k8s_openapi::api::apps::v1::{DaemonSet, Deployment, StatefulSet};
 use k8s_openapi::api::batch::v1::{CronJob, Job};
 use k8s_openapi::api::core::v1::{
-    ConfigMap, Event as CoreEvent, LimitRange, Namespace, Node, PersistentVolume, PersistentVolumeClaim, Pod,
-    ResourceQuota, Secret, Service, ServiceAccount,
+    ConfigMap, Event as CoreEvent, LimitRange, Namespace, Node, PersistentVolume,
+    PersistentVolumeClaim, Pod, ResourceQuota, Secret, Service, ServiceAccount,
 };
 use k8s_openapi::api::discovery::v1::EndpointSlice;
 use k8s_openapi::api::networking::v1::{Ingress, NetworkPolicy};
 use k8s_openapi::api::rbac::v1::{ClusterRole, ClusterRoleBinding, Role, RoleBinding};
 use k8s_openapi::api::storage::v1::StorageClass;
 use kube::runtime::watcher::{Config, Event};
+use kube::runtime::WatchStreamExt;
 use kube::Api;
 use serde::de::DeserializeOwned;
 
@@ -26,13 +27,17 @@ use crate::client_cache::ClientCache;
 use crate::configmaps::{summarise as summarise_configmap, ConfigMapSummary};
 use crate::cronjobs::{summarise as summarise_cronjob, CronJobSummary};
 use crate::daemonsets::{summarise as summarise_daemonset, DaemonSetSummary};
+use crate::deployments::{summarise as summarise_deployment, DeploymentSummary};
 use crate::endpointslices::{summarise as summarise_endpointslice, EndpointSliceSummary};
+use crate::events::{summarise as summarise_event, EventSummary};
 use crate::ingresses::{summarise as summarise_ingress, IngressSummary};
-use crate::nodes::{summarise as summarise_node, NodeSummary};
+use crate::jobs::{summarise as summarise_job, JobSummary};
 use crate::limitranges::{summarise as summarise_limitrange, LimitRangeSummary};
 use crate::networkpolicies::{summarise as summarise_networkpolicy, NetworkPolicySummary};
+use crate::nodes::{summarise as summarise_node, NodeSummary};
 use crate::persistentvolumes::{summarise as summarise_pv, PvSummary};
 use crate::pvcs::{summarise as summarise_pvc, PvcSummary};
+use crate::resourcequotas::{summarise as summarise_resourcequota, ResourceQuotaSummary};
 use crate::rolebindings::{
     summarise as summarise_rolebinding, summarise_cluster as summarise_clusterrolebinding,
     ClusterRoleBindingSummary, RoleBindingSummary,
@@ -41,15 +46,11 @@ use crate::roles::{
     summarise as summarise_role, summarise_cluster as summarise_clusterrole, ClusterRoleSummary,
     RoleSummary,
 };
-use crate::serviceaccounts::{summarise as summarise_serviceaccount, ServiceAccountSummary};
-use crate::storageclasses::{summarise as summarise_storageclass, StorageClassSummary};
-use crate::resourcequotas::{summarise as summarise_resourcequota, ResourceQuotaSummary};
 use crate::secrets::{summarise as summarise_secret, SecretSummary};
-use crate::deployments::{summarise as summarise_deployment, DeploymentSummary};
-use crate::events::{summarise as summarise_event, EventSummary};
-use crate::jobs::{summarise as summarise_job, JobSummary};
+use crate::serviceaccounts::{summarise as summarise_serviceaccount, ServiceAccountSummary};
 use crate::services::{summarise as summarise_service, ServiceSummary};
 use crate::statefulsets::{summarise as summarise_statefulset, StatefulSetSummary};
+use crate::storageclasses::{summarise as summarise_storageclass, StorageClassSummary};
 use crate::workloads::{summarise_pod, PodSummary};
 
 /// Normalised watch event over summaries (decoupled from kube-rs types so the
@@ -121,18 +122,36 @@ fn is_permanent_watch_error(msg: &str) -> bool {
     msg.to_ascii_lowercase().contains("forbidden")
 }
 
-/// Generic watch loop: stream `K`, summarise to `T`, key by `key_of`, call
-/// `on_update` with a full snapshot on every change, and `on_status` on
-/// connection transitions.
+/// The map key for a watched object: its name, then its namespace.
+///
+/// Taken from the object's own metadata, not from its summary, and never the
+/// name alone: on "All namespaces" the watch is `Api::all`, and a name is only
+/// unique within its namespace. A name key let `staging/db` overwrite
+/// `default/db` and a delete of either remove the other (#684).
+///
+/// Name first so a snapshot stays name-sorted, as it was; the NUL separator
+/// sorts below every character a Kubernetes name may hold, so `db` still
+/// precedes `db-2` and two `db`s sit together, ordered by namespace.
+fn object_key<K: kube::Resource>(obj: &K) -> String {
+    let meta = obj.meta();
+    format!(
+        "{}\0{}",
+        meta.name.as_deref().unwrap_or(""),
+        meta.namespace.as_deref().unwrap_or("")
+    )
+}
+
+/// Generic watch loop: stream `K`, summarise to `T`, key by
+/// [`object_key`], call `on_update` with a full snapshot on every change, and
+/// `on_status` on connection transitions.
 ///
 /// kube-rs `watcher()` is a self-healing infinite stream — on API errors it
 /// yields an `Err` item but keeps running and re-lists on the next poll. So we
 /// consume with `next()` (not `try_next()?`) and, instead of terminating on the
 /// first error, surface `Reconnecting` and carry on until it recovers.
-async fn watch_typed<K, T, S, N, F, G>(
+async fn watch_typed<K, T, S, F, G>(
     api: Api<K>,
     summarise: S,
-    key_of: N,
     mut on_update: F,
     mut on_status: G,
 ) -> Result<(), String>
@@ -141,29 +160,34 @@ where
     K::DynamicType: Default + Eq + Hash + Clone + Debug + Unpin,
     T: Clone,
     S: Fn(K) -> T,
-    N: Fn(&T) -> String,
     F: FnMut(Vec<T>),
     G: FnMut(WatchStatus),
 {
-    let mut state: BTreeMap<String, T> = BTreeMap::new();
-    let mut stream = kube::runtime::watcher(api, Config::default()).boxed();
+    // Each entry carries its own key so `reduce` can store it without asking
+    // the summary, which does not always hold a namespace.
+    let mut state: BTreeMap<String, (String, T)> = BTreeMap::new();
+    let key_of = |(key, _): &(String, T)| key.clone();
+    let keyed = |obj: K| (object_key(&obj), summarise(obj));
+    let mut stream = kube::runtime::watcher(api, Config::default())
+        .default_backoff()
+        .boxed();
     let mut reconnecting = false;
     while let Some(item) = stream.next().await {
         match item {
             Ok(event) => {
-                if reconnecting {
+                if reconnecting && !matches!(event, Event::Init | Event::InitApply(_)) {
                     reconnecting = false;
                     on_status(WatchStatus::Live);
                 }
                 let mapped = match event {
                     Event::Init => WatchEvent::Init,
-                    Event::InitApply(obj) => WatchEvent::InitApply(summarise(obj)),
+                    Event::InitApply(obj) => WatchEvent::InitApply(keyed(obj)),
                     Event::InitDone => WatchEvent::InitDone,
-                    Event::Apply(obj) => WatchEvent::Apply(summarise(obj)),
-                    Event::Delete(obj) => WatchEvent::Delete(key_of(&summarise(obj))),
+                    Event::Apply(obj) => WatchEvent::Apply(keyed(obj)),
+                    Event::Delete(obj) => WatchEvent::Delete(object_key(&obj)),
                 };
                 if reduce(&mut state, &key_of, mapped) {
-                    on_update(snapshot(&state));
+                    on_update(state.values().map(|(_, row)| row.clone()).collect());
                 }
             }
             Err(e) => {
@@ -173,8 +197,9 @@ where
                     // error so the caller can emit it to the UI.
                     return Err(msg);
                 }
-                // Transient: the watcher backs off and re-lists internally. Flag
-                // the UI once per outage, then keep consuming.
+                // The raw watcher retries immediately; default_backoff above
+                // delays retries so a dead cluster cannot flood the UI queue.
+                // Init/InitApply only build a partial list; recovery waits for InitDone.
                 if !reconnecting {
                     reconnecting = true;
                     on_status(WatchStatus::Reconnecting);
@@ -199,7 +224,7 @@ where
 {
     let client = cache.get(&context).await?;
     let api: Api<Pod> = crate::scoped_api(client, &namespace);
-    watch_typed(api, summarise_pod, |p: &PodSummary| p.name.clone(), on_update, on_status).await
+    watch_typed(api, summarise_pod, on_update, on_status).await
 }
 
 /// Watch deployments in a namespace.
@@ -216,14 +241,7 @@ where
 {
     let client = cache.get(&context).await?;
     let api: Api<Deployment> = crate::scoped_api(client, &namespace);
-    watch_typed(
-        api,
-        summarise_deployment,
-        |d: &DeploymentSummary| d.name.clone(),
-        on_update,
-        on_status,
-    )
-    .await
+    watch_typed(api, summarise_deployment, on_update, on_status).await
 }
 
 /// Watch StatefulSets in a namespace.
@@ -240,14 +258,7 @@ where
 {
     let client = cache.get(&context).await?;
     let api: Api<StatefulSet> = crate::scoped_api(client, &namespace);
-    watch_typed(
-        api,
-        summarise_statefulset,
-        |s: &StatefulSetSummary| s.name.clone(),
-        on_update,
-        on_status,
-    )
-    .await
+    watch_typed(api, summarise_statefulset, on_update, on_status).await
 }
 
 /// Watch DaemonSets in a namespace.
@@ -264,14 +275,7 @@ where
 {
     let client = cache.get(&context).await?;
     let api: Api<DaemonSet> = crate::scoped_api(client, &namespace);
-    watch_typed(
-        api,
-        summarise_daemonset,
-        |d: &DaemonSetSummary| d.name.clone(),
-        on_update,
-        on_status,
-    )
-    .await
+    watch_typed(api, summarise_daemonset, on_update, on_status).await
 }
 
 /// Watch Jobs in a namespace.
@@ -288,7 +292,7 @@ where
 {
     let client = cache.get(&context).await?;
     let api: Api<Job> = crate::scoped_api(client, &namespace);
-    watch_typed(api, summarise_job, |j: &JobSummary| j.name.clone(), on_update, on_status).await
+    watch_typed(api, summarise_job, on_update, on_status).await
 }
 
 /// Watch CronJobs in a namespace.
@@ -305,14 +309,7 @@ where
 {
     let client = cache.get(&context).await?;
     let api: Api<CronJob> = crate::scoped_api(client, &namespace);
-    watch_typed(
-        api,
-        summarise_cronjob,
-        |c: &CronJobSummary| c.name.clone(),
-        on_update,
-        on_status,
-    )
-    .await
+    watch_typed(api, summarise_cronjob, on_update, on_status).await
 }
 
 /// Watch ConfigMaps in a namespace.
@@ -329,14 +326,7 @@ where
 {
     let client = cache.get(&context).await?;
     let api: Api<ConfigMap> = crate::scoped_api(client, &namespace);
-    watch_typed(
-        api,
-        summarise_configmap,
-        |c: &ConfigMapSummary| c.name.clone(),
-        on_update,
-        on_status,
-    )
-    .await
+    watch_typed(api, summarise_configmap, on_update, on_status).await
 }
 
 /// Watch Secrets in a namespace (type + key count only — no values).
@@ -353,14 +343,7 @@ where
 {
     let client = cache.get(&context).await?;
     let api: Api<Secret> = crate::scoped_api(client, &namespace);
-    watch_typed(
-        api,
-        summarise_secret,
-        |s: &SecretSummary| s.name.clone(),
-        on_update,
-        on_status,
-    )
-    .await
+    watch_typed(api, summarise_secret, on_update, on_status).await
 }
 
 /// Watch ResourceQuotas in a namespace.
@@ -377,14 +360,7 @@ where
 {
     let client = cache.get(&context).await?;
     let api: Api<ResourceQuota> = crate::scoped_api(client, &namespace);
-    watch_typed(
-        api,
-        summarise_resourcequota,
-        |r: &ResourceQuotaSummary| r.name.clone(),
-        on_update,
-        on_status,
-    )
-    .await
+    watch_typed(api, summarise_resourcequota, on_update, on_status).await
 }
 
 /// Watch LimitRanges in a namespace.
@@ -401,14 +377,7 @@ where
 {
     let client = cache.get(&context).await?;
     let api: Api<LimitRange> = crate::scoped_api(client, &namespace);
-    watch_typed(
-        api,
-        summarise_limitrange,
-        |l: &LimitRangeSummary| l.name.clone(),
-        on_update,
-        on_status,
-    )
-    .await
+    watch_typed(api, summarise_limitrange, on_update, on_status).await
 }
 
 /// Watch services in a namespace.
@@ -425,14 +394,7 @@ where
 {
     let client = cache.get(&context).await?;
     let api: Api<Service> = crate::scoped_api(client, &namespace);
-    watch_typed(
-        api,
-        summarise_service,
-        |s: &ServiceSummary| s.name.clone(),
-        on_update,
-        on_status,
-    )
-    .await
+    watch_typed(api, summarise_service, on_update, on_status).await
 }
 
 /// Watch events in a namespace — a true stream, replacing the poll.
@@ -449,14 +411,7 @@ where
 {
     let client = cache.get(&context).await?;
     let api: Api<CoreEvent> = crate::scoped_api(client, &namespace);
-    watch_typed(
-        api,
-        summarise_event,
-        |e: &EventSummary| e.name.clone(),
-        on_update,
-        on_status,
-    )
-    .await
+    watch_typed(api, summarise_event, on_update, on_status).await
 }
 
 /// Watch Ingresses in a namespace.
@@ -473,14 +428,7 @@ where
 {
     let client = cache.get(&context).await?;
     let api: Api<Ingress> = crate::scoped_api(client, &namespace);
-    watch_typed(
-        api,
-        summarise_ingress,
-        |i: &IngressSummary| i.name.clone(),
-        on_update,
-        on_status,
-    )
-    .await
+    watch_typed(api, summarise_ingress, on_update, on_status).await
 }
 
 /// Watch EndpointSlices in a namespace.
@@ -497,14 +445,7 @@ where
 {
     let client = cache.get(&context).await?;
     let api: Api<EndpointSlice> = crate::scoped_api(client, &namespace);
-    watch_typed(
-        api,
-        summarise_endpointslice,
-        |e: &EndpointSliceSummary| e.name.clone(),
-        on_update,
-        on_status,
-    )
-    .await
+    watch_typed(api, summarise_endpointslice, on_update, on_status).await
 }
 
 /// Watch NetworkPolicies in a namespace.
@@ -521,14 +462,7 @@ where
 {
     let client = cache.get(&context).await?;
     let api: Api<NetworkPolicy> = crate::scoped_api(client, &namespace);
-    watch_typed(
-        api,
-        summarise_networkpolicy,
-        |n: &NetworkPolicySummary| n.name.clone(),
-        on_update,
-        on_status,
-    )
-    .await
+    watch_typed(api, summarise_networkpolicy, on_update, on_status).await
 }
 
 /// Watch PersistentVolumeClaims in a namespace.
@@ -545,14 +479,7 @@ where
 {
     let client = cache.get(&context).await?;
     let api: Api<PersistentVolumeClaim> = crate::scoped_api(client, &namespace);
-    watch_typed(
-        api,
-        summarise_pvc,
-        |p: &PvcSummary| p.name.clone(),
-        on_update,
-        on_status,
-    )
-    .await
+    watch_typed(api, summarise_pvc, on_update, on_status).await
 }
 
 /// Watch cluster PersistentVolumes (cluster-scoped; namespace ignored).
@@ -569,14 +496,7 @@ where
 {
     let client = cache.get(&context).await?;
     let api: Api<PersistentVolume> = Api::all(client);
-    watch_typed(
-        api,
-        summarise_pv,
-        |p: &PvSummary| p.name.clone(),
-        on_update,
-        on_status,
-    )
-    .await
+    watch_typed(api, summarise_pv, on_update, on_status).await
 }
 
 /// Watch cluster StorageClasses (cluster-scoped; namespace ignored).
@@ -593,14 +513,7 @@ where
 {
     let client = cache.get(&context).await?;
     let api: Api<StorageClass> = Api::all(client);
-    watch_typed(
-        api,
-        summarise_storageclass,
-        |s: &StorageClassSummary| s.name.clone(),
-        on_update,
-        on_status,
-    )
-    .await
+    watch_typed(api, summarise_storageclass, on_update, on_status).await
 }
 
 /// Watch ServiceAccounts in a namespace.
@@ -617,14 +530,7 @@ where
 {
     let client = cache.get(&context).await?;
     let api: Api<ServiceAccount> = crate::scoped_api(client, &namespace);
-    watch_typed(
-        api,
-        summarise_serviceaccount,
-        |s: &ServiceAccountSummary| s.name.clone(),
-        on_update,
-        on_status,
-    )
-    .await
+    watch_typed(api, summarise_serviceaccount, on_update, on_status).await
 }
 
 /// Watch Roles in a namespace.
@@ -641,14 +547,7 @@ where
 {
     let client = cache.get(&context).await?;
     let api: Api<Role> = crate::scoped_api(client, &namespace);
-    watch_typed(
-        api,
-        summarise_role,
-        |r: &RoleSummary| r.name.clone(),
-        on_update,
-        on_status,
-    )
-    .await
+    watch_typed(api, summarise_role, on_update, on_status).await
 }
 
 /// Watch cluster ClusterRoles (cluster-scoped; namespace ignored).
@@ -665,14 +564,7 @@ where
 {
     let client = cache.get(&context).await?;
     let api: Api<ClusterRole> = Api::all(client);
-    watch_typed(
-        api,
-        summarise_clusterrole,
-        |r: &ClusterRoleSummary| r.name.clone(),
-        on_update,
-        on_status,
-    )
-    .await
+    watch_typed(api, summarise_clusterrole, on_update, on_status).await
 }
 
 /// Watch RoleBindings in a namespace.
@@ -689,14 +581,7 @@ where
 {
     let client = cache.get(&context).await?;
     let api: Api<RoleBinding> = crate::scoped_api(client, &namespace);
-    watch_typed(
-        api,
-        summarise_rolebinding,
-        |r: &RoleBindingSummary| r.name.clone(),
-        on_update,
-        on_status,
-    )
-    .await
+    watch_typed(api, summarise_rolebinding, on_update, on_status).await
 }
 
 /// Watch cluster ClusterRoleBindings (cluster-scoped; namespace ignored).
@@ -713,14 +598,7 @@ where
 {
     let client = cache.get(&context).await?;
     let api: Api<ClusterRoleBinding> = Api::all(client);
-    watch_typed(
-        api,
-        summarise_clusterrolebinding,
-        |r: &ClusterRoleBindingSummary| r.name.clone(),
-        on_update,
-        on_status,
-    )
-    .await
+    watch_typed(api, summarise_clusterrolebinding, on_update, on_status).await
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, schemars::JsonSchema)]
@@ -765,14 +643,7 @@ where
 {
     let client = cache.get(&context).await?;
     let api: Api<Node> = Api::all(client);
-    watch_typed(
-        api,
-        summarise_node,
-        |n: &NodeSummary| n.name.clone(),
-        on_update,
-        on_status,
-    )
-    .await
+    watch_typed(api, summarise_node, on_update, on_status).await
 }
 
 /// Watch cluster Namespaces (cluster-scoped; namespace ignored).
@@ -789,14 +660,7 @@ where
 {
     let client = cache.get(&context).await?;
     let api: Api<Namespace> = Api::all(client);
-    watch_typed(
-        api,
-        summarise_namespace,
-        |n: &NamespaceSummary| n.name.clone(),
-        on_update,
-        on_status,
-    )
-    .await
+    watch_typed(api, summarise_namespace, on_update, on_status).await
 }
 
 /// Classify a watcher event as an object change. `Apply`/`Delete` always are.
@@ -913,13 +777,15 @@ where
     };
 
     let config = Config::default().fields(&format!("metadata.name={name}"));
-    let mut stream = kube::runtime::watcher(api, config).boxed();
+    let mut stream = kube::runtime::watcher(api, config)
+        .default_backoff()
+        .boxed();
     let mut reconnecting = false;
 
     while let Some(item) = stream.next().await {
         match item {
             Ok(event) => {
-                if reconnecting {
+                if reconnecting && !matches!(event, Event::Init | Event::InitApply(_)) {
                     reconnecting = false;
                     on_status(WatchStatus::Live);
                 }
@@ -981,7 +847,10 @@ pub fn dynamic_object_to_value(item: &kube::api::DynamicObject) -> serde_json::V
                 obj.insert("name".to_string(), serde_json::Value::String(n.clone()));
             }
             if let Some(ns_name) = &item.metadata.namespace {
-                obj.insert("namespace".to_string(), serde_json::Value::String(ns_name.clone()));
+                obj.insert(
+                    "namespace".to_string(),
+                    serde_json::Value::String(ns_name.clone()),
+                );
             }
             if let Some(ts) = &item.metadata.creation_timestamp {
                 let age = crate::humanize_age(Some(ts));
@@ -1029,13 +898,15 @@ where
     };
 
     let mut state: BTreeMap<String, serde_json::Value> = BTreeMap::new();
-    let mut stream = kube::runtime::watcher(api, Config::default()).boxed();
+    let mut stream = kube::runtime::watcher(api, Config::default())
+        .default_backoff()
+        .boxed();
     let mut reconnecting = false;
 
     while let Some(item) = stream.next().await {
         match item {
             Ok(event) => {
-                if reconnecting {
+                if reconnecting && !matches!(event, Event::Init | Event::InitApply(_)) {
                     reconnecting = false;
                     on_status(WatchStatus::Live);
                 }
@@ -1052,7 +923,7 @@ where
             }
             Err(e) => {
                 let msg = e.to_string();
-                if is_permanent_watch_error(&msg) {
+                if is_permanent_custom_watch_error(&msg) {
                     return Err(msg);
                 }
                 if !reconnecting {
@@ -1065,9 +936,377 @@ where
     Ok(())
 }
 
+/// A watcher error on a custom resource that will not self-heal (e.g. 404 CRD
+/// not installed/deleted, or RBAC forbidden) -- surface it so the UI does not hang.
+fn is_permanent_custom_watch_error(msg: &str) -> bool {
+    let lower = msg.to_ascii_lowercase();
+    is_permanent_watch_error(msg)
+        || lower.contains("not found")
+        || lower.contains("could not find the requested resource")
+        || lower.contains("no matches for kind")
+}
+
+/// What one watch of an app's bound kind reports (#566). Carries nothing of
+/// any object: the app stream built on it tells the view *that* the kind
+/// changed, and the view reads again through the reader's own path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KindSignal {
+    /// A full list completed (the first, or the one after a fresh start).
+    Listed,
+    /// An object was added, modified or deleted.
+    Changed,
+}
+
+/// The signal an event is, if any. `Init`/`InitApply` are a list still
+/// arriving; it is reported once, on its `InitDone`.
+pub fn kind_signal<K>(event: &Event<K>) -> Option<KindSignal> {
+    match event {
+        Event::Init | Event::InitApply(_) => None,
+        Event::InitDone => Some(KindSignal::Listed),
+        Event::Apply(_) | Event::Delete(_) => Some(KindSignal::Changed),
+    }
+}
+
+/// A watch error that a fresh start will not cure: RBAC forbids it, or the
+/// cluster no longer serves the kind.
+pub fn is_permanent_kind_watch_error(msg: &str) -> bool {
+    is_permanent_custom_watch_error(msg)
+}
+
+/// The one kind watch error nothing on the cluster's side cures: RBAC forbids it.
+pub fn is_forbidden_kind_watch_error(msg: &str) -> bool {
+    is_permanent_watch_error(msg)
+}
+
+/// One watch session over `api`: list, then follow, calling `on_signal` for
+/// each [`KindSignal`], and return at the **first** error with its message.
+///
+/// No backoff and no resume here, on purpose: the caller decides whether the
+/// error is permanent, and otherwise starts a new session, which lists afresh.
+/// kube-runtime would resume from the last `resourceVersion` on its own, and
+/// a resumed watch that then stays quiet never says it recovered; a fresh
+/// list always does, and a `410 Gone` needs one anyway.
+pub async fn watch_kind_session<K, F>(api: Api<K>, mut on_signal: F) -> Result<(), String>
+where
+    K: kube::Resource + Clone + DeserializeOwned + Debug + Send + 'static,
+    F: FnMut(KindSignal) + Send,
+{
+    let mut stream = kube::runtime::watcher(api, Config::default()).boxed();
+    while let Some(item) = stream.next().await {
+        match item {
+            Ok(event) => {
+                if let Some(signal) = kind_signal(&event) {
+                    on_signal(signal);
+                }
+            }
+            Err(e) => return Err(e.to_string()),
+        }
+    }
+    Ok(())
+}
+
+/// One watch session over `target` in `context`, metadata only: the host
+/// never receives a watched object's `data` or `spec` through it. A namespaced
+/// kind is watched in `namespace`, or in every namespace when it is empty; a
+/// cluster-scoped kind ignores it.
+pub async fn watch_kind_once<F>(
+    cache: Arc<ClientCache>,
+    context: String,
+    namespace: String,
+    target: CustomWatchTarget,
+    on_signal: F,
+) -> Result<(), String>
+where
+    F: FnMut(KindSignal) + Send,
+{
+    use kube::api::{DynamicObject, PartialObjectMeta};
+    let client = cache.get(&context).await?;
+    let ar = crate::crds::custom_api_resource(
+        &target.group,
+        &target.version,
+        &target.kind,
+        &target.plural,
+    );
+    let api: Api<PartialObjectMeta<DynamicObject>> = if target.namespaced && !namespace.is_empty() {
+        Api::namespaced_with(client, &namespace, &ar)
+    } else {
+        Api::all_with(client, &ar)
+    };
+    watch_kind_session(api, on_signal).await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn unavailable_cluster_backs_off_without_reporting_live() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Mutex;
+        use std::time::Duration;
+
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let requests = attempts.clone();
+        let service = tower::service_fn(move |_: http::Request<kube::client::Body>| {
+            requests.fetch_add(1, Ordering::SeqCst);
+            async {
+                Err::<http::Response<kube::client::Body>, _>(std::io::Error::new(
+                    std::io::ErrorKind::ConnectionRefused,
+                    "cluster was deleted or Docker stopped",
+                ))
+            }
+        });
+        let api: Api<Namespace> = Api::all(kube::Client::new(service, "default"));
+        let statuses = Arc::new(Mutex::new(Vec::new()));
+        let received = statuses.clone();
+        let task = tokio::spawn(async move {
+            watch_typed(
+                api,
+                |ns: Namespace| ns.metadata.name.unwrap(),
+                |_| panic!("an unavailable cluster cannot supply a snapshot"),
+                move |status| received.lock().unwrap().push(status),
+            )
+            .await
+        });
+
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let count = attempts.load(Ordering::SeqCst);
+        // Even with backoff, a synthetic Init precedes each retry. Wait for a
+        // second attempt so this also catches false Live/Reconnecting churn.
+        let retried = tokio::time::timeout(Duration::from_secs(5), async {
+            while attempts.load(Ordering::SeqCst) < 2 {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await;
+        task.abort();
+        let _ = task.await;
+        assert!(count > 0, "the watch must attempt to connect");
+        assert!(
+            count <= 2,
+            "watch retried {count} times in 200ms without backoff"
+        );
+        assert!(retried.is_ok(), "transient errors must still be retried");
+        assert_eq!(*statuses.lock().unwrap(), vec![WatchStatus::Reconnecting]);
+    }
+
+    #[tokio::test]
+    async fn watch_recovers_after_outage_and_still_stops_on_forbidden() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Mutex;
+        use std::time::Duration;
+
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let service = tower::service_fn(move |_: http::Request<kube::client::Body>| {
+            let attempt = attempts.fetch_add(1, Ordering::SeqCst);
+            async move {
+                if attempt == 0 {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::ConnectionRefused,
+                        "offline",
+                    ));
+                }
+                let (status, body) = if attempt == 1 {
+                    (
+                        200,
+                        serde_json::json!({
+                            "apiVersion": "v1", "kind": "NamespaceList",
+                            "metadata": {"resourceVersion": "1"}, "items": []
+                        }),
+                    )
+                } else {
+                    (
+                        403,
+                        serde_json::json!({
+                            "apiVersion": "v1", "kind": "Status", "status": "Failure",
+                            "reason": "Forbidden", "message": "forbidden", "code": 403
+                        }),
+                    )
+                };
+                Ok(http::Response::builder()
+                    .status(status)
+                    .body(kube::client::Body::from(body.to_string().into_bytes()))
+                    .unwrap())
+            }
+        });
+        let api: Api<Namespace> = Api::all(kube::Client::new(service, "default"));
+        let events = Mutex::new(Vec::new());
+        let result = tokio::time::timeout(
+            Duration::from_secs(5),
+            watch_typed(
+                api,
+                |ns: Namespace| ns.metadata.name.unwrap(),
+                |rows| {
+                    assert!(rows.is_empty());
+                    events.lock().unwrap().push("snapshot");
+                },
+                |status| events.lock().unwrap().push(status.as_str()),
+            ),
+        )
+        .await
+        .expect("watch should recover and then stop on RBAC denial");
+        assert!(result.unwrap_err().contains("forbidden"));
+        assert_eq!(
+            *events.lock().unwrap(),
+            vec!["reconnecting", "live", "snapshot"]
+        );
+    }
+
+    /// #684: on "All namespaces" the watch is `Api::all`, and two namespaces
+    /// may each hold a Secret called `db`. Keyed by name alone, the second
+    /// overwrote the first and the list showed one row — and deleting either
+    /// removed the row of whichever had arrived last. Every typed watch shared
+    /// the bug; Secrets are the one a reader noticed.
+    #[tokio::test]
+    async fn all_namespaces_keeps_same_named_objects_apart() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Mutex;
+        use std::time::Duration;
+
+        fn secret(namespace: &str, name: &str) -> serde_json::Value {
+            serde_json::json!({
+                "apiVersion": "v1", "kind": "Secret", "type": "Opaque",
+                "metadata": {"name": name, "namespace": namespace, "resourceVersion": "1"}
+            })
+        }
+
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let service = tower::service_fn(move |_: http::Request<kube::client::Body>| {
+            let attempt = attempts.fetch_add(1, Ordering::SeqCst);
+            async move {
+                let (status, body) = match attempt {
+                    0 => (
+                        200,
+                        serde_json::json!({
+                            "apiVersion": "v1", "kind": "SecretList",
+                            "metadata": {"resourceVersion": "1"},
+                            "items": [
+                                secret("staging", "db"),
+                                secret("default", "db"),
+                                secret("default", "api"),
+                            ]
+                        })
+                        .to_string(),
+                    ),
+                    1 => (
+                        200,
+                        serde_json::json!({"type": "DELETED", "object": secret("staging", "db")})
+                            .to_string(),
+                    ),
+                    _ => (
+                        403,
+                        serde_json::json!({
+                            "apiVersion": "v1", "kind": "Status", "status": "Failure",
+                            "reason": "Forbidden", "message": "forbidden", "code": 403
+                        })
+                        .to_string(),
+                    ),
+                };
+                Ok::<_, std::convert::Infallible>(
+                    http::Response::builder()
+                        .status(status)
+                        .body(kube::client::Body::from(body.into_bytes()))
+                        .unwrap(),
+                )
+            }
+        });
+        let cache = ClientCache::new(std::path::PathBuf::from("/nonexistent/kubeconfig"));
+        cache
+            .preload("fake", kube::Client::new(service, "default"))
+            .await;
+
+        let snapshots = Mutex::new(Vec::new());
+        let result = tokio::time::timeout(
+            Duration::from_secs(5),
+            watch_secrets(
+                cache,
+                "fake".into(),
+                String::new(),
+                |rows| {
+                    let rows: Vec<String> = rows
+                        .iter()
+                        .map(|s| format!("{}/{}", s.namespace, s.name))
+                        .collect();
+                    snapshots.lock().unwrap().push(rows);
+                },
+                |_| {},
+            ),
+        )
+        .await
+        .expect("the watch stops on the fake server's RBAC denial");
+        assert!(result.unwrap_err().contains("forbidden"));
+        assert_eq!(
+            *snapshots.lock().unwrap(),
+            vec![
+                // Name-sorted, namespace breaking the tie.
+                vec!["default/api", "default/db", "staging/db"],
+                // Deleting staging's `db` leaves default's.
+                vec!["default/api", "default/db"],
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn partial_relist_does_not_report_recovery_before_the_last_page() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Mutex;
+        use std::time::Duration;
+
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let service = tower::service_fn(move |request: http::Request<kube::client::Body>| {
+            let attempt = attempts.fetch_add(1, Ordering::SeqCst);
+            async move {
+                if attempt == 0 {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::ConnectionRefused,
+                        "offline",
+                    ));
+                }
+                let (status, body) = if attempt == 1 {
+                    (
+                        200,
+                        serde_json::json!({
+                            "apiVersion": "v1", "kind": "NamespaceList",
+                            "metadata": {"resourceVersion": "1", "continue": "next-page"},
+                            "items": [{"apiVersion": "v1", "kind": "Namespace", "metadata": {"name": "first-page"}}]
+                        }),
+                    )
+                } else {
+                    assert!(request
+                        .uri()
+                        .query()
+                        .unwrap()
+                        .contains("continue=next-page"));
+                    (
+                        403,
+                        serde_json::json!({
+                            "apiVersion": "v1", "kind": "Status", "status": "Failure",
+                            "reason": "Forbidden", "message": "forbidden", "code": 403
+                        }),
+                    )
+                };
+                Ok(http::Response::builder()
+                    .status(status)
+                    .body(kube::client::Body::from(body.to_string().into_bytes()))
+                    .unwrap())
+            }
+        });
+        let api: Api<Namespace> = Api::all(kube::Client::new(service, "default"));
+        let statuses = Mutex::new(Vec::new());
+        let result = tokio::time::timeout(
+            Duration::from_secs(5),
+            watch_typed(
+                api,
+                |ns: Namespace| ns.metadata.name.unwrap(),
+                |_| panic!("an incomplete relist must not emit a snapshot"),
+                |status| statuses.lock().unwrap().push(status),
+            ),
+        )
+        .await
+        .expect("the failed second page should stop the watch");
+        assert!(result.unwrap_err().contains("forbidden"));
+        assert_eq!(*statuses.lock().unwrap(), vec![WatchStatus::Reconnecting]);
+    }
 
     #[test]
     fn custom_resource_keys_and_values_reduce_consistently() {
@@ -1118,16 +1357,31 @@ mod tests {
         // Reducer applies Init, InitApply, InitDone, Apply, Delete on Value state
         let mut state = BTreeMap::new();
         assert!(!reduce(&mut state, &dynamic_value_key, WatchEvent::Init));
-        assert!(!reduce(&mut state, &dynamic_value_key, WatchEvent::InitApply(val.clone())));
+        assert!(!reduce(
+            &mut state,
+            &dynamic_value_key,
+            WatchEvent::InitApply(val.clone())
+        ));
         assert!(reduce(&mut state, &dynamic_value_key, WatchEvent::InitDone));
         assert_eq!(state.len(), 1);
 
         let mut updated = val.clone();
         updated["status"]["conditions"][0]["status"] = json!("False");
-        assert!(reduce(&mut state, &dynamic_value_key, WatchEvent::Apply(updated)));
-        assert_eq!(state.get("prod/vault-backend").unwrap()["status"]["conditions"][0]["status"], "False");
+        assert!(reduce(
+            &mut state,
+            &dynamic_value_key,
+            WatchEvent::Apply(updated)
+        ));
+        assert_eq!(
+            state.get("prod/vault-backend").unwrap()["status"]["conditions"][0]["status"],
+            "False"
+        );
 
-        assert!(reduce(&mut state, &dynamic_value_key, WatchEvent::Delete("prod/vault-backend".into())));
+        assert!(reduce(
+            &mut state,
+            &dynamic_value_key,
+            WatchEvent::Delete("prod/vault-backend".into())
+        ));
         assert!(state.is_empty());
     }
 
@@ -1151,7 +1405,10 @@ mod tests {
         )
         .await
         .unwrap_err();
-        assert!(!err.is_empty(), "client failure must be surfaced as an error string");
+        assert!(
+            !err.is_empty(),
+            "client failure must be surfaced as an error string"
+        );
     }
 
     fn pod(name: &str, phase: &str) -> PodSummary {
@@ -1167,11 +1424,15 @@ mod tests {
             created_at: String::new(),
             image: "nginx:1.27".into(),
             waiting_reason: String::new(),
+            status: phase.into(),
             pod_ip: "10.244.0.1".into(),
             cpu_req_millicores: 0,
             cpu_lim_millicores: 0,
             mem_req_mib: 0,
             mem_lim_mib: 0,
+            cpu_lim_all: false,
+            mem_lim_all: false,
+            containers: Vec::new(),
         }
     }
 
@@ -1183,11 +1444,22 @@ mod tests {
     fn init_sequence_emits_only_on_init_done() {
         let mut state = BTreeMap::new();
         assert!(!reduce(&mut state, &key, WatchEvent::Init));
-        assert!(!reduce(&mut state, &key, WatchEvent::InitApply(pod("a", "Running"))));
-        assert!(!reduce(&mut state, &key, WatchEvent::InitApply(pod("b", "Pending"))));
+        assert!(!reduce(
+            &mut state,
+            &key,
+            WatchEvent::InitApply(pod("a", "Running"))
+        ));
+        assert!(!reduce(
+            &mut state,
+            &key,
+            WatchEvent::InitApply(pod("b", "Pending"))
+        ));
         assert!(reduce(&mut state, &key, WatchEvent::InitDone));
         let snap = snapshot(&state);
-        assert_eq!(snap.iter().map(|p| p.name.as_str()).collect::<Vec<_>>(), vec!["a", "b"]);
+        assert_eq!(
+            snap.iter().map(|p| p.name.as_str()).collect::<Vec<_>>(),
+            vec!["a", "b"]
+        );
     }
 
     #[test]
@@ -1195,7 +1467,11 @@ mod tests {
         let mut state = BTreeMap::new();
         reduce(&mut state, &key, WatchEvent::InitApply(pod("a", "Pending")));
         reduce(&mut state, &key, WatchEvent::InitDone);
-        assert!(reduce(&mut state, &key, WatchEvent::Apply(pod("a", "Running"))));
+        assert!(reduce(
+            &mut state,
+            &key,
+            WatchEvent::Apply(pod("a", "Running"))
+        ));
         assert_eq!(snapshot(&state)[0].phase, "Running");
     }
 
@@ -1215,7 +1491,9 @@ mod tests {
     /// reconnect forever, and everything else must be treated as transient.
     #[test]
     fn only_forbidden_is_a_permanent_watch_error_for_object_watches() {
-        assert!(is_permanent_watch_error("Forbidden: User cannot watch pods"));
+        assert!(is_permanent_watch_error(
+            "Forbidden: User cannot watch pods"
+        ));
         assert!(is_permanent_watch_error("FORBIDDEN"));
         assert!(!is_permanent_watch_error("connection reset by peer"));
         assert!(!is_permanent_watch_error("401 Unauthorized"));
@@ -1238,7 +1516,10 @@ mod tests {
         )
         .await
         .unwrap_err();
-        assert!(!err.is_empty(), "the client failure must be surfaced as an error string");
+        assert!(
+            !err.is_empty(),
+            "the client failure must be surfaced as an error string"
+        );
     }
 
     #[tokio::test]
@@ -1262,7 +1543,10 @@ mod tests {
         )
         .await
         .unwrap_err();
-        assert!(err.contains("empty"), "expected an empty-name error, got: {err}");
+        assert!(
+            err.contains("empty"),
+            "expected an empty-name error, got: {err}"
+        );
     }
 
     #[tokio::test]
@@ -1315,7 +1599,10 @@ mod tests {
         )
         .await
         .unwrap_err();
-        assert!(err.contains("namespace"), "expected a namespace error, got: {err}");
+        assert!(
+            err.contains("namespace"),
+            "expected a namespace error, got: {err}"
+        );
     }
 
     /// `Event` is generic; `()` is the cheapest `K` that still lets us
@@ -1353,7 +1640,10 @@ mod tests {
             }
         }
 
-        assert_eq!(changes, 2, "expected one change per InitDone, first list and relist alike");
+        assert_eq!(
+            changes, 2,
+            "expected one change per InitDone, first list and relist alike"
+        );
     }
 
     #[test]
@@ -1381,5 +1671,140 @@ mod tests {
         ));
         // A benign message with a "14030" substring must not false-positive.
         assert!(!is_permanent_watch_error("read 14030 bytes"));
+    }
+
+    #[test]
+    fn custom_resource_watch_permanent_errors() {
+        assert!(is_permanent_custom_watch_error("watch is forbidden"));
+        assert!(is_permanent_custom_watch_error(
+            "the server could not find the requested resource"
+        ));
+        assert!(is_permanent_custom_watch_error("404 Not Found"));
+        assert!(is_permanent_custom_watch_error(
+            "no matches for kind VirtualMachine in version kubevirt.io/v1"
+        ));
+        assert!(!is_permanent_custom_watch_error("connection reset by peer"));
+        assert!(!is_permanent_custom_watch_error("401 Unauthorized"));
+    }
+
+    /// #566: a list and every later event are signals; a relist in progress
+    /// is not, until its `InitDone`. A signal carries nothing of the object,
+    /// so a Secret's value cannot travel on one.
+    #[test]
+    fn kind_signals_carry_no_object() {
+        let secret: Secret = serde_json::from_value(serde_json::json!({
+            "metadata": {"name": "db", "namespace": "team"},
+            "data": {"password": "cGxhaW50ZXh0LXZhbHVl"},
+            "stringData": {"password": "plaintext-value"}
+        }))
+        .unwrap();
+        assert_eq!(kind_signal(&Event::<Secret>::Init), None);
+        assert_eq!(kind_signal(&Event::InitApply(secret.clone())), None);
+        assert_eq!(
+            kind_signal(&Event::<Secret>::InitDone),
+            Some(KindSignal::Listed)
+        );
+        let changed = kind_signal(&Event::Apply(secret.clone())).unwrap();
+        assert_eq!(changed, KindSignal::Changed);
+        assert_eq!(
+            kind_signal(&Event::Delete(secret)),
+            Some(KindSignal::Changed)
+        );
+        let shown = format!("{changed:?}");
+        assert!(
+            !shown.contains("plaintext") && !shown.contains("cGxhaW50"),
+            "{shown}"
+        );
+        assert!(is_permanent_kind_watch_error("applications is forbidden"));
+        assert!(is_permanent_kind_watch_error("404 Not Found"));
+        // Of the two, only a denial is final whatever the cluster serves; an
+        // unserved kind may be served at another version (#547).
+        assert!(is_forbidden_kind_watch_error("applications is forbidden"));
+        assert!(!is_forbidden_kind_watch_error("404 Not Found"));
+        assert!(!is_permanent_kind_watch_error(
+            "ErrorResponse { code: 410, reason: \"Expired\" }"
+        ));
+    }
+
+    /// #566: one session lists, follows, and returns at its first error — a
+    /// `410 Gone` among them — rather than resuming: the caller starts again
+    /// from a fresh list. And it asks the API server for metadata only.
+    #[tokio::test]
+    async fn a_kind_session_lists_follows_and_returns_at_410() {
+        use std::sync::Mutex;
+        let requests = Arc::new(Mutex::new(Vec::<(String, String)>::new()));
+        let seen = requests.clone();
+        let service = tower::service_fn(move |req: http::Request<kube::client::Body>| {
+            let accept = req
+                .headers()
+                .get(http::header::ACCEPT)
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("")
+                .to_owned();
+            let uri = req.uri().to_string();
+            seen.lock().unwrap().push((uri.clone(), accept));
+            async move {
+                let meta = |name: &str, rv: &str| {
+                    serde_json::json!({
+                        "apiVersion": "meta.k8s.io/v1", "kind": "PartialObjectMetadata",
+                        "metadata": {"name": name, "namespace": "team", "resourceVersion": rv}
+                    })
+                };
+                let body = if uri.contains("watch=true") {
+                    let added = serde_json::json!({"type": "ADDED", "object": meta("b", "2")});
+                    let gone = serde_json::json!({"type": "ERROR", "object": {
+                        "apiVersion": "v1", "kind": "Status", "status": "Failure",
+                        "message": "too old resource version", "reason": "Expired", "code": 410
+                    }});
+                    format!("{added}\n{gone}\n")
+                } else {
+                    serde_json::json!({
+                        "apiVersion": "meta.k8s.io/v1", "kind": "PartialObjectMetadataList",
+                        "metadata": {"resourceVersion": "1"}, "items": [meta("a", "1")]
+                    })
+                    .to_string()
+                };
+                Ok::<_, std::convert::Infallible>(
+                    http::Response::builder()
+                        .status(200)
+                        .body(kube::client::Body::from(body.into_bytes()))
+                        .unwrap(),
+                )
+            }
+        });
+        let client = kube::Client::new(service, "default");
+        let ar = crate::crds::custom_api_resource(
+            "argoproj.io",
+            "v1alpha1",
+            "Application",
+            "applications",
+        );
+        let api: Api<kube::api::PartialObjectMeta<kube::api::DynamicObject>> =
+            Api::namespaced_with(client, "team", &ar);
+        let mut signals = Vec::new();
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            watch_kind_session(api, |signal| signals.push(signal)),
+        )
+        .await
+        .expect("a 410 ends the session");
+        let error = result.unwrap_err();
+        assert!(
+            error.contains("410") || error.contains("too old"),
+            "{error}"
+        );
+        assert_eq!(signals, [KindSignal::Listed, KindSignal::Changed]);
+        let requests = requests.lock().unwrap();
+        assert!(
+            requests.iter().all(|(uri, _)| uri
+                .starts_with("/apis/argoproj.io/v1alpha1/namespaces/team/applications")),
+            "{requests:?}"
+        );
+        assert!(
+            requests
+                .iter()
+                .all(|(_, accept)| accept.contains("PartialObjectMetadata")),
+            "metadata only: {requests:?}"
+        );
     }
 }

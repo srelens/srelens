@@ -16,28 +16,31 @@ use ratatui::{Frame, Terminal};
 use serde_json::{json, Value};
 use srelens_kube::lineage::{LineageNode, LineageRelation};
 use srelens_kube::metrics::MetricSample;
-use srelens_tui::commands::{CrdMeta, PrinterColumn, ResourceKind};
-use srelens_tui::theme::Theme;
-use srelens_tui::views::cracked_lens::render_cracked_lens;
-use srelens_tui::views::describe_view::{render_describe_view, DescribeViewState};
-use srelens_tui::views::helm_view::{render_helm_view, HelmReleaseItem, HelmViewState};
-use srelens_tui::views::logs_view::{render_logs_view, LogsViewState};
-use srelens_tui::views::metrics_panel_view::{
+use srectl::commands::{CrdMeta, PrinterColumn, ResourceKind};
+use srectl::theme::Theme;
+use srectl::views::argo_detail_view::{
+    render_argo_detail_view, ArgoDetailTab, ArgoDetailViewState,
+};
+use srectl::views::cracked_lens::render_cracked_lens;
+use srectl::views::describe_view::{render_describe_view, DescribeViewState};
+use srectl::views::helm_view::{render_helm_view, HelmReleaseItem, HelmViewState};
+use srectl::views::logs_view::{render_logs_view, LogsViewState};
+use srectl::views::metrics_panel_view::{
     render_metrics_panel_modal, MetricsPanelState, MetricsTimeRange,
 };
-use srelens_tui::views::port_forward_view::{
+use srectl::views::port_forward_view::{
     render_port_forward_view, PortForwardEntry, PortForwardViewState,
 };
-use srelens_tui::views::reason_rail::{
+use srectl::views::reason_rail::{
     render_reason_rail_modal, render_reason_rail_widget, tally_event_reasons, ReasonTally,
 };
-use srelens_tui::views::resource_table::{
+use srectl::views::resource_table::{
     default_columns_for_kind, eval_crd_json_path, extract_field_str, is_event_warning_or_failure,
     render_resource_table, ResourceTableState, WorkloadSegment,
 };
-use srelens_tui::views::toolbox_view::{render_toolbox_view, ToolStatusItem, ToolboxViewState};
-use srelens_tui::views::tree_view::{render_tree_view, TreeViewState};
-use srelens_tui::views::{highlight_text_matches, sanitize_span_text};
+use srectl::views::toolbox_view::{render_toolbox_view, ToolStatusItem, ToolboxViewState};
+use srectl::views::tree_view::{render_tree_view, TreeViewState};
+use srectl::views::{highlight_text_matches, sanitize_span_text};
 
 /// Render one frame and hand back the raw buffer so a test can inspect cell
 /// styles (the colour a status cell was drawn in), not only the text.
@@ -161,6 +164,86 @@ fn highlight_text_matches_handles_a_match_that_ends_the_text() {
     assert_eq!(parts, vec!["abc", "XYZ"]);
 }
 
+#[test]
+fn highlight_text_matches_safely_handles_unicode_and_case_expansion_without_panicking() {
+    let base = Style::default().fg(Color::White);
+    let hit = Style::default().fg(Color::Yellow);
+
+    // 1. Multibyte emoji and accented characters
+    let spans = highlight_text_matches("Prefix ⚡ Bolt", "bolt", base, hit);
+    let parts: Vec<(&str, Option<Color>)> = spans
+        .iter()
+        .map(|s| (s.content.as_ref(), s.style.fg))
+        .collect();
+    assert_eq!(
+        parts,
+        vec![
+            ("Prefix ⚡ ", Some(Color::White)),
+            ("Bolt", Some(Color::Yellow))
+        ]
+    );
+
+    let spans = highlight_text_matches("café LATTE", "latte", base, hit);
+    let parts: Vec<(&str, Option<Color>)> = spans
+        .iter()
+        .map(|s| (s.content.as_ref(), s.style.fg))
+        .collect();
+    assert_eq!(
+        parts,
+        vec![
+            ("café ", Some(Color::White)),
+            ("LATTE", Some(Color::Yellow))
+        ]
+    );
+
+    let spans = highlight_text_matches("CAFÉ Latte", "café", base, hit);
+    let parts: Vec<(&str, Option<Color>)> = spans
+        .iter()
+        .map(|s| (s.content.as_ref(), s.style.fg))
+        .collect();
+    assert_eq!(
+        parts,
+        vec![
+            ("CAFÉ", Some(Color::Yellow)),
+            (" Latte", Some(Color::White))
+        ]
+    );
+
+    // 2. German capital sharp S (ẞ) which lowercases to 'ß'
+    let spans = highlight_text_matches("GROẞE Halle", "große", base, hit);
+    let parts: Vec<(&str, Option<Color>)> = spans
+        .iter()
+        .map(|s| (s.content.as_ref(), s.style.fg))
+        .collect();
+    assert_eq!(
+        parts,
+        vec![
+            ("GROẞE", Some(Color::Yellow)),
+            (" Halle", Some(Color::White))
+        ]
+    );
+
+    // 3. Turkish dotted I (\u{0130}) where lowercasing expands from 2 bytes to 3 bytes
+    let spans = highlight_text_matches("T\u{0130}TLE", "\u{0130}", base, hit);
+    let parts: Vec<(&str, Option<Color>)> = spans
+        .iter()
+        .map(|s| (s.content.as_ref(), s.style.fg))
+        .collect();
+    assert_eq!(
+        parts,
+        vec![
+            ("T", Some(Color::White)),
+            ("\u{0130}", Some(Color::Yellow)),
+            ("TLE", Some(Color::White))
+        ]
+    );
+
+    // 4. Multibyte with no matches
+    let spans = highlight_text_matches("⚡ Bolt ❄", "zzz", base, hit);
+    assert_eq!(spans.len(), 1);
+    assert_eq!(spans[0].content, "⚡ Bolt ❄");
+}
+
 // ---------------------------------------------------------------------------
 // logs_view
 // ---------------------------------------------------------------------------
@@ -181,8 +264,8 @@ fn logs_view_starts_empty_and_following() {
     assert!(state.follow);
     assert!(!state.timestamps);
     assert!(!state.previous);
-    // Machine text does not wrap by default; `w` turns it on.
-    assert!(!state.wrap);
+    // Wrap is enabled by default; `w` turns it off.
+    assert!(state.wrap);
     assert_eq!(state.horizontal_scroll, 0);
     assert_eq!(state.scroll_offset, 0);
     assert!(state.search_query.is_empty());
@@ -247,12 +330,9 @@ fn logs_view_toggle_follow_jumps_back_to_the_bottom() {
 }
 
 #[test]
-fn a_long_log_entry_is_one_row_by_default_and_scrolls_sideways() {
-    // A pod that logs one long JSON entry. Wrapped, that is a wall that
-    // pushes the short lines around it out of view; and the wrapped renderer
-    // scrolls by entry, so an entry taller than the viewport has middle rows
-    // nothing can reach. Unwrapped, it is one row, and `l` reveals the rest.
+fn a_long_log_entry_scrolls_sideways_when_unwrapped() {
     let mut state = logs();
+    state.toggle_wrap(); // switch to unwrapped mode
     state.follow = false;
     state.push_line("before".to_string());
     let long = format!("{{\"payload\":\"{}\",\"tail\":\"END\"}}", "x".repeat(400));
@@ -260,10 +340,23 @@ fn a_long_log_entry_is_one_row_by_default_and_scrolls_sideways() {
     state.push_line("after".to_string());
 
     let lines = common::render_lines(60, 8, |f| render_logs_view(f, f.area(), &state));
-    let before = lines.iter().position(|l| l.contains("before")).expect("before");
-    let after = lines.iter().position(|l| l.contains("after")).expect("after");
-    assert_eq!(after, before + 2, "the long entry takes exactly one row: {lines:#?}");
-    assert!(!lines.iter().any(|l| l.contains("END")), "the tail is off screen, not wrapped down");
+    let before = lines
+        .iter()
+        .position(|l| l.contains("before"))
+        .expect("before");
+    let after = lines
+        .iter()
+        .position(|l| l.contains("after"))
+        .expect("after");
+    assert_eq!(
+        after,
+        before + 2,
+        "the long entry takes exactly one row: {lines:#?}"
+    );
+    assert!(
+        !lines.iter().any(|l| l.contains("END")),
+        "the tail is off screen, not wrapped down"
+    );
 
     // Sideways to the end of it.
     state.scroll_right(380);
@@ -274,14 +367,15 @@ fn a_long_log_entry_is_one_row_by_default_and_scrolls_sideways() {
 #[test]
 fn logs_view_flag_toggles_flip_each_flag_independently() {
     let mut state = logs();
+    assert!(state.wrap);
     state.toggle_timestamps();
     state.toggle_previous();
     state.toggle_wrap();
-    assert!(state.timestamps && state.previous && state.wrap);
+    assert!(state.timestamps && state.previous && !state.wrap);
     state.toggle_timestamps();
-    assert!(!state.timestamps && state.previous && state.wrap);
+    assert!(!state.timestamps && state.previous && !state.wrap);
     state.toggle_wrap();
-    assert!(!state.wrap);
+    assert!(state.wrap);
 }
 
 #[test]
@@ -365,7 +459,7 @@ fn logs_view_renders_a_waiting_placeholder_when_there_are_no_lines() {
     let state = logs();
     let text = common::render_text(120, 40, |f| render_logs_view(f, f.area(), &state));
     assert!(
-        text.contains("Logs: web-0 (default/app) [Ftpw] [1/0 lines]"),
+        text.contains("Logs: web-0 (default/app) [FtpW] [1/0 lines]"),
         "{text}"
     );
     assert!(text.contains("Waiting for logs..."));
@@ -382,7 +476,7 @@ fn logs_view_renders_numbered_lines_and_the_flag_letters_when_following() {
     state.toggle_previous();
     let text = common::render_text(120, 40, |f| render_logs_view(f, f.area(), &state));
     assert!(
-        text.contains("Logs: api (prod/all) [FTPw] [3/3 lines]"),
+        text.contains("Logs: api (prod/all) [FTPW] [3/3 lines]"),
         "{text}"
     );
     assert!(text.contains("    1 │ message 1"));
@@ -411,6 +505,7 @@ fn logs_view_shows_the_tail_while_following_and_the_offset_when_not() {
 
 #[test]
 fn logs_view_colours_lines_by_severity_and_highlights_search_hits() {
+    let _theme = common::theme::lock();
     let mut state = logs();
     state.push_line("something FATAL happened".to_string());
     state.push_line("a warning here".to_string());
@@ -457,8 +552,7 @@ fn logs_view_title_reports_zero_matches_and_wraps_long_lines_when_asked() {
     let mut state = logs();
     state.push_line("x".repeat(100));
     state.set_search_query("nothing");
-    // Asked for with `w`, the 100-char line wraps onto line 2 with hanging indent.
-    state.toggle_wrap();
+    // Default is wrap: true, the 100-char line wraps onto line 2 with hanging indent.
     let wrapped = common::render_lines(60, 20, |f| render_logs_view(f, f.area(), &state));
     assert!(wrapped[1].starts_with("│    1 │ xxxx"), "{}", wrapped[1]);
     assert!(
@@ -477,9 +571,15 @@ fn logs_view_title_reports_zero_matches_and_wraps_long_lines_when_asked() {
     // Toggling wrap off cuts the 100-char line at the border without wrapping.
     state.toggle_wrap();
     let unwrapped = common::render_lines(60, 20, |f| render_logs_view(f, f.area(), &state));
-    assert!(unwrapped[1].starts_with("│    1 │ xxxx"), "{}", unwrapped[1]);
     assert!(
-        unwrapped[2].trim_matches(|c| c == '│' || c == ' ').is_empty(),
+        unwrapped[1].starts_with("│    1 │ xxxx"),
+        "{}",
+        unwrapped[1]
+    );
+    assert!(
+        unwrapped[2]
+            .trim_matches(|c| c == '│' || c == ' ')
+            .is_empty(),
         "{}",
         unwrapped[2]
     );
@@ -487,7 +587,8 @@ fn logs_view_title_reports_zero_matches_and_wraps_long_lines_when_asked() {
 
 #[test]
 fn logs_view_horizontal_scroll_when_unwrapped() {
-    let mut state = logs(); // unwrapped is the default
+    let mut state = logs();
+    state.toggle_wrap(); // switch to unwrapped mode
     state.push_line("0123456789abcdefghij".to_string());
 
     // At h_scroll = 0: contains initial digits
@@ -509,16 +610,23 @@ fn logs_view_horizontal_scroll_when_unwrapped() {
 
 #[test]
 fn logs_view_wrapped_follow_shows_bottom_rows() {
-    let mut state = logs();
-    state.toggle_wrap();
-    // In a 60-column terminal, inner width is 58. Gutter is 8. Message width is 50.
-    // Pushing a line of 120 chars wraps onto 3 visual lines.
+    let mut state = logs(); // wrapped by default
+                            // In a 60-column terminal, inner width is 58. Gutter is 8. Message width is 50.
+                            // Pushing a line of 120 chars wraps onto 3 visual lines.
     state.push_line("START_".to_string() + &"a".repeat(110) + "_END");
     let lines = common::render_lines(60, 10, |f| render_logs_view(f, f.area(), &state));
     assert!(lines[1].contains("START_"), "row 1 has start: {}", lines[1]);
     assert!(lines[3].contains("_END"), "row 3 has end: {}", lines[3]);
-    assert!(lines[2].starts_with("│      │ "), "continuation has indent: {}", lines[2]);
-    assert!(lines[3].starts_with("│      │ "), "continuation has indent: {}", lines[3]);
+    assert!(
+        lines[2].starts_with("│      │ "),
+        "continuation has indent: {}",
+        lines[2]
+    );
+    assert!(
+        lines[3].starts_with("│      │ "),
+        "continuation has indent: {}",
+        lines[3]
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -601,6 +709,7 @@ fn describe_view_scrolling_is_clamped_to_the_content() {
 
 #[test]
 fn describe_view_renders_title_with_namespace_and_styled_key_value_lines() {
+    let _theme = common::theme::lock();
     let state = describe();
     let buf = render_buffer(120, 40, |f| render_describe_view(f, f.area(), &state));
     let title = buffer_row(&buf, 0);
@@ -641,6 +750,7 @@ fn describe_view_renders_without_namespace_and_from_the_scroll_offset() {
 
 #[test]
 fn describe_view_shows_the_search_badge_and_highlights_the_hit() {
+    let _theme = common::theme::lock();
     let mut state = describe();
     state.set_search_query("nginx");
     let buf = render_buffer(120, 40, |f| render_describe_view(f, f.area(), &state));
@@ -819,6 +929,7 @@ fn tree_view_renders_loading_error_and_empty_branches() {
 
 #[test]
 fn tree_view_renders_every_node_kind_with_its_badges_and_status_colour() {
+    let _theme = common::theme::lock();
     let mut state = TreeViewState::new("Pod".into(), "web-abc-1".into(), Some("prod".into()));
     state.set_tree(lineage());
     let buf = render_buffer(120, 40, |f| render_tree_view(f, f.area(), &state));
@@ -935,6 +1046,7 @@ fn toolbox_view_selection_moves_within_the_tool_list() {
 
 #[test]
 fn toolbox_view_renders_one_status_per_tool_with_the_right_colour() {
+    let _theme = common::theme::lock();
     let state = toolbox();
     let buf = render_buffer(120, 20, |f| render_toolbox_view(f, f.area(), &state));
     let rows: Vec<String> = (0..buf.area.height).map(|y| buffer_row(&buf, y)).collect();
@@ -974,6 +1086,7 @@ fn toolbox_view_renders_one_status_per_tool_with_the_right_colour() {
 
 #[test]
 fn toolbox_view_highlights_the_selected_row_even_on_a_narrow_screen() {
+    let _theme = common::theme::lock();
     let mut state = toolbox();
     state.select_next();
     let buf = render_buffer(60, 20, |f| render_toolbox_view(f, f.area(), &state));
@@ -1056,6 +1169,7 @@ fn port_forward_view_renders_the_empty_placeholder() {
 
 #[test]
 fn port_forward_view_renders_rows_with_human_byte_counts_and_status_colours() {
+    let _theme = common::theme::lock();
     let mut state = PortForwardViewState::new();
     state.set_forwards(vec![
         forward("a", "active", 8080, 512, 1536),
@@ -1165,6 +1279,38 @@ fn helm_view_set_releases_clamps_the_selection() {
 }
 
 #[test]
+fn helm_view_set_releases_preserves_selected_release_by_name_and_namespace() {
+    let mut state = HelmViewState::new();
+    let mut rel_c_default = release("c", "deployed", 1);
+    rel_c_default.namespace = "default".to_string();
+    let mut rel_c_platform = release("c", "deployed", 1);
+    rel_c_platform.namespace = "platform".to_string();
+
+    state.set_releases(vec![
+        release("b", "deployed", 1),
+        rel_c_platform.clone(),
+        rel_c_default.clone(),
+    ]);
+    state.select_next();
+    state.select_next();
+    assert_eq!(state.selected_release().unwrap().name, "c");
+    assert_eq!(state.selected_release().unwrap().namespace, "default");
+    assert_eq!(state.selected_idx, 2);
+
+    // A new release "a" is installed and prepended:
+    state.set_releases(vec![
+        release("a", "deployed", 1),
+        release("b", "deployed", 1),
+        rel_c_platform.clone(),
+        rel_c_default.clone(),
+    ]);
+    // Selection stays locked to release ("c", "default") at index 3:
+    assert_eq!(state.selected_release().unwrap().name, "c");
+    assert_eq!(state.selected_release().unwrap().namespace, "default");
+    assert_eq!(state.selected_idx, 3);
+}
+
+#[test]
 fn helm_view_renders_the_empty_placeholder() {
     let mut state = HelmViewState::new();
     state.set_releases(vec![]);
@@ -1181,6 +1327,7 @@ fn helm_view_renders_the_empty_placeholder() {
 
 #[test]
 fn helm_view_renders_rows_and_colours_status_by_outcome() {
+    let _theme = common::theme::lock();
     let mut state = HelmViewState::new();
     state.set_releases(vec![
         release("ingress", "deployed", 4),
@@ -1294,6 +1441,7 @@ fn reason_rail_widget_shows_the_empty_placeholder_and_the_focus_dependent_title(
 
 #[test]
 fn reason_rail_widget_marks_the_cursor_the_active_filter_and_warning_dots() {
+    let _theme = common::theme::lock();
     let t = tallies();
     let buf = render_buffer(40, 8, |f| {
         render_reason_rail_widget(f, f.area(), &t, 1, true, Some("Pulled"))
@@ -1766,6 +1914,7 @@ fn crd(namespaced: bool, columns: &[(&str, &str, i32)]) -> ResourceKind {
                 description: None,
             })
             .collect(),
+        created_at: None,
     })
 }
 
@@ -2249,7 +2398,9 @@ fn an_off_screen_wall_of_a_cell_does_not_squeeze_the_rows_on_screen() {
     for i in 0..40 {
         items.push(json!({ "name": format!("filler-{i}"), "namespace": "prod", "status": "Running", "age": "1d" }));
     }
-    items.push(json!({ "name": "bad", "namespace": "prod", "status": "S".repeat(300), "age": "1d" }));
+    items.push(
+        json!({ "name": "bad", "namespace": "prod", "status": "S".repeat(300), "age": "1d" }),
+    );
     t.set_items(items, "");
 
     let buf = render_buffer(160, 12, |f| render_resource_table(f, f.area(), &t));
@@ -2257,10 +2408,19 @@ fn an_off_screen_wall_of_a_cell_does_not_squeeze_the_rows_on_screen() {
     let (_, r1) = row_containing(&rows, "web-1").expect("web-1 on screen");
     // Everything for the visible rows is still there, including a status
     // longer than its declared width -- the column grew to fit what is shown.
-    assert!(r1.contains("CrashLoopBackOff") && r1.contains("node-b") && r1.contains("1h"), "{r1}");
+    assert!(
+        r1.contains("CrashLoopBackOff") && r1.contains("node-b") && r1.contains("1h"),
+        "{r1}"
+    );
     let (_, r0) = row_containing(&rows, "web-0").expect("web-0 on screen");
-    assert!(r0.contains("10.0.0.1") && r0.contains("node-a") && r0.contains("2d"), "{r0}");
-    assert!(!rows.iter().any(|l| l.contains("SSSSSSSSSS")), "the wall is off screen");
+    assert!(
+        r0.contains("10.0.0.1") && r0.contains("node-a") && r0.contains("2d"),
+        "{r0}"
+    );
+    assert!(
+        !rows.iter().any(|l| l.contains("SSSSSSSSSS")),
+        "the wall is off screen"
+    );
 
     // Scroll down to the wall: it is clipped inside its column, one row high,
     // and the row's other cells survive it.
@@ -2271,13 +2431,17 @@ fn an_off_screen_wall_of_a_cell_does_not_squeeze_the_rows_on_screen() {
     let rows: Vec<String> = (0..buf.area.height).map(|y| buffer_row(&buf, y)).collect();
     let (_, bad) = row_containing(&rows, "bad").expect("bad on screen");
     assert!(bad.contains("SSSSSSSSSS"), "{bad}");
-    assert!(bad.contains("prod") && bad.contains("1d"), "other cells survive the wall: {bad}");
+    assert!(
+        bad.contains("prod") && bad.contains("1d"),
+        "other cells survive the wall: {bad}"
+    );
     let walls = rows.iter().filter(|l| l.contains("SSSSSSSSSS")).count();
     assert_eq!(walls, 1, "one row high, not wrapped: {rows:#?}");
 }
 
 #[test]
 fn table_renders_headers_rows_marks_and_the_filtered_count_badge() {
+    let _theme = common::theme::lock();
     let mut t = ResourceTableState::new(ResourceKind::Pods);
     t.set_items(
         vec![
@@ -2340,6 +2504,7 @@ fn table_renders_headers_rows_marks_and_the_filtered_count_badge() {
 
 #[test]
 fn table_marked_but_unselected_row_uses_the_marked_background() {
+    let _theme = common::theme::lock();
     let mut t = ResourceTableState::new(ResourceKind::Namespaces);
     t.set_items(
         vec![
@@ -2371,6 +2536,7 @@ fn table_marked_but_unselected_row_uses_the_marked_background() {
 
 #[test]
 fn table_scrolls_to_keep_a_far_selection_in_a_short_viewport() {
+    let _theme = common::theme::lock();
     let mut t = ResourceTableState::new(ResourceKind::Pods);
     t.set_items(pods(40), "");
     t.select_bottom();
@@ -2439,6 +2605,7 @@ fn events_table_shows_the_reason_rail_only_when_wide_enough() {
 
 #[test]
 fn events_table_title_carries_triage_and_reason_badges_and_colours_the_type() {
+    let _theme = common::theme::lock();
     let mut t = ResourceTableState::new(ResourceKind::Events);
     t.set_items(events(), "");
     t.toggle_warning_triage("");
@@ -2520,6 +2687,7 @@ fn workloads_table_title_shows_the_segment_and_kind_column() {
 
 #[test]
 fn custom_resource_table_colours_printer_status_columns() {
+    let _theme = common::theme::lock();
     let kind = crd(
         true,
         &[
@@ -2566,4 +2734,113 @@ fn custom_resource_table_colours_printer_status_columns() {
     assert!(r2.contains("Degraded"), "{r2}");
     assert_eq!(fg_of(&buf, y2 as u16, "False"), Theme::status_error().fg);
     assert_eq!(fg_of(&buf, y2 as u16, "Degraded"), Theme::status_error().fg);
+}
+
+#[test]
+fn a_long_argo_sync_error_wraps_instead_of_clipping() {
+    let mut state = ArgoDetailViewState::new("my-app".to_string(), "argocd".to_string(), None);
+    let marker = "CRD-ERROR-TAIL";
+    let mut app = srelens_kube::argo::ArgoApplication::from_json(&json!({
+        "metadata": { "name": "my-app", "namespace": "argocd" }
+    }));
+    app.operation_phase = "Failed".to_string();
+    app.operation_message = format!(
+        "one or more objects failed to apply, CustomResourceDefinition.apiextensions.k8s.io {} {marker}",
+        "x".repeat(80),
+    );
+    state.set_application(app);
+    state.active_tab = ArgoDetailTab::Overview;
+
+    let rows = common::render_lines(80, 40, |f| {
+        render_argo_detail_view(f, f.area(), &state);
+    });
+    let text = rows.join("\n");
+    assert!(
+        text.contains(marker),
+        "sync error was clipped at the card edge:\n{text}"
+    );
+    let start = rows
+        .iter()
+        .position(|row| row.contains("one or more objects failed"))
+        .expect("message start");
+    let end = rows
+        .iter()
+        .position(|row| row.contains(marker))
+        .expect("message tail");
+    assert!(
+        end > start,
+        "the error should wrap onto a later row, not stay on one clipped line:\n{text}"
+    );
+}
+
+#[test]
+fn test_resource_table_renders_explicit_error_panel_when_crd_not_found() {
+    let crd_meta = CrdMeta {
+        crd_name: "clustersecretstores.external-secrets.io".to_string(),
+        group: "external-secrets.io".to_string(),
+        version: "v1beta1".to_string(),
+        kind: "ClusterSecretStore".to_string(),
+        plural: "clustersecretstores".to_string(),
+        singular: "clustersecretstore".to_string(),
+        namespaced: false,
+        short_names: vec!["css".to_string()],
+        printer_columns: Vec::new(),
+        created_at: None,
+    };
+    let mut state = ResourceTableState::new(ResourceKind::CustomResource(crd_meta));
+    state.set_error("Resource definition not found on cluster (404 Not Found)".to_string());
+
+    let rows = common::render_lines(100, 30, |f| {
+        render_resource_table(f, f.area(), &mut state);
+    });
+    let text = rows.join("\n");
+    assert!(
+        text.contains("Resource definition unavailable on this cluster"),
+        "error title should be rendered:\n{text}"
+    );
+    assert!(
+        text.contains("ClusterSecretStore was not found on this cluster"),
+        "error description should name the resource as not found:\n{text}"
+    );
+    assert!(
+        !text.contains("No ClusterSecretStore found in this scope."),
+        "misleading empty state must NOT be rendered when error is present:\n{text}"
+    );
+}
+
+#[test]
+fn test_resource_table_renders_explicit_error_panel_when_load_fails_with_network_or_rbac_error() {
+    let crd_meta = CrdMeta {
+        crd_name: "clustersecretstores.external-secrets.io".to_string(),
+        group: "external-secrets.io".to_string(),
+        version: "v1beta1".to_string(),
+        kind: "ClusterSecretStore".to_string(),
+        plural: "clustersecretstores".to_string(),
+        singular: "clustersecretstore".to_string(),
+        namespaced: false,
+        short_names: vec!["css".to_string()],
+        printer_columns: Vec::new(),
+        created_at: None,
+    };
+    let mut state = ResourceTableState::new(ResourceKind::CustomResource(crd_meta));
+    state.set_error(
+        "Forbidden: User 'bob' cannot list resource in API group (403 Forbidden)".to_string(),
+    );
+
+    let rows = common::render_lines(100, 30, |f| {
+        render_resource_table(f, f.area(), &mut state);
+    });
+    let text = rows.join("\n");
+    assert!(
+        text.contains("Failed to load resource"),
+        "failure title should be rendered:\n{text}"
+    );
+    assert!(
+        text.contains("ClusterSecretStore could not be loaded from the cluster"),
+        "error description should indicate failure to load rather than claiming not found:\n{text}"
+    );
+    assert!(
+        !text.contains("was not found on this cluster"),
+        "must NOT claim resource was not found when error is RBAC or network failure:\n{text}"
+    );
 }

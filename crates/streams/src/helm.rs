@@ -30,6 +30,8 @@ struct Session {
 pub struct HelmManager {
     next_id: AtomicU64,
     sessions: Mutex<HashMap<u64, Session>>,
+    /// The `helm` to run; looked up on PATH at each start when unset.
+    helm: Option<PathBuf>,
 }
 
 impl Default for HelmManager {
@@ -43,6 +45,16 @@ impl HelmManager {
         Self {
             next_id: AtomicU64::new(1),
             sessions: Mutex::new(HashMap::new()),
+            helm: None,
+        }
+    }
+
+    /// A manager that runs the `helm` at `helm` rather than the one on PATH —
+    /// what a test runs a stand-in through.
+    pub fn with_helm(helm: PathBuf) -> Self {
+        Self {
+            helm: Some(helm),
+            ..Self::new()
         }
     }
 
@@ -67,7 +79,10 @@ impl HelmManager {
         helm_home: Option<PathBuf>,
     ) -> Result<u64, String> {
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
-        let bin = srelens_kube::helm_cli::helm_binary()?;
+        let bin = match &self.helm {
+            Some(helm) => helm.clone(),
+            None => srelens_kube::helm_cli::helm_binary()?,
+        };
 
         let ctx = context.clone();
         let kubeconfig_path = tokio::task::spawn_blocking(move || {

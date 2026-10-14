@@ -85,7 +85,7 @@ export function Titlebar({ controls = "none", leading, title, actions, label = "
         {title}
       </div>
 
-      <div className="flex items-center justify-end gap-0.5 pr-2">
+      <div data-tauri-drag-region className="flex items-center justify-end gap-0.5 pr-2">
         {filled(actions) && (
           <span data-slot="actions" className="inline-flex items-center gap-0.5" style={NO_DRAG}>
             {actions}

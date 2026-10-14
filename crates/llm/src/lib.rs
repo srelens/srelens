@@ -15,12 +15,16 @@ pub mod anthropic;
 pub mod client;
 pub mod error;
 pub mod gemini;
+pub mod history;
+pub mod invoker;
 pub mod openai;
 pub mod provider;
 pub mod types;
 
 pub use client::{HttpProvider, ProviderConfig};
 pub use error::LlmError;
+pub use history::distill_and_trim_history;
+pub use invoker::{FilteredToolInvoker, CORE_SRE_TOOLS};
 pub use provider::{Provider, ToolCallResult, ToolInvoker};
 
 pub use types::{

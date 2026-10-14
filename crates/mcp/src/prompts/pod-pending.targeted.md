@@ -22,12 +22,12 @@ The evidence:
   `objectName: {{pod}}`, `namespace: {{namespace}}`. Start here — the
   scheduler explains itself in `FailedScheduling` messages, and image pull,
   init, and mount problems surface here too.
-- For node-side facts, Call `k8s.listNodes` with `context: {{context}}` to
-  enumerate real node names. Then Call `k8s.getObject` with
-  `context: {{context}}`, `kind: Node`, `name: <candidate>` and read
-  whichever the cause needs: `status.allocatable`, `metadata.labels`, or
-  `spec.taints`. Call `k8s.nodeMetrics` with `context: {{context}}` to judge
-  the scale of a capacity shortfall — cluster-wide or a handful of nodes.
+- For node-side facts, Call `k8s.listResource` with `context: {{context}}`,
+  `kind: Node`, `fields: [".status.allocatable", ".metadata.labels", ".spec.taints"]`.
+  One call reads them for every real node — never one `k8s.getObject` per
+  node — and read whichever the cause needs. Call `k8s.nodeMetrics` with
+  `context: {{context}}` to judge the scale of a capacity shortfall —
+  cluster-wide or a handful of nodes.
 - For volume binding, Call `k8s.listPersistentVolumeClaims` with
   `context: {{context}}`, `namespace: {{namespace}}`. Call
   `k8s.listStorageClasses` with `context: {{context}}`. For a shared claim,

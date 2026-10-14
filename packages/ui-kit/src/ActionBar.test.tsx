@@ -46,6 +46,32 @@ function setup(props: Partial<Parameters<typeof ActionBar>[0]> = {}) {
   return render(<ActionBar label="Pod actions" actions={four} {...props} />);
 }
 
+/**
+ * The accessible description of an element, resolved the way an accessibility
+ * tree resolves it: every id in `aria-describedby`, in order, the text of each.
+ *
+ * `title` is deliberately not consulted. It is the *fallback* description — a
+ * browser reaches for it only when there is no `aria-describedby` and no
+ * `aria-description`, several screen readers never announce it, and the tooltip
+ * it draws fires on hover and never on focus. Asserting on `title` is what let
+ * the gap in #670 read as covered.
+ */
+function description(el: Element): string | null {
+  const ids = el.getAttribute("aria-describedby");
+  if (ids === null) return null;
+  return ids
+    .split(/\s+/)
+    .filter(Boolean)
+    .map((id) => el.ownerDocument.getElementById(id)?.textContent ?? "")
+    .join(" ")
+    .trim();
+}
+
+it("resolves every whitespace-separated description ID in order", () => {
+  render(<><button aria-describedby={"reason-first\t reason-second\n"}>Test descriptions</button><span id="reason-first">First reason</span><span id="reason-second">Second reason</span></>);
+  expect(description(screen.getByRole("button", { name: "Test descriptions" }))).toBe("First reason Second reason");
+});
+
 const more = () => screen.getByRole("button", { name: "More actions" });
 
 async function openMenu() {
@@ -236,11 +262,78 @@ describe("ActionBar", () => {
       expect(document.activeElement).toBe(button);
     });
 
-    it("carries the reason as its description", () => {
+    it("keeps the reason as a tooltip for the mouse", () => {
       setup({ actions: blocked });
       expect(screen.getByRole("button", { name: "Delete" }).getAttribute("title")).toBe(
         "You cannot delete pods in kube-system",
       );
+    });
+
+    // #670. The `title` above is the tooltip for a mouse, and that is all it is
+    // worth relying on for: it is the fallback description, so any real one
+    // beats it, and it never fires on keyboard focus. The reason has to be an
+    // element the control points at, or choosing `aria-disabled` over
+    // `disabled` — done precisely so the button stays focusable and the reason
+    // stays reachable — buys a focus stop with nothing at the end of it.
+    it("points at the reason with aria-describedby, not only at a tooltip", () => {
+      setup({ actions: blocked });
+      expect(description(screen.getByRole("button", { name: "Delete" }))).toBe(
+        "You cannot delete pods in kube-system",
+      );
+    });
+
+    it("shows the blocked bar reason in a tooltip outside a clipping footer", async () => {
+      render(<footer data-testid="clipping-footer" style={{ overflow: "hidden" }}><ActionBar label="Footer actions" actions={blocked} /></footer>);
+      await userEvent.tab();
+      const tip = await screen.findByRole("tooltip");
+      expect(tip.textContent).toBe("You cannot delete pods in kube-system");
+      expect(screen.getByTestId("clipping-footer").contains(tip)).toBe(false);
+      expect(description(screen.getByRole("button", { name: "Delete" }))).toBe("You cannot delete pods in kube-system");
+    });
+
+    it("describes a blocked row in the menu the same way", () => {
+      setup({ max: 1, actions: [action("Logs"), ...blocked] });
+      return openMenu().then(() => {
+        // `No access` is the row's visible tag, and it is a constant. Pointing
+        // the description at those two words would say less than the `title`
+        // already carried; the row has to name the reason too.
+        expect(description(screen.getByRole("button", { name: "Delete" }))).toBe(
+          "You cannot delete pods in kube-system",
+        );
+      });
+    });
+
+    it("leaves the reason in the tree the description points into", () => {
+      // The reason is hidden by clipping, never by `display: none` or `hidden`:
+      // an element removed from the accessibility tree is one `aria-describedby`
+      // resolves to nothing at all, which is the bug wearing a fix.
+      setup({ actions: blocked });
+      const id = screen.getByRole("button", { name: "Delete" }).getAttribute("aria-describedby");
+      const reason = document.getElementById(id ?? "");
+      expect(reason).not.toBeNull();
+      expect(reason?.hasAttribute("hidden")).toBe(false);
+      expect(reason?.getAttribute("aria-hidden")).toBeNull();
+    });
+
+    it("keeps the reason out of the accessible name", () => {
+      // The name is the verb. A button called "Delete You cannot delete pods in
+      // kube-system" is exactly what the `MenuRow` aria-label note warns about,
+      // one element over.
+      setup({ actions: blocked });
+      expect(screen.getByRole("button", { name: "Delete" })).toBeDefined();
+      expect(screen.queryByRole("button", { name: /kube-system/ })).toBeNull();
+    });
+
+    it("describes nothing when the action is not blocked", () => {
+      setup({ actions: [action("Delete")] });
+      expect(description(screen.getByRole("button", { name: "Delete" }))).toBeNull();
+    });
+
+    it("describes nothing on an unblocked row in the menu", () => {
+      setup({ max: 1, actions: [action("Logs"), action("Delete")] });
+      return openMenu().then(() => {
+        expect(description(screen.getByRole("button", { name: "Delete" }))).toBeNull();
+      });
     });
 
     it("says so in words in the menu, not only in the dimming", () => {

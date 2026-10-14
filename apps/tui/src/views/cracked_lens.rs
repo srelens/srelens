@@ -2,7 +2,7 @@ use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Paragraph},
+    widgets::{Block, Borders, Paragraph, Wrap},
     Frame,
 };
 
@@ -40,7 +40,12 @@ pub fn render_cracked_lens(
                 Span::styled("Press <r> to retry or <Ctrl+x> to switch context", Style::default().fg(Theme::CYAN)),
             ]),
         ];
-        f.render_widget(Paragraph::new(compact_msg).alignment(Alignment::Center), inner);
+        f.render_widget(
+            Paragraph::new(compact_msg)
+                .wrap(Wrap { trim: true })
+                .alignment(Alignment::Center),
+            inner,
+        );
         return;
     }
 
@@ -232,7 +237,10 @@ pub fn render_cracked_lens(
             .split(content_area);
 
         f.render_widget(Paragraph::new(cracked_lens_lines), h_chunks[1]);
-        f.render_widget(Paragraph::new(diag_lines), h_chunks[3]);
+        f.render_widget(
+            Paragraph::new(diag_lines).wrap(Wrap { trim: false }),
+            h_chunks[3],
+        );
     } else {
         // Narrow terminal: stack vertically
         let mut combined = cracked_lens_lines;

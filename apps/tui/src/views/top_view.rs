@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Cell, Clear, Row, Table};
+use ratatui::widgets::{Block, Borders, Cell, Clear, Paragraph, Row, Table, Wrap};
 use ratatui::Frame;
 
 use crate::theme::Theme;
@@ -369,7 +369,7 @@ pub fn render_top_view(f: &mut Frame, area: Rect, state: &TopViewState) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(3), // Top header / tab bar
+            Constraint::Length(4), // Top header / tab bar, with a row for wrap
             Constraint::Min(5),    // Table body
         ])
         .split(area);
@@ -419,7 +419,10 @@ pub fn render_top_view(f: &mut Frame, area: Rect, state: &TopViewState) {
 
     let inner_header = header_block.inner(chunks[0]);
     f.render_widget(header_block, chunks[0]);
-    f.render_widget(ratatui::widgets::Paragraph::new(header_line), inner_header);
+    f.render_widget(
+        Paragraph::new(header_line).wrap(Wrap { trim: true }),
+        inner_header,
+    );
 
     // 2. Table Body
     let table_block = Block::default()
@@ -439,7 +442,10 @@ pub fn render_top_view(f: &mut Frame, area: Rect, state: &TopViewState) {
                 let empty_msg = Line::from(vec![
                     Span::styled("No pod metrics available. (Ensure metrics-server is installed and pods are running)", Style::default().fg(Theme::dim())),
                 ]);
-                f.render_widget(ratatui::widgets::Paragraph::new(empty_msg), inner_table);
+                f.render_widget(
+                    Paragraph::new(empty_msg).wrap(Wrap { trim: true }),
+                    inner_table,
+                );
                 return;
             }
 
@@ -572,7 +578,10 @@ pub fn render_top_view(f: &mut Frame, area: Rect, state: &TopViewState) {
                 let empty_msg = Line::from(vec![
                     Span::styled("No node metrics available. (Ensure metrics-server is installed and nodes are ready)", Style::default().fg(Theme::dim())),
                 ]);
-                f.render_widget(ratatui::widgets::Paragraph::new(empty_msg), inner_table);
+                f.render_widget(
+                    Paragraph::new(empty_msg).wrap(Wrap { trim: true }),
+                    inner_table,
+                );
                 return;
             }
 

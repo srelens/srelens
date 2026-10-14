@@ -26,6 +26,9 @@ around.
 - **`-bin`, not a source build.** AUR policy requires the `-bin` suffix for a
   package that ships a prebuilt binary. It repackages the upstream `.deb`, whose
   payload is exactly `usr/bin` + a `.desktop` entry + hicolor icons.
+- **The sandbox launcher comes with the `.deb`.** `usr/bin/srelens-sandbox-launch`,
+  which executable apps need beside `srelens`, is in the payload `package()`
+  unpacks, so nothing here names it.
 - **Dependencies come from the binary's real `DT_NEEDED`,** not guesswork:
   `webkit2gtk-4.1` (which supplies javascriptcore + libsoup3) and `gtk3` (which
   pulls cairo/gdk-pixbuf/glib/dbus). Note the binary never links `libwayland`

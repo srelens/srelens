@@ -55,6 +55,164 @@ impl ResolvedContext {
     pub fn stable_id(&self) -> String {
         format!("{}#{}", self.source.display(), self.original_name)
     }
+
+    /// [`stable_id`](Self::stable_id) with the kubeconfig path made absolute: the form a
+    /// caller that has already checked this context passes on, so a later lookup reaches
+    /// this context and nothing else.
+    ///
+    /// Explicitly prefixed, so [`resolve_context`] never takes it for a context name, even when
+    /// the kubeconfig was added by a relative path. Never persisted: settings keep
+    /// `stable_id`, which must not change for relative paths.
+    ///
+    /// Unlike `stable_id`, it names exactly one context: `#` and `%` in the path are
+    /// percent-encoded, so the first `#` is always the delimiter. A path `a` with context
+    /// `b#c` and a path `a#b` with context `c` share a stable ID but not a pinned one.
+    ///
+    /// `None` when the path cannot be made absolute (an empty path, or a working directory
+    /// that no longer exists): a relative fallback would not be recognised as an ID, so a
+    /// caller must refuse rather than dispatch under it.
+    pub fn pinned_id(&self) -> Option<String> {
+        let source = std::path::absolute(&self.source).ok()?;
+        Some(format!(
+            "srelens-context:{}#{}",
+            encode_path(&source),
+            encode_part(&self.original_name)
+        ))
+    }
+
+    /// The identity an app's cluster list holds (`extensions.configure` `clusters`).
+    ///
+    /// Like [`stable_id`](Self::stable_id) it keeps the path as given, so it does not depend
+    /// on the working directory; unlike it, `#` and `%` are percent-encoded in each part, so
+    /// the first `#` is always the delimiter and no two contexts share a key. A path `a` with
+    /// context `b#c` and a path `a#b` with context `c` share a stable ID but not a key, so a
+    /// list naming one can never admit the other, whether or not both are ever listed.
+    pub fn key(&self) -> String {
+        format!(
+            "{}#{}",
+            encode_path(&self.source),
+            encode_part(&self.original_name)
+        )
+    }
+}
+
+/// One part of a pinned ID or key: `%` and `#` encoded, so `#` can delimit the parts.
+fn encode_part(part: &str) -> String {
+    part.replace('%', "%25").replace('#', "%23")
+}
+
+/// The path part of a pinned ID or key, from the path's native bytes rather than its
+/// `display()` form, which is lossy: two files that differ only in bytes that are not UTF-8
+/// display as the same replacement character. A path that is valid UTF-8 is encoded as text
+/// (`encode_part`); any other is encoded unit by unit, with every unit that is not printable
+/// ASCII written as `%xx` (Unix bytes) or `%uxxxx` (Windows code units). A literal `%` is
+/// always `%25`, so the two forms cannot collide.
+fn encode_path(path: &Path) -> String {
+    if let Some(text) = path.to_str() {
+        return encode_part(text);
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        path.as_os_str()
+            .as_bytes()
+            .iter()
+            .map(|&b| match b {
+                b'#' => "%23".to_string(),
+                b'%' => "%25".to_string(),
+                0x20..=0x7e => (b as char).to_string(),
+                _ => format!("%{b:02x}"),
+            })
+            .collect()
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        path.as_os_str()
+            .encode_wide()
+            .map(|unit| match unit {
+                0x23 => "%23".to_string(),
+                0x25 => "%25".to_string(),
+                0x20..=0x7e => (unit as u8 as char).to_string(),
+                _ => format!("%u{unit:04x}"),
+            })
+            .collect()
+    }
+}
+
+/// The complete dispatch form emitted by `pinned_id`: the prefix alone is also
+/// valid in ordinary context names and must not reserve them.
+pub fn is_pinned_context(name: &str) -> bool {
+    let Some((source, context)) = name
+        .strip_prefix("srelens-context:")
+        .and_then(|id| id.split_once('#'))
+    else {
+        return false;
+    };
+    // Each part carries only the escapes its generator emits, and nothing else is
+    // reserved: `%23` and `%25` in both parts, and in the path part the escapes
+    // `encode_path` writes for a unit it does not print (lowercase hex; `%xx` for a byte on
+    // Unix, `%uxxxx` for a UTF-16 unit on Windows). A literal name such as `%41` for a
+    // printable `A`, or the other platform's form, stays a name.
+    let escaped = |suffix: &str| suffix.starts_with("25") || suffix.starts_with("23");
+    let text = |part: &str| !part.contains('#') && part.split('%').skip(1).all(escaped);
+    Path::new(source).is_absolute() && is_encoded_path(source) && text(context)
+}
+
+/// Whether `encoded` is exactly a form `encode_path` can emit. Checking individual escapes
+/// is not enough on Unix: `%c3%a9` consists of two non-printable byte escapes, but together
+/// those bytes are valid UTF-8, for which the encoder writes `é` instead.
+fn is_encoded_path(encoded: &str) -> bool {
+    if encoded.contains('#') {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        let mut bytes = Vec::with_capacity(encoded.len());
+        let raw = encoded.as_bytes();
+        let mut index = 0;
+        while index < raw.len() {
+            if raw[index] == b'%' {
+                let Some(hex) = raw.get(index + 1..index + 3) else {
+                    return false;
+                };
+                let Ok(hex) = std::str::from_utf8(hex) else {
+                    return false;
+                };
+                let Ok(byte) = u8::from_str_radix(hex, 16) else {
+                    return false;
+                };
+                bytes.push(byte);
+                index += 3;
+            } else {
+                bytes.push(raw[index]);
+                index += 1;
+            }
+        }
+        encode_path(Path::new(std::ffi::OsStr::from_bytes(&bytes))) == encoded
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStringExt;
+        let mut units = Vec::new();
+        let mut chars = encoded.chars().peekable();
+        while let Some(ch) = chars.next() {
+            if ch != '%' {
+                units.extend(ch.encode_utf16(&mut [0; 2]).iter().copied());
+                continue;
+            }
+            let count = if chars.peek() == Some(&'u') { 5 } else { 2 };
+            let suffix: String = chars.by_ref().take(count).collect();
+            let hex = suffix.strip_prefix('u').unwrap_or(&suffix);
+            let Ok(unit) = u16::from_str_radix(hex, 16) else {
+                return false;
+            };
+            units.push(unit);
+        }
+        let path = PathBuf::from(std::ffi::OsString::from_wide(&units));
+        encode_path(&path) == encoded
+    }
 }
 
 /// A parsed kubeconfig paired with the file it came from.
@@ -72,6 +230,17 @@ fn source_tag(path: &Path) -> String {
         .to_string()
 }
 
+/// Helper to resolve the cluster server URL for a context in a SourceConfig.
+fn context_server_url(sc: &SourceConfig, cluster_name: &str) -> String {
+    sc.config
+        .clusters
+        .iter()
+        .find(|cluster| cluster.name == cluster_name)
+        .and_then(|cluster| cluster.cluster.as_ref())
+        .and_then(|cluster| cluster.server.clone())
+        .unwrap_or_default()
+}
+
 /// Enumerate every context across the parsed configs (in file order), assigning
 /// each a unique display name. Pure over parsed input so it is unit-testable
 /// without touching the filesystem.
@@ -83,14 +252,32 @@ pub fn resolve_from(configs: &[SourceConfig]) -> Vec<ResolvedContext> {
         .find_map(|sc| sc.config.current_context.clone())
         .filter(|current| !current.is_empty());
 
-    // Count each original name across all files so we only prefix real clashes.
-    let mut counts: HashMap<&str, usize> = HashMap::new();
+    // Track identical duplicate definitions across files: if an earlier file
+    // already defined context `X` pointing to a known server `S` with user `U`, subsequent definitions
+    // of `(X, S, U)` are exact duplicates. They should not be emitted and should not
+    // inflate collision counts.
+    let mut seen_canonical: std::collections::HashSet<(String, String, String)> =
+        std::collections::HashSet::new();
+
+    // Count each original name across all files (excluding identical duplicates)
+    // so we only prefix real clashes between different clusters.
+    let mut counts: HashMap<String, usize> = HashMap::new();
     for sc in configs {
         for named in &sc.config.contexts {
-            *counts.entry(named.name.as_str()).or_default() += 1;
+            let original = &named.name;
+            let context = named.context.as_ref();
+            let cluster_name = context.map(|c| c.cluster.as_str()).unwrap_or_default();
+            let user_name = context.and_then(|c| c.user.as_deref()).unwrap_or_default();
+            let server = context_server_url(sc, cluster_name);
+            let is_duplicate = !server.is_empty()
+                && !seen_canonical.insert((original.clone(), server, user_name.to_string()));
+            if !is_duplicate {
+                *counts.entry(original.clone()).or_default() += 1;
+            }
         }
     }
 
+    seen_canonical.clear();
     let mut used: HashMap<String, usize> = HashMap::new();
     let mut current_taken = false;
     let mut out = Vec::new();
@@ -99,8 +286,20 @@ pub fn resolve_from(configs: &[SourceConfig]) -> Vec<ResolvedContext> {
         let tag = source_tag(&sc.source);
         for named in &sc.config.contexts {
             let original = named.name.clone();
-            // Prefix only names that appear in more than one file.
-            let base = if counts.get(original.as_str()).copied().unwrap_or(0) > 1 {
+            let context = named.context.clone().unwrap_or_default();
+            let cluster_name = context.cluster;
+            let user_name = context.user.clone().unwrap_or_default();
+            let server = context_server_url(sc, &cluster_name);
+
+            // Skip identical duplicates already registered from an earlier file.
+            if !server.is_empty()
+                && !seen_canonical.insert((original.clone(), server.clone(), user_name))
+            {
+                continue;
+            }
+
+            // Prefix only names that appear in more than one distinct cluster/file.
+            let base = if counts.get(&original).copied().unwrap_or(0) > 1 {
                 format!("{tag}/{original}")
             } else {
                 original.clone()
@@ -109,19 +308,13 @@ pub fn resolve_from(configs: &[SourceConfig]) -> Vec<ResolvedContext> {
             // with the same stem and context name): suffix with a counter.
             let seen = used.entry(base.clone()).or_insert(0);
             *seen += 1;
-            let display_name = if *seen == 1 { base.clone() } else { format!("{base} ({seen})") };
+            let display_name = if *seen == 1 {
+                base.clone()
+            } else {
+                format!("{base} ({seen})")
+            };
 
-            let context = named.context.clone().unwrap_or_default();
-            let cluster_name = context.cluster;
             let user_name = context.user.unwrap_or_default();
-            let server = sc
-                .config
-                .clusters
-                .iter()
-                .find(|cluster| cluster.name == cluster_name)
-                .and_then(|cluster| cluster.cluster.as_ref())
-                .and_then(|cluster| cluster.server.clone())
-                .unwrap_or_default();
             let auth = sc
                 .config
                 .auth_infos
@@ -134,12 +327,9 @@ pub fn resolve_from(configs: &[SourceConfig]) -> Vec<ResolvedContext> {
             let auth_provider = auth
                 .and_then(|info| info.auth_provider.as_ref())
                 .map(|provider| provider.name.clone());
-            let auth_kind = auth
-                .map(auth_kind_of)
-                .unwrap_or_else(|| "none".to_string());
+            let auth_kind = auth.map(auth_kind_of).unwrap_or_else(|| "none".to_string());
 
-            let is_current = !current_taken
-                && global_current.as_deref() == Some(original.as_str());
+            let is_current = !current_taken && global_current.as_deref() == Some(original.as_str());
             if is_current {
                 current_taken = true;
             }
@@ -272,6 +462,19 @@ pub fn resolve_contexts(paths: &[PathBuf]) -> Vec<ResolvedContext> {
     resolve_contexts_with(paths, |path| Kubeconfig::read_from(path).ok())
 }
 
+/// Each kubeconfig in `paths` that cannot be read or parsed. [`resolve_contexts`] skips
+/// these, so a context declared only in one of them looks absent.
+///
+/// Only the paths: a parse error can quote the file's contents, credentials included, so
+/// the reason is not passed on (as `contexts.rs` also does).
+pub fn unreadable_kubeconfigs(paths: &[PathBuf]) -> Vec<PathBuf> {
+    paths
+        .iter()
+        .filter(|path| Kubeconfig::read_from(path).is_err())
+        .cloned()
+        .collect()
+}
+
 /// Same as [`resolve_contexts`], but takes the file reader as a parameter so
 /// a test can count how many times each path is actually read. Kept private:
 /// this seam exists for that one pinning test, not as a public extension
@@ -282,19 +485,57 @@ fn resolve_contexts_with(
 ) -> Vec<ResolvedContext> {
     let configs: Vec<SourceConfig> = paths
         .iter()
-        .filter_map(|path| read(path).map(|config| SourceConfig { source: path.clone(), config }))
+        .filter_map(|path| {
+            read(path).map(|config| SourceConfig {
+                source: path.clone(),
+                config,
+            })
+        })
         .collect();
     resolve_from(&configs)
 }
 
-/// Find a resolved context by display name, falling back to a raw original name
-/// (for MCP/tests that pass the kubeconfig's own context name directly).
+/// Find a resolved context by [stable ID](ResolvedContext::stable_id),
+/// [pinned ID](ResolvedContext::pinned_id) or display name, falling back to a raw original
+/// name (for MCP/tests that pass the kubeconfig's own context name directly).
+///
+/// A caller that has checked a context passes its pinned ID on, so the lookup reaches the
+/// context that was checked: a display name can pass to another cluster when kubeconfig
+/// files change in between (#265).
 pub fn resolve_context(paths: &[PathBuf], name: &str) -> Option<ResolvedContext> {
-    let all = resolve_contexts(paths);
-    all.iter()
+    find_context(&resolve_contexts(paths), name)
+}
+
+/// [`resolve_context`] over an already resolved listing.
+///
+/// One string can mean two different contexts to two kinds of caller: an ID to extension
+/// dispatch, and a display name to delete, connect or the toolbox, when a context is
+/// literally named after another's ID. Such a string resolves to nothing, so neither caller
+/// is redirected. Likewise a stable ID that more than one listed context carries (see
+/// [`ResolvedContext::pinned_id`]) names no single context and resolves to nothing.
+pub fn find_context(all: &[ResolvedContext], name: &str) -> Option<ResolvedContext> {
+    let by_id: Vec<&ResolvedContext> = all
+        .iter()
+        .filter(|context| {
+            context.pinned_id().as_deref() == Some(name) || context.stable_id() == name
+        })
+        .collect();
+    let by_name = all
+        .iter()
         .find(|context| context.display_name == name)
-        .or_else(|| all.iter().find(|context| context.original_name == name))
-        .cloned()
+        .or_else(|| all.iter().find(|context| context.original_name == name));
+    match (by_id.as_slice(), by_name) {
+        ([found], None) => return Some((*found).clone()),
+        ([found], Some(named)) if std::ptr::eq(*found, named) => return Some((*found).clone()),
+        ([], _) => {}
+        _ => return None,
+    }
+    // Only the reserved dispatch form forbids name fallback. Ordinary kubeconfig names
+    // may contain `#`, including names resembling the legacy stable-ID format.
+    if is_pinned_context(name) {
+        return None;
+    }
+    by_name.cloned()
 }
 
 #[cfg(test)]
@@ -346,7 +587,10 @@ mod tests {
         AuthInfo {
             auth_provider: Some(kube::config::AuthProviderConfig {
                 name: provider.to_string(),
-                config: config.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect(),
+                config: config
+                    .iter()
+                    .map(|(k, v)| (k.to_string(), v.to_string()))
+                    .collect(),
                 other: Default::default(),
             }),
             ..Default::default()
@@ -355,7 +599,10 @@ mod tests {
 
     #[test]
     fn auth_kind_names_the_mechanism_and_never_the_secret() {
-        assert_eq!(auth_kind_of(&exec_auth("gcloud", &["--client-id", "s3cr3t"])), "exec plugin · gcloud");
+        assert_eq!(
+            auth_kind_of(&exec_auth("gcloud", &["--client-id", "s3cr3t"])),
+            "exec plugin · gcloud"
+        );
         assert_eq!(auth_kind_of(&token_auth("eyJhbGciOi.very.secret")), "token");
         assert_eq!(auth_kind_of(&client_cert_auth()), "client certificate");
         assert_eq!(auth_kind_of(&empty_auth()), "none");
@@ -364,9 +611,15 @@ mod tests {
     #[test]
     fn auth_kind_leaks_no_credential_material() {
         let kind = auth_kind_of(&token_auth("eyJhbGciOi.very.secret"));
-        assert!(!kind.contains("eyJ"), "auth kind must not carry the token: {kind}");
+        assert!(
+            !kind.contains("eyJ"),
+            "auth kind must not carry the token: {kind}"
+        );
         let exec = auth_kind_of(&exec_auth("gcloud", &["--client-id", "s3cr3t"]));
-        assert!(!exec.contains("s3cr3t"), "auth kind must not carry exec args: {exec}");
+        assert!(
+            !exec.contains("s3cr3t"),
+            "auth kind must not carry exec args: {exec}"
+        );
     }
 
     #[test]
@@ -395,7 +648,10 @@ mod tests {
         assert_eq!(auth_kind_of(&auth_provider("gcp", &[])), "gcp");
         assert_eq!(auth_kind_of(&auth_provider("azure", &[])), "azure");
         assert_eq!(auth_kind_of(&auth_provider("oidc", &[])), "oidc");
-        assert_eq!(auth_kind_of(&auth_provider("my-custom-plugin", &[])), "my-custom-plugin");
+        assert_eq!(
+            auth_kind_of(&auth_provider("my-custom-plugin", &[])),
+            "my-custom-plugin"
+        );
     }
 
     /// **The account is gone, and a real address is the case that proves it.**
@@ -473,7 +729,14 @@ mod tests {
 
         // Control, bidi and zero-width characters, which a table renders
         // invisibly or in reverse.
-        for hostile in ["oi\u{0}dc", "oid\u{202E}c", "oi\u{200B}dc", "oidc\u{FEFF}", "oi dc", "oidc\n"] {
+        for hostile in [
+            "oi\u{0}dc",
+            "oid\u{202E}c",
+            "oi\u{200B}dc",
+            "oidc\u{FEFF}",
+            "oi dc",
+            "oidc\n",
+        ] {
             let kind = auth_kind_of(&auth_provider(hostile, &[]));
             assert_eq!(kind, "auth provider", "rejected: {hostile:?}");
         }
@@ -494,7 +757,12 @@ mod tests {
         let long = auth_kind_of(&exec_auth(&format!("/usr/bin/{}", "a".repeat(200)), &[]));
         assert_eq!(long, "exec plugin");
 
-        for hostile in ["gcl\u{200B}oud", "gcloud\u{202E}", "gcl\u{0}oud", "get token.sh"] {
+        for hostile in [
+            "gcl\u{200B}oud",
+            "gcloud\u{202E}",
+            "gcl\u{0}oud",
+            "get token.sh",
+        ] {
             let kind = auth_kind_of(&exec_auth(hostile, &[]));
             assert_eq!(kind, "exec plugin", "rejected: {hostile:?}");
         }
@@ -502,7 +770,10 @@ mod tests {
         // An exec block naming no command at all: the mechanism, no invented
         // plugin name.
         let nameless = auth_kind_of(&AuthInfo {
-            exec: Some(kube::config::ExecConfig { command: None, ..Default::default() }),
+            exec: Some(kube::config::ExecConfig {
+                command: None,
+                ..Default::default()
+            }),
             ..Default::default()
         });
         assert_eq!(nameless, "exec plugin");
@@ -529,7 +800,14 @@ mod tests {
                 "a real plugin name must not be swallowed: {command}"
             );
         }
-        for provider in ["gcp", "azure", "oidc", "openstack", "azure-ad", "my-custom-plugin"] {
+        for provider in [
+            "gcp",
+            "azure",
+            "oidc",
+            "openstack",
+            "azure-ad",
+            "my-custom-plugin",
+        ] {
             assert_eq!(auth_kind_of(&auth_provider(provider, &[])), provider);
         }
     }
@@ -570,7 +848,10 @@ mod tests {
         );
         let resolved = resolve_from(&[a]);
         assert_eq!(
-            resolved.iter().map(|c| c.display_name.as_str()).collect::<Vec<_>>(),
+            resolved
+                .iter()
+                .map(|c| c.display_name.as_str())
+                .collect::<Vec<_>>(),
             vec!["ctx-a", "ctx-b"],
         );
         assert_eq!(resolved[0].original_name, "ctx-a");
@@ -598,7 +879,11 @@ mod tests {
             "/kube/main",
             "clusters:\n  - name: c\n    cluster: { server: https://m }\ncontexts:\n  - name: my-cluster\n    context: { cluster: c, user: u }\n",
         );
-        let resolved = resolve_from(&[uniq, cfg("/kube/kube_prod.yaml", PROD), cfg("/kube/kube_stage.yaml", STAGE)]);
+        let resolved = resolve_from(&[
+            uniq,
+            cfg("/kube/kube_prod.yaml", PROD),
+            cfg("/kube/kube_stage.yaml", STAGE),
+        ]);
         let names: Vec<_> = resolved.iter().map(|c| c.display_name.as_str()).collect();
         assert!(names.contains(&"my-cluster"));
         assert!(names.contains(&"kube_prod/default"));
@@ -611,6 +896,21 @@ mod tests {
         let resolved = resolve_from(&[cfg("/a/config", PROD), cfg("/b/config", STAGE)]);
         assert_eq!(resolved[0].display_name, "config/default");
         assert_eq!(resolved[1].display_name, "config/default (2)");
+    }
+
+    #[test]
+    fn identical_contexts_across_files_are_deduplicated_without_collision_prefix() {
+        // ~/.kube/config has PROD context, and ~/.kube/prod_snippet.yaml has the EXACT SAME PROD context.
+        let resolved = resolve_from(&[
+            cfg("/home/.kube/config", PROD),
+            cfg("/home/.kube/prod_snippet.yaml", PROD),
+        ]);
+        // The duplicate is dropped, only 1 context is emitted, and it is NOT prefixed as config/default.
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(resolved[0].display_name, "default");
+        assert_eq!(resolved[0].original_name, "default");
+        assert_eq!(resolved[0].server, "https://prod:6443");
+        assert_eq!(resolved[0].source, PathBuf::from("/home/.kube/config"));
     }
 
     #[test]
@@ -632,9 +932,240 @@ mod tests {
             cfg("/kube/kube_prod.yaml", PROD),
             cfg("/kube/kube_stage.yaml", STAGE),
         ]);
-        let by_display = resolved.iter().find(|c| c.display_name == "kube_stage/default").unwrap();
+        let by_display = resolved
+            .iter()
+            .find(|c| c.display_name == "kube_stage/default")
+            .unwrap();
         assert_eq!(by_display.source, PathBuf::from("/kube/kube_stage.yaml"));
         assert_eq!(by_display.original_name, "default");
+    }
+
+    #[test]
+    fn literal_hash_names_resolve_and_can_be_pinned() {
+        for name in ["team#prod", "first.yaml#default"] {
+            let yaml = PROD.replace("default", name);
+            let all = resolve_from(&[cfg("/kube/team.yaml", &yaml)]);
+            let found = find_context(&all, name).expect("literal context name resolves");
+            assert_eq!(found.original_name, name);
+            let pinned = found.pinned_id().unwrap();
+            assert!(pinned.starts_with("srelens-context:"));
+            assert_eq!(find_context(&all, &pinned).unwrap(), found);
+        }
+    }
+
+    #[test]
+    fn a_prefix_alone_does_not_reserve_a_literal_context_name() {
+        for name in [
+            "srelens-context:team",
+            "srelens-context:team#prod",
+            "srelens-context:/kube/team",
+            "srelens-context:/kube/team#prod#extra",
+            "srelens-context:/kube/team%oops#prod",
+            "srelens-context:/kube/team#prod%oops",
+            "srelens-context:/kube/team#prod%2%253",
+            // `A` is printable, so the encoder never writes `%41`; uppercase hex is never written.
+            "srelens-context:/kube/team%41#prod",
+            "srelens-context:/kube/team%C3%A9#prod",
+            // These lowercase escapes decode to valid UTF-8, so `encode_path` writes `é`.
+            "srelens-context:/kube/team%c3%a9#prod",
+            // The other platform's escape form.
+            #[cfg(unix)]
+            "srelens-context:/kube/team%ud800#prod",
+            #[cfg(windows)]
+            "srelens-context:/kube/team%80#prod",
+        ] {
+            assert!(!is_pinned_context(name), "literal name: {name}");
+            let yaml = PROD.replace("default", name);
+            let all = resolve_from(&[cfg("/kube/team.yaml", &yaml)]);
+            let found = find_context(&all, name).expect("literal prefixed name resolves");
+            assert_eq!(found.original_name, name);
+            let pinned = found.pinned_id().unwrap();
+            assert!(is_pinned_context(&pinned), "generated ID: {pinned}");
+            assert_eq!(find_context(&all, &pinned).unwrap(), found);
+        }
+    }
+
+    #[test]
+    fn a_pinned_id_finds_its_own_context_whatever_it_is_displayed_as() {
+        let id = resolve_from(&[cfg("/kube/kube_prod.yaml", PROD)])[0]
+            .pinned_id()
+            .unwrap();
+
+        // A second file renames prod's `default`; its ID still finds it, not stage's.
+        let clashing = resolve_from(&[
+            cfg("/kube/kube_stage.yaml", STAGE),
+            cfg("/kube/kube_prod.yaml", PROD),
+        ]);
+        let found = find_context(&clashing, &id).expect("the stable ID still resolves");
+        assert_eq!(found.display_name, "kube_prod/default");
+        assert_eq!(found.server, "https://prod:6443");
+
+        // With prod's file gone, the ID finds nothing rather than the other `default`.
+        let stage_only = resolve_from(&[cfg("/kube/kube_stage.yaml", STAGE)]);
+        assert!(find_context(&stage_only, &id).is_none());
+
+        // A context literally named after prod's ID never takes it, with prod listed or gone.
+        let impostor = cfg(
+            "/kube/impostor.yaml",
+            "clusters:\n  - name: c\n    cluster: { server: https://impostor }\ncontexts:\n  - name: \"srelens-context:/kube/kube_prod.yaml#default\"\n    context: { cluster: c, user: u }\n",
+        );
+        // Listed together, the string names two different contexts for two kinds of caller
+        // (an ID for extension dispatch, a display name for delete or connect), so it
+        // resolves to neither rather than redirecting either.
+        let listed = resolve_from(&[impostor, cfg("/kube/kube_prod.yaml", PROD)]);
+        assert!(find_context(&listed, &id).is_none());
+        assert!(find_context(&listed[..1], &id).is_none());
+        assert_eq!(
+            find_context(&listed[1..], &id).unwrap().server,
+            "https://prod:6443"
+        );
+    }
+
+    /// An ordinary caller looking a context up by its display name is never sent to a
+    /// different context because that name happens to be another context's ID.
+    #[test]
+    fn a_name_that_is_also_another_contexts_id_is_refused_rather_than_redirected() {
+        let prod = resolve_from(&[cfg("/kube/kube_prod.yaml", PROD)]).remove(0);
+        let named_like_prod = cfg(
+            "/kube/other.yaml",
+            &format!(
+                "clusters:\n  - name: c\n    cluster: {{ server: https://other }}\ncontexts:\n  - name: '{}'\n    context: {{ cluster: c, user: u }}\n",
+                prod.pinned_id().unwrap()
+            ),
+        );
+        let both = resolve_from(&[cfg("/kube/kube_prod.yaml", PROD), named_like_prod]);
+        assert_eq!(both[1].display_name, prod.pinned_id().unwrap());
+        // By that display name: not prod.
+        assert!(find_context(&both, &both[1].display_name).is_none());
+        // Prod itself stays reachable by its own name.
+        assert_eq!(
+            find_context(&both, "default").unwrap().server,
+            "https://prod:6443"
+        );
+    }
+
+    /// The key an app's cluster list holds. Like the stable ID it keeps the path as given, but
+    /// `#` and `%` are encoded in each part, so the first `#` is always the delimiter and no two
+    /// contexts share a key, whether or not they are ever listed together.
+    /// Two files can differ only in bytes that are not UTF-8, which `Path::display` renders
+    /// as the same replacement character. The key encodes the native path bytes instead, so
+    /// such files still get distinct keys and pinned IDs.
+    #[cfg(unix)]
+    #[test]
+    fn paths_that_are_not_utf8_get_distinct_keys() {
+        use std::os::unix::ffi::OsStrExt;
+        let source = |bytes: &[u8], yaml: &str| SourceConfig {
+            source: PathBuf::from(std::ffi::OsStr::from_bytes(bytes)),
+            config: Kubeconfig::from_yaml(yaml).unwrap(),
+        };
+        let both = resolve_from(&[source(b"/kube/a\x80", PROD), source(b"/kube/a\x81", STAGE)]);
+        assert_eq!(both[0].stable_id(), both[1].stable_id(), "display is lossy");
+        assert_ne!(both[0].key(), both[1].key());
+        assert_ne!(both[0].pinned_id(), both[1].pinned_id());
+        assert_eq!(both[0].key(), "/kube/a%80#default");
+        // A valid path that literally reads the same as an escape stays distinct.
+        let literal = resolve_from(&[source(b"/kube/a%80", PROD)]).remove(0);
+        assert_eq!(literal.key(), "/kube/a%2580#default");
+        // The pinned ID is reserved with its byte escapes, so once its context is gone a
+        // context literally named after it never takes a request pinned to it.
+        let pinned = both[0].pinned_id().unwrap();
+        assert!(is_pinned_context(&pinned), "{pinned}");
+        let impostor = cfg("/kube/impostor.yaml", &PROD.replace("default", &pinned));
+        assert!(find_context(&resolve_from(&[impostor]), &pinned).is_none());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn paths_that_are_not_utf16_get_distinct_keys() {
+        use std::os::windows::ffi::OsStringExt;
+        let source = |units: &[u16], yaml: &str| SourceConfig {
+            source: PathBuf::from(std::ffi::OsString::from_wide(units)),
+            config: Kubeconfig::from_yaml(yaml).unwrap(),
+        };
+        let a: Vec<u16> = "C:\\kube\\a".encode_utf16().chain([0xD800]).collect();
+        let b: Vec<u16> = "C:\\kube\\a".encode_utf16().chain([0xD801]).collect();
+        let both = resolve_from(&[source(&a, PROD), source(&b, STAGE)]);
+        assert_eq!(both[0].stable_id(), both[1].stable_id(), "display is lossy");
+        assert_ne!(both[0].key(), both[1].key());
+        assert_ne!(both[0].pinned_id(), both[1].pinned_id());
+        assert_eq!(both[0].key(), "C:\\kube\\a%ud800#default");
+        let pinned = both[0].pinned_id().unwrap();
+        assert!(is_pinned_context(&pinned), "{pinned}");
+        let impostor = cfg("C:\\kube\\impostor.yaml", &PROD.replace("default", &pinned));
+        assert!(find_context(&resolve_from(&[impostor]), &pinned).is_none());
+    }
+    #[test]
+    fn a_context_key_names_exactly_one_context() {
+        let plain = resolve_from(&[cfg("/kube/prod.yaml", PROD)]).remove(0);
+        assert_eq!(plain.key(), plain.stable_id());
+        let relative = resolve_from(&[cfg("kube/prod.yaml", PROD)]).remove(0);
+        assert_eq!(relative.key(), "kube/prod.yaml#default");
+
+        let named = |name: &str| PROD.replace("default", name);
+        let both = resolve_from(&[cfg("/kube/a", &named("b#c")), cfg("/kube/a#b", &named("c"))]);
+        assert_eq!(both[0].stable_id(), both[1].stable_id());
+        assert_eq!(both[0].key(), "/kube/a#b%23c");
+        assert_eq!(both[1].key(), "/kube/a%23b#c");
+        let percent = resolve_from(&[cfg("/kube/100%", &named("x%y"))]).remove(0);
+        assert_eq!(percent.key(), "/kube/100%25#x%25y");
+    }
+    #[test]
+    fn a_relative_kubeconfig_keeps_its_stable_id_and_pins_by_an_absolute_one() {
+        // Settings persist the stable ID, so a relative kubeconfig path must stay in it.
+        let listed = resolve_from(&[cfg("kube/prod.yaml", PROD)]);
+        assert_eq!(listed[0].stable_id(), "kube/prod.yaml#default");
+        let pinned = listed[0].pinned_id().unwrap();
+        assert!(
+            Path::new(pinned.strip_prefix("srelens-context:").unwrap()).is_absolute(),
+            "{pinned}"
+        );
+        assert_eq!(
+            find_context(&listed, &pinned).unwrap().server,
+            "https://prod:6443"
+        );
+
+        // A context literally named after the pinned ID never takes it.
+        let impostor = cfg(
+            "/kube/impostor.yaml",
+            &format!(
+                "clusters:\n  - name: c\n    cluster: {{ server: https://impostor }}\ncontexts:\n  - name: '{pinned}'\n    context: {{ cluster: c, user: u }}\n"
+            ),
+        );
+        let with_impostor = resolve_from(&[impostor, cfg("kube/prod.yaml", PROD)]);
+        assert!(find_context(&with_impostor, &pinned).is_none());
+        assert!(find_context(&with_impostor[..1], &pinned).is_none());
+    }
+
+    /// A pinned ID is only ever absolute. When the path cannot be made absolute (an empty
+    /// path, or a working directory that no longer exists), there is no pinned ID rather
+    /// than a relative one that a lookup would take for a name.
+    #[test]
+    fn a_context_whose_path_cannot_be_made_absolute_has_no_pinned_id() {
+        let unplaceable = resolve_from(&[cfg("", PROD)]).remove(0);
+        assert_eq!(unplaceable.stable_id(), "#default");
+        assert_eq!(unplaceable.pinned_id(), None);
+        let placeable = resolve_from(&[cfg("/kube/prod.yaml", PROD)]).remove(0);
+        assert!(placeable.pinned_id().is_some());
+    }
+
+    #[test]
+    fn contexts_that_share_a_stable_id_have_distinct_pinned_ids_and_resolve_to_neither() {
+        // `a` + `b#c` and `a#b` + `c` both read `/kube/a#b#c`.
+        let named = |name: &str| {
+            format!(
+                "clusters:\n  - name: c\n    cluster: {{ server: https://{} }}\ncontexts:\n  - name: '{name}'\n    context: {{ cluster: c, user: u }}\n",
+                name.replace('#', "-")
+            )
+        };
+        let both = resolve_from(&[cfg("/kube/a", &named("b#c")), cfg("/kube/a#b", &named("c"))]);
+        assert_eq!(both[0].stable_id(), both[1].stable_id());
+        assert_ne!(both[0].pinned_id(), both[1].pinned_id());
+        for context in &both {
+            let pinned = context.pinned_id().unwrap();
+            assert_eq!(find_context(&both, &pinned).unwrap().server, context.server);
+        }
+        // The shared stable ID names no single context, so it reaches none.
+        assert!(find_context(&both, &both[0].stable_id()).is_none());
     }
 
     #[test]
@@ -654,9 +1185,16 @@ mod tests {
 
         assert_eq!(resolved.len(), 3, "all three contexts in the file resolve");
         for context in &resolved {
-            assert_eq!(context.auth_kind, "token", "auth_kind still computed correctly");
+            assert_eq!(
+                context.auth_kind, "token",
+                "auth_kind still computed correctly"
+            );
         }
-        assert_eq!(reads.get(), 1, "the file must be read once, not once per context");
+        assert_eq!(
+            reads.get(),
+            1,
+            "the file must be read once, not once per context"
+        );
     }
 
     #[test]

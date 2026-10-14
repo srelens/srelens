@@ -13,6 +13,10 @@ export function HelmOpPane({ session }: { session: DockSession }) {
     started.current = true;
     const args = session.helm?.args ?? [];
     let cancelled = false;
+    // Closed once helm has exited: that kills nothing, and it tells the
+    // desktop host this pane showed the outcome, so the host does not report
+    // it again when the window goes (#734).
+    let exited = false;
     let handle: { close: () => void } | null = null;
     void startHelmOp(
       session.context,
@@ -22,12 +26,15 @@ export function HelmOpPane({ session }: { session: DockSession }) {
         setStatus(err ? "error" : "done");
         setError(err);
         if (!err) session.helm?.onComplete?.();
+        exited = true;
+        handle?.close();
+        handle = null;
       },
       session.kubeconfigFiles ?? [],
       session.helm?.values ?? "",
     )
       .then((h) => {
-        if (cancelled) h.close();
+        if (cancelled || exited) h.close();
         else handle = h;
       })
       .catch((e) => {

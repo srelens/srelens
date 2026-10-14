@@ -18,8 +18,8 @@ describe("ClusterHotbar", () => {
   it("renders an avatar per cluster and opens one on click", async () => {
     listContextsMock.mockResolvedValue({
       contexts: [
-        { name: "kind-dev", stableId: "/k/kind-dev.yaml#kind-dev", cluster: "k", server: "s", isCurrent: true },
-        { name: "prod", stableId: "/k/prod.yaml#prod", cluster: "p", server: "s", isCurrent: false },
+        { name: "kind-dev", stableId: "/k/kind-dev.yaml#kind-dev", key: "/k/kind-dev.yaml#kind-dev", cluster: "k", server: "s", isCurrent: true },
+        { name: "prod", stableId: "/k/prod.yaml#prod", key: "/k/prod.yaml#prod", cluster: "p", server: "s", isCurrent: false },
       ],
     });
     const onOpenContext = vi.fn();
@@ -43,8 +43,8 @@ describe("ClusterHotbar", () => {
   it("separates local clusters from remote ones with a divider", async () => {
     listContextsMock.mockResolvedValue({
       contexts: [
-        { name: "prod", stableId: "/k/prod.yaml#prod", cluster: "p", server: "s", isCurrent: false },
-        { name: "kind-dev", stableId: "/k/kind-dev.yaml#kind-dev", cluster: "k", server: "s", isCurrent: true, isLocal: true, provider: "kind" },
+        { name: "prod", stableId: "/k/prod.yaml#prod", key: "/k/prod.yaml#prod", cluster: "p", server: "s", isCurrent: false },
+        { name: "kind-dev", stableId: "/k/kind-dev.yaml#kind-dev", key: "/k/kind-dev.yaml#kind-dev", cluster: "k", server: "s", isCurrent: true, isLocal: true, provider: "kind" },
       ],
     });
     render(

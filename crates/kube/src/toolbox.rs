@@ -9,8 +9,8 @@
 //! is a separate step; this half is pure string work and fully unit-tested.
 
 use crate::context_resolve::resolve_context;
-use crate::helm_cli::resolve_on_path;
 use crate::kubeconfig::KubeError;
+use crate::path_lookup::{platform_pathext, resolve_on_path};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use srelens_capability::{Annotations, Capability, CapabilityError};
@@ -197,7 +197,8 @@ pub struct DiagnosisReport {
 }
 
 /// Locate `binary` against the search paths. A bare name is searched in the app
-/// path first (usable), then the system path (present-but-hidden). A command
+/// path first (usable), then the system path (present-but-hidden), under the
+/// names this platform gives programs (`kubectl.exe` on Windows). A command
 /// written as a path is exec'd directly by client-go, so PATH is irrelevant: it
 /// resolves iff the file exists where written.
 pub fn locate(
@@ -211,10 +212,11 @@ pub fn locate(
         return is_file(Path::new(binary))
             .then(|| Located { path: binary.to_string(), on_app_path: true });
     }
-    if let Some(p) = resolve_on_path(binary, &paths.app_path, is_file) {
+    let pathext = platform_pathext();
+    if let Some(p) = resolve_on_path(binary, &paths.app_path, pathext.as_deref(), is_file) {
         return Some(Located { path: p.to_string_lossy().into_owned(), on_app_path: true });
     }
-    resolve_on_path(binary, &paths.system_path, is_file)
+    resolve_on_path(binary, &paths.system_path, pathext.as_deref(), is_file)
         .map(|p| Located { path: p.to_string_lossy().into_owned(), on_app_path: false })
 }
 
@@ -888,6 +890,11 @@ mod capability_tests {
     use serde_json::json;
     use srelens_capability::Registry;
 
+    /// `name` as the platform names an executable: `kubectl.exe` on Windows.
+    fn exe(name: &str) -> String {
+        format!("{name}{}", std::env::consts::EXE_SUFFIX)
+    }
+
     /// Write a kubeconfig with an oidc-login exec context to a temp file.
     fn kubeconfig_with_oidc(dir: &Path) -> PathBuf {
         let path = dir.join("config");
@@ -922,7 +929,7 @@ users:
         // A bin dir holding kubectl but not the plugin.
         let bin = dir.path().join("bin");
         std::fs::create_dir_all(&bin).unwrap();
-        std::fs::write(bin.join("kubectl"), b"#!/bin/sh\n").unwrap();
+        std::fs::write(bin.join(exe("kubectl")), b"#!/bin/sh\n").unwrap();
         let search = SearchPaths {
             app_path: bin.to_string_lossy().into_owned(),
             system_path: String::new(),
@@ -940,7 +947,10 @@ users:
         assert_eq!(items.len(), 2);
         assert_eq!(items[0]["kind"], "kubectl");
         assert_eq!(items[0]["status"], "found");
-        assert!(items[0]["path"].as_str().unwrap().ends_with("/kubectl"));
+        assert_eq!(
+            Path::new(items[0]["path"].as_str().unwrap()),
+            bin.join(exe("kubectl"))
+        );
         assert_eq!(items[1]["kind"], "krew-plugin");
         assert_eq!(items[1]["plugin"], "oidc-login");
         assert_eq!(items[1]["status"], "missing");
@@ -1148,7 +1158,7 @@ users:
         let dir = tempfile::tempdir().unwrap();
         let managed = dir.path().join(".srelens/bin");
         std::fs::create_dir_all(&managed).unwrap();
-        std::fs::write(managed.join("kubectl"), b"#!/bin/sh\n").unwrap();
+        std::fs::write(managed.join(exe("kubectl")), b"#!/bin/sh\n").unwrap();
 
         let cap = status_capability(
             SearchPaths { app_path: managed.to_string_lossy().into_owned(), system_path: String::new() },
@@ -1167,7 +1177,10 @@ users:
         assert_eq!(kubectl["installed"], true);
         assert_eq!(kubectl["source"], "managed");
         assert_eq!(kubectl["version"], "v1.30.2");
-        assert!(kubectl["path"].as_str().unwrap().ends_with("/kubectl"));
+        assert_eq!(
+            Path::new(kubectl["path"].as_str().unwrap()),
+            managed.join(exe("kubectl"))
+        );
         // `b"#!/bin/sh\n"` is 10 bytes on disk.
         assert_eq!(kubectl["sizeBytes"], 10);
         // krew + helm absent: no reading, not a zero.
@@ -1178,6 +1191,9 @@ users:
         assert_eq!(tools[2]["sizeBytes"], serde_json::Value::Null);
     }
 
+    // Unix only: `std::os::unix::fs::symlink` does not exist on Windows, and
+    // creating a symlink there needs a privilege a test cannot assume.
+    #[cfg(unix)]
     #[tokio::test]
     async fn status_follows_a_symlink_to_report_the_targets_size_not_the_links() {
         let dir = tempfile::tempdir().unwrap();
@@ -1227,7 +1243,7 @@ users:
         let dir = tempfile::tempdir().unwrap();
         let sysbin = dir.path().join("usr/local/bin");
         std::fs::create_dir_all(&sysbin).unwrap();
-        std::fs::write(sysbin.join("helm"), b"#!/bin/sh\n").unwrap();
+        std::fs::write(sysbin.join(exe("helm")), b"#!/bin/sh\n").unwrap();
 
         let cap = status_capability(
             SearchPaths { app_path: sysbin.to_string_lossy().into_owned(), system_path: String::new() },
@@ -1296,6 +1312,16 @@ mod resolution_tests {
         move |p: &Path| owned.iter().any(|e| e == p)
     }
 
+    /// Where `name` sits in `dir` once installed: joined the way this host
+    /// joins paths, under the platform's executable name (`kubectl.exe` on
+    /// Windows), which is what `locate` must find.
+    fn installed(dir: &str, name: &str) -> String {
+        Path::new(dir)
+            .join(format!("{name}{}", std::env::consts::EXE_SUFFIX))
+            .to_string_lossy()
+            .into_owned()
+    }
+
     fn paths() -> SearchPaths {
         SearchPaths { app_path: "/app/bin".into(), system_path: "/usr/bin".into() }
     }
@@ -1307,16 +1333,16 @@ mod resolution_tests {
     #[test]
     fn a_binary_on_the_app_path_is_found() {
         assert_eq!(
-            locate("kubectl", &paths(), &fs(&["/app/bin/kubectl"])),
-            Some(Located { path: "/app/bin/kubectl".into(), on_app_path: true }),
+            locate("kubectl", &paths(), &fs(&[&installed("/app/bin", "kubectl")])),
+            Some(Located { path: installed("/app/bin", "kubectl"), on_app_path: true }),
         );
     }
 
     #[test]
     fn a_binary_only_on_the_system_path_is_not_on_app_path() {
         assert_eq!(
-            locate("kubectl", &paths(), &fs(&["/usr/bin/kubectl"])),
-            Some(Located { path: "/usr/bin/kubectl".into(), on_app_path: false }),
+            locate("kubectl", &paths(), &fs(&[&installed("/usr/bin", "kubectl")])),
+            Some(Located { path: installed("/usr/bin", "kubectl"), on_app_path: false }),
         );
     }
 
@@ -1350,7 +1376,7 @@ mod resolution_tests {
         let report = diagnose(
             &ctx,
             &paths(),
-            &fs(&["/app/bin/kubectl"]),
+            &fs(&[&installed("/app/bin", "kubectl")]),
             &|_p| Some("v1.30.2".into()),
         );
         assert_eq!(
@@ -1361,7 +1387,7 @@ mod resolution_tests {
                     ResolvedRequirement {
                         requirement: kubectl_req(),
                         resolution: Resolution::Found {
-                            path: "/app/bin/kubectl".into(),
+                            path: installed("/app/bin", "kubectl"),
                             version: Some("v1.30.2".into()),
                         },
                     },
@@ -1387,12 +1413,12 @@ mod resolution_tests {
             }],
         };
         // The version probe would panic if called for a non-kubectl tool.
-        let report = diagnose(&ctx, &paths(), &fs(&["/app/bin/aws"]), &|_p| {
+        let report = diagnose(&ctx, &paths(), &fs(&[&installed("/app/bin", "aws")]), &|_p| {
             panic!("kubectl_version must not be called for external tools")
         });
         assert_eq!(
             report.items[0].resolution,
-            Resolution::Found { path: "/app/bin/aws".into(), version: None },
+            Resolution::Found { path: installed("/app/bin", "aws"), version: None },
         );
     }
 
@@ -1405,10 +1431,10 @@ mod resolution_tests {
                 kind: RequirementKind::External,
             }],
         };
-        let report = diagnose(&ctx, &paths(), &fs(&["/usr/bin/aws"]), &|_p| None);
+        let report = diagnose(&ctx, &paths(), &fs(&[&installed("/usr/bin", "aws")]), &|_p| None);
         assert_eq!(
             report.items[0].resolution,
-            Resolution::NotOnAppPath { path: "/usr/bin/aws".into() },
+            Resolution::NotOnAppPath { path: installed("/usr/bin", "aws") },
         );
     }
 }

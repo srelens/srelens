@@ -1,8 +1,10 @@
-use std::time::Duration;
 use crossterm::event::{Event as CrosstermEvent, EventStream, KeyEvent, MouseEvent};
 use futures::StreamExt;
 use serde_json::Value;
-use tokio::sync::mpsc::{error::TryRecvError, unbounded_channel, UnboundedReceiver, UnboundedSender};
+use std::time::Duration;
+use tokio::sync::mpsc::{
+    error::TryRecvError, unbounded_channel, UnboundedReceiver, UnboundedSender,
+};
 use tokio::sync::watch;
 
 #[derive(Debug)]
@@ -49,6 +51,56 @@ pub enum AppEvent {
         name: String,
         revision: Option<i64>,
         result: Result<srelens_kube::helm::HelmReleaseDetail, String>,
+    },
+    ArgoApplicationsChunk {
+        context: String,
+        is_remote_hub: bool,
+        hub_context: Option<String>,
+        chunk: srelens_kube::argo::ArgoApplicationsFetchResult,
+    },
+    /// The Argo disk cache for `context`, read off the UI thread, written
+    /// `written_at` (Unix seconds).
+    ArgoDiskSnapshot {
+        context: String,
+        result: srelens_kube::argo::ArgoApplicationsFetchResult,
+        written_at: u64,
+        hub_context: Option<String>,
+    },
+    ArgoApplicationsResult {
+        context: String,
+        is_remote_hub: bool,
+        hub_context: Option<String>,
+        result: Result<srelens_kube::argo::ArgoApplicationsFetchResult, String>,
+    },
+    ArgoDetailResult {
+        context: String,
+        namespace: String,
+        name: String,
+        result: Result<srelens_kube::argo::ArgoApplication, String>,
+    },
+    ArgoActionResult {
+        action: String,
+        result: Result<String, String>,
+    },
+    BgpResult {
+        context: String,
+        result: Result<srelens_kube::bgp::BgpClusterSummary, String>,
+    },
+    ChangedTriageResult {
+        context: String,
+        namespace: Option<String>,
+        result: Result<srelens_kube::changed::ChangedTriageReport, String>,
+    },
+    /// A Quick AI RCA reply for the `:changed` card entry under `key`: the
+    /// model's raw text, or why the call failed.
+    ChangedQuickRcaResult {
+        key: String,
+        result: Result<String, String>,
+    },
+    /// GitHub's answer to why the `:changed` rollout under `key` happened.
+    ChangedCauseResult {
+        key: String,
+        result: Result<srelens_registry::github::RolloutCause, String>,
     },
 }
 

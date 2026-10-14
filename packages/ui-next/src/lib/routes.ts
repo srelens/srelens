@@ -1,3 +1,6 @@
+import { parseExtensionRoute, parseExtensionOperationRoute } from "@srelens/core";
+import { ExtensionOperation } from "../screens/ExtensionOperation";
+import { ExtensionPage } from "../screens/ExtensionPage";
 import type { ComponentType } from "react";
 import { K8S_KIND, RESOURCE_LABELS, type ResourceKind } from "@srelens/core";
 import { parseDetailRoute, parseEditRoute, parseNewRoute } from "./detailRoute";
@@ -9,6 +12,7 @@ import { Events } from "../screens/Events";
 import { Forwards } from "../screens/Forwards";
 import { Helm } from "../screens/Helm";
 import { Logs, parseLogsRoute } from "../screens/Logs";
+import { Home } from "../screens/Home";
 import { Overview } from "../screens/Overview";
 import { ReleaseNotes } from "../screens/ReleaseNotes";
 import { ResourceDetailScreen, Resources } from "../screens/Resources";
@@ -57,6 +61,7 @@ export function isBuiltInKind(slug: string): slug is ResourceKind {
  */
 const APP_SCOPED: Record<string, Omit<RouteInfo, "route" | "sub">> =
   Object.assign(Object.create(null), {
+    "/": { title: "Home", kind: "control", pinned: true },
     "/applog": { title: "Application log", kind: "applog" },
     "/notes": { title: "Release notes", kind: "notes" },
     "/settings": { title: "Settings", kind: "settings" },
@@ -68,7 +73,6 @@ const APP_SCOPED: Record<string, Omit<RouteInfo, "route" | "sub">> =
 /** Routes whose tab names the cluster it is looking at. */
 const CLUSTER_SCOPED: Record<string, Omit<RouteInfo, "route" | "sub">> =
   Object.assign(Object.create(null), {
-    "/": { title: "Control room", kind: "control", pinned: true },
     "/incidents": { title: "Incidents", kind: "incidents" },
     "/agent": { title: "Agent", kind: "agent" },
     "/resources": { title: "Workloads", kind: "workloads" },
@@ -116,6 +120,17 @@ function decodedSegment(raw: string): string {
  * passed in by whoever knows it; the mock hard-coded "prod-eu".
  */
 export function describe(route: string, clusterName?: string): RouteInfo {
+  const operation = parseExtensionOperationRoute(route);
+  if (operation) {
+    const title = operation.operation.replace(/[-_]/g, " ").replace(/^./, c => c.toUpperCase());
+    const subject = operation.params?.reportId ?? operation.params?.image ?? operation.params?.namespace;
+    return { route, title: subject ? `${title} · ${subject}` : title, sub: clusterName ?? operation.contextKey, kind: "resource" };
+  }
+  const extension = parseExtensionRoute(route);
+  // A route that names its cluster by key or stable ID is labelled with the cluster's name;
+  // a legacy one already carries the name.
+  const named = extension && extension.contextKey === undefined && extension.clusterId === undefined;
+  if (extension) return { route, title: extension.resourceName ?? extension.page, sub: named ? extension.context : clusterName ?? extension.context, kind: "resource" };
   const sub = clusterName || undefined;
   if (route.startsWith("/resources/")) {
     const [, , rawName, suffix] = route.split("/");
@@ -170,12 +185,15 @@ export function describe(route: string, clusterName?: string): RouteInfo {
   // contain a `/`, so only the segment count tells the shape.
   const logs = parseLogsRoute(route);
   if (logs) return { route, title: `${logs.name} · logs`, sub, kind: "logs" };
-  // A detail route (`/k/<kind>/<namespace>/<name>`) shares the `/k/` prefix
+  // A detail route (`/k/<cluster>/<kind>/<namespace>/<name>`) shares the `/k/` prefix
   // with a LIST route (`/k/<slug>`) — this must run before the list branch
   // below, or a detail route would fall into it and title itself after the
   // raw "<kind>/<namespace>/<name>" slug instead of the resource's own name.
+  // A detail tab is pinned to the cluster in its route (#834), so that is its
+  // label whatever cluster the caller is relabelling for; only a route an
+  // earlier build persisted, with no cluster in it, takes the caller's.
   const detail = parseDetailRoute(route);
-  if (detail) return { route, title: detail.name, sub, kind: "resource" };
+  if (detail) return { route, title: detail.name, sub: detail.cluster ?? sub, kind: "resource" };
   if (route.startsWith("/k/")) {
     const slug = route.slice(3);
     const title = isBuiltInKind(slug) ? RESOURCE_LABELS[slug] : slug;
@@ -186,6 +204,29 @@ export function describe(route: string, clusterName?: string): RouteInfo {
   const cluster = CLUSTER_SCOPED[route];
   if (cluster) return { route, ...cluster, sub };
   return { route, title: route.replace(/^\//, "") || "Untitled", sub, kind: "control" };
+}
+
+/** Extra identity for a document-tab hover card, decoded by the route parsers. */
+export function tabDetail(route: string): string | undefined {
+  const parts = parseEditRoute(route) ?? parseDetailRoute(route) ?? parseLogsRoute(route);
+  if (!parts) return undefined;
+  const kind = "group" in parts && parts.group ? `${parts.group}/${parts.kind}` : parts.kind;
+  return `${kind} · ${parts.namespace ?? "Cluster-scoped"}`;
+}
+
+/** Whether a route follows a cluster rather than being an app-level screen. */
+export function isClusterScopedRoute(route: string): boolean {
+  if (parseExtensionRoute(route)) return true;
+  // `describe` is already the one exhaustive parser for route shapes. Passing
+  // a sentinel lets its `sub` answer this without duplicating dynamic routes:
+  // an app-scoped route has none, and a route pinned to its own cluster (#834)
+  // answers with that cluster rather than the sentinel.
+  return describe(route, "__cluster_scope__").sub !== undefined;
+}
+
+/** These screens own controls for work that survives their component lifetime. */
+export function keepsManagementWhenPaused(route: string): boolean {
+  return route === "/agent" || route === "/forwards" || route === "/terminals";
 }
 
 /**
@@ -262,6 +303,7 @@ export type ScreenComponent = ComponentType<RoutedScreenProps>;
  * here and nothing else; a route with no entry renders the Placeholder.
  */
 const SCREENS: Record<string, ScreenComponent> = Object.assign(Object.create(null), {
+  "/": Home,
   "/applog": AppLog,
   "/notes": ReleaseNotes,
   // The full view of the one agent run this window holds — the console dock
@@ -337,11 +379,13 @@ const SCREENS: Record<string, ScreenComponent> = Object.assign(Object.create(nul
 const PREFIXED: ReadonlyArray<[string, ScreenComponent]> = [["/k/", Resources]];
 
 export function screenFor(route: string): ScreenComponent | null {
+  if (parseExtensionOperationRoute(route)) return ExtensionOperation;
+  if (parseExtensionRoute(route)) return ExtensionPage;
   // `hasOwnProperty.call` as well as the null prototype: the table is the one
   // thing standing between an arbitrary route string and something rendered as
   // a component, and it costs nothing to say so twice.
   if (Object.prototype.hasOwnProperty.call(SCREENS, route)) return SCREENS[route];
-  // A detail route (`/k/<kind>/<namespace>/<name>`, five segments) shares its
+  // A detail route (`/k/<cluster>/<kind>/<namespace>/<name>`, six segments) shares its
   // `/k/` prefix with a LIST route (`/k/<slug>`, three) — the more specific
   // match must win here, ahead of the prefix loop below, or a detail route
   // would render the LIST screen (`Resources`) as if the resource's own name

@@ -4,14 +4,19 @@ import type { TableSort } from "@srelens/ui-kit";
 import {
   CLOSED_CAP,
   defaultState,
+  focusStrip,
+  followsFocus,
   makeTab,
   newId,
   reconcile,
   relabel,
+  withClusters,
+  withOverview,
   type Tab,
   type TabsState,
   type Workspace,
 } from "./tabs";
+import { isPaletteColor } from "./markSymbols";
 
 /**
  * The tab store: module-level state, one hook, plain functions for actions.
@@ -159,7 +164,10 @@ function patchCurrent(patch: (w: Workspace) => Workspace) {
 }
 
 function remember(w: Workspace, dropped: Tab[]): Tab[] {
-  return [...dropped, ...w.closed].slice(0, CLOSED_CAP);
+  // Stamped, so lists kept per cluster can be put back in order: see
+  // `Tab.closedAt`.
+  const closedAt = Date.now();
+  return [...dropped.map((tab) => ({ ...tab, closedAt })), ...w.closed].slice(0, CLOSED_CAP);
 }
 
 export function useTabs() {
@@ -172,6 +180,34 @@ export function useTabs() {
     workspaces: s.workspaces,
     closed: workspace.closed,
   };
+}
+
+const NO_TABS: readonly Tab[] = [];
+let closedFor: Workspace | null = null;
+let closedAll: readonly Tab[] = NO_TABS;
+
+/**
+ * Every recently closed tab in the workspace: the list for the cluster in
+ * focus, then those put away with the other clusters' tabs (#908).
+ *
+ * For a surface that offers closed tabs across clusters — Home's "Pick up
+ * where you left off" — and brings one back on its own cluster by focusing
+ * that cluster first, which is what moves it into the list `reopenClosed`
+ * reads. The same array until the workspace changes, as `useSyncExternalStore`
+ * requires.
+ */
+function closedEverywhere(): readonly Tab[] {
+  const w = currentWorkspace();
+  if (w !== closedFor) {
+    closedFor = w;
+    const away = Object.values(w.shelved ?? {}).flatMap((strip) => strip.closed);
+    closedAll = away.length > 0 ? [...w.closed, ...away] : w.closed;
+  }
+  return closedAll;
+}
+
+export function useClosedEverywhere(): readonly Tab[] {
+  return useSyncExternalStore(subscribe, closedEverywhere, closedEverywhere);
 }
 
 /**
@@ -193,24 +229,71 @@ export function useTabs() {
  */
 export function openTab(route: string, opts: { preview?: boolean; clusterName?: string } = {}): void {
   patchCurrent((w) => {
+    // The tab the reader is opening this FROM — see `inheritNamespaces`.
+    const source = w.tabs.find((t) => t.id === w.activeId);
     const existing = w.tabs.find((t) => t.route === route);
     if (existing) {
       // Opening for real promotes a preview; re-previewing leaves it be.
       const promoted =
         !opts.preview && existing.preview ? { ...existing, preview: false } : existing;
-      const next = relabel(promoted, opts.clusterName);
+      const next = inheritNamespaces(relabel(promoted, opts.clusterName), source);
       // Identity is the signal, as everywhere else in this store: nothing to
-      // promote and nothing to relabel means no new array and no emit.
+      // promote, relabel or inherit means no new array and no emit.
       const tabs = next === existing ? w.tabs : w.tabs.map((t) => (t.id === existing.id ? next : t));
       if (tabs === w.tabs && w.activeId === existing.id) return w;
       return { ...w, tabs, activeId: existing.id };
     }
-    const next = makeTab(route, opts);
+    const next = inheritNamespaces(makeTab(route, opts), source);
     const previewAt = w.tabs.findIndex((t) => t.preview);
     const tabs =
       opts.preview && previewAt >= 0 ? w.tabs.map((t, i) => (i === previewAt ? next : t)) : [...w.tabs, next];
     return { ...w, tabs, activeId: next.id };
   });
+}
+
+/**
+ * Carry the namespace selection from the tab a reader navigates FROM onto the
+ * tab they land on (#839).
+ *
+ * The selection is per tab, deliberately: narrowing one tab must not narrow
+ * another behind the reader's back. But a tab opened from another started
+ * with no selection at all, so Pods narrowed to two namespaces and then
+ * Deployments from the sidebar was Deployments on "all namespaces" — and for
+ * a reader whose credentials are namespace-scoped, that is not a wider list
+ * but a refusal ("You don't have permission to list deployments at the
+ * cluster scope"), on every kind they visit, until they pick the same
+ * namespaces again.
+ *
+ * So a tab STARTS from where the reader came from, and is its own from then
+ * on. This is a copy at the moment of opening; nothing links the two tabs
+ * afterwards, and changing either leaves the other as it is.
+ *
+ * Per cluster, by `stableId`, and only into the gaps:
+ * - a cluster the source has an entry for and the target does not is copied,
+ *   an explicit empty array — "all namespaces", chosen — included;
+ * - a cluster the target already has an entry for keeps it. That is the
+ *   reader's own choice on that tab, and opening it again from somewhere else
+ *   is not a reason to overrule it;
+ * - a cluster the source has no entry for is left unset, so the target goes on
+ *   following the default-namespace preference there.
+ *
+ * The gaps of an EXISTING tab are filled too, not only a new one's. Tabs
+ * persist across restarts, so the Deployments tab a reader reaches from the
+ * sidebar is as often yesterday's as a fresh one, and one that was never
+ * narrowed is in exactly the state a new tab is.
+ *
+ * The same reference back when there is nothing to carry, which is what
+ * `openTab` reads to decide whether anything changed.
+ */
+function inheritNamespaces(target: Tab, source: Tab | undefined): Tab {
+  if (!source?.namespaces || source.id === target.id) return target;
+  const missing = Object.entries(source.namespaces).filter(([clusterId]) => !(clusterId in (target.namespaces ?? {})));
+  if (missing.length === 0) return target;
+  const namespaces = { ...target.namespaces };
+  // A copy of each list, not the list: the two tabs must not share an array
+  // one of them could be handed back to mutate.
+  for (const [clusterId, selection] of missing) namespaces[clusterId] = [...selection];
+  return { ...target, namespaces };
 }
 
 /**
@@ -275,13 +358,19 @@ export function closeAll(): void {
   });
 }
 
-export function reopenClosed(): void {
+/**
+ * Bring a closed tab back as it was — its view and namespace selection with
+ * it — under a fresh id. The most recent by default, which is what the
+ * shortcut asks for; Home's list names the one the reader picked.
+ */
+export function reopenClosed(id?: string): void {
   const w = currentWorkspace();
-  const [last, ...rest] = w.closed;
-  if (!last) return;
+  const tab = id === undefined ? w.closed[0] : w.closed.find((t) => t.id === id);
+  if (!tab) return;
   patchCurrent((w) => {
-    const revived = { ...last, id: newId() };
-    return { ...w, tabs: [...w.tabs, revived], activeId: revived.id, closed: rest };
+    const revived: Tab = { ...tab, id: newId() };
+    delete revived.closedAt;
+    return { ...w, tabs: [...w.tabs, revived], activeId: revived.id, closed: w.closed.filter((t) => t !== tab) };
   });
 }
 
@@ -292,6 +381,20 @@ export function duplicateTab(id: string): void {
     const copy: Tab = { ...w.tabs[at], id: newId(), preview: false, pinned: false };
     const tabs = [...w.tabs.slice(0, at + 1), copy, ...w.tabs.slice(at + 1)];
     return { ...w, tabs, activeId: copy.id };
+  });
+}
+
+/** Move a document without selecting it; array order is persisted as-is. */
+export function moveTab(id: string, toIndex: number): void {
+  if (!Number.isFinite(toIndex)) return;
+  patchCurrent(w => {
+    const from = w.tabs.findIndex(tab => tab.id === id);
+    const to = Math.max(0, Math.min(w.tabs.length - 1, Math.trunc(toIndex)));
+    if (from < 0 || from === to) return w;
+    const tabs = [...w.tabs];
+    const [tab] = tabs.splice(from, 1);
+    tabs.splice(to, 0, tab);
+    return { ...w, tabs };
   });
 }
 
@@ -328,8 +431,23 @@ export function createWorkspace(name: string, clusters: string[]): string {
   return w.id;
 }
 
+/** Trimmed; a blank name keeps the one it has, since a workspace with no name cannot be told apart. */
 export function renameWorkspace(id: string, name: string): void {
-  patchWorkspace(id, (w) => (w.name === name ? w : { ...w, name }));
+  const trimmed = name.trim();
+  if (!trimmed) return;
+  patchWorkspace(id, (w) => (w.name === trimmed ? w : { ...w, name: trimmed }));
+}
+
+/** `undefined` clears it. A colour outside the mark palette is refused, as the parser would drop it. */
+export function setWorkspaceColor(id: string, color: string | undefined): void {
+  if (color !== undefined && !isPaletteColor(color)) return;
+  patchWorkspace(id, (w) => {
+    if (w.color === color) return w;
+    const next: Workspace = { ...w };
+    if (color) next.color = color;
+    else delete next.color;
+    return next;
+  });
 }
 
 export function removeWorkspace(id: string): void {
@@ -348,14 +466,32 @@ export function setWorkspaceClusters(id: string, clusters: string[]): void {
     const same = w.clusters.length === clusters.length && w.clusters.every((c, i) => c === clusters[i]);
     // The active cluster is an index into this list, so taking a cluster away
     // has to move it — `reconcile` only knows about clusters that vanished
-    // from the machine, not ones dropped from a workspace.
+    // from the machine, not ones dropped from a workspace. Its tabs go with
+    // it, and the next cluster's come back: see `withClusters`.
     const active = w.activeCluster && clusters.includes(w.activeCluster) ? w.activeCluster : clusters[0];
     if (same && active === w.activeCluster) return w;
-    const next: Workspace = { ...w, clusters: [...clusters] };
-    if (active) next.activeCluster = active;
-    else delete next.activeCluster;
-    return next;
+    return {
+      ...withClusters(w, clusters),
+      clusters: [...clusters],
+      pausedClusters: (w.pausedClusters ?? []).filter((cluster) => clusters.includes(cluster)),
+    };
   });
+}
+
+/** A pause belongs to one workspace: another workspace may still use this cluster. */
+export function setClusterPaused(workspaceId: string, clusterId: string, paused: boolean): void {
+  patchWorkspace(workspaceId, (w) => {
+    if (!w.clusters.includes(clusterId)) return w;
+    const current = w.pausedClusters ?? [];
+    const next = paused ? (current.includes(clusterId) ? current : [...current, clusterId]) : current.filter((id) => id !== clusterId);
+    if (next.length === current.length && next.every((id, index) => id === current[index])) return w;
+    return { ...w, pausedClusters: next };
+  });
+}
+
+export function isClusterPaused(clusterId: string, workspaceId = currentWorkspace().id): boolean {
+  const workspace = getState().workspaces.find((w) => w.id === workspaceId);
+  return (workspace?.pausedClusters ?? []).includes(clusterId);
 }
 
 const EMPTY_VIEW: NonNullable<Tab["view"]> = {};
@@ -397,31 +533,90 @@ export function useTabView(tabId: string): NonNullable<Tab["view"]> {
 }
 
 /**
+ * A tab's namespace selection for one cluster, or `undefined` when that tab
+ * has made no choice for it. The stored array itself, so a caller reading it
+ * through `useSyncExternalStore` sees the same reference until it changes.
+ */
+export function tabNamespaces(tabId: string, clusterId: string): string[] | undefined {
+  return currentWorkspace().tabs.find((t) => t.id === tabId)?.namespaces?.[clusterId];
+}
+
+/**
+ * Sets one tab's namespace selection for one cluster. Every other tab keeps
+ * its own. Guarded like `setTabView`: the same selection again does not emit.
+ */
+export function setTabNamespaces(tabId: string, clusterId: string, namespaces: readonly string[]): void {
+  patchCurrent((w) => {
+    const at = w.tabs.findIndex((t) => t.id === tabId);
+    if (at < 0) return w;
+    const current = w.tabs[at].namespaces?.[clusterId];
+    if (current && current.length === namespaces.length && current.every((x, i) => x === namespaces[i])) return w;
+    const tabs = w.tabs.map((t, i) =>
+      i === at ? { ...t, namespaces: { ...t.namespaces, [clusterId]: [...namespaces] } } : t);
+    return { ...w, tabs };
+  });
+}
+
+/** Forget a removed cluster's selection in every tab of every workspace, open or recently closed. */
+export function forgetClusterNamespaces(clusterId: string): void {
+  const strip = (tabs: Tab[]) => {
+    if (!tabs.some((t) => t.namespaces && clusterId in t.namespaces)) return tabs;
+    return tabs.map((t) => {
+      if (!t.namespaces || !(clusterId in t.namespaces)) return t;
+      const namespaces = { ...t.namespaces };
+      delete namespaces[clusterId];
+      return { ...t, namespaces };
+    });
+  };
+  const state = cur();
+  let changed = false;
+  const workspaces = state.workspaces.map((w) => {
+    const tabs = strip(w.tabs);
+    const closed = strip(w.closed);
+    // The strips put away are tabs too: a cluster's selection can sit in a
+    // tab shelved under another cluster, from when a tab followed the rail.
+    let shelved = w.shelved;
+    for (const [id, was] of Object.entries(w.shelved ?? {})) {
+      const put = { tabs: strip(was.tabs), closed: strip(was.closed) };
+      if (put.tabs !== was.tabs || put.closed !== was.closed) shelved = { ...shelved, [id]: { ...was, ...put } };
+    }
+    if (tabs === w.tabs && closed === w.closed && shelved === w.shelved) return w;
+    changed = true;
+    return { ...w, tabs, closed, ...(shelved ? { shelved } : {}) };
+  });
+  if (changed) emit({ ...state, workspaces });
+}
+
+/**
  * `null` for "no cluster in focus"; anything the workspace does not have is
  * refused rather than stored, so the field is always an id in `clusters`.
  *
- * **Every cluster-scoped tab is relabelled for the cluster named here**, and
- * that is not a flourish either. No tab is about a cluster of its own: every
- * cluster-scoped screen reads `useActiveContext()`, so the instant this field
- * moves, the mounted screen is rendering the new cluster. A tab whose `sub`
- * still names the old one labels that screen with a cluster it is not showing,
- * and an action started from it runs against one cluster under a tab reading
- * another. The rail's own `onSelect` was exactly that: `setActiveCluster` bare.
+ * **The strip changes with the cluster (#908).** Almost no tab names a
+ * cluster of its own: every cluster-scoped screen but a detail tab and the
+ * editor reads `useActiveContext()`, so the instant this field moves, a
+ * mounted screen is rendering the new cluster.
+ * For a long while the answer to that was to relabel every tab for the
+ * cluster switched to — one strip that followed the rail — which kept the
+ * labels true and meant that Pods, ConfigMaps and Services opened on one
+ * cluster were all still open on the next, where nobody had opened them.
+ * Each cluster now has its own strip: the outgoing cluster's tabs are put
+ * away with their order, their active tab and their recently-closed list,
+ * and the incoming cluster's come back as they were left. See `focusStrip`
+ * for what stays on screen throughout — the app-wide tabs, and the tabs that
+ * name a cluster of their own in the route: the editor, and a detail tab
+ * (#834).
  *
- * **The whole workspace, not only the active tab.** Every one of its tabs is
- * about the cluster in focus, so leaving the background ones stale only defers
- * the mislabelling until the reader switches tab — and `relabel` is a no-op for
- * a tab already carrying the name, so the pass costs an identity check per tab.
- * App-scoped routes come back from `describe` with no `sub` at all, so
- * `/settings` and `/connections` keep none: the route table stays the one place
- * that decides whether a route is about a cluster.
+ * **A cluster with nothing remembered opens on its overview**, since the
+ * reader asked to look at it and its strip would otherwise have nothing of
+ * its own.
  *
  * **`clusterName` rather than a lookup here.** Workspaces hold `stableId`s
  * (#265) and tabs carry context *names*; the store that translates between them
  * is `lib/clusters`, which imports THIS module, so reaching back for the name
  * would be a cycle. The caller who knows the cluster passes its name, exactly
- * as {@link openTab} takes it. No name means the caller said nothing about a
- * cluster and the labels stand — see {@link relabel}.
+ * as {@link openTab} takes it. It labels the tabs that come back, because a
+ * context can be renamed while its tabs are away, and the same cluster's own
+ * tabs when the focus does not move — a rename with the cluster in focus.
  *
  * The refusal above covers the labels too: a cluster this workspace does not
  * have does not become the label of tabs it did not switch.
@@ -429,18 +624,14 @@ export function useTabView(tabId: string): NonNullable<Tab["view"]> {
 export function setActiveCluster(id: string | null, clusterName?: string): void {
   patchCurrent((w) => {
     if (id !== null && !w.clusters.includes(id)) return w;
-    let tabs = w.tabs;
-    if (clusterName) {
-      const relabelled = w.tabs.map((t) => relabel(t, clusterName));
-      // Identity, as everywhere else here: a strip that needed no relabelling
-      // keeps its array, so an unchanged switch still emits nothing and the
-      // subscriber that writes the settings file stays asleep.
-      if (relabelled.some((t, i) => t !== w.tabs[i])) tabs = relabelled;
+    if ((w.activeCluster ?? null) !== id) {
+      return withOverview(focusStrip(w, id ?? undefined, clusterName), clusterName);
     }
-    if (tabs === w.tabs && (w.activeCluster ?? null) === id) return w;
-    const next: Workspace = { ...w, tabs };
-    if (id === null) delete next.activeCluster;
-    else next.activeCluster = id;
-    return next;
+    if (!clusterName) return w;
+    const relabelled = w.tabs.map((t) => (followsFocus(t) ? relabel(t, clusterName) : t));
+    // Identity, as everywhere else here: a strip that needed no relabelling
+    // keeps its array, so an unchanged switch still emits nothing and the
+    // subscriber that writes the settings file stays asleep.
+    return relabelled.some((t, i) => t !== w.tabs[i]) ? { ...w, tabs: relabelled } : w;
   });
 }

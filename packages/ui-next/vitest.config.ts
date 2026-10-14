@@ -1,5 +1,5 @@
 import { defineConfig } from "vitest/config";
-import { TEST_TIMEOUT_MS } from "../../vitest.shared";
+import { TEST_TIMEOUT_MS, TEST_EXEC_ARGV } from "../../vitest.shared";
 
 // No react plugin: esbuild compiles JSX from tsconfig's `jsx: react-jsx`, the
 // same way apps/desktop's config does. No coverage block either — the root
@@ -10,6 +10,8 @@ export default defineConfig({
     environment: "jsdom",
     /** 15s, not vitest's 5s default — see `vitest.shared.ts` for why. */
     testTimeout: TEST_TIMEOUT_MS,
-    setupFiles: ["./src/test-setup.ts"],
+    execArgv: TEST_EXEC_ARGV,
+    /** No real WebSocket in a test — see `vitest.offline-websocket.ts` for why. */
+    setupFiles: ["../../vitest.offline-websocket.ts", "./src/test-setup.ts"],
   },
 });

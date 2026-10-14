@@ -1,4 +1,5 @@
 import type { NodeSummary, NodeMetric } from "./manifest";
+import type { PodSummary } from "./workloads";
 
 /**
  * A node's usage against its allocatable capacity, computed once so the
@@ -54,6 +55,78 @@ export function nodeUsage(
     cpuPercent: metric ? percentOf(metric.cpuMillicores, node.allocatableCpuMillicores) : null,
     memoryPercent: metric ? percentOf(metric.memoryMiB, node.allocatableMemoryMiB) : null,
     pods: podsOnNode === undefined ? null : { used: podsOnNode, allocatable: node.allocatablePods },
+  };
+}
+
+/** What a pod's usage is measured against. */
+export type PodBound = "limit" | "request";
+
+/** One resource of one pod: how much of its bound is in use, and which bound. */
+export interface PodResourceUsage {
+  /** Unrounded and unclamped, for the reason {@link percentOf} gives. */
+  percent: number;
+  of: PodBound;
+  /** The bound itself, in the unit usage is reported in. */
+  bound: number;
+}
+
+/**
+ * A pod's usage against what it was given, computed once so the pods list and
+ * a pod's own page cannot come to mean different things by a percentage.
+ *
+ * `null` for a resource is "nothing to measure against" or "no reading" —
+ * never `0%`, which is a measurement.
+ */
+export interface PodUsage {
+  cpu: PodResourceUsage | null;
+  memory: PodResourceUsage | null;
+}
+
+/** The request and limit fields of a pod summary that {@link podUsage} reads. */
+export type PodBounds = Pick<
+  PodSummary,
+  "cpuReqMillicores" | "cpuLimMillicores" | "memReqMiB" | "memLimMiB" | "cpuLimAll" | "memLimAll"
+>;
+
+function against(
+  used: number,
+  limit: number | undefined,
+  limitIsWhole: boolean | undefined,
+  request: number | undefined,
+): PodResourceUsage | null {
+  // The limit first: it is the line past which the pod is throttled or
+  // killed, which is the thing a reader scanning a list wants to see coming.
+  // Only when it is the pod's WHOLE ceiling — see `PodSummary.cpuLimAll`.
+  const [bound, of]: [number, PodBound] =
+    limitIsWhole === true && (limit ?? 0) > 0 ? [limit!, "limit"] : [request ?? 0, "request"];
+  const percent = percentOf(used, bound);
+  return percent === null ? null : { percent, of, bound };
+}
+
+/**
+ * A single pod's usage against its own limit, or its request where it has no
+ * whole limit.
+ *
+ * A node's bar is a share of what the node can allocate. A pod has no such
+ * single number: it has what it asked for and what it may not pass, either of
+ * which may be missing. A pod with neither has nothing to take a share of, and
+ * says so with `null` rather than an empty or a full bar.
+ *
+ * Against a request the figure passes 100 routinely and that is not a fault —
+ * a request is a floor for scheduling, not a ceiling. `of` travels with the
+ * percentage so a caller can say which it is showing.
+ *
+ * @param metric - This pod's reading, or `undefined` if metrics-server is
+ *   absent or has no sample for it yet.
+ */
+export function podUsage(
+  pod: PodBounds,
+  metric: { cpuMillicores: number; memoryMiB: number } | undefined,
+): PodUsage {
+  if (!metric) return { cpu: null, memory: null };
+  return {
+    cpu: against(metric.cpuMillicores, pod.cpuLimMillicores, pod.cpuLimAll, pod.cpuReqMillicores),
+    memory: against(metric.memoryMiB, pod.memLimMiB, pod.memLimAll, pod.memReqMiB),
   };
 }
 

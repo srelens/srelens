@@ -1,7 +1,4 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { readFileSync, readdirSync } from "node:fs";
-import { dirname, join, relative } from "node:path";
-import { fileURLToPath } from "node:url";
 import { act, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 
@@ -38,6 +35,7 @@ const core = vi.hoisted(() => ({
   llmKeyStatus: vi.fn(),
   llmListModels: vi.fn(),
   listAgents: vi.fn(),
+  listExtensions: vi.fn(async () => ({ schemaVersion: 1, nextRevision: 1, plugins: [] })),
 }));
 vi.mock("@srelens/core", async (orig) => ({
   ...(await orig<typeof import("@srelens/core")>()),
@@ -45,6 +43,10 @@ vi.mock("@srelens/core", async (orig) => ({
 }));
 
 import type { VaultBiometricStatus } from "@srelens/core";
+import { openSettings } from "../lib/settingsRequest";
+import { defaultState } from "../lib/tabs";
+import { TabScope } from "../lib/tabScope";
+import { activateTab, currentWorkspace, duplicateTab, moveTab, openTab, setState } from "../lib/tabsStore";
 import { Settings } from "./Settings";
 
 const ROUTE = "/settings";
@@ -69,19 +71,31 @@ const PORTED = ["Aardvark ledger", "Basalt tally", "Cinnabar dial"];
 /** §23's nav, in §23's order, minus the entry decision 2 removed. */
 const DESKTOP_SECTIONS = [
   "Agent & MCP",
+  // #851. Desktop only: the skill store is files on this machine.
+  "Skills",
   "Security",
+  "Backup",
   "Appearance",
   "Accessibility",
   "Shortcuts",
-  "Workspace",
+  "Deep links",
+  "Session & layout",
   "Kubernetes",
   "Application logs",
   "Updates",
+  "Workspaces",
   "Clusters",
+  "Apps",
 ];
 
-/** The same nav where no vault command can answer. */
-const WEB_SECTIONS = DESKTOP_SECTIONS.filter((s) => s !== "Security" && s !== "Updates");
+/**
+ * The same nav where no vault command can answer. Apps stays: the server keeps
+ * each user's (#515). Deep links goes: only the desktop app registers the
+ * `srelens://` scheme, so in a browser no such link reaches srelens at all.
+ */
+const WEB_SECTIONS = DESKTOP_SECTIONS.filter(
+  (s) => s !== "Skills" && s !== "Security" && s !== "Backup" && s !== "Updates" && s !== "Deep links",
+);
 
 function paint(props: { onLocked?: () => void } = {}) {
   const onSwitchToClassic = vi.fn();
@@ -137,48 +151,103 @@ describe("Settings", () => {
   it("lists every section, in order, and no section it cannot fill", () => {
     paint();
     expect(sections()).toEqual(DESKTOP_SECTIONS);
-    expect(screen.queryByRole("tab", { name: /deep links/i })).toBeNull();
+  });
+
+  it("opens on the section another screen asked for, and moves to one asked for while open", async () => {
+    openSettings("extensions", "catalog");
+    paint();
+    const rail = screen.getByRole("complementary", { name: "Settings" });
+    expect(within(rail).getByRole("tab", { name: "Apps" }).getAttribute("aria-selected")).toBe("true");
+    expect((await screen.findByRole("tab", { name: "Catalog" })).getAttribute("aria-selected")).toBe("true");
+    expect(screen.getByRole("region", { name: "App catalog" })).toBeTruthy();
+    act(() => openSettings("appearance"));
+    expect(within(rail).getByRole("tab", { name: "Appearance" }).getAttribute("aria-selected")).toBe("true");
+  });
+
+  it("opens on Workspaces when asked, and still finds Session & layout by its old id", () => {
+    openSettings("workspaces");
+    paint();
+    const rail = screen.getByRole("complementary", { name: "Settings" });
+    expect(within(rail).getByRole("tab", { name: "Workspaces" }).getAttribute("aria-selected")).toBe("true");
+    expect(screen.getByRole("list", { name: "Workspaces" })).toBeTruthy();
+    act(() => openSettings("workspace"));
+    expect(within(rail).getByRole("tab", { name: "Session & layout" }).getAttribute("aria-selected")).toBe("true");
+  });
+
+  it("hands a request to the Settings tab it brings to the front, not to another Settings tab", () => {
+    setState(defaultState([]));
+    openTab("/settings");
+    const original = currentWorkspace().activeId;
+    duplicateTab(original);
+    const copy = currentWorkspace().activeId;
+    // The copy moved ahead of the original: `openTab` now focuses the copy.
+    moveTab(copy, 1);
+    // And the request comes from Home, as Home's links do.
+    activateTab(currentWorkspace().tabs[0].id);
+    const props = { route: ROUTE, ported: PORTED, onSwitchToClassic: vi.fn(), onLocked: vi.fn() };
+    render(
+      <>
+        <TabScope.Provider value={original}><Settings {...props} /></TabScope.Provider>
+        <TabScope.Provider value={copy}><Settings {...props} /></TabScope.Provider>
+      </>,
+    );
+    act(() => openSettings("appearance"));
+    expect(currentWorkspace().activeId).toBe(copy);
+    const [originalRail, copyRail] = screen.getAllByRole("complementary", { name: "Settings" });
+    expect(within(copyRail).getByRole("tab", { name: "Appearance" }).getAttribute("aria-selected")).toBe("true");
+    expect(within(originalRail).getByRole("tab", { name: "Appearance" }).getAttribute("aria-selected")).toBe("false");
+  });
+
+  it("shows the installed apps for a later request that names no tab", async () => {
+    openSettings("extensions", "catalog");
+    paint();
+    expect((await screen.findByRole("tab", { name: "Catalog" })).getAttribute("aria-selected")).toBe("true");
+    act(() => openSettings("extensions"));
+    expect(screen.getByRole("tab", { name: "Catalog" }).getAttribute("aria-selected")).toBe("false");
+  });
+
+  it("does not carry a catalog request into a later visit through the rail", async () => {
+    openSettings("extensions", "catalog");
+    const { user } = paint();
+    const rail = screen.getByRole("complementary", { name: "Settings" });
+    expect((await screen.findByRole("tab", { name: "Catalog" })).getAttribute("aria-selected")).toBe("true");
+    await user.click(within(rail).getByRole("tab", { name: "Appearance" }));
+    await user.click(within(rail).getByRole("tab", { name: "Apps" }));
+    expect((await screen.findByRole("tab", { name: "Catalog" })).getAttribute("aria-selected")).toBe("false");
+  });
+
+  it("moves an open Apps section to its catalog when asked", async () => {
+    openSettings("extensions");
+    paint();
+    expect((await screen.findByRole("tab", { name: "Catalog" })).getAttribute("aria-selected")).toBe("false");
+    act(() => openSettings("extensions", "catalog"));
+    expect(screen.getByRole("tab", { name: "Catalog" }).getAttribute("aria-selected")).toBe("true");
+    expect(screen.getByRole("region", { name: "App catalog" })).toBeTruthy();
   });
 
   /**
-   * The reason the `Deep links` entry is absent, pinned as a property rather
-   * than asserted in a comment.
-   *
-   * The comment this replaces said `srelens://` "exists nowhere in this repo —
-   * no scheme, no handler, no parser". All three were false: the scheme is in
-   * `tauri.conf.json`, the parser is `deepLink.ts` with its own suite, the
-   * handler is `deep_link.rs` wired in four places, and `App.tsx` drains and
-   * routes. What is actually true is that the consumer is CLASSIC's:
-   * `main.tsx` mounts `App` or `NextApp` and never both, and nothing in this
-   * package touches deep links — so under the new design a link is queued and
-   * nothing opens it. A pane leading with §23's "opens the exact thing it
-   * refers to" would be false in the design a reader is reading it in.
-   *
-   * This scans the package for a consumer instead of trusting the comment.
-   * Whoever wires the drain into this tree fails this test, and adds the pane
-   * and its nav entry in the same commit (#370).
+   * #370: the two forms `parseDeepLink` accepts, each copyable exactly. The
+   * forms are written out by hand here, not read from the pane, so a pane that
+   * drew or copied a form the parser would refuse fails this.
    */
-  it("has no deep-link consumer of its own, which is why the section is absent", () => {
-    const root = join(dirname(fileURLToPath(import.meta.url)), "..");
-    const consumers: string[] = [];
-    const walk = (dir: string) => {
-      for (const entry of readdirSync(dir, { withFileTypes: true })) {
-        const path = join(dir, entry.name);
-        if (entry.isDirectory()) {
-          walk(path);
-          continue;
-        }
-        if (!/\.tsx?$/.test(entry.name) || /\.test\.tsx?$/.test(entry.name)) continue;
-        // Comments stripped: this very absence is discussed in prose in
-        // `Settings.tsx`, and a scan that read prose would find itself.
-        const source = readFileSync(path, "utf8").replace(/\/\*[\s\S]*?\*\/|\/\/.*/g, "");
-        if (/parseDeepLink|take_pending_deep_links|deep-link-pending/.test(source)) {
-          consumers.push(relative(root, path));
-        }
-      }
-    };
-    walk(root);
-    expect(consumers).toEqual([]);
+  it("draws both link forms under Deep links, and copies each one exactly", async () => {
+    const { user } = paint();
+    // Installed after `userEvent.setup()`, which brings a clipboard of its own.
+    const writeText = vi.fn(async () => {});
+    Object.defineProperty(navigator, "clipboard", { value: { writeText }, configurable: true });
+    await user.click(screen.getByRole("tab", { name: "Deep links" }));
+    const forms = screen.getByRole("heading", { name: "Link forms" }).closest("section") as HTMLElement;
+    const rows = within(within(forms).getByRole("table")).getAllByRole("row").slice(1);
+    const links = [
+      "srelens://cluster/<context>",
+      "srelens://resource/<context>/<namespace>/<kind>/<name>",
+    ];
+    expect(rows.map((row) => within(row).getAllByRole("cell")[0].textContent)).toEqual(links);
+    for (const [index, link] of links.entries()) {
+      await user.click(within(rows[index]).getByRole("button", { name: `Copy ${link}` }));
+      expect(writeText).toHaveBeenLastCalledWith(link);
+    }
+    expect(writeText).toHaveBeenCalledTimes(2);
   });
 
   it("names the rail Settings and holds it at the design's 196px", () => {
@@ -208,7 +277,7 @@ describe("Settings", () => {
     paint();
     expect(await screen.findByText(/never without confirmation/i)).toBeTruthy();
     expect(screen.getByText(/drops in-flight requests/i)).toBeTruthy();
-    expect(screen.getByText(/every capability call/i)).toBeTruthy();
+    expect(screen.getByText(/every change made here/i)).toBeTruthy();
     const nested = screen.getByText("Providers").closest(".card")?.parentElement;
     expect(nested?.className).toContain("settings-agent-groups");
     expect(nested?.className).not.toContain("gap-4");
@@ -253,14 +322,14 @@ describe("Settings", () => {
     expect(tabs.map((t) => t.tabIndex)).toEqual(DESKTOP_SECTIONS.map((_, i) => i === 0 ? 0 : -1));
     tabs[0].focus();
     await user.keyboard("{ArrowDown}");
-    expect(sections()[1]).toBe("Security");
-    expect(document.activeElement?.textContent).toBe("Security");
+    expect(sections()[1]).toBe("Skills");
+    expect(document.activeElement?.textContent).toBe("Skills");
     await user.keyboard("{End}");
-    expect(document.activeElement?.textContent).toBe("Clusters");
+    expect(document.activeElement?.textContent).toBe("Apps");
     await user.keyboard("{ArrowDown}");
     expect(document.activeElement?.textContent).toBe("Agent & MCP");
     await user.keyboard("{ArrowUp}");
-    expect(document.activeElement?.textContent).toBe("Clusters");
+    expect(document.activeElement?.textContent).toBe("Apps");
     await user.keyboard("{Home}");
     expect(document.activeElement?.textContent).toBe("Agent & MCP");
   });
@@ -269,7 +338,7 @@ describe("Settings", () => {
     const { user, onSwitchToClassic } = paint();
     await user.click(screen.getByRole("tab", { name: "Appearance" }));
     expect(screen.getAllByTestId("ported-screen").map((n) => n.textContent)).toEqual(PORTED);
-    await user.click(screen.getByRole("button", { name: /switch to the classic design/i }));
+    await user.click(screen.getByRole("button", { name: "Switch to Classic (deprecated)" }));
     expect(onSwitchToClassic).toHaveBeenCalledTimes(1);
   });
 
@@ -312,6 +381,14 @@ describe("Settings", () => {
       expect(screen.queryByRole("tab", { name: "Security" })).toBeNull();
     });
 
+    it("draws Apps, and lists the signed-in user's own apps from the server (#515)", async () => {
+      const { user } = paint();
+      await user.click(screen.getByRole("tab", { name: "Apps" }));
+      expect(await screen.findByText(/apps you install here are yours/i)).toBeTruthy();
+      expect(core.listExtensions).toHaveBeenCalled();
+      expect(screen.queryByText(/available in the desktop app/i)).toBeNull();
+    });
+
     it("says why the section is missing, once, where the entry would have been", () => {
       paint();
       const rail = screen.getByRole("complementary", { name: "Settings" });
@@ -331,7 +408,8 @@ describe("Settings", () => {
       for (const label of sections()) {
         await user.click(screen.getByRole("tab", { name: label }));
       }
-      expect(await screen.findByRole("button", { name: /open connections/i })).toBeTruthy();
+      // The last pane the loop opened, drawn: Apps, which now ends the web rail too.
+      expect(await screen.findByText(/apps you install here are yours/i)).toBeTruthy();
       expect(core.vaultBiometricStatus).not.toHaveBeenCalled();
       expect(core.vaultLock).not.toHaveBeenCalled();
     });
@@ -362,7 +440,7 @@ describe("Settings", () => {
         await user.click(screen.getByRole("tab", { name: label }));
       }
       expect(screen.queryByText(/drops in-flight requests/i)).toBeNull();
-      expect(screen.queryByText(/every capability call/i)).toBeNull();
+      expect(screen.queryByText(/every change made here/i)).toBeNull();
       expect(screen.queryByRole("button", { name: /start server/i })).toBeNull();
       expect(core.getMcpToken).not.toHaveBeenCalled();
       expect(core.mcpHttpStatus).not.toHaveBeenCalled();
@@ -433,7 +511,7 @@ describe("Settings", () => {
       paint();
       expect(await screen.findByText(/never without confirmation/i)).toBeTruthy();
       expect(screen.getByText(/drops in-flight requests/i)).toBeTruthy();
-      expect(screen.getByText(/every capability call/i)).toBeTruthy();
+      expect(screen.getByText(/every change made here/i)).toBeTruthy();
       expect(screen.queryByTestId("no-agent-server")).toBeNull();
     });
   });
@@ -447,7 +525,7 @@ it("keeps an in-progress update when switching settings sections", async () => {
   await user.click(screen.getByRole("tab", { name: "Updates" }));
   await user.click(screen.getByRole("button", { name: "Check for updates" }));
   await user.click(await screen.findByRole("button", { name: "Download & install" }));
-  await user.click(screen.getByRole("tab", { name: "Workspace" }));
+  await user.click(screen.getByRole("tab", { name: "Session & layout" }));
   await act(async () => finish());
   await user.click(screen.getByRole("tab", { name: "Updates" }));
   expect(await screen.findByRole("button", { name: "Restart srelens" })).toBeTruthy();

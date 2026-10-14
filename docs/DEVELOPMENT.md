@@ -5,7 +5,8 @@ This guide covers everything you need to build, test, and extend srelens.
 ## Prerequisites
 
 - **Rust** (stable) — install via [rustup](https://rustup.rs). The toolchain is pinned by `rust-toolchain.toml` (stable + `llvm-tools-preview` for coverage).
-- **Node.js 22+** and **pnpm 11+**. The exact version is pinned by `packageManager` in `package.json`, and pnpm switches to it on its own — don't install a different one alongside it.
+- **Node.js 26** is the development default; **Node.js 24 LTS** is also supported. Run `nvm install && nvm use` from the repository root. `.nvmrc` selects the default major for developers and CI/release workflows; `package.json` declares supported majors and `engineStrict` in `pnpm-workspace.yaml` rejects unsupported versions during installation. CI builds, typechecks, and tests both supported majors.
+- **pnpm 11+**. Its exact version is pinned by `packageManager` in `package.json`, and pnpm switches to it on its own — don't install a different one alongside it.
 - **Tauri v2 system dependencies** — see the [official prerequisites](https://v2.tauri.app/start/prerequisites/) (on macOS: Xcode command-line tools; on Linux: webkit2gtk and friends).
 - A kubeconfig with at least one reachable cluster ([kind](https://kind.sigs.k8s.io) or k3d works well for development).
 - **Docker** — only if you want to build or run the [web app](#web-mode) locally.
@@ -34,6 +35,16 @@ The first `pnpm dev` compiles the full Rust dependency tree and takes a few minu
 | `pnpm tauri build` | Packaged, installable desktop binaries |
 | `pnpm tauri icon apps/desktop/src-tauri/icons/icon.svg` | Regenerate the full app icon set from the source SVG |
 | `UPDATE_CATALOG=1 cargo test -p srelens-registry` | Regenerate the committed capability catalog after adding a capability |
+| `UPDATE_CATALOG=1 cargo test -p srelens-plugin-host --test schema` | Regenerate the committed extension manifest schema after changing a manifest field |
+| `UPDATE_CATALOG=1 cargo test -p srelens-sidecar-protocol --test schema` | Regenerate the committed sidecar protocol schema after changing a protocol type; then run `go generate ./...` in `sdk/go`, whose generated types CI holds to the schema |
+| `cargo test -p srelens-sidecar -p srelens-sidecar-hello-world` | The Rust sidecar SDK and its example, which runs the real binary under the supervisor |
+| `cargo tree -p srelens-sidecar -e no-dev` | What a sidecar author builds: no `schemars`, because the protocol crate's JSON-Schema generation is its `schema` feature, off by default. In this workspace, without `-e no-dev`, the tree lists it through the dev-dependencies the tests use; a sidecar outside it never does. `sdk/rust/tests/dependencies.rs` holds this, and CI builds the SDK this way |
+| `cd sdk/go && go test ./...` | The Go sidecar SDK (CI adds `-race`, which needs cgo and a C compiler) |
+| `cd sdk/go && go generate ./...` | Regenerate `protocol/protocol_gen.go` after the protocol schema changes |
+| `go build -C sdk/examples/hello-world/go -o "$PWD/target/hello-world-go" .`, then `SRELENS_HELLO_WORLD_GO="$PWD/target/hello-world-go" cargo test -p srelens-sidecar-hello-world --test supervised -- --ignored` | The Go example under the supervisor; add `--test sandboxed` and the sandbox variables in the next row to run both examples in the sandbox too (on Windows, the binary ends `.exe` and the path must be a Windows one, such as `$(pwd -W)` in Git Bash) |
+| `cargo build -p srelens-plugin-host --bin srelens-sandbox-launch`, then `SRELENS_SANDBOX_LAUNCHER="$PWD/target/debug/srelens-sandbox-launch" SRELENS_HELLO_WORLD_GO="$PWD/target/hello-world-go" cargo test -p srelens-sidecar-hello-world --test sandboxed --test supervised -- --ignored --test-threads=1` | The example inside the OS sandbox, run from the workspace root (Linux needs the launcher built first and passed as an absolute path; it asks the systemd user manager for a delegated scope, and without a user session needs `SRELENS_SANDBOX_CGROUP_ROOT`; on Windows neither variable is needed) |
+| `PROPTEST_RNG_SEED=7 PROPTEST_CASES=10000 cargo test -p srelens-registry --lib fuzzing` | Run the extension parser property tests past their fixed cases |
+| `cargo +nightly fuzz run manifest` | Fuzz an extension parser (Linux or macOS, nightly); setup in [docs/extensions/testing.md](extensions/testing.md#fuzzing) |
 
 Live-cluster suites are `#[ignore]`d and need an explicit run — see [Testing standards](#testing-standards).
 
@@ -98,11 +109,11 @@ The two hosts differ only in how they reach the user. Everything below `crates/r
 
 | Crate | Role |
 | --- | --- |
-| `crates/capability` | The `Capability` type itself: id, JSON schemas, safety annotations, async handler, and the `Registry` that holds them. No Kubernetes knowledge. |
+| `crates/capability` | The `Capability` type itself: id, JSON schemas, safety annotations, async handler, and the `Registry` that holds them — plus the local audit trail, which lives here because the registry is where the desktop bridge and the MCP server meet. No Kubernetes knowledge. |
 | `crates/kube` | Everything Kubernetes: kubeconfig discovery and merging, client cache, auth/OIDC resolution, watches, per-resource modules, actions, Helm, metrics, CRDs, toolbox. |
 | `crates/streams` | Host-agnostic streaming cores (exec, logs, forward, terminal, helm, watch). Each manager drives a `crates/kube` stream — or, for `terminal` and `helm`, a local PTY/CLI subprocess — and emits into an `EventSink` the host implements: Tauri events on desktop, WebSocket frames on the web. |
 | `crates/registry` | **Where capabilities are registered.** Tauri-free on purpose, so the headless server binary builds the identical registry without linking Tauri. Also owns the catalog projection and the MCP `KindResolver`. |
-| `crates/mcp` | The MCP server: tools generated from the registry, plus prompts, `k8s://` resources, watch-backed subscriptions, consent policy, token auth, and the audit log. Transports: stdio and loopback HTTP. |
+| `crates/mcp` | The MCP server: tools generated from the registry, plus prompts, `k8s://` resources, watch-backed subscriptions, consent policy, and token auth. Transports: stdio and loopback HTTP. The audit log it records to belongs to `crates/capability`, so a call made in the desktop UI lands in the same trail. |
 | `crates/server` | The web host: axum router, SQLite (sqlx) store, session + OIDC auth, per-user isolated environments, encrypted kubeconfigs and cluster tokens, WebSocket hub, port-forward proxy. Ships as the `srelens-server` binary. |
 | `apps/desktop/src-tauri` | The Tauri shell: window, command bridge, stream commands, updater, settings, MCP wiring. Its `capabilities.rs` is a thin re-export of `crates/registry`. |
 
@@ -122,19 +133,25 @@ Four invariants are enforced by tests rather than by review, so "everything is e
 
 | Test | Guarantee |
 | --- | --- |
-| `every_capability_is_mcp_exposed` (`crates/registry`) | The registry and the MCP tool list match exactly. |
+| `every_capability_is_mcp_exposed` (`crates/registry`) | The registry and the MCP tool list match exactly, except for UI-only capabilities (`Capability::ui_only`), which must not be tools. `app_logs_and_metrics_never_leave_through_mcp_or_the_audit_trail` pins that set to `extensions.inspect`, `extensions.logs` and `extensions.callOperation`, the native app surfaces ([#575](https://github.com/srelens/srelens/issues/575)). |
 | `assert_mutating_capabilities_are_gated` (`crates/mcp/src/completeness.rs`) | Every capability that is not `read_only` is `requires_confirm`. Note the predicate is *mutating*, not *destructive* — a non-destructive capability can still need consent. |
 | `capability_catalog_json_is_in_sync` (`crates/registry`) | The committed `packages/core/src/lib/capability-catalog.json` equals the live registry, so the frontend palette audit can cross-check without linking Rust. Regenerate with `UPDATE_CATALOG=1 cargo test -p srelens-registry`. |
-| `full_capability_suite` (`apps/desktop/src-tauri/tests/e2e.rs`) | Every registered capability is actually exercised against a live kind cluster, or explicitly excluded with a reason. Runs in the `integration` CI job. |
+| `committed_manifest_schema_matches_the_contract` (`crates/plugin-host/tests/schema.rs`) | The committed `schemas/extension-manifest.v0.8.json` (the newest supported API line) equals `Manifest::schema()`, and Vitest validates every example manifest against it. An older line's file stays as it was when the next line was cut, and `a_field_missing_from_an_older_lines_schema_is_gated_in_api_fields` fails when the contract has a field that file lacks and `API_FIELDS` does not list. Regenerate with `UPDATE_CATALOG=1 cargo test -p srelens-plugin-host --test schema`. |
+| `committed_protocol_schema_matches_the_types` (`sdk/protocol/tests/schema.rs`) | The committed `schemas/sidecar-protocol.v0.2.json` (the newest sidecar API line) equals `srelens_sidecar_protocol::schema()`, generated from the types srelens builds its sidecar messages from. The fixtures in `sdk/protocol/tests/messages/` validate against it, `everything_srelens_writes_is_a_host_message_in_the_protocol_schema` holds what the host writes to it, and the broker's conformance test holds its `host/*` shapes to it. Regenerate with `UPDATE_CATALOG=1 cargo test -p srelens-sidecar-protocol --test schema`. |
+| `a_sidecar_built_with_default_features_does_not_build_schemars` (`sdk/rust/tests/dependencies.rs`) | `cargo tree -e no-dev` for `srelens-sidecar`, `srelens-sidecar-protocol` and the Rust hello-world lists no `schemars`: the protocol's JSON Schema is its `schema` feature, off by default, so a sidecar author does not build it. The tests that need the schema (the SDK's, the protocol crate's, `srelens-plugin-host`'s) turn the feature on as a dev-dependency, so their commands need no `--features`. |
+| `extension_inventory_schema_json_is_in_sync` (`crates/registry`) | The committed `packages/core/src/lib/extension-inventory.schema.json` equals the Rust inventory and manifest types, and `extensionTypes.test.ts` holds the `@srelens/core` extension types to its field names and optionality. Regenerate with `UPDATE_CATALOG=1 cargo test -p srelens-registry`. |
+| `full_capability_suite` (`apps/desktop/src-tauri/tests/e2e.rs`) | Every registered capability is actually exercised against a live kind cluster, or explicitly excluded with a reason. Runs in the `backend` CI job. |
 
 ### Long-lived streams
 
 Watches, pod exec, log tails, terminals, helm operations, and port-forwards don't fit request/response. Their logic lives in `crates/streams`, one manager per stream kind, each emitting into an `EventSink`:
 
-- **Desktop** implements `EventSink` over Tauri events (`apps/desktop/src-tauri/src/sink.rs`); the streams are started by dedicated Tauri commands (`start_resource_watch`, `start_pod_exec`, `start_log_stream`, `start_port_forward`, plus matching stop/input commands).
+- **Desktop** implements `EventSink` over Tauri events (`apps/desktop/src-tauri/src/sink.rs`); the streams are started by dedicated Tauri commands (`start_resource_watch`, `start_pod_exec`, `start_log_stream`, `start_port_forward`, plus matching stop/input commands). Watches, pod exec sessions, app streams, log streams, port-forwards and local terminals belong to the window whose call opened them, and end when it closes or reloads (`apps/desktop/src-tauri/src/window_streams.rs`, [#700](https://github.com/srelens/srelens/issues/700), [#735](https://github.com/srelens/srelens/issues/735)). A helm operation is let go of instead of killed: it runs to the end and the host reports the outcome to every window (`apps/desktop/src-tauri/src/helm.rs`). A node shell's privileged debug pod is the host's to delete ([#734](https://github.com/srelens/srelens/issues/734), `apps/desktop/src-tauri/src/node_shells.rs`): the capability bridge records each one a window creates, by uid, and the host deletes it — pinned to that uid — when its shell ends however it ends, when its window closes or reloads, or when srelens quits. The web page still deletes its own.
 - **Web** implements it over WebSocket frames (`crates/server/src/ws/`, `crates/server/src/streams.rs`), started through `/api/command/*`.
 
 The frontend side is identical in both cases and lives in `@srelens/core` (`packages/core/src/lib/`: `watch.ts`, `exec.ts`, `logsStream.ts`, `forward.ts`).
+
+Streams an app's views open go through one generic contract instead of a manager per kind: `crates/streams/src/app.rs` (frames, view ownership, per-app limits, metrics), with the extension broker deciding what an app may open. A new app stream source is a new `source` kind, not a new command: an app's logs, exec and port-forwards (#567) are the `logs`, `exec` and `portForward` sources, held to the binding's pod scope in `crates/registry/src/extensions/pods.rs`, rather than more uses of the core log, exec and forward managers. A log provider (#569) is the `logProvider` source, which polls its backend through `network.http` while its view is open. See [docs/extensions/streams.md](extensions/streams.md).
 
 ### The transport shim
 
@@ -164,7 +181,7 @@ cargo run -p srelens-desktop --no-default-features -- --mcp-stdio
 cargo run -p srelens-desktop --no-default-features -- --mcp-http 127.0.0.1:8765
 ```
 
-The HTTP transport binds to loopback, requires a bearer token (`crates/mcp/src/auth.rs`, supplied via `SRELENS_MCP_TOKEN` — never a flag, since argv is readable via `ps`), and checks the `Host` header on every route to block DNS rebinding. Gated tools go through an injected `ConfirmPolicy` (`crates/mcp/src/policy.rs`), which receives a `ConsentKind` derived from the capability's annotations: a gated capability that is `read_only` is a `SensitiveRead`, anything else gated is `Destructive`. The desktop app prompts in-app for both; headless runs need `"_confirm": true` on the call plus the matching flag (`--mcp-allow-destructive` or `--mcp-allow-sensitive-reads`) — `_confirm` alone never authorizes anything, and neither flag implies the other.
+The HTTP transport binds to loopback (headless `--mcp-http` refuses any other address unless started with `--mcp-expose-http`; `check_bind_addr` in `crates/mcp/src/http.rs`), requires a bearer token (`crates/mcp/src/auth.rs`, supplied via `SRELENS_MCP_TOKEN` — never a flag, since argv is readable via `ps`), and checks the `Host` header on every route to block DNS rebinding. Gated tools go through an injected `ConfirmPolicy` (`crates/mcp/src/policy.rs`), which receives a `ConsentKind` derived from the capability's annotations: a gated capability that is `read_only` is a `SensitiveRead`, anything else gated is `Destructive`. The desktop app prompts in-app for both; headless runs need `"_confirm": true` on the call plus the matching flag (`--mcp-allow-destructive` or `--mcp-allow-sensitive-reads`) — `_confirm` alone never authorizes anything, and neither flag implies the other.
 
 Beyond tools, the server implements:
 
@@ -192,8 +209,10 @@ cargo run -p srelens-server --bin srelens-server -- serve 127.0.0.1:8080 --data 
 docker compose up --build
 ```
 
-The frontend is embedded into the binary with `rust-embed`, so `pnpm build` must
-run before the server crate is compiled for release.
+The `srelens-server` binary embeds the frontend with `rust-embed`, so `pnpm build`
+must run before it is compiled for release. The library embeds none: each binary
+hands `ServerConfig` the copy it carries, and the desktop app's `serve` mode hands
+it the one Tauri embedded, so the desktop does not ship the frontend twice.
 
 Things worth knowing before you touch this crate:
 
@@ -229,6 +248,17 @@ Test placement conventions:
 - Rust: unit tests in `#[cfg(test)]` modules next to the code.
 - TypeScript: `Foo.test.tsx` / `foo.test.ts` beside `Foo.tsx` / `foo.ts`. Component tests use Testing Library against the transport shim (mocked), not Tauri.
 
+### Node.js and browser storage in tests
+
+Node.js 25 and later expose their own Web Storage globals. They are not the
+per-window storage the frontend uses: without a storage file, Node 26's
+`localStorage` getter can throw. Every Vitest project uses `TEST_EXEC_ARGV`
+from `vitest.shared.ts` to disable Node Web Storage **in test workers only**,
+before jsdom initializes. Browser tests then use jsdom's isolated storage;
+Node-only tests have no browser storage. Do not supply a shared
+`--localstorage-file` to make tests pass. Application settings still persist
+through the backend `settingsStorage` adapter.
+
 ### Live-cluster tests
 
 Suites that need a real cluster are `#[ignore]`d so a plain `cargo test` stays fast and offline. Run them explicitly against a kind cluster:
@@ -241,6 +271,8 @@ cargo test -p srelens-kube --test helm_lifecycle -- --ignored --nocapture --test
 ```
 
 The e2e suite prints `covered N/M capabilities` and fails if any registered capability is neither exercised nor explicitly excluded with a reason — so a new capability cannot land with no end-to-end case.
+
+For the extension and GitOps capabilities it applies minimal Flux and Argo CD CRDs from `apps/desktop/src-tauri/tests/fixtures/gitops-crds.yaml` and deletes them in teardown. Use a throwaway cluster: the suite refuses one that already has real Flux or Argo CD CRDs, rather than replace them.
 
 ### Accessibility check
 
@@ -292,13 +324,21 @@ technology, and its version.
 
 ## Continuous integration
 
-`.github/workflows/ci.yml` runs three jobs on every push and PR to `dev` or `main`:
+`.github/workflows/ci.yml` runs these jobs on every push and PR to `dev`, `main` or `feat/ui-next`:
 
-- **frontend** — `pnpm build` + Vitest with the coverage threshold.
-- **backend** — `cargo llvm-cov` with the ratcheting coverage floor (see above).
-- **integration (kind)** — spins up a kind cluster and helm, then runs the `#[ignore]`d live-cluster suites: the full capability e2e suite (which enforces capability coverage) and the helm lifecycle suite. Without this job a new capability could land with no end-to-end case.
+- **frontend** (and **frontend (Node 24)**) — typecheck, `pnpm build`, Vitest with the coverage threshold, and the release and performance-baseline script tests.
+- **backend** — one `cargo llvm-cov` run over the workspace unit suites and, on a kind cluster with helm, the `#[ignore]`d live-cluster suites: the full capability e2e suite (which enforces capability coverage) and the helm lifecycle suite. It then enforces the ratcheting coverage floor. Without the live-cluster half a new capability could land with no end-to-end case.
+- **sandbox conformance** — on `ubuntu-24.04` and `windows-latest`: the sidecar sandbox conformance suite (#572) through the production backend, with a cgroup the job delegates on Linux. It is the only job that compiles the Windows backend, so the other sidecar suites run on Windows there too. On Linux it also builds the Rust SDK crates and the example with the protocol crate's `schema` feature off, the way a sidecar author does, and denies warnings in the protocol lib with it off, which catches an item only the schema reads. The feature is on only for builds that include test targets (`cargo test`, `clippy --all-targets`, `llvm-cov`), which take it from the tests' dev-dependencies; a plain `cargo build` has it off, but nothing else builds the SDK crates that way or denies warnings. The tree check, `sdk/rust/tests/dependencies.rs`, runs in `backend` and in this job's Windows step. See [extensions/sidecar-protocol.md](extensions/sidecar-protocol.md#sandbox).
+- **smoke (webdriver)** — pull requests only: the built app, driven through tauri-driver against a kind cluster.
+- **install script** — shellcheck and the install script's tests, again as root in a container.
+- **docker image** — builds the whole container image.
+- **extension budgets (release)** — the extension platform's performance budgets (#581) without coverage — the host suite as a release build, the client suite in Vitest — uploaded as the `extension-budgets` artifact so they can be tracked across runs. The same tests run inside `frontend` and `backend`; there, as debug builds under coverage, they hold only counts and generous time ceilings. See [extensions/testing.md](extensions/testing.md#performance-budgets).
 
-All three must be green.
+All must be green.
+
+`.github/workflows/extension-catalog.yml` runs the `#[ignore]`d live extension catalog check daily, and on pull requests that change anything its verdict depends on: the extension module (`crates/registry/src/extensions.rs` and `extensions/`), `crates/plugin-host`, the reader capabilities app bindings are checked against (`crates/kube/src/crds.rs` and `events.rs`, with `gitops.rs` beside them), their registration in `crates/registry/src/lib.rs`, and `crates/capability`, which derives their schemas: every release in the public catalog must download, match its checksum and publisher signature, and validate on this host. A re-uploaded release asset or a bad signature breaks installs without any commit here, so a schedule is what catches it.
+
+A separate Fuzz workflow (`.github/workflows/fuzz.yml`) runs the extension parsers' cargo-fuzz targets on nightly: for a minute each on a pull request that touches those parsers, their fixtures or `Cargo.lock`, and for fifteen minutes each night. It is not a required check. See [docs/extensions/testing.md](extensions/testing.md#fuzzing).
 
 A separate Release workflow (`.github/workflows/release.yml`) publishes on pushes to `main` — Conventional-Commit-driven stable releases. Rolling `dev` pre-releases are **not** cut on every push: they come from a daily 18:00 UTC cron, or on demand via *Run workflow*. AUR publishing is split into `.github/workflows/aur-publish.yml` so it can also be run by hand.
 
@@ -438,6 +478,24 @@ unrevoked. A rotation that updates the secret but not the table — or the
 reverse — fails the release rather than publishing signatures the instructions
 tell users to reject.
 
+**Rotate in two releases, for `srectl update`.** The TUI's self-update
+trusts the keys `KEYS` held when that binary was built, compiled in, and
+nothing else (#448). A binary already installed never learns a key added
+later. So a new key has to ship before it signs:
+
+1. Add the new key to `KEYS` as in step 4, but leave `GPG_PRIVATE_KEY` and the
+   `**current**` row on the old key. Cut a stable release. Every binary from
+   then on trusts both keys.
+2. In a later release, switch `GPG_PRIVATE_KEY` to the new key and move the
+   `**current**` marker to its row.
+
+A binary older than step 1 cannot verify anything the new key signs, so its
+users must install by hand once. Two more things follow from compiling the keys
+in. Extending a key's expiry also reaches only binaries built after `KEYS`
+carries the extension, so extend at least one release before the old expiry.
+And revoking a key in `KEYS` protects only binaries built after the
+revocation. That is why a lost key also needs the new key in place quickly.
+
 **5. Verify the next release.** After the following release completes, download
 one asset and its `.asc` and confirm `gpg --verify` succeeds following only the
 public instructions — the signing job failing loudly is not proof the signature
@@ -448,6 +506,26 @@ is *usable*.
 - **Branching** — `dev` is the default branch; open PRs against it. `main` carries stable releases.
 - **Commits** — imperative subject line, body explaining *why* when non-obvious. Stable releases are Conventional-Commit-driven, so use `feat(scope):` / `fix(scope):` prefixes.
 - **Formatting** — `cargo fmt` for Rust; the existing Prettier-ish style for TS (match surrounding code).
-- **UI** — primitives come from `src/components/ui` (shadcn/radix) and `src/ui`; feature views compose them. Styling lives in `src/ui/styles.css` design tokens — avoid ad-hoc inline styles.
+- **UI** — the new design composes `@srelens/ui-kit` in `packages/ui-next`; shared tokens and component rules live in `packages/ui-kit/src/styles`. Read the [design contract and visibility audit](../design.md) for theme, contrast, typography, density and verification rules. The classic design uses `src/components/ui` (shadcn/radix), `src/ui` and `src/ui/styles.css`. Use the owning design’s tokens rather than ad-hoc colours.
 - **No direct Tauri imports** outside `src/transport/`.
 - **No host-specific logic in `crates/`** — if a change only makes sense for the desktop or only for the web, it belongs in `apps/desktop/src-tauri` or `crates/server`, not in the shared core.
+
+### macOS executable-app bundles
+
+Release builds prepare `srelens-sandbox-launch` for the same architecture as
+Srelens, then load the release-only Tauri binary overlay. The preparation script
+signs the helper without the desktop's restricted App ID
+entitlements; Tauri copies it unchanged into `Contents/MacOS` beside the host
+and notarizes the complete app.
+For a local bundle, run from the repository root:
+
+```bash
+sh packaging/macos/prepare-launcher.sh aarch64-apple-darwin
+pnpm tauri build --target aarch64-apple-darwin --config src-tauri/macos-launcher.conf.json
+```
+
+Use `x86_64-apple-darwin` for Intel. Ordinary Cargo/dev builds do not load the
+overlay, so they do not require a prebuilt release launcher. The release
+workflow checks that the bundled launcher is executable and verifies its
+signature on signed builds and executes its error path before the updater
+manifest can publish.

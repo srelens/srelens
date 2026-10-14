@@ -13,6 +13,7 @@ export interface KubectlInput {
     | "delete"
     | "scale"
     | "rollout-restart"
+    | "rollout-undo"
     | "cordon"
     | "uncordon"
     | "drain"
@@ -28,10 +29,23 @@ export interface KubectlInput {
   output?: string;
   /** For scale: target replica count. */
   replicas?: number;
+  /** For rollout-undo: the revision to roll back to (#389). */
+  revision?: number;
   /** For port-forward: the local machine's port. */
   localPort?: number;
   /** For port-forward: the port on the target pod/service. */
   remotePort?: number;
+  /**
+   * Leave `--context` off, for a command srelens itself runs in a local
+   * terminal whose KUBECONFIG already holds that one cluster and nothing else.
+   *
+   * Not a shorter spelling of the same command: the name `context` carries is
+   * the app's, and a duplicate-named or pinned context is written to that
+   * shell's kubeconfig under its in-file name. `--context <app name>` there is
+   * "context not found". Never set this for a command the reader copies — a
+   * line with no `--context` runs against whatever their own shell points at.
+   */
+  scoped?: boolean;
 }
 
 /**
@@ -121,7 +135,7 @@ function shellQuote(value: string, what: string, windows: boolean): string {
  * `KubectlPreview`'s `note` prop).
  */
 export function toKubectl(input: KubectlInput, windows: boolean = IS_WINDOWS): string {
-  const { action, kind, name, context, namespace, output, replicas, localPort, remotePort } = input;
+  const { action, kind, name, context, namespace, output, replicas, revision, localPort, remotePort, scoped } = input;
   // Prefer the authoritative kind→resource table (mirrors the backend's own
   // GVR mapping) over a bare lowercase, which drifts for kinds whose plural
   // isn't just "+s" (Ingress → ingresses). Falls back to lowercasing for
@@ -135,7 +149,8 @@ export function toKubectl(input: KubectlInput, windows: boolean = IS_WINDOWS): s
   // through the shared "verb first, -n/--context appended last" assembly.
   if (action === "port-forward") {
     const qName = shellQuote(name, "name", windows);
-    const parts: string[] = ["kubectl", "--context", shellQuote(context, "context", windows)];
+    const parts: string[] = ["kubectl"];
+    if (!scoped) parts.push("--context", shellQuote(context, "context", windows));
     if (ns) {
       parts.push("-n", shellQuote(ns, "namespace", windows));
     }
@@ -171,6 +186,10 @@ export function toKubectl(input: KubectlInput, windows: boolean = IS_WINDOWS): s
 
     case "rollout-restart":
       parts.push("rollout", "restart", `${kindLower}/${qName}`);
+      break;
+
+    case "rollout-undo":
+      parts.push("rollout", "undo", `${kindLower}/${qName}`, `--to-revision=${revision}`);
       break;
 
     case "cordon":
@@ -212,7 +231,7 @@ export function toKubectl(input: KubectlInput, windows: boolean = IS_WINDOWS): s
     parts.push("-n", shellQuote(ns, "namespace", windows));
   }
 
-  parts.push("--context", shellQuote(context, "context", windows));
+  if (!scoped) parts.push("--context", shellQuote(context, "context", windows));
 
   if (output) {
     parts.push("-o", output);

@@ -62,7 +62,7 @@ pub async fn reveal_app_log(app: AppHandle) -> Result<(), String> {
     reveal_in_file_manager(&log_file(&app)?)
 }
 
-fn reveal_in_file_manager(path: &Path) -> Result<(), String> {
+pub(crate) fn reveal_in_file_manager(path: &Path) -> Result<(), String> {
     let dir = path.parent().unwrap_or(path);
     #[cfg(any(target_os = "macos", target_os = "windows"))]
     let exists = path.exists();

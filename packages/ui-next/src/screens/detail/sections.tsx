@@ -42,6 +42,8 @@ import { AgeCell } from "../../lib/ageCell";
 import type { WorkloadSelector } from "../../lib/workloadSelector";
 import { detailRoute } from "../../lib/detailRoute";
 import { currentWorkspace, openTab, setTabView } from "../../lib/tabsStore";
+import { openOnNamedCluster } from "../../lib/openCluster";
+import { ContainerBlocks } from "../../lib/kinds/containerBlocks";
 
 /**
  * A formatted list, one item per line — a pod's IPs, an owner reference, a
@@ -332,7 +334,13 @@ interface RelatedPod extends PodSummary {
 const RELATED_POD_COLUMNS: Column<RelatedPod>[] = [
   { key: "name", header: "Name", render: (p) => <span className="font-mono">{p.name}</span> },
   { key: "node", header: "Node", render: (p) => <span className="font-mono">{p.node || "—"}</span> },
-  { key: "ready", header: "Ready", render: (p) => p.ready },
+  // The Pods list's own squares (#878): which container, in what state, where
+  // this printed how many were ready.
+  {
+    key: "containers",
+    header: "Containers",
+    render: (p) => <ContainerBlocks containers={p.containers} fallback={p.ready} />,
+  },
   // `formatCpu`/`formatMemory`, the same two the list and the Workloads table
   // render these very fields through. They were formatted twice: one pod read
   // "2 410m" / "3.1 Gi" in the list and "2.410" / "3174 Mi" in the workload's
@@ -425,6 +433,12 @@ const NODE_POD_COLUMNS: Column<PodSummary>[] = [
     header: "Namespace",
     render: (pod) => <span className="font-mono">{pod.namespace || "—"}</span>,
   },
+  // What each pod on this node is running, as the Pods list draws it (#878).
+  {
+    key: "containers",
+    header: "Containers",
+    render: (pod) => <ContainerBlocks containers={pod.containers} fallback={pod.ready} />,
+  },
   {
     key: "age",
     header: "Age",
@@ -448,9 +462,11 @@ export function NodePodsSection({ context, node }: { context: string; node: stri
   const all = state.data ?? [];
   const rows = all.slice(0, NODE_POD_LIMIT);
   const openPod = (pod: PodSummary) =>
-    openTab(detailRoute("Pod", pod.namespace, pod.name), { clusterName: context });
+    openTab(detailRoute("Pod", pod.namespace, pod.name, { cluster: context }), { clusterName: context });
   const viewAll = () => {
-    openTab("/k/pods", { clusterName: context });
+    // The Pods list follows the rail: the node's cluster comes into focus
+    // first when the rail shows another (#834).
+    openOnNamedCluster(context, "/k/pods");
     setTabView(currentWorkspace().activeId, { filter: node, filterKey: "node" });
   };
 

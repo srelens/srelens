@@ -9,7 +9,8 @@ import type { KindDescriptor, ListRow } from "../../lib/kinds/types";
 // The reads behind the tab: the object itself, the pod usage its CPU and
 // Memory tiles show, and the two pane fetches it inherits from the shared
 // pane machinery.
-const { getObject, getManifest, listEvents, listCrds, podMetrics, podsForSelector, podsOnNode } = vi.hoisted(() => ({
+const { getObject, getManifest, listEvents, listCrds, podMetrics, podsForSelector, podsOnNode, cordonNode } = vi.hoisted(() => ({
+  cordonNode: vi.fn(async (): Promise<{ ok?: boolean; error?: string }> => ({ ok: true })),
   getObject: vi.fn(async (): Promise<{ object?: K8sObject; error?: string }> => ({})),
   getManifest: vi.fn(async (): Promise<{ yaml?: string; error?: string }> => ({ yaml: "" })),
   listEvents: vi.fn(async () => ({ events: [] })),
@@ -28,6 +29,9 @@ vi.mock("@srelens/core", async (importOriginal) => ({
   podMetrics,
   podsForSelector,
   podsOnNode,
+  cordonNode,
+  // The web server's answer for a user with no apps (#515): the app slot stays empty.
+  listExtensions: async () => ({ schemaVersion: 1, nextRevision: 1, plugins: [] }),
 }));
 
 const { descriptorFor } = vi.hoisted(() => ({
@@ -35,6 +39,15 @@ const { descriptorFor } = vi.hoisted(() => ({
 }));
 
 vi.mock("../../lib/kinds/descriptors", () => ({ descriptorFor }));
+vi.mock("../../extensions/ExtensionPanelSlot", () => ({
+  ExtensionPanelSlot: ({resource}:{resource:K8sObject}) => <section className="section" data-testid="extension-panel-slot">{resource.kind} app panels</section>,
+}));
+vi.mock("../../extensions/ExtensionRelatedSlot", () => ({
+  ExtensionRelatedSlot: ({context,resource}:{context:string;resource:K8sObject}) => <section className="section" data-testid="extension-related-slot">{resource.kind} related on {context}</section>,
+}));
+vi.mock("../../extensions/ExtensionProviderSlot", () => ({
+  ExtensionProviderSlot: ({context,resource}:{context:string;resource:K8sObject}) => <section className="section" data-testid="extension-provider-slot">{resource.kind} metrics and traces on {context}</section>,
+}));
 
 import { ConsoleProvider } from "../../console";
 import { loadSectionFolds, setSectionOpen } from "../../lib/sectionFolds";
@@ -205,16 +218,97 @@ describe("ResourceTabView — the full tab the design draws", () => {
       expect(pair.compareDocumentPosition(pods) & Node.DOCUMENT_POSITION_FOLLOWING).not.toBe(0);
     });
 
+    it("offers the name to copy, directly after the heading, in the row that reveals it (#827)", async () => {
+      await openPod();
+      const heading = screen.getByRole("heading", { level: 1, name: "cart-session-store-1" });
+      const copy = screen.getByRole("button", { name: "Copy name cart-session-store-1" });
+
+      // After the name, not somewhere else in the header.
+      expect(heading.nextElementSibling?.contains(copy)).toBe(true);
+      // `.name-row` is what the stylesheet shows the control on hover and
+      // focus of; outside one it would never appear.
+      expect(copy.closest(".name-action")).not.toBeNull();
+      expect(copy.closest(".name-row")?.contains(heading)).toBe(true);
+    });
+
     it("puts the actions in the header row, not in a footer bar", async () => {
       await openPod();
       const header = document.querySelector("header")!;
-      const words = Array.from(header.querySelectorAll("button")).map((b) => b.textContent);
+      // The actions, and not the copy control that sits beside the name: that
+      // one acts on the heading, and is not part of this row (#827).
+      const words = Array.from(header.querySelectorAll("button"))
+        .filter((b) => !b.closest('[data-slot="tab-name-action"]'))
+        .map((b) => b.textContent);
       // The design's row: Ask first, then the kind's own, then the overflow.
       expect(words[0]).toBe("Ask");
       expect(words).toContain("Logs");
       expect(words).toContain("Shell");
       expect(words).toContain("Edit");
       expect(document.querySelector("footer")).toBeNull();
+    });
+
+    it("re-reads the node after a cordon made from the header, so the action becomes Uncordon (PR #831 review)", async () => {
+      // The page reads its subject once. Cordoned from here, the node went on
+      // being offered Cordon until the reader reopened the page.
+      const node = (unschedulable: boolean) => ({
+        object: {
+          kind: "Node",
+          apiVersion: "v1",
+          metadata: { name: "worker-1" },
+          spec: unschedulable ? { unschedulable } : {},
+        },
+      });
+      const header = () => document.querySelector("header")!;
+      const headerWords = () => Array.from(header().querySelectorAll("button")).map((b) => b.textContent);
+      descriptorFor.mockReturnValue(
+        podDescriptor({ k8sKind: "Node", panes: {}, actions: { cordon: true, drain: true } }),
+      );
+      getObject.mockResolvedValue(node(false));
+      await openPod({ kind: "Node", namespace: null, name: "worker-1" });
+      expect(headerWords()).toContain("Cordon");
+
+      // What the cluster answers once the write has landed.
+      getObject.mockResolvedValue(node(true));
+      const readsBefore = getObject.mock.calls.length;
+      await userEvent.click(within(header()).getByRole("button", { name: "Cordon" }));
+      await userEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Cordon" }));
+
+      await waitFor(() => expect(cordonNode).toHaveBeenCalledWith("prod-eu", "worker-1", true));
+      await waitFor(() => expect(headerWords()).toContain("Uncordon"));
+      expect(headerWords()).not.toContain("Cordon");
+      expect(getObject.mock.calls.length).toBe(readsBefore + 1);
+      // And the page was never taken away to do it: its tabs are still there.
+      expect(screen.getAllByRole("tab").length).toBeGreaterThan(0);
+    });
+
+    it("offers a node Cordon and Drain in the header row, and Uncordon once it is cordoned (#820)", async () => {
+      const node = (unschedulable: boolean) => ({
+        object: {
+          kind: "Node",
+          apiVersion: "v1",
+          metadata: { name: "worker-1" },
+          spec: unschedulable ? { unschedulable } : {},
+        },
+      });
+      const headerWords = () =>
+        Array.from(document.querySelector("header")!.querySelectorAll("button")).map((b) => b.textContent);
+      descriptorFor.mockReturnValue(
+        podDescriptor({ k8sKind: "Node", panes: {}, actions: { cordon: true, drain: true } }),
+      );
+
+      getObject.mockResolvedValue(node(false));
+      const view = await openPod({ kind: "Node", namespace: null, name: "worker-1" });
+      expect(headerWords()).toContain("Cordon");
+      expect(headerWords()).toContain("Drain");
+      expect(headerWords()).not.toContain("Uncordon");
+      view.unmount();
+
+      // The pane's own `spec.unschedulable`, not a default: a cordoned node
+      // offered Cordon again is an action that does nothing.
+      getObject.mockResolvedValue(node(true));
+      await openPod({ kind: "Node", namespace: null, name: "worker-1" });
+      expect(headerWords()).toContain("Uncordon");
+      expect(headerWords()).not.toContain("Cordon");
     });
   });
 
@@ -294,6 +388,27 @@ describe("ResourceTabView — the full tab the design draws", () => {
   });
 
   describe("Overview", () => {
+    it("places declared app panels after the host's Overview sections", async () => {
+      await openPod();
+      const slot = screen.getByTestId("extension-panel-slot");
+      expect(slot.textContent).toBe("Pod app panels");
+      const facts = document.querySelector("[data-slot='fact-grid']")!;
+      expect(facts.compareDocumentPosition(slot) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    });
+    it("places app metrics and traces after the host's Overview sections (#569)", async () => {
+      await openPod();
+      const slot = screen.getByTestId("extension-provider-slot");
+      expect(slot.textContent).toContain("Pod metrics and traces on");
+      const facts = document.querySelector("[data-slot='fact-grid']")!;
+      expect(facts.compareDocumentPosition(slot) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    });
+    it("places the Related section after the host's Overview sections (#545)", async () => {
+      await openPod();
+      const related = screen.getByTestId("extension-related-slot");
+      expect(related.textContent).toBe("Pod related on prod-eu");
+      const facts = document.querySelector("[data-slot='fact-grid']")!;
+      expect(facts.compareDocumentPosition(related) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    });
     it("lays the facts out as three columns of label-above-value, in a grid of its own", async () => {
       await openPod();
       // THIS SCREEN'S grid, built here — not the peek's rows restyled from

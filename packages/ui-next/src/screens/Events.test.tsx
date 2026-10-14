@@ -16,6 +16,9 @@ const { watchResource, useNamespaceOptions } = vi.hoisted(() => ({
 vi.mock("@srelens/core", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@srelens/core")>()),
   watchResource: (...a: unknown[]) => watchResource(...a),
+  // Core's own watchNamespaces calls its module-local watchResource, which
+  // the line above cannot reach — route each namespace to the mock instead.
+  watchNamespaces: (await import("@srelens/core/lib/testDoubles")).watchNamespacesVia((...a) => watchResource(...a)),
 }));
 
 vi.mock("@srelens/core/react", async (importOriginal) => ({
@@ -50,7 +53,7 @@ import { resetView, setNamespaces } from "../lib/workspace";
 
 const CTX: ClusterContext = {
   name: "prod-eu",
-  stableId: "prod",
+  stableId: "prod", key: "prod",
   cluster: "prod",
   server: "https://prod",
   isCurrent: true,
@@ -329,7 +332,7 @@ describe("Events", () => {
     await user.click(row("BackOff"));
     // The event's own key is `billing/api-7.17a`; what the reader wants is the
     // pod it is about, in the namespace the key carried.
-    expect(routes()).toContain("/k/Pod/billing/api-7");
+    expect(routes()).toContain("/k/prod-eu/Pod/billing/api-7");
     expect(routes().some((r) => r.includes("17a"))).toBe(false);
   });
 
@@ -339,10 +342,11 @@ describe("Events", () => {
     await waitFor(() => expect(cells().length).toBe(4));
 
     await user.click(row("NodeReady"));
-    expect(routes()).toContain("/k/Node/-/node-3");
+    expect(routes()).toContain("/k/prod-eu/Node/-/node-3");
   });
 
-  it("inherits the workspace's namespace selection", async () => {
+  it("reads its own tab's namespace selection", async () => {
+    store.openTab("/events");
     setNamespaces("prod", ["shop"]);
     open();
     // A namespaced event is narrowed; a cluster-scoped one — which belongs to
@@ -393,6 +397,32 @@ describe("Events", () => {
     expect(
       screen.getByText("prod-eu has no events in the namespaces you are looking at."),
     ).toBeTruthy();
+  });
+
+  // #688: the namespace that answered had none, the other was refused — an
+  // error that names the refused namespace, not "no events" and not a
+  // failure of the whole list.
+  it("names the refused namespace when the one that answered was empty", async () => {
+    store.openTab("/events");
+    setNamespaces("prod", ["team-a", "team-b"]);
+    watchResource.mockImplementation(
+      async (
+        _c: string,
+        namespace: string,
+        _k: string,
+        onRows: (rows: unknown[]) => void,
+        _onStatus: unknown,
+        onError: (message: string) => void,
+      ) => {
+        if (namespace === "team-b") onError('events is forbidden: User "dev" cannot watch resource "events" in the namespace "team-b"');
+        else onRows([]);
+        return { stop: vi.fn() };
+      },
+    );
+    open();
+
+    expect(await screen.findByText("Could not list events in team-b")).toBeTruthy();
+    expect(screen.queryByText(/has no events/)).toBeNull();
   });
 
   it("names what failed, and offers a way back, when nothing arrived", async () => {
@@ -550,6 +580,7 @@ describe("Events", () => {
     const user = userEvent.setup();
     // billing holds one event and it is a Warning, so asking for the Normal
     // ones leaves the screen — table and rail alike — with nothing to show.
+    store.openTab("/events");
     setNamespaces("prod", ["billing"]);
     open();
     await waitFor(() => expect(reasons()).toEqual(["BackOff"]));

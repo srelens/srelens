@@ -372,14 +372,16 @@ describe("containerStateText", () => {
 });
 
 describe("phaseKind", () => {
-  it("calls the three settled-and-well phases success", () => {
+  it("calls settled-and-well workload and namespace phases success", () => {
     expect(phaseKind("Running")).toBe("success");
     expect(phaseKind("Succeeded")).toBe("success");
     expect(phaseKind("Ready")).toBe("success");
+    expect(phaseKind("Active")).toBe("success");
   });
 
-  it("calls a Pending phase a warning — on its way, not yet wrong", () => {
+  it("calls in-progress workload and namespace phases warning — on their way, not yet wrong", () => {
     expect(phaseKind("Pending")).toBe("warning");
+    expect(phaseKind("Terminating")).toBe("warning");
   });
 
   it("calls the failed, unknown and not-ready phases danger", () => {

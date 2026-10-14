@@ -27,11 +27,68 @@ export interface PodSummary {
    * Optional only for the sake of fixtures: `k8s.listPods` always sends it.
    */
   waitingReason?: string;
+  /**
+   * The word `kubectl get pods` prints in its STATUS column for this pod —
+   * "CrashLoopBackOff", "OOMKilled", "Init:0/2", "Terminating", "Completed" —
+   * and the phase only when nothing more specific applies. The backend's
+   * `kubectl_status` derives it; read it through `podStatus`, which tones it.
+   *
+   * Optional only for the sake of fixtures: `k8s.listPods` always sends it.
+   */
+  status?: string;
+  /**
+   * What the pod's containers ask for and may use, summed: CPU in millicores,
+   * memory in MiB — the units metrics-server reports usage in. `0` when no
+   * container sets one. Optional only for the sake of fixtures.
+   */
+  cpuReqMillicores?: number;
+  cpuLimMillicores?: number;
+  memReqMiB?: number;
+  memLimMiB?: number;
+  /**
+   * Whether EVERY container sets the limit, so the sum above is the pod's
+   * whole ceiling. With one unlimited container the pod has no ceiling, and
+   * the partial sum is a number it can pass with nothing wrong. Read these
+   * through `podUsage`, never the sums alone. (#864)
+   */
+  cpuLimAll?: boolean;
+  memLimAll?: boolean;
+  /**
+   * Each container's own state: app containers in spec order, then init
+   * containers. `ready` says how many are ready and not which is not, or why.
+   * Read each through `containerVerdict`. Optional only for fixtures. (#878)
+   */
+  containers?: PodContainer[];
+}
+
+/** One container of a pod, as far as a list row needs it. */
+export interface PodContainer {
+  name: string;
+  /** `sidecar` is an init container that restarts always, and so runs for the
+   *  pod's whole life beside the app containers. */
+  kind: "app" | "init" | "sidecar";
+  /** `unknown` when the kubelet has reported nothing for it yet. */
+  state: "running" | "waiting" | "terminated" | "unknown";
+  /** The waiting or terminated reason, or `""`. */
+  reason: string;
+  /** The exit code of a terminated container. */
+  exitCode?: number | null;
+  ready: boolean;
+  restarts: number;
+  image: string;
 }
 
 export interface NamespacesOutcome {
   namespaces?: string[];
+  summaries?: NamespaceSummary[];
   error?: string;
+}
+
+export interface NamespaceSummary {
+  name: string;
+  phase: string;
+  labels: Record<string, string>;
+  age: string;
 }
 
 export interface PodsOutcome {
@@ -50,6 +107,9 @@ export interface DeploymentSummary {
   ready: string;
   upToDate: number;
   available: number;
+  /** `creationTimestamp` (RFC 3339), for a LIVE age. Prefer over `age`, which
+   *  the backend renders once and which freezes (#405). */
+  created?: string | null;
   age: string;
 }
 
@@ -62,6 +122,9 @@ export interface ServiceSummary {
    *  empty when there is none, `<pending>` while a LoadBalancer waits. */
   externalIP: string;
   ports: string;
+  /** `creationTimestamp` (RFC 3339), for a LIVE age. Prefer over `age`, which
+   *  the backend renders once and which freezes (#405). */
+  created?: string | null;
   age: string;
 }
 
@@ -71,8 +134,21 @@ export async function listNamespaces(
   invoke: Invoker = invokeCapability,
 ): Promise<NamespacesOutcome> {
   try {
-    const out = await invoke<{ namespaces: string[] }>("k8s.listNamespaces", { context });
-    return { namespaces: out.namespaces };
+    const out = await invoke<{ namespaces: string[]; summaries?: NamespaceSummary[] }>(
+      "k8s.listNamespaces",
+      { context },
+    );
+    const summaries =
+      out.summaries ??
+      out.namespaces.map((name) => ({
+        name,
+        // A legacy backend did not report phase at all. Keep that distinct
+        // from a real `Unknown` phase, which is an unhealthy cluster verdict.
+        phase: "-",
+        labels: {},
+        age: "-",
+      }));
+    return { namespaces: out.namespaces, summaries };
   } catch (e) {
     return { error: String(e) };
   }
@@ -132,7 +208,18 @@ export interface ReplicaSetSummary {
   desired: number;
   ready: number;
   current: number;
+  /** `creationTimestamp` (RFC 3339), for a LIVE age. Prefer over `age`, which
+   *  the backend renders once and which freezes (#405). */
+  created?: string | null;
   age: string;
+  /** The pod template's container images, in order (#389). */
+  images?: string[];
+  /** `kubernetes.io/change-cause`, when the revision was recorded with one (#389). */
+  changeCause?: string;
+  /** This revision's pod template is the one the Deployment runs now — the
+   *  revision a rollback refuses as already running. Not the newest by number:
+   *  right after a template change the newest can still be the previous one. */
+  currentTemplate?: boolean;
 }
 
 export interface PodMetric {

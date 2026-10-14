@@ -3,6 +3,8 @@
 //! bridge driven against an in-process fake OpenAI-compatible endpoint on
 //! loopback (no real provider, no agent subprocess).
 
+mod common;
+
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -17,25 +19,27 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver};
 
-use srelens_tui::agent::{
+use srectl::agent::{
     build_mcp_server, run_boxed_cursor_turn, run_native_agent_turn, McpToolInvoker,
 };
-use srelens_tui::ai_config::{
+use srectl::ai_config::{
     default_base_url_for_provider, default_model_for_provider, env_var_for_provider,
     provider_display_name, provider_slug, AiProvider, AiSettings, ALL_PROVIDERS,
 };
-use srelens_tui::ai_skills::{
+use srectl::ai_skills::{
     expand_slash_command, load_user_skills_dir, match_slash_commands, parse_caveman_command,
     CavemanCommandAction, CavemanLevel, BUILTIN_PLAYBOOKS,
 };
-use srelens_tui::commands::{
-    command_suggestions, command_suggestions_with_crds, resolve_command, resolve_command_with_crds,
-    CommandTarget, CrdMeta, DynamicCommandDef, ResourceKind, COMMAND_REGISTRY,
+use srectl::commands::{
+    command_suggestions, command_suggestions_with_crds, crd_cache_path, load_cached_crds,
+    resolve_command, resolve_command_with_crds, save_cached_crds, CommandTarget, CrdMeta,
+    DynamicCommandDef, ResourceKind, COMMAND_REGISTRY,
 };
-use srelens_tui::deep_link::DeepLink;
-use srelens_tui::event::{AppEvent, EventHandler};
-use srelens_tui::sink::TuiSink;
-use srelens_tui::theme::{status_style, Theme};
+use srectl::deep_link::DeepLink;
+use srectl::event::{AppEvent, EventHandler};
+use srectl::sink::TuiSink;
+use srectl::theme::{status_style, Theme};
+use srectl::tui_config::{CommandPopupDensity, TuiConfig};
 
 // ---------------------------------------------------------------------------
 // Shared helpers
@@ -68,6 +72,7 @@ fn crd(plural: &str, singular: &str, kind: &str, group: &str, short_names: &[&st
         namespaced: true,
         short_names: short_names.iter().map(|s| s.to_string()).collect(),
         printer_columns: vec![],
+        created_at: None,
     }
 }
 
@@ -250,6 +255,7 @@ async fn native_turn(
         prompt.to_string(),
         "kind-dev".into(),
         "payments".into(),
+        None,
         tx,
         30,
     )
@@ -362,6 +368,45 @@ async fn an_unknown_tool_name_is_a_tool_error_not_a_transport_failure() {
 }
 
 #[tokio::test]
+async fn tool_name_resolution_is_resilient_to_prefix_and_separator_variations() {
+    let inv = invoker();
+    inv.list_tools().await.unwrap();
+
+    // Calling listEndpoints without k8s_ prefix or with dot resolves to k8s.listEndpoints
+    let res1 = inv
+        .call_tool(
+            "listEndpoints",
+            &json!({"context": "prod", "namespace": "default"}),
+        )
+        .await
+        .unwrap();
+    // Reaching the handler (which errors on reading kubeconfig) proves the name resolved to the capability
+    // rather than failing at the RPC dispatcher with "unknown tool".
+    assert!(!res1.content.contains("unknown tool"));
+    assert!(res1.content.starts_with("handler error:"));
+
+    let res2 = inv
+        .call_tool(
+            "k8s.listEndpoints",
+            &json!({"context": "prod", "namespace": "default"}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res1.content, res2.content);
+    assert_eq!(res1.is_error, res2.is_error);
+
+    let res3 = inv
+        .call_tool(
+            "k8s_listEndpoints",
+            &json!({"context": "prod", "namespace": "default"}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res1.content, res3.content);
+    assert_eq!(res1.is_error, res3.is_error);
+}
+
+#[tokio::test]
 async fn a_tool_that_needs_a_missing_cluster_reports_an_error_result() {
     let inv = invoker();
     inv.list_tools().await.unwrap();
@@ -440,11 +485,30 @@ async fn a_native_turn_streams_text_thinking_usage_and_done_in_order() {
         .as_str()
         .unwrap()
         .starts_with("[Active Kubernetes Context: \"kind-dev\""));
-    assert!(requests[0]["tools"]
+    let advertised_tools: Vec<String> = requests[0]["tools"]
         .as_array()
         .unwrap()
         .iter()
-        .any(|t| t["function"]["name"] == "ping"));
+        .map(|t| t["function"]["name"].as_str().unwrap().to_string())
+        .collect();
+
+    // Must include core tools
+    assert!(advertised_tools.iter().any(|t| t == "k8s_listPods"));
+    assert!(advertised_tools.iter().any(|t| t == "ping"));
+
+    // Every advertised tool must be in CORE_SRE_TOOLS
+    for tool in &advertised_tools {
+        assert!(
+            srelens_llm::invoker::CORE_SRE_TOOLS
+                .iter()
+                .any(|&c| c == tool || c.replace('.', "_") == *tool),
+            "tool '{tool}' should be in CORE_SRE_TOOLS allowlist"
+        );
+    }
+
+    // Must NOT contain excluded non-core tools from registry
+    assert!(!advertised_tools.iter().any(|t| t.contains("drainNode")));
+    assert!(!advertised_tools.iter().any(|t| t.contains("helmInstall")));
 }
 
 #[tokio::test]
@@ -699,6 +763,7 @@ async fn a_boxed_cursor_turn_reports_a_missing_binary_and_finishes() {
         "what is wrong?".into(),
         "kind-dev".into(),
         "default".into(),
+        None,
         cache,
         vec![],
         tx,
@@ -821,9 +886,10 @@ fn bold(style: Style) -> bool {
 
 #[test]
 fn every_theme_style_uses_its_palette_colour() {
+    let _theme = common::theme::lock();
     assert_eq!(Theme::header().fg, Some(Theme::CYAN));
     assert!(bold(Theme::header()));
-    assert_eq!(Theme::header_label().fg, Some(Theme::DIM));
+    assert_eq!(Theme::header_label().fg, Some(Theme::LABEL));
     assert!(!bold(Theme::header_label()));
     assert_eq!(Theme::header_val().fg, Some(Theme::FG));
     assert_eq!(Theme::title().fg, Some(Theme::ACCENT));
@@ -837,7 +903,7 @@ fn every_theme_style_uses_its_palette_colour() {
     assert_eq!(Theme::status_error().fg, Some(Theme::RED));
     assert_eq!(Theme::status_dim().fg, Some(Theme::DIM));
     assert_eq!(Theme::key_hint_key().fg, Some(Theme::CYAN));
-    assert_eq!(Theme::key_hint_desc().fg, Some(Theme::DIM));
+    assert_eq!(Theme::key_hint_desc().fg, Some(Theme::LABEL));
     assert_eq!(Theme::prompt().fg, Some(Theme::ACCENT));
     assert!(bold(Theme::prompt()));
     let badge = Theme::badge(Theme::RED, Theme::SEL_FG);
@@ -879,6 +945,7 @@ fn context_colour_reflects_the_environment_named_in_the_context() {
 
 #[test]
 fn status_style_maps_every_status_family_to_its_colour() {
+    let _theme = common::theme::lock();
     for s in [
         "CrashLoopBackOff",
         "Error",
@@ -911,6 +978,34 @@ fn status_style_maps_every_status_family_to_its_colour() {
     }
     assert_eq!(status_style("Bound"), Style::default().fg(Theme::FG));
     assert_eq!(status_style(""), Style::default().fg(Theme::FG));
+}
+
+/// The words kubectl's STATUS column uses for a pod (`PodSummary::status`)
+/// that say neither "error" nor "backoff" yet name a failure, and the ones
+/// that name a pod still on its way up. Each used to fall through to plain
+/// text.
+#[test]
+fn status_style_colours_kubectls_pod_status_words() {
+    let _theme = common::theme::lock();
+    for s in [
+        "OOMKilled",
+        "ErrImagePull",
+        "ErrImageNeverPull",
+        "InvalidImageName",
+        "ExitCode:1",
+        "Signal:9",
+        "Evicted",
+        "DeadlineExceeded",
+        "Init:OOMKilled",
+        "Init:ExitCode:2",
+        "Init:CrashLoopBackOff",
+        "Init:Error",
+    ] {
+        assert_eq!(status_style(s), Theme::status_error(), "{s}");
+    }
+    for s in ["Init:0/2", "Init:1/2", "PodInitializing", "SchedulingGated"] {
+        assert_eq!(status_style(s), Theme::status_warn(), "{s}");
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1148,8 +1243,16 @@ fn caveman_level_setting_round_trips_and_clears() {
     s.set_caveman_level(Some(CavemanLevel::WenyanFull));
     assert_eq!(s.caveman_level.as_deref(), Some("wenyan-full"));
     assert_eq!(s.get_caveman_level(), Some(CavemanLevel::WenyanFull));
+    // Off is stored as "off", so it is not mistaken for "never set" (ultra).
     s.set_caveman_level(None);
-    assert_eq!(s.caveman_level, None);
+    assert_eq!(s.caveman_level.as_deref(), Some("off"));
+    assert_eq!(s.get_caveman_level(), None);
+    s.caveman_level = None;
+    assert_eq!(
+        s.get_caveman_level(),
+        Some(CavemanLevel::Ultra),
+        "unset is ultra"
+    );
     s.caveman_level = Some("garbage".into());
     assert_eq!(s.get_caveman_level(), None);
 }
@@ -1185,34 +1288,15 @@ fn an_explicit_api_key_produces_a_provider_config_and_cursor_never_does() {
     assert_ne!(s.get_api_key(AiProvider::OpenAi).as_deref(), Some("   "));
 }
 
-/// The only test in this binary that touches process environment variables, so
-/// it cannot race with a sibling test. Each variable is restored afterwards.
 #[test]
 fn settings_paths_and_key_lookups_follow_the_environment() {
-    struct Restore(Vec<(&'static str, Option<String>)>);
-    impl Drop for Restore {
-        fn drop(&mut self) {
-            for (k, v) in &self.0 {
-                match v {
-                    Some(v) => std::env::set_var(k, v),
-                    None => std::env::remove_var(k),
-                }
-            }
-        }
-    }
-    let vars = [
-        "SRELENS_AI_SETTINGS_PATH",
-        "SRELENS_CONFIG_DIR",
-        "GEMINI_API_KEY",
-        "OPENAI_COMPATIBLE_API_KEY",
-    ];
-    let _restore = Restore(vars.iter().map(|k| (*k, std::env::var(k).ok())).collect());
+    let mut env = common::env::lock();
 
     // 1. Explicit settings file: save then load round-trips.
     let dir = tempfile::tempdir().unwrap();
     let file = dir.path().join("nested").join("ai.json");
-    std::env::set_var("SRELENS_AI_SETTINGS_PATH", &file);
-    std::env::remove_var("SRELENS_CONFIG_DIR");
+    env.set("SRELENS_AI_SETTINGS_PATH", &file);
+    env.remove("SRELENS_CONFIG_DIR");
     assert_eq!(AiSettings::config_path(), file);
 
     let mut s = AiSettings::default();
@@ -1225,14 +1309,14 @@ fn settings_paths_and_key_lookups_follow_the_environment() {
     assert_eq!(AiSettings::load(), s);
 
     // 2. A config dir puts the file at <dir>/ai_settings.json; the explicit path wins over it.
-    std::env::set_var("SRELENS_CONFIG_DIR", dir.path());
+    env.set("SRELENS_CONFIG_DIR", dir.path());
     assert_eq!(AiSettings::config_path(), file);
-    std::env::set_var("SRELENS_AI_SETTINGS_PATH", "   ");
+    env.set("SRELENS_AI_SETTINGS_PATH", "   ");
     assert_eq!(
         AiSettings::config_path(),
         dir.path().join("ai_settings.json")
     );
-    std::env::remove_var("SRELENS_AI_SETTINGS_PATH");
+    env.remove("SRELENS_AI_SETTINGS_PATH");
     assert_eq!(
         AiSettings::config_path(),
         dir.path().join("ai_settings.json")
@@ -1240,13 +1324,13 @@ fn settings_paths_and_key_lookups_follow_the_environment() {
 
     // 3. Key lookup: stored key first, then the provider's env var, else none.
     let mut s = AiSettings::default();
-    std::env::remove_var("GEMINI_API_KEY");
+    env.remove("GEMINI_API_KEY");
     assert_eq!(s.get_api_key(AiProvider::Gemini), None);
     assert!(
         s.resolve_provider_config(AiProvider::Gemini).is_none(),
         "no key, no config"
     );
-    std::env::set_var("GEMINI_API_KEY", "g-env");
+    env.set("GEMINI_API_KEY", "g-env");
     assert_eq!(s.get_api_key(AiProvider::Gemini).as_deref(), Some("g-env"));
     assert_eq!(
         s.resolve_provider_config(AiProvider::Gemini)
@@ -1259,7 +1343,7 @@ fn settings_paths_and_key_lookups_follow_the_environment() {
         s.get_api_key(AiProvider::Gemini).as_deref(),
         Some("g-stored")
     );
-    std::env::set_var("GEMINI_API_KEY", "   ");
+    env.set("GEMINI_API_KEY", "   ");
     s.api_keys.remove("gemini");
     assert_eq!(
         s.get_api_key(AiProvider::Gemini),
@@ -1268,7 +1352,7 @@ fn settings_paths_and_key_lookups_follow_the_environment() {
     );
 
     // 4. OpenAI-compatible endpoints need no key: "ollama" is substituted.
-    std::env::remove_var("OPENAI_COMPATIBLE_API_KEY");
+    env.remove("OPENAI_COMPATIBLE_API_KEY");
     let cfg = s
         .resolve_provider_config(AiProvider::OpenAiCompatible)
         .expect("keyless config");
@@ -1305,6 +1389,10 @@ fn view_links_format_every_target_kind() {
     assert_eq!(
         view(CommandTarget::Resource(ResourceKind::Settings)),
         "srelens://view/prod/_/settings"
+    );
+    assert_eq!(
+        view(CommandTarget::Resource(ResourceKind::TuiConfig)),
+        "srelens://view/prod/_/config"
     );
     assert_eq!(
         view(CommandTarget::Resource(ResourceKind::Deployments)),
@@ -1525,7 +1613,17 @@ fn all_static_kinds() -> Vec<ResourceKind> {
         ResourceKind::Toolbox,
         ResourceKind::Assistant,
         ResourceKind::Settings,
+        ResourceKind::TuiConfig,
         ResourceKind::Workloads,
+        ResourceKind::ReplicaSets,
+        ResourceKind::HorizontalPodAutoscalers,
+        ResourceKind::PodDisruptionBudgets,
+        ResourceKind::PriorityClasses,
+        ResourceKind::RuntimeClasses,
+        ResourceKind::Leases,
+        ResourceKind::MutatingWebhookConfigurations,
+        ResourceKind::ValidatingWebhookConfigurations,
+        ResourceKind::IngressClasses,
     ]
 }
 
@@ -1562,21 +1660,21 @@ fn watch_kinds_are_lowercase_plurals_for_watchable_kinds_only() {
             None => assert!(
                 matches!(
                     kind,
-                    ResourceKind::Endpoints
-                        | ResourceKind::CustomResourceDefinitions
+                    ResourceKind::CustomResourceDefinitions
                         | ResourceKind::HelmReleases
                         | ResourceKind::PortForwards
                         | ResourceKind::Overview
                         | ResourceKind::Toolbox
                         | ResourceKind::Assistant
                         | ResourceKind::Settings
+                        | ResourceKind::TuiConfig
                         | ResourceKind::Workloads
                 ),
                 "{kind:?} unexpectedly has no watch kind"
             ),
         }
     }
-    assert_eq!(watchable, 25);
+    assert_eq!(watchable, 35);
     assert_eq!(
         ResourceKind::CustomResource(cilium_pool()).watch_kind(),
         None
@@ -1606,6 +1704,7 @@ fn k8s_kinds_are_singular_pascal_case_and_crds_use_their_own_kind() {
                         | ResourceKind::Toolbox
                         | ResourceKind::Assistant
                         | ResourceKind::Settings
+                        | ResourceKind::TuiConfig
                         | ResourceKind::Workloads
                 ),
                 "{kind:?} unexpectedly has no k8s kind"
@@ -1640,6 +1739,11 @@ fn cluster_scoped_kinds_are_not_namespaced() {
         ResourceKind::Overview,
         ResourceKind::Toolbox,
         ResourceKind::Assistant,
+        ResourceKind::PriorityClasses,
+        ResourceKind::RuntimeClasses,
+        ResourceKind::MutatingWebhookConfigurations,
+        ResourceKind::ValidatingWebhookConfigurations,
+        ResourceKind::IngressClasses,
     ];
     for kind in all_static_kinds() {
         assert_eq!(
@@ -1664,7 +1768,7 @@ fn static_commands_convert_to_dynamic_definitions_verbatim() {
     let dynamic = DynamicCommandDef::from(pods);
     assert_eq!(dynamic.name, "pods");
     assert_eq!(dynamic.aliases, vec!["po".to_string(), "pod".to_string()]);
-    assert_eq!(dynamic.description, "Pods view");
+    assert_eq!(dynamic.description, pods.description);
     assert_eq!(dynamic.target, CommandTarget::Resource(ResourceKind::Pods));
 }
 
@@ -1744,6 +1848,60 @@ fn resolve_matches_static_commands_case_insensitively_then_by_prefix() {
     assert_eq!(
         resolve_command(":netpo"),
         Some(CommandTarget::Resource(ResourceKind::NetworkPolicies))
+    );
+    assert_eq!(
+        resolve_command(":pdb"),
+        Some(CommandTarget::Resource(ResourceKind::PodDisruptionBudgets))
+    );
+    assert_eq!(
+        resolve_command(":hpa"),
+        Some(CommandTarget::Resource(
+            ResourceKind::HorizontalPodAutoscalers
+        ))
+    );
+    assert_eq!(
+        resolve_command(":rs"),
+        Some(CommandTarget::Resource(ResourceKind::ReplicaSets))
+    );
+    assert_eq!(
+        resolve_command(":quota"),
+        Some(CommandTarget::Resource(ResourceKind::ResourceQuotas))
+    );
+    assert_eq!(
+        resolve_command(":limits"),
+        Some(CommandTarget::Resource(ResourceKind::LimitRanges))
+    );
+    assert_eq!(
+        resolve_command(":pc"),
+        Some(CommandTarget::Resource(ResourceKind::PriorityClasses))
+    );
+    assert_eq!(
+        resolve_command(":rc"),
+        Some(CommandTarget::Resource(ResourceKind::RuntimeClasses))
+    );
+    assert_eq!(
+        resolve_command(":lease"),
+        Some(CommandTarget::Resource(ResourceKind::Leases))
+    );
+    assert_eq!(
+        resolve_command(":mwc"),
+        Some(CommandTarget::Resource(
+            ResourceKind::MutatingWebhookConfigurations
+        ))
+    );
+    assert_eq!(
+        resolve_command(":vwc"),
+        Some(CommandTarget::Resource(
+            ResourceKind::ValidatingWebhookConfigurations
+        ))
+    );
+    assert_eq!(
+        resolve_command(":ic"),
+        Some(CommandTarget::Resource(ResourceKind::IngressClasses))
+    );
+    assert_eq!(
+        resolve_command(":endpoints"),
+        Some(CommandTarget::Resource(ResourceKind::Endpoints))
     );
     assert_eq!(resolve_command(":?"), Some(CommandTarget::Help));
     assert_eq!(resolve_command(":exit"), Some(CommandTarget::Quit));
@@ -1928,4 +2086,184 @@ fn crd_suggestions_are_scored_by_exact_prefix_alias_and_group() {
     // A CRD prefix (105) outranks a static name prefix (100) for the same query.
     let both = command_suggestions_with_crds("cilium", &crds);
     assert_eq!(both[0].0.name, "ciliumloadbalancerippools");
+}
+
+#[test]
+fn tui_config_file_paths_clamping_and_round_trip() {
+    let mut env = common::env::lock();
+
+    // 1. Explicit path override. The documented name wins over the one from
+    // before the srectl rename.
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("nested").join("tui.json");
+    let legacy_file = dir.path().join("legacy.json");
+    env.set("SRECTL_CONFIG_PATH", &file);
+    env.set("SRELENS_TUI_CONFIG_PATH", &legacy_file);
+    env.remove("SRELENS_CONFIG_DIR");
+    assert_eq!(TuiConfig::config_file_path(), file);
+
+    // 2. Round trip save and load
+    let cfg = TuiConfig {
+        command_popup_max_width: 120,
+        command_popup_max_visible: 12,
+        command_popup_density: CommandPopupDensity::Large,
+        show_feature_banner: true,
+        check_updates: true,
+        show_changed_guide: true,
+        argo_hub_context: None,
+        argo_hub_kubeconfig: None,
+        argo_ui_url: None,
+        argo_timeout_secs: None,
+        update_available: None,
+    };
+    cfg.save().expect("save succeeds");
+    assert!(file.is_file());
+    assert_eq!(TuiConfig::load(), cfg);
+
+    // 3. The previous override still applies when the new name is unset.
+    env.remove("SRECTL_CONFIG_PATH");
+    assert_eq!(TuiConfig::config_file_path(), legacy_file);
+
+    // 4. Fallback to SRELENS_CONFIG_DIR
+    env.remove("SRELENS_TUI_CONFIG_PATH");
+    env.set("SRELENS_CONFIG_DIR", dir.path());
+    assert_eq!(TuiConfig::config_file_path(), dir.path().join("tui.json"));
+
+    // 5. The cwd fallback used to be .srelens-tui.json. Load reads it when
+    // the new file is absent.
+    let cwd_dir = tempfile::tempdir().unwrap();
+    let new_fallback = cwd_dir.path().join(".srectl.json");
+    let old_fallback = cwd_dir.path().join(".srelens-tui.json");
+    std::fs::write(
+        &old_fallback,
+        r#"{"commandPopupMaxWidth":120,"commandPopupMaxVisible":12}"#,
+    )
+    .unwrap();
+    env.remove("SRELENS_CONFIG_DIR");
+    env.set("SRECTL_CONFIG_PATH", &new_fallback);
+    let loaded_legacy = TuiConfig::load();
+    assert_eq!(loaded_legacy.command_popup_max_width, 120);
+    assert_eq!(loaded_legacy.command_popup_max_visible, 12);
+    assert!(!new_fallback.exists());
+
+    // A present file that cannot be read must not use the old fallback.
+    // Invalid UTF-8 makes read_to_string fail on every platform; a directory
+    // does not.
+    std::fs::write(&new_fallback, [0xff_u8]).unwrap();
+    assert_eq!(TuiConfig::load(), TuiConfig::default());
+
+    // 4. Clamping out-of-range values
+    let mut clamped = TuiConfig {
+        command_popup_max_width: 500,
+        command_popup_max_visible: 1,
+        command_popup_density: CommandPopupDensity::Compact,
+        show_feature_banner: true,
+        check_updates: true,
+        show_changed_guide: true,
+        argo_hub_context: None,
+        argo_hub_kubeconfig: None,
+        argo_ui_url: None,
+        argo_timeout_secs: None,
+        update_available: None,
+    };
+    clamped.clamp();
+    assert_eq!(clamped.command_popup_max_width, 200);
+    assert_eq!(clamped.command_popup_max_visible, 3);
+    assert_eq!(clamped.command_popup_density, CommandPopupDensity::Compact);
+    assert!(clamped.show_feature_banner);
+    assert!(clamped.check_updates);
+
+    let mut low = TuiConfig {
+        command_popup_max_width: 10,
+        command_popup_max_visible: 99,
+        command_popup_density: CommandPopupDensity::Large,
+        show_feature_banner: false,
+        check_updates: false,
+        show_changed_guide: false,
+        argo_hub_context: None,
+        argo_hub_kubeconfig: None,
+        argo_ui_url: None,
+        argo_timeout_secs: None,
+        update_available: None,
+    };
+    low.clamp();
+    assert_eq!(low.command_popup_max_width, 40);
+    assert_eq!(low.command_popup_max_visible, 20);
+    assert_eq!(low.command_popup_density, CommandPopupDensity::Large);
+    assert!(!low.show_feature_banner);
+    assert!(!low.check_updates);
+
+    // 6. A present but unreadable file is a default, not the old fallback.
+    std::fs::write(&file, "{ corrupt json").unwrap();
+    env.set("SRECTL_CONFIG_PATH", &file);
+    assert_eq!(TuiConfig::load(), TuiConfig::default());
+}
+
+#[test]
+fn crd_cache_persistence_and_sanitization() {
+    let mut env = common::env::lock();
+    let temp_dir = tempfile::tempdir().unwrap();
+    env.set("SRELENS_CACHE_DIR", temp_dir.path());
+
+    // 1. Empty context returns None
+    assert_eq!(crd_cache_path(""), None);
+    assert_eq!(crd_cache_path("   "), None);
+
+    // 2. Path sanitizes special characters like slashes, colons, spaces
+    let complex_ctx = "arn:aws:eks:us-west-2:123456789012:cluster/prod-cluster";
+    let path = crd_cache_path(complex_ctx).expect("path exists");
+    assert!(path
+        .to_string_lossy()
+        .contains("arn_aws_eks_us-west-2_123456789012_cluster_prod-cluster.json"));
+    assert!(!path.to_string_lossy().contains(':'));
+
+    // 3. Loading non-existent cache returns empty vec
+    let loaded = load_cached_crds("nonexistent-cluster");
+    assert!(loaded.is_empty());
+
+    // 4. Save and load round trip with created_at and printer columns
+    let test_meta = vec![
+        CrdMeta {
+            crd_name: "virtualmachines.kubevirt.io".to_string(),
+            group: "kubevirt.io".to_string(),
+            version: "v1".to_string(),
+            kind: "VirtualMachine".to_string(),
+            plural: "virtualmachines".to_string(),
+            singular: "virtualmachine".to_string(),
+            namespaced: true,
+            short_names: vec!["vm".to_string(), "vms".to_string()],
+            printer_columns: vec![srectl::commands::PrinterColumn {
+                name: "AGE".to_string(),
+                json_path: ".metadata.creationTimestamp".to_string(),
+                col_type: "date".to_string(),
+                priority: 0,
+                description: None,
+            }],
+            created_at: Some("2026-01-15T10:00:00Z".to_string()),
+        },
+        cilium_pool(),
+    ];
+
+    save_cached_crds("kind-kind", &test_meta);
+    let reloaded = load_cached_crds("kind-kind");
+    assert_eq!(reloaded.len(), 2);
+    assert_eq!(reloaded[0].kind, "VirtualMachine");
+    assert_eq!(
+        reloaded[0].created_at.as_deref(),
+        Some("2026-01-15T10:00:00Z")
+    );
+    assert_eq!(reloaded[0].printer_columns.len(), 1);
+    assert_eq!(reloaded[1].crd_name, "ciliumloadbalancerippools.cilium.io");
+
+    // 5. Saving empty slice does not overwrite or create empty files
+    let empty: Vec<CrdMeta> = vec![];
+    save_cached_crds("empty-cluster", &empty);
+    assert!(load_cached_crds("empty-cluster").is_empty());
+
+    // 6. Corrupt cache file gracefully returns empty vec
+    let corrupt_ctx = "corrupt-cluster";
+    let corrupt_path = crd_cache_path(corrupt_ctx).unwrap();
+    std::fs::create_dir_all(corrupt_path.parent().unwrap()).unwrap();
+    std::fs::write(&corrupt_path, "{ not valid json").unwrap();
+    assert!(load_cached_crds(corrupt_ctx).is_empty());
 }

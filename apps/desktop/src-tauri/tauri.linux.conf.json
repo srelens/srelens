@@ -1,0 +1,25 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "build": {
+    "beforeBundleCommand": "cargo build --release --locked -p srelens-plugin-host --bin srelens-sandbox-launch"
+  },
+  "bundle": {
+    "linux": {
+      "deb": {
+        "files": {
+          "/usr/bin/srelens-sandbox-launch": "../../../target/release/srelens-sandbox-launch"
+        }
+      },
+      "rpm": {
+        "files": {
+          "/usr/bin/srelens-sandbox-launch": "../../../target/release/srelens-sandbox-launch"
+        }
+      },
+      "appimage": {
+        "files": {
+          "/usr/bin/srelens-sandbox-launch": "../../../target/release/srelens-sandbox-launch"
+        }
+      }
+    }
+  }
+}

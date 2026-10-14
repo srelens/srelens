@@ -20,7 +20,7 @@ export interface NamespaceOptions {
  * ServiceAccount namespace parsed out of the Forbidden error. On a
  * NON-Forbidden error, surface the real error and do NOT auto-scope.
  */
-export function useNamespaceOptions(context: string, kubeconfigFiles: string[]): NamespaceOptions {
+export function useNamespaceOptions(context: string, kubeconfigFiles: string[], refresh = 0): NamespaceOptions {
   const [namespaces, setNamespaces] = useState<string[] | null>(null);
   const [nsError, setNsError] = useState("");
   // Set when namespace listing was forbidden but the kubeconfig context
@@ -36,6 +36,7 @@ export function useNamespaceOptions(context: string, kubeconfigFiles: string[]):
     setNamespaces(null);
     setNsError("");
     setNsScope("");
+    if (!context) { setNamespaces([]); return; }
     // Ensure the client cache knows about all configured kubeconfig files (incl.
     // pasted/additional) before we build a client for this context. Otherwise a
     // restored tab for a context from an additional file races the app's initial
@@ -93,7 +94,7 @@ export function useNamespaceOptions(context: string, kubeconfigFiles: string[]):
     return () => {
       active = false;
     };
-  }, [context, kubeconfigFilesKey]);
+  }, [context, kubeconfigFilesKey, refresh]);
 
   return { namespaces, scope: nsScope, error: nsError };
 }

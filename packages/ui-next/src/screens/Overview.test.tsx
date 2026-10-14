@@ -25,6 +25,20 @@ vi.mock("@srelens/core", async (orig) => ({
   ...(await orig<typeof import("@srelens/core")>()),
   ...core,
 }));
+// The band has its own suite (extensions/DashboardCards.test.tsx); here it is
+// only whether the overview carries it, for which cluster, and where. Shaped
+// like the real band — a `Section` — so the adjacency the bands rely on for
+// their hairlines is checked with it in place.
+vi.mock("../extensions/DashboardCards", async () => {
+  const { Section } = await import("@srelens/ui-kit");
+  return {
+    DashboardCards: ({ context }: { context: { stableId: string } }) => (
+      <Section title="App cards" smallCaps padded={false}>
+        <p data-testid="app-cards">{context.stableId}</p>
+      </Section>
+    ),
+  };
+});
 
 if (!("ResizeObserver" in globalThis)) {
   (globalThis as unknown as { ResizeObserver: unknown }).ResizeObserver = class {
@@ -66,7 +80,7 @@ import { resetView, setLink, type LinkState } from "../lib/workspace";
 
 const CTX: ClusterContext = {
   name: "prod-eu",
-  stableId: "prod",
+  stableId: "prod", key: "prod",
   cluster: "prod",
   server: "https://prod",
   isCurrent: true,
@@ -481,7 +495,7 @@ describe("Overview — the nodes table", () => {
   it("empties the table and says why when the node list is refused", async () => {
     core.listNodes.mockResolvedValue({ error: "nodes is forbidden" });
     open();
-    await waitFor(() => expect(screen.getByText(/nodes is forbidden/)).toBeTruthy());
+    await waitFor(() => expect(within(screen.getByRole("heading", { name: "Nodes" }).closest("section")!).getByText(/nodes is forbidden/)).toBeTruthy());
     // One refused list is one empty section: the namespace count is untouched.
     expect(value("Namespaces")).toBe("4");
   });
@@ -621,6 +635,17 @@ describe("Overview — the node actions", () => {
     // Still open, so nothing reads as having succeeded.
     expect(dialog()).toBeTruthy();
   });
+
+  it("opens the node in a tab pinned to this cluster (#834)", async () => {
+    open();
+    await waitFor(() => expect(rowFor("n1")).toBeTruthy());
+
+    // Past the bar's two visible actions, in its overflow menu.
+    await userEvent.click(within(rowFor("n1")).getByRole("button", { name: "More actions" }));
+    await userEvent.click(within(await screen.findByRole("dialog")).getByRole("button", { name: "Open in new tab" }));
+
+    expect(store.activeRoute()).toBe("/k/prod-eu/Node/-/n1");
+  });
 });
 
 /* --------------------------------------------------------------- not ready */
@@ -656,7 +681,7 @@ const SICK_PODS: PodSummary[] = [
   aPod("bb-queue-0", "n2", { namespace: "payments", phase: "Pending", ready: "0/1" }),
   // A phase core's table does not know: neutral, and still flagged — not
   // recognising a state is not the same as knowing it is fine.
-  aPod("dd-mystery-0", "n3", { namespace: "search", phase: "Terminating", ready: "0/1" }),
+  aPod("dd-mystery-0", "n3", { namespace: "search", phase: "Mysterious", ready: "0/1" }),
   aPod("ok-web-0", "n1", { namespace: "checkout" }),
   aPod("done-backup-0", "n2", { namespace: "ops", phase: "Succeeded", ready: "0/1" }),
 ];
@@ -762,7 +787,7 @@ describe("Overview — the not-ready list", () => {
         ),
       ],
       ["bb-queue-0", resourceStatusLine("Pod", asObject("Pod", {}, { phase: "Pending" }))],
-      ["dd-mystery-0", resourceStatusLine("Pod", asObject("Pod", {}, { phase: "Terminating" }))],
+      ["dd-mystery-0", resourceStatusLine("Pod", asObject("Pod", {}, { phase: "Mysterious" }))],
     ];
 
     // Three distinct tones among them, so a single wrong tone cannot pass by
@@ -792,13 +817,12 @@ describe("Overview — the not-ready list", () => {
 
   it("holds a crash-looping pod in the list through the instant it is not backing off", async () => {
     // The flicker, at the screen it was observed on. `aa-worker-0` is the same
-    // pod as in the fixture above with one field changed — the waiting reason
-    // the kubelet stops reporting while the container is briefly up. Nothing
-    // else about the pod moves: still 0/1 ready, still 41 restarts, still
-    // phase "Running". Two of four consecutive screenshots of this list caught
-    // it and two did not.
+    // pod as in the fixture above, caught after its container exited and
+    // before the kubelet backs it off: no waiting reason, and kubectl's word
+    // is the container's `Error`, which is what the backend sends as
+    // `status`. That word is red, so the pod holds its place.
     const between = SICK_PODS.map((p) =>
-      p.name === "aa-worker-0" ? { ...p, waitingReason: "", restarts: 41 } : p,
+      p.name === "aa-worker-0" ? { ...p, waitingReason: "", status: "Error", restarts: 41 } : p,
     );
     core.listDeployments.mockResolvedValue({ deployments: SICK_DEPLOYMENTS });
     core.listStatefulSets.mockResolvedValue({ statefulsets: SICK_STATEFULSETS });
@@ -819,7 +843,7 @@ describe("Overview — the not-ready list", () => {
     ]);
     const row = notReadyRow("aa-worker-0")!;
     expect(row.querySelector(".status")?.getAttribute("data-kind")).toBe("danger");
-    expect(row.querySelector(".status")?.textContent).toBe("NotReady");
+    expect(row.querySelector(".status")?.textContent).toBe("Error");
 
     // And the two pods that must NOT be dragged in with it, both of which are
     // also short of ready: one finished, one never started.
@@ -830,9 +854,10 @@ describe("Overview — the not-ready list", () => {
   it("counts that pod in the pods tile too, at the same severity", async () => {
     // The tile reads `podFlagged` over the same list, so a pod that fell out
     // of the rows fell out of the count and its colour with it — "4 not ready"
-    // one second and "3 not ready" the next, on an unchanged cluster.
+    // one second and "3 not ready" the next, on an unchanged cluster. The
+    // exited moment carries kubectl's red `Error`, so it stays counted.
     const between = SICK_PODS.map((p) =>
-      p.name === "aa-worker-0" ? { ...p, waitingReason: "", restarts: 41 } : p,
+      p.name === "aa-worker-0" ? { ...p, waitingReason: "", status: "Error", restarts: 41 } : p,
     );
     core.podOverview.mockResolvedValue({ pods: anOverview(between) });
     core.listDeployments.mockResolvedValue({ deployments: SICK_DEPLOYMENTS });
@@ -879,10 +904,10 @@ describe("Overview — the not-ready list", () => {
     await waitFor(() => expect(notReadyNames()).toHaveLength(6));
 
     await userEvent.click(within(notReady()).getByRole("button", { name: /zz-checkout-api/ }));
-    expect(store.activeRoute()).toBe("/k/Deployment/checkout/zz-checkout-api");
+    expect(store.activeRoute()).toBe("/k/prod-eu/Deployment/checkout/zz-checkout-api");
 
     await userEvent.click(within(notReady()).getByRole("button", { name: /aa-worker-0/ }));
-    expect(store.activeRoute()).toBe("/k/Pod/checkout/aa-worker-0");
+    expect(store.activeRoute()).toBe("/k/prod-eu/Pod/checkout/aa-worker-0");
   });
 
   it("says that nothing is unhealthy rather than leaving a blank", async () => {
@@ -967,6 +992,7 @@ describe("Overview — the rail's control plane", () => {
     expect(factLabels()).not.toContain("Region");
     // And nothing standing in for them: "unknown" and an em dash both read as
     // answers, and the cluster gave none.
+    expect(section("Control plane").hasAttribute("data-band")).toBe(true);
     expect(section("Control plane").textContent).not.toMatch(/unknown/i);
     expect(section("Control plane").textContent).not.toContain("—");
   });
@@ -1166,7 +1192,7 @@ describe("Overview — the rail's object counts", () => {
   });
 });
 
-describe("Overview — the rail's incidents and fleet", () => {
+describe("Overview — the rail's incidents and node versions", () => {
   it("names the incidents section rather than leaving a hole", async () => {
     open();
     const incidents = await waitFor(() => section("Open incidents"));
@@ -1179,24 +1205,37 @@ describe("Overview — the rail's incidents and fleet", () => {
     expect(incidents.textContent).not.toMatch(/SEV-\d/);
   });
 
-  it("counts this cluster's pods in the fleet, whatever else is in the workspace", async () => {
-    core.podCount.mockResolvedValue({ counts: { running: 30, total: 33 } });
+  it("shows versions from this cluster without querying other workspace clusters", async () => {
+    const other = { ...CTX, name: "other", stableId: "other", key: "other" };
+    setContexts([CTX, other]);
+    store.setState(defaultState([CTX, other]));
+    core.listNodes.mockResolvedValue({ nodes: [aNode("n1"), aNode("n2"), aNode("n3", { version: "v1.32.5" })] });
     open();
-
-    const fleet = await waitFor(() => section("Fleet"));
-    await waitFor(() => expect(fleet.textContent).toContain("30/33 running"));
-    expect(within(fleet).getByText("prod-eu")).toBeTruthy();
-    expect(core.podCount).toHaveBeenCalledWith("prod-eu");
+    const versions = await waitFor(() => section("Node versions"));
+    await waitFor(() => expect(versions.textContent).toContain("v1.31.4"));
+    expect(within(versions).getByText("2 nodes")).toBeTruthy();
+    expect(within(versions).getByText("v1.32.5")).toBeTruthy();
+    expect(within(versions).getByText("1 node")).toBeTruthy();
+    expect(screen.queryByText("Fleet")).toBeNull();
+    expect(core.podCount).not.toHaveBeenCalled();
+    expect(core.listNodes.mock.calls.map(([context]) => context)).toEqual([CTX.name]);
   });
 
-  it("keeps the rest of the screen when the fleet cannot answer", async () => {
-    core.podCount.mockResolvedValue({ error: "pod count timed out" });
+  it("shows a node-read failure instead of reporting no versions", async () => {
+    core.listNodes.mockResolvedValue({ error: "node list denied" });
     open();
+    const versions = await waitFor(() => section("Node versions"));
+    await waitFor(() => expect(within(versions).getByRole("button", { name: "Retry" })).toBeTruthy());
+    expect(versions.textContent).not.toContain("No nodes");
+    core.listNodes.mockResolvedValue({ nodes: [aNode("n1", {version:""})] });
+    await userEvent.click(within(versions).getByRole("button", {name:"Retry"}));
+    await waitFor(() => expect(within(versions).getByText("Not reported")).toBeTruthy());
+  });
 
-    await waitFor(() => expect(section("Fleet").textContent).toContain("Unreachable"));
-    // Fleet is a courtesy; the overview is about this cluster.
-    expect(value("Nodes")).toBe("3");
-    expect(rowFor("n1")).toBeTruthy();
+  it("reports an empty current cluster", async () => {
+    core.listNodes.mockResolvedValue({ nodes: [] });
+    open();
+    await waitFor(() => expect(section("Node versions").textContent).toContain("No nodes"));
   });
 });
 
@@ -1236,12 +1275,12 @@ describe("Overview — a flat surface, not a stack of cards", () => {
     // one div each to hang a class on — silently removes every rule while
     // leaving the screen looking almost right, so this is pinned rather than
     // trusted. The kit's own suite pins the CSS; this pins the adjacency.
-    expect(bandTitles(leftColumn()!)).toEqual(["Capacity", "Nodes", "Not ready"]);
+    expect(bandTitles(leftColumn()!)).toEqual(["Capacity", "App cards", "Nodes", "Not ready"]);
     expect(bandTitles(railBody()!)).toEqual([
       "Control plane",
       "Objects by kind",
       "Open incidents",
-      "Fleet",
+      "Node versions",
     ]);
     for (const host of [leftColumn()!, railBody()!]) {
       expect([...host.children].every((el) => el.matches("section.section"))).toBe(true);
@@ -1293,32 +1332,25 @@ describe("Overview — a flat surface, not a stack of cards", () => {
     expect(unpadded("Nodes")).toBe("false");
     expect(unpadded("Not ready")).toBe("false");
     expect(unpadded("Objects by kind")).toBe("false");
-    // The key/value bands keep theirs: a `.kv` row is not a full-width row.
-    expect(unpadded("Control plane")).toBeNull();
-    expect(unpadded("Fleet")).toBeNull();
+    // Headings are flush; only the fact content retains a reading gutter.
+    for (const title of ["Control plane", "Node versions"]) {
+      expect(unpadded(title)).toBe("false");
+      expect(section(title).querySelector(".px-3 > .kv")).not.toBeNull();
+    }
   });
 
-  it("heads the left column with the cluster and its server version", async () => {
+  it("keeps the server version in Control plane without a duplicate cluster heading", async () => {
     await probed("v1.31.4");
     open();
 
-    // §7's `prod-eu · v1.31.4`, level with the rail's own head. The version is
-    // the probe's — the same reading the rail's `Version` row takes, not a
-    // second call.
-    await waitFor(() =>
-      expect(document.querySelector('[data-slot="main-head"]')?.textContent).toBe(
-        "prod-eu · v1.31.4",
-      ),
-    );
+    await waitFor(() => expect(within(section("Control plane")).getByText("v1.31.4")).toBeTruthy());
+    expect(document.querySelector('[data-slot="main-head"]')).toBeNull();
   });
 
-  it("heads it with the name alone until something has probed the cluster", async () => {
+  it("does not reserve a duplicate heading before the cluster has been probed", async () => {
     open();
-    // Not "prod-eu · " — a separator with nothing after it reads as a fact
-    // that failed to load rather than as one nobody has asked for yet.
-    await waitFor(() =>
-      expect(document.querySelector('[data-slot="main-head"]')?.textContent).toBe("prod-eu"),
-    );
+    await waitFor(() => expect(rowFor("n1")).toBeTruthy());
+    expect(document.querySelector('[data-slot="main-head"]')).toBeNull();
   });
 });
 
@@ -1499,6 +1531,9 @@ describe("Overview — a nodes band that stays a summary", () => {
   it("marks the two node actions with the design's glyphs", async () => {
     open();
     await waitFor(() => expect(rowFor("n1")).toBeTruthy());
+    // Natural table sizing must reserve room for both buttons and overflow;
+    // otherwise the overflow trigger wraps and doubles every node's height.
+    expect(within(rowFor("n1")).getByRole("group", { name: "Actions for n1" }).className).toContain("w-max");
 
     // A crossed circle on Cordon, a wave on Drain. From `lib/icons` — the
     // app's vocabulary — because the kit takes no icon-set dependency.
@@ -1639,7 +1674,7 @@ describe("Overview — coming back to the tab", () => {
     core.listNodes.mockImplementation((context: string) =>
       Promise.resolve({ nodes: [aNode(`${context}-1`)] }),
     );
-    const other: ClusterContext = { ...CTX, name: "staging-eu", stableId: "staging" };
+    const other: ClusterContext = { ...CTX, name: "staging-eu", stableId: "staging", key: "staging" };
     setContexts([CTX, other]);
     store.setState(defaultState([CTX, other]));
 
@@ -1682,7 +1717,7 @@ describe("Overview — coming back to the tab", () => {
  */
 describe("Overview — the cluster a node action was picked on", () => {
   const MOVED = "stage-eu";
-  const STAGE: ClusterContext = { ...CTX, name: MOVED, stableId: "stage", isCurrent: false };
+  const STAGE: ClusterContext = { ...CTX, name: MOVED, stableId: "stage", key: "stage", isCurrent: false };
 
   const box = () => dialog() as HTMLElement;
   const tick = (verb: string) =>
@@ -1775,5 +1810,12 @@ describe("Overview — the cluster a node action was picked on", () => {
     // One click, exactly as before this fix existed.
     await userEvent.click(within(box()).getByRole("button", { name: "Drain" }));
     await waitFor(() => expect(core.drainNode).toHaveBeenCalledWith("prod-eu", "n1"));
+  });
+});
+
+describe("Overview — app cards", () => {
+  it("carries the app cards band, pinned to the cluster in focus", async () => {
+    open();
+    expect((await screen.findByTestId("app-cards")).textContent).toBe(CTX.stableId);
   });
 });

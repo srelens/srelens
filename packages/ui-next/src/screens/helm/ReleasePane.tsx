@@ -274,7 +274,7 @@ export function ReleasePane({
     !op && previous !== null && (onRollback || onValuesEditor) ? (
       <div
         data-slot="pane-footer"
-        className="flex min-w-0 shrink-0 items-center gap-2 border-t border-rule bg-sunk px-2.5 py-1.5"
+        className="flex min-w-0 shrink-0 items-center gap-2 border-t border-rule bg-[var(--ground-sunk)] px-2.5 py-1.5"
       >
         {onRollback && (
           <Button variant="danger" size="sm" onClick={() => onRollback(previous)}>

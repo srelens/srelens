@@ -5,14 +5,17 @@ import {
   getContexts,
   getContextsError,
   getContextsStatus,
+  getPinnedContextKey,
+  pinContextKey,
   resetContexts,
+  resolveContext,
   setContexts,
 } from "./clusters";
 import { defaultState } from "./tabs";
 import * as store from "./tabsStore";
 
 const ctx = (stableId: string, name = stableId): ClusterContext => ({
-  name, stableId, cluster: name, server: "", isCurrent: false,
+  name, stableId, key: stableId, cluster: name, server: "", isCurrent: false,
   sourceFile: "/home/dana/.kube/config", authKind: "client certificate",
 });
 
@@ -33,6 +36,33 @@ describe("contexts store", () => {
   it("hands back the same array until it is replaced, so a subscriber cannot tear", () => {
     setContexts([ctx("prod-1")]);
     expect(getContexts()).toBe(getContexts());
+  });
+
+  /**
+   * Two contexts can share a stable id (#623). A context window is opened by
+   * key, but the workspace holds the id, so without the pinned key every
+   * lookup by id in that window would answer with the first of the pair.
+   */
+  it("prefers the context this window was opened for when a stable id is shared", () => {
+    const first = { ...ctx("dup", "left"), key: "a#b%23c" };
+    const second = { ...ctx("dup", "right"), key: "a%23b#c" };
+    setContexts([first, second]);
+
+    expect(contextFor("dup")?.name).toBe("left");
+
+    pinContextKey(second.key);
+    expect(getPinnedContextKey()).toBe(second.key);
+    expect(contextFor("dup")?.name).toBe("right");
+    expect(resolveContext([first, second], "dup")?.name).toBe("right");
+    // A pin that names neither of the pair changes nothing.
+    pinContextKey("elsewhere");
+    expect(contextFor("dup")?.name).toBe("left");
+  });
+
+  it("forgets the pinned key with the rest of the store", () => {
+    pinContextKey("a%23b#c");
+    resetContexts();
+    expect(getPinnedContextKey()).toBeNull();
   });
 });
 

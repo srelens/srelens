@@ -1,11 +1,16 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
+import { __resetUsageHistoryForTests } from "../usageHistory";
 import { WATCHABLE_KINDS, type ResourceKind } from "@srelens/core";
 
 // Hoisted for the same reason resourceList.test.tsx hoists its doubles:
 // `vi.mock` is lifted above every declaration in the file.
-const { podMetrics } = vi.hoisted(() => ({ podMetrics: vi.fn() }));
+const { listNamespaces, podMetrics } = vi.hoisted(() => ({
+  listNamespaces: vi.fn(),
+  podMetrics: vi.fn(),
+}));
 vi.mock("@srelens/core", async (orig) => ({
   ...(await orig<typeof import("@srelens/core")>()),
+  listNamespaces,
   podMetrics,
 }));
 
@@ -82,11 +87,11 @@ describe("descriptors", () => {
 
   /**
    * The kinds that must have a typed view: every kind the backend streams, plus
-   * nodes. This is classic's TYPED_KINDS, which is exactly WATCHABLE_KINDS + nodes.
+   * nodes and the richer polled Namespace summary.
    * A kind added to that set without columns falls back to the generic table and
    * silently loses its detail — this is what catches that.
    */
-  const MUST_BE_TYPED = [...WATCHABLE_KINDS, "nodes"].filter((k) => k !== "events");
+  const MUST_BE_TYPED = [...WATCHABLE_KINDS, "nodes", "namespaces"].filter((k) => k !== "events");
 
   it("gives every kind that should have a typed view one, rather than the generic table", () => {
     const generic = ["name", "namespace", "age"];
@@ -96,6 +101,30 @@ describe("descriptors", () => {
       return keys.join() === generic.join() || keys.join() === genericCluster.join();
     });
     expect(untyped).toEqual([]);
+  });
+
+  it("polls typed namespace summaries without turning their server-computed Age into a frozen watch field", async () => {
+    const summaries = [
+      {
+        name: "legacy-billing",
+        phase: "Terminating",
+        labels: { env: "prod", team: "payments" },
+        age: "17m",
+      },
+    ];
+    listNamespaces.mockResolvedValue({ summaries });
+    const descriptor = descriptorFor("namespaces")!;
+
+    expect(descriptor.source).toBe("poll");
+    expect(descriptor.scope).toBe("cluster");
+    expect(descriptor.columns.map((column) => column.key)).toEqual([
+      "name",
+      "phase",
+      "labels",
+      "age",
+    ]);
+    expect(await descriptor.load!("prod", "ignored")).toEqual({ rows: summaries });
+    expect(listNamespaces).toHaveBeenCalledWith("prod");
   });
 
   describe("flagged rows — the design's unhealthy dot", () => {
@@ -132,9 +161,21 @@ describe("descriptors", () => {
     });
   });
 
+  describe("node actions (#820)", () => {
+    it("offers Cordon and Drain on nodes, and on no other kind", () => {
+      expect(descriptorFor("nodes")!.actions).toMatchObject({ cordon: true, drain: true });
+      for (const slug of ["pods", "deployments", "statefulsets", "daemonsets", "cronjobs", "namespaces", "configmaps"]) {
+        const actions = descriptorFor(slug)!.actions;
+        expect(actions.cordon).toBeUndefined();
+        expect(actions.drain).toBeUndefined();
+      }
+    });
+  });
+
   describe("pod metrics enrichment", () => {
     beforeEach(() => {
       podMetrics.mockReset();
+      __resetUsageHistoryForTests();
     });
 
     /**
@@ -153,8 +194,46 @@ describe("descriptors", () => {
       const out = await descriptorFor("pods")!.enrich!("prod", "");
 
       expect(out.size).toBe(2);
-      expect(out.get(rowKey({ name: "api-0", namespace: "shop" }))).toEqual({ cpu: 10, memory: 100 });
-      expect(out.get(rowKey({ name: "api-0", namespace: "billing" }))).toEqual({ cpu: 20, memory: 200 });
+      expect(out.get(rowKey({ name: "api-0", namespace: "shop" }))).toMatchObject({ cpu: 10, memory: 100 });
+      expect(out.get(rowKey({ name: "api-0", namespace: "billing" }))).toMatchObject({ cpu: 20, memory: 200 });
+    });
+
+    /**
+     * #864: metrics-server has no past, so the row's graph is drawn from the
+     * readings this window has been handed, one per poll.
+     */
+    it("hands each row its readings so far, oldest first, ending in the current one", async () => {
+      vi.useFakeTimers();
+      try {
+        const key = rowKey({ name: "api-0", namespace: "shop" });
+        const reading = (cpu: number, memory: number) =>
+          podMetrics.mockResolvedValue({ metrics: [{ name: "api-0", namespace: "shop", cpuMillicores: cpu, memoryMiB: memory }] });
+        vi.setSystemTime(new Date("2026-10-09T10:00:00Z"));
+        reading(10, 100);
+        const first = await descriptorFor("pods")!.enrich!("prod", "shop");
+        const t0 = Date.parse("2026-10-09T10:00:00Z");
+        expect(first.get(key)).toEqual({ cpu: 10, memory: 100, usageHistory: [{ at: t0, cpu: 10, memory: 100 }] });
+
+        vi.setSystemTime(new Date("2026-10-09T10:00:10Z"));
+        reading(30, 120);
+        const second = await descriptorFor("pods")!.enrich!("prod", "shop");
+        // Each with the time it was taken, so the row can place it and can tell
+        // what was read before its own pod existed.
+        expect(second.get(key)).toEqual({
+          cpu: 30,
+          memory: 120,
+          usageHistory: [
+            { at: t0, cpu: 10, memory: 100 },
+            { at: t0 + 10_000, cpu: 30, memory: 120 },
+          ],
+        });
+
+        // Another cluster's pod of the same name has its own past.
+        const other = await descriptorFor("pods")!.enrich!("staging", "shop");
+        expect(other.get(key)).toMatchObject({ usageHistory: [expect.objectContaining({ cpu: 30 })] });
+      } finally {
+        vi.useRealTimers();
+      }
     });
 
     it("lists no reading at all when the metrics call answers with nothing", async () => {

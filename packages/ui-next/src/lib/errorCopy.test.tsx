@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { render, screen } from "@testing-library/react";
 import { describeError } from "@srelens/core";
-import { FailureAlert, FailureState, FailureWord, friendly, summarise } from "./errorCopy";
+import { FailureAlert, FailureState, FailureWord, NamespaceFailuresAlert, StaleListAlert, friendly, summarise } from "./errorCopy";
 
 /** The 401 the overview's Fleet rail was printing at the reader, verbatim. */
 const API_401 =
@@ -61,6 +61,25 @@ describe("summarise", () => {
     expect(detail).toContain(" · ");
   });
 
+  // #701: a real 403 names its resource, so one refusal behind five kinds
+  // classifies as five different sentences. Same verb, same scope: one.
+  it("says one refusal across several resources once, naming them all", () => {
+    const refused = (r: string, where: string) =>
+      `${r} is forbidden: User "dana" cannot list resource "${r}" in API group "apps" ${where}`;
+    const { detail, raw } = summarise([
+      refused("deployments", "at the cluster scope"),
+      refused("pods", "at the cluster scope"),
+      refused("pods", "at the cluster scope"),
+      refused("secrets", 'in the namespace "team-b"'),
+    ]);
+    expect(detail).toBe(
+      "You don't have permission to list deployments and pods at the cluster scope. · " +
+        "You don't have permission to list secrets in team-b.",
+    );
+    // Nothing folded away: every distinct original is still offered.
+    expect(raw?.split("\n\n")).toHaveLength(3);
+  });
+
   it("drops the empty reasons the callers filter on", () => {
     expect(summarise([]).detail).toBe("");
     expect(summarise(["", ""]).detail).toBe("");
@@ -106,6 +125,24 @@ describe("FailureState", () => {
     expect(screen.getByText("Could not load secret/db-creds's manifest")).toBeDefined();
     expect(screen.getByText(REDACTION_REFUSED)).toBeDefined();
     expect(screen.queryByText("Something went wrong")).toBeNull();
+  });
+
+  // #701: one content area fed by several calls that all refused.
+  it("says several refusals of one cause once", () => {
+    render(<FailureState error={[API_401, API_401, API_401]} />);
+    expect(screen.getByText("Not authorized")).toBeDefined();
+    expect(screen.getAllByText(/rejected your credentials/)).toHaveLength(1);
+  });
+
+  it("keeps several different refusals apart, under no one of their headlines", () => {
+    const { container } = render(
+      <FailureState error={[API_401, "dial tcp 10.1.2.3:6443: connect: connection refused"]} />,
+    );
+    const detail = container.querySelector('[data-slot="detail"]')?.textContent ?? "";
+    expect(detail).toMatch(/rejected your credentials/);
+    expect(detail).toMatch(/connection to the API server could not be made/);
+    expect(screen.queryByText("Not authorized")).toBeNull();
+    expect(screen.getByText("Something went wrong")).toBeDefined();
   });
 
   it("passes the caller's domain to the classifier", () => {
@@ -183,5 +220,93 @@ describe("FailureWord", () => {
   it("takes a lead so a row can say what it is about", () => {
     render(<FailureWord error={API_401} lead="Could not count Pod: " />);
     expect(screen.getByText(/Could not count Pod: Not authorized/)).toBeDefined();
+  });
+});
+
+describe("NamespaceFailuresAlert", () => {
+  const FORBIDDEN =
+    'pods is forbidden: User "dev" cannot watch resource "pods" in API group "" in the namespace "team-b"';
+
+  it("names the namespace that could not be listed, and says why", () => {
+    render(<NamespaceFailuresAlert what="pods" failures={[{ namespace: "team-b", error: FORBIDDEN }]} />);
+    expect(screen.getByText("Could not list pods in team-b")).toBeTruthy();
+    // The reason is describeError's, not the raw struct.
+    expect(screen.getByText(describeError(FORBIDDEN).detail)).toBeTruthy();
+  });
+
+  it("lists every failed namespace in one banner", () => {
+    render(
+      <NamespaceFailuresAlert
+        what="pods"
+        failures={[
+          { namespace: "team-b", error: FORBIDDEN },
+          { namespace: "team-c", error: FORBIDDEN },
+        ]}
+      />,
+    );
+    expect(screen.getByText("Could not list pods in team-b and team-c")).toBeTruthy();
+  });
+
+  it("counts, rather than lists, a long run of failed namespaces", () => {
+    const failures = ["a", "b", "c", "d", "e"].map((namespace) => ({ namespace, error: FORBIDDEN }));
+    render(<NamespaceFailuresAlert what="pods" failures={failures} />);
+    expect(screen.getByText("Could not list pods in 5 namespaces: a, b, c and 2 more")).toBeTruthy();
+  });
+
+  it("names a namespace once, and keeps every reason, when several kinds failed in it", () => {
+    render(
+      <NamespaceFailuresAlert
+        what="pods and cronjobs"
+        failures={[
+          { namespace: "team-b", error: FORBIDDEN },
+          { namespace: "team-b", error: "dial tcp 10.1.2.3:6443: connect: connection refused" },
+        ]}
+      />,
+    );
+    expect(screen.getByText("Could not list pods and cronjobs in team-b")).toBeTruthy();
+    const alert = screen.getByText("Could not list pods and cronjobs in team-b").closest('[role="alert"], [data-slot="alert"], div')!.parentElement!;
+    expect(alert.textContent).toContain(describeError(FORBIDDEN).detail);
+    expect(alert.textContent).toContain(describeError("dial tcp 10.1.2.3:6443: connect: connection refused").detail);
+  });
+
+  it("renders nothing when every namespace answered", () => {
+    const { container } = render(<NamespaceFailuresAlert what="pods" failures={[]} />);
+    expect(container.textContent).toBe("");
+  });
+});
+
+describe("StaleListAlert", () => {
+  const FORBIDDEN =
+    'pods is forbidden: User "dev" cannot watch resource "pods" in API group "" in the namespace "team-a"';
+  const REFUSED = "dial tcp 10.1.2.3:6443: connect: connection refused";
+
+  it("says the rows are stale, and why, for a one-scope list", () => {
+    render(<StaleListAlert what="pods" error={REFUSED} failures={[]} />);
+    expect(screen.getByText("These pods are stale")).toBeTruthy();
+    expect(screen.getByText(describeError(REFUSED).detail)).toBeTruthy();
+  });
+
+  it("names every failed namespace with its own reason", () => {
+    render(
+      <StaleListAlert
+        what="pods"
+        error={FORBIDDEN}
+        failures={[
+          { namespace: "team-a", error: FORBIDDEN },
+          { namespace: "team-b", error: REFUSED },
+        ]}
+      />,
+    );
+    expect(screen.getByText("These pods are stale")).toBeTruthy();
+    expect(screen.getByText(`team-a: ${describeError(FORBIDDEN).detail}`)).toBeTruthy();
+    expect(screen.getByText(`team-b: ${describeError(REFUSED).detail}`)).toBeTruthy();
+  });
+
+  it("keeps the list's own reason when it belongs to no one namespace", () => {
+    // The watch could not start after team-a had already refused: both are
+    // why the rows are stale, and the start failure is nobody's namespace.
+    render(<StaleListAlert what="pods" error={REFUSED} failures={[{ namespace: "team-a", error: FORBIDDEN }]} />);
+    expect(screen.getByText(describeError(REFUSED).detail)).toBeTruthy();
+    expect(screen.getByText(`team-a: ${describeError(FORBIDDEN).detail}`)).toBeTruthy();
   });
 });

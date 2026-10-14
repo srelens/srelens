@@ -1,5 +1,5 @@
 import { PALETTE, SYMBOLS, symbolFor } from "../lib/markSymbols";
-import { useOrderedContexts } from "../lib/contextOrder";
+import { moveContext, useOrderedContexts } from "../lib/contextOrder";
 import { useEffect, useState } from "react";
 import type { ClusterContext } from "@srelens/core";
 import {
@@ -10,14 +10,18 @@ import {
   Mark,
   NavIcon,
   type ClusterRailItem,
+  type ClusterRailMoves,
   type ContextMenuItem,
 } from "@srelens/ui-kit";
 import { friendly } from "../lib/errorCopy";
 import { Icons } from "../lib/icons";
 import { getMark, resetMark, setMark, useEditableMark } from "../lib/marks";
+import { resolveContext } from "../lib/clusters";
+import { openCluster, pauseCluster, reconnectCluster } from "../lib/openCluster";
 import { useInfos } from "../lib/probe";
-import { openTab, setActiveCluster, setWorkspaceClusters, useActiveCluster, useTabs } from "../lib/tabsStore";
+import { openTab, setWorkspaceClusters, useActiveCluster, useTabs } from "../lib/tabsStore";
 import { useWorkspaceView } from "../lib/workspace";
+import { describeError, invokeCommand, isTauri, notify } from "@srelens/core";
 
 export interface RailProps {
   contexts: ClusterContext[];
@@ -51,17 +55,10 @@ const MAX_IMAGE_BYTES = 64 * 1024;
  * only covers the window between a kubeconfig changing and the store catching
  * up, and a mark for a cluster that is not there is worse than one mark fewer.
  *
- * What the menu offers, and what it deliberately does not. The design draws a
- * `Disconnect` in the destructive slot, and there is nothing behind that verb:
- * core connects (`connectCluster`, which is a probe) and deletes a context out
- * of the kubeconfig on disk (`deleteContext`, which is a far larger act than
- * this menu implies), and the `disconnected` link state is derived from a
- * probe's answer and re-derived by the next one — writing it by hand would be
- * a claim the next probe erases. So the item keeps the name of what it really
- * does, which is to drop the cluster from this workspace; a red row wired to
- * the nearest available verb is worse than an honest one. `Connection details`
- * opens `/connections`, which is a route this shell already knows and titles,
- * though the screen behind it is still the Placeholder.
+ * Disconnect is a persisted pause, not a made-up connection state: it leaves
+ * the cluster in this workspace and stops future probes until Reconnect asks
+ * for one. Its `Paused` label is intentionally distinct from a probe that
+ * found an unreachable cluster. `Connection details` opens `/connections`.
  *
  * The marks and the probes are read once for the whole list rather than once
  * per cluster: the number of clusters changes between renders, so a hook per
@@ -78,8 +75,12 @@ export function Rail({ contexts, onConnect, error }: RailProps) {
   const { links } = useWorkspaceView();
   const [editing, setEditing] = useState<string | null>(null);
 
-  const byId = new Map(contexts.map((c) => [c.stableId, c]));
-  const target = editing === null ? null : (byId.get(editing) ?? null);
+  // By stable id, but never through a `Map` of them: two contexts can share
+  // one (a kubeconfig `a` declaring `b#c` beside `a#b` declaring `c`), and a
+  // map keeps whichever came last. `resolveContext` prefers the context this
+  // window was opened for (#648), so the rail agrees with the screens.
+  const byId = (id: string) => resolveContext(contexts, id);
+  const target = editing === null ? null : (byId(editing) ?? null);
 
   // One subscription each, standing in for the per-item hooks — see above.
   const value = useEditableMark(target?.stableId ?? "", target?.name ?? "");
@@ -89,13 +90,16 @@ export function Rail({ contexts, onConnect, error }: RailProps) {
   // the app. The dialog is already gone by then, since `target` cannot resolve;
   // this forgets which cluster it was about, so a context that comes back does
   // not bring a dialog nobody asked for back with it.
-  const stale = editing !== null && !byId.has(editing);
+  const stale = editing !== null && !byId(editing);
   useEffect(() => {
     if (stale) setEditing(null);
   }, [stale]);
 
   const ordered = useOrderedContexts(
-    workspace.clusters.flatMap(id => byId.get(id) ? [byId.get(id)!] : []),
+    workspace.clusters.flatMap((id) => {
+      const context = byId(id);
+      return context ? [context] : [];
+    }),
     contexts,
   );
   const items: ClusterRailItem[] = [];
@@ -104,6 +108,7 @@ export function Rail({ contexts, onConnect, error }: RailProps) {
     const mark = getMark(id, ctx.name);
     const info = infos[id];
     const link = links[id];
+    const paused = workspace.pausedClusters?.includes(id) === true;
     items.push({
       id,
       name: mark.name,
@@ -137,33 +142,24 @@ export function Rail({ contexts, onConnect, error }: RailProps) {
       // is not offered here because there is nowhere in a 46px strip to offer
       // it from; the overview's Fleet row for the same cluster has it.
       unavailable:
-        link?.state === "error"
+        paused
+          ? "Paused"
+          : link?.state === "error"
           ? link.error
             ? friendly(link.error).title
             : "Unreachable"
           : link?.state === "disconnected"
             ? "Disconnected"
             : undefined,
-      markers: link?.state === "connecting" ? [{ label: "Connecting", tone: "info" }] : [],
+      markers: !paused && link?.state === "connecting" ? [{ label: "Connecting", tone: "info" }] : [],
       color: mark.color,
     });
   }
 
-  /**
-   * Switch the rail's cluster, and hand the store the name the strip needs.
-   *
-   * `setActiveCluster` takes a stableId — that is what a workspace holds (#265)
-   * — but a tab's label is the context's NAME, and the store cannot translate
-   * between the two (`lib/clusters` imports it, not the other way round). The
-   * rail already has both, in `byId`, so the name is passed from here. Without
-   * it every cluster-scoped tab kept the label of the cluster switched away
-   * from while the mounted screen rendered the new one.
-   *
-   * Both ways in go through this: the click on a mark and the menu's `Open`.
-   * They are one gesture, and fixing one is how the two start disagreeing.
-   */
+  /** Selecting a cluster has the same destination as opening it from Home or Connections. */
   function select(id: string) {
-    setActiveCluster(id, byId.get(id)?.name);
+    const context = byId(id);
+    if (context) openCluster(context);
   }
 
   function remove(id: string) {
@@ -174,14 +170,76 @@ export function Rail({ contexts, onConnect, error }: RailProps) {
     setEditing(null);
   }
 
-  function menuFor(item: ClusterRailItem): ContextMenuItem[] {
+  function toggleConnection(id: string) {
+    const context = byId(id);
+    if (!context) return;
+    if (workspace.pausedClusters?.includes(id)) reconnectCluster(context);
+    else pauseCluster(workspace.id, id);
+  }
+
+  /**
+   * Put a cluster somewhere else in the rail (#829).
+   *
+   * The order is the one Settings → Clusters edits, written through the same
+   * `moveContext`, so the two places cannot disagree — the rail simply had no
+   * way to ask. `ordered` is this workspace's clusters only, so the move is
+   * made as a `subset` one: the slots these clusters hold in the shared order
+   * are the only ones rewritten, and a context outside the workspace stays
+   * exactly where it was. Without that it was taken for offline and sent to
+   * the end — see `mergeSubsetOrder`.
+   *
+   * `toIndex` is the kit's: where the cluster ends up, counted with it already
+   * taken out. `moveContext` wants the neighbour it goes BEFORE, or `null` for
+   * the end, which is the item at that index in the list without it.
+   */
+  function move(id: string, toIndex: number) {
+    const moving = ordered.find((ctx) => ctx.stableId === id);
+    if (!moving) return;
+    const rest = ordered.filter((ctx) => ctx.stableId !== id);
+    moveContext(ordered, moving.name, rest[toIndex]?.name ?? null, true);
+  }
+
+  function menuFor(item: ClusterRailItem, moves: ClusterRailMoves): ContextMenuItem[] {
+    // The rail's own moves, so one picked here is announced like a drag or a
+    // key press. Each is there only when the mark has somewhere to go: absent,
+    // not disabled, because a greyed entry is a thing to read that does nothing.
+    const moveItems: ContextMenuItem[] = [
+      ...(moves.moveUp ? [{ label: "Move up", onPick: moves.moveUp } as ContextMenuItem] : []),
+      ...(moves.moveDown ? [{ label: "Move down", onPick: moves.moveDown } as ContextMenuItem] : []),
+    ];
     return [
       { label: `Open ${item.name}`, onPick: () => select(item.id) },
-      // The ellipsis is the promise that this one asks something more before
+      ...(isTauri()
+        ? [
+            {
+              label: "Open in new window",
+              icon: Icons.openTab,
+              onPick: () => {
+                // The window's identity is the context KEY, not the `stableId`
+                // this rail keys marks and workspaces on: a path `a` with
+                // context `b#c` and a path `a#b` with context `c` share a
+                // stable ID, so the second cluster's window focused the
+                // first's and could never be opened (#623). `stableId` stays
+                // the persisted identity; only the window label and the
+                // `?context=` query move to the key, and neither is persisted.
+                const contextId = byId(item.id)?.key;
+                if (!contextId) return;
+                // Titles the window, in the rail's words: a mark can rename it.
+                void invokeCommand("open_context_window", { contextId, name: item.name }).catch((e) => {
+                  notify.error(`Couldn't open window for ${item.name}`, describeError(e).detail);
+                });
+              },
+            } as ContextMenuItem,
+          ]
+        : []),
       // anything happens — it opens the dialog below.
       { label: "Customise…", icon: Icons.edit, onPick: () => setEditing(item.id) },
       { kind: "sep" },
+      { label: workspace.pausedClusters?.includes(item.id) ? "Reconnect" : "Disconnect", onPick: () => toggleConnection(item.id) },
       { label: "Connection details", onPick: () => openTab("/connections") },
+      // The pointer-free way to rearrange, beside the drag and the keys.
+      ...(moveItems.length > 0 ? [{ kind: "sep" } as ContextMenuItem, ...moveItems] : []),
+      { kind: "sep" },
       // Named for what it does. See the note above on the design's Disconnect.
       { label: "Remove from workspace", icon: Icons.trash, danger: true, onPick: () => remove(item.id) },
     ];
@@ -196,6 +254,7 @@ export function Rail({ contexts, onConnect, error }: RailProps) {
         activeId={active ?? undefined}
         onSelect={select}
         menuFor={menuFor}
+        onMove={move}
         onAdd={onConnect}
         error={error}
       />

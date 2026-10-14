@@ -143,6 +143,17 @@ describe("openTabs persistence (web mode)", () => {
     const restored = loadOpenTabs();
     expect(restored!.tabs.map((t) => t.id)).toEqual([1]);
   });
+
+  it("stores tabs independently when given a window label", () => {
+    saveOpenTabs([tab({ id: 1 })], 1, "ctx-minikube");
+    saveOpenTabs([tab({ id: 2 })], 2, "ctx-prod");
+    saveOpenTabs([tab({ id: 3 })], 3);
+
+    expect(loadOpenTabs("ctx-minikube")?.activeTabId).toBe(1);
+    expect(loadOpenTabs("ctx-prod")?.activeTabId).toBe(2);
+    expect(loadOpenTabs()?.activeTabId).toBe(3);
+    expect(loadOpenTabs("main")?.activeTabId).toBe(3);
+  });
 });
 
 describe("openTabs on desktop", () => {

@@ -6,6 +6,8 @@ import { describe as suite, it, expect } from "vitest";
 import {
   describe,
   isBuiltInKind,
+  isClusterScopedRoute,
+  keepsManagementWhenPaused,
   screenFor,
   type RoutedScreenProps,
   type ScreenComponent,
@@ -47,7 +49,7 @@ suite("isBuiltInKind", () => {
 suite("describe", () => {
   it("names the home route and pins it", () => {
     const info = describe("/", "prod-eu");
-    expect(info).toMatchObject({ route: "/", title: "Control room", kind: "control", pinned: true });
+    expect(info).toMatchObject({ route: "/", title: "Home", kind: "control", pinned: true });
   });
 
   it("uses the real cluster name as the sub for cluster-scoped routes", () => {
@@ -57,7 +59,7 @@ suite("describe", () => {
   });
 
   it("gives app-scoped routes no sub at all", () => {
-    for (const route of ["/applog", "/notes", "/settings", "/connections", "/connect", "/toolbox"]) {
+    for (const route of ["/", "/applog", "/notes", "/settings", "/connections", "/connect", "/toolbox"]) {
       expect(describe(route, "staging-1").sub, route).toBeUndefined();
     }
   });
@@ -86,6 +88,18 @@ suite("describe", () => {
 
   it("names a cluster-scoped /k/ resource detail the same way", () => {
     expect(describe("/k/Node/-/worker-1", "c")).toMatchObject({ title: "worker-1", kind: "resource", sub: "c" });
+  });
+
+  it("labels a detail tab with the cluster in its route, not the one it is told (#834)", () => {
+    // A detail tab is pinned to the cluster it was opened on. Every relabel —
+    // a rail switch, a reused tab, boot's reconcile — comes through here, and
+    // a pinned tab must keep naming its own cluster through all of them.
+    expect(describe("/k/prod/Node/-/worker-1", "staging")).toMatchObject({
+      title: "worker-1",
+      kind: "resource",
+      sub: "prod",
+    });
+    expect(describe("/k/prod/Pod/default/web-1")).toMatchObject({ sub: "prod" });
   });
 
   it("titles the /resources/<name>/logs|shell|forward shapes distinctly from the bare resource tab", () => {
@@ -227,6 +241,21 @@ suite("describe", () => {
   });
 });
 
+suite("isClusterScopedRoute", () => {
+  it("keeps run and stream management available while pausing cluster readers", () => {
+    for (const route of ["/agent", "/forwards", "/terminals"]) expect(keepsManagementWhenPaused(route)).toBe(true);
+    for (const route of ["/overview", "/helm", "/k/pods"]) expect(keepsManagementWhenPaused(route)).toBe(false);
+  });
+  it("distinguishes cluster-following routes from app screens", () => {
+    for (const route of ["/overview", "/helm", "/forwards", "/terminals", "/k/pods", "/k/Pod/default/web", "/k/prod/Pod/default/web", "/edit/Pod/default/web"]) {
+      expect(isClusterScopedRoute(route), route).toBe(true);
+    }
+    for (const route of ["/", "/settings", "/connections", "/notes"]) {
+      expect(isClusterScopedRoute(route), route).toBe(false);
+    }
+  });
+});
+
 suite("screenFor", () => {
   it("resolves the screens that have been ported", () => {
     expect(screenFor("/applog")).toBe(AppLog);
@@ -354,7 +383,7 @@ suite("screenFor", () => {
   });
 
   it("gives a route with no screen a placeholder", () => {
-    for (const route of ["/", "/incidents"]) {
+    for (const route of ["/incidents"]) {
       expect(screenFor(route), route).toBeNull();
     }
   });
@@ -379,6 +408,8 @@ suite("screenFor", () => {
     // The cluster-scoped sentinel is a namespace segment like any other, so a
     // Node's route resolves the same way a Pod's does.
     expect(screenFor("/k/Node/-/worker-1")).toBe(ResourceDetailScreen);
+    // And with the cluster a detail tab is pinned to (#834).
+    expect(screenFor("/k/prod/Pod/default/web-1")).toBe(ResourceDetailScreen);
   });
 
   it("keeps a custom resource's detail route on the detail screen", () => {
@@ -457,4 +488,19 @@ suite("ScreenComponent", () => {
     };
     expect(plain).toBeTypeOf("function");
   });
+});
+
+it("registers the app landing page", () => { expect(screenFor("/")?.name).toBe("Home"); });
+
+it("describes resource identity for tab hints without guessing a namespace", async () => {
+  const {tabDetail}=await import("./routes");
+  expect(tabDetail("/edit/prod/ConfigMap/monitoring/config")).toBe("ConfigMap · monitoring");
+  expect(tabDetail("/k/Node/-/node-1")).toBe("Node · Cluster-scoped");
+  expect(tabDetail("/logs/Pod/default/app")).toBe("Pod · default");
+  expect(tabDetail("/overview")).toBeUndefined();
+});
+
+it("distinguishes operation tabs by their report or image subject", () => {
+  expect(describe("/extension-operation-contexts/config%23demo/org.srelens.trivy/3/findings/" + encodeURIComponent(JSON.stringify({reportId:"report-a"}))).title).toBe("Findings · report-a");
+  expect(describe("/extension-operation-contexts/config%23demo/org.srelens.trivy/3/findings/" + encodeURIComponent(JSON.stringify({reportId:"report-b"}))).title).toBe("Findings · report-b");
 });

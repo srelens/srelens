@@ -3,6 +3,7 @@ import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { RunsRail } from "./RunsRail";
 import { askAgent, getAgentRun, resetAgentRun } from "../../lib/agentRun";
+import { loadSkillUses } from "../../lib/skillUses";
 
 const { listSessions, loadSession, saveSession, deleteSession, listSkills, startChat, sendChat, listAgents } =
   vi.hoisted(() => ({
@@ -103,6 +104,39 @@ describe("the agent screen's rail", () => {
     await vi.waitFor(() => {
       expect(getAgentRun().turns.map((t) => t.text)).toContain("check mongodb deployment");
     });
+  });
+
+  it("says how often a skill has been used, and nothing for one never used (#387)", async () => {
+    const m = new Map<string, string>([["srelens.next.skillUses", JSON.stringify({ triage: 3 })]]);
+    loadSkillUses({ getItem: (k) => m.get(k) ?? null, setItem: (k, v) => void m.set(k, v), removeItem: (k) => void m.delete(k) });
+    listSkills.mockResolvedValue([
+      { name: "triage", description: "Triage a crashloop" },
+      { name: "pending", description: "Diagnose a pending pod" },
+    ]);
+    render(<RunsRail />);
+    const triage = (await screen.findByText("triage")).closest("div")?.parentElement;
+    const pending = screen.getByText("pending").closest("div")?.parentElement;
+    expect(triage?.textContent).toContain("used 3×");
+    expect(pending?.textContent).not.toMatch(/used/);
+  });
+
+  it("draws a saved run's calls and answering time when its file kept them (#386)", async () => {
+    listSessions.mockResolvedValue([
+      { id: "s9", title: "why is checkout slow", createdAt: 1, updatedAt: 2, calls: 7, durationMs: 11_200 },
+    ]);
+    render(<RunsRail />);
+    const row = await screen.findByRole("button", { name: /why is checkout slow/i });
+    expect(row.textContent).toContain("7 calls");
+    expect(row.textContent).toContain("11.2s");
+    expect(row.textContent).not.toMatch(/saved/);
+  });
+
+  it("still says only 'saved' for a run whose file predates the figures", async () => {
+    listSessions.mockResolvedValue([{ id: "s0", title: "old one", createdAt: 1, updatedAt: 2 }]);
+    render(<RunsRail />);
+    const row = await screen.findByRole("button", { name: /old one/i });
+    expect(row.textContent).toMatch(/saved/);
+    expect(row.textContent).not.toMatch(/call/);
   });
 
   /**

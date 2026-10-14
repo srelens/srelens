@@ -60,6 +60,29 @@ const workloadSubject: LogSubject = {
 };
 
 describe("resolveLogSubject", () => {
+  it.each([podSubject, workloadSubject])("includes completed and failed init containers for $type logs", async (subject) => {
+    const result = await resolveLogSubject(subject, fakeInvoke({
+      objects: {
+        "Deployment/web": workloadObject({ app: "web" }),
+        "Pod/web-1": {
+          spec: { containers: [{ name: "app" }], initContainers: [{ name: "setup" }, { name: "migrate" }] },
+          status: {
+            phase: "Pending",
+            containerStatuses: [{ name: "app", state: { waiting: { reason: "PodInitializing" } } }],
+            initContainerStatuses: [
+              { name: "setup", state: { terminated: { exitCode: 0 } } },
+              { name: "migrate", state: { terminated: { exitCode: 1 } } },
+            ],
+          },
+        },
+      },
+      pods: { pods: [{ name: "web-1" }] },
+    }));
+    if (result.status !== "resolved") throw new Error("expected resolved");
+    expect(result.targets.map((t) => t.container)).toEqual(["app", "setup", "migrate"]);
+    // A current termination is read with ordinary logs, not previous=true.
+    expect(result.previous).toEqual([]);
+  });
   it("resolves a pod subject to itself, unlabelled", async () => {
     const invoke = fakeInvoke({ objects: { "Pod/web-1": podObject(["app"]) } });
     const result = await resolveLogSubject(podSubject, invoke);
@@ -151,12 +174,11 @@ describe("resolveLogSubject", () => {
     expect(result.detail).toContain("Deployment/web");
   });
 
-  it("says a workload whose pods exist but have no app container is empty, not resolved to nothing", async () => {
+  it("says a workload whose pods exist but have no containers is empty, not resolved to nothing", async () => {
     const invoke = fakeInvoke({
       objects: {
         "Deployment/web": workloadObject({ app: "web" }),
-        // The pod exists and answers, but has no app container to follow —
-        // e.g. every container it does have is an init container.
+        // The pod exists and answers, but has no containers to follow.
         "Pod/web-abc": podObject([]),
       },
       pods: { pods: [{ name: "web-abc" }] },
@@ -422,10 +444,7 @@ describe("resolveLogSubject's previous instances", () => {
     expect(result.previous).toEqual([]);
   });
 
-  it("leaves out a container that is not followed, whose logs no toggle can reach", async () => {
-    // An init container's status carries a `lastState` like any other, and it
-    // is not one of this stream's targets — offering its corpse would be
-    // offering a buffer the screen has no target to draw it against.
+  it("offers a restarted init container's previous instance", async () => {
     const invoke = fakeInvoke({
       objects: {
         "Pod/web-1": {
@@ -441,7 +460,10 @@ describe("resolveLogSubject's previous instances", () => {
     });
     const result = await resolveLogSubject(podSubject, invoke);
     if (result.status !== "resolved") throw new Error("expected resolved");
-    expect(result.previous).toEqual([]);
+    expect(result.previous).toEqual([{
+      pod: "web-1", container: "migrate", exitCode: 137,
+      reason: "OOMKilled", finishedAt: "2026-08-24T14:07:42Z",
+    }]);
   });
 });
 

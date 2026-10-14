@@ -1,6 +1,20 @@
-import { describe, it, expect, vi } from "vitest";
-import { render, waitFor } from "@testing-library/react";
+import { describe, it, expect, vi, afterEach } from "vitest";
+import { fireEvent, render, waitFor } from "@testing-library/react";
+import { EditorState } from "@codemirror/state";
+import { EditorView, activateHover } from "@codemirror/view";
+import { forEachDiagnostic } from "@codemirror/lint";
+import { openSearchPanel } from "@codemirror/search";
 import { CodeEditor } from "./CodeEditor";
+
+/**
+ * The clipboard stub, taken back whether or not the test that set it passed.
+ *
+ * Cleanup written at the end of a test body does not run when an assertion
+ * before it throws, and a stubbed `navigator` outlives the failure into every
+ * later test in the same worker — one red test reported as several. The hook
+ * is `CustomizeMark.test.tsx`'s shape. (#656 review)
+ */
+afterEach(() => vi.unstubAllGlobals());
 
 describe("CodeEditor", () => {
   it("mounts a CodeMirror editor showing the initial value", () => {
@@ -47,6 +61,25 @@ describe("CodeEditor", () => {
     const { container } = render(<CodeEditor value="a: 1" fill minHeight={100} maxHeight={400} />);
     expect(container.querySelector(".cm-editor")).not.toBeNull();
   });
+
+  it("selects every search match", () => {
+    // `selectMatches` dispatches one range per match, but a state that does not
+    // allow multiple selections collapses them to one — the widget's select-all
+    // control looks enabled and quietly selects a single match.
+    const { container } = render(<CodeEditor value="one two one three one" />);
+    const view = EditorView.findFromDOM(container.querySelector<HTMLElement>(".cm-editor")!)!;
+    expect(view.state.facet(EditorState.allowMultipleSelections)).toBe(true);
+
+    openSearchPanel(view);
+    const find = container.querySelector<HTMLInputElement>('input[aria-label="Find"]')!;
+    find.value = "one";
+    // The widget searches as you type, off `input` rather than `change`.
+    fireEvent.input(find);
+    fireEvent.click(container.querySelector<HTMLButtonElement>('button[aria-label="Select all matches"]')!);
+
+    expect(view.state.selection.ranges).toHaveLength(3);
+  });
+
   it("does not report a prop-driven value change as a user edit", () => {
     // Reset and reload replace the document from outside. The dispatch that
     // does it changes the doc, so an unconditional listener reports it as
@@ -103,5 +136,236 @@ describe("CodeEditor — what it tells the caller", () => {
     const onDiagnostics = vi.fn();
     render(<CodeEditor value={"a: 1\n"} onDiagnostics={onDiagnostics} />);
     await waitFor(() => expect(onDiagnostics).toHaveBeenCalledWith([]), { timeout: 3000 });
+  });
+});
+
+describe("CodeEditor — taking the document away", () => {
+  /** ⌘A as the browser delivers it with focus on the page, not the editor. */
+  function pressSelectAll(): KeyboardEvent {
+    const event = new KeyboardEvent("keydown", {
+      key: "a",
+      metaKey: true,
+      bubbles: true,
+      cancelable: true,
+    });
+    document.body.dispatchEvent(event);
+    return event;
+  }
+
+  it("makes a read-only document a tab stop", () => {
+    // A read-only view is `contenteditable="false"`, which the browser will
+    // not focus and will not put a caret in — so the pane was unreachable by
+    // keyboard, and any selection made in it was never the document's own
+    // selection, which is what ⌘C copies. (#656)
+    const { container } = render(<CodeEditor value="kind: Pod" readOnly ariaLabel="web manifest" />);
+    expect(container.querySelector(".cm-content")?.getAttribute("tabindex")).toBe("0");
+  });
+
+  it("leaves an editable document to CodeMirror's own tab stop", () => {
+    const { container } = render(<CodeEditor value="kind: Pod" />);
+    expect(container.querySelector(".cm-content")?.hasAttribute("tabindex")).toBe(false);
+  });
+
+  it("answers ⌘A pressed on the page by selecting the manifest", () => {
+    // The complaint in #656: ⌘A on the manifest view selected every label and
+    // table row AROUND the YAML and left the YAML itself out, because that is
+    // what the browser's select-all does to a `contenteditable`.
+    const { container } = render(
+      <CodeEditor value={"kind: Pod\nmetadata:\n  name: web\n"} readOnly ariaLabel="web manifest" />,
+    );
+    const content = container.querySelector(".cm-content");
+    expect(document.activeElement).not.toBe(content);
+
+    const event = pressSelectAll();
+
+    expect(event.defaultPrevented).toBe(true);
+    // Focus is the half that makes the selection the clipboard's: CodeMirror
+    // writes the DOM selection only for a view that has focus.
+    expect(document.activeElement).toBe(content);
+    expect(container.querySelector(".cm-selectionBackground, .cm-selectionLayer")).not.toBeNull();
+  });
+
+  it("draws a focus indicator on the read-only pane it made reachable", () => {
+    // `tabindex="0"` puts the pane in the tab order; `kit.css` clears the
+    // outline from every focused `div`, and this content is one — so without
+    // a rule of its own a keyboard reader arriving here is given nothing at
+    // all to say where they are. Read off the stylesheet CodeMirror actually
+    // injected rather than off the source: jsdom applies no CSS and resolves
+    // no `:focus-visible`, so the rule's presence is what is observable.
+    // (#656 review)
+    render(<CodeEditor value="kind: Pod" readOnly ariaLabel="web manifest" />);
+    const sheets = [...document.querySelectorAll("style")].map((s) => s.textContent ?? "").join("");
+    const at = sheets.indexOf(".cm-content[tabindex]:focus-visible");
+    expect(at, "no focus indicator for a focusable read-only pane").toBeGreaterThan(-1);
+    expect(sheets.slice(at, sheets.indexOf("}", at))).toContain("outline");
+  });
+
+  it("renders no Copy control unless the caller asks for one", () => {
+    const { queryByRole } = render(<CodeEditor value="kind: Pod" ariaLabel="web manifest" />);
+    expect(queryByRole("button", { name: /copy/i })).toBeNull();
+  });
+
+  it("puts the whole document on the clipboard", async () => {
+    const writeText = vi.fn(async () => {});
+    vi.stubGlobal("navigator", { ...navigator, clipboard: { writeText } });
+    const yaml = "kind: Pod\nmetadata:\n  name: web\n";
+    const { getByRole, findByText } = render(
+      <CodeEditor value={yaml} readOnly copy ariaLabel="web manifest" />,
+    );
+
+    getByRole("button", { name: /copy/i }).click();
+
+    await findByText("Copied");
+    expect(writeText).toHaveBeenCalledWith(yaml);
+  });
+
+  it("copies what is in the editor NOW, not the text it was mounted with", async () => {
+    // `onChange` is optional, so an editable editor is free to hold a document
+    // the caller has never been told about — and a Copy that reads the `value`
+    // prop would hand over the text from mount while the reader looks at
+    // something else. Read at the click instead. (#656 review)
+    const writeText = vi.fn(async () => {});
+    vi.stubGlobal("navigator", { ...navigator, clipboard: { writeText } });
+    const { container, getByRole, findByText } = render(
+      <CodeEditor value="kind: Pod" copy ariaLabel="web manifest" />,
+    );
+
+    // Typed into, the way CodeMirror delivers it — not by replacing `value`,
+    // which is the path that already works.
+    const view = EditorView.findFromDOM(container.querySelector(".cm-editor")!)!;
+    view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: "kind: Service" } });
+
+    getByRole("button", { name: /copy/i }).click();
+
+    await findByText("Copied");
+    expect(writeText).toHaveBeenCalledWith("kind: Service");
+  });
+});
+
+/**
+ * Every CSS rule CodeMirror has mounted, in the order a browser applies them.
+ *
+ * Style modules write one rule per line into a `<style>` in the head, base
+ * themes first. That order is the point here: a base theme and this editor's
+ * theme reach the same elements at the same specificity, so the rule written
+ * last is the one that wins.
+ */
+function mountedRules(): string[] {
+  return [...document.head.querySelectorAll("style")]
+    .flatMap((tag) => (tag.textContent ?? "").split("\n"))
+    .filter((line) => line.includes("{"));
+}
+
+/** The rule that wins for `selector`, given that ties go to the last one. */
+function winningRule(selector: string): string | undefined {
+  return mountedRules().filter((rule) => rule.includes(selector + " {")).at(-1);
+}
+
+/**
+ * Ctrl-F used to open CodeMirror's own panel, coloured from a light/dark fork
+ * this editor never chose: on every dark theme its buttons came out pale grey
+ * under near-white ink. (#652)
+ *
+ * The editor now configures a find widget of its own instead — what that
+ * widget does is covered in `searchPanel.test.ts`; what matters here is that
+ * the editor is the thing that installs it, and that the colours it is given
+ * are the theme's rather than a literal.
+ */
+describe("CodeEditor — find", () => {
+  it("opens its own widget, not CodeMirror's panel", () => {
+    const { container } = render(<CodeEditor value="a: 1" />);
+    const view = EditorView.findFromDOM(container.querySelector(".cm-editor")!)!;
+    openSearchPanel(view);
+    expect(container.querySelector(".cm-sl-find")).not.toBeNull();
+    // `openSearchPanel` installs CodeMirror's configuration — default panel
+    // and all — unless the editor already brought a `search()` of its own.
+    expect(container.querySelector(".cm-panel.cm-search")).toBeNull();
+  });
+
+  it("floats the widget rather than shoving the document down", () => {
+    // A bar at the top moves the line the reader was looking at, at the exact
+    // moment they asked to look for something else.
+    render(<CodeEditor value="a: 1" />);
+    expect(winningRule(".cm-panels.cm-panels-top:has(.cm-sl-find)")).toContain("height: 0");
+    expect(winningRule(".cm-sl-find")).toContain("position: absolute");
+  });
+
+  it.each([".cm-sl-find", ".cm-sl-input", ".cm-panels"])("dresses %s from tokens", (part) => {
+    render(<CodeEditor value="a: 1" />);
+    const rule = winningRule(part);
+    expect(rule, `no rule for ${part}`).toBeDefined();
+    expect(rule).toContain("background-color: var(--");
+  });
+
+  it("still dresses the go-to-line dialog, which is CodeMirror's", () => {
+    // Mod-Alt-g is in the same keymap and still opens a `.cm-textfield` and a
+    // `.cm-button`; replacing the search panel did not replace those.
+    render(<CodeEditor value="a: 1" />);
+    expect(winningRule(".cm-button")).toContain("background-color: var(--");
+    expect(winningRule(".cm-textfield")).toContain("background-color: var(--");
+  });
+});
+
+/**
+ * Hovering a squiggle on a dark theme showed the lint message as near-white
+ * ink on CodeMirror's light-only `#f5f5f5`. The dressing was written for
+ * `.cm-tooltip.cm-tooltip-lint`, which is the gutter marker's tooltip; the
+ * squiggle's is a `.cm-tooltip-hover` host with the lint list inside it as a
+ * section, so the rule reached neither element. A completion's description
+ * (`.cm-completionInfo`) is a third host, which is why the rule is on the
+ * class every tooltip carries rather than on a list of them.
+ */
+describe("CodeEditor — tooltips", () => {
+  it("dresses the tooltip box itself, whichever path opened it", () => {
+    render(<CodeEditor value="a: 1" />);
+    const rule = winningRule(".cm-tooltip");
+    expect(rule, "no rule for .cm-tooltip").toBeDefined();
+    expect(rule).toContain("background-color: var(--surface-sunk)");
+    expect(rule).toMatch(/[{;]\s*color: var\(--ink\)/);
+  });
+
+  it("rules stacked sections apart from a token, not the base theme's grey", () => {
+    render(<CodeEditor value="a: 1" />);
+    expect(winningRule(".cm-tooltip-section:not(:first-child)")).toContain("var(--rule)");
+  });
+
+  it("reaches the host a squiggle's hover actually opens", async () => {
+    // The two above read the stylesheet without opening anything, so they
+    // pass whatever element a hover lands in, and the fault was exactly a rule
+    // that existed and matched no host. Open the squiggle's tooltip the way a
+    // pointer would and ask which background the element it landed in gets.
+    // `activateHover` stands in for the pointer: jsdom has no layout, so
+    // `posAtCoords` cannot place a mouse over a character. (#826 review)
+    const onDiagnostics = vi.fn();
+    const { container } = render(<CodeEditor value={"a: 1\na: 2\n"} onDiagnostics={onDiagnostics} />);
+    await waitFor(() => expect(onDiagnostics).toHaveBeenCalled(), { timeout: 3000 });
+    const view = EditorView.findFromDOM(container.querySelector(".cm-editor")!)!;
+    let at = -1;
+    forEachDiagnostic(view.state, (_, from) => {
+      if (at < 0) at = from;
+    });
+    expect(at, "the duplicate key raised no diagnostic").toBeGreaterThan(-1);
+
+    activateHover(view, at, 1);
+
+    const host = await waitFor(() => {
+      const list = view.dom.querySelector(".cm-tooltip-lint");
+      expect(list, "no lint tooltip opened").not.toBeNull();
+      return list!.closest<HTMLElement>(".cm-tooltip")!;
+    });
+    // The squiggle's path, not the gutter marker's: the list is a section of
+    // a hover host, and the host is not itself the lint tooltip.
+    expect(host.classList.contains("cm-tooltip-hover")).toBe(true);
+    expect(host.classList.contains("cm-tooltip-lint")).toBe(false);
+    // Ties go to the later rule, as in `winningRule`; every candidate here is
+    // a theme-scoped `.cm-tooltip`, so specificity does not split them. Read
+    // off the rule text rather than `document.styleSheets`: jsdom's CSSOM
+    // drops declarations it cannot parse, `var()` among them.
+    const background = mountedRules()
+      .filter((rule) => rule.includes("background-color:"))
+      .filter((rule) => host.matches(rule.slice(0, rule.indexOf("{")).trim()))
+      .at(-1);
+    expect(background, "no background reaches the hover host").toBeDefined();
+    expect(background).toContain("background-color: var(--surface-sunk)");
   });
 });

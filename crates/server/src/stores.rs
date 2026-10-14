@@ -288,6 +288,48 @@ impl Db {
             .map_err(|e| e.to_string())?;
         Ok(())
     }
+
+    /// The user's saved app inventory, at most its first `limit` bytes; `None`
+    /// before their first save. Bounded here, in the query, so an oversized row
+    /// is refused by the caller without ever being fetched whole.
+    pub async fn get_extension_inventory(
+        &self,
+        user_id: i64,
+        limit: usize,
+    ) -> Result<Option<Vec<u8>>, String> {
+        let limit = i64::try_from(limit).map_err(|e| e.to_string())?;
+        let row: Option<(Vec<u8>,)> = sqlx::query_as(
+            "SELECT substr(inventory, 1, ?) FROM extension_inventories WHERE user_id = ?",
+        )
+        .bind(limit)
+        .bind(user_id)
+        .fetch_optional(self.pool())
+        .await
+        .map_err(|e| e.to_string())?;
+        Ok(row.map(|(raw,)| raw))
+    }
+
+    /// Replace the user's app inventory. One statement, so a reader sees the
+    /// previous inventory or this one.
+    pub async fn put_extension_inventory(
+        &self,
+        user_id: i64,
+        inventory: &[u8],
+        now: i64,
+    ) -> Result<(), String> {
+        sqlx::query(
+            "INSERT INTO extension_inventories (user_id, inventory, updated_at) VALUES (?, ?, ?)
+             ON CONFLICT (user_id) DO UPDATE SET inventory = excluded.inventory,
+                                                 updated_at = excluded.updated_at",
+        )
+        .bind(user_id)
+        .bind(inventory)
+        .bind(now)
+        .execute(self.pool())
+        .await
+        .map_err(|e| e.to_string())?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -497,5 +539,51 @@ mod tests {
             db.get_setting(bob.id, "theme").await.unwrap().unwrap(),
             "\"light\""
         );
+    }
+
+    #[tokio::test]
+    async fn extension_inventories_are_per_user_bounded_and_replaced_whole() {
+        let db = db().await;
+        let alice = db.upsert_user("i", "alice", "", "", 1).await.unwrap();
+        let bob = db.upsert_user("i", "bob", "", "", 1).await.unwrap();
+        assert_eq!(
+            db.get_extension_inventory(alice.id, 64).await.unwrap(),
+            None
+        );
+
+        db.put_extension_inventory(alice.id, b"{\"first\":1}", 10)
+            .await
+            .unwrap();
+        db.put_extension_inventory(alice.id, b"{\"second\":2}", 11)
+            .await
+            .unwrap();
+        assert_eq!(
+            db.get_extension_inventory(alice.id, 64)
+                .await
+                .unwrap()
+                .unwrap(),
+            b"{\"second\":2}"
+        );
+        // Only the first `limit` bytes come back: the caller refuses the rest unread.
+        assert_eq!(
+            db.get_extension_inventory(alice.id, 4)
+                .await
+                .unwrap()
+                .unwrap(),
+            b"{\"se"
+        );
+        assert_eq!(db.get_extension_inventory(bob.id, 64).await.unwrap(), None);
+
+        // A deleted account takes its inventory with it.
+        sqlx::query("DELETE FROM users WHERE id = ?")
+            .bind(alice.id)
+            .execute(db.pool())
+            .await
+            .unwrap();
+        let (left,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM extension_inventories")
+            .fetch_one(db.pool())
+            .await
+            .unwrap();
+        assert_eq!(left, 0);
     }
 }

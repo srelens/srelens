@@ -183,4 +183,43 @@ describe("WorkspaceSwitcher", () => {
     expect(panel.textContent).toContain("No workspaces");
     expect(trigger().textContent).toContain("No workspaces");
   });
+
+  describe("colour", () => {
+    const COLOURED = [
+      { id: "prod", name: "Production", clusters: 2, tabs: 11, color: "var(--mark-red)" },
+      { id: "local", name: "Local & staging", clusters: 5, tabs: 2 },
+    ];
+    const swatch = (root: Element) => root.querySelector<HTMLElement>('[data-slot="workspace-color"]');
+
+    it("draws the active workspace's colour on the chip, hidden from assistive tech", () => {
+      setup({ workspaces: COLOURED, activeId: "prod" });
+      expect(swatch(trigger())?.style.background).toBe("var(--mark-red)");
+      expect(swatch(trigger())?.getAttribute("aria-hidden")).toBe("true");
+      expect(trigger().textContent).toContain("Production");
+    });
+
+    it("draws nothing on the chip for a workspace with no colour", () => {
+      setup({ workspaces: COLOURED, activeId: "local" });
+      expect(swatch(trigger())).toBeNull();
+    });
+
+    it("draws each row's colour, and none on a row without one", async () => {
+      await open({ workspaces: COLOURED, activeId: "local" });
+      expect(swatch(row(/Production/))?.style.background).toBe("var(--mark-red)");
+      expect(swatch(row(/Local & staging/))).toBeNull();
+    });
+  });
+
+  it("offers to manage workspaces when the caller can, and closes after", async () => {
+    const onManage = vi.fn();
+    await open({ onManage });
+    await userEvent.click(screen.getByRole("button", { name: "Manage workspaces…" }));
+    expect(onManage).toHaveBeenCalledTimes(1);
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  });
+
+  it("offers no manage action when the caller has none", async () => {
+    await open({ onCreate: vi.fn() });
+    expect(screen.queryByRole("button", { name: "Manage workspaces…" })).toBeNull();
+  });
 });

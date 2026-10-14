@@ -1,0 +1,440 @@
+mod common;
+
+use common::{FakeHost, WAIT};
+use serde::Deserialize;
+use serde_json::{json, Value};
+use srelens_sidecar::{Context, Error, Frames, Sidecar, StreamClosed};
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
+use tokio::sync::mpsc;
+
+#[derive(Deserialize)]
+struct Count {
+    to: u64,
+}
+
+async fn count(ctx: Context, input: Count, frames: Frames) -> Result<(), Error> {
+    for n in 0..input.to {
+        if ctx.is_cancelled() {
+            break;
+        }
+        frames.send(&n).await?;
+    }
+    Ok(())
+}
+
+fn sidecar() -> Sidecar {
+    Sidecar::new("t", "1")
+        .stream("count", count)
+        .stream(
+            "fail",
+            |_ctx: Context, _: Value, frames: Frames| async move {
+                frames.send(&"first").await?;
+                Err(Error::internal("the registry did not answer"))
+            },
+        )
+        .stream(
+            "forever",
+            |ctx: Context, _: Value, frames: Frames| async move {
+                let mut n = 0u64;
+                while frames.send(&n).await.is_ok() {
+                    n += 1;
+                    tokio::task::yield_now().await;
+                    if ctx.is_cancelled() {
+                        break;
+                    }
+                }
+                Ok(())
+            },
+        )
+}
+
+#[tokio::test]
+async fn a_stream_is_acknowledged_then_sends_its_frames_then_closes() {
+    let mut host = FakeHost::start(sidecar());
+    host.initialize().await;
+    let id = host
+        .request(
+            "stream/open",
+            json!({"stream": 1, "method": "count", "params": {"to": 3}}),
+        )
+        .await;
+    assert_eq!(host.answer(id).await["result"], json!({}));
+    for n in 0..3 {
+        assert_eq!(
+            host.recv().await,
+            json!({"jsonrpc": "2.0", "method": "stream/data", "params": {"stream": 1, "data": n}})
+        );
+    }
+    assert_eq!(
+        host.recv().await,
+        json!({"jsonrpc": "2.0", "method": "stream/close", "params": {"stream": 1}})
+    );
+    host.finish().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_failing_stream_ends_with_its_error() {
+    let mut host = FakeHost::start(sidecar());
+    host.initialize().await;
+    let id = host
+        .request(
+            "stream/open",
+            json!({"stream": 2, "method": "fail", "params": {}}),
+        )
+        .await;
+    host.answer(id).await;
+    assert_eq!(host.recv().await["params"]["data"], "first");
+    assert_eq!(
+        host.recv().await,
+        json!({"jsonrpc": "2.0", "method": "stream/error", "params": {"stream": 2, "message": "the registry did not answer"}})
+    );
+    host.finish().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_stream_handler_that_panics_ends_its_stream_with_one_error_and_the_sidecar_goes_on() {
+    let sidecar = Sidecar::new("t", "1").stream(
+        "boom",
+        |_ctx: Context, _: Value, frames: Frames| async move {
+            frames.send(&"first").await?;
+            if true {
+                panic!("nil map");
+            }
+            Ok::<(), Error>(())
+        },
+    );
+    let mut host = FakeHost::start(sidecar);
+    host.initialize().await;
+    let id = host
+        .request(
+            "stream/open",
+            json!({"stream": 10, "method": "boom", "params": {}}),
+        )
+        .await;
+    host.answer(id).await;
+    assert_eq!(
+        host.recv().await,
+        json!({"jsonrpc": "2.0", "method": "stream/data", "params": {"stream": 10, "data": "first"}})
+    );
+    assert_eq!(
+        host.recv().await,
+        json!({"jsonrpc": "2.0", "method": "stream/error", "params": {"stream": 10, "message": "the stream `boom` panicked"}})
+    );
+    // The sidecar still serves. That the stream was ended once is what
+    // `finish` shows, failing on any line not read: `health`'s answer can go
+    // ahead of a queued line.
+    let health = host.request("health", json!({})).await;
+    assert_eq!(host.answer(health).await["result"], json!({}));
+    host.finish().await.unwrap();
+}
+
+#[tokio::test]
+async fn an_unknown_stream_or_bad_input_is_refused_before_it_opens() {
+    let mut host = FakeHost::start(sidecar());
+    host.initialize().await;
+    let id = host
+        .request(
+            "stream/open",
+            json!({"stream": 3, "method": "nope", "params": {}}),
+        )
+        .await;
+    assert_eq!(host.answer(id).await["error"]["code"], -32601);
+    let id = host
+        .request(
+            "stream/open",
+            json!({"stream": 4, "method": "count", "params": {"to": "three"}}),
+        )
+        .await;
+    assert_eq!(host.answer(id).await["error"]["code"], -32602);
+    let health = host.request("health", json!({})).await;
+    assert_eq!(
+        host.answer(health).await["result"],
+        json!({}),
+        "nothing else was sent"
+    );
+    host.finish().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_cancelled_stream_stops_and_sends_no_terminal_frame() {
+    let mut host = FakeHost::start(sidecar());
+    host.initialize().await;
+    let id = host
+        .request(
+            "stream/open",
+            json!({"stream": 5, "method": "forever", "params": {}}),
+        )
+        .await;
+    host.answer(id).await;
+    host.recv().await;
+    host.notify("stream/cancel", json!({"stream": 5})).await;
+    // Fenced by a request answered in the same queue as the frames, which is
+    // first in, first out: unlike `health`, whose answer goes ahead of queued
+    // frames, this answer arrives only after every frame queued before it.
+    let fence = host
+        .request(
+            "stream/open",
+            json!({"stream": 6, "method": "nope", "params": {}}),
+        )
+        .await;
+    loop {
+        let line = host.recv().await;
+        if line.get("id") == Some(&json!(fence)) {
+            assert_eq!(line["error"]["code"], -32601, "the fence: {line}");
+            break;
+        }
+        assert_eq!(
+            line["method"], "stream/data",
+            "only frames queued before the cancel: {line}"
+        );
+    }
+    // Then at most the one frame that was mid-send when the cancel landed,
+    // and never a close or an error: the stream stopped.
+    let mut stragglers = 0;
+    while let Some(line) = host
+        .next_within(std::time::Duration::from_millis(300))
+        .await
+    {
+        assert_eq!(
+            line["method"], "stream/data",
+            "no terminal frame after a cancel: {line}"
+        );
+        stragglers += 1;
+        assert!(stragglers <= 1, "the stream kept sending after its cancel");
+    }
+    host.finish().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_stream_whose_error_is_too_large_still_ends_with_an_error_frame() {
+    let sidecar = Sidecar::new("t", "1").stream(
+        "too-large-error",
+        |_ctx: Context, _: Value, _frames: Frames| async move {
+            Err(Error::internal("x".repeat(5 * 1024 * 1024)))
+        },
+    );
+    let mut host = FakeHost::start(sidecar);
+    host.initialize().await;
+    let id = host
+        .request(
+            "stream/open",
+            json!({"stream": 7, "method": "too-large-error", "params": {}}),
+        )
+        .await;
+    host.answer(id).await;
+    let end = host.recv().await;
+    assert_eq!(end["method"], "stream/error");
+    assert_eq!(end["params"]["stream"], 7);
+    assert!(
+        end["params"]["message"].as_str().unwrap().contains("4 MiB"),
+        "{end}"
+    );
+    host.finish().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_frame_that_cannot_be_serialized_says_so() {
+    let captured: Arc<Mutex<Option<StreamClosed>>> = Arc::new(Mutex::new(None));
+    let captured_in_handler = captured.clone();
+    let sidecar = Sidecar::new("t", "1").stream(
+        "unserializable",
+        move |_ctx: Context, _: Value, frames: Frames| {
+            let captured = captured_in_handler.clone();
+            async move {
+                let mut m: HashMap<(u8, u8), u8> = HashMap::new();
+                m.insert((1, 2), 3);
+                let error = frames.send(&m).await.unwrap_err();
+                *captured.lock().unwrap() = Some(error.clone());
+                Err(error.into())
+            }
+        },
+    );
+    let mut host = FakeHost::start(sidecar);
+    host.initialize().await;
+    let id = host
+        .request(
+            "stream/open",
+            json!({"stream": 8, "method": "unserializable", "params": {}}),
+        )
+        .await;
+    host.answer(id).await;
+    let end = host.recv().await;
+    assert_eq!(end["method"], "stream/error");
+    assert!(
+        end["params"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("could not be serialized"),
+        "{end}"
+    );
+    assert!(
+        matches!(
+            captured.lock().unwrap().take(),
+            Some(StreamClosed::Invalid(_))
+        ),
+        "expected StreamClosed::Invalid"
+    );
+    host.finish().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_frame_over_the_message_limit_is_refused_to_the_handler() {
+    let sidecar = Sidecar::new("t", "1").stream(
+        "big",
+        |_ctx: Context, _: Value, frames: Frames| async move {
+            let refused = frames.send(&"x".repeat(5 * 1024 * 1024)).await.unwrap_err();
+            Err(Error::internal(refused.to_string()))
+        },
+    );
+    let mut host = FakeHost::start(sidecar);
+    host.initialize().await;
+    let id = host
+        .request(
+            "stream/open",
+            json!({"stream": 6, "method": "big", "params": {}}),
+        )
+        .await;
+    host.answer(id).await;
+    let end = host.recv().await;
+    assert_eq!(end["method"], "stream/error");
+    assert!(
+        end["params"]["message"].as_str().unwrap().contains("4 MiB"),
+        "{end}"
+    );
+    host.finish().await.unwrap();
+}
+
+/// How many frames `flood` sends.
+const FLOOD: u64 = 200;
+
+/// The SDK's queue holds 64 lines, and its writer one more it is writing.
+const QUEUED: u64 = 64;
+
+/// A sidecar whose stream `flood` sends [`FLOOD`] frames as fast as they are
+/// queued, telling `sent` the number of each once it is.
+fn flooding(sent: mpsc::UnboundedSender<u64>) -> Sidecar {
+    Sidecar::new("t", "1").stream("flood", move |_ctx: Context, _: Value, frames: Frames| {
+        let sent = sent.clone();
+        async move {
+            for n in 0..FLOOD {
+                frames.send(&n).await?;
+                let _ = sent.send(n);
+            }
+            Ok::<_, Error>(())
+        }
+    })
+}
+
+/// Open `flood` as stream 1 over a pipe too small to hold one frame, and
+/// return once the SDK's queue is full of its frames: the writer is held on
+/// the first, until the test reads.
+async fn flooded() -> FakeHost {
+    let (sent_tx, mut sent) = mpsc::unbounded_channel();
+    let mut host = FakeHost::start_with_pipe(flooding(sent_tx), 16);
+    host.initialize().await;
+    let id = host
+        .request(
+            "stream/open",
+            json!({"stream": 1, "method": "flood", "params": {}}),
+        )
+        .await;
+    host.answer(id).await;
+    loop {
+        let n = tokio::time::timeout(WAIT, sent.recv())
+            .await
+            .expect("the stream queued its frames in time")
+            .expect("the stream is still running");
+        if n + 1 >= QUEUED {
+            return host;
+        }
+    }
+}
+
+#[tokio::test]
+async fn health_is_answered_ahead_of_a_full_queue_of_frames() {
+    let mut host = flooded().await;
+    let health = host.request("health", json!({})).await;
+    let mut ahead = 0;
+    loop {
+        let line = host.recv().await;
+        if line.get("id") == Some(&json!(health)) {
+            assert_eq!(line["result"], json!({}));
+            break;
+        }
+        assert_eq!(line["method"], "stream/data", "{line}");
+        ahead += 1;
+    }
+    // The frame the writer was already writing, and perhaps the next before
+    // the answer was queued; never the queue's worth.
+    assert!(
+        ahead < QUEUED / 2,
+        "{ahead} frames were written ahead of the health answer"
+    );
+    for _ in ahead..FLOOD {
+        assert_eq!(host.recv().await["method"], "stream/data");
+    }
+    assert_eq!(host.recv().await["method"], "stream/close");
+    host.finish().await.unwrap();
+}
+
+#[tokio::test]
+async fn the_shutdown_answer_follows_the_frames_queued_before_it_and_nothing_follows_it() {
+    let mut host = flooded().await;
+    let shutdown = host.request("shutdown", json!({})).await;
+    let mut ahead = 0;
+    loop {
+        let line = host.recv().await;
+        if line.get("id") == Some(&json!(shutdown)) {
+            assert_eq!(line["result"], json!({}));
+            break;
+        }
+        assert_eq!(line["method"], "stream/data", "{line}");
+        ahead += 1;
+    }
+    assert!(
+        ahead >= QUEUED,
+        "only {ahead} frames were written ahead of the shutdown answer"
+    );
+    // `ended` fails on any line after it: a frame, or the stream's close.
+    host.ended().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_frames_clone_kept_past_its_handler_sends_nothing_after_the_closing_frame() {
+    let kept: Arc<Mutex<Option<Frames>>> = Arc::new(Mutex::new(None));
+    let keep = kept.clone();
+    let sidecar =
+        Sidecar::new("t", "1").stream("leak", move |_ctx: Context, _: Value, frames: Frames| {
+            let keep = keep.clone();
+            async move {
+                *keep.lock().unwrap() = Some(frames.clone());
+                Ok::<_, Error>(())
+            }
+        });
+    let mut host = FakeHost::start(sidecar);
+    host.initialize().await;
+    let id = host
+        .request(
+            "stream/open",
+            json!({"stream": 9, "method": "leak", "params": {}}),
+        )
+        .await;
+    host.answer(id).await;
+    assert_eq!(
+        host.recv().await,
+        json!({"jsonrpc": "2.0", "method": "stream/close", "params": {"stream": 9}})
+    );
+    let frames = kept
+        .lock()
+        .unwrap()
+        .take()
+        .expect("the handler kept a clone");
+    assert_eq!(
+        frames.send(&"late").await,
+        Err(StreamClosed::Finished),
+        "a frame was queued after the stream's closing frame"
+    );
+    // `finish` also fails on any line not read, such as a late stream/data.
+    host.finish().await.unwrap();
+}

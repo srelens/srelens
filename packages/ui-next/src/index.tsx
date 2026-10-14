@@ -59,7 +59,7 @@ function useHash(): string {
  * `onExit` is the way back to the classic design, and it is now reached from
  * two places rather than one. It shipped when `Settings` did not exist in this
  * tree, so without it someone who opted in had no route out of the app except
- * editing localStorage — which is why the Placeholder's "Open in classic" is
+ * editing localStorage — which is why the Placeholder's "Open in Classic (deprecated)" is
  * wired to it. `screens/Settings.tsx` exists now, and its Appearance pane's
  * `Design` panel is the way out a reader will actually look for; both go
  * through this one callback, so there is one exit and not two.
@@ -70,6 +70,7 @@ export function NextApp({
   onToggleTheme = () => {},
   controls = "none",
   brandMarkSrc,
+  windowLabel = "main",
 }: {
   onExit: (route: string, context?: string) => Promise<string | null> | string | null;
   /** Display names of the screens that exist in the new design. */
@@ -92,12 +93,16 @@ export function NextApp({
    * is what its own comment calls "a state, not an error to report".
    */
   brandMarkSrc?: string;
+  /**
+   * The window's Tauri label, used to isolate its saved workspaces.
+   */
+  windowLabel?: string;
 }) {
   const [error, setError] = useState<string | null>(null);
 
   async function leave(route: string, context?: string) {
-    // Rendered here rather than raised as a toast: the toast host lives in the
-    // classic tree, so a failure on the way out would have been invisible and
+    // Rendered here rather than raised as a toast: the toast host lived only in the
+    // classic tree then (#374), so a failure on the way out would have been invisible and
     // this button would have looked inert. (#314 review)
     setError((await onExit(route, context)) ?? null);
   }
@@ -132,6 +137,7 @@ export function NextApp({
             active={!gallery}
             controls={controls}
             brandMarkSrc={brandMarkSrc}
+            windowLabel={windowLabel}
             onToggleTheme={onToggleTheme}
             onOpenInClassic={leave}
             onOpenGallery={() => {
@@ -153,3 +159,4 @@ export function NextApp({
     </div>
   );
 }
+export { ExtensionManager, ExtensionResults, ExtensionResourceSlot } from "./extensions/Extensions";

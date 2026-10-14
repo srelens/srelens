@@ -108,13 +108,59 @@ const ALLOWED_TOOLS: &str = "mcp__srelens__*";
 /// Residual risk: this is a deny-list, not deny-by-default — a new built-in
 /// tool added in a future Claude Code version would not be covered until
 /// this list is updated. Tracked as a known gap, not solved here.
-const DISALLOWED_TOOLS: &str = "Bash Read Edit Write NotebookEdit Glob Grep WebFetch WebSearch Task";
+const DISALLOWED_TOOLS: &str =
+    "Bash Read Edit Write NotebookEdit Glob Grep WebFetch WebSearch Task";
 
 /// Establishes the assistant's identity and scope. Deliberately names no
 /// local path and makes no mention of srelens's own source, repo, or
 /// branches — it must not leak anything about the machine srelens runs on,
 /// only the cluster-operating role the agent is boxed into.
-pub const BASE_SYSTEM_PROMPT: &str = "You are srelens's Kubernetes assistant. Investigate and operate the selected cluster(s) ONLY through the srelens MCP tools (the mcp__srelens__* tools). You have no access to the local filesystem, shell, git, or network beyond those tools; do not attempt to read files or run commands. Be concise. Anything that changes cluster state will prompt the user for confirmation.";
+pub const BASE_SYSTEM_PROMPT: &str = concat!(
+    "You are srelens's Kubernetes assistant. Investigate and operate the selected cluster(s) ",
+    "ONLY through the srelens MCP tools (the mcp__srelens__* tools). You have no access to the ",
+    "local filesystem, shell, git, or network beyond those tools; do not attempt to read files ",
+    "or run commands. Be concise. Anything that changes cluster state will prompt the user ",
+    "for confirmation.\n\n",
+    "Core Investigation Rules:\n",
+    "1. Always query live cluster state: Cluster state is dynamic. Never answer questions about ",
+    "resource existence, status, capacity, labels, taints, or scheduling feasibility from memory, ",
+    "assumptions, or prior conversation turns. Always execute the appropriate MCP tool to inspect ",
+    "the live cluster freshly before answering.\n",
+    "2. Say what you know, not what you guess: Summary listing tools (such as listNodes or listPods) ",
+    "return abridged data and omit full metadata.labels, annotations, extended resources, and complete ",
+    "container specs. If a field or label is not displayed in a summary list, NEVER assert that it does ",
+    "not exist on the resource. To read it across many resources, call listResource once with `fields` ",
+    "(kubectl-style JSONPath such as \".status.allocatable\" or \".spec.taints\"), narrowing the set with ",
+    "labelSelector or fieldSelector; do not call getObject once per item. For one specific resource, ",
+    "call getObject (with `fields` when only part of it is needed) or getManifest.\n",
+    "3. Zero-hallucination component verification: NEVER name, diagnose, or blame a specific infrastructure ",
+    "component (such as Cilium, Calico, Istio, MetalLB, CoreDNS, Vault) without confirming its presence ",
+    "in the cluster first via listPods or getObject. On managed Kubernetes (GKE, EKS, AKS), verify the native ",
+    "cloud provider components (e.g. GKE Datapath V2 with anetd/netd) rather than assuming open-source defaults.\n",
+    "4. Tool failure transparency: If an MCP tool call fails or errors, state clearly that the tool call ",
+    "failed and try an alternative (e.g. getObject, getManifest, listEndpoints, listEndpointSlices). NEVER ",
+    "fabricate a cluster issue or speculate on cluster health to explain away a failed tool call.\n",
+    "5. Cross-layer incident correlation: When investigating why pods restarted, disappeared, or moved:\n",
+    "- Young pods (<30m) with 0 restart count do not establish why they were created. Check events and owner history before attributing their creation to eviction, replacement, scaling, or a rollout.\n",
+    "- Trace the timeline: Check listEvents for TaintManagerEviction, Killing, SuccessfulCreate, and node NodeNotReady events.\n",
+    "- Inspect candidate nodes with listEvents or getObject for kernel OOMKilling, MemoryPressure, DiskPressure, and ReadOnlyFileSystemDetected.\n",
+    "- Distinguish between application rollouts (new ReplicaSet revision or image) and infrastructure-level pod rescheduling.\n",
+    "6. Compute and scheduling headroom: A node's allocatable capacity is the ceiling for all pods, ",
+    "NOT free or available headroom. Nodes always run system daemonsets and existing workloads. ",
+    "Never calculate whether a pod will fit by subtracting its requests from node allocatable ",
+    "capacity alone. Always inspect the running pods on candidate nodes (via podsOnNode or ",
+    "listPods) and sum their requested CPU and memory:\n",
+    "Schedulable Headroom = Allocatable - Sum(Running Pod Requests).\n",
+    "Only state a pod can schedule if Schedulable Headroom >= Pod Request, and all node affinities, ",
+    "tolerations, and taints match.\n",
+    "7. Service endpoints and network discovery: To inspect service endpoints, call listEndpoints ",
+    "or listEndpointSlices. Check whether endpoints exist, are ready, and match selector-backed pods.\n",
+    "8. GitOps and ArgoCD in Multi-Cluster (Hub-and-Spoke): If an ArgoCD Hub Context is designated, ",
+    "or if the active cluster has no argoproj.io CRDs (such as Application), ArgoCD applications ",
+    "and GitOps controllers reside on the Hub cluster while workloads run on the spoke cluster. ",
+    "Query the ArgoCD Hub context with \"context\": \"<hub_context>\" to inspect Application definitions, ",
+    "sync status, and deployment sources for workloads on the active cluster.",
+);
 
 /// Build the Claude Code argv. `resume` carries a prior session id for a
 /// follow-up turn. Prompt is the trailing positional so it can't be mistaken
@@ -163,7 +209,11 @@ pub fn claude_command(
     args.push(prompt.to_string());
     // Claude passes its MCP bearer token via the config file at
     // `mcp_config_path`, never via env.
-    AgentCommand { program: binary.to_string(), args, env: Vec::new() }
+    AgentCommand {
+        program: binary.to_string(),
+        args,
+        env: Vec::new(),
+    }
 }
 
 /// Escape a string for embedding inside a double-quoted TOML value (used for
@@ -222,7 +272,10 @@ pub fn codex_command(
         "-C".to_string(),
         empty_cwd.to_string(),
         "-c".to_string(),
-        format!("mcp_servers.srelens.url=\"{}\"", escape_toml_string(mcp_url)),
+        format!(
+            "mcp_servers.srelens.url=\"{}\"",
+            escape_toml_string(mcp_url)
+        ),
         "-c".to_string(),
         format!("mcp_servers.srelens.bearer_token_env_var=\"{CODEX_TOKEN_ENV}\""),
         // Surface the model's reasoning as `reasoning` items in the JSON
@@ -380,13 +433,24 @@ mod tests {
 
     #[test]
     fn claude_command_points_the_cli_at_our_mcp_server() {
-        let cmd = claude_command("/usr/bin/claude", "Why is web-0 failing?", "/tmp/mcp.json", None);
+        let cmd = claude_command(
+            "/usr/bin/claude",
+            "Why is web-0 failing?",
+            "/tmp/mcp.json",
+            None,
+        );
         assert_eq!(cmd.program, "/usr/bin/claude");
         // Non-interactive, streaming, our config, permissions bypassed so tool
         // calls don't block on Claude's own allowlist (srelens gates them).
         assert!(cmd.args.contains(&"-p".to_string()));
-        assert!(cmd.args.windows(2).any(|w| w == ["--output-format", "stream-json"]));
-        assert!(cmd.args.windows(2).any(|w| w == ["--mcp-config", "/tmp/mcp.json"]));
+        assert!(cmd
+            .args
+            .windows(2)
+            .any(|w| w == ["--output-format", "stream-json"]));
+        assert!(cmd
+            .args
+            .windows(2)
+            .any(|w| w == ["--mcp-config", "/tmp/mcp.json"]));
         assert!(cmd.args.contains(&"--verbose".to_string()));
         // The prompt is the trailing positional argument.
         assert_eq!(cmd.args.last().unwrap(), "Why is web-0 failing?");
@@ -403,7 +467,12 @@ mod tests {
 
     #[test]
     fn a_resume_id_adds_the_resume_flag() {
-        let cmd = claude_command("/usr/bin/claude", "and now?", "/tmp/mcp.json", Some("sess-123"));
+        let cmd = claude_command(
+            "/usr/bin/claude",
+            "and now?",
+            "/tmp/mcp.json",
+            Some("sess-123"),
+        );
         assert!(cmd.args.windows(2).any(|w| w == ["--resume", "sess-123"]));
     }
 
@@ -439,7 +508,12 @@ mod tests {
 
     #[test]
     fn the_prompt_stays_the_trailing_positional_with_all_new_flags() {
-        let cmd = claude_command("/usr/bin/claude", "Why is web-0 failing?", "/tmp/mcp.json", None);
+        let cmd = claude_command(
+            "/usr/bin/claude",
+            "Why is web-0 failing?",
+            "/tmp/mcp.json",
+            None,
+        );
         assert_eq!(cmd.args.last().unwrap(), "Why is web-0 failing?");
     }
 
@@ -458,14 +532,40 @@ mod tests {
         assert!(!BASE_SYSTEM_PROMPT.contains("/home"));
         assert!(!BASE_SYSTEM_PROMPT.to_lowercase().contains("repo"));
         assert!(!BASE_SYSTEM_PROMPT.to_lowercase().contains("branch"));
-        assert!(!BASE_SYSTEM_PROMPT.to_lowercase().contains("filesystem-access"));
+        assert!(!BASE_SYSTEM_PROMPT
+            .to_lowercase()
+            .contains("filesystem-access"));
+        // Anti-hallucination and operational guardrails.
+        assert!(BASE_SYSTEM_PROMPT.contains("live cluster state"));
+        assert!(BASE_SYSTEM_PROMPT.contains("Allocatable"));
+        assert!(BASE_SYSTEM_PROMPT.contains("podsOnNode"));
+        assert!(BASE_SYSTEM_PROMPT.contains("getObject"));
+        assert!(BASE_SYSTEM_PROMPT.contains("Schedulable Headroom"));
+        assert!(BASE_SYSTEM_PROMPT.contains("Zero-hallucination"));
+        assert!(BASE_SYSTEM_PROMPT.contains("Cross-layer incident correlation"));
+        assert!(BASE_SYSTEM_PROMPT.contains("TaintManagerEviction"));
+        assert!(BASE_SYSTEM_PROMPT.contains("listEndpoints"));
+    }
+
+    /// A field a summary lacks is read across the set in one projected list,
+    /// not with one full-object fetch per item — the fan-out the old rule
+    /// prescribed cost a whole Node (every cached image included) per node.
+    #[test]
+    fn base_system_prompt_reads_a_missing_field_with_one_projected_list() {
+        assert!(BASE_SYSTEM_PROMPT.contains("listResource"));
+        assert!(BASE_SYSTEM_PROMPT.contains("`fields`"));
+        assert!(BASE_SYSTEM_PROMPT.contains("labelSelector"));
+        assert!(BASE_SYSTEM_PROMPT.contains("not call getObject once per item"));
     }
 
     #[test]
     fn the_mcp_config_is_an_http_server_entry_with_the_bearer_token() {
         let cfg = McpConfig::http("http://127.0.0.1:8765/mcp", "deadbeef");
         let v = serde_json::to_value(&cfg).unwrap();
-        assert_eq!(v["mcpServers"]["srelens"]["url"], "http://127.0.0.1:8765/mcp");
+        assert_eq!(
+            v["mcpServers"]["srelens"]["url"],
+            "http://127.0.0.1:8765/mcp"
+        );
         assert_eq!(
             v["mcpServers"]["srelens"]["headers"]["Authorization"],
             "Bearer deadbeef"
@@ -486,8 +586,14 @@ mod tests {
     #[test]
     fn codex_command_disables_the_shell_and_unified_exec_tools() {
         let cmd = codex_cmd();
-        assert!(cmd.args.windows(2).any(|w| w == ["--disable", "shell_tool"]));
-        assert!(cmd.args.windows(2).any(|w| w == ["--disable", "unified_exec"]));
+        assert!(cmd
+            .args
+            .windows(2)
+            .any(|w| w == ["--disable", "shell_tool"]));
+        assert!(cmd
+            .args
+            .windows(2)
+            .any(|w| w == ["--disable", "unified_exec"]));
     }
 
     #[test]
@@ -515,15 +621,17 @@ mod tests {
             w[0] == "-c" && w[1] == "mcp_servers.srelens.url=\"http://127.0.0.1:8765/mcp\""
         }));
         assert!(cmd.args.windows(2).any(|w| {
-            w[0] == "-c"
-                && w[1] == "mcp_servers.srelens.bearer_token_env_var=\"SRELENS_MCP_TOKEN\""
+            w[0] == "-c" && w[1] == "mcp_servers.srelens.bearer_token_env_var=\"SRELENS_MCP_TOKEN\""
         }));
     }
 
     #[test]
     fn codex_command_carries_the_token_only_in_env_never_in_argv() {
         let cmd = codex_cmd();
-        assert_eq!(cmd.env, vec![(CODEX_TOKEN_ENV.to_string(), "deadbeef".to_string())]);
+        assert_eq!(
+            cmd.env,
+            vec![(CODEX_TOKEN_ENV.to_string(), "deadbeef".to_string())]
+        );
         assert!(!cmd.args.iter().any(|a| a.contains("deadbeef")));
     }
 
@@ -537,8 +645,7 @@ mod tests {
             "/tmp/srelens-empty-cwd",
             &["/tmp/img1.png".to_string(), "/tmp/img2.png".to_string()],
         );
-        let i_pairs: Vec<&[String]> =
-            cmd.args.windows(2).filter(|w| w[0] == "-i").collect();
+        let i_pairs: Vec<&[String]> = cmd.args.windows(2).filter(|w| w[0] == "-i").collect();
         assert_eq!(i_pairs.len(), 2);
         assert_eq!(i_pairs[0][1], "/tmp/img1.png");
         assert_eq!(i_pairs[1][1], "/tmp/img2.png");
@@ -619,9 +726,11 @@ mod tests {
             "/tmp/srelens-empty-cwd",
             &[],
         );
-        let expected =
-            "mcp_servers.srelens.url=\"http://127.0.0.1:8765/mcp?x=\\\"evil\\\"\\\\\"";
-        assert!(cmd.args.windows(2).any(|w| w[0] == "-c" && w[1] == expected));
+        let expected = "mcp_servers.srelens.url=\"http://127.0.0.1:8765/mcp?x=\\\"evil\\\"\\\\\"";
+        assert!(cmd
+            .args
+            .windows(2)
+            .any(|w| w[0] == "-c" && w[1] == expected));
     }
 
     fn cursor_cmd() -> AgentCommand {
@@ -692,9 +801,15 @@ mod tests {
         let cmd = cursor_cmd();
         assert_eq!(
             cmd.env,
-            vec![(CURSOR_CONFIG_DIR_ENV.to_string(), "/tmp/srelens-cursor-config".to_string())]
+            vec![(
+                CURSOR_CONFIG_DIR_ENV.to_string(),
+                "/tmp/srelens-cursor-config".to_string()
+            )]
         );
-        assert!(cmd.args.iter().all(|a| !a.contains("srelens-cursor-config")));
+        assert!(cmd
+            .args
+            .iter()
+            .all(|a| !a.contains("srelens-cursor-config")));
     }
 
     #[test]
@@ -753,8 +868,14 @@ mod tests {
     fn cursor_mcp_json_points_at_our_server_with_the_bearer_token() {
         let s = cursor_mcp_json("http://127.0.0.1:8765/mcp", "deadbeef");
         let v: serde_json::Value = serde_json::from_str(&s).unwrap();
-        assert_eq!(v["mcpServers"]["srelens"]["url"], "http://127.0.0.1:8765/mcp");
-        assert_eq!(v["mcpServers"]["srelens"]["headers"]["Authorization"], "Bearer deadbeef");
+        assert_eq!(
+            v["mcpServers"]["srelens"]["url"],
+            "http://127.0.0.1:8765/mcp"
+        );
+        assert_eq!(
+            v["mcpServers"]["srelens"]["headers"]["Authorization"],
+            "Bearer deadbeef"
+        );
     }
 
     #[test]
@@ -765,6 +886,20 @@ mod tests {
         assert_eq!(
             v["mcpServers"]["srelens"]["headers"]["Authorization"],
             format!("Bearer {token}")
+        );
+    }
+
+    #[test]
+    fn prompt_does_not_categorically_attribute_young_pods_to_eviction() {
+        assert!(
+            !BASE_SYSTEM_PROMPT.contains("they were evicted/rescheduled by Kubernetes"),
+            "prompt must not speculate or categorically attribute young pods to eviction"
+        );
+        assert!(
+            BASE_SYSTEM_PROMPT.contains(
+                "Young pods (<30m) with 0 restart count do not establish why they were created"
+            ),
+            "prompt must guide assistant to verify before concluding eviction"
         );
     }
 }

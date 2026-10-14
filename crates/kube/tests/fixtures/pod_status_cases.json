@@ -1,0 +1,427 @@
+[
+  {
+    "name": "a crash-looping container's waiting reason beats the phase",
+    "status": "CrashLoopBackOff",
+    "pod": {
+      "metadata": { "name": "crasher-6d8f9b7c4-x2x9k", "namespace": "default" },
+      "spec": { "containers": [{ "name": "crasher" }] },
+      "status": {
+        "phase": "Running",
+        "containerStatuses": [
+          { "name": "crasher", "image": "busybox:1.36", "imageID": "", "ready": false, "restartCount": 6,
+            "state": { "waiting": { "reason": "CrashLoopBackOff", "message": "back-off 2m40s restarting failed container=crasher" } },
+            "lastState": { "terminated": { "exitCode": 1, "reason": "Error" } } }
+        ]
+      }
+    }
+  },
+  {
+    "name": "a waiting container with an empty reason says nothing",
+    "status": "CrashLoopBackOff",
+    "pod": {
+      "metadata": { "name": "web-1", "namespace": "default" },
+      "spec": { "containers": [{ "name": "shim" }, { "name": "api" }] },
+      "status": {
+        "phase": "Running",
+        "containerStatuses": [
+          { "name": "shim", "image": "shim:1", "imageID": "", "ready": false, "restartCount": 0,
+            "state": { "waiting": { "reason": "" } } },
+          { "name": "api", "image": "api:1", "imageID": "", "ready": false, "restartCount": 5,
+            "state": { "waiting": { "reason": "CrashLoopBackOff" } } }
+        ]
+      }
+    }
+  },
+  {
+    "name": "a terminated container's reason beats the phase",
+    "status": "OOMKilled",
+    "pod": {
+      "metadata": { "name": "web-1", "namespace": "default" },
+      "spec": { "containers": [{ "name": "api" }] },
+      "status": {
+        "phase": "Running",
+        "containerStatuses": [
+          { "name": "api", "image": "api:1", "imageID": "", "ready": false, "restartCount": 0,
+            "state": { "terminated": { "exitCode": 137, "reason": "OOMKilled" } } }
+        ]
+      }
+    }
+  },
+  {
+    "name": "an exit code stands in for a missing reason",
+    "status": "ExitCode:1",
+    "pod": {
+      "metadata": { "name": "web-1", "namespace": "default" },
+      "spec": { "containers": [{ "name": "api" }] },
+      "status": {
+        "phase": "Running",
+        "containerStatuses": [
+          { "name": "api", "image": "api:1", "imageID": "", "ready": false, "restartCount": 0,
+            "state": { "terminated": { "exitCode": 1 } } }
+        ]
+      }
+    }
+  },
+  {
+    "name": "a signal stands in for a missing reason",
+    "status": "Signal:9",
+    "pod": {
+      "metadata": { "name": "web-1", "namespace": "default" },
+      "spec": { "containers": [{ "name": "api" }] },
+      "status": {
+        "phase": "Running",
+        "containerStatuses": [
+          { "name": "api", "image": "api:1", "imageID": "", "ready": false, "restartCount": 0,
+            "state": { "terminated": { "exitCode": 137, "signal": 9 } } }
+        ]
+      }
+    }
+  },
+  {
+    "name": "the first container with something to say has the last word",
+    "status": "Error",
+    "pod": {
+      "metadata": { "name": "web-1", "namespace": "default" },
+      "spec": { "containers": [{ "name": "app" }, { "name": "sidecar" }] },
+      "status": {
+        "phase": "Running",
+        "containerStatuses": [
+          { "name": "app", "image": "app:1", "imageID": "", "ready": false, "restartCount": 0,
+            "state": { "terminated": { "exitCode": 1, "reason": "Error" } } },
+          { "name": "sidecar", "image": "sidecar:1", "imageID": "", "ready": false, "restartCount": 0,
+            "state": { "waiting": { "reason": "CrashLoopBackOff" } } }
+        ]
+      }
+    }
+  },
+  {
+    "name": "a finished pod reads Completed",
+    "status": "Completed",
+    "pod": {
+      "metadata": { "name": "web-1", "namespace": "default" },
+      "spec": { "containers": [{ "name": "job" }] },
+      "status": {
+        "phase": "Succeeded",
+        "containerStatuses": [
+          { "name": "job", "image": "job:1", "imageID": "", "ready": false, "restartCount": 0,
+            "state": { "terminated": { "exitCode": 0, "reason": "Completed" } } }
+        ]
+      }
+    }
+  },
+  {
+    "name": "Completed beside a running container of a Ready pod reads Running",
+    "status": "Running",
+    "pod": {
+      "metadata": { "name": "web-1", "namespace": "default" },
+      "spec": { "containers": [{ "name": "setup" }, { "name": "server" }] },
+      "status": {
+        "phase": "Running",
+        "conditions": [{ "type": "Ready", "status": "True" }],
+        "containerStatuses": [
+          { "name": "setup", "image": "setup:1", "imageID": "", "ready": false, "restartCount": 0,
+            "state": { "terminated": { "exitCode": 0, "reason": "Completed" } } },
+          { "name": "server", "image": "server:1", "imageID": "", "ready": true, "restartCount": 0,
+            "state": { "running": { "startedAt": "2026-10-03T10:00:00Z" } } }
+        ]
+      }
+    }
+  },
+  {
+    "name": "Completed beside a running container of an unready pod reads NotReady",
+    "status": "NotReady",
+    "pod": {
+      "metadata": { "name": "web-1", "namespace": "default" },
+      "spec": { "containers": [{ "name": "setup" }, { "name": "server" }] },
+      "status": {
+        "phase": "Running",
+        "conditions": [{ "type": "Ready", "status": "False" }],
+        "containerStatuses": [
+          { "name": "setup", "image": "setup:1", "imageID": "", "ready": false, "restartCount": 0,
+            "state": { "terminated": { "exitCode": 0, "reason": "Completed" } } },
+          { "name": "server", "image": "server:1", "imageID": "", "ready": true, "restartCount": 0,
+            "state": { "running": { "startedAt": "2026-10-03T10:00:00Z" } } }
+        ]
+      }
+    }
+  },
+  {
+    "name": "Completed beside a failed container reads the first failure",
+    "status": "Error",
+    "pod": {
+      "metadata": { "name": "web-1", "namespace": "default" },
+      "spec": { "containers": [{ "name": "setup" }, { "name": "worker" }, { "name": "cache" }] },
+      "status": {
+        "phase": "Running",
+        "containerStatuses": [
+          { "name": "setup", "image": "setup:1", "imageID": "", "ready": false, "restartCount": 0,
+            "state": { "terminated": { "exitCode": 0, "reason": "Completed" } } },
+          { "name": "worker", "image": "worker:1", "imageID": "", "ready": false, "restartCount": 0,
+            "state": { "terminated": { "exitCode": 1, "reason": "Error" } } },
+          { "name": "cache", "image": "cache:1", "imageID": "", "ready": false, "restartCount": 0,
+            "state": { "terminated": { "exitCode": 137, "reason": "OOMKilled" } } }
+        ]
+      }
+    }
+  },
+  {
+    "name": "a failure outranks NotReady on an unready pod",
+    "status": "OOMKilled",
+    "pod": {
+      "metadata": { "name": "web-1", "namespace": "default" },
+      "spec": { "containers": [{ "name": "setup" }, { "name": "server" }, { "name": "worker" }] },
+      "status": {
+        "phase": "Running",
+        "conditions": [{ "type": "Ready", "status": "False" }],
+        "containerStatuses": [
+          { "name": "setup", "image": "setup:1", "imageID": "", "ready": false, "restartCount": 0,
+            "state": { "terminated": { "exitCode": 0, "reason": "Completed" } } },
+          { "name": "server", "image": "server:1", "imageID": "", "ready": true, "restartCount": 0,
+            "state": { "running": { "startedAt": "2026-10-03T10:00:00Z" } } },
+          { "name": "worker", "image": "worker:1", "imageID": "", "ready": false, "restartCount": 0,
+            "state": { "terminated": { "exitCode": 137, "reason": "OOMKilled" } } }
+        ]
+      }
+    }
+  },
+  {
+    "name": "a waiting init container speaks first",
+    "status": "Init:CrashLoopBackOff",
+    "pod": {
+      "metadata": { "name": "web-1", "namespace": "default" },
+      "spec": { "initContainers": [{ "name": "migrate" }], "containers": [{ "name": "app" }] },
+      "status": {
+        "phase": "Pending",
+        "initContainerStatuses": [
+          { "name": "migrate", "image": "migrate:1", "imageID": "", "ready": false, "restartCount": 3,
+            "state": { "waiting": { "reason": "CrashLoopBackOff" } } }
+        ],
+        "containerStatuses": [
+          { "name": "app", "image": "app:1", "imageID": "", "ready": false, "restartCount": 0,
+            "state": { "waiting": { "reason": "PodInitializing" } } }
+        ]
+      }
+    }
+  },
+  {
+    "name": "a failed init container speaks first",
+    "status": "Init:Error",
+    "pod": {
+      "metadata": { "name": "web-1", "namespace": "default" },
+      "spec": { "initContainers": [{ "name": "migrate" }], "containers": [{ "name": "app" }] },
+      "status": {
+        "phase": "Pending",
+        "initContainerStatuses": [
+          { "name": "migrate", "image": "migrate:1", "imageID": "", "ready": false, "restartCount": 0,
+            "state": { "terminated": { "exitCode": 1, "reason": "Error" } } }
+        ],
+        "containerStatuses": [
+          { "name": "app", "image": "app:1", "imageID": "", "ready": false, "restartCount": 0,
+            "state": { "waiting": { "reason": "PodInitializing" } } }
+        ]
+      }
+    }
+  },
+  {
+    "name": "a failed init container gives its exit code",
+    "status": "Init:ExitCode:2",
+    "pod": {
+      "metadata": { "name": "web-1", "namespace": "default" },
+      "spec": { "initContainers": [{ "name": "migrate" }], "containers": [{ "name": "app" }] },
+      "status": {
+        "phase": "Pending",
+        "initContainerStatuses": [
+          { "name": "migrate", "image": "migrate:1", "imageID": "", "ready": false, "restartCount": 0,
+            "state": { "terminated": { "exitCode": 2 } } }
+        ],
+        "containerStatuses": [
+          { "name": "app", "image": "app:1", "imageID": "", "ready": false, "restartCount": 0,
+            "state": { "waiting": { "reason": "PodInitializing" } } }
+        ]
+      }
+    }
+  },
+  {
+    "name": "an init container at work reads as progress",
+    "status": "Init:0/2",
+    "pod": {
+      "metadata": { "name": "web-1", "namespace": "default" },
+      "spec": { "initContainers": [{ "name": "fetch" }, { "name": "migrate" }], "containers": [{ "name": "app" }] },
+      "status": {
+        "phase": "Pending",
+        "initContainerStatuses": [
+          { "name": "fetch", "image": "fetch:1", "imageID": "", "ready": false, "restartCount": 0,
+            "state": { "running": { "startedAt": "2026-10-03T10:00:00Z" } } },
+          { "name": "migrate", "image": "migrate:1", "imageID": "", "ready": false, "restartCount": 0,
+            "state": { "waiting": { "reason": "PodInitializing" } } }
+        ],
+        "containerStatuses": [
+          { "name": "app", "image": "app:1", "imageID": "", "ready": false, "restartCount": 0,
+            "state": { "waiting": { "reason": "PodInitializing" } } }
+        ]
+      }
+    }
+  },
+  {
+    "name": "a finished init container counts toward progress",
+    "status": "Init:1/2",
+    "pod": {
+      "metadata": { "name": "web-1", "namespace": "default" },
+      "spec": { "initContainers": [{ "name": "fetch" }, { "name": "migrate" }], "containers": [{ "name": "app" }] },
+      "status": {
+        "phase": "Pending",
+        "initContainerStatuses": [
+          { "name": "fetch", "image": "fetch:1", "imageID": "", "ready": false, "restartCount": 0,
+            "state": { "terminated": { "exitCode": 0, "reason": "Completed" } } },
+          { "name": "migrate", "image": "migrate:1", "imageID": "", "ready": false, "restartCount": 0,
+            "state": { "running": { "startedAt": "2026-10-03T10:00:00Z" } } }
+        ],
+        "containerStatuses": [
+          { "name": "app", "image": "app:1", "imageID": "", "ready": false, "restartCount": 0,
+            "state": { "waiting": { "reason": "PodInitializing" } } }
+        ]
+      }
+    }
+  },
+  {
+    "name": "a started sidecar does not hold the pod in init",
+    "status": "Init:1/2",
+    "pod": {
+      "metadata": { "name": "web-1", "namespace": "default" },
+      "spec": {
+        "initContainers": [{ "name": "proxy", "restartPolicy": "Always" }, { "name": "migrate" }],
+        "containers": [{ "name": "app" }]
+      },
+      "status": {
+        "phase": "Running",
+        "initContainerStatuses": [
+          { "name": "proxy", "image": "proxy:1", "imageID": "", "ready": true, "restartCount": 0, "started": true,
+            "state": { "running": { "startedAt": "2026-10-03T10:00:00Z" } } },
+          { "name": "migrate", "image": "migrate:1", "imageID": "", "ready": false, "restartCount": 0,
+            "state": { "running": { "startedAt": "2026-10-03T10:00:05Z" } } }
+        ],
+        "containerStatuses": [
+          { "name": "app", "image": "app:1", "imageID": "", "ready": false, "restartCount": 0,
+            "state": { "waiting": { "reason": "PodInitializing" } } }
+        ]
+      }
+    }
+  },
+  {
+    "name": "a pod past its sidecar reads its containers",
+    "status": "Running",
+    "pod": {
+      "metadata": { "name": "web-1", "namespace": "default" },
+      "spec": {
+        "initContainers": [{ "name": "proxy", "restartPolicy": "Always" }],
+        "containers": [{ "name": "app" }]
+      },
+      "status": {
+        "phase": "Running",
+        "initContainerStatuses": [
+          { "name": "proxy", "image": "proxy:1", "imageID": "", "ready": true, "restartCount": 0, "started": true,
+            "state": { "running": { "startedAt": "2026-10-03T10:00:00Z" } } }
+        ],
+        "containerStatuses": [
+          { "name": "app", "image": "app:1", "imageID": "", "ready": false, "restartCount": 0,
+            "state": { "running": { "startedAt": "2026-10-03T10:00:05Z" } } }
+        ]
+      }
+    }
+  },
+  {
+    "name": "an Initialized pod reads its containers over a stale init failure",
+    "status": "CrashLoopBackOff",
+    "pod": {
+      "metadata": { "name": "web-1", "namespace": "default" },
+      "spec": { "initContainers": [{ "name": "migrate" }], "containers": [{ "name": "app" }] },
+      "status": {
+        "phase": "Running",
+        "conditions": [{ "type": "Initialized", "status": "True" }],
+        "initContainerStatuses": [
+          { "name": "migrate", "image": "migrate:1", "imageID": "", "ready": false, "restartCount": 0,
+            "state": { "terminated": { "exitCode": 1, "reason": "Error" } } }
+        ],
+        "containerStatuses": [
+          { "name": "app", "image": "app:1", "imageID": "", "ready": false, "restartCount": 4,
+            "state": { "waiting": { "reason": "CrashLoopBackOff" } } }
+        ]
+      }
+    }
+  },
+  {
+    "name": "a pod-level reason replaces the phase",
+    "status": "Evicted",
+    "pod": {
+      "metadata": { "name": "web-1", "namespace": "default" },
+      "spec": { "containers": [{ "name": "app" }] },
+      "status": { "phase": "Failed", "reason": "Evicted", "containerStatuses": [] }
+    }
+  },
+  {
+    "name": "a scheduling gate names itself",
+    "status": "SchedulingGated",
+    "pod": {
+      "metadata": { "name": "web-1", "namespace": "default" },
+      "spec": { "containers": [{ "name": "app" }] },
+      "status": {
+        "phase": "Pending",
+        "conditions": [{ "type": "PodScheduled", "status": "False", "reason": "SchedulingGated" }]
+      }
+    }
+  },
+  {
+    "name": "a pod being deleted reads Terminating",
+    "status": "Terminating",
+    "pod": {
+      "metadata": { "name": "web-1", "namespace": "default", "deletionTimestamp": "2026-10-03T10:05:00Z" },
+      "spec": { "containers": [{ "name": "api" }] },
+      "status": {
+        "phase": "Running",
+        "containerStatuses": [
+          { "name": "api", "image": "api:1", "imageID": "", "ready": true, "restartCount": 0,
+            "state": { "running": { "startedAt": "2026-10-03T10:00:00Z" } } }
+        ]
+      }
+    }
+  },
+  {
+    "name": "a finished pod being deleted keeps its word",
+    "status": "Completed",
+    "pod": {
+      "metadata": { "name": "web-1", "namespace": "default", "deletionTimestamp": "2026-10-03T10:05:00Z" },
+      "spec": { "containers": [{ "name": "job" }] },
+      "status": {
+        "phase": "Succeeded",
+        "containerStatuses": [
+          { "name": "job", "image": "job:1", "imageID": "", "ready": false, "restartCount": 0,
+            "state": { "terminated": { "exitCode": 0, "reason": "Completed" } } }
+        ]
+      }
+    }
+  },
+  {
+    "name": "a pod on a lost node reads Unknown",
+    "status": "Unknown",
+    "pod": {
+      "metadata": { "name": "web-1", "namespace": "default", "deletionTimestamp": "2026-10-03T10:05:00Z" },
+      "spec": { "containers": [{ "name": "api" }] },
+      "status": {
+        "phase": "Running",
+        "reason": "NodeLost",
+        "containerStatuses": [
+          { "name": "api", "image": "api:1", "imageID": "", "ready": true, "restartCount": 0,
+            "state": { "running": { "startedAt": "2026-10-03T10:00:00Z" } } }
+        ]
+      }
+    }
+  },
+  {
+    "name": "a pod with no status reads Unknown",
+    "status": "Unknown",
+    "pod": {
+      "metadata": { "name": "web-1", "namespace": "default" },
+      "spec": { "containers": [{ "name": "app" }] }
+    }
+  }
+]

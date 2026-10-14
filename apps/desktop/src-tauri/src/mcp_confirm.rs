@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use serde::Serialize;
 use serde_json::Value;
-use srelens_mcp::policy::{ConfirmPolicy, ConsentKind, Decision};
+use srelens_mcp::policy::{ConfirmPolicy, Decision};
 use tauri::Runtime;
 use tokio::sync::oneshot;
 
@@ -26,18 +26,228 @@ use tokio::sync::oneshot;
 /// only the answer channel.
 struct Waiting {
     tx: oneshot::Sender<bool>,
-    tool: String,
-    args: Value,
+    request: PendingRequest,
 }
 
 /// What `confirm` emits, as a value — the same shape as the
 /// `mcp://confirm-request` payload, so a replayed request and a live one are
 /// indistinguishable to the frontend and go down the same path there.
+///
+/// That indistinguishability is why `prompt` and `impact` live HERE rather than
+/// only in the emit: a field carried by the live event and missing from the
+/// replayed snapshot would draw two different questions about the same call,
+/// and which one a reader saw would depend on when their window finished
+/// loading.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct PendingRequest {
     pub id: String,
     pub tool: String,
     pub args: Value,
+    /// The host's own sentence for this call, already rendered — what the
+    /// prompt asks.
+    ///
+    /// `None` when the capability carries no confirmation template, or when
+    /// the template names a field this call has no value for. The window then
+    /// shows what it always showed, the tool id and its arguments; it does not
+    /// draw half a sentence. The fallback is the point: a prompt that says
+    /// "Drain ?" is worse than one that says nothing.
+    ///
+    /// Rendered in the host, from a template compiled into the host, through a
+    /// closed placeholder vocabulary (`srelens_capability::CONFIRM_FIELDS`).
+    /// Nothing a caller sends reaches this string except as the value of one of
+    /// those six named fields — and `{resource}` is derived rather than read,
+    /// so a caller cannot even name the thing it is about to change.
+    pub prompt: Option<String>,
+    /// `low`, `medium` or `high` — how much this call disturbs if it runs.
+    /// Shown beside the question, because "an agent wants to run a cluster
+    /// action" is the same sentence for a status refresh and a node drain.
+    pub impact: String,
+    /// What the HOST read out of the call: the cluster it is pinned to, the
+    /// object it names, and the app it was made through. See [`ConfirmTarget`].
+    pub target: ConfirmTarget,
+    /// The app that asked, when the host knows it: only for a call an app's
+    /// sidecar made through the broker (#573), whose process the supervisor
+    /// started for exactly this app and revision. Never for an MCP call, whose
+    /// caller is a bearer token (see [`ConfirmTarget`]). An ID and a revision,
+    /// and nothing else: the window looks the name and publisher up in its own
+    /// inventory, so nothing on this wire names or vouches for an app.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub requester: Option<Requester>,
+    /// Which of srelens's own chats raised the call (#393), as the transport
+    /// authenticated it. `null` for an external client, a headless caller or
+    /// an app's sidecar (which `requester` names instead) — always present,
+    /// for the same reason `prompt` and `impact` live on this value.
+    pub caller: Option<CallerWire>,
+}
+
+/// One of srelens's own chats, as the window matches it against its runs.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CallerWire {
+    pub chat_session: String,
+}
+
+/// Which installed app asked, as the host that started its sidecar knows it.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct Requester {
+    pub id: String,
+    pub revision: u64,
+}
+
+/// The facts the one confirmation names under its question (#552), as the host
+/// reads them — not as the window parses them.
+///
+/// **Why the host and not the window.** The same question is asked for a write
+/// clicked in an app's resource view and for the same write asked for by an
+/// agent, and the app path knows its cluster and object directly. Leaving the
+/// MCP path to dig them out of `args` would be a second reading of a
+/// caller-controlled payload, in TypeScript, drifting from the one the
+/// sentence is rendered from. So both come from
+/// [`srelens_capability::confirm_fields`]: one vocabulary, one escaping, one
+/// 80-character bound, already applied here.
+///
+/// Every field is optional and an absent one stays `None`: a call that names
+/// no namespace and one that names the empty namespace are different facts,
+/// and the surface draws them apart.
+///
+/// **There is deliberately no `app` here**, and that is a decision rather than
+/// an omission. The confirmation's "Requested by app … (signed by …)" is the
+/// host vouching for who asked, and on this path the host has no grounds for
+/// it. `extensions.action` is reachable over MCP; the registry checks that
+/// `resource.id` and `revision` name an installed, enabled app, but nothing
+/// authenticates the CALLER as that app — an MCP client is a bearer token, not
+/// an app. Reading the attribution out of `args` would therefore let any
+/// caller put a signed app's name above its own Approve button: provenance
+/// chosen by the party being vouched for, which is the spoof #552 exists to
+/// prevent. Saying nothing is the honest answer and is what the window draws.
+///
+/// The line comes back when an authenticated, host-owned execution context
+/// carries the app — a declared action the host runs on an app's behalf
+/// (#549) — and not before. An app's own screens already have that context,
+/// and already draw the line (`ExtensionResourceDetails`).
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+pub struct ConfirmTarget {
+    /// The kubeconfig context, escaped and bounded.
+    pub cluster: Option<String>,
+    pub namespace: Option<String>,
+    pub name: Option<String>,
+    pub kind: Option<String>,
+}
+
+impl PendingRequest {
+    /// What the window is asked, built from the host's metadata for one gated
+    /// call. For `extension.secretStore` it reads the installed apps to know
+    /// which names are real; everything else is pure, so the three cases that
+    /// matter — a sentence, no template, and a template that cannot render —
+    /// are testable without a window (see [`from_consent_checked`](Self::from_consent_checked)).
+    pub fn from_consent(id: String, request: &srelens_mcp::policy::ConsentRequest) -> Self {
+        let inventory = crate::capabilities::default_settings_path()
+            .map(|path| path.with_extension("extensions.json"));
+        Self::from_consent_checked(id, request, &|app, setting| {
+            inventory
+                .as_deref()
+                .is_some_and(|path| srelens_registry::declares_secret_setting(path, app, setting))
+        })
+    }
+
+    /// [`from_consent`](Self::from_consent), told by `known` which app and
+    /// secret-setting names are real (#543): only those are shown for
+    /// `extension.secretStore`.
+    pub fn from_consent_checked(
+        id: String,
+        request: &srelens_mcp::policy::ConsentRequest,
+        known: &dyn Fn(&str, Option<&str>) -> bool,
+    ) -> Self {
+        // The same read the sentence is rendered from: one closed vocabulary,
+        // escaped and bounded once, so the facts under the question cannot
+        // disagree with the question.
+        let args = shown_args(&request.tool, &request.args, known);
+        let fields = srelens_capability::confirm_fields(&args);
+        let field = |key: &str| fields.get(key).cloned();
+        // The sentence was rendered from the caller's whole arguments; for an
+        // app's secret it is rendered again from the names alone (#543).
+        let prompt = if request.tool == srelens_registry::SECRET_STORE_PERMISSION {
+            srelens_registry::SECRET_STORE_ANNOTATIONS.confirm_text(&args)
+        } else {
+            request.confirm_text.clone()
+        };
+        Self {
+            id,
+            tool: request.tool.clone(),
+            args,
+            prompt,
+            impact: request.impact.as_str().to_string(),
+            target: ConfirmTarget {
+                cluster: field("cluster"),
+                namespace: field("namespace"),
+                name: field("name"),
+                kind: field("kind"),
+            },
+            requester: None,
+            caller: request.caller.as_ref().map(|caller| match caller {
+                srelens_mcp::policy::Caller::Chat(session) => CallerWire { chat_session: session.clone() },
+            }),
+        }
+    }
+
+    /// What the window is asked for a gated call an app's sidecar made through the
+    /// broker (#573). The broker rendered the host's sentence from the capability's
+    /// template and knows which app asked; the facts under the question are read
+    /// from the arguments through the same closed vocabulary as an MCP call's.
+    pub fn from_sidecar(id: String, request: &srelens_registry::SidecarConsentRequest) -> Self {
+        let fields = srelens_capability::confirm_fields(&request.args);
+        let field = |key: &str| fields.get(key).cloned();
+        Self {
+            id,
+            tool: request.tool.clone(),
+            args: request.args.clone(),
+            prompt: request.confirm_text.clone(),
+            impact: request.impact.as_str().to_string(),
+            target: ConfirmTarget {
+                cluster: field("cluster"),
+                namespace: field("namespace"),
+                name: field("name"),
+                kind: field("kind"),
+            },
+            requester: Some(Requester {
+                id: request.app.id.clone(),
+                revision: request.app.revision,
+            }),
+            // An app's provenance is `requester`, never a chat.
+            caller: None,
+        }
+    }
+}
+
+/// The arguments the window is shown.
+///
+/// For an app's secret (#543) the window gets only the names a person decides
+/// on — the action, the app and the setting — and each only when the host
+/// knows it for one: `set` or `clear`, an installed app that keeps secrets,
+/// and one of that app's declared secret settings (`known`). `secret` is
+/// shown as present and blanked. Consent is asked before the call is parsed,
+/// so an agent can put the value anywhere, including in a name's place, and
+/// no shape tells a hex API key from a setting ID; the renderer, which could
+/// only display it, must never hold it.
+fn shown_args(tool: &str, args: &Value, known: &dyn Fn(&str, Option<&str>) -> bool) -> Value {
+    if tool != srelens_registry::SECRET_STORE_PERMISSION {
+        return args.clone();
+    }
+    let text = |key: &str| args.get(key).and_then(Value::as_str);
+    let mut shown = serde_json::Map::new();
+    if let Some(action @ ("set" | "clear")) = text("action") {
+        shown.insert("action".into(), Value::String(action.into()));
+    }
+    if let Some(app) = text("id").filter(|app| known(app, None)) {
+        shown.insert("id".into(), Value::String(app.into()));
+        if let Some(setting) = text("setting").filter(|setting| known(app, Some(setting))) {
+            shown.insert("setting".into(), Value::String(setting.into()));
+        }
+    }
+    if args.get("secret").is_some() {
+        shown.insert("secret".into(), Value::String("<redacted>".into()));
+    }
+    Value::Object(shown)
 }
 
 /// Every confirmation waiting on an answer, by id.
@@ -52,8 +262,11 @@ pub struct PendingRequest {
 pub struct Pending(Mutex<HashMap<String, Waiting>>);
 
 impl Pending {
-    pub fn register(&self, id: String, tool: String, args: Value, tx: oneshot::Sender<bool>) {
-        self.0.lock().unwrap().insert(id, Waiting { tx, tool, args });
+    pub fn register(&self, request: PendingRequest, tx: oneshot::Sender<bool>) {
+        self.0
+            .lock()
+            .unwrap()
+            .insert(request.id.clone(), Waiting { tx, request });
     }
 
     /// Returns false when the id is unknown (already answered or timed out).
@@ -72,8 +285,8 @@ impl Pending {
         self.0
             .lock()
             .unwrap()
-            .iter()
-            .map(|(id, w)| PendingRequest { id: id.clone(), tool: w.tool.clone(), args: w.args.clone() })
+            .values()
+            .map(|w| w.request.clone())
             .collect()
     }
 
@@ -90,8 +303,11 @@ impl Pending {
     }
 }
 
-pub struct PromptUser {
-    app: tauri::AppHandle,
+/// Generic over the runtime only so a unit test can build one — and, through
+/// it, a whole `McpServer` — over a `tauri::test::mock_app`; the app always
+/// instantiates it on Wry, which is the default.
+pub struct PromptUser<R: Runtime = tauri::Wry> {
+    app: tauri::AppHandle<R>,
     pending: Arc<Pending>,
     timeout: Duration,
 }
@@ -103,8 +319,7 @@ pub struct PromptUser {
 /// and broadcasts `mcp://confirm-resolved`, so neither the app-wide modal nor
 /// the transcript's inline card can outlive the request they prompt for.
 ///
-/// Generic over the runtime only so the unit test below can hold one over a
-/// `tauri::test::mock_app`; `PromptUser` itself is Wry.
+/// Generic over the runtime for the same reason [`PromptUser`] is.
 struct ResolveOnDrop<R: Runtime> {
     app: tauri::AppHandle<R>,
     pending: Arc<Pending>,
@@ -119,29 +334,72 @@ impl<R: Runtime> Drop for ResolveOnDrop<R> {
     }
 }
 
-impl PromptUser {
-    pub fn new(app: tauri::AppHandle, pending: Arc<Pending>, timeout: Duration) -> Self {
+impl<R: Runtime> PromptUser<R> {
+    pub fn new(app: tauri::AppHandle<R>, pending: Arc<Pending>, timeout: Duration) -> Self {
         Self { app, pending, timeout }
     }
 }
 
 #[async_trait::async_trait]
-impl ConfirmPolicy for PromptUser {
-    /// `kind` is deliberately unused: a human being shown the tool name and its
-    /// arguments is the consent mechanism either way, so the GUI prompts for a
-    /// sensitive read exactly as it does for a mutation. The distinction exists
-    /// for headless policies, which have no human to look at the call.
-    async fn confirm(&self, tool: &str, args: &Value, _kind: ConsentKind) -> Decision {
+impl<R: Runtime> ConfirmPolicy for PromptUser<R> {
+    /// `request.kind` is deliberately unused: a human being shown the call is
+    /// the consent mechanism either way, so the GUI prompts for a sensitive
+    /// read exactly as it does for a mutation. The distinction exists for
+    /// headless policies, which have no human to look at the call.
+    ///
+    /// `impact` and `confirm_text` are not: they are carried to the window and
+    /// drawn. The prompt used to be the tool id and a JSON blob, which is the
+    /// same question for a status refresh and a node drain, while the words a
+    /// person should read sat in UI constants three files away
+    /// (`ExtensionResourceDetails.tsx`). The sentence is the host's, rendered
+    /// in the host, from a template compiled into the host.
+    ///
+    /// **What is left for #552** is not this: it is that the in-app action
+    /// review (`ExtensionResourceDetails`) and this prompt are still two
+    /// confirmations with two implementations, so a write from the UI and the
+    /// same write from an agent are approved in different words and through
+    /// different code. #552 makes them one host-owned flow. Both sides now read
+    /// the same metadata, which is what makes that a merge rather than a
+    /// rewrite.
+    async fn confirm(&self, request: &srelens_mcp::policy::ConsentRequest) -> Decision {
+        let id = uuid::Uuid::new_v4().to_string();
+        self.ask(PendingRequest::from_consent(id, request)).await
+    }
+}
+
+/// The desktop's answer to a sidecar's gated call (#573): the one host confirmation
+/// an agent's gated call gets (#552), with the app that asked named by the host from
+/// its own inventory. Declined, unanswered or with no window, the call never runs,
+/// and the sidecar is told why.
+impl<R: Runtime> srelens_registry::SidecarConsent for PromptUser<R> {
+    fn confirm<'a>(
+        &'a self,
+        request: &'a srelens_registry::SidecarConsentRequest,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send + 'a>> {
+        Box::pin(async move {
+            let id = uuid::Uuid::new_v4().to_string();
+            match self.ask(PendingRequest::from_sidecar(id, request)).await {
+                Decision::Approved => Ok(()),
+                Decision::Denied(why) => Err(why),
+            }
+        })
+    }
+}
+
+impl<R: Runtime> PromptUser<R> {
+    /// Put `pending` to the person, and wait for the answer or the timeout.
+    async fn ask(&self, pending: PendingRequest) -> Decision {
         use tauri::{Emitter, Manager};
 
-        let id = uuid::Uuid::new_v4().to_string();
+        let tool = pending.tool.clone();
+        let id = pending.id.clone();
         let (tx, rx) = oneshot::channel();
         // Registered — with the request itself — BEFORE the emit below, and the
         // order is load-bearing for the frontend's replay: a subscriber that
         // installs its listener and then reads `snapshot` sees this request in
         // one of the two whatever the interleaving, because it is in the map
         // before any event about it exists.
-        self.pending.register(id.clone(), tool.to_string(), args.clone(), tx);
+        self.pending.register(pending.clone(), tx);
         // The same request is rendered in TWO places — the app-wide modal and
         // the assistant transcript's inline card — and answering in one only
         // clears that one's own queue. This guard broadcasts the resolution on
@@ -160,14 +418,10 @@ impl ConfirmPolicy for PromptUser {
         let _ = win.unminimize();
         let _ = win.set_focus();
 
-        if self
-            .app
-            .emit(
-                "mcp://confirm-request",
-                serde_json::json!({ "id": id, "tool": tool, "args": args }),
-            )
-            .is_err()
-        {
+        // The VALUE, not a hand-built object: the live event and the replayed
+        // snapshot are the same type, so a field added to one is added to both.
+        // They drifted once, which is what `PendingRequest`'s doc is about.
+        if self.app.emit("mcp://confirm-request", &pending).is_err() {
             return Decision::Denied("srelens could not show a confirmation dialog".into());
         }
 
@@ -185,10 +439,42 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    use srelens_capability::{Annotations, Impact};
+    use srelens_mcp::policy::{ConsentKind, ConsentRequest};
+
+    fn request(id: &str, tool: &str) -> PendingRequest {
+        PendingRequest {
+            id: id.into(),
+            tool: tool.into(),
+            args: json!({ "name": id }),
+            prompt: None,
+            impact: "medium".into(),
+            target: ConfirmTarget {
+                name: Some(id.into()),
+                ..ConfirmTarget::default()
+            },
+            requester: None,
+            caller: None,
+        }
+    }
+
     fn waiting(p: &Pending, id: &str, tool: &str) -> oneshot::Receiver<bool> {
         let (tx, rx) = oneshot::channel();
-        p.register(id.to_string(), tool.to_string(), json!({ "name": id }), tx);
+        p.register(request(id, tool), tx);
         rx
+    }
+
+    /// One gated call as `McpServer::consent_request` builds it, so these
+    /// tests exercise the real rendering rather than a hand-written sentence.
+    fn consent(tool: &str, annotations: Annotations, args: serde_json::Value) -> ConsentRequest {
+        ConsentRequest {
+            tool: tool.into(),
+            args: args.clone(),
+            kind: ConsentKind::Destructive,
+            impact: annotations.impact,
+            confirm_text: annotations.confirm_text(&args),
+            caller: None,
+        }
     }
 
     #[tokio::test]
@@ -235,13 +521,403 @@ mod tests {
         let _rx2 = waiting(&p, "b", "k8s_scale");
         let mut got = p.snapshot();
         got.sort_by(|x, y| x.id.cmp(&y.id));
-        assert_eq!(
-            got,
-            vec![
-                PendingRequest { id: "a".into(), tool: "k8s_deletePod".into(), args: json!({ "name": "a" }) },
-                PendingRequest { id: "b".into(), tool: "k8s_scale".into(), args: json!({ "name": "b" }) },
-            ]
+        assert_eq!(got, vec![request("a", "k8s_deletePod"), request("b", "k8s_scale")]);
+    }
+
+    // ---- What the window is asked ------------------------------------------
+
+    /// The prompt used to be the tool id and a JSON blob — the same question
+    /// for a status refresh and a node drain. It now carries the host's own
+    /// sentence, rendered against this call, and the level.
+    #[test]
+    fn a_high_impact_call_carries_the_hosts_sentence_and_its_level() {
+        let annotations =
+            Annotations::DESTRUCTIVE.with_confirm("Drain[ {resource}][ in cluster {cluster}]?");
+        let got = PendingRequest::from_consent(
+            "id-1".into(),
+            &consent(
+                "k8s.drainNode",
+                annotations,
+                json!({ "context": "prod", "name": "node-7" }),
+            ),
         );
+        assert_eq!(got.prompt.as_deref(), Some("Drain node-7 in cluster prod?"));
+        assert_eq!(got.impact, "high");
+        // And the arguments still travel: the sentence says what, the payload
+        // still says exactly which call.
+        assert_eq!(got.args["name"], json!("node-7"));
+    }
+
+    /// #393: the window is told which of srelens's chats raised the call, so
+    /// the transcript records it in that conversation and no other.
+    #[test]
+    fn a_call_from_one_of_srelens_s_chats_names_it_on_the_wire() {
+        let mut req = consent("k8s.scale", Annotations::MUTATING, json!({ "name": "api" }));
+        req.caller = Some(srelens_mcp::policy::Caller::Chat("sess-7".into()));
+        let payload =
+            serde_json::to_value(PendingRequest::from_consent_checked("id".into(), &req, &|_, _| false)).unwrap();
+        assert_eq!(payload["caller"], json!({ "chatSession": "sess-7" }));
+    }
+
+    /// Always on the wire, `null` when nobody can be named: the live event and
+    /// the replayed snapshot are one type, and a field one of them omits is
+    /// the drift `PendingRequest` exists to prevent.
+    #[test]
+    fn a_call_nobody_vouched_for_carries_a_null_caller() {
+        let req = consent("k8s.scale", Annotations::MUTATING, json!({ "name": "api" }));
+        let payload =
+            serde_json::to_value(PendingRequest::from_consent_checked("id".into(), &req, &|_, _| false)).unwrap();
+        assert!(payload.get("caller").is_some_and(serde_json::Value::is_null), "got {payload}");
+    }
+
+    /// A sidecar's provenance is `requester`, never a chat.
+    #[test]
+    fn a_sidecar_s_call_names_no_chat() {
+        let payload =
+            serde_json::to_value(PendingRequest::from_sidecar("id".into(), &sidecar_request(json!({})))).unwrap();
+        assert!(payload.get("caller").is_some_and(serde_json::Value::is_null), "got {payload}");
+    }
+
+    /// #543. An agent asking to keep an app's secret sends the value in its
+    /// arguments, and the prompt ships its arguments to the window. The
+    /// window is told which app, which setting and what is asked — never the
+    /// value, which it has no use for and must not hold.
+    #[test]
+    fn the_prompt_for_an_app_secret_never_carries_the_value() {
+        let secret = "agent-sent-token-9d1c";
+        let got = PendingRequest::from_consent_checked(
+            "id-9".into(),
+            &consent(
+                "extension.secretStore",
+                Annotations::MUTATING,
+                json!({"action":"set","id":"org.example.metrics","setting":"token","secret":secret}),
+            ),
+            &|app, setting| app == "org.example.metrics" && setting.is_none_or(|s| s == "token"),
+        );
+        // Facts only in the messages: what the window would get is not
+        // printed, since in the failing case it holds the secret.
+        let leaked = serde_json::to_string(&got).unwrap().contains(secret);
+        assert!(!leaked, "the window was sent the secret");
+        assert!(got.args["setting"] == json!("token"), "the setting is named");
+        assert!(got.args["action"] == json!("set"), "the action is named");
+        let p = Pending::default();
+        let (tx, _rx) = oneshot::channel();
+        p.register(got, tx);
+        let replayed = serde_json::to_string(&p.snapshot()).unwrap().contains(secret);
+        assert!(!replayed, "a late subscriber was sent the secret");
+    }
+
+    /// Review of #543: consent is asked before the call is parsed, so an agent
+    /// can put the value anywhere — under another key, nested, or in `action`
+    /// or `setting`. The window is shown the three names it needs, and only
+    /// while they look like names; the sentence is rendered from those too.
+    #[test]
+    fn the_prompt_for_an_app_secret_shows_names_only_wherever_the_value_is_put() {
+        let secret = "agent-sent-token-9d1c";
+        // The one app installed, and its one secret setting.
+        let known = |app: &str, setting: Option<&str>| {
+            app == "org.example.metrics" && setting.is_none_or(|s| s == "token")
+        };
+        for (case, args) in [
+            json!({"action":"set","id":"org.example.metrics","setting":"token","value":secret}),
+            json!({"action":"set","id":"org.example.metrics","setting":"token","nested":{"deep":[secret]}}),
+            json!({"action":secret,"id":"org.example.metrics","setting":"token"}),
+            json!({"action":"set","id":"org.example.metrics","setting":secret,"secret":"x"}),
+            json!({"action":"set","id":secret,"setting":"token","secret":"x"}),
+            json!({"action":"set","id":"org.example.metrics","setting":"token","name":secret,"context":secret}),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let got = PendingRequest::from_consent_checked(
+                "id-10".into(),
+                &consent("extension.secretStore", srelens_registry::SECRET_STORE_ANNOTATIONS, args.clone()),
+                &known,
+            );
+            // Facts only in the message: every case's arguments carry the
+            // secret, so neither they nor what was shown are printed.
+            let leaked = serde_json::to_string(&got).unwrap().contains(secret);
+            assert!(!leaked, "case {case}: the window was sent the secret");
+        }
+        // The names a person needs to decide are still there.
+        let got = PendingRequest::from_consent_checked(
+            "id-11".into(),
+            &consent(
+                "extension.secretStore",
+                srelens_registry::SECRET_STORE_ANNOTATIONS,
+                json!({"action":"set","id":"org.example.metrics","setting":"token","secret":secret}),
+            ),
+            &known,
+        );
+        assert!(
+            got.args
+                == json!({"action":"set","id":"org.example.metrics","setting":"token","secret":"<redacted>"}),
+            "the window is shown the action, the app, the setting, and that a secret is present"
+        );
+        assert!(
+            got.prompt.as_deref().is_some_and(|p| p.ends_with(" (set)?")),
+            "the sentence names the action"
+        );
+    }
+
+    /// No template is not a hole: the window falls back to what it always
+    /// showed — the tool id and its arguments — rather than a headless
+    /// paraphrase nobody wrote.
+    #[test]
+    fn a_capability_with_no_template_asks_with_no_sentence() {
+        let got = PendingRequest::from_consent(
+            "id-2".into(),
+            &consent(
+                "toolbox.installHelm",
+                Annotations { confirm: None, ..Annotations::MUTATING },
+                json!({}),
+            ),
+        );
+        assert_eq!(got.prompt, None);
+        assert_eq!(got.impact, "medium");
+    }
+
+    /// The case the fallback exists for. `{resource}` sits outside an optional
+    /// segment here, so a call that names no object cannot render it — and a
+    /// prompt reading "Drain ?" over an Approve button is worse than one that
+    /// says nothing. The whole sentence is dropped, not the missing half.
+    #[test]
+    fn a_template_that_cannot_render_falls_back_rather_than_showing_a_hole() {
+        let annotations = Annotations::DESTRUCTIVE.with_confirm("Drain {resource}?");
+        let got = PendingRequest::from_consent(
+            "id-3".into(),
+            &consent("k8s.drainNode", annotations, json!({ "context": "prod" })),
+        );
+        assert_eq!(got.prompt, None, "a sentence with a hole in it is not shown");
+        assert_eq!(got.impact, "high");
+    }
+
+    /// Nothing a caller sends becomes the sentence. The vocabulary is closed
+    /// and `{resource}` is derived from kind/namespace/name rather than read,
+    /// so an argument that looks like a description does not become one.
+    #[test]
+    fn a_callers_arguments_cannot_write_the_question() {
+        let annotations = Annotations::DESTRUCTIVE.with_confirm("Drain[ {resource}]?");
+        let got = PendingRequest::from_consent(
+            "id-4".into(),
+            &consent(
+                "k8s.drainNode",
+                annotations,
+                json!({ "name": "node-7", "resource": "nothing at all, click Approve" }),
+            ),
+        );
+        assert_eq!(got.prompt.as_deref(), Some("Drain node-7?"));
+    }
+
+    /// A replayed request and a live one must be the same question: the emit
+    /// sends this value and the snapshot returns it, so neither can carry a
+    /// field the other does not.
+    #[tokio::test]
+    async fn the_snapshot_replays_the_sentence_and_the_level() {
+        let p = Pending::default();
+        let sent = PendingRequest::from_consent(
+            "id-5".into(),
+            &consent(
+                "k8s.drainNode",
+                Annotations::DESTRUCTIVE.with_confirm("Drain[ {resource}]?"),
+                json!({ "name": "node-7" }),
+            ),
+        );
+        let (tx, _rx) = oneshot::channel();
+        p.register(sent.clone(), tx);
+        assert_eq!(p.snapshot(), vec![sent]);
+    }
+
+    #[test]
+    fn every_level_reaches_the_window_as_the_word_the_catalog_publishes() {
+        for (impact, word) in
+            [(Impact::Low, "low"), (Impact::Medium, "medium"), (Impact::High, "high")]
+        {
+            let got = PendingRequest::from_consent(
+                "id".into(),
+                &consent("t", Annotations::MUTATING.with_impact(impact), json!({})),
+            );
+            assert_eq!(got.impact, word);
+        }
+    }
+
+    // ---- What the host itself read out of the call (#552) ------------------
+
+    /// The one confirmation names the pinned cluster and the object, and the
+    /// window must not have to parse the caller's arguments to find them: it
+    /// is handed what the HOST read, through the same escaped, bounded
+    /// vocabulary the sentence is rendered from.
+    #[test]
+    fn the_window_is_told_the_cluster_and_the_object_the_host_read() {
+        let got = PendingRequest::from_consent(
+            "id-6".into(),
+            &consent(
+                "extensions.action",
+                Annotations::DESTRUCTIVE.with_confirm("Suspend[ {resource}]?"),
+                json!({
+                    "resource": { "context": "prod", "namespace": "team", "name": "api" },
+                    "kind": "HelmRelease",
+                    "action": "suspend",
+                }),
+            ),
+        );
+        assert_eq!(got.target.cluster.as_deref(), Some("prod"));
+        assert_eq!(got.target.namespace.as_deref(), Some("team"));
+        assert_eq!(got.target.name.as_deref(), Some("api"));
+        assert_eq!(got.target.kind.as_deref(), Some("HelmRelease"));
+    }
+
+    /// **An MCP call attributes itself to no app, whatever its arguments say.**
+    ///
+    /// The confirmation's "Requested by app … (signed by …)" is the host
+    /// vouching for who asked, and on this path the host has no grounds for
+    /// it. `extensions.action` is reachable over MCP; the registry checks
+    /// that `resource.id`/`revision` name an installed, enabled app, but
+    /// nothing authenticates the CALLER as that app — an MCP client is a
+    /// bearer token, not an app. Deriving the line from `args` would let any
+    /// caller put a signed app's name on its own prompt, which is the exact
+    /// spoof #552 exists to prevent. It is better to say nothing than to say
+    /// something an attacker chose.
+    ///
+    /// The line comes back when an authenticated, host-owned execution
+    /// context carries the app — a declared action the host runs on an app's
+    /// behalf (#549) — and not before.
+    #[test]
+    fn an_mcp_call_is_attributed_to_no_app_whatever_its_arguments_claim() {
+        let got = PendingRequest::from_consent(
+            "id-7".into(),
+            &consent(
+                "extensions.action",
+                Annotations::DESTRUCTIVE.with_confirm("Suspend[ {resource}]?"),
+                json!({
+                    "resource": { "id": "org.srelens.flux", "revision": 4, "context": "prod", "name": "api" },
+                    "action": "suspend",
+                    "app": { "id": "srelens-core", "revision": 1 },
+                }),
+            ),
+        );
+        let payload = serde_json::to_value(&got).unwrap();
+        assert!(
+            payload.get("app").is_none()
+                && payload["target"].get("app").is_none()
+                && payload.get("requester").is_none(),
+            "no app identity may cross this wire: {payload}"
+        );
+        // What the host DID read is still carried, because none of it is a
+        // claim about who asked.
+        assert_eq!(got.target.cluster.as_deref(), Some("prod"));
+        assert_eq!(got.target.name.as_deref(), Some("api"));
+    }
+
+    /// A sidecar's gated call (#573) is the one case the host knows who asked: the
+    /// supervisor started that process for this app at this revision. So the request
+    /// names it — by ID and revision only, for the window to look up in its own
+    /// inventory — and still carries the host's sentence and the facts it read.
+    fn sidecar_request(args: serde_json::Value) -> srelens_registry::SidecarConsentRequest {
+        let annotations = Annotations::MUTATING
+            .with_impact(Impact::High)
+            .with_confirm("Run the declared action[ ({action})][ on {resource}][ in cluster {cluster}]?");
+        srelens_registry::SidecarConsentRequest {
+            app: srelens_registry::SidecarApp {
+                id: "org.example.argocd".into(),
+                revision: 4,
+                name: "Argo CD".into(),
+                publisher: None,
+            },
+            tool: "extensions.action".into(),
+            confirm_text: annotations.confirm_text(&args),
+            impact: annotations.impact,
+            cluster_id: "prod".into(),
+            namespace: Some("argocd".into()),
+            args,
+        }
+    }
+
+    #[test]
+    fn a_sidecars_call_names_the_app_the_host_started_it_for_and_nothing_more() {
+        let args = json!({
+            "resource": {"id": "org.example.argocd", "revision": 4, "capability": "applications",
+                "context": "prod", "namespace": "argocd", "name": "web"},
+            "action": "refresh", "uid": "u-1", "resourceVersion": "7",
+        });
+        let got = PendingRequest::from_sidecar("id-s".into(), &sidecar_request(args));
+        assert_eq!(
+            got.requester,
+            Some(Requester { id: "org.example.argocd".into(), revision: 4 })
+        );
+        assert_eq!(
+            got.prompt.as_deref(),
+            Some("Run the declared action (refresh) on argocd/web in cluster prod?")
+        );
+        assert_eq!(got.impact, "high");
+        assert_eq!(got.target.cluster.as_deref(), Some("prod"));
+        assert_eq!(got.target.name.as_deref(), Some("web"));
+        // The name and the publisher are the window's to look up, never this wire's.
+        let payload = serde_json::to_value(&got).unwrap();
+        assert_eq!(payload["requester"], json!({"id": "org.example.argocd", "revision": 4}));
+        assert!(!payload.to_string().contains("Argo CD"), "{payload}");
+    }
+
+    /// With no window to ask in, a sidecar's write is refused, never let through.
+    #[tokio::test]
+    async fn a_sidecars_write_with_no_window_to_ask_in_is_refused() {
+        use srelens_registry::SidecarConsent;
+        let app = tauri::test::mock_app();
+        let prompt = PromptUser::new(
+            app.handle().clone(),
+            Arc::new(Pending::default()),
+            Duration::from_secs(1),
+        );
+        let why = SidecarConsent::confirm(&prompt, &sidecar_request(json!({"action": "refresh"})))
+            .await
+            .unwrap_err();
+        assert!(why.contains("no window"), "{why}");
+    }
+
+    /// The target travels through the same escaping and the same 80-character
+    /// bound as the sentence: a name carrying a right-to-left override must
+    /// not reorder the facts under the question, and one long enough to push
+    /// the tail out of the frame is cut.
+    #[test]
+    fn a_hostile_name_reaches_the_window_escaped_and_bounded() {
+        let got = PendingRequest::from_consent(
+            "id-9".into(),
+            &consent(
+                "k8s.drainNode",
+                Annotations::DESTRUCTIVE,
+                json!({ "context": "pr\u{202e}od", "name": "n".repeat(400) }),
+            ),
+        );
+        let cluster = got.target.cluster.expect("the cluster is carried");
+        assert!(
+            !cluster.contains('\u{202e}'),
+            "an override reached the window drawn"
+        );
+        assert!(cluster.contains("\\u{202e}"));
+        let name = got.target.name.expect("the name is carried");
+        assert_eq!(
+            name.chars().count(),
+            srelens_capability::CONFIRM_FIELD_MAX_CHARS
+        );
+        assert!(name.ends_with('…'));
+    }
+
+    /// A replayed request and a live one are the same question, target
+    /// included — the emit sends this value and the snapshot returns it.
+    #[tokio::test]
+    async fn the_snapshot_replays_the_target() {
+        let p = Pending::default();
+        let sent = PendingRequest::from_consent(
+            "id-10".into(),
+            &consent(
+                "extensions.action",
+                Annotations::DESTRUCTIVE.with_confirm("Suspend[ {resource}]?"),
+                json!({ "resource": { "context": "prod", "namespace": "team", "name": "api" } }),
+            ),
+        );
+        let (tx, _rx) = oneshot::channel();
+        p.register(sent.clone(), tx);
+        assert_eq!(p.snapshot(), vec![sent]);
     }
 
     #[test]

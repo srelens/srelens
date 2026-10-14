@@ -13,7 +13,7 @@ export interface LogStream {
 }
 
 /** Connection health of a live-tail stream. */
-export type LogStatus = "live" | "reconnecting";
+export type LogStatus = "live" | "reconnecting" | "completed";
 
 /** Per-stream options: how much history to tail and whether to timestamp. */
 export interface LogStreamOptions {
@@ -43,17 +43,21 @@ let streamSeq = 0;
  * event any target happened to send. The tag is the second argument so a
  * caller that only wants the state — classic's `LogsView` — keeps working
  * unchanged.
+ *
+ * `onLine`'s third argument says the host cut the line at its limit (#747):
+ * the backend reads at most so much of one line, drops the rest up to its
+ * newline, and marks what it kept (`crates/kube/src/logs.rs`).
  */
 export async function startLogStream(
   context: string,
   namespace: string,
   targets: LogTarget[],
-  onLine: (source: string, line: string) => void,
+  onLine: (source: string, line: string, truncated: boolean) => void,
   onStatus?: (status: LogStatus, source: string) => void,
   options: LogStreamOptions = {},
 ): Promise<LogStream> {
   if (targets.length === 0) throw new Error("cannot start live logs without a pod target");
-  const channel = `logs:line:${++streamSeq}`;
+  const channel = `logs:line:${++streamSeq}-${Math.random().toString(36).slice(2, 10)}`;
   const dispose = await subscribe(channel, (p) => {
     // The backend emits either a log line (`{source, line}`) or a status
     // (`{source, status}`). Both carry a source, so the `status` key is what
@@ -63,8 +67,8 @@ export async function startLogStream(
       const { status, source } = p as { status: LogStatus; source?: string };
       onStatus?.(status, source ?? "");
     } else {
-      const { source, line } = p as { source: string; line: string };
-      onLine(source, line);
+      const { source, line, truncated } = p as { source: string; line: string; truncated?: boolean };
+      onLine(source, line, truncated === true);
     }
   });
   try {

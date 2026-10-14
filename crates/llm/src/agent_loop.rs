@@ -36,12 +36,15 @@ pub async fn run(
     let tools = invoker.list_tools().await?;
     let mut turns = history.clone();
     turns.push(Turn::User(prompt));
+    let mut total_usage = crate::types::TokenUsage::default();
 
     for _ in 0..MAX_ROUNDS {
         let mut text = String::new();
         let mut calls: Vec<ToolCall> = Vec::new();
         let mut stream_error: Option<String> = None;
         let mut truncated = false;
+
+        let mut round_usage: Option<crate::types::TokenUsage> = None;
 
         {
             let mut on_item = |item: StreamItem| match item {
@@ -53,8 +56,27 @@ pub async fn run(
                 StreamItem::ToolCall(c) => calls.push(c),
                 StreamItem::Done(reason) => truncated |= reason == StopReason::MaxTokens,
                 StreamItem::Error(e) => stream_error = Some(e),
+                StreamItem::Usage(u) => {
+                    round_usage = Some(u);
+                    on_event(AgentEvent::Usage {
+                        prompt_tokens: total_usage.prompt_tokens + u.prompt_tokens,
+                        completion_tokens: total_usage.completion_tokens + u.completion_tokens,
+                        cached_tokens: total_usage.cached_tokens + u.cached_tokens,
+                        total_tokens: total_usage.total_tokens + u.total_tokens,
+                    });
+                }
             };
-            provider.stream_turn(&turns, &tools, &mut on_item).await?;
+            let request_turns = compact_request_turns_for_round(&turns);
+            provider
+                .stream_turn(&request_turns, &tools, &mut on_item)
+                .await?;
+        }
+
+        if let Some(u) = round_usage {
+            total_usage.prompt_tokens += u.prompt_tokens;
+            total_usage.completion_tokens += u.completion_tokens;
+            total_usage.cached_tokens += u.cached_tokens;
+            total_usage.total_tokens += u.total_tokens;
         }
 
         if let Some(message) = stream_error {
@@ -70,9 +92,10 @@ pub async fn run(
         // model never finished writing. Discard the round instead.
         if truncated && !calls.is_empty() {
             on_event(AgentEvent::Error {
-                message: "the reply was cut off at the provider's output-token limit mid-tool-call; \
+                message:
+                    "the reply was cut off at the provider's output-token limit mid-tool-call; \
                           stopping without running the incomplete call"
-                    .into(),
+                        .into(),
             });
             on_event(AgentEvent::TurnDone);
             return Ok(history);
@@ -81,7 +104,10 @@ pub async fn run(
         // No tool calls → the model gave its final reply; the turn is done.
         if calls.is_empty() {
             // Record the reply so a follow-up message sees it in context.
-            turns.push(Turn::Assistant { text, tool_calls: Vec::new() });
+            turns.push(Turn::Assistant {
+                text,
+                tool_calls: Vec::new(),
+            });
             // A token-limit cutoff means the reply above is a fragment — say
             // so instead of presenting it as a finished answer. It's still
             // recorded, so a follow-up "continue" has the fragment in context.
@@ -95,7 +121,10 @@ pub async fn run(
         }
 
         // Record what the model said and requested, then run each call.
-        turns.push(Turn::Assistant { text: text.clone(), tool_calls: calls.clone() });
+        turns.push(Turn::Assistant {
+            text: text.clone(),
+            tool_calls: calls.clone(),
+        });
         let mut outcomes = Vec::with_capacity(calls.len());
         for call in &calls {
             on_event(AgentEvent::ToolCallStart {
@@ -134,24 +163,152 @@ async fn invoke_one(
             } else {
                 ToolStatus::Ok
             };
-            on_event(AgentEvent::ToolResult { id: call.id.clone(), status });
             // A denied call is fed back as an error so the model can adapt.
+            let raw_content = if res.denied && res.content.is_empty() {
+                "the user declined this tool call".to_string()
+            } else {
+                res.content
+            };
+            let content = cap_tool_result_content(&call.name, &raw_content);
+            let is_error = res.is_error || res.denied;
+            // The row's summary reads the same text the model is given (#385),
+            // so the two never tell different stories about one call.
+            let summary = srelens_agent::event::summarize_result(&content, is_error);
+            on_event(AgentEvent::ToolResult {
+                id: call.id.clone(),
+                status,
+                summary,
+            });
             ToolOutcome {
                 id: call.id.clone(),
                 name: call.name.clone(),
-                content: if res.denied && res.content.is_empty() {
-                    "the user declined this tool call".to_string()
-                } else {
-                    res.content
-                },
-                is_error: res.is_error || res.denied,
+                content,
+                is_error,
             }
         }
         Err(e) => {
-            on_event(AgentEvent::ToolResult { id: call.id.clone(), status: ToolStatus::Error });
-            ToolOutcome { id: call.id.clone(), name: call.name.clone(), content: e.to_string(), is_error: true }
+            let err_str = e.to_string();
+            let content = cap_tool_result_content(&call.name, &err_str);
+            let summary = srelens_agent::event::summarize_result(&content, true);
+            on_event(AgentEvent::ToolResult {
+                id: call.id.clone(),
+                status: ToolStatus::Error,
+                summary,
+            });
+            ToolOutcome {
+                id: call.id.clone(),
+                name: call.name.clone(),
+                content,
+                is_error: true,
+            }
         }
     }
+}
+
+/// Maximum tool result bytes passed to the native model in one tool execution.
+pub const MAX_AGENT_TOOL_RESULT_BYTES: usize = 16 * 1024; // 16 KB
+
+/// Returns true if the tool outputs sequential logs where newest entries are most critical.
+fn is_log_tool(tool_name: &str) -> bool {
+    let lower = tool_name.to_ascii_lowercase();
+    lower.contains("podlogs") || lower.contains("journallogs") || lower.ends_with("logs")
+}
+
+/// Cap individual tool result content to prevent single massive outputs (e.g. huge pod logs)
+/// from blowing out the model context window.
+///
+/// For log streams (`podLogs`, `nodeJournalLogs`), the newest lines at the tail are preserved
+/// up to 16KB so that panics, stack traces, and crash reasons are not dropped.
+/// For structured objects/lists (`listPods`, `getManifest`), the head is preserved.
+pub fn cap_tool_result_content(tool_name: &str, content: &str) -> String {
+    if content.len() <= MAX_AGENT_TOOL_RESULT_BYTES {
+        return content.to_string();
+    }
+
+    if is_log_tool(tool_name) {
+        // Log streams: keep the newest lines at the tail where panics, errors, and crashes appear.
+        // Budget space for the notice header so total output never exceeds MAX_AGENT_TOOL_RESULT_BYTES.
+        let notice_prefix = format!(
+            "[Earlier log lines truncated (kept newest bytes for `{tool_name}`). Specify tail_lines or container if needed.]\n\n"
+        );
+        let max_tail = MAX_AGENT_TOOL_RESULT_BYTES.saturating_sub(notice_prefix.len() + 10);
+        let mut start = content.len().saturating_sub(max_tail);
+        while start < content.len() && !content.is_char_boundary(start) {
+            start += 1;
+        }
+        let slice = &content[start..];
+        let offset = match slice.find('\n') {
+            Some(newline_pos) if start + newline_pos + 1 < content.len() => start + newline_pos + 1,
+            _ => start,
+        };
+        let tail = &content[offset..];
+        format!(
+            "[Earlier log lines truncated (kept newest {} bytes for `{tool_name}`). Specify tail_lines or container if needed.]\n\n{}",
+            tail.len(),
+            tail
+        )
+    } else {
+        // Structured objects/lists: keep head and reserve budget for notice suffix.
+        let notice = format!(
+            "\n\n[Output truncated at 16KB for `{tool_name}`. Output exceeded limit; specify more focused selectors, namespace, or fields.]"
+        );
+        let max_head = MAX_AGENT_TOOL_RESULT_BYTES.saturating_sub(notice.len());
+        let boundary = content
+            .char_indices()
+            .take_while(|(idx, _)| *idx <= max_head)
+            .last()
+            .map(|(idx, _)| idx)
+            .unwrap_or(0);
+        let mut truncated = content[..boundary].to_string();
+        truncated.push_str(&notice);
+        truncated
+    }
+}
+
+/// Compact earlier intermediate tool results from previous user turns when sending
+/// requests to the provider in multi-round execution. Tool results within the
+/// current active user turn are preserved in full so that diagnostic facts gathered
+/// in early rounds (e.g. `listPods`, `listEvents`) are not lost mid-investigation.
+/// (Each individual tool result is already safely capped at 16KB by `cap_tool_result_content`).
+pub fn compact_request_turns_for_round(turns: &[Turn]) -> Vec<Turn> {
+    let current_turn_start = turns
+        .iter()
+        .rposition(|t| matches!(t, Turn::User(_)))
+        .unwrap_or(0);
+
+    turns
+        .iter()
+        .enumerate()
+        .map(|(idx, turn)| match turn {
+            Turn::ToolResults(outcomes) => {
+                if idx >= current_turn_start {
+                    turn.clone()
+                } else {
+                    let compacted = outcomes
+                        .iter()
+                        .map(|o| {
+                            let mut copy = o.clone();
+                            if copy.content.len() > 600 {
+                                let snippet: String = copy
+                                    .content
+                                    .char_indices()
+                                    .take_while(|(byte_idx, ch)| *byte_idx + ch.len_utf8() <= 250)
+                                    .map(|(_, ch)| ch)
+                                    .collect();
+                                copy.content = format!(
+                                    "{}... [Output condensed for subsequent round]",
+                                    snippet.trim_end()
+                                );
+                            }
+                            copy
+                        })
+                        .collect();
+                    Turn::ToolResults(compacted)
+                }
+            }
+            _ => turn.clone(),
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -217,7 +374,10 @@ mod tests {
         }
 
         async fn call_tool(&self, name: &str, args: &Value) -> Result<ToolCallResult, LlmError> {
-            self.calls.lock().unwrap().push((name.to_string(), args.clone()));
+            self.calls
+                .lock()
+                .unwrap()
+                .push((name.to_string(), args.clone()));
             Ok(self.result.clone())
         }
     }
@@ -237,8 +397,18 @@ mod tests {
         let events = std::sync::Arc::new(Mutex::new(Vec::new()));
         let sink = events.clone();
         let mut on_event = move |e: AgentEvent| sink.lock().unwrap().push(e);
-        let rt = tokio::runtime::Builder::new_current_thread().build().unwrap();
-        let out = rt.block_on(run(provider, invoker, history, prompt.to_string(), &mut on_event)).unwrap();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let out = rt
+            .block_on(run(
+                provider,
+                invoker,
+                history,
+                prompt.to_string(),
+                &mut on_event,
+            ))
+            .unwrap();
         drop(on_event);
         let collected = events.lock().unwrap().clone();
         (collected, out)
@@ -251,13 +421,23 @@ mod tests {
             StreamItem::Done(StopReason::EndTurn),
         ]]);
         let invoker = StubInvoker {
-            result: ToolCallResult { content: String::new(), is_error: false, denied: false },
+            result: ToolCallResult {
+                content: String::new(),
+                is_error: false,
+                denied: false,
+            },
             calls: Mutex::new(Vec::new()),
         };
         let (_events, history) = drive_from(&provider, &invoker, Vec::new(), "status?");
         assert_eq!(history.len(), 2);
         assert_eq!(history[0], Turn::User("status?".into()));
-        assert_eq!(history[1], Turn::Assistant { text: "all healthy".into(), tool_calls: Vec::new() });
+        assert_eq!(
+            history[1],
+            Turn::Assistant {
+                text: "all healthy".into(),
+                tool_calls: Vec::new()
+            }
+        );
     }
 
     #[test]
@@ -267,15 +447,27 @@ mod tests {
             StreamItem::Done(StopReason::MaxTokens),
         ]]);
         let invoker = StubInvoker {
-            result: ToolCallResult { content: String::new(), is_error: false, denied: false },
+            result: ToolCallResult {
+                content: String::new(),
+                is_error: false,
+                denied: false,
+            },
             calls: Mutex::new(Vec::new()),
         };
         let (events, history) = drive_from(&provider, &invoker, Vec::new(), "status?");
         // The fragment stays in history so a follow-up "continue" has it…
-        assert_eq!(history[1], Turn::Assistant { text: "the pods are".into(), tool_calls: Vec::new() });
+        assert_eq!(
+            history[1],
+            Turn::Assistant {
+                text: "the pods are".into(),
+                tool_calls: Vec::new()
+            }
+        );
         // …but the user is told it was cut off, not shown a "complete" reply.
         assert!(
-            events.iter().any(|e| matches!(e, AgentEvent::Error { message } if message.contains("cut off"))),
+            events
+                .iter()
+                .any(|e| matches!(e, AgentEvent::Error { message } if message.contains("cut off"))),
             "expected a truncation error event, got {events:?}"
         );
         assert!(matches!(events.last(), Some(AgentEvent::TurnDone)));
@@ -287,18 +479,32 @@ mod tests {
         // `{}`), so executing the call could act on arguments the model never
         // finished. The whole round is discarded instead.
         let provider = ScriptedProvider::new(vec![vec![
-            StreamItem::ToolCall(ToolCall { id: "c1".into(), name: "k8s_scale".into(), arguments: json!({}), thought_signature: None }),
+            StreamItem::ToolCall(ToolCall {
+                id: "c1".into(),
+                name: "k8s_scale".into(),
+                arguments: json!({}),
+                thought_signature: None,
+            }),
             StreamItem::Done(StopReason::MaxTokens),
         ]]);
         let invoker = StubInvoker {
-            result: ToolCallResult { content: "ok".into(), is_error: false, denied: false },
+            result: ToolCallResult {
+                content: "ok".into(),
+                is_error: false,
+                denied: false,
+            },
             calls: Mutex::new(Vec::new()),
         };
         let prior = vec![Turn::User("earlier".into())];
         let (events, history) = drive_from(&provider, &invoker, prior.clone(), "scale it");
-        assert!(invoker.calls.lock().unwrap().is_empty(), "no tool may run from a truncated round");
         assert!(
-            events.iter().any(|e| matches!(e, AgentEvent::Error { message } if message.contains("cut off"))),
+            invoker.calls.lock().unwrap().is_empty(),
+            "no tool may run from a truncated round"
+        );
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, AgentEvent::Error { message } if message.contains("cut off"))),
             "expected a truncation error event, got {events:?}"
         );
         assert!(matches!(events.last(), Some(AgentEvent::TurnDone)));
@@ -313,12 +519,19 @@ mod tests {
             StreamItem::Done(StopReason::EndTurn),
         ]]);
         let invoker = StubInvoker {
-            result: ToolCallResult { content: String::new(), is_error: false, denied: false },
+            result: ToolCallResult {
+                content: String::new(),
+                is_error: false,
+                denied: false,
+            },
             calls: Mutex::new(Vec::new()),
         };
         let prior = vec![
             Turn::User("what pods are down?".into()),
-            Turn::Assistant { text: "web-0".into(), tool_calls: Vec::new() },
+            Turn::Assistant {
+                text: "web-0".into(),
+                tool_calls: Vec::new(),
+            },
         ];
         let (_events, history) = drive_from(&provider, &invoker, prior.clone(), "and now?");
         // The provider saw the full prior conversation plus the new prompt.
@@ -334,12 +547,19 @@ mod tests {
     fn a_failed_turn_is_discarded_from_the_continued_history() {
         let provider = ScriptedProvider::new(vec![vec![StreamItem::Error("Overloaded".into())]]);
         let invoker = StubInvoker {
-            result: ToolCallResult { content: String::new(), is_error: false, denied: false },
+            result: ToolCallResult {
+                content: String::new(),
+                is_error: false,
+                denied: false,
+            },
             calls: Mutex::new(Vec::new()),
         };
         let prior = vec![
             Turn::User("hi".into()),
-            Turn::Assistant { text: "hello".into(), tool_calls: Vec::new() },
+            Turn::Assistant {
+                text: "hello".into(),
+                tool_calls: Vec::new(),
+            },
         ];
         let (_events, history) = drive_from(&provider, &invoker, prior.clone(), "do a thing");
         // The failed turn (its user message and any partial reply) is dropped,
@@ -354,14 +574,20 @@ mod tests {
             StreamItem::Done(StopReason::EndTurn),
         ]]);
         let invoker = StubInvoker {
-            result: ToolCallResult { content: String::new(), is_error: false, denied: false },
+            result: ToolCallResult {
+                content: String::new(),
+                is_error: false,
+                denied: false,
+            },
             calls: Mutex::new(Vec::new()),
         };
         let events = drive(&provider, &invoker, "status?");
         assert_eq!(
             events,
             vec![
-                AgentEvent::TextDelta { text: "all healthy".into() },
+                AgentEvent::TextDelta {
+                    text: "all healthy".into()
+                },
                 AgentEvent::TurnDone,
             ]
         );
@@ -376,13 +602,22 @@ mod tests {
                 StreamItem::ToolCall(ToolCall {
                     id: "c1".into(),
                     name: "k8s_scale".into(),
-                    arguments: json!({ "replicas": 3 }), thought_signature: None }),
+                    arguments: json!({ "replicas": 3 }),
+                    thought_signature: None,
+                }),
                 StreamItem::Done(StopReason::ToolUse),
             ],
-            vec![StreamItem::Text("scaled to 3".into()), StreamItem::Done(StopReason::EndTurn)],
+            vec![
+                StreamItem::Text("scaled to 3".into()),
+                StreamItem::Done(StopReason::EndTurn),
+            ],
         ]);
         let invoker = StubInvoker {
-            result: ToolCallResult { content: "ok".into(), is_error: false, denied: false },
+            result: ToolCallResult {
+                content: "ok".into(),
+                is_error: false,
+                denied: false,
+            },
             calls: Mutex::new(Vec::new()),
         };
         let events = drive(&provider, &invoker, "scale web to 3");
@@ -395,13 +630,22 @@ mod tests {
                     tool: "k8s_scale".into(),
                     args: json!({ "replicas": 3 }),
                 },
-                AgentEvent::ToolResult { id: "c1".into(), status: ToolStatus::Ok },
-                AgentEvent::TextDelta { text: "scaled to 3".into() },
+                AgentEvent::ToolResult {
+                    id: "c1".into(),
+                    status: ToolStatus::Ok,
+                    summary: Some("ok".into())
+                },
+                AgentEvent::TextDelta {
+                    text: "scaled to 3".into()
+                },
                 AgentEvent::TurnDone,
             ]
         );
         // The tool was actually invoked with the model's args.
-        assert_eq!(invoker.calls.lock().unwrap().as_slice(), &[("k8s_scale".into(), json!({ "replicas": 3 }))]);
+        assert_eq!(
+            invoker.calls.lock().unwrap().as_slice(),
+            &[("k8s_scale".into(), json!({ "replicas": 3 }))]
+        );
         // The second provider request carried the tool result back.
         let seen = provider.seen_turns.lock().unwrap();
         assert_eq!(seen.len(), 2);
@@ -412,32 +656,517 @@ mod tests {
     fn a_denied_tool_call_reports_denied_and_feeds_that_back() {
         let provider = ScriptedProvider::new(vec![
             vec![
-                StreamItem::ToolCall(ToolCall { id: "c1".into(), name: "k8s_scale".into(), arguments: json!({}), thought_signature: None }),
+                StreamItem::ToolCall(ToolCall {
+                    id: "c1".into(),
+                    name: "k8s_scale".into(),
+                    arguments: json!({}),
+                    thought_signature: None,
+                }),
                 StreamItem::Done(StopReason::ToolUse),
             ],
-            vec![StreamItem::Text("ok, leaving it".into()), StreamItem::Done(StopReason::EndTurn)],
+            vec![
+                StreamItem::Text("ok, leaving it".into()),
+                StreamItem::Done(StopReason::EndTurn),
+            ],
         ]);
         let invoker = StubInvoker {
-            result: ToolCallResult { content: String::new(), is_error: false, denied: true },
+            result: ToolCallResult {
+                content: String::new(),
+                is_error: false,
+                denied: true,
+            },
             calls: Mutex::new(Vec::new()),
         };
         let events = drive(&provider, &invoker, "scale it");
-        assert!(events.contains(&AgentEvent::ToolResult { id: "c1".into(), status: ToolStatus::Denied }));
+        assert!(events.contains(&AgentEvent::ToolResult {
+            id: "c1".into(),
+            status: ToolStatus::Denied,
+            summary: Some("the user declined this tool call".into())
+        }));
         let seen = provider.seen_turns.lock().unwrap();
         assert!(matches!(seen[1].last(), Some(Turn::ToolResults(o)) if o[0].is_error));
+    }
+
+    /// An invoker that cannot reach the MCP server at all.
+    struct UnreachableInvoker;
+
+    #[async_trait]
+    impl ToolInvoker for UnreachableInvoker {
+        async fn list_tools(&self) -> Result<Vec<ToolDef>, LlmError> {
+            Ok(vec![ToolDef {
+                name: "k8s_scale".into(),
+                description: "scale".into(),
+                input_schema: json!({ "type": "object" }),
+                read_only: false,
+            }])
+        }
+
+        async fn call_tool(&self, _name: &str, _args: &Value) -> Result<ToolCallResult, LlmError> {
+            Err(LlmError::Http("connection refused".into()))
+        }
+    }
+
+    /// PR #806 review: a call that never reached the server is an error whose
+    /// summary is the transport's own message.
+    #[test]
+    fn an_unreachable_tool_is_an_error_summarised_by_the_transport_failure() {
+        let provider = ScriptedProvider::new(vec![
+            vec![
+                StreamItem::ToolCall(ToolCall {
+                    id: "c1".into(),
+                    name: "k8s_scale".into(),
+                    arguments: json!({}),
+                    thought_signature: None,
+                }),
+                StreamItem::Done(StopReason::ToolUse),
+            ],
+            vec![
+                StreamItem::Text("could not reach it".into()),
+                StreamItem::Done(StopReason::EndTurn),
+            ],
+        ]);
+        let events = drive(&provider, &UnreachableInvoker, "scale it");
+        assert!(
+            events.contains(&AgentEvent::ToolResult {
+                id: "c1".into(),
+                status: ToolStatus::Error,
+                summary: Some("network error: connection refused".into()),
+            }),
+            "events: {events:?}"
+        );
+    }
+
+    struct LargeErrorInvoker;
+
+    #[async_trait]
+    impl ToolInvoker for LargeErrorInvoker {
+        async fn list_tools(&self) -> Result<Vec<ToolDef>, LlmError> {
+            Ok(vec![ToolDef {
+                name: "k8s_scale".into(),
+                description: "scale".into(),
+                input_schema: json!({ "type": "object" }),
+                read_only: false,
+            }])
+        }
+
+        async fn call_tool(&self, _name: &str, _args: &Value) -> Result<ToolCallResult, LlmError> {
+            Err(LlmError::Api(
+                "fatal error trace: ".to_string() + &"x".repeat(25 * 1024),
+            ))
+        }
+    }
+
+    #[test]
+    fn a_large_tool_error_is_capped_in_outcome_and_event() {
+        let provider = ScriptedProvider::new(vec![
+            vec![
+                StreamItem::ToolCall(ToolCall {
+                    id: "c1".into(),
+                    name: "k8s_scale".into(),
+                    arguments: json!({}),
+                    thought_signature: None,
+                }),
+                StreamItem::Done(StopReason::ToolUse),
+            ],
+            vec![
+                StreamItem::Text("done".into()),
+                StreamItem::Done(StopReason::EndTurn),
+            ],
+        ]);
+        let (_events, returned_history) =
+            drive_from(&provider, &LargeErrorInvoker, Vec::new(), "scale it");
+        if let Turn::ToolResults(outcomes) = &returned_history[2] {
+            assert!(outcomes[0].is_error);
+            assert!(outcomes[0].content.len() <= MAX_AGENT_TOOL_RESULT_BYTES);
+            assert!(outcomes[0]
+                .content
+                .contains("[Output truncated at 16KB for `k8s_scale`"));
+        } else {
+            panic!("Expected Turn::ToolResults at index 2");
+        }
     }
 
     #[test]
     fn a_provider_error_surfaces_before_turn_done() {
         let provider = ScriptedProvider::new(vec![vec![StreamItem::Error("Overloaded".into())]]);
         let invoker = StubInvoker {
-            result: ToolCallResult { content: String::new(), is_error: false, denied: false },
+            result: ToolCallResult {
+                content: String::new(),
+                is_error: false,
+                denied: false,
+            },
             calls: Mutex::new(Vec::new()),
         };
         let events = drive(&provider, &invoker, "hi");
         assert_eq!(
             events,
-            vec![AgentEvent::Error { message: "Overloaded".into() }, AgentEvent::TurnDone]
+            vec![
+                AgentEvent::Error {
+                    message: "Overloaded".into()
+                },
+                AgentEvent::TurnDone
+            ]
         );
+    }
+
+    #[test]
+    fn token_usage_is_accumulated_and_emitted_across_rounds() {
+        let provider = ScriptedProvider::new(vec![
+            vec![
+                StreamItem::Usage(crate::types::TokenUsage {
+                    prompt_tokens: 1000,
+                    completion_tokens: 50,
+                    cached_tokens: 200,
+                    total_tokens: 1050,
+                }),
+                StreamItem::ToolCall(ToolCall {
+                    id: "c1".into(),
+                    name: "k8s_scale".into(),
+                    arguments: json!({ "replicas": 3 }),
+                    thought_signature: None,
+                }),
+                StreamItem::Done(StopReason::ToolUse),
+            ],
+            vec![
+                StreamItem::Text("done".into()),
+                StreamItem::Usage(crate::types::TokenUsage {
+                    prompt_tokens: 1200,
+                    completion_tokens: 80,
+                    cached_tokens: 300,
+                    total_tokens: 1280,
+                }),
+                StreamItem::Done(StopReason::EndTurn),
+            ],
+        ]);
+        let invoker = StubInvoker {
+            result: ToolCallResult {
+                content: "ok".into(),
+                is_error: false,
+                denied: false,
+            },
+            calls: Mutex::new(Vec::new()),
+        };
+        let events = drive(&provider, &invoker, "scale it");
+        assert!(events.contains(&AgentEvent::Usage {
+            prompt_tokens: 1000,
+            completion_tokens: 50,
+            cached_tokens: 200,
+            total_tokens: 1050,
+        }));
+        assert!(events.contains(&AgentEvent::Usage {
+            prompt_tokens: 2200,
+            completion_tokens: 130,
+            cached_tokens: 500,
+            total_tokens: 2330,
+        }));
+    }
+
+    #[test]
+    fn a_round_with_multiple_usage_snapshots_does_not_double_count() {
+        let provider = ScriptedProvider::new(vec![vec![
+            StreamItem::Text("working...".into()),
+            StreamItem::Usage(crate::types::TokenUsage {
+                prompt_tokens: 1000,
+                completion_tokens: 20,
+                cached_tokens: 0,
+                total_tokens: 1020,
+            }),
+            StreamItem::Text("done".into()),
+            StreamItem::Usage(crate::types::TokenUsage {
+                prompt_tokens: 1000,
+                completion_tokens: 50,
+                cached_tokens: 0,
+                total_tokens: 1050,
+            }),
+            StreamItem::Done(StopReason::EndTurn),
+        ]]);
+        let invoker = StubInvoker {
+            result: ToolCallResult {
+                content: "ok".into(),
+                is_error: false,
+                denied: false,
+            },
+            calls: Mutex::new(Vec::new()),
+        };
+        let events = drive(&provider, &invoker, "do work");
+        let final_usage = events
+            .iter()
+            .filter_map(|e| match e {
+                AgentEvent::Usage {
+                    prompt_tokens,
+                    completion_tokens,
+                    cached_tokens,
+                    total_tokens,
+                } => Some((
+                    *prompt_tokens,
+                    *completion_tokens,
+                    *cached_tokens,
+                    *total_tokens,
+                )),
+                _ => None,
+            })
+            .last()
+            .expect("should have emitted usage");
+
+        assert_eq!(
+            final_usage,
+            (1000, 50, 0, 1050),
+            "multiple snapshots in a single round must record the latest snapshot, not sum them"
+        );
+    }
+
+    #[test]
+    fn test_cap_tool_result_content_structured_tool_truncates_head_with_hint() {
+        let large = "a".repeat(20 * 1024);
+        let capped = cap_tool_result_content("k8s_listPods", &large);
+        assert!(capped.len() <= MAX_AGENT_TOOL_RESULT_BYTES);
+        assert!(capped.contains("[Output truncated at 16KB for `k8s_listPods`"));
+        assert!(capped.contains("specify more focused selectors"));
+    }
+
+    #[test]
+    fn test_cap_tool_result_content_log_tool_preserves_tail() {
+        let mut large = "OLD_STARTUP_LOG\n".to_string();
+        large.push_str(&"x".repeat(20 * 1024));
+        large.push_str("\nCRITICAL_PANIC_AT_TAIL\n");
+
+        let capped = cap_tool_result_content("k8s_podLogs", &large);
+        assert!(capped.len() <= MAX_AGENT_TOOL_RESULT_BYTES);
+        assert!(capped.contains("[Earlier log lines truncated (kept newest"));
+        assert!(capped.contains("CRITICAL_PANIC_AT_TAIL"));
+        assert!(!capped.contains("OLD_STARTUP_LOG"));
+    }
+
+    #[test]
+    fn test_cap_tool_result_content_preserves_short_output() {
+        let short = "{\"status\":\"ok\"}";
+        let capped = cap_tool_result_content("k8s_scale", short);
+        assert_eq!(capped, short);
+    }
+
+    #[test]
+    fn test_compact_request_turns_condenses_prior_user_turns_preserves_active_turn() {
+        let turns = vec![
+            // Prior user turn
+            Turn::User("earlier question".into()),
+            Turn::Assistant {
+                text: "".into(),
+                tool_calls: vec![ToolCall {
+                    id: "c1".into(),
+                    name: "k8s_listPods".into(),
+                    arguments: json!({}),
+                    thought_signature: None,
+                }],
+            },
+            Turn::ToolResults(vec![ToolOutcome {
+                id: "c1".into(),
+                name: "k8s_listPods".into(),
+                content: "a".repeat(1500),
+                is_error: false,
+            }]),
+            Turn::Assistant {
+                text: "earlier answer".into(),
+                tool_calls: vec![],
+            },
+            // Current active user turn
+            Turn::User("current question".into()),
+            Turn::Assistant {
+                text: "".into(),
+                tool_calls: vec![ToolCall {
+                    id: "c2".into(),
+                    name: "k8s_listPods".into(),
+                    arguments: json!({}),
+                    thought_signature: None,
+                }],
+            },
+            Turn::ToolResults(vec![ToolOutcome {
+                id: "c2".into(),
+                name: "k8s_listPods".into(),
+                content: "b".repeat(1500),
+                is_error: false,
+            }]),
+            Turn::Assistant {
+                text: "".into(),
+                tool_calls: vec![ToolCall {
+                    id: "c3".into(),
+                    name: "k8s_scale".into(),
+                    arguments: json!({}),
+                    thought_signature: None,
+                }],
+            },
+            Turn::ToolResults(vec![ToolOutcome {
+                id: "c3".into(),
+                name: "k8s_scale".into(),
+                content: "c".repeat(1500),
+                is_error: false,
+            }]),
+        ];
+
+        let compacted = compact_request_turns_for_round(&turns);
+        assert_eq!(compacted.len(), 9);
+
+        // Turn at index 2 (from earlier user question) must be condensed
+        if let Turn::ToolResults(outcomes) = &compacted[2] {
+            assert!(outcomes[0]
+                .content
+                .contains("... [Output condensed for subsequent round]"));
+            assert!(outcomes[0].content.len() < 400);
+        } else {
+            panic!("Expected Turn::ToolResults at index 2");
+        }
+
+        // Turns at index 6 and 8 (from current active user turn) must remain full
+        if let Turn::ToolResults(outcomes) = &compacted[6] {
+            assert_eq!(outcomes[0].content.len(), 1500);
+            assert!(!outcomes[0].content.contains("[Output condensed"));
+        } else {
+            panic!("Expected Turn::ToolResults at index 6");
+        }
+        if let Turn::ToolResults(outcomes) = &compacted[8] {
+            assert_eq!(outcomes[0].content.len(), 1500);
+            assert!(!outcomes[0].content.contains("[Output condensed"));
+        } else {
+            panic!("Expected Turn::ToolResults at index 8");
+        }
+    }
+
+    #[test]
+    fn test_compact_request_turns_multibyte_prefix_bounded_by_bytes() {
+        // '日' is 3 bytes in UTF-8. 250 characters = 750 bytes (> 600 bytes guard).
+        let multibyte_content = "日".repeat(250);
+        let turns = vec![
+            Turn::User("earlier question".into()),
+            Turn::Assistant {
+                text: "".into(),
+                tool_calls: vec![ToolCall {
+                    id: "c1".into(),
+                    name: "k8s_listPods".into(),
+                    arguments: json!({}),
+                    thought_signature: None,
+                }],
+            },
+            Turn::ToolResults(vec![ToolOutcome {
+                id: "c1".into(),
+                name: "k8s_listPods".into(),
+                content: multibyte_content,
+                is_error: false,
+            }]),
+            Turn::Assistant {
+                text: "answer".into(),
+                tool_calls: vec![],
+            },
+            Turn::User("current question".into()),
+        ];
+
+        let compacted = compact_request_turns_for_round(&turns);
+        if let Turn::ToolResults(outcomes) = &compacted[2] {
+            let prefix = outcomes[0]
+                .content
+                .strip_suffix("... [Output condensed for subsequent round]")
+                .expect("has condensation suffix");
+            assert!(
+                prefix.len() <= 250,
+                "prefix byte length {} must be <= 250 bytes",
+                prefix.len()
+            );
+            // 83 chars * 3 bytes = 249 bytes. If it had taken 250 chars, prefix.len() would be 750 bytes.
+            assert_eq!(prefix.len(), 249);
+            assert_eq!(prefix.chars().count(), 83);
+        } else {
+            panic!("Expected Turn::ToolResults at index 2");
+        }
+    }
+
+    #[test]
+    fn test_run_preserves_current_turn_tool_results_across_rounds_and_condenses_history() {
+        let heavy_output_1 = "X".repeat(1000);
+        let history = vec![
+            Turn::User("past query".into()),
+            Turn::Assistant {
+                text: "".into(),
+                tool_calls: vec![ToolCall {
+                    id: "c0".into(),
+                    name: "k8s_scale".into(),
+                    arguments: json!({}),
+                    thought_signature: None,
+                }],
+            },
+            Turn::ToolResults(vec![ToolOutcome {
+                id: "c0".into(),
+                name: "k8s_scale".into(),
+                content: "H".repeat(1000),
+                is_error: false,
+            }]),
+            Turn::Assistant {
+                text: "past answer".into(),
+                tool_calls: vec![],
+            },
+        ];
+
+        let provider = ScriptedProvider::new(vec![
+            // Round 1: calls tool 1
+            vec![
+                StreamItem::ToolCall(ToolCall {
+                    id: "c1".into(),
+                    name: "k8s_scale".into(),
+                    arguments: json!({}),
+                    thought_signature: None,
+                }),
+                StreamItem::Done(StopReason::ToolUse),
+            ],
+            // Round 2: calls tool 2
+            vec![
+                StreamItem::ToolCall(ToolCall {
+                    id: "c2".into(),
+                    name: "k8s_scale".into(),
+                    arguments: json!({}),
+                    thought_signature: None,
+                }),
+                StreamItem::Done(StopReason::ToolUse),
+            ],
+            // Round 3: final answer
+            vec![
+                StreamItem::Text("done".into()),
+                StreamItem::Done(StopReason::EndTurn),
+            ],
+        ]);
+
+        let invoker = StubInvoker {
+            result: ToolCallResult {
+                content: heavy_output_1.clone(),
+                is_error: false,
+                denied: false,
+            },
+            calls: Mutex::new(Vec::new()),
+        };
+
+        let (_events, returned_history) = drive_from(&provider, &invoker, history, "multi step");
+
+        let seen = provider.seen_turns.lock().unwrap().clone();
+        assert_eq!(seen.len(), 3);
+
+        // In round 3, check that:
+        // 1. The historical tool result (index 2) was condensed
+        if let Turn::ToolResults(outcomes) = &seen[2][2] {
+            assert!(outcomes[0]
+                .content
+                .contains("... [Output condensed for subsequent round]"));
+        } else {
+            panic!("Expected Turn::ToolResults at index 2 of round 3");
+        }
+
+        // 2. The active turn's round 1 tool result (index 6) was preserved in full
+        if let Turn::ToolResults(outcomes) = &seen[2][6] {
+            assert_eq!(outcomes[0].content, heavy_output_1);
+        } else {
+            panic!("Expected Turn::ToolResults at index 6 of round 3");
+        }
+
+        // Canonical returned_history preserves the full content for active turn tool results
+        if let Turn::ToolResults(outcomes) = &returned_history[6] {
+            assert_eq!(outcomes[0].content, heavy_output_1);
+        } else {
+            panic!("Expected Turn::ToolResults at index 6 of returned history");
+        }
     }
 }

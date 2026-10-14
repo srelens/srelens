@@ -46,3 +46,16 @@ describe("TextInput", () => {
     expect(screen.getByRole("textbox").getAttribute("aria-invalid")).toBeNull();
   });
 });
+
+
+it("keeps a visible control boundary and does not suppress keyboard focus", () => {
+  render(<TextInput value="" onValueChange={() => {}} aria-label="Name" />);
+  const control = screen.getByRole("textbox");
+  expect(control.className).not.toContain("outline-none");
+  expect(control.style.borderColor).toBe("var(--control-line)");
+});
+
+it("uses readable theme ink for placeholder text instead of half-transparent browser ink", () => {
+  render(<TextInput value="" onValueChange={() => {}} placeholder="Find a resource" />);
+  expect(screen.getByRole("textbox").className).toContain("placeholder:text-faint");
+});

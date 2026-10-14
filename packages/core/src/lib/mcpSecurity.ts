@@ -1,20 +1,165 @@
 // Typed wrappers for the MCP consent/token/audit commands.
 import { invoke } from "@tauri-apps/api/core";
+import type { CapabilityImpact } from "./capabilities";
+
+/**
+ * What the HOST read out of a gated call: the cluster it is pinned to and the
+ * object it names.
+ *
+ * Every value here is derived in the backend by
+ * `srelens_capability::confirm_fields` — the same closed vocabulary the
+ * confirmation sentence is rendered from, escaped and bounded to 80 characters
+ * there. It is on the wire so that a write clicked in the app and the same
+ * write asked for by an agent name their target through one reading of the
+ * arguments rather than two: the alternative is a second parse, in TypeScript,
+ * of a payload the caller controls.
+ *
+ * Each field is independently optional, and an absent one is `null` rather
+ * than an empty string: "this call named no namespace" and "this call named
+ * the empty namespace" are different facts.
+ *
+ * **There is deliberately no app here**, so the confirmation this feeds names
+ * no requester. "Requested by app X (signed by Y)" is the host vouching for
+ * who asked, and on the MCP path the host has no grounds for it:
+ * `extensions.action` is reachable over MCP, and while the registry checks
+ * that a call's `resource.id` and `revision` name an installed, enabled app,
+ * nothing authenticates the CALLER as that app — an MCP client is a bearer
+ * token. An attribution read off the request would be provenance chosen by
+ * the party being vouched for. An app's own screens have real host context
+ * and do draw the line; see `confirmationApp.ts`.
+ */
+export interface ConfirmTarget {
+  cluster?: string | null;
+  namespace?: string | null;
+  name?: string | null;
+  kind?: string | null;
+}
 
 export interface ConfirmRequest {
   id: string;
   tool: string;
   args: Record<string, unknown>;
+  /**
+   * The host's own sentence for this call, already rendered — what the prompt
+   * asks, in place of the tool id and a JSON blob.
+   *
+   * Written in the backend beside the handler it describes and rendered there
+   * from a template compiled into the binary, through a closed placeholder
+   * vocabulary (see {@link renderConfirmTemplate}). Nothing a caller sends
+   * reaches this string except as the value of one of those six named fields,
+   * and `{resource}` is derived rather than read — so a caller cannot name the
+   * thing it is about to change, let alone write the question.
+   *
+   * Absent when the capability carries no template, or when the template names
+   * something this call has no value for. The prompt then shows the tool and
+   * its arguments as it always did; it does not draw half a sentence. That
+   * fallback is deliberate: "Drain ?" over an Approve button is worse than
+   * saying nothing.
+   */
+  prompt?: string | null;
+  /**
+   * `low`, `medium` or `high` — how much this call disturbs if it runs. Shown
+   * beside the question, because "an agent wants to run a cluster action" is
+   * the same sentence for an Argo CD status refresh and a node drain.
+   *
+   * Optional only because the payload crosses a process boundary and this
+   * narrows rather than casts; the backend always sends it.
+   */
+  impact?: CapabilityImpact;
+  /**
+   * The cluster, the object and the app, as the host read them. See
+   * {@link ConfirmTarget}.
+   *
+   * Optional for the same reason `impact` is: it crosses a process boundary
+   * and consumers narrow rather than cast. The backend always sends it, empty
+   * when the call named nothing.
+   */
+  target?: ConfirmTarget | null;
+  /**
+   * The installed app that asked, when the HOST knows it: only for a call an
+   * executable app's sidecar made back into srelens (#573), whose process the
+   * supervisor started for exactly this app and revision. Never for an MCP
+   * call, whose caller is a bearer token and not an app (see
+   * {@link ConfirmTarget}).
+   *
+   * An ID and a revision, and nothing more: the window looks the name and the
+   * publisher up in its own installed inventory, so nothing on this wire names
+   * or vouches for an app, and a revision the window no longer has draws no
+   * requester line.
+   */
+  requester?: { id: string; revision: number } | null;
+  /**
+   * Which of srelens's own chats raised this call (#393), as the host
+   * authenticated it — never as the call's arguments say. `null` when nobody
+   * can be named: an external MCP client, a headless caller, or an app's
+   * sidecar (which {@link requester} names instead).
+   *
+   * Optional for the same reason `impact` is: it crosses a process boundary
+   * and consumers narrow rather than cast.
+   */
+  caller?: { chatSession: string } | null;
 }
 
+/**
+ * One line of the local audit trail, as `srelens_capability::audit`
+ * (`crates/capability/src/audit.rs`) writes it.
+ *
+ * **Both surfaces are in here** (#555). The trail used to hold MCP calls
+ * alone, because the sink lived in the MCP crate and a capability invoked from
+ * the app went straight to the registry — so an Argo CD sync clicked in
+ * srelens left no record while the identical call from an agent did. The sink
+ * moved beside the registry, where the two paths meet, and `source` is how a
+ * reader tells them apart.
+ *
+ * **It is local and it stays local.** These lines come from one `0600` file
+ * under the app's config directory, read by the Settings pane on the same
+ * machine. Nothing uploads it and nothing else reads it.
+ *
+ * **Older lines arrive in this shape too.** `audit.jsonl` predates #555, so an
+ * installed copy of srelens has records on disk with no `source` and an
+ * `outcome` of `"error"`. The backend upgrades them as it reads
+ * (`upgrade_record`, `crates/capability/src/audit.rs`) — missing `source`
+ * becomes `mcp`, because nothing else could have written them, and `error`
+ * becomes `rejected` or `failed` from the decision beside it — so this type
+ * describes every row a caller will see, not only the ones written since. A
+ * consumer must still treat `app`, `cluster` and `resource` as genuinely
+ * absent on an old row rather than as a fact about the call.
+ */
 export interface AuditEntry {
   ts: number;
-  transport: "stdio" | "http";
+  /**
+   * Who made the call: the app's own UI, an MCP client, or an installed
+   * app's sidecar calling back into the host (#573), which `app` names.
+   */
+  source: "ui" | "mcp" | "app";
+  /** How it reached the registry. `"ui"` is the Tauri bridge; `"sidecar"` an app's sidecar pipe. */
+  transport: "ui" | "stdio" | "http" | "sidecar";
   tool: string;
   args: Record<string, unknown>;
+  /** The app the call was made through, when it was made through one. */
+  app: { id: string; revision: number } | null;
+  /** The cluster context the call named, when it named one. */
+  cluster: string | null;
+  /** The object the call named, as `namespace/name` or `name`. */
+  resource: string | null;
   decision: "approved" | "denied" | "auto";
-  outcome: "ok" | "error";
+  /**
+   * `ok` — it ran and answered. `rejected` — it never ran: consent refused,
+   * arguments refused, no such capability. `failed` — it ran and did not
+   * finish. "srelens would not do this" and "the cluster would not" are
+   * different answers to "did my sync happen?".
+   */
+  outcome: "ok" | "rejected" | "failed";
   err: string | null;
+  /**
+   * Bytes of the JSON the capability answered with — for an MCP tool call,
+   * exactly what the agent received; a `resources/read` of a manifest or logs
+   * hands over the unwrapped document, without the wrapper and the JSON
+   * escaping counted here. `null` when it did not
+   * answer, for a sensitive capability, and on records written before sizes
+   * were kept.
+   */
+  resultBytes: number | null;
 }
 
 export async function respondToConfirm(id: string, approved: boolean): Promise<void> {

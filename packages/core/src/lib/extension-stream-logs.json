@@ -1,0 +1,18 @@
+{
+  "id": "org.example.certmanager",
+  "revision": 1,
+  "view": "org.example.certmanager/resource:controllers#1",
+  "channel": "extstream:3-q7w2e9",
+  "context": "cluster/a",
+  "namespace": "cert-manager",
+  "source": {
+    "kind": "logs",
+    "capability": "controllerLogs",
+    "name": "cert-manager",
+    "pod": "cert-manager-7d9f8b6c5-x2x9k",
+    "container": "cert-manager-controller",
+    "tailLines": 200,
+    "sinceSeconds": 3600,
+    "timestamps": true
+  }
+}

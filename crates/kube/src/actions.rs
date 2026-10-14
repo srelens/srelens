@@ -151,12 +151,7 @@ pub fn update_config_data_capability(cache: Arc<ClientCache>) -> Capability {
     Capability::typed::<UpdateConfigDataIn, ActionOut, _, _>(
         "k8s.updateConfigData",
         "update ConfigMap or Secret values in place (merge patch)",
-        Annotations {
-            read_only: false,
-            destructive: false,
-            requires_confirm: true,
-            sensitive: false,
-        },
+        Annotations::MUTATING.with_confirm("Overwrite values[ in {resource}][ in cluster {cluster}]?"),
         move |input: UpdateConfigDataIn| {
             let cache = cache.clone();
             async move {
@@ -213,12 +208,8 @@ pub fn scale_capability(cache: Arc<ClientCache>) -> Capability {
     Capability::typed::<ScaleIn, ActionOut, _, _>(
         "k8s.scale",
         "set the replica count of a workload (Deployment/StatefulSet/ReplicaSet)",
-        Annotations {
-            read_only: false,
-            destructive: false,
-            requires_confirm: true,
-            sensitive: false,
-        },
+        Annotations::MUTATING
+            .with_confirm("Change the replica count[ of {resource}][ in cluster {cluster}]?"),
         move |input: ScaleIn| {
             let cache = cache.clone();
             async move {
@@ -247,29 +238,31 @@ pub struct RestartIn {
     pub name: String,
 }
 
+/// The host-owned rollout patch, shared with the reviewed extension adapter.
+pub(crate) fn restart_patch() -> serde_json::Value {
+    let now = k8s_openapi::jiff::Timestamp::now().to_string();
+    json!({"spec":{"template":{"metadata":{"annotations":{"kubectl.kubernetes.io/restartedAt":now}}}}})
+}
+
+/// The host-owned scheduling patch, shared with the reviewed extension adapter.
+pub(crate) fn cordon_patch(unschedulable: bool) -> serde_json::Value {
+    json!({"spec":{"unschedulable":unschedulable}})
+}
+
 /// `k8s.rolloutRestart` — trigger a rolling restart by stamping the pod
 /// template (the `kubectl rollout restart` mechanism). Requires confirmation.
 pub fn rollout_restart_capability(cache: Arc<ClientCache>) -> Capability {
     Capability::typed::<RestartIn, ActionOut, _, _>(
         "k8s.rolloutRestart",
         "trigger a rolling restart of a workload",
-        Annotations {
-            read_only: false,
-            destructive: false,
-            requires_confirm: true,
-            sensitive: false,
-        },
+        Annotations::MUTATING
+            .with_confirm("Roll every pod[ of {resource}][ in cluster {cluster}]?"),
         move |input: RestartIn| {
             let cache = cache.clone();
             async move {
                 let client = cache.get(&input.context).await.map_err(CapabilityError::Handler)?;
                 let api = dynamic_api(client, &input.kind, &input.namespace)?;
-                let now = k8s_openapi::jiff::Timestamp::now().to_string();
-                let patch = json!({
-                    "spec": { "template": { "metadata": { "annotations": {
-                        "kubectl.kubernetes.io/restartedAt": now
-                    }}}}
-                });
+                let patch = restart_patch();
                 tokio::time::timeout(
                     request_timeout(),
                     api.patch(&input.name, &PatchParams::default(), &Patch::Merge(&patch)),
@@ -297,18 +290,14 @@ pub fn cordon_node_capability(cache: Arc<ClientCache>) -> Capability {
     Capability::typed::<CordonIn, ActionOut, _, _>(
         "k8s.cordonNode",
         "cordon or uncordon a node (set spec.unschedulable)",
-        Annotations {
-            read_only: false,
-            destructive: false,
-            requires_confirm: true,
-            sensitive: false,
-        },
+        Annotations::MUTATING
+            .with_confirm("Change scheduling[ on {resource}][ in cluster {cluster}]?"),
         move |input: CordonIn| {
             let cache = cache.clone();
             async move {
                 let client = cache.get(&input.context).await.map_err(CapabilityError::Handler)?;
                 let api: Api<Node> = Api::all(client);
-                let patch = json!({ "spec": { "unschedulable": input.unschedulable } });
+                let patch = cordon_patch(input.unschedulable);
                 tokio::time::timeout(
                     request_timeout(),
                     api.patch(&input.name, &PatchParams::default(), &Patch::Merge(&patch)),

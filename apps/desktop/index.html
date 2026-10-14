@@ -5,6 +5,19 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>srelens</title>
     <link rel="icon" type="image/svg+xml" href="/srelens-mark.svg" />
+    <!--
+      On macOS the window is created transparent, so the Appearance pane's
+      window opacity has something to show through. Until the stylesheet lands
+      nothing has painted the page, and a transparent window with an unpainted
+      page is a hole in the desktop with a shadow round it. This coat is what
+      the window opens wearing instead; the new design takes it off again for a
+      see-through dark theme (`[data-opacity]` in ui-kit's tokens.css). The two
+      values are `canvas` from that file's light and dark blocks.
+    -->
+    <style>
+      html { background: #f5f4f8; }
+      @media (prefers-color-scheme: dark) { html { background: #0d0c12; } }
+    </style>
   </head>
   <body>
     <div id="root"></div>

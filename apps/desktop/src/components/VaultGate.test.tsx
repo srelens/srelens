@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen, fireEvent, waitFor } from "@testing-library/react";
+import { act, render, screen, fireEvent, waitFor } from "@testing-library/react";
 
-const { mcpSecurity } = vi.hoisted(() => ({
+const { mcpSecurity, listeners } = vi.hoisted(() => ({
   mcpSecurity: {
     vaultStatus: vi.fn(),
     vaultSetupPassword: vi.fn(),
@@ -9,8 +9,21 @@ const { mcpSecurity } = vi.hoisted(() => ({
     vaultRecoverPassword: vi.fn(),
     vaultBiometricUnlock: vi.fn(),
   },
+  listeners: {} as Record<string, (payload?: unknown) => void>,
 }));
 vi.mock("@srelens/core/lib/mcpSecurity", () => mcpSecurity);
+vi.mock("@srelens/core", async (orig) => {
+  const actual = await orig<typeof import("@srelens/core")>();
+  return {
+    ...actual,
+    on: (channel: string, handler: (payload?: unknown) => void) => {
+      listeners[channel] = handler;
+      return () => {
+        delete listeners[channel];
+      };
+    },
+  };
+});
 
 import { VaultGate } from "./VaultGate";
 
@@ -18,6 +31,7 @@ import { VaultGate } from "./VaultGate";
 beforeEach(() => {
   (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__ = {};
   Object.values(mcpSecurity).forEach((m) => m.mockReset());
+  for (const key of Object.keys(listeners)) delete listeners[key];
   mcpSecurity.vaultSetupPassword.mockResolvedValue(undefined);
   mcpSecurity.vaultUnlockPassword.mockResolvedValue(undefined);
   mcpSecurity.vaultBiometricUnlock.mockResolvedValue(undefined);
@@ -113,5 +127,102 @@ describe("VaultGate", () => {
     mcpSecurity.vaultStatus.mockResolvedValue(status({ mode: "unlocked", keySource: "password" }));
     fireEvent.click(screen.getByRole("button", { name: /continue/i }));
     await waitFor(() => expect(screen.queryByText("recovered-pass-123")).toBeFalsy());
+  });
+
+  it("covers classic window immediately when vault-locked fires, before refresh resolves", async () => {
+    mcpSecurity.vaultStatus.mockResolvedValue(status({ mode: "unlocked", keySource: "password" }));
+    const onLocked = vi.fn();
+    const { container } = render(<VaultGate onLocked={onLocked} />);
+    await waitFor(() => expect(mcpSecurity.vaultStatus).toHaveBeenCalledTimes(1));
+    expect(container.textContent).toBe("");
+
+    // Simulate an in-flight status call that has not yet resolved
+    let resolveStatus: () => void = () => {};
+    mcpSecurity.vaultStatus.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolveStatus = () => resolve(status({ mode: "locked" }));
+        }),
+    );
+
+    // Trigger vault-locked event
+    act(() => {
+      listeners["vault-locked"]?.();
+    });
+
+    // Synchronously covered with the unlock screen
+    expect(screen.getByRole("heading", { name: /unlock srelens/i })).toBeTruthy();
+    expect(onLocked).toHaveBeenCalledTimes(1);
+
+    // After refresh completes, remains covered
+    act(() => {
+      resolveStatus();
+    });
+    expect(screen.getByRole("heading", { name: /unlock srelens/i })).toBeTruthy();
+  });
+
+  it("lowers the gate when vault-unlocked fires from another window", async () => {
+    mcpSecurity.vaultStatus.mockResolvedValue(status({ mode: "locked" }));
+    const onReady = vi.fn();
+    render(<VaultGate onReady={onReady} />);
+    expect(await screen.findByRole("heading", { name: /unlock srelens/i })).toBeTruthy();
+
+    mcpSecurity.vaultStatus.mockResolvedValue(status({ mode: "unlocked", keySource: "password" }));
+    await act(async () => {
+      listeners["vault-unlocked"]?.();
+    });
+    await waitFor(() => expect(onReady).toHaveBeenCalledTimes(1));
+    expect(screen.queryByRole("heading", { name: /unlock srelens/i })).toBeNull();
+  });
+
+  it("ignores a stale unlock status that resolves after vault-locked", async () => {
+    mcpSecurity.vaultStatus.mockResolvedValue(status({ mode: "locked" }));
+    const onReady = vi.fn();
+    render(<VaultGate onReady={onReady} />);
+    expect(await screen.findByRole("heading", { name: /unlock srelens/i })).toBeTruthy();
+
+    const resolvers: Array<(s: ReturnType<typeof status>) => void> = [];
+    mcpSecurity.vaultStatus.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolvers.push(resolve);
+        }),
+    );
+    act(() => {
+      listeners["vault-unlocked"]?.();
+    });
+    act(() => {
+      listeners["vault-locked"]?.();
+    });
+    expect(resolvers).toHaveLength(2);
+    await act(async () => {
+      resolvers[0](status({ mode: "unlocked", keySource: "password" }));
+    });
+    await act(async () => {
+      resolvers[1](status({ mode: "locked" }));
+    });
+    expect(screen.getByRole("heading", { name: /unlock srelens/i })).toBeTruthy();
+    expect(onReady).not.toHaveBeenCalled();
+  });
+
+  it("keeps one vault-locked subscription across onLocked identity changes", async () => {
+    mcpSecurity.vaultStatus.mockResolvedValue(status({ mode: "unlocked", keySource: "password" }));
+    const first = vi.fn();
+    const { rerender } = render(<VaultGate onLocked={first} />);
+    await waitFor(() => expect(mcpSecurity.vaultStatus).toHaveBeenCalled());
+    expect(listeners["vault-locked"]).toBeDefined();
+
+    // App passes an inline `() => setVaultReady(false)` every render. A
+    // dependency on that identity would unlisten and re-listen here, leaving a
+    // gap where a broadcast is dropped.
+    const second = vi.fn();
+    rerender(<VaultGate onLocked={second} />);
+    expect(listeners["vault-locked"]).toBeDefined();
+
+    act(() => {
+      listeners["vault-locked"]?.();
+    });
+    expect(first).not.toHaveBeenCalled();
+    expect(second).toHaveBeenCalledTimes(1);
   });
 });

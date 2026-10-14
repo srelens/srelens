@@ -1,0 +1,18 @@
+{
+  "format": "srelens-extension-package",
+  "formatVersion": 1,
+  "id": "test.signed.packaged",
+  "version": "1.0.0",
+  "files": [
+    {
+      "path": "extension.json",
+      "size": 797,
+      "sha256": "8de1ea44c2d7fd026b654882148bf992db5f11a1224e1b26b92636017ee80412"
+    },
+    {
+      "path": "icons/icon.png",
+      "size": 70,
+      "sha256": "5ac582e7e6400b3553127899e5269211ef46edd3eaef504ced739e2652fc82a2"
+    }
+  ]
+}

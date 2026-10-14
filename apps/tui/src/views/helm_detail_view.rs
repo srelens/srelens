@@ -75,6 +75,9 @@ pub struct HelmDetailViewState {
     pub scroll_offset: usize,
     pub values_diff_mode: ValuesDiffMode,
     pub filter_query: String,
+    pub search_query: String,
+    pub search_matches: Vec<usize>,
+    pub current_match_idx: Option<usize>,
 }
 
 impl HelmDetailViewState {
@@ -91,13 +94,24 @@ impl HelmDetailViewState {
             scroll_offset: 0,
             values_diff_mode: ValuesDiffMode::CustomVsComputed,
             filter_query: String::new(),
+            search_query: String::new(),
+            search_matches: Vec::new(),
+            current_match_idx: None,
         }
     }
 
     pub fn set_detail(&mut self, detail: HelmReleaseDetail) {
+        if let Some(current) = &self.detail {
+            if current.revision != detail.revision {
+                self.previous_detail = None;
+            }
+        }
         self.detail = Some(detail);
         self.is_loading = false;
         self.error = None;
+        if !self.search_query.is_empty() {
+            self.recompute_search_matches();
+        }
     }
 
     pub fn set_previous_detail(&mut self, detail: HelmReleaseDetail) {
@@ -113,17 +127,20 @@ impl HelmDetailViewState {
         let curr = self.active_tab as usize;
         self.active_tab = HelmDetailTab::from_index((curr + 1) % 5);
         self.scroll_offset = 0;
+        self.recompute_search_matches();
     }
 
     pub fn prev_tab(&mut self) {
         let curr = self.active_tab as usize;
         self.active_tab = HelmDetailTab::from_index(if curr == 0 { 4 } else { curr - 1 });
         self.scroll_offset = 0;
+        self.recompute_search_matches();
     }
 
     pub fn set_tab(&mut self, tab: HelmDetailTab) {
         self.active_tab = tab;
         self.scroll_offset = 0;
+        self.recompute_search_matches();
     }
 
     pub fn toggle_diff_mode(&mut self) {
@@ -133,6 +150,138 @@ impl HelmDetailViewState {
             ValuesDiffMode::RevisionVsPrevious => ValuesDiffMode::CustomVsComputed,
         };
         self.scroll_offset = 0;
+        self.recompute_search_matches();
+    }
+
+    pub fn text_lines_for_active_tab(&self) -> Vec<String> {
+        match self.active_tab {
+            HelmDetailTab::Manifest => self
+                .detail
+                .as_ref()
+                .map(|d| d.manifest.lines().map(super::sanitize_span_text).collect())
+                .unwrap_or_default(),
+            HelmDetailTab::Notes => self
+                .detail
+                .as_ref()
+                .map(|d| d.notes.lines().map(super::sanitize_span_text).collect())
+                .unwrap_or_default(),
+            HelmDetailTab::ValuesDiff => self
+                .compute_values_diff()
+                .into_iter()
+                .map(|dl| super::sanitize_span_text(&dl.text))
+                .collect(),
+            HelmDetailTab::Overview | HelmDetailTab::Revisions => Vec::new(),
+        }
+    }
+
+    pub fn total_lines_for_active_tab(&self) -> usize {
+        match self.active_tab {
+            HelmDetailTab::Manifest => self
+                .detail
+                .as_ref()
+                .map(|d| d.manifest.lines().count())
+                .unwrap_or(0),
+            HelmDetailTab::Notes => self
+                .detail
+                .as_ref()
+                .map(|d| d.notes.lines().count())
+                .unwrap_or(0),
+            HelmDetailTab::ValuesDiff => self.compute_values_diff().len(),
+            HelmDetailTab::Revisions => self.detail.as_ref().map(|d| d.history.len()).unwrap_or(0),
+            HelmDetailTab::Overview => 0,
+        }
+    }
+
+    pub fn manifest_line_count(&self) -> usize {
+        self.detail
+            .as_ref()
+            .map(|d| d.manifest.lines().count())
+            .unwrap_or(0)
+    }
+
+    pub fn set_search_query(&mut self, query: &str) {
+        self.search_query = query.to_string();
+        self.filter_query = query.to_string();
+        if query.is_empty() {
+            self.search_matches.clear();
+            self.current_match_idx = None;
+            return;
+        }
+
+        let lines = self.text_lines_for_active_tab();
+        let q = query.to_lowercase();
+        self.search_matches = lines
+            .iter()
+            .enumerate()
+            .filter(|(_, l)| l.to_lowercase().contains(&q))
+            .map(|(i, _)| i)
+            .collect();
+
+        if !self.search_matches.is_empty() {
+            self.current_match_idx = Some(0);
+            self.scroll_offset = self.search_matches[0];
+        } else {
+            self.current_match_idx = None;
+        }
+    }
+
+    pub fn recompute_search_matches(&mut self) {
+        if self.search_query.is_empty() {
+            self.search_matches.clear();
+            self.current_match_idx = None;
+            return;
+        }
+
+        let lines = self.text_lines_for_active_tab();
+        let q = self.search_query.to_lowercase();
+        self.search_matches = lines
+            .iter()
+            .enumerate()
+            .filter(|(_, l)| l.to_lowercase().contains(&q))
+            .map(|(i, _)| i)
+            .collect();
+
+        if !self.search_matches.is_empty() {
+            let next_idx = self
+                .current_match_idx
+                .unwrap_or(0)
+                .min(self.search_matches.len() - 1);
+            self.current_match_idx = Some(next_idx);
+            self.scroll_offset = self.search_matches[next_idx];
+        } else {
+            self.current_match_idx = None;
+        }
+    }
+
+    pub fn next_match(&mut self) {
+        if self.search_matches.is_empty() {
+            return;
+        }
+        let next_idx = match self.current_match_idx {
+            Some(curr) => (curr + 1) % self.search_matches.len(),
+            None => 0,
+        };
+        self.current_match_idx = Some(next_idx);
+        self.scroll_offset = self.search_matches[next_idx];
+    }
+
+    pub fn prev_match(&mut self) {
+        if self.search_matches.is_empty() {
+            return;
+        }
+        let prev_idx = match self.current_match_idx {
+            Some(0) | None => self.search_matches.len().saturating_sub(1),
+            Some(curr) => curr - 1,
+        };
+        self.current_match_idx = Some(prev_idx);
+        self.scroll_offset = self.search_matches[prev_idx];
+    }
+
+    pub fn clear_search(&mut self) {
+        self.search_query.clear();
+        self.filter_query.clear();
+        self.search_matches.clear();
+        self.current_match_idx = None;
     }
 
     pub fn scroll_down(&mut self, n: usize) {
@@ -145,6 +294,11 @@ impl HelmDetailViewState {
 
     pub fn scroll_to_top(&mut self) {
         self.scroll_offset = 0;
+    }
+
+    pub fn scroll_to_bottom(&mut self) {
+        let total = self.total_lines_for_active_tab();
+        self.scroll_offset = total.saturating_sub(1);
     }
 
     pub fn select_next_revision(&mut self) {
@@ -169,18 +323,42 @@ impl HelmDetailViewState {
     pub fn compute_values_diff(&self) -> Vec<DiffLine> {
         let (left, right) = match self.values_diff_mode {
             ValuesDiffMode::CustomVsComputed => {
-                let custom_values = self.detail.as_ref().map(|d| d.values_yaml.as_str()).unwrap_or("");
-                let computed_values = self.detail.as_ref().map(|d| d.computed_values_yaml.as_str()).unwrap_or("");
+                let custom_values = self
+                    .detail
+                    .as_ref()
+                    .map(|d| d.values_yaml.as_str())
+                    .unwrap_or("");
+                let computed_values = self
+                    .detail
+                    .as_ref()
+                    .map(|d| d.computed_values_yaml.as_str())
+                    .unwrap_or("");
                 (custom_values, computed_values)
             }
             ValuesDiffMode::CustomVsDefault => {
-                let default_values = self.detail.as_ref().map(|d| d.chart_values_yaml.as_str()).unwrap_or("");
-                let custom_values = self.detail.as_ref().map(|d| d.values_yaml.as_str()).unwrap_or("");
+                let default_values = self
+                    .detail
+                    .as_ref()
+                    .map(|d| d.chart_values_yaml.as_str())
+                    .unwrap_or("");
+                let custom_values = self
+                    .detail
+                    .as_ref()
+                    .map(|d| d.values_yaml.as_str())
+                    .unwrap_or("");
                 (default_values, custom_values)
             }
             ValuesDiffMode::RevisionVsPrevious => {
-                let prev = self.previous_detail.as_ref().map(|d| d.values_yaml.as_str()).unwrap_or("");
-                let curr = self.detail.as_ref().map(|d| d.values_yaml.as_str()).unwrap_or("");
+                let prev = self
+                    .previous_detail
+                    .as_ref()
+                    .map(|d| d.values_yaml.as_str())
+                    .unwrap_or("");
+                let curr = self
+                    .detail
+                    .as_ref()
+                    .map(|d| d.values_yaml.as_str())
+                    .unwrap_or("");
                 (prev, curr)
             }
         };
@@ -227,7 +405,9 @@ impl HelmDetailViewState {
     }
 
     pub fn parse_manifest_resource_counts(&self) -> Vec<(String, usize)> {
-        let Some(ref d) = self.detail else { return Vec::new() };
+        let Some(ref d) = self.detail else {
+            return Vec::new();
+        };
         let mut map: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
         for doc in d.manifest.split("---") {
             for line in doc.lines() {
@@ -246,12 +426,20 @@ impl HelmDetailViewState {
 }
 
 pub fn render_helm_detail_view(f: &mut Frame, area: Rect, state: &HelmDetailViewState) {
+    let show_hints = !state.is_loading && state.error.is_none();
+    let hints = helm_detail_hints(state);
+    let hint_para = Paragraph::new(format!(" {hints}")).wrap(Wrap { trim: true });
+    let hint_height = if show_hints {
+        (hint_para.line_count(area.width.max(1)) as u16).clamp(1, 3)
+    } else {
+        0
+    };
     let main_chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(3), // Tab navigation bar
             Constraint::Min(10),   // Active tab contents
-            Constraint::Length(1), // Bottom hints
+            Constraint::Length(hint_height),
         ])
         .split(area);
 
@@ -264,8 +452,12 @@ pub fn render_helm_detail_view(f: &mut Frame, area: Rect, state: &HelmDetailView
             .border_style(Style::default().fg(Theme::border()));
         let inner = block.inner(main_chunks[1]);
         f.render_widget(block, main_chunks[1]);
-        let msg = Paragraph::new(format!("⟳ Loading Helm release details for '{}/{}'...", state.namespace, state.release_name))
-            .style(Style::default().fg(Theme::cyan()));
+        let msg = Paragraph::new(format!(
+            "⟳ Loading Helm release details for '{}/{}'...",
+            state.namespace, state.release_name
+        ))
+        .wrap(Wrap { trim: true })
+        .style(Style::default().fg(Theme::cyan()));
         f.render_widget(msg, inner);
         return;
     }
@@ -278,6 +470,7 @@ pub fn render_helm_detail_view(f: &mut Frame, area: Rect, state: &HelmDetailView
         let inner = block.inner(main_chunks[1]);
         f.render_widget(block, main_chunks[1]);
         let msg = Paragraph::new(format!("⚠ Failed to load release: {}", err))
+            .wrap(Wrap { trim: true })
             .style(Style::default().fg(Theme::red()));
         f.render_widget(msg, inner);
         return;
@@ -295,9 +488,20 @@ pub fn render_helm_detail_view(f: &mut Frame, area: Rect, state: &HelmDetailView
 }
 
 fn render_tab_strip(f: &mut Frame, area: Rect, state: &HelmDetailViewState) {
-    let rev_str = state.detail.as_ref().map(|d| format!("v{}", d.revision)).unwrap_or_default();
-    let status_str = state.detail.as_ref().map(|d| d.status.as_str()).unwrap_or("loading");
-    let title = format!(" ⎈ Helm Release: {}/{} [{}] ({}) ", state.namespace, state.release_name, rev_str, status_str);
+    let rev_str = state
+        .detail
+        .as_ref()
+        .map(|d| format!("v{}", d.revision))
+        .unwrap_or_default();
+    let status_str = state
+        .detail
+        .as_ref()
+        .map(|d| d.status.as_str())
+        .unwrap_or("loading");
+    let title = format!(
+        " ⎈ Helm Release: {}/{} [{}] ({}) ",
+        state.namespace, state.release_name, rev_str, status_str
+    );
 
     let titles: Vec<Line> = [
         HelmDetailTab::Overview,
@@ -310,7 +514,9 @@ fn render_tab_strip(f: &mut Frame, area: Rect, state: &HelmDetailViewState) {
     .map(|tab| {
         let is_selected = *tab == state.active_tab;
         let style = if is_selected {
-            Style::default().fg(Theme::accent()).add_modifier(Modifier::BOLD)
+            Style::default()
+                .fg(Theme::accent())
+                .add_modifier(Modifier::BOLD)
         } else {
             Style::default().fg(Theme::dim())
         };
@@ -342,7 +548,10 @@ fn render_overview_tab(f: &mut Frame, area: Rect, state: &HelmDetailViewState) {
         .borders(Borders::ALL)
         .border_type(Theme::border_type())
         .border_style(Style::default().fg(Theme::border()))
-        .title(Span::styled(" Release Overview & Topology Breakdown ", Theme::title()));
+        .title(Span::styled(
+            " Release Overview & Topology Breakdown ",
+            Theme::title(),
+        ));
     let inner = block.inner(area);
     f.render_widget(block, area);
 
@@ -353,7 +562,7 @@ fn render_overview_tab(f: &mut Frame, area: Rect, state: &HelmDetailViewState) {
         .constraints([
             Constraint::Length(8), // Release details table/cards
             Constraint::Length(1), // Separator
-            Constraint::Min(6),   // Rendered Kubernetes resources
+            Constraint::Min(6),    // Rendered Kubernetes resources
         ])
         .split(inner);
 
@@ -368,7 +577,12 @@ fn render_overview_tab(f: &mut Frame, area: Rect, state: &HelmDetailViewState) {
     let meta_lines = vec![
         Line::from(vec![
             Span::styled("  Release Name  : ", Style::default().fg(Theme::dim())),
-            Span::styled(&d.name, Style::default().fg(Theme::fg()).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                &d.name,
+                Style::default()
+                    .fg(Theme::fg())
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::raw("    "),
             Span::styled("Namespace     : ", Style::default().fg(Theme::dim())),
             Span::styled(&d.namespace, Style::default().fg(Theme::cyan())),
@@ -378,11 +592,17 @@ fn render_overview_tab(f: &mut Frame, area: Rect, state: &HelmDetailViewState) {
             Span::styled(&d.status, status_style.add_modifier(Modifier::BOLD)),
             Span::raw("        "),
             Span::styled("Revision      : ", Style::default().fg(Theme::dim())),
-            Span::styled(format!("{} (latest)", d.revision), Style::default().fg(Theme::fg())),
+            Span::styled(
+                format!("{} (latest)", d.revision),
+                Style::default().fg(Theme::fg()),
+            ),
         ]),
         Line::from(vec![
             Span::styled("  Chart         : ", Style::default().fg(Theme::dim())),
-            Span::styled(format!("{}-{}", d.chart, d.chart_version), Style::default().fg(Theme::accent())),
+            Span::styled(
+                format!("{}-{}", d.chart, d.chart_version),
+                Style::default().fg(Theme::accent()),
+            ),
             Span::raw("    "),
             Span::styled("App Version   : ", Style::default().fg(Theme::dim())),
             Span::styled(&d.app_version, Style::default().fg(Theme::fg())),
@@ -393,46 +613,83 @@ fn render_overview_tab(f: &mut Frame, area: Rect, state: &HelmDetailViewState) {
         ]),
         Line::from(vec![
             Span::styled("  Revisions     : ", Style::default().fg(Theme::dim())),
-            Span::styled(format!("{} revisions recorded in history", d.history.len()), Style::default().fg(Theme::dim())),
+            Span::styled(
+                format!("{} revisions recorded in history", d.history.len()),
+                Style::default().fg(Theme::dim()),
+            ),
         ]),
     ];
 
-    let meta_para = Paragraph::new(meta_lines);
+    let meta_para = Paragraph::new(meta_lines).wrap(Wrap { trim: true });
     f.render_widget(meta_para, chunks[0]);
 
     // Resource breakdown from manifest
     let res_counts = state.parse_manifest_resource_counts();
     let mut count_lines = Vec::new();
-    count_lines.push(Line::from(vec![
-        Span::styled("  Kubernetes Resources in Manifest:", Style::default().fg(Theme::accent()).add_modifier(Modifier::BOLD)),
-    ]));
+    count_lines.push(Line::from(vec![Span::styled(
+        "  Kubernetes Resources in Manifest:",
+        Style::default()
+            .fg(Theme::accent())
+            .add_modifier(Modifier::BOLD),
+    )]));
     count_lines.push(Line::from(""));
 
     if res_counts.is_empty() {
-        count_lines.push(Line::from(vec![
-            Span::styled("    (No resources detected in rendered manifest)", Style::default().fg(Theme::dim())),
-        ]));
+        count_lines.push(Line::from(vec![Span::styled(
+            "    (No resources detected in rendered manifest)",
+            Style::default().fg(Theme::dim()),
+        )]));
     } else {
         for (kind, count) in res_counts {
             count_lines.push(Line::from(vec![
-                Span::styled(format!("    • {:<20} : ", kind), Style::default().fg(Theme::fg())),
-                Span::styled(format!("{}", count), Style::default().fg(Theme::cyan()).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    format!("    • {:<20} : ", kind),
+                    Style::default().fg(Theme::fg()),
+                ),
+                Span::styled(
+                    format!("{}", count),
+                    Style::default()
+                        .fg(Theme::cyan())
+                        .add_modifier(Modifier::BOLD),
+                ),
             ]));
         }
     }
 
-    let res_para = Paragraph::new(count_lines);
+    let res_para = Paragraph::new(count_lines).wrap(Wrap { trim: false });
     f.render_widget(res_para, chunks[2]);
 }
 
 fn render_values_diff_tab(f: &mut Frame, area: Rect, state: &HelmDetailViewState) {
     let mode_desc = match state.values_diff_mode {
-        ValuesDiffMode::CustomVsComputed => "[Mode: User Values (helm get values) vs Computed Values (helm get values --all)]",
+        ValuesDiffMode::CustomVsComputed => {
+            "[Mode: User Values (helm get values) vs Computed Values (helm get values --all)]"
+        }
         ValuesDiffMode::CustomVsDefault => "[Mode: User Values vs Chart Defaults]",
-        ValuesDiffMode::RevisionVsPrevious => "[Mode: Current Revision vs Previous Revision Values]",
+        ValuesDiffMode::RevisionVsPrevious => {
+            "[Mode: Current Revision vs Previous Revision Values]"
+        }
     };
 
-    let title = format!(" Values Diff {} (Press <m> to toggle mode) ", mode_desc);
+    let search_badge = if !state.search_query.is_empty() {
+        if state.search_matches.is_empty() {
+            format!(" [Search: \"{}\" (0 matches)]", state.search_query)
+        } else {
+            format!(
+                " [Search: \"{}\" ({}/{} matches, n/N)]",
+                state.search_query,
+                state.current_match_idx.map(|i| i + 1).unwrap_or(0),
+                state.search_matches.len()
+            )
+        }
+    } else {
+        String::new()
+    };
+
+    let title = format!(
+        " Values Diff {} (Press <m> to toggle mode){} ",
+        mode_desc, search_badge
+    );
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(Theme::border_type())
@@ -444,11 +701,18 @@ fn render_values_diff_tab(f: &mut Frame, area: Rect, state: &HelmDetailViewState
     let diff_lines = state.compute_values_diff();
     if diff_lines.is_empty() {
         let msg = Paragraph::new("No values diff detected (values identical or empty).")
+            .wrap(Wrap { trim: true })
             .style(Style::default().fg(Theme::dim()));
         f.render_widget(msg, inner);
         return;
     }
 
+    let match_style = Style::default()
+        .bg(Theme::YELLOW)
+        .fg(Color::Rgb(20, 20, 20))
+        .add_modifier(Modifier::BOLD);
+
+    let query_lower = state.search_query.to_lowercase();
     let viewport_height = inner.height as usize;
     let visible_lines: Vec<Line> = diff_lines
         .iter()
@@ -461,19 +725,44 @@ fn render_values_diff_tab(f: &mut Frame, area: Rect, state: &HelmDetailViewState
                 DiffKind::Remove => (" - ", Style::default().fg(Theme::red())),
             };
 
-            let left_str = dl.line_num_left.map(|n| format!("{:>4}", n)).unwrap_or_else(|| "    ".to_string());
-            let right_str = dl.line_num_right.map(|n| format!("{:>4}", n)).unwrap_or_else(|| "    ".to_string());
+            let left_str = dl
+                .line_num_left
+                .map(|n| format!("{:>4}", n))
+                .unwrap_or_else(|| "    ".to_string());
+            let right_str = dl
+                .line_num_right
+                .map(|n| format!("{:>4}", n))
+                .unwrap_or_else(|| "    ".to_string());
 
             let clean_text = super::sanitize_span_text(&dl.text);
-            Line::from(vec![
-                Span::styled(format!("{} {} ", left_str, right_str), Style::default().fg(Theme::dim())),
+            let mut spans = vec![
+                Span::styled(
+                    format!("{} {} ", left_str, right_str),
+                    Style::default().fg(Theme::dim()),
+                ),
                 Span::styled(prefix, style.add_modifier(Modifier::BOLD)),
-                Span::styled(clean_text, style),
-            ])
+            ];
+
+            let has_match =
+                !query_lower.is_empty() && clean_text.to_lowercase().contains(&query_lower);
+
+            if has_match {
+                let highlighted = super::highlight_text_matches(
+                    &clean_text,
+                    &state.search_query,
+                    style,
+                    match_style,
+                );
+                spans.extend(highlighted);
+            } else {
+                spans.push(Span::styled(clean_text, style));
+            }
+
+            Line::from(spans)
         })
         .collect();
 
-    let para = Paragraph::new(visible_lines);
+    let para = Paragraph::new(visible_lines).wrap(Wrap { trim: false });
     f.render_widget(para, inner);
 }
 
@@ -489,7 +778,9 @@ fn render_revisions_tab(f: &mut Frame, area: Rect, state: &HelmDetailViewState) 
 
     let Some(ref d) = state.detail else { return };
     if d.history.is_empty() {
-        let msg = Paragraph::new("No revision history available.").style(Style::default().fg(Theme::dim()));
+        let msg = Paragraph::new("No revision history available.")
+            .wrap(Wrap { trim: true })
+            .style(Style::default().fg(Theme::dim()));
         f.render_widget(msg, inner);
         return;
     }
@@ -575,7 +866,25 @@ fn render_revisions_tab(f: &mut Frame, area: Rect, state: &HelmDetailViewState) 
 }
 
 fn render_manifest_tab(f: &mut Frame, area: Rect, state: &HelmDetailViewState) {
-    let title = " Rendered Kubernetes Manifests (YAML) (<c> Copy  </> Search) ";
+    let search_badge = if !state.search_query.is_empty() {
+        if state.search_matches.is_empty() {
+            format!(" [Search: \"{}\" (0 matches)]", state.search_query)
+        } else {
+            format!(
+                " [Search: \"{}\" ({}/{} matches, n/N)]",
+                state.search_query,
+                state.current_match_idx.map(|i| i + 1).unwrap_or(0),
+                state.search_matches.len()
+            )
+        }
+    } else {
+        String::new()
+    };
+
+    let title = format!(
+        " Rendered Kubernetes Manifests (YAML) (<y> Copy  </> Search){} ",
+        search_badge
+    );
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(Theme::border_type())
@@ -586,11 +895,19 @@ fn render_manifest_tab(f: &mut Frame, area: Rect, state: &HelmDetailViewState) {
 
     let Some(ref d) = state.detail else { return };
     if d.manifest.is_empty() {
-        let msg = Paragraph::new("Manifest is empty.").style(Style::default().fg(Theme::dim()));
+        let msg = Paragraph::new("Manifest is empty.")
+            .wrap(Wrap { trim: true })
+            .style(Style::default().fg(Theme::dim()));
         f.render_widget(msg, inner);
         return;
     }
 
+    let match_style = Style::default()
+        .bg(Theme::YELLOW)
+        .fg(Color::Rgb(20, 20, 20))
+        .add_modifier(Modifier::BOLD);
+
+    let query_lower = state.search_query.to_lowercase();
     let viewport_height = inner.height as usize;
     let lines: Vec<Line> = d
         .manifest
@@ -601,9 +918,13 @@ fn render_manifest_tab(f: &mut Frame, area: Rect, state: &HelmDetailViewState) {
         .map(|(i, l)| {
             let line_idx = state.scroll_offset + i + 1;
             let style = if l.starts_with("kind:") || l.starts_with("apiVersion:") {
-                Style::default().fg(Theme::accent()).add_modifier(Modifier::BOLD)
+                Style::default()
+                    .fg(Theme::accent())
+                    .add_modifier(Modifier::BOLD)
             } else if l.starts_with("---") {
-                Style::default().fg(Theme::cyan()).add_modifier(Modifier::BOLD)
+                Style::default()
+                    .fg(Theme::cyan())
+                    .add_modifier(Modifier::BOLD)
             } else if l.trim_start().starts_with('#') {
                 Style::default().fg(Theme::dim())
             } else if l.contains(':') {
@@ -613,19 +934,54 @@ fn render_manifest_tab(f: &mut Frame, area: Rect, state: &HelmDetailViewState) {
             };
 
             let clean_l = super::sanitize_span_text(l);
-            Line::from(vec![
-                Span::styled(format!("{:>5} │ ", line_idx), Style::default().fg(Theme::dim())),
-                Span::styled(clean_l, style),
-            ])
+            let mut spans = vec![Span::styled(
+                format!("{:>5} │ ", line_idx),
+                Style::default().fg(Theme::dim()),
+            )];
+
+            let has_match =
+                !query_lower.is_empty() && clean_l.to_lowercase().contains(&query_lower);
+
+            if has_match {
+                let highlighted = super::highlight_text_matches(
+                    &clean_l,
+                    &state.search_query,
+                    style,
+                    match_style,
+                );
+                spans.extend(highlighted);
+            } else {
+                spans.push(Span::styled(clean_l, style));
+            }
+
+            Line::from(spans)
         })
         .collect();
 
-    let para = Paragraph::new(lines);
+    let para = Paragraph::new(lines).wrap(Wrap { trim: false });
     f.render_widget(para, inner);
 }
 
 fn render_notes_tab(f: &mut Frame, area: Rect, state: &HelmDetailViewState) {
-    let title = " Chart Release Notes (NOTES.txt) ";
+    let search_badge = if !state.search_query.is_empty() {
+        if state.search_matches.is_empty() {
+            format!(" [Search: \"{}\" (0 matches)]", state.search_query)
+        } else {
+            format!(
+                " [Search: \"{}\" ({}/{} matches, n/N)]",
+                state.search_query,
+                state.current_match_idx.map(|i| i + 1).unwrap_or(0),
+                state.search_matches.len()
+            )
+        }
+    } else {
+        String::new()
+    };
+
+    let title = format!(
+        " Chart Release Notes (NOTES.txt) (<y> Copy  </> Search){} ",
+        search_badge
+    );
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(Theme::border_type())
@@ -637,34 +993,61 @@ fn render_notes_tab(f: &mut Frame, area: Rect, state: &HelmDetailViewState) {
     let Some(ref d) = state.detail else { return };
     if d.notes.is_empty() {
         let msg = Paragraph::new("No release notes (NOTES.txt) provided by chart.")
+            .wrap(Wrap { trim: true })
             .style(Style::default().fg(Theme::dim()));
         f.render_widget(msg, inner);
         return;
     }
 
+    let match_style = Style::default()
+        .bg(Theme::YELLOW)
+        .fg(Color::Rgb(20, 20, 20))
+        .add_modifier(Modifier::BOLD);
+
+    let query_lower = state.search_query.to_lowercase();
     let viewport_height = inner.height as usize;
     let lines: Vec<Line> = d
         .notes
         .lines()
         .skip(state.scroll_offset)
         .take(viewport_height)
-        .map(|l| Line::from(Span::styled(super::sanitize_span_text(l), Style::default().fg(Theme::fg()))))
+        .map(|l| {
+            let clean_l = super::sanitize_span_text(l);
+            let has_match =
+                !query_lower.is_empty() && clean_l.to_lowercase().contains(&query_lower);
+
+            if has_match {
+                let highlighted = super::highlight_text_matches(
+                    &clean_l,
+                    &state.search_query,
+                    Style::default().fg(Theme::fg()),
+                    match_style,
+                );
+                Line::from(highlighted)
+            } else {
+                Line::from(Span::styled(clean_l, Style::default().fg(Theme::fg())))
+            }
+        })
         .collect();
 
-    let para = Paragraph::new(lines);
+    let para = Paragraph::new(lines).wrap(Wrap { trim: false });
     f.render_widget(para, inner);
 }
 
-fn render_bottom_hints(f: &mut Frame, area: Rect, state: &HelmDetailViewState) {
-    let hints = match state.active_tab {
+fn helm_detail_hints(state: &HelmDetailViewState) -> &'static str {
+    match state.active_tab {
         HelmDetailTab::Overview => "<Tab> Switch Tab  <1-5> Jump Tab  <Esc> Back to Releases",
-        HelmDetailTab::ValuesDiff => "<Tab> Switch Tab  <m> Toggle Diff Mode  <j/k> Scroll  <g/G> Top/Bottom  <Esc> Back",
+        HelmDetailTab::ValuesDiff => "<Tab> Switch Tab  <m> Toggle Diff Mode  </> Search  <n/N> Next/Prev  <j/k> Scroll  <g/G> Top/Bottom  <Esc> Back",
         HelmDetailTab::Revisions => "<Tab> Switch Tab  <j/k> Select Rev  <r> Rollback to Selected  <Enter>/<v> View  <Esc> Back",
-        HelmDetailTab::Manifest => "<Tab> Switch Tab  <j/k> Scroll  <c> Copy  </> Search  <Esc> Back",
-        HelmDetailTab::Notes => "<Tab> Switch Tab  <j/k> Scroll  <c> Copy  <Esc> Back",
-    };
+        HelmDetailTab::Manifest => "<Tab> Switch Tab  <j/k> Scroll  <g/G> Top/Bottom  <y> Copy  </> Search  <n/N> Next/Prev  <Esc> Back",
+        HelmDetailTab::Notes => "<Tab> Switch Tab  <j/k> Scroll  <g/G> Top/Bottom  <y> Copy  </> Search  <n/N> Next/Prev  <Esc> Back",
+    }
+}
 
-    let p = Paragraph::new(format!(" {}", hints))
+fn render_bottom_hints(f: &mut Frame, area: Rect, state: &HelmDetailViewState) {
+    let hints = helm_detail_hints(state);
+    let p = Paragraph::new(format!(" {hints}"))
+        .wrap(Wrap { trim: true })
         .style(Style::default().fg(Theme::dim()));
     f.render_widget(p, area);
 }

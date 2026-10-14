@@ -18,6 +18,7 @@ vi.mock("@srelens/core", async (orig) => ({
 }));
 
 import { AgentPane } from "./AgentPane";
+import { useAgentInventoryVersion } from "../../lib/agentInventory";
 
 const {
   llmGetSettings,
@@ -388,5 +389,78 @@ describe("AgentPane", () => {
     // Not a latch the other way: an untouched field is still emptied, so the
     // pane never sits holding what was just sent.
     await waitFor(() => expect(field.value).toBe(""));
+  });
+});
+
+/**
+ * #396. Whether the native agent is available is a key on the DEFAULT
+ * provider, so all three of this pane's writes can change what `listAgents`
+ * answers — and the dock's picker, mounted long before Settings was opened,
+ * re-reads only when told. Read through the same hook the dock reads, so this
+ * asserts what a reader of the signal actually sees.
+ */
+describe("AgentPane — telling the agent surfaces their inventory changed (#396)", () => {
+  function InventoryVersion() {
+    return <output aria-label="agent inventory version">{useAgentInventoryVersion()}</output>;
+  }
+  const versionNow = () => Number(screen.getByLabelText("agent inventory version").textContent);
+
+  function renderPane() {
+    return render(
+      <>
+        <AgentPane />
+        <InventoryVersion />
+      </>,
+    );
+  }
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    llmGetSettings.mockResolvedValue(SETTINGS);
+    llmSetSettings.mockResolvedValue(undefined);
+    llmSetKey.mockResolvedValue(undefined);
+    llmClearKey.mockResolvedValue(undefined);
+    llmKeyStatus.mockResolvedValue(["anthropic"]);
+    llmListModels.mockResolvedValue([]);
+    listAgents.mockResolvedValue([]);
+  });
+
+  it("once a key is saved", async () => {
+    llmKeyStatus.mockResolvedValue([]);
+    renderPane();
+    const field = await screen.findByLabelText(/anthropic api key/i);
+    const before = versionNow();
+    fireEvent.change(field, { target: { value: "sk-test" } });
+    await userEvent.click(screen.getByRole("button", { name: /save key/i }));
+    await waitFor(() => expect(versionNow()).toBe(before + 1));
+  });
+
+  it("once a key is removed", async () => {
+    renderPane();
+    await screen.findByText(/key set/i);
+    const before = versionNow();
+    await userEvent.click(within(screen.getByTestId("provider-row-anthropic")).getByRole("button", { name: "Remove key" }));
+    await waitFor(() => expect(versionNow()).toBe(before + 1));
+  });
+
+  it("once the default provider is saved", async () => {
+    renderPane();
+    await screen.findByText(/key set/i);
+    const before = versionNow();
+    await userEvent.click(screen.getByRole("radio", { name: /use openai as the default provider/i }));
+    await userEvent.click(screen.getByRole("button", { name: "Save settings" }));
+    await waitFor(() => expect(versionNow()).toBe(before + 1));
+  });
+
+  it("not for a key save that failed, which changed nothing", async () => {
+    llmKeyStatus.mockResolvedValue([]);
+    llmSetKey.mockRejectedValue(new Error("the vault is sealed"));
+    renderPane();
+    const field = await screen.findByLabelText(/anthropic api key/i);
+    const before = versionNow();
+    fireEvent.change(field, { target: { value: "sk-test" } });
+    await userEvent.click(screen.getByRole("button", { name: /save key/i }));
+    expect(await screen.findByText(/key could not be updated/i)).toBeTruthy();
+    expect(versionNow()).toBe(before);
   });
 });

@@ -24,29 +24,16 @@ pub struct ToolboxViewState {
 }
 
 fn detect_tool(name: &str, alt_names: &[&str], required: bool, version_args: &[&str]) -> ToolStatusItem {
-    let mut resolved_path = None;
-
-    // Check primary name and alternatives with `which`
-    for bin in std::iter::once(&name).chain(alt_names.iter()) {
-        if let Ok(output) = std::process::Command::new("which").arg(bin).output() {
-            if output.status.success() {
-                let path_str = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                if !path_str.is_empty() {
-                    resolved_path = Some(path_str);
-                    break;
-                }
-            }
-        }
-    }
+    // The lookup Helm operations and the toolbox diagnosis use too, so the
+    // TUI cannot disagree with them about what is installed.
+    let mut resolved_path = std::iter::once(&name)
+        .chain(alt_names.iter())
+        .find_map(|bin| srelens_kube::path_lookup::find_on_path(bin))
+        .map(|path| path.display().to_string());
 
     // Fallback: check standard ~/.krew/bin if checking krew
     if resolved_path.is_none() && name == "krew" {
-        if let Some(home) = dirs::home_dir() {
-            let candidate = home.join(".krew").join("bin").join("kubectl-krew");
-            if candidate.is_file() {
-                resolved_path = Some(candidate.display().to_string());
-            }
-        }
+        resolved_path = dirs::home_dir().and_then(|home| krew_fallback(&home));
     }
 
     let installed = resolved_path.is_some();
@@ -74,6 +61,13 @@ fn detect_tool(name: &str, alt_names: &[&str], required: bool, version_args: &[&
         path: resolved_path,
         required,
     }
+}
+
+/// krew's shim in its own bin directory under `home`, which krew's installer
+/// does not put on `PATH` for you. `kubectl-krew.exe` on Windows.
+fn krew_fallback(home: &std::path::Path) -> Option<String> {
+    srelens_kube::path_lookup::find_executable("kubectl-krew", home.join(".krew").join("bin"))
+        .map(|path| path.display().to_string())
 }
 
 impl ToolboxViewState {
@@ -186,6 +180,23 @@ mod tests {
     use super::*;
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
+
+    #[test]
+    fn krew_is_found_in_its_own_bin_dir_under_the_platform_name() {
+        let home = tempfile::tempdir().unwrap();
+        let bin = home.path().join(".krew").join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        // `kubectl-krew.exe` on Windows.
+        let krew = bin.join(format!("kubectl-krew{}", std::env::consts::EXE_SUFFIX));
+        std::fs::write(&krew, b"").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&krew, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        assert_eq!(krew_fallback(home.path()), Some(krew.display().to_string()));
+    }
 
     #[test]
     fn test_toolbox_view_state_and_render() {

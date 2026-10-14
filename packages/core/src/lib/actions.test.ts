@@ -3,6 +3,7 @@ import {
   deleteResource,
   scaleResource,
   rolloutRestart,
+  rolloutUndo,
   cronjobSetSuspend,
   cronjobTriggerNow,
   updateConfigData,
@@ -44,6 +45,25 @@ describe("resource actions", () => {
       namespace: "default",
       name: "web",
     });
+  });
+
+  it("rolloutUndo names the Deployment and the revision, and says it went through (#389)", async () => {
+    const invoke = vi.fn().mockResolvedValue({ name: "web", revision: 2 });
+    const out = await rolloutUndo("c", "default", "web", 2, invoke);
+    expect(invoke).toHaveBeenCalledWith("k8s.rolloutUndo", {
+      context: "c",
+      namespace: "default",
+      name: "web",
+      revision: 2,
+    });
+    expect(out).toEqual({ ok: true });
+  });
+
+  it("rolloutUndo hands a refusal back as an error", async () => {
+    const out = await rolloutUndo("c", "default", "web", 2, () =>
+      Promise.reject(new Error("Deployment default/web already runs revision 2")),
+    );
+    expect(out.error).toMatch(/already runs revision 2/);
   });
 
   it("normalises errors", async () => {

@@ -7,11 +7,15 @@
 // localStorage — one code path, no platform branch.
 
 import { loadRestoreSession } from "./settings";
-import { settingsStorage } from "./settingsStorage";
+import { scopedSettingsKey, settingsStorage } from "./settingsStorage";
 import type { CrdRef } from "./crds";
 import type { ViewTab } from "./tabs";
 
-const KEY = "srelens.openTabs";
+const BASE_KEY = "srelens.openTabs";
+
+function getStorageKey(windowLabel?: string): string {
+  return scopedSettingsKey(BASE_KEY, windowLabel);
+}
 
 export interface PersistedWorkspace {
   tabs: ViewTab[];
@@ -58,13 +62,13 @@ export function openTabsPersistenceKey(
  * restore (no storage, empty, or a parse/shape error) so the caller falls back
  * to the landing page.
  */
-export function loadOpenTabs(): PersistedWorkspace | null {
+export function loadOpenTabs(windowLabel?: string): PersistedWorkspace | null {
   // Opting out starts fresh but deliberately leaves the stored snapshot
   // alone, so turning the setting back on restores the last real session
   // instead of nothing.
   if (!loadRestoreSession()) return null;
   try {
-    const raw = settingsStorage.getItem(KEY);
+    const raw = settingsStorage.getItem(getStorageKey(windowLabel));
     if (!raw) return null;
     const parsed = JSON.parse(raw) as PersistedWorkspace;
     if (!parsed || !Array.isArray(parsed.tabs)) return null;
@@ -94,15 +98,15 @@ export function nextTabId(tabs: ViewTab[]): number {
 }
 
 /** Persist the open tabs + active tab (web-only, best-effort). */
-export function saveOpenTabs(tabs: ViewTab[], activeTabId: number | null): void {
+export function saveOpenTabs(tabs: ViewTab[], activeTabId: number | null, windowLabel?: string): void {
   if (!loadRestoreSession()) return;
   try {
     const workspace = persistedWorkspace(tabs, activeTabId);
     if (!workspace) {
-      settingsStorage.removeItem(KEY);
+      settingsStorage.removeItem(getStorageKey(windowLabel));
       return;
     }
-    settingsStorage.setItem(KEY, JSON.stringify(workspace));
+    settingsStorage.setItem(getStorageKey(windowLabel), JSON.stringify(workspace));
   } catch {
     // Storage full, disabled, or the settings write failed — best-effort.
   }
@@ -118,7 +122,7 @@ export function saveOpenTabs(tabs: ViewTab[], activeTabId: number | null): void 
  */
 const SAVE_DEBOUNCE_MS = 400;
 
-let pendingSave: { tabs: ViewTab[]; activeTabId: number | null } | null = null;
+let pendingSave: { tabs: ViewTab[]; activeTabId: number | null; windowLabel?: string } | null = null;
 let saveTimer: ReturnType<typeof setTimeout> | null = null;
 
 /**
@@ -129,14 +133,14 @@ let saveTimer: ReturnType<typeof setTimeout> | null = null;
  * after the first change of a burst, carrying the newest snapshot. A restarting
  * debounce would starve during continuous typing and never write at all.
  */
-export function scheduleSaveOpenTabs(tabs: ViewTab[], activeTabId: number | null): void {
-  pendingSave = { tabs, activeTabId };
+export function scheduleSaveOpenTabs(tabs: ViewTab[], activeTabId: number | null, windowLabel?: string): void {
+  pendingSave = { tabs, activeTabId, windowLabel };
   if (saveTimer) return;
   saveTimer = setTimeout(() => {
     saveTimer = null;
     const snapshot = pendingSave;
     pendingSave = null;
-    if (snapshot) saveOpenTabs(snapshot.tabs, snapshot.activeTabId);
+    if (snapshot) saveOpenTabs(snapshot.tabs, snapshot.activeTabId, snapshot.windowLabel);
   }, SAVE_DEBOUNCE_MS);
 }
 
@@ -151,7 +155,7 @@ export function flushSaveOpenTabs(): void {
   }
   const snapshot = pendingSave;
   pendingSave = null;
-  if (snapshot) saveOpenTabs(snapshot.tabs, snapshot.activeTabId);
+  if (snapshot) saveOpenTabs(snapshot.tabs, snapshot.activeTabId, snapshot.windowLabel);
 }
 
 /**

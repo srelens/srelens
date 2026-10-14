@@ -1,0 +1,76 @@
+{
+  "$schema": "https://raw.githubusercontent.com/srelens/srelens/main/schemas/extension-manifest.v0.7.json",
+  "id": "org.srelens.prometheus",
+  "name": "Prometheus",
+  "version": "0.1.0",
+  "srelensApiVersion": "^0.7",
+  "kind": "declarative",
+  "permissions": [
+    { "capability": "network.http", "hosts": ["${settings.prometheusUrl}"] }
+  ],
+  "settings": [
+    {
+      "id": "prometheusUrl",
+      "type": "url",
+      "title": "Prometheus URL",
+      "description": "The base URL of a Prometheus HTTP API, or of anything that serves one, such as a Thanos or Mimir query frontend.",
+      "required": true
+    }
+  ],
+  "capabilities": [
+    {
+      "name": "rangeQuery",
+      "title": "Prometheus range query",
+      "target": "network.http",
+      "inputs": [],
+      "arguments": {
+        "url": "${settings.prometheusUrl}",
+        "path": "/api/v1/query_range",
+        "headers": { "Accept": "application/json" }
+      }
+    }
+  ],
+  "contributions": {
+    "pages": [],
+    "detailTabs": [],
+    "detailLinks": [],
+    "metricProviders": [
+      {
+        "id": "cpu",
+        "title": "CPU by pod",
+        "capability": "rangeQuery",
+        "language": "promql",
+        "forKinds": ["apps/Deployment", "apps/StatefulSet", "apps/DaemonSet"],
+        "unit": "cores",
+        "query": "sum by (pod) (rate(container_cpu_usage_seconds_total{namespace=\"${namespace}\", pod=~\"${workload:regex}-.+\", container!=\"\"}[5m]))"
+      },
+      {
+        "id": "memory",
+        "title": "Memory working set by pod",
+        "capability": "rangeQuery",
+        "language": "promql",
+        "forKinds": ["apps/Deployment", "apps/StatefulSet", "apps/DaemonSet"],
+        "unit": "bytes",
+        "query": "sum by (pod) (container_memory_working_set_bytes{namespace=\"${namespace}\", pod=~\"${workload:regex}-.+\", container!=\"\"})"
+      },
+      {
+        "id": "podCpu",
+        "title": "CPU by container",
+        "capability": "rangeQuery",
+        "language": "promql",
+        "forKinds": ["/Pod"],
+        "unit": "cores",
+        "query": "sum by (container) (rate(container_cpu_usage_seconds_total{namespace=\"${namespace}\", pod=\"${pod}\", container!=\"\"}[5m]))"
+      },
+      {
+        "id": "podMemory",
+        "title": "Memory working set by container",
+        "capability": "rangeQuery",
+        "language": "promql",
+        "forKinds": ["/Pod"],
+        "unit": "bytes",
+        "query": "sum by (container) (container_memory_working_set_bytes{namespace=\"${namespace}\", pod=\"${pod}\", container!=\"\"})"
+      }
+    ]
+  }
+}

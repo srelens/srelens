@@ -27,6 +27,7 @@ import { useObject } from "../../lib/useObject";
 import { ConfigDetailsBody } from "./ConfigBody";
 import { CronJobDetailsBody } from "./CronJobBody";
 import { GenericBody, identityFacts } from "./GenericBody";
+import { IngressDetailsBody } from "./IngressBody";
 import { JobDetailsBody } from "./JobBody";
 import { NodeDetailsBody } from "./NodeBody";
 import { PodContainersBody, PodContainersTable, PodDetailsBody, podFacts } from "./PodBody";
@@ -113,6 +114,7 @@ export const DETAILS_BODY: Record<string, PaneBody> = {
   DaemonSet: WorkloadDetailsBody,
   ReplicaSet: WorkloadDetailsBody,
   Service: ServiceDetailsBody,
+  Ingress: IngressDetailsBody,
   Node: NodeDetailsBody,
   Job: JobDetailsBody,
   CronJob: CronJobDetailsBody,
@@ -276,6 +278,8 @@ export interface DetailSubject {
   object?: K8sObject;
   status: ReturnType<typeof useObject>["status"];
   error?: string;
+  /** Read the subject again without blanking the pane — see `useObject`. */
+  refresh: () => void;
   /** The kind's own row actions and extra panes, or `undefined` for a CRD. */
   descriptor: ReturnType<typeof descriptorFor>;
   /** Core's one verdict on this subject — the peek's status line and the
@@ -329,7 +333,7 @@ export function useDetailSubject({
   namespace: string | null;
   name: string;
 }): DetailSubject {
-  const { object, status, error } = useObject(context, kind, namespace, name);
+  const { object, status, error, refresh } = useObject(context, kind, namespace, name);
 
   const slug = SLUG_BY_K8S_KIND[kind];
   const descriptor = slug ? descriptorFor(slug) : undefined;
@@ -360,6 +364,7 @@ export function useDetailSubject({
     object,
     status,
     error,
+    refresh,
     descriptor,
     statusLine: object ? resourceStatusLine(kind, object) : null,
     hasContainers,
@@ -468,13 +473,13 @@ export function useDetailPaneState({
   // this is looked up here rather than threaded in from a descriptor.
   const builtIn = isBuiltInKind(kind);
   // The Details pane keeps a Secret's values out of the DOM until the reader
-  // reveals them; `k8s.getManifest` returns them in the clear (only
-  // `k8s.getObject` redacts — see `crates/kube/src/manifest.rs`), so without
-  // this the reveal gate is worth nothing to anyone who clicks one tab over.
-  // The redaction goes here, on the result, rather than inside `getManifest`:
-  // classic calls that same function and deliberately shows the manifest
-  // unredacted, and classic is frozen. Divergence from classic here is the
-  // point, not an oversight.
+  // reveals them, and `k8s.getManifest` is an ungated read. The host blanks a
+  // Secret's values on it (#661, `crates/kube/src/manifest.rs`); this redacts
+  // again on arrival rather than trust that alone, because without it the
+  // reveal gate is worth nothing to anyone who clicks one tab over. The
+  // redaction goes here, on the result, rather than inside `getManifest`,
+  // because other callers of that function handle a Secret their own way.
+  // Classic's drawer YAML view does exactly this too (#659).
   const isSecret = kind === "Secret";
   const yamlState = useLoad<string>(openedPanes.has(PANE_YAML), target, async () => {
     let crd: DynamicGvk | undefined;
@@ -493,8 +498,14 @@ export function useDetailPaneState({
     const redacted = redactSecretManifest(result.yaml);
     return redacted.error !== undefined ? { error: redacted.error } : { data: redacted.yaml };
   });
-  const eventsState = useLoad<EventSummary[]>(openedPanes.has(PANE_EVENTS), target, () =>
-    listEvents(context, namespace, { kind, name }).then((r) => ({ data: r.events, error: r.error })),
+  const eventsState = useLoad<{ events: EventSummary[]; truncated?: boolean }>(
+    openedPanes.has(PANE_EVENTS),
+    target,
+    () =>
+      listEvents(context, namespace, { kind, name }).then((r) => ({
+        data: r.events !== undefined ? { events: r.events, truncated: r.truncated } : undefined,
+        error: r.error,
+      })),
   );
 
   // Falls back to the first pane rather than pointing at one that isn't
@@ -578,7 +589,7 @@ function YamlPane({
         </Alert>
       )}
       <div className="min-h-0 flex-1">
-        <CodeEditor value={state.data} readOnly language="yaml" fill ariaLabel={`${name} manifest`} />
+        <CodeEditor value={state.data} readOnly language="yaml" fill copy ariaLabel={`${name} manifest`} />
       </div>
     </div>
   );
@@ -616,7 +627,7 @@ function EventsPane({
   namespace,
   name,
 }: {
-  state: LoadState<EventSummary[]>;
+  state: LoadState<{ events: EventSummary[]; truncated?: boolean }>;
   kind: string;
   namespace: string | null;
   name: string;
@@ -635,5 +646,21 @@ function EventsPane({
   // `Table` renders `emptyText` itself for a genuinely empty list — an early
   // `return null` here would leave a healthy, event-free object looking like
   // a broken pane instead of a labelled one.
-  return <Table columns={EVENT_COLUMNS} data={state.data} getRowKey={(e) => e.name} emptyText="No events" />;
+  return (
+    <div className="flex h-full min-h-0 flex-col gap-2">
+      {state.data.truncated && (
+        <Alert tone="info" title={`Showing the first ${state.data.events.length.toLocaleString()} events`}>
+          More remain on the cluster. This list stops at the shared list row cap.
+        </Alert>
+      )}
+      <div className="min-h-0 flex-1">
+        <Table
+          columns={EVENT_COLUMNS}
+          data={state.data.events}
+          getRowKey={(e) => e.name}
+          emptyText="No events"
+        />
+      </div>
+    </div>
+  );
 }

@@ -109,4 +109,24 @@ describe("StatusBar", () => {
     render(<StatusBar activeCluster={null} tabCount={0} onOpenTerminal={vi.fn()} />);
     expect(screen.queryByRole("button", { name: "Open kubectl terminal" })).toBeNull();
   });
+
+  // jsdom is a plain browser, i.e. web mode: `isTauri()` looks for
+  // `window.__TAURI_INTERNALS__`. The footer is the one line of chrome that
+  // names the host, and on the web it named the wrong one (#513).
+  it("names the web host in the footer when there is no Tauri runtime (#513)", () => {
+    delete (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__;
+    render(<StatusBar activeCluster={null} tabCount={0} />);
+    expect(screen.getByText("srelens · web")).toBeDefined();
+    expect(screen.queryByText("srelens · Tauri")).toBeNull();
+  });
+
+  it("names Tauri in the footer under the desktop runtime", () => {
+    (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__ = {};
+    try {
+      render(<StatusBar activeCluster={null} tabCount={0} />);
+      expect(screen.getByText("srelens · Tauri")).toBeDefined();
+    } finally {
+      delete (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__;
+    }
+  });
 });

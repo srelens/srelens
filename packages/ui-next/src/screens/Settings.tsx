@@ -1,8 +1,14 @@
-import { useId, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
+import { ExtensionManager } from "../extensions/Extensions";
+import { useContexts } from "../lib/clusters";
+import { onSettingsRequested, takeSettingsRequest } from "../lib/settingsRequest";
+import { useTabScope } from "../lib/tabScope";
+import { openTab } from "../lib/tabsStore";
+import { useId, useLayoutEffect, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
 import { isTauri } from "@srelens/core";
 import { Screen } from "@srelens/ui-kit";
 import type { RoutedScreenProps } from "../lib/routes";
 import { ApplicationLogsPane, KubernetesPane, WorkspacePane } from "./settings/PreferencePanes";
+import { SkillsPane } from "./settings/SkillsPane";
 import { UpdatesPane } from "./settings/UpdatesPane";
 import { AgentAccess } from "./settings/AgentAccess";
 import { AgentPane } from "./settings/AgentPane";
@@ -10,16 +16,23 @@ import { AppearancePane } from "./settings/AppearancePane";
 import { AuditPane } from "./settings/AuditPane";
 import { McpServer } from "./settings/McpServer";
 import { SecurityPane } from "./settings/SecurityPane";
-import { AccessibilityPane, ClustersPane, ShortcutsPane } from "./settings/SmallPanes";
+import { BackupPane } from "./settings/BackupPane";
+import { WorkspacesPane } from "./settings/WorkspacesPane";
+import { AccessibilityPane, ClustersPane, DeepLinksPane, ShortcutsPane } from "./settings/SmallPanes";
 
 /** Settings use the new design's stores and shared core commands. */
 /** §23's rail width for this screen, and this screen's alone (§A.1's table). */
 const NAV_WIDTH = 196;
 
-type SectionId = "agent" | "security" | "appearance" | "accessibility" | "shortcuts" | "workspace" | "kubernetes" | "logs" | "updates" | "clusters";
+type SectionId = "extensions" | "agent" | "skills" | "security" | "backup" | "appearance" | "accessibility" | "shortcuts" | "deeplinks" | "workspace" | "workspaces" | "kubernetes" | "logs" | "updates" | "clusters";
 
 /**
- * §23's nav, in §23's order, minus `Deep links`.
+ * §23's nav, in §23's order.
+ *
+ * **`Deep links` is desktop-only** because only the desktop app registers the
+ * `srelens://` scheme and drains the links it receives (`shell/useDeepLinks`).
+ * In a browser no such link ever reaches srelens, so a pane listing link forms
+ * there would describe links that do nothing.
  *
  * `desktopOnly` is carried here rather than checked at the render site so the
  * order lives in exactly one list: a second array for the web build is a
@@ -37,6 +50,14 @@ type SectionId = "agent" | "security" | "appearance" | "accessibility" | "shortc
  * and Connections offers no file adding there for the same reason. A control
  * that cannot work is not drawn, and the reason is said once — in the rail,
  * where the missing entry would have been.
+ *
+ * **`Backup` is desktop-only for the same reason, one step further.**
+ * `bundle_export`, `bundle_pick_file`, `bundle_preview` and `bundle_import`
+ * are Tauri commands with no arm in `api_command.rs`, so on the web every
+ * control in the pane would reject — and even if they answered, a bundle is
+ * assembled from the desktop config directory and the kubeconfig files on that
+ * machine's disk, neither of which a browser has. There is nothing left over
+ * to draw, so the entry is not drawn.
  *
  * **`Agent & MCP` keeps its entry on the web, and loses two of its four
  * panes.** It is the section this screen OPENS ON, and `McpServer` and
@@ -69,15 +90,24 @@ type SectionId = "agent" | "security" | "appearance" | "accessibility" | "shortc
  */
 const SECTIONS: ReadonlyArray<{ id: SectionId; label: string; desktopOnly?: true }> = [
   { id: "agent", label: "Agent & MCP" },
+  // Desktop-only: the skill store is a set of files on this machine, read
+  // through commands the web server does not have.
+  { id: "skills", label: "Skills", desktopOnly: true },
   { id: "security", label: "Security", desktopOnly: true },
+  { id: "backup", label: "Backup", desktopOnly: true },
   { id: "appearance", label: "Appearance" },
   { id: "accessibility", label: "Accessibility" },
   { id: "shortcuts", label: "Shortcuts" },
-  { id: "workspace", label: "Workspace" },
+  { id: "deeplinks", label: "Deep links", desktopOnly: true },
+  // Session restore, panel widths and the star prompt. The id is older than the label and stays, so openSettings("workspace") still lands here.
+  { id: "workspace", label: "Session & layout" },
   { id: "kubernetes", label: "Kubernetes" },
   { id: "logs", label: "Application logs" },
   { id: "updates", label: "Updates", desktopOnly: true },
+  { id: "workspaces", label: "Workspaces" },
   { id: "clusters", label: "Clusters" },
+  // Not desktop-only: the web server keeps each user's own apps (#515).
+  { id: "extensions", label: "Apps" },
 ];
 
 /**
@@ -95,10 +125,14 @@ export type SettingsProps = RoutedScreenProps;
 
 export function Settings({ ported, onSwitchToClassic, onLocked }: SettingsProps) {
   const desktop = isTauri();
+  const contexts = useContexts();
   const visible = SECTIONS.filter((s) => !s.desktopOnly || desktop);
 
   const [updatesOpened, setUpdatesOpened] = useState(false);
   const [active, setActive] = useState<SectionId>(SECTIONS[0].id);
+  /** The Apps tab another screen asked for; a new object per request, so asking twice still moves it. */
+  const [appsTab, setAppsTab] = useState<{ tab: string }>();
+  const scope = useTabScope();
   const headId = useId();
   const tabBase = useId();
   const tabId = (id: SectionId) => `${tabBase}-${id}`;
@@ -107,7 +141,30 @@ export function Settings({ ported, onSwitchToClassic, onLocked }: SettingsProps)
   function select(id: SectionId) {
     if (id === "updates") setUpdatesOpened(true);
     setActive(id);
+    // A section the reader picks is not the one a request asked for: Apps opens
+    // on its own list, not on the catalog a past request left behind.
+    setAppsTab(undefined);
   }
+
+  // A section another screen asked for (`openSettings`): the one held for a
+  // Settings that was not open yet, and any asked for while it is. A layout
+  // effect, so a Settings opened on Apps never paints its first section first.
+  useLayoutEffect(() => {
+    const apply = () => {
+      // Only the request for THIS tab: another Settings tab may be open too.
+      const request = takeSettingsRequest(scope);
+      const section = visible.find((s) => s.id === request?.section)?.id;
+      if (!request || !section) return;
+      select(section);
+      // Every request says which Apps tab it wants — the installed list unless
+      // it names one — so a catalog asked for earlier cannot linger into it.
+      setAppsTab({ tab: request.tab ?? "installed" });
+    };
+    apply();
+    return onSettingsRequested(apply);
+  // `visible` and `select` are this render's; the subscription is for the life of the screen.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   function focus(id: SectionId) {
     select(id);
@@ -182,22 +239,32 @@ export function Settings({ ported, onSwitchToClassic, onLocked }: SettingsProps)
             )}
           </div>
         );
+      case "skills":
+        return <SkillsPane />;
       case "security":
         return <SecurityPane onLocked={onLocked} />;
+      case "backup":
+        return <BackupPane />;
       case "appearance":
         return <AppearancePane ported={ported} onSwitchToClassic={onSwitchToClassic} />;
       case "accessibility":
         return <AccessibilityPane />;
       case "shortcuts":
         return <ShortcutsPane />;
+      case "deeplinks":
+        return <DeepLinksPane />;
       case "workspace":
         return <WorkspacePane />;
+      case "workspaces":
+        return <WorkspacesPane />;
       case "kubernetes":
         return <KubernetesPane />;
       case "logs":
         return <ApplicationLogsPane />;
       case "updates":
         return null;
+      case "extensions":
+        return <ExtensionManager show={appsTab} />;
       case "clusters":
         return <ClustersPane />;
     }
@@ -217,7 +284,7 @@ export function Settings({ ported, onSwitchToClassic, onLocked }: SettingsProps)
             jump to and may equally want to skip. */}
         <aside
           aria-labelledby={headId}
-          className="flex min-h-0 shrink-0 flex-col border-r border-rule bg-surface"
+          className="flex min-h-0 shrink-0 flex-col border-r border-rule bg-[var(--ground-surface)]"
           style={{ width: NAV_WIDTH }}
         >
           <div id={headId} className="pane-head">
@@ -286,7 +353,7 @@ export function Settings({ ported, onSwitchToClassic, onLocked }: SettingsProps)
           // The one Tab stop into the pane's own content, so a reader arrowing
           // to a section can Tab straight into it.
           tabIndex={0}
-          className={`scroll min-h-0 min-w-0 flex-1${active === "updates" || active === "clusters" || active === "agent" ? "" : " p-3"}`}
+          className={`scroll min-h-0 min-w-0 flex-1${active === "extensions" || active === "updates" || active === "clusters" || active === "agent" ? "" : " p-3"}`}
         >
           {pane(active)}
           {desktop && updatesOpened && (

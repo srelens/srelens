@@ -37,7 +37,16 @@ fn endpoint_for(channel: &str) -> &'static str {
 /// the updater would run (`dpkg -i` / `rpm -U`) isn't there. In that case the
 /// install belongs to a package manager the updater knows nothing about, and
 /// self-updating would both fail and desync that manager's database.
-fn self_updatable(os: &str, bundle: Option<BundleType>, has_dpkg: bool, has_rpm: bool) -> bool {
+fn self_updatable(
+    os: &str,
+    bundle: Option<BundleType>,
+    has_dpkg: bool,
+    has_rpm: bool,
+    nix_managed: bool,
+) -> bool {
+    if nix_managed {
+        return false;
+    }
     if os != "linux" {
         return true;
     }
@@ -60,7 +69,18 @@ fn needs_privileges(os: &str, bundle: Option<BundleType>) -> bool {
     os == "linux" && matches!(bundle, Some(BundleType::Deb) | Some(BundleType::Rpm))
 }
 
-fn externally_managed() -> bool {
+fn is_nix_store_path(executable: &std::path::Path) -> bool {
+    executable.starts_with("/nix/store")
+}
+
+fn is_nix_managed() -> bool {
+    std::env::current_exe().is_ok_and(|executable| {
+        let executable = std::fs::canonicalize(&executable).unwrap_or(executable);
+        is_nix_store_path(&executable)
+    })
+}
+
+fn externally_managed(nix_managed: bool) -> bool {
     let rpm_db = std::path::Path::new("/var/lib/rpm").exists()
         || std::path::Path::new("/usr/lib/sysimage/rpm").exists();
     !self_updatable(
@@ -68,6 +88,7 @@ fn externally_managed() -> bool {
         tauri::utils::platform::bundle_type(),
         std::path::Path::new("/var/lib/dpkg").exists(),
         rpm_db,
+        nix_managed,
     )
 }
 
@@ -80,6 +101,8 @@ pub struct UpdateMeta {
     /// can't drive (e.g. pacman for the AUR package) — the UI should point at
     /// that manager instead of offering an in-app install.
     pub external: bool,
+    /// True when Nix owns the executable and updates must use `nix profile upgrade`.
+    pub nix_managed: bool,
     /// True when applying the update needs administrator rights (a .deb or
     /// .rpm install, which runs `dpkg -i` / `rpm -U` under pkexec or sudo), so
     /// the UI can warn before a password prompt appears unannounced.
@@ -112,11 +135,13 @@ async fn fetch_update(
 #[tauri::command]
 pub async fn update_check(app: AppHandle, channel: String) -> Result<Option<UpdateMeta>, String> {
     let update = fetch_update(&app, &channel).await?;
+    let nix_managed = is_nix_managed();
     Ok(update.map(|u| UpdateMeta {
         version: u.version.clone(),
         current_version: u.current_version.clone(),
         notes: u.body.clone(),
-        external: externally_managed(),
+        external: externally_managed(nix_managed),
+        nix_managed,
         elevates: needs_privileges(std::env::consts::OS, tauri::utils::platform::bundle_type()),
     }))
 }
@@ -125,7 +150,12 @@ pub async fn update_check(app: AppHandle, channel: String) -> Result<Option<Upda
 /// `update://progress` events. The caller relaunches the app afterward.
 #[tauri::command]
 pub async fn update_install(app: AppHandle, channel: String) -> Result<(), String> {
-    if externally_managed() {
+    if is_nix_managed() {
+        return Err(
+            "This install is managed by Nix; update it with `nix profile upgrade`".to_string(),
+        );
+    }
+    if externally_managed(false) {
         return Err(
             "This install is managed by a system package manager; update it there instead \
              (AUR package: pacman/paru)"
@@ -173,28 +203,89 @@ mod tests {
 
     #[test]
     fn aur_repack_of_the_deb_is_externally_managed() {
-        assert!(!self_updatable("linux", Some(BundleType::Deb), false, false));
+        assert!(!self_updatable(
+            "linux",
+            Some(BundleType::Deb),
+            false,
+            false,
+            false
+        ));
     }
 
     #[test]
     fn dpkg_managed_deb_install_self_updates() {
-        assert!(self_updatable("linux", Some(BundleType::Deb), true, false));
+        assert!(self_updatable(
+            "linux",
+            Some(BundleType::Deb),
+            true,
+            false,
+            false
+        ));
     }
 
     #[test]
     fn rpm_install_self_updates_only_with_rpm_present() {
-        assert!(self_updatable("linux", Some(BundleType::Rpm), false, true));
-        assert!(!self_updatable("linux", Some(BundleType::Rpm), false, false));
+        assert!(self_updatable(
+            "linux",
+            Some(BundleType::Rpm),
+            false,
+            true,
+            false
+        ));
+        assert!(!self_updatable(
+            "linux",
+            Some(BundleType::Rpm),
+            false,
+            false,
+            false
+        ));
     }
 
     #[test]
     fn appimage_self_updates_without_any_package_tools() {
-        assert!(self_updatable("linux", Some(BundleType::AppImage), false, false));
+        assert!(self_updatable(
+            "linux",
+            Some(BundleType::AppImage),
+            false,
+            false,
+            false
+        ));
     }
 
     #[test]
     fn unknown_linux_packaging_is_externally_managed() {
-        assert!(!self_updatable("linux", None, true, true));
+        assert!(!self_updatable("linux", None, true, true, false));
+    }
+
+    #[test]
+    fn nix_store_installs_are_externally_managed_on_every_platform() {
+        assert!(!self_updatable(
+            "macos",
+            Some(BundleType::App),
+            false,
+            false,
+            true
+        ));
+        assert!(!self_updatable(
+            "linux",
+            Some(BundleType::AppImage),
+            false,
+            false,
+            true
+        ));
+    }
+
+    #[test]
+    fn only_executables_in_the_nix_store_are_nix_managed() {
+        assert!(is_nix_store_path(std::path::Path::new(
+            "/nix/store/hash-srelens/bin/srelens"
+        )));
+        assert!(!is_nix_store_path(std::path::Path::new(
+            "/nix/store-backup/srelens"
+        )));
+        assert!(!is_nix_store_path(std::path::Path::new(
+            "/Applications/srelens.app/Contents/MacOS/srelens"
+        )));
     }
 
     #[test]
@@ -215,7 +306,13 @@ mod tests {
 
     #[test]
     fn non_linux_platforms_always_self_update() {
-        assert!(self_updatable("macos", Some(BundleType::App), false, false));
-        assert!(self_updatable("windows", None, false, false));
+        assert!(self_updatable(
+            "macos",
+            Some(BundleType::App),
+            false,
+            false,
+            false
+        ));
+        assert!(self_updatable("windows", None, false, false, false));
     }
 }

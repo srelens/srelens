@@ -2,7 +2,7 @@
 
 use std::fmt;
 
-/// Supported Resource Views in the SRElens TUI
+/// Supported Resource Views in srectl
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum ResourceKind {
     Pods,
@@ -34,16 +34,29 @@ pub enum ResourceKind {
     CustomResourceDefinitions,
     CustomResource(CrdMeta),
     HelmReleases,
+    ArgoApplications,
     PortForwards,
     Overview,
     Toolbox,
     Assistant,
     Settings,
+    TuiConfig,
     Workloads,
     Topology,
     GpuInfo,
     TopPods,
     TopNodes,
+    BgpPeers,
+    Changed,
+    ReplicaSets,
+    HorizontalPodAutoscalers,
+    PodDisruptionBudgets,
+    PriorityClasses,
+    RuntimeClasses,
+    Leases,
+    MutatingWebhookConfigurations,
+    ValidatingWebhookConfigurations,
+    IngressClasses,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
@@ -67,6 +80,78 @@ pub struct CrdMeta {
     pub short_names: Vec<String>,
     #[serde(default)]
     pub printer_columns: Vec<PrinterColumn>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_at: Option<String>,
+}
+
+/// Returns the cache file path for discovered CRDs for a cluster context.
+pub fn crd_cache_path(context: &str) -> Option<std::path::PathBuf> {
+    if context.trim().is_empty() {
+        return None;
+    }
+    // In automated tests or when using fake/test contexts, avoid writing to user cache
+    // unless SRELENS_CACHE_DIR is explicitly configured.
+    let has_explicit_cache = std::env::var("SRELENS_CACHE_DIR")
+        .map(|v| !v.trim().is_empty())
+        .unwrap_or(false);
+    if !has_explicit_cache
+        && (context.starts_with("test-")
+            || context.starts_with("fake-")
+            || context.starts_with("srelens-fake-"))
+    {
+        return None;
+    }
+    let base = if let Ok(custom) = std::env::var("SRELENS_CACHE_DIR") {
+        if custom.trim().is_empty() {
+            dirs::cache_dir()
+                .map(|p| p.join("srelens"))
+                .or_else(|| dirs::home_dir().map(|h| h.join(".cache").join("srelens")))?
+        } else {
+            std::path::PathBuf::from(custom)
+        }
+    } else {
+        dirs::cache_dir()
+            .map(|p| p.join("srelens"))
+            .or_else(|| dirs::home_dir().map(|h| h.join(".cache").join("srelens")))?
+    };
+    let sanitized_ctx: String = context
+        .chars()
+        .map(|c| {
+            if c.is_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    Some(base.join("crds").join(format!("{}.json", sanitized_ctx)))
+}
+
+/// Loads cached CRDs for a given context from disk.
+pub fn load_cached_crds(context: &str) -> Vec<CrdMeta> {
+    if let Some(path) = crd_cache_path(context) {
+        if let Ok(data) = std::fs::read_to_string(&path) {
+            if let Ok(crds) = serde_json::from_str::<Vec<CrdMeta>>(&data) {
+                return crds;
+            }
+        }
+    }
+    Vec::new()
+}
+
+/// Persists discovered CRDs for a given context to disk.
+pub fn save_cached_crds(context: &str, crds: &[CrdMeta]) {
+    if crds.is_empty() {
+        return;
+    }
+    if let Some(path) = crd_cache_path(context) {
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        if let Ok(json) = serde_json::to_string(crds) {
+            let _ = std::fs::write(path, json);
+        }
+    }
 }
 
 impl ResourceKind {
@@ -101,16 +186,29 @@ impl ResourceKind {
             Self::CustomResourceDefinitions => "CustomResourceDefinitions",
             Self::CustomResource(crd) => crd.kind.as_str(),
             Self::HelmReleases => "Helm Releases",
+            Self::ArgoApplications => "ArgoCD Applications",
             Self::PortForwards => "Port Forwards",
             Self::Overview => "Cluster Overview",
             Self::Toolbox => "Toolbox Diagnostics",
             Self::Assistant => "SRElens Assistant",
             Self::Settings => "AI & Assistant Settings",
+            Self::TuiConfig => "TUI Configuration",
             Self::Workloads => "Workloads",
             Self::Topology => "Workload & Traffic Topology",
             Self::GpuInfo => "GPU Info & VRAM Allocation",
             Self::TopPods => "Top Pods",
             Self::TopNodes => "Top Nodes",
+            Self::BgpPeers => "BGP Peering & Routes",
+            Self::Changed => "Changed & Triage",
+            Self::ReplicaSets => "ReplicaSets",
+            Self::HorizontalPodAutoscalers => "HorizontalPodAutoscalers",
+            Self::PodDisruptionBudgets => "PodDisruptionBudgets",
+            Self::PriorityClasses => "PriorityClasses",
+            Self::RuntimeClasses => "RuntimeClasses",
+            Self::Leases => "Leases",
+            Self::MutatingWebhookConfigurations => "MutatingWebhookConfigurations",
+            Self::ValidatingWebhookConfigurations => "ValidatingWebhookConfigurations",
+            Self::IngressClasses => "IngressClasses",
         }
     }
 
@@ -127,6 +225,7 @@ impl ResourceKind {
             Self::ResourceQuotas => Some("resourcequotas"),
             Self::LimitRanges => Some("limitranges"),
             Self::Services => Some("services"),
+            Self::Endpoints => Some("endpoints"),
             Self::EndpointSlices => Some("endpointslices"),
             Self::Ingresses => Some("ingresses"),
             Self::NetworkPolicies => Some("networkpolicies"),
@@ -141,6 +240,15 @@ impl ResourceKind {
             Self::Nodes => Some("nodes"),
             Self::Namespaces => Some("namespaces"),
             Self::Events => Some("events"),
+            Self::ReplicaSets => Some("replicasets"),
+            Self::HorizontalPodAutoscalers => Some("horizontalpodautoscalers"),
+            Self::PodDisruptionBudgets => Some("poddisruptionbudgets"),
+            Self::PriorityClasses => Some("priorityclasses"),
+            Self::RuntimeClasses => Some("runtimeclasses"),
+            Self::Leases => Some("leases"),
+            Self::MutatingWebhookConfigurations => Some("mutatingwebhookconfigurations"),
+            Self::ValidatingWebhookConfigurations => Some("validatingwebhookconfigurations"),
+            Self::IngressClasses => Some("ingressclasses"),
             _ => None,
         }
     }
@@ -173,6 +281,15 @@ impl ResourceKind {
             Self::Nodes => Some("Node"),
             Self::Namespaces => Some("Namespace"),
             Self::Events => Some("Event"),
+            Self::ReplicaSets => Some("ReplicaSet"),
+            Self::HorizontalPodAutoscalers => Some("HorizontalPodAutoscaler"),
+            Self::PodDisruptionBudgets => Some("PodDisruptionBudget"),
+            Self::PriorityClasses => Some("PriorityClass"),
+            Self::RuntimeClasses => Some("RuntimeClass"),
+            Self::Leases => Some("Lease"),
+            Self::MutatingWebhookConfigurations => Some("MutatingWebhookConfiguration"),
+            Self::ValidatingWebhookConfigurations => Some("ValidatingWebhookConfiguration"),
+            Self::IngressClasses => Some("IngressClass"),
             Self::CustomResourceDefinitions => Some("CustomResourceDefinition"),
             Self::CustomResource(crd) => Some(crd.kind.as_str()),
             _ => None,
@@ -191,7 +308,13 @@ impl ResourceKind {
             | Self::CustomResourceDefinitions
             | Self::Overview
             | Self::Toolbox
-            | Self::Assistant => false,
+            | Self::Assistant
+            | Self::BgpPeers
+            | Self::PriorityClasses
+            | Self::RuntimeClasses
+            | Self::MutatingWebhookConfigurations
+            | Self::ValidatingWebhookConfigurations
+            | Self::IngressClasses => false,
             _ => true,
         }
     }
@@ -221,6 +344,9 @@ pub enum CommandTarget {
     OpenUrl(String),
     ThemePicker,
     SetTheme(String),
+    FeatureBanner,
+    Update,
+    AddCluster,
 }
 
 pub const COMMAND_REGISTRY: &[CommandDef] = &[
@@ -269,199 +395,315 @@ pub const COMMAND_REGISTRY: &[CommandDef] = &[
     CommandDef {
         name: "pods",
         aliases: &["po", "pod"],
-        description: "Pods view",
+        description: "List, inspect, and tail Kubernetes pods across namespaces",
         target: CommandTarget::Resource(ResourceKind::Pods),
     },
     CommandDef {
         name: "deployments",
         aliases: &["dp", "deploy"],
-        description: "Deployments view",
+        description: "Manage, inspect, and scale deployment workloads",
         target: CommandTarget::Resource(ResourceKind::Deployments),
     },
     CommandDef {
         name: "statefulsets",
         aliases: &["sts", "statefulset"],
-        description: "StatefulSets view",
+        description: "Stateful set workloads and distributed replicas",
         target: CommandTarget::Resource(ResourceKind::StatefulSets),
     },
     CommandDef {
         name: "daemonsets",
         aliases: &["ds", "daemonset"],
-        description: "DaemonSets view",
+        description: "Node-local daemonset agent workloads",
         target: CommandTarget::Resource(ResourceKind::DaemonSets),
     },
     CommandDef {
         name: "jobs",
         aliases: &["job"],
-        description: "Jobs view",
+        description: "Batch job runs and execution completion status",
         target: CommandTarget::Resource(ResourceKind::Jobs),
     },
     CommandDef {
         name: "cronjobs",
         aliases: &["cj", "cronjob"],
-        description: "CronJobs view",
+        description: "Scheduled cron jobs and recurring execution history",
         target: CommandTarget::Resource(ResourceKind::CronJobs),
     },
     CommandDef {
         name: "services",
         aliases: &["svc", "service"],
-        description: "Services view",
+        description: "Service routing, cluster IPs, NodePorts and LoadBalancers",
         target: CommandTarget::Resource(ResourceKind::Services),
     },
     CommandDef {
         name: "ingresses",
         aliases: &["ing", "ingress"],
-        description: "Ingresses view",
+        description: "HTTP/HTTPS ingress routing rules and TLS certs",
         target: CommandTarget::Resource(ResourceKind::Ingresses),
     },
     CommandDef {
         name: "endpointslices",
         aliases: &["ep", "eps", "endpointslice"],
-        description: "EndpointSlices view",
+        description: "Scalable network endpoints for Kubernetes services",
         target: CommandTarget::Resource(ResourceKind::EndpointSlices),
     },
     CommandDef {
         name: "networkpolicies",
         aliases: &["np", "netpol"],
-        description: "NetworkPolicies view",
+        description: "Pod network traffic filtering and isolation rules",
         target: CommandTarget::Resource(ResourceKind::NetworkPolicies),
+    },
+    CommandDef {
+        name: "bgp",
+        aliases: &["peers", "bgppeers", "peering", "bgproutes"],
+        description: "BGP control plane peering sessions, advertised VIPs & IP pools",
+        target: CommandTarget::Resource(ResourceKind::BgpPeers),
     },
     CommandDef {
         name: "configmaps",
         aliases: &["cm", "configmap"],
-        description: "ConfigMaps view",
+        description: "Key-value configuration maps and application data",
         target: CommandTarget::Resource(ResourceKind::ConfigMaps),
     },
     CommandDef {
         name: "secrets",
         aliases: &["sec", "secret"],
-        description: "Secrets view",
+        description: "Kubernetes secrets with masked base64 credentials",
         target: CommandTarget::Resource(ResourceKind::Secrets),
     },
     CommandDef {
         name: "persistentvolumeclaims",
         aliases: &["pvc"],
-        description: "PersistentVolumeClaims view",
+        description: "Persistent storage volume claims by namespace",
         target: CommandTarget::Resource(ResourceKind::PersistentVolumeClaims),
     },
     CommandDef {
         name: "persistentvolumes",
         aliases: &["pv"],
-        description: "PersistentVolumes view",
+        description: "Cluster-wide persistent storage volumes",
         target: CommandTarget::Resource(ResourceKind::PersistentVolumes),
     },
     CommandDef {
         name: "storageclasses",
         aliases: &["sc", "storageclass"],
-        description: "StorageClasses view",
+        description: "Storage provisioners, volume plugins & reclaim policies",
         target: CommandTarget::Resource(ResourceKind::StorageClasses),
     },
     CommandDef {
         name: "nodes",
         aliases: &["no", "node"],
-        description: "Nodes view",
+        description: "Cluster worker and control-plane node hardware and status",
         target: CommandTarget::Resource(ResourceKind::Nodes),
     },
     CommandDef {
         name: "namespaces",
         aliases: &["ns", "namespace"],
-        description: "Namespaces view / Switcher",
+        description: "Cluster tenancy namespaces switcher and viewer",
         target: CommandTarget::Namespaces,
     },
     CommandDef {
         name: "events",
         aliases: &["ev", "event"],
-        description: "Cluster Events stream",
+        description: "Cluster-wide event stream, errors, warnings & scheduling",
         target: CommandTarget::Resource(ResourceKind::Events),
+    },
+    CommandDef {
+        name: "changed",
+        aliases: &[
+            "change",
+            "chg",
+            "recent",
+            "triage",
+            "page",
+            "incident",
+            "incidents",
+        ],
+        description: "SRE incident investigation & change triage (:changed [duration], :page, :incident)",
+        target: CommandTarget::Resource(ResourceKind::Changed),
     },
     CommandDef {
         name: "serviceaccounts",
         aliases: &["sa", "serviceaccount"],
-        description: "ServiceAccounts view",
+        description: "Service account identities and RBAC token bindings",
         target: CommandTarget::Resource(ResourceKind::ServiceAccounts),
     },
     CommandDef {
         name: "roles",
         aliases: &["role"],
-        description: "Roles view",
+        description: "Namespace-scoped RBAC roles and resource permissions",
         target: CommandTarget::Resource(ResourceKind::Roles),
     },
     CommandDef {
         name: "clusterroles",
         aliases: &["cr", "clusterrole"],
-        description: "ClusterRoles view",
+        description: "Cluster-wide RBAC roles and resource permissions",
         target: CommandTarget::Resource(ResourceKind::ClusterRoles),
     },
     CommandDef {
         name: "rolebindings",
         aliases: &["rb", "rolebinding"],
-        description: "RoleBindings view",
+        description: "Bindings granting roles to users and service accounts",
         target: CommandTarget::Resource(ResourceKind::RoleBindings),
     },
     CommandDef {
         name: "clusterrolebindings",
         aliases: &["crb", "clusterrolebinding"],
-        description: "ClusterRoleBindings view",
+        description: "Cluster-level role bindings for cluster roles",
         target: CommandTarget::Resource(ResourceKind::ClusterRoleBindings),
     },
     CommandDef {
         name: "crds",
         aliases: &["crd", "customresourcedefinitions"],
-        description: "Custom Resource Definitions",
+        description: "Custom Resource Definitions registered in cluster",
         target: CommandTarget::Resource(ResourceKind::CustomResourceDefinitions),
     },
     CommandDef {
         name: "helm",
         aliases: &["helmreleases", "releases"],
-        description: "Helm 3 Releases",
+        description: "Helm 3 release revisions, status, values and manifests",
         target: CommandTarget::Resource(ResourceKind::HelmReleases),
+    },
+    CommandDef {
+        name: "argo",
+        aliases: &["argocd", "apps", "gitops"],
+        description: "ArgoCD applications, sync status, drift & GitOps control",
+        target: CommandTarget::Resource(ResourceKind::ArgoApplications),
     },
     CommandDef {
         name: "portforwards",
         aliases: &["pf", "portforward"],
-        description: "Active Port Forwards",
+        description: "Active port forwards",
         target: CommandTarget::Resource(ResourceKind::PortForwards),
+    },
+    CommandDef {
+        name: "replicasets",
+        aliases: &["rs", "replicaset"],
+        description: "ReplicaSet controllers and pod replica management",
+        target: CommandTarget::Resource(ResourceKind::ReplicaSets),
+    },
+    CommandDef {
+        name: "resourcequotas",
+        aliases: &["quota", "quotas", "resourcequota"],
+        description: "Hard resource constraints and usage tracking per namespace",
+        target: CommandTarget::Resource(ResourceKind::ResourceQuotas),
+    },
+    CommandDef {
+        name: "limitranges",
+        aliases: &["limits", "limitrange"],
+        description: "Default, min, and max compute resource limits per pod",
+        target: CommandTarget::Resource(ResourceKind::LimitRanges),
+    },
+    CommandDef {
+        name: "horizontalpodautoscalers",
+        aliases: &["hpa", "autoscaler", "horizontalpodautoscaler"],
+        description: "Automatic horizontal pod scaling based on metrics",
+        target: CommandTarget::Resource(ResourceKind::HorizontalPodAutoscalers),
+    },
+    CommandDef {
+        name: "pdb",
+        aliases: &["poddisruptionbudgets", "poddisruptionbudget"],
+        description: "Voluntary disruption budgets ensuring minimum pod availability",
+        target: CommandTarget::Resource(ResourceKind::PodDisruptionBudgets),
+    },
+    CommandDef {
+        name: "priorityclasses",
+        aliases: &["pc", "priorityclass"],
+        description: "Pod scheduling priority and eviction preemption mapping",
+        target: CommandTarget::Resource(ResourceKind::PriorityClasses),
+    },
+    CommandDef {
+        name: "runtimeclasses",
+        aliases: &["rc", "runtimeclass"],
+        description: "Container runtime configurations and handler selections",
+        target: CommandTarget::Resource(ResourceKind::RuntimeClasses),
+    },
+    CommandDef {
+        name: "leases",
+        aliases: &["lease"],
+        description: "Distributed leader election locks and component heartbeat leases",
+        target: CommandTarget::Resource(ResourceKind::Leases),
+    },
+    CommandDef {
+        name: "mutatingwebhookconfigurations",
+        aliases: &["mwc", "mutatingwebhooks"],
+        description: "Admission mutating webhook interceptors and injectors",
+        target: CommandTarget::Resource(ResourceKind::MutatingWebhookConfigurations),
+    },
+    CommandDef {
+        name: "validatingwebhookconfigurations",
+        aliases: &["vwc", "validatingwebhooks"],
+        description: "Admission validating webhook policies and enforcement",
+        target: CommandTarget::Resource(ResourceKind::ValidatingWebhookConfigurations),
+    },
+    CommandDef {
+        name: "ingressclasses",
+        aliases: &["ic", "ingressclass"],
+        description: "Ingress controller implementations and routing class specs",
+        target: CommandTarget::Resource(ResourceKind::IngressClasses),
+    },
+    CommandDef {
+        name: "endpoints",
+        aliases: &["endpoint", "ep-legacy"],
+        description: "Network endpoints routing traffic to service pods",
+        target: CommandTarget::Resource(ResourceKind::Endpoints),
     },
     CommandDef {
         name: "contexts",
         aliases: &["ctx", "context"],
-        description: "Cluster Contexts Switcher",
+        description: "Kubeconfig context switcher for multi-cluster management",
         target: CommandTarget::Contexts,
+    },
+    CommandDef {
+        name: "import",
+        aliases: &["add-cluster", "import-kubeconfig", "add-ctx", "kubeconfig-add"],
+        description: "Import a new Kubernetes cluster / kubeconfig from clipboard or file path",
+        target: CommandTarget::AddCluster,
     },
     CommandDef {
         name: "overview",
         aliases: &["info", "cluster"],
-        description: "Cluster Overview & Health",
+        description: "Cluster overview, health summary and node/pod capacity",
         target: CommandTarget::Resource(ResourceKind::Overview),
     },
     CommandDef {
         name: "toolbox",
         aliases: &["tb", "tools"],
-        description: "Toolbox diagnostics (kubectl, helm, krew)",
+        description: "Toolbox diagnostics (kubectl, helm, krew plugins)",
         target: CommandTarget::Resource(ResourceKind::Toolbox),
     },
     CommandDef {
         name: "assistant",
         aliases: &["ai", "chat"],
-        description: "SRElens AI Assistant Chat",
+        description: "SRElens AI Assistant Chat for troubleshooting",
         target: CommandTarget::Resource(ResourceKind::Assistant),
     },
     CommandDef {
         name: "ai-settings",
-        aliases: &["settings", "config", "ai-config"],
-        description: "AI & Assistant Settings",
+        aliases: &["settings", "ai-config"],
+        description: "AI & Assistant Settings (provider, model, API keys)",
         target: CommandTarget::Resource(ResourceKind::Settings),
+    },
+    CommandDef {
+        name: "config",
+        aliases: &["tui-config", "tui"],
+        description: "TUI Configuration (popup dimensions, visible rows & text size)",
+        target: CommandTarget::Resource(ResourceKind::TuiConfig),
+    },
+    CommandDef {
+        name: "features",
+        aliases: &["banner", "guide", "welcome"],
+        description: "Show SRElens feature highlights banner (:page, :helm, :overview, :gpuinfo, :workloads, :argo, :ai, :ai-settings, :config, :import, :banner)",
+        target: CommandTarget::FeatureBanner,
     },
     CommandDef {
         name: "help",
         aliases: &["?"],
-        description: "Show keybindings and command help",
+        description: "Show interactive keybindings palette and command cheatsheet",
         target: CommandTarget::Help,
     },
     CommandDef {
         name: "quit",
         aliases: &["q", "exit"],
-        description: "Quit srelens",
+        description: "Quit srectl session",
         target: CommandTarget::Quit,
     },
     CommandDef {
@@ -469,6 +711,12 @@ pub const COMMAND_REGISTRY: &[CommandDef] = &[
         aliases: &["goto", "url"],
         description: "Open deep link URL or resource (:open <url>)",
         target: CommandTarget::OpenUrl(String::new()),
+    },
+    CommandDef {
+        name: "update",
+        aliases: &["self-update", "upgrade"],
+        description: "Check for updates or view update status",
+        target: CommandTarget::Update,
     },
 ];
 
@@ -516,6 +764,108 @@ impl From<&CrdMeta> for DynamicCommandDef {
             aliases,
             description: format!("CRD: {} ({})", crd.kind, crd.group),
             target: CommandTarget::CustomResource(crd.clone()),
+        }
+    }
+}
+
+impl DynamicCommandDef {
+    pub fn category(&self) -> &'static str {
+        match &self.target {
+            CommandTarget::Resource(kind) => match kind {
+                ResourceKind::Pods
+                | ResourceKind::Deployments
+                | ResourceKind::StatefulSets
+                | ResourceKind::DaemonSets
+                | ResourceKind::Jobs
+                | ResourceKind::CronJobs
+                | ResourceKind::ReplicaSets
+                | ResourceKind::HorizontalPodAutoscalers
+                | ResourceKind::Workloads => "Workload",
+                ResourceKind::Services
+                | ResourceKind::Endpoints
+                | ResourceKind::EndpointSlices
+                | ResourceKind::Ingresses
+                | ResourceKind::IngressClasses
+                | ResourceKind::NetworkPolicies
+                | ResourceKind::BgpPeers => "Network",
+                ResourceKind::ConfigMaps
+                | ResourceKind::Secrets
+                | ResourceKind::ResourceQuotas
+                | ResourceKind::LimitRanges
+                | ResourceKind::PodDisruptionBudgets
+                | ResourceKind::Leases => "Config",
+                ResourceKind::PersistentVolumeClaims
+                | ResourceKind::PersistentVolumes
+                | ResourceKind::StorageClasses => "Storage",
+                ResourceKind::ServiceAccounts
+                | ResourceKind::Roles
+                | ResourceKind::ClusterRoles
+                | ResourceKind::RoleBindings
+                | ResourceKind::ClusterRoleBindings => "Auth / RBAC",
+                ResourceKind::PriorityClasses
+                | ResourceKind::RuntimeClasses
+                | ResourceKind::MutatingWebhookConfigurations
+                | ResourceKind::ValidatingWebhookConfigurations
+                | ResourceKind::Nodes
+                | ResourceKind::Namespaces
+                | ResourceKind::Events
+                | ResourceKind::CustomResourceDefinitions => "Cluster",
+                ResourceKind::HelmReleases => "Helm",
+                ResourceKind::ArgoApplications => "GitOps",
+                ResourceKind::PortForwards => "Forward",
+                ResourceKind::Overview => "Overview",
+                ResourceKind::Toolbox => "Diagnostic",
+                ResourceKind::Assistant => "AI Assistant",
+                ResourceKind::Settings => "Settings",
+                ResourceKind::TuiConfig => "Configuration",
+                ResourceKind::Topology => "Topology",
+                ResourceKind::GpuInfo => "GPU / Hardware",
+                ResourceKind::TopPods | ResourceKind::TopNodes => "Hotspots",
+                ResourceKind::Changed => "Triage",
+                ResourceKind::CustomResource(_) => "Custom Resource",
+            },
+            CommandTarget::CustomResource(_) => "CRD",
+            CommandTarget::ThemePicker | CommandTarget::SetTheme(_) => "Themes",
+            CommandTarget::Contexts | CommandTarget::AddCluster => "Context",
+            CommandTarget::Namespaces => "Namespace",
+            CommandTarget::Help => "Help",
+            CommandTarget::FeatureBanner => "Guide",
+            CommandTarget::Quit => "System",
+            CommandTarget::Update => "System",
+            CommandTarget::OpenUrl(_) => "Navigation",
+        }
+    }
+
+    pub fn syntax_hint(&self) -> &'static str {
+        match &self.target {
+            CommandTarget::Resource(ResourceKind::Changed) => ":changed [duration]",
+            CommandTarget::Resource(ResourceKind::Pods) => ":pods [namespace]",
+            CommandTarget::Resource(ResourceKind::Deployments) => ":deployments [ns]",
+            CommandTarget::Resource(ResourceKind::Services) => ":services [ns]",
+            CommandTarget::Resource(ResourceKind::ConfigMaps) => ":configmaps [ns]",
+            CommandTarget::Resource(ResourceKind::Secrets) => ":secrets [ns]",
+            CommandTarget::Resource(ResourceKind::Nodes) => ":nodes",
+            CommandTarget::Resource(ResourceKind::Events) => ":events [ns]",
+            CommandTarget::Resource(ResourceKind::HelmReleases) => ":helm [ns]",
+            CommandTarget::Resource(ResourceKind::ArgoApplications) => ":argo [ns]",
+            CommandTarget::Resource(ResourceKind::Workloads) => ":workloads [ns]",
+            CommandTarget::Resource(ResourceKind::Ingresses) => ":ingresses [ns]",
+            CommandTarget::Resource(ResourceKind::TopPods) => ":toppods [ns]",
+            CommandTarget::Resource(ResourceKind::TopNodes) => ":topnodes",
+            CommandTarget::Resource(ResourceKind::TuiConfig) => ":config",
+            CommandTarget::Resource(ResourceKind::Assistant) => ":assistant",
+            CommandTarget::Resource(ResourceKind::Toolbox) => ":toolbox",
+            CommandTarget::ThemePicker => ":themes",
+            CommandTarget::SetTheme(_) => ":theme <name>",
+            CommandTarget::Namespaces => ":namespaces",
+            CommandTarget::Contexts => ":contexts",
+            CommandTarget::AddCluster => ":import",
+            CommandTarget::Help => ":help",
+            CommandTarget::FeatureBanner => ":features",
+            CommandTarget::Quit => ":quit",
+            CommandTarget::Update => ":update",
+            CommandTarget::OpenUrl(_) => ":open <url>",
+            _ => "",
         }
     }
 }
@@ -638,7 +988,10 @@ pub fn command_suggestions(query: &str) -> Vec<(DynamicCommandDef, usize)> {
     command_suggestions_with_crds(query, &[])
 }
 
-pub fn command_suggestions_with_crds(query: &str, crds: &[CrdMeta]) -> Vec<(DynamicCommandDef, usize)> {
+pub fn command_suggestions_with_crds(
+    query: &str,
+    crds: &[CrdMeta],
+) -> Vec<(DynamicCommandDef, usize)> {
     let q = query.trim().trim_start_matches(':').to_lowercase();
     let mut matches = Vec::new();
 
@@ -654,10 +1007,17 @@ pub fn command_suggestions_with_crds(query: &str, crds: &[CrdMeta]) -> Vec<(Dyna
 
     // Direct theme name suggestions when typing ":theme <subquery>" or ":colors <subquery>"
     if q.starts_with("theme ") || q.starts_with("colors ") {
-        let prefix = if q.starts_with("theme ") { "theme " } else { "colors " };
+        let prefix = if q.starts_with("theme ") {
+            "theme "
+        } else {
+            "colors "
+        };
         let sub = q.strip_prefix(prefix).unwrap().trim();
         for p in crate::theme::ALL_THEMES {
-            if sub.is_empty() || p.name.starts_with(sub) || p.display_name.to_lowercase().starts_with(sub) {
+            if sub.is_empty()
+                || p.name.starts_with(sub)
+                || p.display_name.to_lowercase().starts_with(sub)
+            {
                 matches.push((
                     DynamicCommandDef {
                         name: format!("theme {}", p.name),
@@ -709,7 +1069,11 @@ pub fn command_suggestions_with_crds(query: &str, crds: &[CrdMeta]) -> Vec<(Dyna
             || norm_singular.starts_with(&q)
         {
             matches.push((crd_def, 105));
-        } else if crd_def.aliases.iter().any(|a| a.to_lowercase().starts_with(&q)) {
+        } else if crd_def
+            .aliases
+            .iter()
+            .any(|a| a.to_lowercase().starts_with(&q))
+        {
             matches.push((crd_def, 95));
         } else if crd.plural.to_lowercase().contains(&q)
             || crd.kind.to_lowercase().contains(&q)

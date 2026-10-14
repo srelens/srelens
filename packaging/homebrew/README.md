@@ -1,6 +1,6 @@
 # Homebrew tap
 
-`brew install srelens/tap/srelens-tui` installs the terminal UI from the
+`brew install srelens/tap/srectl` installs the terminal UI from the
 archive the release already publishes.
 
 This directory holds the formula and the script that renders it. The published
@@ -10,7 +10,7 @@ a repository of its own.
 
 | File | What it is |
 | --- | --- |
-| `srelens-tui.rb` | The formula, as a template. Version `0.0.0` and zeroed checksums. |
+| `srectl.rb` | The formula, as a template. Version `0.0.0` and zeroed checksums. |
 | `render.mjs` | Fills those in from a published release's `SHA256SUMS`. |
 
 Linux installs take the **static musl** archives, not the glibc ones. The
@@ -40,9 +40,9 @@ Two things this repository cannot do for itself:
 
 1. **The tap repository** — ~~to create~~ **done**: [srelens/homebrew-tap](https://github.com/srelens/homebrew-tap)
    exists, public, default branch `main`. The name matters: Homebrew maps
-   `srelens/tap` to exactly that, and `brew install srelens/tap/srelens-tui`
+   `srelens/tap` to exactly that, and `brew install srelens/tap/srectl`
    will not resolve without it. It can stay empty — the first publish creates
-   `Formula/srelens-tui.rb` and the branch with it.
+   `Formula/srectl.rb` and the branch with it.
 2. **A token.** Set `HOMEBREW_TAP_TOKEN` as a repository secret — a
    fine-grained token with **Contents: read and write** on the tap repository
    only. `GITHUB_TOKEN` cannot be used: it is scoped to this repository and
@@ -64,7 +64,7 @@ personal tap before pointing it at the real one.
 
 ```bash
 node packaging/homebrew/render.mjs 1.2.3            # prints the formula
-node packaging/homebrew/render.mjs 1.2.3 --out Formula/srelens-tui.rb
+node packaging/homebrew/render.mjs 1.2.3 --out Formula/srectl.rb
 ```
 
 It reads the checksums the release published rather than downloading the
@@ -80,7 +80,7 @@ render or to try one before the release is public.
 
 ## The formula and self-update
 
-`srelens-tui update` refuses to overwrite a Homebrew-managed copy and points
+`srectl update` refuses to overwrite a Homebrew-managed copy and points
 back at `brew upgrade` — writing over a file Homebrew tracks would leave its
 database describing a version that is no longer there. The formula's caveats
 say the same thing from the other side.

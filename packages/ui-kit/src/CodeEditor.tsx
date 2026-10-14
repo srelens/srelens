@@ -18,12 +18,15 @@ import {
   foldGutter,
   foldKeymap,
 } from "@codemirror/language";
-import { highlightSelectionMatches, searchKeymap } from "@codemirror/search";
+import { highlightSelectionMatches, search, searchKeymap } from "@codemirror/search";
+import { codeSearchPanel, searchPanelStyles } from "./searchPanel";
 import { yaml } from "@codemirror/lang-yaml";
 import { linter, lintGutter, type Diagnostic } from "@codemirror/lint";
 import { autocompletion, completionKeymap, type CompletionSource } from "@codemirror/autocomplete";
 import { parseAllDocuments } from "yaml";
 import { tags as t } from "@lezer/highlight";
+import { CopyButton } from "./CopyButton";
+import { registerSelectAllTarget } from "./selectAll";
 
 /**
  * Parse YAML (one or more `---`-separated documents) and return syntax
@@ -180,6 +183,18 @@ function editorTheme(minHeight: number, maxHeight: number, fill: boolean, flush:
     // A focus ring is an edge too; a flush editor fills its region and has
     // nothing to ring, and the caret already says where typing goes.
     "&.cm-focused": flush ? { outline: "none" } : { outline: "none", borderColor: "var(--accent)" },
+    // Except when there is no caret. A read-only document carries
+    // `tabindex="0"` so the chord can focus it (see below), which makes it a
+    // tab stop — and `kit.css` clears the outline from every focused `div`,
+    // which this content is. So a keyboard reader arriving here had nothing at
+    // all to tell them where they were. The ring is drawn INSIDE the content
+    // (`-2px`) because the pane is flush to its region's hairline and an
+    // outset ring is clipped by the scroller. Costs no layout either way: an
+    // outline never does. (#656 review)
+    ".cm-content[tabindex]:focus-visible": {
+      outline: "2px solid var(--accent)",
+      outlineOffset: "-2px",
+    },
     ".cm-scroller": { fontFamily: "var(--font-mono)", lineHeight: "1.55", overflow: "auto" },
     ".cm-content": { minHeight: fill ? "0" : `${minHeight}px`, caretColor: "var(--accent)" },
     ".cm-cursor, .cm-dropCursor": { borderLeftColor: "var(--accent)" },
@@ -204,10 +219,121 @@ function editorTheme(minHeight: number, maxHeight: number, fill: boolean, flush:
       backgroundColor: "color-mix(in srgb, var(--accent) 22%, transparent)",
       outline: "1px solid var(--accent)",
     },
-    ".cm-panels": { backgroundColor: "var(--surface-sunk)", color: "var(--ink)" },
-    ".cm-searchMatch": { backgroundColor: "color-mix(in srgb, var(--warn) 30%, transparent)" },
-    ".cm-tooltip": { maxWidth: "480px" },
-    ".cm-tooltip.cm-tooltip-lint": {
+    // --- find & replace -------------------------------------------------
+    // The panel itself is ours (see `searchPanel.ts`); these are the colours
+    // it asks for, and the container CodeMirror wraps around it. Go-to-line
+    // (Mod-Alt-g) is still CodeMirror's dialog, built from `.cm-textfield` and
+    // `.cm-button`, so those keep a dressing of their own below. (#652)
+    ...searchPanelStyles({
+      surface: "var(--surface-raised)",
+      fieldBg: "var(--surface-sunk)",
+      ink: "var(--ink)",
+      inkMuted: "var(--ink-muted)",
+      rule: "var(--rule-strong)",
+      hover: "var(--field)",
+      accent: "var(--accent)",
+      accentWash: "var(--accent-wash)",
+      danger: "var(--sev)",
+      font: "var(--font-sans)",
+      shadow: "0 8px 24px color-mix(in srgb, var(--canvas-deep) 55%, transparent)",
+      radius: "var(--radius-tile)",
+    }),
+    ".cm-panels": {
+      backgroundColor: "var(--surface-sunk)",
+      color: "var(--ink)",
+      fontFamily: "var(--font-sans)",
+    },
+    ".cm-textfield": {
+      boxSizing: "border-box",
+      backgroundColor: "var(--surface)",
+      color: "var(--ink)",
+      border: "1px solid var(--control-line)",
+      borderRadius: "6px",
+      fontFamily: "var(--font-sans)",
+      fontSize: "12px",
+      padding: "3px 7px",
+      "&::placeholder": { color: "var(--ink-faint)" },
+      "&:focus": {
+        outline: "none",
+        borderColor: "var(--accent)",
+        boxShadow: "0 0 0 2px color-mix(in srgb, var(--accent) 30%, transparent)",
+      },
+    },
+    // Matched to the kit's own `.btn` (see `kit.css`), so the dialog reads as
+    // part of the app rather than as CodeMirror's default chrome.
+    ".cm-button": {
+      backgroundImage: "none",
+      backgroundColor: "var(--surface)",
+      color: "var(--ink-soft)",
+      border: "1px solid var(--rule)",
+      borderRadius: "6px",
+      fontFamily: "var(--font-sans)",
+      fontSize: "12px",
+      fontWeight: "500",
+      padding: "3px 9px",
+      cursor: "pointer",
+      transition: "background-color 120ms ease, border-color 120ms ease, color 120ms ease",
+      "&:hover": {
+        backgroundImage: "none",
+        backgroundColor: "var(--field)",
+        borderColor: "var(--rule-strong)",
+        color: "var(--ink)",
+      },
+      "&:active": {
+        backgroundImage: "none",
+        backgroundColor: "var(--accent-wash)",
+        borderColor: "var(--accent-line)",
+        color: "var(--ink)",
+      },
+      "&:focus-visible": { outline: "2px solid var(--accent)", outlineOffset: "1px" },
+    },
+    ".cm-dialog": {
+      display: "flex",
+      alignItems: "center",
+      gap: "6px",
+      padding: "7px 32px 7px 8px",
+      fontFamily: "var(--font-sans)",
+      fontSize: "12px",
+      "& label": {
+        display: "inline-flex",
+        alignItems: "center",
+        gap: "6px",
+        fontSize: "12px",
+        color: "var(--ink-muted)",
+      },
+    },
+    ".cm-dialog-close": {
+      top: "5px",
+      right: "6px",
+      width: "20px",
+      height: "20px",
+      borderRadius: "5px",
+      backgroundColor: "transparent",
+      color: "var(--ink-muted)",
+      lineHeight: "1",
+      cursor: "pointer",
+      "&:hover": { backgroundColor: "var(--field)", color: "var(--ink)" },
+    },
+    ".cm-searchMatch": {
+      backgroundColor: "color-mix(in srgb, var(--warn) 30%, transparent)",
+      borderRadius: "2px",
+    },
+    // The match the cursor is on. The base theme leaves this a hardcoded
+    // orange (magenta on dark); against the warn tint of the rest it has to
+    // be a different hue, not a different strength of the same one.
+    ".cm-searchMatch-selected": {
+      backgroundColor: "color-mix(in srgb, var(--accent) 42%, transparent)",
+      outline: "1px solid var(--accent)",
+    },
+    // The box goes on `.cm-tooltip` itself, not on `.cm-tooltip-lint`. Hovering
+    // the gutter marker makes the lint list the tooltip, but hovering the
+    // squiggle hosts it as a `.cm-tooltip-section` inside a `.cm-tooltip-hover`,
+    // and a rule needing both classes on one element matched neither. The host
+    // kept the base theme's light-only `#f5f5f5`, since this editor never sets
+    // `darkTheme`, under the dark theme's near-white ink. Naming each host in
+    // turn misses the next one: a completion's description is a
+    // `.cm-tooltip.cm-completionInfo` of its own, and had the same fault.
+    ".cm-tooltip": {
       backgroundColor: "var(--surface-sunk)",
       border: "1px solid var(--rule)",
       borderRadius: "var(--radius-tile)",
@@ -215,6 +341,9 @@ function editorTheme(minHeight: number, maxHeight: number, fill: boolean, flush:
       color: "var(--ink)",
       maxWidth: "480px",
     },
+    // A hover tooltip can stack sections (a diagnostic and anything else
+    // hovering the same spot); the base theme rules them apart in `#bbb`.
+    ".cm-tooltip-section:not(:first-child)": { borderTop: "1px solid var(--rule)" },
     ".cm-diagnostic": {
       padding: "6px 10px",
       whiteSpace: "normal",
@@ -224,12 +353,6 @@ function editorTheme(minHeight: number, maxHeight: number, fill: boolean, flush:
       lineHeight: "1.45",
     },
     ".cm-diagnostic-error": { borderLeft: "3px solid var(--sev)" },
-    ".cm-tooltip.cm-tooltip-autocomplete": {
-      backgroundColor: "var(--surface-sunk)",
-      border: "1px solid var(--rule)",
-      borderRadius: "var(--radius-tile)",
-      boxShadow: "0 4px 16px color-mix(in srgb, var(--canvas-deep) 60%, transparent)",
-    },
     ".cm-tooltip-autocomplete > ul > li": {
       padding: "2px 8px",
       fontFamily: "var(--font-mono)",
@@ -309,6 +432,16 @@ export interface CodeEditorProps {
    * knowing too.
    */
   onDiagnostics?: (diagnostics: EditorDiagnostic[]) => void;
+  /**
+   * A Copy control over the pane's top-right corner, putting the whole
+   * document on the clipboard in one click.
+   *
+   * Off by default, because this is chrome and an editor that is a control
+   * inside a form does not want any. On for the panes a reader opens in order
+   * to take the text away — a manifest, a release's values — where the
+   * select-all chord alone is an affordance with nothing to see. (#656)
+   */
+  copy?: boolean;
 }
 
 /**
@@ -330,6 +463,7 @@ export function CodeEditor({
   flush = false,
   onCursorChange,
   onDiagnostics,
+  copy = false,
 }: CodeEditorProps) {
   const parentRef = useRef<HTMLDivElement>(null);
   const viewRef = useRef<EditorView | null>(null);
@@ -360,10 +494,16 @@ export function CodeEditor({
       indentOnInput(),
       bracketMatching(),
       highlightSelectionMatches(),
+      // Our own find widget rather than CodeMirror's panel — see
+      // `searchPanel.ts`. It has to be configured here: `openSearchPanel`
+      // installs the default configuration, default panel and all, when it
+      // finds the editor has none. (#652)
+      search({ top: true, createPanel: codeSearchPanel }),
       keymap.of([...completionKeymap, ...defaultKeymap, ...historyKeymap, ...searchKeymap, ...foldKeymap, indentWithTab]),
       editorTheme(minHeight, maxHeight, fill, flush),
       syntaxHighlighting(highlightStyle),
       EditorView.editable.of(!readOnly),
+      EditorState.allowMultipleSelections.of(true),
       EditorState.readOnly.of(readOnly),
       EditorView.updateListener.of((u) => {
         // The cursor is a fact about the view, not an edit: reported whether
@@ -427,7 +567,17 @@ export function CodeEditor({
         autocompletion({ override: [(ctx) => completionsRef.current?.(ctx) ?? null] }),
       );
     }
-    if (ariaLabel) extensions.push(EditorView.contentAttributes.of({ "aria-label": ariaLabel }));
+    const contentAttrs: Record<string, string> = {};
+    if (ariaLabel) contentAttrs["aria-label"] = ariaLabel;
+    // A read-only document is `contenteditable="false"`, which the browser
+    // will not focus and will not put a caret in — so the pane could not be
+    // reached by keyboard at all, and a selection made in it was never the
+    // document's own selection, which is what ⌘C copies. A tab stop is what a
+    // non-editable text region needs either way. (#656)
+    if (readOnly) contentAttrs.tabindex = "0";
+    if (Object.keys(contentAttrs).length > 0) {
+      extensions.push(EditorView.contentAttributes.of(contentAttrs));
+    }
 
     const view = new EditorView({
       state: EditorState.create({ doc: value, extensions }),
@@ -442,6 +592,33 @@ export function CodeEditor({
     // Re-create only when structural options change, not on every value/onChange.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [readOnly, language, ariaLabel, minHeight, maxHeight, fill, flush]);
+
+  /**
+   * Answer ⌘A / Ctrl-A for a reader who has not clicked into the editor.
+   *
+   * `selectAll.ts` has the why: pressed on the body, the chord selects the
+   * whole page AROUND a `contenteditable` and leaves its text out of the
+   * selection entirely — every label and table row beside the manifest on the
+   * clipboard, and no manifest. The closures are read at keypress because the
+   * view is created imperatively above, and is replaced outright whenever a
+   * structural option rebuilds it. (#656)
+   */
+  useEffect(
+    () =>
+      registerSelectAllTarget({
+        dom: () => viewRef.current?.dom ?? null,
+        selectAll: () => {
+          const view = viewRef.current;
+          if (!view) return;
+          // Focus FIRST: CodeMirror writes the DOM selection only for a view
+          // that has focus (or already holds the selection), so without it the
+          // editor draws a range the clipboard knows nothing about.
+          view.focus();
+          view.dispatch({ selection: { anchor: 0, head: view.state.doc.length } });
+        },
+      }),
+    [],
+  );
 
   // A new validator has to be asked about the document already on screen.
   // Swapping it changes what is true — a different cluster, a different set of
@@ -465,5 +642,24 @@ export function CodeEditor({
     }
   }, [value]);
 
-  return <div ref={parentRef} className="h-full w-full [&_.cm-editor]:h-full [&_.cm-scroller]:overflow-auto" />;
+  // The Copy control is positioned against a wrapper rather than dropped in
+  // beside the editor: CodeMirror owns `parentRef`'s children — it appends its
+  // own tree there — and React reconciling siblings into a node another
+  // library writes to is how a pane loses its editor on the next render.
+  return (
+    <div className="relative h-full w-full">
+      <div ref={parentRef} className="h-full w-full [&_.cm-editor]:h-full [&_.cm-scroller]:overflow-auto" />
+      {copy && (
+        <CopyButton
+          // The live document, read at the click. CodeMirror owns it and
+          // `onChange` is optional, so `value` is only the text this component
+          // was last TOLD about — which is not what the reader is looking at
+          // the moment they have typed. (#656 review)
+          text={() => viewRef.current?.state.doc.toString() ?? value}
+          label={ariaLabel ? `Copy ${ariaLabel}` : "Copy"}
+          className="code-copy"
+        />
+      )}
+    </div>
+  );
 }

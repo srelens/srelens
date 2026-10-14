@@ -38,6 +38,14 @@ pub struct Session {
     /// session files written before this field existed.
     #[serde(default)]
     pub agent_kind: Option<String>,
+    /// How many tool calls the conversation made, written by the frontend at
+    /// save time (#386). Absent for sessions saved before it was kept.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub calls: Option<u32>,
+    /// How long srelens spent answering, in ms (#386). Absent when nothing
+    /// could be measured, and for sessions saved before it was kept.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<u64>,
     /// Opaque to the backend — the frontend owns the message shape. Stored
     /// and returned verbatim.
     pub messages: Vec<serde_json::Value>,
@@ -51,6 +59,12 @@ pub struct SessionMeta {
     pub title: String,
     pub created_at: i64,
     pub updated_at: i64,
+    /// The session's own figures, so a rail row can draw them without loading
+    /// the transcript (#386). Absent in index entries written before them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub calls: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<u64>,
 }
 
 /// `<base>/assistant/sessions` — where session files and `index.json` live.
@@ -197,6 +211,8 @@ fn save_session(dir: &Path, session: &Session) -> Result<(), String> {
         title: session.title.clone(),
         created_at: session.created_at,
         updated_at: session.updated_at,
+        calls: session.calls,
+        duration_ms: session.duration_ms,
     };
     upsert_index(dir, &meta)
 }
@@ -272,8 +288,39 @@ mod tests {
             skills: vec!["skill-a".to_string()],
             cli_session_id: Some("cli-123".to_string()),
             agent_kind: Some("codex".to_string()),
+            calls: None,
+            duration_ms: None,
             messages: vec![serde_json::json!({"role": "user", "text": "hi"})],
         }
+    }
+
+    /// #386: the figures a rail row draws are in the index, so listing does not
+    /// mean loading every transcript.
+    #[test]
+    fn a_session_saved_with_figures_lists_them() {
+        let dir = TempDir::new();
+        let mut s = sample_session("fig", 5);
+        s.calls = Some(7);
+        s.duration_ms = Some(11_200);
+        save_session(dir.path(), &s).unwrap();
+        let metas = list_sessions(dir.path()).unwrap();
+        assert_eq!(metas[0].calls, Some(7));
+        assert_eq!(metas[0].duration_ms, Some(11_200));
+    }
+
+    /// An index written before the figures existed still reads, figure-less.
+    #[test]
+    fn an_index_entry_without_figures_still_reads() {
+        let meta: SessionMeta =
+            serde_json::from_str(r#"{"id":"old","title":"t","createdAt":1,"updatedAt":2}"#).unwrap();
+        assert_eq!((meta.calls, meta.duration_ms), (None, None));
+    }
+
+    /// And a session without them writes no keys for them.
+    #[test]
+    fn a_session_without_figures_writes_no_figure_keys() {
+        let raw = serde_json::to_string(&sample_session("nofig", 1)).unwrap();
+        assert!(!raw.contains("\"calls\"") && !raw.contains("\"durationMs\""), "got {raw}");
     }
 
     #[test]

@@ -1,0 +1,10 @@
+{
+  "id": "org.example.observability",
+  "revision": 3,
+  "provider": "cpu",
+  "context": "kind-dev",
+  "namespace": "team",
+  "resourceKind": "apps/Deployment",
+  "name": "web",
+  "rangeSeconds": 3600
+}

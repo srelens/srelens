@@ -3,14 +3,19 @@ import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { Chrome } from "./Chrome";
 import {
+  activeRoute,
+  closeTab,
   createWorkspace,
   currentWorkspace,
   getState,
   openTab,
+  setActiveCluster,
   setState,
+  setWorkspaceColor,
   switchWorkspace,
   togglePin,
 } from "../lib/tabsStore";
+import { takeSettingsRequest } from "../lib/settingsRequest";
 import { defaultState } from "../lib/tabs";
 import { APPEARANCE_KEY } from "../lib/appearance";
 import { lockWorkspace, resetLock, __setKnownVaultMode } from "./LockGate";
@@ -65,7 +70,7 @@ vi.mock("@srelens/core", async (orig) => ({
 }));
 
 const ctx = (id: string) => ({
-  name: id, stableId: id, cluster: id, server: "", isCurrent: false,
+  name: id, stableId: id, key: id, cluster: id, server: "", isCurrent: false,
   sourceFile: "/home/dana/.kube/config", authKind: "client certificate",
 });
 
@@ -134,11 +139,24 @@ describe("Chrome", () => {
     expect(document.querySelectorAll("[data-light]")).toHaveLength(3);
   });
 
+  it("carries the way to the repository, ahead of the window's own controls", () => {
+    chrome();
+    const actions = document.querySelector('[data-slot="actions"]') as HTMLElement;
+    const first = actions.querySelector("button");
+    expect(first?.getAttribute("aria-label")).toBe("Star srelens on GitHub");
+  });
+
   it("zooms through uiScale", async () => {
     chrome();
     await userEvent.click(screen.getByRole("button", { name: "Zoom in" }));
-    expect(scale.set).toHaveBeenCalledWith(110);
-    expect(scale.apply).toHaveBeenCalledWith(110);
+    expect(scale.set).toHaveBeenCalledWith(110, "next");
+    expect(scale.apply).toHaveBeenCalledWith(110, "next");
+  });
+
+  it("restores only the new design's scale when its shell mounts", () => {
+    chrome();
+    expect(scale.get).toHaveBeenCalledWith("next");
+    expect(scale.apply).toHaveBeenCalledWith(100, "next");
   });
 
   it("switches workspaces from the switcher", async () => {
@@ -148,6 +166,24 @@ describe("Chrome", () => {
     await openSwitcher();
     await userEvent.click(screen.getByRole("button", { name: /^Team/ }));
     expect(currentWorkspace().id).toBe(id);
+  });
+
+  it("draws the workspace's colour on the chip and on its row", async () => {
+    setWorkspaceColor(getState().currentId, "var(--mark-teal)");
+    chrome();
+    const chip = screen.getByRole("button", { name: /Default/ });
+    expect(chip.querySelector<HTMLElement>('[data-slot="workspace-color"]')?.style.background).toBe("var(--mark-teal)");
+    await openSwitcher();
+    const row = screen.getAllByRole("button", { name: /^Default/ }).find((el) => el.classList.contains("ns-row"))!;
+    expect(row.querySelector<HTMLElement>('[data-slot="workspace-color"]')?.style.background).toBe("var(--mark-teal)");
+  });
+
+  it("opens Settings on Workspaces from the switcher", async () => {
+    chrome();
+    await openSwitcher();
+    await userEvent.click(screen.getByRole("button", { name: "Manage workspaces…" }));
+    expect(activeRoute()).toBe("/settings");
+    expect(takeSettingsRequest(null)?.section).toBe("workspaces");
   });
 
   it("asks before removing a workspace holding tabs the user opened", async () => {
@@ -190,6 +226,34 @@ describe("Chrome", () => {
     expect(getState().workspaces.some((w) => w.id === id)).toBe(true);
   });
 
+  /** Team, on stage with only its home tab on screen, and a Pods tab put away under prod (#908). */
+  const teamWithAShelvedTab = () => {
+    const id = createWorkspace("Team", ["prod", "stage"]);
+    openTab("/k/pods");
+    setActiveCluster("stage");
+    closeTab(currentWorkspace().activeId); // stage's overview
+    expect(currentWorkspace().tabs.map((t) => t.route)).toEqual(["/"]);
+    expect(currentWorkspace().shelved?.prod.tabs.map((t) => t.route)).toEqual(["/k/pods"]);
+    switchWorkspace(getState().workspaces[0].id);
+    return id;
+  };
+
+  it("asks before removing a workspace whose tabs are put away under another cluster", async () => {
+    const id = teamWithAShelvedTab();
+    chrome();
+    await openSwitcher();
+    await userEvent.click(screen.getByRole("button", { name: /Remove Team/ }));
+    expect(screen.getByRole("dialog", { name: /Remove Team/ }).textContent).toContain("2 open tabs");
+    expect(getState().workspaces.some((w) => w.id === id)).toBe(true);
+  });
+
+  it("counts the tabs put away under another cluster in the switcher", async () => {
+    teamWithAShelvedTab();
+    chrome();
+    await openSwitcher();
+    expect(screen.getByRole("button", { name: /^Team/ }).textContent).toContain("2 clusters · 2 tabs");
+  });
+
   it("keeps the workspace when the confirmation is dismissed", async () => {
     const id = createWorkspace("Team", ["prod"]);
     openTab("/k/pods");
@@ -206,6 +270,7 @@ describe("Chrome", () => {
     desktop.mockReturnValue(false);
     chrome();
     expect(screen.queryByRole("button", { name: "Zoom in" })).toBeNull();
+    expect(scale.apply).not.toHaveBeenCalled();
     expect(screen.getByRole("button", { name: "Theme" })).toBeDefined();
   });
 
@@ -286,6 +351,14 @@ describe("Chrome", () => {
       expect(screen.queryByRole("button", { name: /^Team/ })).toBeNull();
       expect(screen.getByText("Team")).toBeDefined();
       expect(getState().workspaces.some((w) => w.id === id)).toBe(true);
+    });
+
+    it("keeps the workspace's colour on the sealed chip", () => {
+      setWorkspaceColor(getState().currentId, "var(--mark-teal)");
+      lockWorkspace();
+      const { container } = chrome();
+      const swatch = container.querySelector<HTMLElement>('[data-sealed="true"] [data-slot="workspace-color"]');
+      expect(swatch?.style.background).toBe("var(--mark-teal)");
     });
 
     it("disables the way into Settings, and says why", async () => {

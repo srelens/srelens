@@ -15,7 +15,8 @@
 import { setWebviewZoom } from "../transport/transport";
 import { settingsStorage } from "./settingsStorage";
 
-const UI_SCALE_KEY = "srelens.uiScale";
+export type UiScaleDesign = "classic" | "next";
+const SCALE_KEYS = { classic: "srelens.uiScale", next: "srelens.next.uiScale" } as const;
 
 /** Interface scale bounds, in percent of the default size. */
 export const UI_SCALE = { MIN: 80, MAX: 150, DEFAULT: 100, STEP: 10 } as const;
@@ -28,32 +29,38 @@ export function clampUiScale(value: unknown): number {
 }
 
 /** The persisted interface scale in percent, or 100 when unset/invalid. */
-export function getUiScale(): number {
+export function getUiScale(design: UiScaleDesign = "classic"): number {
   try {
-    const raw = settingsStorage.getItem(UI_SCALE_KEY);
-    return raw === null ? UI_SCALE.DEFAULT : clampUiScale(JSON.parse(raw));
+    const raw = settingsStorage.getItem(SCALE_KEYS[design]);
+    if (raw === null) return UI_SCALE.DEFAULT;
+    return clampUiScale(JSON.parse(raw));
   } catch {
     return UI_SCALE.DEFAULT;
   }
 }
 
 /** Persist the interface scale (clamped). Returns the value stored. */
-export function setUiScale(percent: number): number {
+export function setUiScale(percent: number, design: UiScaleDesign = "classic"): number {
   const clamped = clampUiScale(percent);
   try {
-    settingsStorage.setItem(UI_SCALE_KEY, JSON.stringify(clamped));
+    settingsStorage.setItem(SCALE_KEYS[design], JSON.stringify(clamped));
   } catch {
     // ignore unavailable/quota-exceeded storage
   }
   return clamped;
 }
 
+/** The larger baseline belongs only to the new design. */
+export function uiScaleFactor(percent: number, design: UiScaleDesign = "classic"): number {
+  return Math.round(clampUiScale(percent) * (design === "next" ? 110 : 100)) / 10000;
+}
+
 /**
  * Apply a scale to the webview. Fire-and-forget: a zoom failure (missing
  * permission, web mode) must never break the caller's render or keystroke.
  */
-export function applyUiScale(percent: number): void {
-  void setWebviewZoom(clampUiScale(percent) / 100).catch(() => {});
+export function applyUiScale(percent: number, design: UiScaleDesign = "classic"): void {
+  void setWebviewZoom(uiScaleFactor(percent, design)).catch(() => {});
 }
 
 /**

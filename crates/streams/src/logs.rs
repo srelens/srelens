@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
 use srelens_kube::client_cache::ClientCache;
-use srelens_kube::logs::{stream_pod_logs_resilient, StreamOpts};
+use srelens_kube::logs::{stream_pod_logs_resilient, Line, StreamOpts};
 use tokio::task::JoinHandle;
 
 use crate::sink::EventSink;
@@ -27,11 +27,15 @@ pub struct LogTarget {
     pub label: String,
 }
 
-/// A line emitted on the stream channel: its source tag and text.
+/// A line emitted on the stream channel: its source tag and text, and whether
+/// the host cut it at [`srelens_kube::logs::MAX_LOG_LINE_BYTES`] (#747). The
+/// flag is sent only on a cut line, so every other line's payload is as it was.
 #[derive(Debug, Clone, Serialize)]
 pub struct LogLine {
     pub source: String,
     pub line: String,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub truncated: bool,
 }
 
 /// A connection-state change emitted on the stream channel, tagged with the
@@ -87,6 +91,7 @@ impl LogStreamManager {
             tail_lines: tail_lines.unwrap_or(STREAM_TAIL_LINES),
             since_seconds,
             timestamps: timestamps.unwrap_or(false),
+            ..StreamOpts::default()
         };
 
         let handles = targets
@@ -111,10 +116,11 @@ impl LogStreamManager {
                         t.pod,
                         t.container,
                         opts,
-                        move |line| {
+                        move |line: Line| {
                             if let Ok(v) = serde_json::to_value(LogLine {
                                 source: source.clone(),
-                                line,
+                                line: line.text,
+                                truncated: line.truncated,
                             }) {
                                 line_sink.emit(&line_channel, v);
                             }
@@ -243,6 +249,28 @@ mod tests {
         for p in &status_payloads {
             assert_eq!(p["status"], "reconnecting");
         }
+    }
+
+    /// The payload the frontend reads: `truncated` only on a cut line, so a
+    /// whole line's payload is `{source, line}` as before.
+    #[test]
+    fn a_cut_line_says_so_and_a_whole_one_is_unchanged() {
+        let line = |truncated| {
+            serde_json::to_value(LogLine {
+                source: "web-1".into(),
+                line: "text".into(),
+                truncated,
+            })
+            .unwrap()
+        };
+        assert_eq!(
+            line(true),
+            serde_json::json!({"source": "web-1", "line": "text", "truncated": true})
+        );
+        assert_eq!(
+            line(false),
+            serde_json::json!({"source": "web-1", "line": "text"})
+        );
     }
 
     #[test]

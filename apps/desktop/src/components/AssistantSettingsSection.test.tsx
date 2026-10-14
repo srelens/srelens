@@ -56,10 +56,13 @@ describe("AssistantSettingsSection", () => {
   });
 
   it("expands only the default provider initially, and one row at a time", async () => {
+    // Provider labels render before the asynchronous settings response.
+    const settings = { defaultProvider: "anthropic", models: {}, baseUrls: {}, maxTokens: 4096 };
+    llm.llmGetSettings.mockImplementation(() => new Promise(resolve => setTimeout(() => resolve(settings), 30)));
     render(<AssistantSettingsSection />);
     await screen.findByText("Anthropic");
     // Only the default (Anthropic) row is open → exactly one key input.
-    expect(screen.getAllByPlaceholderText(/paste api key/i)).toHaveLength(1);
+    expect(await screen.findAllByPlaceholderText(/paste api key/i)).toHaveLength(1);
 
     // Opening Gemini collapses Anthropic — still exactly one key input.
     fireEvent.click(screen.getByRole("button", { name: /google gemini/i }));
@@ -95,7 +98,7 @@ describe("AssistantSettingsSection", () => {
     await screen.findByText("Anthropic");
 
     // The default (Anthropic) row is the expanded one.
-    fireEvent.change(screen.getByPlaceholderText(/paste api key/i), { target: { value: "sk-ant-123" } });
+    fireEvent.change(await screen.findByPlaceholderText(/paste api key/i), { target: { value: "sk-ant-123" } });
     fireEvent.click(screen.getByRole("button", { name: /save key/i }));
 
     await waitFor(() => expect(llm.llmSetKey).toHaveBeenCalledWith("anthropic", "sk-ant-123"));
@@ -109,13 +112,13 @@ describe("AssistantSettingsSection", () => {
     render(<AssistantSettingsSection />);
     await screen.findByText("Anthropic");
 
-    fireEvent.click(screen.getByRole("button", { name: /fetch models/i }));
+    fireEvent.click(await screen.findByRole("button", { name: /fetch models/i }));
     expect(await screen.findByText("Claude Opus 4.8")).toBeTruthy();
   });
 
   it("picking a radio changes the default provider saved with settings", async () => {
     render(<AssistantSettingsSection />);
-    await screen.findByText("Anthropic");
+    await screen.findByRole("button", { name: /anthropic/i, expanded: true });
     fireEvent.click(screen.getByRole("radio", { name: /use google gemini as the default/i }));
     fireEvent.click(screen.getByRole("button", { name: /save settings/i }));
     await waitFor(() =>

@@ -24,7 +24,7 @@ describe("listContexts", () => {
   it("carries the source file and auth kind the backend reported", async () => {
     const invoke = vi.fn().mockResolvedValue({
       contexts: [{
-        name: "prod-eu", stableId: "prod-eu", cluster: "prod", server: "https://prod:6443",
+        name: "prod-eu", stableId: "prod-eu", key: "prod-eu", cluster: "prod", server: "https://prod:6443",
         namespace: "", isCurrent: true, isLocal: false,
         sourceFile: "/home/dana/.kube/config", authKind: "exec plugin · gcloud",
       }],

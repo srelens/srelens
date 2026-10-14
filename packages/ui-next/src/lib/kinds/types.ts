@@ -35,11 +35,17 @@ export interface KindActions {
   forward?: boolean;
   scale?: boolean;
   restart?: boolean;
+  /** Deployment only: offers Roll back to an earlier revision (#389). */
+  rollback?: boolean;
   evict?: boolean;
   /** CronJob only: offers Suspend/Resume, labelled from the row's own state. */
   suspend?: boolean;
   /** CronJob only: offers Run now — not destructive, takes no confirm. */
   trigger?: boolean;
+  /** Node only: offers Cordon/Uncordon, labelled from the row's own state (#820). */
+  cordon?: boolean;
+  /** Node only: offers Drain (#820). */
+  drain?: boolean;
   /**
    * Opposite default from every field above: absent (or `true`) offers
    * Delete, which is what keeps all 34 built-in kinds offering it without
@@ -76,7 +82,10 @@ export interface KindDescriptor<Row extends ListRow = ListRow> {
   source: "watch" | "poll";
   scope: "namespaced" | "cluster";
   /** Required for `poll`; unused for `watch`. */
-  load?: (context: string, namespace: string) => Promise<{ rows?: Row[]; error?: string }>;
+  load?: (
+    context: string,
+    namespace: string,
+  ) => Promise<{ rows?: Row[]; truncated?: boolean; error?: string }>;
   /** Extra per-row data merged onto the row of the same identity — pod
    *  metrics, node metrics. Keyed by {@link rowKey}, never by name: see
    *  {@link RowKey}. */

@@ -1,13 +1,13 @@
 #!/usr/bin/env node
 // Render the Homebrew formula for a published release.
 //
-//   node packaging/homebrew/render.mjs 1.2.3 [--out Formula/srelens-tui.rb]
+//   node packaging/homebrew/render.mjs 1.2.3 [--out Formula/srectl.rb]
 //                                           [--sums path/to/SHA256SUMS.txt]
 //
 // `--sums` reads the checksums from a file instead of the release, for an
 // offline render or to try one before the release is public.
 //
-// Reads that release's own `srelens-tui-<version>-SHA256SUMS.txt` and writes
+// Reads that release's own `srectl-<version>-SHA256SUMS.txt` and writes
 // the four URLs and checksums into the template. Deliberately NOT a
 // `brew bump-formula-pr`-style fetch-and-hash: the release already publishes
 // the checksums, and re-hashing a download here would only prove that whatever
@@ -59,7 +59,7 @@ const out = flag("--out");
 const sumsFile = flag("--sums");
 
 const base = `https://github.com/${REPO}/releases/download/srelens-v${version}`;
-const sumsUrl = `${base}/srelens-tui-${version}-SHA256SUMS.txt`;
+const sumsUrl = `${base}/srectl-${version}-SHA256SUMS.txt`;
 
 let sums;
 if (sumsFile) {
@@ -92,13 +92,13 @@ function checksumFor(file) {
 // with "could not find the checksum line", which reads like a broken template
 // rather than a line ending. The formula is written out with LF either way,
 // which is what the tap should carry.
-let formula = readFileSync(join(HERE, "srelens-tui.rb"), "utf8").split(String.fromCharCode(13)).join("");
+let formula = readFileSync(join(HERE, "srectl.rb"), "utf8").split(String.fromCharCode(13)).join("");
 
 // Substitute per target, so a placeholder left behind is a bug that shows up
 // here rather than as an install failure.
 for (const target of TARGETS) {
-  const file = `srelens-tui-${version}-${target}.tar.gz`;
-  const placeholderUrl = `https://github.com/srelens/srelens/releases/download/srelens-v0.0.0/srelens-tui-0.0.0-${target}.tar.gz`;
+  const file = `srectl-${version}-${target}.tar.gz`;
+  const placeholderUrl = `https://github.com/srelens/srelens/releases/download/srelens-v0.0.0/srectl-0.0.0-${target}.tar.gz`;
   if (!formula.includes(placeholderUrl)) {
     die(`the template no longer contains a URL for ${target}`);
   }
@@ -123,7 +123,7 @@ if (formula.includes("0.0.0") || formula.includes("0".repeat(64))) {
 formula = formula.replace(
   /^# The version and checksums below are placeholders[\s\S]*?# which is why it names a version that does not exist\.\n/m,
   `# GENERATED for srelens-v${version} — do not edit by hand.\n` +
-    "# Rendered from packaging/homebrew/srelens-tui.rb in srelens/srelens by\n" +
+    "# Rendered from packaging/homebrew/srectl.rb in srelens/srelens by\n" +
     "# packaging/homebrew/render.mjs, using that release's published SHA256SUMS.\n"
 );
 

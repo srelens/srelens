@@ -3,6 +3,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 const transportMocks = vi.hoisted(() => ({ setWebviewZoom: vi.fn(async () => {}) }));
 vi.mock("../transport/transport", () => transportMocks);
 
+import { settingsStorage } from "./settingsStorage";
+
 import {
   UI_SCALE,
   applyUiScale,
@@ -31,11 +33,33 @@ describe("clampUiScale", () => {
 });
 
 describe("persistence", () => {
-  it("round-trips through localStorage, clamped", () => {
+  it("round-trips through backend settings, clamped", () => {
     expect(setUiScale(120)).toBe(120);
     expect(getUiScale()).toBe(120);
     expect(setUiScale(9000)).toBe(UI_SCALE.MAX);
     expect(getUiScale()).toBe(UI_SCALE.MAX);
+  });
+
+  it("preserves classic stored percentages without conversion", () => {
+    settingsStorage.setItem("srelens.uiScale", "110");
+    expect(getUiScale()).toBe(110);
+  });
+
+  it("keeps each design's saved scale independent", () => {
+    setUiScale(120);
+    expect(getUiScale("next")).toBe(100);
+    setUiScale(140, "next");
+    expect(getUiScale()).toBe(120);
+    expect(getUiScale("next")).toBe(140);
+    setUiScale(90);
+    expect(getUiScale("next")).toBe(140);
+  });
+
+  it("stores displayed percentages for the new design without compounding", () => {
+    setUiScale(100, "next");
+    expect(settingsStorage.getItem("srelens.next.uiScale")).toBe("100");
+    setUiScale(getUiScale("next"), "next");
+    expect(getUiScale("next")).toBe(100);
   });
 
   it("defaults when unset or corrupted", () => {
@@ -53,7 +77,16 @@ describe("applyUiScale", () => {
     expect(transportMocks.setWebviewZoom).toHaveBeenLastCalledWith(1);
     // Out-of-range input is clamped before it reaches the webview.
     applyUiScale(400);
-    expect(transportMocks.setWebviewZoom).toHaveBeenLastCalledWith(UI_SCALE.MAX / 100);
+    expect(transportMocks.setWebviewZoom).toHaveBeenLastCalledWith(1.5);
+  });
+
+  it("applies the larger baseline only when the new design requests it", () => {
+    applyUiScale(100, "next");
+    expect(transportMocks.setWebviewZoom).toHaveBeenLastCalledWith(1.1);
+    applyUiScale(120, "next");
+    expect(transportMocks.setWebviewZoom).toHaveBeenLastCalledWith(1.32);
+    applyUiScale(100);
+    expect(transportMocks.setWebviewZoom).toHaveBeenLastCalledWith(1);
   });
 
   it("swallows a zoom rejection so a keystroke never throws", () => {

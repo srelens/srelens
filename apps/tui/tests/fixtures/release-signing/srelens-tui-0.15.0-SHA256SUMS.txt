@@ -1,0 +1,7 @@
+497380818023b644fe108298652f40b9b6df03593b652e2c1f5d821d8c923438  srelens-tui-0.15.0-aarch64-apple-darwin.tar.gz
+e3ad7f9076450a7407a1bb84e36dabafafe98217aa62c526a78bb257884e1543  srelens-tui-0.15.0-aarch64-unknown-linux-gnu.tar.gz
+f12f1ada2cb29219444bab5845c7883ddb0b4a03ad40bf79809076abf8d86595  srelens-tui-0.15.0-aarch64-unknown-linux-musl.tar.gz
+f645c6c6b54771da8623ffee38756b90dbbeb870daa3a4bd8466817a46ea927c  srelens-tui-0.15.0-x86_64-apple-darwin.tar.gz
+45139e24fc4cf504827f89cb3a05ddc0bbd44e7504fc07316469a28c4bd7036d  srelens-tui-0.15.0-x86_64-unknown-linux-gnu.tar.gz
+7ff2ceb8d8e58cf58fbf0d45c007605131e3a44b6ff030a06672b7ffb31eb0ae  srelens-tui-0.15.0-x86_64-unknown-linux-musl.tar.gz
+4d1aa6fa388535f9d73dfb1bd5e31c76a1070120976476bdec19cdb2c8966c24  srelens-tui-0.15.0-x86_64-pc-windows-msvc.zip

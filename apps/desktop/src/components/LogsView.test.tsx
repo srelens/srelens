@@ -46,6 +46,36 @@ afterEach(() => {
 });
 
 describe("LogsView", () => {
+  it("keeps completed init logs visible and labels the finished stream", async () => {
+    startLogStreamMock.mockImplementation(async (_c, _n, _t, onLine, onStatus) => {
+      onLine("", "init finished");
+      onStatus("completed", "");
+      return { stop: vi.fn() };
+    });
+    render(<LogsView context="kind-dev" namespace="default" source={{type:"pod",pod:"web-1"}} initialContainer="setup" />);
+    await screen.findByRole("combobox", { name: "Container" });
+    fireEvent.click(screen.getByRole("button", { name: "Live tail" }));
+    expect(await screen.findByText("completed")).toBeDefined();
+    expect(screen.getByText("init finished")).toBeDefined();
+    expect(screen.queryByText("reconnecting…")).toBeNull();
+  });
+  it("offers init logs while the app container is waiting and can tail the selected init container", async () => {
+    getObjectMock.mockResolvedValue({ object: {
+      spec: { containers: [{ name: "app" }], initContainers: [{ name: "migrate" }] },
+      status: { phase: "Pending" },
+    } });
+    podLogsMock.mockImplementation(async (_c, _n, _p, _i, options) =>
+      options.container === "migrate" ? { logs: "migration failed" } : { error: "PodInitializing" });
+    render(<LogsView context="kind-dev" namespace="default" source={{ type: "pod", pod: "web-1" }} />);
+    await userEvent.click(await screen.findByRole("combobox", { name: "Container" }));
+    await userEvent.click(await screen.findByRole("option", { name: "migrate" }));
+    expect(await screen.findByText(/migration failed/)).toBeDefined();
+    fireEvent.click(screen.getByRole("button", { name: "Live tail" }));
+    await waitFor(() => expect(startLogStreamMock).toHaveBeenCalledWith(
+      "kind-dev", "default", [{ pod: "web-1", container: "migrate", label: "" }],
+      expect.any(Function), expect.any(Function), expect.any(Object),
+    ));
+  });
   it("fetches and renders logs for the pod's container", async () => {
     podLogsMock.mockResolvedValue({ logs: "line one\nline two" });
     render(<LogsView context="kind-dev" namespace="default" source={{ type: "pod", pod: "web-1" }} />);
@@ -156,7 +186,7 @@ describe("LogsView", () => {
 
   it("starts a live-tail stream and appends streamed lines", async () => {
     podLogsMock.mockResolvedValue({ logs: "" });
-    let emit: ((source: string, line: string) => void) | undefined;
+    let emit: ((source: string, line: string, truncated: boolean) => void) | undefined;
     const stop = vi.fn();
     startLogStreamMock.mockImplementation(async (_c, _n, _t, onLine) => {
       emit = onLine;
@@ -168,8 +198,13 @@ describe("LogsView", () => {
     fireEvent.click(screen.getByLabelText("Live tail"));
     await waitFor(() => expect(startLogStreamMock).toHaveBeenCalled());
 
-    act(() => emit?.("", "streamed line"));
+    act(() => emit?.("", "streamed line", false));
     expect(await screen.findByText("streamed line")).toBeDefined();
+    // A line the host cut says so after it, and the line itself is as it came (#747).
+    act(() => emit?.("", "the start of a long one", true));
+    const cut = await screen.findByText("the start of a long one", { exact: false });
+    expect(cut.closest("[data-log-row]")?.textContent).toBe("the start of a long one [line cut: too long]");
+    expect(screen.getAllByText(/line cut/)).toHaveLength(1);
 
     // Toggling off stops the stream.
     fireEvent.click(screen.getByLabelText("Pause live tail"));

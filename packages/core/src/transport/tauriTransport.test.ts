@@ -3,7 +3,15 @@ import { invoke } from "@tauri-apps/api/core";
 import { invokeCapability } from "./tauriTransport";
 import { requestClusterLogin } from "../lib/clusterLogin";
 
-vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
+vi.mock("@tauri-apps/api/core", () => ({
+  invoke: vi.fn(),
+  Channel: class {
+    onmessage: (message: unknown) => void;
+    constructor(onmessage?: (message: unknown) => void) {
+      this.onmessage = onmessage ?? (() => {});
+    }
+  },
+}));
 vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn() }));
 vi.mock("@tauri-apps/api/app", () => ({ getVersion: vi.fn() }));
 vi.mock("@tauri-apps/plugin-process", () => ({ relaunch: vi.fn() }));
@@ -15,6 +23,29 @@ vi.mock("../lib/clusterLogin", async (importOriginal) => ({
 
 describe("tauriTransport.invokeCapability", () => {
   afterEach(() => { vi.clearAllMocks(); vi.restoreAllMocks(); });
+
+  it.each([
+    ["extensions.packageManifest", {}],
+    ["extensions.configure", { action: "installPackage", grants: ["k8s.listCustomResource"], reviewedRevision: 7 }],
+  ])("sends %s package bytes through raw IPC without a browser base64 string", async (id, metadata) => {
+    vi.mocked(invoke).mockResolvedValue({ ok: true });
+    const packageBytes = new Uint8Array(512 * 1024 * 1024);
+    packageBytes.set([0x1f, 0x8b, 0x08, 0x00, 0xff]);
+    await expect(invokeCapability(id, { ...metadata, package: packageBytes })).resolves.toEqual({ ok: true });
+    const call = vi.mocked(invoke).mock.calls.at(-1)!;
+    expect(call[0]).toBe("invoke_package_capability");
+    expect(call[1]).toBe(packageBytes);
+    expect(call[2]).toEqual({
+      headers: { "x-srelens-package-input": JSON.stringify({ id, input: metadata }) },
+    });
+  });
+
+  it("keeps existing base64 package calls on the JSON capability bridge", async () => {
+    vi.mocked(invoke).mockResolvedValue({ ok: true });
+    const input = { package: "H4sIAP8=" };
+    await invokeCapability("extensions.packageManifest", input);
+    expect(invoke).toHaveBeenCalledWith("invoke_capability", { id: "extensions.packageManifest", input });
+  });
 
   it("prompts cluster sign-in and rethrows a stable sentinel when the rejection carries the marker", async () => {
     vi.mocked(invoke).mockRejectedValue("NEEDS_CLUSTER_LOGIN:k:ctx");
@@ -28,5 +59,250 @@ describe("tauriTransport.invokeCapability", () => {
     vi.mocked(invoke).mockRejectedValue("boom");
     await expect(invokeCapability("k8s.listPods")).rejects.toBe("boom");
     expect(requestClusterLogin).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * #700: a reloaded page's window still holds the streams the page before it
+ * opened. The first stream this page opens waits for the host to end them, so
+ * the reset cannot end the new page's streams, and it is asked once a page.
+ */
+describe("tauriTransport window stream reset", () => {
+  const realWarn = console.warn;
+  afterEach(() => {
+    vi.clearAllMocks();
+    vi.restoreAllMocks();
+    vi.resetModules();
+    // A silenced console.warn must not outlive its case.
+    expect(console.warn).toBe(realWarn);
+  });
+
+  async function fresh() {
+    vi.resetModules();
+    const core = await import("@tauri-apps/api/core");
+    return { invoke: vi.mocked(core.invoke), transport: await import("./tauriTransport") };
+  }
+
+  it("ends the window's old streams before the first stream opens, and only once", async () => {
+    const { invoke, transport } = await fresh();
+    let finishReset: () => void = () => {};
+    invoke.mockImplementation((command: string) =>
+      command === "window_streams_reset"
+        ? new Promise((resolve) => { finishReset = () => resolve({ appStreams: 2, watches: 1, execs: 0 }); })
+        : Promise.resolve("ok"),
+    );
+    const watch = transport.invokeCommand("start_resource_watch", { channel: "watch:1" });
+    const exec = transport.invokeCommand("start_pod_exec", { channel: "exec-1" });
+    const app = transport.invokeCommand("extension_stream_open", { input: {} });
+    await Promise.resolve();
+    expect(invoke.mock.calls.map(([c]) => c)).toEqual(["window_streams_reset"]);
+    finishReset();
+    await Promise.all([watch, exec, app]);
+    expect(invoke.mock.calls.map(([c]) => c)).toEqual([
+      "window_streams_reset", "start_resource_watch", "start_pod_exec", "extension_stream_open",
+    ]);
+    await transport.invokeCommand("start_resource_watch", { channel: "watch:2" });
+    expect(invoke.mock.calls.filter(([c]) => c === "window_streams_reset")).toHaveLength(1);
+  });
+
+  // #735: the window owns these too, so each waits for the reset as well. Their
+  // output is broadcast on events, not sent on a channel of their own, so they
+  // are passed none.
+  it.each(["start_log_stream", "start_port_forward", "start_terminal", "start_helm_op"])(
+    "holds %s until the window's old streams have ended, and passes it no channel",
+    async (command) => {
+      const { invoke, transport } = await fresh();
+      let finishReset: () => void = () => {};
+      invoke.mockImplementation((c: string) =>
+        c === "window_streams_reset"
+          ? new Promise((resolve) => { finishReset = () => resolve(undefined); })
+          : Promise.resolve(7),
+      );
+      const open = transport.invokeCommand(command, { channel: "ch:1" });
+      await Promise.resolve();
+      expect(invoke.mock.calls.map(([c]) => c)).toEqual(["window_streams_reset"]);
+      finishReset();
+      await expect(open).resolves.toBe(7);
+      expect(invoke.mock.calls).toEqual([["window_streams_reset"], [command, { channel: "ch:1" }]]);
+    },
+  );
+
+  it("does not hold up a command that opens nothing", async () => {
+    const { invoke, transport } = await fresh();
+    invoke.mockResolvedValue(undefined);
+    await transport.invokeCommand("stop_watch", { channel: "watch:1" });
+    expect(invoke.mock.calls.map(([c]) => c)).toEqual(["stop_watch"]);
+  });
+
+  it("opens no stream while the old ones may still run: a failed reset rejects each opener, uninvoked", async () => {
+    const { invoke, transport } = await fresh();
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    invoke.mockImplementation((command: string) =>
+      command === "window_streams_reset" ? Promise.reject("bridge down") : Promise.resolve(7),
+    );
+    const opens = ["start_resource_watch", "start_pod_exec", "extension_stream_open"].map((c) =>
+      transport.invokeCommand(c, {}),
+    );
+    for (const open of opens) {
+      await expect(open).rejects.toThrow(/could not end this window's streams from before the reload.*bridge down/);
+    }
+    // One attempt, shared by the opens that arrived during it; none ran.
+    expect(invoke.mock.calls.map(([c]) => c)).toEqual(["window_streams_reset"]);
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining("could not end"), "bridge down");
+  });
+
+  it("retries a failed reset on the next open, and opens once one succeeds", async () => {
+    const { invoke, transport } = await fresh();
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    let resets = 0;
+    invoke.mockImplementation((command: string) =>
+      command === "window_streams_reset"
+        ? (++resets === 1 ? Promise.reject("busy") : Promise.resolve({ appStreams: 0, watches: 0, execs: 0 }))
+        : Promise.resolve(7),
+    );
+    await expect(transport.invokeCommand("start_pod_exec", {})).rejects.toThrow(/busy/);
+    await expect(transport.invokeCommand("start_pod_exec", {})).resolves.toBe(7);
+    await expect(transport.invokeCommand("start_resource_watch", {})).resolves.toBe(7);
+    // Never again after a success: it would end this page's own streams.
+    expect(invoke.mock.calls.map(([c]) => c)).toEqual([
+      "window_streams_reset", "window_streams_reset", "start_pod_exec", "start_resource_watch",
+    ]);
+  });
+
+  it("never holds up or blocks a command that opens nothing, even while the reset fails", async () => {
+    const { invoke, transport } = await fresh();
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    let failReset: () => void = () => {};
+    invoke.mockImplementation((command: string) =>
+      command === "window_streams_reset"
+        ? new Promise((_, reject) => { failReset = () => reject("down"); })
+        : Promise.resolve("stopped"),
+    );
+    const open = transport.invokeCommand("start_resource_watch", {});
+    await expect(transport.invokeCommand("stop_watch", { channel: "w" })).resolves.toBe("stopped");
+    failReset();
+    await expect(open).rejects.toThrow(/down/);
+    await expect(transport.invokeCommand("stop_watch", { channel: "w" })).resolves.toBe("stopped");
+  });
+
+  it("handles a failed page-load reset, so it only warns", async () => {
+    const w = window as unknown as Record<string, unknown>;
+    w.__TAURI_INTERNALS__ = {};
+    try {
+      const { invoke, transport } = await fresh();
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      let failReset: () => void = () => {};
+      invoke.mockImplementation(() => new Promise((_, reject) => { failReset = () => reject("bridge down"); }));
+      // The page-load call shares this pending attempt; see what it attaches.
+      const attempt = transport.resetWindowStreams();
+      const then = vi.spyOn(attempt, "then");
+      await import("./transport");
+      const handlers = then.mock.calls.map(([, onRejected]) => onRejected);
+      then.mockRestore();
+      expect(handlers.some((h) => typeof h === "function")).toBe(true);
+      failReset();
+      await expect(attempt).rejects.toBe("bridge down");
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining("could not end"), "bridge down");
+    } finally {
+      delete w.__TAURI_INTERNALS__;
+    }
+  });
+
+  it("is asked as the desktop transport loads, and never on the web", async () => {
+    const { invoke } = await fresh();
+    invoke.mockResolvedValue(undefined);
+    await import("./transport");
+    expect(invoke).not.toHaveBeenCalled();
+
+    vi.resetModules();
+    const w = window as unknown as Record<string, unknown>;
+    w.__TAURI_INTERNALS__ = {};
+    try {
+      const core = await import("@tauri-apps/api/core");
+      vi.mocked(core.invoke).mockResolvedValue(undefined);
+      await import("./transport");
+      expect(vi.mocked(core.invoke).mock.calls).toEqual([["window_streams_reset"]]);
+    } finally {
+      delete w.__TAURI_INTERNALS__;
+    }
+  });
+
+  it("can be asked for up front, as the page loads", async () => {
+    const { invoke, transport } = await fresh();
+    invoke.mockResolvedValue(undefined);
+    await transport.resetWindowStreams();
+    await transport.resetWindowStreams();
+    await transport.invokeCommand("extension_stream_open", { input: {} });
+    expect(invoke.mock.calls.map(([c]) => c)).toEqual(["window_streams_reset", "extension_stream_open"]);
+  });
+});
+
+/**
+ * #733: a stream's frames reach only the page that opened it. The host sends
+ * them on a Tauri channel the transport passes with each open, where an
+ * emitted event would reach every window listening on its name; the
+ * transport hands each frame to this page's subscription for its event name.
+ */
+describe("tauriTransport stream frames", () => {
+  afterEach(() => { vi.clearAllMocks(); vi.restoreAllMocks(); vi.resetModules(); });
+
+  async function fresh() {
+    vi.resetModules();
+    const core = await import("@tauri-apps/api/core");
+    const event = await import("@tauri-apps/api/event");
+    const invoke = vi.mocked(core.invoke);
+    invoke.mockResolvedValue(undefined);
+    vi.mocked(event.listen).mockResolvedValue(() => {});
+    return { invoke, Channel: core.Channel, transport: await import("./tauriTransport") };
+  }
+
+  /** The channel the host was handed with the `index`th call to `command`. */
+  function sentChannel(invoke: ReturnType<typeof vi.fn>, command: string, index = 0) {
+    const call = invoke.mock.calls.filter(([c]) => c === command)[index];
+    return (call?.[1] as { onEvent?: { onmessage: (m: unknown) => void } } | undefined)?.onEvent;
+  }
+
+  it.each(["start_resource_watch", "start_pod_exec", "extension_stream_open"])(
+    "passes %s its own channel and hands its frames to this page's subscription",
+    async (command) => {
+      const { invoke, Channel, transport } = await fresh();
+      const rows: unknown[] = [];
+      const others: unknown[] = [];
+      await transport.subscribe("ch:1", (p) => rows.push(p));
+      await transport.subscribe("ch:other", (p) => others.push(p));
+      await transport.invokeCommand(command, { channel: "ch:1" });
+
+      const onEvent = sentChannel(invoke, command);
+      expect(onEvent).toBeInstanceOf(Channel);
+      onEvent!.onmessage({ event: "ch:1", payload: [{ name: "a" }] });
+      onEvent!.onmessage({ event: "ch:unheard", payload: 1 });
+      expect(rows).toEqual([[{ name: "a" }]]);
+      expect(others).toEqual([]);
+    },
+  );
+
+  it("gives each open a channel of its own, and a command that opens nothing none", async () => {
+    const { invoke, transport } = await fresh();
+    await transport.invokeCommand("start_resource_watch", { channel: "w1" });
+    await transport.invokeCommand("start_resource_watch", { channel: "w2" });
+    await transport.invokeCommand("stop_watch", { channel: "w1" });
+    expect(sentChannel(invoke, "start_resource_watch", 0)).not.toBe(
+      sentChannel(invoke, "start_resource_watch", 1),
+    );
+    expect(sentChannel(invoke, "stop_watch")).toBeUndefined();
+  });
+
+  it("stops handing frames to a subscription once it is disposed", async () => {
+    const { invoke, transport } = await fresh();
+    const rows: unknown[] = [];
+    const dispose = await transport.subscribe("ch:1", (p) => rows.push(p));
+    const off = transport.on("ch:1", (p) => rows.push(`on:${String(p)}`));
+    await transport.invokeCommand("start_pod_exec", { channel: "ch:1" });
+    const onEvent = sentChannel(invoke, "start_pod_exec")!;
+    onEvent.onmessage({ event: "ch:1", payload: "x" });
+    dispose();
+    off();
+    onEvent.onmessage({ event: "ch:1", payload: "y" });
+    expect(rows).toEqual(["x", "on:x"]);
   });
 });

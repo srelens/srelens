@@ -241,7 +241,7 @@ export function ConsoleDock({
             <>
               <div
                 className="rule-b flex items-center justify-between gap-3 px-2.5 py-1"
-                style={{ background: "var(--surface-sunk)" }}
+                style={{ background: "var(--ground-sunk)" }}
               >
                 <div className="flex min-w-0 items-center gap-2">
                   {filled(mode) && <Eyebrow>{mode}</Eyebrow>}
@@ -386,7 +386,7 @@ export function ConsoleDock({
             className="shrink-0 self-stretch"
             style={{
               width: insetRight,
-              background: "var(--surface)",
+              background: "var(--ground-surface)",
               borderLeft: "1px solid var(--rule)",
             }}
           />

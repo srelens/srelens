@@ -1,10 +1,11 @@
 //! The `k8s.getManifest` capability — fetch any supported resource as YAML via
 //! kube-rs's dynamic API, so a single capability serves every resource type.
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use kube::api::{Api, DynamicObject, ListParams, Patch, PatchParams, ValidationDirective};
-use kube::core::{ApiResource, GroupVersionKind};
+use kube::core::{discovery::Scope, ApiResource, GroupVersionKind};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use similar::{ChangeTag, TextDiff};
@@ -143,6 +144,43 @@ pub struct ManifestIn {
     pub plural: Option<String>,
 }
 
+/// Build the dynamic `ApiResource` for an `apiVersion` (`group/version`, or a
+/// bare `version` for the core group) that a caller has already discovered.
+///
+/// `gvk_for` resolves by kind name alone, and a kind name is not an identity:
+/// MetalLB's `metallb.io/v1beta2 BGPPeer` and Calico's cluster-scoped
+/// `crd.projectcalico.org/v1 BGPPeer` share one. The table can only name one
+/// of them, so a caller that knows which CRD a row came from — the BGP
+/// dashboard carries it on the row — says so here instead of resolving by
+/// name and hoping. Returns `None` for an empty or malformed `apiVersion`,
+/// where the name-only table remains the caller's answer.
+pub fn api_resource_for_api_version(api_version: &str, kind: &str) -> Option<ApiResource> {
+    let api_version = api_version.trim();
+    if api_version.is_empty() || kind.trim().is_empty() {
+        return None;
+    }
+    // `version` or `group/version`, both parts present and neither carrying
+    // whitespace. `Some` means "pinned" to the caller, which then queries
+    // this resource instead of falling back to the name-only table, so a
+    // shape that is not an apiVersion — `/v1`, `metallb.io/v1/extra` — is
+    // refused here rather than handed to `from_gvk` to make something of.
+    let parts: Vec<&str> = api_version.split('/').collect();
+    let (group, version) = match parts.as_slice() {
+        [version] => ("", *version),
+        [group, version] if !group.is_empty() => (*group, *version),
+        _ => return None,
+    };
+    if version.is_empty()
+        || group.chars().any(char::is_whitespace)
+        || version.chars().any(char::is_whitespace)
+    {
+        return None;
+    }
+    Some(ApiResource::from_gvk(&GroupVersionKind::gvk(
+        group, version, kind,
+    )))
+}
+
 /// Resolve the (ApiResource, namespaced) for a request: a dynamic CRD GVK if
 /// group/version/plural are supplied, else the static `gvk_for` table.
 fn resolve_api_resource(input: &ManifestIn) -> Result<(ApiResource, bool), CapabilityError> {
@@ -151,8 +189,15 @@ fn resolve_api_resource(input: &ManifestIn) -> Result<(ApiResource, bool), Capab
         input.version.as_deref(),
         input.plural.as_deref(),
     ) {
-        let namespaced = input.namespace.as_deref().map(|s| !s.is_empty()).unwrap_or(false);
-        Ok((crate::crds::custom_api_resource(g, v, &input.kind, p), namespaced))
+        let namespaced = input
+            .namespace
+            .as_deref()
+            .map(|s| !s.is_empty())
+            .unwrap_or(false);
+        Ok((
+            crate::crds::custom_api_resource(g, v, &input.kind, p),
+            namespaced,
+        ))
     } else {
         let (gvk, namespaced) = gvk_for(&input.kind)
             .ok_or_else(|| CapabilityError::Handler(format!("unsupported kind: {}", input.kind)))?;
@@ -170,37 +215,153 @@ pub struct ObjectOut {
     pub object: serde_json::Value,
 }
 
+/// What a `fields` entry means, said once for both tools that take it.
+/// What a `fields` entry means, for the error that refuses one. The
+/// arguments' doc comments say the same to an MCP client through the schema.
+const FIELDS_HELP: &str = "kubectl-style JSONPath, each starting with '.', e.g. \
+    .status.allocatable, .metadata.labels['app.kubernetes.io/name'] or \
+    .status.conditions[?(@.type==\"Ready\")].status";
+
+/// Bounds on what a caller may ask for (#633): every path is walked once per
+/// item. Thirty-two matches the printer columns `listCustomResource` evaluates.
+const MAX_FIELDS: usize = 32;
+const MAX_FIELD_CHARS: usize = 256;
+const MAX_SELECTOR_CHARS: usize = 1024;
+
+/// Refuse `fields` the walker could only ever resolve to nothing — a JSON
+/// Pointer (`/status/x`), a kubectl template (`{.x}`), a wildcard, a broken
+/// bracket. Each would come back `null` on every item, and a column of nulls
+/// reads as "none of them have it": a confident answer to a malformed question.
+fn check_fields(fields: &[String]) -> Result<(), CapabilityError> {
+    if fields.len() > MAX_FIELDS {
+        return Err(CapabilityError::InvalidInput(format!(
+            "fields: {} paths requested, at most {MAX_FIELDS}",
+            fields.len()
+        )));
+    }
+    for f in fields {
+        if f.len() > MAX_FIELD_CHARS {
+            return Err(CapabilityError::InvalidInput(format!(
+                "fields: a path is longer than {MAX_FIELD_CHARS} characters"
+            )));
+        }
+        if let Some(problem) = crate::crds::json_path_problem(f) {
+            return Err(CapabilityError::InvalidInput(format!(
+                "fields: {f:?} is not a supported path: it {problem}. Use {FIELDS_HELP}"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn check_selectors(input: &ListResourceIn) -> Result<(), CapabilityError> {
+    for (name, value) in [
+        ("labelSelector", &input.label_selector),
+        ("fieldSelector", &input.field_selector),
+    ] {
+        if value.as_ref().is_some_and(|s| s.len() > MAX_SELECTOR_CHARS) {
+            return Err(CapabilityError::InvalidInput(format!(
+                "{name}: longer than {MAX_SELECTOR_CHARS} characters"
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// An object as any ungated reader may see it: `managedFields` dropped, and
+/// a Secret's values blanked — the consent-gated `k8s.getSecret` is the only
+/// way to them. Every projection runs on this, never on the raw object.
+fn readable_object(
+    mut obj: DynamicObject,
+    ar: &ApiResource,
+) -> Result<serde_json::Value, CapabilityError> {
+    obj.metadata.managed_fields = None;
+    let mut object =
+        serde_json::to_value(obj).map_err(|e| CapabilityError::Handler(e.to_string()))?;
+    if ar.kind == "Secret" && ar.group.is_empty() {
+        crate::secrets::redact_secret_data(&mut object);
+    }
+    Ok(object)
+}
+
+/// Each requested path mapped to what it lands on — a scalar, a map or a
+/// list — and `null` where the object has nothing there.
+fn project(object: &serde_json::Value, fields: &[String]) -> BTreeMap<String, serde_json::Value> {
+    fields
+        .iter()
+        .map(|f| {
+            let value = crate::crds::json_path_value(object, f).cloned();
+            (f.clone(), value.unwrap_or(serde_json::Value::Null))
+        })
+        .collect()
+}
+
+/// `getObject`'s answer: the readable object, or with `fields`, only those
+/// paths keyed by path.
+fn object_out(
+    obj: DynamicObject,
+    ar: &ApiResource,
+    fields: &[String],
+) -> Result<ObjectOut, CapabilityError> {
+    let object = readable_object(obj, ar)?;
+    if fields.is_empty() {
+        return Ok(ObjectOut { object });
+    }
+    let projected = project(&object, fields);
+    serde_json::to_value(projected)
+        .map(|object| ObjectOut { object })
+        .map_err(|e| CapabilityError::Handler(e.to_string()))
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct GetObjectIn {
+    #[serde(flatten)]
+    pub target: ManifestIn,
+    /// Return only these paths instead of the whole object: kubectl-style
+    /// JSONPath, each starting with '.', e.g. `.status.allocatable`,
+    /// `.metadata.labels['app.kubernetes.io/name']`, `.spec.containers[0].image`
+    /// or `.status.conditions[?(@.type=="Ready")].status`. The result maps each
+    /// path to its value, `null` where the object has none. Wildcards `[*]`,
+    /// slices, `..` and filters other than one `==` are not supported: ask for
+    /// the parent, e.g. `.spec.containers`. At most 32 paths.
+    #[serde(default)]
+    pub fields: Vec<String>,
+}
+
 /// `k8s.getObject` — fetch a resource as a structured JSON object (for rich
 /// detail rendering, vs. `k8s.getManifest` which returns YAML).
 pub fn get_object_capability(cache: Arc<ClientCache>) -> Capability {
-    Capability::typed::<ManifestIn, ObjectOut, _, _>(
+    Capability::typed::<GetObjectIn, ObjectOut, _, _>(
         "k8s.getObject",
-        "fetch a resource as a structured JSON object (any supported kind)",
+        "fetch one resource as a structured JSON object (any supported kind). Pass `fields` \
+         (kubectl-style JSONPath such as .status.allocatable) to get only those paths, keyed by \
+         path, with null where the object has none. To read a field across many objects, use \
+         k8s.listResource with `fields` instead of calling this once per object.",
         Annotations::READ_ONLY,
-        move |input: ManifestIn| {
+        move |GetObjectIn { target: input, fields }: GetObjectIn| {
             let cache = cache.clone();
             async move {
+                check_fields(&fields)?;
                 let (ar, namespaced) = resolve_api_resource(&input)?;
-                let client = cache.get(&input.context).await.map_err(CapabilityError::Handler)?;
+                let client = cache
+                    .get(&input.context)
+                    .await
+                    .map_err(CapabilityError::Handler)?;
                 let api: Api<DynamicObject> = if namespaced {
-                    let ns = input.namespace.as_deref().filter(|s| !s.is_empty()).unwrap_or("default");
+                    let ns = input
+                        .namespace
+                        .as_deref()
+                        .filter(|s| !s.is_empty())
+                        .unwrap_or("default");
                     Api::namespaced_with(client, ns, &ar)
                 } else {
                     Api::all_with(client, &ar)
                 };
-                let mut obj = tokio::time::timeout(request_timeout(), api.get(&input.name))
+                let obj = tokio::time::timeout(request_timeout(), api.get(&input.name))
                     .await
                     .map_err(|_| CapabilityError::Handler("get object timed out".into()))?
                     .map_err(|e| CapabilityError::Handler(e.to_string()))?;
-                obj.metadata.managed_fields = None;
-                let mut object = serde_json::to_value(obj)
-                    .map_err(|e| CapabilityError::Handler(e.to_string()))?;
-                // Never return Secret values through the generic path; the UI
-                // reads them via the dedicated, consent-gateable `k8s.getSecret`.
-                if ar.kind == "Secret" && ar.group.is_empty() {
-                    crate::secrets::redact_secret_data(&mut object);
-                }
-                Ok(ObjectOut { object })
+                object_out(obj, &ar, &fields)
             }
         },
     )
@@ -251,32 +412,136 @@ pub fn gvk_for(kind: &str) -> Option<(GroupVersionKind, bool)> {
         "job" | "jobs" => ("batch", "v1", "Job", true),
         "cronjob" | "cronjobs" | "cj" => ("batch", "v1", "CronJob", true),
         "ingress" | "ingresses" | "ing" => ("networking.k8s.io", "v1", "Ingress", true),
-        "networkpolicy" | "networkpolicies" | "netpol" | "np" => ("networking.k8s.io", "v1", "NetworkPolicy", true),
+        "networkpolicy" | "networkpolicies" | "netpol" | "np" => {
+            ("networking.k8s.io", "v1", "NetworkPolicy", true)
+        }
         "endpoints" | "endpoint" | "ep" => ("", "v1", "Endpoints", true),
         "event" | "events" | "ev" => ("", "v1", "Event", true),
         "serviceaccount" | "serviceaccounts" | "sa" => ("", "v1", "ServiceAccount", true),
-        "persistentvolumeclaim" | "persistentvolumeclaims" | "pvc" | "pvcs" => ("", "v1", "PersistentVolumeClaim", true),
-        "persistentvolume" | "persistentvolumes" | "pv" | "pvs" => ("", "v1", "PersistentVolume", false),
+        "persistentvolumeclaim" | "persistentvolumeclaims" | "pvc" | "pvcs" => {
+            ("", "v1", "PersistentVolumeClaim", true)
+        }
+        "persistentvolume" | "persistentvolumes" | "pv" | "pvs" => {
+            ("", "v1", "PersistentVolume", false)
+        }
         "role" | "roles" => ("rbac.authorization.k8s.io", "v1", "Role", true),
-        "rolebinding" | "rolebindings" | "rb" => ("rbac.authorization.k8s.io", "v1", "RoleBinding", true),
-        "clusterrole" | "clusterroles" | "cr" => ("rbac.authorization.k8s.io", "v1", "ClusterRole", false),
-        "clusterrolebinding" | "clusterrolebindings" | "crb" => ("rbac.authorization.k8s.io", "v1", "ClusterRoleBinding", false),
+        "rolebinding" | "rolebindings" | "rb" => {
+            ("rbac.authorization.k8s.io", "v1", "RoleBinding", true)
+        }
+        "clusterrole" | "clusterroles" | "cr" => {
+            ("rbac.authorization.k8s.io", "v1", "ClusterRole", false)
+        }
+        "clusterrolebinding" | "clusterrolebindings" | "crb" => (
+            "rbac.authorization.k8s.io",
+            "v1",
+            "ClusterRoleBinding",
+            false,
+        ),
         "resourcequota" | "resourcequotas" | "quota" => ("", "v1", "ResourceQuota", true),
         "limitrange" | "limitranges" | "limits" => ("", "v1", "LimitRange", true),
-        "horizontalpodautoscaler" | "hpa" => ("autoscaling", "v2", "HorizontalPodAutoscaler", true),
-        "poddisruptionbudget" | "pdb" => ("policy", "v1", "PodDisruptionBudget", true),
-        "priorityclass" => ("scheduling.k8s.io", "v1", "PriorityClass", false),
-        "runtimeclass" => ("node.k8s.io", "v1", "RuntimeClass", false),
+        "horizontalpodautoscaler" | "horizontalpodautoscalers" | "hpa" => {
+            ("autoscaling", "v2", "HorizontalPodAutoscaler", true)
+        }
+        "poddisruptionbudget" | "poddisruptionbudgets" | "pdb" => {
+            ("policy", "v1", "PodDisruptionBudget", true)
+        }
+        "priorityclass" | "priorityclasses" | "pc" => {
+            ("scheduling.k8s.io", "v1", "PriorityClass", false)
+        }
+        "runtimeclass" | "runtimeclasses" => ("node.k8s.io", "v1", "RuntimeClass", false),
         "lease" | "leases" => ("coordination.k8s.io", "v1", "Lease", true),
-        "mutatingwebhookconfiguration" => ("admissionregistration.k8s.io", "v1", "MutatingWebhookConfiguration", false),
-        "validatingwebhookconfiguration" => ("admissionregistration.k8s.io", "v1", "ValidatingWebhookConfiguration", false),
+        "mutatingwebhookconfiguration" | "mutatingwebhookconfigurations" | "mwc" => (
+            "admissionregistration.k8s.io",
+            "v1",
+            "MutatingWebhookConfiguration",
+            false,
+        ),
+        "validatingwebhookconfiguration" | "validatingwebhookconfigurations" | "vwc" => (
+            "admissionregistration.k8s.io",
+            "v1",
+            "ValidatingWebhookConfiguration",
+            false,
+        ),
         "endpointslice" | "endpointslices" => ("discovery.k8s.io", "v1", "EndpointSlice", true),
         "ingressclass" | "ingressclasses" => ("networking.k8s.io", "v1", "IngressClass", false),
         "storageclass" | "storageclasses" | "sc" => ("storage.k8s.io", "v1", "StorageClass", false),
-        "customresourcedefinition" | "customresourcedefinitions" | "crd" | "crds" => ("apiextensions.k8s.io", "v1", "CustomResourceDefinition", false),
+        "customresourcedefinition" | "customresourcedefinitions" | "crd" | "crds" => (
+            "apiextensions.k8s.io",
+            "v1",
+            "CustomResourceDefinition",
+            false,
+        ),
+        "ciliumbgpnodeconfig" | "ciliumbgpnodeconfigs" => {
+            ("cilium.io", "v2", "CiliumBGPNodeConfig", false)
+        }
+        "ciliumbgpclusterconfig" | "ciliumbgpclusterconfigs" => {
+            ("cilium.io", "v2", "CiliumBGPClusterConfig", false)
+        }
+        "ciliumbgppeerconfig" | "ciliumbgppeerconfigs" => {
+            ("cilium.io", "v2", "CiliumBGPPeerConfig", false)
+        }
+        "ciliumbgpadvertisement" | "ciliumbgpadvertisements" => {
+            ("cilium.io", "v2", "CiliumBGPAdvertisement", false)
+        }
+        "ciliumbgpnodeconfigoverride" | "ciliumbgpnodeconfigoverrides" => {
+            ("cilium.io", "v2", "CiliumBGPNodeConfigOverride", false)
+        }
+        "ciliumbgppeeringpolicy" | "ciliumbgppeeringpolicies" => {
+            ("cilium.io", "v2alpha1", "CiliumBGPPeeringPolicy", false)
+        }
+        "ciliumloadbalancerippool" | "ciliumloadbalancerippools" => {
+            ("cilium.io", "v2", "CiliumLoadBalancerIPPool", false)
+        }
+        "ciliumnode" | "ciliumnodes" => ("cilium.io", "v2", "CiliumNode", false),
+        "ciliumclusterwidenetworkpolicy" | "ciliumclusterwidenetworkpolicies" | "ccnp" => {
+            ("cilium.io", "v2", "CiliumClusterwideNetworkPolicy", false)
+        }
+        "ciliumnetworkpolicy" | "ciliumnetworkpolicies" | "cnp" => {
+            ("cilium.io", "v2", "CiliumNetworkPolicy", true)
+        }
+        "ciliumendpoint" | "ciliumendpoints" | "cep" => ("cilium.io", "v2", "CiliumEndpoint", true),
+        "ciliumidentity" | "ciliumidentities" => ("cilium.io", "v2", "CiliumIdentity", false),
+        // MetalLB ships a `BGPPeer` too (`metallb.io/v1beta2`, namespaced).
+        // This table is keyed by name, so it can only answer with one of
+        // them; a caller that knows which CRD it means resolves through
+        // `api_resource_for_api_version` instead.
+        "bgppeer" | "bgppeers" => ("crd.projectcalico.org", "v1", "BGPPeer", false),
+        "bgpconfiguration" | "bgpconfigurations" => {
+            ("crd.projectcalico.org", "v1", "BGPConfiguration", false)
+        }
+        "ippool" | "ippools" => ("crd.projectcalico.org", "v1", "IPPool", false),
+        "ipaddresspool" | "ipaddresspools" => ("metallb.io", "v1beta1", "IPAddressPool", true),
+        "bgpadvertisement" | "bgpadvertisements" => {
+            ("metallb.io", "v1beta1", "BGPAdvertisement", true)
+        }
         _ => return None,
     };
     Some((GroupVersionKind::gvk(group, version, k), namespaced))
+}
+
+/// Serialize a fetched object as the YAML `k8s.getManifest` returns, with a
+/// core-group `Secret`'s values and annotations blanked by
+/// [`crate::secrets::redact_secret_data`] first.
+///
+/// Takes the [`ApiResource`] rather than a `bool` so a caller cannot reach
+/// this without answering "is this a Secret?" — which is the shape the leak
+/// this closes had. `k8s.getObject` redacted; this path, written beside it,
+/// serialized the object straight to YAML and simply never asked, so every
+/// Secret's `data`, `stringData` and annotations reached any MCP client
+/// outside the consent-gated `k8s.getSecret`.
+///
+/// Only a Secret takes the JSON round trip. `serde_json::Value` sorts a map's
+/// keys, so routing every kind through it would reorder every manifest the
+/// editor and the detail pane show, for no gain on a resource that carries
+/// nothing to redact.
+fn manifest_yaml(obj: &DynamicObject, ar: &ApiResource) -> Result<String, CapabilityError> {
+    if ar.kind == "Secret" && ar.group.is_empty() {
+        let mut object =
+            serde_json::to_value(obj).map_err(|e| CapabilityError::Handler(e.to_string()))?;
+        crate::secrets::redact_secret_data(&mut object);
+        return serde_yaml::to_string(&object).map_err(|e| CapabilityError::Handler(e.to_string()));
+    }
+    serde_yaml::to_string(obj).map_err(|e| CapabilityError::Handler(e.to_string()))
 }
 
 /// `k8s.getManifest` — return a resource's manifest as YAML.
@@ -294,7 +559,11 @@ pub fn get_manifest_capability(cache: Arc<ClientCache>) -> Capability {
                     .await
                     .map_err(CapabilityError::Handler)?;
                 let api: Api<DynamicObject> = if namespaced {
-                    let ns = input.namespace.as_deref().filter(|s| !s.is_empty()).unwrap_or("default");
+                    let ns = input
+                        .namespace
+                        .as_deref()
+                        .filter(|s| !s.is_empty())
+                        .unwrap_or("default");
                     Api::namespaced_with(client, ns, &ar)
                 } else {
                     Api::all_with(client, &ar)
@@ -305,9 +574,9 @@ pub fn get_manifest_capability(cache: Arc<ClientCache>) -> Capability {
                     .map_err(|e| CapabilityError::Handler(e.to_string()))?;
                 // Drop noisy server-managed fields for a readable manifest.
                 obj.metadata.managed_fields = None;
-                let yaml = serde_yaml::to_string(&obj)
-                    .map_err(|e| CapabilityError::Handler(e.to_string()))?;
-                Ok(ManifestOut { yaml })
+                Ok(ManifestOut {
+                    yaml: manifest_yaml(&obj, &ar)?,
+                })
             }
         },
     )
@@ -320,17 +589,75 @@ pub struct ListResourceIn {
     pub kind: String,
     #[serde(default)]
     pub namespace: Option<String>,
+    /// Label selector the API server filters by, as `kubectl get -l` takes
+    /// it, e.g. `app=web,tier!=cache`.
+    #[serde(default, rename = "labelSelector")]
+    pub label_selector: Option<String>,
+    /// Field selector the API server filters by, as `kubectl get
+    /// --field-selector` takes it, e.g. `spec.nodeName=worker-1`.
+    #[serde(default, rename = "fieldSelector")]
+    pub field_selector: Option<String>,
+    /// Paths to return for every item, in its row's `fields`: kubectl-style
+    /// JSONPath, each starting with '.', e.g. `.status.allocatable`,
+    /// `.metadata.labels['app.kubernetes.io/name']`, `.spec.containers[0].image`
+    /// or `.status.conditions[?(@.type=="Ready")].status`. Each row maps a path
+    /// to its value, `null` where that item has none. Wildcards `[*]`, slices,
+    /// `..` and filters other than one `==` are not supported: ask for the
+    /// parent, e.g. `.spec.containers`. At most 32 paths.
+    #[serde(default)]
+    pub fields: Vec<String>,
+}
+
+/// The selectors a caller gave, an empty one meaning none.
+fn list_params(input: &ListResourceIn) -> ListParams {
+    let given = |s: &Option<String>| s.as_deref().filter(|s| !s.is_empty()).map(String::from);
+    ListParams {
+        label_selector: given(&input.label_selector),
+        field_selector: given(&input.field_selector),
+        ..ListParams::default()
+    }
+}
+
+/// One row of `listResource`, carrying the requested `fields` when there
+/// are any — read from the readable object, so a Secret's values never ride
+/// along — and the bare row the UI lists by when there are none.
+fn resource_row(
+    o: DynamicObject,
+    ar: &ApiResource,
+    fields: &[String],
+) -> Result<ResourceRow, CapabilityError> {
+    let created = o.metadata.creation_timestamp.as_ref();
+    let mut row = ResourceRow {
+        name: o.metadata.name.clone().unwrap_or_default(),
+        namespace: o.metadata.namespace.clone().unwrap_or_default(),
+        created: crate::creation_rfc3339(created),
+        age: crate::humanize_age(created),
+        created_at: crate::creation_timestamp_iso(created),
+        fields: None,
+    };
+    if !fields.is_empty() {
+        row.fields = Some(project(&readable_object(o, ar)?, fields));
+    }
+    Ok(row)
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
 pub struct ResourceRow {
     pub name: String,
     pub namespace: String,
+    /// `creationTimestamp` (RFC 3339), so the frontend can derive a LIVE age.
+    /// `age` below is rendered once, when this summary is built, and only
+    /// rebuilt when a watch event arrives — so it goes stale (#405).
+    pub created: Option<String>,
     pub age: String,
     /// Raw ISO 8601 timestamp `age` derives from, so UIs can recompute the
     /// age live at render time. Empty when the resource carries none.
     #[serde(rename = "createdAt")]
     pub created_at: String,
+    /// What `fields` asked for, keyed by path: `null` where this item has
+    /// nothing there. Absent when the caller asked for no fields.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fields: Option<BTreeMap<String, serde_json::Value>>,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -338,17 +665,25 @@ pub struct ListResourceOut {
     pub items: Vec<ResourceRow>,
 }
 
-/// `k8s.listResource` — list any supported kind generically (name + namespace).
+/// `k8s.listResource` — list any supported kind generically: name and
+/// namespace, filtered by selectors, plus the `fields` a caller names.
 pub fn list_resource_capability(cache: Arc<ClientCache>) -> Capability {
     Capability::typed::<ListResourceIn, ListResourceOut, _, _>(
         "k8s.listResource",
-        "list any supported resource kind (name + namespace)",
+        "list any supported resource kind (name + namespace), optionally filtered by \
+         `labelSelector`/`fieldSelector`. Pass `fields` (kubectl-style JSONPath such as \
+         .status.allocatable or .spec.taints) to get those paths for every item in one call, \
+         keyed by path in each row's `fields`, with null where an item has none. Prefer this \
+         over one getObject call per item when a summary tool lacks a field you need.",
         Annotations::READ_ONLY,
         move |input: ListResourceIn| {
             let cache = cache.clone();
             async move {
-                let (gvk, namespaced) = gvk_for(&input.kind)
-                    .ok_or_else(|| CapabilityError::Handler(format!("unsupported kind: {}", input.kind)))?;
+                check_fields(&input.fields)?;
+                check_selectors(&input)?;
+                let (gvk, namespaced) = gvk_for(&input.kind).ok_or_else(|| {
+                    CapabilityError::Handler(format!("unsupported kind: {}", input.kind))
+                })?;
                 let client = cache
                     .get(&input.context)
                     .await
@@ -361,20 +696,15 @@ pub fn list_resource_capability(cache: Arc<ClientCache>) -> Capability {
                 } else {
                     Api::all_with(client, &ar)
                 };
-                let list = tokio::time::timeout(request_timeout(), api.list(&ListParams::default()))
+                let list = tokio::time::timeout(request_timeout(), api.list(&list_params(&input)))
                     .await
                     .map_err(|_| CapabilityError::Handler("list resource timed out".into()))?
                     .map_err(|e| CapabilityError::Handler(e.to_string()))?;
                 let items = list
                     .items
                     .into_iter()
-                    .map(|o| ResourceRow {
-                        name: o.metadata.name.unwrap_or_default(),
-                        namespace: o.metadata.namespace.unwrap_or_default(),
-                        age: crate::humanize_age(o.metadata.creation_timestamp.as_ref()),
-                        created_at: crate::creation_timestamp_iso(o.metadata.creation_timestamp.as_ref()),
-                    })
-                    .collect();
+                    .map(|o| resource_row(o, &ar, &input.fields))
+                    .collect::<Result<_, _>>()?;
                 Ok(ListResourceOut { items })
             }
         },
@@ -386,9 +716,7 @@ pub struct ApplyIn {
     pub context: String,
     /// One or more resource manifests as YAML (documents separated by `---`).
     pub yaml: String,
-    /// Namespace the request is scoped to, used for a document that names
-    /// none. Threaded from the caller (the tab's namespace) rather than
-    /// hardcoded — see `apply_namespace`.
+    /// Namespace used when a namespaced document omits `metadata.namespace`.
     #[serde(default)]
     pub namespace: Option<String>,
     /// Force apply, taking ownership of fields held by other managers.
@@ -520,9 +848,160 @@ pub fn parse_api_version(api_version: &str) -> (String, String) {
     }
 }
 
+/// Resolve both the resource name and its scope from the document's GVK.
+///
+/// The static table avoids discovery for built-in kinds. Unknown kinds use
+/// discovery because `ApiResource::from_gvk` only guesses their plural and
+/// cannot tell a namespaced CRD from a cluster-scoped one.
+async fn resolve_manifest_resource(
+    client: &kube::Client,
+    resource: &ResourceRef,
+) -> Result<(ApiResource, bool), CapabilityError> {
+    let (group, version) = parse_api_version(&resource.api_version);
+    let gvk = GroupVersionKind::gvk(&group, &version, &resource.kind);
+    if let Some((known_gvk, namespaced)) = gvk_for(&resource.kind) {
+        // A CRD may reuse a built-in kind name in another API group or at a
+        // version the static table does not know. Only an exact built-in G/V
+        // match is safe to resolve without discovery.
+        if known_gvk.group == group && known_gvk.version == version {
+            return Ok((ApiResource::from_gvk(&gvk), namespaced));
+        }
+    }
+    let (ar, capabilities) = tokio::time::timeout(
+        request_timeout(),
+        kube::discovery::pinned_kind(client, &gvk),
+    )
+    .await
+    .map_err(|_| CapabilityError::Handler("resource discovery timed out".into()))?
+    .map_err(|e| CapabilityError::Handler(format!("discover {}: {e}", resource.kind)))?;
+    Ok((ar, capabilities.scope == Scope::Namespaced))
+}
+
+/// Build the correctly-scoped dynamic API and report the namespace it uses.
+/// An explicit document namespace wins, then the caller's tab/context scope,
+/// then the kubeconfig context's default namespace. Cluster-scoped kinds
+/// ignore all three so a fallback can never put a Node or cluster-scoped CRD
+/// on a bad URL.
+fn manifest_api(
+    client: kube::Client,
+    ar: &ApiResource,
+    namespaced: bool,
+    document_namespace: Option<&str>,
+    fallback_namespace: Option<&str>,
+) -> (Api<DynamicObject>, Option<String>) {
+    if !namespaced {
+        return (Api::all_with(client, ar), None);
+    }
+    let namespace = document_namespace
+        .filter(|namespace| !namespace.is_empty())
+        .or_else(|| fallback_namespace.filter(|namespace| !namespace.is_empty()))
+        .map(str::to_string)
+        .unwrap_or_else(|| client.default_namespace().to_string());
+    (
+        Api::namespaced_with(client, &namespace, ar),
+        Some(namespace),
+    )
+}
+
 /// True only when there is at least one document and every one applied.
 fn overall_applied(docs: &[ApplyDoc]) -> bool {
     !docs.is_empty() && docs.iter().all(|d| d.applied)
+}
+
+/// Strip server-managed status and metadata noise before applying
+pub fn strip_server_managed_fields(value: &mut serde_json::Value) {
+    if let Some(obj) = value.as_object_mut() {
+        obj.remove("status");
+        if let Some(meta) = obj.get_mut("metadata").and_then(|m| m.as_object_mut()) {
+            for k in [
+                "managedFields",
+                "resourceVersion",
+                "generation",
+                "uid",
+                "creationTimestamp",
+                "deletionTimestamp",
+                "deletionGracePeriodSeconds",
+                "selfLink",
+            ] {
+                meta.remove(k);
+            }
+        }
+    }
+}
+
+/// Apply every parsed document while preserving one result per document.
+///
+/// Manifest application is deliberately non-atomic: an earlier document may
+/// already be committed when a later one fails. Discovery failures therefore
+/// belong in that document's result just like API patch failures; returning
+/// early would hide prior mutations and skip the remaining documents.
+pub async fn apply_documents(
+    client: &kube::Client,
+    docs: Vec<serde_json::Value>,
+    fallback_namespace: Option<&str>,
+    force: bool,
+) -> Vec<ApplyDoc> {
+    let mut documents = Vec::with_capacity(docs.len());
+    for mut value in docs {
+        strip_server_managed_fields(&mut value);
+        let r = match resource_ref(&value) {
+            Some(r) => r,
+            None => {
+                documents.push(ApplyDoc {
+                    kind: String::new(),
+                    name: String::new(),
+                    applied: false,
+                    conflict: None,
+                    error: Some("document missing apiVersion/kind/metadata.name".into()),
+                });
+                continue;
+            }
+        };
+        let (ar, namespaced) = match resolve_manifest_resource(client, &r).await {
+            Ok(resolved) => resolved,
+            Err(error) => {
+                documents.push(ApplyDoc {
+                    kind: r.kind,
+                    name: r.name,
+                    applied: false,
+                    conflict: None,
+                    error: Some(clean_capability_error(error)),
+                });
+                continue;
+            }
+        };
+        let (api, _) = manifest_api(
+            client.clone(),
+            &ar,
+            namespaced,
+            r.namespace.as_deref(),
+            fallback_namespace,
+        );
+        let mut params = PatchParams::apply("srelens");
+        if force {
+            params = params.force();
+        }
+        let result = match tokio::time::timeout(
+            request_timeout(),
+            api.patch(&r.name, &params, &Patch::Apply(&value)),
+        )
+        .await
+        {
+            Ok(result) => result,
+            Err(_) => {
+                documents.push(ApplyDoc {
+                    kind: r.kind,
+                    name: r.name,
+                    applied: false,
+                    conflict: None,
+                    error: Some("apply timed out".into()),
+                });
+                continue;
+            }
+        };
+        documents.push(apply_doc_from_result(r.kind, r.name, result.map(|_| ())));
+    }
+    documents
 }
 
 /// `k8s.applyManifest` — server-side apply one or more YAML documents with field
@@ -532,12 +1011,9 @@ pub fn apply_manifest_capability(cache: Arc<ClientCache>) -> Capability {
     Capability::typed::<ApplyIn, ApplyOut, _, _>(
         "k8s.applyManifest",
         "server-side apply resource manifests (YAML, multi-doc); creates or updates",
-        Annotations {
-            read_only: false,
-            destructive: false,
-            requires_confirm: true,
-            sensitive: false,
-        },
+        Annotations::MUTATING.with_confirm(
+            "Apply these manifests[ in cluster {cluster}]? Existing objects are updated in place.",
+        ),
         move |input: ApplyIn| {
             let cache = cache.clone();
             async move {
@@ -546,64 +1022,8 @@ pub fn apply_manifest_capability(cache: Arc<ClientCache>) -> Capability {
                     .get(&input.context)
                     .await
                     .map_err(CapabilityError::Handler)?;
-                let mut documents = Vec::with_capacity(docs.len());
-                for value in docs {
-                    let r = match resource_ref(&value) {
-                        Some(r) => r,
-                        None => {
-                            documents.push(ApplyDoc {
-                                kind: String::new(),
-                                name: String::new(),
-                                applied: false,
-                                conflict: None,
-                                error: Some(
-                                    "document missing apiVersion/kind/metadata.name".into(),
-                                ),
-                            });
-                            continue;
-                        }
-                    };
-                    let (group, version) = parse_api_version(&r.api_version);
-                    let ar =
-                        ApiResource::from_gvk(&GroupVersionKind::gvk(&group, &version, &r.kind));
-                    // Scope comes from the KIND, not from whether the document
-                    // named a namespace (#404).
-                    let ns = apply_namespace(
-                        &r.kind,
-                        &group,
-                        &version,
-                        r.namespace.as_deref(),
-                        input.namespace.as_deref(),
-                    );
-                    let api: Api<DynamicObject> = match &ns {
-                        Some(ns) => Api::namespaced_with(client.clone(), ns, &ar),
-                        None => Api::all_with(client.clone(), &ar),
-                    };
-                    let mut params = PatchParams::apply("srelens");
-                    if input.force {
-                        params = params.force();
-                    }
-                    let result = match tokio::time::timeout(
-                        request_timeout(),
-                        api.patch(&r.name, &params, &Patch::Apply(&value)),
-                    )
-                    .await
-                    {
-                        Ok(result) => result,
-                        Err(_) => {
-                            documents.push(ApplyDoc {
-                                kind: r.kind,
-                                name: r.name,
-                                applied: false,
-                                conflict: None,
-                                error: Some("apply timed out".into()),
-                            });
-                            continue;
-                        }
-                    };
-                    let doc = apply_doc_from_result(r.kind, r.name, result.map(|_| ()));
-                    documents.push(doc);
-                }
+                let documents =
+                    apply_documents(&client, docs, input.namespace.as_deref(), input.force).await;
                 let applied = overall_applied(&documents);
                 Ok(ApplyOut { documents, applied })
             }
@@ -615,9 +1035,7 @@ pub fn apply_manifest_capability(cache: Arc<ClientCache>) -> Capability {
 pub struct ValidateIn {
     pub context: String,
     pub yaml: String,
-    /// Namespace the request is scoped to, used for a document that names
-    /// none. Threaded from the caller (the tab's namespace) rather than
-    /// hardcoded — see `apply_namespace`.
+    /// Namespace used when a namespaced document omits `metadata.namespace`.
     #[serde(default)]
     pub namespace: Option<String>,
 }
@@ -651,6 +1069,17 @@ pub fn clean_kube_error(e: kube::Error) -> String {
     }
 }
 
+/// Extract the actionable payload for an inline editor diagnostic without
+/// changing `CapabilityError`'s structured variants or their boundary-facing
+/// `Display` implementation elsewhere.
+fn clean_capability_error(error: CapabilityError) -> String {
+    match error {
+        CapabilityError::NotFound(message)
+        | CapabilityError::InvalidInput(message)
+        | CapabilityError::Handler(message) => message,
+    }
+}
+
 /// Validate one already-parsed document against the API server (dry-run,
 /// strict field validation). `None` means the document has no
 /// apiVersion/kind/metadata.name yet — nothing to validate, not an error.
@@ -661,17 +1090,17 @@ async fn validate_document(
     fallback_namespace: Option<&str>,
 ) -> Option<Result<(), String>> {
     let r = resource_ref(value)?;
-    let (group, version) = parse_api_version(&r.api_version);
-    let gvk = GroupVersionKind::gvk(&group, &version, &r.kind);
-    let ar = ApiResource::from_gvk(&gvk);
-    // Scope from the KIND (#404): reading it off the document made a valid
-    // manifest with no namespace fail validation, which is the inline red
-    // marker the issue reports.
-    let ns = apply_namespace(&r.kind, &group, &version, r.namespace.as_deref(), fallback_namespace);
-    let api: Api<DynamicObject> = match &ns {
-        Some(ns) => Api::namespaced_with(client.clone(), ns, &ar),
-        None => Api::all_with(client.clone(), &ar),
+    let (ar, namespaced) = match resolve_manifest_resource(client, &r).await {
+        Ok(resolved) => resolved,
+        Err(error) => return Some(Err(clean_capability_error(error))),
     };
+    let (api, _) = manifest_api(
+        client.clone(),
+        &ar,
+        namespaced,
+        r.namespace.as_deref(),
+        fallback_namespace,
+    );
     let params = PatchParams {
         field_manager: Some("srelens".into()),
         dry_run: true,
@@ -753,7 +1182,12 @@ pub fn validate_manifest_capability(cache: Arc<ClientCache>) -> Capability {
                     }
                     results.push((
                         doc_index,
-                        validate_document(client.as_ref().unwrap(), value, input.namespace.as_deref()).await,
+                        validate_document(
+                            client.as_ref().unwrap(),
+                            value,
+                            input.namespace.as_deref(),
+                        )
+                        .await,
                     ));
                 }
                 Ok(aggregate_validation(results))
@@ -766,9 +1200,7 @@ pub fn validate_manifest_capability(cache: Arc<ClientCache>) -> Capability {
 pub struct DiffIn {
     pub context: String,
     pub yaml: String,
-    /// Namespace the request is scoped to, used for a document that names
-    /// none. Threaded from the caller (the tab's namespace) rather than
-    /// hardcoded — see `apply_namespace`.
+    /// Namespace used when a namespaced document omits `metadata.namespace`.
     #[serde(default)]
     pub namespace: Option<String>,
 }
@@ -879,11 +1311,12 @@ pub fn diff_manifest_capability(cache: Arc<ClientCache>) -> Capability {
     Capability::typed::<DiffIn, DiffOut, _, _>(
         "k8s.diffManifest",
         "diff a manifest against the cluster via server dry-run apply (per document)",
+        // Sensitive but deliberately ungated: a server dry-run changes nothing,
+        // so it stays `Low` and authors no confirmation text. `sensitive` here
+        // is a redaction flag for the audit log, not a safety class.
         Annotations {
-            read_only: true,
-            destructive: false,
-            requires_confirm: false,
             sensitive: true,
+            ..Annotations::READ_ONLY
         },
         move |input: DiffIn| {
             let cache = cache.clone();
@@ -901,23 +1334,15 @@ pub fn diff_manifest_capability(cache: Arc<ClientCache>) -> Capability {
                         // it rather than aborting the whole diff.
                         None => continue,
                     };
-                    let (group, version) = parse_api_version(&r.api_version);
-                    let gvk = GroupVersionKind::gvk(&group, &version, &r.kind);
-                    let ar = ApiResource::from_gvk(&gvk);
-                    // Scope from the KIND (#404): the wrong path made the live
-                    // object read as absent, so the Changes panel showed a full
-                    // create for a resource that already exists.
-                    let doc_ns = apply_namespace(
-                        &r.kind,
-                        &group,
-                        &version,
+                    let (group, _) = parse_api_version(&r.api_version);
+                    let (ar, namespaced) = resolve_manifest_resource(&client, &r).await?;
+                    let (api, effective_namespace) = manifest_api(
+                        client.clone(),
+                        &ar,
+                        namespaced,
                         r.namespace.as_deref(),
                         input.namespace.as_deref(),
                     );
-                    let api: Api<DynamicObject> = match &doc_ns {
-                        Some(ns) => Api::namespaced_with(client.clone(), ns, &ar),
-                        None => Api::all_with(client.clone(), &ar),
-                    };
                     let is_secret = r.kind == "Secret" && group.is_empty();
 
                     // Current live object (may not exist).
@@ -955,10 +1380,7 @@ pub fn diff_manifest_capability(cache: Arc<ClientCache>) -> Capability {
                     documents.push(diff_document(
                         r.kind,
                         r.name,
-                        // The namespace actually diffed against, not the one the
-                        // document happened to name — they differ exactly when
-                        // the document named none (#404).
-                        doc_ns,
+                        effective_namespace,
                         exists,
                         current_resource_version,
                         current_json,
@@ -1045,7 +1467,8 @@ mod tests {
     async fn the_callers_namespace_reaches_the_request_path() {
         let (client, seen) = recording_server().await;
         let doc: serde_json::Value =
-            serde_yaml::from_str("apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: my-config\n").unwrap();
+            serde_yaml::from_str("apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: my-config\n")
+                .unwrap();
         let _ = validate_document(&client, &doc, Some("staging")).await;
 
         let lines = seen.lock().unwrap().clone();
@@ -1061,18 +1484,30 @@ mod tests {
     async fn a_cluster_scoped_kind_keeps_the_cluster_path() {
         let (client, seen) = recording_server().await;
         let doc: serde_json::Value =
-            serde_yaml::from_str("apiVersion: v1\nkind: Namespace\nmetadata:\n  name: my-ns\n").unwrap();
+            serde_yaml::from_str("apiVersion: v1\nkind: Namespace\nmetadata:\n  name: my-ns\n")
+                .unwrap();
         let _ = validate_document(&client, &doc, Some("staging")).await;
 
         let lines = seen.lock().unwrap().clone();
-        assert!(lines[0].contains("/api/v1/namespaces/my-ns"), "got: {}", lines[0]);
-        assert!(!lines[0].contains("/namespaces/staging/"), "got: {}", lines[0]);
+        assert!(
+            lines[0].contains("/api/v1/namespaces/my-ns"),
+            "got: {}",
+            lines[0]
+        );
+        assert!(
+            !lines[0].contains("/namespaces/staging/"),
+            "got: {}",
+            lines[0]
+        );
     }
 
     #[test]
     fn parses_api_version_groups() {
         assert_eq!(parse_api_version("v1"), ("".to_string(), "v1".to_string()));
-        assert_eq!(parse_api_version("apps/v1"), ("apps".to_string(), "v1".to_string()));
+        assert_eq!(
+            parse_api_version("apps/v1"),
+            ("apps".to_string(), "v1".to_string())
+        );
     }
 
     #[test]
@@ -1100,6 +1535,117 @@ mod tests {
         let cap = get_manifest_capability(ClientCache::new(PathBuf::from("/x")));
         assert_eq!(cap.id, "k8s.getManifest");
         assert!(cap.annotations.read_only);
+    }
+
+    /// Build a fetched Secret as the API server hands one back: base64 `data`,
+    /// plaintext `stringData`, and the whole applied manifest echoed into the
+    /// annotation `kubectl` writes.
+    fn fetched_secret() -> (ApiResource, DynamicObject) {
+        let (gvk, _) = gvk_for("Secret").expect("Secret is a supported kind");
+        let ar = ApiResource::from_gvk(&gvk);
+        let mut obj = DynamicObject::new("db", &ar).within("team");
+        obj.metadata.annotations = Some(std::collections::BTreeMap::from([(
+            "kubectl.kubernetes.io/last-applied-configuration".to_string(),
+            r#"{"kind":"Secret","data":{"password":"aHVudGVyMg=="}}"#.to_string(),
+        )]));
+        obj.data = serde_json::json!({
+            "type": "Opaque",
+            "data": { "password": "aHVudGVyMg==" },
+            "stringData": { "plain": "hunter2" },
+        });
+        (ar, obj)
+    }
+
+    /// PR #661 review (CodeRabbit, CWE-200). `k8s.getObject` ran
+    /// `redact_secret_data`; `k8s.getManifest` — the *other* ungated reader,
+    /// and the one an MCP client reaches for — serialized the fetched object
+    /// straight to YAML. `docs/MCP.md` and `redact_secret_data`'s own doc
+    /// comment both claimed it ran the redactor. It did not, so every Secret
+    /// value and every annotation came back in the clear outside the
+    /// consent-gated `k8s.getSecret` path.
+    #[test]
+    fn get_manifest_redacts_a_secrets_values_and_annotations() {
+        let (ar, obj) = fetched_secret();
+        let yaml = manifest_yaml(&obj, &ar).expect("serializes");
+        assert!(
+            !yaml.contains("aHVudGVyMg=="),
+            "the base64 `data` value leaked: {yaml}"
+        );
+        assert!(
+            !yaml.contains("hunter2"),
+            "the plaintext `stringData` value leaked: {yaml}"
+        );
+        // Keys survive so the reader still sees which fields a Secret has —
+        // the same trade `k8s.getObject` and the diff path already make.
+        assert!(yaml.contains("password"), "keys must survive: {yaml}");
+        assert!(yaml.contains("plain"), "keys must survive: {yaml}");
+    }
+
+    /// PR #661 follow-up review. The test above drives `manifest_yaml`, so it
+    /// would still pass if `get_manifest_capability` stopped calling it and
+    /// serialized the fetched object itself — which is the leak this PR
+    /// closes, arriving back by the door it came in. This one drives the
+    /// capability end to end against a fake API server and asserts on what
+    /// `ManifestOut` actually carries.
+    #[tokio::test]
+    async fn the_get_manifest_handler_never_returns_a_secrets_plaintext() {
+        let served = serde_json::json!({
+            "apiVersion": "v1",
+            "kind": "Secret",
+            "metadata": {
+                "name": "db",
+                "namespace": "team",
+                "annotations": {
+                    "kubectl.kubernetes.io/last-applied-configuration":
+                        r#"{"kind":"Secret","data":{"password":"aHVudGVyMg=="}}"#,
+                },
+            },
+            "type": "Opaque",
+            "data": { "password": "aHVudGVyMg==" },
+            "stringData": { "plain": "hunter2" },
+        });
+        let (client, _uris) =
+            crate::list_cap::test_support::mock_slow_pages(vec![served], std::time::Duration::ZERO);
+        let cache = ClientCache::new(PathBuf::from("/x"));
+        cache.preload("fake", client).await;
+        let capability = get_manifest_capability(cache);
+
+        let out = (capability.handler)(serde_json::json!({
+            "context": "fake", "kind": "Secret", "namespace": "team", "name": "db"
+        }))
+        .await
+        .expect("the fake API server answers");
+        let yaml = out["yaml"].as_str().expect("the capability returns YAML");
+
+        assert!(
+            !yaml.contains("aHVudGVyMg=="),
+            "the base64 `data` value left the handler: {yaml}"
+        );
+        assert!(
+            !yaml.contains("hunter2"),
+            "the plaintext `stringData` value left the handler: {yaml}"
+        );
+        assert!(yaml.contains("password"), "keys must survive: {yaml}");
+        assert!(yaml.contains("plain"), "keys must survive: {yaml}");
+        assert!(
+            yaml.contains("last-applied-configuration"),
+            "the annotation key survives, only its value is blanked: {yaml}"
+        );
+    }
+
+    /// The redactor runs for core-group `Secret` and nothing else: a ConfigMap
+    /// carries no secret material and its manifest must come back byte for
+    /// byte as it always has.
+    #[test]
+    fn get_manifest_leaves_a_non_secret_manifest_exactly_as_serialized() {
+        let (gvk, _) = gvk_for("ConfigMap").expect("ConfigMap is a supported kind");
+        let ar = ApiResource::from_gvk(&gvk);
+        let mut obj = DynamicObject::new("app", &ar).within("team");
+        obj.data = serde_json::json!({ "data": { "greeting": "hello" } });
+        assert_eq!(
+            manifest_yaml(&obj, &ar).expect("serializes"),
+            serde_yaml::to_string(&obj).expect("serializes"),
+        );
     }
 
     #[test]
@@ -1153,7 +1699,10 @@ metadata:
             Some("default"),
         );
         // Not Secret-specific.
-        assert_eq!(apply_namespace("ConfigMap", "", "v1", None, None).as_deref(), Some("default"));
+        assert_eq!(
+            apply_namespace("ConfigMap", "", "v1", None, None).as_deref(),
+            Some("default")
+        );
         assert_eq!(
             apply_namespace("Deployment", "apps", "v1", None, None).as_deref(),
             Some("default"),
@@ -1165,10 +1714,19 @@ metadata:
     /// would 404 the same way.
     #[test]
     fn a_cluster_scoped_kind_ignores_any_namespace() {
-        assert_eq!(apply_namespace("Namespace", "", "v1", None, Some("prod")), None);
+        assert_eq!(
+            apply_namespace("Namespace", "", "v1", None, Some("prod")),
+            None
+        );
         assert_eq!(apply_namespace("Node", "", "v1", Some("prod"), None), None);
         assert_eq!(
-            apply_namespace("ClusterRole", "rbac.authorization.k8s.io", "v1", Some("prod"), None),
+            apply_namespace(
+                "ClusterRole",
+                "rbac.authorization.k8s.io",
+                "v1",
+                Some("prod"),
+                None
+            ),
             None,
         );
     }
@@ -1183,7 +1741,10 @@ metadata:
             apply_namespace("Widget", "acme.io", "v1", Some("prod"), Some("staging")).as_deref(),
             Some("prod"),
         );
-        assert_eq!(apply_namespace("Widget", "acme.io", "v1", None, Some("staging")), None);
+        assert_eq!(
+            apply_namespace("Widget", "acme.io", "v1", None, Some("staging")),
+            None
+        );
     }
 
     /// `gvk_for` keys on the kind alone, so a custom `Service` in someone
@@ -1191,8 +1752,14 @@ metadata:
     /// namespace it may not have.
     #[test]
     fn a_same_named_kind_in_another_group_is_not_the_core_one() {
-        assert_eq!(apply_namespace("Service", "", "v1", None, None).as_deref(), Some("default"));
-        assert_eq!(apply_namespace("Service", "acme.io", "v1", None, None), None);
+        assert_eq!(
+            apply_namespace("Service", "", "v1", None, None).as_deref(),
+            Some("default")
+        );
+        assert_eq!(
+            apply_namespace("Service", "acme.io", "v1", None, None),
+            None
+        );
     }
 
     #[test]
@@ -1291,6 +1858,107 @@ metadata:
         assert!(cap.annotations.sensitive);
     }
 
+    /// The finding on #661: blanking `data` left the same base64 map visible
+    /// in `kubectl.kubernetes.io/last-applied-configuration`, which an
+    /// `apply`-managed Secret carries in full. A server dry-run apply returns
+    /// the merged object, so the LIVE annotation comes back on the proposed
+    /// side too — both sides have to be clean.
+    ///
+    /// Asserted here as well as in `secrets.rs` because this is the reader the
+    /// finding was filed against: the redactor being right is one fact, and
+    /// the diff path running it over both documents is another.
+    #[test]
+    fn diff_never_renders_secret_values_hidden_in_an_annotation() {
+        let applied = serde_json::json!({
+            "apiVersion": "v1",
+            "kind": "Secret",
+            "metadata": { "name": "web-tls", "namespace": "prod" },
+            "data": { "token": "U0VDUkVU", "tls.key": "TU9SRQ==" }
+        })
+        .to_string();
+        let live = serde_json::json!({
+            "apiVersion": "v1",
+            "kind": "Secret",
+            "metadata": {
+                "name": "web-tls",
+                "namespace": "prod",
+                "resourceVersion": "12",
+                "annotations": { "kubectl.kubernetes.io/last-applied-configuration": applied }
+            },
+            "data": { "token": "U0VDUkVU", "tls.key": "TU9SRQ==" }
+        });
+
+        let doc = diff_document(
+            "Secret".into(),
+            "web-tls".into(),
+            Some("prod".into()),
+            true,
+            Some("12".into()),
+            live.clone(),
+            live,
+            true,
+        )
+        .unwrap();
+
+        // Every rendered cell, both sides: the rows ARE what the panel draws.
+        let rendered: String = doc
+            .rows
+            .iter()
+            .flat_map(|r| [r.left.clone(), r.right.clone()])
+            .flatten()
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            !rendered.contains("U0VDUkVU"),
+            "leaked a Secret value:\n{rendered}"
+        );
+        assert!(
+            !rendered.contains("TU9SRQ=="),
+            "leaked a Secret value:\n{rendered}"
+        );
+        // The key still names the controller that wrote it — the reader learns
+        // the Secret is apply-managed without learning what is in it.
+        assert!(rendered.contains("kubectl.kubernetes.io/last-applied-configuration"));
+        assert!(rendered.contains("token"), "key names survive: {rendered}");
+    }
+
+    /// Where the new rule stops. The SAME annotation is blanked on a Secret
+    /// and kept on a ConfigMap, asserted together because either half alone
+    /// says nothing: the ConfigMap side holds on the unredacted code this
+    /// replaced, and the Secret side would hold on a redactor that blanked
+    /// every kind's annotations and hid real changes in the one panel a
+    /// reader consults before applying.
+    #[test]
+    fn diff_blanks_an_annotation_on_a_secret_and_leaves_other_kinds_alone() {
+        let annotated = |kind: &str| {
+            serde_json::json!({
+                "kind": kind,
+                "metadata": { "name": "app", "annotations": { "note": "hunter2" } },
+                "data": { "key": "value" }
+            })
+        };
+
+        let mut config_map = annotated("ConfigMap");
+        normalize_for_diff(&mut config_map, false);
+        assert_eq!(
+            config_map["metadata"]["annotations"]["note"],
+            serde_json::json!("hunter2")
+        );
+        assert_eq!(config_map["data"]["key"], serde_json::json!("value"));
+
+        let mut secret = annotated("Secret");
+        normalize_for_diff(&mut secret, true);
+        assert_eq!(
+            secret["metadata"]["annotations"]["note"],
+            serde_json::json!(""),
+            "a Secret's annotation values are blanked, keys kept"
+        );
+        assert!(secret["metadata"]["annotations"]
+            .as_object()
+            .unwrap()
+            .contains_key("note"));
+    }
+
     #[test]
     fn parse_conflict_extracts_managers_and_fields() {
         let msg = "Apply failed with 2 conflicts: conflicts with \"kubectl\" using apps/v1:\n- .spec.replicas\n- .spec.template.spec.containers[0].image";
@@ -1347,6 +2015,452 @@ metadata:
         }))
         .unwrap();
         assert!(!input.force);
+    }
+
+    #[test]
+    fn manifest_inputs_accept_a_fallback_namespace() {
+        let apply: ApplyIn = serde_json::from_value(serde_json::json!({
+            "context": "c", "yaml": "kind: ConfigMap", "namespace": "team-a"
+        }))
+        .unwrap();
+        let validate: ValidateIn = serde_json::from_value(serde_json::json!({
+            "context": "c", "yaml": "kind: ConfigMap", "namespace": "team-a"
+        }))
+        .unwrap();
+        let diff: DiffIn = serde_json::from_value(serde_json::json!({
+            "context": "c", "yaml": "kind: ConfigMap", "namespace": "team-a"
+        }))
+        .unwrap();
+        assert_eq!(apply.namespace.as_deref(), Some("team-a"));
+        assert_eq!(validate.namespace.as_deref(), Some("team-a"));
+        assert_eq!(diff.namespace.as_deref(), Some("team-a"));
+    }
+
+    #[tokio::test]
+    async fn namespaced_manifest_without_metadata_namespace_uses_fallback_path() {
+        use std::convert::Infallible;
+        use std::sync::{Arc, Mutex};
+
+        let seen = Arc::new(Mutex::new(String::new()));
+        let captured = seen.clone();
+        let service = tower::service_fn(move |request: http::Request<kube::client::Body>| {
+            *captured.lock().unwrap() = request.uri().path().to_string();
+            async move {
+                let body = serde_json::json!({
+                    "apiVersion": "v1",
+                    "kind": "ConfigMap",
+                    "metadata": { "name": "cfg", "namespace": "team-a" }
+                })
+                .to_string();
+                Ok::<_, Infallible>(
+                    http::Response::builder()
+                        .header("content-type", "application/json")
+                        .body(kube::client::Body::from(body.into_bytes()))
+                        .unwrap(),
+                )
+            }
+        });
+        let client = kube::Client::new(service, "client-default");
+        let ar = ApiResource::from_gvk(&GroupVersionKind::gvk("", "v1", "ConfigMap"));
+        let (api, namespace) = manifest_api(client, &ar, true, None, Some("team-a"));
+        let value = serde_json::json!({
+            "apiVersion": "v1", "kind": "ConfigMap", "metadata": { "name": "cfg" }
+        });
+        api.patch("cfg", &PatchParams::apply("srelens"), &Patch::Apply(&value))
+            .await
+            .unwrap();
+
+        assert_eq!(namespace.as_deref(), Some("team-a"));
+        assert_eq!(
+            &*seen.lock().unwrap(),
+            "/api/v1/namespaces/team-a/configmaps/cfg"
+        );
+    }
+
+    #[tokio::test]
+    async fn explicit_namespace_wins_and_cluster_scope_ignores_fallback() {
+        use std::convert::Infallible;
+
+        let service = tower::service_fn(|_: http::Request<kube::client::Body>| async move {
+            Ok::<_, Infallible>(http::Response::new(kube::client::Body::empty()))
+        });
+        let client = kube::Client::new(service, "client-default");
+        let config_maps = ApiResource::from_gvk(&GroupVersionKind::gvk("", "v1", "ConfigMap"));
+        let (_, explicit) = manifest_api(
+            client.clone(),
+            &config_maps,
+            true,
+            Some("from-yaml"),
+            Some("from-tab"),
+        );
+        let (_, context_default) = manifest_api(client.clone(), &config_maps, true, None, None);
+        let nodes = ApiResource::from_gvk(&GroupVersionKind::gvk("", "v1", "Node"));
+        let (_, cluster_scoped) = manifest_api(client, &nodes, false, None, Some("from-tab"));
+        assert_eq!(explicit.as_deref(), Some("from-yaml"));
+        assert_eq!(context_default.as_deref(), Some("client-default"));
+        assert_eq!(cluster_scoped, None);
+    }
+
+    #[tokio::test]
+    async fn discovers_unknown_kind_plural_and_cluster_scope() {
+        use std::convert::Infallible;
+
+        let service = tower::service_fn(|_: http::Request<kube::client::Body>| async move {
+            let body = serde_json::json!({
+                "apiVersion": "v1",
+                "groupVersion": "example.com/v1",
+                "kind": "APIResourceList",
+                "resources": [{
+                    "name": "people",
+                    "singularName": "person",
+                    "namespaced": false,
+                    "kind": "Person",
+                    "verbs": ["get", "patch"]
+                }]
+            })
+            .to_string();
+            Ok::<_, Infallible>(
+                http::Response::builder()
+                    .header("content-type", "application/json")
+                    .body(kube::client::Body::from(body.into_bytes()))
+                    .unwrap(),
+            )
+        });
+        let client = kube::Client::new(service, "default");
+        let resource = ResourceRef {
+            api_version: "example.com/v1".into(),
+            kind: "Person".into(),
+            name: "ada".into(),
+            namespace: None,
+        };
+        let (ar, namespaced) = resolve_manifest_resource(&client, &resource).await.unwrap();
+        assert_eq!(ar.plural, "people");
+        assert!(!namespaced);
+    }
+
+    #[tokio::test]
+    async fn discovers_same_named_kind_at_an_unrecognised_version() {
+        use std::convert::Infallible;
+
+        let service = tower::service_fn(|_: http::Request<kube::client::Body>| async move {
+            let body = serde_json::json!({
+                "apiVersion": "v1",
+                "groupVersion": "apps/v2",
+                "kind": "APIResourceList",
+                "resources": [{
+                    "name": "deploymentrecords",
+                    "singularName": "deploymentrecord",
+                    "namespaced": false,
+                    "kind": "Deployment",
+                    "verbs": ["get", "patch"]
+                }]
+            })
+            .to_string();
+            Ok::<_, Infallible>(
+                http::Response::builder()
+                    .header("content-type", "application/json")
+                    .body(kube::client::Body::from(body.into_bytes()))
+                    .unwrap(),
+            )
+        });
+        let client = kube::Client::new(service, "default");
+        let resource = ResourceRef {
+            api_version: "apps/v2".into(),
+            kind: "Deployment".into(),
+            name: "web".into(),
+            namespace: None,
+        };
+
+        let (ar, namespaced) = resolve_manifest_resource(&client, &resource).await.unwrap();
+
+        assert_eq!(ar.plural, "deploymentrecords");
+        assert!(!namespaced);
+    }
+
+    #[test]
+    fn capability_error_messages_drop_transport_prefixes() {
+        assert_eq!(
+            clean_capability_error(CapabilityError::Handler(
+                "resource discovery timed out".into(),
+            )),
+            "resource discovery timed out",
+        );
+        assert_eq!(
+            clean_capability_error(CapabilityError::InvalidInput("bad manifest".into())),
+            "bad manifest",
+        );
+        assert_eq!(
+            clean_capability_error(CapabilityError::NotFound("k8s.example".into())),
+            "k8s.example",
+        );
+    }
+
+    #[tokio::test]
+    async fn validation_discovery_error_is_clean_for_editor() {
+        use std::convert::Infallible;
+
+        let service = tower::service_fn(|_: http::Request<kube::client::Body>| async move {
+            let body = serde_json::json!({
+                "apiVersion": "v1",
+                "kind": "Status",
+                "status": "Failure",
+                "message": "the server could not find the requested resource",
+                "reason": "NotFound",
+                "code": 404
+            })
+            .to_string();
+            Ok::<_, Infallible>(
+                http::Response::builder()
+                    .status(404)
+                    .header("content-type", "application/json")
+                    .body(kube::client::Body::from(body.into_bytes()))
+                    .unwrap(),
+            )
+        });
+        let client = kube::Client::new(service, "default");
+        let document = serde_json::json!({
+            "apiVersion": "example.com/v1",
+            "kind": "Person",
+            "metadata": { "name": "ada" }
+        });
+
+        let message = validate_document(&client, &document, None)
+            .await
+            .expect("document has an identity")
+            .expect_err("discovery must fail");
+
+        assert!(message.starts_with("discover Person:"), "got: {message}");
+        assert!(!message.contains("handler error:"), "got: {message}");
+    }
+
+    #[tokio::test]
+    async fn apply_keeps_prior_results_and_continues_after_discovery_error() {
+        use std::convert::Infallible;
+
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let captured = seen.clone();
+        let service = tower::service_fn(move |request: http::Request<kube::client::Body>| {
+            captured
+                .lock()
+                .unwrap()
+                .push(format!("{} {}", request.method(), request.uri().path()));
+            async move {
+                let is_discovery = request.uri().path() == "/apis/missing.example/v1";
+                let (status, body) = if is_discovery {
+                    (
+                        404,
+                        serde_json::json!({
+                            "apiVersion": "v1",
+                            "kind": "Status",
+                            "status": "Failure",
+                            "message": "the server could not find the requested resource",
+                            "reason": "NotFound",
+                            "code": 404
+                        }),
+                    )
+                } else {
+                    (
+                        200,
+                        serde_json::json!({
+                            "apiVersion": "v1",
+                            "kind": "ConfigMap",
+                            "metadata": { "name": "applied" }
+                        }),
+                    )
+                };
+                Ok::<_, Infallible>(
+                    http::Response::builder()
+                        .status(status)
+                        .header("content-type", "application/json")
+                        .body(kube::client::Body::from(body.to_string().into_bytes()))
+                        .unwrap(),
+                )
+            }
+        });
+        let client = kube::Client::new(service, "default");
+        let docs = vec![
+            serde_json::json!({
+                "apiVersion": "v1",
+                "kind": "ConfigMap",
+                "metadata": { "name": "first" }
+            }),
+            serde_json::json!({
+                "apiVersion": "missing.example/v1",
+                "kind": "Widget",
+                "metadata": { "name": "missing" }
+            }),
+            serde_json::json!({
+                "apiVersion": "v1",
+                "kind": "ConfigMap",
+                "metadata": { "name": "third" }
+            }),
+        ];
+
+        let documents = apply_documents(&client, docs, Some("team-a"), false).await;
+
+        assert_eq!(documents.len(), 3);
+        assert!(documents[0].applied);
+        assert!(!documents[1].applied);
+        assert!(
+            documents[1]
+                .error
+                .as_deref()
+                .is_some_and(|message| message.starts_with("discover Widget:")),
+            "got: {:?}",
+            documents[1].error,
+        );
+        assert!(!documents[1]
+            .error
+            .as_deref()
+            .unwrap_or_default()
+            .contains("handler error:"),);
+        assert!(
+            documents[2].applied,
+            "processing stopped after discovery failed"
+        );
+        assert!(!overall_applied(&documents));
+        assert_eq!(
+            *seen.lock().unwrap(),
+            vec![
+                "PATCH /api/v1/namespaces/team-a/configmaps/first",
+                "GET /apis/missing.example/v1",
+                "PATCH /api/v1/namespaces/team-a/configmaps/third",
+            ],
+        );
+    }
+
+    #[tokio::test]
+    async fn apply_cluster_scoped_crd_resolves_to_non_namespaced_path_and_strips_noise() {
+        use std::convert::Infallible;
+
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let patched_bodies = Arc::new(Mutex::new(Vec::new()));
+        let captured = seen.clone();
+        let captured_bodies = patched_bodies.clone();
+
+        let service = tower::service_fn(move |request: http::Request<kube::client::Body>| {
+            let captured = captured.clone();
+            let bodies = captured_bodies.clone();
+            async move {
+                let path = request.uri().path().to_string();
+                let method = request.method().to_string();
+                captured.lock().unwrap().push(format!("{method} {path}"));
+                let body_bytes = request.into_body().collect_bytes().await.unwrap();
+                if method == "PATCH" {
+                    if let Ok(val) = serde_json::from_slice::<serde_json::Value>(&body_bytes) {
+                        bodies.lock().unwrap().push(val);
+                    }
+                }
+                let (status, resp_body) = if path == "/apis/external-secrets.io/v1beta1" {
+                    (
+                        200,
+                        serde_json::json!({
+                            "apiVersion": "v1",
+                            "kind": "APIResourceList",
+                            "groupVersion": "external-secrets.io/v1beta1",
+                            "resources": [
+                                {
+                                    "name": "clustersecretstores",
+                                    "singularName": "clustersecretstore",
+                                    "namespaced": false,
+                                    "kind": "ClusterSecretStore",
+                                    "verbs": ["get", "list", "watch", "create", "update", "patch", "delete"]
+                                },
+                                {
+                                    "name": "externalsecrets",
+                                    "singularName": "externalsecret",
+                                    "namespaced": true,
+                                    "kind": "ExternalSecret",
+                                    "verbs": ["get", "list", "watch", "create", "update", "patch", "delete"]
+                                }
+                            ]
+                        }),
+                    )
+                } else {
+                    (
+                        200,
+                        serde_json::json!({
+                            "apiVersion": "external-secrets.io/v1beta1",
+                            "kind": "Resource",
+                            "metadata": { "name": "applied" }
+                        }),
+                    )
+                };
+                Ok::<_, Infallible>(
+                    http::Response::builder()
+                        .status(status)
+                        .header("content-type", "application/json")
+                        .body(kube::client::Body::from(resp_body.to_string().into_bytes()))
+                        .unwrap(),
+                )
+            }
+        });
+        let client = kube::Client::new(service, "default");
+
+        let docs = vec![
+            serde_json::json!({
+                "apiVersion": "external-secrets.io/v1beta1",
+                "kind": "ClusterSecretStore",
+                "metadata": {
+                    "name": "global-vault",
+                    "resourceVersion": "999",
+                    "managedFields": [{"manager": "old"}],
+                    "uid": "1234",
+                },
+                "status": { "conditions": [] },
+                "spec": { "provider": { "vault": {} } }
+            }),
+            serde_json::json!({
+                "apiVersion": "external-secrets.io/v1beta1",
+                "kind": "ExternalSecret",
+                "metadata": {
+                    "name": "db-pass",
+                    "namespace": "team-b",
+                },
+                "spec": { "secretStoreRef": { "name": "global-vault", "kind": "ClusterSecretStore" } }
+            }),
+        ];
+
+        let documents = apply_documents(&client, docs, Some("team-a"), true).await;
+
+        assert_eq!(documents.len(), 2);
+        assert!(
+            documents[0].applied,
+            "ClusterSecretStore apply failed: {:?}",
+            documents[0].error
+        );
+        assert!(
+            documents[1].applied,
+            "ExternalSecret apply failed: {:?}",
+            documents[1].error
+        );
+        assert!(overall_applied(&documents));
+
+        assert_eq!(
+            *seen.lock().unwrap(),
+            vec![
+                "GET /apis/external-secrets.io/v1beta1",
+                "PATCH /apis/external-secrets.io/v1beta1/clustersecretstores/global-vault",
+                "GET /apis/external-secrets.io/v1beta1",
+                "PATCH /apis/external-secrets.io/v1beta1/namespaces/team-b/externalsecrets/db-pass",
+            ],
+            "cluster-scoped CRD must never route under /namespaces/ even when fallback_namespace is provided"
+        );
+
+        let bodies = patched_bodies.lock().unwrap();
+        assert_eq!(bodies.len(), 2);
+        assert!(
+            bodies[0].get("status").is_none(),
+            "status should be stripped before apply"
+        );
+        assert!(
+            bodies[0]["metadata"].get("resourceVersion").is_none(),
+            "resourceVersion should be stripped"
+        );
+        assert!(
+            bodies[0]["metadata"].get("managedFields").is_none(),
+            "managedFields should be stripped"
+        );
     }
 
     // -- aggregate_validation -----------------------------------------------
@@ -1535,6 +2649,34 @@ metadata:
         let (gvk, ns) = gvk_for("MutatingWebhookConfiguration").unwrap();
         assert_eq!(gvk.group, "admissionregistration.k8s.io");
         assert!(!ns);
+
+        assert_eq!(
+            gvk_for("horizontalpodautoscalers").unwrap().0.kind,
+            "HorizontalPodAutoscaler"
+        );
+        assert_eq!(
+            gvk_for("poddisruptionbudgets").unwrap().0.kind,
+            "PodDisruptionBudget"
+        );
+        assert_eq!(gvk_for("priorityclasses").unwrap().0.kind, "PriorityClass");
+        assert_eq!(gvk_for("pc").unwrap().0.kind, "PriorityClass");
+        assert_eq!(gvk_for("runtimeclasses").unwrap().0.kind, "RuntimeClass");
+        assert_eq!(
+            gvk_for("mutatingwebhookconfigurations").unwrap().0.kind,
+            "MutatingWebhookConfiguration"
+        );
+        assert_eq!(
+            gvk_for("mwc").unwrap().0.kind,
+            "MutatingWebhookConfiguration"
+        );
+        assert_eq!(
+            gvk_for("validatingwebhookconfigurations").unwrap().0.kind,
+            "ValidatingWebhookConfiguration"
+        );
+        assert_eq!(
+            gvk_for("vwc").unwrap().0.kind,
+            "ValidatingWebhookConfiguration"
+        );
     }
 
     // -- resolve_api_resource --------------------------------------------------
@@ -1590,6 +2732,241 @@ metadata:
         assert!(!namespaced);
     }
 
+    // -- listResource / getObject: selectors and projected fields ---------------
+
+    /// The payload an MCP client sends, spelled the way the tool schema
+    /// advertises it. The snake_case spelling must not quietly fill the
+    /// field: an ignored selector returns the whole, unfiltered list as if it
+    /// were the answer.
+    #[test]
+    fn list_resource_in_reads_the_callers_camel_case_selectors_and_fields() {
+        let input: ListResourceIn = serde_json::from_value(serde_json::json!({
+            "context": "c", "kind": "Pod", "namespace": "prod",
+            "labelSelector": "app=web", "fieldSelector": "spec.nodeName=worker-1",
+            "fields": [".spec.nodeName", ".status.phase"],
+        }))
+        .unwrap();
+        assert_eq!(input.label_selector.as_deref(), Some("app=web"));
+        assert_eq!(input.field_selector.as_deref(), Some("spec.nodeName=worker-1"));
+        assert_eq!(input.fields, [".spec.nodeName", ".status.phase"]);
+
+        let snake: ListResourceIn = serde_json::from_value(serde_json::json!({
+            "context": "c", "kind": "Pod", "label_selector": "app=web",
+        }))
+        .unwrap();
+        assert_eq!(snake.label_selector, None);
+        assert!(snake.fields.is_empty());
+    }
+
+    #[test]
+    fn list_params_carry_the_selectors_and_skip_empty_ones() {
+        let input: ListResourceIn = serde_json::from_value(serde_json::json!({
+            "context": "c", "kind": "Pod",
+            "labelSelector": "app=web", "fieldSelector": "",
+        }))
+        .unwrap();
+        let lp = list_params(&input);
+        assert_eq!(lp.label_selector.as_deref(), Some("app=web"));
+        assert_eq!(lp.field_selector, None);
+    }
+
+    /// A path the walker cannot read resolves to nothing on every item, and a
+    /// column of nulls reads as "none of them have it". Refused up front, so
+    /// a malformed request is an error and not an answer about the cluster.
+    #[test]
+    fn check_fields_refuses_paths_that_could_only_resolve_to_nothing() {
+        for bad in [
+            "/status/allocatable",
+            "{.metadata.name}",
+            "status",
+            "",
+            ".spec.ports[0",
+            ".a][",
+            ".spec.containers[*].image",
+            "..image",
+            ".status.conditions[?(@.type==\"Ready\"&&@.status==\"True\")].status",
+        ] {
+            assert!(
+                matches!(check_fields(&[bad.to_string()]), Err(CapabilityError::InvalidInput(_))),
+                "{bad:?} must be refused"
+            );
+        }
+        let good = [
+            ".status.allocatable",
+            ".metadata.labels['node.kubernetes.io/instance-type']",
+            ".status.conditions[?(@.type==\"Ready\")].status",
+        ]
+        .map(String::from);
+        assert!(check_fields(&good).is_ok());
+        assert!(check_fields(&[".".to_string()]).is_ok(), "root is a path");
+    }
+
+    /// Every path is walked once per item, so the count and length a caller
+    /// may send are bounded, like every other caller-supplied size (#633).
+    #[test]
+    fn check_fields_bounds_how_many_paths_and_how_long() {
+        let at_limit: Vec<String> = (0..MAX_FIELDS).map(|i| format!(".a{i}")).collect();
+        assert!(check_fields(&at_limit).is_ok());
+        let over: Vec<String> = (0..=MAX_FIELDS).map(|i| format!(".a{i}")).collect();
+        assert!(matches!(check_fields(&over), Err(CapabilityError::InvalidInput(_))));
+        let long = format!(".{}", "a".repeat(MAX_FIELD_CHARS));
+        assert!(matches!(check_fields(&[long]), Err(CapabilityError::InvalidInput(_))));
+    }
+
+    #[test]
+    fn selectors_longer_than_the_bound_are_refused() {
+        let input = |label: String| -> ListResourceIn {
+            serde_json::from_value(serde_json::json!({
+                "context": "c", "kind": "Pod", "labelSelector": label,
+            }))
+            .unwrap()
+        };
+        assert!(check_selectors(&input("a".repeat(MAX_SELECTOR_CHARS))).is_ok());
+        assert!(matches!(
+            check_selectors(&input("a".repeat(MAX_SELECTOR_CHARS + 1))),
+            Err(CapabilityError::InvalidInput(_))
+        ));
+    }
+
+    /// `tools/list` hands an MCP client the input schema, whose property
+    /// descriptions come from these doc comments: the `fields` argument has
+    /// to explain its own syntax there, not point at a Rust constant the
+    /// client never sees.
+    #[test]
+    fn the_fields_argument_explains_its_syntax_to_an_mcp_client() {
+        for schema in [
+            serde_json::to_value(schemars::schema_for!(ListResourceIn)).unwrap(),
+            serde_json::to_value(schemars::schema_for!(GetObjectIn)).unwrap(),
+        ] {
+            let text = schema["properties"]["fields"]["description"].as_str().unwrap();
+            assert!(text.contains(".status.allocatable"), "{text}");
+            assert!(text.contains("[?(@.type"), "{text}");
+            assert!(text.contains("[*]"), "says wildcards are unsupported: {text}");
+            assert!(!text.contains("FIELDS_HELP"), "{text}");
+        }
+    }
+
+    fn node_object() -> DynamicObject {
+        let (gvk, _) = gvk_for("Node").unwrap();
+        let mut node = DynamicObject::new("worker-1", &ApiResource::from_gvk(&gvk)).data(
+            serde_json::json!({
+                "status": { "allocatable": { "cpu": "4", "example.com/fpga": "2" } },
+            }),
+        );
+        node.metadata.managed_fields = Some(vec![Default::default()]);
+        node
+    }
+
+    #[test]
+    fn a_row_carries_each_requested_path_and_null_where_the_item_has_none() {
+        let (gvk, _) = gvk_for("Node").unwrap();
+        let fields = [".status.allocatable", ".spec.taints"].map(String::from);
+        let row = resource_row(node_object(), &ApiResource::from_gvk(&gvk), &fields).unwrap();
+        assert_eq!(row.name, "worker-1");
+        let projected = row.fields.unwrap();
+        assert_eq!(
+            projected[".status.allocatable"],
+            serde_json::json!({ "cpu": "4", "example.com/fpga": "2" })
+        );
+        assert_eq!(projected[".spec.taints"], serde_json::Value::Null);
+    }
+
+    #[test]
+    fn a_row_without_fields_keeps_the_shape_the_ui_reads() {
+        let (gvk, _) = gvk_for("Node").unwrap();
+        let row = resource_row(node_object(), &ApiResource::from_gvk(&gvk), &[]).unwrap();
+        assert_eq!(row.fields, None);
+        assert!(serde_json::to_value(&row).unwrap().get("fields").is_none());
+    }
+
+    #[test]
+    fn projected_metadata_leaves_managed_fields_behind() {
+        let (gvk, _) = gvk_for("Node").unwrap();
+        let fields = [".metadata".to_string()];
+        let row = resource_row(node_object(), &ApiResource::from_gvk(&gvk), &fields).unwrap();
+        let projected = row.fields.unwrap();
+        assert_eq!(projected[".metadata"]["name"], "worker-1");
+        assert!(projected[".metadata"].get("managedFields").is_none());
+    }
+
+    fn secret_object() -> (DynamicObject, ApiResource) {
+        let (gvk, _) = gvk_for("Secret").unwrap();
+        let ar = ApiResource::from_gvk(&gvk);
+        let mut secret = DynamicObject::new("db", &ar)
+            .within("prod")
+            .data(serde_json::json!({ "data": { "password": "aHVudGVyMg==" } }));
+        secret.metadata.annotations = Some(
+            [("note".to_string(), "hunter2".to_string())].into_iter().collect(),
+        );
+        (secret, ar)
+    }
+
+    /// `listResource` reads Secrets without consent, so a projected `.data`
+    /// must arrive blanked like `getObject`'s does — the consent-gated
+    /// `k8s.getSecret` stays the only way to the values.
+    #[test]
+    fn a_secrets_values_never_leave_through_projected_fields() {
+        let (secret, ar) = secret_object();
+        let fields = [".data", ".metadata.annotations", ".data.password"].map(String::from);
+        let row = serde_json::to_string(&resource_row(secret, &ar, &fields).unwrap()).unwrap();
+        assert!(!row.contains("aHVudGVyMg=="), "{row}");
+        assert!(!row.contains("hunter2"), "{row}");
+        assert!(row.contains("password"), "the key stays, only the value goes: {row}");
+    }
+
+    #[test]
+    fn get_objects_projection_runs_after_the_secret_is_blanked() {
+        let (secret, ar) = secret_object();
+        let fields = [".data.password".to_string()];
+        let out = serde_json::to_string(&object_out(secret, &ar, &fields).unwrap()).unwrap();
+        assert!(!out.contains("aHVudGVyMg=="), "{out}");
+
+        let (secret, ar) = secret_object();
+        let whole = serde_json::to_string(&object_out(secret, &ar, &[]).unwrap()).unwrap();
+        assert!(!whole.contains("aHVudGVyMg==") && !whole.contains("hunter2"), "{whole}");
+    }
+
+    #[test]
+    fn get_object_with_fields_returns_only_those_paths() {
+        let (gvk, _) = gvk_for("Node").unwrap();
+        let fields = [".status.allocatable".to_string()];
+        let out = object_out(node_object(), &ApiResource::from_gvk(&gvk), &fields).unwrap();
+        assert_eq!(
+            out.object,
+            serde_json::json!({ ".status.allocatable": { "cpu": "4", "example.com/fpga": "2" } })
+        );
+    }
+
+    /// `getObject` takes its target flat, beside `fields` — the shape the
+    /// desktop wrapper already sends — and its tool schema lists every
+    /// argument as a plain property, which is what an MCP client reads.
+    #[test]
+    fn get_object_in_takes_the_target_flat_beside_fields() {
+        let input: GetObjectIn = serde_json::from_value(serde_json::json!({
+            "context": "c", "kind": "Node", "name": "worker-1",
+            "fields": [".status.allocatable"],
+        }))
+        .unwrap();
+        assert_eq!(input.target.name, "worker-1");
+        assert_eq!(input.fields, [".status.allocatable"]);
+
+        let schema = serde_json::to_value(schemars::schema_for!(GetObjectIn)).unwrap();
+        for property in ["context", "kind", "namespace", "name", "group", "fields"] {
+            assert!(
+                schema["properties"].get(property).is_some(),
+                "{property} missing from {schema}"
+            );
+        }
+        let required: Vec<&str> = schema["required"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|v| v.as_str())
+            .collect();
+        assert!(required.contains(&"context") && required.contains(&"name"), "{schema}");
+        assert!(!required.contains(&"fields"), "{schema}");
+    }
+
     #[test]
     fn resolve_api_resource_rejects_unsupported_kind() {
         let input = ManifestIn {
@@ -1602,6 +2979,57 @@ metadata:
             plural: None,
         };
         assert!(resolve_api_resource(&input).is_err());
+    }
+
+    #[test]
+    fn a_discovered_api_version_resolves_the_bgppeer_the_caller_meant() {
+        // The name-only table can only name one of the two BGPPeer CRDs.
+        let (gvk, namespaced) = gvk_for("BGPPeer").unwrap();
+        assert_eq!(gvk.group, "crd.projectcalico.org");
+        assert!(!namespaced);
+
+        let metallb = api_resource_for_api_version("metallb.io/v1beta2", "BGPPeer").unwrap();
+        assert_eq!(metallb.group, "metallb.io");
+        assert_eq!(metallb.version, "v1beta2");
+        assert_eq!(metallb.kind, "BGPPeer");
+        assert_eq!(metallb.plural, "bgppeers");
+        assert_eq!(metallb.api_version, "metallb.io/v1beta2");
+
+        let calico = api_resource_for_api_version("crd.projectcalico.org/v1", "BGPPeer").unwrap();
+        assert_eq!(calico.group, "crd.projectcalico.org");
+        assert_eq!(calico.version, "v1");
+        assert_ne!(calico.api_version, metallb.api_version);
+
+        // A core-group apiVersion carries no slash.
+        let node = api_resource_for_api_version("v1", "Node").unwrap();
+        assert_eq!(node.group, "");
+        assert_eq!(node.version, "v1");
+
+        // Nothing pinned: the caller falls back to the name-only table.
+        assert!(api_resource_for_api_version("", "BGPPeer").is_none());
+        assert!(api_resource_for_api_version("   ", "BGPPeer").is_none());
+        assert!(api_resource_for_api_version("metallb.io/", "BGPPeer").is_none());
+        assert!(api_resource_for_api_version("metallb.io/v1beta2", "").is_none());
+    }
+
+    /// The doc promises `None` for a malformed `apiVersion`, and a caller
+    /// takes `Some` as "pinned": YAML and Describe then query that resource
+    /// instead of the name-only fallback. So a string that is not
+    /// `version` or `group/version` must not become a resource.
+    #[test]
+    fn a_malformed_api_version_pins_nothing() {
+        // An empty group beside a slash is not the core group.
+        assert!(api_resource_for_api_version("/v1", "BGPPeer").is_none());
+        // A second slash is not a version.
+        assert!(api_resource_for_api_version("metallb.io/v1/extra", "BGPPeer").is_none());
+        assert!(api_resource_for_api_version("a/b/c/d", "BGPPeer").is_none());
+        // Whitespace inside either part.
+        assert!(api_resource_for_api_version("metallb.io/v1 beta2", "BGPPeer").is_none());
+        assert!(api_resource_for_api_version("metal lb.io/v1beta2", "BGPPeer").is_none());
+        assert!(api_resource_for_api_version("v 1", "Node").is_none());
+        // The well-formed shapes still resolve.
+        assert!(api_resource_for_api_version("v1", "Node").is_some());
+        assert!(api_resource_for_api_version("metallb.io/v1beta2", "BGPPeer").is_some());
     }
 
     // -- parse_api_version edge cases ------------------------------------------
@@ -1687,5 +3115,56 @@ metadata:
             .unwrap()
             .contains_key("password"));
         assert_eq!(v["stringData"]["password"], "");
+    }
+
+    #[test]
+    fn test_cilium_bgp_gvk_scoping() {
+        let (gvk, namespaced) =
+            gvk_for("CiliumBGPNodeConfig").expect("gvk for CiliumBGPNodeConfig");
+        assert_eq!(gvk.group, "cilium.io");
+        assert_eq!(gvk.version, "v2");
+        assert_eq!(gvk.kind, "CiliumBGPNodeConfig");
+        assert!(
+            !namespaced,
+            "CiliumBGPNodeConfig must be cluster-scoped (non-namespaced)"
+        );
+
+        let (gvk, namespaced) =
+            gvk_for("CiliumBGPClusterConfig").expect("gvk for CiliumBGPClusterConfig");
+        assert_eq!(gvk.group, "cilium.io");
+        assert_eq!(gvk.version, "v2");
+        assert_eq!(gvk.kind, "CiliumBGPClusterConfig");
+        assert!(!namespaced, "CiliumBGPClusterConfig must be cluster-scoped");
+
+        let (gvk, namespaced) =
+            gvk_for("CiliumBGPPeerConfig").expect("gvk for CiliumBGPPeerConfig");
+        assert_eq!(gvk.group, "cilium.io");
+        assert_eq!(gvk.version, "v2");
+        assert_eq!(gvk.kind, "CiliumBGPPeerConfig");
+        assert!(!namespaced, "CiliumBGPPeerConfig must be cluster-scoped");
+
+        let (gvk, namespaced) =
+            gvk_for("CiliumBGPAdvertisement").expect("gvk for CiliumBGPAdvertisement");
+        assert_eq!(gvk.group, "cilium.io");
+        assert_eq!(gvk.version, "v2");
+        assert_eq!(gvk.kind, "CiliumBGPAdvertisement");
+        assert!(!namespaced, "CiliumBGPAdvertisement must be cluster-scoped");
+
+        let (gvk, namespaced) =
+            gvk_for("CiliumLoadBalancerIPPool").expect("gvk for CiliumLoadBalancerIPPool");
+        assert_eq!(gvk.group, "cilium.io");
+        assert_eq!(gvk.version, "v2");
+        assert_eq!(gvk.kind, "CiliumLoadBalancerIPPool");
+        assert!(
+            !namespaced,
+            "CiliumLoadBalancerIPPool must be cluster-scoped"
+        );
+
+        let (gvk, namespaced) =
+            gvk_for("CiliumNetworkPolicy").expect("gvk for CiliumNetworkPolicy");
+        assert_eq!(gvk.group, "cilium.io");
+        assert_eq!(gvk.version, "v2");
+        assert_eq!(gvk.kind, "CiliumNetworkPolicy");
+        assert!(namespaced, "CiliumNetworkPolicy must be namespaced");
     }
 }

@@ -188,7 +188,7 @@ describe("ResizeHandle on either edge", () => {
 });
 
 /**
- * The CSS is one-sided too: the base rule pins the handle to `right: -2px`
+ * The CSS is one-sided too: the base rule pins the handle to `right: 0`
  * with a `border-right`, so a left-edge handle needs the mirrored rule — and
  * it has to land in the same cascade layer, or it wins and loses against the
  * wrong things.
@@ -197,10 +197,18 @@ describe("the resize handle's stylesheet", () => {
   const css = readFileSync(join(__dirname, "styles", "kit.css"), "utf8");
   const components = css.slice(css.indexOf("@layer components {"), css.indexOf("@layer utilities {"));
 
+  it("draws the divider on the pane boundary without extending into its neighbor", () => {
+    const rule = components.slice(components.indexOf(".resize-handle {"));
+    const body = rule.slice(0, rule.indexOf("}"));
+    expect(body).toMatch(/right:\s*0;/);
+    expect(body).toContain("width: 5px");
+    expect(body).toContain("border-right:");
+  });
+
   it("mirrors the handle onto the left edge, in the components layer", () => {
     const rule = components.slice(components.indexOf('.resize-handle[data-edge="left"] {'));
     const body = rule.slice(0, rule.indexOf("}"));
-    expect(body).toContain("left: -2px");
+    expect(body).toContain("left: 0");
     expect(body).toContain("border-left:");
     // Or the base rule's own border draws down the far side of the grip.
     expect(body).toMatch(/border-right:\s*none/);

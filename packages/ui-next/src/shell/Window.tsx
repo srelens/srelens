@@ -1,28 +1,66 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
+  checkForUpdateAndNotify,
   cleanErrorMessage,
+  closeCurrentWindow,
   describeError,
   isApplePlatform,
   isTauri,
   listContexts,
   loadKubeconfigFiles,
+  listenForHostNotices,
   loadMcpSettings,
+  loadUpdateChannel,
+  notify,
+  on,
   rehydrateForwards,
+  setNotifier,
   startMcpHttp,
   vaultLock,
   type ClusterContext,
+  type ContextProfiles,
+  type HostNotice,
+  flushSettingsWrites,
+  onWindowCloseRequested,
 } from "@srelens/core";
-import { Button, Checkbox, Drawer, LoadingState, TabStrip, TextInput, type ContextMenuItem, type StripTab } from "@srelens/ui-kit";
+import {
+  Button,
+  Checkbox,
+  Drawer,
+  LoadingState,
+  SurfaceToast,
+  TabStrip,
+  TextInput,
+  type ContextMenuItem,
+  type StripTab,
+} from "@srelens/ui-kit";
 import { contextLabelFor } from "../lib/agentSuggestions";
-import { setContexts, setKubeconfigFiles, useContexts, useContextsError } from "../lib/clusters";
+import {
+  getContexts,
+  getKubeconfigFiles,
+  pinContextKey,
+  resolveContext,
+  setContexts,
+  setKubeconfigFiles,
+  useContexts,
+  useContextsError,
+  useContextsStatus,
+} from "../lib/clusters";
 import { loadColumnPrefs } from "../lib/columnPrefs";
 import { loadRecentLogSubjects } from "../lib/logRecents";
-import { getMark, loadMarks, useMark } from "../lib/marks";
+import { getMark, getContextLabel, loadMarks, useMark } from "../lib/marks";
+import { useContextLabel } from "../lib/contextLabel";
 import { mcpAutoStartSettled, mcpAutoStartStarting } from "../lib/mcpAutoStart";
+import { openCluster } from "../lib/openCluster";
+import { openSettings } from "../lib/settingsRequest";
 import { loadPeekWidth } from "../lib/peekWidth";
 import { loadSectionFolds } from "../lib/sectionFolds";
-import { loadExpanded, loadNamespaces } from "../lib/workspace";
-import { defaultState, reconcile } from "../lib/tabs";
+import { loadExpanded } from "../lib/workspace";
+import { TabScope } from "../lib/tabScope";
+import { getInfo, probeCluster } from "../lib/probe";
+import { defaultState, makeTab, reconcile, type TabsState } from "../lib/tabs";
+import { parseEditRoute, parseNewRoute } from "../lib/detailRoute";
+import { isClusterScopedRoute, keepsManagementWhenPaused, tabDetail } from "../lib/routes";
 import { flushSave, installFlushOnUnload, loadTabsState, scheduleSave } from "../lib/tabsPersist";
 import {
   activateTab,
@@ -37,6 +75,7 @@ import {
   getState,
   newTab,
   openTab,
+  moveTab,
   reopenClosed,
   selectIndex,
   setState,
@@ -46,18 +85,54 @@ import {
   useActiveCluster,
   useTabs,
 } from "../lib/tabsStore";
+
+/** `null` or a document with no workspaces is the same for seeding: unusable. */
+function usableTabsState(saved: TabsState | null | undefined): TabsState | null {
+  return saved && saved.workspaces.length > 0 ? saved : null;
+}
+
+/** Strip cloned main-window tabs down to a fresh home tab per workspace. */
+function resetWorkspacesToHome(state: TabsState): void {
+  for (const w of state.workspaces) {
+    const home = makeTab("/");
+    w.tabs = [home];
+    w.activeId = home.id;
+    w.closed = [];
+    // The main window's other clusters' tabs are not this window's either.
+    delete w.shelved;
+  }
+}
 import { useConsole } from "../console";
-import { getInfo, probeCluster } from "../lib/probe";
+import { canOpenClusterTerminal, openClusterTerminal } from "../lib/clusterTerminal";
+import { applySkillDefaults } from "../lib/skillDefaults";
+import { countLaunch, useStarCountRefresh } from "../lib/starOnGitHub";
 import { hint, matchWindowKey, type WindowAction } from "../lib/shortcuts";
 import { AgentConsent } from "./AgentConsent";
 import { Body } from "./Body";
 import { Chrome, zoom } from "./Chrome";
 import { Console } from "./Console";
-import { isWorkspaceSealed, LockGate, lockWorkspace } from "./LockGate";
+import { isWorkspaceSealed, LockGate, lockWorkspace, useWorkspaceSealed } from "./LockGate";
 import { Nav } from "./Nav";
 import { Rail } from "./Rail";
 import { Status } from "./Status";
 import { TabSurface } from "./TabSurface";
+import { useDeepLinks } from "./useDeepLinks";
+
+/** One toast in the window's queue: a host notice, or a `notify` call. */
+type Notice = Omit<HostNotice, "level"> & {
+  /** `ok` is `notify.success`; a host notice is only ever `info` or `error`. */
+  level: HostNotice["level"] | "ok";
+  /** A sign-in prompt's or an update's one button. */
+  action?: { label: string; run: () => void };
+  /** Goes on its own after {@link TRANSIENT_NOTICE_MS}. */
+  transient?: boolean;
+};
+
+/** How long a confirmation stays up: sonner's default, which classic used. */
+const TRANSIENT_NOTICE_MS = 4_000;
+
+/** How often the automatic update check runs after the one at launch: classic's. */
+const UPDATE_CHECK_EVERY_MS = 6 * 60 * 60 * 1000;
 
 export interface WindowProps {
   /** Display names of the screens that exist in the new design. */
@@ -76,6 +151,10 @@ export interface WindowProps {
    * stop listening, but the tab bodies stay mounted so the session survives.
    */
   active?: boolean;
+  /**
+   * The window's Tauri label, used to isolate its saved workspaces.
+   */
+  windowLabel?: string;
 }
 
 /**
@@ -99,6 +178,7 @@ export function Window({
   controls = "none",
   brandMarkSrc,
   active = true,
+  windowLabel = "main",
 }: WindowProps) {
   const [booted, setBooted] = useState(false);
   /**
@@ -124,6 +204,11 @@ export function Window({
   // — and a screen receives only `{ route }`, so a copy held here can never
   // reach one. See `NoClusterScreen`.
   const contextsError = useContextsError();
+  const contextsStatus = useContextsStatus();
+  // Deep-link `?context=` for a context window that booted before the listing
+  // answered. Cleared once a later successful `setContexts` can open it — or
+  // once a successful listing proves the context is genuinely absent.
+  const pendingCtxQuery = useRef<string | null>(null);
   const [creating, setCreating] = useState(false);
   const [name, setName] = useState("");
   const [picked, setPicked] = useState<Set<string>>(new Set());
@@ -132,18 +217,133 @@ export function Window({
   // under Tauri. In a browser the native zoom already does this (see core's
   // uiScale doc), so a zoom chord here has to fall through to it untouched.
   const desktop = useMemo(() => isTauri(), []);
+  
   const { setOpen, setScope } = useConsole();
   const { tabs, activeId, workspace } = useTabs();
   useMark("", "");
   const activeIdCluster = useActiveCluster();
-  const activeCtx = contexts.find((c) => c.stableId === activeIdCluster) ?? null;
+  const activeCtx = resolveContext(contexts, activeIdCluster) ?? null;
   // The console dock's own scope label — `Window`'s job because it is the one
   // place that already knows both the active tab's route and the active
   // cluster's name; `Console` itself only reads `scope` back off the provider.
   const activeTabRoute = tabs.find((t) => t.id === activeId)?.route ?? "/";
+  const activeTab = tabs.find((t) => t.id === activeId);
+  const routeCluster = parseEditRoute(activeTabRoute)?.cluster ?? parseNewRoute(activeTabRoute)?.cluster ?? activeTab?.sub;
+  const probeContext = isClusterScopedRoute(activeTabRoute)
+    ? (routeCluster ? contexts.find(c => c.name === routeCluster) : activeCtx)
+    : undefined;
+  const probePaused = !!probeContext && !!workspace.pausedClusters?.includes(probeContext.stableId);
   useEffect(() => {
-    setScope(contextLabelFor(activeTabRoute, activeCtx?.name ?? ""));
-  }, [activeTabRoute, activeCtx?.name, setScope]);
+    if (!booted || !active || !probeContext || probePaused || getInfo(probeContext.stableId)) return;
+    void probeCluster(probeContext, undefined, undefined, { workspaceId: workspace.id });
+  }, [booted, active, probeContext, probePaused, workspace.id]);
+  const scopeName = routeCluster ?? activeCtx?.name ?? "";
+  const scopeLabel = useContextLabel(scopeName, contexts.find(c => c.name === scopeName)?.stableId);
+  useEffect(() => {
+    setScope(contextLabelFor(activeTabRoute, scopeLabel));
+  }, [activeTabRoute, scopeLabel, setScope]);
+
+  // The star button's two start-up acts (#850), done here rather than by the
+  // button: once per window, after boot — settings are readable by then — and
+  // never from a test or a gallery that merely draws the bar. The count is
+  // then kept current for as long as the window is open (#866); its failure
+  // is silent by design.
+  useEffect(() => {
+    if (!booted) return;
+    countLaunch();
+    // The skills the reader keeps on (#851), once settings are readable.
+    applySkillDefaults();
+  }, [booted]);
+  useStarCountRefresh(booted);
+
+  // What the desktop host reports after the page that would have heard it is
+  // gone: a helm operation outlives the window that started it, and how it
+  // ended reaches every window (#735). The web host sends none. A refused
+  // `srelens://` link joins the same queue (#370), and so do links held behind
+  // a failed context listing (#855): one surface, oldest first.
+  const [notices, setNotices] = useState<Notice[]>([]);
+  useEffect(
+    () =>
+      isTauri()
+        ? listenForHostNotices((notice) => setNotices((shown) => [...shown, notice]))
+        : undefined,
+    [],
+  );
+  // Every `notify` call joins it too (#374): its only other renderer is
+  // classic's sonner Toaster, which this design never mounts. Installed in
+  // place of that sink, not beside it, so a toast is drawn once; and handed
+  // back on unmount. Declared before boot so boot's own reports are caught.
+  useEffect(() => {
+    const push = (notice: Notice) => setNotices((shown) => [...shown, notice]);
+    return setNotifier({
+      success: (title, detail) => push({ level: "ok", title, detail, transient: true }),
+      info: (title, detail) => push({ level: "info", title, detail, transient: true }),
+      // An error stays until dismissed, and a notice with no words draws
+      // nothing, so no dismiss button either: one empty error would hold every
+      // later notice back. Core's own title for an unclassified failure.
+      error: (title, detail) =>
+        push({ level: "error", title: !title && !detail ? "Something went wrong" : title, detail }),
+      updateAvailable: (version, onView) =>
+        push({
+          level: "info",
+          title: "Update available",
+          detail: `srelens ${version} is ready to install.`,
+          action: { label: "View update", run: onView },
+        }),
+      clusterSignIn: (title, detail, onSignIn) =>
+        push({ level: "info", title, detail, action: { label: "Sign in", run: onSignIn } }),
+    });
+  }, []);
+  // #374 item 6: classic checks for an update at launch and every six hours
+  // (`App.tsx`), on the channel the reader chose, and offers it in a toast that
+  // opens Settings on Updates. Core's helper swallows a failed check, because a
+  // background poll must not nag, and a version already offered is not offered
+  // again.
+  const offeredVersion = useRef<string | null>(null);
+  useEffect(() => {
+    if (!isTauri()) return;
+    // A check still out when the window goes would answer into whatever sink
+    // `setNotifier` handed back, so its answer is dropped.
+    let live = true;
+    const check = () =>
+      void checkForUpdateAndNotify(
+        loadUpdateChannel(),
+        (update) => {
+          if (!live) return;
+          offeredVersion.current = update.version;
+          notify.updateAvailable(update.version, () => openSettings("updates"));
+        },
+        { alreadyNotified: (version) => offeredVersion.current === version },
+      );
+    check();
+    const timer = setInterval(check, UPDATE_CHECK_EVERY_MS);
+    return () => {
+      live = false;
+      clearInterval(timer);
+    };
+  }, []);
+  const notice = notices[0];
+  const dismissNotice = () => setNotices((shown) => shown.slice(1));
+  // The queue is drawn outside `LockGate`, so a notice stays in view over the
+  // cover, but its action ("View update", "Sign in") opens a tab: held while
+  // the cover is up, like every other act on the workspace (see `run`).
+  // Subscribed, not read at render, so it comes back on unlock.
+  const sealed = useWorkspaceSealed();
+  // A confirmation goes on its own, the way classic's did; a failure or a
+  // prompt waits for the reader.
+  useEffect(() => {
+    if (!notice?.transient) return;
+    const timer = setTimeout(
+      () => setNotices((shown) => (shown[0] === notice ? shown.slice(1) : shown)),
+      TRANSIENT_NOTICE_MS,
+    );
+    return () => clearTimeout(timer);
+  }, [notice]);
+  useDeepLinks({
+    windowLabel,
+    ready: booted,
+    onNotice: (notice) => setNotices((shown) => [...shown, { level: "error", ...notice }]),
+  });
 
   useEffect(() => {
     let cancelled = false;
@@ -174,10 +374,10 @@ export function Window({
       // unfolded — and the first unfold then spreads over an empty record and
       // erases every other kind's, exactly as `loadMarks` above describes.
       loadSectionFolds();
-      // Restore each cluster's sidebar groups and namespace selection before
-      // rendering navigation, so the first toggle preserves other clusters.
+      // Restore each cluster's sidebar groups before rendering navigation, so
+      // the first toggle preserves other clusters. (Namespace selections live
+      // on the tabs and come back with them.)
       loadExpanded();
-      loadNamespaces();
       // And the subjects a bare `/logs` offers as a way in. Unread, that
       // screen has nothing to offer on the first visit of every launch — and
       // the first subject followed then spreads over an empty list and erases
@@ -212,7 +412,95 @@ export function Window({
         found = outcome.contexts ?? [];
         failure = outcome.error ?? "";
         listed = true;
-        const saved = loadTabsState();
+        const ctxQuery = typeof window !== "undefined" ? new URLSearchParams(window.location.search).get("context") : null;
+        // The key outlives its resolution into a stable id below: workspaces
+        // hold the id, two contexts can share one, and every later lookup by
+        // id in this window must land on the context the query named rather
+        // than the first of the pair (see `pinContextKey`).
+        if (ctxQuery && windowLabel !== "main") pinContextKey(ctxQuery);
+        // Empty workspaces from a parse that kept the document shell are the
+        // same as no save: seeding against them cannot pick a target workspace.
+        let saved = usableTabsState(loadTabsState(undefined, undefined, windowLabel));
+
+        if (!saved && ctxQuery && windowLabel !== "main") {
+          // Both designs put a context KEY in `?context=` — not a display
+          // name, and not a `stableId`: a path `a` with context `b#c` and a
+          // path `a#b` with context `c` share a stable ID, so resolving by one
+          // could pick the wrong cluster for this window (#623). Workspaces
+          // still key clusters on stable ids, so resolve the query to a
+          // context first — looking up `clusters.includes(ctxQuery)` with
+          // anything but a stable id misses the right workspace and then seeds
+          // the wrong one.
+          const targetContext = found.find(
+            (context) => context.key === ctxQuery,
+          );
+          if (targetContext) {
+            let mainSaved = usableTabsState(loadTabsState(undefined, undefined, "main"));
+            if (!mainSaved) {
+              mainSaved = defaultState(found);
+            }
+            saved = JSON.parse(JSON.stringify(mainSaved));
+            if (saved) {
+              const seeded = saved;
+              resetWorkspacesToHome(seeded);
+              const contextId = targetContext.stableId;
+              let targetWorkspace = seeded.workspaces.find((w) => w.clusters.includes(contextId));
+              if (!targetWorkspace && seeded.currentId) {
+                targetWorkspace = seeded.workspaces.find((w) => w.id === seeded.currentId);
+                if (targetWorkspace && !targetWorkspace.clusters.includes(contextId)) {
+                  targetWorkspace.clusters.push(contextId);
+                }
+              }
+              const contextName = targetContext.name;
+              if (targetWorkspace) {
+                targetWorkspace.activeCluster = contextId;
+                const ot = makeTab("/overview", { clusterName: contextName });
+                targetWorkspace.tabs.push(ot);
+                targetWorkspace.activeId = ot.id;
+                seeded.currentId = targetWorkspace.id;
+              }
+            }
+          } else if (failure !== "") {
+            // Listing failed — keep the query for a later Connections reload
+            // rather than activating whatever Default would pick first. Reset
+            // tabs and clear inherited focus: deferred `openCluster` only adds
+            // overview, and leaving main's activeCluster intact would focus a
+            // different readable cluster from a partial listing.
+            pendingCtxQuery.current = ctxQuery;
+            const mainSaved = usableTabsState(loadTabsState(undefined, undefined, "main"));
+            saved = mainSaved
+              ? (JSON.parse(JSON.stringify(mainSaved)) as typeof mainSaved)
+              : defaultState(found);
+            if (saved) {
+              resetWorkspacesToHome(saved);
+              for (const w of saved.workspaces) {
+                delete w.activeCluster;
+                w.clusters = [];
+                w.pausedClusters = [];
+              }
+            }
+          } else {
+            // Listing answered: the requested context is not there. An empty
+            // workspace says that; cloning Default would silently open another
+            // cluster under this deep link.
+            saved = defaultState([]);
+          }
+        } else if (
+          ctxQuery &&
+          windowLabel !== "main" &&
+          !found.some((context) => context.key === ctxQuery)
+        ) {
+          if (failure !== "") {
+            // Own saved state already existed; still retain the query across a
+            // failed listing so a retry can focus the requested cluster.
+            pendingCtxQuery.current = ctxQuery;
+          } else {
+            // Listing answered and the target is gone. Reconciling the saved
+            // state would promote another remaining cluster to activeCluster.
+            saved = defaultState([]);
+          }
+        }
+
         if (saved && failure !== "") {
           // The list failed, not the clusters: reconciling against nothing would
           // strip every workspace's cluster ids and the next change would persist
@@ -231,6 +519,11 @@ export function Window({
         if (cancelled) return;
         if (!listed) failure = cleanErrorMessage(error);
         console.error(listed ? "could not restore the workspaces" : "could not list the contexts", error);
+        const ctxQuery =
+          typeof window !== "undefined" ? new URLSearchParams(window.location.search).get("context") : null;
+        if (!listed && ctxQuery && windowLabel !== "main") {
+          pendingCtxQuery.current = ctxQuery;
+        }
         setState(defaultState(found));
       }
       setContexts(found, failure);
@@ -245,7 +538,7 @@ export function Window({
   // over the real one on the way in.
   useEffect(() => {
     if (!booted) return;
-    const off = subscribe(() => scheduleSave(getState()));
+    const off = subscribe(() => scheduleSave(getState(), undefined, undefined, windowLabel));
     const offUnload = installFlushOnUnload();
     return () => {
       off();
@@ -257,23 +550,62 @@ export function Window({
     };
   }, [booted]);
 
-  // Every cluster you are looking at gets probed once, so the rail shows link
-  // state and the status bar shows a version without waiting to be asked. The
-  // effect runs per workspace rather than per render — switching away and back
-  // re-runs it, and the probe store's memory is what keeps it to once each.
-  const workspaceId = workspace.id;
   useEffect(() => {
-    if (!booted) return;
-    if (!active) return;
-    const byId = new Map(contexts.map((c) => [c.stableId, c]));
-    for (const id of currentWorkspace().clusters) {
-      if (getInfo(id)) continue;
-      const ctx = byId.get(id);
-      if (ctx) void probeCluster(ctx);
+    return onWindowCloseRequested(async () => {
+      flushSave();
+      // throwOnError: a silent resolve after a failed write would destroy the
+      // webview and lose the latest workspace snapshot with it.
+      await flushSettingsWrites({ throwOnError: true });
+    });
+  }, []);
+
+  // Boot only runs once; a context window that missed its `?context=` match
+  // because `listContexts` failed still has the query in `pendingCtxQuery`.
+  // Connections' reload writes through `setContexts`, which wakes this effect.
+  useEffect(() => {
+    const query = pendingCtxQuery.current;
+    if (!booted || !query) return;
+    const target = contexts.find(
+      (context) => context.key === query,
+    );
+    if (target) {
+      pendingCtxQuery.current = null;
+      openCluster(target);
+      return;
     }
-    // `contexts` rides along because a kubeconfig change replaces them; the
-    // workspace id is the trigger for the switch case.
-  }, [booted, contexts, workspaceId, active]);
+    // A successful listing without the requested context is an answer, not a
+    // reason to wait forever for a Connections retry.
+    if (contextsStatus === "loaded") {
+      pendingCtxQuery.current = null;
+    }
+  }, [booted, contexts, contextsStatus]);
+
+  // #374 item 3: an edit made outside srelens (`kubectl config use-context`, a
+  // file dropped into the kubeconfig folder) reaches this window only as the
+  // host watcher's `kubeconfig-changed` (`watch_kubeconfig_files`, lib.rs).
+  // Classic re-lists on it. Written the way every Refresh here writes, so a
+  // failed listing keeps the clusters on screen and says why, and whatever
+  // waits on the store — a held deep link, a `?context=` — is judged again.
+  //
+  // Counted, not listed on the spot, so an older listing can never land last.
+  // An edit while boot is still listing waits for boot to install its list,
+  // and each edit drops the reply of the listing before it.
+  const [kubeconfigEdits, setKubeconfigEdits] = useState(0);
+  useEffect(() => {
+    if (!isTauri()) return;
+    return on("kubeconfig-changed", () => setKubeconfigEdits((n) => n + 1));
+  }, []);
+  useEffect(() => {
+    if (!booted || kubeconfigEdits === 0) return;
+    let current = true;
+    void listContexts(getKubeconfigFiles()).then((outcome) => {
+      if (current) setContexts(outcome.contexts ?? getContexts(), outcome.error ?? "");
+    });
+    return () => {
+      current = false;
+    };
+  }, [booted, kubeconfigEdits]);
+
 
   /**
    * Which accelerators survive a raised cover, and why one of them does.
@@ -303,6 +635,10 @@ export function Window({
     );
   }
 
+  function openTerminal(cluster: ClusterContext | undefined): void {
+    if (canOpenClusterTerminal(cluster)) void openClusterTerminal(cluster);
+  }
+
   // Read at call time rather than closed over: an effect installed once must
   // act on whatever the strip shows now, not whatever it showed at mount.
   function run(action: WindowAction) {
@@ -326,6 +662,10 @@ export function Window({
         return selectIndex(action.index);
       case "console":
         return setOpen(true);
+      case "terminal":
+        // The status bar's Terminal button, from the keyboard: the same
+        // conditions, so the chord does nothing where the button is absent.
+        return openTerminal(activeCtx ?? undefined);
       case "lock":
         return lockNow();
       case "zoom-in":
@@ -397,11 +737,33 @@ export function Window({
       // command is a Tauri command, so in web mode there is no vault to seal
       // and the chord could only log a refusal. It falls through untouched.
       if (action.type === "lock" && !desktop) return;
+      // The local shell is the desktop's too, and Ctrl+J is the browser's
+      // downloads list: left alone rather than swallowed for nothing.
+      if (action.type === "terminal" && !desktop) return;
       e.preventDefault();
       runRef.current(action);
     }
     window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
+    // #374 item 4: on macOS the menu's own Close item takes ⌘W before the
+    // webview sees a keydown (`install_macos_menu`, lib.rs) and says
+    // `close-active-tab` instead, which classic listens for. Here it is the
+    // chord's own action, so the sealed rule in `run` covers it too. Classic's
+    // fallback comes with it: Close on the last tab closes the window, as
+    // macOS does when nothing is left in one. Not under the cover, where the
+    // chord does nothing either. A refused close goes to the console, as
+    // `lockNow`'s refusal does, and for the reason it gives.
+    const offMenuClose = desktop
+      ? on("close-active-tab", () => {
+          if (isWorkspaceSealed() || currentWorkspace().tabs.length !== 1) return runRef.current({ type: "close-tab" });
+          closeCurrentWindow().catch((error) => {
+            console.error("the window could not be closed:", describeError(error).title, error);
+          });
+        })
+      : undefined;
+    return () => {
+      window.removeEventListener("keydown", onKey);
+      offMenuClose?.();
+    };
   }, [active, apple, desktop]);
 
   /**
@@ -447,7 +809,7 @@ export function Window({
    * not the URL this start returns.
    */
   useEffect(() => {
-    if (!vaultReady) return;
+    if (!vaultReady || windowLabel !== "main") return;
     const mcp = loadMcpSettings();
     if (!mcp.enabled) return;
     void (async () => {
@@ -464,7 +826,7 @@ export function Window({
       }
       mcpAutoStartSettled();
     })();
-  }, [vaultReady]);
+  }, [vaultReady, windowLabel]);
 
   function menuFor(tab: StripTab): ContextMenuItem[] {
     return [
@@ -527,7 +889,7 @@ export function Window({
       {active && (
         <Rail contexts={contexts} error={contextsError || undefined} onConnect={() => openTab("/connect")} />
       )}
-      {active && <Nav contexts={contexts} />}
+      {active && activeTabRoute !== "/" && <Nav contexts={contexts} />}
       {/* `min-w-0` as well as `min-h-0`. This column holds the tab strip
           and the screen, and a flex item's implicit `min-width: auto`
           refuses to shrink below its content — so a wide screen widens the
@@ -540,11 +902,19 @@ export function Window({
           <TabStrip
             tabs={tabs.map(tab => {
               const context = contexts.find(c => c.name === tab.sub);
-              return context ? { ...tab, sub: getMark(context.stableId, context.name).name } : tab;
+              const tooltipName = parseEditRoute(tab.route)?.cluster ?? parseNewRoute(tab.route)?.cluster ?? tab.sub
+                ?? (isClusterScopedRoute(tab.route) ? activeCtx?.name : undefined);
+              const tooltipContext = contexts.find(c => c.name === tooltipName);
+              return { ...tab,
+                sub: context ? getMark(context.stableId, context.name).name : tab.sub,
+                context: tooltipContext ? getContextLabel(tooltipContext.stableId, tooltipContext.name) : tooltipName,
+                detail: tabDetail(tab.route),
+              };
             })}
             activeId={activeId}
             onSelect={activateTab}
             onClose={closeTab}
+            onMove={moveTab}
             menuFor={menuFor}
             onNew={() => run({ type: "new-tab" })}
             newHint={hint("new-tab", apple)}
@@ -552,14 +922,32 @@ export function Window({
           />
         )}
         <div className="relative min-h-0 flex-1">
-          {tabs.map((tab) => (
+          {tabs.map((tab) => {
+            // An editor's target is pinned in its route. Its tab label follows
+            // the rail, so it cannot decide whether the editor's readers are
+            // paused.
+            const pinnedContext = parseEditRoute(tab.route)?.cluster ?? parseNewRoute(tab.route)?.cluster;
+            // Status-bar actions open cluster-following routes without a
+            // `clusterName`. They follow the active cluster and need its pause
+            // gate; app-level tabs never receive one just because it is active.
+            const context = pinnedContext
+              ? contexts.find((c) => c.name === pinnedContext)
+              : tab.sub === undefined
+              ? (isClusterScopedRoute(tab.route) ? activeCtx : undefined)
+              : contexts.find((c) => c.name === tab.sub);
+            // Keep Stop/Detach accessible even on explicitly labelled tabs.
+            // Their submission and creation controls check the actual target.
+            const pausedContext = !keepsManagementWhenPaused(tab.route) && context && workspace.pausedClusters?.includes(context.stableId) ? context : undefined;
+            return (
             <TabSurface key={tab.id} visible={tab.id === activeId}>
+              <TabScope.Provider value={tab.id}>
               {/* A placeholder tab without a cluster of its own still leaves
                   via the cluster this window is looking at — that is the
                   context classic reopens onto. */}
               <Body
                 route={tab.route}
                 clusterName={tab.sub ?? activeCtx?.name}
+                pausedContext={pausedContext}
                 ported={ported}
                 onOpenInClassic={onOpenInClassic}
                 onOpenGallery={onOpenGallery}
@@ -571,8 +959,10 @@ export function Window({
                 // non-throwing and idempotent: the whole of the contract.
                 onLocked={lockWorkspace}
               />
+              </TabScope.Provider>
             </TabSurface>
-          ))}
+            );
+          })}
         </div>
         {/* Not on `/agent`: that screen mounts the dock at the foot of its own
             main column, so its rail is a full-height sibling and uses the
@@ -699,11 +1089,45 @@ export function Window({
         (`isCovered`). Subscribed always; asking only where the window is
         genuinely open.
 
-        ONE mount, here. Not one per branch of the boot check: two listeners on
-        `mcp://confirm-request` are two prompts and two answers to a request
-        that has a single `oneshot::Sender` waiting on it.
+        ONE mount, here, and ONLY in the main window. Context windows must not
+        mount AgentConsent: mcp_confirm.rs broadcasts every request
+        application-wide, and mounting in secondary windows produces duplicate
+        prompts and automatic denials while those windows are covered/booting.
       */}
-      <AgentConsent />
+      {windowLabel === "main" && <AgentConsent />}
+      {/* What the host reports after the page that would have heard it is
+        gone (#735), why a deep link was refused (#370), and every `notify`
+        call (#374): the oldest first, each until it is dismissed or, for a
+        confirmation, until it times out. */}
+      <SurfaceToast
+        anchor="window"
+        title={notice?.title}
+        hint={
+          notice?.action ? (
+            <>
+              {notice.detail}
+              <Button
+                type="button"
+                size="sm"
+                className="mt-1.5 block"
+                disabled={sealed}
+                title={sealed ? "Unlock the workspace first" : undefined}
+                onClick={() => {
+                  dismissNotice();
+                  notice.action?.run();
+                }}
+              >
+                {notice.action.label}
+              </Button>
+            </>
+          ) : (
+            notice?.detail
+          )
+        }
+        tone={notice?.level === "error" ? "sev" : notice?.level === "ok" ? "ok" : "info"}
+        onClose={dismissNotice}
+        dismissLabel="Dismiss notice"
+      />
     </>
   );
 }

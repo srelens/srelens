@@ -1,0 +1,5 @@
+{
+  "id": "org.example.argocd",
+  "after": 41,
+  "minLevel": "warn"
+}

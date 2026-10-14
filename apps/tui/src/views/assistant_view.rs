@@ -101,6 +101,7 @@ pub struct AssistantViewState {
     pub context_name: String,
     pub messages: Vec<ChatMessage>,
     pub input: String,
+    pub input_cursor: Option<usize>,
     pub is_busy: bool,
     pub busy_status: String,
     pub busy_start: Option<std::time::Instant>,
@@ -122,6 +123,7 @@ pub struct AssistantViewState {
     pub slash_suggestions: Vec<&'static crate::ai_skills::SkillDef>,
     pub slash_suggestion_idx: usize,
     pub caveman_level: Option<crate::ai_skills::CavemanLevel>,
+    pub task: Option<tokio::task::AbortHandle>,
 }
 
 pub fn is_internal_meta_tool(tool: &str) -> bool {
@@ -155,6 +157,7 @@ impl AssistantViewState {
                 token_usage: None,
             }],
             input: String::new(),
+            input_cursor: None,
             is_busy: false,
             busy_status: String::new(),
             busy_start: None,
@@ -176,6 +179,7 @@ impl AssistantViewState {
             slash_suggestions: Vec::new(),
             slash_suggestion_idx: 0,
             caveman_level: None,
+            task: None,
         }
     }
 
@@ -215,9 +219,147 @@ impl AssistantViewState {
         }
         let chosen = self.slash_suggestions[self.slash_suggestion_idx];
         self.input = format!("/{} ", chosen.command);
+        self.input_cursor = None;
         self.slash_suggestions.clear();
         self.slash_suggestion_idx = 0;
         true
+    }
+
+    pub fn cursor_pos(&self) -> usize {
+        let len = self.input.chars().count();
+        match self.input_cursor {
+            Some(pos) => pos.min(len),
+            None => len,
+        }
+    }
+
+    pub fn move_cursor_left(&mut self) {
+        let pos = self.cursor_pos();
+        if pos > 0 {
+            self.input_cursor = Some(pos - 1);
+        } else {
+            self.input_cursor = Some(0);
+        }
+    }
+
+    pub fn move_cursor_right(&mut self) {
+        let pos = self.cursor_pos();
+        let len = self.input.chars().count();
+        if pos < len {
+            self.input_cursor = Some(pos + 1);
+        } else {
+            self.input_cursor = Some(len);
+        }
+    }
+
+    pub fn move_cursor_word_left(&mut self) {
+        let pos = self.cursor_pos();
+        if pos == 0 {
+            return;
+        }
+        let chars: Vec<char> = self.input.chars().collect();
+        let mut i = pos;
+        while i > 0 && chars[i - 1].is_whitespace() {
+            i -= 1;
+        }
+        while i > 0 && !chars[i - 1].is_whitespace() {
+            i -= 1;
+        }
+        self.input_cursor = Some(i);
+    }
+
+    pub fn move_cursor_word_right(&mut self) {
+        let pos = self.cursor_pos();
+        let chars: Vec<char> = self.input.chars().collect();
+        let len = chars.len();
+        if pos >= len {
+            return;
+        }
+        let mut i = pos;
+        while i < len && !chars[i].is_whitespace() {
+            i += 1;
+        }
+        while i < len && chars[i].is_whitespace() {
+            i += 1;
+        }
+        self.input_cursor = Some(i);
+    }
+
+    pub fn move_cursor_home(&mut self) {
+        self.input_cursor = Some(0);
+    }
+
+    pub fn move_cursor_end(&mut self) {
+        self.input_cursor = None;
+    }
+
+    pub fn insert_char(&mut self, c: char) {
+        let pos = self.cursor_pos();
+        let mut chars: Vec<char> = self.input.chars().collect();
+        chars.insert(pos, c);
+        self.input = chars.into_iter().collect();
+        self.input_cursor = Some(pos + 1);
+        self.update_slash_suggestions();
+    }
+
+    pub fn insert_str(&mut self, s: &str) {
+        let pos = self.cursor_pos();
+        let mut chars: Vec<char> = self.input.chars().collect();
+        let added_len = s.chars().count();
+        for (i, c) in s.chars().enumerate() {
+            chars.insert(pos + i, c);
+        }
+        self.input = chars.into_iter().collect();
+        self.input_cursor = Some(pos + added_len);
+        self.update_slash_suggestions();
+    }
+
+    pub fn backspace(&mut self) {
+        let pos = self.cursor_pos();
+        if pos > 0 {
+            let mut chars: Vec<char> = self.input.chars().collect();
+            chars.remove(pos - 1);
+            self.input = chars.into_iter().collect();
+            self.input_cursor = Some(pos - 1);
+            self.update_slash_suggestions();
+        }
+    }
+
+    pub fn delete(&mut self) {
+        let pos = self.cursor_pos();
+        let mut chars: Vec<char> = self.input.chars().collect();
+        if pos < chars.len() {
+            chars.remove(pos);
+            self.input = chars.into_iter().collect();
+            self.input_cursor = Some(pos);
+            self.update_slash_suggestions();
+        }
+    }
+
+    pub fn delete_word_back(&mut self) {
+        let pos = self.cursor_pos();
+        if pos == 0 {
+            return;
+        }
+        let chars: Vec<char> = self.input.chars().collect();
+        let mut i = pos;
+        while i > 0 && chars[i - 1].is_whitespace() {
+            i -= 1;
+        }
+        while i > 0 && !chars[i - 1].is_whitespace() {
+            i -= 1;
+        }
+        let mut new_chars = chars[..i].to_vec();
+        new_chars.extend_from_slice(&chars[pos..]);
+        self.input = new_chars.into_iter().collect();
+        self.input_cursor = Some(i);
+        self.update_slash_suggestions();
+    }
+
+    pub fn clear_input(&mut self) {
+        self.input.clear();
+        self.input_cursor = None;
+        self.update_slash_suggestions();
     }
 
     pub fn start_selection(&mut self, line: usize, col: usize) {
@@ -305,7 +447,19 @@ impl AssistantViewState {
 
     pub fn history_up(&mut self) {
         if self.prompt_history.is_empty() {
-            return;
+            for msg in &self.messages {
+                if msg.role == "user" {
+                    let trimmed = msg.content.trim();
+                    if !trimmed.is_empty()
+                        && self.prompt_history.last().map(|s| s.as_str()) != Some(trimmed)
+                    {
+                        self.prompt_history.push(trimmed.to_string());
+                    }
+                }
+            }
+            if self.prompt_history.is_empty() {
+                return;
+            }
         }
         match self.history_cursor {
             None => {
@@ -313,15 +467,18 @@ impl AssistantViewState {
                 let last_idx = self.prompt_history.len() - 1;
                 self.history_cursor = Some(last_idx);
                 self.input = self.prompt_history[last_idx].clone();
+                self.input_cursor = None;
             }
             Some(idx) => {
                 if idx > 0 {
                     let new_idx = idx - 1;
                     self.history_cursor = Some(new_idx);
                     self.input = self.prompt_history[new_idx].clone();
+                    self.input_cursor = None;
                 }
             }
         }
+        self.update_slash_suggestions();
     }
 
     pub fn history_down(&mut self) {
@@ -330,11 +487,14 @@ impl AssistantViewState {
                 let new_idx = idx + 1;
                 self.history_cursor = Some(new_idx);
                 self.input = self.prompt_history[new_idx].clone();
+                self.input_cursor = None;
             } else {
                 self.history_cursor = None;
                 self.input = self.history_draft.clone();
                 self.history_draft.clear();
+                self.input_cursor = None;
             }
+            self.update_slash_suggestions();
         }
     }
 
@@ -358,6 +518,7 @@ impl AssistantViewState {
             token_usage: None,
         });
         self.input.clear();
+        self.input_cursor = None;
         self.is_busy = true;
         self.busy_status = "Consulting AI provider & cluster state...".to_string();
         self.busy_start = Some(std::time::Instant::now());
@@ -390,17 +551,15 @@ impl AssistantViewState {
         }
         if let Some(last) = self.messages.last_mut() {
             if last.role == "assistant" {
-                if !last.content.is_empty() {
-                    let last_char = last.content.chars().last().unwrap();
-                    let first_char = chunk.chars().next().unwrap();
-                    // If previous content ends with punctuation (. ! ? : ;) and chunk starts without whitespace
-                    if (last_char == '.' || last_char == '!' || last_char == '?' || last_char == ':' || last_char == ';')
-                        && !first_char.is_whitespace()
-                    {
-                        last.content.push(' ');
-                    }
-                }
-                last.content.push_str(chunk);
+                // Collapse excessive consecutive newlines between agent stream steps
+                let chunk_to_add = if last.content.ends_with("\n\n") {
+                    chunk.trim_start_matches('\n')
+                } else if last.content.ends_with('\n') && chunk.starts_with("\n\n") {
+                    &chunk[1..]
+                } else {
+                    chunk
+                };
+                last.content.push_str(chunk_to_add);
                 return;
             }
         }
@@ -448,7 +607,12 @@ impl AssistantViewState {
     }
 
     pub fn set_token_usage(&mut self, usage: TokenUsage) {
-        if let Some(last_asst) = self.messages.iter_mut().rev().find(|m| m.role == "assistant") {
+        if let Some(last_asst) = self
+            .messages
+            .iter_mut()
+            .rev()
+            .find(|m| m.role == "assistant")
+        {
             last_asst.token_usage = Some(usage);
         }
     }
@@ -458,11 +622,49 @@ impl AssistantViewState {
     }
 
     pub fn finish_turn(&mut self) {
+        self.task = None;
         self.is_busy = false;
         self.busy_start = None;
     }
 
+    pub fn cancel_turn(&mut self) {
+        if !self.is_busy && self.task.is_none() {
+            return;
+        }
+        if let Some(h) = self.task.take() {
+            h.abort();
+        }
+        self.is_busy = false;
+        self.busy_status.clear();
+        self.busy_start = None;
+        if let Some(last) = self.messages.last_mut() {
+            for tc in &mut last.tool_calls {
+                if tc.status == ToolCallStatus::Running {
+                    tc.status = ToolCallStatus::Error("Cancelled by user".to_string());
+                }
+            }
+            if last.role == "assistant" {
+                if !last.content.is_empty() {
+                    last.content.push_str("\n\n*[Cancelled by user]*");
+                } else {
+                    last.content = "*[Cancelled by user]*".to_string();
+                }
+            } else {
+                self.messages.push(ChatMessage {
+                    role: "assistant".to_string(),
+                    content: "*[Cancelled by user]*".to_string(),
+                    timestamp: current_timestamp(),
+                    tool_calls: Vec::new(),
+                    token_usage: None,
+                });
+            }
+        }
+    }
+
     pub fn clear_conversation(&mut self) {
+        if let Some(h) = self.task.take() {
+            h.abort();
+        }
         let content = if self.context_name.is_empty() {
             "Hello! I am your SRElens AI Assistant. I can analyze pod crashes, diagnose cluster events, inspect configurations, and suggest Kubernetes remediation actions. Type your prompt below:".to_string()
         } else {
@@ -479,6 +681,7 @@ impl AssistantViewState {
             token_usage: None,
         }];
         self.input.clear();
+        self.input_cursor = None;
         self.is_busy = false;
         self.busy_status.clear();
         self.busy_start = None;
@@ -513,7 +716,11 @@ impl AssistantViewState {
 
             md.push_str(&format!("{}{}\n\n", role_label, time_str));
 
-            let visible_tools: Vec<_> = msg.tool_calls.iter().filter(|tc| !is_internal_meta_tool(&tc.tool)).collect();
+            let visible_tools: Vec<_> = msg
+                .tool_calls
+                .iter()
+                .filter(|tc| !is_internal_meta_tool(&tc.tool))
+                .collect();
 
             if !visible_tools.is_empty() {
                 md.push_str("#### Executed Tools:\n");
@@ -523,7 +730,10 @@ impl AssistantViewState {
                         ToolCallStatus::Success => "ok",
                         ToolCallStatus::Error(e) => e.as_str(),
                     };
-                    md.push_str(&format!("- `{}`: `{}` [{}]\n", tc.tool, tc.args_summary, status));
+                    md.push_str(&format!(
+                        "- `{}`: `{}` [{}]\n",
+                        tc.tool, tc.args_summary, status
+                    ));
                 }
                 md.push_str("\n");
             }
@@ -534,13 +744,16 @@ impl AssistantViewState {
             }
 
             if let Some(usage) = &msg.token_usage {
-                let duration_str = usage.duration_ms.map(|ms| {
-                    if ms >= 1000 {
-                        format!("{:.1}s", ms as f64 / 1000.0)
-                    } else {
-                        format!("{}ms", ms)
-                    }
-                }).unwrap_or_default();
+                let duration_str = usage
+                    .duration_ms
+                    .map(|ms| {
+                        if ms >= 1000 {
+                            format!("{:.1}s", ms as f64 / 1000.0)
+                        } else {
+                            format!("{}ms", ms)
+                        }
+                    })
+                    .unwrap_or_default();
 
                 let cached_str = if usage.cached_tokens > 0 {
                     format!(" • {} cached", format_number(usage.cached_tokens))
@@ -570,7 +783,12 @@ impl AssistantViewState {
         md
     }
 
-    pub fn save_conversation_to_file(&self, provider_name: &str, model_name: &str, custom_path: Option<&str>) -> Result<std::path::PathBuf, String> {
+    pub fn save_conversation_to_file(
+        &self,
+        provider_name: &str,
+        model_name: &str,
+        custom_path: Option<&str>,
+    ) -> Result<std::path::PathBuf, String> {
         let md_content = self.export_to_markdown(provider_name, model_name);
 
         let path = if let Some(p) = custom_path {
@@ -579,12 +797,17 @@ impl AssistantViewState {
             let base_dir = dirs::config_dir()
                 .map(|d| d.join("srelens").join("conversations"))
                 .unwrap_or_else(|| std::path::PathBuf::from("srelens_conversations"));
-            std::fs::create_dir_all(&base_dir).map_err(|e| format!("Failed to create export directory: {}", e))?;
-            let filename = format!("srelens_ai_{}.md", chrono::Local::now().format("%Y%m%d_%H%M%S"));
+            std::fs::create_dir_all(&base_dir)
+                .map_err(|e| format!("Failed to create export directory: {}", e))?;
+            let filename = format!(
+                "srelens_ai_{}.md",
+                chrono::Local::now().format("%Y%m%d_%H%M%S")
+            );
             base_dir.join(filename)
         };
 
-        std::fs::write(&path, md_content).map_err(|e| format!("Failed to save conversation: {}", e))?;
+        std::fs::write(&path, md_content)
+            .map_err(|e| format!("Failed to save conversation: {}", e))?;
         Ok(path)
     }
 
@@ -645,13 +868,18 @@ pub fn wrap_line(line: Line<'static>, max_width: usize) -> Vec<Line<'static>> {
 
     // Never wrap box-drawing table rows
     let is_table = line.spans.iter().any(|s| {
-        s.content.contains('│') || s.content.contains('┌') || s.content.contains('└') || s.content.contains('├')
+        s.content.contains('│')
+            || s.content.contains('┌')
+            || s.content.contains('└')
+            || s.content.contains('├')
     });
     if is_table {
         return vec![line];
     }
 
-    let total_width: usize = line.spans.iter()
+    let total_width: usize = line
+        .spans
+        .iter()
         .map(|s| unicode_width::UnicodeWidthStr::width(s.content.as_ref()))
         .sum();
     if total_width <= max_width {
@@ -743,7 +971,10 @@ pub fn wrap_line(line: Line<'static>, max_width: usize) -> Vec<Line<'static>> {
 }
 
 fn highlight_line_selection<'a>(line: &Line<'a>, c_start: usize, c_end: usize) -> Line<'a> {
-    let sel_style = Style::default().bg(Theme::CYAN).fg(Color::Black).add_modifier(Modifier::BOLD);
+    let sel_style = Style::default()
+        .bg(Theme::CYAN)
+        .fg(Color::Black)
+        .add_modifier(Modifier::BOLD);
     let mut new_spans = Vec::new();
     let mut current_col = 0;
 
@@ -786,11 +1017,23 @@ pub fn render_assistant_view(
     let prov = settings.default_provider;
     let prov_name = crate::ai_config::provider_display_name(prov);
     let model = settings.get_model(prov);
-    let token_hint = state.messages.iter().rev().find_map(|m| m.token_usage.as_ref()).map(|u| {
-        format!("⚡ {} tokens, ", format_number(u.total_tokens))
-    }).unwrap_or_default();
-    let tools_hint = if state.expand_tools { "<Ctrl+t> Fold Tools" } else { "<Ctrl+t> Tools" };
-    let copy_hint = if state.selection.is_some() { "<c> Copy Selection" } else { "<c> Copy" };
+    let token_hint = state
+        .messages
+        .iter()
+        .rev()
+        .find_map(|m| m.token_usage.as_ref())
+        .map(|u| format!("⚡ {} tokens, ", format_number(u.total_tokens)))
+        .unwrap_or_default();
+    let tools_hint = if state.expand_tools {
+        "<Ctrl+t> Fold Tools"
+    } else {
+        "<Ctrl+t> Tools"
+    };
+    let copy_hint = if state.selection.is_some() {
+        "<Ctrl+c> Copy Selection"
+    } else {
+        "<Ctrl+c> Copy"
+    };
     let cluster_tag = if !state.context_name.is_empty() {
         format!(" @{} ", state.context_name)
     } else {
@@ -800,39 +1043,84 @@ pub fn render_assistant_view(
         Some(lvl) => format!(" [🦖 CAVEMAN: {}]", lvl.display_name().to_uppercase()),
         None => String::new(),
     };
+    let back_or_cancel = if state.is_busy {
+        "<Ctrl+c> Cancel, <Esc> Back"
+    } else {
+        "<Esc> Back"
+    };
     let title = format!(
-        " SRElens AI Assistant{}{}[{} - {}] [{}{}, {}, <Ctrl+e> Save, <Ctrl+l> Clear, <Ctrl+s> Settings, <Esc> Back] ",
-        cluster_tag, caveman_tag, prov_name, model, token_hint, copy_hint, tools_hint
+        " SRElens AI Assistant{}{}[{} - {}] [{}{}, {}, <Ctrl+o> Save, <Ctrl+l> Clear, <Ctrl+s> Settings, {}] ",
+        cluster_tag, caveman_tag, prov_name, model, token_hint, copy_hint, tools_hint, back_or_cancel
     );
 
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Theme::ACCENT))
-        .title(Span::styled(title, Theme::title()));
+        .border_style(Style::default().fg(Theme::ACCENT));
 
     let inner = block.inner(area);
     f.render_widget(block, area);
 
+    let header_width = (inner.width as usize).saturating_sub(2).max(10);
+    let header_line = Line::from(vec![Span::styled(title, Theme::title())]);
+    let raw_wrapped_header = wrap_line(header_line, header_width);
+    let mut wrapped_header = Vec::new();
+    for (i, mut line) in raw_wrapped_header.into_iter().enumerate() {
+        if i > 0 {
+            let starts_with_space = line
+                .spans
+                .first()
+                .map(|s| s.content.starts_with(' '))
+                .unwrap_or(false);
+            if !starts_with_space {
+                line.spans.insert(0, Span::styled(" ", Theme::title()));
+            }
+        }
+        wrapped_header.push(line);
+    }
+    let header_height = (wrapped_header.len() as u16).clamp(1, 4);
+
+    let split = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(header_height), Constraint::Min(4)])
+        .split(inner);
+    let header_area = split[0];
+    let body_area = split[1];
+    f.render_widget(Paragraph::new(wrapped_header), header_area);
+
     // Calculate dynamic input box height based on wrapped lines
-    let input_inner_width = (inner.width.saturating_sub(2).max(10)) as usize;
-    let input_full_text = format!("{}█", state.input);
+    let input_inner_width = (body_area.width.saturating_sub(2).max(10)) as usize;
+    let cursor_idx = state.cursor_pos();
+    let chars: Vec<char> = state.input.chars().collect();
+    let before: String = chars[..cursor_idx].iter().collect();
+    let after: String = chars[cursor_idx..].iter().collect();
+    let input_full_text = format!("{}█{}", before, after);
+
     let mut input_lines = 0;
     for raw_line in input_full_text.split('\n') {
         let line = Line::from(raw_line.to_string());
         input_lines += wrap_line(line, input_inner_width).len().max(1);
     }
     let input_lines = input_lines.max(1);
-    let max_box_height = (inner.height / 3).clamp(3, 8);
+
+    let before_with_cursor = format!("{}█", before);
+    let mut cursor_row = 0;
+    for raw_line in before_with_cursor.split('\n') {
+        let line = Line::from(raw_line.to_string());
+        cursor_row += wrap_line(line, input_inner_width).len().max(1);
+    }
+    let cursor_row = cursor_row.saturating_sub(1) as u16;
+
+    let max_box_height = (body_area.height / 3).clamp(3, 8);
     let input_box_height = ((input_lines as u16) + 2).min(max_box_height).max(3);
 
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Min(5),    // Messages history
+            Constraint::Min(5),                   // Messages history
             Constraint::Length(1), // Blank separator between chat history and input window
             Constraint::Length(input_box_height), // Dynamic input prompt
         ])
-        .split(inner);
+        .split(body_area);
 
     // 1. Message history
     state.tool_chip_lines.borrow_mut().clear();
@@ -841,14 +1129,27 @@ pub fn render_assistant_view(
 
     for msg in &state.messages {
         let (role_label, role_style) = match msg.role.as_str() {
-            "user" => ("You", Style::default().fg(Theme::CYAN).add_modifier(Modifier::BOLD)),
-            "assistant" => ("SRElens", Style::default().fg(Theme::ACCENT).add_modifier(Modifier::BOLD)),
-            _ => ("System", Style::default().fg(Theme::YELLOW).add_modifier(Modifier::BOLD)),
+            "user" => (
+                "You",
+                Style::default()
+                    .fg(Theme::CYAN)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            "assistant" => (
+                "SRElens",
+                Style::default()
+                    .fg(Theme::ACCENT)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            _ => (
+                "System",
+                Style::default()
+                    .fg(Theme::YELLOW)
+                    .add_modifier(Modifier::BOLD),
+            ),
         };
 
-        let mut header_spans = vec![
-            Span::styled(role_label, role_style),
-        ];
+        let mut header_spans = vec![Span::styled(role_label, role_style)];
 
         if !msg.timestamp.is_empty() {
             header_spans.push(Span::raw(" "));
@@ -862,11 +1163,19 @@ pub fn render_assistant_view(
         rendered_lines.push(Line::from(header_spans));
 
         // 1a. Render tool calls (if any)
-        let visible_tools: Vec<_> = msg.tool_calls.iter().filter(|tc| !is_internal_meta_tool(&tc.tool)).collect();
+        let visible_tools: Vec<_> = msg
+            .tool_calls
+            .iter()
+            .filter(|tc| !is_internal_meta_tool(&tc.tool))
+            .collect();
         if !visible_tools.is_empty() {
             let total_tools = visible_tools.len();
-            let any_running = visible_tools.iter().any(|tc| matches!(tc.status, ToolCallStatus::Running));
-            let any_error = visible_tools.iter().any(|tc| matches!(tc.status, ToolCallStatus::Error(_)));
+            let any_running = visible_tools
+                .iter()
+                .any(|tc| matches!(tc.status, ToolCallStatus::Running));
+            let any_error = visible_tools
+                .iter()
+                .any(|tc| matches!(tc.status, ToolCallStatus::Error(_)));
 
             let (overall_badge, overall_style) = if any_running {
                 ("[⠋ running]", Theme::status_warn())
@@ -879,7 +1188,11 @@ pub fn render_assistant_view(
             // Group consecutive identical tool names (e.g. getObject × 4)
             let mut grouped_names: Vec<(String, usize)> = Vec::new();
             for tc in &visible_tools {
-                let clean = tc.tool.strip_prefix("srelens-k8s.").or_else(|| tc.tool.strip_prefix("k8s_")).unwrap_or(&tc.tool);
+                let clean = tc
+                    .tool
+                    .strip_prefix("srelens-k8s.")
+                    .or_else(|| tc.tool.strip_prefix("k8s_"))
+                    .unwrap_or(&tc.tool);
                 if let Some(last) = grouped_names.last_mut() {
                     if last.0 == clean {
                         last.1 += 1;
@@ -903,17 +1216,39 @@ pub fn render_assistant_view(
             let chip_line = if !state.expand_tools {
                 // Collapsed mode: sleek 1-line chip
                 Line::from(vec![
-                    Span::styled("  ▶ ⚙ ", Style::default().fg(Theme::CYAN).add_modifier(Modifier::BOLD)),
-                    Span::styled(format!("{} tools queried: ", total_tools), Style::default().fg(Theme::DIM)),
+                    Span::styled(
+                        "  ▶ ⚙ ",
+                        Style::default()
+                            .fg(Theme::CYAN)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(
+                        format!("{} tools queried: ", total_tools),
+                        Style::default().fg(Theme::DIM),
+                    ),
                     Span::styled(summary_str, Style::default().fg(Theme::ACCENT)),
                     Span::styled(format!(" {}", overall_badge), overall_style),
-                    Span::styled("  (click or <Ctrl+t> to expand)", Style::default().fg(Theme::DIM)),
+                    Span::styled(
+                        "  (click or <Ctrl+t> to expand)",
+                        Style::default().fg(Theme::DIM),
+                    ),
                 ])
             } else {
                 // Expanded mode: header + compact 1-line chips per tool
                 Line::from(vec![
-                    Span::styled("  ▼ ⚙ ", Style::default().fg(Theme::CYAN).add_modifier(Modifier::BOLD)),
-                    Span::styled(format!("{} tools queried (click or <Ctrl+t> to collapse):", total_tools), Style::default().fg(Theme::DIM)),
+                    Span::styled(
+                        "  ▼ ⚙ ",
+                        Style::default()
+                            .fg(Theme::CYAN)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(
+                        format!(
+                            "{} tools queried (click or <Ctrl+t> to collapse):",
+                            total_tools
+                        ),
+                        Style::default().fg(Theme::DIM),
+                    ),
                     Span::styled(format!(" {}", overall_badge), overall_style),
                 ])
             };
@@ -933,7 +1268,11 @@ pub fn render_assistant_view(
                         ToolCallStatus::Error(_err) => ("[✗ error]", Theme::status_error()),
                     };
 
-                    let clean_name = tc.tool.strip_prefix("srelens-k8s.").or_else(|| tc.tool.strip_prefix("k8s_")).unwrap_or(&tc.tool);
+                    let clean_name = tc
+                        .tool
+                        .strip_prefix("srelens-k8s.")
+                        .or_else(|| tc.tool.strip_prefix("k8s_"))
+                        .unwrap_or(&tc.tool);
                     let arg_preview = if tc.args_summary.len() > 65 {
                         format!("{}...", &tc.args_summary[..62])
                     } else {
@@ -942,7 +1281,12 @@ pub fn render_assistant_view(
 
                     let mut spans = vec![
                         Span::styled("    ⚙ ", Style::default().fg(Theme::CYAN)),
-                        Span::styled(clean_name.to_string(), Style::default().fg(Theme::ACCENT).add_modifier(Modifier::BOLD)),
+                        Span::styled(
+                            clean_name.to_string(),
+                            Style::default()
+                                .fg(Theme::ACCENT)
+                                .add_modifier(Modifier::BOLD),
+                        ),
                     ];
                     if !arg_preview.is_empty() {
                         spans.push(Span::raw(" "));
@@ -969,13 +1313,16 @@ pub fn render_assistant_view(
 
         // 1c. Render token usage footer (if any)
         if let Some(usage) = &msg.token_usage {
-            let duration_str = usage.duration_ms.map(|ms| {
-                if ms >= 1000 {
-                    format!("{:.1}s", ms as f64 / 1000.0)
-                } else {
-                    format!("{}ms", ms)
-                }
-            }).unwrap_or_default();
+            let duration_str = usage
+                .duration_ms
+                .map(|ms| {
+                    if ms >= 1000 {
+                        format!("{:.1}s", ms as f64 / 1000.0)
+                    } else {
+                        format!("{}ms", ms)
+                    }
+                })
+                .unwrap_or_default();
 
             let cached_str = if usage.cached_tokens > 0 {
                 format!(" • {} cached", format_number(usage.cached_tokens))
@@ -990,7 +1337,12 @@ pub fn render_assistant_view(
             };
 
             let usage_line = Line::from(vec![
-                Span::styled("  ⚡ ", Style::default().fg(Theme::YELLOW).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    "  ⚡ ",
+                    Style::default()
+                        .fg(Theme::YELLOW)
+                        .add_modifier(Modifier::BOLD),
+                ),
                 Span::styled(
                     format!(
                         "{} tokens ({} prompt, {} completion{}){}",
@@ -1000,7 +1352,9 @@ pub fn render_assistant_view(
                         cached_str,
                         duration_badge
                     ),
-                    Style::default().fg(Theme::DIM).add_modifier(Modifier::ITALIC),
+                    Style::default()
+                        .fg(Theme::DIM)
+                        .add_modifier(Modifier::ITALIC),
                 ),
             ]);
             let wrapped_usage = wrap_line(usage_line, content_width);
@@ -1013,10 +1367,7 @@ pub fn render_assistant_view(
     if state.is_busy {
         let frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
         let spinner = frames[state.spinner_frame % frames.len()];
-        let elapsed_secs = state
-            .busy_start
-            .map(|t| t.elapsed().as_secs())
-            .unwrap_or(0);
+        let elapsed_secs = state.busy_start.map(|t| t.elapsed().as_secs()).unwrap_or(0);
 
         let status_text = if state.busy_status.is_empty() {
             "Consulting AI provider & cluster state..."
@@ -1025,9 +1376,22 @@ pub fn render_assistant_view(
         };
 
         let busy_line = Line::from(vec![
-            Span::styled(format!("  {} ", spinner), Style::default().fg(Theme::CYAN).add_modifier(Modifier::BOLD)),
-            Span::styled(format!("{} ", status_text), Style::default().fg(Theme::YELLOW).add_modifier(Modifier::BOLD)),
-            Span::styled(format!("({}s elapsed)", elapsed_secs), Style::default().fg(Theme::DIM)),
+            Span::styled(
+                format!("  {} ", spinner),
+                Style::default()
+                    .fg(Theme::CYAN)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!("{} ", status_text),
+                Style::default()
+                    .fg(Theme::YELLOW)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!("({}s elapsed)", elapsed_secs),
+                Style::default().fg(Theme::DIM),
+            ),
         ]);
         let wrapped_busy = wrap_line(busy_line, content_width);
         rendered_lines.extend(wrapped_busy);
@@ -1051,7 +1415,11 @@ pub fn render_assistant_view(
         for (l_idx, line) in rendered_lines.iter_mut().enumerate() {
             if l_idx >= start.line && l_idx <= end.line {
                 let c_start = if l_idx == start.line { start.col } else { 0 };
-                let c_end = if l_idx == end.line { end.col } else { usize::MAX };
+                let c_end = if l_idx == end.line {
+                    end.col
+                } else {
+                    usize::MAX
+                };
                 if c_start < c_end {
                     *line = highlight_line_selection(line, c_start, c_end);
                 }
@@ -1073,19 +1441,36 @@ pub fn render_assistant_view(
     f.render_widget(history_widget, chunks[0]);
 
     // 2. Input box
-    let input_title = if !state.slash_suggestions.is_empty() {
-        " Ask Assistant (⚡ SRE Playbooks: <Tab>/<Enter> Apply, ↑/↓ Select, <Esc> Dismiss) ".to_string()
+    let input_title = if state.is_busy {
+        " Assistant is thinking... (<Ctrl+c> to Cancel, <Esc> to leave it running) ".to_string()
+    } else if !state.slash_suggestions.is_empty() {
+        " Ask Assistant (⚡ SRE Playbooks: <Tab>/<Enter> Apply, ↑/↓ Select, <Esc> Dismiss) "
+            .to_string()
     } else if !state.auto_scroll && effective_scroll < max_scroll {
-        format!(" Ask Assistant (<End> Follow bottom, <PageUp>/<PageDown> Scroll) [Line {}/{}] ", effective_scroll + 1, total_lines)
+        format!(
+            " Ask Assistant (<End> Follow bottom, <PageUp>/<PageDown> Scroll) [Line {}/{}] ",
+            effective_scroll + 1,
+            total_lines
+        )
     } else {
-        " Ask Assistant (Type '/' for SRE Playbooks, ↑/↓ History, <c> Copy, <Ctrl+s> Settings) ".to_string()
+        " Ask Assistant (Type '/' for SRE Playbooks, <Ctrl+Enter> New line, ↑/↓ History, <Ctrl+c> Copy, <Ctrl+s> Settings) ".to_string()
     };
     let input_block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(if !state.slash_suggestions.is_empty() { Theme::ACCENT } else { Theme::CYAN }))
+        .border_style(Style::default().fg(if !state.slash_suggestions.is_empty() {
+            Theme::ACCENT
+        } else {
+            Theme::CYAN
+        }))
         .title(input_title);
     let visible_input_rows = input_box_height.saturating_sub(2);
-    let scroll_y = (input_lines as u16).saturating_sub(visible_input_rows);
+    let scroll_y = if cursor_row >= visible_input_rows {
+        (cursor_row + 1)
+            .saturating_sub(visible_input_rows)
+            .min((input_lines as u16).saturating_sub(visible_input_rows))
+    } else {
+        0
+    };
 
     let input_widget = Paragraph::new(input_full_text)
         .block(input_block)
@@ -1129,7 +1514,10 @@ pub fn render_assistant_view(
                 };
 
                 let row_style = if is_selected {
-                    Style::default().fg(Color::Black).bg(Theme::CYAN).add_modifier(Modifier::BOLD)
+                    Style::default()
+                        .fg(Color::Black)
+                        .bg(Theme::CYAN)
+                        .add_modifier(Modifier::BOLD)
                 } else {
                     Style::default().fg(Theme::FG)
                 };
@@ -1141,7 +1529,9 @@ pub fn render_assistant_view(
                         if is_selected {
                             row_style
                         } else {
-                            Style::default().fg(Theme::CYAN).add_modifier(Modifier::BOLD)
+                            Style::default()
+                                .fg(Theme::CYAN)
+                                .add_modifier(Modifier::BOLD)
                         },
                     ),
                 ];
@@ -1179,7 +1569,9 @@ pub fn render_assistant_view(
             .border_style(Style::default().fg(Theme::ACCENT))
             .title(Span::styled(
                 popup_title,
-                Style::default().fg(Theme::ACCENT).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(Theme::ACCENT)
+                    .add_modifier(Modifier::BOLD),
             ));
 
         let list_widget = List::new(items).block(popup_block);
@@ -1223,7 +1615,7 @@ pub fn format_message_content_with_width(
             if i < lines.len() && lines[i].trim().starts_with("```") {
                 i += 1; // skip closing ```
             }
-            render_code_block(out, lang, &code_lines);
+            render_code_block(out, lang, &code_lines, max_width);
             continue;
         }
 
@@ -1242,15 +1634,15 @@ pub fn format_message_content_with_width(
 
         // 3. Horizontal Rule: --- or *** or ___
         if (trimmed.starts_with("---") || trimmed.starts_with("***") || trimmed.starts_with("___"))
-            && trimmed.chars().all(|c| c == '-' || c == '*' || c == '_' || c.is_whitespace())
+            && trimmed
+                .chars()
+                .all(|c| c == '-' || c == '*' || c == '_' || c.is_whitespace())
             && trimmed.len() >= 3
         {
+            let hr_len = max_width.map(|w| w.saturating_sub(4).max(10)).unwrap_or(72);
             out.push(Line::from(vec![
                 Span::raw("  "),
-                Span::styled(
-                    "────────────────────────────────────────────────────────────────────────",
-                    Style::default().fg(Theme::BORDER),
-                ),
+                Span::styled("─".repeat(hr_len), Style::default().fg(Theme::BORDER)),
             ]));
             i += 1;
             continue;
@@ -1262,11 +1654,15 @@ pub fn format_message_content_with_width(
             out.push(Line::from(""));
             let mut spans = vec![Span::styled(
                 "  ▌ ",
-                Style::default().fg(Theme::ACCENT).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(Theme::ACCENT)
+                    .add_modifier(Modifier::BOLD),
             )];
             spans.extend(parse_inline_markdown_with_base_style(
                 heading_text,
-                Style::default().fg(Theme::ACCENT).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(Theme::ACCENT)
+                    .add_modifier(Modifier::BOLD),
             ));
             out.push(Line::from(spans));
             i += 1;
@@ -1276,11 +1672,15 @@ pub fn format_message_content_with_width(
             out.push(Line::from(""));
             let mut spans = vec![Span::styled(
                 "  ▌ ",
-                Style::default().fg(Theme::CYAN).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(Theme::CYAN)
+                    .add_modifier(Modifier::BOLD),
             )];
             spans.extend(parse_inline_markdown_with_base_style(
                 heading_text,
-                Style::default().fg(Theme::CYAN).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(Theme::CYAN)
+                    .add_modifier(Modifier::BOLD),
             ));
             out.push(Line::from(spans));
             i += 1;
@@ -1289,11 +1689,15 @@ pub fn format_message_content_with_width(
             let heading_text = trimmed[4..].trim();
             let mut spans = vec![Span::styled(
                 "  ● ",
-                Style::default().fg(Theme::YELLOW).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(Theme::YELLOW)
+                    .add_modifier(Modifier::BOLD),
             )];
             spans.extend(parse_inline_markdown_with_base_style(
                 heading_text,
-                Style::default().fg(Theme::YELLOW).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(Theme::YELLOW)
+                    .add_modifier(Modifier::BOLD),
             ));
             out.push(Line::from(spans));
             i += 1;
@@ -1322,23 +1726,34 @@ pub fn format_message_content_with_width(
             ];
             spans.extend(parse_inline_markdown_with_base_style(
                 quote_text,
-                Style::default().fg(Theme::DIM).add_modifier(Modifier::ITALIC),
+                Style::default()
+                    .fg(Theme::DIM)
+                    .add_modifier(Modifier::ITALIC),
             ));
             out.push(Line::from(spans));
             i += 1;
             continue;
         }
 
-        // 6. Bullet lists: - , * , + 
+        // 6. Bullet lists: - , * , +
         let leading_spaces = line.len() - line.trim_start().len();
         if trimmed.starts_with("- ") || trimmed.starts_with("* ") || trimmed.starts_with("+ ") {
             let item_text = &trimmed[2..];
             let bullet_symbol = if leading_spaces >= 2 { "◦ " } else { "• " };
-            let bullet_color = if leading_spaces >= 2 { Theme::YELLOW } else { Theme::CYAN };
+            let bullet_color = if leading_spaces >= 2 {
+                Theme::YELLOW
+            } else {
+                Theme::CYAN
+            };
             let indent = " ".repeat(leading_spaces + 2);
             let mut spans = vec![
                 Span::raw(indent),
-                Span::styled(bullet_symbol, Style::default().fg(bullet_color).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    bullet_symbol,
+                    Style::default()
+                        .fg(bullet_color)
+                        .add_modifier(Modifier::BOLD),
+                ),
             ];
             let normalized_item = ensure_spacing_after_periods(item_text);
             spans.extend(parse_inline_markdown(&normalized_item));
@@ -1347,7 +1762,7 @@ pub fn format_message_content_with_width(
             continue;
         }
 
-        // 7. Numbered lists: 1. , 2. 
+        // 7. Numbered lists: 1. , 2.
         if let Some(dot_pos) = trimmed.find(". ") {
             let prefix = &trimmed[..dot_pos];
             if !prefix.is_empty() && prefix.chars().all(|c| c.is_numeric()) {
@@ -1355,7 +1770,12 @@ pub fn format_message_content_with_width(
                 let indent = " ".repeat(leading_spaces + 2);
                 let mut spans = vec![
                     Span::raw(indent),
-                    Span::styled(format!("{}. ", prefix), Style::default().fg(Theme::YELLOW).add_modifier(Modifier::BOLD)),
+                    Span::styled(
+                        format!("{}. ", prefix),
+                        Style::default()
+                            .fg(Theme::YELLOW)
+                            .add_modifier(Modifier::BOLD),
+                    ),
                 ];
                 let normalized_item = ensure_spacing_after_periods(item_text);
                 spans.extend(parse_inline_markdown(&normalized_item));
@@ -1371,13 +1791,103 @@ pub fn format_message_content_with_width(
     }
 }
 
-fn render_code_block(out: &mut Vec<Line<'static>>, lang: &str, code_lines: &[&str]) {
+fn wrap_code_line(line: &str, width: usize) -> Vec<String> {
+    let width = width.max(10);
+    let total_w = unicode_width::UnicodeWidthStr::width(line);
+    if total_w <= width {
+        return vec![line.to_string()];
+    }
+
+    let leading_spaces = line.len() - line.trim_start().len();
+    let indent_str = &line[..leading_spaces];
+    let content = &line[leading_spaces..];
+
+    let mut result = Vec::new();
+    let mut current_line = indent_str.to_string();
+    let mut current_w = unicode_width::UnicodeWidthStr::width(indent_str);
+
+    // Tokenize content by whitespace and common punctuation delimiters
+    let mut tokens = Vec::new();
+    let mut cur_token = String::new();
+    for ch in content.chars() {
+        cur_token.push(ch);
+        if ch == ' ' || ch == ',' || ch == '/' || ch == '-' || ch == ';' {
+            tokens.push(cur_token.clone());
+            cur_token.clear();
+        }
+    }
+    if !cur_token.is_empty() {
+        tokens.push(cur_token);
+    }
+
+    let cont_indent = if leading_spaces > 0 {
+        indent_str.to_string()
+    } else {
+        "  ".to_string()
+    };
+    let cont_indent_w = unicode_width::UnicodeWidthStr::width(cont_indent.as_str());
+
+    for token in tokens {
+        let token_w = unicode_width::UnicodeWidthStr::width(token.as_str());
+        if current_w + token_w <= width {
+            current_line.push_str(&token);
+            current_w += token_w;
+        } else {
+            if current_w > unicode_width::UnicodeWidthStr::width(indent_str)
+                && !current_line.trim().is_empty()
+            {
+                result.push(current_line);
+                current_line = cont_indent.clone();
+                current_w = cont_indent_w;
+            }
+
+            let token_trimmed = if current_line == cont_indent {
+                token.trim_start()
+            } else {
+                token.as_str()
+            };
+            let token_trimmed_w = unicode_width::UnicodeWidthStr::width(token_trimmed);
+
+            if current_w + token_trimmed_w <= width {
+                current_line.push_str(token_trimmed);
+                current_w += token_trimmed_w;
+            } else {
+                for ch in token_trimmed.chars() {
+                    let ch_w = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(1);
+                    if current_w + ch_w > width && !current_line.trim().is_empty() {
+                        result.push(current_line);
+                        current_line = cont_indent.clone();
+                        current_w = cont_indent_w;
+                    }
+                    current_line.push(ch);
+                    current_w += ch_w;
+                }
+            }
+        }
+    }
+
+    if !current_line.trim().is_empty() || result.is_empty() {
+        result.push(current_line);
+    }
+
+    result
+}
+
+fn render_code_block(
+    out: &mut Vec<Line<'static>>,
+    lang: &str,
+    code_lines: &[&str],
+    max_width: Option<usize>,
+) {
     let border_style = Style::default().fg(Theme::BORDER);
     let lang_display = if lang.is_empty() { "code" } else { lang };
 
+    let box_w = max_width.map(|w| w.saturating_sub(2).max(20)).unwrap_or(67);
+    let inner_w = box_w.saturating_sub(2).max(10);
+
     // Header border: ┌── lang ────────────────────────────────────────
     let header_prefix = format!("── {} ", lang_display);
-    let bar_len = 65usize.saturating_sub(header_prefix.len());
+    let bar_len = (box_w.saturating_sub(2)).saturating_sub(header_prefix.len());
     let top_line = format!("┌{}{}", header_prefix, "─".repeat(bar_len));
     out.push(Line::from(vec![
         Span::raw("  "),
@@ -1386,38 +1896,56 @@ fn render_code_block(out: &mut Vec<Line<'static>>, lang: &str, code_lines: &[&st
 
     // Code lines with prefix "│ "
     for code_line in code_lines {
-        let mut spans = vec![
-            Span::raw("  "),
-            Span::styled("│ ", border_style),
-        ];
-
-        let trimmed_code = code_line.trim_start();
-        if trimmed_code.starts_with('#') || trimmed_code.starts_with("//") {
-            // Comment
-            spans.push(Span::styled(
-                code_line.to_string(),
-                Style::default().fg(Theme::DIM).add_modifier(Modifier::ITALIC),
-            ));
-        } else if trimmed_code.contains(':') && !trimmed_code.starts_with("http") {
-            // YAML / Key-value
-            if let Some(colon_idx) = code_line.find(':') {
-                let key = &code_line[..=colon_idx];
-                let val = &code_line[colon_idx + 1..];
-                spans.push(Span::styled(key.to_string(), Style::default().fg(Theme::CYAN)));
-                spans.push(Span::styled(val.to_string(), Style::default().fg(Theme::FG)));
-            } else {
-                spans.push(Span::styled(code_line.to_string(), Style::default().fg(Theme::FG)));
-            }
-        } else {
-            spans.push(Span::styled(code_line.to_string(), Style::default().fg(Theme::FG)));
+        if code_line.trim().is_empty() {
+            out.push(Line::from(vec![
+                Span::raw("  "),
+                Span::styled("│", border_style),
+            ]));
+            continue;
         }
-        out.push(Line::from(spans));
+
+        let wrapped_sub_lines = wrap_code_line(code_line, inner_w);
+        let trimmed_code = code_line.trim_start();
+        let is_comment = trimmed_code.starts_with('#') || trimmed_code.starts_with("//");
+        let is_kv = trimmed_code.contains(':') && !trimmed_code.starts_with("http");
+
+        for (idx, sub_line) in wrapped_sub_lines.into_iter().enumerate() {
+            let mut spans = vec![Span::raw("  "), Span::styled("│ ", border_style)];
+
+            if is_comment {
+                spans.push(Span::styled(
+                    sub_line,
+                    Style::default()
+                        .fg(Theme::DIM)
+                        .add_modifier(Modifier::ITALIC),
+                ));
+            } else if is_kv && idx == 0 {
+                if let Some(colon_idx) = sub_line.find(':') {
+                    let key = &sub_line[..=colon_idx];
+                    let val = &sub_line[colon_idx + 1..];
+                    spans.push(Span::styled(
+                        key.to_string(),
+                        Style::default().fg(Theme::CYAN),
+                    ));
+                    spans.push(Span::styled(
+                        val.to_string(),
+                        Style::default().fg(Theme::FG),
+                    ));
+                } else {
+                    spans.push(Span::styled(sub_line, Style::default().fg(Theme::FG)));
+                }
+            } else {
+                spans.push(Span::styled(sub_line, Style::default().fg(Theme::FG)));
+            }
+            out.push(Line::from(spans));
+        }
     }
 
     // Bottom border: └────────────────────────────────────────────────
+    let bot_bar_len = box_w.saturating_sub(1);
     out.push(Line::from(vec![
         Span::raw("  "),
-        Span::styled(format!("└{}", "─".repeat(66)), border_style),
+        Span::styled(format!("└{}", "─".repeat(bot_bar_len)), border_style),
     ]));
 }
 
@@ -1431,7 +1959,9 @@ fn is_table_separator(line: &str) -> bool {
     if !trimmed.starts_with('|') || !trimmed.ends_with('|') {
         return false;
     }
-    trimmed.chars().all(|c| c == '|' || c == '-' || c == ':' || c.is_whitespace())
+    trimmed
+        .chars()
+        .all(|c| c == '|' || c == '-' || c == ':' || c.is_whitespace())
 }
 
 fn parse_cells(line: &str) -> Vec<String> {
@@ -1556,14 +2086,20 @@ pub fn render_markdown_table(
     max_width: Option<usize>,
 ) {
     let raw_headers = parse_cells(header_line);
-    let headers: Vec<String> = raw_headers.into_iter().map(|h| clean_cell_text(&h)).collect();
+    let headers: Vec<String> = raw_headers
+        .into_iter()
+        .map(|h| clean_cell_text(&h))
+        .collect();
     if headers.is_empty() {
         return;
     }
 
     let mut rows: Vec<Vec<String>> = Vec::new();
     for r in row_lines {
-        let cells: Vec<String> = parse_cells(r).into_iter().map(|c| clean_cell_text(&c)).collect();
+        let cells: Vec<String> = parse_cells(r)
+            .into_iter()
+            .map(|c| clean_cell_text(&c))
+            .collect();
         if !cells.is_empty() {
             rows.push(cells);
         }
@@ -1578,7 +2114,8 @@ pub fn render_markdown_table(
     for r in &rows {
         for (c_idx, cell) in r.iter().enumerate() {
             if c_idx < col_widths.len() {
-                col_widths[c_idx] = col_widths[c_idx].max(unicode_width::UnicodeWidthStr::width(cell.as_str()));
+                col_widths[c_idx] =
+                    col_widths[c_idx].max(unicode_width::UnicodeWidthStr::width(cell.as_str()));
             }
         }
     }
@@ -1601,7 +2138,9 @@ pub fn render_markdown_table(
     }
 
     let border_style = Style::default().fg(Theme::BORDER);
-    let header_style = Style::default().fg(Theme::CYAN).add_modifier(Modifier::BOLD);
+    let header_style = Style::default()
+        .fg(Theme::CYAN)
+        .add_modifier(Modifier::BOLD);
 
     // 1. Top border: ┌────────┬────────┐
     let mut top_spans = vec![Span::raw("  "), Span::styled("┌", border_style)];
@@ -1621,12 +2160,20 @@ pub fn render_markdown_table(
         .enumerate()
         .map(|(i, h)| wrap_cell_text(h, col_widths.get(i).copied().unwrap_or(10)))
         .collect();
-    let header_height = header_cells_lines.iter().map(|lines| lines.len()).max().unwrap_or(1);
+    let header_height = header_cells_lines
+        .iter()
+        .map(|lines| lines.len())
+        .max()
+        .unwrap_or(1);
 
     for sub_idx in 0..header_height {
         let mut hdr_spans = vec![Span::raw("  "), Span::styled("│", border_style)];
         for (i, w) in col_widths.iter().enumerate() {
-            let title = header_cells_lines.get(i).and_then(|lines| lines.get(sub_idx)).map(String::as_str).unwrap_or("");
+            let title = header_cells_lines
+                .get(i)
+                .and_then(|lines| lines.get(sub_idx))
+                .map(String::as_str)
+                .unwrap_or("");
             let title_len = unicode_width::UnicodeWidthStr::width(title);
             let pad = w.saturating_sub(title_len);
             hdr_spans.push(Span::raw(" "));
@@ -1659,19 +2206,31 @@ pub fn render_markdown_table(
                 wrap_cell_text(cell_raw, w)
             })
             .collect();
-        let row_height = row_cells_lines.iter().map(|lines| lines.len()).max().unwrap_or(1);
+        let row_height = row_cells_lines
+            .iter()
+            .map(|lines| lines.len())
+            .max()
+            .unwrap_or(1);
 
         for sub_idx in 0..row_height {
             let mut row_spans = vec![Span::raw("  "), Span::styled("│", border_style)];
             for (i, w) in col_widths.iter().enumerate() {
-                let val = row_cells_lines.get(i).and_then(|lines| lines.get(sub_idx)).map(String::as_str).unwrap_or("");
+                let val = row_cells_lines
+                    .get(i)
+                    .and_then(|lines| lines.get(sub_idx))
+                    .map(String::as_str)
+                    .unwrap_or("");
                 let val_len = unicode_width::UnicodeWidthStr::width(val);
                 let pad = w.saturating_sub(val_len);
                 row_spans.push(Span::raw(" "));
 
                 let cell_style = if val.chars().all(|c| c.is_numeric() || c == '.') {
                     Style::default().fg(Theme::YELLOW)
-                } else if val.ends_with("GiB") || val.ends_with("MiB") || val.ends_with("GB") || val.ends_with("MB") {
+                } else if val.ends_with("GiB")
+                    || val.ends_with("MiB")
+                    || val.ends_with("GB")
+                    || val.ends_with("MB")
+                {
                     Style::default().fg(Theme::GREEN)
                 } else if val.contains('/') || val.starts_with("data-") || val.starts_with("gpu-") {
                     Style::default().fg(Theme::CYAN)
@@ -1741,9 +2300,19 @@ pub fn ensure_spacing_after_periods(text: &str) -> String {
     result
 }
 
+fn is_line_blank(line: &Line<'_>) -> bool {
+    line.spans.is_empty() || line.spans.iter().all(|s| s.content.trim().is_empty())
+}
+
+pub fn push_blank_line_if_needed(out: &mut Vec<Line<'static>>) {
+    if !out.is_empty() && !is_line_blank(out.last().unwrap()) {
+        out.push(Line::from(""));
+    }
+}
+
 fn render_text_line(out: &mut Vec<Line<'static>>, line: &str) {
     if line.trim().is_empty() {
-        out.push(Line::from(""));
+        push_blank_line_if_needed(out);
         return;
     }
     let normalized = ensure_spacing_after_periods(line);
@@ -1782,7 +2351,9 @@ pub fn parse_inline_markdown_with_base_style(line: &str, base: Style) -> Vec<Spa
             }
             spans.push(Span::styled(
                 code_buf,
-                Style::default().fg(Theme::CYAN).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(Theme::CYAN)
+                    .add_modifier(Modifier::BOLD),
             ));
             continue;
         }
@@ -1792,7 +2363,9 @@ pub fn parse_inline_markdown_with_base_style(line: &str, base: Style) -> Vec<Spa
             flush_buf(&mut text_buf, &mut spans, base);
             i += 3;
             let mut inner = String::new();
-            while i + 2 < chars.len() && !(chars[i] == '*' && chars[i + 1] == '*' && chars[i + 2] == '*') {
+            while i + 2 < chars.len()
+                && !(chars[i] == '*' && chars[i + 1] == '*' && chars[i + 2] == '*')
+            {
                 inner.push(chars[i]);
                 i += 1;
             }
@@ -1801,7 +2374,8 @@ pub fn parse_inline_markdown_with_base_style(line: &str, base: Style) -> Vec<Spa
             }
             spans.push(Span::styled(
                 inner,
-                base.add_modifier(Modifier::BOLD | Modifier::ITALIC).fg(Theme::YELLOW),
+                base.add_modifier(Modifier::BOLD | Modifier::ITALIC)
+                    .fg(Theme::YELLOW),
             ));
             continue;
         }
@@ -1837,10 +2411,7 @@ pub fn parse_inline_markdown_with_base_style(line: &str, base: Style) -> Vec<Spa
             if i < chars.len() && chars[i] == '*' {
                 i += 1; // skip closing *
             }
-            spans.push(Span::styled(
-                inner,
-                base.add_modifier(Modifier::ITALIC),
-            ));
+            spans.push(Span::styled(inner, base.add_modifier(Modifier::ITALIC)));
             continue;
         }
 
@@ -1849,14 +2420,18 @@ pub fn parse_inline_markdown_with_base_style(line: &str, base: Style) -> Vec<Spa
             if let Some(close_bracket) = chars[i + 1..].iter().position(|&c| c == ']') {
                 let bracket_end = i + 1 + close_bracket;
                 if bracket_end + 1 < chars.len() && chars[bracket_end + 1] == '(' {
-                    if let Some(close_paren) = chars[bracket_end + 2..].iter().position(|&c| c == ')') {
+                    if let Some(close_paren) =
+                        chars[bracket_end + 2..].iter().position(|&c| c == ')')
+                    {
                         let paren_end = bracket_end + 2 + close_paren;
                         flush_buf(&mut text_buf, &mut spans, base);
                         let label: String = chars[i + 1..bracket_end].iter().collect();
                         let url: String = chars[bracket_end + 2..paren_end].iter().collect();
                         spans.push(Span::styled(
                             label,
-                            Style::default().fg(Theme::CYAN).add_modifier(Modifier::UNDERLINED),
+                            Style::default()
+                                .fg(Theme::CYAN)
+                                .add_modifier(Modifier::UNDERLINED),
                         ));
                         spans.push(Span::styled(
                             format!(" ({})", url),
@@ -1961,8 +2536,20 @@ All nodes nominal.";
             .join("\n");
 
         for l in &lines {
-            let line_w: usize = l.spans.iter().map(|s| unicode_width::UnicodeWidthStr::width(s.content.as_ref())).sum();
-            assert!(line_w <= 90, "line exceeded 90 chars: '{}' (width {})", l.spans.iter().map(|s| s.content.as_ref()).collect::<String>(), line_w);
+            let line_w: usize = l
+                .spans
+                .iter()
+                .map(|s| unicode_width::UnicodeWidthStr::width(s.content.as_ref()))
+                .sum();
+            assert!(
+                line_w <= 90,
+                "line exceeded 90 chars: '{}' (width {})",
+                l.spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>(),
+                line_w
+            );
         }
 
         assert!(text_dump.contains("trivago"));
@@ -2007,13 +2594,71 @@ Done.";
     }
 
     #[test]
+    fn test_format_message_content_with_long_code_block_wrapping() {
+        let content = "\
+Events: FailedScheduling from optimize-scheduler:
+```code
+0/20 nodes are available: 1 node(s) were unschedulable, 11 node(s) didn't match Pod's node affinity/selector, 2 Insufficient cpu, 2 node(s) had untolerated taint(s), 6 Insufficient memory.
+```";
+
+        let mut lines = Vec::new();
+        format_message_content_with_width(&mut lines, content, Some(80));
+
+        for l in &lines {
+            let line_w: usize = l
+                .spans
+                .iter()
+                .map(|s| unicode_width::UnicodeWidthStr::width(s.content.as_ref()))
+                .sum();
+            assert!(
+                line_w <= 80,
+                "line exceeded 80 chars: '{}' (width {})",
+                l.spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>(),
+                line_w
+            );
+        }
+
+        let code_box_lines: Vec<String> = lines
+            .iter()
+            .map(|l| {
+                l.spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<Vec<_>>()
+                    .join("")
+            })
+            .filter(|s| s.contains('│'))
+            .collect();
+
+        // Ensure the long event wrapped across multiple boxed lines
+        assert!(
+            code_box_lines.len() >= 3,
+            "expected at least 3 wrapped lines for long event, got {}",
+            code_box_lines.len()
+        );
+        for line in &code_box_lines {
+            assert!(
+                line.starts_with("  │ "),
+                "each wrapped code line must maintain left border prefix, got: '{}'",
+                line
+            );
+        }
+    }
+
+    #[test]
     fn test_inline_markdown_rendering() {
         let line = "In the current context `data-processing-prod-eu-dus1`, **4 of 32 nodes** advertise a GPU.";
         let spans = parse_inline_markdown(line);
         let text_dump: String = spans.iter().map(|s| s.content.as_ref()).collect();
 
         // Ensure backticks and asterisks are stripped
-        assert_eq!(text_dump, "In the current context data-processing-prod-eu-dus1, 4 of 32 nodes advertise a GPU.");
+        assert_eq!(
+            text_dump,
+            "In the current context data-processing-prod-eu-dus1, 4 of 32 nodes advertise a GPU."
+        );
         assert!(!text_dump.contains('`'));
         assert!(!text_dump.contains('*'));
     }
@@ -2067,31 +2712,46 @@ Done.";
     fn test_ensure_spacing_after_periods() {
         let input = "deployed.HAMi is running. Next doing.ArgoCD owns it. GPUs.I have";
         let output = ensure_spacing_after_periods(input);
-        assert_eq!(output, "deployed. HAMi is running. Next doing. ArgoCD owns it. GPUs. I have");
+        assert_eq!(
+            output,
+            "deployed. HAMi is running. Next doing. ArgoCD owns it. GPUs. I have"
+        );
 
         // Code spans preserved
         let code_input = "Use `pod.Status` to inspect.";
-        assert_eq!(ensure_spacing_after_periods(code_input), "Use `pod.Status` to inspect.");
+        assert_eq!(
+            ensure_spacing_after_periods(code_input),
+            "Use `pod.Status` to inspect."
+        );
 
         // Domain names and versions preserved
         let domain_input = "Visit https://srelens.io or v1.31.7 with 10.240.0.1";
-        assert_eq!(ensure_spacing_after_periods(domain_input), "Visit https://srelens.io or v1.31.7 with 10.240.0.1");
+        assert_eq!(
+            ensure_spacing_after_periods(domain_input),
+            "Visit https://srelens.io or v1.31.7 with 10.240.0.1"
+        );
 
         // Abbreviations preserved
         let abbrev_input = "Made in the U.S.A. today.";
-        assert_eq!(ensure_spacing_after_periods(abbrev_input), "Made in the U.S.A. today.");
+        assert_eq!(
+            ensure_spacing_after_periods(abbrev_input),
+            "Made in the U.S.A. today."
+        );
     }
 
     #[test]
-    fn test_append_stream_chunk_spacing() {
+    fn test_append_stream_chunk_preserves_tokens_and_handles_boundaries() {
         let mut state = AssistantViewState::new();
         state.add_user_message("check cluster".to_string());
-        state.append_stream_chunk("I'll query the cluster and how it's deployed.");
-        // Appending chunk starting with capital letter after a period adds space
-        state.append_stream_chunk("HAMi is running in hami-system.");
+        state.append_stream_chunk("Version v1.31.");
+        state.append_stream_chunk("7 is deployed.");
+        state.append_stream_chunk(" Visit https://srelens.");
+        state.append_stream_chunk("io for docs.");
+        state.append_stream_chunk(" Run script.");
+        state.append_stream_chunk("sh now.");
         assert_eq!(
             state.messages.last().unwrap().content,
-            "I'll query the cluster and how it's deployed. HAMi is running in hami-system."
+            "Version v1.31.7 is deployed. Visit https://srelens.io for docs. Run script.sh now."
         );
     }
 
@@ -2173,10 +2833,7 @@ Done.";
         state.update_selection(1, 24); // end at "Line 1: Second line with"
         state.finish_selection(1, 24);
         let extracted = state.get_selected_text().unwrap();
-        assert_eq!(
-            extracted,
-            "of assistant reply.\nLine 1: Second line with"
-        );
+        assert_eq!(extracted, "of assistant reply.\nLine 1: Second line with");
 
         // 4. Clear selection
         state.clear_selection();
@@ -2195,12 +2852,17 @@ Done.";
         let wrapped = wrap_line(long, 50);
         assert!(wrapped.len() >= 3);
         for l in &wrapped {
-            let width: usize = l.spans.iter().map(|s| unicode_width::UnicodeWidthStr::width(s.content.as_ref())).sum();
+            let width: usize = l
+                .spans
+                .iter()
+                .map(|s| unicode_width::UnicodeWidthStr::width(s.content.as_ref()))
+                .sum();
             assert!(width <= 50, "wrapped line width {} exceeds 50", width);
         }
 
         // 3. Table rows are preserved intact
-        let table_row = Line::from("│ data-processing-prod-gpu-t4-jt8ld │ gpu-t4 │ 2x T4 (15 GiB each) │");
+        let table_row =
+            Line::from("│ data-processing-prod-gpu-t4-jt8ld │ gpu-t4 │ 2x T4 (15 GiB each) │");
         let wrapped_table = wrap_line(table_row, 30);
         assert_eq!(wrapped_table.len(), 1);
     }
@@ -2225,5 +2887,143 @@ Done.";
         let input_box_height = ((input_lines as u16) + 2).min(max_box_height).max(3);
         assert!(input_box_height >= 5);
         assert!(input_box_height <= 8);
+    }
+
+    #[test]
+    fn test_assistant_cursor_navigation_and_editing() {
+        let mut state = AssistantViewState::new();
+        assert_eq!(state.cursor_pos(), 0);
+
+        // Typing characters
+        state.insert_char('h');
+        state.insert_char('i');
+        assert_eq!(state.input, "hi");
+        assert_eq!(state.cursor_pos(), 2);
+
+        // Left arrow
+        state.move_cursor_left();
+        assert_eq!(state.cursor_pos(), 1);
+
+        // Inserting character in between
+        state.insert_char('a');
+        assert_eq!(state.input, "hai");
+        assert_eq!(state.cursor_pos(), 2);
+
+        // Home
+        state.move_cursor_home();
+        assert_eq!(state.cursor_pos(), 0);
+
+        // Insert at beginning
+        state.insert_char('o');
+        assert_eq!(state.input, "ohai");
+        assert_eq!(state.cursor_pos(), 1);
+
+        // End
+        state.move_cursor_end();
+        assert_eq!(state.cursor_pos(), 4);
+
+        // Right arrow at end stays at end
+        state.move_cursor_right();
+        assert_eq!(state.cursor_pos(), 4);
+
+        // Backspace at end
+        state.backspace();
+        assert_eq!(state.input, "oha");
+        assert_eq!(state.cursor_pos(), 3);
+
+        // Left, then Delete (forward delete)
+        state.move_cursor_left(); // at pos 2 ('a')
+        assert_eq!(state.cursor_pos(), 2);
+        state.delete(); // deletes 'a'
+        assert_eq!(state.input, "oh");
+        assert_eq!(state.cursor_pos(), 2);
+
+        // Insert string
+        state.insert_str(" beautiful world");
+        assert_eq!(state.input, "oh beautiful world");
+
+        // Word navigation
+        state.move_cursor_word_left(); // moves before "world"
+        assert_eq!(state.cursor_pos(), 13);
+        state.move_cursor_word_left(); // moves before "beautiful"
+        assert_eq!(state.cursor_pos(), 3);
+        state.move_cursor_word_right(); // moves after "beautiful "
+        assert_eq!(state.cursor_pos(), 13);
+
+        // Delete word back
+        state.delete_word_back(); // deletes "beautiful "
+        assert_eq!(state.input, "oh world");
+        assert_eq!(state.cursor_pos(), 3);
+
+        // Clear input
+        state.clear_input();
+        assert_eq!(state.input, "");
+        assert_eq!(state.cursor_pos(), 0);
+    }
+
+    #[test]
+    fn test_assistant_history_seeding_from_messages() {
+        let mut state = AssistantViewState::new();
+        // Prompt history is empty, but messages has user messages with whitespace and duplicates
+        state.messages.push(ChatMessage {
+            role: "user".to_string(),
+            content: "  seeded query  ".to_string(),
+            timestamp: "12:00:00".to_string(),
+            tool_calls: Vec::new(),
+            token_usage: None,
+        });
+        state.messages.push(ChatMessage {
+            role: "user".to_string(),
+            content: "seeded query".to_string(),
+            timestamp: "12:00:05".to_string(),
+            tool_calls: Vec::new(),
+            token_usage: None,
+        });
+
+        // Pressing Up seeds prompt_history with trimmed content and deduplicates
+        state.history_up();
+        assert_eq!(state.prompt_history.len(), 1);
+        assert_eq!(state.prompt_history[0], "seeded query");
+        assert_eq!(state.input, "seeded query");
+        assert_eq!(state.cursor_pos(), 12);
+    }
+
+    #[test]
+    fn test_format_message_collapses_consecutive_blank_lines() {
+        let content = "\n\nFirst paragraph.\n\n\n\n\nSecond paragraph.\n\n\n### Heading\n\n\nThird paragraph.\n\n";
+        let mut lines = Vec::new();
+        format_message_content(&mut lines, content);
+
+        let text_dump: String = lines
+            .iter()
+            .map(|l| {
+                l.spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<Vec<_>>()
+                    .join("")
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert_eq!(
+            text_dump,
+            "First paragraph.\n\nSecond paragraph.\n\n  ● Heading\n\nThird paragraph.\n"
+        );
+    }
+
+    #[test]
+    fn test_append_stream_chunk_collapses_excessive_newlines() {
+        let mut state = AssistantViewState::new();
+        state.add_user_message("prompt".to_string());
+        state.append_stream_chunk("Step 1 done.\n\n");
+        state.append_stream_chunk("\n\nStep 2 done.\n\n");
+        state.append_stream_chunk("\n\n\nFinal answer.");
+
+        let last_msg = state.messages.last().unwrap();
+        assert_eq!(
+            last_msg.content,
+            "Step 1 done.\n\nStep 2 done.\n\nFinal answer."
+        );
     }
 }

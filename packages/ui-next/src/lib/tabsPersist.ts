@@ -1,6 +1,9 @@
-import { loadRestoreSession, settingsStorage } from "@srelens/core";
+import { describe } from "./routes";
+import { detailRoute, parseDetailRoute } from "./detailRoute";
+import { loadRestoreSession, scopedSettingsKey, settingsStorage } from "@srelens/core";
 import type { TableSort } from "@srelens/ui-kit";
-import type { Tab, TabsState, Workspace } from "./tabs";
+import type { ClusterStrip, Tab, TabsState, Workspace } from "./tabs";
+import { isPaletteColor } from "./markSymbols";
 
 /**
  * Where the shell's tabs live between launches.
@@ -11,8 +14,12 @@ import type { Tab, TabsState, Workspace } from "./tabs";
  * this can be tested with a Map and no platform at all, the way core's
  * `listContexts` takes its invoker.
  */
-export const STORAGE_KEY = "srelens.next.workspaces";
+export const BASE_STORAGE_KEY = "srelens.next.workspaces";
 export const STORAGE_VERSION = 1;
+
+export function getStorageKey(windowLabel?: string): string {
+  return scopedSettingsKey(BASE_STORAGE_KEY, windowLabel);
+}
 
 export interface Storage {
   getItem(key: string): string | null;
@@ -46,15 +53,64 @@ function parseView(v: unknown): Tab["view"] | undefined {
   return view;
 }
 
+/** Per-cluster namespace selections; one malformed cluster entry costs that entry alone. */
+function parseNamespaces(v: unknown): Tab["namespaces"] | undefined {
+  if (!isRecord(v)) return undefined;
+  return Object.fromEntries(
+    Object.entries(v).filter((entry): entry is [string, string[]] => Array.isArray(entry[1]) && entry[1].every(isString)),
+  );
+}
+
 function parseTab(v: unknown): Tab | null {
   if (!isRecord(v) || !isString(v.id) || !isString(v.route) || !isString(v.title) || !isString(v.kind)) return null;
   const tab: Tab = { id: v.id, route: v.route, title: v.title, kind: v.kind as Tab["kind"] };
   if (isString(v.sub)) tab.sub = v.sub;
+  // An earlier build's detail route had no cluster and showed the rail's — the
+  // cluster its `sub` was last relabelled for. Pin it there (#834), so it comes
+  // back showing what it showed; with no `sub` it follows the rail as before.
+  const detail = parseDetailRoute(tab.route);
+  if (detail && !detail.cluster && tab.sub) {
+    tab.route = detailRoute(detail.kind, detail.namespace, detail.name, { cluster: tab.sub });
+  }
+  // The former Control room route is now app-wide; retain the tab's identity
+  // and pin preference while dropping its obsolete cluster label.
+  if (tab.route === "/") {
+    const home = describe("/");
+    tab.title = home.title;
+    tab.kind = home.kind;
+    delete tab.sub;
+  }
   if (v.preview === true) tab.preview = true;
   if (v.pinned === true) tab.pinned = true;
   const view = parseView(v.view);
   if (view !== undefined) tab.view = view;
+  const namespaces = parseNamespaces(v.namespaces);
+  if (namespaces !== undefined) tab.namespaces = namespaces;
+  if (typeof v.closedAt === "number" && Number.isFinite(v.closedAt)) tab.closedAt = v.closedAt;
   return tab;
+}
+
+/**
+ * The tabs of the clusters not in focus (#908). One cluster's entry that
+ * cannot be read costs that cluster's tabs, not the workspace; an entry for a
+ * cluster the workspace does not have is dropped, as `reconcile` would.
+ */
+function parseShelved(v: unknown, clusters: readonly string[]): Workspace["shelved"] | undefined {
+  if (!isRecord(v)) return undefined;
+  const shelved: Record<string, ClusterStrip> = {};
+  for (const [id, raw] of Object.entries(v)) {
+    if (!clusters.includes(id) || !isRecord(raw) || !Array.isArray(raw.tabs)) continue;
+    const tabs = raw.tabs.map(parseTab).filter((t): t is Tab => t !== null);
+    const closed = Array.isArray(raw.closed) ? raw.closed.map(parseTab).filter((t): t is Tab => t !== null) : [];
+    if (tabs.length === 0 && closed.length === 0) continue;
+    shelved[id] = {
+      tabs,
+      order: Array.isArray(raw.order) ? raw.order.filter(isString) : tabs.map((t) => t.id),
+      activeId: isString(raw.activeId) ? raw.activeId : (tabs[0]?.id ?? ""),
+      closed,
+    };
+  }
+  return Object.keys(shelved).length > 0 ? shelved : undefined;
 }
 
 function parseWorkspace(v: unknown): Workspace | null {
@@ -71,9 +127,17 @@ function parseWorkspace(v: unknown): Workspace | null {
     activeId: v.activeId,
     closed,
   };
+  if (Array.isArray(v.pausedClusters)) ws.pausedClusters = v.pausedClusters.filter(isString).filter((id) => clusters.includes(id));
   // Only a cluster the workspace actually has: the field is an index into
   // `clusters`, and `reconcile` would drop a dangling one anyway.
   if (isString(v.activeCluster) && clusters.includes(v.activeCluster)) ws.activeCluster = v.activeCluster;
+  // Not the cluster in focus: its tabs are the strip itself.
+  const shelved = parseShelved(v.shelved, clusters.filter((id) => id !== ws.activeCluster));
+  if (shelved) ws.shelved = shelved;
+  // Only a palette colour: the chip paints whatever it is handed, and a value
+  // from a hand-edited file or another build's palette is not one this build
+  // can name.
+  if (isPaletteColor(v.color)) ws.color = v.color;
   return ws;
 }
 
@@ -118,19 +182,19 @@ export function parseStoredState(raw: string | null): TabsState | null {
  * write escaped a `setTimeout` and the `beforeunload` listener, where nothing
  * can catch it.
  */
-export function loadTabsState(storage: Storage = settingsStorage, restore: () => boolean = loadRestoreSession): TabsState | null {
+export function loadTabsState(storage: Storage = settingsStorage, restore: () => boolean = loadRestoreSession, windowLabel?: string): TabsState | null {
   if (!restore()) return null;
   try {
-    return parseStoredState(storage.getItem(STORAGE_KEY));
+    return parseStoredState(storage.getItem(getStorageKey(windowLabel)));
   } catch (error) {
     console.error("could not read the saved workspaces", error);
     return null;
   }
 }
 
-export function saveTabsState(state: TabsState, storage: Storage = settingsStorage): void {
+export function saveTabsState(state: TabsState, storage: Storage = settingsStorage, windowLabel?: string): void {
   try {
-    storage.setItem(STORAGE_KEY, JSON.stringify({ version: STORAGE_VERSION, ...state }));
+    storage.setItem(getStorageKey(windowLabel), JSON.stringify({ version: STORAGE_VERSION, ...state }));
   } catch (error) {
     // Best-effort, as `settingsStorage` itself is: losing the tabs of a
     // session is a great deal better than losing the session.
@@ -138,12 +202,12 @@ export function saveTabsState(state: TabsState, storage: Storage = settingsStora
   }
 }
 
-let pending: { state: TabsState; storage: Storage } | null = null;
+let pending: { state: TabsState; storage: Storage; windowLabel?: string } | null = null;
 let timer: ReturnType<typeof setTimeout> | null = null;
 
 /** Save soon, coalescing a burst of changes into one write of the latest. */
-export function scheduleSave(state: TabsState, storage: Storage = settingsStorage, delayMs = 300): void {
-  pending = { state, storage };
+export function scheduleSave(state: TabsState, storage: Storage = settingsStorage, delayMs = 300, windowLabel?: string): void {
+  pending = { state, storage, windowLabel };
   if (timer) clearTimeout(timer);
   timer = setTimeout(flushSave, delayMs);
 }
@@ -155,9 +219,9 @@ export function flushSave(): void {
     timer = null;
   }
   if (!pending) return;
-  const { state, storage } = pending;
+  const { state, storage, windowLabel } = pending;
   pending = null;
-  saveTabsState(state, storage);
+  saveTabsState(state, storage, windowLabel);
 }
 
 /** A debounced save must not lose the last change to a window closing. */

@@ -7,6 +7,8 @@ import { Popover } from "./Popover";
 export interface WorkspaceSummary {
   id: string;
   name: string;
+  /** A CSS colour drawn beside the name. Decorative: the name already identifies the workspace. */
+  color?: string;
   /** How many clusters it holds, and how many tabs are open in it. */
   clusters: number;
   tabs: number;
@@ -21,6 +23,9 @@ export interface WorkspaceSwitcherProps {
   /** Offered under the list when given. */
   onCreate?: () => void;
   createLabel?: string;
+  /** Offered beside "New workspace" when given: where the app lets workspaces be edited. */
+  onManage?: () => void;
+  manageLabel?: string;
   /** Marks the chip — a grid, a mark, whatever the app uses for a workspace. */
   icon?: IconComponent;
   emptyLabel?: string;
@@ -43,6 +48,12 @@ const CloseGlyph: IconComponent = ({ size = 11, className, "aria-hidden": hidden
   </svg>
 );
 
+/** The workspace's colour, when it has one. Hidden from assistive tech: the name beside it says which workspace it is. */
+const Swatch = ({ color }: { color?: string }) =>
+  color ? (
+    <span data-slot="workspace-color" aria-hidden="true" className="h-2 w-2 shrink-0 rounded-full" style={{ background: color }} />
+  ) : null;
+
 /** "2 clusters · 11 tabs", and "1 cluster · 1 tab". */
 function summarize({ clusters, tabs }: WorkspaceSummary): string {
   const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? "" : "s"}`;
@@ -62,7 +73,7 @@ function summarize({ clusters, tabs }: WorkspaceSummary): string {
  * Everything it knew, it now takes. The mock read `useTabs()` and called
  * `switchWorkspace`, `createWorkspace` and `removeWorkspace` straight out of a
  * click; the kit may not hold app state, and a summary of each workspace plus
- * three callbacks is all the panel ever needed.
+ * four callbacks (select, remove, create and manage) is all the panel needs.
  *
  * Removing a workspace is one click, has no undo, and takes every tab in it.
  * Whether to ask first is the caller's — a confirmation this component put up
@@ -78,6 +89,8 @@ export function WorkspaceSwitcher({
   onRemove,
   onCreate,
   createLabel = "New workspace",
+  onManage,
+  manageLabel = "Manage workspaces…",
   icon: Icon,
   emptyLabel = "No workspaces",
   label = "Workspaces",
@@ -95,6 +108,7 @@ export function WorkspaceSwitcher({
       trigger={
         <span className="ws-chip">
           {Icon && <Icon size={12} aria-hidden="true" />}
+          <Swatch color={active?.color} />
           <span className="max-w-[110px] truncate">{active?.name ?? emptyLabel}</span>
           <ChevronGlyph />
         </span>
@@ -125,6 +139,7 @@ export function WorkspaceSwitcher({
                     }}
                   >
                     <OptionCheck checked={current} />
+                    <Swatch color={workspace.color} />
                     <span className="min-w-0 flex-1 text-left">
                       <span className="block truncate">{workspace.name}</span>
                       <span className="path block truncate text-faint">{summarize(workspace)}</span>
@@ -145,18 +160,32 @@ export function WorkspaceSwitcher({
               );
             })
           )}
-          {filled(onCreate ? createLabel : null) && (
-            <div data-slot="workspace-new" className="rule-t mt-1 p-1.5">
-              <button
-                type="button"
-                className="btn w-full justify-center"
-                onClick={() => {
-                  onCreate?.();
-                  close();
-                }}
-              >
-                {createLabel}
-              </button>
+          {(filled(onCreate ? createLabel : null) || onManage) && (
+            <div data-slot="workspace-new" className="rule-t mt-1 flex flex-col gap-1 p-1.5">
+              {filled(onCreate ? createLabel : null) && (
+                <button
+                  type="button"
+                  className="btn w-full justify-center"
+                  onClick={() => {
+                    onCreate?.();
+                    close();
+                  }}
+                >
+                  {createLabel}
+                </button>
+              )}
+              {onManage && (
+                <button
+                  type="button"
+                  className="btn w-full justify-center"
+                  onClick={() => {
+                    onManage();
+                    close();
+                  }}
+                >
+                  {manageLabel}
+                </button>
+              )}
             </div>
           )}
         </>

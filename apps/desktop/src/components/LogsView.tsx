@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { Clock, Download, DownloadCloud, History, Pause, Play, RefreshCw, WrapText } from "lucide-react";
 import { podLogs, podsForSelector } from "@srelens/core";
-import { getObject } from "@srelens/core";
+import { getObject, podContainerChoices } from "@srelens/core";
 import { startLogStream, type LogStream, type LogTarget, type LogStatus } from "@srelens/core";
 import { saveTextFile } from "@srelens/core";
 import { Spinner, Select, IconButton, TextInput, avatarColor } from "../ui";
@@ -56,6 +56,8 @@ interface LogEntry {
   /** Source tag ("pod/container"); empty for a single target. */
   source: string;
   line: string;
+  /** The host cut the line at its limit (#747); said beside it, never in it. */
+  truncated?: true;
 }
 
 /** Classify a klog-style line (I/W/E0629 …) for colourising. */
@@ -198,7 +200,7 @@ export function LogsView({
           .filter((p) => p && !containersByPod[p])
           .map(async (p) => {
             const o = await getObject(context, "Pod", namespace, p);
-            const cs = ((o.object?.spec ?? {}) as { containers?: { name: string }[] }).containers ?? [];
+            const cs = podContainerChoices(o.object).filter((c) => c.kind !== "ephemeral");
             return [p, cs.map((c) => c.name)] as const;
           }),
       );
@@ -301,17 +303,24 @@ export function LogsView({
     setStreamError("");
     setLoading(true);
     setStreamStatus("connecting");
+    const statuses = new Map<string, LogStatus>();
     void startLogStream(
       context,
       namespace,
       targets,
-      (sourceTag, line) => {
-        const next = [...entriesRef.current, { source: sourceTag, line }];
+      (sourceTag, line, truncated) => {
+        const entry: LogEntry = truncated ? { source: sourceTag, line, truncated: true } : { source: sourceTag, line };
+        const next = [...entriesRef.current, entry];
         if (next.length > MAX_LINES) next.splice(0, next.length - MAX_LINES);
         setBuffer(next);
       },
-      (status) => {
-        if (!stopped) setStreamStatus(status);
+      (status, source) => {
+        if (stopped) return;
+        statuses.set(source, status);
+        const values = [...statuses.values()];
+        setStreamStatus(values.includes("reconnecting") ? "reconnecting"
+          : statuses.size < targets.length ? "connecting"
+          : values.every((s) => s === "completed") ? "completed" : "live");
       },
       { timestamps, sinceSeconds, tailLines },
     ).then((s) => {
@@ -515,6 +524,9 @@ export function LogsView({
           {follow && streamStatus === "reconnecting" && (
             <span className="text-amber-600 dark:text-amber-400">reconnecting…</span>
           )}
+          {follow && streamStatus === "completed" && (
+            <span className="text-muted-foreground">completed</span>
+          )}
           {follow && streamStatus === "connecting" && (
             <span className="text-muted-foreground">connecting…</span>
           )}
@@ -576,6 +588,7 @@ export function LogsView({
                     </span>
                   )}
                   {e.line || " "}
+                  {e.truncated && <span className="text-muted-foreground"> [line cut: too long]</span>}
                 </div>
               );
             })}

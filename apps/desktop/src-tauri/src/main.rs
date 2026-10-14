@@ -1,6 +1,8 @@
 // Prevents additional console window on Windows in release, DO NOT REMOVE!!
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod headless_log;
+
 use std::sync::Arc;
 
 use srelens_mcp::auth::TokenStore as _;
@@ -26,6 +28,12 @@ fn main() {
     // Apply the SRELENS_TIMEOUT_SECS override up front so every mode — GUI, MCP
     // stdio, and MCP HTTP — honors it (the GUI can adjust it further at runtime).
     srelens_kube::connect::init_timeout_from_env();
+
+    // A release build has no console (`windows_subsystem` above), in every run
+    // mode, so on Windows each exec plugin kube-rs starts (`aws eks get-token`)
+    // would open a console window of its own (#775). Still single-threaded.
+    #[cfg(not(debug_assertions))]
+    srelens_desktop_lib::hide_exec_plugin_windows();
 
     // Running from a Linux AppImage, keep the bundled GLib from scanning the
     // host's GIO modules (its gvfs modules use symbols the bundled GLib lacks,
@@ -79,11 +87,15 @@ fn main() {
     let allow_destructive = args.iter().any(|a| a == "--mcp-allow-destructive");
     let allow_sensitive_reads = args.iter().any(|a| a == "--mcp-allow-sensitive-reads");
     if args.iter().any(|a| a == "--mcp-stdio") {
+        // Headless: no `tauri_plugin_log`. Install a stderr logger so durability
+        // warnings from `durable::replace` reach the operator.
+        headless_log::init();
         drop(master_password);
         run_mcp_stdio(allow_destructive, allow_sensitive_reads);
         return;
     }
     if let Some(i) = args.iter().position(|a| a == "--mcp-http") {
+        headless_log::init();
         // The next arg is the address unless it's itself a flag (e.g.
         // `--mcp-http --mcp-allow-destructive` with no address given).
         let addr = args
@@ -91,7 +103,16 @@ fn main() {
             .filter(|a| !a.starts_with("--"))
             .cloned()
             .unwrap_or_else(|| "127.0.0.1:8765".into());
-        run_mcp_http(&addr, allow_destructive, allow_sensitive_reads, master_password);
+        // The HTTP transport is loopback-only: a non-loopback address is
+        // refused unless the operator says, in so many words, that they want
+        // the server exposed. Plain HTTP, so the bearer token is then the
+        // only barrier (#607, docs/MCP.md "Security model").
+        let exposure = if args.iter().any(|a| a == "--mcp-expose-http") {
+            srelens_mcp::http::Exposure::Network
+        } else {
+            srelens_mcp::http::Exposure::Loopback
+        };
+        run_mcp_http(&addr, exposure, allow_destructive, allow_sensitive_reads, master_password);
         return;
     }
     drop(master_password);
@@ -141,11 +162,28 @@ const MCP_AUDIT_CAP_BYTES: u64 = 5 * 1024 * 1024;
 
 fn run_mcp_http(
     addr: &str,
+    exposure: srelens_mcp::http::Exposure,
     allow_destructive: bool,
     allow_sensitive_reads: bool,
     master_password: Option<String>,
 ) {
-    let addr: std::net::SocketAddr = addr.parse().expect("invalid --mcp-http address");
+    let addr: std::net::SocketAddr = addr.parse().unwrap_or_else(|_| {
+        eprintln!(
+            "srelens: invalid --mcp-http address {addr:?} (expected host:port, e.g. 127.0.0.1:8765)"
+        );
+        std::process::exit(2);
+    });
+    // Decided before the vault is opened or a token minted: a refused
+    // address should fail with nothing else done. The listener itself is
+    // bound below, in the runtime, and cannot be handed a different address.
+    if let Err(e) = srelens_mcp::http::check_bind_addr(addr, exposure) {
+        eprintln!(
+            "srelens: {e}. To serve on that address anyway, pass --mcp-expose-http: the server \
+             then speaks plain HTTP to anyone who can reach it, with the bearer token as the \
+             only barrier (see docs/MCP.md, \"Security model\")."
+        );
+        std::process::exit(2);
+    }
     let policy = Arc::new(srelens_mcp::policy::FlagGated::new(
         allow_destructive,
         allow_sensitive_reads,
@@ -227,17 +265,36 @@ fn run_mcp_http(
         let cache = srelens_kube::client_cache::ClientCache::new_many(
             srelens_registry::all_kubeconfig_paths(),
         );
-        let registry = srelens_desktop_lib::build_registry_with_paths_and_settings(
+        // Apps' secrets (#543) in the vault this process already opened, and
+        // installed apps' tools (#574).
+        let (registry, app_tools) = srelens_desktop_lib::mcp_registry_for(
             cache.clone(),
             srelens_registry::default_kubeconfig_paths(),
             srelens_desktop_lib::default_settings_path(),
+            Arc::new(srelens_desktop_lib::extension_secrets::VaultSecretStore::with(
+                vault.clone(),
+            )),
         );
-        let server = srelens_mcp::McpServer::new(Arc::new(registry))
+        let audit: Arc<dyn srelens_capability::audit::AuditSink> = Arc::new(
+            srelens_mcp::audit::JsonlAuditLog::new(mcp_audit_path(), MCP_AUDIT_CAP_BYTES),
+        );
+        let registry = Arc::new(registry);
+        let server = srelens_mcp::McpServer::new(registry.clone());
+        let server = match app_tools {
+            Some(tools) => {
+                // Headless: nobody to ask, so a sidecar's writes are all refused (#573).
+                tools.serve_sidecars(srelens_registry::SidecarHost {
+                    registry,
+                    consent: Arc::new(srelens_registry::NoConsent),
+                    audit: audit.clone(),
+                });
+                server.with_app_tools(tools)
+            }
+            None => server,
+        };
+        let server = server
             .with_policy(policy)
-            .with_audit(Arc::new(srelens_mcp::audit::JsonlAuditLog::new(
-                mcp_audit_path(),
-                MCP_AUDIT_CAP_BYTES,
-            )))
+            .with_audit(audit)
             .with_prompts(srelens_mcp::prompts::PromptLibrary::new(Some(
                 mcp_prompts_dir(),
             )))
@@ -245,11 +302,40 @@ fn run_mcp_http(
             .with_watcher(Arc::new(srelens_desktop_lib::mcp_watch::CacheWatcher::new(
                 cache,
             )));
+        // `bind` re-checks the address against `exposure` and refuses a
+        // non-loopback one — the check above only lets us fail before the
+        // vault is touched. A bind failure (port held by the GUI's own
+        // toggle, say) is an error exit, not a silent return.
+        let listener = match srelens_mcp::http::HttpListener::bind(addr, exposure).await {
+            Ok(l) => l,
+            Err(e) => {
+                eprintln!("srelens: could not bind --mcp-http {addr}: {e}");
+                std::process::exit(1);
+            }
+        };
+        // The address actually bound, not the one asked for: a port of 0
+        // resolves only now, and the message must not call an exposed
+        // listener loopback.
+        let bound = listener.local_addr().unwrap_or(addr);
+        let reach = match listener.exposure() {
+            srelens_mcp::http::Exposure::Loopback => "loopback only".to_string(),
+            srelens_mcp::http::Exposure::Network => {
+                let on = if bound.ip().is_unspecified() {
+                    format!("every interface, port {}", bound.port())
+                } else {
+                    bound.to_string()
+                };
+                format!(
+                    "EXPOSED by --mcp-expose-http: plain HTTP on {on}, with the bearer token as \
+                     the only barrier"
+                )
+            }
+        };
         eprintln!(
-            "MCP HTTP listening on http://{addr}/mcp (loopback; gated tools need _confirm plus \
+            "MCP HTTP listening on http://{bound}/mcp ({reach}; gated tools need _confirm plus \
              --mcp-allow-destructive to mutate or --mcp-allow-sensitive-reads to read secrets)"
         );
-        if let Err(e) = srelens_mcp::http::serve_http(server, addr, token).await {
+        if let Err(e) = srelens_mcp::http::serve_http(server, listener, token).await {
             eprintln!("mcp http server error: {e}");
         }
     });
@@ -265,12 +351,15 @@ fn run_serve(addr: &str, data_flag: Option<&str>) {
         .expect("build tokio runtime");
     runtime.block_on(async {
         let factory: srelens_server::RegistryFactory =
-            Arc::new(|cache, paths| srelens_desktop_lib::build_registry_with_paths(cache, paths));
+            Arc::new(srelens_desktop_lib::build_registry_for_user);
         eprintln!("srelens web server listening on http://{addr}");
         eprintln!("srelens data directory: {}", data_dir.display());
-        if let Err(e) =
-            srelens_server::serve(factory, srelens_server::ServerConfig { addr, data_dir }).await
-        {
+        let config = srelens_server::ServerConfig {
+            addr,
+            data_dir,
+            assets: srelens_desktop_lib::web_frontend::assets(),
+        };
+        if let Err(e) = srelens_server::serve(factory, config).await {
             eprintln!("web server error: {e}");
         }
     });
@@ -292,17 +381,41 @@ fn run_mcp_stdio(allow_destructive: bool, allow_sensitive_reads: bool) {
         let cache = srelens_kube::client_cache::ClientCache::new_many(
             srelens_registry::all_kubeconfig_paths(),
         );
-        let registry = srelens_desktop_lib::build_registry_with_paths_and_settings(
+        // Apps' secrets (#543) in the same vault as the GUI, opened only to
+        // keep a secret or to delete one from a vault that exists: listing
+        // apps reports the vault as not open yet rather than opening it, so a
+        // run that stores no secret never touches the keychain. Installed
+        // apps' tools (#574) follow the inventory the GUI writes too: a
+        // change it makes is found within a poll and sent as
+        // `tools/list_changed`.
+        let (registry, app_tools) = srelens_desktop_lib::mcp_registry_for(
             cache.clone(),
             srelens_registry::default_kubeconfig_paths(),
             srelens_desktop_lib::default_settings_path(),
+            Arc::new(srelens_desktop_lib::extension_secrets::VaultSecretStore::opening(
+                mcp_dir(),
+            )),
         );
-        let server = srelens_mcp::McpServer::new(Arc::new(registry))
+        let audit: Arc<dyn srelens_capability::audit::AuditSink> = Arc::new(
+            srelens_mcp::audit::JsonlAuditLog::new(mcp_audit_path(), MCP_AUDIT_CAP_BYTES),
+        );
+        let registry = Arc::new(registry);
+        let server = srelens_mcp::McpServer::new(registry.clone());
+        let server = match app_tools {
+            Some(tools) => {
+                // Headless: nobody to ask, so a sidecar's writes are all refused (#573).
+                tools.serve_sidecars(srelens_registry::SidecarHost {
+                    registry,
+                    consent: Arc::new(srelens_registry::NoConsent),
+                    audit: audit.clone(),
+                });
+                server.with_app_tools(tools)
+            }
+            None => server,
+        };
+        let server = server
             .with_policy(policy)
-            .with_audit(Arc::new(srelens_mcp::audit::JsonlAuditLog::new(
-                mcp_audit_path(),
-                MCP_AUDIT_CAP_BYTES,
-            )))
+            .with_audit(audit)
             .with_prompts(srelens_mcp::prompts::PromptLibrary::new(Some(
                 mcp_prompts_dir(),
             )))

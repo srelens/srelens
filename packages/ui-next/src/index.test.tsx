@@ -46,26 +46,27 @@ describe("NextApp", () => {
   it("renders the window, with a tab strip and a home tab", async () => {
     render(<NextApp onExit={() => null} />);
     expect(await screen.findByRole("tablist")).toBeDefined();
-    expect(screen.getByRole("tab", { name: /Control room/ })).toBeDefined();
+    expect(screen.getByRole("tab", { name: /Home/ })).toBeDefined();
   });
 
   it("the Placeholder's way back to classic is the onExit the app supplied", async () => {
-    // Settings does not exist in this tree yet, so the Placeholder's button is
-    // the only exit — it has to be wired to the app's switch, not to nothing.
+    // Unported routes still offer the host's way back to classic.
     const onExit = vi.fn(() => null);
     render(<NextApp onExit={onExit} />);
     await screen.findByRole("tablist");
+    act(() => openTab("/incidents"));
     await userEvent.click(screen.getByRole("button", { name: /open in classic/i }));
     expect(onExit).toHaveBeenCalledTimes(1);
   });
 
-  it("shows why it could not leave, since there is no toast host here", async () => {
-    // The Toaster lives in the classic tree, so a failure on the way out would
-    // be invisible and the button would look inert. (#314 review)
+  it("shows why it could not leave, at the window root", async () => {
+    // Otherwise the button would look inert. (#314 review) Found by its text:
+    // the window's toasts are alerts too, and boot in jsdom raises one.
     render(<NextApp onExit={() => "storage refused the preference"} />);
     await screen.findByRole("tablist");
+    act(() => openTab("/incidents"));
     await userEvent.click(screen.getByRole("button", { name: /open in classic/i }));
-    expect(screen.getByRole("alert").textContent).toContain("storage refused");
+    expect(screen.getByText(/storage refused/).getAttribute("role")).toBe("alert");
   });
 
   it("keeps the exit error on screen rather than below the fold", async () => {
@@ -76,9 +77,10 @@ describe("NextApp", () => {
     // structure that prevents it is what gets pinned here.
     render(<NextApp onExit={() => "storage refused the preference"} />);
     await screen.findByRole("tablist");
+    act(() => openTab("/incidents"));
     await userEvent.click(screen.getByRole("button", { name: /open in classic/i }));
 
-    const alert = screen.getByRole("alert");
+    const alert = screen.getByText(/storage refused/);
     const container = alert.parentElement;
     expect(container?.className).toMatch(/\bflex\b/);
     expect(container?.className).toMatch(/\bflex-col\b/);
@@ -100,6 +102,7 @@ describe("NextApp", () => {
     // on passing after the way in was deleted.
     render(<NextApp onExit={() => null} />);
     await screen.findByRole("tablist");
+    act(() => openTab("/incidents"));
     await userEvent.click(screen.getByRole("button", { name: /component gallery/i }));
     expect(await screen.findByRole("heading", { name: /design system/i })).toBeDefined();
     // The gallery replaces the window rather than rendering inside it. Asked
@@ -127,7 +130,7 @@ describe("NextApp", () => {
     window.dispatchEvent(new HashChangeEvent("hashchange"));
     await screen.findByRole("tablist");
     expect(screen.getAllByRole("tab").map((t) => t.textContent)).toEqual([
-      expect.stringContaining("Control room"),
+      expect.stringContaining("Home"),
       expect.stringContaining("Pods"),
     ]);
     expect(currentWorkspace().tabs.map((t) => t.id)).toEqual(before);
@@ -170,7 +173,7 @@ describe("NextApp", () => {
     await screen.findByRole("heading", { name: /design system/i });
     expect(windowHost.hidden).toBe(true);
     expect(within(windowHost).queryByRole("tablist", { hidden: true })).toBeNull();
-    expect(windowHost.textContent).toContain("is not in the new design yet");
+    expect(windowHost.textContent).toContain("What needs you, what is running, and where you left off.");
 
     window.location.hash = "";
     window.dispatchEvent(new HashChangeEvent("hashchange"));
@@ -184,11 +187,12 @@ describe("NextApp", () => {
     // Default workspace makes the one context active, so no seeding is needed.
     const onExit = vi.fn(() => null);
     listContexts.mockResolvedValue({
-      contexts: [{ name: "prod", stableId: "prod", cluster: "prod", server: "", isCurrent: false }],
+      contexts: [{ name: "prod", stableId: "prod", key: "prod", cluster: "prod", server: "", isCurrent: false }],
     });
     render(<NextApp onExit={onExit} />);
     await screen.findByRole("tablist");
+    act(() => openTab("/incidents"));
     await userEvent.click(screen.getByRole("button", { name: /open in classic/i }));
-    expect(onExit).toHaveBeenCalledWith("/", "prod");
+    expect(onExit).toHaveBeenCalledWith("/incidents", "prod");
   });
 });

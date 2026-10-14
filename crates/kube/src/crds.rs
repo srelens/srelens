@@ -3,11 +3,11 @@
 
 use std::sync::Arc;
 
-use srelens_capability::{Annotations, Capability, CapabilityError};
 use kube::api::{Api, DynamicObject, ListParams};
 use kube::core::{ApiResource, GroupVersionKind};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use srelens_capability::{Annotations, Capability, CapabilityError};
 
 use crate::client_cache::ClientCache;
 use crate::connect::request_timeout;
@@ -67,7 +67,11 @@ fn chosen_version(spec: &serde_json::Value) -> Option<&serde_json::Value> {
     versions
         .iter()
         .find(|v| v["storage"].as_bool().unwrap_or(false))
-        .or_else(|| versions.iter().find(|v| v["served"].as_bool().unwrap_or(false)))
+        .or_else(|| {
+            versions
+                .iter()
+                .find(|v| v["served"].as_bool().unwrap_or(false))
+        })
         .or_else(|| versions.first())
 }
 
@@ -111,6 +115,9 @@ fn printer_columns(spec: &serde_json::Value) -> Vec<PrinterColumn> {
     let Some(version) = chosen_version(spec) else {
         return Vec::new();
     };
+    version_printer_columns(version)
+}
+fn version_printer_columns(version: &serde_json::Value) -> Vec<PrinterColumn> {
     let Some(columns) = version["additionalPrinterColumns"].as_array() else {
         return Vec::new();
     };
@@ -144,14 +151,122 @@ fn printer_columns(spec: &serde_json::Value) -> Vec<PrinterColumn> {
 ///
 /// Anything absent, null, or not a scalar renders empty — an empty cell reads
 /// better than a blob of JSON.
-fn resolve_json_path(value: &serde_json::Value, path: &str) -> String {
+/// Restricted scalar projection shared by CRD printer columns and host-owned app columns.
+pub fn resolve_json_path(value: &serde_json::Value, path: &str) -> String {
+    match json_path_value(value, path) {
+        Some(serde_json::Value::String(s)) => s.clone(),
+        Some(serde_json::Value::Number(n)) => n.to_string(),
+        Some(serde_json::Value::Bool(b)) => b.to_string(),
+        _ => String::new(),
+    }
+}
+
+/// Why `path` is outside the grammar [`json_path_value`] reads, or `None`
+/// when it is in. For a path taken from a caller: the walker reads anything
+/// it does not recognise as a key, so `[*]` or `..` would silently resolve to
+/// nothing and a present field would be reported absent. Root `.` is in.
+pub fn json_path_problem(path: &str) -> Option<&'static str> {
+    let Some(mut rest) = path.strip_prefix('.') else {
+        return Some("must start with '.'");
+    };
+    if rest.starts_with('.') {
+        return Some("uses '..', which is not supported");
+    }
+    while !rest.is_empty() {
+        if let Some(open) = rest.strip_prefix('[') {
+            let Some(close) = open.find(']') else {
+                return Some("has an unclosed '['");
+            };
+            let inner = open[..close].trim();
+            let quoted = inner.len() >= 2
+                && ((inner.starts_with('\'') && inner.ends_with('\''))
+                    || (inner.starts_with('"') && inner.ends_with('"')));
+            if !(quoted || single_equality(inner) || inner.parse::<usize>().is_ok()) {
+                return Some(
+                    "uses a bracket other than [0], ['key'] or one [?(@.field==\"value\")]; \
+                     wildcards [*], slices, negative indexes and composite or non-equality \
+                     filters are not supported",
+                );
+            }
+            rest = &open[close + 1..];
+        } else {
+            let mut end = rest.len();
+            let mut chars = rest.char_indices();
+            while let Some((index, ch)) = chars.next() {
+                match ch {
+                    '\\' => {
+                        if chars.next().is_none() {
+                            return Some("ends with an unfinished '\\' escape");
+                        }
+                    }
+                    '.' | '[' => {
+                        end = index;
+                        break;
+                    }
+                    ']' => return Some("has a ']' with no '['"),
+                    _ => {}
+                }
+            }
+            rest = &rest[end..];
+        }
+        if let Some(after) = rest.strip_prefix('.') {
+            if after.is_empty() {
+                return Some("ends with '.'");
+            }
+            if after.starts_with('.') {
+                return Some("uses '..', which is not supported");
+            }
+            rest = after;
+        }
+    }
+    None
+}
+
+/// `?(@.field==literal)` with one field and one literal — the only predicate
+/// `Segment::bracket` evaluates. It splits at the first `==`, so a composite
+/// (`&&`, `||`) would compare against the rest of the expression. The field
+/// is read as a path, escapes included, so it is checked as one.
+fn single_equality(inner: &str) -> bool {
+    let Some(expression) = inner.strip_prefix("?(").and_then(|e| e.strip_suffix(')')) else {
+        return false;
+    };
+    let Some((field, literal)) = expression.split_once("==") else {
+        return false;
+    };
+    let (field, literal) = (field.trim(), literal.trim());
+    let plain = |c: char| c.is_ascii_alphanumeric() || "._-/".contains(c);
+    let quoted_with = |q: char| {
+        literal.len() >= 2
+            && literal.starts_with(q)
+            && literal.ends_with(q)
+            && !literal[1..literal.len() - 1].contains(q)
+    };
+    let literal_ok = quoted_with('"')
+        || quoted_with('\'')
+        || (!literal.is_empty() && literal.chars().all(plain));
+    let operator = |c: char| c.is_whitespace() || "&|!<>=()".contains(c);
+    let field_ok = field
+        .strip_prefix('@')
+        .is_some_and(|f| !f.contains(operator) && json_path_problem(f).is_none());
+    field_ok && literal_ok
+}
+
+/// The value a [`resolve_json_path`] path lands on, unrendered — a map or a
+/// list as well as a scalar. `None` when the path is absent or malformed.
+pub fn json_path_value<'v>(
+    value: &'v serde_json::Value,
+    path: &str,
+) -> Option<&'v serde_json::Value> {
     let mut current = value;
     let mut rest = path.trim_start_matches('.');
     while !rest.is_empty() {
         let (segment, remainder) = match rest.strip_prefix('[') {
             Some(open) => {
-                let Some(close) = open.find(']') else { return String::new() };
-                (Segment::bracket(&open[..close]), open[close + 1..].trim_start_matches('.'))
+                let close = open.find(']')?;
+                (
+                    Segment::bracket(&open[..close]),
+                    open[close + 1..].trim_start_matches('.'),
+                )
             }
             None => {
                 // Scan to the next *unescaped* separator. `\.` keeps a literal dot
@@ -177,16 +292,10 @@ fn resolve_json_path(value: &serde_json::Value, path: &str) -> String {
                 (Segment::Key(key), rest[end..].trim_start_matches('.'))
             }
         };
-        let Some(next) = segment.apply(current) else { return String::new() };
-        current = next;
+        current = segment.apply(current)?;
         rest = remainder;
     }
-    match current {
-        serde_json::Value::String(s) => s.clone(),
-        serde_json::Value::Number(n) => n.to_string(),
-        serde_json::Value::Bool(b) => b.to_string(),
-        _ => String::new(),
-    }
+    Some(current)
 }
 
 /// One step of a CRD jsonPath.
@@ -194,7 +303,10 @@ enum Segment {
     Key(String),
     Index(usize),
     /// `[?(@.field=="literal")]` — the first array element that matches.
-    Filter { field: String, literal: String },
+    Filter {
+        field: String,
+        literal: String,
+    },
 }
 
 impl Segment {
@@ -204,7 +316,11 @@ impl Segment {
         if let Some(expression) = trimmed.strip_prefix("?(").and_then(|e| e.strip_suffix(')')) {
             if let Some((left, right)) = expression.split_once("==") {
                 return Segment::Filter {
-                    field: left.trim().trim_start_matches('@').trim_start_matches('.').to_string(),
+                    field: left
+                        .trim()
+                        .trim_start_matches('@')
+                        .trim_start_matches('.')
+                        .to_string(),
                     literal: unquote(right.trim()).to_string(),
                 };
             }
@@ -271,7 +387,9 @@ fn render_column(object: &serde_json::Value, column: &PrinterColumn) -> String {
         return raw;
     }
     match raw.parse::<k8s_openapi::jiff::Timestamp>() {
-        Ok(ts) => crate::humanize_age(Some(&k8s_openapi::apimachinery::pkg::apis::meta::v1::Time(ts))),
+        Ok(ts) => crate::humanize_age(Some(&k8s_openapi::apimachinery::pkg::apis::meta::v1::Time(
+            ts,
+        ))),
         Err(_) => raw,
     }
 }
@@ -285,15 +403,19 @@ pub fn list_crds_capability(cache: Arc<ClientCache>) -> Capability {
         move |input: ListCrdsIn| {
             let cache = cache.clone();
             async move {
-                let client = cache.get(&input.context).await.map_err(CapabilityError::Handler)?;
+                let client = cache
+                    .get(&input.context)
+                    .await
+                    .map_err(CapabilityError::Handler)?;
                 let gvk =
                     GroupVersionKind::gvk("apiextensions.k8s.io", "v1", "CustomResourceDefinition");
                 let ar = ApiResource::from_gvk(&gvk);
                 let api: Api<DynamicObject> = Api::all_with(client, &ar);
-                let list = tokio::time::timeout(request_timeout(), api.list(&ListParams::default()))
-                    .await
-                    .map_err(|_| CapabilityError::Handler("list CRDs timed out".into()))?
-                    .map_err(handler_err)?;
+                let list =
+                    tokio::time::timeout(request_timeout(), api.list(&ListParams::default()))
+                        .await
+                        .map_err(|_| CapabilityError::Handler("list CRDs timed out".into()))?
+                        .map_err(handler_err)?;
 
                 let mut crds: Vec<CrdDescriptor> = list
                     .items
@@ -301,11 +423,21 @@ pub fn list_crds_capability(cache: Arc<ClientCache>) -> Capability {
                     .filter_map(|o| {
                         let spec = &o.data["spec"];
                         let group = spec["group"].as_str().unwrap_or_default().to_string();
-                        let kind = spec["names"]["kind"].as_str().unwrap_or_default().to_string();
-                        let plural = spec["names"]["plural"].as_str().unwrap_or_default().to_string();
-                        let namespaced = spec["scope"].as_str().unwrap_or("Namespaced") == "Namespaced";
+                        let kind = spec["names"]["kind"]
+                            .as_str()
+                            .unwrap_or_default()
+                            .to_string();
+                        let plural = spec["names"]["plural"]
+                            .as_str()
+                            .unwrap_or_default()
+                            .to_string();
+                        let namespaced =
+                            spec["scope"].as_str().unwrap_or("Namespaced") == "Namespaced";
                         let version = pick_version(spec);
-                        if group.is_empty() || kind.is_empty() || plural.is_empty() || version.is_empty()
+                        if group.is_empty()
+                            || kind.is_empty()
+                            || plural.is_empty()
+                            || version.is_empty()
                         {
                             return None;
                         }
@@ -332,6 +464,8 @@ pub fn list_crds_capability(cache: Arc<ClientCache>) -> Capability {
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ListCustomIn {
+    #[serde(default, rename = "useCrdColumns")]
+    pub use_crd_columns: bool,
     pub context: String,
     pub group: String,
     pub version: String,
@@ -344,6 +478,12 @@ pub struct ListCustomIn {
     /// Callers that omit these get just name/namespace/age, as before.
     #[serde(default)]
     pub printer_columns: Vec<PrinterColumn>,
+    /// An app's status rules for this kind (#541), bound by the host from the
+    /// manifest's `statusResolvers`; each row then carries its `status`.
+    /// Evaluated here because this is where the whole object is: the rows
+    /// that leave are summaries.
+    #[serde(default)]
+    pub status_rules: Vec<srelens_capability::status::StatusRule>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
@@ -351,6 +491,10 @@ pub struct ListCustomIn {
 pub struct CustomRow {
     pub name: String,
     pub namespace: String,
+    /// `creationTimestamp` (RFC 3339), so the frontend can derive a LIVE age.
+    /// `age` below is rendered once, when this summary is built, and only
+    /// rebuilt when a watch event arrives — so it goes stale (#405).
+    pub created: Option<String>,
     pub age: String,
     /// Values for the requested printer columns, in the order they were asked
     /// for. Empty when none were requested.
@@ -359,15 +503,31 @@ pub struct CustomRow {
     /// information -- `type: date`, where timestamps 65 and 115 minutes old both
     /// render "1h" and would otherwise tie. Empty where the text sorts fine.
     pub sort_keys: Vec<String>,
+    /// The resolved status, when the request carried status rules.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<srelens_capability::status::ResolvedStatus>,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct ListCustomOut {
+    #[serde(rename = "printerColumns", skip_serializing_if = "Option::is_none")]
+    pub printer_columns: Option<Vec<PrinterColumn>>,
+    #[serde(rename = "columnsError", skip_serializing_if = "Option::is_none")]
+    pub columns_error: Option<String>,
     pub items: Vec<CustomRow>,
+    /// True when the list was cut at [`crate::list_cap::APP_LIST_CAP`] and more
+    /// resources remain on the API server (#609).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub truncated: bool,
 }
 
 /// Build a dynamic ApiResource for an arbitrary CRD GVK + plural.
-pub(crate) fn custom_api_resource(group: &str, version: &str, kind: &str, plural: &str) -> ApiResource {
+pub(crate) fn custom_api_resource(
+    group: &str,
+    version: &str,
+    kind: &str,
+    plural: &str,
+) -> ApiResource {
     let api_version = if group.is_empty() {
         version.to_string()
     } else {
@@ -382,6 +542,105 @@ pub(crate) fn custom_api_resource(group: &str, version: &str, kind: &str, plural
     }
 }
 
+async fn discover_columns(
+    client: kube::Client,
+    group: &str,
+    plural: &str,
+    version: &str,
+) -> Result<Vec<PrinterColumn>, String> {
+    let ar = ApiResource::from_gvk(&GroupVersionKind::gvk(
+        "apiextensions.k8s.io",
+        "v1",
+        "CustomResourceDefinition",
+    ));
+    let api: Api<DynamicObject> = Api::all_with(client, &ar);
+    let crd = tokio::time::timeout(request_timeout(), api.get(&format!("{plural}.{group}")))
+        .await
+        .map_err(|_| "CRD column discovery timed out".to_string())?
+        .map_err(|e| e.to_string())?;
+    columns_for_named_version(&crd.data["spec"], version)
+}
+
+/// Whether a CustomResourceDefinition named `{plural}.{group}` serves `version` of that
+/// group and plural, so a caller can tell a custom resource from a built-in or aggregated
+/// API before reading it. A CRD that exists but does not serve the version is not enough:
+/// the same group and plural at another version may be served by something else.
+/// `Ok(false)` means only that the API server answered and no such CRD serves it; a failed
+/// lookup is an error, never an absence.
+pub async fn custom_resource_serves(
+    client: kube::Client,
+    group: &str,
+    version: &str,
+    plural: &str,
+) -> Result<bool, String> {
+    Ok(
+        custom_resource_first_served(client, group, &[version.to_owned()], plural)
+            .await?
+            .is_some(),
+    )
+}
+
+/// The first of `versions`, in their order, that a CustomResourceDefinition named
+/// `{plural}.{group}` serves for that group and plural: how an app reader that accepts
+/// several versions picks one on this cluster (#547). One lookup answers the whole list.
+/// `Ok(None)` means only that the API server answered and no such CRD serves any of them;
+/// a failed lookup is an error, never an absence.
+pub async fn custom_resource_first_served(
+    client: kube::Client,
+    group: &str,
+    versions: &[String],
+    plural: &str,
+) -> Result<Option<String>, String> {
+    let ar = ApiResource::from_gvk(&GroupVersionKind::gvk(
+        "apiextensions.k8s.io",
+        "v1",
+        "CustomResourceDefinition",
+    ));
+    let api: Api<DynamicObject> = Api::all_with(client, &ar);
+    let found = tokio::time::timeout(request_timeout(), api.get_opt(&format!("{plural}.{group}")))
+        .await
+        .map_err(|_| "CustomResourceDefinition lookup timed out".to_string())?
+        .map_err(|e| e.to_string())?;
+    Ok(found.and_then(|crd| first_served(&crd.data["spec"], group, versions, plural)))
+}
+
+/// The first of `versions` a CRD `spec` serves for this group and plural.
+fn first_served(
+    spec: &serde_json::Value,
+    group: &str,
+    versions: &[String],
+    plural: &str,
+) -> Option<String> {
+    versions
+        .iter()
+        .find(|version| crd_serves(spec, group, version, plural))
+        .cloned()
+}
+/// Whether a CRD `spec` declares this group and plural and serves this version.
+fn crd_serves(spec: &serde_json::Value, group: &str, version: &str, plural: &str) -> bool {
+    spec["group"] == group
+        && spec["names"]["plural"] == plural
+        && spec["versions"].as_array().is_some_and(|versions| {
+            versions
+                .iter()
+                .any(|v| v["name"] == version && v["served"] == true)
+        })
+}
+fn columns_for_named_version(
+    spec: &serde_json::Value,
+    version: &str,
+) -> Result<Vec<PrinterColumn>, String> {
+    let definition = spec["versions"]
+        .as_array()
+        .and_then(|versions| {
+            versions
+                .iter()
+                .find(|v| v["name"] == version && v["served"] == true)
+        })
+        .ok_or_else(|| format!("CRD has no served version {version}"))?;
+    Ok(version_printer_columns(definition))
+}
+
 /// `k8s.listCustomResource` — list instances of a CRD by its GVK + plural.
 pub fn list_custom_resource_capability(cache: Arc<ClientCache>) -> Capability {
     Capability::typed::<ListCustomIn, ListCustomOut, _, _>(
@@ -391,44 +650,237 @@ pub fn list_custom_resource_capability(cache: Arc<ClientCache>) -> Capability {
         move |input: ListCustomIn| {
             let cache = cache.clone();
             async move {
-                let client = cache.get(&input.context).await.map_err(CapabilityError::Handler)?;
-                let ar = custom_api_resource(&input.group, &input.version, &input.kind, &input.plural);
-                let api: Api<DynamicObject> = if input.namespaced && !input.namespace.is_empty() {
-                    Api::namespaced_with(client, &input.namespace, &ar)
-                } else {
-                    Api::all_with(client, &ar)
-                };
-                let list = tokio::time::timeout(request_timeout(), api.list(&ListParams::default()))
+                // Checked before the cluster is asked: a rule list the host
+                // would refuse at install is a bad request, not a column of
+                // "Unknown" rows that look like an answer.
+                if !input.status_rules.is_empty() {
+                    if let Some((path, why)) =
+                        srelens_capability::status::rule_problems(&input.status_rules)
+                            .into_iter()
+                            .next()
+                    {
+                        return Err(CapabilityError::InvalidInput(format!(
+                            "statusRules: {path}: {why}"
+                        )));
+                    }
+                }
+                let client = cache
+                    .get(&input.context)
                     .await
-                    .map_err(|_| CapabilityError::Handler("list custom resource timed out".into()))?
-                    .map_err(handler_err)?;
-                let columns = input.printer_columns;
-                let items = list
-                    .items
+                    .map_err(CapabilityError::Handler)?;
+                let ar =
+                    custom_api_resource(&input.group, &input.version, &input.kind, &input.plural);
+                let api: Api<DynamicObject> = if input.namespaced && !input.namespace.is_empty() {
+                    Api::namespaced_with(client.clone(), &input.namespace, &ar)
+                } else {
+                    Api::all_with(client.clone(), &ar)
+                };
+                // No outer timeout: `list_capped` spends `request_timeout()` on
+                // each page, which is what that budget measures. Wrapping the
+                // walk gave four pages one request's time, and a cluster large
+                // enough to need paging was the one most likely to be cut off.
+                // The error mapping — an API error's own words, a sentence of
+                // ours only for a timeout — is `into_capability_error`'s.
+                let (objects, truncated) =
+                    crate::list_cap::list_capped(&api, ListParams::default())
+                        .await
+                        .map_err(|e| e.into_capability_error("list custom resource"))?;
+                let (columns, columns_error) = if input.use_crd_columns {
+                    match discover_columns(client, &input.group, &input.plural, &input.version)
+                        .await
+                    {
+                        Ok(columns) => (columns, None),
+                        Err(error) => (input.printer_columns, Some(error)),
+                    }
+                } else {
+                    (input.printer_columns, None)
+                };
+                // Cap columns evaluated per row as well as those a binding may
+                // declare (#609) — a CRD can declare more than the manifest cap.
+                // Keep in sync with `MAX_PRINTER_COLUMNS` in plugin-host.
+                const MAX_COLUMNS: usize = 32;
+                let columns: Vec<_> = columns.into_iter().take(MAX_COLUMNS).collect();
+                let printer_columns = input.use_crd_columns.then(|| columns.clone());
+                let items = objects
                     .into_iter()
                     .map(|o| {
-                        let (values, sort_keys) = if columns.is_empty() {
-                            (Vec::new(), Vec::new())
-                        } else {
-                            let object = whole_object(&o);
-                            columns
+                        let object = (!columns.is_empty() || !input.status_rules.is_empty())
+                            .then(|| whole_object(&o));
+                        let (values, sort_keys) = match &object {
+                            Some(object) if !columns.is_empty() => columns
                                 .iter()
-                                .map(|c| (render_column(&object, c), column_sort_key(&object, c)))
-                                .unzip()
+                                .map(|c| (render_column(object, c), column_sort_key(object, c)))
+                                .unzip(),
+                            _ => (Vec::new(), Vec::new()),
                         };
+                        let status = object
+                            .as_ref()
+                            .filter(|_| !input.status_rules.is_empty())
+                            .map(|object| {
+                                srelens_capability::status::resolve_status(
+                                    &input.status_rules,
+                                    object,
+                                )
+                            });
                         CustomRow {
                             name: o.metadata.name.clone().unwrap_or_default(),
                             namespace: o.metadata.namespace.clone().unwrap_or_default(),
+                            created: crate::creation_rfc3339(
+                                o.metadata.creation_timestamp.as_ref(),
+                            ),
                             age: crate::humanize_age(o.metadata.creation_timestamp.as_ref()),
                             columns: values,
                             sort_keys,
+                            status,
                         }
                     })
                     .collect();
-                Ok(ListCustomOut { items })
+                Ok(ListCustomOut {
+                    items,
+                    printer_columns,
+                    columns_error,
+                    truncated,
+                })
             }
         },
     )
+}
+
+/// Host-only join read. Raw resources stay in the broker and only resolved scalar cells
+/// leave `extensions.resolveColumns`; an app's reader capability still returns summaries.
+pub async fn list_custom_resource_join_objects(
+    cache: &ClientCache,
+    context: &str,
+    namespace: &str,
+    group: &str,
+    version: &str,
+    kind: &str,
+    plural: &str,
+    namespaced: bool,
+) -> Result<(Vec<serde_json::Value>, bool), CapabilityError> {
+    let client = cache.get(context).await.map_err(CapabilityError::Handler)?;
+    let ar = custom_api_resource(group, version, kind, plural);
+    let api: Api<DynamicObject> = if namespaced && !namespace.is_empty() {
+        Api::namespaced_with(client, namespace, &ar)
+    } else {
+        Api::all_with(client, &ar)
+    };
+    let (objects, truncated) = crate::list_cap::list_capped(&api, ListParams::default())
+        .await
+        .map_err(|error| error.into_capability_error("list joined custom resources"))?;
+    Ok((objects.iter().map(whole_object).collect(), truncated))
+}
+
+/// Host-only read of a built-in kind's row metadata, for app badges (#541).
+///
+/// `kind` is qualified (`apps/Deployment`, `/Pod`) and must be a built-in kind
+/// this host knows in exactly that group. Only identity, labels, annotations
+/// and owner references are kept: a badge without a join reads its row's
+/// metadata and nothing else, so an app never reaches a spec or a status it
+/// holds no reader for. Secrets are refused outright — their annotation values
+/// are redacted on every ungated read, and a badge must not become a way
+/// around that.
+pub async fn list_builtin_metadata(
+    cache: &ClientCache,
+    context: &str,
+    namespace: &str,
+    kind: &str,
+) -> Result<(Vec<serde_json::Value>, bool), CapabilityError> {
+    let refuse = |why: &str| Err(CapabilityError::InvalidInput(format!("{kind}: {why}")));
+    let Some((group, name)) = kind.split_once('/') else {
+        return refuse("qualify a kind with its API group");
+    };
+    if group.is_empty() && name == "Secret" {
+        return refuse("Secret metadata is never read for an app");
+    }
+    let Some((gvk, namespaced)) = crate::manifest::gvk_for(name) else {
+        return refuse("not a built-in kind this host reads");
+    };
+    if gvk.group != group || gvk.kind != name {
+        return refuse("not a built-in kind this host reads");
+    }
+    let client = cache.get(context).await.map_err(CapabilityError::Handler)?;
+    let resource = ApiResource::from_gvk(&gvk);
+    let api: Api<DynamicObject> = if namespaced && !namespace.is_empty() {
+        Api::namespaced_with(client, namespace, &resource)
+    } else {
+        Api::all_with(client, &resource)
+    };
+    let (objects, truncated) = crate::list_cap::list_capped(&api, ListParams::default())
+        .await
+        .map_err(|error| error.into_capability_error("list built-in resource metadata"))?;
+    let metadata = objects
+        .iter()
+        .map(|object| metadata_of(&resource, &object.metadata, true))
+        .collect();
+    Ok((metadata, truncated))
+}
+
+/// What the host keeps of one built-in object's metadata for an app: identity,
+/// labels, owner references and, when `annotations`, annotations. Never
+/// managed fields, whose `fieldsV1` names every key a Secret holds.
+fn metadata_of(
+    resource: &ApiResource,
+    meta: &kube::api::ObjectMeta,
+    annotations: bool,
+) -> serde_json::Value {
+    // The kind's identity is the host's own, from the GVK it listed, so a
+    // rule can check a reference against the very object.
+    let mut metadata = serde_json::json!({
+        "name": meta.name,
+        "namespace": meta.namespace,
+        "uid": meta.uid,
+        "labels": meta.labels,
+        "ownerReferences": meta.owner_references,
+    });
+    if annotations {
+        metadata["annotations"] = serde_json::json!(meta.annotations);
+    }
+    serde_json::json!({"apiVersion": resource.api_version, "kind": resource.kind, "metadata": metadata})
+}
+
+/// Host-only read of a built-in kind's metadata for resource links (#728): the
+/// target a link names, or the resources whose links name one.
+///
+/// `kind` is qualified and must be a built-in kind this host knows in exactly
+/// that group. The API server is asked for metadata only
+/// (`PartialObjectMetadataList`), so no spec or status is sent, and a
+/// Secret's values never leave it — a link reads a Secret's identity, labels
+/// and owner references, and not its annotations, which the host redacts on
+/// every ungated read. What the host keeps is [`metadata_of`], whatever the
+/// server answered.
+pub async fn list_builtin_link_metadata(
+    cache: &ClientCache,
+    context: &str,
+    namespace: &str,
+    kind: &str,
+) -> Result<(Vec<serde_json::Value>, bool), CapabilityError> {
+    let refuse = |why: &str| Err(CapabilityError::InvalidInput(format!("{kind}: {why}")));
+    let Some((group, name)) = kind.split_once('/') else {
+        return refuse("qualify a kind with its API group");
+    };
+    let Some((gvk, namespaced)) = crate::manifest::gvk_for(name) else {
+        return refuse("not a built-in kind this host reads");
+    };
+    if gvk.group != group || gvk.kind != name {
+        return refuse("not a built-in kind this host reads");
+    }
+    let secret = group.is_empty() && name == "Secret";
+    let client = cache.get(context).await.map_err(CapabilityError::Handler)?;
+    let resource = ApiResource::from_gvk(&gvk);
+    let api: Api<DynamicObject> = if namespaced && !namespace.is_empty() {
+        Api::namespaced_with(client, namespace, &resource)
+    } else {
+        Api::all_with(client, &resource)
+    };
+    let (objects, truncated) = crate::list_cap::list_metadata_capped(&api, ListParams::default())
+        .await
+        .map_err(|error| error.into_capability_error("list built-in resource metadata"))?;
+    let metadata = objects
+        .iter()
+        .map(|object| metadata_of(&resource, &object.metadata, !secret))
+        .collect();
+    Ok((metadata, truncated))
 }
 
 #[cfg(test)]
@@ -440,7 +892,58 @@ mod tests {
     fn capabilities_have_ids() {
         let cache = ClientCache::new(PathBuf::from("/x"));
         assert_eq!(list_crds_capability(cache.clone()).id, "k8s.listCRDs");
-        assert_eq!(list_custom_resource_capability(cache).id, "k8s.listCustomResource");
+        assert_eq!(
+            list_custom_resource_capability(cache).id,
+            "k8s.listCustomResource"
+        );
+    }
+
+    #[tokio::test]
+    async fn capabilities_reject_invalid_and_missing_contexts() {
+        let cache = ClientCache::new(PathBuf::from("/x"));
+
+        // 1. list_crds_capability
+        let list_crds = list_crds_capability(cache.clone());
+        let err = (list_crds.handler)(serde_json::json!({}))
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            srelens_capability::CapabilityError::InvalidInput(_)
+        ));
+
+        let err = (list_crds.handler)(serde_json::json!({ "context": "missing-cluster" }))
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            srelens_capability::CapabilityError::Handler(_)
+        ));
+
+        // 2. list_custom_resource_capability
+        let list_custom = list_custom_resource_capability(cache);
+        let err = (list_custom.handler)(serde_json::json!({}))
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            srelens_capability::CapabilityError::InvalidInput(_)
+        ));
+
+        let err = (list_custom.handler)(serde_json::json!({
+            "context": "missing-cluster",
+            "group": "example.com",
+            "version": "v1",
+            "plural": "widgets",
+            "kind": "Widget",
+            "namespaced": true
+        }))
+        .await
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            srelens_capability::CapabilityError::Handler(_)
+        ));
     }
 
     #[test]
@@ -519,11 +1022,17 @@ mod tests {
     #[test]
     fn resolves_filter_expressions_by_field_equality() {
         assert_eq!(
-            resolve_json_path(&fluxish(), ".status.conditions[?(@.type==\"Ready\")].status"),
+            resolve_json_path(
+                &fluxish(),
+                ".status.conditions[?(@.type==\"Ready\")].status"
+            ),
             "True"
         );
         assert_eq!(
-            resolve_json_path(&fluxish(), ".status.conditions[?(@.type==\"Ready\")].message"),
+            resolve_json_path(
+                &fluxish(),
+                ".status.conditions[?(@.type==\"Ready\")].message"
+            ),
             "Release reconciliation succeeded"
         );
     }
@@ -531,7 +1040,10 @@ mod tests {
     #[test]
     fn filter_expressions_accept_single_quotes_and_spacing() {
         assert_eq!(
-            resolve_json_path(&fluxish(), ".status.conditions[?(@.type == 'Stalled')].status"),
+            resolve_json_path(
+                &fluxish(),
+                ".status.conditions[?(@.type == 'Stalled')].status"
+            ),
             "False"
         );
     }
@@ -539,7 +1051,10 @@ mod tests {
     #[test]
     fn a_filter_matching_nothing_renders_empty() {
         assert_eq!(
-            resolve_json_path(&fluxish(), ".status.conditions[?(@.type==\"Missing\")].status"),
+            resolve_json_path(
+                &fluxish(),
+                ".status.conditions[?(@.type==\"Missing\")].status"
+            ),
             ""
         );
     }
@@ -559,6 +1074,90 @@ mod tests {
         assert_eq!(resolve_json_path(&obj(), ".spec"), "");
     }
 
+    /// The same walk, handing back the JSON it lands on — a whole map or list
+    /// as well as a scalar — for callers that project fields rather than
+    /// render a cell.
+    #[test]
+    fn json_path_value_returns_the_subtree_and_none_when_absent() {
+        assert_eq!(
+            json_path_value(&obj(), ".spec"),
+            Some(&serde_json::json!({ "version": "4.1.2", "nodes": 3, "paused": false }))
+        );
+        assert_eq!(
+            json_path_value(&obj(), ".metadata.labels['app.kubernetes.io/name']"),
+            Some(&serde_json::json!("cassandra"))
+        );
+        assert_eq!(
+            json_path_value(&fluxish(), ".status.conditions[?(@.type==\"Ready\")]"),
+            Some(&fluxish()["status"]["conditions"][1])
+        );
+        assert_eq!(json_path_value(&obj(), ".status.nope"), None);
+        assert_eq!(json_path_value(&obj(), ".spec.ports[0"), None);
+    }
+
+    /// A filter's field is itself a path, escapes included — the walker reads
+    /// it with `resolve_json_path` — so the check takes one too.
+    #[test]
+    fn a_filter_on_an_escaped_key_is_read_and_accepted() {
+        let pod = serde_json::json!({ "spec": { "containers": [
+            { "name": "web", "resources": { "limits": { "cpu": "1" } } },
+            { "name": "trainer", "resources": { "limits": { "nvidia.com/gpu": "1" } } },
+        ]}});
+        let path = r#".spec.containers[?(@.resources.limits.nvidia\.com/gpu=="1")].name"#;
+        assert_eq!(json_path_value(&pod, path), Some(&serde_json::json!("trainer")));
+        assert_eq!(json_path_problem(path), None);
+    }
+
+    /// A path from outside must be one the walker can read, or a present
+    /// field comes back as absent. Every form the walker tests above read is
+    /// in; kubectl forms it does not implement are out, not read as keys.
+    #[test]
+    fn json_path_problem_accepts_what_the_walker_reads_and_refuses_the_rest() {
+        for good in [
+            ".",
+            ".status.health",
+            r".metadata.labels.app\.kubernetes\.io/name",
+            ".metadata.labels['app.kubernetes.io/name']",
+            ".metadata.labels[\"app.kubernetes.io/name\"]",
+            ".status.conditions[?(@.type==\"Ready\")].status",
+            ".status.conditions[?(@.type == 'Stalled')].status",
+            ".status.conditions[?(@.type==Ready)].status",
+            r#".spec.containers[?(@.resources.limits.nvidia\.com/gpu=="1")].name"#,
+            ".spec.ports[1].port",
+        ] {
+            assert_eq!(json_path_problem(good), None, "{good:?}");
+        }
+        for bad in [
+            "status",
+            "/status/allocatable",
+            "{.metadata.name}",
+            "",
+            ".spec.ports[0",
+            ".a][",
+            ".a]",
+            ".spec.containers[*].image",
+            ".spec.containers[-1]",
+            ".spec.containers[0:2]",
+            ".spec.containers[name]",
+            ".status.conditions[?(@.count>1)]",
+            "..image",
+            ".spec..image",
+            // The walker splits at the first `==`, so a composite predicate
+            // would compare against `Ready"&&@.status=="True` and match nothing.
+            ".status.conditions[?(@.type==\"Ready\"&&@.status==\"True\")].status",
+            ".status.conditions[?(@.type==\"Ready\" || @.type==\"Stalled\")]",
+            ".status.conditions[?(@.type!=\"Ready\")]",
+            ".status.conditions[?(@.type && @.status==\"True\")]",
+            ".status.conditions[?(@.type==\"Ready\"&&@.status==True)]",
+            // An unfinished suffix the walker would drop, reading another path.
+            r".metadata.name\",
+            ".metadata.",
+            ".spec.ports[0].",
+        ] {
+            assert!(json_path_problem(bad).is_some(), "{bad:?} must be refused");
+        }
+    }
+
     fn spec_with_columns() -> serde_json::Value {
         serde_json::json!({
             "versions": [{
@@ -573,6 +1172,32 @@ mod tests {
         })
     }
 
+    #[test]
+    fn app_columns_use_the_requested_served_version_and_standard_filters() {
+        let spec = serde_json::json!({"versions":[
+            {"name":"v1","served":true,"additionalPrinterColumns":[{"name":"Source","jsonPath":".spec.sourceRef.name","type":"string"},{"name":"Age","jsonPath":".metadata.creationTimestamp","type":"date"},{"name":"Hidden","jsonPath":".status.secret","priority":1}]},
+            {"name":"v2","served":true,"storage":true,"additionalPrinterColumns":[{"name":"Revision","jsonPath":".status.revision","type":"string"}]},
+            {"name":"v3","served":true},
+            {"name":"v4","served":false}
+        ]});
+        let columns = columns_for_named_version(&spec, "v1").unwrap();
+        assert_eq!(columns.len(), 1);
+        assert_eq!(columns[0].name, "Source");
+        assert_eq!(
+            render_column(
+                &serde_json::json!({"spec":{"sourceRef":{"name":"platform"}}}),
+                &columns[0]
+            ),
+            "platform"
+        );
+        assert_eq!(
+            columns_for_named_version(&spec, "v2").unwrap()[0].name,
+            "Revision"
+        );
+        assert!(columns_for_named_version(&spec, "v3").unwrap().is_empty());
+        assert!(columns_for_named_version(&spec, "v4").is_err());
+        assert!(columns_for_named_version(&spec, "missing").is_err());
+    }
     #[test]
     fn takes_printer_columns_from_the_chosen_version() {
         let cols = printer_columns(&spec_with_columns());
@@ -684,8 +1309,7 @@ mod tests {
                 {"type": "Ready", "status": "True", "message": "Release reconciliation succeeded"},
             ]}
         });
-        let rendered: Vec<String> =
-            columns.iter().map(|c| render_column(&release, c)).collect();
+        let rendered: Vec<String> = columns.iter().map(|c| render_column(&release, c)).collect();
         assert_eq!(rendered, vec!["True", "Release reconciliation succeeded"]);
     }
 
@@ -702,10 +1326,59 @@ mod tests {
         .expect("dynamic object");
         let whole = whole_object(&object);
         assert_eq!(resolve_json_path(&whole, ".kind"), "Cluster");
-        assert_eq!(resolve_json_path(&whole, ".apiVersion"), "db.example.com/v1");
+        assert_eq!(
+            resolve_json_path(&whole, ".apiVersion"),
+            "db.example.com/v1"
+        );
         // The other two sources still resolve.
         assert_eq!(resolve_json_path(&whole, ".metadata.name"), "c1");
         assert_eq!(resolve_json_path(&whole, ".spec.version"), "4.1.2");
+    }
+
+    /// The whole-walk timeout this PR removed, re-created at the capability
+    /// level: three pages that each answer inside the per-request budget but
+    /// together outlast it. `k8s.listCustomResource` completes; a handler that
+    /// wrapped the walk in one `request_timeout()` would have cut it off.
+    #[tokio::test]
+    async fn list_custom_resource_walks_pages_that_together_outlast_one_request_budget() {
+        let _budget = crate::list_cap::test_support::hold_request_timeout(1);
+        let per_page = std::time::Duration::from_millis(450);
+        let widget = |name: &str| {
+            serde_json::json!({"apiVersion":"example.io/v1","kind":"Widget",
+                "metadata":{"name":name,"namespace":"default"}})
+        };
+        let page = |items: Vec<serde_json::Value>, next: Option<&str>| {
+            serde_json::json!({"apiVersion":"example.io/v1","kind":"WidgetList",
+                "metadata":{"continue":next},"items":items})
+        };
+        let (client, uris) = crate::list_cap::test_support::mock_slow_pages(
+            vec![
+                page(vec![widget("w1")], Some("p2")),
+                page(vec![widget("w2")], Some("p3")),
+                page(vec![widget("w3")], None),
+            ],
+            per_page,
+        );
+        let cache = ClientCache::new(PathBuf::from("/x"));
+        cache.preload("fake", client).await;
+        let capability = list_custom_resource_capability(cache);
+
+        let started = std::time::Instant::now();
+        let out = (capability.handler)(serde_json::json!({
+            "context": "fake", "group": "example.io", "version": "v1",
+            "plural": "widgets", "kind": "Widget", "namespaced": false
+        }))
+        .await
+        .expect("every page answered inside the per-request budget");
+
+        assert!(
+            started.elapsed() > crate::connect::request_timeout(),
+            "the walk must have outlasted one request's budget to prove anything"
+        );
+        // A false `truncated` is omitted on the wire (`skip_serializing_if`).
+        assert_ne!(out["truncated"], true, "{out}");
+        assert_eq!(out["items"].as_array().map(Vec::len), Some(3), "{out}");
+        assert_eq!(uris.lock().unwrap().len(), 3);
     }
 
     #[test]
@@ -713,5 +1386,543 @@ mod tests {
         let ar = custom_api_resource("gateway.networking.k8s.io", "v1", "Gateway", "gateways");
         assert_eq!(ar.api_version, "gateway.networking.k8s.io/v1");
         assert_eq!(ar.plural, "gateways");
+    }
+
+    /// A client whose API server answers every request with `status`, recording each path.
+    fn answering(status: u16) -> (kube::Client, Arc<std::sync::Mutex<Vec<String>>>) {
+        let paths = Arc::new(std::sync::Mutex::new(vec![]));
+        let seen = paths.clone();
+        let service = tower::service_fn(move |request: http::Request<kube::client::Body>| {
+            seen.lock().unwrap().push(request.uri().path().to_owned());
+            async move {
+                let body = if status == 200 {
+                    serde_json::json!({"apiVersion":"apiextensions.k8s.io/v1",
+                        "kind":"CustomResourceDefinition",
+                        "metadata":{"name":"applications.argoproj.io"},
+                        "spec":{"group":"argoproj.io","names":{"plural":"applications","kind":"Application"},
+                            "scope":"Namespaced",
+                            "versions":[{"name":"v1alpha1","served":true,"storage":true},
+                                {"name":"v1beta1","served":false,"storage":false}]}})
+                } else {
+                    let reason = if status == 404 {
+                        "NotFound"
+                    } else {
+                        "Forbidden"
+                    };
+                    serde_json::json!({"apiVersion":"v1","kind":"Status","status":"Failure",
+                        "code":status,"reason":reason,"message":"rejected"})
+                };
+                Ok::<_, std::convert::Infallible>(
+                    http::Response::builder()
+                        .status(status)
+                        .header("content-type", "application/json")
+                        .body(kube::client::Body::from(body.to_string().into_bytes()))
+                        .unwrap(),
+                )
+            }
+        });
+        (kube::Client::new(service, "default"), paths)
+    }
+
+    #[tokio::test]
+    async fn join_list_scopes_requests_and_reconstructs_complete_custom_resources() {
+        let object = serde_json::json!({"apiVersion":"example.io/v1","kind":"Widget",
+            "metadata":{"name":"report","namespace":"team","labels":{"target":"api"}},
+            "report":{"critical":3}});
+        let page = serde_json::json!({"apiVersion":"example.io/v1","kind":"WidgetList",
+            "metadata":{},"items":[object]});
+        for (namespace, namespaced, expected_path) in [
+            ("team", true, "/apis/example.io/v1/namespaces/team/widgets"),
+            ("team", false, "/apis/example.io/v1/widgets"),
+        ] {
+            let (client, uris) = crate::list_cap::test_support::mock_slow_pages(
+                vec![page.clone()],
+                std::time::Duration::ZERO,
+            );
+            let cache = ClientCache::new_many(vec![]);
+            cache.preload("fake", client).await;
+            let (objects, truncated) = list_custom_resource_join_objects(
+                &cache,
+                "fake",
+                namespace,
+                "example.io",
+                "v1",
+                "Widget",
+                "widgets",
+                namespaced,
+            )
+            .await
+            .unwrap();
+            assert!(!truncated);
+            assert_eq!(objects.len(), 1);
+            assert_eq!(objects[0]["apiVersion"], "example.io/v1");
+            assert_eq!(objects[0]["kind"], "Widget");
+            assert_eq!(objects[0]["metadata"]["labels"]["target"], "api");
+            assert_eq!(objects[0]["report"]["critical"], 3);
+            assert!(uris.lock().unwrap()[0].starts_with(expected_path));
+        }
+    }
+
+    /// Three Flux Kustomizations as the API server lists them.
+    fn kustomization_page() -> serde_json::Value {
+        let item = |name: &str, suspend: bool, ready: &str, message: &str| {
+            serde_json::json!({"apiVersion":"kustomize.toolkit.fluxcd.io/v1","kind":"Kustomization",
+                "metadata":{"name":name,"namespace":"flux-system"},
+                "spec":{"suspend":suspend},
+                "status":{"conditions":[{"type":"Ready","status":ready,"message":message}]}})
+        };
+        serde_json::json!({"apiVersion":"kustomize.toolkit.fluxcd.io/v1","kind":"KustomizationList",
+        "metadata":{},"items":[
+            item("apps", false, "True", "Applied revision: main@sha1:abc"),
+            item("infra", true, "True", "Applied"),
+            item("broken", false, "False", "kustomize build failed"),
+        ]})
+    }
+
+    /// The payload `extensions.read` sends once the host has bound a
+    /// resolver's rules: the caller's camelCase spelling.
+    fn kustomizations_with_rules() -> serde_json::Value {
+        serde_json::json!({
+            "context":"fake","group":"kustomize.toolkit.fluxcd.io","version":"v1",
+            "plural":"kustomizations","kind":"Kustomization","namespaced":true,"namespace":"flux-system",
+            "statusRules":[
+                {"when":[{"jsonPath":".spec.suspend","equals":true}],"status":"suspended","label":"Suspended"},
+                {"when":[{"jsonPath":".status.conditions[?(@.type==\"Ready\")].status","equals":"True"}],
+                 "status":"healthy","label":"Ready"},
+                {"when":[{"jsonPath":".status.conditions[?(@.type==\"Ready\")].status","equals":"False"}],
+                 "status":"error","label":"Not ready","reason":".status.conditions[?(@.type==\"Ready\")].message"}
+            ]
+        })
+    }
+
+    #[tokio::test]
+    async fn a_list_with_status_rules_resolves_each_row_against_the_whole_object() {
+        let (client, _) = crate::list_cap::test_support::mock_slow_pages(
+            vec![kustomization_page()],
+            std::time::Duration::ZERO,
+        );
+        let cache = ClientCache::new_many(vec![]);
+        cache.preload("fake", client).await;
+        let list = list_custom_resource_capability(cache);
+        let out = (list.handler)(kustomizations_with_rules()).await.unwrap();
+        let statuses: Vec<_> = out["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|row| row["status"].clone())
+            .collect();
+        assert_eq!(
+            statuses,
+            vec![
+                serde_json::json!({"status":"healthy","label":"Ready"}),
+                serde_json::json!({"status":"suspended","label":"Suspended"}),
+                serde_json::json!({"status":"error","label":"Not ready","reason":"kustomize build failed"}),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_list_without_status_rules_carries_no_status() {
+        let (client, _) = crate::list_cap::test_support::mock_slow_pages(
+            vec![kustomization_page()],
+            std::time::Duration::ZERO,
+        );
+        let cache = ClientCache::new_many(vec![]);
+        cache.preload("fake", client).await;
+        let mut payload = kustomizations_with_rules();
+        payload.as_object_mut().unwrap().remove("statusRules");
+        let out = (list_custom_resource_capability(cache).handler)(payload)
+            .await
+            .unwrap();
+        assert!(out["items"][0].get("status").is_none(), "{out}");
+    }
+
+    #[tokio::test]
+    async fn status_rules_the_host_would_refuse_are_invalid_input_not_unknown_rows() {
+        let cache = ClientCache::new_many(vec![]);
+        let mut payload = kustomizations_with_rules();
+        payload["statusRules"][0]["when"][0]["jsonPath"] = serde_json::json!(".spec.*");
+        let error = (list_custom_resource_capability(cache).handler)(payload)
+            .await
+            .unwrap_err();
+        assert!(matches!(error, CapabilityError::InvalidInput(_)), "{error}");
+    }
+
+    #[tokio::test]
+    async fn builtin_metadata_is_read_for_a_qualified_kind_and_nothing_else_of_it_is_kept() {
+        let page = serde_json::json!({"apiVersion":"apps/v1","kind":"DeploymentList","metadata":{},
+            "items":[{"apiVersion":"apps/v1","kind":"Deployment",
+                "metadata":{"name":"api","namespace":"team","uid":"u1",
+                    "labels":{"kustomize.toolkit.fluxcd.io/name":"apps"},
+                    "annotations":{"argocd.argoproj.io/tracking-id":"guestbook:apps/Deployment:team/api"}},
+                "spec":{"replicas":3,"template":{"spec":{"containers":[{"name":"api","image":"x"}]}}},
+                "status":{"readyReplicas":3}}]});
+        let (client, uris) =
+            crate::list_cap::test_support::mock_slow_pages(vec![page], std::time::Duration::ZERO);
+        let cache = ClientCache::new_many(vec![]);
+        cache.preload("fake", client).await;
+        let (objects, truncated) = list_builtin_metadata(&cache, "fake", "team", "apps/Deployment")
+            .await
+            .unwrap();
+        assert!(!truncated);
+        assert_eq!(
+            uris.lock().unwrap()[0].split('?').next(),
+            Some("/apis/apps/v1/namespaces/team/deployments")
+        );
+        assert_eq!(objects.len(), 1);
+        assert_eq!(
+            objects[0]["metadata"]["labels"]["kustomize.toolkit.fluxcd.io/name"],
+            "apps"
+        );
+        assert_eq!(objects[0]["metadata"]["uid"], "u1");
+        // The object's own identity, so a rule can hold a reference against
+        // the resource it sits on (an Argo CD tracking id, #541 review).
+        assert_eq!(objects[0]["apiVersion"], "apps/v1");
+        assert_eq!(objects[0]["kind"], "Deployment");
+        assert!(
+            objects[0].get("spec").is_none() && objects[0].get("status").is_none(),
+            "{}",
+            objects[0]
+        );
+    }
+
+    #[tokio::test]
+    async fn builtin_metadata_refuses_secrets_unknown_kinds_and_a_group_that_does_not_match() {
+        let cache = ClientCache::new_many(vec![]);
+        for kind in [
+            "/Secret",
+            "acme.io/Widget",
+            "acme.io/Deployment",
+            "Deployment",
+            "/Nope",
+        ] {
+            let error = list_builtin_metadata(&cache, "fake", "team", kind)
+                .await
+                .err()
+                .unwrap_or_else(|| panic!("{kind} must be refused"));
+            assert!(
+                matches!(error, CapabilityError::InvalidInput(_)),
+                "{kind}: {error}"
+            );
+        }
+    }
+
+    /// A Secret list as a server that ignored the metadata-only request would send it:
+    /// whole objects, values and all.
+    fn secret_list_page() -> serde_json::Value {
+        serde_json::json!({"apiVersion":"v1","kind":"SecretList","metadata":{},
+            "items":[{"apiVersion":"v1","kind":"Secret",
+                "metadata":{"name":"db","namespace":"team","uid":"u-db",
+                    "labels":{"app.kubernetes.io/name":"api"},
+                    "annotations":{"note":"hunter2",
+                        "kubectl.kubernetes.io/last-applied-configuration":
+                            "{\"data\":{\"password\":\"aHVudGVyMg==\"}}"},
+                    "ownerReferences":[{"apiVersion":"external-secrets.io/v1beta1",
+                        "kind":"ExternalSecret","name":"db","uid":"u-es"}],
+                    "managedFields":[{"manager":"kubectl","fieldsV1":{"f:data":{"f:password":{}}}}]},
+                "data":{"password":"aHVudGVyMg=="},
+                "stringData":{"password":"hunter2"},
+                "type":"Opaque"}]})
+    }
+
+    #[tokio::test]
+    async fn link_metadata_asks_for_metadata_only_and_keeps_no_secret_value() {
+        let (client, seen) = crate::test_support::fake_api(|_| secret_list_page());
+        let cache = ClientCache::new_many(vec![]);
+        cache.preload("fake", client).await;
+        let (objects, truncated) = list_builtin_link_metadata(&cache, "fake", "team", "/Secret")
+            .await
+            .unwrap();
+        assert!(!truncated);
+        let request = &seen.lock().unwrap()[0];
+        assert_eq!(request.path, "/api/v1/namespaces/team/secrets");
+        // The API server is asked for metadata alone: it never sends a value.
+        assert!(
+            request.accept.contains("as=PartialObjectMetadataList"),
+            "{}",
+            request.accept
+        );
+        // And had it sent them, none leaves: no data, no stringData, no annotation.
+        let text = serde_json::to_string(&objects).unwrap();
+        for secret in [
+            "hunter2",
+            "aHVudGVyMg==",
+            "password",
+            "last-applied",
+            "note",
+        ] {
+            assert!(!text.contains(secret), "{secret} in {text}");
+        }
+        // What a link needs is kept: identity, labels and owner references.
+        assert_eq!(objects.len(), 1);
+        let metadata = &objects[0]["metadata"];
+        assert_eq!(metadata["name"], "db");
+        assert_eq!(metadata["namespace"], "team");
+        assert_eq!(metadata["uid"], "u-db");
+        assert_eq!(metadata["labels"]["app.kubernetes.io/name"], "api");
+        assert_eq!(metadata["ownerReferences"][0]["uid"], "u-es");
+        assert_eq!(objects[0]["apiVersion"], "v1");
+        assert_eq!(objects[0]["kind"], "Secret");
+    }
+
+    #[tokio::test]
+    async fn link_metadata_keeps_the_annotations_of_any_kind_but_a_secret() {
+        let (client, seen) = crate::test_support::fake_api(|_| {
+            serde_json::json!({"apiVersion":"v1","kind":"ServiceList","metadata":{},
+                "items":[{"apiVersion":"v1","kind":"Service","metadata":{"name":"api",
+                    "namespace":"team","annotations":{"example.io/owner":"web"}},
+                    "spec":{"clusterIP":"10.0.0.1"}}]})
+        });
+        let cache = ClientCache::new_many(vec![]);
+        cache.preload("fake", client).await;
+        let (objects, _) = list_builtin_link_metadata(&cache, "fake", "", "/Service")
+            .await
+            .unwrap();
+        assert_eq!(seen.lock().unwrap()[0].path, "/api/v1/services");
+        assert_eq!(
+            objects[0]["metadata"]["annotations"]["example.io/owner"],
+            "web"
+        );
+        assert!(objects[0].get("spec").is_none(), "{}", objects[0]);
+    }
+
+    #[tokio::test]
+    async fn link_metadata_refuses_a_kind_this_host_does_not_read_in_that_group() {
+        let cache = ClientCache::new_many(vec![]);
+        for kind in [
+            "acme.io/Widget",
+            "acme.io/Secret",
+            "Deployment",
+            "/Nope",
+            "apps/Service",
+        ] {
+            let error = list_builtin_link_metadata(&cache, "fake", "team", kind)
+                .await
+                .err()
+                .unwrap_or_else(|| panic!("{kind} must be refused"));
+            assert!(
+                matches!(error, CapabilityError::InvalidInput(_)),
+                "{kind}: {error}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn join_list_reports_truncation_at_the_shared_list_cap() {
+        let page = |start: usize, next: Option<&str>| {
+            serde_json::json!({
+                "apiVersion":"example.io/v1","kind":"WidgetList",
+                "metadata":{"continue":next},
+                "items":(start..start+500).map(|i| serde_json::json!({
+                    "apiVersion":"example.io/v1","kind":"Widget","metadata":{"name":format!("w{i}")}
+                })).collect::<Vec<_>>(),
+            })
+        };
+        let (client, uris) = crate::list_cap::test_support::mock_slow_pages(
+            vec![
+                page(0, Some("p2")),
+                page(500, Some("p3")),
+                page(1000, Some("p4")),
+                page(1500, Some("p5")),
+            ],
+            std::time::Duration::ZERO,
+        );
+        let cache = ClientCache::new_many(vec![]);
+        cache.preload("fake", client).await;
+        let (objects, truncated) = list_custom_resource_join_objects(
+            &cache,
+            "fake",
+            "",
+            "example.io",
+            "v1",
+            "Widget",
+            "widgets",
+            false,
+        )
+        .await
+        .unwrap();
+        assert_eq!(objects.len(), crate::list_cap::APP_LIST_CAP);
+        assert!(truncated);
+        assert_eq!(uris.lock().unwrap().len(), 4);
+    }
+
+    #[tokio::test]
+    async fn join_list_preserves_api_failure_as_an_error() {
+        let (client, paths) = answering(403);
+        let cache = ClientCache::new_many(vec![]);
+        cache.preload("fake", client).await;
+        let error = list_custom_resource_join_objects(
+            &cache,
+            "fake",
+            "team",
+            "example.io",
+            "v1",
+            "Widget",
+            "widgets",
+            true,
+        )
+        .await
+        .err()
+        .expect("Forbidden must not become an empty list");
+        assert!(matches!(error, CapabilityError::Handler(_)));
+        assert!(error.to_string().contains("Forbidden"), "{error}");
+        assert_eq!(
+            paths.lock().unwrap()[0],
+            "/apis/example.io/v1/namespaces/team/widgets"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_crd_lookup_checks_the_served_version_and_tells_absence_from_failure() {
+        let (client, paths) = answering(200);
+        assert_eq!(
+            custom_resource_serves(client, "argoproj.io", "v1alpha1", "applications").await,
+            Ok(true)
+        );
+        assert_eq!(
+            paths.lock().unwrap().as_slice(),
+            ["/apis/apiextensions.k8s.io/v1/customresourcedefinitions/applications.argoproj.io"]
+        );
+        // The CRD exists, but another API may serve this version of the group.
+        let (client, _) = answering(200);
+        assert_eq!(
+            custom_resource_serves(client, "argoproj.io", "v1beta1", "applications").await,
+            Ok(false)
+        );
+        let (client, _) = answering(200);
+        assert_eq!(
+            custom_resource_serves(client, "argoproj.io", "v1", "applications").await,
+            Ok(false)
+        );
+        let (client, _) = answering(404);
+        assert_eq!(
+            custom_resource_serves(client, "apps", "v1", "deployments").await,
+            Ok(false)
+        );
+        // Forbidden is not "no such CRD".
+        let (client, _) = answering(403);
+        assert!(
+            custom_resource_serves(client, "argoproj.io", "v1alpha1", "applications")
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn one_crd_lookup_answers_the_first_listed_version_it_serves() {
+        let listed = |names: &[&str]| names.iter().map(|n| n.to_string()).collect::<Vec<_>>();
+        let (client, paths) = answering(200);
+        assert_eq!(
+            custom_resource_first_served(
+                client,
+                "argoproj.io",
+                &listed(&["v1", "v1beta1", "v1alpha1"]),
+                "applications"
+            )
+            .await,
+            Ok(Some("v1alpha1".to_owned()))
+        );
+        // The whole list is answered from one lookup of the CRD.
+        assert_eq!(
+            paths.lock().unwrap().as_slice(),
+            ["/apis/apiextensions.k8s.io/v1/customresourcedefinitions/applications.argoproj.io"]
+        );
+        // Listed but not served — v1beta1 is declared unserved — is no answer.
+        let (client, _) = answering(200);
+        assert_eq!(
+            custom_resource_first_served(
+                client,
+                "argoproj.io",
+                &listed(&["v1", "v1beta1"]),
+                "applications"
+            )
+            .await,
+            Ok(None)
+        );
+        let (client, _) = answering(404);
+        assert_eq!(
+            custom_resource_first_served(
+                client,
+                "argoproj.io",
+                &listed(&["v1alpha1"]),
+                "applications"
+            )
+            .await,
+            Ok(None)
+        );
+        // Forbidden is a failed lookup, never "serves none of them".
+        let (client, _) = answering(403);
+        assert!(custom_resource_first_served(
+            client,
+            "argoproj.io",
+            &listed(&["v1alpha1"]),
+            "applications"
+        )
+        .await
+        .is_err());
+    }
+
+    #[test]
+    fn the_first_served_version_follows_the_listed_order_not_the_crds() {
+        let spec = serde_json::json!({"group":"helm.toolkit.fluxcd.io","names":{"plural":"helmreleases"},
+            "versions":[{"name":"v2beta1","served":true},{"name":"v2beta2","served":true},
+                {"name":"v2","served":true}]});
+        let first = |names: &[&str]| {
+            let names: Vec<String> = names.iter().map(|n| n.to_string()).collect();
+            first_served(&spec, "helm.toolkit.fluxcd.io", &names, "helmreleases")
+        };
+        assert_eq!(first(&["v2", "v2beta2"]).as_deref(), Some("v2"));
+        assert_eq!(first(&["v2beta2", "v2"]).as_deref(), Some("v2beta2"));
+        assert_eq!(first(&["v3", "v2beta2"]).as_deref(), Some("v2beta2"));
+        assert_eq!(first(&["v3"]), None);
+        assert_eq!(first(&[]), None);
+        assert_eq!(
+            first_served(
+                &spec,
+                "helm.toolkit.fluxcd.io",
+                &["v2".into()],
+                "kustomizations"
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn a_crd_serves_only_its_own_group_plural_and_served_versions() {
+        let spec = serde_json::json!({"group":"argoproj.io","names":{"plural":"applications"},
+            "versions":[{"name":"v1alpha1","served":true},{"name":"v1beta1","served":false},
+                {"name":"v1"}]});
+        assert!(crd_serves(&spec, "argoproj.io", "v1alpha1", "applications"));
+        assert!(!crd_serves(&spec, "argoproj.io", "v1beta1", "applications"));
+        assert!(!crd_serves(&spec, "argoproj.io", "v1", "applications"));
+        assert!(!crd_serves(&spec, "argoproj.io", "v2", "applications"));
+        assert!(!crd_serves(&spec, "argoproj.io", "v1alpha1", "appprojects"));
+        assert!(!crd_serves(&spec, "other.io", "v1alpha1", "applications"));
+        assert!(!crd_serves(
+            &serde_json::json!({}),
+            "argoproj.io",
+            "v1alpha1",
+            "applications"
+        ));
+    }
+
+    #[test]
+    fn list_custom_out_omits_truncated_when_false() {
+        let raw = serde_json::to_value(ListCustomOut {
+            printer_columns: None,
+            columns_error: None,
+            items: vec![],
+            truncated: false,
+        })
+        .unwrap();
+        assert!(raw.get("truncated").is_none());
+        let cut = serde_json::to_value(ListCustomOut {
+            printer_columns: None,
+            columns_error: None,
+            items: vec![],
+            truncated: true,
+        })
+        .unwrap();
+        assert_eq!(cut["truncated"], true);
     }
 }
