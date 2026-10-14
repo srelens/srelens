@@ -593,6 +593,15 @@ fn build_with(
     reg.register(srelens_kube::pod_overview::pod_overview_capability(
         cache.clone(),
     ));
+    reg.register(srelens_kube::service_health::service_health_probe_capability(
+        cache.clone(),
+    ));
+    reg.register(srelens_kube::why_not_ready::why_not_ready_capability(
+        cache.clone(),
+    ));
+    reg.register(srelens_kube::why_pending::why_pending_capability(
+        cache.clone(),
+    ));
     reg.register(srelens_kube::topology::topology_graph_capability(
         cache.clone(),
     ));

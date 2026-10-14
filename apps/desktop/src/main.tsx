@@ -6,6 +6,7 @@ import { isTauri } from "@srelens/core/platform";
 // render so a toast raised during startup is not dropped on the floor.
 import { installToastNotifier } from "./ui/notifier";
 import srelensMark from "./assets/srelens-mark.svg";
+import { trimDevMeasures } from "./devPerformance";
 import {
   PORTED_SCREENS,
   applyNextDesignChrome,
@@ -18,6 +19,10 @@ import {
 } from "./design";
 
 installToastNotifier();
+// React's dev build records a performance entry per render and never clears
+// them, which crashes the renderer under a busy log. A production build does
+// not, and `import.meta.env.DEV` is statically false there.
+if (import.meta.env.DEV) trimDevMeasures();
 
 // Re-apply the persisted request timeout to the backend, which resets to its
 // default each launch. Fire-and-forget: it resolves well before the user picks

@@ -1503,6 +1503,17 @@ describe("the Stream rail", () => {
   });
 });
 
+/** Export's menu (#915), opened: the panel its rows are read from. */
+async function exportMenu() {
+  await userEvent.click(screen.getByRole("button", { name: /export/i }));
+  return screen.findByRole("dialog", { name: "Export" });
+}
+
+/** Export → Current view: what the Export button did on its own before it had a menu (#915). */
+async function exportCurrentView() {
+  await userEvent.click(within(await exportMenu()).getByRole("button", { name: "Current view" }));
+}
+
 describe("exporting what is on screen", () => {
   const flatten = () => String(h.saved.mock.calls[0][1]).split("\n");
 
@@ -1518,7 +1529,7 @@ describe("exporting what is on screen", () => {
     draw();
     await body();
     push(...LINES);
-    await userEvent.click(screen.getByRole("button", { name: /export/i }));
+    await exportCurrentView();
     await waitFor(() => expect(h.saved).toHaveBeenCalledTimes(1));
     expect(h.saved.mock.calls[0][0]).toBe("checkout-api.log");
     expect(flatten()).toEqual([
@@ -1534,7 +1545,7 @@ describe("exporting what is on screen", () => {
     await body();
     push(...LINES);
     await userEvent.type(filterField(), "pool");
-    await userEvent.click(screen.getByRole("button", { name: /export/i }));
+    await exportCurrentView();
     await waitFor(() => expect(h.saved).toHaveBeenCalledTimes(1));
     expect(flatten()).toEqual([
       "api-8/api | 2026-08-24T14:07:43.900000000Z error pool timeout waited=30.0s in_use=5",
@@ -1567,7 +1578,7 @@ describe("exporting what is on screen", () => {
       expect(drawn).toBeGreaterThan(0);
       expect(drawn).toBeLessThan(150);
 
-      await userEvent.click(screen.getByRole("button", { name: /export/i }));
+      await exportCurrentView();
       await waitFor(() => expect(h.saved).toHaveBeenCalledTimes(1));
       const written = flatten();
       // Every matching line, not the `drawn` rows. How far someone happened to
@@ -1590,7 +1601,7 @@ describe("exporting what is on screen", () => {
       h.state.pending = 900;
       notify();
     });
-    await userEvent.click(screen.getByRole("button", { name: /export/i }));
+    await exportCurrentView();
     await waitFor(() => expect(h.saved).toHaveBeenCalledTimes(1));
     expect(flatten()).toHaveLength(4);
   });
@@ -1617,7 +1628,7 @@ describe("exporting what is on screen", () => {
       draw();
       await body();
       push(...LINES);
-      await userEvent.click(screen.getByRole("button", { name: /export/i }));
+      await exportCurrentView();
       await waitFor(() => expect(clicked).toEqual(["checkout-api.log"]));
       expect(h.saved).not.toHaveBeenCalled();
       expect(await readBlob(urls[0])).toContain("api-8/api | ");
@@ -1626,12 +1637,17 @@ describe("exporting what is on screen", () => {
     }
   });
 
-  it("offers nothing to export when there is nothing on screen", async () => {
+  it("offers the view only once there is something on screen, and the cluster's history either way", async () => {
     draw();
     await body();
-    expect(screen.getByRole("button", { name: /export/i })).toHaveProperty("disabled", true);
+    let panel = await exportMenu();
+    expect(within(panel).getByRole("button", { name: "Current view" })).toHaveProperty("disabled", true);
+    // A range reads the cluster, not this buffer: a quiet tail is no reason to refuse the last hour.
+    expect(within(panel).getByRole("button", { name: "Last 1 h" })).toHaveProperty("disabled", false);
+    await userEvent.keyboard("{Escape}");
     push(...LINES);
-    expect(screen.getByRole("button", { name: /export/i })).toHaveProperty("disabled", false);
+    panel = await exportMenu();
+    expect(within(panel).getByRole("button", { name: "Current view" })).toHaveProperty("disabled", false);
   });
 
   it("heads a failed save with the screen's own sentence, not the backend's", async () => {
@@ -1639,7 +1655,7 @@ describe("exporting what is on screen", () => {
     draw();
     await body();
     push(...LINES);
-    await userEvent.click(screen.getByRole("button", { name: /export/i }));
+    await exportCurrentView();
     const notice = await screen.findByText(/could not save this stream/i);
     // The headline says what failed. `describeError` has nothing to classify
     // in a local filesystem refusal, so the original is what sits underneath
@@ -1652,7 +1668,7 @@ describe("exporting what is on screen", () => {
     draw();
     await body();
     push(...LINES);
-    await userEvent.click(screen.getByRole("button", { name: /export/i }));
+    await exportCurrentView();
     const notice = await screen.findByText(/could not save this stream/i);
     const alert = notice.closest("[role=status]") as HTMLElement;
     expect(within(alert).getByText(/didn't respond in time/i)).toBeTruthy();
@@ -1668,12 +1684,193 @@ describe("exporting what is on screen", () => {
     draw();
     await body();
     push(...LINES);
-    await userEvent.click(screen.getByRole("button", { name: /export/i }));
+    await exportCurrentView();
     await screen.findByText(/could not save this stream/i);
 
     h.saved.mockResolvedValue("/home/u/checkout-api.log");
-    await userEvent.click(screen.getByRole("button", { name: /export/i }));
+    await exportCurrentView();
     await waitFor(() => expect(screen.queryByText(/could not save this stream/i)).toBeNull());
+  });
+});
+
+describe("exporting a time range (#915)", () => {
+  /**
+   * What the cluster still holds for each container, one stamped blob each as
+   * `podLogs` hands it back. Older than anything in the buffer, and out of
+   * order across pods on purpose: the export has to merge them.
+   */
+  const HISTORY: Record<string, string> = {
+    "api-7/api":
+      "2026-08-24T13:20:00.000000000Z info warmed the cache\n" +
+      "2026-08-24T14:07:41.208000000Z error pool timeout on api-7\n",
+    "api-7/otel-sidecar": "2026-08-24T13:30:00.000000000Z warn exporter queue is full\n",
+    "api-8/api": "2026-08-24T13:25:00.000000000Z error pool timeout on api-8\n",
+    "api-9/api": "2026-08-24T13:10:00.000000000Z GET /healthz 200 1ms\n",
+  };
+  const history = async (_context: string, _namespace: string, pod: string, _invoke: unknown, options: { container?: string }) => ({
+    logs: HISTORY[`${pod}/${options.container}`],
+  });
+  const written = () => String(h.saved.mock.calls[0][1]).split("\n");
+  const pick = async (range: string) =>
+    userEvent.click(within(await exportMenu()).getByRole("button", { name: range }));
+
+  beforeEach(() => {
+    h.fetched.mockImplementation(history);
+  });
+
+  it("offers the view on screen first, then spans of the cluster's history back from now", async () => {
+    draw();
+    await body();
+    push(...LINES);
+    const panel = await exportMenu();
+    expect(within(panel).getAllByRole("button").map((b) => b.textContent)).toEqual([
+      "Current view",
+      "Last 10 min",
+      "Last 1 h",
+      "Last 6 h",
+      "Last 24 h",
+      "All",
+    ]);
+  });
+
+  it("reads the range from the cluster, once for each container still in view", async () => {
+    draw();
+    await body();
+    push(...LINES);
+    await userEvent.click(screen.getByRole("checkbox", { name: "api-9" }));
+    await pick("Last 1 h");
+    await waitFor(() => expect(h.saved).toHaveBeenCalledTimes(1));
+    const asked = { timestamps: true, sinceSeconds: 3600, allLines: true };
+    expect(h.fetched.mock.calls.map(([context, namespace, pod, , options]) => [context, namespace, pod, options])).toEqual([
+      ["prod-eu", "checkout", "api-7", { container: "api", ...asked }],
+      ["prod-eu", "checkout", "api-7", { container: "otel-sidecar", ...asked }],
+      ["prod-eu", "checkout", "api-8", { container: "api", ...asked }],
+    ]);
+  });
+
+  it("writes the range merged by stamp and through the query, under the range's name", async () => {
+    draw();
+    await body();
+    push(...LINES);
+    await userEvent.type(filterField(), "pool");
+    await pick("Last 6 h");
+    await waitFor(() => expect(h.saved).toHaveBeenCalledTimes(1));
+    expect(h.saved.mock.calls[0][0]).toBe("checkout-api-last-6h.log");
+    expect(written()).toEqual([
+      "api-8/api | 2026-08-24T13:25:00.000000000Z error pool timeout on api-8",
+      "api-7/api | 2026-08-24T14:07:41.208000000Z error pool timeout on api-7",
+    ]);
+  });
+
+  it("orders two containers' lines inside one millisecond by the whole stamp", async () => {
+    // A trimmed fraction on purpose: the kubelet's RFC3339Nano drops trailing zeros.
+    const blobs: Record<string, string> = {
+      "api-7/api": "2026-08-24T14:07:41.2089Z info later\n",
+      "api-8/api": "2026-08-24T14:07:41.208100000Z info earlier\n",
+    };
+    h.fetched.mockImplementation(async (_c: string, _n: string, pod: string, _i: unknown, options: { container?: string }) => ({
+      logs: blobs[`${pod}/${options.container}`] ?? "",
+    }));
+    draw();
+    await body();
+    push(...LINES);
+    await pick("Last 1 h");
+    await waitFor(() => expect(h.saved).toHaveBeenCalledTimes(1));
+    expect(written()).toEqual([
+      "api-8/api | 2026-08-24T14:07:41.208100000Z info earlier",
+      "api-7/api | 2026-08-24T14:07:41.2089Z info later",
+    ]);
+  });
+
+  it("stays busy when the source changes while a range is read", async () => {
+    h.plugins = [observability()];
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    h.fetched.mockImplementation(async (...a: Parameters<typeof history>) => {
+      await gate;
+      return history(...a);
+    });
+    draw();
+    await body();
+    push(...LINES);
+    await pick("Last 1 h");
+    await screen.findByRole("button", { name: "Exporting…" });
+    fireEvent.change(screen.getByRole("combobox", { name: "Logs from" }), {
+      target: { value: "org.example.observability/loki" },
+    });
+    await waitFor(() => expect(h.seen.at(-1)?.options.source).toBeDefined());
+    // The provider's one-click Export, but not a second save while the first is still coming.
+    expect(screen.getByRole("button", { name: "Exporting…" })).toHaveProperty("disabled", true);
+    await act(async () => release());
+    await waitFor(() => expect(h.saved).toHaveBeenCalledTimes(1));
+    expect(screen.getByRole("button", { name: "Export" })).toHaveProperty("disabled", false);
+  });
+
+  it("exports the whole range, not the window picked off the histogram", async () => {
+    const { container } = draw();
+    await body();
+    push(...LINES);
+    const bar = container.querySelectorAll('[data-slot="bucket"]')[0];
+    fireEvent.pointerDown(bar);
+    fireEvent.pointerUp(bar);
+    await pick("Last 24 h");
+    await waitFor(() => expect(h.saved).toHaveBeenCalledTimes(1));
+    expect(written()).toHaveLength(5);
+  });
+
+  it("asks for everything the container runtime still keeps when the range is All", async () => {
+    draw();
+    await body();
+    push(...LINES);
+    await pick("All");
+    await waitFor(() => expect(h.saved).toHaveBeenCalledTimes(1));
+    expect(h.fetched.mock.calls[0][4]).toEqual({ container: "api", timestamps: true, allLines: true });
+    expect(h.saved.mock.calls[0][0]).toBe("checkout-api-all.log");
+  });
+
+  it("writes nothing when a container's history cannot be read, and says which", async () => {
+    h.fetched.mockImplementation(async (...a: Parameters<typeof history>) =>
+      a[2] === "api-8" ? { error: "k8s.podLogs failed: request timeout" } : history(...a),
+    );
+    draw();
+    await body();
+    push(...LINES);
+    await pick("Last 1 h");
+    const notice = await screen.findByText("Could not read the logs of api-8 · api");
+    expect(h.saved).not.toHaveBeenCalled();
+    expect(notice.closest("[role=status]")?.querySelector("details")?.textContent).toContain("request timeout");
+  });
+
+  it("says it is working, and takes no second export, while the history is read", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    h.fetched.mockImplementation(async (...a: Parameters<typeof history>) => {
+      await gate;
+      return history(...a);
+    });
+    draw();
+    await body();
+    push(...LINES);
+    await pick("Last 1 h");
+    expect(await screen.findByRole("button", { name: "Exporting…" })).toHaveProperty("disabled", true);
+    await act(async () => release());
+    await waitFor(() => expect(h.saved).toHaveBeenCalledTimes(1));
+    expect(screen.getByRole("button", { name: "Export" })).toHaveProperty("disabled", false);
+  });
+
+  it("exports a log provider's view straight away: the cluster's history is not the provider's", async () => {
+    h.plugins = [observability()];
+    draw();
+    fireEvent.change(await screen.findByRole("combobox", { name: "Logs from" }), {
+      target: { value: "org.example.observability/loki" },
+    });
+    await waitFor(() => expect(h.seen.at(-1)?.options.source).toBeDefined());
+    await body();
+    push(...LINES);
+    await userEvent.click(screen.getByRole("button", { name: "Export" }));
+    await waitFor(() => expect(h.saved).toHaveBeenCalledTimes(1));
+    expect(h.saved.mock.calls[0][0]).toBe("checkout-api.log");
+    expect(h.fetched).not.toHaveBeenCalled();
   });
 });
 
@@ -2463,7 +2660,7 @@ describe("the volume histogram (#898)", () => {
     fireEvent.pointerDown(bars[0]);
     fireEvent.pointerUp(bars[0]);
     expect(messages(region)).toEqual(["info starting checkout-api build=4f2a1c"]);
-    await userEvent.click(screen.getByRole("button", { name: "Export" }));
+    await exportCurrentView();
     await waitFor(() => expect(h.saved).toHaveBeenCalled());
     expect(String(h.saved.mock.calls[0][1]).split("\n")).toHaveLength(1);
     await userEvent.click(screen.getByRole("button", { name: "Remove the time window" }));
@@ -3180,6 +3377,27 @@ describe("under a busy stream (#898)", () => {
     expect(drawn.textContent).toContain("line 10");
   });
 
+  it("keeps a drawn line on its own element when the targets are resolved again, after the ring has dropped lines", async () => {
+    // A row's id belongs to the module, not to one indexing of the targets: numbered afresh from 0 by place in the
+    // buffer, a rebuilt row takes the id of a line the ring has since dropped, and that line's element with it.
+    const region = await (draw(), body());
+    push(...many(30));
+    ring(5, 30);
+    const drawn = lineRow(10);
+    // The same stream under a renamed context: the subject is resolved again, to targets the screen indexes afresh.
+    // The answer lands in the request's own tick, so React takes the loading state and the new targets as one render
+    // and the screen is rebuilt in place; an answer a network later unmounts it, and with it every drawn element.
+    const again = TARGETS.map((t) => ({ ...t }));
+    const answer = { status: "resolved", targets: again, pods: PODS, previous: [] };
+    h.resolve.mockReturnValue({ then: (done: (a: typeof answer) => void) => done(answer) });
+    act(() => setContexts([{ ...CTX, name: "prod-eu-2" }]));
+    expect(h.seen[h.seen.length - 1].targets).toBe(again);
+    expect(region.isConnected).toBe(true);
+    expect(rendered(region)).toHaveLength(30);
+    // Replaced by an element of its own, or still its own line: never another's.
+    expect(drawn.isConnected ? drawn.textContent : "line 10").toContain("line 10");
+  });
+
   it("recounts the rail, the facets and the histogram at most four times a second, and the last batch always lands", async () => {
     // The quarter second is read off the clock; stopped, a slow machine cannot run it out between two batches.
     vi.useFakeTimers({ toFake: ["Date"] });
@@ -3201,6 +3419,32 @@ describe("under a busy stream (#898)", () => {
         expect(screen.getByRole("button", { name: "error 2" })).toBeTruthy();
         expect(caption()).toMatch(/^5 lines · /);
       });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("empties the counts at once when the buffer is emptied, though a recount is waiting", async () => {
+    // A restart leaves nothing to count: the old buffer's tallies must not go on being read for the quarter second a
+    // recount waits. The clock is stopped, so that quarter second cannot run out inside the test.
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      const region = await (draw(), body());
+      push(...LINES);
+      expect(screen.getByText("1 error")).toBeTruthy();
+      push(anotherError);
+      // The recount is waiting: the counts still hold the last one.
+      expect(screen.getByText("1 error")).toBeTruthy();
+      act(() => {
+        // What the hook does on a restart: a fresh buffer and a bumped restart count.
+        h.state.lines = [];
+        h.state.restarts = 1;
+        notify();
+      });
+      expect(rendered(region)).toHaveLength(0);
+      expect(screen.queryByText("1 error")).toBeNull();
+      expect(screen.queryByRole("button", { name: "error 1" })).toBeNull();
+      expect(caption()).toBe("");
     } finally {
       vi.useRealTimers();
     }
@@ -3335,6 +3579,30 @@ describe("under a busy stream (#898)", () => {
       expect(rendered(region)).toHaveLength(10);
     });
 
+    it.each([
+      ["Ctrl+A", () => select(document.body)],
+      [
+        "a drag from the filter bar to past the log",
+        () =>
+          act(() => {
+            const wrap = screen.getByRole("button", { name: "Wrap" });
+            (document.getSelection() as Selection).setBaseAndExtent(wrap, 0, document.body, document.body.childNodes.length);
+            document.dispatchEvent(new Event("selectionchange"));
+          }),
+      ],
+    ])("holds the view while %s selects the log, though neither end of the selection is in it", async (_, enclose) => {
+      // The text under the selection is rewritten as surely as under one that starts in the log.
+      const region = await (draw(), body());
+      push(...many(5));
+      enclose();
+      const selection = document.getSelection() as Selection;
+      expect(region.contains(selection.anchorNode) || region.contains(selection.focusNode)).toBe(false);
+      push(...many(3, 5));
+      expect(rendered(region)).toHaveLength(5);
+      select(null);
+      expect(rendered(region)).toHaveLength(8);
+    });
+
     it("says the view is held only once a hold has lasted, never for an ordinary click", async () => {
       // Every click holds the view for as long as the button is down; a note that flashed on each one would be noise.
       await (draw(), body());
@@ -3363,6 +3631,37 @@ describe("under a busy stream (#898)", () => {
         expect(heldNote()).toBeNull();
         lift(lineRow(2));
         act(() => vi.advanceTimersByTime(0));
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("tells a screen reader the view is held while the note shows, without the count that changes under it", async () => {
+      await (draw(), body());
+      push(...many(5));
+      const live = () => document.querySelector('[data-slot="held-live"]') as HTMLElement;
+      // Mounted before anything is held, so the first announcement is a change to a region the reader already has.
+      expect(live().textContent).toBe("");
+      expect(live().getAttribute("role")).toBe("status");
+      expect(live().getAttribute("aria-live")).toBe("polite");
+      expect(live().getAttribute("aria-atomic")).toBe("true");
+      expect(live().className).toContain("sr-only");
+      vi.useFakeTimers();
+      try {
+        select(lineRow(3));
+        h.state.pending = 3;
+        push(...many(3, 5));
+        act(() => vi.advanceTimersByTime(299));
+        expect(live().textContent).toBe("");
+        act(() => vi.advanceTimersByTime(1));
+        expect(heldNote()?.textContent).toBe("Held while you select · 3 new lines");
+        // The count is the visible note's alone: said here, it would be read out again on every batch.
+        expect(live().textContent).toBe("View held while you select");
+        h.state.pending = 40;
+        push(...many(1, 8));
+        expect(live().textContent).toBe("View held while you select");
+        select(null);
+        expect(live().textContent).toBe("");
       } finally {
         vi.useRealTimers();
       }
@@ -3425,8 +3724,6 @@ describe("history on disk (#914)", () => {
       notify();
     });
   }
-  const scopePicker = () => screen.getByRole("combobox", { name: "What to export" }) as HTMLSelectElement;
-  const exportButton = () => screen.getByRole("button", { name: "Export" });
 
   it("asks the cluster's stream to keep the chosen history", async () => {
     draw();
@@ -3634,63 +3931,76 @@ describe("history on disk (#914)", () => {
     );
   });
 
-  it("exports the history the reader picks, and the view by default", async () => {
-    draw();
-    await body();
-    act(() => {
-      h.state.history = { first: 1 };
-      notify();
-    });
-    push(...LINES);
-    const scope = screen.getByRole("combobox", { name: "What to export" }) as HTMLSelectElement;
-    expect(scope.value).toBe("view");
-    fireEvent.change(scope, { target: { value: "600" } });
-    await userEvent.click(screen.getByRole("button", { name: "Export" }));
-    expect(h.exportSpool).toHaveBeenCalledWith("checkout-api.log", 600);
-    expect(h.saved).not.toHaveBeenCalled();
+  /** A row of Export's menu by its accessible name; the history's rows say "kept on disk" beside the cluster's. */
+  const nameOf = (b: HTMLElement) => b.getAttribute("aria-label") ?? b.textContent;
+  const pickKept = async (range: string) =>
+    userEvent.click(within(await exportMenu()).getByRole("button", { name: `${range} kept on disk` }));
 
-    fireEvent.change(scope, { target: { value: "all" } });
-    await userEvent.click(screen.getByRole("button", { name: "Export" }));
-    expect(h.exportSpool).toHaveBeenLastCalledWith("checkout-api.log", undefined);
-  });
-
-  it("names the four things Export can write", async () => {
+  it("offers the history kept on disk between the view and the cluster's spans", async () => {
     draw();
     await body();
     keepHistory({ first: 1 }, 0);
     push(...LINES);
-    expect(
-      within(scopePicker())
-        .getAllByRole("option")
-        .map((o) => [(o as HTMLOptionElement).value, o.textContent]),
-    ).toEqual([
-      ["view", "Current view"],
-      ["all", "All history"],
-      ["600", "Last 10 minutes"],
-      ["3600", "Last hour"],
+    const panel = await exportMenu();
+    expect(within(panel).getByText("kept on disk")).toBeTruthy();
+    expect(within(panel).getAllByRole("button").map(nameOf)).toEqual([
+      "Current view",
+      "Last 10 min kept on disk",
+      "Last 1 h kept on disk",
+      "All kept on disk",
+      "Last 10 min",
+      "Last 1 h",
+      "Last 6 h",
+      "Last 24 h",
+      "All",
     ]);
   });
 
-  it("writes the view, not the history, while the picker says view", async () => {
+  it("exports the history kept on disk, a span back from now or all of it, under its own name", async () => {
     draw();
     await body();
     keepHistory({ first: 1 }, 0);
     push(...LINES);
-    await userEvent.click(exportButton());
+    await pickKept("Last 10 min");
+    await waitFor(() => expect(h.exportSpool).toHaveBeenCalledWith("checkout-api-disk-last-10m.log", 600));
+    await pickKept("All");
+    await waitFor(() => expect(h.exportSpool).toHaveBeenLastCalledWith("checkout-api-disk-all.log", undefined));
+    // The disk, not this buffer and not the cluster.
+    expect(h.saved).not.toHaveBeenCalled();
+    expect(h.fetched).not.toHaveBeenCalled();
+  });
+
+  it("writes the view, not the history, from Current view", async () => {
+    draw();
+    await body();
+    keepHistory({ first: 1 }, 0);
+    push(...LINES);
+    await exportCurrentView();
     await waitFor(() => expect(h.saved).toHaveBeenCalledTimes(1));
     expect(h.exportSpool).not.toHaveBeenCalled();
   });
 
-  it("offers the history to export even when the view is empty, and nothing for an empty view", async () => {
+  it("offers the history to export even when the view is empty", async () => {
     draw();
     await body();
     keepHistory({ first: 1 }, 0);
     // No lines on screen: the view has nothing to write, the history on disk may have.
-    expect(exportButton()).toHaveProperty("disabled", true);
-    fireEvent.change(scopePicker(), { target: { value: "all" } });
-    expect(exportButton()).toHaveProperty("disabled", false);
-    fireEvent.change(scopePicker(), { target: { value: "view" } });
-    expect(exportButton()).toHaveProperty("disabled", true);
+    const panel = await exportMenu();
+    expect(within(panel).getByRole("button", { name: "Current view" })).toHaveProperty("disabled", true);
+    expect(within(panel).getByRole("button", { name: "All kept on disk" })).toHaveProperty("disabled", false);
+  });
+
+  it("reads Exporting… while the history is written, and Export once it is", async () => {
+    let finish: (path: string | null) => void = () => {};
+    h.exportSpool.mockReturnValue(new Promise<string | null>((resolve) => (finish = resolve)));
+    draw();
+    await body();
+    keepHistory({ first: 1 }, 0);
+    push(...LINES);
+    await pickKept("All");
+    expect(await screen.findByText("Exporting…")).toBeTruthy();
+    await act(async () => finish("/home/u/checkout-api-disk-all.log"));
+    expect(screen.queryByText("Exporting…")).toBeNull();
   });
 
   it("says why the history could not be saved", async () => {
@@ -3699,73 +4009,42 @@ describe("history on disk (#914)", () => {
     await body();
     keepHistory({ first: 1 }, 0);
     push(...LINES);
-    fireEvent.change(scopePicker(), { target: { value: "all" } });
-    await userEvent.click(exportButton());
+    await pickKept("All");
     expect((await screen.findByText(/could not save this stream/i)).textContent).toBe("Could not save this stream");
   });
 
-  it("writes the view once history stops, whatever the picker was left on", async () => {
+  it("stops offering the history once it stops, and keeps the dropped-lines banner", async () => {
     draw();
     await body();
     keepHistory({ first: 1 }, 0);
     push(...LINES);
-    fireEvent.change(scopePicker(), { target: { value: "all" } });
     // The hook goes on offering an export of a history that is no longer whole; the screen must not take it up.
-    keepHistory({ first: 1, failed: "No space left on device" }, 0);
-    expect(screen.queryByRole("combobox", { name: "What to export" })).toBeNull();
-    await userEvent.click(exportButton());
-    await waitFor(() => expect(h.saved).toHaveBeenCalledTimes(1));
-    expect(h.saved.mock.calls[0][0]).toBe("checkout-api.log");
-    expect(h.exportSpool).not.toHaveBeenCalled();
-  });
-
-  it("writes the previous instance, not the live spool, whatever the picker was left on", async () => {
-    h.resolve.mockResolvedValue({ status: "resolved", targets: TARGETS, pods: PODS, previous: TERMINATED });
-    const region = await (draw(), body());
-    keepHistory({ first: 1 }, 0);
-    push(...LINES);
-    fireEvent.change(scopePicker(), { target: { value: "all" } });
-    await userEvent.click(screen.getByRole("button", { name: /previous instance/i }));
-    await waitFor(() => expect(rendered(region)).toHaveLength(4));
-    await userEvent.click(exportButton());
-    await waitFor(() => expect(h.saved).toHaveBeenCalledTimes(1));
-    expect(h.saved.mock.calls[0][0]).toBe("checkout-api-previous.log");
-    expect(h.exportSpool).not.toHaveBeenCalled();
-  });
-
-  it("has nothing to export from an empty view once history stops, whatever the picker was left on", async () => {
-    draw();
-    await body();
-    keepHistory({ first: 1 }, 0);
-    fireEvent.change(scopePicker(), { target: { value: "all" } });
-    expect(exportButton()).toHaveProperty("disabled", false);
-    keepHistory({ first: 1, failed: "No space left on device" }, 0);
-    expect(exportButton()).toHaveProperty("disabled", true);
-  });
-
-  it("keeps the plain Export and the dropped-lines banner when history stopped", async () => {
-    draw();
-    await body();
     act(() => {
       h.state.history = { first: 1, failed: "No space left on device" };
       h.state.dropped = 1200;
       notify();
     });
-    push(...LINES);
-    expect(screen.queryByRole("combobox", { name: "What to export" })).toBeNull();
+    const panel = await exportMenu();
+    expect(within(panel).queryByText("kept on disk")).toBeNull();
+    expect(within(panel).queryByRole("button", { name: /kept on disk/ })).toBeNull();
     expect(screen.getByText(/1\s?200 earlier lines dropped/)).toBeTruthy();
   });
 
-  it("leaves the picker and the history banner off the previous instance, whose buffer is not the stream's", async () => {
+  it("writes the previous instance, not the live history, and offers neither the history nor its banner there", async () => {
     h.resolve.mockResolvedValue({ status: "resolved", targets: TARGETS, pods: PODS, previous: TERMINATED });
     const region = await (draw(), body());
     keepHistory({ first: 1 }, 182_340);
     push(...LINES);
-    expect(scopePicker()).toBeTruthy();
+    expect(within(await exportMenu()).getByRole("button", { name: "All kept on disk" })).toBeTruthy();
+    await userEvent.keyboard("{Escape}");
     await userEvent.click(screen.getByRole("button", { name: /previous instance/i }));
     await waitFor(() => expect(rendered(region)).toHaveLength(4));
-    expect(screen.queryByRole("combobox", { name: "What to export" })).toBeNull();
     expect(within(region).queryByText(/earlier lines on disk/)).toBeNull();
     expect(screen.queryByRole("button", { name: /Load 5\s?000 earlier/ })).toBeNull();
+    // A previous instance keeps the one-click Export (#915): it writes that buffer.
+    await userEvent.click(screen.getByRole("button", { name: "Export" }));
+    await waitFor(() => expect(h.saved).toHaveBeenCalledTimes(1));
+    expect(h.saved.mock.calls[0][0]).toBe("checkout-api-previous.log");
+    expect(h.exportSpool).not.toHaveBeenCalled();
   });
 });

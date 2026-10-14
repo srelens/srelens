@@ -613,11 +613,64 @@ describe("a line that declares its own level", () => {
     expect(logLineHealth("null")).toBe("neutral");
   });
 
-  it("ignores a non-string level and falls back to the text scan", () => {
-    // pino writes `"level":30`. There is no word to print, so the scan
-    // decides, exactly as it did before this existed.
-    expect(logLineLevel('{"level":30,"msg":"listening"}')).toBeUndefined();
-    expect(logLineLevel('{"level":50,"msg":"connection error"}')).toBe("error");
+  it("reads the numeric level pino and bunyan write as its name", () => {
+    // 10 to 60 are the six names both loggers share. Each row is the word the
+    // column prints and the tone it carries.
+    const rows: [number, string, string][] = [
+      [10, "trace", "neutral"],
+      [20, "debug", "neutral"],
+      [30, "info", "info"],
+      [40, "warn", "warning"],
+      [50, "error", "danger"],
+      [60, "fatal", "danger"],
+    ];
+    for (const [n, word, tone] of rows) {
+      const line = `{"level":${n},"msg":"listening"}`;
+      expect(logLineLevel(line)).toBe(word);
+      expect(logLineHealth(line)).toBe(tone);
+    }
+    expect(logLineLevel('{"level":50}')).toBe("error");
+    expect(logLineHealth('{"level":50}')).toBe("danger");
+  });
+
+  it("believes the number over a word in the message", () => {
+    // The line says 30; `error pool timeout` is what it is talking about, not
+    // how bad it is.
+    const line = '{"level":30,"msg":"error pool timeout"}';
+    expect(logLineLevel(line)).toBe("info");
+    expect(logLineHealth(line)).toBe("info");
+  });
+
+  it("reads a numeric `severity` as well as a numeric `level`", () => {
+    expect(logLineLevel('{"severity":40,"msg":"slow"}')).toBe("warn");
+  });
+
+  it("leaves a number that is not one of the six to the text scan", () => {
+    // 35 names nothing, so the line is read the way it was before numbers
+    // counted: by the scan, which finds what the message says.
+    expect(logLineLevel('{"level":35,"msg":"warn x"}')).toBe("warn");
+    expect(logLineLevel('{"level":35,"msg":"error pool timeout"}')).toBe("error");
+    expect(logLineLevel('{"level":35,"msg":"listening"}')).toBeUndefined();
+    expect(logLineLevel('{"level":0,"msg":"listening"}')).toBeUndefined();
+    expect(logLineLevel('{"level":30.5,"msg":"listening"}')).toBeUndefined();
+  });
+
+  it("counts only a JSON number: the string \"30\" is the application's own word", () => {
+    expect(logLineLevel('{"level":"30","msg":"listening"}')).toBe("30");
+    expect(logLineHealth('{"level":"30","msg":"listening"}')).toBe("neutral");
+  });
+
+  it("lets a declared string level win over a number", () => {
+    expect(logLineLevel('{"level":"warn","msg":"x"}')).toBe("warn");
+    expect(logLineLevel('{"level":30,"severity":"warning","msg":"x"}')).toBe("warning");
+  });
+
+  it("tones the term tally from a numeric level too", () => {
+    const lines = [
+      line('{"level":50,"time":1760000000001,"msg":"upgrade failed"}'),
+      line('{"level":50,"time":1760000000002,"msg":"upgrade failed"}'),
+    ];
+    expect(tallyLogTerms(lines)).toEqual([{ term: "upgrade failed", count: 2, tone: "danger" }]);
   });
 
   it("does not let an empty error field repaint a declared info line", () => {

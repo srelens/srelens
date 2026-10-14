@@ -44,6 +44,7 @@ import {
   LiveSignal,
   LoadingState,
   LogLine,
+  Popover,
   Screen,
   Select,
   SideRail,
@@ -155,6 +156,29 @@ const SINCE: { value: string; seconds: number | undefined }[] = [
 const SINCE_OPTIONS = SINCE.map((s) => ({ value: s.value, label: s.value }));
 
 /**
+ * What Export offers beyond the view on screen (#915): a span of the cluster's
+ * history back from now, or all of it (`seconds` absent). `slug` names the file.
+ */
+const EXPORT_RANGES: { label: string; slug: string; seconds?: number }[] = [
+  { label: "Last 10 min", slug: "last-10m", seconds: 600 },
+  { label: "Last 1 h", slug: "last-1h", seconds: 3600 },
+  { label: "Last 6 h", slug: "last-6h", seconds: 6 * 3600 },
+  { label: "Last 24 h", slug: "last-24h", seconds: 24 * 3600 },
+  { label: "All", slug: "all" },
+];
+
+/**
+ * What Export offers from the history kept on disk (#914): every line since the
+ * stream opened, including those the kubelet has already rotated away, which a
+ * span of the cluster's cannot bring back on a busy workload.
+ */
+const KEPT_RANGES: { label: string; slug: string; seconds?: number }[] = [
+  { label: "Last 10 min", slug: "disk-last-10m", seconds: 600 },
+  { label: "Last 1 h", slug: "disk-last-1h", seconds: 3600 },
+  { label: "All", slug: "disk-all" },
+];
+
+/**
  * How many trailing lines a connect asks for.
  *
  * A ceiling rather than a preference. `since=all` on a container that has been
@@ -177,15 +201,6 @@ const KUBERNETES_SOURCE = "kubernetes";
  */
 const PROVIDER_ALL_SECONDS = 7 * 24 * 3600;
 
-type ExportScope = "view" | "all" | "600" | "3600";
-/** The Export picker's choices; the last three read the history on disk (#914). */
-const EXPORT_SCOPES: { value: ExportScope; label: string }[] = [
-  { value: "view", label: "Current view" },
-  { value: "all", label: "All history" },
-  { value: "600", label: "Last 10 minutes" },
-  { value: "3600", label: "Last hour" },
-];
-
 /** The qualified kind a log provider is declared for (#569), from the route's kind. */
 function providerKind(kind: string): string | undefined {
   return (
@@ -206,6 +221,13 @@ const RECOUNT_MS = 250;
 
 /** How long the view must be held before the filter bar says so: longer than a click's press. */
 const HELD_NOTE_MS = 300;
+
+/**
+ * The next row's id, for the life of the module. A row's id is its element's key, so it must never be given to a
+ * second line: numbered again from 0 whenever the rows are rebuilt, a line would take the id of one the ring
+ * has since dropped, and with it that line's element, under the reader's pointer or selection.
+ */
+let nextRowId = 0;
 
 /**
  * The one state this readout can be in that the CONNECTION is not.
@@ -286,6 +308,17 @@ function stampTime(stamp: RegExpMatchArray): number | undefined {
   return Number.isNaN(ms) ? undefined : ms;
 }
 
+/**
+ * The stamp's fraction below the millisecond {@link stampTime} keeps, in
+ * nanoseconds: what orders two containers' lines inside one millisecond. Read
+ * from the digits rather than compared as text, because RFC3339Nano trims
+ * trailing zeros (`.2089Z` is later than `.208100000Z`).
+ */
+function subMillisecond(raw: string): number {
+  const fraction = raw.match(RFC3339)?.[3] ?? "";
+  return Number(fraction.slice(4, 10).padEnd(6, "0"));
+}
+
 /** No clauses: the query is empty, or it does not parse and so is not applied. */
 const NO_CLAUSES: readonly QueryClause[] = [];
 
@@ -362,6 +395,14 @@ function sourceOf(row: Row, separator: string): string {
     ? `${row.pod}${separator}${row.container}`
     : row.pod;
 }
+
+/** Rows as an export writes them: classic's `source | line`, each line raw, stamp and all. */
+function exportContent(rows: readonly Row[]): string {
+  return rows.map((row) => `${sourceOf(row, "/")} | ${row.raw}`).join("\n");
+}
+
+/** What heads an export the save itself refused. */
+const SAVE_FAILED = "Could not save this stream";
 
 /**
  * Every target under the label its lines arrive tagged with — the index
@@ -472,9 +513,52 @@ type Snapshot =
       failure?: { where: string; error: string };
     };
 
-/** `api-7 · api` — a target as this screen names one. */
-function whereOf(instance: PreviousInstance): string {
-  return `${instance.pod} · ${instance.container}`;
+/** `api-7 · api` — a target as this screen names one; the pod alone when it names no container. */
+function whereOf(instance: { pod: string; container?: string }): string {
+  return instance.container ? `${instance.pod} · ${instance.container}` : instance.pod;
+}
+
+/** A `podLogs` blob as stream lines under one target's label. A blob ends on a newline; a trailing empty row is not a log line. */
+function blobLines(source: string, blob: string): StreamLine[] {
+  return blob
+    .split("\n")
+    .filter((text) => text !== "")
+    .map((text) => ({ source, text }));
+}
+
+/**
+ * A span of the cluster's history for each target, tagged with the label the
+ * live stream gives that target's lines, so {@link toRow} reads them alike.
+ * One `podLogs` per target, in parallel, stamped and uncapped; no `seconds` is
+ * everything the container runtime still keeps.
+ *
+ * All or nothing: the first target that could not be read is reported instead
+ * of the lines, because an export missing one container's lines looks exactly
+ * like a container that had nothing to say.
+ *
+ * Only the cluster is read. The Logs history spool, once it lands, is where the
+ * part of a span it already holds would come from instead.
+ */
+async function readRange(
+  context: string,
+  namespace: string,
+  targets: readonly LogTarget[],
+  seconds: number | undefined,
+): Promise<{ lines: StreamLine[] } | { where: string; error: string }> {
+  const results = await Promise.all(
+    targets.map(async (target) => ({
+      target,
+      out: await podLogs(context, namespace, target.pod, undefined, {
+        container: target.container,
+        timestamps: true,
+        sinceSeconds: seconds,
+        allLines: true,
+      }),
+    })),
+  );
+  const failed = results.find((r) => r.out.error !== undefined);
+  if (failed) return { where: whereOf(failed.target), error: failed.out.error ?? "" };
+  return { lines: results.flatMap((r) => blobLines(r.target.label ?? "", r.out.logs ?? "")) };
 }
 
 /**
@@ -797,10 +881,10 @@ function LogsStream({
   const [previous, setPrevious] = useState(false);
   /** That instance's buffer. A one-shot fetch, not a subscription. */
   const [snapshot, setSnapshot] = useState<Snapshot>({ status: "idle" });
-  /** Why the last export did not land, if it did not. */
-  const [saveError, setSaveError] = useState<unknown>(undefined);
-  /** What Export writes: the view on screen, or the history on disk (#914). */
-  const [exportScope, setExportScope] = useState<ExportScope>("view");
+  /** Why the last export did not land, if it did not: the sentence that heads it, over what went wrong. */
+  const [exportFailure, setExportFailure] = useState<{ title: string; error: unknown } | undefined>(undefined);
+  /** Whether a range is being read from the cluster for an export. */
+  const [exporting, setExporting] = useState(false);
   /** Read once, when the screen opens its stream: a change applies to the next one, never restarts this. */
   const [spoolMaxBytes] = useState(() => megabytes(logHistoryMb()));
   /** The line the detail panel is open on. The Row itself, so the panel outlives the line leaving the view. */
@@ -910,7 +994,11 @@ function LogsStream({
         selection !== null &&
         !selection.isCollapsed &&
         viewport !== null &&
-        (viewport.contains(selection.anchorNode) || viewport.contains(selection.focusNode));
+        // Either end in the log, or the log inside it: Ctrl+A, or a drag from the filter bar past the whole log. A
+        // selection that only reaches into the log has an end in it, so the whole log is all there is left to ask.
+        (viewport.contains(selection.anchorNode) ||
+          viewport.contains(selection.focusNode) ||
+          selection.containsNode(viewport));
       syncHold();
     };
     // Anywhere on the window: a drag that started in the log can end anywhere, and a press the browser takes back,
@@ -955,6 +1043,8 @@ function LogsStream({
     const timer = setTimeout(() => setHeldLong(true), HELD_NOTE_MS);
     return () => clearTimeout(timer);
   }, [stream.held]);
+  /** Whether the filter bar says the view is held: a following pane, held long enough to name. */
+  const heldNoted = !previous && !stream.paused && stream.held && heldLong;
   /**
    * The restarts the "Scrollback cleared" notice is not about. That notice says a
    * change of window reopened the stream and nothing already sent comes back. A change
@@ -979,11 +1069,10 @@ function LogsStream({
    */
   const rowOf = useMemo(() => {
     const cache = new WeakMap<StreamLine, Row>();
-    let next = 0;
     return (line: StreamLine): Row => {
       let row = cache.get(line);
       if (row === undefined) {
-        row = toRow(line, byLabel, next++);
+        row = toRow(line, byLabel, nextRowId++);
         cache.set(line, row);
       }
       return row;
@@ -1042,10 +1131,7 @@ function LogsStream({
           targets.find(
             (t) => t.pod === instance.pod && t.container === instance.container,
           )?.label ?? "";
-        for (const text of (out.logs ?? "").split("\n")) {
-          // A blob ends on a newline; a trailing empty row is not a log line.
-          if (text !== "") lines.push({ source, text });
-        }
+        lines.push(...blobLines(source, out.logs ?? ""));
       }
       setSnapshot({
         status: "ready",
@@ -1110,9 +1196,10 @@ function LogsStream({
    * The rows the rail, the facets and the histogram count. Each count is a pass over the whole buffer, and a busy
    * stream commits every frame: while lines are arriving these take the stream's rows at most four times a second,
    * the last batch always landing. A filter still applies at once, over the rows they have. Paused or reading a
-   * snapshot, nothing is arriving to hold back.
+   * snapshot, nothing is arriving to hold back, and neither is an empty buffer (a restart or a clear): it has nothing
+   * to count, and must not go on showing the old buffer's counts for the wait.
    */
-  const counted = useThrottledValue(rows, following ? RECOUNT_MS : 0);
+  const counted = useThrottledValue(rows, following && rows.length > 0 ? RECOUNT_MS : 0);
   const scoped = useMemo(() => counted.filter(inScope), [counted, inScope]);
   /** The query applied, but not the window: what the histogram counts, so it can shade the window instead of cropping to it. */
   const queried = useMemo(
@@ -1270,26 +1357,72 @@ function LogsStream({
    * With history on disk, the picker beside Export chooses the history instead (#914).
    */
   function exportView() {
-    setSaveError(undefined);
-    const content = filtered
-      .map((row) => `${sourceOf(row, "/")} | ${row.raw}`)
-      .join("\n");
+    setExportFailure(undefined);
     // The previous instance's buffer goes out under its own name. Two files of
     // the same workload's logs, one of them from an instance that no longer
     // exists, are not tellable apart afterwards if they are called the same
     // thing.
     void saveOrDownload(
       `${name}${previous ? "-previous" : ""}.log`,
-      content,
-    ).catch((e: unknown) => setSaveError(e));
+      exportContent(filtered),
+    ).catch((e: unknown) => setExportFailure({ title: SAVE_FAILED, error: e }));
   }
 
-  /** Export the history on disk: all of it, or the last ten minutes or hour of it (#914). */
-  function exportHistory(scope: Exclude<ExportScope, "view">) {
-    setSaveError(undefined);
-    void stream
-      .exportSpool?.(`${name}.log`, scope === "all" ? undefined : Number(scope))
-      .catch((e: unknown) => setSaveError(e));
+  /**
+   * Export a span of the cluster's history (#915), read fresh rather than cut
+   * from the buffer: the ring holds the last few thousand lines, which on a
+   * busy workload is minutes, not the hour asked for.
+   *
+   * Through the same scope and query as the view: the pods left ticked and the
+   * container chosen decide what is read, the query what is kept. Not through
+   * the histogram's window, which the range replaces — a window picked off the
+   * buffer's chart intersected with the last day is a surprise, not a filter.
+   * Each container arrives on its own, so the lines are merged by stamp.
+   */
+  async function exportRange(range: (typeof EXPORT_RANGES)[number]) {
+    setExportFailure(undefined);
+    setExporting(true);
+    try {
+      const read = await readRange(
+        context,
+        namespace,
+        targets.filter(
+          (t) => !hidden.includes(t.pod) && (container === ALL_CONTAINERS || (t.container ?? "") === container),
+        ),
+        range.seconds,
+      );
+      if ("error" in read) {
+        setExportFailure({ title: `Could not read the logs of ${read.where}`, error: read.error });
+        return;
+      }
+      const kept = read.lines
+        .map((l, i) => toRow(l, byLabel, i))
+        .filter((row) => clauses.length === 0 || matchLine(row, clauses))
+        // Stable, so lines of one container that share a stamp keep the order they were written in.
+        .sort((a, b) => (a.at ?? 0) - (b.at ?? 0) || subMillisecond(a.raw) - subMillisecond(b.raw));
+      await saveOrDownload(`${name}-${range.slug}.log`, exportContent(kept));
+    } catch (e) {
+      setExportFailure({ title: SAVE_FAILED, error: e });
+    } finally {
+      setExporting(false);
+    }
+  }
+
+  /**
+   * Export the history kept on disk (#914): all of it, or a span of it back from
+   * now. The stream writes it as it was kept — every line, unfiltered — through
+   * the native save on the desktop and a download on the web.
+   */
+  async function exportKept(range: (typeof KEPT_RANGES)[number]) {
+    setExportFailure(undefined);
+    setExporting(true);
+    try {
+      await stream.exportSpool?.(`${name}-${range.slug}.log`, range.seconds);
+    } catch (e) {
+      setExportFailure({ title: SAVE_FAILED, error: e });
+    } finally {
+      setExporting(false);
+    }
   }
 
   // Sample the viewport and one row so the render can window the list. Both
@@ -1582,23 +1715,88 @@ function LogsStream({
             )}
             {following ? "Pause" : "Follow"}
           </Button>
-          {spooled && (
-            <Select aria-label="What to export" value={exportScope}
-              onValueChange={(value) => setExportScope(value as ExportScope)} options={EXPORT_SCOPES} />
+          {/* The view on screen, disabled on an empty view rather than hidden:
+              a control that vanishes leaves the reader wondering whether this
+              screen exports at all, where a greyed one says "yes, once there is
+              something to export". Classic disabled it on the same condition.
+              A range of the cluster's history is offered beside it (#915),
+              except over a provider's stream, which `podLogs` cannot read, and
+              a previous instance, whose last ten minutes before now are empty.
+              So is the history kept on disk (#914), while it is whole. A history
+              on disk is something to export even when the view is empty.
+              A range still being read keeps either one busy: switching source
+              does not stop it, and its save is still to come. */}
+          {previous || chosen ? (
+            <Button
+              variant="secondary"
+              size="sm"
+              onClick={exportView}
+              disabled={filtered.length === 0 || exporting}
+            >
+              {exporting ? "Exporting…" : "Export"}
+            </Button>
+          ) : (
+            <Popover
+              label="Export"
+              align="end"
+              disabled={exporting}
+              className="min-w-[9rem] p-[2px]"
+              trigger={
+                <span className="btn" data-variant="secondary" data-size="sm" aria-disabled={exporting || undefined}>
+                  {exporting ? "Exporting…" : "Export"}
+                </span>
+              }
+            >
+              {(close) => (
+                <div className="flex flex-col">
+                  <button
+                    type="button"
+                    className="ns-row rounded-[5px] disabled:cursor-not-allowed disabled:opacity-50"
+                    disabled={filtered.length === 0}
+                    onClick={() => {
+                      close();
+                      exportView();
+                    }}
+                  >
+                    Current view
+                  </button>
+                  {spooled && (
+                    <>
+                      <Eyebrow className="rule-t mt-[2px] px-2 pt-1.5 pb-0.5">kept on disk</Eyebrow>
+                      {KEPT_RANGES.map((range) => (
+                        <button
+                          key={range.slug}
+                          type="button"
+                          className="ns-row rounded-[5px]"
+                          aria-label={`${range.label} kept on disk`}
+                          onClick={() => {
+                            close();
+                            void exportKept(range);
+                          }}
+                        >
+                          {range.label}
+                        </button>
+                      ))}
+                    </>
+                  )}
+                  <Eyebrow className="rule-t mt-[2px] px-2 pt-1.5 pb-0.5">from the cluster</Eyebrow>
+                  {EXPORT_RANGES.map((range) => (
+                    <button
+                      key={range.slug}
+                      type="button"
+                      className="ns-row rounded-[5px]"
+                      onClick={() => {
+                        close();
+                        void exportRange(range);
+                      }}
+                    >
+                      {range.label}
+                    </button>
+                  ))}
+                </div>
+              )}
+            </Popover>
           )}
-          {/* Disabled on an empty view rather than hidden: a control that
-              vanishes leaves the reader wondering whether this screen exports
-              at all, where a greyed one says "yes, once there is something to
-              export". Classic disabled it on the same condition. A history
-              on disk is something to export even when the view is empty. */}
-          <Button
-            variant="secondary"
-            size="sm"
-            onClick={() => (spooled && exportScope !== "view" ? exportHistory(exportScope) : exportView())}
-            disabled={(!spooled || exportScope === "view") && filtered.length === 0}
-          >
-            Export
-          </Button>
         </>
       }
     >
@@ -1725,11 +1923,16 @@ function LogsStream({
             </Eyebrow>
           )}
           {/* Why a following pane stopped moving under a press or a selection, and what waits for its release. */}
-          {!previous && !stream.paused && stream.held && heldLong && (
+          {heldNoted && (
             <Eyebrow>
               {`Held while you select${stream.pendingWhilePaused > 0 ? ` · ${groupNumber(stream.pendingWhilePaused)} new lines` : ""}`}
             </Eyebrow>
           )}
+          {/* The same for a screen reader, which the note's coming and going does not reach. Always mounted, so the
+              words are a change to a region it already has, and without the count: that moves with every batch. */}
+          <span className="sr-only" role="status" aria-live="polite" aria-atomic="true" data-slot="held-live">
+            {heldNoted ? "View held while you select" : ""}
+          </span>
           {!previous && (
             <LiveSignal
               label={connectionLabel(
@@ -1853,10 +2056,10 @@ function LogsStream({
           </Alert>
         )}
 
-        {saveError !== undefined && (
+        {exportFailure !== undefined && (
           <FailureAlert
-            title="Could not save this stream"
-            error={saveError}
+            title={exportFailure.title}
+            error={exportFailure.error}
             className="mx-3 mt-3"
           />
         )}

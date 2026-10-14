@@ -641,5 +641,5 @@ away, and just after you have used a Star button — never more than once a
 minute, and not at all for up to an hour once GitHub says the hourly allowance
 for your address is spent. If a request fails the
 button keeps the last count it had, or shows no number if it never had one. The
-button is not shown while the workspace is locked. **Settings → Workspace → srelens on GitHub** hides
+button is not shown while the workspace is locked. **Settings → Session & layout → srelens on GitHub** hides
 the button, which also stops those requests.

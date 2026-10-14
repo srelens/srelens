@@ -177,6 +177,21 @@ copy, so `srectl update` will decline to replace it and point you back
 at `brew` — writing over a file Homebrew tracks would leave its database
 describing a version that is no longer there.
 
+**Nix** builds from this repository. The flake's default package is `srectl`:
+
+```bash
+nix profile install github:srelens/srelens#srectl
+```
+
+The same flake builds the desktop app and the headless web server:
+
+```bash
+nix profile install github:srelens/srelens#srelens
+nix profile install github:srelens/srelens#srelens-server
+```
+
+`nix run github:srelens/srelens#srectl` runs the terminal UI without installing it. A copy installed this way lives under `/nix/store`, which srelens recognises, so `srectl update` will decline to replace it. Move it forward with `nix profile upgrade`.
+
 **Or by hand, on Linux and macOS.** Extract and put it on your `PATH`:
 
 ```bash

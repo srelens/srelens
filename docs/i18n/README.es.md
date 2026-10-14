@@ -41,6 +41,7 @@
 <p align="center">
   <a href="https://github.com/srelens/srelens/stargazers"><img alt="GitHub stars" src="https://img.shields.io/github/stars/srelens/srelens?logo=github&color=eab308"></a>
   <a href="https://www.reddit.com/r/srelens/"><img alt="Reddit: r/srelens" src="https://img.shields.io/reddit/subreddit-subscribers/srelens?label=r%2Fsrelens&logo=reddit&logoColor=white&color=FF4500"></a>
+  <a href="https://join.slack.com/t/srelens/shared_invite/zt-4cu0tzuzo-Ktei1KsVlqPi2XY~irTDAg"><img alt="Slack: srelens" src="https://img.shields.io/badge/Slack-srelens-4A154B?logo=slack&logoColor=white"></a>
   <a href="https://deepwiki.com/srelens/srelens"><img alt="Ask DeepWiki" src="https://img.shields.io/badge/Ask-DeepWiki-2563eb"></a>
 </p>
 
@@ -411,6 +412,8 @@ notas de la versión cuando actualices.
 
 - [r/srelens en Reddit](https://www.reddit.com/r/srelens/) — anuncios, preguntas
   y feedback
+- [srelens en Slack](https://join.slack.com/t/srelens/shared_invite/zt-4cu0tzuzo-Ktei1KsVlqPi2XY~irTDAg) —
+  chat con los mantenedores y otros usuarios
 - [Issues](https://github.com/srelens/srelens/issues) — bugs y peticiones de
   funcionalidades
 - [Sitio web](https://srelens.com)

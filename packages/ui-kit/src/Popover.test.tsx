@@ -65,6 +65,13 @@ describe("Popover", () => {
     expect(screen.getByText("Only failing pods")).toBeDefined();
   });
 
+  it("stays shut while its trigger is disabled", async () => {
+    setup({ disabled: true });
+    expect(trigger()).toHaveProperty("disabled", true);
+    await userEvent.click(trigger());
+    expect(screen.queryByRole("dialog")).toBeNull();
+  });
+
   it("reports its open state on the trigger", async () => {
     setup();
     expect(trigger().getAttribute("aria-expanded")).toBe("false");
