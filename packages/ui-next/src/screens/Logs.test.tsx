@@ -499,13 +499,14 @@ const lastOptions = () => h.seen[h.seen.length - 1].options;
  * call this runs against the "render everything" bail-out, where the drawn
  * window and the filtered buffer are the same array and nothing can tell them
  * apart. Only `.logline` is given a height, so the measurement path under test
- * is the real one: the screen finds the first row itself.
+ * is the real one: the screen finds the first row itself. `height` is read on
+ * each measurement, so a test can take it away, as `display: none` does.
  */
-function measurableRows() {
+function measurableRows(height: () => number = () => 20) {
   const proto = window.HTMLElement.prototype;
   const original = proto.getBoundingClientRect;
   proto.getBoundingClientRect = function (this: HTMLElement) {
-    if (this.classList.contains("logline")) return { height: 20 } as DOMRect;
+    if (this.classList.contains("logline")) return { height: height() } as DOMRect;
     return original.call(this);
   };
   return () => {
@@ -1020,6 +1021,102 @@ describe("Logs", () => {
       } finally {
         restore();
       }
+    });
+
+    describe("when its viewport has no size", () => {
+      /**
+       * A tab behind another is `display: none`: its viewport and its rows measure 0px, and the viewport's
+       * ResizeObserver says so. 0 reads as "draw every row" to the window, so a 50,000-line tab hiding drew all of
+       * them once, a freeze of seconds.
+       */
+      async function measured(visible: boolean) {
+        let size = 100;
+        const restore = measurableRows(() => (size === 0 ? 0 : 20));
+        const resized: (() => void)[] = [];
+        const realObserver = globalThis.ResizeObserver;
+        globalThis.ResizeObserver = class {
+          constructor(callback: () => void) {
+            resized.push(callback);
+          }
+          observe() {}
+          unobserve() {}
+          disconnect() {}
+        } as unknown as typeof ResizeObserver;
+        const inTab = (visible: boolean) => (
+          <PortalScopeProvider scope={{ container: undefined, visible, hold: () => () => {} }}>
+            <ConsoleProvider>
+              <Logs route={ROUTE} />
+            </ConsoleProvider>
+          </PortalScopeProvider>
+        );
+        const view = render(inTab(visible));
+        const region = await body();
+        Object.defineProperty(region, "clientHeight", { configurable: true, get: () => size });
+        push(...many(300));
+        const drawn = () => region.querySelectorAll(".logline").length;
+        return {
+          region,
+          drawn,
+          /** The viewport goes to 0px (and its rows with it), and its observer says so. */
+          collapse: (stillVisible = false) => {
+            size = 0;
+            view.rerender(inTab(stillVisible));
+            act(() => resized.forEach((callback) => callback()));
+          },
+          /** And comes back. */
+          comeBack: () => {
+            size = 100;
+            view.rerender(inTab(true));
+            act(() => resized.forEach((callback) => callback()));
+          },
+          done: () => {
+            restore(); // the row heights
+            globalThis.ResizeObserver = realObserver;
+          },
+        };
+      }
+
+      it("keeps the window it had while the tab is hidden, rather than drawing every row", async () => {
+        const tab = await measured(true);
+        try {
+          const before = tab.drawn();
+          expect(before).toBeGreaterThan(0);
+          expect(before).toBeLessThan(300);
+          tab.collapse();
+          expect(tab.drawn()).toBe(before);
+          // Back on screen, it measures what is there again.
+          tab.comeBack();
+          expect(tab.drawn()).toBeGreaterThan(0);
+          expect(tab.drawn()).toBeLessThan(300);
+        } finally {
+          tab.done();
+        }
+      });
+
+      it("keeps it while the document is hidden too", async () => {
+        const tab = await measured(true);
+        try {
+          const before = tab.drawn();
+          Object.defineProperty(document, "hidden", { configurable: true, get: () => true });
+          tab.collapse(true);
+          expect(tab.drawn()).toBe(before);
+        } finally {
+          delete (document as { hidden?: boolean }).hidden;
+          tab.done();
+        }
+      });
+
+      it("still measures a viewport that is 0px tall while it is showing: that is a real size", async () => {
+        const tab = await measured(true);
+        try {
+          expect(tab.drawn()).toBeLessThan(300);
+          // Showing, in a showing document, with a viewport that has collapsed: no fixed rows to window by.
+          tab.collapse(true);
+          expect(tab.drawn()).toBe(300);
+        } finally {
+          tab.done();
+        }
+      });
     });
 
     it("draws everything once lines wrap, because a wrapped row has no fixed height", async () => {

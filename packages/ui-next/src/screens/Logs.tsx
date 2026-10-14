@@ -1295,9 +1295,16 @@ function LogsStream({
   // Sample the viewport and one row so the render can window the list. Both
   // degrade to 0 in jsdom, which `computeLogWindow` reads as "render
   // everything" — one of the bail-outs that make it correct.
+  const showingRef = useRef(showing);
+  showingRef.current = showing;
   const measure = useCallback(() => {
     const viewport = viewportRef.current;
     if (!viewport) return;
+    // A tab behind another is `display: none`, and a hidden document may lay out nothing: the viewport and its rows
+    // measure 0px, and 0 reads as "draw every row" to the window. So hiding a tab with 50,000 lines drew all of
+    // them once (a freeze of seconds), and so did showing it. The size it had stands until it is seen again.
+    // Only a zero-height viewport that is not showing is passed over: one that is showing is as small as it is.
+    if (viewport.clientHeight === 0 && (document.hidden || !showingRef.current)) return;
     const firstRow = rowsRef.current?.querySelector<HTMLElement>(".logline");
     const rowHeight = firstRow ? firstRow.getBoundingClientRect().height : 0;
     setMetrics((m) =>
