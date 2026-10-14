@@ -199,6 +199,25 @@ test("refuses an asset GitHub recorded no digest for", () => {
   assert.match(stderr, /GitHub records no sha256 for srelens_1\.2\.3_x64-setup\.exe/);
 });
 
+test("--package renders that package alone, without the other's asset", () => {
+  // A desktop-only submission for a release whose CLI archive is missing or
+  // named differently -- v0.15.0 and earlier shipped it as srelens-tui.
+  const { status, out } = render(
+    [VERSION, "--package", "srelens"],
+    release([DESKTOP, `sha256:${DESKTOP_HASH}`])
+  );
+  assert.equal(status, 0);
+  const installer = read(out, "srelens", "srelens.srelens.installer.yaml");
+  assert.match(installer, new RegExp(`InstallerSha256: ${"B".repeat(64)}`));
+  assert.equal(existsSync(manifests(out, "srectl")), false);
+});
+
+test("refuses a --package it does not know", () => {
+  const { status, stderr } = render([VERSION, "--package", "srelens-tui"], BOTH);
+  assert.equal(status, 1);
+  assert.match(stderr, /unknown package 'srelens-tui'; expected srectl or srelens/);
+});
+
 test("reports a missing version argument rather than rendering nothing", () => {
   const { status, stderr } = render([], BOTH);
   assert.equal(status, 1);

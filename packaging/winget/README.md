@@ -27,7 +27,9 @@ That is also why it is a separate workflow. Welded into the release pipeline,
 a rejected or stale submission could only be retried by cutting another
 release — which is how AUR once sat four versions behind. A manual run takes
 a `package` input, so a submission that failed can be retried without opening
-a second pull request for the one that went through.
+a second pull request for the one that went through. The workflow renders
+only what it submits (`render.mjs --package`), so a release missing one
+package's asset can still submit the other.
 
 ## Prerequisites
 
@@ -91,12 +93,13 @@ cannot vouch for the desktop installer; for the srectl archive the two agree.
 node --test packaging/winget/render.test.mjs
 ```
 
-Nine cases, all offline: they pass `--release` with a release written by the
+Eleven cases, all offline: they pass `--release` with a release written by the
 test, so nothing depends on a release existing or on GitHub being reachable.
 They cover a full render of each package, ASCII-only output, and the
 refusals -- a pre-release version, a release missing either asset (and
 writing nothing when it does), a digest that is not a sha256 or is not there,
-and a missing version argument. CI runs them on every pull request.
+and a missing version argument -- and `--package` rendering one package
+without needing the other's asset. CI runs them on every pull request.
 
 ## Checking a render before submitting
 

@@ -2,8 +2,9 @@
 // Render the winget manifests for a published release.
 //
 //   node packaging/winget/render.mjs 1.2.3 [--out <dir>] [--release <path>]
+//                                          [--package srectl|srelens]
 //
-// Writes two packages, three files each -- version, defaultLocale, installer
+// Writes two packages, or the one `--package` names, three files each -- version, defaultLocale, installer
 // -- into the paths they must occupy inside a microsoft/winget-pkgs checkout:
 //
 //   <out>/manifests/s/srelens/srectl/<version>/    srelens.srectl, the CLI
@@ -21,7 +22,8 @@
 // `gh api repos/<repo>/releases/tags/srelens-v<version>` prints -- for an
 // offline render or to try one before the release is public.
 //
-// Fails rather than guesses, and writes nothing unless both packages render.
+// Fails rather than guesses, and writes nothing unless every package asked
+// for renders.
 // A missing asset, an asset without a digest, or a surviving placeholder all
 // stop the render -- a manifest with a wrong hash fails on a stranger's
 // machine at install time, after moderation has already waved it through.
@@ -58,7 +60,7 @@ async function main() {
   // named a release `--out`. Saying so beats "'--out' is not a stable X.Y.Z
   // version", which reads as though the flag itself were the problem.
   if (!version || version.startsWith("-")) {
-    die("usage: render.mjs <version> [--out <dir>] [--release <path>]");
+    die("usage: render.mjs <version> [--out <dir>] [--release <path>] [--package srectl|srelens]");
   }
   if (!/^\d+\.\d+\.\d+$/.test(version)) {
     // winget is a public catalogue of stable software. A dev pre-release
@@ -73,6 +75,14 @@ async function main() {
   };
   const outRoot = flag("--out") || "winget-out";
   const releaseFile = flag("--release");
+  // One package needs only its own asset, so a release missing the other's
+  // -- v0.15.0 and earlier named the CLI archive srelens-tui -- can still
+  // submit this one.
+  const only = flag("--package");
+  if (only && !PACKAGES.some((p) => p.name === only)) {
+    die(`unknown package '${only}'; expected ${PACKAGES.map((p) => p.name).join(" or ")}`);
+  }
+  const packages = PACKAGES.filter((p) => !only || p.name === only);
 
   const tag = `srelens-v${version}`;
   const base = `https://github.com/${REPO}/releases/download/${tag}`;
@@ -151,7 +161,7 @@ async function main() {
   // Every file rendered before any is written: half a render on disk is half
   // a submission waiting to happen.
   const files = [];
-  for (const { name, asset } of PACKAGES) {
+  for (const { name, asset } of packages) {
     const id = `srelens.${name}`;
     // s/srelens/<name>/<version> -- winget-pkgs partitions by the publisher's
     // first letter, then identifier, then version.
@@ -167,7 +177,8 @@ async function main() {
     console.error(`wrote ${join(dir, file)}`);
   }
 
-  console.error(`\nsrelens.srectl and srelens.srelens ${version} are ready to submit`);
+  const ids = packages.map((p) => `srelens.${p.name}`).join(" and ");
+  console.error(`\n${ids} ${version} ${packages.length > 1 ? "are" : "is"} ready to submit`);
 }
 
 try {

@@ -123,9 +123,14 @@ jobs:
           VERSION: ${{ steps.resolve.outputs.version }}
           # Read access to a public release; it only lifts the API rate limit.
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PACKAGES: ${{ steps.resolve.outputs.packages }}
         run: |
           set -euo pipefail
-          node packaging/winget/render.mjs "$VERSION" --out winget-out
+          # Only the packages being submitted, so a release missing the other
+          # one's asset does not block this one.
+          for p in $PACKAGES; do
+            node packaging/winget/render.mjs "$VERSION" --out winget-out --package "$p"
+          done
           echo "--- rendered manifests ---"
           for f in winget-out/manifests/s/srelens/*/"$VERSION"/*; do
             echo "=== $f"
