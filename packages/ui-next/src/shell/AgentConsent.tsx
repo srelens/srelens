@@ -9,6 +9,7 @@ import {
 import { getRun, noteGate, noteGateIn, runKeyHoldingGate, type GateRecord } from "../lib/agentRun";
 import { Alert, ConfirmDialog } from "@srelens/ui-kit";
 import { FailureLine } from "../lib/errorCopy";
+import { useProtectedConfirm } from "../lib/protectedConfirm";
 import { useWorkspaceSealed } from "./LockGate";
 import { RequestConfirmation } from "../confirm/RequestConfirmation";
 import { asConfirmRequest } from "../confirm/confirmRequest";
@@ -271,6 +272,20 @@ export function AgentConsent() {
   // answered. See the file comment for what this component does about it.
   const covered = useWorkspaceSealed();
   const current = queue[0];
+  /**
+   * On a protected cluster, its name, typed, before an Approve (#101). Asked
+   * of the host's own reading of the call — `target.cluster` — which every
+   * cluster write carries (`context` is required on each one,
+   * `crates/kube/src/actions.rs`). A request that names no cluster is not
+   * cluster-scoped and asks nothing more. Deny never waits; the host's sixty
+   * seconds still run.
+   */
+  const typed = useProtectedConfirm(current?.target?.cluster);
+  const resetTyped = typed.reset;
+  // Each request is its own question: a name typed for one answers nothing else.
+  useEffect(() => {
+    resetTyped();
+  }, [current?.id, resetTyped]);
 
   useEffect(() => {
     // Every vault command and `mcp_confirm_respond` alike are Tauri commands,
@@ -534,6 +549,7 @@ export function AgentConsent() {
                 <pre className="code max-h-64 overflow-auto rounded p-3 text-[0.6875rem]">
                   <code>{JSON.stringify(current.args, null, 2)}</code>
                 </pre>
+                {typed.field}
                 {queue.length > 1 && (
                   <p className="m-0 text-[0.6875rem] text-muted">
                     {queue.length - 1} more request{queue.length - 1 === 1 ? "" : "s"} waiting
@@ -564,6 +580,8 @@ export function AgentConsent() {
         cancelLabel="Deny"
         danger
         busy={busy}
+        // Approve waits for a protected cluster's name (#101); Deny never does.
+        confirmDisabled={!typed.ready}
         onConfirm={() => void answer(true)}
         onCancel={() => void answer(false)}
       />

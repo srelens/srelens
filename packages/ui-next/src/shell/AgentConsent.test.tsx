@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach, type Mock } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach, type Mock } from "vitest";
 import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 
@@ -122,10 +122,13 @@ vi.mock("@srelens/core", async (orig) => ({
   },
 }));
 
-import type { ConfirmRequest } from "@srelens/core";
+import type { ClusterContext, ConfirmRequest } from "@srelens/core";
 import { AgentConsent } from "./AgentConsent";
 import { lockWorkspace, resetLock, __setKnownVaultMode } from "./LockGate";
 import { askAgent, getAgentRun, resetAgentRun } from "../lib/agentRun";
+import { resetContexts, setContexts } from "../lib/clusters";
+import { defaultState } from "../lib/tabs";
+import { getState, setState, setWorkspaceProtected } from "../lib/tabsStore";
 
 const REQUEST = "mcp://confirm-request";
 const RESOLVED = "mcp://confirm-resolved";
@@ -1300,5 +1303,110 @@ describe("the host's own words", () => {
     );
     await waitFor(() => expect(core.listExtensions).toHaveBeenCalled());
     expect(screen.queryByTestId("host-confirm-requester")).toBeNull();
+  });
+});
+
+/**
+ * On a protected cluster (#101) Approve waits for the cluster's name, typed.
+ * The cluster is the host's reading of the call — `target.cluster` — never
+ * something dug out of `args`. Deny never waits.
+ */
+describe("on a protected cluster (#101)", () => {
+  const PROD: ClusterContext = { name: "prod", stableId: "prod", key: "prod", cluster: "prod", server: "", isCurrent: true, sourceFile: "", authKind: "token" };
+
+  beforeEach(() => {
+    setContexts([PROD]);
+    setState(defaultState([PROD]));
+    setWorkspaceProtected(getState().currentId, true);
+  });
+  afterEach(() => {
+    resetContexts();
+    setState(defaultState([]));
+  });
+
+  const drain = (id: string, node = "node-7") =>
+    emit(REQUEST, {
+      id,
+      tool: "k8s.drainNode",
+      args: { context: "prod", name: node },
+      prompt: `Drain ${node} in cluster prod?`,
+      impact: "high",
+      target: { cluster: "prod", name: node },
+    });
+  const typed = () => screen.getByRole("textbox", { name: "Type prod to confirm" }) as HTMLInputElement;
+  const approve = () => screen.getByRole("button", { name: /approve/i }) as HTMLButtonElement;
+  const deny = () => screen.getByRole("button", { name: /deny/i }) as HTMLButtonElement;
+
+  it("keeps Approve disabled until the cluster's name is typed, exactly", async () => {
+    await mount();
+    drain("p1");
+    expect(await screen.findByText("prod is protected (workspace Default).")).toBeTruthy();
+    expect(approve().disabled).toBe(true);
+
+    await userEvent.type(typed(), "Prod");
+    expect(approve().disabled).toBe(true);
+
+    await userEvent.clear(typed());
+    await userEvent.type(typed(), "prod");
+    expect(approve().disabled).toBe(false);
+    await userEvent.click(approve());
+    await waitFor(() => expect(core.respondToConfirm).toHaveBeenCalledWith("p1", true));
+  });
+
+  it("denies without the name", async () => {
+    await mount();
+    drain("p2");
+    await screen.findByText("prod is protected (workspace Default).");
+    expect(deny().disabled).toBe(false);
+    await userEvent.click(deny());
+    await waitFor(() => expect(core.respondToConfirm).toHaveBeenCalledWith("p2", false));
+  });
+
+  it("does not carry a name typed for one request over to the next", async () => {
+    await mount();
+    drain("p3");
+    drain("p4", "node-8");
+    await screen.findByText("prod is protected (workspace Default).");
+    await userEvent.type(typed(), "prod");
+    await userEvent.click(approve());
+    await waitFor(() => expect(core.respondToConfirm).toHaveBeenCalledWith("p3", true));
+
+    // p4 is the question now, and nobody has answered it.
+    expect(await screen.findByText("Drain node-8 in cluster prod?")).toBeTruthy();
+    await waitFor(() => expect(typed().value).toBe(""));
+    expect(approve().disabled).toBe(true);
+  });
+
+  it("asks of the cluster the host names, which an app's call carries outside its arguments", async () => {
+    await mount();
+    emit(REQUEST, {
+      id: "p6",
+      tool: "extensions.action",
+      args: {},
+      prompt: "Run the declared action?",
+      impact: "high",
+      target: { cluster: "prod" },
+    });
+    expect(await screen.findByText("prod is protected (workspace Default).")).toBeTruthy();
+    expect(approve().disabled).toBe(true);
+  });
+
+  it.each([
+    [
+      "a cluster no protected workspace holds",
+      { id: "p5", tool: "k8s.drainNode", args: { context: "stage", name: "node-7" }, prompt: "Drain node-7 in cluster stage?", impact: "high", target: { cluster: "stage", name: "node-7" } },
+    ],
+    [
+      "no cluster at all",
+      { id: "p5", tool: "toolbox.installHelm", args: { version: "3.16" }, prompt: "Install helm 3.16?", impact: "medium" },
+    ],
+  ])("asks nothing more of a request on %s", async (_, payload) => {
+    await mount();
+    emit(REQUEST, payload);
+    await screen.findByRole("dialog");
+    expect(screen.queryByRole("textbox", { name: /to confirm/ })).toBeNull();
+    expect(approve().disabled).toBe(false);
+    await userEvent.click(approve());
+    await waitFor(() => expect(core.respondToConfirm).toHaveBeenCalledWith("p5", true));
   });
 });
