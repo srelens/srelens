@@ -240,6 +240,22 @@ describe("WorkspaceSwitcher", () => {
       expect(shield(local)).toBeNull();
       expect(local.textContent).not.toContain("Protected");
     });
+
+    it("hides the summary's Protected from assistive tech, since the word after the name already says it", async () => {
+      // `textContent` counts hidden nodes, so the test above cannot tell. Without
+      // `aria-hidden` a screen reader says Protected twice on the same row.
+      await open({ workspaces: GUARDED, activeId: "local" });
+      const suffix = [...row(/Production/).querySelectorAll("span")].find((s) => s.textContent === " · Protected");
+      expect(suffix?.getAttribute("aria-hidden")).toBe("true");
+    });
+
+    it("leaves a protected row's remove label as the unprotected wording", async () => {
+      // The label is the cost of the press, and Protected is not part of the cost.
+      await open({ workspaces: GUARDED, activeId: "local", onRemove: vi.fn() });
+      expect(screen.getByRole("button", { name: /Remove Production/ }).getAttribute("aria-label")).toBe(
+        "Remove Production, 2 clusters and 11 tabs",
+      );
+    });
   });
 
   it("offers to manage workspaces when the caller can, and closes after", async () => {
