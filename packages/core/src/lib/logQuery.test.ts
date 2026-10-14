@@ -258,8 +258,38 @@ describe("parseLogQuery", () => {
   });
 });
 
+describe("comparisons", () => {
+  it("reads a field compared with a number or a duration", () => {
+    expect(clauses("latency>500")[0]).toMatchObject({ match: "compare", field: "latency", op: ">", kind: "number", target: 500, value: "500", negated: false, span: [0, 11] });
+    expect(clauses("n>=-1.5e3")[0]).toMatchObject({ op: ">=", kind: "number", target: -1500 });
+    expect(clauses("-took<=1h2m3s")[0]).toMatchObject({ negated: true, op: "<=", kind: "duration", target: 3723 });
+    expect(clauses("t<350µs")[0]).toMatchObject({ kind: "duration", target: 0.00035 });
+    expect(clauses("t<350μs")[0]).toMatchObject({ kind: "duration", target: 0.00035 });
+    expect(clauses("t>.5s")[0]).toMatchObject({ kind: "duration", target: 0.5 });
+  });
+
+  it("leaves anything that is not a comparison as the text it was", () => {
+    for (const q of ["a->b", "x>y", "=>", "latency>", "latency>abc", "latency>5x"]) {
+      expect(clauses(q).every((c) => c.match === "text"), q).toBe(true);
+    }
+  });
+
+  // The box parses on every keystroke, so each half-typed shape must be a query, never an error.
+  it.each([
+    ["latency>", "text"],
+    ["latency>=", "text"],
+    ["latency>5", "number"],
+    ["latency>5s", "duration"],
+    ["latency>5s3", "text"],
+    ["latency>5s3m", "duration"],
+  ] as const)("reads %j as %s while it is being typed", (query, read) => {
+    const [clause] = clauses(query);
+    expect(clause.match === "compare" ? clause.kind : clause.match).toBe(read);
+  });
+});
+
 describe("matchLine", () => {
-  const A = '{"level":"info","msg":"Wrote batch","system":"camlog"}';
+  const A ='{"level":"info","msg":"Wrote batch","system":"camlog"}';
   const B = '{"level":"warn","msg":"Skipping checkpoint","system":"schwarz"}';
   const C = '{"level":"error","msg":"Write failed: timeout","system":"camlog"}';
   const D = "GET /healthz 200 1ms";
@@ -326,6 +356,51 @@ describe("matchLine", () => {
 
   it("matches a free-text regex without regard to case, as the rest of the query does", () => {
     expect(matches("/WROTE/", A, B)).toEqual([A]);
+  });
+});
+
+describe("matching comparisons", () => {
+  // logfmt needs two pairs to count as fields; one is prose (see logfmtTail).
+  const at = (pair: string) => `svc=api ${pair}`;
+
+  it("compares numbers with numbers and durations with durations", () => {
+    expect(matches("latency>500", at("latency=900"), at("latency=100"), at("latency=30.1s"), "nothing")).toEqual([
+      at("latency=900"),
+    ]);
+    expect(matches("took>1s", at("took=1.2s"), at("took=1200ms"), at("took=900ms"), at("took=5"))).toEqual([
+      at("took=1.2s"),
+      at("took=1200ms"),
+    ]);
+    expect(matches("n>=1000", '{"n":-1.5e3}', '{"n":1e3}')).toEqual(['{"n":1e3}']);
+  });
+
+  it("ANDs comparisons on one field into a range, beside an OR of its plain values", () => {
+    expect(matches("latency>100 latency<500", at("latency=50"), at("latency=300"), at("latency=700"))).toEqual([
+      at("latency=300"),
+    ]);
+    expect(
+      matches("status:200 status:201 latency<500", "status=200 latency=100", "status=201 latency=900", "status=500 latency=1"),
+    ).toEqual(["status=200 latency=100"]);
+  });
+
+  it("keeps lines without the field under a negated comparison, as a negated value does", () => {
+    expect(matches("-latency>500", at("latency=900"), at("latency=100"), "no field")).toEqual([
+      at("latency=100"),
+      "no field",
+    ]);
+  });
+
+  it("never holds a comparison on the level word", () => {
+    expect(matches("level>1", "error boom", '{"level":50}')).toEqual([]);
+  });
+
+  it("is no facet's value and no row mark, and its pill removes it by span", () => {
+    const q = clauses("latency>500");
+    expect(clauseState(q, { field: "latency", value: "500" })).toBeUndefined();
+    expect(toggleClause("latency>500", { field: "latency", value: "500" }, "include")).toBe("latency>500 latency:500");
+    expect(highlightRanges(at("latency=500"), q)).toEqual([]);
+    const both = clauses("a latency>500 b");
+    expect(removeClause("a latency>500 b", both[1])).toBe("a b");
   });
 });
 

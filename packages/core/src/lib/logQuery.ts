@@ -198,11 +198,25 @@ interface ClauseBase {
   readonly span: readonly [number, number];
 }
 
+export type CompareOp = ">" | ">=" | "<" | "<=";
+
 export type QueryClause = ClauseBase &
   (
     | { readonly match: "text" | "equals"; readonly value: string }
     | { readonly match: "phrase"; readonly value: string; readonly words: string }
     | { readonly match: "regex"; readonly value: string; readonly regex: RegExp }
+    /**
+     * `field>5`, `field<=1.5s`. `value` is the right side as typed, for the pill
+     * and for editing by span; `target` is the number, or the duration in seconds.
+     */
+    | {
+        readonly match: "compare";
+        readonly field: string;
+        readonly op: CompareOp;
+        readonly kind: "number" | "duration";
+        readonly target: number;
+        readonly value: string;
+      }
   );
 
 export type ParsedQuery =
@@ -239,16 +253,74 @@ export function isQueryableKey(key: string): boolean {
 
 const isSpace = (ch: string) => /\s/.test(ch);
 
+const NUMBER = /^[+-]?(\d+(\.\d*)?|\.\d+)([eE][+-]?\d+)?$/;
+/**
+ * One `<number><unit>` part of a Go duration. Sticky, so `readMeasure` walks the
+ * string by index and no start position is rescanned; the unit list is a flat
+ * alternation, so a run of digits cannot backtrack against itself. Go spells
+ * micro with U+00B5 or U+03BC, and a logger can use either.
+ */
+const DURATION_PART = /(\d+(?:\.\d*)?|\.\d+)(ns|us|µs|μs|ms|s|m|h)/y;
+const UNIT_SECONDS: Readonly<Record<string, number>> = {
+  ns: 1e-9,
+  us: 1e-6,
+  "µs": 1e-6,
+  "μs": 1e-6,
+  ms: 1e-3,
+  s: 1,
+  m: 60,
+  h: 3600,
+};
+
+/**
+ * A number, or a Go-style duration in seconds (`350ms`, `1h2m3s`), or undefined
+ * when `s` is neither. The query's right side and a line's field value are read
+ * by this one function, so they cannot disagree about what a measure is.
+ */
+export function readMeasure(s: string): { kind: "number" | "duration"; value: number } | undefined {
+  if (NUMBER.test(s)) return { kind: "number", value: Number(s) };
+  let i = s[0] === "-" || s[0] === "+" ? 1 : 0;
+  const sign = s[0] === "-" ? -1 : 1;
+  if (i >= s.length) return undefined;
+  let total = 0;
+  while (i < s.length) {
+    DURATION_PART.lastIndex = i;
+    const m = DURATION_PART.exec(s);
+    if (m === null) return undefined;
+    total += Number(m[1]) * UNIT_SECONDS[m[2]];
+    i = DURATION_PART.lastIndex;
+  }
+  return { kind: "duration", value: sign * total };
+}
+
+/**
+ * `key>v`, `key>=v`, `key<v` or `key<=v` at `i`, when `v` reads as a number or a
+ * duration; otherwise undefined and the token stays text, so `a->b` and `x>y`
+ * still search for what they say.
+ */
+function readComparison(q: string, i: number) {
+  const keyStop = keyEnd(q, i);
+  if (keyStop === i || (q[keyStop] !== ">" && q[keyStop] !== "<")) return undefined;
+  const op = (q[keyStop + 1] === "=" ? `${q[keyStop]}=` : q[keyStop]) as CompareOp;
+  const from = keyStop + op.length;
+  let end = from;
+  while (end < q.length && !isSpace(q[end])) end += 1;
+  const measure = readMeasure(q.slice(from, end));
+  if (measure === undefined) return undefined;
+  return { field: q.slice(i, keyStop), op, kind: measure.kind, target: measure.value, value: q.slice(from, end), end };
+}
+
 type Term =
   | { readonly kind: "bare" | "quoted" | "regex"; readonly value: string; readonly end: number }
   | { readonly error: string; readonly at: number };
 
 /**
  * Whitespace-separated clauses: `word`, `"phrase"`, `/regex/`, `field:value`,
- * `field:"value"`, `field:/regex/`, each optionally `-`-negated. Values are
- * lowercased here once (a regex is made case-insensitive instead), so matching
- * 5,000 lines does no case folding of the query. Field names keep their
- * spelling and compare case-insensitively at match time.
+ * `field:"value"`, `field:/regex/`, `field>5`, `field<=1.5s`, each optionally
+ * `-`-negated. Values are lowercased here once (a regex is made
+ * case-insensitive instead), so matching 5,000 lines does no case folding of
+ * the query. Field names keep their spelling and compare case-insensitively at
+ * match time.
  */
 export function parseLogQuery(query: string): ParsedQuery {
   const clauses: QueryClause[] = [];
@@ -263,6 +335,21 @@ export function parseLogQuery(query: string): ParsedQuery {
     if (negated) i += 1;
     if (i >= query.length || isSpace(query[i])) {
       return { ok: false, error: "A '-' needs something to exclude", at: start };
+    }
+    const cmp = readComparison(query, i);
+    if (cmp !== undefined) {
+      clauses.push({
+        match: "compare",
+        field: cmp.field,
+        op: cmp.op,
+        kind: cmp.kind,
+        target: cmp.target,
+        value: cmp.value,
+        negated,
+        span: [start, cmp.end],
+      });
+      i = cmp.end;
+      continue;
     }
     const prefixEnd = fieldPrefixEnd(query, i);
     const field = prefixEnd < 0 ? undefined : query.slice(i, prefixEnd - 1);
@@ -331,7 +418,8 @@ function toClause(
 
 /**
  * Whether a line passes. Positive clauses on ONE field OR together — so two
- * clicks on the Level facet show both levels — and everything else ANDs.
+ * clicks on the Level facet show both levels — and everything else ANDs,
+ * comparisons included, so `latency>100 latency<500` is a range.
  * `ignoreField` skips that field's clauses, which is how a facet counts its
  * own values without filtering itself down to the one already picked.
  */
@@ -344,7 +432,8 @@ export function matchLine(line: QueryLine, clauses: readonly QueryClause[], igno
     const hit = hits(line, clause);
     if (clause.negated) {
       if (hit) return false;
-    } else if (field === undefined) {
+    } else if (field === undefined || clause.match === "compare") {
+      // A comparison narrows, so two on one field are a range and not an either-or.
       if (!hit) return false;
     } else {
       anyOf ??= new Map();
@@ -360,6 +449,22 @@ function hits(line: QueryLine, clause: QueryClause): boolean {
     if (clause.match === "regex") return clause.regex.test(line.text);
     if (line.haystack.includes(clause.value)) return true;
     return clause.match === "phrase" && clause.words !== "" && ` ${line.words} `.includes(` ${clause.words} `);
+  }
+  if (clause.match === "compare") {
+    // Like compares with like: `5` is no answer to `took>1s`, and `30.1s` none to `took>5`.
+    const raw = fieldValue(line, clause.field);
+    const got = raw === undefined ? undefined : readMeasure(raw.trim());
+    if (got === undefined || got.kind !== clause.kind) return false;
+    switch (clause.op) {
+      case ">":
+        return got.value > clause.target;
+      case ">=":
+        return got.value >= clause.target;
+      case "<":
+        return got.value < clause.target;
+      case "<=":
+        return got.value <= clause.target;
+    }
   }
   const value = fieldValue(line, clause.field);
   if (value === undefined) return false;
