@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, onTestFinished, vi } from "vitest";
 import { act, renderHook, waitFor } from "@testing-library/react";
-import type { ClusterContext } from "@srelens/core";
+import { saveRestoreSession, type ClusterContext } from "@srelens/core";
 
 // The one backend read this module makes: main's saved workspaces, read again
 // when a context window is focused. A stand-in, so each test says what it brings in.
@@ -77,6 +77,13 @@ describe("isClusterProtected and protectingWorkspace", () => {
     expect(isClusterProtected(prod.stableId)).toBe(true);
     expect(protectingWorkspace(prod.stableId)).toBe("Production");
     expect(isClusterProtected(staging.stableId)).toBe(false);
+  });
+
+  it("reads main's save with Restore session off, since main saves every change regardless", () => {
+    saveRestoreSession(false);
+    protectInMain("Production", [prod]);
+    expect(isClusterProtected(prod.stableId)).toBe(true);
+    expect(protectionFor("prod-eu")).toEqual({ name: "prod-eu", workspace: "Production" });
   });
 
   it("names this window's protecting workspace before the main window's", () => {

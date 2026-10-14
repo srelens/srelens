@@ -17,9 +17,9 @@ import { getState, subscribe } from "./tabsStore";
  * **This window's workspaces, then the main window's save.** A context window
  * copies main's workspaces once, when it first opens, and keeps its own copy
  * from then on, so main's save is read as well: a context window can add
- * protection, never remove what main set. The save is read through
- * `loadTabsState`, which honours "Restore session": with it off, a save left
- * by an earlier session protects nothing.
+ * protection, never remove what main set. The save is read whatever
+ * "Restore session" says: main saves every change regardless of it, so the
+ * save is current, and a stale one could only ask more.
  */
 export interface Protection {
   /** What the reader types: the cluster's mark name, `getMark(stableId, contextName).name`. */
@@ -33,7 +33,7 @@ export interface Protection {
 // window sees main's later saves when it is focused (followMainProtection).
 // Cache by the raw string if this ever shows in a profile.
 function workspaces(): Workspace[] {
-  return [...getState().workspaces, ...(loadTabsState(undefined, undefined, "main")?.workspaces ?? [])];
+  return [...getState().workspaces, ...(loadTabsState(undefined, () => true, "main")?.workspaces ?? [])];
 }
 
 /** Name of the first protected workspace holding the cluster (this window first, then main's save), or undefined. */
