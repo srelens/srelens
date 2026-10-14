@@ -72,7 +72,7 @@ import {
 import { recentKey, rememberLogSubject, useOfferedRecents } from "../lib/logRecents";
 import { useMarkLogStream } from "../lib/liveLogStreams";
 import { useTabScope } from "../lib/tabScope";
-import { openTab } from "../lib/tabsStore";
+import { openTab, setTabView, useTabView } from "../lib/tabsStore";
 import { FilterPills } from "./logs/FilterPills";
 import { LineDetail } from "./logs/LineDetail";
 import { renderMessage } from "./logs/LogMessage";
@@ -840,7 +840,13 @@ function LogsStream({
   terminated: PreviousInstance[];
 }) {
   const { ask } = useConsole();
-  const [text, setText] = useState("");
+  const tabId = useTabScope();
+  // The box starts from what the tab was left with, read once: it is this
+  // screen's to edit after that, so a later change to the saved value does not
+  // reset it. Outside a tab there is no id, and `""` is one no tab has — the
+  // empty view comes back, as it does for `useResourceTabView`.
+  const savedQuery = useTabView(tabId ?? "").query;
+  const [text, setText] = useState(savedQuery ?? "");
   /** The window picked off the histogram, if any. The one filter that isn't query text. */
   const [range, setRange] = useState<TimeRange | undefined>(undefined);
   /** Where focus goes when a pill is removed: the × that had it is about to unmount. */
@@ -944,7 +950,7 @@ function LogsStream({
     source: provider.source,
   });
   // Home's "Live now" lists this tab only while the stream is actually running.
-  useMarkLogStream(useTabScope(), stream.status !== "error" && stream.status !== "completed");
+  useMarkLogStream(tabId, stream.status !== "error" && stream.status !== "completed");
   // A provider's stream that ended sends no more statuses, so the hook's last one
   // would go on saying it follows: the ending is what the readout says instead.
   const ended = chosen ? provider.end : null;
@@ -1151,6 +1157,11 @@ function LogsStream({
   const deferredText = useDeferredValue(text);
   const applied = useMemo(() => parseLogQuery(deferredText), [deferredText]);
   const clauses = applied.ok ? applied.clauses : NO_CLAUSES;
+  // Saved with the applied text, not the typed one: the store writes a file,
+  // and a write per keystroke is what the deferral is there to avoid.
+  useEffect(() => {
+    if (tabId !== null) setTabView(tabId, { query: deferredText });
+  }, [tabId, deferredText]);
 
   /** The pod boxes and the container select: the scope every view starts from. */
   const inScope = useCallback(

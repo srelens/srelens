@@ -17,8 +17,9 @@ export interface Tab {
    * A resource list's sort, filter string and active filter column. Belongs
    * to the tab, not the screen, so it survives a restart the way the rest of
    * the tab does. Absent until the user sorts or filters — see `setTabView`.
+   * A Logs tab keeps its search box here, as `query`.
    */
-  view?: { sort?: TableSort | null; filter?: string; filterKey?: string | null; regex?: boolean };
+  view?: { sort?: TableSort | null; filter?: string; filterKey?: string | null; regex?: boolean; query?: string };
   /**
    * The namespace selection this tab is narrowed to, per cluster, keyed by
    * `ClusterContext.stableId`. On the tab, not the cluster: narrowing one tab

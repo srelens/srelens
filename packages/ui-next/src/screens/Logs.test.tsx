@@ -380,6 +380,15 @@ function draw(route = ROUTE) {
   );
 }
 
+/** The screen as `Window` mounts it: inside the tab whose id it is given. */
+function drawInTab(tabId: string) {
+  return render(
+    <ConsoleProvider>
+      <TabScope.Provider value={tabId}><Logs route={ROUTE} /></TabScope.Provider>
+    </ConsoleProvider>,
+  );
+}
+
 /** The rendered lines as `ts|source|level|message`, in order. */
 /**
  * The drawn rows, read from the log region that is in the document NOW.
@@ -2338,14 +2347,6 @@ describe("log sources (#569)", () => {
  * alone says a tab is open, not that a stream started or is still running.
  */
 describe("the running-stream registry", () => {
-  function drawInTab(tabId: string) {
-    return render(
-      <ConsoleProvider>
-        <TabScope.Provider value={tabId}><Logs route={ROUTE} /></TabScope.Provider>
-      </ConsoleProvider>,
-    );
-  }
-
   it("marks the tab while its stream runs, and unmarks it when the tab goes", async () => {
     const view = drawInTab("tab-1");
     await body();
@@ -2367,6 +2368,68 @@ describe("the running-stream registry", () => {
     drawInTab("tab-3");
     await screen.findByText("Nothing to follow");
     expect(liveLogStreams().has("tab-3")).toBe(false);
+  });
+});
+
+/**
+ * The search box is the tab's to keep (#898): a restart reopens each Logs tab
+ * with the query it was left with. The tab store stands in for the settings
+ * file, the way `resourceShell`'s tests seed it for sort and filter.
+ */
+describe("a Logs tab's saved query (#898)", () => {
+  /** A tab on the logs route, as a previous launch left it: with `query` saved, or with no view at all. */
+  function tabLeftWith(query?: string) {
+    store.openTab(ROUTE);
+    const id = store.currentWorkspace().tabs.find((t) => t.route === ROUTE)!.id;
+    if (query !== undefined) store.setTabView(id, { query });
+    return id;
+  }
+  const tabView = (id: string) => store.currentWorkspace().tabs.find((t) => t.id === id)?.view;
+
+  it("opens with the box, the pills and the body showing the saved query", async () => {
+    const id = tabLeftWith("level:error");
+    drawInTab(id);
+    const region = await body();
+    push(...LINES);
+    expect(filterField()).toHaveProperty("value", "level:error");
+    expect(screen.getByRole("button", { name: "Remove filter level:error" })).toBeTruthy();
+    expect(messages(region)).toEqual(["error pool timeout waited=30.0s in_use=5"]);
+  });
+
+  it("writes the query back to its tab once it is typed", async () => {
+    const id = tabLeftWith();
+    drawInTab(id);
+    await body();
+    await userEvent.type(filterField(), "level:error pool");
+    await waitFor(() => expect(tabView(id)?.query).toBe("level:error pool"));
+  });
+
+  it("writes an emptied box as an empty query, so the old one does not come back", async () => {
+    const id = tabLeftWith("level:error");
+    drawInTab(id);
+    await body();
+    await userEvent.clear(filterField());
+    await waitFor(() => expect(tabView(id)?.query).toBe(""));
+  });
+
+  it("leaves a tab with no saved query untouched until something is typed", async () => {
+    const id = tabLeftWith();
+    drawInTab(id);
+    await body();
+    expect(tabView(id)).toBeUndefined();
+  });
+
+  it("starts empty, and writes nothing, when it is not in a tab", async () => {
+    // The tab it would borrow if it fell back to the active one: it holds a query this screen must not read or touch.
+    const id = tabLeftWith("level:error");
+    const region = await (draw(), body());
+    const before = store.getState();
+    expect(filterField()).toHaveProperty("value", "");
+    push(...LINES);
+    await userEvent.type(filterField(), "pool");
+    await waitFor(() => expect(messages(region)).toEqual(["error pool timeout waited=30.0s in_use=5"]));
+    expect(store.getState()).toBe(before);
+    expect(tabView(id)?.query).toBe("level:error");
   });
 });
 

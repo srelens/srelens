@@ -274,6 +274,28 @@ describe("parseStoredState", () => {
     });
   });
 
+  it("keeps a Logs tab's query through a save and a load, up to 2000 characters", () => {
+    for (const query of ["level:error -pool", "", "a".repeat(2000)]) {
+      const s = valid();
+      s.workspaces[0].tabs[1].view = { query };
+      const storage = memory();
+      saveTabsState(s, storage);
+      const parsed = parseStoredState(storage.getItem(BASE_STORAGE_KEY));
+      expect(parsed!.workspaces[0].tabs[1].view).toEqual({ query });
+    }
+  });
+
+  it.each([
+    ["is not a string", 5],
+    ["is longer than 2000 characters", "a".repeat(2001)],
+  ])("drops a query that %s, keeping the rest of the view", (_why, query) => {
+    const s = valid();
+    s.workspaces[0].tabs[1].view = { filter: "crash" };
+    const doc = JSON.parse(JSON.stringify({ version: 1, ...s }));
+    doc.workspaces[0].tabs[1].view.query = query;
+    expect(parseStoredState(JSON.stringify(doc))!.workspaces[0].tabs[1].view).toEqual({ filter: "crash" });
+  });
+
   it("drops a non-boolean regex mode without losing the rest of the view", () => {
     const s = valid();
     s.workspaces[0].tabs[1].view = { filter: "crash" };
