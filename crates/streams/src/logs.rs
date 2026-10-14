@@ -401,6 +401,10 @@ impl LogStreamManager {
             .get(channel)
             .and_then(|s| Some((s.spool.clone()?, s.lone_pod.clone())))
             .ok_or_else(|| "this log stream keeps no history".to_string())?;
+        // ponytail: `snapshot` flushes the spool's `BufWriter` (file I/O) here, on the
+        // async caller, and takes the spool's lock, which a target's `push` may hold
+        // while it writes. Both are brief; to keep them off the runtime, move this call
+        // into the `tokio::task::spawn_blocking` closure of `read` and `export`.
         let snapshot = spool
             .lock()
             .unwrap()

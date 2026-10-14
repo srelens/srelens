@@ -190,6 +190,11 @@ impl LogSpool {
 
 impl Drop for LogSpool {
     fn drop(&mut self) {
+        // ponytail: this `remove_dir_all` is blocking file I/O on whichever task
+        // drops the last `Arc` of the spool, which on the web is a tokio worker (a
+        // `stop`, a reader finishing after one, an aborted task unwinding). A spool
+        // is about eight segment files, so it is brief; hand the directory to
+        // `tokio::task::spawn_blocking` (a thread, off the runtime) if it ever stalls one.
         // The open segment first: Windows refuses to delete a file still open.
         self.writer = None;
         let _ = fs::remove_dir_all(&self.dir);
@@ -487,6 +492,12 @@ impl SpoolDirs {
             // as this runs, which can fail the sweep of the root half-way. Try again
             // a few times (about 200 ms at the most) while the root is still there,
             // then leave what is left to the next launch's `sweep_stale`.
+            //
+            // ponytail: that retry `thread::sleep` blocks the calling thread for up to
+            // those 200 ms. On the web the caller is `UserStreams::drop`, which runs on
+            // a tokio worker when a user's environment is rebuilt or evicted. Run the
+            // removal in `tokio::task::spawn_blocking` (a thread, off the runtime) if a
+            // worker stalled there ever shows up.
             for _ in 0..10 {
                 if fs::remove_dir_all(&dir).is_ok() || !dir.exists() {
                     break;
