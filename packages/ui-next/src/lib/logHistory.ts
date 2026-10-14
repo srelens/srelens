@@ -12,7 +12,7 @@ import type { Storage } from "./tabsPersist";
  */
 export const LOG_HISTORY_KEY = "srelens.next.logHistoryMb";
 
-/** The sizes offered. The desktop backend refuses more than the largest. */
+/** The sizes offered. The desktop backend clamps a request to 4 GiB, which is the largest choice. */
 export const LOG_HISTORY_CHOICES = [64, 256, 1024, 4096] as const;
 
 export const DEFAULT_LOG_HISTORY_MB = 256;

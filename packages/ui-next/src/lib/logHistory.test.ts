@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { DEFAULT_LOG_HISTORY_MB, LOG_HISTORY_KEY, logHistoryMb, megabytes, saveLogHistoryMb } from "./logHistory";
 
 function storage(initial?: string) {
@@ -15,8 +15,15 @@ describe("log history setting", () => {
   });
 
   it("reads anything that is not one of the choices as the default", () => {
-    expect(logHistoryMb(storage("7"))).toBe(256);
-    expect(logHistoryMb(storage("not json"))).toBe(256);
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      expect(logHistoryMb(storage("7"))).toBe(256);
+      expect(error).not.toHaveBeenCalled();
+      expect(logHistoryMb(storage("not json"))).toBe(256);
+      expect(error).toHaveBeenCalledTimes(1);
+    } finally {
+      error.mockRestore();
+    }
   });
 
   it("converts to bytes for the stream", () => {

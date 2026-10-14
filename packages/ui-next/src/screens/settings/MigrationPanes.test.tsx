@@ -89,8 +89,24 @@ it("keeps the chosen log history size for new log streams", async () => {
   const size = screen.getByRole("combobox", { name: "History kept per log stream" }) as HTMLSelectElement;
   expect(size.value).toBe("256");
   fireEvent.change(size, { target: { value: "1024" } });
+  expect(size.value).toBe("1024");
   expect(settingsStorage.getItem("srelens.next.logHistoryMb")).toBe("1024");
   expect(screen.getByText(/opened from now on/)).toBeTruthy();
+});
+it("offers the history sizes as megabytes and gigabytes", () => {
+  core.isTauri.mockReturnValue(true);
+  render(<KubernetesPane />);
+  const size = screen.getByRole("combobox", { name: "History kept per log stream" }) as HTMLSelectElement;
+  expect(Array.from(size.options, (option) => option.textContent)).toEqual(["64 MB", "256 MB", "1 GB", "4 GB"]);
+});
+it("names the server's lower limit only on the web", () => {
+  core.isTauri.mockReturnValue(true);
+  const desktop = render(<KubernetesPane />);
+  expect(screen.queryByText(/Your server may set a lower limit/)).toBeNull();
+  desktop.unmount();
+  core.isTauri.mockReturnValue(false);
+  render(<KubernetesPane />);
+  expect(screen.getByText(/Your server may set a lower limit/)).toBeTruthy();
 });
 it("opens the existing application log screen", async () => {
   render(<ApplicationLogsPane />); await userEvent.click(screen.getByRole("button", { name: "Open application logs" }));
