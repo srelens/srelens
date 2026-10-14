@@ -47,7 +47,7 @@ Everything this server exposes over MCP, generated from the live registry so it 
 | `k8s.listPersistentVolumes` | low | list PersistentVolumes of a connected kube context (cluster-scoped) |
 | `k8s.listPods` | low | list pods in a namespace of a connected kube context |
 | `k8s.listReplicaSets` | low | list the ReplicaSets owned by a Deployment (its rollout revisions) |
-| `k8s.listResource` | low | list any supported resource kind (name + namespace), optionally filtered by `labelSelector`/`fieldSelector`. Pass `fields` (kubectl-style JSONPath such as .status.allocatable or .spec.taints) to get those paths for every item in one call, keyed by path in each row's `fields`, with null where an item has none. Prefer this over one getObject call per item when a summary tool lacks a field you need. |
+| `k8s.listResource` | low | list resources of a kind (name + namespace), optionally filtered by `labelSelector`/`fieldSelector`. For a custom resource, pass its `group`, `version` and `plural` as well as `kind` (e.g. traefik.io / v1alpha1 / ingressroutes for IngressRoute), as getObject takes them. Pass `fields` (kubectl-style JSONPath such as .status.allocatable or .spec.taints) to get those paths for every item in one call, keyed by path in each row's `fields`, with null where an item has none. Prefer this over one getObject call per item when a summary tool lacks a field you need. |
 | `k8s.listResourceQuotas` | low | list ResourceQuotas in a namespace of a connected kube context |
 | `k8s.listRoleBindings` | low | list RoleBindings in a namespace of a connected kube context |
 | `k8s.listRoles` | low | list Roles in a namespace of a connected kube context |
