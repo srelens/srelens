@@ -55,7 +55,10 @@ import {
  * meantime. Resume folds the buffer into view and resets that count; it
  * never touches the connection, so it can never cause a re-tail. A `hold`
  * from the screen freezes the view the same way, for as long as the reader
- * presses or selects in it, without touching their pause.
+ * presses or selects in it, without touching their pause. A hidden document is
+ * held too, in the one respect that matters there: lines still fold into the
+ * ring (so it stays bounded) but nothing is shown, not even the pending count,
+ * until the document is visible again.
  *
  * **The unmount race `startLogStream` opens.** `startLogStream` is async: it
  * awaits an `invokeCommand` before its promise resolves. If the component
@@ -228,8 +231,8 @@ export const MAX_LOADED_LINES = 50_000;
 /**
  * Run `fn` before the next frame is drawn: a commit is a render of the whole screen, and the backend can deliver a
  * line per IPC event, many times between two frames. A hidden document draws no frames and would hold every line
- * back until it is shown again, so it, and a host without frames, get a timer of about one frame instead.
- * Returns what takes the request back.
+ * back, unfolded, until it is shown again, so it, and a host without frames, get a timer of about one frame instead
+ * (the hidden one's commit only folds: see `commit`). Returns what takes the request back.
  */
 function nextFrame(fn: () => void): () => void {
   if (typeof requestAnimationFrame === "function" && !document.hidden) {
@@ -312,13 +315,19 @@ export function useLogStream(
   /** Fold what is waiting and show the whole ring: the end of the last pause or hold. */
   const reveal = useCallback(() => {
     fold();
+    // Nobody is looking: the document being shown again is what shows it (below).
+    if (document.hidden) return;
     show(bufferRef.current);
   }, [fold, show]);
 
   const commit = useCallback(() => {
     cancelCommitRef.current = undefined;
-    // Folded while paused or held too: they freeze the view, not the ring.
+    // Folded while paused, held or hidden too: they freeze the view, not the ring.
     fold();
+    // A hidden document measures its viewport at 0px, so the screen draws every row of the ring: 50,000 rows a frame
+    // for nobody starved the browser until the stream's socket queue overflowed. Nothing is set either, not even the
+    // count of what waits: that is a render too, and it is read off the ring when the document is shown again.
+    if (document.hidden) return;
     if (pausedRef.current || heldRef.current) {
       // Every line the ring has taken since the view froze, those it has since dropped among them, and those that
       // came before the freeze but were not shown yet: counted off the ring, not as they arrive.
@@ -341,6 +350,18 @@ export function useLogStream(
     },
     [],
   );
+
+  // The document is shown again: bring the view up to date at once, rather than wait out a frame that a hidden
+  // document may have kept from running. Paused or held, `commit` leaves the view as it is and counts what waits.
+  useEffect(() => {
+    const onVisibility = () => {
+      if (document.hidden) return;
+      cancelCommitRef.current?.();
+      commit();
+    };
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => document.removeEventListener("visibilitychange", onVisibility);
+  }, [commit]);
 
   // Stable across restarts: the same ref keeps accumulating, so a target
   // change doesn't need a new callback, only a fresh buffer (below).

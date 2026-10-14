@@ -300,22 +300,137 @@ describe("useLogStream", () => {
       }
     });
 
-    it.each([
-      [
-        "the document is hidden, which draws no frames",
-        () => {
-          frames();
-          Object.defineProperty(document, "hidden", { configurable: true, get: () => true });
-        },
-      ],
-      ["there are no frames to wait for", () => vi.stubGlobal("requestAnimationFrame", undefined)],
-    ])("still commits when %s", async (_, setUp) => {
-      setUp();
+    it("still commits when there are no frames to wait for", async () => {
+      vi.stubGlobal("requestAnimationFrame", undefined);
       const s = fakeStream();
       const { result } = renderHook(() => useLogStream("kind-dev", "default", [target]));
       await s.connect();
       act(() => s.line("", "one"));
       await waitFor(() => expect(result.current.lines).toHaveLength(1));
+    });
+
+    describe("in a document nobody is looking at", () => {
+      /** `document.hidden`, as the test says it is. The enclosing `afterEach` puts the real one back. */
+      function visibility(initiallyHidden: boolean) {
+        let hidden = initiallyHidden;
+        Object.defineProperty(document, "hidden", { configurable: true, get: () => hidden });
+        return {
+          hide: () => {
+            hidden = true;
+            act(() => void document.dispatchEvent(new Event("visibilitychange")));
+          },
+          show: () => {
+            hidden = false;
+            act(() => void document.dispatchEvent(new Event("visibilitychange")));
+          },
+        };
+      }
+      /** A hidden document gets a timer of about a frame, so wait a few of them. */
+      const aFrame = () => act(() => new Promise((r) => setTimeout(r, 50)));
+
+      it("takes lines into the ring but does not show them: drawing 50,000 rows for nobody starved the browser", async () => {
+        visibility(true);
+        const s = fakeStream();
+        const { result } = renderHook(() => useLogStream("kind-dev", "default", [target]));
+        await s.connect();
+        appendLogLines.mockClear();
+        act(() => {
+          s.line("", "one");
+          s.line("", "two");
+        });
+        await aFrame();
+        // The timer path still folds, so a long-hidden tab holds a ring, not a backlog...
+        expect(appendLogLines).toHaveBeenCalledTimes(1);
+        // ...and the view, which every row of is a render, stays as it was.
+        expect(result.current.lines).toHaveLength(0);
+        act(() => s.line("", "three"));
+        await aFrame();
+        expect(result.current.lines).toHaveLength(0);
+      });
+
+      it("shows what it took in the moment the document is visible again", async () => {
+        const doc = visibility(true);
+        const s = fakeStream();
+        const { result } = renderHook(() => useLogStream("kind-dev", "default", [target]));
+        await s.connect();
+        act(() => {
+          s.line("", "one");
+          s.line("", "two");
+        });
+        await aFrame();
+        act(() => s.line("", "three"));
+        await aFrame();
+        expect(result.current.lines).toHaveLength(0);
+
+        doc.show();
+        expect(result.current.lines.map((l) => l.text)).toEqual(["one", "two", "three"]);
+        expect(result.current.pendingWhilePaused).toBe(0);
+        // And it follows again from there.
+        act(() => s.line("", "four"));
+        await waitFor(() => expect(result.current.lines).toHaveLength(4));
+      });
+
+      it("takes back the frame it asked for before the document was hidden, and shows its lines on return", async () => {
+        const frame = frames();
+        const doc = visibility(false);
+        const s = fakeStream();
+        const { result } = renderHook(() => useLogStream("kind-dev", "default", [target]));
+        await s.connect();
+        act(() => s.line("", "one"));
+        expect(frame.queued.size).toBe(1);
+        // The frame asked for never runs in a document that is hidden, and the line waits.
+        doc.hide();
+        expect(result.current.lines).toHaveLength(0);
+        doc.show();
+        expect(result.current.lines.map((l) => l.text)).toEqual(["one"]);
+        expect(frame.queued.size).toBe(0);
+      });
+
+      type Hook = ReturnType<typeof useLogStream>;
+      it.each([
+        ["paused", (h: Hook) => h.togglePause(), (h: Hook) => h.togglePause()],
+        ["held", (h: Hook) => h.hold(true), (h: Hook) => h.hold(false)],
+      ])("leaves a %s view as it was when the document is visible again, and counts what waited", async (_, freeze, release) => {
+        const doc = visibility(false);
+        const s = fakeStream();
+        const { result } = renderHook(() => useLogStream("kind-dev", "default", [target]));
+        await s.connect();
+        act(() => s.line("", "before"));
+        await waitFor(() => expect(result.current.lines).toHaveLength(1));
+        act(() => freeze(result.current));
+        // The document goes away, and lines arrive while it is.
+        doc.hide();
+        act(() => {
+          s.line("", "a");
+          s.line("", "b");
+          s.line("", "c");
+        });
+        await aFrame();
+
+        doc.show();
+        expect(result.current.lines.map((l) => l.text)).toEqual(["before"]);
+        expect(result.current.pendingWhilePaused).toBe(3);
+        // Its own release is what lets them in.
+        act(() => release(result.current));
+        expect(result.current.lines.map((l) => l.text)).toEqual(["before", "a", "b", "c"]);
+      });
+
+      it("does not listen for the document being shown once the screen has gone", async () => {
+        const added = vi.spyOn(document, "addEventListener");
+        const removed = vi.spyOn(document, "removeEventListener");
+        try {
+          const s = fakeStream();
+          const { unmount } = renderHook(() => useLogStream("kind-dev", "default", [target]));
+          await s.connect();
+          const listener = added.mock.calls.find(([type]) => type === "visibilitychange")?.[1];
+          expect(listener).toBeDefined();
+          unmount();
+          expect(removed).toHaveBeenCalledWith("visibilitychange", listener);
+        } finally {
+          added.mockRestore();
+          removed.mockRestore();
+        }
+      });
     });
   });
 
