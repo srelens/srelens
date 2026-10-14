@@ -1242,6 +1242,93 @@ describe("useLogStream with history on disk (#914)", () => {
     expect(result.current.dropped).toBe(7000);
   });
 
+  describe("giving the room back", () => {
+    /** A full 5,000-line ring of a stream that has written 10,000, with the 5,000 before it loaded while paused. */
+    async function loadedWhilePaused() {
+      const { s, result } = await openSpooled();
+      s.frame(5001, many(5001, 5000));
+      await waitFor(() => expect(result.current.lines.length).toBe(5000));
+      act(() => result.current.togglePause());
+      s.readEarlier.mockResolvedValueOnce(s.page(1, many(1, 5000)));
+      await act(() => result.current.loadEarlier());
+      expect(result.current.lines.length).toBe(10000);
+      return { s, result };
+    }
+    const total = (r: { current: { lines: readonly unknown[]; dropped: number } }) =>
+      r.current.dropped + r.current.lines.length;
+
+    it("shrinks the ring back to the hook's capacity on resume, keeping the newest lines and counting the rest as on disk", async () => {
+      // The ring went past its capacity to hold the loaded page; left there it would stay that big at frame rate.
+      const { result } = await loadedWhilePaused();
+      expect(total(result)).toBe(10000);
+      act(() => result.current.togglePause());
+      expect(result.current.lines.length).toBe(5000);
+      expect(texts(result)[0]).toBe("l5001");
+      expect(texts(result).at(-1)).toBe("l10000");
+      expect(result.current.dropped).toBe(5000);
+      expect(total(result)).toBe(10000);
+    });
+
+    it("shrinks to a capacity the caller chose, not to the default", async () => {
+      const { s, result } = await openSpooled({ capacity: 10 });
+      s.frame(11, many(11, 10));
+      await waitFor(() => expect(result.current.lines.length).toBe(10));
+      act(() => result.current.togglePause());
+      s.readEarlier.mockResolvedValueOnce(s.page(1, many(1, 10)));
+      await act(() => result.current.loadEarlier());
+      expect(result.current.lines.length).toBe(20);
+      act(() => result.current.togglePause());
+      expect(texts(result)).toEqual(many(11, 10));
+      expect(result.current.dropped).toBe(10);
+    });
+
+    it("trims at the hook's capacity again once it has resumed", async () => {
+      const { s, result } = await loadedWhilePaused();
+      act(() => result.current.togglePause());
+      s.frame(10001, ["new"]);
+      await waitFor(() => expect(texts(result).at(-1)).toBe("new"));
+      expect(result.current.lines.length).toBe(5000);
+      expect(result.current.dropped).toBe(5001);
+    });
+
+    it("keeps the big ring when only a hold lets go: a press is not a resume", async () => {
+      const { s, result } = await openSpooled();
+      s.frame(5001, many(5001, 5000));
+      await waitFor(() => expect(result.current.lines.length).toBe(5000));
+      act(() => result.current.hold(true));
+      s.readEarlier.mockResolvedValueOnce(s.page(1, many(1, 5000)));
+      await act(() => result.current.loadEarlier());
+      expect(result.current.lines.length).toBe(10000);
+      act(() => result.current.hold(false));
+      expect(result.current.lines.length).toBe(10000);
+      expect(result.current.dropped).toBe(0);
+      s.frame(10001, ["new"]);
+      await waitFor(() => expect(result.current.lines.length).toBe(10001));
+    });
+
+    it("gives the room back at a resume even while held, and shows the smaller ring once the hold lets go", async () => {
+      const { result } = await loadedWhilePaused();
+      act(() => result.current.hold(true));
+      act(() => result.current.togglePause());
+      // The hold still keeps the view as it was.
+      expect(result.current.lines.length).toBe(10000);
+      act(() => result.current.hold(false));
+      expect(result.current.lines.length).toBe(5000);
+      expect(result.current.dropped).toBe(5000);
+    });
+
+    it("leaves a pause alone that has loaded nothing: the ring is as it was", async () => {
+      const { s, result } = await openSpooled();
+      s.frame(5001, many(5001, 5000));
+      await waitFor(() => expect(result.current.lines.length).toBe(5000));
+      const before = result.current.lines;
+      act(() => result.current.togglePause());
+      act(() => result.current.togglePause());
+      expect(result.current.lines).toBe(before);
+      expect(result.current.dropped).toBe(5000);
+    });
+  });
+
   it("while paused, still shows a page in the view when the ring has moved on past the view's start", async () => {
     const { s, result } = await openSpooled({ capacity: 10 });
     s.frame(4, ["d", "e"]);

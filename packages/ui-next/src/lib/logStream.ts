@@ -53,7 +53,8 @@ import {
  * ring's own capacity — but the rendered `lines` snapshot is not refreshed
  * from it until resume, and `pendingWhilePaused` counts what arrived in the
  * meantime. Resume folds the buffer into view and resets that count; it
- * never touches the connection, so it can never cause a re-tail. A `hold`
+ * never touches the connection, so it can never cause a re-tail. (With history
+ * on disk it also gives back any room a loaded page made: see `loadEarlier`.) A `hold`
  * from the screen freezes the view the same way, for as long as the reader
  * presses or selects in it, without touching their pause. A hidden document is
  * held too, in the one respect that matters there: lines still fold into the
@@ -416,11 +417,21 @@ export function useLogStream(
     const next = !pausedRef.current;
     pausedRef.current = next;
     setPaused(next);
+    if (!next) {
+      // Pages loaded while paused (#914) took the ring past its capacity, and left there it would stay that big at
+      // frame rate. Resuming is the reader going back to the live tail, so the ring is as wide as asked again: the
+      // newest lines stay, and the ones let go are on disk, which `dropped` says. A hold's release is no resume.
+      const b = bufferRef.current;
+      if (b.capacity > capacity) {
+        const extra = Math.max(0, b.lines.length - capacity);
+        bufferRef.current = { capacity, lines: extra > 0 ? b.lines.slice(extra) : b.lines, dropped: b.dropped + extra };
+      }
+    }
     // Resuming folds the accumulated buffer into view in one step — never
     // a re-tail, since the connection is untouched by this branch — unless
     // the screen is holding the view, whose release does it instead.
     if (!next && !heldRef.current) reveal();
-  }, [reveal]);
+  }, [reveal, capacity]);
 
   const hold = useCallback(
     (on: boolean) => {
@@ -452,8 +463,9 @@ export function useLogStream(
    * room back if the read fails or its page does not join, so a stream that
    * keeps failing does not leave the ring at its ceiling. While paused
    * or held, the page goes into the frozen view, and into the ring too if
-   * the ring still starts where the view does. On resume the view shows the
-   * ring, as ever. A page that no longer ends where the lines in memory start
+   * the ring still starts where the view does. On resume the ring goes back to
+   * its capacity (the oldest lines it let go are on disk again, in `dropped`)
+   * and the view shows it, as ever; a hold's release shrinks nothing. A page that no longer ends where the lines in memory start
    * would leave a hole, so it is not shown, and `loadError` says why. Asked
    * again while a read is out, it does nothing: the same page would come back
    * and no longer join.

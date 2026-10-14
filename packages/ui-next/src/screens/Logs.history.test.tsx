@@ -178,4 +178,35 @@ describe("loading earlier lines by mouse on a busy, followed stream (#914)", () 
       restore();
     }
   });
+
+  it("gives the ring back on Follow, and offers the lines it let go again", async () => {
+    const restore = measurableRows();
+    try {
+      const s = spooledStream();
+      render(
+        <ConsoleProvider>
+          <Logs route={logsRoute("Deployment", "checkout", "checkout-api")} />
+        </ConsoleProvider>,
+      );
+      await waitFor(() => expect(h.startLogStream).toHaveBeenCalled());
+      s.frame(5001, 5000);
+      const load = await screen.findByRole("button", { name: /Load 5\s?000 earlier/ });
+      s.readEarlier.mockResolvedValue({ first: 1, seq: 1, lines: many(1, 5000) });
+      await act(async () => {
+        fireEvent.click(load);
+        await Promise.resolve();
+      });
+      await frame();
+      // Every line before the ring is in the view, so there is nothing on disk to offer.
+      expect(screen.queryByText(/earlier lines on disk/)).toBeNull();
+
+      await act(async () => void fireEvent.click(screen.getByRole("button", { name: "Follow" })));
+      await frame();
+      // Following again is the live tail in the ring's own size: the 5,000 lines that no longer fit are on disk again.
+      expect(screen.getByText(/5\s?000 earlier lines on disk/)).toBeTruthy();
+      expect(screen.getByRole("button", { name: /Load 5\s?000 earlier/ })).toBeTruthy();
+    } finally {
+      restore();
+    }
+  });
 });
