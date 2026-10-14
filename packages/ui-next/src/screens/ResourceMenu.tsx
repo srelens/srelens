@@ -174,7 +174,8 @@ interface Forwarding {
 }
 
 /** What `Open shell` is waiting on, once the pod turned out to run more than
- *  one container worth asking about. See {@link startShell}. */
+ *  one container worth asking about, or to be on a protected cluster (#101).
+ *  See {@link startShell}. */
 interface ShellPick {
   row: ListRow;
   namespace: string;
@@ -252,9 +253,10 @@ export function useRowMenu({ context, kind, actions, group, onChanged }: UseRowM
   /**
    * The pod `Open shell` was picked on, waiting on which container to attach
    * to — set only when {@link startShell} found more than one candidate worth
-   * asking about. A one-container pod never reaches this: it starts straight
-   * away. A slot of its own for the same reason `forwarding` has one: this is
-   * a question with its own fields, not a `Pending` variant.
+   * asking about, or the cluster is protected. A one-container pod starts
+   * straight away, except on a protected cluster, where it asks for the typed
+   * name here (#101). A slot of its own for the same reason `forwarding` has
+   * one: this is a question with its own fields, not a `Pending` variant.
    */
   const [shellPick, setShellPick] = useState<ShellPick | null>(null);
   /**
@@ -349,7 +351,8 @@ export function useRowMenu({ context, kind, actions, group, onChanged }: UseRowM
    * comma-joined image string and a ready count), and `kubectl exec` with no
    * `-c` lands on the manifest's FIRST container — often a sidecar with no
    * shell at all — not the one the reader meant. A pod with exactly one
-   * candidate starts right away; a pod with more than one is asked, because
+   * candidate starts right away, unless its cluster is protected, which asks
+   * for the typed name first (#101); a pod with more than one is asked, because
    * landing in the wrong container silently is worse than one extra click.
    */
   async function startShell(row: ListRow) {

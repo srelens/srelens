@@ -255,6 +255,23 @@ describe("ConfirmDialog focus", () => {
     const dialog = screen.getByRole("dialog");
     expect(dialog.contains(document.activeElement), "focus must stay in the modal").toBe(true);
   });
+
+  it("keeps focus inside when the caller holds the focused confirm button", () => {
+    // The same blur, from `confirmDisabled` rather than `busy`: a typed name
+    // edited back out of match disables Approve while it has focus.
+    const { rerender } = render(
+      <ConfirmDialog title="t" message="m" confirmLabel="Approve" onConfirm={() => {}} onCancel={() => {}} />,
+    );
+    const confirm = screen.getByRole("button", { name: "Approve" });
+    confirm.focus();
+    confirm.blur(); // as above: what the browser does when the button is disabled
+
+    rerender(
+      <ConfirmDialog title="t" message="m" confirmDisabled confirmLabel="Approve" onConfirm={() => {}} onCancel={() => {}} />,
+    );
+    const dialog = screen.getByRole("dialog");
+    expect(dialog.contains(document.activeElement), "focus must stay in the modal").toBe(true);
+  });
 });
 
 /** A tab-sized surface that owns the layers opened inside it, as TabSurface does. */

@@ -80,6 +80,13 @@ describe("useProtectedConfirm", () => {
     expect(screen.getByTestId("protection").textContent).toBe("prod-eu · Default");
   });
 
+  it("describes the field with its line, so a screen reader hears why it is asked", () => {
+    protect();
+    render(<Typed context="prod-eu" />);
+    const describedBy = field().getAttribute("aria-describedby") ?? "";
+    expect(document.getElementById(describedBy)?.textContent).toBe("prod-eu is protected (workspace Default).");
+  });
+
   it("refuses until the trimmed text is the name exactly, case included", async () => {
     protect();
     render(<Typed context="prod-eu" />);

@@ -64,7 +64,7 @@ export function ProtectedStrip({ contextName }: { contextName: string | null }) 
   return (
     <div role="note" className="flex shrink-0 items-center gap-2 border-b border-warn/40 bg-warn-wash px-3 py-1 text-[0.75rem] text-warn">
       <Icons.shield size={12} aria-hidden="true" className="shrink-0" />
-      <span>{`${protection.name} is protected (workspace ${protection.workspace}). Changes ask you to type its name.`}</span>
+      <span className="min-w-0 break-words">{`${protection.name} is protected (workspace ${protection.workspace}). Changes ask you to type its name.`}</span>
     </div>
   );
 }

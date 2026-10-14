@@ -1,4 +1,4 @@
-import { useCallback, useState, type ReactNode } from "react";
+import { useCallback, useId, useState, type ReactNode } from "react";
 import { TextInput } from "@srelens/ui-kit";
 import { useProtection, type Protection } from "./protection";
 
@@ -34,6 +34,7 @@ export function useProtectedConfirm(contextName: string | null | undefined): Pro
   const protection = useProtection(contextName);
   const [typed, setTyped] = useState("");
   const reset = useCallback(() => setTyped(""), []);
+  const lineId = useId();
 
   const refusal =
     protection && typed.trim() !== protection.name ? `Type ${protection.name} to confirm.` : null;
@@ -42,8 +43,13 @@ export function useProtectedConfirm(contextName: string | null | undefined): Pro
     protection,
     field: protection ? (
       <div className="my-2 flex flex-col gap-1" data-slot="protected-confirm">
-        <p className="m-0">{`${protection.name} is protected (workspace ${protection.workspace}).`}</p>
-        <TextInput value={typed} onValueChange={setTyped} aria-label={`Type ${protection.name} to confirm`} />
+        <p id={lineId} className="m-0">{`${protection.name} is protected (workspace ${protection.workspace}).`}</p>
+        <TextInput
+          value={typed}
+          onValueChange={setTyped}
+          aria-label={`Type ${protection.name} to confirm`}
+          aria-describedby={lineId}
+        />
       </div>
     ) : null,
     refusal,

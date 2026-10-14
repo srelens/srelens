@@ -107,10 +107,12 @@ export function ConfirmDialog({
   // disabled control produces, and its recovery watches for removed nodes
   // rather than changed attributes. So watch the transition here. The content
   // can hold focus: Radix's focus scope gives it `tabindex="-1"`. (#324 review)
+  // `confirmDisabled` blurs the confirm button the same way, when a caller
+  // holds it while it has focus.
   useEffect(() => {
     const content = contentRef.current;
     if (content && !content.contains(document.activeElement)) content.focus();
-  }, [busy]);
+  }, [busy, confirmDisabled]);
 
   return (
     <Dialog.Root

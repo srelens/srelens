@@ -88,8 +88,8 @@ export interface ClusterGate {
    *
    * Checked by the confirm handler and shown as the dialog's own error line —
    * the same path a validation message this side wrote takes today. It is
-   * `null` in the ordinary case, so a dialog nobody moved the rail under
-   * behaves exactly as it did before.
+   * `null` in the ordinary case, so a dialog nobody moved the rail under, on a
+   * cluster that is not protected, behaves exactly as it did before.
    */
   refusal: string | null;
   /**
@@ -106,8 +106,8 @@ export interface ClusterGate {
 }
 
 /**
- * The divergence banner, its acknowledgement, and the refusal that keeps the
- * two honest — see this module's note.
+ * The divergence banner, its acknowledgement, the protected cluster's typed
+ * name (#101), and the refusal that keeps them honest — see this module's note.
  *
  * `pinned` is `null` while nothing is open, which is also how a caller says
  * "there is nothing to compare": `moved` is false, the alert is nothing, and
@@ -134,9 +134,9 @@ export function useClusterGate({
    * On a protected cluster, its name, typed (#101). Asked of the cluster the
    * action runs ON — the pinned one — never the one in focus: a write to
    * production from a dialog opened there still asks, wherever the rail has
-   * gone since.
+   * gone since. Nothing pinned, nothing asked.
    */
-  const typed = useProtectedConfirm(pinned ?? live);
+  const typed = useProtectedConfirm(pinned);
   const resetTyped = typed.reset;
   const reset = useCallback(() => {
     setAcknowledgedFor(null);

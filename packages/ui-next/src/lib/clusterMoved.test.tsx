@@ -106,6 +106,15 @@ describe("useClusterGate", () => {
     expect(refusal()).toBe("This runs on stage-eu, not prod-eu. Confirm the cluster above, or cancel.");
   });
 
+  it("asks nothing while nothing is pinned, even with a protected cluster in focus", () => {
+    // A closed dialog: every caller pins when it opens.
+    protect();
+    render(<Gate pinned={null} live="prod-eu" />);
+    expect(screen.queryByRole("textbox")).toBeNull();
+    expect(refusal()).toBe("none");
+    expect(ready()).toBe("true");
+  });
+
   it("forgets both the tick and the typed name on reset", async () => {
     protect();
     render(<Gate pinned="prod-eu" live="stage-eu" />);
