@@ -211,7 +211,15 @@ fn resolve_kind(
 ) -> Result<(ApiResource, bool), CapabilityError> {
     if let (Some(g), Some(v), Some(p)) = (group, version, plural) {
         let namespaced = namespace.is_some_and(|s| !s.is_empty());
-        return Ok((crate::crds::custom_api_resource(g, v, kind, p), namespaced));
+        // The plural decides what the request reaches; the caller's kind is
+        // only a label. Where the group and plural are a built-in kind's, that
+        // kind is the identity, so every check made on it — a Secret's values
+        // being blanked above all — sees what is actually being read.
+        let kind = match gvk_for(p) {
+            Some((gvk, _)) if gvk.group == g => gvk.kind,
+            _ => kind.to_string(),
+        };
+        return Ok((crate::crds::custom_api_resource(g, v, &kind, p), namespaced));
     }
     let (gvk, namespaced) = gvk_for(kind).ok_or_else(|| {
         CapabilityError::Handler(format!(
@@ -295,10 +303,23 @@ fn readable_object(
     obj.metadata.managed_fields = None;
     let mut object =
         serde_json::to_value(obj).map_err(|e| CapabilityError::Handler(e.to_string()))?;
-    if ar.kind == "Secret" && ar.group.is_empty() {
+    if is_core_secret(ar) {
         crate::secrets::redact_secret_data(&mut object);
     }
     Ok(object)
+}
+
+/// Whether a resolved resource is the core `Secret`, whose values the
+/// ungated readers blank.
+///
+/// By the plural as well as the kind, because the plural is what the request
+/// is sent to. A caller naming a custom resource supplies both, and the kind
+/// is only a label the API server never checks: `kind: "Anything"` with an
+/// empty group, `v1` and plural `secrets` reads core Secrets. `resolve_kind`
+/// already puts the real kind back for a built-in plural; this is the second
+/// lock on the same door, at the place the values leave.
+fn is_core_secret(ar: &ApiResource) -> bool {
+    ar.group.is_empty() && (ar.kind == "Secret" || ar.plural == "secrets")
 }
 
 /// Each requested path mapped to what it lands on — a scalar, a map or a
@@ -552,7 +573,7 @@ pub fn gvk_for(kind: &str) -> Option<(GroupVersionKind, bool)> {
 /// editor and the detail pane show, for no gain on a resource that carries
 /// nothing to redact.
 fn manifest_yaml(obj: &DynamicObject, ar: &ApiResource) -> Result<String, CapabilityError> {
-    if ar.kind == "Secret" && ar.group.is_empty() {
+    if is_core_secret(ar) {
         let mut object =
             serde_json::to_value(obj).map_err(|e| CapabilityError::Handler(e.to_string()))?;
         crate::secrets::redact_secret_data(&mut object);
@@ -2795,6 +2816,88 @@ metadata:
     }
 
     // -- listResource: custom resources (#932) ----------------------------------
+
+    /// A custom resource's kind is the caller's word, and the API server
+    /// never checks it: the plural is what the request reaches. A caller
+    /// naming core Secrets by group, version and plural, under any kind, must
+    /// get a resource that is a Secret, or every check made on the kind —
+    /// blanking a Secret's values above all — is skipped.
+    #[test]
+    fn a_built_in_plural_resolves_to_its_own_kind_whatever_kind_the_caller_names() {
+        let (ar, _) = resolve_kind("Anything", Some("team"), Some(""), Some("v1"), Some("secrets")).unwrap();
+        assert_eq!(ar.kind, "Secret");
+        assert!(is_core_secret(&ar));
+        // getObject and getManifest resolve through the same function.
+        let input = ManifestIn {
+            context: "c".into(),
+            kind: "Anything".into(),
+            namespace: Some("team".into()),
+            name: "db".into(),
+            group: Some(String::new()),
+            version: Some("v1".into()),
+            plural: Some("secrets".into()),
+        };
+        assert_eq!(resolve_api_resource(&input).unwrap().0.kind, "Secret");
+        // A custom resource keeps the kind the caller named.
+        let (ar, _) = resolve_kind("Widget", None, Some("example.com"), Some("v1"), Some("widgets")).unwrap();
+        assert_eq!(ar.kind, "Widget");
+        // And a plural that only shares a built-in name in another group is not that kind.
+        let (ar, _) = resolve_kind("Secret", None, Some("example.com"), Some("v1"), Some("secrets")).unwrap();
+        assert!(!is_core_secret(&ar));
+    }
+
+    /// The payload from review of #934: core Secrets listed under another
+    /// kind, asking for `.data`. The values must come back blanked, as they
+    /// do for `kind: Secret`; this tool is not consent-gated.
+    #[tokio::test]
+    async fn listing_secrets_under_another_kind_still_blanks_their_values() {
+        let input = list_input(serde_json::json!({
+            "context": "c", "kind": "Anything", "namespace": "team",
+            "group": "", "version": "v1", "plural": "secrets",
+            "fields": [".data", ".metadata.annotations"],
+        }));
+        let (ar, namespaced) = resolve_kind(
+            &input.kind,
+            input.namespace.as_deref(),
+            input.group.as_deref(),
+            input.version.as_deref(),
+            input.plural.as_deref(),
+        )
+        .unwrap();
+        let (client, _) = listing_client(serde_json::json!({
+            "apiVersion": "v1", "kind": "SecretList", "metadata": {},
+            "items": [{
+                "apiVersion": "v1", "kind": "Secret",
+                "metadata": {"name": "db", "namespace": "team", "annotations": {"note": "hunter2"}},
+                "data": {"password": "aHVudGVyMg=="},
+            }],
+        }));
+
+        let out = list_resource(client, &ar, namespaced, &input).await.unwrap();
+
+        let shown = serde_json::to_string(&out.items).unwrap();
+        assert!(!shown.contains("aHVudGVyMg=="), "{shown}");
+        assert!(!shown.contains("hunter2"), "{shown}");
+        assert_eq!(out.items[0].name, "db");
+    }
+
+    /// The second lock: whatever kind a resolved resource carries, the core
+    /// `secrets` plural is a Secret to the redactor.
+    #[test]
+    fn the_redactor_knows_a_core_secret_by_its_plural_too() {
+        let ar = crate::crds::custom_api_resource("", "v1", "Anything", "secrets");
+        assert!(is_core_secret(&ar));
+        let object = serde_json::from_value::<DynamicObject>(serde_json::json!({
+            "apiVersion": "v1", "kind": "Secret",
+            "metadata": {"name": "db", "annotations": {"note": "hunter2"}},
+            "data": {"password": "aHVudGVyMg=="},
+        }))
+        .unwrap();
+        let readable = serde_json::to_string(&readable_object(object.clone(), &ar).unwrap()).unwrap();
+        assert!(!readable.contains("aHVudGVyMg==") && !readable.contains("hunter2"), "{readable}");
+        let yaml = manifest_yaml(&object, &ar).unwrap();
+        assert!(!yaml.contains("aHVudGVyMg==") && !yaml.contains("hunter2"), "{yaml}");
+    }
 
     /// A client that records each request line and answers every one with
     /// `body`.
