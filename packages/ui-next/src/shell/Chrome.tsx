@@ -166,6 +166,13 @@ export function Chrome({ controls, clusterName, onToggleTheme, onNewWorkspace, o
                   <span data-slot="workspace-color" aria-hidden="true" className="h-2 w-2 shrink-0 rounded-full" style={{ background: workspace.color }} />
                 )}
                 <span className="max-w-[110px] truncate">{workspace.name}</span>
+                {/* The kit chip's shield, drawn here because this chip is not the kit's. */}
+                {workspace.protected && (
+                  <>
+                    <Icons.shield size={11} aria-hidden="true" data-slot="workspace-protected" className="shrink-0" />{" "}
+                    <span className="sr-only">Protected</span>
+                  </>
+                )}
               </span>
             ) : (
               <WorkspaceSwitcher
@@ -174,6 +181,7 @@ export function Chrome({ controls, clusterName, onToggleTheme, onNewWorkspace, o
                   id: w.id,
                   name: w.name,
                   color: w.color,
+                  protected: w.protected,
                   clusters: w.clusters.length,
                   tabs: workspaceTabCount(w),
                 }))}

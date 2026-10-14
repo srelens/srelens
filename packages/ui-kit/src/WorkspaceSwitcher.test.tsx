@@ -210,6 +210,38 @@ describe("WorkspaceSwitcher", () => {
     });
   });
 
+  describe("protection", () => {
+    const GUARDED = [
+      { id: "prod", name: "Production", clusters: 2, tabs: 11, protected: true },
+      { id: "local", name: "Local & staging", clusters: 5, tabs: 2 },
+    ];
+    const shield = (root: Element) => root.querySelector('[data-slot="workspace-protected"]');
+
+    it("draws a shield after the active workspace's name, and says Protected in words", () => {
+      setup({ workspaces: GUARDED, activeId: "prod" });
+      expect(shield(trigger())?.getAttribute("aria-hidden")).toBe("true");
+      expect(trigger().querySelector(".sr-only")?.textContent).toBe("Protected");
+      // A space between the two, or a screen reader runs them into one word.
+      expect(trigger().textContent).toContain("Production Protected");
+    });
+
+    it("draws neither on the chip of a workspace that is not protected", () => {
+      setup({ workspaces: GUARDED, activeId: "local" });
+      expect(shield(trigger())).toBeNull();
+      expect(trigger().textContent).not.toContain("Protected");
+    });
+
+    it("marks a protected row, and adds Protected to its summary", async () => {
+      await open({ workspaces: GUARDED, activeId: "local" });
+      const production = row(/Production/);
+      expect(shield(production)).not.toBeNull();
+      expect(production.textContent).toContain("2 clusters · 11 tabs · Protected");
+      const local = row(/Local & staging/);
+      expect(shield(local)).toBeNull();
+      expect(local.textContent).not.toContain("Protected");
+    });
+  });
+
   it("offers to manage workspaces when the caller can, and closes after", async () => {
     const onManage = vi.fn();
     await open({ onManage });
