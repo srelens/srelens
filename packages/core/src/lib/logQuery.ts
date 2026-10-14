@@ -389,14 +389,21 @@ export function clauseState(clauses: readonly QueryClause[], target: ClauseTarge
  * The query after a facet click: absent → appended; same mode → removed;
  * other mode → flipped in place. Every other character of what was typed is
  * left alone — the box is the reader's, and a click must not rewrite it.
+ *
+ * A target typed twice (`level:error level:error`) is one filter to the facet,
+ * so a click acts on every copy: the first one decides the mode it is read in,
+ * and when the click flips it the rest go, or the facet would stay lit.
  */
 export function toggleClause(query: string, target: ClauseTarget, mode: ClauseMode): string {
   const parsed = parseLogQuery(query);
-  const found = parsed.ok ? parsed.clauses.find((c) => sameTarget(c, target)) : undefined;
+  const found = parsed.ok ? parsed.clauses.filter((c) => sameTarget(c, target)) : [];
   const spelled = mode === "exclude" ? `-${spell(target)}` : spell(target);
-  if (found === undefined) return append(query, spelled);
-  if ((mode === "exclude") === found.negated) return removeSpan(query, found.span);
-  return query.slice(0, found.span[0]) + spelled + query.slice(found.span[1]);
+  if (found.length === 0) return append(query, spelled);
+  const [first, ...rest] = found;
+  // From the end backwards, so the spans still to come are where they were parsed.
+  const flip = (mode === "exclude") !== first.negated;
+  const without = (flip ? rest : found).reduceRight((q, c) => removeSpan(q, c.span), query);
+  return flip ? without.slice(0, first.span[0]) + spelled + without.slice(first.span[1]) : without;
 }
 
 /** The query without `clause`, which must come from parsing this same text. */

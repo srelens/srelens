@@ -3237,6 +3237,27 @@ describe("under a busy stream (#898)", () => {
     expect(drawn.textContent).toContain("line 10");
   });
 
+  it("keeps a drawn line on its own element when the targets are resolved again, after the ring has dropped lines", async () => {
+    // A row's id belongs to the module, not to one indexing of the targets: numbered afresh from 0 by place in the
+    // buffer, a rebuilt row takes the id of a line the ring has since dropped, and that line's element with it.
+    const region = await (draw(), body());
+    push(...many(30));
+    ring(5, 30);
+    const drawn = lineRow(10);
+    // The same stream under a renamed context: the subject is resolved again, to targets the screen indexes afresh.
+    // The answer lands in the request's own tick, so React takes the loading state and the new targets as one render
+    // and the screen is rebuilt in place; an answer a network later unmounts it, and with it every drawn element.
+    const again = TARGETS.map((t) => ({ ...t }));
+    const answer = { status: "resolved", targets: again, pods: PODS, previous: [] };
+    h.resolve.mockReturnValue({ then: (done: (a: typeof answer) => void) => done(answer) });
+    act(() => setContexts([{ ...CTX, name: "prod-eu-2" }]));
+    expect(h.seen[h.seen.length - 1].targets).toBe(again);
+    expect(region.isConnected).toBe(true);
+    expect(rendered(region)).toHaveLength(30);
+    // Replaced by an element of its own, or still its own line: never another's.
+    expect(drawn.isConnected ? drawn.textContent : "line 10").toContain("line 10");
+  });
+
   it("recounts the rail, the facets and the histogram at most four times a second, and the last batch always lands", async () => {
     // The quarter second is read off the clock; stopped, a slow machine cannot run it out between two batches.
     vi.useFakeTimers({ toFake: ["Date"] });
@@ -3258,6 +3279,32 @@ describe("under a busy stream (#898)", () => {
         expect(screen.getByRole("button", { name: "error 2" })).toBeTruthy();
         expect(caption()).toMatch(/^5 lines · /);
       });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("empties the counts at once when the buffer is emptied, though a recount is waiting", async () => {
+    // A restart leaves nothing to count: the old buffer's tallies must not go on being read for the quarter second a
+    // recount waits. The clock is stopped, so that quarter second cannot run out inside the test.
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      const region = await (draw(), body());
+      push(...LINES);
+      expect(screen.getByText("1 error")).toBeTruthy();
+      push(anotherError);
+      // The recount is waiting: the counts still hold the last one.
+      expect(screen.getByText("1 error")).toBeTruthy();
+      act(() => {
+        // What the hook does on a restart: a fresh buffer and a bumped restart count.
+        h.state.lines = [];
+        h.state.restarts = 1;
+        notify();
+      });
+      expect(rendered(region)).toHaveLength(0);
+      expect(screen.queryByText("1 error")).toBeNull();
+      expect(screen.queryByRole("button", { name: "error 1" })).toBeNull();
+      expect(caption()).toBe("");
     } finally {
       vi.useRealTimers();
     }
@@ -3392,6 +3439,30 @@ describe("under a busy stream (#898)", () => {
       expect(rendered(region)).toHaveLength(10);
     });
 
+    it.each([
+      ["Ctrl+A", () => select(document.body)],
+      [
+        "a drag from the filter bar to past the log",
+        () =>
+          act(() => {
+            const wrap = screen.getByRole("button", { name: "Wrap" });
+            (document.getSelection() as Selection).setBaseAndExtent(wrap, 0, document.body, document.body.childNodes.length);
+            document.dispatchEvent(new Event("selectionchange"));
+          }),
+      ],
+    ])("holds the view while %s selects the log, though neither end of the selection is in it", async (_, enclose) => {
+      // The text under the selection is rewritten as surely as under one that starts in the log.
+      const region = await (draw(), body());
+      push(...many(5));
+      enclose();
+      const selection = document.getSelection() as Selection;
+      expect(region.contains(selection.anchorNode) || region.contains(selection.focusNode)).toBe(false);
+      push(...many(3, 5));
+      expect(rendered(region)).toHaveLength(5);
+      select(null);
+      expect(rendered(region)).toHaveLength(8);
+    });
+
     it("says the view is held only once a hold has lasted, never for an ordinary click", async () => {
       // Every click holds the view for as long as the button is down; a note that flashed on each one would be noise.
       await (draw(), body());
@@ -3420,6 +3491,37 @@ describe("under a busy stream (#898)", () => {
         expect(heldNote()).toBeNull();
         lift(lineRow(2));
         act(() => vi.advanceTimersByTime(0));
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("tells a screen reader the view is held while the note shows, without the count that changes under it", async () => {
+      await (draw(), body());
+      push(...many(5));
+      const live = () => document.querySelector('[data-slot="held-live"]') as HTMLElement;
+      // Mounted before anything is held, so the first announcement is a change to a region the reader already has.
+      expect(live().textContent).toBe("");
+      expect(live().getAttribute("role")).toBe("status");
+      expect(live().getAttribute("aria-live")).toBe("polite");
+      expect(live().getAttribute("aria-atomic")).toBe("true");
+      expect(live().className).toContain("sr-only");
+      vi.useFakeTimers();
+      try {
+        select(lineRow(3));
+        h.state.pending = 3;
+        push(...many(3, 5));
+        act(() => vi.advanceTimersByTime(299));
+        expect(live().textContent).toBe("");
+        act(() => vi.advanceTimersByTime(1));
+        expect(heldNote()?.textContent).toBe("Held while you select · 3 new lines");
+        // The count is the visible note's alone: said here, it would be read out again on every batch.
+        expect(live().textContent).toBe("View held while you select");
+        h.state.pending = 40;
+        push(...many(1, 8));
+        expect(live().textContent).toBe("View held while you select");
+        select(null);
+        expect(live().textContent).toBe("");
       } finally {
         vi.useRealTimers();
       }

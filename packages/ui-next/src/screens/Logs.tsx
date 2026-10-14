@@ -210,6 +210,13 @@ const RECOUNT_MS = 250;
 const HELD_NOTE_MS = 300;
 
 /**
+ * The next row's id, for the life of the module. A row's id is its element's key, so it must never be given to a
+ * second line: numbered again from 0 whenever the rows are rebuilt, a line would take the id of one the ring
+ * has since dropped, and with it that line's element, under the reader's pointer or selection.
+ */
+let nextRowId = 0;
+
+/**
  * The one state this readout can be in that the CONNECTION is not.
  *
  * Everything else comes from core's `logConnectionStatus` — the four
@@ -963,7 +970,11 @@ function LogsStream({
         selection !== null &&
         !selection.isCollapsed &&
         viewport !== null &&
-        (viewport.contains(selection.anchorNode) || viewport.contains(selection.focusNode));
+        // Either end in the log, or the log inside it: Ctrl+A, or a drag from the filter bar past the whole log. A
+        // selection that only reaches into the log has an end in it, so the whole log is all there is left to ask.
+        (viewport.contains(selection.anchorNode) ||
+          viewport.contains(selection.focusNode) ||
+          selection.containsNode(viewport));
       syncHold();
     };
     // Anywhere on the window: a drag that started in the log can end anywhere, and a press the browser takes back,
@@ -1008,6 +1019,8 @@ function LogsStream({
     const timer = setTimeout(() => setHeldLong(true), HELD_NOTE_MS);
     return () => clearTimeout(timer);
   }, [stream.held]);
+  /** Whether the filter bar says the view is held: a following pane, held long enough to name. */
+  const heldNoted = !previous && !stream.paused && stream.held && heldLong;
   /**
    * The restarts the "Scrollback cleared" notice is not about. That notice says a
    * change of window reopened the stream and nothing already sent comes back. A change
@@ -1032,11 +1045,10 @@ function LogsStream({
    */
   const rowOf = useMemo(() => {
     const cache = new WeakMap<StreamLine, Row>();
-    let next = 0;
     return (line: StreamLine): Row => {
       let row = cache.get(line);
       if (row === undefined) {
-        row = toRow(line, byLabel, next++);
+        row = toRow(line, byLabel, nextRowId++);
         cache.set(line, row);
       }
       return row;
@@ -1160,9 +1172,10 @@ function LogsStream({
    * The rows the rail, the facets and the histogram count. Each count is a pass over the whole buffer, and a busy
    * stream commits every frame: while lines are arriving these take the stream's rows at most four times a second,
    * the last batch always landing. A filter still applies at once, over the rows they have. Paused or reading a
-   * snapshot, nothing is arriving to hold back.
+   * snapshot, nothing is arriving to hold back, and neither is an empty buffer (a restart or a clear): it has nothing
+   * to count, and must not go on showing the old buffer's counts for the wait.
    */
-  const counted = useThrottledValue(rows, following ? RECOUNT_MS : 0);
+  const counted = useThrottledValue(rows, following && rows.length > 0 ? RECOUNT_MS : 0);
   const scoped = useMemo(() => counted.filter(inScope), [counted, inScope]);
   /** The query applied, but not the window: what the histogram counts, so it can shade the window instead of cropping to it. */
   const queried = useMemo(
@@ -1839,11 +1852,16 @@ function LogsStream({
             </Eyebrow>
           )}
           {/* Why a following pane stopped moving under a press or a selection, and what waits for its release. */}
-          {!previous && !stream.paused && stream.held && heldLong && (
+          {heldNoted && (
             <Eyebrow>
               {`Held while you select${stream.pendingWhilePaused > 0 ? ` · ${groupNumber(stream.pendingWhilePaused)} new lines` : ""}`}
             </Eyebrow>
           )}
+          {/* The same for a screen reader, which the note's coming and going does not reach. Always mounted, so the
+              words are a change to a region it already has, and without the count: that moves with every batch. */}
+          <span className="sr-only" role="status" aria-live="polite" aria-atomic="true" data-slot="held-live">
+            {heldNoted ? "View held while you select" : ""}
+          </span>
           {!previous && (
             <LiveSignal
               label={connectionLabel(
