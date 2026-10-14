@@ -1159,11 +1159,10 @@ function LogsStream({
   const applied = useMemo(() => parseLogQuery(deferredText), [deferredText]);
   /**
    * What the screen filters by, and the rows it may filter. A regex in the query is never run on this thread: a
-   * worker answers each row. A new regex applies once its worker has answered the buffer, the screen keeping the
-   * filter it had until then, and after that `answered` holds a later row back until it has. With no regex,
-   * `answered` is `rows` itself. A regex too slow on some line, or with no worker to run it, sends the screen back to the filter it had,
-   * for a typed query and for one restored with the tab alike. Everything below reads `answered`, not `rows`: the
-   * body, the rail, the facets, the histogram, the legend and the export.
+   * worker answers each row. A regex applies once its worker has answered the buffer, the query applying without it
+   * until then, and after that `answered` holds a later row back until it has. With no regex, `answered` is `rows`
+   * itself. A regex too slow on some line, or with no worker to run it, is left out the same way and named, for a
+   * typed query and for one restored with the tab alike. Every filter and count below reads `answered`, not `rows`.
    */
   const gate = useRegexGate(applied, rows);
   const clauses = gate.clauses;
@@ -1377,6 +1376,12 @@ function LogsStream({
    */
   async function exportRange(range: (typeof EXPORT_RANGES)[number]) {
     setExportFailure(undefined);
+    // The screen has left that regex out, and the file must not quietly do the same under a box that still holds it.
+    if (gate.slow !== undefined || gate.unavailable) {
+      const said = gate.slow !== undefined ? `Too slow to run on these lines: ${gate.slow}` : "Regex search is unavailable here";
+      setExportFailure({ title: SAVE_FAILED, error: new Error(said) });
+      return;
+    }
     setExporting(true);
     try {
       const read = await readRange(
@@ -1391,8 +1396,10 @@ function LogsStream({
         setExportFailure({ title: `Could not read the logs of ${read.where}`, error: read.error });
         return;
       }
-      // Not the screen's answers: these lines are not the buffer's, so a regex is answered for them on its own.
-      const kept = (await keepMatching(clauses, read.lines.map((l, i) => toRow(l, byLabel, i))))
+      // The query as applied, not the screen's clauses, which leave out a regex still answering the buffer. These
+      // lines are not the buffer's anyway, so a regex is answered for them by workers of their own.
+      const query = applied.ok ? applied.clauses : NO_CLAUSES;
+      const kept = (await keepMatching(query, read.lines.map((l, i) => toRow(l, byLabel, i))))
         // Stable, so lines of one container that share a stamp keep the order they were written in.
         .sort((a, b) => (a.at ?? 0) - (b.at ?? 0) || subMillisecond(a.raw) - subMillisecond(b.raw));
       await saveOrDownload(`${name}-${range.slug}.log`, exportContent(kept));

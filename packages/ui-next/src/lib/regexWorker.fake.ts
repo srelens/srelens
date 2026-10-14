@@ -1,9 +1,10 @@
 /**
  * A stand-in for `regexWorker`, for tests: jsdom has no `Worker`. Mock the
  * module with this one (`vi.mock(".../regexWorker", () => import(".../regexWorker.fake"))`)
- * and every oracle the code makes lands in `oracles`, keeping each `ask`
- * exactly as it was made. It answers only when the test says so, with the
- * worker's own code, so a test sees the screen wait on it.
+ * and every oracle the code makes lands in `oracles`. Each keeps in `asks` what
+ * the real oracle would send its worker: the strings asked about that are
+ * neither answered nor on their way. It answers only when the test says so, with
+ * the worker's own code, so a test sees the screen wait on it.
  */
 import { answer, type RegexAnswer, type RegexItem } from "./regexMatch";
 import type { OracleState, RegexOracle } from "./regexWorker";
@@ -45,6 +46,7 @@ export class FakeOracle implements RegexOracle {
   readonly answers = new Map<string, RegexAnswer>();
   state: OracleState;
   disposed = false;
+  private pending = new Map<string, RegexItem>();
   private waiting: (() => void)[] = [];
 
   constructor(
@@ -56,7 +58,14 @@ export class FakeOracle implements RegexOracle {
 
   ask(items: readonly RegexItem[]): Promise<void> {
     if (this.state !== "ready" || this.disposed) return Promise.resolve();
-    this.asks.push([...items]);
+    const fresh: RegexItem[] = [];
+    for (const item of items) {
+      if (this.answers.has(item.test) || this.pending.has(item.test)) continue;
+      this.pending.set(item.test, item);
+      fresh.push(item);
+    }
+    if (fresh.length > 0) this.asks.push(fresh);
+    if (this.pending.size === 0) return Promise.resolve();
     return new Promise((resolve) => this.waiting.push(resolve));
   }
 
@@ -74,17 +83,18 @@ export class FakeOracle implements RegexOracle {
 
   dispose(): void {
     this.disposed = true;
+    this.pending.clear();
     this.release();
   }
 
-  /** The worker answers every item asked so far: with the worker's code, or with `given` for every item. */
+  /** The worker answers every item on its way: with the worker's code, or with `given` for every item. */
   reply(given?: RegexAnswer): void {
     answering = true;
     try {
-      for (const items of this.asks) {
-        const answers = given === undefined ? answer(this.source, this.flags, items) : items.map(() => given);
-        answers.forEach((a, i) => this.answers.set(items[i].test, a));
-      }
+      const items = [...this.pending.values()];
+      const answers = given === undefined ? answer(this.source, this.flags, items) : items.map(() => given);
+      answers.forEach((a, i) => this.answers.set(items[i].test, a));
+      this.pending.clear();
     } finally {
       answering = false;
     }
@@ -95,6 +105,7 @@ export class FakeOracle implements RegexOracle {
   fail(to: "slow" | "unavailable"): void {
     this.state = to;
     if (to === "slow") knownSlow.add(`${this.flags}/${this.source}`);
+    this.pending.clear();
     this.release();
   }
 

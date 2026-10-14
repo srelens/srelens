@@ -1665,6 +1665,36 @@ describe("exporting a time range (#915)", () => {
     expect(watch.runs).toEqual([]);
   });
 
+  it("writes the range through the regex in the box while its worker still has the buffer", async () => {
+    draw();
+    await body();
+    push(...LINES);
+    await userEvent.type(filterField(), "/timeout.on/");
+    await waitFor(() => expect(oracleFor("timeout.on").asks).toHaveLength(1));
+    // Not answered yet: the screen keeps what it had, but the file is what the box says.
+    await pick("Last 6 h");
+    await waitFor(() => expect(oracles).toHaveLength(2));
+    await act(async () => oracles[1].reply());
+    await waitFor(() => expect(h.saved).toHaveBeenCalledTimes(1));
+    expect(written()).toEqual([
+      "api-8/api | 2026-08-24T13:25:00.000000000Z error pool timeout on api-8",
+      "api-7/api | 2026-08-24T14:07:41.208000000Z error pool timeout on api-7",
+    ]);
+  });
+
+  it("refuses to write a range through a regex too slow to run, in the alert's words", async () => {
+    draw();
+    await body();
+    push(...LINES);
+    await userEvent.type(filterField(), "/timeout.on/");
+    await waitFor(() => expect(oracleFor("timeout.on").asks).toHaveLength(1));
+    await act(async () => oracleFor("timeout.on").fail("slow"));
+    await pick("Last 6 h");
+    const failure = await screen.findByText("Could not save this stream");
+    expect(failure.closest('[role="status"]')?.textContent).toContain("Too slow to run on these lines: /timeout.on/");
+    expect(h.saved).not.toHaveBeenCalled();
+  });
+
   it("orders two containers' lines inside one millisecond by the whole stamp", async () => {
     // A trimmed fraction on purpose: the kubelet's RFC3339Nano drops trailing zeros.
     const blobs: Record<string, string> = {
