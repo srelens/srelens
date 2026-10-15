@@ -1,12 +1,19 @@
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { settingsStorage } from "@srelens/core";
+
+const refreshSetting = vi.hoisted(() => vi.fn());
+vi.mock("@srelens/core", async (orig) => ({ ...(await orig<typeof import("@srelens/core")>()), refreshSetting }));
+
 import {
   COLLECTIONS_KEY,
   __resetCollectionsForTests,
   byRecentUse,
+  collectionsSaved,
   deleteCollections,
   getCollections,
   markCollectionsUsed,
+  onCollectionRenamed,
+  refreshCollections,
   saveCollection,
 } from "./collections";
 
@@ -15,15 +22,24 @@ const stored = () => JSON.parse(settingsStorage.getItem(COLLECTIONS_KEY) ?? "nul
 beforeEach(() => {
   settingsStorage.removeItem(COLLECTIONS_KEY);
   __resetCollectionsForTests();
+  refreshSetting.mockReset().mockResolvedValue(undefined);
 });
+
+/** Another window saving its own change, seen when this one reads the setting again. */
+function anotherWindowSaves(collections: unknown[]): void {
+  refreshSetting.mockImplementationOnce(async () => {
+    settingsStorage.setItem(COLLECTIONS_KEY, JSON.stringify({ version: 1, collections }));
+  });
+}
 
 describe("the saved collections", () => {
   it("start as none", () => {
     expect(getCollections()).toEqual([]);
   });
 
-  it("keep a saved collection across a restart, in a versioned document", () => {
+  it("keep a saved collection across a restart, in a versioned document", async () => {
     saveCollection({ name: "prod", type: "namespace", patterns: ["prod-*"] });
+    await collectionsSaved();
     __resetCollectionsForTests();
     expect(getCollections()).toEqual([{ name: "prod", type: "namespace", patterns: ["prod-*"] }]);
     expect(stored()).toEqual({ version: 1, collections: [{ name: "prod", type: "namespace", patterns: ["prod-*"] }] });
@@ -40,6 +56,30 @@ describe("the saved collections", () => {
     expect(getCollections()).toEqual([
       { name: "production", type: "namespace", patterns: ["prod-*", "live-*"], clusters: ["eu"] },
     ]);
+  });
+
+  /**
+   * The editor leaves an emptied field out of what it saves. Merged over the
+   * old collection, that kept the old value: a cleared pattern still matched.
+   */
+  it("clear a field the editor cleared, and keep when it was last used", async () => {
+    saveCollection({ name: "prod", type: "namespace", patterns: ["prod-*"], labelSelector: "env=prod", members: ["a"], description: "P" });
+    markCollectionsUsed("namespace", ["prod"], 7);
+    saveCollection({ name: "prod", type: "namespace", members: ["a"] }, "prod");
+    expect(getCollections()).toEqual([{ name: "prod", type: "namespace", members: ["a"], lastUsedAt: 7 }]);
+    await collectionsSaved();
+    __resetCollectionsForTests();
+    expect(getCollections()).toEqual([{ name: "prod", type: "namespace", members: ["a"], lastUsedAt: 7 }]);
+  });
+
+  it("tell their listeners when a collection is renamed, and not when it is only edited", () => {
+    const heard = vi.fn();
+    onCollectionRenamed(heard);
+    saveCollection({ name: "prod", type: "namespace" });
+    saveCollection({ name: "prod", type: "namespace", patterns: ["p-*"] }, "prod");
+    expect(heard).not.toHaveBeenCalled();
+    saveCollection({ name: "production", type: "namespace" }, "prod");
+    expect(heard).toHaveBeenCalledExactlyOnceWith("namespace", "prod", "production");
   });
 
   it("delete several at once, of one type only", () => {
@@ -71,6 +111,50 @@ describe("the saved collections", () => {
     } finally {
       settingsStorage.setItem = original;
     }
+    expect(getCollections().map((c) => c.name)).toEqual(["prod"]);
+  });
+});
+
+/**
+ * Each window keeps its own copy of the document and used to write it whole,
+ * so a window that had loaded the collections before another added one put
+ * its old copy back — the other window's collection, gone.
+ */
+describe("a change made in another window", () => {
+  it("is not undone by saving, deleting or merely using a collection here", async () => {
+    saveCollection({ name: "prod", type: "namespace" });
+    await collectionsSaved();
+
+    anotherWindowSaves([{ name: "prod", type: "namespace" }, { name: "staging", type: "namespace" }]);
+    saveCollection({ name: "dev", type: "namespace" });
+    await collectionsSaved();
+    expect(getCollections().map((c) => c.name)).toEqual(["prod", "staging", "dev"]);
+
+    anotherWindowSaves([{ name: "prod", type: "namespace" }, { name: "staging", type: "namespace" }, { name: "dev", type: "namespace" }, { name: "qa", type: "namespace" }]);
+    markCollectionsUsed("namespace", ["prod"], 5);
+    await collectionsSaved();
+    expect(getCollections().map((c) => c.name)).toEqual(["prod", "staging", "dev", "qa"]);
+    expect(getCollections()[0].lastUsedAt).toBe(5);
+
+    anotherWindowSaves([{ name: "prod", type: "namespace" }, { name: "qa", type: "namespace" }, { name: "uat", type: "namespace" }]);
+    deleteCollections("namespace", ["prod"]);
+    await collectionsSaved();
+    __resetCollectionsForTests();
+    expect(getCollections().map((c) => c.name)).toEqual(["qa", "uat"]);
+  });
+
+  it("shows once this window reads the setting again", async () => {
+    getCollections();
+    anotherWindowSaves([{ name: "staging", type: "namespace" }]);
+    await refreshCollections();
+    expect(getCollections().map((c) => c.name)).toEqual(["staging"]);
+  });
+
+  it("does not cost this window its change when the setting cannot be read again", async () => {
+    refreshSetting.mockRejectedValueOnce(new Error("backend gone"));
+    saveCollection({ name: "prod", type: "namespace" });
+    await collectionsSaved();
+    __resetCollectionsForTests();
     expect(getCollections().map((c) => c.name)).toEqual(["prod"]);
   });
 });

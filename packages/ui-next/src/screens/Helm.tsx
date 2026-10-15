@@ -48,7 +48,7 @@ import {
 } from "../lib/helmOps";
 import { Icons } from "../lib/icons";
 import { describe } from "../lib/routes";
-import { useNamespaces, useSetNamespaces } from "../lib/workspace";
+import { useNamespaces, useSetFallbackNamespace, useSetNamespaces } from "../lib/workspace";
 import { HelmOpDialog } from "./helm/HelmOpDialog";
 import { ReleasePane, type PaneRelease } from "./helm/ReleasePane";
 import {
@@ -320,6 +320,7 @@ function HelmReleases({
    */
   const selection = useNamespaces(context.stableId);
   const setNamespaces = useSetNamespaces();
+  const setFallbackNamespace = useSetFallbackNamespace();
   const namespaceOptions = useNamespaceOptions(name, files);
   const { namespaces, scope, error: namespaceError } = namespaceOptions;
 
@@ -338,8 +339,8 @@ function HelmReleases({
   // another — the same rule every other screen follows, written to the shared
   // store so they all agree about it.
   useEffect(() => {
-    if (scope) setNamespaces(context.stableId, [scope]);
-  }, [scope, context.stableId, setNamespaces]);
+    if (scope) setFallbackNamespace(context.stableId, scope);
+  }, [scope, context.stableId, setFallbackNamespace]);
 
   /**
    * Which listing is the current one.

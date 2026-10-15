@@ -5,6 +5,7 @@ import type { Storage } from "./tabsPersist";
 import {
   currentWorkspace,
   forgetClusterNamespaces,
+  renameNamespaceCollection,
   setTabNamespaceCollections,
   setTabNamespaces,
   subscribe as subscribeTabs,
@@ -12,7 +13,7 @@ import {
   tabNamespaces,
 } from "./tabsStore";
 import { collectionScope, subscribeScopes } from "./collectionScope";
-import { markCollectionsUsed } from "./collections";
+import { markCollectionsUsed, onCollectionRenamed } from "./collections";
 import { useTabScope } from "./tabScope";
 
 export type LinkState = "connected" | "connecting" | "disconnected" | "error";
@@ -205,6 +206,11 @@ function subscribeSelection(listener: () => void): () => void {
   };
 }
 
+// A namespace collection renamed in Settings takes the tabs scoped to it along.
+onCollectionRenamed((type, from, to) => {
+  if (type === "namespace") renameNamespaceCollection(from, to);
+});
+
 /**
  * A tab's selection for a cluster: what its namespace collections resolve
  * to, where it is scoped to any that still exist (#881), else the namespaces
@@ -229,6 +235,25 @@ export function useNamespaceCollections(clusterId: string | undefined): string[]
   const scoped = useTabScope();
   const read = () => (clusterId === undefined ? undefined : tabNamespaceCollections(scoped ?? currentWorkspace().activeId, clusterId));
   return useSyncExternalStore(subscribeTabs, read, () => undefined);
+}
+
+/**
+ * The setter for the one namespace restricted credentials can see, for the
+ * tab this component is mounted in.
+ *
+ * Such credentials cannot list namespaces, so a screen scopes itself to the
+ * one they declare, every time it loads. That is not the reader choosing, and
+ * a tab scoped to a namespace collection keeps its collection (#881): the
+ * collection resolves against the one namespace the listing has, and says
+ * the result may be partial.
+ */
+export function useSetFallbackNamespace(): (clusterId: string, namespace: string) => void {
+  const tabId = useTabScope();
+  return useCallback((clusterId: string, namespace: string) => {
+    const tab = tabId ?? currentWorkspace().activeId;
+    if (tabNamespaceCollections(tab, clusterId)) return;
+    setTabNamespaces(tab, clusterId, [namespace]);
+  }, [tabId]);
 }
 
 /** The collections setter for the tab this component is mounted in. */

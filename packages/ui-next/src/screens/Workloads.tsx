@@ -51,7 +51,7 @@ import type { ListRow } from "../lib/kinds/types";
 import { useResourceList, type ResourceList } from "../lib/resourceList";
 import { describe } from "../lib/routes";
 import { openTab, useTabs } from "../lib/tabsStore";
-import { useNamespaces, useSetNamespaces } from "../lib/workspace";
+import { useNamespaces, useSetFallbackNamespace, useSetNamespaces } from "../lib/workspace";
 import { useRowMenu } from "./ResourceMenu";
 import {
   NamespaceErrorAlert,
@@ -367,6 +367,7 @@ function WorkloadList({
 
   const selection = useNamespaces(context.stableId);
   const setNamespaces = useSetNamespaces();
+  const setFallbackNamespace = useSetFallbackNamespace();
   const namespaceOptions = useNamespaceOptions(name, files);
   const { namespaces, scope, error: namespaceError } = namespaceOptions;
   // Every workload kind here is namespaced, so the selection is handed to
@@ -445,8 +446,8 @@ function WorkloadList({
   // A namespace-restricted credential has one namespace and no way to ask
   // for another — same rule `KindList` follows.
   useEffect(() => {
-    if (scope) setNamespaces(context.stableId, [scope]);
-  }, [scope, context.stableId, setNamespaces]);
+    if (scope) setFallbackNamespace(context.stableId, scope);
+  }, [scope, context.stableId, setFallbackNamespace]);
 
   // Plain data after the fixed hooks above, not another hook: summarizing
   // five results into a table is not itself something React needs to track

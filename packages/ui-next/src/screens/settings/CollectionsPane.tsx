@@ -1,7 +1,7 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import type { Collection } from "@srelens/core";
 import { Button, Checkbox, ConfirmDialog, EmptyState } from "@srelens/ui-kit";
-import { deleteCollections, useCollections } from "../../lib/collections";
+import { deleteCollections, refreshCollections, useCollections } from "../../lib/collections";
 import { useActiveContext } from "../../lib/clusters";
 import { CollectionDialog } from "../collections/CollectionEditor";
 
@@ -28,6 +28,10 @@ function rules(c: Collection): string {
 export function CollectionsPane() {
   const all = useCollections();
   const context = useActiveContext();
+  // Another window may have saved or deleted one since this one started.
+  useEffect(() => {
+    void refreshCollections();
+  }, []);
   const collections = all.filter((c) => c.type === "namespace").sort((a, b) => a.name.localeCompare(b.name));
   const [editing, setEditing] = useState<Collection | "new" | null>(null);
   const [picked, setPicked] = useState<Set<string>>(new Set());

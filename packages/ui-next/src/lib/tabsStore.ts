@@ -618,6 +618,44 @@ export function setTabNamespaceCollections(tabId: string, clusterId: string, nam
   });
 }
 
+/**
+ * Move every tab scoped to the namespace collection `from` onto `to`, in
+ * every workspace, open, recently closed or put away with another cluster's
+ * tabs (#881). A collection renamed in Settings is the same collection, and a
+ * tab scoped to it must not read the old name as "deleted" and fall back.
+ */
+export function renameNamespaceCollection(from: string, to: string): void {
+  if (from === to) return;
+  const move = (tabs: Tab[]) => {
+    if (!tabs.some((t) => Object.values(t.namespaceCollections ?? {}).some((names) => names.includes(from)))) return tabs;
+    return tabs.map((t) => {
+      if (!t.namespaceCollections) return t;
+      const namespaceCollections = Object.fromEntries(
+        Object.entries(t.namespaceCollections).map(([clusterId, names]) => [
+          clusterId,
+          [...new Set(names.map((n) => (n === from ? to : n)))],
+        ]),
+      );
+      return { ...t, namespaceCollections };
+    });
+  };
+  const state = cur();
+  let changed = false;
+  const workspaces = state.workspaces.map((w) => {
+    const tabs = move(w.tabs);
+    const closed = move(w.closed);
+    let shelved = w.shelved;
+    for (const [id, strip] of Object.entries(w.shelved ?? {})) {
+      const put = { tabs: move(strip.tabs), closed: move(strip.closed) };
+      if (put.tabs !== strip.tabs || put.closed !== strip.closed) shelved = { ...shelved, [id]: { ...strip, ...put } };
+    }
+    if (tabs === w.tabs && closed === w.closed && shelved === w.shelved) return w;
+    changed = true;
+    return { ...w, tabs, closed, ...(shelved ? { shelved } : {}) };
+  });
+  if (changed) emit({ ...state, workspaces });
+}
+
 function sameList(a: readonly string[], b: readonly string[]): boolean {
   return a.length === b.length && a.every((x, i) => x === b[i]);
 }

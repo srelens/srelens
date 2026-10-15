@@ -12,7 +12,7 @@ import type { NamespaceOptions } from "@srelens/core/react";
 };
 Element.prototype.scrollIntoView ??= () => {};
 
-const core = vi.hoisted(() => ({ resolveNamespaceCollections: vi.fn(), validateCollection: vi.fn() }));
+const core = vi.hoisted(() => ({ resolveNamespaceCollections: vi.fn(), validateCollection: vi.fn(), listNamespaces: vi.fn() }));
 vi.mock("@srelens/core", async (orig) => ({ ...(await orig<typeof import("@srelens/core")>()), ...core }));
 const openSettings = vi.hoisted(() => vi.fn());
 vi.mock("../../lib/settingsRequest", () => ({ openSettings }));
@@ -22,7 +22,7 @@ import { __resetCollectionScopeForTests } from "../../lib/collectionScope";
 import { makeTab } from "../../lib/tabs";
 import { getState, setState, tabNamespaceCollections } from "../../lib/tabsStore";
 import { TabScope } from "../../lib/tabScope";
-import { CollectionScopeNotice, NamespaceScopePicker } from "./NamespaceScope";
+import { CollectionScopeNotice, NamespaceScopePicker, RELIST_MS } from "./NamespaceScope";
 
 const CONTEXT: ClusterContext = {
   name: "kind-shop",
@@ -78,6 +78,7 @@ beforeEach(() => {
   __resetCollectionScopeForTests();
   core.resolveNamespaceCollections.mockReset().mockResolvedValue(resolution(["prod-eu", "prod-us"]));
   core.validateCollection.mockReset().mockResolvedValue([]);
+  core.listNamespaces.mockReset();
   openSettings.mockReset();
   setState({
     workspaces: [
@@ -180,6 +181,46 @@ describe("NamespaceScopePicker", () => {
 
     expect(getCollections()).toEqual([{ name: "picked", type: "namespace", members: ["prod-eu", "dev"], lastUsedAt: expect.any(Number) }]);
     expect(tabNamespaceCollections("tab-a", CONTEXT.stableId)).toEqual(["picked"]);
+  });
+
+  /**
+   * The view reads its namespaces once, when it opens; a collection is a rule,
+   * and a namespace created or relabelled since may now match it.
+   */
+  it("reads the namespaces again while a collection is in force, and resolves against what it finds", async () => {
+    // Before anything mounts, so the picker's interval is a fake one.
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      saveCollection({ name: "prod", type: "namespace", patterns: ["prod-*"] });
+      paint();
+      await choose("prod");
+      await waitFor(() => expect(picker().textContent).toBe("prod · 2 namespaces"));
+      core.listNamespaces.mockResolvedValue({
+        namespaces: ["prod-eu", "prod-us", "prod-ap", "dev"],
+        summaries: ["prod-eu", "prod-us", "prod-ap", "dev"].map((name) => ({ name, phase: "Active", labels: {}, age: "1d" })),
+      });
+      core.resolveNamespaceCollections.mockResolvedValue(resolution(["prod-eu", "prod-us", "prod-ap"]));
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(RELIST_MS);
+      });
+      await waitFor(() => expect(picker().textContent).toBe("prod · 3 namespaces"));
+      expect(core.listNamespaces).toHaveBeenCalledWith(CONTEXT.name);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("does not read the namespaces again while nothing but namespaces is chosen", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      paint();
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(RELIST_MS * 2);
+      });
+      expect(core.listNamespaces).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("opens on the Collections tab while a collection is in force", async () => {

@@ -960,7 +960,18 @@ mod tests {
             .filter(|capability| capability.ui_only)
             .map(|capability| capability.id.as_str())
             .collect();
-        assert_eq!(ui_only, ["extensions.callOperation", "extensions.inspect", "extensions.logs"]);
+        // Collections (#881) are kept in the UI's settings, so an agent would
+        // have nothing to pass their two capabilities.
+        assert_eq!(
+            ui_only,
+            [
+                "collections.resolveNamespaces",
+                "collections.validate",
+                "extensions.callOperation",
+                "extensions.inspect",
+                "extensions.logs",
+            ]
+        );
         for id in &ui_only {
             assert!(reg.get(id).unwrap().annotations.read_only, "{id}");
         }

@@ -1255,6 +1255,25 @@ describe("namespace collections on a tab (#881)", () => {
     expect(heard).not.toHaveBeenCalled();
   });
 
+  it("follow a renamed collection, in open and recently closed tabs alike, and no other", () => {
+    store.setTabNamespaceCollections(tabNow().id, C, ["prod", "staging"]);
+    store.openTab("/k/services");
+    store.setTabNamespaceCollections(tabNow().id, C, ["prod"]);
+    store.closeTab(tabNow().id);
+    store.renameNamespaceCollection("prod", "production");
+    const open = store.currentWorkspace().tabs.find((t) => t.route === "/k/pods")!;
+    expect(open.namespaceCollections).toEqual({ [C]: ["production", "staging"] });
+    expect(store.currentWorkspace().closed[0].namespaceCollections).toEqual({ [C]: ["production"] });
+  });
+
+  it("does not wake anyone when no tab names the collection renamed", () => {
+    const heard = vi.fn();
+    const stop = store.subscribe(heard);
+    store.renameNamespaceCollection("nobody", "else");
+    stop();
+    expect(heard).not.toHaveBeenCalled();
+  });
+
   it("are forgotten with a removed cluster, in open and closed tabs alike", () => {
     store.setTabNamespaceCollections(tabNow().id, C, ["prod"]);
     store.setTabNamespaces(tabNow().id, "other", ["a"]);

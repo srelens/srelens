@@ -17,7 +17,7 @@ import { getKubeconfigFiles } from "../lib/clusters";
 import { FailureAlert } from "../lib/errorCopy";
 import { openTab } from "../lib/tabsStore";
 import { useResource } from "../lib/useResource";
-import { useNamespaces, useSetNamespaces } from "../lib/workspace";
+import { useNamespaceCollections, useNamespaces, useSetNamespaces } from "../lib/workspace";
 import { NamespaceErrorAlert } from "../screens/resourceShell";
 import { ExtensionResults } from "./ExtensionResults";
 import { NO_PINNED_ID_MESSAGE } from "./contextIds";
@@ -73,8 +73,12 @@ function CardsBand({ context, apps }: { context: ClusterContext; apps: Installed
   const namespaceOptions = useNamespaceOptions(context.name, getKubeconfigFiles());
   const { namespaces, scope, error: namespaceError } = namespaceOptions;
   const [refresh, setRefresh] = useState(0);
-  // A credential that may only read one namespace reads that one, whatever is selected.
-  const effective = scope ? [scope] : selection;
+  const collections = useNamespaceCollections(context.stableId);
+  // A credential that may only read one namespace reads that one, whatever is
+  // selected — unless the tab is scoped to a namespace collection (#881),
+  // which has already resolved against what those credentials can see, and
+  // may have matched nothing.
+  const effective = scope && !collections ? [scope] : selection;
   // Each app's card readers are followed (#566): a change redraws that app's
   // figures in place. One namespace is watched there; several, or none, in
   // every namespace — the scope the cards themselves are read in.

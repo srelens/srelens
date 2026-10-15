@@ -1,5 +1,8 @@
 import { useEffect, useState } from "react";
-import { selectsNothing, type ClusterContext, type Collection } from "@srelens/core";
+import { listNamespaces, selectsNothing, type ClusterContext, type Collection } from "@srelens/core";
+
+/** How often a collection-scoped view reads the namespaces again. */
+export const RELIST_MS = 30_000;
 import type { NamespaceOptions } from "@srelens/core/react";
 import { Alert, Button, MultiSelect, PickerRow, Spinner } from "@srelens/ui-kit";
 import { byRecentUse, useCollections } from "../../lib/collections";
@@ -61,6 +64,31 @@ export function NamespaceScopePicker({
   useEffect(() => {
     if (items !== null) noteNamespaceListing(clusterId, items, complete);
   }, [clusterId, items, complete]);
+
+  // The view's listing is read once, when it opens. A collection is a rule,
+  // and a namespace created since — or relabelled — may now match it, so
+  // while one is in force the listing is read again on a cadence, and an
+  // unchanged answer changes nothing. Only a complete listing is taken: what
+  // restricted credentials could see is already what the view has.
+  const scopedHere = chosen.length > 0;
+  useEffect(() => {
+    if (!scopedHere || !complete) return;
+    let live = true;
+    const timer = setInterval(() => {
+      void listNamespaces(context.name).then((outcome) => {
+        if (!live || outcome.error || !outcome.summaries) return;
+        noteNamespaceListing(
+          clusterId,
+          outcome.summaries.map((ns) => ({ name: ns.name, labels: ns.labels })),
+          true,
+        );
+      });
+    }, RELIST_MS);
+    return () => {
+      live = false;
+      clearInterval(timer);
+    };
+  }, [scopedHere, complete, context.name, clusterId]);
 
   if (namespaces === null) {
     return (

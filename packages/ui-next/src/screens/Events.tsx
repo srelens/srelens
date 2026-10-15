@@ -41,7 +41,7 @@ import {
 import { useResourceList } from "../lib/resourceList";
 import { describe } from "../lib/routes";
 import { openTab, useTabs } from "../lib/tabsStore";
-import { useNamespaces, useSetNamespaces } from "../lib/workspace";
+import { useNamespaces, useSetFallbackNamespace, useSetNamespaces } from "../lib/workspace";
 import { ReasonRail } from "./events/ReasonRail";
 import {
   NamespaceErrorAlert,
@@ -153,6 +153,7 @@ function EventList({
 
   const selection = useNamespaces(context.stableId);
   const setNamespaces = useSetNamespaces();
+  const setFallbackNamespace = useSetFallbackNamespace();
   const namespaceOptions = useNamespaceOptions(name, files);
   const { namespaces, scope, error: namespaceError } = namespaceOptions;
 
@@ -160,8 +161,8 @@ function EventList({
   // another — written to the workspace store rather than held here, so every
   // screen looking at this cluster follows the same scope.
   useEffect(() => {
-    if (scope) setNamespaces(context.stableId, [scope]);
-  }, [scope, context.stableId, setNamespaces]);
+    if (scope) setFallbackNamespace(context.stableId, scope);
+  }, [scope, context.stableId, setFallbackNamespace]);
 
   // Each selected namespace is watched on its own (#688); none is "all
   // namespaces". Events are namespaced, so there is no cluster-scoped branch.

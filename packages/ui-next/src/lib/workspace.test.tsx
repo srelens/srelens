@@ -330,6 +330,29 @@ describe("namespace selection by collection", () => {
     expect(getCollections()[0].lastUsedAt).toEqual(expect.any(Number));
   });
 
+  /** A rename is the same collection: the tabs scoped to it follow it. */
+  it("follows a collection renamed in Settings", () => {
+    const choose = renderHook(() => ws.useSetNamespaceCollections(), { wrapper: inTab("tab-a") }).result.current;
+    act(() => choose("prod", ["prod"]));
+    act(() => saveCollection({ name: "production", type: "namespace", patterns: ["prod-*"] }, "prod"));
+    expect(tab("tab-a").namespaceCollections).toEqual({ prod: ["production"] });
+  });
+
+  /**
+   * Restricted credentials make every list scope itself to their one
+   * namespace as it loads. That is not the reader choosing, and it must not
+   * wipe a collection the tab is scoped to.
+   */
+  it("keeps the collection when a restricted credential's namespace is applied, and takes the namespace otherwise", () => {
+    const fallback = renderHook(() => ws.useSetFallbackNamespace(), { wrapper: inTab("tab-a") }).result.current;
+    const choose = renderHook(() => ws.useSetNamespaceCollections(), { wrapper: inTab("tab-a") }).result.current;
+    act(() => choose("prod", ["prod"]));
+    act(() => fallback("prod", "team-a"));
+    expect(tab("tab-a").namespaceCollections).toEqual({ prod: ["prod"] });
+    act(() => fallback("dev", "team-a"));
+    expect(tab("tab-a").namespaces).toEqual({ dev: ["team-a"] });
+  });
+
   /** #885: a collection deleted while a tab is scoped to it gives the tab back its default. */
   it("falls back to the default namespace when every collection it named is deleted", async () => {
     settingsStorage.setItem("srelens.defaultNamespace", "default");
