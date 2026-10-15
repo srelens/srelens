@@ -431,7 +431,7 @@ pub fn node_capacity_overview_capability(cache: Arc<ClientCache>) -> Capability 
                 let pod_api: Api<Pod> = Api::all(client);
                 let node_lp = ListParams::default();
                 let pod_lp = ListParams::default();
-                let timeout = request_timeout().max(std::time::Duration::from_secs(20));
+                let timeout = request_timeout();
                 let (nodes_res, pods_res) = tokio::join!(
                     tokio::time::timeout(timeout, node_api.list(&node_lp)),
                     tokio::time::timeout(timeout, pod_api.list(&pod_lp)),
