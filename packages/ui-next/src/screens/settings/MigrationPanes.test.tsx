@@ -1,6 +1,6 @@
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { beforeEach, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 const core = vi.hoisted(() => ({ isTauri: vi.fn(() => true), checkForUpdate: vi.fn(), installUpdate: vi.fn(), appVersion: vi.fn(), relaunchApp: vi.fn(), openExternal: vi.fn(), loadUpdateNotes: vi.fn(), updateRequestTimeout: vi.fn() }));
 vi.mock("@srelens/core", async (orig) => ({ ...(await orig<typeof import("@srelens/core")>()), ...core }));
 import { getDefaultNamespace, getRequestTimeoutSecs, loadWorkspaceLayout, loadRestoreSession, loadUpdateChannel, settingsStorage } from "@srelens/core";
@@ -233,4 +233,36 @@ it("reports browser-opening failures beside the release notes", async () => {
   await userEvent.click(await screen.findByRole("link", { name: "View release on GitHub" }));
   expect((await screen.findByRole("alert")).textContent).toContain("Could not open the release in your browser");
   expect(screen.getByText("A useful fix")).toBeTruthy();
+});
+
+describe("release notes without the network (#926)", () => {
+  // The real loader against a stubbed network: what reaches GitHub, and what
+  // the reader is told when it refuses, are the behaviour under test.
+  beforeEach(async () => {
+    // A fresh loader each time: a rate limit one test hits must not outlive it.
+    vi.resetModules();
+    const actual = await vi.importActual<typeof import("@srelens/core")>("@srelens/core");
+    core.loadUpdateNotes.mockImplementation(actual.loadUpdateNotes);
+  });
+  afterEach(() => { vi.unstubAllEnvs(); vi.unstubAllGlobals(); });
+
+  it("shows the installed build's bundled notes without asking GitHub", async () => {
+    vi.stubEnv("VITE_SRELENS_RELEASE_NOTES", "### Fixes\n- Bundled with the build");
+    const fetcher = vi.fn();
+    vi.stubGlobal("fetch", fetcher);
+    render(<UpdatesPane />);
+    expect(await screen.findByText("Bundled with the build")).toBeTruthy();
+    expect(fetcher).not.toHaveBeenCalled();
+  });
+  it("names GitHub's rate limit, never the cluster's RBAC", async () => {
+    const reset = String(Math.floor(Date.now() / 1000) + 23 * 60);
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify({ message: "API rate limit exceeded" }), {
+      status: 403, headers: { "x-ratelimit-remaining": "0", "x-ratelimit-reset": reset },
+    })));
+    render(<UpdatesPane />);
+    const alert = await screen.findByRole("alert");
+    expect(alert.textContent).toContain("Could not load release notes");
+    expect(alert.textContent).toMatch(/GitHub's rate limit was reached; try again in 2[23] minutes\./);
+    expect(alert.textContent).not.toMatch(/RBAC|cluster/);
+  });
 });

@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import {
-  appVersion, checkForUpdate, installUpdate, loadUpdateChannel, parseReleaseNotes,
+  appVersion, bundledReleaseNotes, checkForUpdate, installUpdate, loadUpdateChannel, parseReleaseNotes,
   loadUpdateNotes, openExternal, relaunchApp, saveUpdateChannel, type UpdateChannel, type UpdateMeta,
 } from "@srelens/core";
 import { Button, Progress, Select } from "@srelens/ui-kit";
@@ -22,7 +22,8 @@ export function UpdatesPane() {
   const [openError, setOpenError] = useState<unknown>(null);
   const [notesAttempt, setNotesAttempt] = useState(0);
   const releaseVersion = update?.version ?? version;
-  const embeddedNotes = update?.notes ?? "";
+  // No update pending means the installed build, whose notes it carries.
+  const embeddedNotes = update ? update.notes : bundledReleaseNotes();
   useEffect(() => {
     if (!releaseVersion) return;
     let current = true;

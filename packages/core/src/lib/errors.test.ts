@@ -113,9 +113,33 @@ describe("describeError", () => {
     expect(result.detail).not.toMatch(/cluster|kubeconfig|certificate-authority/);
   });
 
-  it("keeps cluster timeout and TLS guidance as the default", () => {
+  it("does not send another server's 403 to cluster RBAC (#926)", () => {
+    // What the Updates pane showed for GitHub refusing a release read.
+    const result = describeError("Could not read the GitHub release (HTTP 403).", { domain: "http" });
+    expect(result.detail).toMatch(/server refused/i);
+    expect(result.detail).not.toMatch(/cluster|RBAC|context/);
+  });
+
+  it("does not send another server's 401 to kubeconfig credentials (#926)", () => {
+    const result = describeError("Could not read the GitHub release (HTTP 401).", { domain: "http" });
+    expect(result.detail).toMatch(/server rejected/i);
+    expect(result.detail).not.toMatch(/cluster|kubeconfig|client certificate/);
+  });
+
+  it("words a local operation's 401 and 403 for this machine, not a server or cluster (#926)", () => {
+    const refused = describeError("forbidden", { domain: "local" }).detail;
+    expect(refused).toMatch(/on this machine/);
+    expect(refused).not.toMatch(/cluster|RBAC|server|network/);
+    const rejected = describeError("Unauthorized", { domain: "local" }).detail;
+    expect(rejected).toMatch(/operation used were rejected/);
+    expect(rejected).not.toMatch(/cluster|kubeconfig|server/);
+  });
+
+  it("keeps cluster timeout, TLS, 401 and 403 guidance as the default", () => {
     expect(describeError("list pods timed out").detail).toMatch(/Kubernetes API server/);
     expect(describeError("x509: unknown authority").detail).toMatch(/kubeconfig/);
+    expect(describeError("Unauthorized").detail).toMatch(/kubeconfig credentials/);
+    expect(describeError("HTTP 403").detail).toMatch(/RBAC roles/);
   });
 
   it("classifies a refused connection", () => {

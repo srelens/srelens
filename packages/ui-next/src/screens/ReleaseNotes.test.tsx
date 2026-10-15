@@ -177,7 +177,8 @@ describe("ReleaseNotes", () => {
     render(<ReleaseNotes route="/release-notes" />);
 
     const alert = await screen.findByRole("alert");
-    expect(within(alert).getByText(/rejected your credentials/i)).toBeTruthy();
+    // The update server's refusal, not the cluster's (#926).
+    expect(within(alert).getByText(/server rejected the request's credentials/i)).toBeTruthy();
     expect(alert.querySelector('[data-slot="raw"]')?.textContent).toContain("ApiError");
     // The screen's own title survives the classification.
     expect(within(alert).getByText("Could not check for updates")).toBeTruthy();
