@@ -76,6 +76,8 @@ vi.mock("@srelens/ui-kit", async (importOriginal) => {
 
 import { ConsoleProvider, useConsole } from "../../console";
 import { loadSectionFolds, setSectionOpen } from "../../lib/sectionFolds";
+import { defaultState } from "../../lib/tabs";
+import * as tabsStore from "../../lib/tabsStore";
 import { detailFacts } from "./detailData";
 import { ResourceDetailView } from "./ResourceDetailView";
 import { ResourceTabView } from "./ResourceTabView";
@@ -1309,6 +1311,40 @@ describe("ResourceDetailView", () => {
           plural: "deployments",
         }),
       );
+    });
+
+    it("opens Edit on the custom resource in its own group, not on the built-in of the same name", async () => {
+      tabsStore.setState(defaultState([]));
+      const deployments: CrdRef = {
+        ...WIDGET_CRD,
+        name: "deployments.acme.io",
+        group: "acme.io",
+        kind: "Deployment",
+        plural: "deployments",
+      };
+      listCrds.mockResolvedValue({ crds: [deployments] });
+      getObject.mockResolvedValue({ object: { kind: "Deployment", metadata: { name: "api", namespace: "default" } } });
+      render(<ResourceDetailView context="ctx" kind="Deployment" group="acme.io" namespace="default" name="api" />);
+      await waitFor(() => expect(screen.getByRole("tab", { name: "Status" })).toBeDefined());
+      await userEvent.click(screen.getByRole("button", { name: "Edit" }));
+      expect(tabsStore.currentWorkspace().tabs.map((t) => t.route)).toContain("/edit/ctx/acme.io%2FDeployment/default/api");
+    });
+
+    it("opens Edit in the custom resource's own group from the full tab's header too", async () => {
+      tabsStore.setState(defaultState([]));
+      const deployments: CrdRef = {
+        ...WIDGET_CRD,
+        name: "deployments.acme.io",
+        group: "acme.io",
+        kind: "Deployment",
+        plural: "deployments",
+      };
+      listCrds.mockResolvedValue({ crds: [deployments] });
+      getObject.mockResolvedValue({ object: { kind: "Deployment", metadata: { name: "api", namespace: "default" } } });
+      render(<ResourceTabView context="ctx" kind="Deployment" group="acme.io" namespace="default" name="api" />);
+      await waitFor(() => expect(screen.getByRole("tab", { name: "Status" })).toBeDefined());
+      await userEvent.click(screen.getByRole("button", { name: "Edit" }));
+      expect(tabsStore.currentWorkspace().tabs.map((t) => t.route)).toContain("/edit/ctx/acme.io%2FDeployment/default/api");
     });
   });
 

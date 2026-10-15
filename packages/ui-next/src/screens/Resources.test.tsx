@@ -1933,6 +1933,24 @@ describe("the detail pane's two hosts", () => {
     expect(fromTab).toEqual(subject);
   });
 
+  it("reads a grouped detail tab in its own group, and hands the group to the tab (#919)", async () => {
+    listCrds.mockResolvedValue({
+      crds: [
+        { name: "deployments.acme.io", group: "acme.io", version: "v1", kind: "Deployment", plural: "deployments", namespaced: true },
+      ],
+    });
+    getObject.mockResolvedValue({ object: { kind: "Deployment", metadata: { name: "api", namespace: "default" } } });
+    openDetailTab("/k/prod-eu/acme.io%2FDeployment/default/api");
+    await waitFor(() =>
+      expect(getObject).toHaveBeenCalledWith("prod-eu", "Deployment", "default", "api", undefined, {
+        group: "acme.io",
+        version: "v1",
+        plural: "deployments",
+      }),
+    );
+    expect(tabProps.at(-1)).toMatchObject({ kind: "Deployment", group: "acme.io" });
+  });
+
   it("hands a custom resource's group to its peek and to the tab it opens (#919)", async () => {
     listCrds.mockResolvedValue({ crds: [WIDGETS] });
     listCustomResource.mockResolvedValue({
