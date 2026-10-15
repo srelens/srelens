@@ -37,8 +37,19 @@ test('a release is published with this run\'s notes, not the ones its draft was 
   assert.match(publish, /gh release edit [^\n]*\\\n[^\n]*--notes-file [^\n]* --draft=false|--notes-file[\s\S]*--draft=false/);
 });
 
-// The version step's own script, as the workflow runs it on `main`.
-const computeVersion = (() => {
+test('the desktop build carries this run\'s release notes (#926)', () => {
+  // Vite inlines them, so Settings › Updates shows the installed build's notes
+  // without spending GitHub's 60-an-hour API allowance.
+  const step = job('build').split('- name: Build app & publish release\n')[1].split('\n      - ')[0];
+  assert.match(step, /VITE_SRELENS_RELEASE_NOTES: \$\{\{ needs\.version\.outputs\.notes \}\}/);
+});
+
+test('a dev pre-release is published with the notes its build carries (#926)', () => {
+  assert.match(job('release-notes'), /NOTES: \$\{\{ needs\.version\.outputs\.notes \}\}/);
+});
+
+// The version step's own script, as the workflow runs it on `ref`.
+const computeScript = (ref) => {
   const step = job('version').split('- name: Compute + commit next version\n')[1];
   const lines = step.split('run: |\n')[1].split('\n');
   const indent = lines[0].match(/^ */)[0].length;
@@ -47,8 +58,8 @@ const computeVersion = (() => {
     if (line.trim() && line.match(/^ */)[0].length < indent) break;
     body.push(line.slice(indent));
   }
-  return body.join('\n').replace(/\$\{\{ github\.ref_name \}\}/g, 'main').replace(/\$\{\{ inputs\.force \}\}/g, '');
-})();
+  return body.join('\n').replace(/\$\{\{ github\.ref_name \}\}/g, ref).replace(/\$\{\{ inputs\.force \}\}/g, '');
+};
 
 /** A repository whose `main` holds `commits` ([subject, version, tag?]), with a bare origin. */
 function repository(commits) {
@@ -69,18 +80,22 @@ function repository(commits) {
     if (tag) git('tag', tag);
   }
   git('push', '-q', 'origin', 'main');
-  const run = () => {
+  const outputs = (ref) => {
     const output = join(dir, 'output');
     writeFileSync(output, '');
-    execFileSync('bash', ['-c', computeVersion], {
+    execFileSync('bash', ['-c', computeScript(ref)], {
       cwd: join(dir, 'work'),
-      env: { ...process.env, GITHUB_OUTPUT: output },
+      env: { ...process.env, GITHUB_OUTPUT: output, GITHUB_SHA: 'c0ffee', GITHUB_RUN_NUMBER: '214' },
       stdio: ['ignore', 'ignore', 'inherit'],
     });
-    const values = readFileSync(output, 'utf8');
+    return readFileSync(output, 'utf8');
+  };
+  const run = () => {
+    const values = outputs('main');
     return { version: values.match(/^version=(.*)$/m)?.[1], release: values.match(/^release=(.*)$/m)?.[1] };
   };
-  return { dir, git, run, cleanup: () => rmSync(dir, { recursive: true, force: true }) };
+  const notes = (ref) => outputs(ref).match(/^notes<<(\w+)\n([\s\S]*?)\n\1$/m)?.[2];
+  return { dir, git, run, notes, cleanup: () => rmSync(dir, { recursive: true, force: true }) };
 }
 
 test('a release that failed after its bump is retried at the same version, not bumped past', () => {
@@ -128,6 +143,22 @@ test('a pending version too small for what landed since is bumped, not retried',
   try {
     assert.deepEqual(repo.run(), { version: '2.0.0', release: 'true' });
     assert.equal(repo.git('log', '-1', '--format=%s'), 'chore(release): srelens-v2.0.0 [skip ci]');
+  } finally {
+    repo.cleanup();
+  }
+});
+
+test('a dev run composes its pre-release notes before the build (#926)', () => {
+  // Before the build, so the build can carry them: see the build test above.
+  const repo = repository([
+    ['feat: the last release', '0.16.0', 'srelens-v0.16.0'],
+    ['fix(ui): a later fix', '0.16.0'],
+  ]);
+  try {
+    const notes = repo.notes('dev');
+    assert.match(notes ?? '', /^Development pre-release — unstable, not for production\.\n/);
+    assert.match(notes ?? '', /\*\*Commit:\*\* `c0ffee`/);
+    assert.match(notes ?? '', /### Recent changes\n- fix\(ui\): a later fix \([0-9a-f]+\)\n- feat: the last release \([0-9a-f]+\)$/);
   } finally {
     repo.cleanup();
   }

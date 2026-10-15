@@ -92,6 +92,20 @@ jobs:
             BASE=${CUR%%-*}
             NEXT=$(node -e 'const p=process.argv[1].split(".").map(Number);p[2]++;process.stdout.write(p.join("."))' "$BASE")
             DEVV="${NEXT}-${GITHUB_RUN_NUMBER}"
+            # The pre-release body, composed before the build so the build can
+            # carry it (#926): Settings › Updates then shows the installed
+            # build's notes without spending GitHub's 60-an-hour API allowance.
+            {
+              echo "notes<<__NOTES_EOF__"
+              echo "Development pre-release — unstable, not for production."
+              echo ""
+              echo "**Commit:** \`${GITHUB_SHA}\`"
+              echo "**Built:** $(date -u '+%Y-%m-%d %H:%M UTC')"
+              echo ""
+              echo "### Recent changes"
+              git log -15 --no-merges --pretty='- %s (%h)'
+              echo "__NOTES_EOF__"
+            } >> "$GITHUB_OUTPUT"
             echo "version=$DEVV" >> "$GITHUB_OUTPUT"
             echo "release=true" >> "$GITHUB_OUTPUT"
             echo "Dev build version: $DEVV"
@@ -643,6 +657,9 @@ jobs:
           # Keep host-ABI Wayland libs out of the AppImage (#111); read by the
           # seeded linuxdeploy, ignored everywhere else.
           LINUXDEPLOY_EXCLUDED_LIBRARIES: ${{ env.APPIMAGE_EXCLUDED_LIBS }}
+          # This build's own release notes, inlined by Vite so Settings ›
+          # Updates never asks GitHub's rate-limited API for them (#926).
+          VITE_SRELENS_RELEASE_NOTES: ${{ needs.version.outputs.notes }}
           # Apple signing env (APPLE_CERTIFICATE etc.) is exported to
           # GITHUB_ENV by the step above only when signing is enabled —
           # defining the variables empty here would trigger Tauri's signing
@@ -651,8 +668,7 @@ jobs:
           projectPath: apps/desktop
           tagName: ${{ env.REL_TAG }}
           releaseName: ${{ env.REL_NAME }}
-          # On main, real notes are computed in the version job; dev keeps a
-          # placeholder filled in by the release-notes job.
+          # Both channels' notes are computed in the version job.
           releaseBody: ${{ needs.version.outputs.notes || 'Generating release notes…' }}
           prerelease: ${{ github.ref_name != 'main' }}
           # On main, publish as a DRAFT: assets upload here, but a draft never
@@ -1091,8 +1107,9 @@ jobs:
             srectl-*.tar.gz srectl-*.zip "$SUMS" \
             srelens-tui-*.tar.gz srelens-tui-*.zip "$LEGACY_SUMS" --clobber
 
-  # Dev only: fill the pre-release body with a recent-commit list and keep the
-  # Releases page tidy. Stable (main) notes come from the version job.
+  # Dev only: set the pre-release body to the notes the version job composed,
+  # the same text the build carries, and keep the Releases page tidy. Stable
+  # (main) notes are set by publish-release.
   release-notes:
     needs: [version, build]
     if: github.ref_name != 'main'
@@ -1100,25 +1117,16 @@ jobs:
     permissions:
       contents: write
     steps:
+      # The repository the gh calls below act on.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          fetch-depth: 0
-      - name: Compose and publish release notes
+      - name: Publish release notes
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: srelens-v${{ needs.version.outputs.version }}
+          NOTES: ${{ needs.version.outputs.notes }}
         shell: bash
         run: |
-          VERSION="${{ needs.version.outputs.version }}"
-          TAG="srelens-v${VERSION}"
-          {
-            echo "Development pre-release — unstable, not for production."
-            echo ""
-            echo "**Commit:** \`${{ github.sha }}\`"
-            echo "**Built:** $(date -u '+%Y-%m-%d %H:%M UTC')"
-            echo ""
-            echo "### Recent changes"
-            git log -15 --no-merges --pretty='- %s (%h)'
-          } > notes.md
+          printf '%s\n' "$NOTES" > notes.md
           gh release edit "$TAG" --notes-file notes.md
 
       # Keep only the 10 newest dev pre-releases (tags like srelens-vX.Y.Z-<run>)
