@@ -82,6 +82,7 @@ pub struct ClientCache {
     discovery: Mutex<HashMap<String, Arc<DiscoveryIndex>>>,
     auth_resolver: RwLock<Option<Arc<dyn AuthResolver>>>,
     generation: AtomicU64,
+    context_generations: Mutex<HashMap<String, u64>>,
 }
 
 impl ClientCache {
@@ -96,7 +97,18 @@ impl ClientCache {
             discovery: Mutex::new(HashMap::new()),
             auth_resolver: RwLock::new(None),
             generation: AtomicU64::new(0),
+            context_generations: Mutex::new(HashMap::new()),
         })
+    }
+
+    /// Read the current generation for a specific context.
+    async fn context_generation(&self, context: &str) -> u64 {
+        self.context_generations
+            .lock()
+            .await
+            .get(context)
+            .copied()
+            .unwrap_or(0)
     }
 
     /// Install a per-context auth resolver (web mode). None = kube-rs default.
@@ -112,6 +124,7 @@ impl ClientCache {
         *current = paths;
         drop(current);
         self.generation.fetch_add(1, Ordering::SeqCst);
+        self.context_generations.lock().await.clear();
         self.clients.lock().await.clear();
         self.discovery.lock().await.clear();
     }
@@ -140,7 +153,8 @@ impl ClientCache {
     /// Without a resolver (desktop) this is the original miss-builds-and-caches
     /// behavior, with `None` as the bearer.
     pub async fn get(&self, context: &str) -> Result<Client, String> {
-        let start_gen = self.generation.load(Ordering::SeqCst);
+        let start_global_gen = self.generation.load(Ordering::SeqCst);
+        let start_ctx_gen = self.context_generation(context).await;
         // Resolve desired auth first. Cheap for non-OIDC (in-memory lookup);
         // for OIDC this consults the token provider (and may refresh, single-
         // flighted). A needs-login propagates out as the marker String error.
@@ -174,7 +188,10 @@ impl ClientCache {
             None => build_client(&paths, context).await?,
         };
         let mut lock = self.clients.lock().await;
-        if self.generation.load(Ordering::SeqCst) == start_gen {
+        let curr_ctx_gen = self.context_generation(context).await;
+        if self.generation.load(Ordering::SeqCst) == start_global_gen
+            && curr_ctx_gen == start_ctx_gen
+        {
             lock.insert(context.to_string(), (client.clone(), want_bearer));
         }
         Ok(client)
@@ -203,7 +220,11 @@ impl ClientCache {
 
     /// Drop any cached client or discovery for a context (e.g. after a connection failure).
     pub async fn invalidate(&self, context: &str) {
-        self.generation.fetch_add(1, Ordering::SeqCst);
+        {
+            let mut gens = self.context_generations.lock().await;
+            let current = gens.get(context).copied().unwrap_or(0);
+            gens.insert(context.to_string(), current + 1);
+        }
         self.clients.lock().await.remove(context);
         self.discovery.lock().await.remove(context);
     }
@@ -211,6 +232,7 @@ impl ClientCache {
     /// Clear all cached clients and discovery (e.g. after a kubeconfig change).
     pub async fn clear(&self) {
         self.generation.fetch_add(1, Ordering::SeqCst);
+        self.context_generations.lock().await.clear();
         self.clients.lock().await.clear();
         self.discovery.lock().await.clear();
     }
@@ -218,7 +240,8 @@ impl ClientCache {
     /// Discover all available API resources in the cluster (aggregated discovery
     /// with fallback to standard discovery, plus CRD inspection for aliases and short names).
     async fn discover_cluster(&self, context: &str) -> Result<Arc<DiscoveryIndex>, String> {
-        let start_gen = self.generation.load(Ordering::SeqCst);
+        let start_global_gen = self.generation.load(Ordering::SeqCst);
+        let start_ctx_gen = self.context_generation(context).await;
         let client = self.get(context).await?;
         let mut index = DiscoveryIndex::new();
 
@@ -301,7 +324,10 @@ impl ClientCache {
 
         let arc_index = Arc::new(index);
         let mut lock = self.discovery.lock().await;
-        if self.generation.load(Ordering::SeqCst) != start_gen {
+        let curr_ctx_gen = self.context_generation(context).await;
+        if self.generation.load(Ordering::SeqCst) != start_global_gen
+            || curr_ctx_gen != start_ctx_gen
+        {
             return Err(format!(
                 "discovery for context '{context}' invalidated by cache reset"
             ));
@@ -744,7 +770,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cache_generation_increments_on_resets() {
+    async fn cache_generation_increments_on_global_resets() {
         let cache = ClientCache::new(PathBuf::from("/nonexistent"));
         assert_eq!(cache.generation.load(Ordering::SeqCst), 0);
 
@@ -753,8 +779,29 @@ mod tests {
 
         cache.clear().await;
         assert_eq!(cache.generation.load(Ordering::SeqCst), 2);
+    }
 
-        cache.invalidate("ctx").await;
-        assert_eq!(cache.generation.load(Ordering::SeqCst), 3);
+    #[tokio::test]
+    async fn context_invalidation_does_not_affect_unrelated_contexts() {
+        let cache = ClientCache::new(PathBuf::from("/nonexistent"));
+        assert_eq!(cache.generation.load(Ordering::SeqCst), 0);
+        assert_eq!(cache.context_generation("cluster-a").await, 0);
+        assert_eq!(cache.context_generation("cluster-b").await, 0);
+
+        // Invalidate cluster-a
+        cache.invalidate("cluster-a").await;
+
+        // Global generation must NOT change (unrelated cluster-b discovery is not disrupted)
+        assert_eq!(cache.generation.load(Ordering::SeqCst), 0);
+        // cluster-a generation increments
+        assert_eq!(cache.context_generation("cluster-a").await, 1);
+        // cluster-b generation remains unchanged
+        assert_eq!(cache.context_generation("cluster-b").await, 0);
+
+        // Whole-cache reset bumps global generation and clears context generations
+        cache.clear().await;
+        assert_eq!(cache.generation.load(Ordering::SeqCst), 1);
+        assert_eq!(cache.context_generation("cluster-a").await, 0);
+        assert_eq!(cache.context_generation("cluster-b").await, 0);
     }
 }
