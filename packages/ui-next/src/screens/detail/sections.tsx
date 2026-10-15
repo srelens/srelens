@@ -136,6 +136,9 @@ export function ConditionsSection({ conditions }: ConditionsSectionProps) {
     <Section title="Conditions">
       {shown.map((condition, index) => {
         const hasStatus = typeof condition.status === "string";
+        // Text or nothing, like the message: an operator's object here would
+        // take the window down, or read "[object Object]" (#940).
+        const reason = typeof condition.reason === "string" && condition.reason ? condition.reason : "—";
         return (
           <KV
             // Positional: an operator may report one type twice.
@@ -150,7 +153,7 @@ export function ConditionsSection({ conditions }: ConditionsSectionProps) {
             v={
               <>
                 <span>
-                  {hasStatus ? `${condition.status} · ${condition.reason || "—"}` : condition.reason || "—"}
+                  {hasStatus ? `${condition.status} · ${reason}` : reason}
                 </span>
                 {typeof condition.message === "string" && condition.message && (
                   <span data-slot="condition-message" className="block text-[0.75rem] text-muted">

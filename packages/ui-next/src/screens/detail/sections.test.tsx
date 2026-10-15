@@ -94,6 +94,20 @@ describe("ConditionsSection", () => {
     expect(container.querySelector("[data-slot='condition-message']")).toBeNull();
   });
 
+  it("reads a reason that is not text as none, with or without a status (#940)", () => {
+    const { container } = render(
+      <ConditionsSection
+        conditions={[
+          { type: "Ready", reason: { code: "Waiting" } },
+          { type: "Synced", status: "False", reason: { code: "Waiting" } },
+        ] as unknown as Condition[]}
+      />,
+    );
+    expect(container.querySelectorAll(".kv")).toHaveLength(2);
+    expect(container.textContent).not.toContain("[object Object]");
+    expect(screen.getByText("False · —")).toBeDefined();
+  });
+
   it("renders two conditions of one type without a key clash", () => {
     const errors = vi.spyOn(console, "error").mockImplementation(() => {});
     const { container } = render(
