@@ -2672,6 +2672,93 @@ mod tests {
         assert!(text.contains("k8s://c/ns/Pod/web-0"), "the notification must name the URI: {text}");
     }
 
+    #[tokio::test]
+    async fn event_subscription_notifies_canonical_uri_and_unsubscribe_aborts_watch() {
+        struct ControlledWatcher {
+            change: std::sync::Mutex<Option<Box<dyn FnMut() + Send>>>,
+            join: std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
+        }
+        impl crate::resources::ObjectWatcher for ControlledWatcher {
+            fn watch(
+                &self,
+                uri: &crate::resources::ResourceUri,
+                on_change: Box<dyn FnMut() + Send>,
+                _on_dead: Box<dyn FnOnce(String) + Send>,
+            ) -> Result<tokio::task::AbortHandle, String> {
+                assert_eq!(uri.to_string(), "k8s://c/ns/Pod/web-0/events");
+                *self.change.lock().unwrap() = Some(on_change);
+                let join = tokio::spawn(std::future::pending::<()>());
+                let abort = join.abort_handle();
+                *self.join.lock().unwrap() = Some(join);
+                Ok(abort)
+            }
+        }
+        let watcher = Arc::new(ControlledWatcher {
+            change: std::sync::Mutex::new(None),
+            join: std::sync::Mutex::new(None),
+        });
+        let server = server_with_kinds().with_watcher(watcher.clone());
+        let (mut input, mut output, serve_task) = spawn_serve_over_duplex(server);
+        let timeout = std::time::Duration::from_secs(2);
+        input.write_all(concat!(
+            r#"{"jsonrpc":"2.0","id":1,"method":"resources/subscribe","params":{"uri":"k8s://c/ns/Pod/web%2D0/events"}}"#,
+            "\n",
+        ).as_bytes()).await.unwrap();
+        let line = tokio::time::timeout(timeout, output.next_line())
+            .await
+            .expect("subscribe responds")
+            .unwrap()
+            .unwrap();
+        let response: Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(response["id"], 1);
+        assert!(response.get("result").is_some(), "{response}");
+
+        watcher
+            .change
+            .lock()
+            .unwrap()
+            .take()
+            .expect("watch installed")();
+        let line = tokio::time::timeout(timeout, output.next_line())
+            .await
+            .expect("Event update reaches client")
+            .unwrap()
+            .unwrap();
+        let notification: Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(notification["method"], "notifications/resources/updated");
+        assert_eq!(notification["params"]["uri"], "k8s://c/ns/Pod/web-0/events");
+
+        input.write_all(concat!(
+            r#"{"jsonrpc":"2.0","id":2,"method":"resources/unsubscribe","params":{"uri":"k8s://c/ns/Pod/web-0/events"}}"#,
+            "\n",
+        ).as_bytes()).await.unwrap();
+        let line = tokio::time::timeout(timeout, output.next_line())
+            .await
+            .expect("unsubscribe responds")
+            .unwrap()
+            .unwrap();
+        let response: Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(response["id"], 2);
+        assert!(response.get("result").is_some(), "{response}");
+        let join = watcher
+            .join
+            .lock()
+            .unwrap()
+            .take()
+            .expect("watch task exists");
+        assert!(tokio::time::timeout(timeout, join)
+            .await
+            .expect("unsubscribe cancels watch")
+            .unwrap_err()
+            .is_cancelled());
+        drop(input);
+        tokio::time::timeout(timeout, serve_task)
+            .await
+            .expect("server stops")
+            .unwrap()
+            .unwrap();
+    }
+
     /// The bug the per-line drain in `serve_loop` closes: `biased` select
     /// polls `rx.recv()` only when no line is ready, so a pipelined client —
     /// several requests arriving in one read before the loop catches up —

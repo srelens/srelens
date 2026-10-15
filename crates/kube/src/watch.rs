@@ -737,8 +737,8 @@ pub async fn watch_object<F, G>(
     namespace: Option<String>,
     gvk: kube::api::GroupVersionKind,
     name: String,
-    mut on_change: F,
-    mut on_status: G,
+    on_change: F,
+    on_status: G,
 ) -> Result<(), String>
 where
     F: FnMut() + Send,
@@ -777,6 +777,84 @@ where
     };
 
     let config = Config::default().fields(&format!("metadata.name={name}"));
+    watch_changes(api, config, on_change, on_status, |error| {
+        is_permanent_watch_error(&error.to_string())
+    })
+    .await
+}
+
+/// Watch the Event collection involving one object, invalidating on each
+/// completed list, apply or delete just as [`watch_object`] does.
+///
+/// `namespace: Some(ns)` watches Events in the parent's namespace. `None`
+/// is reserved for a cluster-scoped parent and watches Events across namespaces,
+/// matching `k8s.listEvents`: Events involving a Node still live in namespaces.
+/// The caller must establish the parent's scope before calling.
+pub async fn watch_object_events<F, G>(
+    cache: Arc<ClientCache>,
+    context: String,
+    namespace: Option<String>,
+    gvk: kube::api::GroupVersionKind,
+    name: String,
+    on_change: F,
+    on_status: G,
+) -> Result<(), String>
+where
+    F: FnMut() + Send,
+    G: FnMut(WatchStatus) + Send,
+{
+    for (field, value) in [("name", name.as_str()), ("kind", gvk.kind.as_str())] {
+        if value.is_empty() || value.contains([',', '=']) {
+            return Err(format!(
+                "watch_object_events: object {field} must not be empty or contain field-selector delimiters: {value:?}"
+            ));
+        }
+    }
+    if namespace.as_deref() == Some("") {
+        return Err("watch_object_events: namespace must not be empty; pass None for a cluster-scoped parent".into());
+    }
+
+    let client = cache.get(&context).await?;
+    let api: Api<CoreEvent> = match namespace.as_deref() {
+        Some(ns) => Api::namespaced(client, ns),
+        None => Api::all(client),
+    };
+    let config = Config::default().fields(&format!(
+        "involvedObject.name={name},involvedObject.kind={}",
+        gvk.kind
+    ));
+    watch_changes(api, config, on_change, on_status, |error| {
+        // A rejected field selector will never establish this collection watch.
+        // Surface it to the subscription owner instead of retrying forever.
+        is_bad_request_watch_error(error) || is_permanent_watch_error(&error.to_string())
+    })
+    .await
+}
+
+fn is_bad_request_watch_error(error: &kube::runtime::watcher::Error) -> bool {
+    use kube::runtime::watcher::Error;
+    match error {
+        Error::InitialListFailed(kube::Error::Api(response))
+        | Error::WatchStartFailed(kube::Error::Api(response))
+        | Error::WatchFailed(kube::Error::Api(response))
+        | Error::WatchError(response) => response.code == 400,
+        _ => false,
+    }
+}
+
+/// Shared invalidation loop for an object or its filtered Event collection.
+async fn watch_changes<K, F, G>(
+    api: Api<K>,
+    config: Config,
+    mut on_change: F,
+    mut on_status: G,
+    is_terminal: impl Fn(&kube::runtime::watcher::Error) -> bool + Send,
+) -> Result<(), String>
+where
+    K: kube::Resource + Clone + DeserializeOwned + Debug + Send + 'static,
+    F: FnMut() + Send,
+    G: FnMut(WatchStatus) + Send,
+{
     let mut stream = kube::runtime::watcher(api, config)
         .default_backoff()
         .boxed();
@@ -795,7 +873,7 @@ where
             }
             Err(e) => {
                 let msg = e.to_string();
-                if is_permanent_watch_error(&msg) {
+                if is_terminal(&e) {
                     return Err(msg);
                 }
                 if !reconnecting {
@@ -1603,6 +1681,164 @@ mod tests {
             err.contains("namespace"),
             "expected a namespace error, got: {err}"
         );
+    }
+
+    #[tokio::test]
+    async fn object_events_watch_rejects_invalid_selectors_before_client_lookup() {
+        for (namespace, kind, name, expected) in [
+            (Some("team"), "Pod", "", "name"),
+            (Some("team"), "Pod", "web,other=1", "name"),
+            (Some("team"), "Pod", "web=1", "name"),
+            (Some("team"), "", "web", "kind"),
+            (Some("team"), "Pod,other=1", "web", "kind"),
+            (Some("team"), "Pod=1", "web", "kind"),
+            (Some(""), "Pod", "web", "namespace"),
+        ] {
+            let cache = ClientCache::new(std::path::PathBuf::from("/nonexistent/kubeconfig"));
+            let err = watch_object_events(
+                cache,
+                "missing".into(),
+                namespace.map(str::to_owned),
+                kube::api::GroupVersionKind::gvk("", "v1", kind),
+                name.into(),
+                || {},
+                |_| {},
+            )
+            .await
+            .unwrap_err();
+            assert!(err.contains(expected), "{err}");
+        }
+    }
+
+    #[tokio::test]
+    async fn object_events_watch_surfaces_an_unsupported_selector() {
+        let service = tower::service_fn(|_: http::Request<kube::client::Body>| async {
+            Ok::<_, std::convert::Infallible>(
+                http::Response::builder()
+                    .status(400)
+                    .body(kube::client::Body::from(
+                        serde_json::json!({
+                            "apiVersion":"v1", "kind":"Status", "status":"Failure",
+                            "message":"field label not supported: involvedObject.kind",
+                            "reason":"BadRequest", "code":400
+                        })
+                        .to_string()
+                        .into_bytes(),
+                    ))
+                    .unwrap(),
+            )
+        });
+        let cache = ClientCache::new(std::path::PathBuf::from("/unused"));
+        cache
+            .preload("fake", kube::Client::new(service, "default"))
+            .await;
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            watch_object_events(
+                cache,
+                "fake".into(),
+                Some("team".into()),
+                kube::api::GroupVersionKind::gvk("", "v1", "Pod"),
+                "web-0".into(),
+                || panic!("an unsuccessful list must not notify"),
+                |_| panic!("a rejected selector must not retry"),
+            ),
+        )
+        .await
+        .expect("an unsupported selector must terminate the watch");
+        assert!(result.unwrap_err().contains("field label not supported"));
+    }
+
+    #[tokio::test]
+    async fn object_events_watch_targets_filtered_event_collection_and_invalidates() {
+        for (namespace, kind, name, path) in [
+            (
+                Some("team"),
+                "Pod",
+                "web-0",
+                "/api/v1/namespaces/team/events?",
+            ),
+            (None, "Node", "node-a", "/api/v1/events?"),
+            (
+                Some("team"),
+                "Widget",
+                "custom-a",
+                "/api/v1/namespaces/team/events?",
+            ),
+        ] {
+            let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let captured = requests.clone();
+            let service = tower::service_fn(move |req: http::Request<kube::client::Body>| {
+                captured.lock().unwrap().push(req.uri().to_string());
+                async move {
+                    let event = serde_json::json!({
+                        "apiVersion":"v1", "kind":"Event",
+                        "metadata":{"name":"event-1", "namespace":"team", "resourceVersion":"2"},
+                        "involvedObject":{"name":name,"kind":kind}
+                    });
+                    let body = if req.uri().query().unwrap_or("").contains("watch=true") {
+                        let applied = serde_json::json!({"type":"ADDED", "object":event});
+                        let deleted = serde_json::json!({"type":"DELETED", "object":event});
+                        let denied = serde_json::json!({"type":"ERROR", "object":{
+                            "apiVersion":"v1", "kind":"Status", "status":"Failure",
+                            "message":"Forbidden", "reason":"Forbidden", "code":403
+                        }});
+                        format!("{applied}\n{deleted}\n{denied}\n")
+                    } else {
+                        serde_json::json!({"apiVersion":"v1", "kind":"EventList",
+                            "metadata":{"resourceVersion":"1"},"items":[event]})
+                        .to_string()
+                    };
+                    Ok::<_, std::convert::Infallible>(
+                        http::Response::builder()
+                            .status(200)
+                            .body(kube::client::Body::from(body.into_bytes()))
+                            .unwrap(),
+                    )
+                }
+            });
+            let cache = ClientCache::new(std::path::PathBuf::from("/unused"));
+            cache
+                .preload("fake", kube::Client::new(service, "default"))
+                .await;
+            let mut changes = 0;
+            let result = tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                watch_object_events(
+                    cache,
+                    "fake".into(),
+                    namespace.map(str::to_owned),
+                    kube::api::GroupVersionKind::gvk("example.io", "v1", kind),
+                    name.into(),
+                    || changes += 1,
+                    |_| {},
+                ),
+            )
+            .await
+            .expect("Forbidden must stop the watch");
+            assert!(result
+                .unwrap_err()
+                .to_ascii_lowercase()
+                .contains("forbidden"));
+            assert_eq!(
+                changes, 3,
+                "initial list, apply and delete each invalidate once"
+            );
+            let requests = requests.lock().unwrap();
+            assert!(requests.len() >= 2, "list and watch: {requests:?}");
+            for uri in requests.iter() {
+                assert!(uri.starts_with(path), "{uri}");
+                // kube percent-encodes the field-selector query value.
+                let decoded = uri.replace("%3D", "=").replace("%2C", ",");
+                assert!(
+                    decoded.contains(&format!(
+                        "fieldSelector=involvedObject.name={name},involvedObject.kind={kind}"
+                    )),
+                    "{uri}"
+                );
+                assert!(!decoded.contains("metadata.name="), "{uri}");
+            }
+        }
     }
 
     /// `Event` is generic; `()` is the cheapest `K` that still lets us

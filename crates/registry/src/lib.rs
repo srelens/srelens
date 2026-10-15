@@ -776,6 +776,12 @@ pub fn build_registry_with(cache: Arc<ClientCache>) -> Registry {
 pub fn kind_resolver() -> std::sync::Arc<dyn srelens_mcp::resources::KindResolver> {
     struct GvkKinds;
     impl srelens_mcp::resources::KindResolver for GvkKinds {
+        fn canonical_kind(&self, kind: &str) -> String {
+            srelens_kube::manifest::gvk_for(kind)
+                .map(|(gvk, _)| gvk.kind)
+                .unwrap_or_else(|| kind.to_string())
+        }
+
         fn scope(&self, kind: &str) -> Option<srelens_mcp::resources::KindScope> {
             use srelens_mcp::resources::KindScope;
             if kind == "Secret" {
@@ -1540,6 +1546,26 @@ mod tests {
         let listed = without.invoke("extensions.list", json!({})).await.unwrap();
         assert_eq!(listed["secretStore"]["available"], false);
         assert!(without.get("extension.secretStore").is_some(), "its metadata is still the catalog's");
+    }
+
+    #[test]
+    fn event_resource_aliases_read_the_same_kind_as_the_watch() {
+        use srelens_mcp::resources::{plan_read, ResourceUri};
+        let kinds = crate::kind_resolver();
+        for (alias, canonical, namespace) in [
+            ("pod", "Pod", "ns"),
+            ("pods", "Pod", "ns"),
+            ("cm", "ConfigMap", "ns"),
+            ("nodes", "Node", "-"),
+        ] {
+            let uri = ResourceUri::parse(&format!("k8s://c/{namespace}/{alias}/web-0/events"))
+                .unwrap();
+            let read = plan_read(&uri, kinds.as_ref()).unwrap();
+            let (gvk, _) = srelens_kube::manifest::gvk_for(alias).unwrap();
+            assert_eq!(gvk.kind, canonical);
+            assert_eq!(read.args["objectKind"], gvk.kind);
+            assert_eq!(read.args["objectName"], "web-0");
+        }
     }
 
     #[test]

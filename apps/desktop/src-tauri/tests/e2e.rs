@@ -2113,6 +2113,7 @@ async fn run_suite() {
     println!("=== mcp resources (#24) ===");
     mcp_resource_reads(&ctx, &pod_name).await;
     mcp_resource_subscription(&ctx, &pod_name).await;
+    mcp_event_resource_subscription(&ctx, NS).await;
 
     // === 6. Metrics ============================================================
     // A bare kind cluster ships no metrics-server, so the metrics API may be
@@ -4552,6 +4553,170 @@ async fn mcp_resource_subscription(ctx: &str, pod: &str) {
     }
     handle.abort();
     println!("mcp resources: subscription fired on Apply after a label change");
+}
+
+/// A focused #197 live check, independent of the full capability suite's
+/// workloads, CRDs and node operations. Refuse an existing namespace so cleanup
+/// only removes fixtures this invocation owns.
+#[tokio::test]
+#[ignore = "needs an explicitly selected disposable cluster and kubectl"]
+async fn mcp_events_subscription_live() {
+    let ctx = std::env::var("SRELENS_E2E_CONTEXT")
+        .expect("set SRELENS_E2E_CONTEXT to an explicitly selected disposable cluster");
+    assert!(!ctx.trim().is_empty(), "SRELENS_E2E_CONTEXT must not be empty");
+    let namespace = "srelens-mcp-events-e2e";
+    let created = tokio::time::timeout(
+        Duration::from_secs(60),
+        tokio::process::Command::new("kubectl")
+            .args([
+                "--context",
+                &ctx,
+                "--request-timeout=30s",
+                "create",
+                "namespace",
+                namespace,
+            ])
+            .kill_on_drop(true)
+            .output(),
+    )
+    .await
+    .expect("namespace creation completes")
+    .expect("kubectl runs");
+    assert!(
+        created.status.success(),
+        "cannot create isolated test namespace: {}",
+        String::from_utf8_lossy(&created.stderr)
+    );
+
+    let result = std::panic::AssertUnwindSafe(mcp_event_resource_subscription(&ctx, namespace))
+        .catch_unwind()
+        .await;
+    let deleted = tokio::time::timeout(
+        Duration::from_secs(90),
+        tokio::process::Command::new("kubectl")
+            .args([
+                "--context",
+                &ctx,
+                "--request-timeout=70s",
+                "delete",
+                "namespace",
+                namespace,
+                "--ignore-not-found",
+                "--wait=true",
+                "--timeout=60s",
+            ])
+            .kill_on_drop(true)
+            .output(),
+    )
+    .await
+    .expect("namespace cleanup completes")
+    .expect("kubectl runs");
+    assert!(
+        deleted.status.success(),
+        "test namespace cleanup failed: {}",
+        String::from_utf8_lossy(&deleted.stderr)
+    );
+    if let Err(error) = result {
+        std::panic::resume_unwind(error);
+    }
+}
+
+/// #197: a real Event change invalidates the event list without a parent
+/// mutation; parent-only and unrelated Event changes do not invalidate it.
+async fn mcp_event_resource_subscription(ctx: &str, namespace: &str) {
+    let server = srelens_mcp::McpServer::new(Arc::new(build_registry_with(cache())))
+        .with_kind_resolver(srelens_registry::kind_resolver())
+        .with_watcher(Arc::new(srelens_desktop_lib::mcp_watch::CacheWatcher::new(
+            cache(),
+        )));
+    let parent = "e2e-event-parent";
+    let parent_manifest = json!({
+        "apiVersion": "v1", "kind": "ConfigMap",
+        "metadata": {"name": parent, "namespace": namespace}
+    });
+    let apply = |manifest: Value| {
+        let server = &server;
+        async move {
+            let out = server
+                .call_tool(
+                    "k8s.applyManifest",
+                    json!({
+                        "context": ctx, "yaml": manifest.to_string()
+                    }),
+                )
+                .await
+                .expect("fixture apply succeeds");
+            assert_eq!(out["applied"], true, "{out}");
+        }
+    };
+    apply(parent_manifest.clone()).await;
+
+    // An accepted alias must select ConfigMap Events on both watch and read.
+    let uri_text = format!("k8s://{ctx}/{namespace}/cm/{parent}/events");
+    let uri = srelens_mcp::resources::ResourceUri::parse(&uri_text).unwrap();
+    assert!(srelens_mcp::resources::is_subscribable(&uri).is_ok());
+    let (tx, mut changes) = tokio::sync::mpsc::unbounded_channel();
+    let dead = tx.clone();
+    let handle = srelens_mcp::resources::ObjectWatcher::watch(
+        server.watcher().as_ref(),
+        &uri,
+        Box::new(move || {
+            let _ = tx.send(Ok(()));
+        }),
+        Box::new(move |reason| {
+            let _ = dead.send(Err(reason));
+        }),
+    )
+    .expect("event watch spawns");
+    // Abort even if an assertion unwinds; namespace teardown owns the fixtures.
+    struct WatchGuard(tokio::task::AbortHandle);
+    impl Drop for WatchGuard {
+        fn drop(&mut self) {
+            self.0.abort();
+        }
+    }
+    let _guard = WatchGuard(handle);
+    tokio::time::timeout(Duration::from_secs(30), changes.recv())
+        .await
+        .expect("initial Event list completes")
+        .expect("watch stays open")
+        .expect("watch establishes successfully");
+
+    let mut changed_parent = parent_manifest;
+    changed_parent["metadata"]["labels"] = json!({"subscription-marker": "changed"});
+    apply(changed_parent).await;
+    let event = |name: &str, object: &str| {
+        json!({
+            "apiVersion": "v1", "kind": "Event",
+            "metadata": {"name": name, "namespace": namespace},
+            "involvedObject": {"apiVersion": "v1", "kind": "ConfigMap", "name": object, "namespace": namespace},
+            "reason": "SubscriptionTest", "message": "MCP event subscription fixture", "type": "Normal"
+        })
+    };
+    apply(event("e2e-unrelated-event", "another-configmap")).await;
+    assert!(
+        tokio::time::timeout(Duration::from_secs(1), changes.recv())
+            .await
+            .is_err(),
+        "parent-only or unrelated Event changes must not notify"
+    );
+
+    apply(event("e2e-matching-event", parent)).await;
+    tokio::time::timeout(Duration::from_secs(30), changes.recv())
+        .await
+        .expect("matching Event notifies without changing the parent")
+        .expect("watch stays open")
+        .expect("watch remains healthy");
+    let response = srelens_mcp::stdio::handle_request(
+        &server,
+        &json!({"jsonrpc": "2.0", "id": 197, "method": "resources/read", "params": {"uri": uri_text}}),
+        srelens_mcp::Transport::Stdio,
+    ).await.expect("resource read response");
+    let text = response["result"]["contents"][0]["text"]
+        .as_str()
+        .unwrap_or_else(|| panic!("event list re-read failed: {response}"));
+    assert!(text.contains("e2e-matching-event"), "{text}");
+    assert!(!text.contains("e2e-unrelated-event"), "{text}");
 }
 
 /// Delete the `srelens-e2e` namespace and its CRD, and make sure the node(s)

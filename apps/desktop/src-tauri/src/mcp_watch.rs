@@ -1,12 +1,12 @@
 //! The real `ObjectWatcher`: bridges an MCP subscription to a single-object
-//! kube watch, using the app's shared authenticated client cache.
+//! or matching Event collection kube watch, using the app's shared authenticated client cache.
 
 use std::sync::Arc;
 
 use srelens_kube::client_cache::ClientCache;
-use srelens_mcp::resources::{KindResolver, KindScope, ObjectWatcher, ResourceUri, CLUSTER_SCOPED};
+use srelens_mcp::resources::{KindResolver, KindScope, ObjectWatcher, ResourceUri, SubResource, CLUSTER_SCOPED};
 
-/// Watches single objects through the app's shared authenticated client cache,
+/// Watches objects and their Event collections through the app's shared authenticated client cache,
 /// so an MCP subscription sees exactly the clusters the GUI does.
 pub struct CacheWatcher {
     cache: Arc<ClientCache>,
@@ -30,7 +30,7 @@ impl ObjectWatcher for CacheWatcher {
         on_change: Box<dyn FnMut() + Send>,
         on_dead: Box<dyn FnOnce(String) + Send>,
     ) -> Result<tokio::task::AbortHandle, String> {
-        let ResourceUri::Object { context, namespace, kind, name, .. } = uri else {
+        let ResourceUri::Object { context, namespace, kind, name, sub } = uri else {
             return Err("only object URIs can be watched".to_string());
         };
 
@@ -75,6 +75,7 @@ impl ObjectWatcher for CacheWatcher {
         let (gvk, _namespaced) = srelens_kube::manifest::gvk_for(kind)
             .ok_or_else(|| format!("kind `{kind}` cannot be watched"))?;
 
+        let events = matches!(sub, Some(SubResource::Events));
         let cache = self.cache.clone();
         let (context, namespace, name) = (context.clone(), namespace.clone(), name.clone());
         // `watch` is synchronous and returns before the client is ever
@@ -90,18 +91,20 @@ impl ObjectWatcher for CacheWatcher {
         // stderr (stdout is the JSON-RPC channel on stdio — see `main.rs`).
         let watch_uri = uri.to_string();
         let task = tokio::spawn(async move {
-            let result = srelens_kube::watch::watch_object(
-                cache,
-                context,
-                namespace,
-                gvk,
-                name,
-                on_change,
-                |status| {
-                    eprintln!("srelens: mcp watch {watch_uri}: {}", status.as_str());
-                },
-            )
-            .await;
+            let on_status = |status: srelens_kube::watch::WatchStatus| {
+                eprintln!("srelens: mcp watch {watch_uri}: {}", status.as_str());
+            };
+            let result = if events {
+                srelens_kube::watch::watch_object_events(
+                    cache, context, namespace, gvk, name, on_change, on_status,
+                )
+                .await
+            } else {
+                srelens_kube::watch::watch_object(
+                    cache, context, namespace, gvk, name, on_change, on_status,
+                )
+                .await
+            };
             let reason = match result {
                 Ok(()) => "the watch stream ended".to_string(),
                 Err(e) => e,
@@ -127,7 +130,12 @@ mod tests {
             std::path::PathBuf::from("/nonexistent/kubeconfig"),
         );
         let w = CacheWatcher::new(cache);
-        for uri in ["k8s://c/ns/Pod/web-0", "k8s://c/-/Node/node-1"] {
+        for uri in [
+            "k8s://c/ns/Pod/web-0",
+            "k8s://c/-/Node/node-1",
+            "k8s://c/ns/Pod/web-0/events",
+            "k8s://c/-/Node/node-1/events",
+        ] {
             let parsed = ResourceUri::parse(uri).unwrap();
             let handle = w.watch(&parsed, Box::new(|| {}), Box::new(|_| {})).expect("spawns");
             handle.abort();
@@ -160,6 +168,38 @@ mod tests {
             .expect("on_dead fires")
             .expect("reason arrives");
         assert!(!reason.is_empty(), "the death carries its reason");
+    }
+
+    #[tokio::test]
+    async fn event_collection_reports_death_for_an_unresolvable_context() {
+        let cache = ClientCache::new(std::path::PathBuf::from("/nonexistent/kubeconfig"));
+        let watcher = CacheWatcher::new(cache);
+        let uri = ResourceUri::parse("k8s://c/ns/Pod/web-0/events").unwrap();
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let _handle = watcher.watch(
+            &uri,
+            Box::new(|| {}),
+            Box::new(move |reason| { let _ = tx.send(reason); }),
+        ).expect("spawns");
+        let reason = tokio::time::timeout(std::time::Duration::from_secs(10), rx)
+            .await.expect("on_dead fires").expect("reason arrives");
+        assert!(!reason.is_empty());
+    }
+
+    #[tokio::test]
+    async fn event_collections_preserve_kind_and_scope_restrictions() {
+        let cache = ClientCache::new(std::path::PathBuf::from("/nonexistent/kubeconfig"));
+        let watcher = CacheWatcher::new(cache);
+        for (uri, expected) in [
+            ("k8s://c/ns/Secret/db-creds/events", "not addressable"),
+            ("k8s://c/ns/Nonsense/x/events", "not addressable"),
+            ("k8s://c/-/Pod/web-0/events", "namespaced"),
+            ("k8s://c/ns/Node/node-1/events", "cluster-scoped"),
+        ] {
+            let uri = ResourceUri::parse(uri).unwrap();
+            let error = watcher.watch(&uri, Box::new(|| {}), Box::new(|_| {})).unwrap_err();
+            assert!(error.contains(expected), "{error}");
+        }
     }
 
     #[tokio::test]

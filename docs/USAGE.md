@@ -502,8 +502,15 @@ AI clients, using your locally authenticated cluster contexts. Open
   is never sent anywhere.
 
 Both transports support **resource subscriptions** (`resources/subscribe` on
-`k8s://` object URIs): the server pushes a `notifications/resources/updated`
-when the watched object changes, and the client re-reads. Over stdio,
+`k8s://` object URIs, including `/events`): the server pushes a
+`notifications/resources/updated` when the watched object or its matching Event
+collection changes, and the client re-reads. An `/events` subscription watches
+Events filtered by the involved object's name and kind, in its namespace (or
+across namespaces for a cluster-scoped object). A change to the parent object
+alone does not trigger an event-list notification. Initial lists and relists
+also notify, so changes between reading and subscribing are not missed. The
+32-subscription limit and existing resource restrictions still apply; pod log
+resources remain readable but cannot be subscribed to. Over stdio,
 notifications arrive on the server's stdout. Over HTTP, the client first opens
 the push channel — `GET /mcp` with `Accept: text/event-stream`, same bearer
 token — and notifications arrive as SSE events on that stream; subscribing
