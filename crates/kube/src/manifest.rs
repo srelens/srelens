@@ -678,7 +678,11 @@ pub fn matches_field_selector(obj_val: &serde_json::Value, selector: &str) -> bo
         };
 
         let actual = field_value_as_str(crate::crds::json_path_value(obj_val, key));
-        let actual_str = actual.as_deref().unwrap_or("");
+        let actual_str = match actual.as_deref() {
+            Some(s) => s,
+            None if key == "spec.unschedulable" => "false",
+            None => "",
+        };
         if equals {
             if actual_str != val {
                 return false;
@@ -842,6 +846,7 @@ async fn list_resource(
         Api::all_with(client, ar)
     };
     let mut params = list_params(input);
+    let mut fallback_field_selector = false;
     let list_res = tokio::time::timeout(request_timeout(), api.list(&params)).await;
     let list = match list_res {
         Ok(Ok(l)) => l,
@@ -853,6 +858,7 @@ async fn list_resource(
                     || err_str.contains("field selector"))
             {
                 params.field_selector = None;
+                fallback_field_selector = true;
                 tokio::time::timeout(request_timeout(), api.list(&params))
                     .await
                     .map_err(|_| CapabilityError::Handler("list resource timed out".into()))?
@@ -865,11 +871,15 @@ async fn list_resource(
     };
     let mut items = Vec::new();
     for o in list.items {
-        if input.field_selector.is_some() || input.field_filter.is_some() {
+        if (fallback_field_selector && input.field_selector.is_some())
+            || input.field_filter.is_some()
+        {
             let obj_val = readable_object(o.clone(), ar)?;
-            if let Some(ref sel) = input.field_selector {
-                if !matches_field_selector(&obj_val, sel) {
-                    continue;
+            if fallback_field_selector {
+                if let Some(ref sel) = input.field_selector {
+                    if !matches_field_selector(&obj_val, sel) {
+                        continue;
+                    }
                 }
             }
             if let Some(ref filter) = input.field_filter {
@@ -3798,6 +3808,49 @@ metadata:
         assert!(matches_field_selector(
             &obj,
             "spec.nodeName!=harvester-amd008-eu-dus1"
+        ));
+    }
+
+    #[test]
+    fn test_matches_field_selector_spec_unschedulable_default_false() {
+        let node_without_unschedulable = serde_json::json!({
+            "metadata": { "name": "node-schedulable" },
+            "spec": {}
+        });
+        let node_with_unschedulable_true = serde_json::json!({
+            "metadata": { "name": "node-cordoned" },
+            "spec": { "unschedulable": true }
+        });
+        let node_with_unschedulable_false = serde_json::json!({
+            "metadata": { "name": "node-explicit-schedulable" },
+            "spec": { "unschedulable": false }
+        });
+
+        assert!(matches_field_selector(
+            &node_without_unschedulable,
+            "spec.unschedulable=false"
+        ));
+        assert!(!matches_field_selector(
+            &node_without_unschedulable,
+            "spec.unschedulable=true"
+        ));
+
+        assert!(!matches_field_selector(
+            &node_with_unschedulable_true,
+            "spec.unschedulable=false"
+        ));
+        assert!(matches_field_selector(
+            &node_with_unschedulable_true,
+            "spec.unschedulable=true"
+        ));
+
+        assert!(matches_field_selector(
+            &node_with_unschedulable_false,
+            "spec.unschedulable=false"
+        ));
+        assert!(!matches_field_selector(
+            &node_with_unschedulable_false,
+            "spec.unschedulable=true"
         ));
     }
 
