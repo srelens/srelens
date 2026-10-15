@@ -44,6 +44,16 @@ describe("detailRoute", () => {
     });
   });
 
+  it("reads an empty namespace as cluster-scoped, as a custom resource's list row carries one (#940)", () => {
+    // `CustomRow.namespace` is "" for a cluster-scoped kind; an empty segment
+    // is one the parser refuses, so the tab would never open.
+    const route = detailRoute("ClusterIssuer", "", "letsencrypt", { cluster: "prod", group: "cert-manager.io" });
+    expect(route).toBe("/k/prod/cert-manager.io%2FClusterIssuer/-/letsencrypt");
+    expect(parseDetailRoute(route)).toMatchObject({ kind: "ClusterIssuer", namespace: null, name: "letsencrypt" });
+    expect(parseEditRoute(editRoute("ClusterIssuer", "", "letsencrypt", { cluster: "prod", group: "cert-manager.io" })))
+      .toMatchObject({ kind: "ClusterIssuer", namespace: null, name: "letsencrypt" });
+  });
+
   it("round-trips", () => {
     for (const [k, ns, n] of [["Pod", "default", "web"], ["Node", null, "n1"]] as const) {
       expect(parseDetailRoute(detailRoute(k, ns, n, ON))).toEqual({ cluster: "prod", kind: k, namespace: ns, name: n });

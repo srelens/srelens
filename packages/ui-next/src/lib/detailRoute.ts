@@ -18,6 +18,15 @@
 /** Stands in for a cluster-scoped kind's namespace, which does not exist. */
 export const CLUSTER_SCOPED_SEGMENT = "-";
 
+/**
+ * A namespace as its route segment. Empty reads as none: a custom resource's
+ * list row carries `""` for a cluster-scoped kind, and an empty segment is one
+ * the parser refuses, so its tab would never open (#940).
+ */
+function namespaceSegment(namespace: string | null): string {
+  return namespace ? encodeURIComponent(namespace) : CLUSTER_SCOPED_SEGMENT;
+}
+
 export function detailRoute(
   kind: string,
   namespace: string | null,
@@ -29,9 +38,8 @@ export function detailRoute(
     group?: string;
   },
 ): string {
-  const ns = namespace === null ? CLUSTER_SCOPED_SEGMENT : encodeURIComponent(namespace);
   const qualified = on.group ? `${on.group}/${kind}` : kind;
-  return `/k/${encodeURIComponent(on.cluster)}/${encodeURIComponent(qualified)}/${ns}/${encodeURIComponent(name)}`;
+  return `/k/${encodeURIComponent(on.cluster)}/${encodeURIComponent(qualified)}/${namespaceSegment(namespace)}/${encodeURIComponent(name)}`;
 }
 
 export interface DetailRouteParts {
@@ -79,9 +87,8 @@ export function editRoute(
     group?: string;
   },
 ): string {
-  const ns = namespace === null ? CLUSTER_SCOPED_SEGMENT : encodeURIComponent(namespace);
   const qualified = on.group ? `${on.group}/${kind}` : kind;
-  return `/edit/${encodeURIComponent(on.cluster)}/${encodeURIComponent(qualified)}/${ns}/${encodeURIComponent(name)}`;
+  return `/edit/${encodeURIComponent(on.cluster)}/${encodeURIComponent(qualified)}/${namespaceSegment(namespace)}/${encodeURIComponent(name)}`;
 }
 
 /**
