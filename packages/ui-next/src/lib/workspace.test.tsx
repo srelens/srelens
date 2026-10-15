@@ -357,6 +357,19 @@ describe("namespace selection by collection", () => {
    * credentials' namespace comes back, rather than the list asking for every
    * namespace and being refused.
    */
+  /**
+   * Leaving a collection for namespaces of the reader's own also leaves the
+   * tab unscoped; that is a choice, and the credentials' namespace must not
+   * replace it.
+   */
+  it("leaves namespaces picked by hand alone when the reader leaves a collection for them", () => {
+    const choose = renderHook(() => ws.useSetNamespaceCollections(), { wrapper: inTab("tab-a") }).result.current;
+    act(() => choose("prod", ["prod"]));
+    renderHook(() => ws.useFallbackNamespace("prod", "team-a"), { wrapper: inTab("tab-a") });
+    act(() => ws.setNamespaces("prod", ["team-b"], "tab-a"));
+    expect(tab("tab-a").namespaces).toEqual({ prod: ["team-b"] });
+  });
+
   it("applies the restricted credential's namespace again once the collection is deleted", () => {
     const choose = renderHook(() => ws.useSetNamespaceCollections(), { wrapper: inTab("tab-a") }).result.current;
     act(() => choose("prod", ["prod"]));

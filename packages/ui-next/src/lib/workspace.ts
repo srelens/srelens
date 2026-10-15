@@ -267,11 +267,26 @@ export function useInCollectionScope(clusterId: string | undefined): boolean {
  */
 export function useFallbackNamespace(clusterId: string, namespace: string): void {
   const tabId = useTabScope();
-  const scoped = useInCollectionScope(clusterId);
+  // Not "is it scoped" but "does it name collections that are all gone": the
+  // reader leaving a collection for namespaces of their own makes it unscoped
+  // too, and that choice must stand. Only a deletion should bring the
+  // credentials' namespace back.
+  const orphaned = useOrphanedCollections(clusterId);
   useEffect(() => {
-    if (!namespace || scoped) return;
-    setTabNamespaces(tabId ?? currentWorkspace().activeId, clusterId, [namespace]);
-  }, [namespace, clusterId, tabId, scoped]);
+    const tab = tabId ?? currentWorkspace().activeId;
+    if (!namespace || inCollectionScope(tab, clusterId)) return;
+    setTabNamespaces(tab, clusterId, [namespace]);
+  }, [namespace, clusterId, tabId, orphaned]);
+}
+
+/** Whether this tab names collections on the cluster, every one of which has been deleted. */
+function useOrphanedCollections(clusterId: string): boolean {
+  const scoped = useTabScope();
+  const read = () => {
+    const tab = scoped ?? currentWorkspace().activeId;
+    return tabNamespaceCollections(tab, clusterId) !== undefined && !inCollectionScope(tab, clusterId);
+  };
+  return useSyncExternalStore(subscribeSelection, read, () => false);
 }
 
 /** The collections setter for the tab this component is mounted in. */
