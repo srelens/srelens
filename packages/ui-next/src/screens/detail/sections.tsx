@@ -112,8 +112,9 @@ export interface ConditionsSectionProps {
  * there ("ComparisonError: repository not found"), and a custom resource's
  * conditions are often all a reader gets of its state (#919).
  *
- * The last-transition time the old table carried is gone: the design has no column for it, and the block is
- * read for what the object is complaining about, not when it started.
+ * The last-transition time the old table carried is gone: the design has no
+ * column for it, and the block is read for what the object is complaining
+ * about, not when it started.
  *
  * An object reporting no conditions renders nothing at all — not an empty
  * block, which would still draw its own rule against the block below it.

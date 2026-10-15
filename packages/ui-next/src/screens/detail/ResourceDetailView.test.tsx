@@ -1255,6 +1255,63 @@ describe("ResourceDetailView", () => {
    * The mock's third header line — a toned dot, the state, the ready ratio and
    * the age — and the two affordances at its top right.
    */
+  describe("a custom resource (#919)", () => {
+    const WIDGET_CRD: CrdRef = {
+      name: "widgets.example.com",
+      group: "example.com",
+      version: "v1",
+      kind: "Widget",
+      plural: "widgets",
+      namespaced: true,
+      printerColumns: [{ name: "Ready", jsonPath: ".status.ready", type: "string" }],
+    };
+    const WIDGET: K8sObject = {
+      apiVersion: "example.com/v1",
+      kind: "Widget",
+      metadata: { name: "w-1", namespace: "default" },
+      status: { ready: "3/3", conditions: [{ type: "Ready", status: "True", reason: "AllGood" }] },
+    };
+
+    it("reads it through its CRD and offers Status, YAML and Events", async () => {
+      listCrds.mockResolvedValue({ crds: [WIDGET_CRD] });
+      getObject.mockResolvedValue({ object: WIDGET });
+      render(<ResourceDetailView context="ctx" kind="Widget" namespace="default" name="w-1" />);
+      await waitFor(() => expect(screen.getByRole("tab", { name: "Status" })).toBeDefined());
+      expect(screen.getAllByRole("tab").map((t) => t.textContent)).toEqual(["Status", "YAML", "Events"]);
+      expect(getObject).toHaveBeenCalledWith("ctx", "Widget", "default", "w-1", undefined, {
+        group: "example.com",
+        version: "v1",
+        plural: "widgets",
+      });
+      // The CRD's own printer column leads the pane.
+      expect(document.querySelector(".fact-list")?.textContent).toContain("3/3");
+    });
+
+    it("gives a CRD named like a built-in the custom pane, and reads its YAML in its own group", async () => {
+      const deployments: CrdRef = {
+        ...WIDGET_CRD,
+        name: "deployments.acme.io",
+        group: "acme.io",
+        kind: "Deployment",
+        plural: "deployments",
+      };
+      listCrds.mockResolvedValue({ crds: [deployments] });
+      getObject.mockResolvedValue({ object: { kind: "Deployment", metadata: { name: "api", namespace: "default" } } });
+      render(<ResourceDetailView context="ctx" kind="Deployment" group="acme.io" namespace="default" name="api" />);
+      await waitFor(() => expect(screen.getByRole("tab", { name: "Status" })).toBeDefined());
+      // The built-in Deployment's descriptor is never consulted for it.
+      expect(descriptorFor).not.toHaveBeenCalled();
+      await userEvent.click(screen.getByRole("tab", { name: "YAML" }));
+      await waitFor(() =>
+        expect(getManifest).toHaveBeenCalledWith("ctx", "Deployment", "default", "api", undefined, {
+          group: "acme.io",
+          version: "v1",
+          plural: "deployments",
+        }),
+      );
+    });
+  });
+
   describe("the header the design draws", () => {
     it("reads the state, the ready ratio and the age across one line", async () => {
       getObject.mockResolvedValue({ object: DEGRADED_DEPLOYMENT });
@@ -1589,7 +1646,7 @@ describe("ResourceDetailView", () => {
       const { getByRole, queryByRole } = render(
         <ResourceDetailView context="ctx" kind="Widget" namespace="default" name="w-1" />,
       );
-      await waitFor(() => expect(getByRole("tab", { name: "Details" })).toBeDefined());
+      await waitFor(() => expect(getByRole("tab", { name: "Status" })).toBeDefined());
 
       expect(barWords()).toEqual(["Ask", "Edit", "Copy as kubectl"]);
       // Nothing was left over to fold, so there is no overflow to open onto an
