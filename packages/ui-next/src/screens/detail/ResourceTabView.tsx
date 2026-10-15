@@ -222,7 +222,8 @@ export function ResourceTabView({ context, kind, group, namespace, name }: Resou
   // Hooks before any early return, so the fetch below is never conditional on
   // the object having arrived. Only a Pod is looked up — see `usageTiles`.
   const target = [context, kind, namespace, name] as const;
-  const wantsUsage = kind === "Pod" && namespace !== null;
+  // Never for a custom kind called Pod: the usage would be the built-in pod's (#919).
+  const wantsUsage = !subject.custom && kind === "Pod" && namespace !== null;
   const usage = useLoad<{ cpu: number; memory: number } | null>(wantsUsage, target, async () => {
     const result = await podMetrics(context, namespace ?? "");
     const mine = result.metrics?.find((m) => m.name === name);

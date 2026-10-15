@@ -184,6 +184,18 @@ describe("ResourceTabView — the full tab the design draws", () => {
     expect(screen.getAllByRole("tab").map((t) => t.textContent)).toEqual(["Status", "YAML", "Events"]);
   });
 
+  it("reads no pod usage for a custom kind that happens to be called Pod (#919)", async () => {
+    listCrds.mockResolvedValue({
+      crds: [{ name: "pods.acme.io", group: "acme.io", version: "v1", kind: "Pod", plural: "pods", namespaced: true }],
+    });
+    getObject.mockResolvedValue({ object: { kind: "Pod", metadata: { name: "p-1", namespace: "default" } } });
+    descriptorFor.mockReturnValue(undefined);
+    render_(<ResourceTabView context="prod-eu" kind="Pod" group="acme.io" namespace="default" name="p-1" />);
+    await waitFor(() => expect(screen.getAllByRole("tab").map((t) => t.textContent)).toEqual(["Status", "YAML", "Events"]));
+    // The built-in pod of the same name's usage is not this resource's.
+    expect(podMetrics).not.toHaveBeenCalled();
+  });
+
   describe("the breadcrumb header", () => {
     it("heads the page with the name, then cluster / namespace / kind", async () => {
       await openPod();
