@@ -29,7 +29,7 @@ import {
 import { useConsole } from "../console";
 import { getKubeconfigFiles, useActiveContext } from "../lib/clusters";
 import { useClusterGate } from "../lib/clusterMoved";
-import { SLUG_BY_K8S_KIND, isBuiltInKind, resolveCrdGvk } from "../lib/crdGvk";
+import { SLUG_BY_K8S_KIND, isCustomKind, resolveCrdGvk } from "../lib/crdGvk";
 import { parseEditRoute, parseNewRoute, type EditRouteParts } from "../lib/detailRoute";
 import { FailureAlert } from "../lib/errorCopy";
 import { collapseDiff, diffCounts } from "../lib/diffCollapse";
@@ -408,7 +408,7 @@ function EditExisting({ context, parts }: { context: ClusterContext; parts: Edit
   // kind, and it is what tells `Deployment` in `acme.io` from the built-in
   // — or, on a route with no group, when the kind is outside the built-in
   // table.
-  const custom = parts.group !== undefined || !isBuiltInKind(kind);
+  const custom = isCustomKind(kind, parts.group);
 
   // Whether Delete is offered at all: the same verdict the list menu and the
   // detail footer reach from the kind's descriptor. `k8s.deleteResource`
