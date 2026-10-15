@@ -280,11 +280,12 @@ describe("CollectionScopeNotice", () => {
 
 describe("CollectionNameNotice (#885)", () => {
   const prod = { name: "prod", type: "namespace" as const, resources: { kinds: ["apps/Deployment"], nameRegex: "^payment-" } };
+  const retry = vi.fn();
   const notice = (state: CollectionNameFilter["state"]) =>
-    render(<CollectionNameNotice filter={{ narrowing: [prod], state, apply: (r) => r }} noun="deployments" />);
+    render(<CollectionNameNotice filter={{ narrowing: [prod], state, apply: (r) => r, retry }} noun="deployments" />);
 
   it("says nothing while no collection narrows the list", () => {
-    const { container } = render(<CollectionNameNotice filter={{ narrowing: [], state: { status: "off" }, apply: (r) => r }} noun="deployments" />);
+    const { container } = render(<CollectionNameNotice filter={{ narrowing: [], state: { status: "off" }, apply: (r) => r, retry }} noun="deployments" />);
     expect(container.textContent).toBe("");
   });
 
@@ -292,6 +293,14 @@ describe("CollectionNameNotice (#885)", () => {
     notice({ status: "ready", shown: new Set(["payment-service"]), problems: [] });
     expect(screen.getByText(/Showing only deployments whose name matches/)).toBeDefined();
     expect(screen.getByText("^payment- (prod)")).toBeDefined();
+  });
+
+  /** A failed match leaves the list empty; the notice says why, in the app's words, and asks again. */
+  it("says why it could not narrow the list, and tries again when asked", async () => {
+    notice({ status: "failed", error: "connection refused" });
+    expect(screen.getByText("Could not narrow deployments by collection")).toBeDefined();
+    await userEvent.click(screen.getByRole("button", { name: "Try again" }));
+    expect(retry).toHaveBeenCalledOnce();
   });
 
   it("says plainly when nothing here matches, and when an expression could not be used", () => {

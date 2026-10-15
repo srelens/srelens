@@ -175,6 +175,8 @@ export interface NameMatches {
   matches: boolean[];
   /** A collection whose expression could not be used, which then shows nothing. */
   problems: string[];
+  /** The collections that narrow the list, by name; empty when it is not narrowed. */
+  narrowing: string[];
 }
 
 /** A kind as a list view knows it: by name, and by group for a custom kind. */
@@ -202,7 +204,13 @@ export async function matchCollectionNames(
   });
 }
 
-/** Whether a collection's resource filter names `kind` — the same rule the backend applies. */
+/**
+ * Whether a collection's resource filter may name `kind`: by the kind's name,
+ * and by group where the list knows it. A first look only — a list of a
+ * built-in kind does not know its group, so this can say yes for a custom
+ * kind of the same name, which the backend then rules out (it knows the
+ * built-in kinds' groups). It never says no to a kind the backend would narrow.
+ */
 export function filtersKind(collection: Collection, kind: ListKind): boolean {
   return (collection.resources?.kinds ?? []).some((entry) => {
     const slash = entry.lastIndexOf("/");

@@ -241,7 +241,8 @@ export function MultiSelect({
         if (otherTab && view === "other") return otherTab.rows(close);
         // With no options the list is never empty — the "all" row is there —
         // so the caller's message would never show as the list's own.
-        if (options.length === 0 && empty !== undefined) {
+        // Without one, the list's own empty state says it, once.
+        if (options.length === 0 && empty !== undefined && all !== undefined) {
           return (
             <>
               {rows}

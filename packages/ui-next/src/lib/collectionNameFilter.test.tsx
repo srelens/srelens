@@ -40,6 +40,7 @@ beforeEach(() => {
     filtered: true,
     matches: names.map((n) => n.startsWith("payment-")),
     problems: [],
+    narrowing: ["prod"],
   }));
   setState({
     workspaces: [{ id: "w", name: "W", clusters: ["c"], activeCluster: "c", tabs: [{ ...makeTab("/k/deployments"), id: "t" }], activeId: "t", closed: [] }],
@@ -99,12 +100,32 @@ describe("useCollectionNameFilter", () => {
     expect(result.current.apply(more)).toHaveLength(3);
   });
 
-  it("says so when the names could not be matched, and lists nothing", async () => {
-    matchCollectionNames.mockRejectedValue(new Error("backend gone"));
+  it("says so when the names could not be matched, lists nothing, and asks again on retry", async () => {
+    matchCollectionNames.mockRejectedValueOnce(new Error("backend gone"));
     const { result } = filterFor();
     scopeTo("prod");
     await settle();
     expect(result.current.state).toEqual({ status: "failed", error: "backend gone" });
     expect(result.current.apply(ROWS)).toEqual([]);
+    act(() => result.current.retry());
+    await settle();
+    expect(result.current.state.status).toBe("ready");
+    expect(result.current.apply(ROWS)).toHaveLength(2);
+  });
+
+  /**
+   * The list knows a built-in kind by name only, so a filter for a custom
+   * kind of that name looks like it applies; the backend, which knows the
+   * built-in kind's group, says it does not, and the list is left alone.
+   */
+  it("leaves the list alone when the backend says the collection does not narrow this kind", async () => {
+    saveCollection({ ...PROD, name: "custom", resources: { kinds: ["acme.io/Deployment"], nameRegex: "^payment-" } });
+    matchCollectionNames.mockResolvedValue({ filtered: false, matches: [true, true], problems: [], narrowing: [] });
+    const { result } = filterFor();
+    scopeTo("custom");
+    await settle();
+    expect(result.current.state.status).toBe("off");
+    expect(result.current.apply(ROWS)).toBe(ROWS);
+    expect(result.current.narrowing).toEqual([]);
   });
 });

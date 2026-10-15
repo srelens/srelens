@@ -369,6 +369,12 @@ describe("MultiSelect, without Select all", () => {
     expect(screen.getByRole("button", { name: "Reset" })).toBeDefined();
   });
 
+  it("says the caller's empty message once when there is no all row either", async () => {
+    open({ options: [], empty: "Nothing to offer yet" });
+    await userEvent.click(trigger());
+    expect(screen.getAllByText("Nothing to offer yet")).toHaveLength(1);
+  });
+
   it("says the caller's empty message beside the all row when there are no options", async () => {
     open({ allLabel: "All deployments", options: [], empty: "Nothing to offer yet" });
     await userEvent.click(trigger());

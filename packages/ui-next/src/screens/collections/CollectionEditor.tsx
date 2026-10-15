@@ -12,6 +12,7 @@ import {
 } from "@srelens/core";
 import { Button, Checkbox, Dialog, Field, MultiSelect, Switch, TextInput } from "@srelens/ui-kit";
 import { useCollections, saveCollection } from "../../lib/collections";
+import { friendly } from "../../lib/errorCopy";
 import { useListing } from "../../lib/collectionScope";
 
 /** How long typing settles before the backend is asked to check or preview. */
@@ -324,7 +325,10 @@ function Preview({
     const timer = setTimeout(() => {
       // Resolved under a stand-in name when it has none yet: the backend
       // refuses a nameless collection, and the name decides nothing here.
-      resolveNamespaceCollections([{ ...collection, name: collection.name || "preview" }], listing.items, listing.complete).then(
+      // Without the resource filter: it does not change which namespaces
+      // match, and an unfinished one would have the whole draft refused.
+      const { resources: _resources, ...namespaces } = collection;
+      resolveNamespaceCollections([{ ...namespaces, name: collection.name || "preview" }], listing.items, listing.complete).then(
         (r) => current && setResult(r),
         (e: unknown) => current && setError(e instanceof Error ? e.message : String(e)),
       );
@@ -429,6 +433,7 @@ function KindsPicker({
 }) {
   const [served, setServed] = useState<ApiKind[] | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [attempt, setAttempt] = useState(0);
   useEffect(() => {
     let live = true;
     setServed(null);
@@ -441,12 +446,19 @@ function KindsPicker({
     return () => {
       live = false;
     };
-  }, [clusterName]);
+  }, [clusterName, attempt]);
   const names = [...new Set([...(served ?? []).map(apiKindName), ...kinds])];
   const empty = !clusterName
     ? "Pick a cluster to choose from the kinds it serves."
     : error !== null
-      ? `Could not read the kinds ${clusterName} serves: ${error}`
+      ? (
+          <>
+            {`Could not read the kinds ${clusterName} serves. ${friendly(error).detail} `}
+            <button type="button" className="btn !py-0" onClick={() => setAttempt((n) => n + 1)}>
+              Try again
+            </button>
+          </>
+        )
       : served === null
         ? `Reading the kinds ${clusterName} serves…`
         : "This cluster serves no kinds that can be listed.";

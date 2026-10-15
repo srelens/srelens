@@ -243,12 +243,25 @@ fn first_line(text: &str) -> &str {
     text.lines().rev().find(|l| l.trim_start().starts_with("error:")).map(str::trim).unwrap_or(text)
 }
 
-/// Whether a filter's kind entry names `kind`: `group/Kind` with that group,
-/// or the bare `Kind`. A list view knows a built-in kind by its name alone
-/// (`group` is `None`), and the name is unambiguous among built-in kinds.
+/// Whether a filter's kind entry names the kind a list shows: `group/Kind`
+/// with that kind's group, or the bare `Kind`.
+///
+/// A list view knows a built-in kind by its name alone (`group` is `None`).
+/// Its group is then the built-in table's — not "any group": a filter for a
+/// custom `acme.io/Deployment` must not narrow the built-in Deployments.
 fn names_kind(entry: &str, kind: &str, group: Option<&str>) -> bool {
     let (entry_group, entry_kind) = entry.rsplit_once('/').unwrap_or(("", entry));
-    entry_kind == kind && group.is_none_or(|g| g == entry_group)
+    if entry_kind != kind {
+        return false;
+    }
+    if !entry.contains('/') {
+        // The bare kind: a built-in kind, or a core-group one.
+        return group.is_none_or(str::is_empty);
+    }
+    match group {
+        Some(g) => g == entry_group,
+        None => crate::manifest::gvk_for(kind).is_some_and(|(gvk, _)| gvk.group == entry_group),
+    }
 }
 
 /// Which of `names` a list of `kind` shows when scoped to `collections`.
@@ -260,24 +273,26 @@ fn names_kind(entry: &str, kind: &str, group: Option<&str>) -> bool {
 pub fn match_names(collections: &[Collection], kind: &str, group: Option<&str>, names: &[String]) -> NameMatches {
     let mut expressions = Vec::new();
     let mut problems = Vec::new();
+    let mut narrowing = Vec::new();
     for collection in collections {
         let filter = collection
             .resources
             .as_ref()
             .filter(|f| f.kinds.iter().any(|k| names_kind(k, kind, group)));
         let Some(filter) = filter else {
-            return NameMatches { filtered: false, matches: vec![true; names.len()], problems };
+            return NameMatches { filtered: false, matches: vec![true; names.len()], problems, narrowing: vec![] };
         };
+        narrowing.push(collection.name.clone());
         match compile_name_regex(&filter.name_regex) {
             Ok(re) => expressions.push(re),
             Err(why) => problems.push(format!("{}: {why}", collection.name)),
         }
     }
     if collections.is_empty() {
-        return NameMatches { filtered: false, matches: vec![true; names.len()], problems };
+        return NameMatches { filtered: false, matches: vec![true; names.len()], problems, narrowing };
     }
     let matches = names.iter().map(|name| expressions.iter().any(|re| re.is_match(name))).collect();
-    NameMatches { filtered: true, matches, problems }
+    NameMatches { filtered: true, matches, problems, narrowing }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
@@ -288,6 +303,8 @@ pub struct NameMatches {
     pub matches: Vec<bool>,
     /// A collection whose expression could not be used, which then shows nothing.
     pub problems: Vec<String>,
+    /// The collections that narrow the list, by name; empty when it is not narrowed.
+    pub narrowing: Vec<String>,
 }
 
 // -- names, kinds and patterns -------------------------------------------------
@@ -1193,6 +1210,25 @@ mod tests {
         assert!(!match_names(&[c.clone()], "Deployment", Some("acme.io"), &strings(&NAMES)).filtered);
         let custom = with_filter("prod", &["acme.io/Deployment"], "^payment-");
         assert!(match_names(&[custom], "Deployment", Some("acme.io"), &strings(&NAMES)).filtered);
+    }
+
+    /// The bug review found: a built-in list carries no group, and a filter
+    /// for a custom kind of the same name narrowed it.
+    #[test]
+    fn a_filter_for_a_custom_kind_does_not_narrow_the_built_in_kind_of_that_name() {
+        let custom = with_filter("prod", &["acme.io/Deployment"], "^payment-");
+        assert!(!match_names(&[custom], "Deployment", None, &strings(&NAMES)).filtered);
+        let builtin = with_filter("prod", &["apps/Deployment"], "^payment-");
+        assert!(match_names(&[builtin], "Deployment", None, &strings(&NAMES)).filtered);
+        let bare = with_filter("prod", &["Deployment"], "^payment-");
+        let m = match_names(&[bare], "Deployment", None, &strings(&NAMES));
+        assert!(m.filtered);
+        assert_eq!(m.narrowing, ["prod"]);
+        // A core-group kind is named bare or not at all.
+        let services = with_filter("prod", &["Service"], "^payment-");
+        assert!(match_names(&[services], "Service", None, &strings(&NAMES)).filtered);
+        let wrong = with_filter("prod", &["apps/Service"], "^payment-");
+        assert!(!match_names(&[wrong], "Service", None, &strings(&NAMES)).filtered);
     }
 
     #[test]

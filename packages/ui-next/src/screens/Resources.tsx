@@ -631,10 +631,12 @@ function KindList({
         </Alert>
       )}
 
+      {/* Outside the namespaced guard: a cluster-scoped list (Nodes, a
+          cluster-scoped custom kind) is narrowed by name too, and says so. */}
+      <CollectionNameNotice filter={nameFilter} noun={lower} />
       {!clusterScoped && (
         <>
           <CollectionScopeNotice context={context} />
-          <CollectionNameNotice filter={nameFilter} noun={lower} />
           <StaleSelectionAlert
             selection={selection}
             namespaces={namespaces}

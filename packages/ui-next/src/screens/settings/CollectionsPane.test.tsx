@@ -240,6 +240,32 @@ describe("CollectionsPane", () => {
     expect(within(dialog).getByRole("button", { name: "Save" }).hasAttribute("disabled")).toBe(true);
   });
 
+  /** An unfinished filter must not make the namespace preview say nothing matches. */
+  it("previews the namespaces without the resource filter", async () => {
+    active.context = SHOP;
+    noteNamespaceListing(SHOP.stableId, [{ name: "prod-eu" }], true);
+    core.resolveNamespaceCollections.mockResolvedValue({ namespaces: ["prod-eu"], collections: [{ name: "prod", matched: ["prod-eu"], members: [] }], partial: false });
+    saveCollection({ name: "prod", type: "namespace", patterns: ["prod-*"], resources: { kinds: [], nameRegex: "" } });
+    render(<CollectionsPane />);
+    await userEvent.click(within(row("prod")).getByRole("button", { name: "Edit" }));
+    const dialog = screen.getByRole("dialog");
+    expect(await within(dialog).findByText("Matches 1 namespace on kind-shop.")).toBeDefined();
+    expect(core.resolveNamespaceCollections.mock.calls.at(-1)?.[0][0]).not.toHaveProperty("resources");
+  });
+
+  it("offers to read the cluster's kinds again when that failed", async () => {
+    active.context = SHOP;
+    core.listApiKinds.mockRejectedValueOnce(new Error("connection refused"));
+    saveCollection({ name: "prod", type: "namespace", patterns: ["prod-*"], resources: { kinds: [], nameRegex: "^a" } });
+    render(<CollectionsPane />);
+    await userEvent.click(within(row("prod")).getByRole("button", { name: "Edit" }));
+    const dialog = screen.getByRole("dialog");
+    await userEvent.click(within(dialog).getByRole("combobox", { name: "Kinds" }));
+    await userEvent.click(await screen.findByRole("button", { name: "Try again" }));
+    expect(core.listApiKinds).toHaveBeenCalledTimes(2);
+    expect(await screen.findByRole("option", { name: "apps/Deployment" })).toBeDefined();
+  });
+
   it("drops the filter when switched off", async () => {
     saveCollection({ name: "prod", type: "namespace", patterns: ["prod-*"], resources: { kinds: ["Service"], nameRegex: "^a" } });
     render(<CollectionsPane />);

@@ -4,7 +4,8 @@ import { listNamespaces, selectsNothing, type ClusterContext, type Collection } 
 /** How often a collection-scoped view reads the namespaces again. */
 export const RELIST_MS = 30_000;
 import type { NamespaceOptions } from "@srelens/core/react";
-import { Alert, Button, MultiSelect, PickerRow, Spinner } from "@srelens/ui-kit";
+import { Alert, Button, MultiSelect, PickerRow, RawError, Spinner } from "@srelens/ui-kit";
+import { friendly } from "../../lib/errorCopy";
 import { byRecentUse, useCollections } from "../../lib/collections";
 import { noteNamespaceListing, useCollectionScope, useListing } from "../../lib/collectionScope";
 import { openSettings } from "../../lib/settingsRequest";
@@ -273,9 +274,17 @@ export function CollectionNameNotice({ filter, noun }: { filter: CollectionNameF
   if (state.status === "off") return null;
   const rules = narrowing.map((c) => `${c.resources?.nameRegex} (${c.name})`).join(" or ");
   if (state.status === "failed") {
+    const copy = friendly(state.error);
     return (
-      <Alert tone="sev" title={`Could not narrow ${noun} by collection`} className="mx-3 mt-3 mb-3">
-        {state.error}
+      <Alert
+        tone="warn"
+        title={`Could not narrow ${noun} by collection`}
+        className="mx-3 mt-3 mb-3"
+        onDismiss={filter.retry}
+        dismissLabel="Try again"
+      >
+        {copy.detail}
+        <RawError text={copy.raw ?? ""} className="mt-1" />
       </Alert>
     );
   }
