@@ -1933,6 +1933,23 @@ describe("the detail pane's two hosts", () => {
     expect(fromTab).toEqual(subject);
   });
 
+  it("hands a custom resource's group to its peek and to the tab it opens (#919)", async () => {
+    listCrds.mockResolvedValue({ crds: [WIDGETS] });
+    listCustomResource.mockResolvedValue({
+      items: [{ name: "left", namespace: "default", age: "1d", columns: ["Ready"] }],
+    });
+    open("/k/widgets.example.com");
+    await waitFor(() => expect(rowNames()).toEqual(["left"]));
+
+    fireEvent.click(row("left"));
+    await waitFor(() =>
+      expect(lastDetailProps()).toMatchObject({ kind: "Widget", group: "example.com", name: "left" }),
+    );
+
+    fireEvent.doubleClick(row("left"));
+    await waitFor(() => expect(tabFor("/k/prod-eu/example.com%2FWidget/default/left")).toBeTruthy());
+  });
+
   it("promotes the peeked row to its own tab, at the very route a double click opens", async () => {
     open("/k/pods");
     await waitFor(() => expect(rowNames()).toEqual(["web-1", "api-7"]));

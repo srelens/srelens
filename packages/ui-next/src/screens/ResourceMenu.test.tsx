@@ -250,6 +250,15 @@ describe("useRowMenu", () => {
     expect(store.currentWorkspace().tabs.some((t) => t.route === "/k/prod/Pod/kube-system/web-0")).toBe(true);
   });
 
+  it("carries a custom kind's group into Open in new tab's route (#919)", async () => {
+    const args: UseRowMenuArgs = { context: "prod", kind: "Deployment", actions: { delete: false }, group: "acme.io" };
+    render(<Harness args={args} row={{ name: "api", namespace: "default" }} />);
+    await userEvent.click(screen.getByRole("button", { name: "Open in new tab" }));
+    expect(
+      store.currentWorkspace().tabs.some((t) => t.route === "/k/prod/acme.io%2FDeployment/default/api"),
+    ).toBe(true);
+  });
+
   /**
    * `Edit` used to mint `/edit/<name>` — the NAME alone, while `Open in new
    * tab` and `Follow logs` beside it both carry kind, namespace and name.
