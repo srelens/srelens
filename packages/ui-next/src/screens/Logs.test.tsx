@@ -167,6 +167,12 @@ vi.mock("@srelens/core", async (orig) => {
   };
 });
 
+/**
+ * A regex is answered by a worker, and jsdom has none. Each oracle the screen makes is a fake the test answers:
+ * see `regexWorker.fake`.
+ */
+vi.mock("../lib/regexWorker", () => import("../lib/regexWorker.fake"));
+
 vi.mock("../extensions/inventoryStore", async (orig) => ({
   ...(await orig<typeof import("../extensions/inventoryStore")>()),
   useExtensions: () =>
@@ -192,6 +198,8 @@ import { ConsoleProvider, useConsole } from "../console";
 import { resetContexts, setContexts, setKubeconfigFiles } from "../lib/clusters";
 import { loadRecentLogSubjects, recentLogSubjects, rememberLogSubject } from "../lib/logRecents";
 import { liveLogStreams } from "../lib/liveLogStreams";
+import type { RegexAnswer } from "../lib/regexMatch";
+import { oracleFor, oracles, resetFakeOracles, workerIsRunning } from "../lib/regexWorker.fake";
 import { defaultState } from "../lib/tabs";
 import { TabScope } from "../lib/tabScope";
 import * as store from "../lib/tabsStore";
@@ -317,6 +325,7 @@ beforeEach(() => {
   h.plugins = [];
   h.inventoryError = undefined;
   h.views = [];
+  resetFakeOracles();
   h.state = {
     lines: [],
     dropped: 0,
@@ -376,6 +385,15 @@ function draw(route = ROUTE) {
     <ConsoleProvider>
       <AskSpy />
       <Logs route={route} />
+    </ConsoleProvider>,
+  );
+}
+
+/** The screen as `Window` mounts it: inside the tab whose id it is given. */
+function drawInTab(tabId: string) {
+  return render(
+    <ConsoleProvider>
+      <TabScope.Provider value={tabId}><Logs route={ROUTE} /></TabScope.Provider>
     </ConsoleProvider>,
   );
 }
@@ -1622,6 +1640,61 @@ describe("exporting a time range (#915)", () => {
     ]);
   });
 
+  it("writes the range through a regex answered by a worker of its own, never run on this thread", async () => {
+    const watch = mainThreadRuns("timeout.on");
+    try {
+      draw();
+      await body();
+      push(...LINES);
+      await userEvent.type(filterField(), "/timeout.on/");
+      await waitFor(() => expect(oracleFor("timeout.on").asks).toHaveLength(1));
+      await act(async () => oracleFor("timeout.on").reply());
+      await pick("Last 6 h");
+      // The range's lines are not the buffer's: a worker is made for them, apart from the screen's.
+      await waitFor(() => expect(oracles).toHaveLength(2));
+      await act(async () => oracles[1].reply());
+      await waitFor(() => expect(h.saved).toHaveBeenCalledTimes(1));
+      expect(written()).toEqual([
+        "api-8/api | 2026-08-24T13:25:00.000000000Z error pool timeout on api-8",
+        "api-7/api | 2026-08-24T14:07:41.208000000Z error pool timeout on api-7",
+      ]);
+      expect(oracles[1].disposed).toBe(true);
+    } finally {
+      watch.restore();
+    }
+    expect(watch.runs).toEqual([]);
+  });
+
+  it("writes the range through the regex in the box while its worker still has the buffer", async () => {
+    draw();
+    await body();
+    push(...LINES);
+    await userEvent.type(filterField(), "/timeout.on/");
+    await waitFor(() => expect(oracleFor("timeout.on").asks).toHaveLength(1));
+    // Not answered yet: the screen keeps what it had, but the file is what the box says.
+    await pick("Last 6 h");
+    await waitFor(() => expect(oracles).toHaveLength(2));
+    await act(async () => oracles[1].reply());
+    await waitFor(() => expect(h.saved).toHaveBeenCalledTimes(1));
+    expect(written()).toEqual([
+      "api-8/api | 2026-08-24T13:25:00.000000000Z error pool timeout on api-8",
+      "api-7/api | 2026-08-24T14:07:41.208000000Z error pool timeout on api-7",
+    ]);
+  });
+
+  it("refuses to write a range through a regex too slow to run, in the alert's words", async () => {
+    draw();
+    await body();
+    push(...LINES);
+    await userEvent.type(filterField(), "/timeout.on/");
+    await waitFor(() => expect(oracleFor("timeout.on").asks).toHaveLength(1));
+    await act(async () => oracleFor("timeout.on").fail("slow"));
+    await pick("Last 6 h");
+    const failure = await screen.findByText("Could not save this stream");
+    expect(failure.closest('[role="status"]')?.textContent).toContain("Too slow to run on these lines: /timeout.on/");
+    expect(h.saved).not.toHaveBeenCalled();
+  });
+
   it("orders two containers' lines inside one millisecond by the whole stamp", async () => {
     // A trimmed fraction on purpose: the kubelet's RFC3339Nano drops trailing zeros.
     const blobs: Record<string, string> = {
@@ -2338,14 +2411,6 @@ describe("log sources (#569)", () => {
  * alone says a tab is open, not that a stream started or is still running.
  */
 describe("the running-stream registry", () => {
-  function drawInTab(tabId: string) {
-    return render(
-      <ConsoleProvider>
-        <TabScope.Provider value={tabId}><Logs route={ROUTE} /></TabScope.Provider>
-      </ConsoleProvider>,
-    );
-  }
-
   it("marks the tab while its stream runs, and unmarks it when the tab goes", async () => {
     const view = drawInTab("tab-1");
     await body();
@@ -2367,6 +2432,209 @@ describe("the running-stream registry", () => {
     drawInTab("tab-3");
     await screen.findByText("Nothing to follow");
     expect(liveLogStreams().has("tab-3")).toBe(false);
+  });
+});
+
+/**
+ * The search box is the tab's to keep (#898): a restart reopens each Logs tab
+ * with the query it was left with. The tab store stands in for the settings
+ * file, the way `resourceShell`'s tests seed it for sort and filter.
+ */
+describe("a Logs tab's saved query (#898)", () => {
+  /** A tab on the logs route, as a previous launch left it: with `query` saved, or with no view at all. */
+  function tabLeftWith(query?: string) {
+    store.openTab(ROUTE);
+    const id = store.currentWorkspace().tabs.find((t) => t.route === ROUTE)!.id;
+    if (query !== undefined) store.setTabView(id, { query });
+    return id;
+  }
+  const tabView = (id: string) => store.currentWorkspace().tabs.find((t) => t.id === id)?.view;
+
+  it("opens with the box, the pills and the body showing the saved query", async () => {
+    const id = tabLeftWith("level:error");
+    drawInTab(id);
+    const region = await body();
+    push(...LINES);
+    expect(filterField()).toHaveProperty("value", "level:error");
+    expect(screen.getByRole("button", { name: "Remove filter level:error" })).toBeTruthy();
+    expect(messages(region)).toEqual(["error pool timeout waited=30.0s in_use=5"]);
+  });
+
+  it("writes the query back to its tab once it is typed", async () => {
+    const id = tabLeftWith();
+    drawInTab(id);
+    await body();
+    await userEvent.type(filterField(), "level:error pool");
+    await waitFor(() => expect(tabView(id)?.query).toBe("level:error pool"));
+  });
+
+  it("writes an emptied box as an empty query, so the old one does not come back", async () => {
+    const id = tabLeftWith("level:error");
+    drawInTab(id);
+    await body();
+    await userEvent.clear(filterField());
+    await waitFor(() => expect(tabView(id)?.query).toBe(""));
+  });
+
+  it("leaves a tab with no saved query untouched until something is typed", async () => {
+    const id = tabLeftWith();
+    drawInTab(id);
+    await body();
+    expect(tabView(id)).toBeUndefined();
+  });
+
+  it("starts empty, and writes nothing, when it is not in a tab", async () => {
+    // The tab it would borrow if it fell back to the active one: it holds a query this screen must not read or touch.
+    const id = tabLeftWith("level:error");
+    const region = await (draw(), body());
+    const before = store.getState();
+    expect(filterField()).toHaveProperty("value", "");
+    push(...LINES);
+    await userEvent.type(filterField(), "pool");
+    await waitFor(() => expect(messages(region)).toEqual(["error pool timeout waited=30.0s in_use=5"]));
+    expect(store.getState()).toBe(before);
+    expect(tabView(id)?.query).toBe("level:error");
+  });
+
+  it("puts a saved regex through its worker like a typed one: a slow one opens with the alert, never run here", async () => {
+    const watch = mainThreadRuns("(a+)+$");
+    try {
+      const id = tabLeftWith("/(a+)+$/");
+      drawInTab(id);
+      const region = await body();
+      push(...LINES);
+      expect(filterField()).toHaveProperty("value", "/(a+)+$/");
+      await waitFor(() => expect(oracleFor("(a+)+$").asks).toHaveLength(1));
+      // The regex met an empty buffer, so it applied at once: these lines came after, and wait on the worker.
+      expect(rendered(region)).toHaveLength(0);
+      await act(async () => oracleFor("(a+)+$").fail("slow"));
+      expect(screen.getByText("Too slow to run on these lines: /(a+)+$/").closest('[role="alert"]')).not.toBeNull();
+      expect(rendered(region)).toHaveLength(4);
+    } finally {
+      watch.restore();
+    }
+    expect(watch.runs).toEqual([]);
+  });
+});
+
+/**
+ * Every run of a regex whose source is `source` that is not a fake worker's,
+ * from now until `restore`: the main thread must make none. Parsing compiles
+ * the pattern, and compiling is not running it.
+ */
+function mainThreadRuns(source: string) {
+  const runs: string[] = [];
+  const realTest = RegExp.prototype.test;
+  const realExec = RegExp.prototype.exec;
+  const test = vi.spyOn(RegExp.prototype, "test").mockImplementation(function (this: RegExp, s: string) {
+    if (this.source === source && !workerIsRunning()) runs.push(`test ${s}`);
+    return realTest.call(this, s);
+  });
+  const exec = vi.spyOn(RegExp.prototype, "exec").mockImplementation(function (this: RegExp, s: string) {
+    if (this.source === source && !workerIsRunning()) runs.push(`exec ${s}`);
+    return realExec.call(this, s);
+  });
+  return {
+    runs,
+    restore: () => {
+      test.mockRestore();
+      exec.mockRestore();
+    },
+  };
+}
+
+describe("a regex in the query (#898)", () => {
+  /** Type `query` and wait for the screen to ask the worker for `source` about the buffer. */
+  async function typeRegex(query: string, source: string) {
+    await userEvent.type(filterField(), query);
+    await waitFor(() => expect(oracleFor(source).asks).toHaveLength(1));
+  }
+
+  /** The worker for `source` answers what it has been asked: with its own code, or with `given` for every line. */
+  const reply = (source: string, given?: RegexAnswer) => act(async () => oracleFor(source).reply(given));
+
+  it("filters by what the worker answers, holding each later line back until it has", async () => {
+    const region = await (draw(), body());
+    push(...LINES);
+    await typeRegex("/po+l/", "po+l");
+    // Not an empty body while the worker has the buffer: the lines it had stay.
+    expect(rendered(region)).toHaveLength(4);
+    await reply("po+l");
+    expect(messages(region)).toEqual(["error pool timeout waited=30.0s in_use=5"]);
+    expect(screen.queryByText(/Too slow to run/)).toBeNull();
+    // A line that lands later is asked about, and shown once it is answered.
+    push(line("api-8/api", "14:07:45.000000000", "warn pool drained"));
+    await waitFor(() => expect(oracleFor("po+l").asks).toHaveLength(2));
+    expect(oracleFor("po+l").asks[1].map((item) => item.test)).toEqual(["warn pool drained"]);
+    expect(messages(region)).toEqual(["error pool timeout waited=30.0s in_use=5"]);
+    await reply("po+l");
+    expect(messages(region)).toEqual(["error pool timeout waited=30.0s in_use=5", "warn pool drained"]);
+  });
+
+  it("goes back to the filter it had when a later line is too slow, never having run the pattern itself", async () => {
+    // What froze the app: a pattern that passed over the first lines, then met a line of the bad kind.
+    const watch = mainThreadRuns("(a+)+$");
+    // Short enough that the pattern, run here by mistake, takes a moment and the spy says so, rather than hanging.
+    const bad = `error ${"a".repeat(20)}!`;
+    try {
+      const region = await (draw(), body());
+      push(...LINES);
+      await userEvent.type(filterField(), "level:error");
+      await waitFor(() => expect(messages(region)).toEqual(["error pool timeout waited=30.0s in_use=5"]));
+      await userEvent.type(filterField(), " /(a+)+$/");
+      await waitFor(() => expect(oracleFor("(a+)+$").asks).toHaveLength(1));
+      // The buffer comes back in time: the query is applied, and no line matches it.
+      await reply("(a+)+$");
+      expect(messages(region)).toEqual([]);
+      push(line("api-8/api", "14:07:45.000000000", bad));
+      await waitFor(() => expect(oracleFor("(a+)+$").asks).toHaveLength(2));
+      await act(async () => oracleFor("(a+)+$").fail("slow"));
+      expect(screen.getByText("Too slow to run on these lines: /(a+)+$/").closest('[role="alert"]')).not.toBeNull();
+      expect(messages(region)).toEqual(["error pool timeout waited=30.0s in_use=5", bad]);
+    } finally {
+      watch.restore();
+    }
+    expect(watch.runs).toEqual([]);
+  });
+
+  it("marks a line where the worker says the pattern falls", async () => {
+    const region = await (draw(), body());
+    push(...LINES);
+    await typeRegex("/pool/", "pool");
+    // Ranges the pattern itself would not give: the marks can only have come from the answer.
+    await reply("pool", { hit: true, ranges: [[0, 5]] });
+    expect(rendered(region)).toHaveLength(4);
+    const log = screen.getByRole("log", { name: /logs/i });
+    expect([...log.querySelectorAll("mark")].map((m) => m.textContent)).toEqual(["info ", "warn ", "error", "GET /"]);
+  });
+
+  it("says a regex is too slow, applies nothing, and drops the alert once the box is cleared", async () => {
+    const region = await (draw(), body());
+    push(...LINES);
+    await typeRegex("/(a+)+$/", "(a+)+$");
+    await act(async () => oracleFor("(a+)+$").fail("slow"));
+    const alert = screen.getByText("Too slow to run on these lines: /(a+)+$/");
+    expect(alert.closest('[role="alert"]')).not.toBeNull();
+    expect(rendered(region)).toHaveLength(4);
+    await userEvent.clear(filterField());
+    await waitFor(() => expect(screen.queryByText(/Too slow to run/)).toBeNull());
+  });
+
+  it("says when no worker can run a regex, and applies nothing", async () => {
+    const region = await (draw(), body());
+    push(...LINES);
+    await typeRegex("/po+l/", "po+l");
+    await act(async () => oracleFor("po+l").fail("unavailable"));
+    expect(screen.getByText("Regex search is unavailable here").closest('[role="alert"]')).not.toBeNull();
+    expect(rendered(region)).toHaveLength(4);
+  });
+
+  it("makes no worker for a query that holds no regex, and filters by it at once", async () => {
+    const region = await (draw(), body());
+    push(...LINES);
+    await userEvent.type(filterField(), "level:error pool");
+    await waitFor(() => expect(messages(region)).toEqual(["error pool timeout waited=30.0s in_use=5"]));
+    expect(oracles).toHaveLength(0);
   });
 });
 
