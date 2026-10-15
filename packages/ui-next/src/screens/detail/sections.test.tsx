@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { readFileSync, readdirSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
@@ -61,6 +61,47 @@ describe("ConditionsSection", () => {
   it("draws no message line for a condition that reports none", () => {
     const { container } = render(<ConditionsSection conditions={DEPLOYMENT_CONDITIONS} />);
     expect(container.querySelector("[data-slot='condition-message']")).toBeNull();
+  });
+
+  it("reads a condition with no status, as Argo CD writes them, as unknown rather than healthy (#919)", () => {
+    // Argo's ApplicationCondition carries a type and a message and nothing
+    // else: no status, no reason.
+    const { container } = render(
+      <ConditionsSection
+        conditions={[
+          { type: "ComparisonError", message: "repository not found" } as unknown as Condition,
+          { type: "Ready", status: "Unknown" },
+          { type: "Available", status: "True" },
+        ]}
+      />,
+    );
+    expect(container.textContent).not.toContain("undefined");
+    expect(screen.getByText("repository not found")).toBeDefined();
+    const dots = [...container.querySelectorAll(".dot")].map((d) => (d as HTMLElement).style.background);
+    // Toned as an Unknown status is: without one, srelens cannot tell good
+    // from bad — and never as the healthy condition below it.
+    expect(dots[0]).toBe(dots[1]);
+    expect(dots[0]).not.toBe(dots[2]);
+  });
+
+  it("skips a malformed condition and a message that is not text, rather than failing the pane", () => {
+    const { container } = render(
+      <ConditionsSection
+        conditions={[null, { type: 7 }, { type: "Ready", status: "True", message: { nested: true } }] as unknown as Condition[]}
+      />,
+    );
+    expect(container.querySelectorAll(".kv")).toHaveLength(1);
+    expect(container.querySelector("[data-slot='condition-message']")).toBeNull();
+  });
+
+  it("renders two conditions of one type without a key clash", () => {
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    const { container } = render(
+      <ConditionsSection conditions={[{ type: "Ready", status: "True" }, { type: "Ready", status: "False" }]} />,
+    );
+    expect(container.querySelectorAll(".kv")).toHaveLength(2);
+    expect(errors.mock.calls.some((call) => String(call[0]).includes("same key"))).toBe(false);
+    errors.mockRestore();
   });
 
   it("drops the last-transition column the design does not have", () => {

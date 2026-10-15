@@ -116,29 +116,52 @@ export interface ConditionsSectionProps {
  * column for it, and the block is read for what the object is complaining
  * about, not when it started.
  *
+ * A custom resource's conditions are its operator's shape, not Kubernetes'
+ * (#919). Argo CD writes a type and a message with no status at all: such a
+ * condition reads its reason alone, and is toned as an `Unknown` status is —
+ * without a status srelens cannot tell good from bad, and core's rule would
+ * otherwise read a status-less `ComparisonError` as healthy. An entry that is
+ * not a condition at all (no string type) is skipped, and a message that is
+ * not text is not printed: either would otherwise take the window down.
+ *
  * An object reporting no conditions renders nothing at all — not an empty
  * block, which would still draw its own rule against the block below it.
  */
 export function ConditionsSection({ conditions }: ConditionsSectionProps) {
-  if (conditions.length === 0) return null;
+  const shown = conditions.filter(
+    (condition): condition is Condition => typeof condition?.type === "string" && condition.type !== "",
+  );
+  if (shown.length === 0) return null;
   return (
     <Section title="Conditions">
-      {conditions.map((condition) => (
-        <KV
-          key={condition.type}
-          k={<StatusPill status={condition.type} kind={conditionKindWithReason(condition)} tinted />}
-          v={
-            <>
-              <span>{`${condition.status} · ${condition.reason || "—"}`}</span>
-              {condition.message && (
-                <span data-slot="condition-message" className="block text-[0.75rem] text-muted">
-                  {condition.message}
+      {shown.map((condition, index) => {
+        const hasStatus = typeof condition.status === "string";
+        return (
+          <KV
+            // Positional: an operator may report one type twice.
+            key={`${index}:${condition.type}`}
+            k={
+              <StatusPill
+                status={condition.type}
+                kind={conditionKindWithReason(hasStatus ? condition : { ...condition, status: "Unknown" })}
+                tinted
+              />
+            }
+            v={
+              <>
+                <span>
+                  {hasStatus ? `${condition.status} · ${condition.reason || "—"}` : condition.reason || "—"}
                 </span>
-              )}
-            </>
-          }
-        />
-      ))}
+                {typeof condition.message === "string" && condition.message && (
+                  <span data-slot="condition-message" className="block text-[0.75rem] text-muted">
+                    {condition.message}
+                  </span>
+                )}
+              </>
+            }
+          />
+        );
+      })}
     </Section>
   );
 }
