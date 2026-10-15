@@ -107,8 +107,12 @@ export interface ConditionsSectionProps {
  *
  * The status and reason read as one value, `False · MinimumReplicasUnavailable`,
  * with an em dash standing in when there is no reason — an empty half of a
- * two-part value reads as a rendering fault. The last-transition time the old
- * table carried is gone: the design has no column for it, and the block is
+ * two-part value reads as a rendering fault. A condition's message, when it
+ * has one, reads beneath that in quiet ink: an operator puts its useful words
+ * there ("ComparisonError: repository not found"), and a custom resource's
+ * conditions are often all a reader gets of its state (#919).
+ *
+ * The last-transition time the old table carried is gone: the design has no column for it, and the block is
  * read for what the object is complaining about, not when it started.
  *
  * An object reporting no conditions renders nothing at all — not an empty
@@ -122,7 +126,16 @@ export function ConditionsSection({ conditions }: ConditionsSectionProps) {
         <KV
           key={condition.type}
           k={<StatusPill status={condition.type} kind={conditionKindWithReason(condition)} tinted />}
-          v={`${condition.status} · ${condition.reason || "—"}`}
+          v={
+            <>
+              <span>{`${condition.status} · ${condition.reason || "—"}`}</span>
+              {condition.message && (
+                <span data-slot="condition-message" className="block text-[0.75rem] text-muted">
+                  {condition.message}
+                </span>
+              )}
+            </>
+          }
         />
       ))}
     </Section>

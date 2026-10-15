@@ -48,6 +48,21 @@ describe("ConditionsSection", () => {
     expect(screen.getByText("False · —")).toBeDefined();
   });
 
+  it("prints a condition's message under its status and reason (#919)", () => {
+    render(
+      <ConditionsSection
+        conditions={[{ type: "Synced", status: "False", reason: "ComparisonError", message: "repository not found" }]}
+      />,
+    );
+    expect(screen.getByText("False · ComparisonError")).toBeDefined();
+    expect(screen.getByText("repository not found")).toBeDefined();
+  });
+
+  it("draws no message line for a condition that reports none", () => {
+    const { container } = render(<ConditionsSection conditions={DEPLOYMENT_CONDITIONS} />);
+    expect(container.querySelector("[data-slot='condition-message']")).toBeNull();
+  });
+
   it("drops the last-transition column the design does not have", () => {
     render(
       <ConditionsSection
