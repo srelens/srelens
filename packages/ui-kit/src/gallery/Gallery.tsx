@@ -2105,8 +2105,12 @@ function SectionedPicker({ grouped }: { grouped: boolean }) {
       allLabel="All namespaces"
       allChecked={groups.length === 0 && picked.length === 0}
       summary={groups.length > 0 ? groups.join(", ") : undefined}
-      heading={grouped ? "Namespaces" : undefined}
-      leading={() => (grouped ? <PickerGroup heading="Collections">{rows}</PickerGroup> : rows)}
+      optionsLabel="Namespaces"
+      otherTab={{
+        label: "Collections",
+        count: groups.length,
+        rows: () => (grouped ? <PickerGroup heading="Saved">{rows}</PickerGroup> : rows),
+      }}
       ariaLabel={grouped ? "Namespaces, with collections" : "Namespaces, with extra rows"}
     />
   );

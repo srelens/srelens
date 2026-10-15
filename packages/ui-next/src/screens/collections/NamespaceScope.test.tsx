@@ -63,6 +63,13 @@ function paint(options: NamespaceOptions = OPTIONS) {
 }
 
 const picker = () => screen.getByRole("combobox", { name: "Namespaces" });
+const showTab = (name: RegExp) => userEvent.click(screen.getByRole("tab", { name }));
+/** Open the picker and choose a collection on its tab. */
+async function choose(name: string) {
+  await userEvent.click(picker());
+  await showTab(/^Collections/);
+  await userEvent.click(screen.getByRole("option", { name }));
+}
 const tab = () => getState().workspaces[0].tabs.find((t) => t.id === "tab-a")!;
 
 beforeEach(() => {
@@ -89,34 +96,34 @@ beforeEach(() => {
 });
 
 describe("NamespaceScopePicker", () => {
-  it("offers no collections section, and no heading over the namespaces, while there are none", async () => {
+  it("opens on the namespaces, beside a Collections tab that says how to make one while there are none", async () => {
     paint();
     await userEvent.click(picker());
-    expect(screen.queryByText("Collections")).toBeNull();
+    expect(screen.getByRole("tab", { name: "Namespaces" }).getAttribute("aria-selected")).toBe("true");
     expect(screen.getByRole("option", { name: "prod-eu" })).toBeDefined();
+    await showTab(/^Collections/);
+    expect(screen.getByText("No collections yet. Pick namespaces, then Save as collection…")).toBeDefined();
+    expect(screen.queryByRole("option", { name: "prod-eu" })).toBeNull();
   });
 
-  it("offers the saved namespace collections above the namespaces, most recently used first", async () => {
+  it("offers the saved namespace collections on their tab, most recently used first, and no resource collection", async () => {
     saveCollection({ name: "staging", type: "namespace", patterns: ["staging-*"] });
     saveCollection({ name: "prod", type: "namespace", patterns: ["prod-*"], description: "Production", lastUsedAt: 5 });
     saveCollection({ name: "release", type: "resource", kinds: ["apps/Deployment"] });
     paint();
     await userEvent.click(picker());
-    expect(screen.getByText("Collections")).toBeDefined();
-    expect(screen.getByText("Namespaces")).toBeDefined();
-    const rows = screen.getAllByRole("option").map((o) => o.getAttribute("aria-label"));
-    expect(rows.slice(0, 3)).toEqual(["prod", "staging", "All namespaces"]);
-    // A resource collection is not a namespace scope.
-    expect(rows).not.toContain("release");
+    await showTab(/^Collections/);
+    expect(screen.getAllByRole("option").map((o) => o.getAttribute("aria-label"))).toEqual(["prod", "staging"]);
   });
 
   it("scopes the tab to a chosen collection and says what it came to", async () => {
     saveCollection({ name: "prod", type: "namespace", patterns: ["prod-*"] });
     paint();
-    await userEvent.click(picker());
-    await userEvent.click(screen.getByRole("option", { name: "prod" }));
+    await choose("prod");
     expect(tabNamespaceCollections("tab-a", CONTEXT.stableId)).toEqual(["prod"]);
     await waitFor(() => expect(picker().textContent).toBe("prod · 2 namespaces"));
+    expect(screen.getByRole("tab", { name: "Collections (1)" })).toBeDefined();
+    await showTab(/^Namespaces/);
     expect(core.resolveNamespaceCollections).toHaveBeenCalledWith(
       [expect.objectContaining({ name: "prod" })],
       OPTIONS.items,
@@ -135,21 +142,20 @@ describe("NamespaceScopePicker", () => {
   it("turns into namespaces picked by hand, starting from the collection's, when one is unticked", async () => {
     saveCollection({ name: "prod", type: "namespace", patterns: ["prod-*"] });
     paint();
-    await userEvent.click(picker());
-    await userEvent.click(screen.getByRole("option", { name: "prod" }));
-    await waitFor(() => expect(screen.getByRole("option", { name: "prod-us" }).getAttribute("aria-checked")).toBe("true"));
+    await choose("prod");
+    await waitFor(() => expect(screen.getByRole("tab", { name: "Namespaces (2)" })).toBeDefined());
+    await showTab(/^Namespaces/);
     await userEvent.click(screen.getByRole("option", { name: "prod-us" }));
     expect(tabNamespaceCollections("tab-a", CONTEXT.stableId)).toBeUndefined();
     expect(tab().namespaces).toEqual({ [CONTEXT.stableId]: ["prod-eu"] });
     expect(picker().textContent).toBe("prod-eu");
-    expect(screen.getByRole("option", { name: "prod" }).getAttribute("aria-checked")).toBe("false");
+    expect(screen.getByRole("tab", { name: "Collections" })).toBeDefined();
   });
 
   it("goes back to every namespace on Reset, collection and all", async () => {
     saveCollection({ name: "prod", type: "namespace", patterns: ["prod-*"] });
     paint();
-    await userEvent.click(picker());
-    await userEvent.click(screen.getByRole("option", { name: "prod" }));
+    await choose("prod");
     await userEvent.click(screen.getByRole("button", { name: "Reset" }));
     expect(tabNamespaceCollections("tab-a", CONTEXT.stableId)).toBeUndefined();
     expect(picker().textContent).toBe("All namespaces");
@@ -176,6 +182,15 @@ describe("NamespaceScopePicker", () => {
     expect(tabNamespaceCollections("tab-a", CONTEXT.stableId)).toEqual(["picked"]);
   });
 
+  it("opens on the Collections tab while a collection is in force", async () => {
+    saveCollection({ name: "prod", type: "namespace", patterns: ["prod-*"] });
+    paint();
+    await choose("prod");
+    await userEvent.keyboard("{Escape}");
+    await userEvent.click(picker());
+    expect(screen.getByRole("tab", { name: "Collections (1)" }).getAttribute("aria-selected")).toBe("true");
+  });
+
   it("opens Settings on Collections from Manage collections…", async () => {
     paint();
     await userEvent.click(picker());
@@ -189,8 +204,7 @@ describe("CollectionScopeNotice", () => {
     core.resolveNamespaceCollections.mockResolvedValue(resolution(namespaces, partial));
     saveCollection({ name: "prod", type: "namespace", patterns: ["prod-*"] });
     paint();
-    await userEvent.click(picker());
-    await userEvent.click(screen.getByRole("option", { name: "prod" }));
+    await choose("prod");
     await userEvent.keyboard("{Escape}");
   }
 
@@ -212,8 +226,7 @@ describe("CollectionScopeNotice", () => {
     core.resolveNamespaceCollections.mockReturnValue(new Promise((resolve) => (answer = resolve)));
     saveCollection({ name: "prod", type: "namespace", patterns: ["prod-*"] });
     paint();
-    await userEvent.click(picker());
-    await userEvent.click(screen.getByRole("option", { name: "prod" }));
+    await choose("prod");
     expect(screen.getByText(/Working out which namespaces prod covers on kind-shop/)).toBeDefined();
     await act(async () => answer(resolution(["prod-eu"])));
     expect(screen.queryByText(/Working out/)).toBeNull();

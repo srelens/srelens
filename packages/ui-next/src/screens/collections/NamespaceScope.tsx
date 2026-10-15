@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { selectsNothing, type ClusterContext, type Collection } from "@srelens/core";
 import type { NamespaceOptions } from "@srelens/core/react";
-import { Alert, Button, MultiSelect, PickerGroup, PickerRow, Spinner } from "@srelens/ui-kit";
+import { Alert, Button, MultiSelect, PickerRow, Spinner } from "@srelens/ui-kit";
 import { byRecentUse, useCollections } from "../../lib/collections";
 import { noteNamespaceListing, useCollectionScope } from "../../lib/collectionScope";
 import { openSettings } from "../../lib/settingsRequest";
@@ -14,8 +14,8 @@ import {
 import { CollectionDialog } from "./CollectionEditor";
 
 /**
- * The namespace picker, with namespace collections above the namespaces
- * (#881).
+ * The namespace picker, with namespace collections on a tab beside the
+ * namespaces (#881).
  *
  * Two ways to say where a list looks, chosen in one place: pick namespaces,
  * or pick collections — saved rules such as `prod-*` or `team=platform` — and
@@ -100,28 +100,32 @@ export function NamespaceScopePicker({
         allChecked={!scoped && handPicked.length === 0}
         ariaLabel="Namespaces"
         summary={summary}
-        heading={offered.length > 0 ? "Namespaces" : undefined}
-        leading={
-          offered.length > 0
-            ? () => (
-                <PickerGroup heading="Collections">
-                  {offered.map((c) => (
-                    <PickerRow
-                      key={c.name}
-                      // Prefixed so a collection and a namespace of the same
-                      // name are two rows, not one.
-                      value={`collection:${c.name}`}
-                      label={c.name}
-                      checked={active.has(c.name)}
-                      onSelect={() => toggle(c.name)}
-                      mark="box"
-                      trailing={c.description ? <span className="truncate text-faint">{c.description}</span> : undefined}
-                    />
-                  ))}
-                </PickerGroup>
-              )
-            : undefined
-        }
+        // Two tabs side by side, Namespaces and Collections, each counting
+        // what is chosen on it. The picker opens on the one in force.
+        optionsLabel="Namespaces"
+        openOn={scoped ? "other" : "options"}
+        otherTab={{
+          label: "Collections",
+          count: active.size,
+          rows: () =>
+            offered.map((c) => (
+              <PickerRow
+                key={c.name}
+                // Prefixed so a collection and a namespace of the same name
+                // are two rows, not one.
+                value={`collection:${c.name}`}
+                label={c.name}
+                checked={active.has(c.name)}
+                onSelect={() => toggle(c.name)}
+                mark="box"
+                trailing={c.description ? <span className="truncate text-faint">{c.description}</span> : undefined}
+              />
+            )),
+          empty:
+            offered.length === 0
+              ? "No collections yet. Pick namespaces, then Save as collection…"
+              : "No collection matches the search",
+        }}
         footerExtra={
           <>
             <button

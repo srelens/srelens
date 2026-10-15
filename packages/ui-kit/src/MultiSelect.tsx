@@ -1,5 +1,6 @@
-import type { ReactNode } from "react";
-import { Picker, PickerGroup, PickerRow, optionLabel, type ComboboxOption } from "./picker";
+import { useState, type ReactNode } from "react";
+import { Picker, PickerRow, optionLabel, type ComboboxOption } from "./picker";
+import { Tabs } from "./Tabs";
 import { filled } from "./slot";
 
 export interface MultiSelectProps {
@@ -16,13 +17,24 @@ export interface MultiSelectProps {
   ariaLabel?: string;
   className?: string;
   /**
-   * Rows above the options — another kind of choice the caller makes in the
-   * same place, given a way to close the popover. With it, the options sit
-   * under `heading`.
+   * A second kind of choice made in the same place, on a tab of its own
+   * beside the options — the namespace picker's collections (#881). With it,
+   * the popover opens on a tab strip: the options under `optionsLabel`, this
+   * under its own `label`, each counting what is chosen on it.
    */
-  leading?: (close: () => void) => ReactNode;
-  /** The options' group heading; used when there is a `leading` section. */
-  heading?: string;
+  otherTab?: {
+    label: string;
+    /** How many are chosen on it, shown on the tab when there are any. */
+    count: number;
+    /** Its rows, given a way to close the popover. */
+    rows: (close: () => void) => ReactNode;
+    /** What it says when it has no rows. */
+    empty?: ReactNode;
+  };
+  /** The options' tab, when there is an `otherTab`. */
+  optionsLabel?: string;
+  /** Which tab the popover opens on; the options unless told otherwise. */
+  openOn?: "options" | "other";
   /**
    * What the trigger says, when the selection alone does not say it — the
    * caller's other choice is in force.
@@ -69,12 +81,14 @@ export function MultiSelect({
   searchPlaceholder,
   ariaLabel,
   className,
-  leading,
-  heading,
+  otherTab,
+  optionsLabel = "Options",
+  openOn = "options",
   summary,
   allChecked,
   footerExtra,
 }: MultiSelectProps) {
+  const [view, setView] = useState<"options" | "other">(openOn);
   // A Set, so a repeated value cannot produce two rows with the same key, and
   // iterating it still yields the caller's order.
   const chosen = new Set(selection);
@@ -120,6 +134,23 @@ export function MultiSelect({
   return (
     <Picker
       summary={summary ?? summarize()}
+      // Each time it opens, on the tab the caller says is the one in force.
+      onOpenChange={(open) => open && setView(openOn)}
+      header={
+        otherTab && (
+          <Tabs
+            variant="segmented"
+            label={ariaLabel ? `${ariaLabel}: show` : "Show"}
+            active={view}
+            onChange={(id) => setView(id === "other" ? "other" : "options")}
+            tabs={[
+              { id: "options", label: counted(optionsLabel, selection.length) },
+              { id: "other", label: counted(otherTab.label, otherTab.count) },
+            ]}
+          />
+        )
+      }
+      empty={view === "other" ? otherTab?.empty : undefined}
       ariaLabel={ariaLabel}
       searchPlaceholder={searchPlaceholder}
       className={className}
@@ -128,12 +159,20 @@ export function MultiSelect({
           {/* What the list currently amounts to, in the design's label voice.
               "all" rather than "0 selected", because an empty selection is not
               an empty result — it is the filter switched off. */}
-          <span className="eyebrow flex-1">
-            {selection.length === 0 ? "all" : selection.length} selected
-          </span>
-          <button type="button" className="btn !py-0" onClick={() => onChange(options.map((o) => o.value))}>
-            Select all
-          </button>
+          {otherTab && view === "other" ? (
+            // The caller's tab counts its own, and "Select all" — every
+            // option on the other tab — is not a thing to offer from here.
+            <span className="eyebrow flex-1">{otherTab.count} chosen</span>
+          ) : (
+            <>
+              <span className="eyebrow flex-1">
+                {selection.length === 0 ? "all" : selection.length} selected
+              </span>
+              <button type="button" className="btn !py-0" onClick={() => onChange(options.map((o) => o.value))}>
+                Select all
+              </button>
+            </>
+          )}
           <button type="button" className="btn !py-0" onClick={() => onChange([])}>
             Reset
           </button>
@@ -186,14 +225,14 @@ export function MultiSelect({
           ))}
         </>
         );
-        if (!leading) return rows;
-        return (
-          <>
-            {leading(close)}
-            {heading ? <PickerGroup heading={heading}>{rows}</PickerGroup> : rows}
-          </>
-        );
+        if (otherTab && view === "other") return otherTab.rows(close);
+        return rows;
       }}
     </Picker>
   );
+}
+
+/** "Namespaces (3)", or the bare label when nothing is chosen there. */
+function counted(label: string, count: number): string {
+  return count > 0 ? `${label} (${count})` : label;
 }

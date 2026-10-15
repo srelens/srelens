@@ -130,8 +130,9 @@ as Deployments from the sidebar while you are on Pods, starts with that tab's
 selection and is independent from then on.
 
 **Namespace collections.** In the new design the namespace selector also offers
-*collections*: saved groups of namespaces, listed above the namespaces, most
-recently used first. A collection is any mix of:
+*collections*: saved groups of namespaces, on a **Collections** tab beside the
+**Namespaces** tab, most recently used first. Each tab counts what is chosen on
+it. A collection is any mix of:
 
 - **members**: namespaces that are always included;
 - **patterns**: names with `*` for any run of characters (`prod-*`, `*-canary`,
