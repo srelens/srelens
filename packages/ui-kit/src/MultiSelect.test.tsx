@@ -335,6 +335,23 @@ describe("MultiSelect matches the design's picker", () => {
  * picker's collections (#881) — with a summary of the caller's own, the "all"
  * row's state decided by the caller, and a footer row of its own.
  */
+describe("MultiSelect, without Select all", () => {
+  /** For options that filter the list rather than being parts of it (#885). */
+  it("offers no Select all, and no count on the all row", async () => {
+    open({ allLabel: "All deployments", selectAll: false });
+    await userEvent.click(trigger());
+    expect(screen.queryByRole("button", { name: "Select all" })).toBeNull();
+    expect(screen.getByRole("option", { name: "All deployments" }).textContent).toBe("All deployments");
+    expect(screen.getByRole("button", { name: "Reset" })).toBeDefined();
+  });
+
+  it("says the caller's empty message beside the all row when there are no options", async () => {
+    open({ allLabel: "All deployments", options: [], empty: "Nothing to offer yet" });
+    await userEvent.click(trigger());
+    expect(screen.getByText("Nothing to offer yet")).toBeDefined();
+  });
+});
+
 describe("MultiSelect, with a tab of the caller's own", () => {
   function withTab(props: Partial<Parameters<typeof MultiSelect>[0]> = {}) {
     const onExtra = vi.fn();

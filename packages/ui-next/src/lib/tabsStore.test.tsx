@@ -1266,6 +1266,21 @@ describe("namespace collections on a tab (#881)", () => {
     expect(store.currentWorkspace().closed[0].namespaceCollections).toEqual({ [C]: ["production"] });
   });
 
+  it("move a list narrowed to a renamed resource collection onto its new name (#885)", () => {
+    store.setTabView(tabNow().id, { collections: ["release", "canary"] });
+    store.renameResourceCollection("release", "release-oct");
+    expect(tabNow().view?.collections).toEqual(["release-oct", "canary"]);
+  });
+
+  it("treat a list's resource collections as part of its view, and set them again as a no-op", () => {
+    store.setTabView(tabNow().id, { collections: ["release"] });
+    const heard = vi.fn();
+    const stop = store.subscribe(heard);
+    store.setTabView(tabNow().id, { collections: ["release"] });
+    stop();
+    expect(heard).not.toHaveBeenCalled();
+  });
+
   it("does not wake anyone when no tab names the collection renamed", () => {
     const heard = vi.fn();
     const stop = store.subscribe(heard);

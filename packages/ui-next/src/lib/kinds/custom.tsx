@@ -69,6 +69,7 @@ export function customDescriptor(crd: CrdRef): KindDescriptor<CustomRow> {
   return {
     k8sKind: crd.kind,
     group: crd.group,
+    api: { version: crd.version, plural: crd.plural },
     columns: customColumns(crd),
     source: "poll",
     scope: crd.namespaced ? "namespaced" : "cluster",

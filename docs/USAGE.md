@@ -155,6 +155,21 @@ the preview to keep it as a member. Members can be
 pasted as a list separated by commas or new lines. Collections are kept with your
 settings, so they are the same in every window and survive a restart.
 
+**Resource collections.** A collection can also group *resources* — the services
+going live in next Tuesday's release, a team's deployments — rather than
+namespaces. A resource collection names the kinds it covers (`Deployment`,
+`Service`, or `group/Kind` such as `traefik.io/IngressRoute` for a custom kind),
+plus the same members, patterns and label selector. A member written as a plain
+name matches that name in every namespace in view, so one collection works across
+dev, staging and prod; `namespace/name` pins it to one namespace.
+
+In the list of a kind it covers, choose it in the **Collections** filter beside the
+namespace selector: the list shows only what it matches, inside the namespaces in
+view, and several chosen are their union. Tick rows in a list and choose
+**Save as collection…** in that filter to save them as one, by name. Manage
+both types in **Settings → Collections**, on its **Namespaces** and **Resources**
+tabs.
+
 **Bulk actions.** Select rows with their checkboxes to reveal a bar with **Delete**,
 **Evict** (Pods), and **Rollout restart** (Deployments, StatefulSets, DaemonSets).
 Each is confirmation-gated and reports partial failures.

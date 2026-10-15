@@ -956,6 +956,31 @@ async fn run_suite() {
         .await;
     assert_eq!(checked["problems"][0]["field"], "patterns", "{checked}");
 
+    // Resource collections (#885): every namespace holds the
+    // kube-root-ca.crt ConfigMap, so a pattern finds it in the e2e namespace,
+    // a pinned member finds it again, and a member that does not exist is
+    // marked missing.
+    let resources = h
+        .ok(
+            "collections.resolveResources",
+            json!({
+                "context": ctx,
+                "kind": "ConfigMap",
+                "namespaces": [NS],
+                "collections": [{
+                    "name": "e2e",
+                    "type": "resource",
+                    "kinds": ["ConfigMap"],
+                    "patterns": ["kube-root-*"],
+                    "members": [format!("{NS}/kube-root-ca.crt"), "no-such-configmap"],
+                }],
+            }),
+        )
+        .await;
+    assert_eq!(resources["keys"], json!([format!("{NS}/kube-root-ca.crt")]), "{resources}");
+    assert_eq!(resources["collections"][0]["members"][0]["status"], "found", "{resources}");
+    assert_eq!(resources["collections"][0]["members"][1]["status"], "missing", "{resources}");
+
     let out = h
         .ok("k8s.listPods", json!({ "context": ctx, "namespace": NS }))
         .await;

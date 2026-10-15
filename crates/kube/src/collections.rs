@@ -568,6 +568,192 @@ pub fn resolve_namespaces(collections: &[Collection], listing: &[NamespaceItem],
     NamespaceResolution { namespaces, collections: results, partial: !complete }
 }
 
+// -- resolving resource collections ------------------------------------------
+
+/** One object of a kind, as a metadata-only list returns it. */
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResourceItem {
+    /// Empty for a cluster-scoped kind.
+    pub namespace: String,
+    pub name: String,
+    pub labels: BTreeMap<String, String>,
+}
+
+impl ResourceItem {
+    /// `namespace/name`, the frontend's row key, with the empty namespace for
+    /// a cluster-scoped object.
+    pub fn key(&self) -> String {
+        format!("{}/{}", self.namespace, self.name)
+    }
+}
+
+/// What one resource collection came to on one kind.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
+pub struct ResourceMatch {
+    pub name: String,
+    /// How many objects it covers here.
+    pub matched: usize,
+    /// Each explicit member, and whether anything in scope has that name.
+    pub members: Vec<MemberCheck>,
+    /// Set when the collection could not be applied — invalid, a namespace
+    /// collection, or not one of this kind's — in which case it matched nothing.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub problem: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
+pub struct ResourceResolution {
+    /// The objects any of the collections covers, as `namespace/name`.
+    pub keys: Vec<String>,
+    pub collections: Vec<ResourceMatch>,
+    /// True when some namespace in scope could not be listed.
+    pub partial: bool,
+}
+
+/// `group/Kind` as a collection's `kinds` writes it: the bare `Kind` for the
+/// core group.
+pub fn kind_key(group: &str, kind: &str) -> String {
+    if group.is_empty() {
+        kind.to_string()
+    } else {
+        format!("{group}/{kind}")
+    }
+}
+
+/// Resolve resource collections against the objects of one kind in scope.
+///
+/// The rule is the namespace collections' rule: members ∪ (patterns AND
+/// selector). A member written `name` matches that name in every namespace in
+/// scope — one release collection works in dev, staging and prod — and
+/// `namespace/name` pins it to one. Patterns match the name only; the
+/// namespace is the view's scope. A collection that does not list `kind` is
+/// not applied to it.
+///
+/// `builtin` is the kind's bare name when it is a built-in kind, which a
+/// collection may also name without its group — `Deployment` for
+/// `apps/Deployment`: a list view knows a built-in kind by name, and the name
+/// is unambiguous there. A custom kind is only ever named with its group.
+pub fn resolve_resources(
+    collections: &[Collection],
+    kind: &str,
+    builtin: Option<&str>,
+    items: &[ResourceItem],
+    complete: bool,
+) -> ResourceResolution {
+    let mut covered: HashSet<String> = HashSet::new();
+    let results = collections
+        .iter()
+        .map(|collection| {
+            let refused = |problem: String| ResourceMatch {
+                name: collection.name.clone(),
+                matched: 0,
+                members: Vec::new(),
+                problem: Some(problem),
+            };
+            if collection.collection_type != CollectionType::Resource {
+                return refused("This is not a resource collection.".into());
+            }
+            if !collection.kinds.iter().any(|k| k == kind || builtin == Some(k.as_str())) {
+                return refused(format!("This collection does not cover {kind}."));
+            }
+            if let Some(problem) = validate(collection, &[]).into_iter().next() {
+                return refused(problem.message);
+            }
+            let selector = match collection.label_selector.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+                Some(text) => match parse_selector(text) {
+                    Ok(selector) => Some(selector),
+                    Err(why) => return refused(why),
+                },
+                None => None,
+            };
+            let has_rule = !collection.patterns.is_empty() || selector.is_some();
+            let is_member = |item: &ResourceItem| {
+                collection.members.iter().any(|m| match m.split_once('/') {
+                    Some((namespace, name)) => item.namespace == namespace && item.name == name,
+                    None => item.name == *m,
+                })
+            };
+            let mut matched = 0;
+            for item in items {
+                let hit = is_member(item)
+                    || (has_rule
+                        && (collection.patterns.is_empty() || collection.patterns.iter().any(|p| glob_match(p, &item.name)))
+                        && selector.as_ref().is_none_or(|s| s.matches(&item.labels)));
+                if hit {
+                    matched += 1;
+                    covered.insert(item.key());
+                }
+            }
+            let mut seen = HashSet::new();
+            let members = collection
+                .members
+                .iter()
+                .filter(|m| seen.insert(m.as_str()))
+                .map(|m| {
+                    let found = items.iter().any(|item| match m.split_once('/') {
+                        Some((namespace, name)) => item.namespace == namespace && item.name == name,
+                        None => item.name == *m,
+                    });
+                    let status = if found {
+                        MemberStatus::Found
+                    } else if complete {
+                        MemberStatus::Missing
+                    } else {
+                        MemberStatus::Unknown
+                    };
+                    MemberCheck { name: m.clone(), status }
+                })
+                .collect();
+            ResourceMatch { name: collection.name.clone(), matched, members, problem: None }
+        })
+        .collect();
+    // In the listing's order, which is the API server's.
+    let keys = items.iter().map(ResourceItem::key).filter(|k| covered.contains(k)).collect::<Vec<_>>();
+    let mut once = HashSet::new();
+    let keys = keys.into_iter().filter(|k| once.insert(k.clone())).collect();
+    ResourceResolution { keys, collections: results, partial: !complete }
+}
+
+/// The objects of `ar` in scope, names and labels only: one metadata-only
+/// list per namespace in `namespaces`, or one across the cluster when there
+/// are none — for a cluster-scoped kind, always. A namespace whose list is
+/// refused costs that namespace, and the answer says it is partial; every
+/// namespace refused is an error.
+pub async fn list_items(
+    client: kube::Client,
+    ar: &kube::core::ApiResource,
+    namespaced: bool,
+    namespaces: &[String],
+) -> Result<(Vec<ResourceItem>, bool), CapabilityError> {
+    use kube::api::{Api, DynamicObject, ListParams};
+    let scopes: Vec<Option<&str>> = if !namespaced || namespaces.is_empty() {
+        vec![None]
+    } else {
+        namespaces.iter().map(|ns| Some(ns.as_str())).collect()
+    };
+    let mut items = Vec::new();
+    let mut failures = Vec::new();
+    for scope in &scopes {
+        let api: Api<DynamicObject> = match scope {
+            Some(ns) => Api::namespaced_with(client.clone(), ns, ar),
+            None => Api::all_with(client.clone(), ar),
+        };
+        match tokio::time::timeout(crate::connect::request_timeout(), api.list_metadata(&ListParams::default())).await {
+            Ok(Ok(list)) => items.extend(list.items.into_iter().map(|o| ResourceItem {
+                namespace: o.metadata.namespace.unwrap_or_default(),
+                name: o.metadata.name.unwrap_or_default(),
+                labels: o.metadata.labels.unwrap_or_default(),
+            })),
+            Ok(Err(e)) => failures.push(e.to_string()),
+            Err(_) => failures.push("listing timed out".into()),
+        }
+    }
+    if failures.len() == scopes.len() {
+        return Err(CapabilityError::Handler(failures.join("; ")));
+    }
+    Ok((items, failures.is_empty()))
+}
+
 // -- capabilities ------------------------------------------------------------------
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -634,6 +820,60 @@ pub fn resolve_namespaces_capability() -> Capability {
                 return Err(CapabilityError::InvalidInput(format!("at most {MAX_COLLECTIONS} collections")));
             }
             Ok(resolve_namespaces(&input.collections, &input.namespaces, input.complete))
+        },
+    )
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ResolveResourcesIn {
+    pub context: String,
+    /// The kind the view lists, e.g. "Deployment".
+    pub kind: String,
+    /// A custom resource's group, version and plural, as getObject takes
+    /// them; left out for a built-in kind.
+    #[serde(default)]
+    pub group: Option<String>,
+    #[serde(default)]
+    pub version: Option<String>,
+    #[serde(default)]
+    pub plural: Option<String>,
+    /// The view's namespace scope; empty for every namespace.
+    #[serde(default)]
+    pub namespaces: Vec<String>,
+    /// The resource collections to apply; the result is their union.
+    pub collections: Vec<Collection>,
+}
+
+/// `collections.resolveResources` — which objects of a kind a set of resource
+/// collections covers, in the view's namespace scope.
+pub fn resolve_resources_capability(cache: std::sync::Arc<crate::client_cache::ClientCache>) -> Capability {
+    Capability::typed::<ResolveResourcesIn, ResourceResolution, _, _>(
+        "collections.resolveResources",
+        "resolve resource collections for one kind in a namespace scope: lists the kind's objects \
+         (names and labels only) and returns the ones the collections cover, as namespace/name, \
+         with each member marked found, missing or unknown",
+        Annotations::READ_ONLY,
+        move |input: ResolveResourcesIn| {
+            let cache = cache.clone();
+            async move {
+                if input.collections.len() > MAX_COLLECTIONS {
+                    return Err(CapabilityError::InvalidInput(format!("at most {MAX_COLLECTIONS} collections")));
+                }
+                let (ar, namespaced) = crate::manifest::resolve_kind(
+                    &input.kind,
+                    None,
+                    input.group.as_deref(),
+                    input.version.as_deref(),
+                    input.plural.as_deref(),
+                )?;
+                // A custom resource's scope is not known from its name: one
+                // asked for in namespaces is namespaced.
+                let namespaced = namespaced || (input.plural.is_some() && !input.namespaces.is_empty());
+                let client = cache.get(&input.context).await.map_err(CapabilityError::Handler)?;
+                let (items, complete) = list_items(client, &ar, namespaced, &input.namespaces).await?;
+                let builtin = input.plural.is_none().then_some(ar.kind.as_str());
+                Ok(resolve_resources(&input.collections, &kind_key(&ar.group, &ar.kind), builtin, &items, complete))
+            }
         },
     )
 }
@@ -940,6 +1180,231 @@ mod tests {
         // Generous, so a loaded CI runner on a debug build does not flake;
         // a release build on a laptop is far under #885's 50 ms.
         assert!(took < std::time::Duration::from_secs(2), "{took:?}");
+    }
+
+    // -- resource collections -------------------------------------------------
+
+    fn resource_collection(name: &str, kinds: &[&str]) -> Collection {
+        Collection {
+            name: name.into(),
+            description: String::new(),
+            collection_type: CollectionType::Resource,
+            kinds: strings(kinds),
+            members: vec![],
+            patterns: vec![],
+            label_selector: None,
+        }
+    }
+
+    fn deployments() -> Vec<ResourceItem> {
+        let item = |namespace: &str, name: &str, labels: &[(&str, &str)]| ResourceItem {
+            namespace: namespace.into(),
+            name: name.into(),
+            labels: labels.iter().map(|(k, v)| ((*k).into(), (*v).into())).collect(),
+        };
+        vec![
+            item("dev", "payment-service", &[("team", "shop")]),
+            item("dev", "order-service", &[("team", "shop")]),
+            item("prod", "payment-service", &[("team", "shop")]),
+            item("prod", "radar-app", &[("team", "platform")]),
+            item("prod", "radar-app-canary", &[("team", "platform"), ("track", "canary")]),
+        ]
+    }
+
+    fn keys(r: &ResourceResolution) -> Vec<&str> {
+        r.keys.iter().map(String::as_str).collect()
+    }
+
+    /// #885's release group: names with nothing in common, the same
+    /// collection across dev, staging and prod.
+    #[test]
+    fn a_plain_member_matches_its_name_in_every_namespace_in_scope() {
+        let mut c = resource_collection("release", &["apps/Deployment"]);
+        c.members = strings(&["payment-service", "shipment-tracker"]);
+        let r = resolve_resources(&[c], "apps/Deployment", None, &deployments(), true);
+        assert_eq!(keys(&r), ["dev/payment-service", "prod/payment-service"]);
+        let checks: Vec<(&str, MemberStatus)> =
+            r.collections[0].members.iter().map(|m| (m.name.as_str(), m.status)).collect();
+        assert_eq!(checks, [("payment-service", MemberStatus::Found), ("shipment-tracker", MemberStatus::Missing)]);
+        assert_eq!(r.collections[0].matched, 2);
+    }
+
+    #[test]
+    fn a_namespace_slash_name_member_is_pinned_to_its_namespace() {
+        let mut c = resource_collection("release", &["apps/Deployment"]);
+        c.members = strings(&["prod/payment-service"]);
+        assert_eq!(keys(&resolve_resources(&[c], "apps/Deployment", None, &deployments(), true)), ["prod/payment-service"]);
+    }
+
+    #[test]
+    fn patterns_and_a_selector_match_as_they_do_for_namespaces_and_members_are_not_filtered() {
+        let mut c = resource_collection("platform canaries", &["apps/Deployment"]);
+        c.patterns = strings(&["*-canary", "order-*"]);
+        c.label_selector = Some("team=platform".into());
+        c.members = strings(&["dev/order-service"]);
+        let r = resolve_resources(&[c], "apps/Deployment", None, &deployments(), true);
+        assert_eq!(keys(&r), ["dev/order-service", "prod/radar-app-canary"]);
+    }
+
+    #[test]
+    fn a_resource_selector_alone_matches_everything_it_selects() {
+        let mut c = resource_collection("platform", &["apps/Deployment"]);
+        c.label_selector = Some("team=platform".into());
+        assert_eq!(
+            keys(&resolve_resources(&[c], "apps/Deployment", None, &deployments(), true)),
+            ["prod/radar-app", "prod/radar-app-canary"]
+        );
+    }
+
+    #[test]
+    fn several_collections_are_unioned_once_each() {
+        let mut a = resource_collection("a", &["apps/Deployment"]);
+        a.members = strings(&["payment-service"]);
+        let mut b = resource_collection("b", &["apps/Deployment"]);
+        b.patterns = strings(&["payment-*"]);
+        let r = resolve_resources(&[a, b], "apps/Deployment", None, &deployments(), true);
+        assert_eq!(keys(&r), ["dev/payment-service", "prod/payment-service"]);
+    }
+
+    #[test]
+    fn a_collection_of_other_kinds_or_a_namespace_collection_is_not_applied() {
+        let mut services = resource_collection("svc", &["Service"]);
+        services.patterns = strings(&["*"]);
+        let mut namespaces = namespace_collection("prod");
+        namespaces.patterns = strings(&["*"]);
+        let r = resolve_resources(&[services, namespaces], "apps/Deployment", Some("Deployment"), &deployments(), true);
+        assert!(r.keys.is_empty());
+        assert!(r.collections[0].problem.as_deref().unwrap().contains("does not cover apps/Deployment"));
+        assert!(r.collections[1].problem.as_deref().unwrap().contains("not a resource collection"));
+    }
+
+    #[test]
+    fn a_cluster_scoped_kind_is_matched_by_name_alone_and_says_unknown_when_partial() {
+        let nodes = vec![ResourceItem { namespace: String::new(), name: "worker-1".into(), labels: BTreeMap::new() }];
+        let mut c = resource_collection("workers", &["Node"]);
+        c.members = strings(&["worker-1", "worker-2"]);
+        let r = resolve_resources(&[c], "Node", Some("Node"), &nodes, false);
+        assert_eq!(keys(&r), ["/worker-1"]);
+        assert!(r.partial);
+        assert_eq!(r.collections[0].members[1].status, MemberStatus::Unknown);
+    }
+
+    /// A client that records each request line and answers each namespace's
+    /// list from `answers`, or with a 403 for one it does not name.
+    fn metadata_client(answers: Vec<(&'static str, serde_json::Value)>) -> (kube::Client, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let log = seen.clone();
+        let answers = std::sync::Arc::new(answers);
+        let service = tower::service_fn(move |request: http::Request<kube::client::Body>| {
+            let log = log.clone();
+            let answers = answers.clone();
+            async move {
+                let uri = request.uri().to_string();
+                log.lock().unwrap().push(format!("{} {} {}", request.method(), uri, request.headers().get("accept").and_then(|v| v.to_str().ok()).unwrap_or("")));
+                let found = answers.iter().find(|(path, _)| uri.starts_with(path)).map(|(_, body)| body.clone());
+                let (status, body) = match found {
+                    Some(body) => (200, body),
+                    None => (403, serde_json::json!({"apiVersion": "v1", "kind": "Status", "status": "Failure", "code": 403, "reason": "Forbidden", "message": "forbidden"})),
+                };
+                Ok::<_, std::convert::Infallible>(
+                    http::Response::builder()
+                        .status(status)
+                        .header("content-type", "application/json")
+                        .body(kube::client::Body::from(body.to_string().into_bytes()))
+                        .unwrap(),
+                )
+            }
+        });
+        (kube::Client::new(service, "default"), seen)
+    }
+
+    fn metadata_list(items: &[(&str, &str, &[(&str, &str)])]) -> serde_json::Value {
+        serde_json::json!({
+            "apiVersion": "meta.k8s.io/v1",
+            "kind": "PartialObjectMetadataList",
+            "metadata": {},
+            "items": items.iter().map(|(ns, name, labels)| serde_json::json!({
+                "apiVersion": "meta.k8s.io/v1",
+                "kind": "PartialObjectMetadata",
+                "metadata": {"name": name, "namespace": ns, "labels": labels.iter().map(|(k, v)| (k.to_string(), serde_json::json!(v))).collect::<serde_json::Map<_, _>>()},
+            })).collect::<Vec<_>>(),
+        })
+    }
+
+    /// Names and labels only, one list per namespace in scope: a credential
+    /// scoped to a few namespaces is refused a cluster-wide list (#688), and
+    /// the objects themselves are not needed to match a collection.
+    #[tokio::test]
+    async fn lists_the_kind_metadata_only_one_namespace_at_a_time_and_says_when_one_was_refused() {
+        let (client, seen) = metadata_client(vec![(
+            "/apis/apps/v1/namespaces/dev/deployments",
+            metadata_list(&[("dev", "payment-service", &[("team", "shop")])]),
+        )]);
+        let ar = kube::core::ApiResource::from_gvk(&kube::core::GroupVersionKind::gvk("apps", "v1", "Deployment"));
+        let (items, complete) = list_items(client, &ar, true, &strings(&["dev", "prod"])).await.unwrap();
+        assert_eq!(items, [ResourceItem {
+            namespace: "dev".into(),
+            name: "payment-service".into(),
+            labels: BTreeMap::from([("team".to_string(), "shop".to_string())]),
+        }]);
+        assert!(!complete, "prod was refused");
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen.len(), 2);
+        assert!(seen[0].starts_with("GET /apis/apps/v1/namespaces/dev/deployments"), "{}", seen[0]);
+        assert!(seen[0].contains("PartialObjectMetadataList"), "metadata only: {}", seen[0]);
+    }
+
+    #[tokio::test]
+    async fn lists_across_the_cluster_with_no_scope_and_fails_when_every_list_is_refused() {
+        let (client, seen) = metadata_client(vec![("/apis/apps/v1/deployments", metadata_list(&[("dev", "a", &[])]))]);
+        let ar = kube::core::ApiResource::from_gvk(&kube::core::GroupVersionKind::gvk("apps", "v1", "Deployment"));
+        let (items, complete) = list_items(client, &ar, true, &[]).await.unwrap();
+        assert_eq!(items.len(), 1);
+        assert!(complete);
+        assert!(seen.lock().unwrap()[0].starts_with("GET /apis/apps/v1/deployments"));
+
+        let (client, _) = metadata_client(vec![]);
+        assert!(matches!(list_items(client, &ar, true, &strings(&["dev"])).await, Err(CapabilityError::Handler(_))));
+    }
+
+    /// A list view knows a built-in kind by name: a collection saved from the
+    /// Deployments list says `Deployment`, and covers `apps/Deployment`. A
+    /// custom kind of the same name in another group is not covered by it.
+    #[test]
+    fn a_built_in_kind_may_be_named_without_its_group_and_a_custom_kind_may_not() {
+        let mut bare = resource_collection("release", &["Deployment"]);
+        bare.members = strings(&["payment-service"]);
+        let r = resolve_resources(&[bare.clone()], "apps/Deployment", Some("Deployment"), &deployments(), true);
+        assert_eq!(keys(&r), ["dev/payment-service", "prod/payment-service"]);
+        let custom = resolve_resources(&[bare], "acme.io/Deployment", None, &deployments(), true);
+        assert!(custom.keys.is_empty());
+        assert!(custom.collections[0].problem.is_some());
+    }
+
+    #[test]
+    fn the_kind_key_drops_the_core_group() {
+        assert_eq!(kind_key("", "Service"), "Service");
+        assert_eq!(kind_key("apps", "Deployment"), "apps/Deployment");
+    }
+
+    #[test]
+    fn resolves_ten_thousand_resources_without_trouble() {
+        let items: Vec<ResourceItem> = (0..10_000)
+            .map(|i| ResourceItem {
+                namespace: format!("team-{}", i % 40),
+                name: format!("svc-{i}"),
+                labels: BTreeMap::from([("tier".to_string(), if i % 3 == 0 { "web" } else { "api" }.to_string())]),
+            })
+            .collect();
+        let mut c = resource_collection("web", &["Service"]);
+        c.patterns = strings(&["svc-*"]);
+        c.label_selector = Some("tier=web".into());
+        c.members = (0..300).map(|i| format!("svc-{i}")).collect();
+        let started = std::time::Instant::now();
+        let r = resolve_resources(&[c], "Service", Some("Service"), &items, true);
+        let took = started.elapsed();
+        assert!(r.keys.len() > 3000);
+        assert!(took < std::time::Duration::from_secs(5), "{took:?}");
     }
 
     // -- the stored document ----------------------------------------------------

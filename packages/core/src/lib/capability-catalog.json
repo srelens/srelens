@@ -10,6 +10,16 @@
     "uiOnly": true
   },
   {
+    "id": "collections.resolveResources",
+    "readOnly": true,
+    "destructive": false,
+    "requiresConfirm": false,
+    "sensitive": false,
+    "impact": "low",
+    "confirm": null,
+    "uiOnly": true
+  },
+  {
     "id": "collections.validate",
     "readOnly": true,
     "destructive": false,

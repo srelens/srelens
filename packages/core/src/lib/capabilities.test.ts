@@ -244,6 +244,7 @@ describe("UI-only capabilities (#575)", () => {
     // have nothing to pass these.
     expect(uiOnly).toEqual([
       "collections.resolveNamespaces",
+      "collections.resolveResources",
       "collections.validate",
       "extensions.callOperation",
       "extensions.inspect",

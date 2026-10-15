@@ -148,6 +148,68 @@ export async function resolveNamespaceCollections(
   });
 }
 
+export interface ResourceMatch {
+  name: string;
+  /** How many objects it covers here. */
+  matched: number;
+  members: Array<{ name: string; status: MemberStatus }>;
+  /** Set when it could not be applied to this kind; it then matched nothing. */
+  problem?: string;
+}
+
+export interface ResourceResolution {
+  /** The objects any of the collections covers, as `namespace/name`. */
+  keys: string[];
+  collections: ResourceMatch[];
+  /** True when some namespace in scope could not be listed. */
+  partial: boolean;
+}
+
+/** A kind as a list view names it; a custom kind also by its API coordinates. */
+export interface KindRef {
+  kind: string;
+  group?: string;
+  version?: string;
+  plural?: string;
+}
+
+/**
+ * The objects of `kind` that `collections` cover on `context`, within the
+ * namespace scope (empty for every namespace). The backend lists the kind's
+ * names and labels itself, so a selector is matched against labels the list
+ * rows do not carry.
+ */
+export async function resolveResourceCollections(
+  context: string,
+  kind: KindRef,
+  namespaces: string[],
+  collections: Collection[],
+  invoke: Invoker = invokeCapability,
+): Promise<ResourceResolution> {
+  const custom = kind.group && kind.version && kind.plural ? { group: kind.group, version: kind.version, plural: kind.plural } : {};
+  return invoke<ResourceResolution>("collections.resolveResources", {
+    context,
+    kind: kind.kind,
+    ...custom,
+    namespaces,
+    collections: collections.map(forBackend),
+  });
+}
+
+/**
+ * Whether a resource collection lists `kind`: by `group/Kind`, and for a
+ * built-in kind whose group the view does not carry, by the kind's name.
+ */
+export function collectionCoversKind(collection: Collection, kind: KindRef): boolean {
+  if (collection.type !== "resource") return false;
+  return (collection.kinds ?? []).some((k) => {
+    const slash = k.lastIndexOf("/");
+    const [group, name] = slash < 0 ? ["", k] : [k.slice(0, slash), k.slice(slash + 1)];
+    if (name !== kind.kind) return false;
+    return kind.group ? group === kind.group : true;
+  });
+}
+
 /** The fields the backend reads; the rest stay in the frontend's document. */
 function forBackend(c: Collection) {
   return {

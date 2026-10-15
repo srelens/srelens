@@ -202,7 +202,7 @@ fn resolve_api_resource(input: &ManifestIn) -> Result<(ApiResource, bool), Capab
 /// namespace". Otherwise the kind must be in the built-in table, and the
 /// refusal says what to pass for one that is not: an agent that is told only
 /// "unsupported kind" does not learn that the tool can read it.
-fn resolve_kind(
+pub(crate) fn resolve_kind(
     kind: &str,
     namespace: Option<&str>,
     group: Option<&str>,

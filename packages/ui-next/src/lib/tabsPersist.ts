@@ -57,6 +57,10 @@ function parseView(v: unknown): Tab["view"] | undefined {
   if (v.filterKey === null) view.filterKey = null;
   else if (isString(v.filterKey)) view.filterKey = v.filterKey;
   if (typeof v.regex === "boolean") view.regex = v.regex;
+  if (Array.isArray(v.collections)) {
+    const collections = v.collections.filter(isString);
+    if (collections.length > 0) view.collections = collections;
+  }
   // Too long is dropped, not cut: half a query filters differently from the
   // one that was typed, and a restored tab should show what it was left with.
   if (isString(v.query) && v.query.length <= MAX_SAVED_QUERY) view.query = v.query;

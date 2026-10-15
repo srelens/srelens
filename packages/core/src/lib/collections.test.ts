@@ -1,6 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
 import {
+  collectionCoversKind,
   parseCollectionsDocument,
+  resolveResourceCollections,
   parseMemberList,
   resolveNamespaceCollections,
   validateCollection,
@@ -106,5 +108,37 @@ describe("the backend calls", () => {
       ],
       complete: false,
     });
+  });
+});
+
+describe("resource collections (#885)", () => {
+  const release: Collection = { name: "release", type: "resource", kinds: ["apps/Deployment", "Service"], members: ["payment-service"] };
+
+  it("resolve a built-in kind by its name, in the namespaces in view", async () => {
+    const invoke = vi.fn().mockResolvedValue({ keys: [], collections: [], partial: false });
+    await resolveResourceCollections("kind-dev", { kind: "Deployment" }, ["dev", "prod"], [release], invoke);
+    expect(invoke).toHaveBeenCalledExactlyOnceWith("collections.resolveResources", {
+      context: "kind-dev",
+      kind: "Deployment",
+      namespaces: ["dev", "prod"],
+      collections: [
+        { name: "release", description: "", type: "resource", kinds: ["apps/Deployment", "Service"], members: ["payment-service"], patterns: [] },
+      ],
+    });
+  });
+
+  it("resolve a custom kind by its group, version and plural", async () => {
+    const invoke = vi.fn().mockResolvedValue({ keys: [], collections: [], partial: false });
+    await resolveResourceCollections("kind-dev", { kind: "IngressRoute", group: "traefik.io", version: "v1alpha1", plural: "ingressroutes" }, [], [], invoke);
+    expect(invoke.mock.calls[0][1]).toMatchObject({ kind: "IngressRoute", group: "traefik.io", version: "v1alpha1", plural: "ingressroutes" });
+  });
+
+  it("cover a kind they list, by group for a custom kind and by name for a built-in one", () => {
+    expect(collectionCoversKind(release, { kind: "Deployment" })).toBe(true);
+    expect(collectionCoversKind(release, { kind: "Service" })).toBe(true);
+    expect(collectionCoversKind(release, { kind: "ConfigMap" })).toBe(false);
+    expect(collectionCoversKind(release, { kind: "Deployment", group: "acme.io" })).toBe(false);
+    expect(collectionCoversKind({ ...release, kinds: ["acme.io/Deployment"] }, { kind: "Deployment", group: "acme.io" })).toBe(true);
+    expect(collectionCoversKind({ ...release, type: "namespace" }, { kind: "Deployment" })).toBe(false);
   });
 });

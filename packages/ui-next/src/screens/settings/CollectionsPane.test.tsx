@@ -9,7 +9,7 @@ import { settingsStorage, type ClusterContext } from "@srelens/core";
   disconnect() {}
 };
 
-const core = vi.hoisted(() => ({ resolveNamespaceCollections: vi.fn(), validateCollection: vi.fn() }));
+const core = vi.hoisted(() => ({ resolveNamespaceCollections: vi.fn(), resolveResourceCollections: vi.fn(), validateCollection: vi.fn() }));
 vi.mock("@srelens/core", async (orig) => ({ ...(await orig<typeof import("@srelens/core")>()), ...core }));
 const active = vi.hoisted(() => ({ context: undefined as ClusterContext | undefined }));
 vi.mock("../../lib/clusters", async (orig) => ({
@@ -40,6 +40,7 @@ beforeEach(() => {
   __resetCollectionScopeForTests();
   core.validateCollection.mockReset().mockResolvedValue([]);
   core.resolveNamespaceCollections.mockReset();
+  core.resolveResourceCollections.mockReset();
   active.context = undefined;
 });
 
@@ -189,6 +190,45 @@ describe("CollectionsPane", () => {
     ));
     await userEvent.click(within(dialog).getByRole("button", { name: "Save" }));
     expect(getCollections().find((c) => c.name === "prod")?.patterns).toEqual(["live-*"]);
+  });
+
+  /** #885: one page, two tabs, Namespaces and Resources. */
+  it("lists the resource collections on their own tab, with the kinds each covers", async () => {
+    saveCollection({ name: "prod", type: "namespace", patterns: ["prod-*"] });
+    saveCollection({ name: "release", type: "resource", kinds: ["apps/Deployment", "Service"], members: ["payment-service"] });
+    render(<CollectionsPane />);
+    expect(screen.getByRole("tab", { name: "Resources (1)" })).toBeDefined();
+    await userEvent.click(screen.getByRole("tab", { name: "Resources (1)" }));
+    expect([...document.querySelectorAll("[data-collection]")].map((el) => el.getAttribute("data-collection"))).toEqual(["release"]);
+    expect(within(row("release")).getByText("apps/Deployment, Service")).toBeDefined();
+  });
+
+  it("creates a resource collection on the Resources tab and previews its first kind on the cluster in focus", async () => {
+    active.context = SHOP;
+    core.resolveResourceCollections.mockResolvedValue({
+      keys: ["dev/payment-service", "prod/payment-service"],
+      collections: [{ name: "release", matched: 2, members: [{ name: "payment-service", status: "found" }] }],
+      partial: false,
+    });
+    render(<CollectionsPane />);
+    await userEvent.click(screen.getByRole("tab", { name: "Resources (0)" }));
+    await userEvent.click(screen.getByRole("button", { name: "New collection…" }));
+    const dialog = screen.getByRole("dialog");
+    expect(within(dialog).getByText("New resource collection")).toBeDefined();
+    await userEvent.type(within(dialog).getByRole("textbox", { name: "Name" }), "release");
+    await userEvent.type(within(dialog).getByRole("textbox", { name: "Kinds" }), "apps/Deployment");
+    await userEvent.type(within(dialog).getByLabelText("Members"), "payment-service");
+    expect(await within(dialog).findByText("Matches 2 Deployment on kind-shop.")).toBeDefined();
+    expect(within(dialog).getByText("dev, prod")).toBeDefined();
+    expect(core.resolveResourceCollections).toHaveBeenLastCalledWith(
+      "kind-shop",
+      { kind: "Deployment" },
+      [],
+      [{ name: "release", type: "resource", kinds: ["apps/Deployment"], members: ["payment-service"] }],
+    );
+    await waitFor(() => expect(within(dialog).getByRole("button", { name: "Save collection" }).hasAttribute("disabled")).toBe(false));
+    await userEvent.click(within(dialog).getByRole("button", { name: "Save collection" }));
+    expect(getCollections()).toEqual([{ name: "release", type: "resource", kinds: ["apps/Deployment"], members: ["payment-service"] }]);
   });
 
   it("deletes several at once, after asking", async () => {

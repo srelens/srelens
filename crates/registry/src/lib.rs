@@ -656,6 +656,7 @@ fn build_with(
     // settings, so an agent has nothing to pass them.
     reg.register(srelens_kube::collections::validate_capability().only_in_the_ui());
     reg.register(srelens_kube::collections::resolve_namespaces_capability().only_in_the_ui());
+    reg.register(srelens_kube::collections::resolve_resources_capability(cache.clone()).only_in_the_ui());
     reg.register(srelens_kube::schema::open_api_schema_capability(
         cache.clone(),
     ));
@@ -998,6 +999,7 @@ mod tests {
             ui_only,
             [
                 "collections.resolveNamespaces",
+                "collections.resolveResources",
                 "collections.validate",
                 "extensions.callOperation",
                 "extensions.inspect",

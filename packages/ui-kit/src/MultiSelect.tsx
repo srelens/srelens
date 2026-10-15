@@ -33,6 +33,15 @@ export interface MultiSelectProps {
   };
   /** The options' tab, when there is an `otherTab`. */
   optionsLabel?: string;
+  /**
+   * Whether to offer Select all and to count the options on the "all" row.
+   * Off for a picker whose options are filters of the list rather than parts
+   * of it, where every one of them at once is not a thing anyone wants and
+   * the count reads as a count of the list.
+   */
+  selectAll?: boolean;
+  /** What the options say when there are none; "No results" otherwise. */
+  empty?: ReactNode;
   /** Which tab the popover opens on; the options unless told otherwise. */
   openOn?: "options" | "other";
   /**
@@ -84,6 +93,8 @@ export function MultiSelect({
   otherTab,
   optionsLabel = "Options",
   openOn = "options",
+  selectAll = true,
+  empty,
   summary,
   allChecked,
   footerExtra,
@@ -150,7 +161,7 @@ export function MultiSelect({
           />
         )
       }
-      empty={view === "other" ? otherTab?.empty : undefined}
+      empty={view === "other" ? otherTab?.empty : empty}
       ariaLabel={ariaLabel}
       searchPlaceholder={searchPlaceholder}
       className={className}
@@ -168,9 +179,11 @@ export function MultiSelect({
               <span className="eyebrow flex-1">
                 {selection.length === 0 ? "all" : selection.length} selected
               </span>
-              <button type="button" className="btn !py-0" onClick={() => onChange(options.map((o) => o.value))}>
-                Select all
-              </button>
+              {selectAll && (
+                <button type="button" className="btn !py-0" onClick={() => onChange(options.map((o) => o.value))}>
+                  Select all
+                </button>
+              )}
             </>
           )}
           <button type="button" className="btn !py-0" onClick={() => onChange([])}>
@@ -193,7 +206,7 @@ export function MultiSelect({
               onSelect={() => onChange([])}
               // A check, not a box: this is not one more thing to switch on
               // beside the others, it is the absence of any of them.
-              trailing={<span className="path text-faint">{options.length}</span>}
+              trailing={selectAll ? <span className="path text-faint">{options.length}</span> : undefined}
             />
           )}
           {ordered.map((option) => (
@@ -226,6 +239,16 @@ export function MultiSelect({
         </>
         );
         if (otherTab && view === "other") return otherTab.rows(close);
+        // With no options the list is never empty — the "all" row is there —
+        // so the caller's message would never show as the list's own.
+        if (options.length === 0 && empty !== undefined) {
+          return (
+            <>
+              {rows}
+              <p className="px-3 py-3 text-center text-[0.75rem] text-faint">{empty}</p>
+            </>
+          );
+        }
         return rows;
       }}
     </Picker>
