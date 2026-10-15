@@ -87,6 +87,12 @@ describe("useProtectedConfirm", () => {
     expect(document.getElementById(describedBy)?.textContent).toBe("prod-eu is protected (workspace Default).");
   });
 
+  it("shows what to type as the field's visible prompt, not only as its accessible name", () => {
+    protect();
+    render(<Typed context="prod-eu" />);
+    expect(field().getAttribute("placeholder")).toBe("Type prod-eu to confirm");
+  });
+
   it("refuses until the trimmed text is the name exactly, case included", async () => {
     protect();
     render(<Typed context="prod-eu" />);

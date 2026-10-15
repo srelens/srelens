@@ -48,6 +48,7 @@ export function useProtectedConfirm(contextName: string | null | undefined): Pro
           value={typed}
           onValueChange={setTyped}
           aria-label={`Type ${protection.name} to confirm`}
+          placeholder={`Type ${protection.name} to confirm`}
           aria-describedby={lineId}
         />
       </div>
