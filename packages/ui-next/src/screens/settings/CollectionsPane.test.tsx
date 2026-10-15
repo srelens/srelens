@@ -95,7 +95,7 @@ describe("CollectionsPane", () => {
   });
 
   /** #885: each explicit member is marked found or not found, so a typo shows before go-live. */
-  it("previews what a collection matches on the cluster in focus, member by member", async () => {
+  it("previews what a collection matches on the cluster in focus, and marks a member it does not have", async () => {
     active.context = SHOP;
     noteNamespaceListing(SHOP.stableId, [{ name: "payments" }, { name: "checkout" }], true);
     core.resolveNamespaceCollections.mockResolvedValue({
@@ -118,14 +118,60 @@ describe("CollectionsPane", () => {
     await userEvent.type(within(dialog).getByRole("textbox", { name: "Name" }), "release");
     await userEvent.type(within(dialog).getByLabelText("Members"), "payments, paymnets");
     expect(await within(dialog).findByText("Matches 1 namespace on kind-shop.")).toBeDefined();
-    const members = within(dialog).getByRole("list", { name: "Members" });
-    expect(within(members).getByText("found")).toBeDefined();
-    expect(within(members).getByText("not found")).toBeDefined();
+    const rows = within(dialog).getByRole("list", { name: "Matched namespaces" });
+    expect(within(rows).getByText("member")).toBeDefined();
+    expect(within(rows).getByText("not found")).toBeDefined();
     expect(core.resolveNamespaceCollections).toHaveBeenLastCalledWith(
       [{ name: "release", type: "namespace", members: ["payments", "paymnets"] }],
       [{ name: "payments" }, { name: "checkout" }],
       true,
     );
+  });
+
+  /** A pattern typed before the name is worth seeing at once. */
+  it("previews a pattern before the collection has a name", async () => {
+    active.context = SHOP;
+    noteNamespaceListing(SHOP.stableId, [{ name: "team-a-api" }, { name: "team-b-api" }], true);
+    core.validateCollection.mockResolvedValue([{ field: "name", message: "Give the collection a name." }]);
+    core.resolveNamespaceCollections.mockResolvedValue({
+      namespaces: ["team-a-api"],
+      collections: [{ name: "preview", matched: ["team-a-api"], members: [] }],
+      partial: false,
+    });
+    render(<CollectionsPane />);
+    await userEvent.click(screen.getByRole("button", { name: "New collection…" }));
+    const dialog = screen.getByRole("dialog");
+    await userEvent.type(within(dialog).getByLabelText("Patterns"), "team-a-*");
+    expect(await within(dialog).findByText("Matches 1 namespace on kind-shop.")).toBeDefined();
+    expect(core.resolveNamespaceCollections).toHaveBeenLastCalledWith(
+      [{ name: "preview", type: "namespace", patterns: ["team-a-*"] }],
+      expect.any(Array),
+      true,
+    );
+    // The name is still asked for before saving.
+    expect(within(dialog).queryByText("Give the collection a name.")).toBeNull();
+  });
+
+  it("keeps a namespace the preview found as a member when it is ticked, and drops it when unticked", async () => {
+    active.context = SHOP;
+    noteNamespaceListing(SHOP.stableId, [{ name: "team-a-api" }, { name: "team-a-web" }], true);
+    core.resolveNamespaceCollections.mockResolvedValue({
+      namespaces: ["team-a-api", "team-a-web"],
+      collections: [{ name: "team-a", matched: ["team-a-api", "team-a-web"], members: [] }],
+      partial: false,
+    });
+    render(<CollectionsPane />);
+    await userEvent.click(screen.getByRole("button", { name: "New collection…" }));
+    const dialog = screen.getByRole("dialog");
+    await userEvent.type(within(dialog).getByLabelText("Patterns"), "team-a-*");
+    const keep = await within(dialog).findByRole("checkbox", { name: "Keep team-a-web as a member" });
+    await userEvent.click(keep);
+    const members = within(dialog).getByLabelText("Members") as HTMLTextAreaElement;
+    expect(members.value).toBe("team-a-web");
+    await userEvent.click(within(dialog).getByRole("checkbox", { name: "Keep team-a-api as a member" }));
+    expect(members.value).toBe("team-a-web\nteam-a-api");
+    await userEvent.click(within(dialog).getByRole("checkbox", { name: "Keep team-a-web as a member" }));
+    expect(members.value).toBe("team-a-api");
   });
 
   it("edits a collection in place, and passes the other names it may not reuse", async () => {

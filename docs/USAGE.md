@@ -150,7 +150,8 @@ says so, rather than falling back to all namespaces.
 Pick namespaces and choose **Save as collection…** in the selector to save them
 as one, or manage them all in **Settings → Collections**, where the editor checks
 each pattern and selector as you type and previews what the collection matches on
-the cluster in focus, marking each member found or not found. Members can be
+the cluster in focus, marking each member found or not found. Tick a namespace in
+the preview to keep it as a member. Members can be
 pasted as a list separated by commas or new lines. Collections are kept with your
 settings, so they are the same in every window and survive a restart.
 

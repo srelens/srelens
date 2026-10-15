@@ -7,7 +7,7 @@ import {
   type CollectionProblem,
   type NamespaceResolution,
 } from "@srelens/core";
-import { Button, Dialog, Field, TextInput } from "@srelens/ui-kit";
+import { Button, Checkbox, Dialog, Field, TextInput } from "@srelens/ui-kit";
 import { useCollections, saveCollection } from "../../lib/collections";
 import { useListing } from "../../lib/collectionScope";
 
@@ -84,6 +84,10 @@ export function CollectionDialog({ editing, members, clusterId, clusterName, onC
   const all = useCollections();
   const [draft, setDraft] = useState<Draft>(() => draftOf(editing, members));
   const [problems, setProblems] = useState<CollectionProblem[] | null>(null);
+  // Set from each change until the backend has checked it. The problems shown
+  // meanwhile are the last ones, so nothing flickers while typing, but a save
+  // waits for the draft's own.
+  const [checking, setChecking] = useState(true);
   const [checkError, setCheckError] = useState<string | null>(null);
   const [touchedName, setTouchedName] = useState(editing !== undefined);
   const collection = useMemo(() => draftCollection(draft), [draft]);
@@ -95,18 +99,20 @@ export function CollectionDialog({ editing, members, clusterId, clusterName, onC
 
   useEffect(() => {
     let current = true;
-    setProblems(null);
+    setChecking(true);
     const timer = setTimeout(() => {
       validateCollection(collection, taken).then(
         (found) => {
           if (!current) return;
           setCheckError(null);
           setProblems(found);
+          setChecking(false);
         },
         (error: unknown) => {
           if (!current) return;
           setCheckError(error instanceof Error ? error.message : String(error));
           setProblems([]);
+          setChecking(false);
         },
       );
     }, SETTLE_MS);
@@ -120,7 +126,11 @@ export function CollectionDialog({ editing, members, clusterId, clusterName, onC
   // An empty name is a problem the reader has not made yet: it is not shown
   // until they have typed one or tried to save.
   const shown = (problems ?? []).filter((p) => p.field !== "name" || touchedName);
-  const canSave = problems !== null && problems.length === 0 && checkError === null;
+  const canSave = !checking && problems !== null && problems.length === 0 && checkError === null;
+  // The preview needs the rules to be sound, not the whole collection: a
+  // pattern typed before the name is worth seeing at once.
+  const previewable =
+    problems !== null && checkError === null && problems.every((p) => p.field === "name" || p.field === "description");
 
   function save() {
     setTouchedName(true);
@@ -141,7 +151,7 @@ export function CollectionDialog({ editing, members, clusterId, clusterName, onC
           <Button variant="secondary" size="sm" onClick={onClose}>
             Cancel
           </Button>
-          <Button variant="primary" size="sm" onClick={save} disabled={problems === null || (!canSave && touchedName)}>
+          <Button variant="primary" size="sm" onClick={save} disabled={checking || (!canSave && touchedName)}>
             {editing ? "Save" : "Save collection"}
           </Button>
         </>
@@ -209,36 +219,58 @@ export function CollectionDialog({ editing, members, clusterId, clusterName, onC
             The collection could not be checked: {checkError}
           </p>
         )}
-        <Preview collection={collection} valid={canSave} clusterId={clusterId} clusterName={clusterName} />
+        <Preview
+          collection={collection}
+          valid={previewable}
+          clusterId={clusterId}
+          clusterName={clusterName}
+          onMembers={(next) => set("members")(next.join("\n"))}
+        />
       </div>
     </Dialog>
   );
 }
 
-/** What the draft matches on the cluster in focus, member by member. */
+/**
+ * What the draft matches on the cluster in focus, one row per namespace, and
+ * a box on each row to keep it as a member.
+ *
+ * A pattern finds namespaces; ticking one pins it, so it stays in the
+ * collection whatever the pattern later says — and a namespace a member
+ * names but this cluster does not have is listed too, marked not found, so a
+ * typo shows before the collection is used.
+ */
 function Preview({
   collection,
   valid,
   clusterId,
   clusterName,
+  onMembers,
 }: {
   collection: Collection;
+  /** Whether the rules are sound enough to resolve; the name is not needed. */
   valid: boolean;
   clusterId?: string;
   clusterName?: string;
+  onMembers: (members: string[]) => void;
 }) {
   const listing = useListing(clusterId);
   const [result, setResult] = useState<NamespaceResolution | null>(null);
   const [error, setError] = useState<string | null>(null);
   const empty = !collection.members && !collection.patterns && !collection.labelSelector;
+  const members = collection.members ?? [];
 
   useEffect(() => {
     let current = true;
-    setResult(null);
     setError(null);
-    if (!listing || !valid || empty) return;
+    if (!listing || !valid || empty) {
+      setResult(null);
+      return;
+    }
     const timer = setTimeout(() => {
-      resolveNamespaceCollections([collection], listing.items, listing.complete).then(
+      // Resolved under a stand-in name when it has none yet: the backend
+      // refuses a nameless collection, and the name decides nothing here.
+      resolveNamespaceCollections([{ ...collection, name: collection.name || "preview" }], listing.items, listing.complete).then(
         (r) => current && setResult(r),
         (e: unknown) => current && setError(e instanceof Error ? e.message : String(e)),
       );
@@ -249,6 +281,9 @@ function Preview({
     };
   }, [collection, valid, empty, listing]);
 
+  const toggle = (name: string, on: boolean) =>
+    onMembers(on ? [...members.filter((m) => m !== name), name] : members.filter((m) => m !== name));
+
   const where = clusterName ?? "this cluster";
   let body;
   if (!clusterId || !listing) {
@@ -257,11 +292,17 @@ function Preview({
     body = <p className="text-muted">Add members, a pattern or a label selector to see what it matches on {where}.</p>;
   } else if (error !== null) {
     body = <p style={{ color: "var(--sev)" }}>The preview could not be worked out: {error}</p>;
-  } else if (!valid || result === null) {
-    body = <p className="text-muted">…</p>;
+  } else if (!valid) {
+    body = <p className="text-muted">Correct the members, patterns or label selector above to see what they match.</p>;
+  } else if (result === null) {
+    body = <p className="text-muted">Working out what this matches on {where}…</p>;
   } else {
     const match = result.collections[0];
     const matched = match?.matched ?? [];
+    const status = new Map((match?.members ?? []).map((m) => [m.name, m.status]));
+    // Every namespace it matched, then each member this cluster lacks.
+    const rows = [...matched, ...members.filter((m) => !matched.includes(m))];
+    const shown = rows.slice(0, PREVIEW_SHOWN);
     body = (
       <>
         <p>
@@ -270,28 +311,38 @@ function Preview({
             : `Matches ${matched.length} ${matched.length === 1 ? "namespace" : "namespaces"} on ${where}.`}
           {result.partial && " These credentials cannot list every namespace, so this may be partial."}
         </p>
-        {matched.length > 0 && (
-          <p className="mt-1 text-[0.75rem] text-muted" data-slot="preview-matched">
-            {matched.slice(0, PREVIEW_SHOWN).join(", ")}
-            {matched.length > PREVIEW_SHOWN && ` and ${matched.length - PREVIEW_SHOWN} more`}
-          </p>
-        )}
-        {match && match.members.length > 0 && (
-          // A word beside each member, and the colour on that word: never the
-          // colour alone. Only the ones that need looking at are toned.
-          <ul className="mt-1.5 flex flex-col gap-0.5" aria-label="Members">
-            {match.members.map((m) => (
-              <li key={m.name} className="flex items-baseline gap-2 text-[0.75rem]" data-member={m.name}>
-                <span className="min-w-0 truncate font-mono">{m.name}</span>
-                <span
-                  className="shrink-0"
-                  style={{ color: m.status === "missing" ? "var(--warn)" : "var(--ink-muted)" }}
-                >
-                  {m.status === "found" ? "found" : m.status === "missing" ? "not found" : "unknown"}
-                </span>
-              </li>
-            ))}
-          </ul>
+        {rows.length > 0 && (
+          <>
+            <p className="mt-1 text-[0.75rem] text-muted">Tick a namespace to keep it as a member.</p>
+            <ul className="scroll mt-1 flex max-h-48 flex-col" aria-label="Matched namespaces">
+              {shown.map((name) => {
+                const isMember = members.includes(name);
+                const state = isMember ? status.get(name) : undefined;
+                return (
+                  <li key={name} className="flex items-center gap-2 py-0.5 text-[0.75rem]" data-namespace={name}>
+                    <Checkbox
+                      checked={isMember}
+                      onChange={(on) => toggle(name, on)}
+                      label={<span className="sr-only">Keep {name} as a member</span>}
+                    />
+                    <span className="min-w-0 flex-1 truncate font-mono">{name}</span>
+                    {/* A word, and the colour on the word: never the colour
+                        alone. Only what needs looking at is toned. */}
+                    {state === "missing" ? (
+                      <span className="shrink-0" style={{ color: "var(--warn)" }}>not found</span>
+                    ) : state === "unknown" ? (
+                      <span className="shrink-0 text-muted">cannot check</span>
+                    ) : isMember ? (
+                      <span className="shrink-0 text-muted">member</span>
+                    ) : null}
+                  </li>
+                );
+              })}
+            </ul>
+            {rows.length > PREVIEW_SHOWN && (
+              <p className="mt-1 text-[0.75rem] text-muted">and {rows.length - PREVIEW_SHOWN} more</p>
+            )}
+          </>
         )}
       </>
     );
