@@ -1,6 +1,6 @@
 import { ContextLabel } from "../lib/contextLabel";
-import type { ClusterContext } from "@srelens/core";
-import { Alert, Button, Combobox, EmptyState, LoadingState, MultiSelect, Screen, Spinner, type Column, type TableSort } from "@srelens/ui-kit";
+import { selectsNothing, type ClusterContext } from "@srelens/core";
+import { Alert, Button, Combobox, EmptyState, LoadingState, Screen, Spinner, type Column, type TableSort } from "@srelens/ui-kit";
 import { useContextsError, useContextsStatus } from "../lib/clusters";
 import { toggleColumn } from "../lib/columnPrefs";
 import { FailureAlert, FailureState } from "../lib/errorCopy";
@@ -93,41 +93,12 @@ export function PausedClusterScreen({ title, noun, context }: { title: string; n
   );
 }
 
-/**
- * The namespace picker's two states: a disabled, spinning stand-in while
- * `namespaces` is still `null`, and the real picker once it has answered.
- * Zero options while `namespaces` is null reads as "this cluster has no
- * namespaces" — a bare `MultiSelect options={(namespaces ?? []).map(...)}`
- * says exactly that, which is what let this drift between the two screens in
- * the first place.
+/*
+ * The namespace picker lives in `collections/NamespaceScope.tsx` now, with
+ * namespace collections above the namespaces (#881). Its loading stand-in is
+ * the one this file used to hold: a disabled, spinning trigger while the
+ * namespaces are still `null`, never an empty list.
  */
-export function NamespacePicker({
-  namespaces,
-  selection,
-  onChange,
-}: {
-  namespaces: string[] | null;
-  selection: string[];
-  onChange: (next: string[]) => void;
-}) {
-  if (namespaces === null) {
-    return (
-      <Button variant="secondary" className="justify-between gap-1.5" disabled aria-label="Namespaces">
-        <Spinner label="Loading namespaces" />
-        Loading namespaces…
-      </Button>
-    );
-  }
-  return (
-    <MultiSelect
-      options={namespaces.map((ns) => ({ value: ns }))}
-      selection={selection}
-      onChange={onChange}
-      allLabel="All namespaces"
-      ariaLabel="Namespaces"
-    />
-  );
-}
 
 /**
  * The same picker, for a screen that needs exactly ONE namespace rather than a
@@ -204,6 +175,9 @@ export function NamespaceErrorAlert({ error }: { error: string }) {
  * loading) is not evidence of anything, since nothing has been checked yet.
  */
 export function selectionIsStale(selection: string[], namespaces: string[] | null): boolean {
+  // A collection that matches nothing (#881) says so itself; it is not a
+  // remembered namespace that has gone.
+  if (selectsNothing(selection)) return false;
   return selection.length > 0 && namespaces !== null && selection.every((ns) => !namespaces.includes(ns));
 }
 

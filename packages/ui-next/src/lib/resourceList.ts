@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { watchNamespaces, type WatchHandle, type WatchStatus } from "@srelens/core";
+import { selectsNothing, watchNamespaces, type WatchHandle, type WatchStatus } from "@srelens/core";
 import { rowKey, type KindDescriptor, type ListRow, type RowKey } from "./kinds/types";
 
 export type ResourceListStatus = "loading" | "ready" | "empty" | "error";
@@ -214,6 +214,13 @@ export function useResourceList<Row extends ListRow>(
     setMetrics(undefined);
 
     if (!descriptor) {
+      return;
+    }
+    // A selection of nothing — a namespace collection that matches no
+    // namespace here (#881) — is an empty list, and nothing is asked of the
+    // cluster for it.
+    if (selectsNothing(namespaces)) {
+      setState((s) => ({ ...s, rows: [], loading: false }));
       return;
     }
 

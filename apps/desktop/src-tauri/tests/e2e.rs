@@ -915,6 +915,47 @@ async fn run_suite() {
         .iter()
         .any(|n| n == NS));
 
+    // Namespace collections (#881), resolved against this cluster's real
+    // listing, labels included: a pattern, a label selector the API server
+    // sets on every namespace, and a member the cluster does not have.
+    let listing: Vec<Value> = out["summaries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| json!({ "name": s["name"], "labels": s["labels"] }))
+        .collect();
+    let resolved = h
+        .ok(
+            "collections.resolveNamespaces",
+            json!({
+                "collections": [{
+                    "name": "e2e",
+                    "type": "namespace",
+                    "patterns": ["kube-*"],
+                    "labelSelector": "kubernetes.io/metadata.name in (kube-system,kube-public)",
+                    "members": [NS, "no-such-namespace"],
+                }],
+                "namespaces": listing,
+            }),
+        )
+        .await;
+    let names: Vec<&str> = resolved["namespaces"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|n| n.as_str().unwrap())
+        .collect();
+    assert!(names.contains(&"kube-system") && names.contains(&NS), "{resolved}");
+    assert!(!names.contains(&"kube-node-lease"), "the selector narrows the pattern: {resolved}");
+    assert_eq!(resolved["collections"][0]["members"][1]["status"], "missing", "{resolved}");
+    let checked = h
+        .ok(
+            "collections.validate",
+            json!({ "collection": { "name": "e2e", "type": "namespace", "patterns": ["!kube-*"] } }),
+        )
+        .await;
+    assert_eq!(checked["problems"][0]["field"], "patterns", "{checked}");
+
     let out = h
         .ok("k8s.listPods", json!({ "context": ctx, "namespace": NS }))
         .await;

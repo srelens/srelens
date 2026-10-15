@@ -1,4 +1,5 @@
 import { ContextLabel } from "../lib/contextLabel";
+import { CollectionScopeNotice, NamespaceScopePicker } from "./collections/NamespaceScope";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   describeError,
@@ -41,7 +42,7 @@ import { useResourceList } from "../lib/resourceList";
 import { describe, isBuiltInKind } from "../lib/routes";
 import { openTab, useTabs } from "../lib/tabsStore";
 import { useResource } from "../lib/useResource";
-import { useNamespaces, useSetNamespaces } from "../lib/workspace";
+import { useNamespaces, useFallbackNamespace, useSetNamespaces } from "../lib/workspace";
 import { FailureState, NamespaceFailuresAlert, StaleListAlert } from "../lib/errorCopy";
 import { useExtensions } from "../extensions/inventoryStore";
 import { qualifiedTableKind, useResolvedColumns } from "../extensions/useResolvedColumns";
@@ -53,7 +54,6 @@ import { useRowMenu } from "./ResourceMenu";
 import { ListCount } from "./ListCount";
 import {
   NamespaceErrorAlert,
-  NamespacePicker,
   NoClusterScreen,
   PausedClusterScreen,
   StaleSelectionAlert,
@@ -170,13 +170,12 @@ function KindList({
 
   const selection = useNamespaces(context.stableId);
   const setNamespaces = useSetNamespaces();
-  const { namespaces, scope, error: namespaceError } = useNamespaceOptions(name, files);
+  const namespaceOptions = useNamespaceOptions(name, files);
+  const { namespaces, scope, error: namespaceError } = namespaceOptions;
 
   // A namespace-restricted credential has one namespace and no way to ask for
   // another. Written to this tab's selection, so the picker shows the scope.
-  useEffect(() => {
-    if (scope) setNamespaces(context.stableId, [scope]);
-  }, [scope, context.stableId, setNamespaces]);
+  useFallbackNamespace(context.stableId, scope);
 
   const clusterScoped = descriptor?.scope === "cluster";
   // Each selected namespace is listed on its own (#688); none is "all
@@ -592,11 +591,7 @@ function KindList({
         )}
       >
         {!clusterScoped && (
-          <NamespacePicker
-            namespaces={namespaces}
-            selection={selection}
-            onChange={(next) => setNamespaces(context.stableId, next)}
-          />
+          <NamespaceScopePicker context={context} options={namespaceOptions} />
         )}
       </FilterBar>
 
@@ -622,11 +617,14 @@ function KindList({
       )}
 
       {!clusterScoped && (
-        <StaleSelectionAlert
-          selection={selection}
-          namespaces={namespaces}
-          onReset={() => setNamespaces(context.stableId, [])}
-        />
+        <>
+          <CollectionScopeNotice context={context} />
+          <StaleSelectionAlert
+            selection={selection}
+            namespaces={namespaces}
+            onReset={() => setNamespaces(context.stableId, [])}
+          />
+        </>
       )}
 
       {showRows && !list.stale && (

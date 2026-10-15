@@ -96,6 +96,11 @@ function parseTab(v: unknown): Tab | null {
   if (view !== undefined) tab.view = view;
   const namespaces = parseNamespaces(v.namespaces);
   if (namespaces !== undefined) tab.namespaces = namespaces;
+  // The same shape: per cluster, a list of names (collection names here).
+  const namespaceCollections = parseNamespaces(v.namespaceCollections);
+  if (namespaceCollections !== undefined && Object.keys(namespaceCollections).length > 0) {
+    tab.namespaceCollections = namespaceCollections;
+  }
   if (typeof v.closedAt === "number" && Number.isFinite(v.closedAt)) tab.closedAt = v.closedAt;
   return tab;
 }

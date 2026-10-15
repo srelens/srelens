@@ -1,4 +1,5 @@
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { CollectionScopeNotice, NamespaceScopePicker } from "./collections/NamespaceScope";
 import {
   prometheusDiscover,
   topologyGraph,
@@ -7,13 +8,13 @@ import {
   type TopologyHealth,
   type TopologyLane,
   type TopologyProbe,
+  selectsNothing,
 } from "@srelens/core";
 import { Button, EmptyState, Screen, StatusPill, type StatusKind } from "@srelens/ui-kit";
 import { useNamespaceOptions } from "@srelens/core/react";
 import { getKubeconfigFiles, useActiveContext } from "../lib/clusters";
 import {
   NamespaceErrorAlert,
-  NamespacePicker,
   NoClusterScreen,
   StaleSelectionAlert,
 } from "./resourceShell";
@@ -105,10 +106,8 @@ function TopologyGraph({ context }: { context: ClusterContext }) {
    * reading it as the list of namespaces gives a picker with no options on a
    * perfectly healthy cluster.
    */
-  const { namespaces, error: namespaceError } = useNamespaceOptions(
-    context.name,
-    getKubeconfigFiles(),
-  );
+  const namespaceOptions = useNamespaceOptions(context.name, getKubeconfigFiles());
+  const { namespaces, error: namespaceError } = namespaceOptions;
 
   /**
    * The reader's namespace selection — this tab's, per cluster.
@@ -153,7 +152,8 @@ function TopologyGraph({ context }: { context: ClusterContext }) {
 
   const graph = useResource(
     async () => {
-      if (!cluster || chosen.length === 0) return { nodes: [], edges: [] };
+      // Nothing chosen, or a namespace collection that matches nothing (#881).
+      if (!cluster || chosen.length === 0 || selectsNothing(chosen)) return { nodes: [], edges: [] };
       const out = await topologyGraph(cluster.name, chosen, sources, probeConnections);
       if (out.error) throw new Error(out.error);
       return out.graph ?? { nodes: [], edges: [] };
@@ -200,14 +200,11 @@ function TopologyGraph({ context }: { context: ClusterContext }) {
           </Button>
           {/* Inherited, not grown here: the same control and the same selection
               every list on this cluster uses. */}
-          <NamespacePicker
-            namespaces={namespaces}
-            selection={scoped}
-            onChange={(next) => {
-              setNamespaces(context.stableId, next);
-              // The old selection may name a node in a namespace no longer drawn.
-              setSelectedId(null);
-            }}
+          <NamespaceScopePicker
+            context={context}
+            options={namespaceOptions}
+            // The old selection may name a node in a namespace no longer drawn.
+            onChange={() => setSelectedId(null)}
           />
         </>
       }
@@ -221,6 +218,7 @@ function TopologyGraph({ context }: { context: ClusterContext }) {
               than holding a band of empty padding above the canvas. */}
           <div className="px-4 pt-4 empty:hidden">
             <NamespaceErrorAlert error={namespaceError} />
+            <CollectionScopeNotice context={context} />
             <StaleSelectionAlert
               selection={scoped}
               namespaces={namespaces}

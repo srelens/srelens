@@ -33,6 +33,14 @@ export interface Tab {
    */
   namespaces?: Record<string, string[]>;
   /**
+   * The namespace collections this tab is scoped to, per cluster, by name
+   * (#881). Where a cluster has any, they stand in for its `namespaces`
+   * entry: the selection is whatever they resolve to on that cluster, worked
+   * out again whenever the collections or the namespace listing change. The
+   * two are never both set for one cluster — choosing either clears the other.
+   */
+  namespaceCollections?: Record<string, string[]>;
+  /**
    * When the tab was closed, on a tab in a recently closed list only. It is
    * what orders that list when a cluster's own closed tabs are brought back
    * beside the app-wide ones that stayed (#908): without it one kind had to
