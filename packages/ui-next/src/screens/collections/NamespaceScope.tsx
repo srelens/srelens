@@ -6,7 +6,7 @@ export const RELIST_MS = 30_000;
 import type { NamespaceOptions } from "@srelens/core/react";
 import { Alert, Button, MultiSelect, PickerRow, Spinner } from "@srelens/ui-kit";
 import { byRecentUse, useCollections } from "../../lib/collections";
-import { noteNamespaceListing, useCollectionScope } from "../../lib/collectionScope";
+import { noteNamespaceListing, useCollectionScope, useListing } from "../../lib/collectionScope";
 import { openSettings } from "../../lib/settingsRequest";
 import {
   useNamespaceCollections,
@@ -59,6 +59,10 @@ export function NamespaceScopePicker({
     onChange?.();
   };
   const scope = useCollectionScope(clusterId, chosen);
+  // The listing a collection is resolved against, read again while one is in
+  // force: the rows offer the same namespaces, so one created since is a row
+  // that can be seen and unticked, not a tick on nothing.
+  const listing = useListing(clusterId);
   const [saving, setSaving] = useState<readonly string[] | null>(null);
 
   useEffect(() => {
@@ -121,7 +125,7 @@ export function NamespaceScopePicker({
   return (
     <>
       <MultiSelect
-        options={namespaces.map((ns) => ({ value: ns }))}
+        options={(listing?.complete && complete ? listing.items.map((ns) => ns.name) : namespaces).map((ns) => ({ value: ns }))}
         selection={ticked}
         onChange={(next) => setNamespaces(clusterId, next)}
         allLabel="All namespaces"

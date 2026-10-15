@@ -101,6 +101,35 @@ describe("the saved collections", () => {
     expect(byRecentUse(getCollections(), "namespace").map((c) => c.name)).toEqual(["b", "c", "a"]);
   });
 
+  /**
+   * Each write starts from the stored document, which a refused write never
+   * reached: the second of two changes dropped the first.
+   */
+  it("keep every change for the session when storage refuses them all", async () => {
+    const original = settingsStorage.setItem;
+    settingsStorage.setItem = () => {
+      throw new Error("Settings backend is unavailable");
+    };
+    try {
+      saveCollection({ name: "prod", type: "namespace" });
+      saveCollection({ name: "staging", type: "namespace" });
+      await collectionsSaved();
+      markCollectionsUsed("namespace", ["prod"], 3);
+      await collectionsSaved();
+    } finally {
+      settingsStorage.setItem = original;
+    }
+    expect(getCollections().map((c) => [c.name, c.lastUsedAt])).toEqual([
+      ["prod", 3],
+      ["staging", undefined],
+    ]);
+    // And the next write that is accepted carries them all.
+    saveCollection({ name: "dev", type: "namespace" });
+    await collectionsSaved();
+    __resetCollectionsForTests();
+    expect(getCollections().map((c) => c.name)).toEqual(["prod", "staging", "dev"]);
+  });
+
   it("hold a change for the session when storage refuses it", () => {
     const original = settingsStorage.setItem;
     settingsStorage.setItem = () => {

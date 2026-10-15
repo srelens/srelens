@@ -205,6 +205,9 @@ describe("NamespaceScopePicker", () => {
       });
       await waitFor(() => expect(picker().textContent).toBe("prod · 3 namespaces"));
       expect(core.listNamespaces).toHaveBeenCalledWith(CONTEXT.name);
+      // A row for the new namespace, ticked, that can be unticked.
+      await showTab(/^Namespaces/);
+      expect(screen.getByRole("option", { name: "prod-ap" }).getAttribute("aria-checked")).toBe("true");
     } finally {
       vi.useRealTimers();
     }

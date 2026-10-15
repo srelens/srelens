@@ -1,4 +1,4 @@
-import { useCallback, useSyncExternalStore } from "react";
+import { useCallback, useEffect, useSyncExternalStore } from "react";
 import { getDefaultNamespace, setDefaultNamespace, settingsStorage } from "@srelens/core";
 import type { Tone } from "@srelens/ui-kit";
 import type { Storage } from "./tabsPersist";
@@ -237,23 +237,41 @@ export function useNamespaceCollections(clusterId: string | undefined): string[]
   return useSyncExternalStore(subscribeTabs, read, () => undefined);
 }
 
+/** Whether a tab is scoped, on a cluster, to a namespace collection that still exists. */
+function inCollectionScope(tabId: string, clusterId: string): boolean {
+  const names = tabNamespaceCollections(tabId, clusterId);
+  return names !== undefined && collectionScope(clusterId, names).status !== "gone";
+}
+
 /**
- * The setter for the one namespace restricted credentials can see, for the
- * tab this component is mounted in.
- *
- * Such credentials cannot list namespaces, so a screen scopes itself to the
- * one they declare, every time it loads. That is not the reader choosing, and
- * a tab scoped to a namespace collection keeps its collection (#881): the
- * collection resolves against the one namespace the listing has, and says
- * the result may be partial.
+ * Whether this tab is scoped to a namespace collection on the cluster — one
+ * that still exists: a tab whose collections have all been deleted is not.
  */
-export function useSetFallbackNamespace(): (clusterId: string, namespace: string) => void {
+export function useInCollectionScope(clusterId: string | undefined): boolean {
+  const scoped = useTabScope();
+  const read = () => clusterId !== undefined && inCollectionScope(scoped ?? currentWorkspace().activeId, clusterId);
+  return useSyncExternalStore(subscribeSelection, read, () => false);
+}
+
+/**
+ * Scope this tab to the one namespace restricted credentials can see, as
+ * each list does when it loads: they cannot list namespaces, and a request
+ * across all of them would be refused.
+ *
+ * That is not the reader choosing, and a tab scoped to a namespace
+ * collection keeps its collection (#881) — it already resolves against the
+ * one namespace the listing has, and says the result may be partial. Once
+ * that collection is deleted the tab is not scoped any more, and the
+ * credentials' namespace is applied again, rather than leaving the list to
+ * ask for every namespace and be refused.
+ */
+export function useFallbackNamespace(clusterId: string, namespace: string): void {
   const tabId = useTabScope();
-  return useCallback((clusterId: string, namespace: string) => {
-    const tab = tabId ?? currentWorkspace().activeId;
-    if (tabNamespaceCollections(tab, clusterId)) return;
-    setTabNamespaces(tab, clusterId, [namespace]);
-  }, [tabId]);
+  const scoped = useInCollectionScope(clusterId);
+  useEffect(() => {
+    if (!namespace || scoped) return;
+    setTabNamespaces(tabId ?? currentWorkspace().activeId, clusterId, [namespace]);
+  }, [namespace, clusterId, tabId, scoped]);
 }
 
 /** The collections setter for the tab this component is mounted in. */

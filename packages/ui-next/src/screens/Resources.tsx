@@ -42,7 +42,7 @@ import { useResourceList } from "../lib/resourceList";
 import { describe, isBuiltInKind } from "../lib/routes";
 import { openTab, useTabs } from "../lib/tabsStore";
 import { useResource } from "../lib/useResource";
-import { useNamespaces, useSetFallbackNamespace, useSetNamespaces } from "../lib/workspace";
+import { useNamespaces, useFallbackNamespace, useSetNamespaces } from "../lib/workspace";
 import { FailureState, NamespaceFailuresAlert, StaleListAlert } from "../lib/errorCopy";
 import { useExtensions } from "../extensions/inventoryStore";
 import { qualifiedTableKind, useResolvedColumns } from "../extensions/useResolvedColumns";
@@ -170,15 +170,12 @@ function KindList({
 
   const selection = useNamespaces(context.stableId);
   const setNamespaces = useSetNamespaces();
-  const setFallbackNamespace = useSetFallbackNamespace();
   const namespaceOptions = useNamespaceOptions(name, files);
   const { namespaces, scope, error: namespaceError } = namespaceOptions;
 
   // A namespace-restricted credential has one namespace and no way to ask for
   // another. Written to this tab's selection, so the picker shows the scope.
-  useEffect(() => {
-    if (scope) setFallbackNamespace(context.stableId, scope);
-  }, [scope, context.stableId, setFallbackNamespace]);
+  useFallbackNamespace(context.stableId, scope);
 
   const clusterScoped = descriptor?.scope === "cluster";
   // Each selected namespace is listed on its own (#688); none is "all

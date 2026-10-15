@@ -53,6 +53,12 @@ type Change = (collections: Collection[]) => Collection[];
 
 /** Changes made and not yet written, oldest first. */
 let waiting: Change[] = [];
+/**
+ * Changes whose write was refused — storage unavailable. They hold for the
+ * session: every later write starts from the stored document with these
+ * applied, so a second change does not quietly drop the first.
+ */
+let unsaved: Change[] = [];
 let saving: Promise<void> = Promise.resolve();
 
 /**
@@ -78,12 +84,16 @@ function change(apply: Change): void {
       // Not readable again: this window's copy of the setting is the best there is.
     }
     const latest = stored();
-    const next = { ...latest, collections: apply(latest.collections) };
+    const base = unsaved.reduce((list, u) => u(list), latest.collections);
+    const next = { ...latest, collections: apply(base) };
     try {
       settingsStorage.setItem(COLLECTIONS_KEY, JSON.stringify({ ...next, version: COLLECTIONS_DOCUMENT_VERSION }));
+      // Written with every change refused before it, so those are kept now.
+      unsaved = [];
     } catch (error) {
       // Storage is unavailable: the change holds for this session.
       console.error("could not save the collections", error);
+      unsaved.push(apply);
     }
     waiting = waiting.filter((w) => w !== apply);
     doc = { ...next, collections: waiting.reduce((list, w) => w(list), next.collections) };
@@ -103,7 +113,8 @@ export function refreshCollections(): Promise<void> {
       return;
     }
     const latest = stored();
-    doc = { ...latest, collections: waiting.reduce((list, w) => w(list), latest.collections) };
+    const base = unsaved.reduce((list, u) => u(list), latest.collections);
+    doc = { ...latest, collections: waiting.reduce((list, w) => w(list), base) };
     notify();
   });
   return saving;
@@ -190,5 +201,6 @@ export function __resetCollectionsForTests(): void {
   doc = null;
   listeners.clear();
   waiting = [];
+  unsaved = [];
   saving = Promise.resolve();
 }

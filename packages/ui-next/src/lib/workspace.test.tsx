@@ -344,13 +344,29 @@ describe("namespace selection by collection", () => {
    * wipe a collection the tab is scoped to.
    */
   it("keeps the collection when a restricted credential's namespace is applied, and takes the namespace otherwise", () => {
-    const fallback = renderHook(() => ws.useSetFallbackNamespace(), { wrapper: inTab("tab-a") }).result.current;
     const choose = renderHook(() => ws.useSetNamespaceCollections(), { wrapper: inTab("tab-a") }).result.current;
     act(() => choose("prod", ["prod"]));
-    act(() => fallback("prod", "team-a"));
+    renderHook(() => ws.useFallbackNamespace("prod", "team-a"), { wrapper: inTab("tab-a") });
     expect(tab("tab-a").namespaceCollections).toEqual({ prod: ["prod"] });
-    act(() => fallback("dev", "team-a"));
+    renderHook(() => ws.useFallbackNamespace("dev", "team-a"), { wrapper: inTab("tab-a") });
     expect(tab("tab-a").namespaces).toEqual({ dev: ["team-a"] });
+  });
+
+  /**
+   * A tab whose collections have all been deleted is not scoped any more: the
+   * credentials' namespace comes back, rather than the list asking for every
+   * namespace and being refused.
+   */
+  it("applies the restricted credential's namespace again once the collection is deleted", () => {
+    const choose = renderHook(() => ws.useSetNamespaceCollections(), { wrapper: inTab("tab-a") }).result.current;
+    act(() => choose("prod", ["prod"]));
+    const scoped = renderHook(() => ws.useInCollectionScope("prod"), { wrapper: inTab("tab-a") });
+    renderHook(() => ws.useFallbackNamespace("prod", "team-a"), { wrapper: inTab("tab-a") });
+    expect(scoped.result.current).toBe(true);
+    act(() => deleteCollections("namespace", ["prod"]));
+    expect(scoped.result.current).toBe(false);
+    expect(tab("tab-a").namespaces).toEqual({ prod: ["team-a"] });
+    expect(tab("tab-a").namespaceCollections).toBeUndefined();
   });
 
   /** #885: a collection deleted while a tab is scoped to it gives the tab back its default. */
