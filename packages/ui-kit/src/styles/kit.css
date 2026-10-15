@@ -791,6 +791,18 @@
     text-align: left;
   }
   .ns-row:hover { background: var(--field); }
+  /* A group's heading inside a picker: the eyebrow voice, ruled off above
+     every group but the first so two kinds of row read as two lists. */
+  .picker-group [cmdk-group-heading] {
+    padding: 0.375rem 0.5rem 0.125rem;
+    font-family: var(--font-mono);
+    font-size: var(--text-meta);
+    font-weight: 500;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--ink-muted);
+  }
+  .picker-group + .picker-group { border-top: 1px solid var(--rule); }
   .ns-row[data-on="true"] { color: var(--ink); font-weight: 500; }
   .ns-only {
     opacity: 0;

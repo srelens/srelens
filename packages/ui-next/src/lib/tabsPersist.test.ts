@@ -359,6 +359,17 @@ describe("parseStoredState", () => {
     expect(parsed!.workspaces[0].tabs[0].namespaces).toBeUndefined();
   });
 
+  it("round-trips a tab's namespace collections per cluster, and drops a malformed entry (#881)", () => {
+    const s = valid();
+    s.workspaces[0].tabs[1].namespaceCollections = { a: ["prod", "staging"], b: ["dev"] };
+    expect(parseStoredState(JSON.stringify({ version: 1, ...s }))?.workspaces[0].tabs[1].namespaceCollections).toEqual({
+      a: ["prod", "staging"],
+      b: ["dev"],
+    });
+    const raw = JSON.stringify({ version: 1, ...s }).replace('"b":["dev"]', '"b":"dev"');
+    expect(parseStoredState(raw)?.workspaces[0].tabs[1].namespaceCollections).toEqual({ a: ["prod", "staging"] });
+  });
+
   it("drops one cluster's malformed namespace entry without losing the others or the tab", () => {
     const doc = {
       version: 1,

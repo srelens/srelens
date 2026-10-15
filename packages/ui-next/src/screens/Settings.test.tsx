@@ -84,6 +84,8 @@ const DESKTOP_SECTIONS = [
   "Application logs",
   "Updates",
   "Workspaces",
+  // #881. On the web too: collections are kept in each user's settings.
+  "Collections",
   "Clusters",
   "Apps",
 ];

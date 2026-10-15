@@ -9,6 +9,7 @@ import { Screen } from "@srelens/ui-kit";
 import type { RoutedScreenProps } from "../lib/routes";
 import { ApplicationLogsPane, KubernetesPane, WorkspacePane } from "./settings/PreferencePanes";
 import { SkillsPane } from "./settings/SkillsPane";
+import { CollectionsPane } from "./settings/CollectionsPane";
 import { UpdatesPane } from "./settings/UpdatesPane";
 import { AgentAccess } from "./settings/AgentAccess";
 import { AgentPane } from "./settings/AgentPane";
@@ -24,7 +25,7 @@ import { AccessibilityPane, ClustersPane, DeepLinksPane, ShortcutsPane } from ".
 /** §23's rail width for this screen, and this screen's alone (§A.1's table). */
 const NAV_WIDTH = 196;
 
-type SectionId = "extensions" | "agent" | "skills" | "security" | "backup" | "appearance" | "accessibility" | "shortcuts" | "deeplinks" | "workspace" | "workspaces" | "kubernetes" | "logs" | "updates" | "clusters";
+type SectionId = "extensions" | "collections" | "agent" | "skills" | "security" | "backup" | "appearance" | "accessibility" | "shortcuts" | "deeplinks" | "workspace" | "workspaces" | "kubernetes" | "logs" | "updates" | "clusters";
 
 /**
  * §23's nav, in §23's order.
@@ -105,6 +106,8 @@ const SECTIONS: ReadonlyArray<{ id: SectionId; label: string; desktopOnly?: true
   { id: "logs", label: "Application logs" },
   { id: "updates", label: "Updates", desktopOnly: true },
   { id: "workspaces", label: "Workspaces" },
+  // Saved namespace groups every namespace picker offers (#881).
+  { id: "collections", label: "Collections" },
   { id: "clusters", label: "Clusters" },
   // Not desktop-only: the web server keeps each user's own apps (#515).
   { id: "extensions", label: "Apps" },
@@ -241,6 +244,8 @@ export function Settings({ ported, onSwitchToClassic, onLocked }: SettingsProps)
         );
       case "skills":
         return <SkillsPane />;
+      case "collections":
+        return <CollectionsPane />;
       case "security":
         return <SecurityPane onLocked={onLocked} />;
       case "backup":

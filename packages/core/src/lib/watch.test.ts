@@ -10,6 +10,7 @@ vi.mock("../transport/transport", () => ({
 }));
 
 import { watchNamespaces, watchResource } from "./watch";
+import { SELECTS_NOTHING } from "./namespaces";
 
 beforeEach(() => {
   invokeCommandMock.mockReset();
@@ -164,6 +165,24 @@ describe("watchNamespaces", () => {
     await watchNamespaces("c", ["team-a", "team-b"], "pods", vi.fn());
 
     expect(started().map((s) => s.namespace)).toEqual(["team-a", "team-b"]);
+  });
+
+  /**
+   * A namespace collection that matches nothing on this cluster (#881) is a
+   * selection of nothing, not the empty selection that means every
+   * namespace: no watch at all, and an empty list.
+   */
+  it("opens no watch for a selection of nothing, and answers with no rows", async () => {
+    const { started } = capture();
+    const onRows = vi.fn();
+
+    const handle = await watchNamespaces("c", [...SELECTS_NOTHING], "pods", onRows);
+    await Promise.resolve();
+
+    expect(started()).toEqual([]);
+    expect(subscribeMock).not.toHaveBeenCalled();
+    expect(onRows).toHaveBeenCalledExactlyOnceWith([]);
+    expect(() => handle.stop()).not.toThrow();
   });
 
   it("opens a single cluster-scope watch for an empty selection (all namespaces)", async () => {

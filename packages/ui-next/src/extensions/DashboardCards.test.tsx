@@ -41,6 +41,8 @@ import * as tabs from "../lib/tabsStore";
 import { TabScope } from "../lib/tabScope";
 import { defaultState } from "../lib/tabs";
 import { resetView, setNamespaces } from "../lib/workspace";
+import { COLLECTIONS_KEY, __resetCollectionsForTests, saveCollection } from "../lib/collections";
+import { __resetCollectionScopeForTests } from "../lib/collectionScope";
 
 const CTX: ClusterContext = {
   name: "prod-eu", stableId: "/kube/config#prod", key: "/kube/config#prod", pinnedId: "srelens-context:/kube/config#prod", cluster: "prod",
@@ -80,6 +82,9 @@ beforeEach(() => {
   vi.clearAllMocks();
   resetView();
   tabs.setState(defaultState([]));
+  localStorage.removeItem(COLLECTIONS_KEY);
+  __resetCollectionsForTests();
+  __resetCollectionScopeForTests();
   namespaceOptions.useNamespaceOptions.mockReturnValue({ namespaces: ["prod", "team"], scope: "", error: "" });
   // A host that never answers an open: the cards stay as read, and say they are connecting.
   core.openExtensionView.mockImplementation((id: string) => ({ view: id, close: async () => {}, open: () => new Promise(() => {}) }));
@@ -293,6 +298,24 @@ describe("DashboardCards", () => {
     await waitFor(() =>
       expect(core.resolveDashboardCards).toHaveBeenLastCalledWith("org.example.certs", 4, CTX.pinnedId, ["team"]),
     );
+  });
+
+  /**
+   * A tab scoped to a namespace collection (#881) has resolved it against
+   * what the credentials can see. Their one namespace must not take its place:
+   * a collection that matched nothing would show "no namespaces match" over
+   * cards read from that namespace anyway.
+   */
+  it("follows a namespace collection rather than a restricted credential's namespace", async () => {
+    namespaceOptions.useNamespaceOptions.mockReturnValue({ namespaces: ["team"], scope: "team", error: "" });
+    saveCollection({ name: "prod", type: "namespace", patterns: ["prod-*"] });
+    tabs.setTabNamespaceCollections(tabs.currentWorkspace().activeId, CTX.stableId, ["prod"]);
+    installed(app([card({ id: "c", title: "Expiring" })]));
+    answer([{ id: "c", state: "count", count: 1 }]);
+    render(<DashboardCards context={CTX} />);
+    await screen.findByText("Expiring");
+    await act(() => new Promise((resolve) => setTimeout(resolve, 0)));
+    expect(core.resolveDashboardCards).not.toHaveBeenCalled();
   });
 
   it("stays loading, and reads nothing, until the namespace scope is known", async () => {

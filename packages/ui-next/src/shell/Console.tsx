@@ -27,7 +27,7 @@ import { askContextFor, runKeyFor } from "../lib/askContext";
 import { useNamespaces } from "../lib/workspace";
 import { readImageFile } from "../lib/pastedImages";
 import { invalidateAgentInventory, useAgentInventoryVersion } from "../lib/agentInventory";
-import { describeError, isTauri, listAgents, type AgentInfo } from "@srelens/core";
+import { describeError, isTauri, listAgents, selectsNothing, type AgentInfo } from "@srelens/core";
 import { useActiveContext, useContexts } from "../lib/clusters";
 import { detailRoute } from "../lib/detailRoute";
 import { hint } from "../lib/shortcuts";
@@ -239,7 +239,11 @@ export function Console({ fullView }: { fullView?: boolean }) {
   // list screens. Without it, a question asked from a list narrowed to one
   // namespace had the agent sweep every namespace in the cluster.
   const selected = useNamespaces(activeCtx?.stableId);
-  const about = useMemo(() => askContextFor(route, context, selected), [route, context, selected]);
+  // A namespace collection that matches nothing names no namespace to ask about (#881).
+  const about = useMemo(
+    () => askContextFor(route, context, selectsNothing(selected) ? [] : selected),
+    [route, context, selected],
+  );
   /**
    * The dock shows the conversation about the thing the reader is LOOKING at,
    * and follows them as they navigate — it is not a window onto whichever run
