@@ -956,30 +956,30 @@ async fn run_suite() {
         .await;
     assert_eq!(checked["problems"][0]["field"], "patterns", "{checked}");
 
-    // Resource collections (#885): every namespace holds the
-    // kube-root-ca.crt ConfigMap, so a pattern finds it in the e2e namespace,
-    // a pinned member finds it again, and a member that does not exist is
-    // marked missing.
-    let resources = h
+    // A collection's resource filter (#885): the kinds it may name come from
+    // this cluster's API discovery, and a name expression narrows a list.
+    let kinds = h.ok("k8s.listApiKinds", json!({ "context": ctx })).await;
+    let served: Vec<(&str, &str)> = kinds["kinds"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|k| (k["group"].as_str().unwrap(), k["kind"].as_str().unwrap()))
+        .collect();
+    assert!(served.contains(&("apps", "Deployment")) && served.contains(&("", "ConfigMap")), "{kinds}");
+    let matched = h
         .ok(
-            "collections.resolveResources",
+            "collections.matchNames",
             json!({
-                "context": ctx,
-                "kind": "ConfigMap",
-                "namespaces": [NS],
                 "collections": [{
-                    "name": "e2e",
-                    "type": "resource",
-                    "kinds": ["ConfigMap"],
-                    "patterns": ["kube-root-*"],
-                    "members": [format!("{NS}/kube-root-ca.crt"), "no-such-configmap"],
+                    "name": "e2e", "type": "namespace", "members": [NS],
+                    "resources": { "kinds": ["ConfigMap"], "nameRegex": "^kube-root-" },
                 }],
+                "kind": "ConfigMap",
+                "names": ["kube-root-ca.crt", "app-settings"],
             }),
         )
         .await;
-    assert_eq!(resources["keys"], json!([format!("{NS}/kube-root-ca.crt")]), "{resources}");
-    assert_eq!(resources["collections"][0]["members"][0]["status"], "found", "{resources}");
-    assert_eq!(resources["collections"][0]["members"][1]["status"], "missing", "{resources}");
+    assert_eq!(matched["matches"], json!([true, false]), "{matched}");
 
     let out = h
         .ok("k8s.listPods", json!({ "context": ctx, "namespace": NS }))

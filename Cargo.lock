@@ -7138,6 +7138,7 @@ dependencies = [
  "k8s-openapi",
  "kube",
  "libc",
+ "regex",
  "schemars 0.8.22",
  "serde",
  "serde_json",

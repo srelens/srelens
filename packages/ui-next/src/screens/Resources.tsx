@@ -1,7 +1,6 @@
 import { ContextLabel } from "../lib/contextLabel";
-import { useResourceCollectionFilter } from "../lib/resourceCollections";
-import { ResourceCollectionNotice, ResourceCollectionPicker } from "./collections/ResourceCollectionFilter";
-import { CollectionScopeNotice, NamespaceScopePicker } from "./collections/NamespaceScope";
+import { useCollectionNameFilter } from "../lib/collectionNameFilter";
+import { CollectionNameNotice, CollectionScopeNotice, NamespaceScopePicker } from "./collections/NamespaceScope";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   describeError,
@@ -191,17 +190,18 @@ function KindList({
     () => clusterScoped ? list.rows : list.rows.filter((row) => rowInSelection(row.namespace ?? "", selection)),
     [list.rows, clusterScoped, selection],
   );
-  // Resource collections (#885): a release's deployments, a team's services.
-  // Narrowed here, ahead of everything that reads `rows`, so the count, the
-  // columns, the bulk actions and the table all agree about what is listed.
-  const kindRef = useMemo(
-    () => (descriptor ? { kind: descriptor.k8sKind, ...(descriptor.group ? { group: descriptor.group } : {}), ...descriptor.api } : undefined),
+  // A collection the tab is scoped to may also narrow this kind's list to the
+  // names matching its expression (#885). Narrowed here, ahead of everything
+  // that reads `rows`, so the count, the columns, the bulk actions and the
+  // table all agree about what is listed.
+  const listKind = useMemo(
+    () => (descriptor ? { kind: descriptor.k8sKind, ...(descriptor.group ? { group: descriptor.group } : {}) } : undefined),
     [descriptor],
   );
-  const collectionFilter = useResourceCollectionFilter(name, kindRef, clusterScoped ? [] : selection, scoped);
-  const narrow = collectionFilter.apply;
-  // Keyed on `apply`, which changes only with the answer: the hook's result
-  // is a new object every render, and a new `rows` every render would re-run
+  const nameFilter = useCollectionNameFilter(context.stableId, listKind, scoped);
+  const narrow = nameFilter.apply;
+  // Keyed on `apply`, which changes only with the answer: the hook's result is
+  // a new object every render, and a new `rows` every render would re-run
   // everything downstream of it.
   const rows = useMemo(() => narrow(scoped), [narrow, scoped]);
   const inventory = useExtensions();
@@ -605,22 +605,10 @@ function KindList({
           />
         )}
       >
-        {kindRef && (
-          <ResourceCollectionPicker
-            filter={collectionFilter}
-            context={name}
-            kind={kindRef}
-            noun={lower}
-            namespaces={clusterScoped ? [] : selection}
-            ticked={[...new Set(filtered.filter((row) => selected.has(rowKey(row))).map((row) => row.name))]}
-          />
-        )}
         {!clusterScoped && (
           <NamespaceScopePicker context={context} options={namespaceOptions} />
         )}
       </FilterBar>
-
-      <ResourceCollectionNotice filter={collectionFilter} noun={lower} context={name} />
 
       {!clusterScoped && <NamespaceErrorAlert error={namespaceError} />}
 
@@ -646,6 +634,7 @@ function KindList({
       {!clusterScoped && (
         <>
           <CollectionScopeNotice context={context} />
+          <CollectionNameNotice filter={nameFilter} noun={lower} />
           <StaleSelectionAlert
             selection={selection}
             namespaces={namespaces}

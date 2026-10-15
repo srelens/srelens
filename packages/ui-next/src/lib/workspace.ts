@@ -6,7 +6,6 @@ import {
   currentWorkspace,
   forgetClusterNamespaces,
   renameNamespaceCollection,
-  renameResourceCollection,
   setTabNamespaceCollections,
   setTabNamespaces,
   subscribe as subscribeTabs,
@@ -210,7 +209,6 @@ function subscribeSelection(listener: () => void): () => void {
 // A namespace collection renamed in Settings takes the tabs scoped to it along.
 onCollectionRenamed((type, from, to) => {
   if (type === "namespace") renameNamespaceCollection(from, to);
-  else renameResourceCollection(from, to);
 });
 
 /**

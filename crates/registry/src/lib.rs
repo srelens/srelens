@@ -656,7 +656,10 @@ fn build_with(
     // settings, so an agent has nothing to pass them.
     reg.register(srelens_kube::collections::validate_capability().only_in_the_ui());
     reg.register(srelens_kube::collections::resolve_namespaces_capability().only_in_the_ui());
-    reg.register(srelens_kube::collections::resolve_resources_capability(cache.clone()).only_in_the_ui());
+    reg.register(srelens_kube::collections::match_names_capability().only_in_the_ui());
+    // The kinds a collection's resource filter may name (#885), offered by
+    // its editor.
+    reg.register(srelens_kube::collections::list_api_kinds_capability(cache.clone()).only_in_the_ui());
     reg.register(srelens_kube::schema::open_api_schema_capability(
         cache.clone(),
     ));
@@ -998,12 +1001,13 @@ mod tests {
         assert_eq!(
             ui_only,
             [
+                "collections.matchNames",
                 "collections.resolveNamespaces",
-                "collections.resolveResources",
                 "collections.validate",
                 "extensions.callOperation",
                 "extensions.inspect",
                 "extensions.logs",
+                "k8s.listApiKinds",
             ]
         );
         for id in &ui_only {

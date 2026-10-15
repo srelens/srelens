@@ -77,12 +77,6 @@ export interface KindDescriptor<Row extends ListRow = ListRow> {
    * kind alone then lands on the built-in. Carried into the edit route.
    */
   group?: string;
-  /**
-   * A custom kind's version and plural, which the API is addressed by and a
-   * kind name does not give — for what lists the kind itself, such as a
-   * resource collection (#885). Absent for a built-in kind.
-   */
-  api?: { version: string; plural: string };
   columns: Column<Row>[];
   /** `watch` streams snapshots; `poll` re-lists on an interval. */
   source: "watch" | "poll";

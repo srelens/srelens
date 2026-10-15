@@ -359,14 +359,6 @@ describe("parseStoredState", () => {
     expect(parsed!.workspaces[0].tabs[0].namespaces).toBeUndefined();
   });
 
-  it("round-trips a list's resource collections, and drops a name that is not a string (#885)", () => {
-    const s = valid();
-    s.workspaces[0].tabs[1].view = { collections: ["release", "canary"] };
-    expect(parseStoredState(JSON.stringify({ version: 1, ...s }))?.workspaces[0].tabs[1].view).toEqual({ collections: ["release", "canary"] });
-    const raw = JSON.stringify({ version: 1, ...s }).replace('"collections":["release","canary"]', '"collections":["release",7]');
-    expect(parseStoredState(raw)?.workspaces[0].tabs[1].view).toEqual({ collections: ["release"] });
-  });
-
   it("round-trips a tab's namespace collections per cluster, and drops a malformed entry (#881)", () => {
     const s = valid();
     s.workspaces[0].tabs[1].namespaceCollections = { a: ["prod", "staging"], b: ["dev"] };

@@ -155,20 +155,15 @@ the preview to keep it as a member. Members can be
 pasted as a list separated by commas or new lines. Collections are kept with your
 settings, so they are the same in every window and survive a restart.
 
-**Resource collections.** A collection can also group *resources* — the services
-going live in next Tuesday's release, a team's deployments — rather than
-namespaces. A resource collection names the kinds it covers (`Deployment`,
-`Service`, or `group/Kind` such as `traefik.io/IngressRoute` for a custom kind),
-plus the same members, patterns and label selector. A member written as a plain
-name matches that name in every namespace in view, so one collection works across
-dev, staging and prod; `namespace/name` pins it to one namespace.
-
-In the list of a kind it covers, choose it in the **Collections** filter beside the
-namespace selector: the list shows only what it matches, inside the namespaces in
-view, and several chosen are their union. Tick rows in a list and choose
-**Save as collection…** in that filter to save them as one, by name. Manage
-both types in **Settings → Collections**, on its **Namespaces** and **Resources**
-tabs.
+A collection can also **filter resources**. Switch on *Filter resources* in its
+editor, choose the kinds it applies to from the ones the cluster serves, and give
+a regular expression for resource names (`^payment-` for names that start so,
+`canary` for names that contain it). With the collection chosen in the namespace
+selector, the lists of those kinds show only the resources, inside its
+namespaces, whose name matches; a line above the list says so. Other kinds' lists
+are only scoped to the namespaces. With several collections chosen, a list is
+narrowed only when each of them filters its kind, and shows a name any of their
+expressions matches.
 
 **Bulk actions.** Select rows with their checkboxes to reveal a bar with **Delete**,
 **Evict** (Pods), and **Rollout restart** (Deployments, StatefulSets, DaemonSets).

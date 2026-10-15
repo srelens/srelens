@@ -538,8 +538,7 @@ export function setTabView(tabId: string, patch: Partial<NonNullable<Tab["view"]
       current.regex === next.regex &&
       // An empty box and no query at all are the same query: a Logs tab writes
       // its box when it opens, and that must not give it a view.
-      (current.query ?? "") === (next.query ?? "") &&
-      sameList(current.collections ?? [], next.collections ?? [])
+      (current.query ?? "") === (next.query ?? "")
     ) {
       return w;
     }
@@ -617,38 +616,6 @@ export function setTabNamespaceCollections(tabId: string, clusterId: string, nam
     if (next.namespaceCollections === undefined) delete next.namespaceCollections;
     return { ...w, tabs: w.tabs.map((t, i) => (i === at ? next : t)) };
   });
-}
-
-/**
- * Move every list narrowed to the resource collection `from` onto `to`
- * (#885), in every workspace, open, recently closed or put away — as
- * {@link renameNamespaceCollection} does for namespace collections.
- */
-export function renameResourceCollection(from: string, to: string): void {
-  if (from === to) return;
-  const move = (tabs: Tab[]) => {
-    if (!tabs.some((t) => t.view?.collections?.includes(from))) return tabs;
-    return tabs.map((t) =>
-      t.view?.collections?.includes(from)
-        ? { ...t, view: { ...t.view, collections: [...new Set(t.view.collections.map((n) => (n === from ? to : n)))] } }
-        : t,
-    );
-  };
-  const state = cur();
-  let changed = false;
-  const workspaces = state.workspaces.map((w) => {
-    const tabs = move(w.tabs);
-    const closed = move(w.closed);
-    let shelved = w.shelved;
-    for (const [id, strip] of Object.entries(w.shelved ?? {})) {
-      const put = { tabs: move(strip.tabs), closed: move(strip.closed) };
-      if (put.tabs !== strip.tabs || put.closed !== strip.closed) shelved = { ...shelved, [id]: { ...strip, ...put } };
-    }
-    if (tabs === w.tabs && closed === w.closed && shelved === w.shelved) return w;
-    changed = true;
-    return { ...w, tabs, closed, ...(shelved ? { shelved } : {}) };
-  });
-  if (changed) emit({ ...state, workspaces });
 }
 
 /**

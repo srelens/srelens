@@ -19,15 +19,7 @@ export interface Tab {
    * the tab does. Absent until the user sorts or filters — see `setTabView`.
    * A Logs tab keeps its search box here, as `query`.
    */
-  view?: {
-    sort?: TableSort | null;
-    filter?: string;
-    filterKey?: string | null;
-    regex?: boolean;
-    query?: string;
-    /** The resource collections the list is narrowed to, by name (#885). */
-    collections?: string[];
-  };
+  view?: { sort?: TableSort | null; filter?: string; filterKey?: string | null; regex?: boolean; query?: string };
   /**
    * The namespace selection this tab is narrowed to, per cluster, keyed by
    * `ClusterContext.stableId`. On the tab, not the cluster: narrowing one tab

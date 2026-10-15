@@ -1,6 +1,6 @@
 [
   {
-    "id": "collections.resolveNamespaces",
+    "id": "collections.matchNames",
     "readOnly": true,
     "destructive": false,
     "requiresConfirm": false,
@@ -10,7 +10,7 @@
     "uiOnly": true
   },
   {
-    "id": "collections.resolveResources",
+    "id": "collections.resolveNamespaces",
     "readOnly": true,
     "destructive": false,
     "requiresConfirm": false,
@@ -535,6 +535,16 @@
     "sensitive": false,
     "impact": "low",
     "confirm": null
+  },
+  {
+    "id": "k8s.listApiKinds",
+    "readOnly": true,
+    "destructive": false,
+    "requiresConfirm": false,
+    "sensitive": false,
+    "impact": "low",
+    "confirm": null,
+    "uiOnly": true
   },
   {
     "id": "k8s.listCRDs",

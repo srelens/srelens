@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
-import type { Collection, CollectionType } from "@srelens/core";
-import { Button, Checkbox, ConfirmDialog, EmptyState, Tabs } from "@srelens/ui-kit";
+import type { Collection } from "@srelens/core";
+import { Button, Checkbox, ConfirmDialog, EmptyState } from "@srelens/ui-kit";
 import { deleteCollections, refreshCollections, useCollections } from "../../lib/collections";
 import { useActiveContext } from "../../lib/clusters";
 import { CollectionDialog } from "../collections/CollectionEditor";
@@ -18,10 +18,9 @@ function rules(c: Collection): string {
 }
 
 /**
- * Settings → Collections: on one tab the namespace collections every
- * namespace picker offers (#881), on the other the resource collections the
- * lists of their kinds offer (#885) — created, edited and deleted in one
- * place, several at once, for cleaning up after a release.
+ * Settings → Collections (#881): the namespace collections every namespace
+ * picker offers, created, edited and deleted in one place — several at once,
+ * for cleaning up after a release.
  *
  * The editor previews each collection against the cluster in focus, so what
  * it matches there is visible before it is used.
@@ -33,10 +32,7 @@ export function CollectionsPane() {
   useEffect(() => {
     void refreshCollections();
   }, []);
-  const [type, setType] = useState<CollectionType>("namespace");
-  const resource = type === "resource";
-  const collections = all.filter((c) => c.type === type).sort((a, b) => a.name.localeCompare(b.name));
-  const count = (t: CollectionType) => all.filter((c) => c.type === t).length;
+  const collections = all.filter((c) => c.type === "namespace").sort((a, b) => a.name.localeCompare(b.name));
   const [editing, setEditing] = useState<Collection | "new" | null>(null);
   const [picked, setPicked] = useState<Set<string>>(new Set());
   const [deleting, setDeleting] = useState<string[] | null>(null);
@@ -55,29 +51,13 @@ export function CollectionsPane() {
   return (
     <div className="min-w-0 text-[0.8125rem]">
       <section className="border-b border-rule px-4 py-3" aria-label="About collections">
-        <h2 className="font-semibold text-ink">Collections</h2>
+        <h2 className="font-semibold text-ink">Namespace collections</h2>
         <p className="mt-1 max-w-[70ch] text-muted">
-          Saved groups — by name pattern (prod-*), by label (env=prod), or picked by hand. A namespace collection is
-          offered by every namespace picker and scopes a list to the namespaces it matches; a resource collection is
-          offered by the lists of its kinds and narrows them to what it matches, such as the services in next
-          Tuesday&apos;s release. Either matches on the cluster you are looking at, so one collection works on every
-          cluster. Members are always included; with both patterns and a label selector, both have to match.
+          Saved groups of namespaces — by name pattern (prod-*), by label (env=prod), or picked by hand — that every
+          namespace picker offers above the namespaces. Choosing one scopes the list to whatever it matches on the
+          cluster you are looking at, so one collection works on every cluster. Members are always included; with
+          both patterns and a label selector, a namespace has to match both.
         </p>
-        <div className="mt-2">
-          <Tabs
-            variant="underline"
-            label="Collection type"
-            active={type}
-            onChange={(id) => {
-              setType(id === "resource" ? "resource" : "namespace");
-              setPicked(new Set());
-            }}
-            tabs={[
-              { id: "namespace", label: `Namespaces (${count("namespace")})` },
-              { id: "resource", label: `Resources (${count("resource")})` },
-            ]}
-          />
-        </div>
       </section>
 
       <section className="flex flex-wrap items-center gap-2 border-b border-rule px-4 py-2" aria-label="Collection actions">
@@ -96,16 +76,12 @@ export function CollectionsPane() {
 
       {collections.length === 0 ? (
         <EmptyState
-          title={resource ? "No resource collections yet" : "No namespace collections yet"}
-          hint={
-            resource
-              ? "Create one here, or tick rows in a list and choose Save as collection… in its Collections filter."
-              : "Create one here, or pick namespaces in any list and choose Save as collection… in the namespace picker."
-          }
+          title="No namespace collections yet"
+          hint="Create one here, or pick namespaces in any list and choose Save as collection… in the namespace picker."
           className="py-10"
         />
       ) : (
-        <ul aria-label={resource ? "Resource collections" : "Namespace collections"}>
+        <ul aria-label="Namespace collections">
           {collections.map((c) => (
             <li key={c.name} className="flex items-start gap-3 border-b border-rule px-4 py-2.5" data-collection={c.name}>
               <Checkbox
@@ -116,14 +92,15 @@ export function CollectionsPane() {
               <div className="min-w-0 flex-1">
                 <p className="font-mono font-semibold text-ink">{c.name}</p>
                 {c.description && <p className="mt-0.5 text-ink-soft">{c.description}</p>}
-                {resource && (
-                  <p className="mt-0.5 text-[0.75rem] text-muted" data-slot="collection-kinds">
-                    {(c.kinds ?? []).join(", ")}
-                  </p>
-                )}
                 <p className="mt-0.5 overflow-x-auto whitespace-nowrap font-mono text-[0.75rem] text-muted" data-slot="collection-rules">
                   {rules(c)}
                 </p>
+                {c.resources && (
+                  <p className="mt-0.5 overflow-x-auto whitespace-nowrap text-[0.75rem] text-muted" data-slot="collection-resources">
+                    Filters {c.resources.kinds.join(", ")} to names matching{" "}
+                    <span className="font-mono">{c.resources.nameRegex}</span>
+                  </p>
+                )}
               </div>
               <div className="flex shrink-0 gap-1.5">
                 <Button variant="secondary" size="xs" onClick={() => setEditing(c)}>
@@ -141,7 +118,6 @@ export function CollectionsPane() {
       {editing !== null && (
         <CollectionDialog
           editing={editing === "new" ? undefined : editing}
-          type={type}
           clusterId={context?.stableId}
           clusterName={context?.name}
           onClose={() => setEditing(null)}
@@ -152,15 +128,13 @@ export function CollectionsPane() {
           title={deleting.length === 1 ? `Delete ${deleting[0]}?` : `Delete ${deleting.length} collections?`}
           message={
             deleting.length === 1
-              ? resource
-                ? "Lists narrowed to it show every row again."
-                : "Lists scoped to it go back to their default namespace."
-              : `${deleting.join(", ")}. ${resource ? "Lists narrowed to them show every row again." : "Lists scoped to them go back to their default namespace."}`
+              ? "Lists scoped to it go back to their default namespace."
+              : `${deleting.join(", ")}. Lists scoped to them go back to their default namespace.`
           }
           confirmLabel="Delete"
           danger
           onConfirm={() => {
-            deleteCollections(type, deleting);
+            deleteCollections("namespace", deleting);
             setPicked(new Set());
             setDeleting(null);
           }}

@@ -1,17 +1,16 @@
 import { useEffect, useId, useMemo, useState } from "react";
 import {
+  apiKindName,
+  listApiKinds,
   parseMemberList,
   resolveNamespaceCollections,
-  resolveResourceCollections,
   validateCollection,
+  type ApiKind,
   type Collection,
   type CollectionProblem,
-  type CollectionType,
-  type KindRef,
   type NamespaceResolution,
-  type ResourceResolution,
 } from "@srelens/core";
-import { Button, Checkbox, Dialog, Field, TextInput } from "@srelens/ui-kit";
+import { Button, Checkbox, Dialog, Field, MultiSelect, Switch, TextInput } from "@srelens/ui-kit";
 import { useCollections, saveCollection } from "../../lib/collections";
 import { useListing } from "../../lib/collectionScope";
 
@@ -24,35 +23,40 @@ const TEXTAREA =
   "scroll w-full rounded-md border border-[var(--control-line)] bg-transparent px-2 py-1.5 font-mono text-[0.75rem] outline-none focus:border-[var(--accent)]";
 
 /** What a draft says, as a collection; empty fields left out. */
-function draftCollection(fields: Draft, type: CollectionType): Collection {
-  const collection: Collection = { name: fields.name.trim(), type };
+function draftCollection(fields: Draft): Collection {
+  const collection: Collection = { name: fields.name.trim(), type: "namespace" };
   if (fields.description.trim()) collection.description = fields.description.trim();
-  if (type === "resource") collection.kinds = parseMemberList(fields.kinds);
   const members = parseMemberList(fields.members);
   if (members.length > 0) collection.members = members;
   const patterns = parseMemberList(fields.patterns);
   if (patterns.length > 0) collection.patterns = patterns;
   if (fields.labelSelector.trim()) collection.labelSelector = fields.labelSelector.trim();
+  if (fields.filterResources) collection.resources = { kinds: fields.kinds, nameRegex: fields.nameRegex };
   return collection;
 }
 
 interface Draft {
   name: string;
   description: string;
-  kinds: string;
   members: string;
   patterns: string;
   labelSelector: string;
+  /** Whether the collection also narrows resource lists (#885). */
+  filterResources: boolean;
+  kinds: string[];
+  nameRegex: string;
 }
 
-function draftOf(collection: Collection | undefined, members: readonly string[] = [], kinds: readonly string[] = []): Draft {
+function draftOf(collection: Collection | undefined, members: readonly string[] = []): Draft {
   return {
     name: collection?.name ?? "",
     description: collection?.description ?? "",
-    kinds: (collection?.kinds ?? kinds).join(", "),
     members: (collection?.members ?? members).join("\n"),
     patterns: (collection?.patterns ?? []).join("\n"),
     labelSelector: collection?.labelSelector ?? "",
+    filterResources: collection?.resources !== undefined,
+    kinds: collection?.resources?.kinds ?? [],
+    nameRegex: collection?.resources?.nameRegex ?? "",
   };
 }
 
@@ -65,19 +69,8 @@ function problemText(problems: CollectionProblem[], field: string): string | und
 export interface CollectionDialogProps {
   /** The collection being edited; absent for a new one. */
   editing?: Collection;
-  /** For a new one: which type. The edited one's own type otherwise. */
-  type?: CollectionType;
-  /** For a new one, the members it starts with — Save as collection… */
+  /** For a new one, the namespaces it starts with — Save as collection… */
   members?: readonly string[];
-  /** For a new resource collection, the kinds it starts with: the list's own. */
-  kinds?: readonly string[];
-  /**
-   * For a resource collection, the kind and namespace scope its preview lists
-   * — the list Save as collection… was chosen from. Without it, the first
-   * kind the draft names, across every namespace.
-   */
-  previewKind?: KindRef;
-  previewNamespaces?: string[];
   /** The cluster the preview resolves against, by `stableId`, and its name. */
   clusterId?: string;
   clusterName?: string;
@@ -87,9 +80,8 @@ export interface CollectionDialogProps {
 }
 
 /**
- * Create or edit a collection: a namespace collection (#881), or a resource
- * collection (#885), which also names the kinds whose lists it filters. Either
- * is a name and any of explicit members, name patterns and a label selector.
+ * Create or edit a namespace collection (#881): a name, and any of explicit
+ * members, name patterns and a label selector.
  *
  * Checked by the backend as it is typed, so the rule that refuses a save is
  * the rule the matching applies, and previewed against the cluster in focus,
@@ -99,22 +91,9 @@ export interface CollectionDialogProps {
  * Members and patterns take one per line, or commas — a list pasted from a
  * release ticket is split, trimmed and kept once each.
  */
-export function CollectionDialog({
-  editing,
-  type: newType = "namespace",
-  members,
-  kinds,
-  previewKind,
-  previewNamespaces,
-  clusterId,
-  clusterName,
-  onClose,
-  onSaved,
-}: CollectionDialogProps) {
-  const type = editing?.type ?? newType;
-  const resource = type === "resource";
+export function CollectionDialog({ editing, members, clusterId, clusterName, onClose, onSaved }: CollectionDialogProps) {
   const all = useCollections();
-  const [draft, setDraft] = useState<Draft>(() => draftOf(editing, members, kinds));
+  const [draft, setDraft] = useState<Draft>(() => draftOf(editing, members));
   const [problems, setProblems] = useState<CollectionProblem[] | null>(null);
   // Set from each change until the backend has checked it. The problems shown
   // meanwhile are the last ones, so nothing flickers while typing, but a save
@@ -122,12 +101,12 @@ export function CollectionDialog({
   const [checking, setChecking] = useState(true);
   const [checkError, setCheckError] = useState<string | null>(null);
   const [touchedName, setTouchedName] = useState(editing !== undefined);
-  const collection = useMemo(() => draftCollection(draft, type), [draft, type]);
+  const collection = useMemo(() => draftCollection(draft), [draft]);
   const taken = useMemo(
-    () => all.filter((c) => c.type === type && c.name !== editing?.name).map((c) => c.name),
-    [all, type, editing?.name],
+    () => all.filter((c) => c.type === "namespace" && c.name !== editing?.name).map((c) => c.name),
+    [all, editing?.name],
   );
-  const ids = { members: useId(), patterns: useId(), selector: useId() };
+  const ids = { members: useId(), patterns: useId(), selector: useId(), kinds: useId() };
 
   useEffect(() => {
     let current = true;
@@ -154,7 +133,8 @@ export function CollectionDialog({
     };
   }, [collection, taken]);
 
-  const set = (field: keyof Draft) => (value: string) => setDraft((d) => ({ ...d, [field]: value }));
+  const set = (field: "name" | "description" | "members" | "patterns" | "labelSelector" | "nameRegex") => (value: string) =>
+    setDraft((d) => ({ ...d, [field]: value }));
   // An empty name is a problem the reader has not made yet: it is not shown
   // until they have typed one or tried to save.
   const shown = (problems ?? []).filter((p) => p.field !== "name" || touchedName);
@@ -162,7 +142,10 @@ export function CollectionDialog({
   // The preview needs the rules to be sound, not the whole collection: a
   // pattern typed before the name is worth seeing at once.
   const previewable =
-    problems !== null && checkError === null && problems.every((p) => p.field === "name" || p.field === "description");
+    problems !== null &&
+    checkError === null &&
+    // The preview is of namespaces; the resource filter does not change it.
+    problems.every((p) => p.field === "name" || p.field === "description" || p.field.startsWith("resources."));
 
   function save() {
     setTouchedName(true);
@@ -175,7 +158,7 @@ export function CollectionDialog({
 
   return (
     <Dialog
-      title={editing ? `Edit ${editing.name}` : resource ? "New resource collection" : "New namespace collection"}
+      title={editing ? `Edit ${editing.name}` : "New namespace collection"}
       onClose={onClose}
       maxWidth={560}
       footer={
@@ -205,22 +188,9 @@ export function CollectionDialog({
         <Field label="Description (optional)" error={problemText(shown, "description")}>
           <TextInput value={draft.description} onValueChange={set("description")} />
         </Field>
-        {resource && (
-          <Field
-            label="Kinds"
-            hint="The lists it filters: Deployment, Service, or group/Kind such as traefik.io/IngressRoute for a custom kind."
-            error={problemText(shown, "kinds")}
-          >
-            <TextInput value={draft.kinds} onValueChange={set("kinds")} placeholder="apps/Deployment, apps/StatefulSet" />
-          </Field>
-        )}
         <Field
           label="Members"
-          hint={
-            resource
-              ? "Always included. A name matches in every namespace in view; namespace/name pins one. One per line, or paste a list."
-              : "Always included. One per line, or paste a comma-separated list."
-          }
+          hint="Always included. One per line, or paste a comma-separated list."
           error={problemText(shown, "members")}
         >
           <textarea
@@ -230,7 +200,7 @@ export function CollectionDialog({
             onChange={(e) => set("members")(e.target.value)}
             rows={3}
             className={TEXTAREA}
-            placeholder={resource ? "payment-service\norder-service" : "payments\ncheckout"}
+            placeholder={"payments\ncheckout"}
           />
         </Field>
         <Field
@@ -250,7 +220,7 @@ export function CollectionDialog({
         </Field>
         <Field
           label="Label selector"
-          hint={`As kubectl get -l takes it. With patterns, ${resource ? "an object" : "a namespace"} must match both.`}
+          hint="As kubectl get -l takes it. With patterns, a namespace must match both."
           error={problemText(shown, "labelSelector")}
         >
           <TextInput
@@ -259,29 +229,57 @@ export function CollectionDialog({
             placeholder="env=prod"
           />
         </Field>
+        {/* The resource half (#885): in the lists of these kinds, inside the
+            namespaces above, only the names this expression is found in. */}
+        <Switch
+          on={draft.filterResources}
+          onChange={(on) => setDraft((d) => ({ ...d, filterResources: on }))}
+          label="Filter resources"
+          hint="Also narrow the lists of chosen kinds, in these namespaces, to names matching a regular expression."
+          // Label and hint across the dialog, the switch at the end of the line.
+          className="!flex w-full justify-between gap-4"
+        />
+        {draft.filterResources && (
+          <>
+            {/* Not a Field: a Field wraps its control in a <label>, and a click
+                on a button inside one is delivered to it twice — the picker
+                opened and closed at once. Same markup otherwise. */}
+            <div className="py-1">
+              <span className="field-label mb-0.5" id={ids.kinds}>
+                Kinds
+              </span>
+              <KindsPicker
+                clusterName={clusterName}
+                kinds={draft.kinds}
+                onChange={(kinds) => setDraft((d) => ({ ...d, kinds }))}
+              />
+              {problemText(shown, "resources.kinds") && (
+                <div className="mt-1 text-[0.75rem]" style={{ color: "var(--sev)" }}>
+                  {problemText(shown, "resources.kinds")}
+                </div>
+              )}
+            </div>
+            <Field
+              label="Name expression"
+              hint="A regular expression searched for in each name: ^payment- for names that start so, canary for names that contain it."
+              error={problemText(shown, "resources.nameRegex")}
+            >
+              <TextInput value={draft.nameRegex} onValueChange={set("nameRegex")} placeholder="^payment-" />
+            </Field>
+          </>
+        )}
         {checkError !== null && (
           <p role="alert" style={{ color: "var(--sev)" }}>
             The collection could not be checked: {checkError}
           </p>
         )}
-        {resource ? (
-          <ResourcePreview
-            collection={collection}
-            valid={previewable}
-            clusterName={clusterName}
-            kind={previewKind ?? firstKind(collection.kinds)}
-            namespaces={previewNamespaces ?? []}
-            onMembers={(next) => set("members")(next.join("\n"))}
-          />
-        ) : (
-          <Preview
-            collection={collection}
-            valid={previewable}
-            clusterId={clusterId}
-            clusterName={clusterName}
-            onMembers={(next) => set("members")(next.join("\n"))}
-          />
-        )}
+        <Preview
+          collection={collection}
+          valid={previewable}
+          clusterId={clusterId}
+          clusterName={clusterName}
+          onMembers={(next) => set("members")(next.join("\n"))}
+        />
       </div>
     </Dialog>
   );
@@ -414,144 +412,55 @@ function Preview({
   );
 }
 
-/** A collection's first kind as a view would name it: `apps/Deployment` → Deployment in apps. */
-function firstKind(kinds: readonly string[] | undefined): KindRef | undefined {
-  const first = kinds?.[0];
-  if (!first) return undefined;
-  const slash = first.lastIndexOf("/");
-  // A built-in kind is resolved by name; its group is the backend's to know.
-  return slash < 0 ? { kind: first } : { kind: first.slice(slash + 1) };
-}
-
 /**
- * What a resource collection matches of one kind on the cluster in focus,
- * one row per name with the namespaces it is in, and a box on each to keep
- * that name as a member — which then matches it in every namespace in view.
+ * The kinds a resource filter narrows, chosen from what the cluster in focus
+ * serves (its API discovery), as `group/Kind` — or the bare kind of the core
+ * group. Kinds already chosen stay offered even where this cluster lacks them:
+ * a collection works across clusters.
  */
-function ResourcePreview({
-  collection,
-  valid,
+function KindsPicker({
   clusterName,
-  kind,
-  namespaces,
-  onMembers,
+  kinds,
+  onChange,
 }: {
-  collection: Collection;
-  valid: boolean;
   clusterName?: string;
-  kind: KindRef | undefined;
-  namespaces: string[];
-  onMembers: (members: string[]) => void;
+  kinds: string[];
+  onChange: (kinds: string[]) => void;
 }) {
-  const [result, setResult] = useState<ResourceResolution | null>(null);
+  const [served, setServed] = useState<ApiKind[] | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const empty = !collection.members && !collection.patterns && !collection.labelSelector;
-  const members = collection.members ?? [];
-  const scopeKey = namespaces.join(",");
-
   useEffect(() => {
-    let current = true;
+    let live = true;
+    setServed(null);
     setError(null);
-    if (!clusterName || !kind || !valid || empty) {
-      setResult(null);
-      return;
-    }
-    const timer = setTimeout(() => {
-      resolveResourceCollections(clusterName, kind, namespaces, [{ ...collection, name: collection.name || "preview" }]).then(
-        (r) => current && setResult(r),
-        (e: unknown) => current && setError(e instanceof Error ? e.message : String(e)),
-      );
-    }, SETTLE_MS);
-    return () => {
-      current = false;
-      clearTimeout(timer);
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [collection, valid, empty, clusterName, kind?.kind, kind?.group, kind?.plural, scopeKey]);
-
-  const toggle = (name: string, on: boolean) =>
-    onMembers(on ? [...members.filter((m) => m !== name), name] : members.filter((m) => m !== name));
-
-  const what = kind ? kind.kind : "objects";
-  const where = clusterName ?? "this cluster";
-  let body;
-  if (!clusterName) {
-    body = <p className="text-muted">Pick a cluster to preview what this matches there.</p>;
-  } else if (!kind) {
-    body = <p className="text-muted">Add a kind to see what this matches on {where}.</p>;
-  } else if (empty) {
-    body = <p className="text-muted">Add members, a pattern or a label selector to see which {what} objects it matches on {where}.</p>;
-  } else if (error !== null) {
-    body = <p style={{ color: "var(--sev)" }}>The preview could not be worked out: {error}</p>;
-  } else if (!valid) {
-    body = <p className="text-muted">Correct the fields above to see what they match.</p>;
-  } else if (result === null) {
-    body = <p className="text-muted">Working out which {what} objects this matches on {where}…</p>;
-  } else {
-    const match = result.collections[0];
-    const status = new Map((match?.members ?? []).map((m) => [m.name, m.status]));
-    // Each name once, with the namespaces it was found in.
-    const byName = new Map<string, string[]>();
-    for (const key of result.keys) {
-      const slash = key.indexOf("/");
-      const namespace = key.slice(0, slash);
-      const name = key.slice(slash + 1);
-      byName.set(name, [...(byName.get(name) ?? []), namespace].filter(Boolean));
-    }
-    const plainMembers = members.filter((m) => !m.includes("/"));
-    const rows = [...byName.keys(), ...plainMembers.filter((m) => !byName.has(m))];
-    const shown = rows.slice(0, PREVIEW_SHOWN);
-    body = (
-      <>
-        <p>
-          {match?.problem
-            ? match.problem
-            : result.keys.length === 0
-              ? `Matches no ${what} on ${where}${namespaces.length > 0 ? " in the namespaces in view" : ""}.`
-              : `Matches ${result.keys.length} ${what} on ${where}${namespaces.length > 0 ? " in the namespaces in view" : ""}.`}
-          {result.partial && " Some namespaces could not be listed, so this may be partial."}
-        </p>
-        {rows.length > 0 && (
-          <>
-            <p className="mt-1 text-[0.75rem] text-muted">Tick a name to keep it as a member, in every namespace in view.</p>
-            <ul className="scroll mt-1 flex max-h-48 flex-col" aria-label="Matched names">
-              {shown.map((name) => {
-                const isMember = members.includes(name);
-                const state = isMember ? status.get(name) : undefined;
-                const where = byName.get(name) ?? [];
-                return (
-                  <li key={name} className="flex items-center gap-2 py-0.5 text-[0.75rem]" data-name={name}>
-                    <Checkbox
-                      checked={isMember}
-                      onChange={(on) => toggle(name, on)}
-                      label={<span className="sr-only">Keep {name} as a member</span>}
-                    />
-                    <span className="min-w-0 flex-1 truncate font-mono">{name}</span>
-                    {where.length > 0 && <span className="min-w-0 shrink truncate text-muted">{where.join(", ")}</span>}
-                    {state === "missing" ? (
-                      <span className="shrink-0" style={{ color: "var(--warn)" }}>not found</span>
-                    ) : state === "unknown" ? (
-                      <span className="shrink-0 text-muted">cannot check</span>
-                    ) : isMember ? (
-                      <span className="shrink-0 text-muted">member</span>
-                    ) : null}
-                  </li>
-                );
-              })}
-            </ul>
-            {rows.length > PREVIEW_SHOWN && (
-              <p className="mt-1 text-[0.75rem] text-muted">and {rows.length - PREVIEW_SHOWN} more</p>
-            )}
-          </>
-        )}
-      </>
+    if (!clusterName) return;
+    listApiKinds(clusterName).then(
+      (found) => live && setServed(found),
+      (e: unknown) => live && setError(e instanceof Error ? e.message : String(e)),
     );
-  }
-
+    return () => {
+      live = false;
+    };
+  }, [clusterName]);
+  const names = [...new Set([...(served ?? []).map(apiKindName), ...kinds])];
+  const empty = !clusterName
+    ? "Pick a cluster to choose from the kinds it serves."
+    : error !== null
+      ? `Could not read the kinds ${clusterName} serves: ${error}`
+      : served === null
+        ? `Reading the kinds ${clusterName} serves…`
+        : "This cluster serves no kinds that can be listed.";
   return (
-    <section aria-label="Preview" className="rule-t -mx-3 px-3 pt-3">
-      <p className="eyebrow mb-1">Preview{kind ? ` · ${kind.kind}` : ""}</p>
-      {body}
-    </section>
+    <MultiSelect
+      options={names.map((value) => ({ value }))}
+      selection={kinds}
+      onChange={onChange}
+      placeholder="Choose kinds…"
+      searchPlaceholder="Find a kind…"
+      ariaLabel="Kinds"
+      className="w-full"
+      selectAll={false}
+      empty={empty}
+    />
   );
 }

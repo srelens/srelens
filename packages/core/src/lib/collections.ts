@@ -19,9 +19,23 @@ export interface Collection {
   patterns?: string[];
   /** A label selector, as `kubectl get -l` takes it. */
   labelSelector?: string;
+  /**
+   * Set when the collection also narrows resource lists (#885): in the lists
+   * of these kinds, inside its namespaces, only resources whose name matches
+   * the expression are shown.
+   */
+  resources?: ResourceFilter;
   /** When a picker last applied it, for most-recently-used order. */
   lastUsedAt?: number;
   [unknown: string]: unknown;
+}
+
+/** A collection's resource filter. */
+export interface ResourceFilter {
+  /** `group/Kind`, or the bare `Kind` of the core group, as API discovery names them. */
+  kinds: string[];
+  /** A regular expression searched for in each resource's name. */
+  nameRegex: string;
 }
 
 /** The stored document: `{ version: 1, collections: [...] }`. */
@@ -84,6 +98,12 @@ export function parseCollectionsDocument(raw: unknown): CollectionsDocument {
     }
     if (typeof entry.description !== "string") delete collection.description;
     if (typeof entry.labelSelector !== "string") delete collection.labelSelector;
+    const resources = entry.resources;
+    if (isRecord(resources) && typeof resources.nameRegex === "string") {
+      collection.resources = { kinds: strings(resources.kinds) ?? [], nameRegex: resources.nameRegex };
+    } else {
+      delete collection.resources;
+    }
     if (typeof entry.lastUsedAt !== "number" || !Number.isFinite(entry.lastUsedAt)) delete collection.lastUsedAt;
     collections.push(collection);
   }
@@ -148,66 +168,68 @@ export async function resolveNamespaceCollections(
   });
 }
 
-export interface ResourceMatch {
-  name: string;
-  /** How many objects it covers here. */
-  matched: number;
-  members: Array<{ name: string; status: MemberStatus }>;
-  /** Set when it could not be applied to this kind; it then matched nothing. */
-  problem?: string;
+export interface NameMatches {
+  /** Whether the list is narrowed at all. */
+  filtered: boolean;
+  /** For each name, in order, whether it is shown. */
+  matches: boolean[];
+  /** A collection whose expression could not be used, which then shows nothing. */
+  problems: string[];
 }
 
-export interface ResourceResolution {
-  /** The objects any of the collections covers, as `namespace/name`. */
-  keys: string[];
-  collections: ResourceMatch[];
-  /** True when some namespace in scope could not be listed. */
-  partial: boolean;
-}
-
-/** A kind as a list view names it; a custom kind also by its API coordinates. */
-export interface KindRef {
+/** A kind as a list view knows it: by name, and by group for a custom kind. */
+export interface ListKind {
   kind: string;
   group?: string;
-  version?: string;
-  plural?: string;
 }
 
 /**
- * The objects of `kind` that `collections` cover on `context`, within the
- * namespace scope (empty for every namespace). The backend lists the kind's
- * names and labels itself, so a selector is matched against labels the list
- * rows do not carry.
+ * Which of `names` a list of `kind` shows when scoped to `collections`: their
+ * resource filters, a union, matched by the backend. A collection that does
+ * not filter this kind allows every name.
  */
-export async function resolveResourceCollections(
-  context: string,
-  kind: KindRef,
-  namespaces: string[],
+export async function matchCollectionNames(
   collections: Collection[],
+  kind: ListKind,
+  names: string[],
   invoke: Invoker = invokeCapability,
-): Promise<ResourceResolution> {
-  const custom = kind.group && kind.version && kind.plural ? { group: kind.group, version: kind.version, plural: kind.plural } : {};
-  return invoke<ResourceResolution>("collections.resolveResources", {
-    context,
-    kind: kind.kind,
-    ...custom,
-    namespaces,
+): Promise<NameMatches> {
+  return invoke<NameMatches>("collections.matchNames", {
     collections: collections.map(forBackend),
+    kind: kind.kind,
+    ...(kind.group ? { group: kind.group } : {}),
+    names,
   });
 }
 
-/**
- * Whether a resource collection lists `kind`: by `group/Kind`, and for a
- * built-in kind whose group the view does not carry, by the kind's name.
- */
-export function collectionCoversKind(collection: Collection, kind: KindRef): boolean {
-  if (collection.type !== "resource") return false;
-  return (collection.kinds ?? []).some((k) => {
-    const slash = k.lastIndexOf("/");
-    const [group, name] = slash < 0 ? ["", k] : [k.slice(0, slash), k.slice(slash + 1)];
-    if (name !== kind.kind) return false;
-    return kind.group ? group === kind.group : true;
+/** Whether a collection's resource filter names `kind` — the same rule the backend applies. */
+export function filtersKind(collection: Collection, kind: ListKind): boolean {
+  return (collection.resources?.kinds ?? []).some((entry) => {
+    const slash = entry.lastIndexOf("/");
+    const [group, name] = slash < 0 ? ["", entry] : [entry.slice(0, slash), entry.slice(slash + 1)];
+    return name === kind.kind && (kind.group === undefined || kind.group === group);
   });
+}
+
+/** One listable kind a cluster serves. */
+export interface ApiKind {
+  /** Empty for the core group. */
+  group: string;
+  version: string;
+  kind: string;
+  plural: string;
+  namespaced: boolean;
+}
+
+/** The kinds `context` serves that can be listed, from its API discovery. */
+export async function listApiKinds(context: string, invoke: Invoker = invokeCapability): Promise<ApiKind[]> {
+  const out = await invoke<{ kinds: ApiKind[] }>("k8s.listApiKinds", { context });
+  return out.kinds;
+}
+
+/** `apps/Deployment`, or the bare `Service` for the core group. */
+export function apiKindName(kind: Pick<ApiKind, "group" | "kind">): string {
+  return kind.group ? `${kind.group}/${kind.kind}` : kind.kind;
 }
 
 /** The fields the backend reads; the rest stay in the frontend's document. */
@@ -220,5 +242,6 @@ function forBackend(c: Collection) {
     members: c.members ?? [],
     patterns: c.patterns ?? [],
     ...(c.labelSelector && c.labelSelector.trim() !== "" ? { labelSelector: c.labelSelector.trim() } : {}),
+    ...(c.resources ? { resources: { kinds: c.resources.kinds, nameRegex: c.resources.nameRegex } } : {}),
   };
 }

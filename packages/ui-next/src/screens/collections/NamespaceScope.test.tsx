@@ -1,4 +1,4 @@
-import { act, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { settingsStorage, type ClusterContext, type NamespaceResolution } from "@srelens/core";
@@ -22,7 +22,8 @@ import { __resetCollectionScopeForTests } from "../../lib/collectionScope";
 import { makeTab } from "../../lib/tabs";
 import { getState, setState, tabNamespaceCollections } from "../../lib/tabsStore";
 import { TabScope } from "../../lib/tabScope";
-import { CollectionScopeNotice, NamespaceScopePicker, RELIST_MS } from "./NamespaceScope";
+import { CollectionNameNotice, CollectionScopeNotice, NamespaceScopePicker, RELIST_MS } from "./NamespaceScope";
+import type { CollectionNameFilter } from "../../lib/collectionNameFilter";
 
 const CONTEXT: ClusterContext = {
   name: "kind-shop",
@@ -274,5 +275,30 @@ describe("CollectionScopeNotice", () => {
     expect(screen.getByText(/Working out which namespaces prod covers on kind-shop/)).toBeDefined();
     await act(async () => answer(resolution(["prod-eu"])));
     expect(screen.queryByText(/Working out/)).toBeNull();
+  });
+});
+
+describe("CollectionNameNotice (#885)", () => {
+  const prod = { name: "prod", type: "namespace" as const, resources: { kinds: ["apps/Deployment"], nameRegex: "^payment-" } };
+  const notice = (state: CollectionNameFilter["state"]) =>
+    render(<CollectionNameNotice filter={{ narrowing: [prod], state, apply: (r) => r }} noun="deployments" />);
+
+  it("says nothing while no collection narrows the list", () => {
+    const { container } = render(<CollectionNameNotice filter={{ narrowing: [], state: { status: "off" }, apply: (r) => r }} noun="deployments" />);
+    expect(container.textContent).toBe("");
+  });
+
+  it("says which names the list is narrowed to, and by which collection", () => {
+    notice({ status: "ready", shown: new Set(["payment-service"]), problems: [] });
+    expect(screen.getByText(/Showing only deployments whose name matches/)).toBeDefined();
+    expect(screen.getByText("^payment- (prod)")).toBeDefined();
+  });
+
+  it("says plainly when nothing here matches, and when an expression could not be used", () => {
+    notice({ status: "ready", shown: new Set(), problems: [] });
+    expect(screen.getByText("No deployments here match ^payment- (prod)")).toBeDefined();
+    cleanup();
+    notice({ status: "ready", shown: new Set(), problems: ["prod: bad expression"] });
+    expect(screen.getByText("prod: bad expression")).toBeDefined();
   });
 });
