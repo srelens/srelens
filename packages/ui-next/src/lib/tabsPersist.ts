@@ -80,7 +80,7 @@ function parseTab(v: unknown): Tab | null {
   // back showing what it showed; with no `sub` it follows the rail as before.
   const detail = parseDetailRoute(tab.route);
   if (detail && !detail.cluster && tab.sub) {
-    tab.route = detailRoute(detail.kind, detail.namespace, detail.name, { cluster: tab.sub });
+    tab.route = detailRoute(detail.kind, detail.namespace, detail.name, { cluster: tab.sub, group: detail.group });
   }
   // The former Control room route is now app-wide; retain the tab's identity
   // and pin preference while dropping its obsolete cluster label.

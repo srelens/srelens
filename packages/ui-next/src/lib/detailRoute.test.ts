@@ -30,6 +30,20 @@ describe("detailRoute", () => {
     expect(parseDetailRoute(route)).toMatchObject({ cluster: "kind/local", name: "a/b" });
   });
 
+  it("qualifies a custom kind with its group, editRoute's spelling, without changing the arity", () => {
+    // A kind name alone does not identify a custom resource: a CRD may reuse
+    // a built-in's name in its own group (#919).
+    const route = detailRoute("Deployment", "default", "api", { cluster: "prod", group: "acme.io" });
+    expect(route).toBe("/k/prod/acme.io%2FDeployment/default/api");
+    expect(parseDetailRoute(route)).toEqual({
+      cluster: "prod",
+      group: "acme.io",
+      kind: "Deployment",
+      namespace: "default",
+      name: "api",
+    });
+  });
+
   it("round-trips", () => {
     for (const [k, ns, n] of [["Pod", "default", "web"], ["Node", null, "n1"]] as const) {
       expect(parseDetailRoute(detailRoute(k, ns, n, ON))).toEqual({ cluster: "prod", kind: k, namespace: ns, name: n });

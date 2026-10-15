@@ -25,10 +25,13 @@ export function detailRoute(
   on: {
     /** The cluster's context name: the tab shows this cluster's object, whatever the rail does. */
     cluster: string;
+    /** The API group, for a custom kind only — see {@link DetailRouteParts.group}. */
+    group?: string;
   },
 ): string {
   const ns = namespace === null ? CLUSTER_SCOPED_SEGMENT : encodeURIComponent(namespace);
-  return `/k/${encodeURIComponent(on.cluster)}/${encodeURIComponent(kind)}/${ns}/${encodeURIComponent(name)}`;
+  const qualified = on.group ? `${on.group}/${kind}` : kind;
+  return `/k/${encodeURIComponent(on.cluster)}/${encodeURIComponent(qualified)}/${ns}/${encodeURIComponent(name)}`;
 }
 
 export interface DetailRouteParts {
@@ -38,6 +41,9 @@ export interface DetailRouteParts {
   /** The cluster the tab is pinned to. Absent only on the shape an earlier
    *  build persisted, which had no cluster in it; such a tab follows the rail. */
   cluster?: string;
+  /** Set only for a custom kind, whose name alone does not identify it — the
+   *  reason {@link EditRouteParts} carries it, word for word (#919). */
+  group?: string;
 }
 
 /**
@@ -219,5 +225,6 @@ function splitGroup(parts: DetailRouteParts): EditRouteParts | null {
  * `screenFor` can tell the two apart.
  */
 export function parseDetailRoute(route: string): DetailRouteParts | null {
-  return parsePinnedRoute(route, "k");
+  const parts = parsePinnedRoute(route, "k");
+  return parts ? splitGroup(parts) : null;
 }
