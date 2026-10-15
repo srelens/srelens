@@ -77,3 +77,23 @@ export function appendLogLines(buffer: LogBuffer, incoming: readonly LogLine[]):
 export function clearLogBuffer(buffer: LogBuffer): LogBuffer {
   return { capacity: buffer.capacity, lines: [], dropped: 0 };
 }
+
+/**
+ * Put `older` lines (oldest first) in front of the buffer: a page read back
+ * from the stream's history on disk (#914). `dropped` falls by exactly as many,
+ * since those lines are no longer missing from view, and the buffer may now
+ * hold up to `capacity`, so lines arriving afterwards do not push the page
+ * straight back out. `dropped + lines.length` does not change: what has
+ * arrived is what it was.
+ */
+export function prependLogLines(
+  buffer: LogBuffer,
+  older: readonly LogLine[],
+  capacity: number,
+): LogBuffer {
+  return {
+    capacity: Math.max(buffer.capacity, Math.floor(capacity)),
+    lines: older.concat(buffer.lines),
+    dropped: Math.max(0, buffer.dropped - older.length),
+  };
+}

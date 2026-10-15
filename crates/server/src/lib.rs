@@ -14,6 +14,7 @@ pub mod api;
 pub mod api_clusters;
 pub mod api_command;
 pub mod api_kubeconfigs;
+pub mod api_logs;
 pub mod api_settings;
 pub mod app_inventory;
 pub mod assets;
@@ -175,6 +176,7 @@ pub fn router(state: AppState) -> Router {
             axum::routing::post(api_command::dispatch),
         )
         .route("/api/extension-policy", get(extension_policy::get))
+        .route("/api/logs/export", get(api_logs::export))
         .route("/api/settings", get(api_settings::list))
         .route(
             "/api/settings/:key",
@@ -253,6 +255,8 @@ pub async fn serve(factory: RegistryFactory, config: ServerConfig) -> Result<(),
     // could not read never leaves it running with none (#578).
     let (policy, source) = extension_policy::from_env(std::env::var(extension_policy::POLICY_ENV))?;
     eprintln!("srelens extension policy: {source}");
+    let log_spool_mb =
+        config::log_spool_mb(std::env::var("SRELENS_LOG_SPOOL_MB").ok().as_deref())?;
     let idp: Arc<dyn auth::idp::IdentityProvider> = match &auth_config.oidc {
         Some(settings) => {
             Arc::new(auth::oidc::OidcProvider::discover(settings, &auth_config.public_url).await?)
@@ -263,12 +267,15 @@ pub async fn serve(factory: RegistryFactory, config: ServerConfig) -> Result<(),
     // start materializing anyone's fresh environment.
     users::UserEnvs::wipe_runtime(&config.data_dir);
     let state = AppState {
-        user_envs: Arc::new(users::UserEnvs::new(
-            factory,
-            config.data_dir.clone(),
-            auth_config.public_url.clone(),
-            srelens_registry::SharedPolicy::new(policy),
-        )),
+        user_envs: Arc::new(
+            users::UserEnvs::new(
+                factory,
+                config.data_dir.clone(),
+                auth_config.public_url.clone(),
+                srelens_registry::SharedPolicy::new(policy),
+            )
+            .with_log_spool_mb(log_spool_mb),
+        ),
         db,
         master_key: Arc::new(master_key),
         auth: Arc::new(auth_config),

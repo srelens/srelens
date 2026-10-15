@@ -3903,9 +3903,13 @@ async fn l_and_s_on_a_single_container_pod_go_straight_to_logs_and_shell() {
         _ => panic!("expected the logs view"),
     }
     let channel = app.active_log_channel.clone().expect("log channel");
-    app.handle_stream_event(channel, json!({ "line": "hello from the pod" }));
+    app.handle_stream_event(
+        channel,
+        json!({ "seq": 1, "lines": [{ "source": "", "line": "hello from the pod" }, { "source": "", "line": "and again" }] }),
+    );
     let screen = common::render_app(&mut app, 120, 30);
     assert!(screen.contains("hello from the pod"), "screen: {}", screen);
+    assert!(screen.contains("and again"), "screen: {}", screen);
     press(&mut app, key(KeyCode::Esc)).await;
 
     press(&mut app, ch('s')).await;
