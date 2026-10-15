@@ -64,11 +64,12 @@ impl DiscoveryIndex {
 
     pub fn find(&self, kind_or_plural: &str, group: Option<&str>) -> Option<DiscoveredResource> {
         let normalized = kind_or_plural.trim().to_lowercase();
-        if let Some(grp) = group {
+        if let Some(grp) = group.filter(|g| !g.trim().is_empty()) {
             let grp_lower = grp.trim().to_lowercase();
-            if let Some(found) = self.by_group_and_name.get(&(grp_lower, normalized.clone())) {
-                return Some(found.clone());
-            }
+            return self
+                .by_group_and_name
+                .get(&(grp_lower, normalized))
+                .cloned();
         }
         self.by_name.get(&normalized).cloned()
     }
@@ -213,11 +214,16 @@ impl ClientCache {
         let client = self.get(context).await?;
         let mut index = DiscoveryIndex::new();
 
-        // 1. Try aggregated discovery, fallback to regular discovery
-        let disc_result = Discovery::new(client.clone()).run_aggregated().await;
+        // 1. Try aggregated discovery, fallback to regular discovery, bounded by request_timeout
+        let timeout = crate::connect::request_timeout();
+        let disc_result =
+            tokio::time::timeout(timeout, Discovery::new(client.clone()).run_aggregated()).await;
         let disc = match disc_result {
-            Ok(d) => Some(d),
-            Err(_) => Discovery::new(client.clone()).run().await.ok(),
+            Ok(Ok(d)) => Some(d),
+            _ => tokio::time::timeout(timeout, Discovery::new(client.clone()).run())
+                .await
+                .ok()
+                .and_then(|r| r.ok()),
         };
 
         let mut discovered_any = false;
@@ -309,8 +315,15 @@ impl ClientCache {
         // Tier 1: Caller provided explicit GVK + plural hints
         if let (Some(g), Some(v), Some(p)) = (group, version, plural) {
             let namespaced = {
-                let lock = self.discovery.lock().await;
-                if let Some(idx) = lock.get(context) {
+                let cached = {
+                    let lock = self.discovery.lock().await;
+                    lock.get(context)
+                        .and_then(|idx| idx.find(kind, Some(g)))
+                        .map(|r| r.namespaced)
+                };
+                if let Some(ns) = cached {
+                    ns
+                } else if let Ok(idx) = self.discover_cluster(context).await {
                     idx.find(kind, Some(g))
                         .map(|r| r.namespaced)
                         .unwrap_or(true)
@@ -335,6 +348,11 @@ impl ClientCache {
             let lock = self.discovery.lock().await;
             if let Some(idx) = lock.get(context) {
                 if let Some(res) = idx.find(kind, group) {
+                    if let Some(v) = version {
+                        let mut ar = res.ar.clone();
+                        ar.version = v.to_string();
+                        return Ok((ar, res.namespaced));
+                    }
                     return Ok((res.ar, res.namespaced));
                 }
             }
@@ -343,6 +361,11 @@ impl ClientCache {
         // Tier 4: Cache miss -> query discovery from the cluster
         let idx = self.discover_cluster(context).await?;
         if let Some(res) = idx.find(kind, group) {
+            if let Some(v) = version {
+                let mut ar = res.ar.clone();
+                ar.version = v.to_string();
+                return Ok((ar, res.namespaced));
+            }
             Ok((res.ar, res.namespaced))
         } else {
             Err(format!(

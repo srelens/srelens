@@ -21,7 +21,7 @@ use crate::client_cache::ClientCache;
 use crate::context_resolve::{is_pinned_context, resolve_context};
 
 /// Default per-request timeout budget (connect + list/get/apply), in seconds.
-pub const DEFAULT_TIMEOUT_SECS: u64 = 30;
+pub const DEFAULT_TIMEOUT_SECS: u64 = 8;
 /// Smallest timeout a user may configure, in seconds.
 pub const MIN_TIMEOUT_SECS: u64 = 1;
 /// Largest timeout a user may configure, in seconds. Raised from 30 for

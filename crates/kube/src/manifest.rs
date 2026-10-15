@@ -812,15 +812,14 @@ pub fn list_resource_capability(cache: Arc<ClientCache>) -> Capability {
                 };
                 let mut items = Vec::new();
                 for o in list.items {
-                    if let Some(ref sel) = input.field_selector {
-                        if let Ok(obj_val) = serde_json::to_value(&o) {
+                    if input.field_selector.is_some() || input.field_filter.is_some() {
+                        let obj_val = readable_object(o.clone(), &ar)?;
+                        if let Some(ref sel) = input.field_selector {
                             if !matches_field_selector(&obj_val, sel) {
                                 continue;
                             }
                         }
-                    }
-                    if let Some(ref filter) = input.field_filter {
-                        if let Ok(obj_val) = serde_json::to_value(&o) {
+                        if let Some(ref filter) = input.field_filter {
                             let matches = filter.iter().all(|(path, val)| {
                                 let actual = field_value_as_str(crate::crds::json_path_value(&obj_val, path));
                                 actual.as_deref().unwrap_or("") == val.as_str()

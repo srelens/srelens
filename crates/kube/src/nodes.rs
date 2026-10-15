@@ -332,22 +332,10 @@ pub fn calculate_node_capacities(nodes: Vec<Node>, pods: Vec<Pod>) -> Vec<NodeCa
             })
             .unwrap_or(false);
 
-        let mut pod_cpu_req = 0;
-        let mut pod_mem_req = 0;
-        if let Some(spec) = &pod.spec {
-            for c in &spec.containers {
-                if let Some(res) = &c.resources {
-                    if let Some(reqs) = &res.requests {
-                        if let Some(cpu) = reqs.get("cpu") {
-                            pod_cpu_req += crate::metrics::cpu_millicores(&cpu.0);
-                        }
-                        if let Some(mem) = reqs.get("memory") {
-                            pod_mem_req += crate::metrics::mem_mib(&mem.0);
-                        }
-                    }
-                }
-            }
-        }
+        let req_summary = crate::why_pending::calculate_pod_resource_requests(pod.spec.as_ref());
+        let pod_cpu_req = req_summary.cpu_millicores;
+        let pod_mem_req = req_summary.memory_mib;
+
         acc.requested_cpu_millicores += pod_cpu_req;
         acc.requested_memory_mib += pod_mem_req;
 
@@ -443,9 +431,10 @@ pub fn node_capacity_overview_capability(cache: Arc<ClientCache>) -> Capability 
                 let pod_api: Api<Pod> = Api::all(client);
                 let node_lp = ListParams::default();
                 let pod_lp = ListParams::default();
+                let timeout = request_timeout().max(std::time::Duration::from_secs(20));
                 let (nodes_res, pods_res) = tokio::join!(
-                    tokio::time::timeout(request_timeout(), node_api.list(&node_lp)),
-                    tokio::time::timeout(request_timeout(), pod_api.list(&pod_lp)),
+                    tokio::time::timeout(timeout, node_api.list(&node_lp)),
+                    tokio::time::timeout(timeout, pod_api.list(&pod_lp)),
                 );
                 let node_list = nodes_res
                     .map_err(|_| CapabilityError::Handler("list nodes timed out".into()))?

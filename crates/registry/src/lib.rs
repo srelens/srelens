@@ -411,7 +411,6 @@ fn build_with(
     network: BrokeredNetwork,
     kubeconfigs: Kubeconfigs,
 ) -> (Registry, Option<Arc<ExtensionStreams>>) {
-    srelens_kube::connect::init_timeout_from_env();
     let mut reg = Registry::new();
 
     reg.register(Capability::read_only(
