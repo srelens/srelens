@@ -808,6 +808,22 @@ mod tests {
         srelens_mcp::completeness::assert_mutating_capabilities_are_gated(&reg);
     }
 
+    /// #920: Cursor drops the whole tool list when one `inputSchema` fails the MCP
+    /// SDK's validation, so every tool `tools/list` serves must pass it.
+    #[tokio::test]
+    async fn every_listed_tool_has_an_object_input_schema() {
+        let server = McpServer::new(Arc::new(build_registry()));
+        let request = json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"});
+        let resp = srelens_mcp::stdio::handle_request(&server, &request, srelens_mcp::Transport::Http)
+            .await
+            .unwrap();
+        let tools = resp["result"]["tools"].as_array().unwrap();
+        assert_eq!(
+            srelens_mcp::completeness::assert_every_input_schema_is_an_object(tools),
+            Ok(())
+        );
+    }
+
     /// #574: every installed app's reader, declared action and sidecar operation is
     /// an MCP tool — and a pod binding, a session a view opens, is not — and the app
     /// tools meet every rule the host's own capabilities do: listed, gated when they
@@ -926,6 +942,16 @@ mod tests {
         assert_eq!(sessions, ["plugin/org.example.releases/logs"]);
         assert_eq!(
             srelens_mcp::completeness::assert_every_app_operation_has_a_tool(&operations, &server),
+            Ok(())
+        );
+        let request = json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"});
+        let resp = srelens_mcp::stdio::handle_request(&server, &request, srelens_mcp::Transport::Http)
+            .await
+            .unwrap();
+        assert_eq!(
+            srelens_mcp::completeness::assert_every_input_schema_is_an_object(
+                resp["result"]["tools"].as_array().unwrap()
+            ),
             Ok(())
         );
         let tool_names: Vec<String> = server.list_tools().into_iter().map(|t| t.name).collect();
