@@ -1,15 +1,20 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { act, render, renderHook, waitFor } from "@testing-library/react";
-import type { K8sObject } from "@srelens/core";
+import type { CrdRef, K8sObject } from "@srelens/core";
 import { useObject } from "./useObject";
 
-vi.mock("@srelens/core", () => ({
+// Everything else stays real: the CRD lookup reads core's `K8S_KIND` table to
+// tell a built-in kind from a custom one.
+vi.mock("@srelens/core", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@srelens/core")>()),
   getObject: vi.fn(),
+  listCrds: vi.fn(),
 }));
 
-import { getObject } from "@srelens/core";
+import { getObject, listCrds } from "@srelens/core";
 
 const mockedGetObject = vi.mocked(getObject);
+const mockedListCrds = vi.mocked(listCrds);
 
 describe("useObject", () => {
   beforeEach(() => {
@@ -219,5 +224,88 @@ describe("useObject", () => {
     // gate lets the settled object through; the effect's own reset is what
     // moves it to loading afterwards.
     expect(seen[0]).toBe("ready");
+  });
+});
+
+describe("useObject on a custom kind (#919)", () => {
+  const WIDGET: CrdRef = {
+    name: "widgets.example.com",
+    group: "example.com",
+    version: "v1",
+    kind: "Widget",
+    plural: "widgets",
+    namespaced: true,
+  };
+  const ACME: CrdRef = { ...WIDGET, name: "widgets.acme.io", group: "acme.io", version: "v2" };
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("reads it through its CustomResourceDefinition and hands that back", async () => {
+    mockedListCrds.mockResolvedValue({ crds: [WIDGET] });
+    const object: K8sObject = { kind: "Widget", metadata: { name: "w-1" } };
+    mockedGetObject.mockResolvedValue({ object });
+    const { result } = renderHook(() => useObject("ctx", "Widget", "default", "w-1"));
+    await waitFor(() => expect(result.current.status).toBe("ready"));
+    expect(mockedGetObject).toHaveBeenCalledWith("ctx", "Widget", "default", "w-1", undefined, {
+      group: "example.com",
+      version: "v1",
+      plural: "widgets",
+    });
+    expect(result.current.object).toEqual(object);
+    expect(result.current.crd).toEqual(WIDGET);
+  });
+
+  it("asks in the group it is given, even under a built-in kind's name", async () => {
+    const deployments: CrdRef = {
+      ...WIDGET,
+      name: "deployments.acme.io",
+      group: "acme.io",
+      kind: "Deployment",
+      plural: "deployments",
+    };
+    mockedListCrds.mockResolvedValue({ crds: [deployments] });
+    mockedGetObject.mockResolvedValue({ object: { kind: "Deployment" } });
+    renderHook(() => useObject("ctx", "Deployment", "default", "api", "acme.io"));
+    await waitFor(() =>
+      expect(mockedGetObject).toHaveBeenCalledWith("ctx", "Deployment", "default", "api", undefined, {
+        group: "acme.io",
+        version: "v1",
+        plural: "deployments",
+      }),
+    );
+  });
+
+  it("fails in the lookup's own words when no CRD claims the kind, and never reads the object", async () => {
+    mockedListCrds.mockResolvedValue({ crds: [] });
+    const { result } = renderHook(() => useObject("ctx", "Widget", "default", "w-1"));
+    await waitFor(() => expect(result.current.status).toBe("error"));
+    expect(result.current.error).toMatch(/no matching CustomResourceDefinition/);
+    expect(mockedGetObject).not.toHaveBeenCalled();
+  });
+
+  it("does not look up CRDs for a built-in kind", async () => {
+    mockedGetObject.mockResolvedValue({ object: { kind: "Pod" } });
+    const { result } = renderHook(() => useObject("ctx", "Pod", "default", "web-1"));
+    await waitFor(() => expect(result.current.status).toBe("ready"));
+    expect(mockedListCrds).not.toHaveBeenCalled();
+    expect(mockedGetObject).toHaveBeenCalledWith("ctx", "Pod", "default", "web-1");
+    expect(result.current.crd).toBeUndefined();
+  });
+
+  it("reads again when only the group changes", async () => {
+    mockedListCrds.mockResolvedValue({ crds: [WIDGET, ACME] });
+    mockedGetObject.mockImplementation(async (_c, _k, _n, _name, _invoke, crd) => ({
+      object: { kind: "Widget", metadata: { name: crd?.group ?? "none" } },
+    }));
+    const { result, rerender } = renderHook(
+      ({ group }: { group: string }) => useObject("ctx", "Widget", "default", "w-1", group),
+      { initialProps: { group: "example.com" } },
+    );
+    await waitFor(() => expect(result.current.object?.metadata?.name).toBe("example.com"));
+    rerender({ group: "acme.io" });
+    await waitFor(() => expect(result.current.object?.metadata?.name).toBe("acme.io"));
+    expect(result.current.crd).toEqual(ACME);
   });
 });

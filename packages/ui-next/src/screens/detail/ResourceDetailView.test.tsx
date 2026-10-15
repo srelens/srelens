@@ -519,36 +519,26 @@ describe("ResourceDetailView", () => {
     });
   });
 
+  // The object itself is read through the CRD (#919), so a lookup that fails
+  // fails the whole subject — before any pane, and before any read.
   it("shows a distinct, informative error when no CRD on the cluster matches the custom resource's kind", async () => {
-    getObject.mockResolvedValue({ object: { kind: "Certificate", metadata: { name: "cert-1", namespace: "default" } } });
     listCrds.mockResolvedValue({ crds: [] });
-    const { getByRole } = render(
-      <ResourceDetailView context="ctx" kind="Certificate" namespace="default" name="cert-1" />,
-    );
-    await waitFor(() => expect(getByRole("tab", { name: "YAML" })).toBeDefined());
-    await userEvent.click(getByRole("tab", { name: "YAML" }));
-    await waitFor(() => expect(getByRole("alert")).toBeDefined());
-    const text = getByRole("alert").textContent ?? "";
-    expect(text).toContain("Certificate");
-    // Distinct from a generic manifest-fetch failure: names the real reason
-    // (no matching CustomResourceDefinition), not a bare "could not load".
+    render(<ResourceDetailView context="ctx" kind="Certificate" namespace="default" name="cert-1" />);
+    const text = (await screen.findByRole("alert")).textContent ?? "";
+    expect(text).toContain("Could not load Certificate default/cert-1");
+    // Distinct from a generic read failure: names the real reason (no
+    // matching CustomResourceDefinition), not a bare "could not load".
     expect(text.toLowerCase()).toContain("customresourcedefinition");
-    expect(getManifest).not.toHaveBeenCalled();
+    expect(getObject).not.toHaveBeenCalled();
   });
 
   it("shows a distinct error when the cluster's CRDs themselves fail to load", async () => {
-    getObject.mockResolvedValue({ object: { kind: "Certificate", metadata: { name: "cert-1", namespace: "default" } } });
     listCrds.mockResolvedValue({ error: "forbidden" });
-    const { getByRole } = render(
-      <ResourceDetailView context="ctx" kind="Certificate" namespace="default" name="cert-1" />,
-    );
-    await waitFor(() => expect(getByRole("tab", { name: "YAML" })).toBeDefined());
-    await userEvent.click(getByRole("tab", { name: "YAML" }));
-    await waitFor(() => expect(getByRole("alert")).toBeDefined());
-    const text = getByRole("alert").textContent ?? "";
+    render(<ResourceDetailView context="ctx" kind="Certificate" namespace="default" name="cert-1" />);
+    const text = (await screen.findByRole("alert")).textContent ?? "";
     expect(text).toContain("Certificate");
     expect(text).toContain("forbidden");
-    expect(getManifest).not.toHaveBeenCalled();
+    expect(getObject).not.toHaveBeenCalled();
   });
 
   it("shows a labelled empty state for a resource with no events, not a blank pane", async () => {
@@ -1227,23 +1217,19 @@ describe("ResourceDetailView", () => {
     // match would fetch a manifest from possibly the wrong group and show it
     // as if it were right — a possibly-wrong success, which is worse than a
     // failure.
-    getObject.mockResolvedValue({ object: { kind: "Widget", metadata: { name: "w-1", namespace: "default" } } });
     listCrds.mockResolvedValue({
       crds: [
         { name: "widgets.example.com", group: "example.com", version: "v1", kind: "Widget", plural: "widgets", namespaced: true },
         { name: "widgets.other.io", group: "other.io", version: "v1", kind: "Widget", plural: "widgets", namespaced: true },
       ],
     });
-    const { getByRole } = render(<ResourceDetailView context="ctx" kind="Widget" namespace="default" name="w-1" />);
-    await waitFor(() => expect(getByRole("tab", { name: "YAML" })).toBeDefined());
-    await userEvent.click(getByRole("tab", { name: "YAML" }));
-    await waitFor(() => expect(getByRole("alert")).toBeDefined());
-    const text = getByRole("alert").textContent ?? "";
+    render(<ResourceDetailView context="ctx" kind="Widget" namespace="default" name="w-1" />);
+    const text = (await screen.findByRole("alert")).textContent ?? "";
     expect(text).toContain("Widget");
     expect(text).toContain("example.com");
     expect(text).toContain("other.io");
-    // Never guessed at: no manifest is fetched from either group.
-    expect(getManifest).not.toHaveBeenCalled();
+    // Never guessed at: nothing is read from either group.
+    expect(getObject).not.toHaveBeenCalled();
   });
 
   it("still resolves a kind claimed by exactly one CustomResourceDefinition among several", async () => {
@@ -1593,6 +1579,9 @@ describe("ResourceDetailView", () => {
 
     it("withholds Delete from a custom resource, whose GVK the backend cannot resolve", async () => {
       getObject.mockResolvedValue({ object: { kind: "Widget", metadata: { name: "w-1", namespace: "default" } } });
+      listCrds.mockResolvedValue({
+        crds: [{ name: "widgets.example.com", group: "example.com", version: "v1", kind: "Widget", plural: "widgets", namespaced: true }],
+      });
       // No descriptor is exactly what a kind outside `K8S_KIND` gets, and it is
       // the same verdict `customDescriptor` reaches: Delete would always fail,
       // and an action that cannot work is worse than an absent one.
