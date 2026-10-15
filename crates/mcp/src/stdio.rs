@@ -139,6 +139,29 @@ pub fn subscription_notification(uri: &str) -> Value {
     })
 }
 
+/// A capability's input schema as MCP clients accept it (#920). MCP wants
+/// `type: "object"` at the root and an object for every property, and the
+/// TypeScript SDK's `ToolSchema` (which Cursor applies to the whole list)
+/// rejects anything else. What schemars writes breaks both: a tagged enum's
+/// root is a bare `oneOf`, a `serde_json::Value` field is `true`, and a
+/// capability with no schema has `null`. MCP `arguments` are always an object,
+/// so stating it narrows nothing, and `{}` is the same schema as `true`.
+fn mcp_input_schema(schema: Value) -> Value {
+    let mut schema = match schema {
+        Value::Object(map) => map,
+        _ => serde_json::Map::new(),
+    };
+    schema.entry("type").or_insert_with(|| json!("object"));
+    if let Some(Value::Object(properties)) = schema.get_mut("properties") {
+        for property in properties.values_mut() {
+            if *property == Value::Bool(true) {
+                *property = json!({});
+            }
+        }
+    }
+    Value::Object(schema)
+}
+
 /// [`handle_request_as`] for a request nobody can be named for: the stdio
 /// transport, an in-process call with no chat behind it, and tests.
 pub async fn handle_request(
@@ -210,15 +233,10 @@ pub async fn handle_request_as(
                 .list_tools()
                 .into_iter()
                 .map(|t| {
-                    let schema = if t.input_schema.is_null() {
-                        json!({ "type": "object" })
-                    } else {
-                        t.input_schema
-                    };
                     json!({
                         "name": t.name,
                         "description": t.description,
-                        "inputSchema": schema,
+                        "inputSchema": mcp_input_schema(t.input_schema),
                         // MCP tool annotations. `readOnlyHint` lets a client
                         // (Cursor) auto-approve read-only calls in headless
                         // mode instead of rejecting them; destructive/consent-
