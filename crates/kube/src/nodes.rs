@@ -429,9 +429,36 @@ pub fn node_capacity_overview_capability(cache: Arc<ClientCache>) -> Capability 
                     .map_err(CapabilityError::Handler)?;
                 let node_api: Api<Node> = Api::all(client.clone());
                 let pod_api: Api<Pod> = Api::all(client);
+                let timeout = request_timeout();
+
+                if let Some(target_node) = input.node.as_deref().filter(|s| !s.trim().is_empty()) {
+                    let pod_lp =
+                        ListParams::default().fields(&format!("spec.nodeName={target_node}"));
+                    let (node_res, pods_res) = tokio::join!(
+                        tokio::time::timeout(timeout, node_api.get(target_node)),
+                        tokio::time::timeout(timeout, pod_api.list(&pod_lp)),
+                    );
+                    let node = match node_res
+                        .map_err(|_| {
+                            CapabilityError::Handler(format!(
+                                "get node '{target_node}' timed out"
+                            ))
+                        })? {
+                        Ok(n) => n,
+                        Err(kube::Error::Api(ref ae)) if ae.code == 404 => {
+                            return Ok(NodeCapacityOverviewOut { nodes: vec![] });
+                        }
+                        Err(e) => return Err(CapabilityError::Handler(e.to_string())),
+                    };
+                    let pod_list = pods_res
+                        .map_err(|_| CapabilityError::Handler("list pods timed out".into()))?
+                        .map_err(|e| CapabilityError::Handler(e.to_string()))?;
+                    let nodes = calculate_node_capacities(vec![node], pod_list.items);
+                    return Ok(NodeCapacityOverviewOut { nodes });
+                }
+
                 let node_lp = ListParams::default();
                 let pod_lp = ListParams::default();
-                let timeout = request_timeout();
                 let (nodes_res, pods_res) = tokio::join!(
                     tokio::time::timeout(timeout, node_api.list(&node_lp)),
                     tokio::time::timeout(timeout, pod_api.list(&pod_lp)),
@@ -442,10 +469,7 @@ pub fn node_capacity_overview_capability(cache: Arc<ClientCache>) -> Capability 
                 let pod_list = pods_res
                     .map_err(|_| CapabilityError::Handler("list pods timed out".into()))?
                     .map_err(|e| CapabilityError::Handler(e.to_string()))?;
-                let mut nodes = calculate_node_capacities(node_list.items, pod_list.items);
-                if let Some(target_node) = input.node.as_deref().filter(|s| !s.trim().is_empty()) {
-                    nodes.retain(|n| n.name == target_node);
-                }
+                let nodes = calculate_node_capacities(node_list.items, pod_list.items);
                 Ok(NodeCapacityOverviewOut { nodes })
             }
         },
@@ -858,5 +882,84 @@ mod tests {
         let s = summarise(node);
         assert_eq!(s.internal_ip.as_deref(), Some("10.0.1.20"));
         assert_eq!(s.external_ip.as_deref(), Some("198.51.100.5"));
+    }
+
+    #[tokio::test]
+    async fn node_capacity_overview_single_node_targets_specific_node_and_pods() {
+        let node_json = serde_json::json!({
+            "apiVersion": "v1",
+            "kind": "Node",
+            "metadata": { "name": "worker-1" },
+            "status": {
+                "allocatable": { "cpu": "4", "memory": "16Gi", "pods": "110" }
+            }
+        });
+        let pods_json = serde_json::json!({
+            "apiVersion": "v1",
+            "kind": "PodList",
+            "items": []
+        });
+
+        let uris = Arc::new(std::sync::Mutex::new(vec![]));
+        let captured = uris.clone();
+        let service = tower::service_fn(move |request: http::Request<kube::client::Body>| {
+            let captured = captured.clone();
+            let node_json = node_json.clone();
+            let pods_json = pods_json.clone();
+            async move {
+                let uri = request.uri().to_string();
+                captured.lock().unwrap().push(uri.clone());
+                let body = if uri.contains("/nodes/") {
+                    node_json
+                } else {
+                    pods_json
+                };
+                Ok::<_, std::convert::Infallible>(
+                    http::Response::builder()
+                        .status(200)
+                        .header("content-type", "application/json")
+                        .body(kube::client::Body::from(body.to_string().into_bytes()))
+                        .unwrap(),
+                )
+            }
+        });
+        let client = kube::Client::new(service, "default");
+        let cache = ClientCache::new(PathBuf::from("/x"));
+        cache.preload("fake", client).await;
+        let cap = node_capacity_overview_capability(cache);
+
+        let out = (cap.handler)(serde_json::json!({
+            "context": "fake",
+            "node": "worker-1"
+        }))
+        .await
+        .expect("capability handler succeeds");
+
+        let requested_uris = uris.lock().unwrap().clone();
+        assert!(
+            requested_uris
+                .iter()
+                .any(|u| u.contains("/api/v1/nodes/worker-1")),
+            "must request specific node directly, got: {requested_uris:?}"
+        );
+        assert!(
+            requested_uris
+                .iter()
+                .any(|u| u.contains("spec.nodeName=worker-1")
+                    || u.contains("spec.nodeName%3Dworker-1")),
+            "must filter pods by spec.nodeName on server, got: {requested_uris:?}"
+        );
+        assert!(
+            !requested_uris.iter().any(|u| u == "/api/v1/nodes"),
+            "must not list all nodes across cluster, got: {requested_uris:?}"
+        );
+        assert!(
+            !requested_uris.iter().any(|u| u == "/api/v1/pods"),
+            "must not list all pods across cluster, got: {requested_uris:?}"
+        );
+
+        let nodes = out["nodes"].as_array().expect("nodes is array");
+        assert_eq!(nodes.len(), 1);
+        assert_eq!(nodes[0]["name"], "worker-1");
     }
 }

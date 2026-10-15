@@ -3,6 +3,7 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use kube::api::{Api, DynamicObject, ListParams};
@@ -80,6 +81,7 @@ pub struct ClientCache {
     clients: Mutex<HashMap<String, (Client, Option<String>)>>,
     discovery: Mutex<HashMap<String, Arc<DiscoveryIndex>>>,
     auth_resolver: RwLock<Option<Arc<dyn AuthResolver>>>,
+    generation: AtomicU64,
 }
 
 impl ClientCache {
@@ -93,6 +95,7 @@ impl ClientCache {
             clients: Mutex::new(HashMap::new()),
             discovery: Mutex::new(HashMap::new()),
             auth_resolver: RwLock::new(None),
+            generation: AtomicU64::new(0),
         })
     }
 
@@ -108,6 +111,7 @@ impl ClientCache {
         }
         *current = paths;
         drop(current);
+        self.generation.fetch_add(1, Ordering::SeqCst);
         self.clients.lock().await.clear();
         self.discovery.lock().await.clear();
     }
@@ -136,6 +140,7 @@ impl ClientCache {
     /// Without a resolver (desktop) this is the original miss-builds-and-caches
     /// behavior, with `None` as the bearer.
     pub async fn get(&self, context: &str) -> Result<Client, String> {
+        let start_gen = self.generation.load(Ordering::SeqCst);
         // Resolve desired auth first. Cheap for non-OIDC (in-memory lookup);
         // for OIDC this consults the token provider (and may refresh, single-
         // flighted). A needs-login propagates out as the marker String error.
@@ -168,10 +173,10 @@ impl ClientCache {
             Some(tok) => crate::connect::build_client_with_bearer(&paths, context, tok).await?,
             None => build_client(&paths, context).await?,
         };
-        self.clients
-            .lock()
-            .await
-            .insert(context.to_string(), (client.clone(), want_bearer));
+        let mut lock = self.clients.lock().await;
+        if self.generation.load(Ordering::SeqCst) == start_gen {
+            lock.insert(context.to_string(), (client.clone(), want_bearer));
+        }
         Ok(client)
     }
 
@@ -198,12 +203,14 @@ impl ClientCache {
 
     /// Drop any cached client or discovery for a context (e.g. after a connection failure).
     pub async fn invalidate(&self, context: &str) {
+        self.generation.fetch_add(1, Ordering::SeqCst);
         self.clients.lock().await.remove(context);
         self.discovery.lock().await.remove(context);
     }
 
     /// Clear all cached clients and discovery (e.g. after a kubeconfig change).
     pub async fn clear(&self) {
+        self.generation.fetch_add(1, Ordering::SeqCst);
         self.clients.lock().await.clear();
         self.discovery.lock().await.clear();
     }
@@ -211,6 +218,7 @@ impl ClientCache {
     /// Discover all available API resources in the cluster (aggregated discovery
     /// with fallback to standard discovery, plus CRD inspection for aliases and short names).
     async fn discover_cluster(&self, context: &str) -> Result<Arc<DiscoveryIndex>, String> {
+        let start_gen = self.generation.load(Ordering::SeqCst);
         let client = self.get(context).await?;
         let mut index = DiscoveryIndex::new();
 
@@ -292,10 +300,13 @@ impl ClientCache {
         }
 
         let arc_index = Arc::new(index);
-        self.discovery
-            .lock()
-            .await
-            .insert(context.to_string(), arc_index.clone());
+        let mut lock = self.discovery.lock().await;
+        if self.generation.load(Ordering::SeqCst) != start_gen {
+            return Err(format!(
+                "discovery for context '{context}' invalidated by cache reset"
+            ));
+        }
+        lock.insert(context.to_string(), arc_index.clone());
         Ok(arc_index)
     }
 
@@ -730,5 +741,20 @@ mod tests {
             .expect("resolves MetalLB BGPPeer");
         assert_eq!(ar_metallb.group, "metallb.io");
         assert!(ns_metallb);
+    }
+
+    #[tokio::test]
+    async fn cache_generation_increments_on_resets() {
+        let cache = ClientCache::new(PathBuf::from("/nonexistent"));
+        assert_eq!(cache.generation.load(Ordering::SeqCst), 0);
+
+        cache.set_paths(vec![PathBuf::from("/other")]).await;
+        assert_eq!(cache.generation.load(Ordering::SeqCst), 1);
+
+        cache.clear().await;
+        assert_eq!(cache.generation.load(Ordering::SeqCst), 2);
+
+        cache.invalidate("ctx").await;
+        assert_eq!(cache.generation.load(Ordering::SeqCst), 3);
     }
 }
