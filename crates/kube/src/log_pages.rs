@@ -487,6 +487,16 @@ pub(crate) fn restarts_of(pod: &Pod, container: &str) -> i32 {
         .map_or(0, |s| s.restart_count)
 }
 
+/// The most a page's answer may be, in bytes of compact JSON: under the MCP
+/// server's 50,000-byte cap on one read-only answer
+/// (`srelens_mcp::MAX_RESULT_BYTES`; a registry test pins the two), with
+/// room to spare.
+pub const MAX_ANSWER_BYTES: usize = 49_000;
+/// The most notices a page carries, past which one more counts the rest.
+const MAX_NOTICES: usize = 20;
+/// The most of one notice kept, escaped.
+const MAX_NOTICE_BYTES: usize = 400;
+
 /// The longest the backlog of one page is read before it is handed back as
 /// it stands.
 const BACKLOG: Duration = Duration::from_secs(20);
@@ -1056,6 +1066,45 @@ async fn resolve_pods(
     Ok(found)
 }
 
+/// The most a page's answer holds besides `logs`: the cursor with every read
+/// at its longest, the notices at their most, and the other fields.
+fn envelope_bound(reads: &[PodRead]) -> usize {
+    let longest = Cursor {
+        v: CURSOR_VERSION,
+        t: "0".repeat(16),
+        // A kubelet stamp is at most 35 characters (nanoseconds and an offset).
+        p: reads
+            .iter()
+            .map(|read| {
+                (
+                    read.name.clone(),
+                    Pos {
+                        u: read.pos.u.clone(),
+                        r: i32::MIN,
+                        t: Some("9".repeat(40)),
+                        k: u32::MAX,
+                    },
+                )
+            })
+            .collect(),
+    };
+    longest.encode().len() + (MAX_NOTICES + 1) * (MAX_NOTICE_BYTES + 3) + 200
+}
+
+/// At most `MAX_NOTICES`, each cut to `MAX_NOTICE_BYTES`, and a last one
+/// counting any dropped.
+fn cap_notices(mut notices: Vec<String>) -> Vec<String> {
+    if notices.len() > MAX_NOTICES {
+        let dropped = notices.len() - MAX_NOTICES;
+        notices.truncate(MAX_NOTICES);
+        notices.push(format!("{dropped} more notices not shown"));
+    }
+    notices
+        .iter()
+        .map(|notice| fit(notice, MAX_NOTICE_BYTES))
+        .collect()
+}
+
 /// One read per pod, from where the cursor left it, and what to tell the
 /// agent about how the pods changed.
 fn plan_reads(
@@ -1141,7 +1190,10 @@ pub(crate) async fn read_page(
     let pods = resolve_pods(&client, &input.namespace, &req.target).await?;
     let (mut reads, mut notices) = plan_reads(pods, &req)?;
     let api: Api<Pod> = Api::namespaced(client, &input.namespace);
-    let mut page = PageText::new(req.max_bytes, !req.target.single(), req.timestamps);
+    let budget = req
+        .max_bytes
+        .min(MAX_ANSWER_BYTES.saturating_sub(envelope_bound(&reads)));
+    let mut page = PageText::new(budget, !req.target.single(), req.timestamps);
     // Phase 1, the backlog. The deadline hands back the page as it stands.
     let mut end = tokio::time::timeout(BACKLOG, merge(&mut reads, &api, &req, &mut page))
         .await
@@ -1170,7 +1222,7 @@ pub(crate) async fn read_page(
             end,
             lines: page.lines,
             scanned: page.scanned,
-            notices,
+            notices: cap_notices(notices),
         }),
     })
 }
@@ -2274,5 +2326,61 @@ mod tests {
             shown.contains("[cmi-a] a50\n") && shown.contains("[cmi-b] b51\n"),
             "{shown}"
         );
+    }
+
+    /// Review focus 5: 20 pods with names as long as a workload's get, lines
+    /// of quotes and ANSI colour codes (2 and 6 bytes each once escaped), half
+    /// the pods failing with long reasons, and a cursor naming 20 more pods
+    /// now gone — still one answer under the cap, its notices capped and
+    /// counted.
+    #[tokio::test]
+    async fn a_worst_case_page_stays_under_the_answer_cap() {
+        let cluster = Arc::new(Cluster::default());
+        let name = |i: usize| format!("{}-{i:02}", "c".repeat(60));
+        let line = "\"\u{1b}[31m".repeat(40);
+        for i in 0..20 {
+            let mut p = pod(&name(i), (0..200).map(|j| (at(j, 0), line.clone())).collect());
+            if i % 2 == 1 {
+                p.fails = Some("x".repeat(1_500));
+            }
+            cluster.pods.lock().unwrap().push(p);
+        }
+        let cache = cache_for(cluster).await;
+        let mut args = by_selector(json!({ "max_bytes": MAX_PAGE_BYTES }));
+        let target = Target::Selector {
+            labels: [("app".to_string(), "cmi".to_string())].into(),
+            expressions: vec![],
+        };
+        let gone = Cursor {
+            v: CURSOR_VERSION,
+            t: fingerprint(&input(args.clone()), &target),
+            p: (0..20)
+                .map(|i| {
+                    (
+                        format!("{}-gone-{i:02}", "g".repeat(55)),
+                        Pos {
+                            u: "u".into(),
+                            r: 0,
+                            t: Some(at(0, 0).to_string()),
+                            k: 1,
+                        },
+                    )
+                })
+                .collect(),
+        };
+        args["cursor"] = json!(gone.encode());
+        let out = page(&cache, args).await.unwrap();
+        let size = out.to_string().len();
+        assert!(size <= MAX_ANSWER_BYTES, "{size} bytes");
+        let notices = out["notices"].as_array().unwrap();
+        assert_eq!(notices.len(), MAX_NOTICES + 1);
+        assert!(notices[MAX_NOTICES]
+            .as_str()
+            .unwrap()
+            .contains("more notices not shown"));
+        assert!(notices
+            .iter()
+            .all(|n| escaped_len(n.as_str().unwrap()) <= MAX_NOTICE_BYTES));
+        assert!(out["lines"].as_u64().unwrap() > 0);
     }
 }

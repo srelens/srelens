@@ -830,6 +830,14 @@ mod tests {
         );
     }
 
+    /// A page of `k8s.podLogs` is built to fit the MCP server's cap on one
+    /// read-only answer, which `agent_text` would otherwise refuse whole.
+    #[test]
+    #[allow(clippy::assertions_on_constants)]
+    fn a_log_page_fits_the_mcp_result_cap() {
+        assert!(srelens_kube::log_pages::MAX_ANSWER_BYTES <= srelens_mcp::MAX_RESULT_BYTES);
+    }
+
     /// #574: every installed app's reader, declared action and sidecar operation is
     /// an MCP tool — and a pod binding, a session a view opens, is not — and the app
     /// tools meet every rule the host's own capabilities do: listed, gated when they
