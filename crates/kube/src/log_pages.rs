@@ -620,7 +620,15 @@ impl PodRead {
             let read = self.lines.as_mut().expect("opened above").next().await;
             let Some(line) = read.map_err(|e| e.to_string())? else {
                 self.lines = None;
-                self.resume = None;
+                if self.resume.take().is_some_and(|r| r.lost_at_end()) {
+                    self.notices.push(format!(
+                        "{}: the line the cursor stopped at ({}) was rotated away by the kubelet, and nothing newer is readable yet",
+                        self.name,
+                        self.pos.t.as_deref().unwrap_or("?")
+                    ));
+                    // What is left of it is all there is to skip next time.
+                    self.pos.k = 0;
+                }
                 if self.instances.len() == 1 {
                     return Ok(None);
                 }
@@ -637,8 +645,15 @@ impl PodRead {
                 continue;
             };
             let line = self.stamp(line);
-            if let Some(Admit::Skip) = self.resume.as_mut().map(|r| r.admit(line.ts)) {
-                continue;
+            match self.resume.as_mut().map(|r| r.admit(line.ts)) {
+                Some(Admit::Skip) => continue,
+                Some(Admit::Gap) => self.notices.push(format!(
+                    "{}: lines written between {} and {} were rotated away by the kubelet before this read reached them",
+                    self.name,
+                    self.pos.t.as_deref().unwrap_or("?"),
+                    line.raw
+                )),
+                _ => {}
             }
             return Ok(Some(line));
         }
@@ -915,16 +930,38 @@ fn plan_reads(
             }
         };
         let now = restarts_of(&pod, &container);
-        let at = req.cursor.as_ref().and_then(|c| c.p.get(&name)).cloned();
-        let (instances, _) = plan_instances(now, req.previous, at.as_ref().map(|p| p.r));
-        reads.push(PodRead::new(
-            name,
-            uid,
-            container,
-            instances.into(),
-            at,
-            req,
-        ));
+        let mut notices_here = Vec::new();
+        let mut at = req.cursor.as_ref().and_then(|c| c.p.get(&name)).cloned();
+        if at.as_ref().is_some_and(|pos| pos.u != uid) {
+            notices_here.push(format!(
+                "{name}: replaced by a new pod since the cursor; read from the new one's first line, and the old one's unread lines are gone"
+            ));
+            at = None;
+        }
+        let (instances, moved) = plan_instances(now, req.previous, at.as_ref().map(|p| p.r));
+        match moved {
+            Moved::Stayed => {}
+            Moved::Restarted => notices_here.push(format!(
+                "{name}: the container restarted since the cursor; this reads the rest of the instance that ended, then the new one from its first line"
+            )),
+            Moved::Lost => {
+                notices_here.push(format!(
+                    "{name}: the container restarted more than once since the cursor; lines written after {} up to the newest instance are lost",
+                    at.as_ref()
+                        .and_then(|p| p.t.as_deref())
+                        .unwrap_or("the cursor")
+                ));
+                at = Some(Pos {
+                    u: uid.clone(),
+                    r: instances[0].restarts,
+                    t: None,
+                    k: 0,
+                });
+            }
+        }
+        let mut read = PodRead::new(name, uid, container, instances.into(), at, req);
+        read.notices = notices_here;
+        reads.push(read);
     }
     Ok((reads, Vec::new()))
 }
@@ -1729,5 +1766,134 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(out["logs"], "b\nMATCH\nc\nf\nMATCH again\ng\n");
+    }
+
+    #[tokio::test]
+    async fn a_cursor_whose_line_was_rotated_away_carries_on_and_says_so() {
+        let log = log_of(100, 100);
+        let cluster = one_pod(log.clone());
+        let cache = cache_for(cluster.clone()).await;
+        let first = page(&cache, read_of(json!({ "max_bytes": 1000 })))
+            .await
+            .unwrap();
+        let read = first["lines"].as_u64().unwrap() as usize;
+        // The kubelet rotates the file: what it serves now starts 40 lines on.
+        cluster.pods.lock().unwrap()[0].current = log[40..].to_vec();
+        let next = page(
+            &cache,
+            read_of(json!({ "max_bytes": 1000, "cursor": first["next_cursor"] })),
+        )
+        .await
+        .unwrap();
+        let notice = next["notices"][0].as_str().unwrap();
+        assert!(
+            notice.starts_with("cmi-0: ") && notice.contains("rotated away"),
+            "{notice}"
+        );
+        assert!(
+            notice.contains(&log[read - 1].0.to_string()),
+            "names where the cursor stopped: {notice}"
+        );
+        assert!(
+            notice.contains(&log[40].0.to_string()),
+            "names the first line readable: {notice}"
+        );
+        assert!(
+            next["logs"].as_str().unwrap().starts_with(&log[40].1),
+            "{next}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_restart_under_the_cursor_reads_the_rest_of_the_old_instance_then_the_new_one() {
+        let old = log_of(30, 60);
+        let new: Vec<_> = log_of(5, 40)
+            .into_iter()
+            .map(|(ts, text)| (ts + SignedDuration::from_hours(1), format!("new {text}")))
+            .collect();
+        let cluster = one_pod(old[..10].to_vec());
+        let cache = cache_for(cluster.clone()).await;
+        let first = page(&cache, read_of(json!({ "max_bytes": MAX_PAGE_BYTES })))
+            .await
+            .unwrap();
+        assert_eq!(first["logs"], joined(&old[..10]));
+        {
+            let mut pods = cluster.pods.lock().unwrap();
+            pods[0].previous = old.clone();
+            pods[0].current = new.clone();
+            pods[0].restarts = 1;
+        }
+        let next = page(
+            &cache,
+            read_of(json!({ "max_bytes": MAX_PAGE_BYTES, "cursor": first["next_cursor"] })),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            next["logs"].as_str().unwrap(),
+            joined(&old[10..]) + &joined(&new)
+        );
+        assert!(
+            next["notices"][0].as_str().unwrap().contains("restarted"),
+            "{next}"
+        );
+    }
+
+    #[tokio::test]
+    async fn two_restarts_under_the_cursor_lose_the_lines_between_and_say_so() {
+        let cluster = one_pod(log_of(10, 60));
+        let cache = cache_for(cluster.clone()).await;
+        let first = page(&cache, read_of(json!({ "max_bytes": MAX_PAGE_BYTES })))
+            .await
+            .unwrap();
+        let new: Vec<_> = log_of(3, 40)
+            .into_iter()
+            .map(|(ts, text)| (ts + SignedDuration::from_hours(1), text))
+            .collect();
+        {
+            let mut pods = cluster.pods.lock().unwrap();
+            pods[0].current = new.clone();
+            pods[0].restarts = 2;
+        }
+        let next = page(
+            &cache,
+            read_of(json!({ "max_bytes": MAX_PAGE_BYTES, "cursor": first["next_cursor"] })),
+        )
+        .await
+        .unwrap();
+        assert_eq!(next["logs"], joined(&new));
+        assert!(
+            next["notices"][0]
+                .as_str()
+                .unwrap()
+                .contains("more than once"),
+            "{next}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_pod_replaced_under_the_cursor_is_read_from_its_first_line() {
+        let cluster = one_pod(log_of(10, 60));
+        let cache = cache_for(cluster.clone()).await;
+        let first = page(&cache, read_of(json!({ "max_bytes": MAX_PAGE_BYTES })))
+            .await
+            .unwrap();
+        let new = log_of(4, 40);
+        {
+            let mut pods = cluster.pods.lock().unwrap();
+            pods[0].uid = "uid-cmi-0-again".into();
+            pods[0].current = new.clone();
+        }
+        let next = page(
+            &cache,
+            read_of(json!({ "max_bytes": MAX_PAGE_BYTES, "cursor": first["next_cursor"] })),
+        )
+        .await
+        .unwrap();
+        assert_eq!(next["logs"], joined(&new));
+        assert!(
+            next["notices"][0].as_str().unwrap().contains("replaced"),
+            "{next}"
+        );
     }
 }
