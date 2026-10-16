@@ -763,10 +763,45 @@ impl PageText {
         }
     }
 
-    /// Take `line`, the next one `read` has. False when the page is full and
-    /// the line is left for the next page.
-    fn offer(&mut self, read: &mut PodRead, line: &Stamped, _req: &PageRequest) -> bool {
-        if !self.push(&read.name, line) {
+    /// Take `line`, the next one `read` has: shown, or skipped by `grep`.
+    /// False when the page is full and the line is left for the next page.
+    fn offer(&mut self, read: &mut PodRead, line: &Stamped, req: &PageRequest) -> bool {
+        let Some(grep) = req.grep.as_ref() else {
+            return self.keep(&read.name, line);
+        };
+        if grep.is_match(&line.text) {
+            // ponytail: before-context a page edge falls inside is not shown
+            // again on the next page; carry it in the cursor if it matters.
+            while let Some(before) = read.before.pop_front() {
+                if !self.push(&read.name, &before) {
+                    return false;
+                }
+            }
+            let kept = self.keep(&read.name, line);
+            if kept {
+                read.after = req.context_lines;
+            }
+            kept
+        } else if read.after > 0 {
+            let kept = self.keep(&read.name, line);
+            if kept {
+                read.after -= 1;
+            }
+            kept
+        } else {
+            if req.context_lines > 0 {
+                if read.before.len() == req.context_lines {
+                    read.before.pop_front();
+                }
+                read.before.push_back(line.clone());
+            }
+            self.scanned += 1;
+            true
+        }
+    }
+
+    fn keep(&mut self, pod: &str, line: &Stamped) -> bool {
+        if !self.push(pod, line) {
             return false;
         }
         self.scanned += 1;
@@ -1659,5 +1694,40 @@ mod tests {
             .unwrap();
         assert!(out["next_cursor"].is_string(), "{out}");
         assert_eq!(out["end"], true);
+    }
+
+    #[tokio::test]
+    async fn grep_returns_only_the_matching_lines_of_the_whole_log() {
+        let mut log = log_of(5_000, 80);
+        log[1234].1 = "POST /webhook 502 upstream reset".into();
+        log[4321].1 = "POST /webhook 504 timeout".into();
+        let cache = cache_for(one_pod(log)).await;
+        let out = page(&cache, read_of(json!({ "grep": "webhook 50[0-9]" })))
+            .await
+            .unwrap();
+        assert_eq!(
+            out["logs"],
+            "POST /webhook 502 upstream reset\nPOST /webhook 504 timeout\n"
+        );
+        assert_eq!(out["lines"], 2);
+        assert_eq!(out["scanned"], 5_000);
+        assert_eq!(out["end"], true);
+    }
+
+    #[tokio::test]
+    async fn context_lines_keep_the_neighbours_of_a_match() {
+        let log: Vec<_> = ["a", "b", "MATCH", "c", "d", "e", "f", "MATCH again", "g"]
+            .iter()
+            .enumerate()
+            .map(|(i, text)| (at(i as i64, 0), text.to_string()))
+            .collect();
+        let cache = cache_for(one_pod(log)).await;
+        let out = page(
+            &cache,
+            read_of(json!({ "grep": "(?i)match", "context_lines": 1 })),
+        )
+        .await
+        .unwrap();
+        assert_eq!(out["logs"], "b\nMATCH\nc\nf\nMATCH again\ng\n");
     }
 }
