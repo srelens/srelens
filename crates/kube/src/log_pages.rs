@@ -452,19 +452,27 @@ pub(crate) enum NoContainer {
 /// The container a read of `pod` covers: the named one, or its only one.
 pub(crate) fn container_of(pod: &Pod, named: Option<&str>) -> Result<String, NoContainer> {
     let pod_name = pod.metadata.name.as_deref().unwrap_or_default();
-    let (main, init): (Vec<&str>, Vec<&str>) = match pod.spec.as_ref() {
+    // `others`: init and ephemeral (`kubectl debug`) containers, read when
+    // named, as a blob read reads them.
+    let (main, others): (Vec<&str>, Vec<&str>) = match pod.spec.as_ref() {
         Some(spec) => (
             spec.containers.iter().map(|c| c.name.as_str()).collect(),
             spec.init_containers
                 .iter()
                 .flatten()
                 .map(|c| c.name.as_str())
+                .chain(
+                    spec.ephemeral_containers
+                        .iter()
+                        .flatten()
+                        .map(|c| c.name.as_str()),
+                )
                 .collect(),
         ),
         None => (Vec::new(), Vec::new()),
     };
     match named {
-        Some(name) if main.contains(&name) || init.contains(&name) => Ok(name.to_string()),
+        Some(name) if main.contains(&name) || others.contains(&name) => Ok(name.to_string()),
         Some(name) => Err(NoContainer::Missing(format!(
             "{pod_name}: has no container {name:?} (it has {})",
             main.join(", ")
@@ -489,6 +497,7 @@ pub(crate) fn restarts_of(pod: &Pod, container: &str) -> i32 {
         .iter()
         .flatten()
         .chain(status.init_container_statuses.iter().flatten())
+        .chain(status.ephemeral_container_statuses.iter().flatten())
         .find(|s| s.name == container)
         .map_or(0, |s| s.restart_count)
 }
@@ -639,14 +648,14 @@ impl PodRead {
             let read = self.lines.as_mut().expect("opened above").next().await;
             let Some(line) = read.map_err(|e| e.to_string())? else {
                 self.lines = None;
-                if self.resume.take().is_some_and(|r| r.lost_at_end()) {
+                if let Some(resume) = self.resume.take().filter(Resume::lost_at_end) {
                     self.notices.push(format!(
                         "{}: the line the cursor stopped at ({}) was rotated away by the kubelet, and nothing newer is readable yet",
                         self.name,
                         self.pos.t.as_deref().unwrap_or("?")
                     ));
                     // What is left of it is all there is to skip next time.
-                    self.pos.k = 0;
+                    self.pos.k = resume.seen;
                 }
                 if self.instances.len() == 1 {
                     return Ok(None);
@@ -1213,10 +1222,21 @@ pub(crate) async fn read_page(
         .max_bytes
         .min(MAX_ANSWER_BYTES.saturating_sub(envelope_bound(&reads)));
     let mut page = PageText::new(budget, !req.target.single(), req.timestamps);
-    // Phase 1, the backlog. The deadline hands back the page as it stands.
-    let mut end = tokio::time::timeout(BACKLOG, merge(&mut reads, &api, &req, &mut page))
+    // Phase 1, the backlog. The deadline hands back the page as it stands,
+    // and says so: a stalled stream must not read as a full page.
+    let mut end = match tokio::time::timeout(BACKLOG, merge(&mut reads, &api, &req, &mut page))
         .await
-        .unwrap_or(Ok(false))?;
+    {
+        Ok(merged) => merged?,
+        Err(_) => {
+            notices.push(format!(
+                "the {}-second backlog deadline passed after {} lines read; this page is what was read by then — call again with `next_cursor` to read on",
+                BACKLOG.as_secs(),
+                page.scanned
+            ));
+            false
+        }
+    };
     // Phase 2, the follow: only once every log is read to its end and the
     // page has room.
     if end && !req.wait.is_zero() {
@@ -1652,6 +1672,9 @@ mod tests {
         later: Vec<(Timestamp, String)>,
         /// Every log read of the pod fails with this message (a 400).
         fails: Option<String>,
+        /// The log stream hands out its lines and then never ends, as a
+        /// kubelet that stalls mid-read does.
+        stalls: bool,
     }
 
     fn pod(name: &str, lines: Vec<(Timestamp, String)>) -> FakePod {
@@ -1811,7 +1834,7 @@ mod tests {
             Ok::<_, std::convert::Infallible>(http_body::Frame::data(Bytes::from(line)))
         });
         let stream = futures::stream::iter(frames);
-        let body = if follow {
+        let body = if follow || p.stalls {
             StreamBody::new(futures::StreamExt::chain(
                 stream,
                 futures::stream::pending(),
@@ -2500,5 +2523,86 @@ mod tests {
             .iter()
             .all(|n| escaped_len(n.as_str().unwrap()) <= MAX_NOTICE_BYTES));
         assert!(out["lines"].as_u64().unwrap() > 0);
+    }
+
+    /// Review finding 1: a stream that stalls holds the page until the
+    /// backlog deadline; the page then says so, rather than look full.
+    #[tokio::test(start_paused = true)]
+    async fn a_backlog_cut_short_by_its_deadline_says_so() {
+        let cluster = one_pod(log_of(3, 30));
+        cluster.pods.lock().unwrap()[0].stalls = true;
+        let cache = cache_for(cluster).await;
+        let out = page(&cache, read_of(json!({ "max_bytes": 1000 })))
+            .await
+            .unwrap();
+        assert_eq!(out["lines"], 3);
+        assert_eq!(out["end"], false);
+        let notice = out["notices"][0].as_str().unwrap();
+        assert!(
+            notice.contains("20-second") && notice.contains("next_cursor"),
+            "{notice}"
+        );
+    }
+
+    /// Review finding 2: rotation takes one of two lines sharing the
+    /// cursor's stamp and nothing newer is written. The survivor was read
+    /// already, so it is skipped on this page and on every later one.
+    #[tokio::test]
+    async fn a_line_left_of_a_rotated_anchor_is_never_read_twice() {
+        let log = vec![
+            (at(0, 0), "a".to_string()),
+            (at(1, 0), "b1".to_string()),
+            (at(1, 0), "b2".to_string()),
+        ];
+        let cluster = one_pod(log.clone());
+        let cache = cache_for(cluster.clone()).await;
+        let first = page(&cache, read_of(json!({ "max_bytes": 1000 })))
+            .await
+            .unwrap();
+        assert_eq!(first["logs"], "a\nb1\nb2\n");
+        cluster.pods.lock().unwrap()[0].current = log[2..].to_vec();
+        let next = page(
+            &cache,
+            read_of(json!({ "max_bytes": 1000, "cursor": first["next_cursor"] })),
+        )
+        .await
+        .unwrap();
+        assert_eq!(next["logs"], "");
+        assert!(
+            next["notices"][0]
+                .as_str()
+                .unwrap()
+                .contains("rotated away"),
+            "{next}"
+        );
+        let again = page(
+            &cache,
+            read_of(json!({ "max_bytes": 1000, "cursor": next["next_cursor"] })),
+        )
+        .await
+        .unwrap();
+        assert_eq!(again["logs"], "", "b2 was read on the first page");
+    }
+
+    /// Review finding 3: an ephemeral container (`kubectl debug`) is one
+    /// a blob read reads, so a page reads it too.
+    #[test]
+    fn an_ephemeral_container_is_one_a_read_covers() {
+        let pod: Pod = serde_json::from_value(json!({
+            "metadata": { "name": "cmi-0" },
+            "spec": {
+                "containers": [{ "name": "app" }],
+                "ephemeralContainers": [{ "name": "debugger" }]
+            },
+            "status": { "ephemeralContainerStatuses": [{
+                "name": "debugger", "restartCount": 2, "ready": false, "image": "i", "imageID": "i"
+            }] }
+        }))
+        .unwrap();
+        assert_eq!(
+            container_of(&pod, Some("debugger")).ok().as_deref(),
+            Some("debugger")
+        );
+        assert_eq!(restarts_of(&pod, "debugger"), 2);
     }
 }
