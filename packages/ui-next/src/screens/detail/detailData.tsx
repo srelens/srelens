@@ -22,10 +22,11 @@ import {
 } from "@srelens/ui-kit";
 import { FailureState } from "../../lib/errorCopy";
 import { descriptorFor } from "../../lib/kinds/descriptors";
-import { SLUG_BY_K8S_KIND, isBuiltInKind, resolveCrdGvk } from "../../lib/crdGvk";
+import { SLUG_BY_K8S_KIND, isCustomKind, resolveCrdGvk } from "../../lib/crdGvk";
 import { useObject } from "../../lib/useObject";
 import { ConfigDetailsBody } from "./ConfigBody";
 import { CronJobDetailsBody } from "./CronJobBody";
+import { CustomResourceBody, customResourceFacts } from "./CustomResourceBody";
 import { GenericBody, identityFacts } from "./GenericBody";
 import { IngressDetailsBody } from "./IngressBody";
 import { JobDetailsBody } from "./JobBody";
@@ -280,6 +281,9 @@ export interface DetailSubject {
   error?: string;
   /** Read the subject again without blanking the pane — see `useObject`. */
   refresh: () => void;
+  /** A custom resource (#919): no built-in table applies to it, whatever its
+   *  kind is called, and its first pane is its status. */
+  custom: boolean;
   /** The kind's own row actions and extra panes, or `undefined` for a CRD. */
   descriptor: ReturnType<typeof descriptorFor>;
   /** Core's one verdict on this subject — the peek's status line and the
@@ -327,15 +331,21 @@ export function useDetailSubject({
   kind,
   namespace,
   name,
+  group,
 }: {
   context: string;
   kind: string;
   namespace: string | null;
   name: string;
+  /** The API group, for a custom kind only — see `isCustomKind`. */
+  group?: string;
 }): DetailSubject {
-  const { object, status, error, refresh } = useObject(context, kind, namespace, name);
+  const { object, crd, status, error, refresh } = useObject(context, kind, namespace, name, group);
 
-  const slug = SLUG_BY_K8S_KIND[kind];
+  // A custom resource reads none of the built-in tables below — not even one
+  // keyed on its name, since `Deployment` in `acme.io` is not a Deployment.
+  const custom = isCustomKind(kind, group);
+  const slug = custom ? undefined : SLUG_BY_K8S_KIND[kind];
   const descriptor = slug ? descriptorFor(slug) : undefined;
   // Never a branch on the kind's name: it is the kind's descriptor that says
   // the kind HAS containers, and each screen decides where they go.
@@ -349,13 +359,13 @@ export function useDetailSubject({
     context,
     str(object?.metadata?.namespace),
     str(object?.metadata?.name),
-    kind === "Deployment",
+    !custom && kind === "Deployment",
   );
 
-  const DetailsBody = DETAILS_BODY[kind];
-  const ContainersBody = CONTAINERS_BODY[kind];
-  const MetricsBody = METRICS_BODY[kind];
-  const ContainersTable = CONTAINERS_TABLE[kind];
+  const DetailsBody = custom ? undefined : DETAILS_BODY[kind];
+  const ContainersBody = custom ? undefined : CONTAINERS_BODY[kind];
+  const MetricsBody = custom ? undefined : METRICS_BODY[kind];
+  const ContainersTable = custom ? undefined : CONTAINERS_TABLE[kind];
   const meta = object?.metadata ?? {};
 
   const bodyProps = object ? { kind, object, context, revisions } : undefined;
@@ -365,16 +375,25 @@ export function useDetailSubject({
     status,
     error,
     refresh,
+    custom,
     descriptor,
-    statusLine: object ? resourceStatusLine(kind, object) : null,
+    statusLine: object && !custom ? resourceStatusLine(kind, object) : null,
     hasContainers,
     hasMetrics,
-    facts: object ? detailFacts({ kind, object, revisions }) : [],
-    body: bodyProps && (
-      <GenericBody kind={kind} object={object as K8sObject} context={context}>
-        {DetailsBody && createElement(DetailsBody, bodyProps)}
-      </GenericBody>
-    ),
+    facts: !object
+      ? []
+      : custom
+        ? customResourceFacts(object, crd?.printerColumns)
+        : detailFacts({ kind, object, revisions }),
+    body:
+      bodyProps &&
+      (custom ? (
+        <CustomResourceBody object={bodyProps.object} name={name} />
+      ) : (
+        <GenericBody kind={kind} object={bodyProps.object} context={context}>
+          {DetailsBody && createElement(DetailsBody, bodyProps)}
+        </GenericBody>
+      )),
     containersPane: bodyProps && ContainersBody ? createElement(ContainersBody, bodyProps) : null,
     containersTable:
       hasContainers && object && ContainersTable
@@ -386,8 +405,8 @@ export function useDetailSubject({
     labels: <LabelsSection labels={meta.labels ?? {}} />,
     annotations: <AnnotationsSection kind={kind} annotations={meta.annotations ?? {}} />,
     afterMetadata:
-      object && kind === "Node" ? <NodePodsSection context={context} node={name} /> : null,
-    isSecret: kind === "Secret",
+      object && !custom && kind === "Node" ? <NodePodsSection context={context} node={name} /> : null,
+    isSecret: !custom && kind === "Secret",
   };
 }
 
@@ -414,14 +433,21 @@ export function useDetailPaneState({
   namespace,
   name,
   tabs,
+  group,
 }: {
   context: string;
   kind: string;
   namespace: string | null;
   name: string;
   tabs: TabItem[];
+  /** The API group, for a custom kind only — see `isCustomKind`. */
+  group?: string;
 }): DetailPaneState {
   const [activeTab, setActiveTab] = useState<string>(PANE_DETAILS);
+  // The group is part of the subject: two CRDs sharing a kind are two
+  // subjects, and switching between them must reset and refetch like any
+  // other subject change.
+  const qualifiedKind = group ? `${group}/${kind}` : kind;
 
   // Which panes have been opened at least once for the CURRENT subject — the
   // lazy-load gate for YAML and Events (see `useLoad`'s doc comment). Reset
@@ -440,7 +466,7 @@ export function useDetailPaneState({
   // for the one case that genuinely needs it: the new subject's kind doesn't
   // have the pane that was selected (e.g. a Pod's Containers tab, followed by
   // a ConfigMap).
-  const targetKey = `${context}|${kind}|${namespace ?? ""}|${name}`;
+  const targetKey = `${context}|${qualifiedKind}|${namespace ?? ""}|${name}`;
   const [trackedTargetKey, setTrackedTargetKey] = useState(targetKey);
   const [openedPanes, setOpenedPanes] = useState<ReadonlySet<string>>(() => new Set());
   if (targetKey !== trackedTargetKey) {
@@ -467,11 +493,11 @@ export function useDetailPaneState({
   // `listEvents` don't depend on `useObject` having succeeded, and while the
   // object is loading or has errored the pane isn't visible anyway (each
   // screen's own early return short-circuits before any tab renders).
-  const target = [context, kind, namespace, name] as const;
+  const target = [context, qualifiedKind, namespace, name] as const;
   // `getManifest` needs a CRD's group/version/plural to resolve a
   // custom-resource manifest — see `resolveCrdGvk`'s own doc comment for why
   // this is looked up here rather than threaded in from a descriptor.
-  const builtIn = isBuiltInKind(kind);
+  const custom = isCustomKind(kind, group);
   // The Details pane keeps a Secret's values out of the DOM until the reader
   // reveals them, and `k8s.getManifest` is an ungated read. The host blanks a
   // Secret's values on it (#661, `crates/kube/src/manifest.rs`); this redacts
@@ -480,11 +506,11 @@ export function useDetailPaneState({
   // redaction goes here, on the result, rather than inside `getManifest`,
   // because other callers of that function handle a Secret their own way.
   // Classic's drawer YAML view does exactly this too (#659).
-  const isSecret = kind === "Secret";
+  const isSecret = !custom && kind === "Secret";
   const yamlState = useLoad<string>(openedPanes.has(PANE_YAML), target, async () => {
     let crd: DynamicGvk | undefined;
-    if (!builtIn) {
-      const resolved = await resolveCrdGvk(context, kind);
+    if (custom) {
+      const resolved = await resolveCrdGvk(context, kind, group);
       if (resolved.error) return { error: resolved.error };
       crd = resolved.crd;
     }

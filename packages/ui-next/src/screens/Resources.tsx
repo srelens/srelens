@@ -1,5 +1,6 @@
 import { ContextLabel } from "../lib/contextLabel";
-import { CollectionScopeNotice, NamespaceScopePicker } from "./collections/NamespaceScope";
+import { useCollectionNameFilter } from "../lib/collectionNameFilter";
+import { CollectionNameNotice, CollectionScopeNotice, NamespaceScopePicker } from "./collections/NamespaceScope";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   describeError,
@@ -185,10 +186,24 @@ function KindList({
   // for several — its contract is a single namespace, not the list's scopes.
   const namespace = clusterScoped ? "" : watchNamespaceForSelection(selection);
 
-  const rows = useMemo(
+  const scoped = useMemo(
     () => clusterScoped ? list.rows : list.rows.filter((row) => rowInSelection(row.namespace ?? "", selection)),
     [list.rows, clusterScoped, selection],
   );
+  // A collection the tab is scoped to may also narrow this kind's list to the
+  // names matching its expression (#885). Narrowed here, ahead of everything
+  // that reads `rows`, so the count, the columns, the bulk actions and the
+  // table all agree about what is listed.
+  const listKind = useMemo(
+    () => (descriptor ? { kind: descriptor.k8sKind, ...(descriptor.group ? { group: descriptor.group } : {}) } : undefined),
+    [descriptor],
+  );
+  const nameFilter = useCollectionNameFilter(context.stableId, listKind, scoped);
+  const narrow = nameFilter.apply;
+  // Keyed on `apply`, which changes only with the answer: the hook's result is
+  // a new object every render, and a new `rows` every render would re-run
+  // everything downstream of it.
+  const rows = useMemo(() => narrow(scoped), [narrow, scoped]);
   const inventory = useExtensions();
   const appColumns = useResolvedColumns({
     plugins: inventory.data?.plugins ?? [], context: name, contextId: context.key, namespace,
@@ -414,6 +429,9 @@ function KindList({
   // declaration closes over the widest type `descriptor` ever has, so the
   // narrowing the guard above performed is not in scope within one.
   const k8sKind = descriptor.k8sKind;
+  // Set only by `customDescriptor`: a custom kind's name alone does not
+  // identify it, so the peek and the tab route carry its group (#919).
+  const group = descriptor.group;
 
   /**
    * Promote a row to a tab of its own — the row's double click and the peek
@@ -423,7 +441,7 @@ function KindList({
    * to stop.
    */
   function openRowTab(rowNamespace: string | null, rowName: string) {
-    openTab(detailRoute(k8sKind, rowNamespace, rowName, { cluster: name }), { clusterName: name });
+    openTab(detailRoute(k8sKind, rowNamespace, rowName, { cluster: name, group }), { clusterName: name });
   }
 
   // Loading and error each replace the table with their own state below; the
@@ -517,6 +535,7 @@ function KindList({
           <ResourceDetailView
             context={name}
             kind={descriptor.k8sKind}
+            group={group}
             namespace={peek.namespace}
             name={peek.name}
             // The one prop the tab host does not pass, carrying both of the
@@ -616,6 +635,9 @@ function KindList({
         </Alert>
       )}
 
+      {/* Outside the namespaced guard: a cluster-scoped list (Nodes, a
+          cluster-scoped custom kind) is narrowed by name too, and says so. */}
+      <CollectionNameNotice filter={nameFilter} noun={lower} />
       {!clusterScoped && (
         <>
           <CollectionScopeNotice context={context} />
@@ -751,6 +773,7 @@ export function ResourceDetailScreen({ route }: { route: string }) {
         <ResourceTabView
           context={context.name}
           kind={parts.kind}
+          group={parts.group}
           namespace={parts.namespace}
           name={parts.name}
         />

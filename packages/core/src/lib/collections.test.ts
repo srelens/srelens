@@ -1,5 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
 import {
+  apiKindName,
+  filtersKind,
+  listApiKinds,
+  matchCollectionNames,
   parseCollectionsDocument,
   parseMemberList,
   resolveNamespaceCollections,
@@ -106,5 +110,65 @@ describe("the backend calls", () => {
       ],
       complete: false,
     });
+  });
+});
+
+describe("a collection's resource filter (#885)", () => {
+  const prod: Collection = {
+    name: "prod",
+    type: "namespace",
+    patterns: ["prod-*"],
+    resources: { kinds: ["apps/Deployment", "Service"], nameRegex: "^payment-" },
+  };
+
+  it("is read from the stored document, and dropped when it is not the shape this build reads", () => {
+    const doc = parseCollectionsDocument({
+      version: 1,
+      collections: [
+        prod,
+        { name: "bad", type: "namespace", resources: { kinds: ["Service"] } },
+        { name: "odd", type: "namespace", resources: { kinds: [3, "Service"], nameRegex: "x" } },
+      ],
+    });
+    expect(doc.collections[0].resources).toEqual(prod.resources);
+    expect(doc.collections[1].resources).toBeUndefined();
+    expect(doc.collections[2].resources).toEqual({ kinds: ["Service"], nameRegex: "x" });
+  });
+
+  it("is sent to the backend with the rest of the collection", async () => {
+    const invoke = vi.fn().mockResolvedValue({ problems: [] });
+    await validateCollection(prod, [], invoke);
+    expect(invoke.mock.calls[0][1].collection.resources).toEqual(prod.resources);
+  });
+
+  it("matches a list's names through the backend, with the kind's group only for a custom kind", async () => {
+    const invoke = vi.fn().mockResolvedValue({ filtered: true, matches: [true, false], problems: [] });
+    await matchCollectionNames([prod], { kind: "Deployment" }, ["payment-service", "order-service"], invoke);
+    expect(invoke).toHaveBeenCalledExactlyOnceWith("collections.matchNames", {
+      collections: [expect.objectContaining({ name: "prod", resources: prod.resources })],
+      kind: "Deployment",
+      names: ["payment-service", "order-service"],
+    });
+    await matchCollectionNames([prod], { kind: "Widget", group: "acme.io" }, [], invoke);
+    expect(invoke.mock.calls[1][1]).toMatchObject({ kind: "Widget", group: "acme.io" });
+  });
+
+  it("names a built-in kind by its name and a custom kind by its group too", () => {
+    expect(filtersKind(prod, { kind: "Deployment" })).toBe(true);
+    expect(filtersKind(prod, { kind: "Service" })).toBe(true);
+    expect(filtersKind(prod, { kind: "ConfigMap" })).toBe(false);
+    expect(filtersKind(prod, { kind: "Deployment", group: "acme.io" })).toBe(false);
+    expect(filtersKind({ name: "x", type: "namespace" }, { kind: "Deployment" })).toBe(false);
+  });
+
+  it("lists the kinds a cluster serves, named as a filter names them", async () => {
+    const kinds = [
+      { group: "apps", version: "v1", kind: "Deployment", plural: "deployments", namespaced: true },
+      { group: "", version: "v1", kind: "Service", plural: "services", namespaced: true },
+    ];
+    const invoke = vi.fn().mockResolvedValue({ kinds });
+    expect(await listApiKinds("kind-dev", invoke)).toEqual(kinds);
+    expect(invoke).toHaveBeenCalledExactlyOnceWith("k8s.listApiKinds", { context: "kind-dev" });
+    expect(kinds.map(apiKindName)).toEqual(["apps/Deployment", "Service"]);
   });
 });

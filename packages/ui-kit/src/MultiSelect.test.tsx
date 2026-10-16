@@ -335,6 +335,53 @@ describe("MultiSelect matches the design's picker", () => {
  * picker's collections (#881) — with a summary of the caller's own, the "all"
  * row's state decided by the caller, and a footer row of its own.
  */
+/**
+ * A popover sits below a dialog's layer (45 to 50), so one opened from inside
+ * a dialog was drawn behind it: open, and unreachable. It now stands above.
+ */
+describe("MultiSelect inside a dialog", () => {
+  const layer = () => (screen.getByRole("listbox").closest("[data-radix-popper-content-wrapper] > *") ?? screen.getByRole("listbox").parentElement!.parentElement!) as HTMLElement;
+
+  it("stands its list above the dialog it was opened from", async () => {
+    render(
+      <div role="dialog" aria-label="Edit">
+        <MultiSelect options={options} selection={[]} onChange={() => {}} ariaLabel="Scope" />
+      </div>,
+    );
+    await userEvent.click(trigger());
+    expect(layer().style.zIndex).toBe("55");
+  });
+
+  it("leaves a list opened from the page at its own layer", async () => {
+    open();
+    await userEvent.click(trigger());
+    expect(layer().style.zIndex).toBe("");
+  });
+});
+
+describe("MultiSelect, without Select all", () => {
+  /** For options that filter the list rather than being parts of it (#885). */
+  it("offers no Select all, and no count on the all row", async () => {
+    open({ allLabel: "All deployments", selectAll: false });
+    await userEvent.click(trigger());
+    expect(screen.queryByRole("button", { name: "Select all" })).toBeNull();
+    expect(screen.getByRole("option", { name: "All deployments" }).textContent).toBe("All deployments");
+    expect(screen.getByRole("button", { name: "Reset" })).toBeDefined();
+  });
+
+  it("says the caller's empty message once when there is no all row either", async () => {
+    open({ options: [], empty: "Nothing to offer yet" });
+    await userEvent.click(trigger());
+    expect(screen.getAllByText("Nothing to offer yet")).toHaveLength(1);
+  });
+
+  it("says the caller's empty message beside the all row when there are no options", async () => {
+    open({ allLabel: "All deployments", options: [], empty: "Nothing to offer yet" });
+    await userEvent.click(trigger());
+    expect(screen.getByText("Nothing to offer yet")).toBeDefined();
+  });
+});
+
 describe("MultiSelect, with a tab of the caller's own", () => {
   function withTab(props: Partial<Parameters<typeof MultiSelect>[0]> = {}) {
     const onExtra = vi.fn();

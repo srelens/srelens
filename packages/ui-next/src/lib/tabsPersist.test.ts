@@ -94,6 +94,13 @@ describe("parseStoredState", () => {
     expect(parsed.workspaces[0].closed[0]).toMatchObject({ route: "/k/staging/Pod/default/web", sub: "staging" });
   });
 
+  it("keeps a custom kind's group when it pins an earlier build's detail tab", () => {
+    const state = valid();
+    state.workspaces[0].tabs.push({ ...makeTab("/k/example.com%2FWidget/default/w-1"), sub: "prod" });
+    const parsed = parseStoredState(JSON.stringify({ version: STORAGE_VERSION, ...state }))!;
+    expect(parsed.workspaces[0].tabs[2].route).toBe("/k/prod/example.com%2FWidget/default/w-1");
+  });
+
   it("keeps an earlier build's detail tab with no label as it was, following the rail", () => {
     const state = valid();
     state.workspaces[0].tabs.push(makeTab("/k/Node/-/worker-1"));

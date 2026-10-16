@@ -57,6 +57,8 @@ export interface ResourceDetailViewProps {
   /** The Kubernetes kind ("Pod", "Deployment", ...) — the same value
    *  `detailRoute` and `useObject` take, not the list screen's slug. */
   kind: string;
+  /** The API group — a custom kind only; see `detailRoute`. */
+  group?: string;
   namespace: string | null;
   name: string;
   /**
@@ -179,8 +181,8 @@ function PeekFacts({ facts }: { facts: DetailFact[] }) {
  * be laid out differently in the two screens and cannot be derived
  * differently. Nothing this file renders is restyled anywhere else.
  */
-export function ResourceDetailView({ context, kind, namespace, name, peek }: ResourceDetailViewProps) {
-  const subject = useDetailSubject({ context, kind, namespace, name });
+export function ResourceDetailView({ context, kind, group, namespace, name, peek }: ResourceDetailViewProps) {
+  const subject = useDetailSubject({ context, kind, namespace, name, group });
   const { object, status, error, descriptor, statusLine, hasContainers, hasMetrics } = subject;
 
   // THIS SCREEN'S STRIP: `Details Containers YAML Events Metrics`, the mock's
@@ -190,7 +192,8 @@ export function ResourceDetailView({ context, kind, namespace, name, peek }: Res
   // one nothing offers yet — no descriptor sets `panes.metrics` — and getting
   // the order right now is cheaper than remembering it later.
   const tabs: TabItem[] = [
-    { id: PANE_DETAILS, label: "Details" },
+    // #919: a custom resource's first pane is its status.
+    { id: PANE_DETAILS, label: subject.custom ? "Status" : "Details" },
     ...(hasContainers ? [{ id: PANE_CONTAINERS, label: "Containers" }] : []),
     { id: PANE_YAML, label: "YAML" },
     { id: PANE_EVENTS, label: "Events" },
@@ -202,6 +205,7 @@ export function ResourceDetailView({ context, kind, namespace, name, peek }: Res
     namespace,
     name,
     tabs,
+    group,
   });
 
   const subtitle = namespace ? `${kind} · ${namespace}` : kind;
@@ -278,6 +282,7 @@ export function ResourceDetailView({ context, kind, namespace, name, peek }: Res
         <DetailActions
           context={context}
           kind={kind}
+          group={group}
           namespace={namespace}
           name={name}
           // A kind outside `K8S_KIND` has no descriptor at all, which is

@@ -243,11 +243,13 @@ describe("UI-only capabilities (#575)", () => {
     // Collections (#881) are kept in the UI's settings, so an agent would
     // have nothing to pass these.
     expect(uiOnly).toEqual([
+      "collections.matchNames",
       "collections.resolveNamespaces",
       "collections.validate",
       "extensions.callOperation",
       "extensions.inspect",
       "extensions.logs",
+      "k8s.listApiKinds",
     ]);
     expect(CAPABILITY_CATALOG.filter((c) => c.uiOnly).every((c) => c.readOnly && !c.requiresConfirm)).toBe(true);
     // Every other row leaves the field out rather than writing `false`.
