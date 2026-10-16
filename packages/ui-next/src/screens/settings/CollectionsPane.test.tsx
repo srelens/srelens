@@ -9,7 +9,8 @@ import { settingsStorage, type ClusterContext } from "@srelens/core";
   disconnect() {}
 };
 
-const core = vi.hoisted(() => ({ resolveNamespaceCollections: vi.fn(), validateCollection: vi.fn() }));
+const core = vi.hoisted(() => ({ resolveNamespaceCollections: vi.fn(), validateCollection: vi.fn(), listApiKinds: vi.fn() }));
+Element.prototype.scrollIntoView ??= () => {};
 vi.mock("@srelens/core", async (orig) => ({ ...(await orig<typeof import("@srelens/core")>()), ...core }));
 const active = vi.hoisted(() => ({ context: undefined as ClusterContext | undefined }));
 vi.mock("../../lib/clusters", async (orig) => ({
@@ -40,6 +41,10 @@ beforeEach(() => {
   __resetCollectionScopeForTests();
   core.validateCollection.mockReset().mockResolvedValue([]);
   core.resolveNamespaceCollections.mockReset();
+  core.listApiKinds.mockReset().mockResolvedValue([
+    { group: "apps", version: "v1", kind: "Deployment", plural: "deployments", namespaced: true },
+    { group: "", version: "v1", kind: "Service", plural: "services", namespaced: true },
+  ]);
   active.context = undefined;
 });
 
@@ -189,6 +194,87 @@ describe("CollectionsPane", () => {
     ));
     await userEvent.click(within(dialog).getByRole("button", { name: "Save" }));
     expect(getCollections().find((c) => c.name === "prod")?.patterns).toEqual(["live-*"]);
+  });
+
+  /**
+   * #885, one collection: the same editor, below the namespace rules, can
+   * also narrow resource lists — kinds from the cluster's APIs, and a name
+   * expression.
+   */
+  it("filters resources too when switched on: kinds from the cluster, and a name expression", async () => {
+    active.context = SHOP;
+    render(<CollectionsPane />);
+    await userEvent.click(screen.getByRole("button", { name: "New collection…" }));
+    const dialog = screen.getByRole("dialog");
+    expect(within(dialog).queryByRole("combobox", { name: "Kinds" })).toBeNull();
+    await userEvent.type(within(dialog).getByRole("textbox", { name: "Name" }), "prod");
+    await userEvent.type(within(dialog).getByLabelText("Patterns"), "prod-*");
+    await userEvent.click(within(dialog).getByRole("switch", { name: "Filter resources" }));
+
+    await userEvent.click(within(dialog).getByRole("combobox", { name: "Kinds" }));
+    expect(core.listApiKinds).toHaveBeenCalledWith("kind-shop");
+    await userEvent.click(await screen.findByRole("option", { name: "apps/Deployment" }));
+    await userEvent.keyboard("{Escape}");
+    await userEvent.type(within(dialog).getByRole("textbox", { name: "Name expression" }), "^payment-");
+    await waitFor(() =>
+      expect(core.validateCollection).toHaveBeenLastCalledWith(
+        { name: "prod", type: "namespace", patterns: ["prod-*"], resources: { kinds: ["apps/Deployment"], nameRegex: "^payment-" } },
+        [],
+      ),
+    );
+    await userEvent.click(within(dialog).getByRole("button", { name: "Save collection" }));
+    expect(getCollections()).toEqual([
+      { name: "prod", type: "namespace", patterns: ["prod-*"], resources: { kinds: ["apps/Deployment"], nameRegex: "^payment-" } },
+    ]);
+    expect(within(row("prod")).getByText(/Filters apps\/Deployment to names matching/)).toBeDefined();
+  });
+
+  it("shows a bad name expression against its field, and does not save", async () => {
+    core.validateCollection.mockResolvedValue([{ field: "resources.nameRegex", message: '"(" is not a regular expression this can use' }]);
+    saveCollection({ name: "prod", type: "namespace", patterns: ["prod-*"], resources: { kinds: ["Service"], nameRegex: "(" } });
+    render(<CollectionsPane />);
+    await userEvent.click(within(row("prod")).getByRole("button", { name: "Edit" }));
+    const dialog = screen.getByRole("dialog");
+    expect(within(dialog).getByRole("switch", { name: "Filter resources" }).getAttribute("aria-checked")).toBe("true");
+    expect(await within(dialog).findByText(/is not a regular expression this can use/)).toBeDefined();
+    expect(within(dialog).getByRole("button", { name: "Save" }).hasAttribute("disabled")).toBe(true);
+  });
+
+  /** An unfinished filter must not make the namespace preview say nothing matches. */
+  it("previews the namespaces without the resource filter", async () => {
+    active.context = SHOP;
+    noteNamespaceListing(SHOP.stableId, [{ name: "prod-eu" }], true);
+    core.resolveNamespaceCollections.mockResolvedValue({ namespaces: ["prod-eu"], collections: [{ name: "prod", matched: ["prod-eu"], members: [] }], partial: false });
+    saveCollection({ name: "prod", type: "namespace", patterns: ["prod-*"], resources: { kinds: [], nameRegex: "" } });
+    render(<CollectionsPane />);
+    await userEvent.click(within(row("prod")).getByRole("button", { name: "Edit" }));
+    const dialog = screen.getByRole("dialog");
+    expect(await within(dialog).findByText("Matches 1 namespace on kind-shop.")).toBeDefined();
+    expect(core.resolveNamespaceCollections.mock.calls.at(-1)?.[0][0]).not.toHaveProperty("resources");
+  });
+
+  it("offers to read the cluster's kinds again when that failed", async () => {
+    active.context = SHOP;
+    core.listApiKinds.mockRejectedValueOnce(new Error("connection refused"));
+    saveCollection({ name: "prod", type: "namespace", patterns: ["prod-*"], resources: { kinds: [], nameRegex: "^a" } });
+    render(<CollectionsPane />);
+    await userEvent.click(within(row("prod")).getByRole("button", { name: "Edit" }));
+    const dialog = screen.getByRole("dialog");
+    await userEvent.click(within(dialog).getByRole("combobox", { name: "Kinds" }));
+    await userEvent.click(await screen.findByRole("button", { name: "Try again" }));
+    expect(core.listApiKinds).toHaveBeenCalledTimes(2);
+    expect(await screen.findByRole("option", { name: "apps/Deployment" })).toBeDefined();
+  });
+
+  it("drops the filter when switched off", async () => {
+    saveCollection({ name: "prod", type: "namespace", patterns: ["prod-*"], resources: { kinds: ["Service"], nameRegex: "^a" } });
+    render(<CollectionsPane />);
+    await userEvent.click(within(row("prod")).getByRole("button", { name: "Edit" }));
+    const dialog = screen.getByRole("dialog");
+    await userEvent.click(within(dialog).getByRole("switch", { name: "Filter resources" }));
+    await waitFor(() => expect(core.validateCollection).toHaveBeenLastCalledWith({ name: "prod", type: "namespace", patterns: ["prod-*"] }, []));
+    await userEvent.click(within(dialog).getByRole("button", { name: "Save" }));
+    expect(getCollections()[0].resources).toBeUndefined();
   });
 
   it("deletes several at once, after asking", async () => {

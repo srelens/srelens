@@ -72,6 +72,12 @@ describe("the saved collections", () => {
     expect(getCollections()).toEqual([{ name: "prod", type: "namespace", members: ["a"], lastUsedAt: 7 }]);
   });
 
+  it("drop a resource filter the editor switched off (#885)", () => {
+    saveCollection({ name: "prod", type: "namespace", resources: { kinds: ["Service"], nameRegex: "^a" } });
+    saveCollection({ name: "prod", type: "namespace" }, "prod");
+    expect(getCollections()).toEqual([{ name: "prod", type: "namespace" }]);
+  });
+
   it("tell their listeners when a collection is renamed, and not when it is only edited", () => {
     const heard = vi.fn();
     onCollectionRenamed(heard);

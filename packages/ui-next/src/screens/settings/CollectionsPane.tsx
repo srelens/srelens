@@ -95,6 +95,12 @@ export function CollectionsPane() {
                 <p className="mt-0.5 overflow-x-auto whitespace-nowrap font-mono text-[0.75rem] text-muted" data-slot="collection-rules">
                   {rules(c)}
                 </p>
+                {c.resources && (
+                  <p className="mt-0.5 overflow-x-auto whitespace-nowrap text-[0.75rem] text-muted" data-slot="collection-resources">
+                    Filters {c.resources.kinds.join(", ")} to names matching{" "}
+                    <span className="font-mono">{c.resources.nameRegex}</span>
+                  </p>
+                )}
               </div>
               <div className="flex shrink-0 gap-1.5">
                 <Button variant="secondary" size="xs" onClick={() => setEditing(c)}>

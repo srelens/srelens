@@ -956,6 +956,31 @@ async fn run_suite() {
         .await;
     assert_eq!(checked["problems"][0]["field"], "patterns", "{checked}");
 
+    // A collection's resource filter (#885): the kinds it may name come from
+    // this cluster's API discovery, and a name expression narrows a list.
+    let kinds = h.ok("k8s.listApiKinds", json!({ "context": ctx })).await;
+    let served: Vec<(&str, &str)> = kinds["kinds"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|k| (k["group"].as_str().unwrap(), k["kind"].as_str().unwrap()))
+        .collect();
+    assert!(served.contains(&("apps", "Deployment")) && served.contains(&("", "ConfigMap")), "{kinds}");
+    let matched = h
+        .ok(
+            "collections.matchNames",
+            json!({
+                "collections": [{
+                    "name": "e2e", "type": "namespace", "members": [NS],
+                    "resources": { "kinds": ["ConfigMap"], "nameRegex": "^kube-root-" },
+                }],
+                "kind": "ConfigMap",
+                "names": ["kube-root-ca.crt", "app-settings"],
+            }),
+        )
+        .await;
+    assert_eq!(matched["matches"], json!([true, false]), "{matched}");
+
     let out = h
         .ok("k8s.listPods", json!({ "context": ctx, "namespace": NS }))
         .await;

@@ -155,6 +155,16 @@ the preview to keep it as a member. Members can be
 pasted as a list separated by commas or new lines. Collections are kept with your
 settings, so they are the same in every window and survive a restart.
 
+A collection can also **filter resources**. Switch on *Filter resources* in its
+editor, choose the kinds it applies to from the ones the cluster serves, and give
+a regular expression for resource names (`^payment-` for names that start so,
+`canary` for names that contain it). With the collection chosen in the namespace
+selector, the lists of those kinds show only the resources, inside its
+namespaces, whose name matches; a line above the list says so. Other kinds' lists
+are only scoped to the namespaces. With several collections chosen, a list is
+narrowed only when each of them filters its kind, and shows a name any of their
+expressions matches.
+
 **Bulk actions.** Select rows with their checkboxes to reveal a bar with **Delete**,
 **Evict** (Pods), and **Rollout restart** (Deployments, StatefulSets, DaemonSets).
 Each is confirmation-gated and reports partial failures.
