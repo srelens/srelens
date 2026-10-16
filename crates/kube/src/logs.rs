@@ -66,6 +66,63 @@ impl Line {
     }
 }
 
+/// [`read_lines`] one line at a time, for a reader that stops between lines:
+/// a page of `k8s.podLogs` stops when it is full and reads on later.
+/// Cancel-safe — everything read so far lives here, not in the future `next`
+/// returns.
+pub struct LineReader<R> {
+    reader: R,
+    max: usize,
+    line: Vec<u8>,
+    dropped: bool,
+    done: bool,
+}
+
+impl<R: AsyncBufRead + Unpin> LineReader<R> {
+    pub fn new(reader: R, max: usize) -> Self {
+        Self {
+            reader,
+            max,
+            line: Vec::new(),
+            dropped: false,
+            done: false,
+        }
+    }
+
+    /// The next line, held to `max` bytes as [`read_lines`] holds it, or
+    /// `None` at the end of the stream.
+    pub async fn next(&mut self) -> std::io::Result<Option<Line>> {
+        if self.done {
+            return Ok(None);
+        }
+        // One byte over `max`, so a `\r` just past it is a line ending and not a cut.
+        let keep = self.max.saturating_add(1);
+        loop {
+            let chunk = self.reader.fill_buf().await?;
+            if chunk.is_empty() {
+                self.done = true;
+                if self.line.is_empty() && !self.dropped {
+                    return Ok(None);
+                }
+                let dropped = std::mem::take(&mut self.dropped);
+                return Ok(Some(finish(&mut self.line, dropped, false, self.max)));
+            }
+            let (part, used, ends) = match chunk.iter().position(|&b| b == b'\n') {
+                Some(at) => (&chunk[..at], at + 1, true),
+                None => (chunk, chunk.len(), false),
+            };
+            let room = keep.saturating_sub(self.line.len()).min(part.len());
+            self.line.extend_from_slice(&part[..room]);
+            self.dropped |= room < part.len();
+            self.reader.consume_unpin(used);
+            if ends {
+                let dropped = std::mem::take(&mut self.dropped);
+                return Ok(Some(finish(&mut self.line, dropped, true, self.max)));
+            }
+        }
+    }
+}
+
 /// Read `reader` a line at a time, handing each to `on_line`, holding at most
 /// `max` bytes of any one line (#747).
 ///
@@ -75,36 +132,16 @@ impl Line {
 /// `max` are read and dropped until the newline, the line is cut on a
 /// character boundary and marked, and bytes that are not UTF-8 are decoded
 /// lossily. A last line with no newline is still a line.
-pub async fn read_lines<R, F>(mut reader: R, max: usize, mut on_line: F) -> std::io::Result<()>
+pub async fn read_lines<R, F>(reader: R, max: usize, mut on_line: F) -> std::io::Result<()>
 where
     R: AsyncBufRead + Unpin,
     F: FnMut(Line),
 {
-    // One byte over `max`, so a `\r` just past it is a line ending and not a cut.
-    let keep = max.saturating_add(1);
-    let mut line = Vec::new();
-    let mut dropped = false;
-    loop {
-        let chunk = reader.fill_buf().await?;
-        if chunk.is_empty() {
-            if !line.is_empty() || dropped {
-                on_line(finish(&mut line, dropped, false, max));
-            }
-            return Ok(());
-        }
-        let (part, used, ends) = match chunk.iter().position(|&b| b == b'\n') {
-            Some(at) => (&chunk[..at], at + 1, true),
-            None => (chunk, chunk.len(), false),
-        };
-        let room = keep.saturating_sub(line.len()).min(part.len());
-        line.extend_from_slice(&part[..room]);
-        dropped |= room < part.len();
-        reader.consume_unpin(used);
-        if ends {
-            on_line(finish(&mut line, dropped, true, max));
-            dropped = false;
-        }
+    let mut lines = LineReader::new(reader, max);
+    while let Some(line) = lines.next().await? {
+        on_line(line);
     }
+    Ok(())
 }
 
 /// The line `bytes` holds, emptying it: its `\r\n` ending stripped, cut to
@@ -629,6 +666,22 @@ mod tests {
             .await
             .unwrap();
         lines
+    }
+
+    /// A page stops between lines and reads on later: `next` hands out one
+    /// line per call, however the bytes arrive, and `None` from the end on.
+    #[tokio::test]
+    async fn a_line_reader_hands_out_one_line_a_call() {
+        let reader = futures::io::BufReader::with_capacity(
+            3,
+            futures::io::Cursor::new(b"one\ntwo\nthree".to_vec()),
+        );
+        let mut lines = LineReader::new(reader, 64);
+        assert_eq!(lines.next().await.unwrap(), Some(whole("one")));
+        assert_eq!(lines.next().await.unwrap(), Some(whole("two")));
+        assert_eq!(lines.next().await.unwrap(), Some(whole("three")));
+        assert_eq!(lines.next().await.unwrap(), None);
+        assert_eq!(lines.next().await.unwrap(), None);
     }
 
     fn whole(text: &str) -> Line {
