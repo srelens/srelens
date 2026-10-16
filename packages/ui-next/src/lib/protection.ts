@@ -20,6 +20,11 @@ import { getState, subscribe } from "./tabsStore";
  * protection, never remove what main set. The save is read whatever
  * "Restore session" says: main saves every change regardless of it, so the
  * save is current, and a stale one could only ask more.
+ *
+ * **The main window reads its store alone.** Its store is the truth there, and
+ * its own save trails it, so reading both would keep protection on after it
+ * was turned off. Main's save exists for the context windows (see
+ * `followMainProtection`).
  */
 export interface Protection {
   /** What the reader types: the cluster's mark name, `getMark(stableId, contextName).name`. */
@@ -28,11 +33,20 @@ export interface Protection {
   workspace: string;
 }
 
-// ponytail: main's save is parsed on every call. In main it trails the store
-// by the 300 ms save debounce, which errs only toward protected; a context
-// window sees main's later saves when it is focused (followMainProtection).
+/**
+ * Whether main's save is read at all. It is, until `followMainProtection` says
+ * this IS the main window: its store is the truth there, and a save that trails
+ * it by the 300 ms debounce would hold protection on after it was turned off
+ * (saving wakes no `useProtection`). True by default, so a window that has not
+ * said what it is yet errs toward protected.
+ */
+let readMainSave = true;
+
+// ponytail: main's save is parsed on every call. A context window sees main's
+// later saves when it is focused (followMainProtection).
 // Cache by the raw string if this ever shows in a profile.
 function workspaces(): Workspace[] {
+  if (!readMainSave) return getState().workspaces;
   return [...getState().workspaces, ...(loadTabsState(undefined, () => true, "main")?.workspaces ?? [])];
 }
 
@@ -91,10 +105,16 @@ const mainSaveReadCount = () => mainSaveReads;
  * settings once, at boot, so protection turned on in main afterwards would
  * otherwise not reach a window that is already open. A read that fails leaves
  * this window's copy in use, and is logged. The main window holds the
- * workspaces itself and listens to nothing. Returns the release.
+ * workspaces itself: it listens to nothing and stops reading its own save.
+ * Returns the release.
  */
 export function followMainProtection(windowLabel: string): () => void {
-  if (windowLabel === "main") return () => {};
+  if (windowLabel === "main") {
+    readMainSave = false;
+    return () => {
+      readMainSave = true;
+    };
+  }
   const onFocus = () => {
     refreshSetting(getStorageKey("main")).then(
       () => {

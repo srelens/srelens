@@ -216,6 +216,48 @@ describe("followMainProtection", () => {
     expect(refreshSetting).not.toHaveBeenCalled();
   });
 
+  /**
+   * Main's store is the truth in main. Its save trails the store by the 300 ms
+   * debounce and saving wakes no `useProtection`, so a save that still says
+   * "protected" would hold the strip and the field up after protection was
+   * turned off, until some other redraw.
+   */
+  it("lets the live store alone decide in the main window, not a save that trails it", () => {
+    onTestFinished(followMainProtection("main"));
+    // The save says prod-eu is protected; this window's store, the same workspace, says it is not.
+    protectInMain("Production", [prod]);
+    expect(protectionFor("prod-eu")).toBeNull();
+    expect(isClusterProtected(prod.stableId)).toBe(false);
+    const { result } = renderHook(() => useProtection("prod-eu"));
+    expect(result.current).toBeNull();
+  });
+
+  it("drops the strip at once when protection is turned off in the main window, with no save", () => {
+    onTestFinished(followMainProtection("main"));
+    const id = protect("Production", [prod.stableId]);
+    saveTabsState(getState(), undefined, "main"); // the save has caught up: protected
+    const production = { name: "prod-eu", workspace: "Production" };
+    const { result } = renderHook(() => useProtection("prod-eu"));
+    expect(result.current).toEqual(production);
+
+    // The save has not caught up yet: it still says protected.
+    act(() => setWorkspaceProtected(id, false));
+
+    expect(result.current).toBeNull();
+  });
+
+  it("still reads main's save in a context window, whose own copy can never remove what main set", () => {
+    onTestFinished(followMainProtection("ctx-prod"));
+    protectInMain("Production", [prod]);
+    expect(protectionFor("prod-eu")).toEqual({ name: "prod-eu", workspace: "Production" });
+  });
+
+  it("reads main's save again once the main window's follow is released", () => {
+    followMainProtection("main")();
+    protectInMain("Production", [prod]);
+    expect(protectionFor("prod-eu")).toEqual({ name: "prod-eu", workspace: "Production" });
+  });
+
   it("keeps this window's copy, and says so, when main's save cannot be read again", async () => {
     onTestFinished(followMainProtection("ctx-prod"));
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
