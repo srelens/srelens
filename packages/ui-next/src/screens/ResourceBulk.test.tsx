@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 
@@ -22,6 +22,10 @@ vi.mock("@srelens/core", async (importOriginal) => ({
 
 import { ResourceBulk } from "./ResourceBulk";
 import type { KindDescriptor, ListRow } from "../lib/kinds/types";
+import type { ClusterContext } from "@srelens/core";
+import { resetContexts, setContexts } from "../lib/clusters";
+import { defaultState } from "../lib/tabs";
+import { getState, setState, setWorkspaceProtected } from "../lib/tabsStore";
 
 const PODS: ListRow[] = [
   { name: "web-0", namespace: "kube-system" },
@@ -491,5 +495,37 @@ describe("ResourceBulk — the cluster the batch was opened on", () => {
     expect(tick("delete").checked).toBe(false);
     await userEvent.click(box().getByRole("button", { name: "Delete" }));
     expect(deleteResource).not.toHaveBeenCalled();
+  });
+});
+
+/** On a protected cluster (#101) the batch waits for the cluster's name, typed. */
+describe("ResourceBulk — on a protected cluster (#101)", () => {
+  const PROD: ClusterContext = { name: "prod", stableId: "prod", key: "prod", cluster: "prod", server: "", isCurrent: true, sourceFile: "", authKind: "token" };
+
+  beforeEach(() => {
+    setContexts([PROD]);
+    setState(defaultState([PROD]));
+    setWorkspaceProtected(getState().currentId, true);
+  });
+  afterEach(() => {
+    resetContexts();
+    setState(defaultState([]));
+  });
+
+  it("runs none of the batch until the cluster's name is typed", async () => {
+    render(
+      <ResourceBulk selected={ALL_SELECTED} kind="pods" descriptor={POD_DESCRIPTOR} context="prod" rows={PODS} onDone={() => {}} />,
+    );
+    await userEvent.click(screen.getByRole("button", { name: "Delete" }));
+    const dialog = within(screen.getByRole("dialog"));
+    expect(dialog.getByText("prod is protected (workspace Default).")).toBeTruthy();
+
+    await userEvent.click(dialog.getByRole("button", { name: "Delete" }));
+    expect(deleteResource).not.toHaveBeenCalled();
+    expect(dialog.getByText("Type prod to confirm.")).toBeTruthy();
+
+    await userEvent.type(dialog.getByRole("textbox", { name: "Type prod to confirm" }), "prod");
+    await userEvent.click(dialog.getByRole("button", { name: "Delete" }));
+    await waitFor(() => expect(deleteResource).toHaveBeenCalledTimes(3));
   });
 });

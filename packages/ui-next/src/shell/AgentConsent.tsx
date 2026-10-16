@@ -9,6 +9,8 @@ import {
 import { getRun, noteGate, noteGateIn, runKeyHoldingGate, type GateRecord } from "../lib/agentRun";
 import { Alert, ConfirmDialog } from "@srelens/ui-kit";
 import { FailureLine } from "../lib/errorCopy";
+import { useProtectedConfirm } from "../lib/protectedConfirm";
+import { protectionFor } from "../lib/protection";
 import { useWorkspaceSealed } from "./LockGate";
 import { RequestConfirmation } from "../confirm/RequestConfirmation";
 import { asConfirmRequest } from "../confirm/confirmRequest";
@@ -260,6 +262,28 @@ function hostWords(request: ConfirmRequest): Pick<GateRecord, "prompt" | "impact
   };
 }
 
+/**
+ * The name of the call's cluster that is protected, if any (#101).
+ *
+ * The value the host executes on comes first: `args.context`, then
+ * `args.resource.context` — the same fixed path `confirm_fields` reads
+ * (`crates/capability/src/annotations.rs`). `target.cluster` is last, for an
+ * app's call that carries its cluster outside its arguments: it is the host's
+ * display copy, escaped and cut at 80 characters, so a long pinned ID or EKS
+ * ARN in it matches nothing. If ANY of them is protected, that one is asked
+ * about; checking more names can only ask more.
+ */
+function askedCluster(request: ConfirmRequest | undefined): string | undefined {
+  if (!request) return undefined;
+  const { context, resource } = request.args;
+  const named = [
+    context,
+    typeof resource === "object" && resource !== null ? (resource as { context?: unknown }).context : undefined,
+    request.target?.cluster,
+  ];
+  return named.find((n): n is string => typeof n === "string" && protectionFor(n) !== null);
+}
+
 export function AgentConsent() {
   const [queue, setQueue] = useState<ConfirmRequest[]>([]);
   const [busy, setBusy] = useState(false);
@@ -271,6 +295,26 @@ export function AgentConsent() {
   // answered. See the file comment for what this component does about it.
   const covered = useWorkspaceSealed();
   const current = queue[0];
+  /**
+   * On a protected cluster, its name, typed, before an Approve (#101). See
+   * {@link askedCluster} for which of the call's names is asked about. A
+   * request that names no cluster is not cluster-scoped and asks nothing
+   * more. Deny never waits; the host's sixty seconds still run.
+   */
+  const typed = useProtectedConfirm(askedCluster(current));
+  // Each request is its own question: a name typed for one answers nothing else.
+  // Cleared DURING render, by React's adjust-state-on-prop-change pattern, and
+  // not in an effect. `answer()` shifts the queue and clears `busy` in one
+  // batch, and the host settling the request on screen shifts it too; an effect
+  // runs only after that render has been committed, so the next request would
+  // be on screen for a frame with the last one's name typed and Approve live.
+  // A state write during render makes React render again before it commits,
+  // so no render with the stale name is ever committed.
+  const [typedFor, setTypedFor] = useState(current?.id);
+  if (typedFor !== current?.id) {
+    setTypedFor(current?.id);
+    typed.reset();
+  }
 
   useEffect(() => {
     // Every vault command and `mcp_confirm_respond` alike are Tauri commands,
@@ -534,6 +578,7 @@ export function AgentConsent() {
                 <pre className="code max-h-64 overflow-auto rounded p-3 text-[0.6875rem]">
                   <code>{JSON.stringify(current.args, null, 2)}</code>
                 </pre>
+                {typed.field}
                 {queue.length > 1 && (
                   <p className="m-0 text-[0.6875rem] text-muted">
                     {queue.length - 1} more request{queue.length - 1 === 1 ? "" : "s"} waiting
@@ -564,6 +609,8 @@ export function AgentConsent() {
         cancelLabel="Deny"
         danger
         busy={busy}
+        // Approve waits for a protected cluster's name (#101); Deny never does.
+        confirmDisabled={!typed.ready}
         onConfirm={() => void answer(true)}
         onCancel={() => void answer(false)}
       />

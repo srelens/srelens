@@ -185,6 +185,29 @@ describe("parseStoredState", () => {
     expect(parseStoredState(JSON.stringify({ version: 1, ...valid() }))?.workspaces[0]).not.toHaveProperty("color");
   });
 
+  it("keeps a protected workspace through a save and a load", () => {
+    const storage = memory();
+    const s = valid();
+    s.workspaces[0].protected = true;
+    saveTabsState(s, storage);
+    expect(loadTabsState(storage, () => true)?.workspaces[0].protected).toBe(true);
+  });
+
+  it("drops a protected flag that is not true", () => {
+    // `false` is never written (the key is deleted instead), and a string or
+    // a number from a hand-edited file is not a flag this build wrote.
+    for (const junk of ["false", '"true"', "1", "null", "{}"]) {
+      const s = valid();
+      s.workspaces[0].protected = true;
+      const raw = JSON.stringify({ version: 1, ...s }).replace('"protected":true', `"protected":${junk}`);
+      expect(parseStoredState(raw)?.workspaces[0], junk).not.toHaveProperty("protected");
+    }
+  });
+
+  it("reads a workspace saved before protection existed as unprotected", () => {
+    expect(parseStoredState(JSON.stringify({ version: 1, ...valid() }))?.workspaces[0]).not.toHaveProperty("protected");
+  });
+
   /** The tabs of the clusters not in focus (#908). */
   describe("the strips put away", () => {
     const shelving = (): TabsState => {

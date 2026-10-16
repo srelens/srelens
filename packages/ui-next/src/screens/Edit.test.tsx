@@ -1,5 +1,5 @@
 import { createElement } from "react";
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, screen, waitFor, within, act } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { Body } from "../shell/Body";
@@ -55,6 +55,10 @@ vi.mock("@srelens/ui-kit", async (importOriginal) => {
 });
 
 import { EditResource, TEMPLATES } from "./Edit";
+import type { ClusterContext } from "@srelens/core";
+import { resetContexts, setContexts } from "../lib/clusters";
+import { defaultState } from "../lib/tabs";
+import * as store from "../lib/tabsStore";
 
 // The same jsdom gaps every screen with a Radix dialog or picker stubs.
 if (!("ResizeObserver" in globalThis)) {
@@ -642,5 +646,110 @@ describe("EditResource on /new", () => {
     // template's.
     await pick("Namespace", "payments");
     await waitFor(() => expect(latestEditor()?.value).toBe(TEMPLATES.ConfigMap("payments")));
+  });
+});
+
+/**
+ * On a protected cluster (#101) every write from the editor asks for the
+ * cluster's name. Apply and Delete already confirm through the gate; Force
+ * apply and Create had no confirm, and get one that carries it.
+ */
+describe("EditResource on a protected cluster (#101)", () => {
+  const PROD_EU: ClusterContext = { name: "prod-eu", stableId: "prod-eu", key: "prod-eu", cluster: "prod", server: "", isCurrent: true, sourceFile: "", authKind: "token" };
+  const typedIn = (dialog: HTMLElement) => within(dialog).getByRole("textbox", { name: "Type prod-eu to confirm" }) as HTMLInputElement;
+
+  beforeEach(() => {
+    setContexts([PROD_EU]);
+    store.setState(defaultState([PROD_EU]));
+    store.setWorkspaceProtected(store.getState().currentId, true);
+  });
+  afterEach(() => {
+    resetContexts();
+    store.setState(defaultState([]));
+  });
+
+  it("applies nothing from the Apply confirm until the name is typed", async () => {
+    render(<EditResource route={ROUTE} />);
+    await waitFor(() => expect(latestEditor()?.value).toBe(LIVE));
+    act(() => latestEditor().onChange(EDITED));
+    await userEvent.click(screen.getByRole("button", { name: "Apply" }));
+    const dialog = await screen.findByRole("dialog");
+    expect(within(dialog).getByText("prod-eu is protected (workspace Default).")).toBeTruthy();
+
+    await userEvent.click(within(dialog).getByRole("button", { name: "Apply" }));
+    expect(core.applyManifest).not.toHaveBeenCalled();
+    expect(within(screen.getByRole("dialog")).getByText("Type prod-eu to confirm.")).toBeTruthy();
+
+    await userEvent.type(typedIn(dialog), "prod-eu");
+    await userEvent.click(within(dialog).getByRole("button", { name: "Apply" }));
+    await waitFor(() => expect(core.applyManifest).toHaveBeenCalledWith("prod-eu", EDITED, false));
+  });
+
+  it("deletes nothing from the Delete confirm until the name is typed", async () => {
+    render(<EditResource route={ROUTE} />);
+    await waitFor(() => expect(latestEditor()?.value).toBe(LIVE));
+    await userEvent.click(screen.getByRole("button", { name: "Delete" }));
+    const dialog = await screen.findByRole("dialog");
+
+    await userEvent.click(within(dialog).getByRole("button", { name: "Delete" }));
+    expect(core.deleteResource).not.toHaveBeenCalled();
+    expect(within(dialog).getByText("Type prod-eu to confirm.")).toBeTruthy();
+
+    await userEvent.type(typedIn(dialog), "prod-eu");
+    await userEvent.click(within(dialog).getByRole("button", { name: "Delete" }));
+    await waitFor(() => expect(core.deleteResource).toHaveBeenCalledWith("prod-eu", "ConfigMap", "checkout", "web"));
+  });
+
+  it("puts Force apply behind its own confirm, asking for the name afresh", async () => {
+    core.applyManifest.mockResolvedValueOnce({
+      documents: [
+        { kind: "ConfigMap", name: "web", applied: false, conflict: { managers: ["helm"], fields: [".data.key"], message: "conflict" } },
+      ],
+      applied: false,
+    });
+    render(<EditResource route={ROUTE} />);
+    await waitFor(() => expect(latestEditor()?.value).toBe(LIVE));
+    act(() => latestEditor().onChange(EDITED));
+    await userEvent.click(screen.getByRole("button", { name: "Apply" }));
+    const apply = await screen.findByRole("dialog");
+    await userEvent.type(typedIn(apply), "prod-eu");
+    await userEvent.click(within(apply).getByRole("button", { name: "Apply" }));
+
+    const banner = await screen.findByRole("alert");
+    await userEvent.click(within(banner).getByRole("button", { name: "Force apply" }));
+    const force = await screen.findByRole("dialog");
+    expect(within(force).getByText("Force apply?")).toBeTruthy();
+    // The name was typed for the plain apply; forcing is its own question.
+    expect(typedIn(force).value).toBe("");
+
+    await userEvent.click(within(force).getByRole("button", { name: "Force apply" }));
+    expect(core.applyManifest).toHaveBeenCalledTimes(1);
+    expect(within(force).getByText("Type prod-eu to confirm.")).toBeTruthy();
+
+    await userEvent.type(typedIn(force), "prod-eu");
+    await userEvent.click(within(force).getByRole("button", { name: "Force apply" }));
+    await waitFor(() => expect(core.applyManifest).toHaveBeenLastCalledWith("prod-eu", EDITED, true));
+  });
+
+  it("puts Create behind a confirm, and draws no field on the page itself", async () => {
+    render(<EditResource route="/new/prod-eu" />);
+    await waitFor(() => expect(latestEditor()?.value).toBe(TEMPLATES.Deployment("default")));
+    // The question is Create's confirm's, not the page's.
+    expect(screen.queryByRole("textbox", { name: "Type prod-eu to confirm" })).toBeNull();
+
+    await userEvent.click(screen.getByRole("button", { name: "Create" }));
+    const dialog = await screen.findByRole("dialog");
+    expect(core.applyManifest).not.toHaveBeenCalled();
+
+    await userEvent.click(within(dialog).getByRole("button", { name: "Create" }));
+    expect(core.applyManifest).not.toHaveBeenCalled();
+    expect(within(dialog).getByText("Type prod-eu to confirm.")).toBeTruthy();
+
+    await userEvent.type(typedIn(dialog), "prod-eu");
+    await userEvent.click(within(dialog).getByRole("button", { name: "Create" }));
+    await waitFor(() =>
+      expect(core.applyManifest).toHaveBeenCalledWith("prod-eu", TEMPLATES.Deployment("default"), false),
+    );
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
   });
 });
