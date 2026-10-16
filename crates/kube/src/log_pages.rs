@@ -14,6 +14,7 @@ use std::time::Duration;
 
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine as _;
+use k8s_openapi::api::core::v1::Pod;
 use k8s_openapi::jiff::{SignedDuration, Timestamp};
 use regex::{Regex, RegexBuilder};
 use schemars::JsonSchema;
@@ -323,6 +324,160 @@ impl PageRequest {
     }
 }
 
+/// Where one pod's read picks up: past the first `k` lines stamped `at`.
+#[derive(Debug)]
+pub(crate) struct Resume {
+    at: Timestamp,
+    k: u32,
+    seen: u32,
+    open: bool,
+}
+
+/// What a read does with the next line past where its request began.
+#[derive(Debug, PartialEq)]
+pub(crate) enum Admit {
+    /// The cursor already read it.
+    Skip,
+    Take,
+    /// Take it — but the cursor's own line never came back: rotated away.
+    Gap,
+}
+
+impl Resume {
+    pub(crate) fn new(at: Timestamp, k: u32) -> Self {
+        Self {
+            at,
+            k,
+            seen: 0,
+            open: true,
+        }
+    }
+
+    pub(crate) fn admit(&mut self, ts: Timestamp) -> Admit {
+        if !self.open {
+            return Admit::Take;
+        }
+        if ts < self.at {
+            return Admit::Skip;
+        }
+        if ts == self.at && self.seen < self.k {
+            self.seen += 1;
+            return Admit::Skip;
+        }
+        self.open = false;
+        if self.seen < self.k {
+            Admit::Gap
+        } else {
+            Admit::Take
+        }
+    }
+
+    /// At the end of the stream: the cursor's line never came back, and
+    /// nothing newer did either.
+    pub(crate) fn lost_at_end(&self) -> bool {
+        self.open && self.seen < self.k
+    }
+}
+
+/// One container instance, by its restart count: the current one, or the
+/// one before it (`previous`).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct Instance {
+    pub(crate) previous: bool,
+    pub(crate) restarts: i32,
+}
+
+/// What became of the instance a cursor was reading.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) enum Moved {
+    Stayed,
+    /// It ended once: read its rest, then the new one from its first line.
+    Restarted,
+    /// It is gone (more than one restart): read the newest from its start.
+    Lost,
+}
+
+/// The instances a read covers, oldest first, given the container's restart
+/// count `now` and the instance the cursor read (`read`, a restart count).
+pub(crate) fn plan_instances(
+    now: i32,
+    previous: bool,
+    read: Option<i32>,
+) -> (Vec<Instance>, Moved) {
+    let current = Instance {
+        previous: false,
+        restarts: now,
+    };
+    let last = Instance {
+        previous: true,
+        restarts: now - 1,
+    };
+    match (previous, read) {
+        (false, None) => (vec![current], Moved::Stayed),
+        (false, Some(r)) if r == now => (vec![current], Moved::Stayed),
+        (false, Some(r)) if r == now - 1 => (vec![last, current], Moved::Restarted),
+        (false, Some(_)) => (vec![current], Moved::Lost),
+        (true, None) => (vec![last], Moved::Stayed),
+        (true, Some(r)) if r == now - 1 => (vec![last], Moved::Stayed),
+        (true, Some(_)) => (vec![last], Moved::Lost),
+    }
+}
+
+/// Why a pod has no container to read.
+#[derive(Debug)]
+pub(crate) enum NoContainer {
+    /// The named container is not in this pod: a notice when the read covers
+    /// several.
+    Missing(String),
+    /// Several containers and none named: the call is wrong for every pod
+    /// alike.
+    Ambiguous(String),
+}
+
+/// The container a read of `pod` covers: the named one, or its only one.
+pub(crate) fn container_of(pod: &Pod, named: Option<&str>) -> Result<String, NoContainer> {
+    let pod_name = pod.metadata.name.as_deref().unwrap_or_default();
+    let (main, init): (Vec<&str>, Vec<&str>) = match pod.spec.as_ref() {
+        Some(spec) => (
+            spec.containers.iter().map(|c| c.name.as_str()).collect(),
+            spec.init_containers
+                .iter()
+                .flatten()
+                .map(|c| c.name.as_str())
+                .collect(),
+        ),
+        None => (Vec::new(), Vec::new()),
+    };
+    match named {
+        Some(name) if main.contains(&name) || init.contains(&name) => Ok(name.to_string()),
+        Some(name) => Err(NoContainer::Missing(format!(
+            "{pod_name}: has no container {name:?} (it has {})",
+            main.join(", ")
+        ))),
+        None => match main.as_slice() {
+            [only] => Ok((*only).to_string()),
+            _ => Err(NoContainer::Ambiguous(format!(
+                "pod {pod_name} has containers {}; name one with `container`",
+                main.join(", ")
+            ))),
+        },
+    }
+}
+
+/// `container`'s restart count in `pod`'s status, 0 when it reports none.
+pub(crate) fn restarts_of(pod: &Pod, container: &str) -> i32 {
+    let Some(status) = pod.status.as_ref() else {
+        return 0;
+    };
+    status
+        .container_statuses
+        .iter()
+        .flatten()
+        .chain(status.init_container_statuses.iter().flatten())
+        .find(|s| s.name == container)
+        .map_or(0, |s| s.restart_count)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -533,5 +688,117 @@ mod tests {
         let err = parse(json!({ "context": "c", "namespace": "n", "pod": "b", "cursor": cursor }))
             .unwrap_err();
         assert!(err.contains("another read"), "{err}");
+    }
+
+    /// Kubelet stamps for the tests: `s` seconds and `ms` milliseconds past
+    /// 2026-09-21.
+    const BASE: i64 = 1_790_000_000;
+    fn at(s: i64, ms: i32) -> Timestamp {
+        Timestamp::new(BASE + s, ms * 1_000_000).unwrap()
+    }
+
+    fn admitted(mut resume: Resume, stamps: &[Timestamp]) -> Vec<&'static str> {
+        stamps
+            .iter()
+            .map(|&ts| match resume.admit(ts) {
+                Admit::Skip => "skip",
+                Admit::Take => "take",
+                Admit::Gap => "gap",
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_resume_drops_what_the_cursor_read_and_takes_the_rest() {
+        // Read: the line at 0.0 and one of the two at 1.0.
+        assert_eq!(
+            admitted(
+                Resume::new(at(1, 0), 1),
+                &[at(0, 0), at(1, 0), at(1, 0), at(2, 0)]
+            ),
+            ["skip", "skip", "take", "take"]
+        );
+        // Both lines at 1.0 were read.
+        assert_eq!(
+            admitted(Resume::new(at(1, 0), 2), &[at(1, 0), at(1, 0), at(1, 500)]),
+            ["skip", "skip", "take"]
+        );
+        // A start time with nothing read yet (`k: 0`) takes its own second's
+        // lines from it on.
+        assert_eq!(
+            admitted(Resume::new(at(1, 500), 0), &[at(1, 0), at(1, 500), at(2, 0)]),
+            ["skip", "take", "take"]
+        );
+    }
+
+    #[test]
+    fn a_resume_whose_line_was_rotated_away_reports_the_gap_once() {
+        assert_eq!(
+            admitted(Resume::new(at(1, 0), 1), &[at(5, 0), at(6, 0)]),
+            ["gap", "take"]
+        );
+        // Only one of the two lines the cursor read is still there.
+        assert_eq!(
+            admitted(Resume::new(at(1, 0), 2), &[at(1, 0), at(3, 0)]),
+            ["skip", "gap"]
+        );
+        let mut resume = Resume::new(at(1, 0), 1);
+        assert!(resume.lost_at_end(), "nothing at all came back");
+        resume.admit(at(1, 0));
+        assert!(!resume.lost_at_end());
+    }
+
+    #[test]
+    fn which_instances_a_read_covers_after_restarts() {
+        let current = |r| Instance {
+            previous: false,
+            restarts: r,
+        };
+        let last = |r| Instance {
+            previous: true,
+            restarts: r,
+        };
+        assert_eq!(plan_instances(3, false, None), (vec![current(3)], Moved::Stayed));
+        assert_eq!(plan_instances(3, false, Some(3)), (vec![current(3)], Moved::Stayed));
+        assert_eq!(
+            plan_instances(3, false, Some(2)),
+            (vec![last(2), current(3)], Moved::Restarted)
+        );
+        assert_eq!(plan_instances(3, false, Some(1)), (vec![current(3)], Moved::Lost));
+        assert_eq!(plan_instances(3, true, None), (vec![last(2)], Moved::Stayed));
+        assert_eq!(plan_instances(3, true, Some(2)), (vec![last(2)], Moved::Stayed));
+        assert_eq!(plan_instances(3, true, Some(1)), (vec![last(2)], Moved::Lost));
+    }
+
+    fn pod_object(containers: &[&str], init: &[&str], restarts: i32) -> Pod {
+        serde_json::from_value(json!({
+            "metadata": { "name": "cmi-0" },
+            "spec": {
+                "containers": containers.iter().map(|c| json!({ "name": c })).collect::<Vec<_>>(),
+                "initContainers": init.iter().map(|c| json!({ "name": c })).collect::<Vec<_>>(),
+            },
+            "status": { "containerStatuses": containers.iter().map(|c| json!({
+                "name": c, "restartCount": restarts, "ready": true, "image": "i", "imageID": "i"
+            })).collect::<Vec<_>>() }
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn the_container_a_read_covers() {
+        let one = pod_object(&["app"], &["setup"], 0);
+        assert_eq!(container_of(&one, None).ok().as_deref(), Some("app"));
+        assert_eq!(container_of(&one, Some("setup")).ok().as_deref(), Some("setup"));
+        let Err(NoContainer::Missing(why)) = container_of(&one, Some("sidecar")) else {
+            panic!("a container the pod lacks is missing")
+        };
+        assert!(why.contains("cmi-0") && why.contains("\"sidecar\""), "{why}");
+        let two = pod_object(&["app", "proxy"], &[], 0);
+        let Err(NoContainer::Ambiguous(why)) = container_of(&two, None) else {
+            panic!("two containers and none named is ambiguous")
+        };
+        assert!(why.contains("app, proxy") && why.contains("`container`"), "{why}");
+        assert_eq!(restarts_of(&pod_object(&["app"], &[], 4), "app"), 4);
+        assert_eq!(restarts_of(&pod_object(&["app"], &[], 4), "missing"), 0);
     }
 }
