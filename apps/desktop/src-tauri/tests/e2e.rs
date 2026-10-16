@@ -1421,12 +1421,15 @@ async fn run_suite() {
         .await;
     assert_eq!(node_details["name"], node_name);
 
-    let gpu_inv = h
+    let node_cap = h
         .ok(
-            "k8s.gpuInventory",
-            json!({ "context": ctx }),
+            "k8s.nodeCapacityOverview",
+            json!({ "context": ctx, "node": node_name }),
         )
         .await;
+    assert!(node_cap["nodes"].is_array());
+
+    let gpu_inv = h.ok("k8s.gpuInventory", json!({ "context": ctx })).await;
     assert!(gpu_inv["total_gpu_nodes"].is_number() || gpu_inv["nodes"].is_array());
     let nd = h
         .ok(

@@ -1198,7 +1198,7 @@ fn every_provider_maps_to_its_slug_label_defaults_and_env_var() {
 fn settings_missing_optional_fields_deserialize_with_defaults() {
     let s: AiSettings = serde_json::from_str(r#"{"defaultProvider":"gemini"}"#).unwrap();
     assert_eq!(s.default_provider, AiProvider::Gemini);
-    assert_eq!(s.max_tokens, 4096);
+    assert_eq!(s.max_tokens, 8192);
     assert_eq!(s.timeout_seconds, 120);
     assert!(s.models.is_empty());
     assert!(s.base_urls.is_empty());

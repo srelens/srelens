@@ -98,6 +98,23 @@ pub async fn run(
                         .into(),
             });
             on_event(AgentEvent::TurnDone);
+            // If prior tool rounds completed successfully in this turn, keep them
+            // so earlier work is not lost, and record whatever text the assistant
+            // generated (closing the turn cleanly with an Assistant turn).
+            // If the cutoff happened on the very first round of this turn, discard
+            // the whole turn so history stays clean.
+            if turns.len() > history.len() + 1 {
+                turns.push(Turn::Assistant {
+                    text: if text.is_empty() {
+                        "The assistant's reply was cut off at the output-token limit mid-tool-call."
+                            .into()
+                    } else {
+                        text
+                    },
+                    tool_calls: Vec::new(),
+                });
+                return Ok(turns);
+            }
             return Ok(history);
         }
 
@@ -265,11 +282,17 @@ pub fn cap_tool_result_content(tool_name: &str, content: &str) -> String {
     }
 }
 
-/// Compact earlier intermediate tool results from previous user turns when sending
-/// requests to the provider in multi-round execution. Tool results within the
-/// current active user turn are preserved in full so that diagnostic facts gathered
-/// in early rounds (e.g. `listPods`, `listEvents`) are not lost mid-investigation.
-/// (Each individual tool result is already safely capped at 16KB by `cap_tool_result_content`).
+/// Compact earlier intermediate tool results when sending requests to the provider
+/// in multi-round execution.
+///
+/// Compact prior completed user turns for sending to the model:
+/// - The active user turn (`idx >= current_turn_start`) is ALWAYS preserved in full fidelity.
+///   This prevents in-turn amnesia loops (where earlier tool outputs disappear, causing
+///   the model to repeatedly re-query) and ensures Anthropic prompt caching prefixes remain
+///   100% stable across all rounds of the active turn.
+/// - Tool results from previous user turns (`idx < current_turn_start`) are condensed if
+///   their content exceeds 600 bytes.
+/// - Canonical conversation history (`turns`) remains immutable and untouched.
 pub fn compact_request_turns_for_round(turns: &[Turn]) -> Vec<Turn> {
     let current_turn_start = turns
         .iter()
@@ -280,31 +303,27 @@ pub fn compact_request_turns_for_round(turns: &[Turn]) -> Vec<Turn> {
         .iter()
         .enumerate()
         .map(|(idx, turn)| match turn {
-            Turn::ToolResults(outcomes) => {
-                if idx >= current_turn_start {
-                    turn.clone()
-                } else {
-                    let compacted = outcomes
-                        .iter()
-                        .map(|o| {
-                            let mut copy = o.clone();
-                            if copy.content.len() > 600 {
-                                let snippet: String = copy
-                                    .content
-                                    .char_indices()
-                                    .take_while(|(byte_idx, ch)| *byte_idx + ch.len_utf8() <= 250)
-                                    .map(|(_, ch)| ch)
-                                    .collect();
-                                copy.content = format!(
-                                    "{}... [Output condensed for subsequent round]",
-                                    snippet.trim_end()
-                                );
-                            }
-                            copy
-                        })
-                        .collect();
-                    Turn::ToolResults(compacted)
-                }
+            Turn::ToolResults(outcomes) if idx < current_turn_start => {
+                let compacted = outcomes
+                    .iter()
+                    .map(|o| {
+                        let mut copy = o.clone();
+                        if copy.content.len() > 600 {
+                            let snippet: String = copy
+                                .content
+                                .char_indices()
+                                .take_while(|(byte_idx, ch)| *byte_idx + ch.len_utf8() <= 250)
+                                .map(|(_, ch)| ch)
+                                .collect();
+                            copy.content = format!(
+                                "{}... [Output condensed for subsequent round]",
+                                snippet.trim_end()
+                            );
+                        }
+                        copy
+                    })
+                    .collect();
+                Turn::ToolResults(compacted)
             }
             _ => turn.clone(),
         })
@@ -510,6 +529,66 @@ mod tests {
         assert!(matches!(events.last(), Some(AgentEvent::TurnDone)));
         // The failed turn is discarded — the next request starts from the prior history.
         assert_eq!(history, prior);
+    }
+
+    #[test]
+    fn a_truncated_round_with_tool_calls_after_successful_rounds_preserves_prior_work() {
+        let provider = ScriptedProvider::new(vec![
+            vec![
+                StreamItem::ToolCall(ToolCall {
+                    id: "c1".into(),
+                    name: "k8s_listPods".into(),
+                    arguments: json!({}),
+                    thought_signature: None,
+                }),
+                StreamItem::Done(StopReason::ToolUse),
+            ],
+            vec![
+                StreamItem::Text("Partial analysis before cutting off".into()),
+                StreamItem::ToolCall(ToolCall {
+                    id: "c2".into(),
+                    name: "k8s_scale".into(),
+                    arguments: json!({}),
+                    thought_signature: None,
+                }),
+                StreamItem::Done(StopReason::MaxTokens),
+            ],
+        ]);
+        let invoker = StubInvoker {
+            result: ToolCallResult {
+                content: "pod-1".into(),
+                is_error: false,
+                denied: false,
+            },
+            calls: Mutex::new(Vec::new()),
+        };
+        let prior = vec![Turn::User("earlier".into())];
+        let (events, history) = drive_from(&provider, &invoker, prior.clone(), "inspect and fix");
+        // Only the first round's tool executed
+        assert_eq!(invoker.calls.lock().unwrap().len(), 1);
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, AgentEvent::Error { message } if message.contains("cut off"))),
+            "expected a truncation error event, got {events:?}"
+        );
+        assert!(matches!(events.last(), Some(AgentEvent::TurnDone)));
+        // Prior work and current turn's successful tool round are preserved,
+        // ending with an Assistant turn containing the text fragment.
+        assert_eq!(history.len(), 5);
+        assert_eq!(history[0], Turn::User("earlier".into()));
+        assert_eq!(history[1], Turn::User("inspect and fix".into()));
+        assert!(
+            matches!(history[2], Turn::Assistant { ref tool_calls, .. } if tool_calls.len() == 1)
+        );
+        assert!(matches!(history[3], Turn::ToolResults(ref res) if res.len() == 1));
+        assert_eq!(
+            history[4],
+            Turn::Assistant {
+                text: "Partial analysis before cutting off".into(),
+                tool_calls: Vec::new(),
+            }
+        );
     }
 
     #[test]
@@ -1027,6 +1106,67 @@ mod tests {
             assert!(!outcomes[0].content.contains("[Output condensed"));
         } else {
             panic!("Expected Turn::ToolResults at index 8");
+        }
+    }
+
+    #[test]
+    fn test_compact_request_turns_preserves_all_rounds_in_active_turn() {
+        let heavy = "x".repeat(1500);
+        let turns = vec![
+            Turn::User("active question".into()),
+            Turn::Assistant {
+                text: "".into(),
+                tool_calls: vec![],
+            },
+            Turn::ToolResults(vec![ToolOutcome {
+                id: "c1".into(),
+                name: "tool1".into(),
+                content: heavy.clone(),
+                is_error: false,
+            }]),
+            Turn::Assistant {
+                text: "".into(),
+                tool_calls: vec![],
+            },
+            Turn::ToolResults(vec![ToolOutcome {
+                id: "c2".into(),
+                name: "tool2".into(),
+                content: heavy.clone(),
+                is_error: false,
+            }]),
+            Turn::Assistant {
+                text: "".into(),
+                tool_calls: vec![],
+            },
+            Turn::ToolResults(vec![ToolOutcome {
+                id: "c3".into(),
+                name: "tool3".into(),
+                content: heavy.clone(),
+                is_error: false,
+            }]),
+            Turn::Assistant {
+                text: "".into(),
+                tool_calls: vec![],
+            },
+            Turn::ToolResults(vec![ToolOutcome {
+                id: "c4".into(),
+                name: "tool4".into(),
+                content: heavy.clone(),
+                is_error: false,
+            }]),
+        ];
+
+        let compacted = compact_request_turns_for_round(&turns);
+        assert_eq!(compacted.len(), 9);
+
+        // All rounds in the active turn (indices 2, 4, 6, 8) must remain full
+        for idx in [2, 4, 6, 8] {
+            if let Turn::ToolResults(outcomes) = &compacted[idx] {
+                assert_eq!(outcomes[0].content.len(), 1500);
+                assert!(!outcomes[0].content.contains("[Output condensed"));
+            } else {
+                panic!("Expected ToolResults at index {idx}");
+            }
         }
     }
 
