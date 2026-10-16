@@ -9,16 +9,19 @@
 //! that stamp. The API server hands `sinceTime` to the kubelet in whole
 //! seconds, so a stamp alone cannot resume mid-second.
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::pin::Pin;
 use std::time::Duration;
 
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine as _;
 use futures::AsyncBufRead;
+use k8s_openapi::api::apps::v1::{DaemonSet, Deployment, ReplicaSet, StatefulSet};
+use k8s_openapi::api::batch::v1::Job;
 use k8s_openapi::api::core::v1::Pod;
+use k8s_openapi::apimachinery::pkg::apis::meta::v1::LabelSelector;
 use k8s_openapi::jiff::{SignedDuration, Timestamp};
-use kube::api::LogParams;
+use kube::api::{ListParams, LogParams};
 use kube::{Api, Client};
 use regex::{Regex, RegexBuilder};
 use schemars::JsonSchema;
@@ -29,7 +32,7 @@ use srelens_capability::CapabilityError;
 use crate::client_cache::ClientCache;
 use crate::connect::request_timeout;
 use crate::logs::{Line, LineReader, PodLogsIn, PodLogsOut, WorkloadRef};
-use crate::workloads::LabelSelectorRequirement;
+use crate::workloads::{selector_query, LabelSelectorRequirement};
 
 const CURSOR_VERSION: u32 = 1;
 const AGAIN: &str = "call again without `cursor` to start a new read";
@@ -897,6 +900,49 @@ async fn timed<T>(
         .map_err(|e| CapabilityError::Handler(e.to_string()))
 }
 
+/// The most pods one page reads.
+pub const MAX_PODS: usize = 20;
+
+/// The pod selector of `workload`, which `parse` checked is a kind srelens
+/// reads.
+async fn workload_selector(
+    client: &Client,
+    namespace: &str,
+    workload: &WorkloadRef,
+) -> Result<LabelSelector, CapabilityError> {
+    let what = format!("reading {} {}", workload.kind, workload.name);
+    let name = workload.name.as_str();
+    let selector = match workload.kind.as_str() {
+        "Deployment" => timed(&what, Api::<Deployment>::namespaced(client.clone(), namespace).get(name))
+            .await?
+            .spec
+            .map(|s| s.selector),
+        "StatefulSet" => timed(&what, Api::<StatefulSet>::namespaced(client.clone(), namespace).get(name))
+            .await?
+            .spec
+            .map(|s| s.selector),
+        "DaemonSet" => timed(&what, Api::<DaemonSet>::namespaced(client.clone(), namespace).get(name))
+            .await?
+            .spec
+            .map(|s| s.selector),
+        "ReplicaSet" => timed(&what, Api::<ReplicaSet>::namespaced(client.clone(), namespace).get(name))
+            .await?
+            .spec
+            .map(|s| s.selector),
+        "Job" => timed(&what, Api::<Job>::namespaced(client.clone(), namespace).get(name))
+            .await?
+            .spec
+            .and_then(|s| s.selector),
+        _ => None,
+    };
+    selector.ok_or_else(|| {
+        CapabilityError::Handler(format!(
+            "{} {} has no pod selector",
+            workload.kind, workload.name
+        ))
+    })
+}
+
 /// The pods a read covers, by name.
 async fn resolve_pods(
     client: &Client,
@@ -904,13 +950,46 @@ async fn resolve_pods(
     target: &Target,
 ) -> Result<Vec<Pod>, CapabilityError> {
     let pods: Api<Pod> = Api::namespaced(client.clone(), namespace);
-    match target {
-        Target::Pod(name) => Ok(vec![timed("reading the pod", pods.get(name)).await?]),
-        // Task 9 resolves selectors and workloads.
-        _ => Err(invalid(
-            "reading by `selector` or `workload` is not built yet",
-        )),
+    let query = match target {
+        Target::Pod(name) => return Ok(vec![timed("reading the pod", pods.get(name)).await?]),
+        Target::Selector {
+            labels,
+            expressions,
+        } => selector_query(labels, expressions)?,
+        Target::Workload(workload) => {
+            let selector = workload_selector(client, namespace, workload).await?;
+            let expressions: Vec<LabelSelectorRequirement> = selector
+                .match_expressions
+                .unwrap_or_default()
+                .into_iter()
+                .map(|e| LabelSelectorRequirement {
+                    key: e.key,
+                    operator: e.operator,
+                    values: e.values.unwrap_or_default(),
+                })
+                .collect();
+            selector_query(&selector.match_labels.unwrap_or_default(), &expressions)?
+        }
+    };
+    // A selector that constrains nothing, or can never match, reads no pods
+    // rather than the whole namespace (`selector_query`).
+    let Some(query) = query else {
+        return Ok(Vec::new());
+    };
+    let mut found = timed(
+        "listing the pods",
+        pods.list(&ListParams::default().labels(&query)),
+    )
+    .await?
+    .items;
+    if found.len() > MAX_PODS {
+        return Err(invalid(format!(
+            "{} pods match; srelens reads at most {MAX_PODS} in one call — narrow the selector (a label such as pod-template-hash, or one pod)",
+            found.len()
+        )));
     }
+    found.sort_by(|a, b| a.metadata.name.cmp(&b.metadata.name));
+    Ok(found)
 }
 
 /// One read per pod, from where the cursor left it, and what to tell the
@@ -920,13 +999,19 @@ fn plan_reads(
     req: &PageRequest,
 ) -> Result<(Vec<PodRead>, Vec<String>), CapabilityError> {
     let mut reads = Vec::new();
+    let mut notices = Vec::new();
+    let mut seen = BTreeSet::new();
     for pod in pods {
         let name = pod.metadata.name.clone().unwrap_or_default();
+        seen.insert(name.clone());
         let uid = pod.metadata.uid.clone().unwrap_or_default();
         let container = match container_of(&pod, req.container.as_deref()) {
             Ok(container) => container,
-            Err(NoContainer::Missing(why) | NoContainer::Ambiguous(why)) => {
-                return Err(invalid(why))
+            Err(NoContainer::Ambiguous(why)) => return Err(invalid(why)),
+            Err(NoContainer::Missing(why)) if req.target.single() => return Err(invalid(why)),
+            Err(NoContainer::Missing(why)) => {
+                notices.push(why);
+                continue;
             }
         };
         let now = restarts_of(&pod, &container);
@@ -937,6 +1022,12 @@ fn plan_reads(
                 "{name}: replaced by a new pod since the cursor; read from the new one's first line, and the old one's unread lines are gone"
             ));
             at = None;
+        }
+        if at.is_none() && req.cursor.is_some() && !req.target.single() && notices_here.is_empty()
+        {
+            notices_here.push(format!(
+                "{name}: new since the cursor; read from its first line"
+            ));
         }
         let (instances, moved) = plan_instances(now, req.previous, at.as_ref().map(|p| p.r));
         match moved {
@@ -963,7 +1054,14 @@ fn plan_reads(
         read.notices = notices_here;
         reads.push(read);
     }
-    Ok((reads, Vec::new()))
+    if let Some(cursor) = &req.cursor {
+        for gone in cursor.p.keys().filter(|name| !seen.contains(*name)) {
+            notices.push(format!(
+                "{gone}: gone since the cursor; its unread lines are lost"
+            ));
+        }
+    }
+    Ok((reads, notices))
 }
 
 /// `k8s.podLogs` in page mode.
@@ -1895,5 +1993,164 @@ mod tests {
             next["notices"][0].as_str().unwrap().contains("replaced"),
             "{next}"
         );
+    }
+
+    fn by_selector(extra: Value) -> Value {
+        with(
+            json!({ "context": "test", "namespace": "team", "selector": { "app": "cmi" } }),
+            extra,
+        )
+    }
+
+    fn two_pods() -> Arc<Cluster> {
+        let t = |s: i64| at(s, 0);
+        let cluster = Arc::new(Cluster::default());
+        cluster.pods.lock().unwrap().extend([
+            pod(
+                "cmi-a",
+                vec![(t(0), "a0".into()), (t(2), "a2".into()), (t(4), "a4".into())],
+            ),
+            pod("cmi-b", vec![(t(1), "b1".into()), (t(3), "b3".into())]),
+        ]);
+        cluster
+    }
+
+    #[tokio::test]
+    async fn a_selectors_pods_are_merged_in_time_order_each_line_naming_its_pod() {
+        let cache = cache_for(two_pods()).await;
+        let out = page(&cache, by_selector(json!({}))).await.unwrap();
+        assert_eq!(
+            out["logs"],
+            "[cmi-a] a0\n[cmi-b] b1\n[cmi-a] a2\n[cmi-b] b3\n[cmi-a] a4\n"
+        );
+        assert_eq!(out["end"], true);
+    }
+
+    #[tokio::test]
+    async fn a_workloads_pods_are_read_through_its_selector() {
+        let cluster = two_pods();
+        cluster
+            .deployments
+            .lock()
+            .unwrap()
+            .insert("cmi".into(), [("app".to_string(), "cmi".to_string())].into());
+        let cache = cache_for(cluster).await;
+        let out = page(
+            &cache,
+            json!({
+                "context": "test", "namespace": "team",
+                "workload": { "kind": "Deployment", "name": "cmi" }, "grep": "[ab][24]"
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(out["logs"], "[cmi-a] a2\n[cmi-a] a4\n");
+    }
+
+    #[tokio::test]
+    async fn more_pods_than_one_call_reads_are_refused_with_the_count() {
+        let cluster = Arc::new(Cluster::default());
+        cluster
+            .pods
+            .lock()
+            .unwrap()
+            .extend((0..21).map(|i| pod(&format!("cmi-{i}"), vec![])));
+        let err = page(&*cache_for(cluster).await, by_selector(json!({})))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("21 pods match") && err.contains("20"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn a_pod_of_several_that_cannot_be_read_is_a_notice_and_the_rest_are_read() {
+        let cluster = two_pods();
+        cluster.pods.lock().unwrap()[1].fails = Some(
+            "container \"app\" in pod \"cmi-b\" is waiting to start: ContainerCreating".into(),
+        );
+        let out = page(&*cache_for(cluster).await, by_selector(json!({})))
+            .await
+            .unwrap();
+        assert_eq!(out["logs"], "[cmi-a] a0\n[cmi-a] a2\n[cmi-a] a4\n");
+        let notice = out["notices"][0].as_str().unwrap();
+        assert!(
+            notice.starts_with("cmi-b: could not read its log") && notice.contains("waiting to start"),
+            "{notice}"
+        );
+    }
+
+    /// Review focus 4: one named pod that cannot be read is the call's error,
+    /// with the API's own reason, not an empty page.
+    #[tokio::test]
+    async fn a_single_pod_that_cannot_be_read_is_the_calls_error() {
+        let cluster = one_pod(vec![]);
+        cluster.pods.lock().unwrap()[0].fails = Some(
+            "container \"app\" in pod \"cmi-0\" is waiting to start: ContainerCreating".into(),
+        );
+        let err = page(&*cache_for(cluster).await, read_of(json!({ "max_bytes": 1000 })))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("waiting to start"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn pods_gone_or_new_since_the_cursor_are_said_and_the_new_one_read_from_its_start() {
+        let cluster = two_pods();
+        let cache = cache_for(cluster.clone()).await;
+        let first = page(&cache, by_selector(json!({}))).await.unwrap();
+        {
+            let mut pods = cluster.pods.lock().unwrap();
+            pods.retain(|p| p.name != "cmi-b");
+            pods.push(pod("cmi-c", vec![(at(10, 0), "c10".into())]));
+        }
+        let next = page(&cache, by_selector(json!({ "cursor": first["next_cursor"] })))
+            .await
+            .unwrap();
+        assert_eq!(next["logs"], "[cmi-c] c10\n");
+        let notices: Vec<&str> = next["notices"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|n| n.as_str().unwrap())
+            .collect();
+        assert!(notices.iter().any(|n| n.starts_with("cmi-b: gone")), "{notices:?}");
+        assert!(notices.iter().any(|n| n.starts_with("cmi-c: new")), "{notices:?}");
+    }
+
+    #[tokio::test]
+    async fn which_container_to_read_across_several_pods() {
+        let cluster = two_pods();
+        cluster.pods.lock().unwrap()[0].containers = vec!["app".into(), "sidecar".into()];
+        let cache = cache_for(cluster).await;
+        let err = page(&cache, by_selector(json!({})))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("app, sidecar") && err.contains("`container`"), "{err}");
+        let out = page(&cache, by_selector(json!({ "container": "sidecar" })))
+            .await
+            .unwrap();
+        assert_eq!(out["logs"], "[cmi-a] a0\n[cmi-a] a2\n[cmi-a] a4\n");
+        assert!(
+            out["notices"][0]
+                .as_str()
+                .unwrap()
+                .starts_with("cmi-b: has no container \"sidecar\""),
+            "{out}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_selector_matching_no_pod_reads_an_empty_page_to_its_end() {
+        let cache = cache_for(two_pods()).await;
+        let out = page(
+            &cache,
+            json!({ "context": "test", "namespace": "team", "selector": { "app": "nothing" } }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(out["logs"], "");
+        assert_eq!(out["end"], true);
     }
 }
