@@ -525,6 +525,9 @@ pub fn pod_logs_capability(cache: Arc<ClientCache>) -> Capability {
         move |input: PodLogsIn| {
             let cache = cache.clone();
             async move {
+                if input.page_mode() {
+                    return crate::log_pages::read_page(&cache, input).await;
+                }
                 let pod = input.pod.clone().ok_or_else(|| {
                     CapabilityError::InvalidInput(
                         "`pod` is required unless a page-mode field (`selector`, `workload`, `cursor`, `grep`, `max_bytes`, …) is given".into(),

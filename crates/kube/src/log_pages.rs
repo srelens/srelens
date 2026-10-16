@@ -9,20 +9,26 @@
 //! that stamp. The API server hands `sinceTime` to the kubelet in whole
 //! seconds, so a stamp alone cannot resume mid-second.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
+use std::pin::Pin;
 use std::time::Duration;
 
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine as _;
+use futures::AsyncBufRead;
 use k8s_openapi::api::core::v1::Pod;
 use k8s_openapi::jiff::{SignedDuration, Timestamp};
+use kube::api::LogParams;
+use kube::{Api, Client};
 use regex::{Regex, RegexBuilder};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use srelens_capability::CapabilityError;
 
-use crate::logs::{PodLogsIn, WorkloadRef};
+use crate::client_cache::ClientCache;
+use crate::connect::request_timeout;
+use crate::logs::{Line, LineReader, PodLogsIn, PodLogsOut, WorkloadRef};
 use crate::workloads::LabelSelectorRequirement;
 
 const CURSOR_VERSION: u32 = 1;
@@ -478,6 +484,458 @@ pub(crate) fn restarts_of(pod: &Pod, container: &str) -> i32 {
         .map_or(0, |s| s.restart_count)
 }
 
+/// The longest the backlog of one page is read before it is handed back as
+/// it stands.
+const BACKLOG: Duration = Duration::from_secs(20);
+/// Marks a line cut to fit the page.
+pub(crate) const CUT: &str = " [line cut by srelens]";
+
+type LogStream = Pin<Box<dyn AsyncBufRead + Send>>;
+
+/// A line with the kubelet's stamp split off.
+#[derive(Debug, Clone)]
+struct Stamped {
+    ts: Timestamp,
+    raw: String,
+    text: String,
+    truncated: bool,
+}
+
+/// One pod a page reads, and where its read stands.
+struct PodRead {
+    name: String,
+    container: String,
+    /// The instances still to read, oldest first; the front one is being read.
+    instances: VecDeque<Instance>,
+    /// `pos.t`, parsed.
+    last: Option<Timestamp>,
+    pos: Pos,
+    /// Lines from the end a fresh read starts with (`tail_lines`).
+    tail: Option<i64>,
+    /// Drops what the cursor already read, once per stream opened.
+    resume: Option<Resume>,
+    lines: Option<LineReader<LogStream>>,
+    /// The next line, read but not yet taken.
+    head: Option<Stamped>,
+    /// Nothing more to read, as of now.
+    ended: bool,
+    /// The read failed; its position stays where it was.
+    failed: bool,
+    /// For `context_lines`: lines held before a match, and how many after one
+    /// are owed.
+    before: VecDeque<Stamped>,
+    after: usize,
+    notices: Vec<String>,
+}
+
+impl PodRead {
+    fn new(
+        name: String,
+        uid: String,
+        container: String,
+        instances: VecDeque<Instance>,
+        at: Option<Pos>,
+        req: &PageRequest,
+    ) -> Self {
+        let restarts = instances.front().map_or(0, |i| i.restarts);
+        let fresh = |t: Option<String>| Pos {
+            u: uid.clone(),
+            r: restarts,
+            t,
+            k: 0,
+        };
+        let (pos, tail) = match (at, req.cursor.is_some(), req.start) {
+            (Some(pos), _, _) => (pos, None),
+            // A pod a cursor has not seen yet is read from its first line.
+            (None, true, _) | (None, false, Start::Beginning) => (fresh(None), None),
+            (None, false, Start::Tail(n)) => (fresh(None), Some(n)),
+            (None, false, Start::At(at)) => (fresh(Some(at.to_string())), None),
+        };
+        let last = pos.t.as_deref().and_then(|t| t.parse().ok());
+        Self {
+            name,
+            container,
+            instances,
+            last,
+            pos,
+            tail,
+            resume: None,
+            lines: None,
+            head: None,
+            ended: false,
+            failed: false,
+            before: VecDeque::new(),
+            after: 0,
+            notices: Vec::new(),
+        }
+    }
+
+    async fn open(
+        &mut self,
+        pods: &Api<Pod>,
+        instance: Instance,
+        req: &PageRequest,
+        follow: bool,
+    ) -> Result<LineReader<LogStream>, String> {
+        let mut params = LogParams {
+            container: Some(self.container.clone()),
+            follow,
+            previous: instance.previous,
+            timestamps: true,
+            ..LogParams::default()
+        };
+        match self.last {
+            Some(at) => {
+                // The kubelet is handed whole seconds; `Resume` drops the rest.
+                params.since_time =
+                    Some(Timestamp::from_second(at.as_second()).map_err(|e| e.to_string())?);
+                self.resume = Some(Resume::new(at, self.pos.k));
+            }
+            None => params.tail_lines = self.tail,
+        }
+        let log = tokio::time::timeout(request_timeout(), pods.log_stream(&self.name, &params))
+            .await
+            .map_err(|_| "opening the log timed out".to_string())?
+            .map_err(|e| e.to_string())?;
+        let log: LogStream = Box::pin(log);
+        // Room for the stamp in front of a line as long as the page.
+        Ok(LineReader::new(log, req.max_bytes + 64))
+    }
+
+    /// The next line past the cursor, reading on into the next instance at
+    /// the end of one; `None` once there is nothing more, as of now.
+    async fn next(
+        &mut self,
+        pods: &Api<Pod>,
+        req: &PageRequest,
+        follow: bool,
+    ) -> Result<Option<Stamped>, String> {
+        loop {
+            let Some(instance) = self.instances.front().copied() else {
+                return Ok(None);
+            };
+            if self.lines.is_none() {
+                self.lines = Some(self.open(pods, instance, req, follow).await?);
+            }
+            let read = self.lines.as_mut().expect("opened above").next().await;
+            let Some(line) = read.map_err(|e| e.to_string())? else {
+                self.lines = None;
+                self.resume = None;
+                if self.instances.len() == 1 {
+                    return Ok(None);
+                }
+                // The instance that ended is read; the next starts at its first line.
+                self.instances.pop_front();
+                self.pos = Pos {
+                    u: self.pos.u.clone(),
+                    r: self.instances[0].restarts,
+                    t: None,
+                    k: 0,
+                };
+                self.last = None;
+                self.tail = None;
+                continue;
+            };
+            let line = self.stamp(line);
+            if let Some(Admit::Skip) = self.resume.as_mut().map(|r| r.admit(line.ts)) {
+                continue;
+            }
+            return Ok(Some(line));
+        }
+    }
+
+    /// `line` with the kubelet's stamp split off. A line without one (the
+    /// kubelet stamps every line; this is defence) takes the stamp before it.
+    fn stamp(&self, line: Line) -> Stamped {
+        if let Some((raw, text)) = line.text.split_once(' ') {
+            if let Ok(ts) = raw.parse::<Timestamp>() {
+                return Stamped {
+                    ts,
+                    raw: raw.to_string(),
+                    text: text.to_string(),
+                    truncated: line.truncated,
+                };
+            }
+        }
+        let ts = self.last.unwrap_or(Timestamp::UNIX_EPOCH);
+        Stamped {
+            ts,
+            raw: ts.to_string(),
+            text: line.text,
+            truncated: line.truncated,
+        }
+    }
+
+    /// Move the read past `line`.
+    fn took(&mut self, line: &Stamped) {
+        if self.last == Some(line.ts) {
+            self.pos.k += 1;
+        } else {
+            self.last = Some(line.ts);
+            self.pos.t = Some(line.raw.clone());
+            self.pos.k = 1;
+        }
+    }
+
+    /// A read that cannot go on: the call's error for a read of one pod, a
+    /// notice for one of several.
+    fn fail(&mut self, why: String, req: &PageRequest) -> Result<(), CapabilityError> {
+        if req.target.single() {
+            return Err(CapabilityError::Handler(why));
+        }
+        self.notices.push(format!(
+            "{}: could not read its log: {}",
+            self.name,
+            one_line(&why)
+        ));
+        self.ended = true;
+        self.failed = true;
+        Ok(())
+    }
+
+    /// Read the next line into `head`, unless one is there or the read ended.
+    async fn fill(
+        &mut self,
+        pods: &Api<Pod>,
+        req: &PageRequest,
+        follow: bool,
+    ) -> Result<(), CapabilityError> {
+        if self.head.is_some() || self.ended {
+            return Ok(());
+        }
+        match self.next(pods, req, follow).await {
+            Ok(Some(line)) => self.head = Some(line),
+            Ok(None) => self.ended = true,
+            Err(why) => self.fail(why, req)?,
+        }
+        Ok(())
+    }
+}
+
+/// What `c` costs inside a JSON string, as serde_json escapes it.
+fn char_cost(c: char) -> usize {
+    match c {
+        '"' | '\\' | '\n' | '\r' | '\t' | '\u{08}' | '\u{0c}' => 2,
+        c if (c as u32) < 0x20 => 6,
+        c => c.len_utf8(),
+    }
+}
+
+/// `s`'s size inside a JSON string.
+fn escaped_len(s: &str) -> usize {
+    s.chars().map(char_cost).sum()
+}
+
+/// The longest start of `s` whose escaped size is at most `room`, cut on a
+/// character boundary.
+fn fit(s: &str, room: usize) -> String {
+    let mut used = 0;
+    s.chars()
+        .take_while(|&c| {
+            used += char_cost(c);
+            used <= room
+        })
+        .collect()
+}
+
+/// A page's `logs`, built a line at a time within its budget.
+struct PageText {
+    text: String,
+    used: usize,
+    budget: usize,
+    lines: usize,
+    scanned: usize,
+    /// `[pod] ` in front of each line, for a read of several pods.
+    prefix: bool,
+    timestamps: bool,
+}
+
+impl PageText {
+    fn new(budget: usize, prefix: bool, timestamps: bool) -> Self {
+        Self {
+            text: String::new(),
+            used: 0,
+            budget,
+            lines: 0,
+            scanned: 0,
+            prefix,
+            timestamps,
+        }
+    }
+
+    /// Take `line`, the next one `read` has. False when the page is full and
+    /// the line is left for the next page.
+    fn offer(&mut self, read: &mut PodRead, line: &Stamped, _req: &PageRequest) -> bool {
+        if !self.push(&read.name, line) {
+            return false;
+        }
+        self.scanned += 1;
+        true
+    }
+
+    /// Show `line`; false when it does not fit. The first line always does,
+    /// cut if it must be, so a read always moves on.
+    fn push(&mut self, pod: &str, line: &Stamped) -> bool {
+        let mut shown = String::new();
+        if self.prefix {
+            shown.push('[');
+            shown.push_str(pod);
+            shown.push_str("] ");
+        }
+        if self.timestamps {
+            shown.push_str(&line.raw);
+            shown.push(' ');
+        }
+        shown.push_str(&line.text);
+        if line.truncated {
+            shown.push_str(CUT);
+        }
+        let room = self.budget.saturating_sub(self.used);
+        // And its "\n", escaped.
+        let mut cost = escaped_len(&shown) + 2;
+        if cost > room {
+            if self.lines > 0 {
+                return false;
+            }
+            shown = fit(&shown, room.saturating_sub(2 + CUT.len()));
+            shown.push_str(CUT);
+            cost = escaped_len(&shown) + 2;
+        }
+        self.text.push_str(&shown);
+        self.text.push('\n');
+        self.used += cost;
+        self.lines += 1;
+        true
+    }
+}
+
+/// Phase 1, the backlog: the reads' lines in time order until the page is
+/// full (`false`) or every log has ended (`true`).
+async fn merge(
+    reads: &mut [PodRead],
+    pods: &Api<Pod>,
+    req: &PageRequest,
+    page: &mut PageText,
+) -> Result<bool, CapabilityError> {
+    futures::future::try_join_all(reads.iter_mut().map(|read| read.fill(pods, req, false)))
+        .await?;
+    loop {
+        // The oldest head; on a tie, the pod first by name.
+        let Some(i) = (0..reads.len())
+            .filter(|&i| reads[i].head.is_some())
+            .min_by_key(|&i| reads[i].head.as_ref().map(|line| line.ts))
+        else {
+            return Ok(true);
+        };
+        let line = reads[i].head.take().expect("picked for its head");
+        if !page.offer(&mut reads[i], &line, req) {
+            reads[i].head = Some(line);
+            return Ok(false);
+        }
+        reads[i].took(&line);
+        reads[i].fill(pods, req, false).await?;
+    }
+}
+
+async fn timed<T>(
+    what: &str,
+    call: impl std::future::Future<Output = Result<T, kube::Error>>,
+) -> Result<T, CapabilityError> {
+    tokio::time::timeout(request_timeout(), call)
+        .await
+        .map_err(|_| CapabilityError::Handler(format!("{what} timed out")))?
+        .map_err(|e| CapabilityError::Handler(e.to_string()))
+}
+
+/// The pods a read covers, by name.
+async fn resolve_pods(
+    client: &Client,
+    namespace: &str,
+    target: &Target,
+) -> Result<Vec<Pod>, CapabilityError> {
+    let pods: Api<Pod> = Api::namespaced(client.clone(), namespace);
+    match target {
+        Target::Pod(name) => Ok(vec![timed("reading the pod", pods.get(name)).await?]),
+        // Task 9 resolves selectors and workloads.
+        _ => Err(invalid(
+            "reading by `selector` or `workload` is not built yet",
+        )),
+    }
+}
+
+/// One read per pod, from where the cursor left it, and what to tell the
+/// agent about how the pods changed.
+fn plan_reads(
+    pods: Vec<Pod>,
+    req: &PageRequest,
+) -> Result<(Vec<PodRead>, Vec<String>), CapabilityError> {
+    let mut reads = Vec::new();
+    for pod in pods {
+        let name = pod.metadata.name.clone().unwrap_or_default();
+        let uid = pod.metadata.uid.clone().unwrap_or_default();
+        let container = match container_of(&pod, req.container.as_deref()) {
+            Ok(container) => container,
+            Err(NoContainer::Missing(why) | NoContainer::Ambiguous(why)) => {
+                return Err(invalid(why))
+            }
+        };
+        let now = restarts_of(&pod, &container);
+        let at = req.cursor.as_ref().and_then(|c| c.p.get(&name)).cloned();
+        let (instances, _) = plan_instances(now, req.previous, at.as_ref().map(|p| p.r));
+        reads.push(PodRead::new(
+            name,
+            uid,
+            container,
+            instances.into(),
+            at,
+            req,
+        ));
+    }
+    Ok((reads, Vec::new()))
+}
+
+/// `k8s.podLogs` in page mode.
+pub(crate) async fn read_page(
+    cache: &ClientCache,
+    input: PodLogsIn,
+) -> Result<PodLogsOut, CapabilityError> {
+    let req = PageRequest::parse(&input)?;
+    let client = cache
+        .get(&input.context)
+        .await
+        .map_err(CapabilityError::Handler)?;
+    let pods = resolve_pods(&client, &input.namespace, &req.target).await?;
+    let (mut reads, mut notices) = plan_reads(pods, &req)?;
+    let api: Api<Pod> = Api::namespaced(client, &input.namespace);
+    let mut page = PageText::new(req.max_bytes, !req.target.single(), req.timestamps);
+    // Phase 1, the backlog. The deadline hands back the page as it stands.
+    let end = tokio::time::timeout(BACKLOG, merge(&mut reads, &api, &req, &mut page))
+        .await
+        .unwrap_or(Ok(false))?;
+    for read in &reads {
+        notices.extend(read.notices.iter().cloned());
+    }
+    let next_cursor = Cursor {
+        v: CURSOR_VERSION,
+        t: fingerprint(&input, &req.target),
+        p: reads
+            .iter()
+            .map(|read| (read.name.clone(), read.pos.clone()))
+            .collect(),
+    }
+    .encode();
+    Ok(PodLogsOut {
+        logs: page.text,
+        page: Some(Page {
+            next_cursor,
+            end,
+            lines: page.lines,
+            scanned: page.scanned,
+            notices,
+        }),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -800,5 +1258,406 @@ mod tests {
         assert!(why.contains("app, proxy") && why.contains("`container`"), "{why}");
         assert_eq!(restarts_of(&pod_object(&["app"], &[], 4), "app"), 4);
         assert_eq!(restarts_of(&pod_object(&["app"], &[], 4), "missing"), 0);
+    }
+
+    use bytes::Bytes;
+    use http_body_util::combinators::UnsyncBoxBody;
+    use http_body_util::{BodyExt, Full, StreamBody};
+    use std::sync::{Arc, Mutex};
+
+    type Body = UnsyncBoxBody<Bytes, std::convert::Infallible>;
+
+    /// A pod as the fake API server keeps it, with each instance's log as the
+    /// kubelet would: `(stamp, text)`, oldest first.
+    #[derive(Clone, Default)]
+    struct FakePod {
+        name: String,
+        uid: String,
+        labels: BTreeMap<String, String>,
+        containers: Vec<String>,
+        restarts: i32,
+        current: Vec<(Timestamp, String)>,
+        previous: Vec<(Timestamp, String)>,
+        /// What a follow hands out after `current`; the stream then stays open.
+        later: Vec<(Timestamp, String)>,
+        /// Every log read of the pod fails with this message (a 400).
+        fails: Option<String>,
+    }
+
+    fn pod(name: &str, lines: Vec<(Timestamp, String)>) -> FakePod {
+        FakePod {
+            name: name.into(),
+            uid: format!("uid-{name}"),
+            labels: [("app".to_string(), "cmi".to_string())].into(),
+            containers: vec!["app".into()],
+            current: lines,
+            ..FakePod::default()
+        }
+    }
+
+    /// The fake API server's state, which a test may change between pages.
+    #[derive(Default)]
+    struct Cluster {
+        pods: Mutex<Vec<FakePod>>,
+        /// Deployments by name, as their `matchLabels`.
+        deployments: Mutex<BTreeMap<String, BTreeMap<String, String>>>,
+    }
+
+    async fn cache_for(cluster: Arc<Cluster>) -> Arc<ClientCache> {
+        let service = tower::service_fn(move |request: http::Request<kube::client::Body>| {
+            let response = answer(&cluster, request.uri());
+            async move { Ok::<_, std::convert::Infallible>(response) }
+        });
+        let cache = ClientCache::new(std::path::PathBuf::from("/nonexistent"));
+        cache.preload("test", Client::new(service, "default")).await;
+        cache
+    }
+
+    fn json_reply(status: u16, value: Value) -> http::Response<Body> {
+        http::Response::builder()
+            .status(status)
+            .header("content-type", "application/json")
+            .body(Full::new(Bytes::from(value.to_string())).boxed_unsync())
+            .unwrap()
+    }
+
+    fn status(code: u16, reason: &str, message: &str) -> http::Response<Body> {
+        json_reply(
+            code,
+            json!({
+                "kind": "Status", "apiVersion": "v1", "metadata": {}, "status": "Failure",
+                "reason": reason, "code": code, "message": message
+            }),
+        )
+    }
+
+    fn pod_json(p: &FakePod) -> Value {
+        json!({
+            "apiVersion": "v1", "kind": "Pod",
+            "metadata": { "name": p.name, "namespace": "team", "uid": p.uid, "labels": p.labels },
+            "spec": { "containers": p.containers.iter().map(|c| json!({ "name": c })).collect::<Vec<_>>() },
+            "status": { "containerStatuses": p.containers.iter().map(|c| json!({
+                "name": c, "restartCount": p.restarts, "ready": true, "image": "i", "imageID": "i"
+            })).collect::<Vec<_>>() }
+        })
+    }
+
+    fn answer(cluster: &Cluster, uri: &http::Uri) -> http::Response<Body> {
+        let query: BTreeMap<String, String> =
+            form_urlencoded::parse(uri.query().unwrap_or("").as_bytes())
+                .into_owned()
+                .collect();
+        let parts: Vec<&str> = uri.path().trim_matches('/').split('/').collect();
+        let pods = cluster.pods.lock().unwrap().clone();
+        match parts.as_slice() {
+            ["api", "v1", "namespaces", _, "pods"] => {
+                // Equality terms only: what the tests' selectors spell.
+                let wanted = query.get("labelSelector").cloned().unwrap_or_default();
+                let items: Vec<Value> = pods
+                    .iter()
+                    .filter(|p| {
+                        wanted.split(',').filter(|t| !t.is_empty()).all(|term| {
+                            term.split_once('=').is_some_and(|(k, v)| {
+                                p.labels.get(k).map(String::as_str) == Some(v)
+                            })
+                        })
+                    })
+                    .map(pod_json)
+                    .collect();
+                json_reply(
+                    200,
+                    json!({ "apiVersion": "v1", "kind": "PodList", "metadata": {}, "items": items }),
+                )
+            }
+            ["api", "v1", "namespaces", _, "pods", name] => {
+                match pods.iter().find(|p| p.name == *name) {
+                    Some(p) => json_reply(200, pod_json(p)),
+                    None => status(404, "NotFound", &format!("pods \"{name}\" not found")),
+                }
+            }
+            ["api", "v1", "namespaces", _, "pods", name, "log"] => {
+                match pods.iter().find(|p| p.name == *name) {
+                    None => status(404, "NotFound", &format!("pods \"{name}\" not found")),
+                    Some(FakePod {
+                        fails: Some(why), ..
+                    }) => status(400, "BadRequest", why),
+                    Some(p) => log_reply(p, &query),
+                }
+            }
+            ["apis", "apps", "v1", "namespaces", _, "deployments", name] => {
+                match cluster.deployments.lock().unwrap().get(*name) {
+                    Some(labels) => json_reply(
+                        200,
+                        json!({
+                            "apiVersion": "apps/v1", "kind": "Deployment", "metadata": { "name": name },
+                            "spec": { "selector": { "matchLabels": labels }, "template": {} }
+                        }),
+                    ),
+                    None => status(
+                        404,
+                        "NotFound",
+                        &format!("deployments.apps \"{name}\" not found"),
+                    ),
+                }
+            }
+            _ => status(404, "NotFound", uri.path()),
+        }
+    }
+
+    /// A log as the kubelet answers one: from `sinceTime` (whole seconds) or
+    /// the last `tailLines`, stamped when asked. A follow then hands out
+    /// `later` and stays open.
+    fn log_reply(p: &FakePod, query: &BTreeMap<String, String>) -> http::Response<Body> {
+        let flag = |k: &str| query.get(k).is_some_and(|v| v == "true");
+        let mut lines = if flag("previous") {
+            p.previous.clone()
+        } else {
+            p.current.clone()
+        };
+        let follow = flag("follow");
+        if follow {
+            lines.extend(p.later.iter().cloned());
+        }
+        if let Some(since) = query.get("sinceTime") {
+            let since: Timestamp = since.parse().unwrap();
+            assert_eq!(
+                since.subsec_nanosecond(),
+                0,
+                "the API server hands the kubelet whole seconds"
+            );
+            lines.retain(|(ts, _)| *ts >= since);
+        }
+        if let Some(tail) = query.get("tailLines") {
+            let n: usize = tail.parse().unwrap();
+            lines = lines.split_off(lines.len().saturating_sub(n));
+        }
+        let stamped = flag("timestamps");
+        let frames = lines.into_iter().map(move |(ts, text)| {
+            let line = if stamped {
+                format!("{ts} {text}\n")
+            } else {
+                format!("{text}\n")
+            };
+            Ok::<_, std::convert::Infallible>(http_body::Frame::data(Bytes::from(line)))
+        });
+        let stream = futures::stream::iter(frames);
+        let body = if follow {
+            StreamBody::new(futures::StreamExt::chain(stream, futures::stream::pending()))
+                .boxed_unsync()
+        } else {
+            StreamBody::new(stream).boxed_unsync()
+        };
+        http::Response::builder()
+            .status(200)
+            .header("content-type", "text/plain")
+            .body(body)
+            .unwrap()
+    }
+
+    /// `n` lines of `bytes` each, about 50 a second, every 7th sharing the
+    /// stamp of the one before it.
+    fn log_of(n: usize, bytes: usize) -> Vec<(Timestamp, String)> {
+        (0..n)
+            .map(|i| {
+                let j = i - usize::from(i % 7 == 6);
+                let ts = Timestamp::new(BASE + (j / 50) as i64, ((j % 50) * 20_000_000) as i32)
+                    .unwrap();
+                let mut text = format!("line {i:06} ");
+                text.push_str(&"x".repeat(bytes.saturating_sub(text.len())));
+                (ts, text)
+            })
+            .collect()
+    }
+
+    fn joined(lines: &[(Timestamp, String)]) -> String {
+        lines.iter().map(|(_, text)| format!("{text}\n")).collect()
+    }
+
+    async fn page(cache: &ClientCache, args: Value) -> Result<Value, CapabilityError> {
+        read_page(cache, input(args))
+            .await
+            .map(|out| serde_json::to_value(out).unwrap())
+    }
+
+    /// Every page from `args` on, until one says `end`: what they held, put
+    /// together, and the pages.
+    async fn read_to_end(cache: &ClientCache, mut args: Value) -> (String, Vec<Value>) {
+        let mut read = String::new();
+        let mut pages = Vec::new();
+        loop {
+            let out = page(cache, args.clone()).await.unwrap();
+            read.push_str(out["logs"].as_str().unwrap());
+            args["cursor"] = out["next_cursor"].clone();
+            let end = out["end"] == true;
+            pages.push(out);
+            if end {
+                return (read, pages);
+            }
+            assert!(pages.len() < 500, "the read never ended");
+        }
+    }
+
+    fn one_pod(lines: Vec<(Timestamp, String)>) -> Arc<Cluster> {
+        let cluster = Arc::new(Cluster::default());
+        cluster.pods.lock().unwrap().push(pod("cmi-0", lines));
+        cluster
+    }
+
+    fn read_of(extra: Value) -> Value {
+        with(
+            json!({ "context": "test", "namespace": "team", "pod": "cmi-0" }),
+            extra,
+        )
+    }
+
+    #[tokio::test]
+    async fn a_3_mb_log_pages_to_its_end_with_every_answer_under_the_cap() {
+        let log = log_of(30_000, 100);
+        let cache = cache_for(one_pod(log.clone())).await;
+        let (read, pages) =
+            read_to_end(&cache, read_of(json!({ "max_bytes": MAX_PAGE_BYTES }))).await;
+        for (i, out) in pages.iter().enumerate() {
+            let size = out.to_string().len();
+            assert!(size <= 50_000, "page {i} was {size} bytes");
+        }
+        assert!(pages.len() > 60, "{} pages for 3 MB", pages.len());
+        assert!(
+            read == joined(&log),
+            "the pages put together are not the log: {} of {} bytes",
+            read.len(),
+            joined(&log).len()
+        );
+    }
+
+    /// Lines sharing one stamp split across page edges are each read once:
+    /// the cursor counts how many lines with its stamp were read.
+    #[tokio::test]
+    async fn lines_sharing_one_stamp_split_across_pages_are_each_read_once() {
+        let log: Vec<_> = (0..10)
+            .map(|i| (at(0, 500), format!("{i} {}", "y".repeat(300))))
+            .collect();
+        let cache = cache_for(one_pod(log.clone())).await;
+        let (read, pages) = read_to_end(&cache, read_of(json!({ "max_bytes": 1000 }))).await;
+        assert!(pages.len() >= 4, "{} pages", pages.len());
+        assert_eq!(read, joined(&log));
+    }
+
+    #[tokio::test]
+    async fn stamps_are_shown_only_when_asked_for() {
+        let log = vec![(at(0, 250), "one".to_string()), (at(1, 0), "two".to_string())];
+        let cache = cache_for(one_pod(log)).await;
+        let plain = page(&cache, read_of(json!({ "max_bytes": 1000 })))
+            .await
+            .unwrap();
+        assert_eq!(plain["logs"], "one\ntwo\n");
+        let stamped = page(&cache, read_of(json!({ "max_bytes": 1000, "timestamps": true })))
+            .await
+            .unwrap();
+        assert_eq!(
+            stamped["logs"],
+            format!("{} one\n{} two\n", at(0, 250), at(1, 0))
+        );
+    }
+
+    /// Review focus 1: a line longer than the page, of characters wider than
+    /// a byte, is cut on a character boundary within the budget, marked, and
+    /// the read moves on to the next line.
+    #[tokio::test]
+    async fn a_line_longer_than_the_page_is_cut_and_the_read_moves_on() {
+        let log = vec![
+            (at(0, 0), "日本語".repeat(1_000)),
+            (at(1, 0), "after".to_string()),
+        ];
+        let cache = cache_for(one_pod(log)).await;
+        let first = page(&cache, read_of(json!({ "max_bytes": 1000 })))
+            .await
+            .unwrap();
+        let shown = first["logs"].as_str().unwrap();
+        assert!(
+            shown.starts_with("日本語") && shown.ends_with(&format!("{CUT}\n")),
+            "{shown}"
+        );
+        assert!(escaped_len(shown) <= 1000, "{}", escaped_len(shown));
+        assert_eq!(first["lines"], 1);
+        let next = page(
+            &cache,
+            read_of(json!({ "max_bytes": 1000, "cursor": first["next_cursor"] })),
+        )
+        .await
+        .unwrap();
+        assert_eq!(next["logs"], "after\n");
+    }
+
+    #[tokio::test]
+    async fn a_since_time_start_drops_earlier_lines_within_its_second() {
+        let log = vec![
+            (at(0, 100), "before".to_string()),
+            (at(0, 600), "after".to_string()),
+        ];
+        let cache = cache_for(one_pod(log)).await;
+        let out = page(
+            &cache,
+            read_of(json!({ "since_time": at(0, 500).to_string() })),
+        )
+        .await
+        .unwrap();
+        assert_eq!(out["logs"], "after\n");
+    }
+
+    /// Review focus 2: polling with the last cursor and no wait gives an
+    /// empty page that says `end`, and repeats nothing.
+    #[tokio::test]
+    async fn polling_past_the_end_repeats_nothing() {
+        let cache = cache_for(one_pod(log_of(20, 50))).await;
+        let (_, pages) = read_to_end(&cache, read_of(json!({ "max_bytes": 1000 }))).await;
+        let cursor = pages.last().unwrap()["next_cursor"].clone();
+        for _ in 0..2 {
+            let again = page(
+                &cache,
+                read_of(json!({ "max_bytes": 1000, "cursor": cursor })),
+            )
+            .await
+            .unwrap();
+            assert_eq!(again["logs"], "");
+            assert_eq!(again["end"], true);
+        }
+    }
+
+    /// Review focus 3: an agent resends its first call's start fields with
+    /// the cursor; the cursor wins and the read goes on rather than
+    /// restarting.
+    #[tokio::test]
+    async fn a_cursor_wins_over_the_start_fields_resent_with_it() {
+        let log = log_of(40, 50);
+        let cache = cache_for(one_pod(log.clone())).await;
+        let first = page(&cache, read_of(json!({ "max_bytes": 1000, "tail_lines": 30 })))
+            .await
+            .unwrap();
+        let shown = first["lines"].as_u64().unwrap() as usize;
+        let next = page(
+            &cache,
+            read_of(json!({
+                "max_bytes": 1000, "tail_lines": 30, "since_time": at(0, 0).to_string(),
+                "cursor": first["next_cursor"]
+            })),
+        )
+        .await
+        .unwrap();
+        assert!(
+            next["logs"].as_str().unwrap().starts_with(&log[10 + shown].1),
+            "{next}"
+        );
+    }
+
+    /// Through the capability: page mode answers with a cursor.
+    #[tokio::test]
+    async fn the_capability_routes_page_mode_here() {
+        let cache = cache_for(one_pod(log_of(5, 20))).await;
+        let cap = crate::logs::pod_logs_capability(cache);
+        let out = (cap.handler)(read_of(json!({ "max_bytes": 1000 })))
+            .await
+            .unwrap();
+        assert!(out["next_cursor"].is_string(), "{out}");
+        assert_eq!(out["end"], true);
     }
 }
