@@ -452,6 +452,11 @@ container instance (by restart count) and the last line read.
 - The pod was replaced (same name, new uid), or a selector's pod is gone or
   new. A new pod is read from its first line.
 - One pod of several could not be read. The others still are.
+- A pod's stream sent nothing for 10 seconds, or the 20-second backlog
+  deadline passed. The page holds what was read by then, `end` is `false`,
+  and the next page reads on from the cursor.
+- The instance a restart ended has no log any more. The read goes on in the
+  new one.
 
 A cursor the call cannot use is refused, in one line ending "call again
 without `cursor`". That covers a cursor srelens did not write, one from
@@ -460,7 +465,9 @@ container, or `previous`). Changing `grep` keeps a cursor usable.
 
 **Bounds.** A page stops reading the API server as soon as it is full, so no
 log is held whole. It reads the backlog for at most 20 seconds, then follows
-for at most `wait_seconds`.
+for at most `wait_seconds`. `grep` searches each line whole, up to 64 KiB;
+a page shows a line longer than itself cut and marked, and counts in
+`notices` any longer line it could search only in part.
 
 srelens' own agent keeps at most 16 KB of one result. It refuses a bigger
 page whole and names a `max_bytes` that fits, rather than cut the page and

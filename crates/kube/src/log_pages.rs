@@ -31,7 +31,7 @@ use srelens_capability::CapabilityError;
 
 use crate::client_cache::ClientCache;
 use crate::connect::request_timeout;
-use crate::logs::{Line, LineReader, PodLogsIn, PodLogsOut, WorkloadRef};
+use crate::logs::{Line, LineReader, PodLogsIn, PodLogsOut, WorkloadRef, MAX_LOG_LINE_BYTES};
 use crate::workloads::{selector_query, LabelSelectorRequirement};
 
 const CURSOR_VERSION: u32 = 1;
@@ -515,6 +515,9 @@ const MAX_NOTICE_BYTES: usize = 400;
 /// The longest the backlog of one page is read before it is handed back as
 /// it stands.
 const BACKLOG: Duration = Duration::from_secs(20);
+/// The longest one pod's backlog may send nothing before the page sets it
+/// aside, so one stalled stream cannot hold back the others.
+const STALL: Duration = Duration::from_secs(10);
 /// Marks a line cut to fit the page.
 pub(crate) const CUT: &str = " [line cut by srelens]";
 
@@ -549,6 +552,13 @@ struct PodRead {
     ended: bool,
     /// The read failed; its position stays where it was.
     failed: bool,
+    /// The stream sent nothing for [`STALL`]: set aside for this call.
+    stalled: bool,
+    /// The stream being read was opened at `tail_lines`.
+    tail_open: bool,
+    /// The first stamp that stream handed out: the read counts the lines at
+    /// it from where the tail began, until [`PodRead::settle_tail`].
+    tail_from: Option<Timestamp>,
     /// For `context_lines`: lines held before a match, and how many after one
     /// are owed.
     before: VecDeque<Stamped>,
@@ -592,6 +602,9 @@ impl PodRead {
             head: None,
             ended: false,
             failed: false,
+            stalled: false,
+            tail_open: false,
+            tail_from: None,
             before: VecDeque::new(),
             after: 0,
             notices: Vec::new(),
@@ -612,6 +625,7 @@ impl PodRead {
             timestamps: true,
             ..LogParams::default()
         };
+        self.tail_open = self.last.is_none() && self.tail.is_some();
         match self.last {
             Some(at) => {
                 // The kubelet is handed whole seconds; `Resume` drops the rest.
@@ -626,8 +640,42 @@ impl PodRead {
             .map_err(|_| "opening the log timed out".to_string())?
             .map_err(|e| e.to_string())?;
         let log: LogStream = Box::pin(log);
-        // Room for the stamp in front of a line as long as the page.
-        Ok(LineReader::new(log, req.max_bytes + 64))
+        // A line is held whole up to what a follow keeps of one, so `grep`
+        // searches past what a page shows; a page cuts what it shows. Room
+        // for the stamp in front of a line as long as the page.
+        Ok(LineReader::new(
+            log,
+            (req.max_bytes + 64).max(MAX_LOG_LINE_BYTES),
+        ))
+    }
+
+    /// The instance being read is done; the next one starts at its first line.
+    fn next_instance(&mut self) {
+        self.lines = None;
+        self.resume = None;
+        self.instances.pop_front();
+        self.pos = Pos {
+            u: self.pos.u.clone(),
+            r: self.instances[0].restarts,
+            t: None,
+            k: 0,
+        };
+        self.last = None;
+        self.tail = None;
+        self.tail_open = false;
+    }
+
+    /// The instance a restart ended can no longer be read (the kubelet keeps
+    /// one previous log, and not for ever): what was left of it is lost, and
+    /// the read goes on in the new one rather than retry it on every call.
+    fn lose_instance(&mut self, why: &str) {
+        self.notices.push(format!(
+            "{}: the log of the instance that ended is gone ({}); lines written after {} up to the new instance are lost",
+            self.name,
+            one_line(why),
+            self.pos.t.as_deref().unwrap_or("the cursor")
+        ));
+        self.next_instance();
     }
 
     /// The next line past the cursor, reading on into the next instance at
@@ -643,10 +691,24 @@ impl PodRead {
                 return Ok(None);
             };
             if self.lines.is_none() {
-                self.lines = Some(self.open(pods, instance, req, follow).await?);
+                match self.open(pods, instance, req, follow).await {
+                    Ok(lines) => self.lines = Some(lines),
+                    Err(why) if self.instances.len() > 1 => {
+                        self.lose_instance(&why);
+                        continue;
+                    }
+                    Err(why) => return Err(why),
+                }
             }
-            let read = self.lines.as_mut().expect("opened above").next().await;
-            let Some(line) = read.map_err(|e| e.to_string())? else {
+            let read = match self.lines.as_mut().expect("opened above").next().await {
+                Ok(read) => read,
+                Err(why) if self.instances.len() > 1 => {
+                    self.lose_instance(&why.to_string());
+                    continue;
+                }
+                Err(why) => return Err(why.to_string()),
+            };
+            let Some(line) = read else {
                 self.lines = None;
                 if let Some(resume) = self.resume.take().filter(Resume::lost_at_end) {
                     self.notices.push(format!(
@@ -660,16 +722,7 @@ impl PodRead {
                 if self.instances.len() == 1 {
                     return Ok(None);
                 }
-                // The instance that ended is read; the next starts at its first line.
-                self.instances.pop_front();
-                self.pos = Pos {
-                    u: self.pos.u.clone(),
-                    r: self.instances[0].restarts,
-                    t: None,
-                    k: 0,
-                };
-                self.last = None;
-                self.tail = None;
+                self.next_instance();
                 continue;
             };
             let line = self.stamp(line);
@@ -711,6 +764,9 @@ impl PodRead {
 
     /// Move the read past `line`.
     fn took(&mut self, line: &Stamped) {
+        if self.tail_open && self.tail_from.is_none() {
+            self.tail_from = Some(line.ts);
+        }
         if self.last == Some(line.ts) {
             self.pos.k += 1;
         } else {
@@ -733,6 +789,68 @@ impl PodRead {
         ));
         self.ended = true;
         self.failed = true;
+        Ok(())
+    }
+
+    /// A stream that sent nothing for [`STALL`]: set aside for this call,
+    /// where its read stands, so the other pods go on — for a read of one
+    /// pod too, which gives back what came before rather than fail.
+    fn stall(&mut self) {
+        self.notices.push(format!(
+            "{}: its log stream sent nothing for {} seconds; this page has what came before — call again with `next_cursor` to read on",
+            self.name,
+            STALL.as_secs()
+        ));
+        self.lines = None;
+        self.ended = true;
+        self.failed = true;
+        self.stalled = true;
+    }
+
+    /// Put a read that began at `tail_lines` in a cursor's terms.
+    ///
+    /// A cursor counts the lines at its stamp from the start of that second;
+    /// a tail counts them from where it began, which may be inside a group of
+    /// lines sharing one stamp (CRI-O stamps a whole chunk alike). Read on
+    /// to the end of that group in the tail, count the group in the log, and
+    /// the difference is how many of its lines are read. A tail that read
+    /// nothing has no stamp at all: it goes on from when this call began.
+    async fn settle_tail(&mut self, pods: &Api<Pod>, started: Timestamp) -> Result<(), String> {
+        if self.tail.take().is_none() || self.failed {
+            return Ok(());
+        }
+        let Some(first) = self.tail_from.take() else {
+            if self.last.is_none() {
+                self.last = Some(started);
+                self.pos.t = Some(started.to_string());
+                self.pos.k = 0;
+            }
+            return Ok(());
+        };
+        if self.last != Some(first) {
+            // Past its first stamp, the read counted every later one whole.
+            return Ok(());
+        }
+        // The lines at `first` the tail holds past what was read: the one
+        // left unread, then the rest of the stream.
+        let mut rest = 0;
+        if self.head.as_ref().is_none_or(|head| head.ts == first) {
+            rest += u32::from(self.head.is_some());
+            if let Some(lines) = self.lines.as_mut() {
+                while let Some(line) = lines.next().await.map_err(|e| e.to_string())? {
+                    if stamp_of(&line) != Some(first) {
+                        break;
+                    }
+                    rest += 1;
+                }
+            }
+        }
+        let instance = *self
+            .instances
+            .front()
+            .expect("a read keeps the instance it last read");
+        let all = count_at(pods, &self.name, &self.container, instance.previous, first).await?;
+        self.pos.k = all.saturating_sub(rest);
         Ok(())
     }
 
@@ -771,6 +889,46 @@ impl PodRead {
     }
 }
 
+/// The kubelet's stamp at the start of `line`, if it has one.
+fn stamp_of(line: &Line) -> Option<Timestamp> {
+    line.text
+        .split_once(' ')
+        .and_then(|(raw, _)| raw.parse().ok())
+}
+
+/// How many lines of `container`'s log carry exactly the stamp `at`.
+async fn count_at(
+    pods: &Api<Pod>,
+    pod: &str,
+    container: &str,
+    previous: bool,
+    at: Timestamp,
+) -> Result<u32, String> {
+    let params = LogParams {
+        container: Some(container.to_string()),
+        previous,
+        timestamps: true,
+        since_time: Some(Timestamp::from_second(at.as_second()).map_err(|e| e.to_string())?),
+        ..LogParams::default()
+    };
+    let log = tokio::time::timeout(request_timeout(), pods.log_stream(pod, &params))
+        .await
+        .map_err(|_| "opening the log timed out".to_string())?
+        .map_err(|e| e.to_string())?;
+    let log: LogStream = Box::pin(log);
+    // Only the stamp is read; the rest of each line is dropped.
+    let mut lines = LineReader::new(log, 64);
+    let mut count = 0;
+    while let Some(line) = lines.next().await.map_err(|e| e.to_string())? {
+        match stamp_of(&line) {
+            Some(ts) if ts == at => count += 1,
+            Some(ts) if ts > at => break,
+            _ => {}
+        }
+    }
+    Ok(count)
+}
+
 /// What `c` costs inside a JSON string, as serde_json escapes it.
 fn char_cost(c: char) -> usize {
     match c {
@@ -799,11 +957,16 @@ fn fit(s: &str, room: usize) -> String {
 
 /// A page's `logs`, built a line at a time within its budget.
 struct PageText {
-    text: String,
+    /// Each line as shown, by its stamp: lines kept before a match arrive
+    /// after other pods' later lines, so the page is put in time order when
+    /// it is done.
+    shown: Vec<(Timestamp, String)>,
     used: usize,
     budget: usize,
     lines: usize,
     scanned: usize,
+    /// Lines `grep` did not match that were too long to search whole.
+    unsearched: usize,
     /// `[pod] ` in front of each line, for a read of several pods.
     prefix: bool,
     timestamps: bool,
@@ -812,14 +975,25 @@ struct PageText {
 impl PageText {
     fn new(budget: usize, prefix: bool, timestamps: bool) -> Self {
         Self {
-            text: String::new(),
+            shown: Vec::new(),
             used: 0,
             budget,
             lines: 0,
             scanned: 0,
+            unsearched: 0,
             prefix,
             timestamps,
         }
+    }
+
+    /// The page's `logs`: its lines in time order, a stable sort, so lines
+    /// sharing a stamp keep the order they were read in.
+    fn into_logs(mut self) -> String {
+        self.shown.sort_by_key(|(ts, _)| *ts);
+        self.shown
+            .into_iter()
+            .map(|(_, shown)| shown + "\n")
+            .collect()
     }
 
     /// Take `line`, the next one `read` has: shown, or skipped by `grep`.
@@ -854,6 +1028,7 @@ impl PageText {
                 }
                 read.before.push_back(line.clone());
             }
+            self.unsearched += usize::from(line.truncated);
             self.scanned += 1;
             true
         }
@@ -895,11 +1070,26 @@ impl PageText {
             shown.push_str(CUT);
             cost = escaped_len(&shown) + 2;
         }
-        self.text.push_str(&shown);
-        self.text.push('\n');
+        self.shown.push((line.ts, shown));
         self.used += cost;
         self.lines += 1;
         true
+    }
+}
+
+/// Read a backlog line into `read`'s head, setting the read aside if its
+/// stream sends nothing for [`STALL`].
+async fn fill_backlog(
+    read: &mut PodRead,
+    pods: &Api<Pod>,
+    req: &PageRequest,
+) -> Result<(), CapabilityError> {
+    match tokio::time::timeout(STALL, read.fill(pods, req, false)).await {
+        Ok(filled) => filled,
+        Err(_) => {
+            read.stall();
+            Ok(())
+        }
     }
 }
 
@@ -911,7 +1101,8 @@ async fn merge(
     req: &PageRequest,
     page: &mut PageText,
 ) -> Result<bool, CapabilityError> {
-    futures::future::try_join_all(reads.iter_mut().map(|read| read.fill(pods, req, false))).await?;
+    futures::future::try_join_all(reads.iter_mut().map(|read| fill_backlog(read, pods, req)))
+        .await?;
     loop {
         // The oldest head; on a tie, the pod first by name.
         let Some(i) = (0..reads.len())
@@ -926,7 +1117,7 @@ async fn merge(
             return Ok(false);
         }
         reads[i].took(&line);
-        reads[i].fill(pods, req, false).await?;
+        fill_backlog(&mut reads[i], pods, req).await?;
     }
 }
 
@@ -1211,6 +1402,8 @@ pub(crate) async fn read_page(
     input: PodLogsIn,
 ) -> Result<PodLogsOut, CapabilityError> {
     let req = PageRequest::parse(&input)?;
+    // Where a tail that reads nothing goes on from, on srelens' clock.
+    let started = Timestamp::now();
     let client = cache
         .get(&input.context)
         .await
@@ -1237,10 +1430,46 @@ pub(crate) async fn read_page(
             false
         }
     };
+    // A stalled pod was not read to its end.
+    end &= !reads.iter().any(|read| read.stalled);
+    // Positions a tail began are put in a cursor's terms before a follow
+    // reopens from them, and before the cursor is written.
+    let settled = futures::future::join_all(
+        reads
+            .iter_mut()
+            .map(|read| tokio::time::timeout(STALL, read.settle_tail(&api, started))),
+    )
+    .await;
+    for (read, settled) in reads.iter_mut().zip(settled) {
+        let why = match settled {
+            Ok(Ok(())) => continue,
+            Ok(Err(why)) => why,
+            Err(_) => format!("no answer in {} seconds", STALL.as_secs()),
+        };
+        read.notices.push(format!(
+            "{}: could not count the lines sharing the tail's first stamp ({}); the next page may repeat some of them",
+            read.name,
+            one_line(&why)
+        ));
+    }
     // Phase 2, the follow: only once every log is read to its end and the
     // page has room.
     if end && !req.wait.is_zero() {
         end = follow(&mut reads, &api, &req, &mut page).await?;
+    }
+    if page.unsearched > 0 {
+        notices.push(match page.unsearched {
+            1 => format!(
+                "1 line was longer than {} KiB and was searched only in its first {} KiB",
+                MAX_LOG_LINE_BYTES / 1024,
+                MAX_LOG_LINE_BYTES / 1024
+            ),
+            n => format!(
+                "{n} lines were longer than {} KiB and were searched only in their first {} KiB",
+                MAX_LOG_LINE_BYTES / 1024,
+                MAX_LOG_LINE_BYTES / 1024
+            ),
+        });
     }
     for read in &reads {
         notices.extend(read.notices.iter().cloned());
@@ -1254,13 +1483,14 @@ pub(crate) async fn read_page(
             .collect(),
     }
     .encode();
+    let (lines, scanned) = (page.lines, page.scanned);
     Ok(PodLogsOut {
-        logs: page.text,
+        logs: page.into_logs(),
         page: Some(Page {
             next_cursor,
             end,
-            lines: page.lines,
-            scanned: page.scanned,
+            lines,
+            scanned,
             notices: cap_notices(notices),
         }),
     })
@@ -1675,6 +1905,11 @@ mod tests {
         /// The log stream hands out its lines and then never ends, as a
         /// kubelet that stalls mid-read does.
         stalls: bool,
+        /// Each line of the log arrives this long after the one before.
+        slow: Option<Duration>,
+        /// The previous instance's log is gone, as after the kubelet
+        /// collects it: a `previous` read answers 400.
+        previous_gone: bool,
     }
 
     fn pod(name: &str, lines: Vec<(Timestamp, String)>) -> FakePod {
@@ -1802,6 +2037,16 @@ mod tests {
     /// `later` and stays open.
     fn log_reply(p: &FakePod, query: &BTreeMap<String, String>) -> http::Response<Body> {
         let flag = |k: &str| query.get(k).is_some_and(|v| v == "true");
+        if flag("previous") && p.previous_gone {
+            return status(
+                400,
+                "BadRequest",
+                &format!(
+                    "previous terminated container \"app\" in pod \"{}\" not found",
+                    p.name
+                ),
+            );
+        }
         let mut lines = if flag("previous") {
             p.previous.clone()
         } else {
@@ -1833,7 +2078,14 @@ mod tests {
             };
             Ok::<_, std::convert::Infallible>(http_body::Frame::data(Bytes::from(line)))
         });
-        let stream = futures::stream::iter(frames);
+        let slow = p.slow;
+        let stream =
+            futures::StreamExt::then(futures::stream::iter(frames), move |frame| async move {
+                if let Some(gap) = slow {
+                    tokio::time::sleep(gap).await;
+                }
+                frame
+            });
         let body = if follow || p.stalls {
             StreamBody::new(futures::StreamExt::chain(
                 stream,
@@ -2525,10 +2777,31 @@ mod tests {
         assert!(out["lines"].as_u64().unwrap() > 0);
     }
 
-    /// Review finding 1: a stream that stalls holds the page until the
-    /// backlog deadline; the page then says so, rather than look full.
+    /// Review finding 1: a stream slow enough to outlast the backlog
+    /// deadline, line by line, gives back the page as it stands, and says so
+    /// rather than look full.
     #[tokio::test(start_paused = true)]
     async fn a_backlog_cut_short_by_its_deadline_says_so() {
+        let cluster = one_pod(log_of(10, 30));
+        cluster.pods.lock().unwrap()[0].slow = Some(Duration::from_secs(5));
+        let cache = cache_for(cluster).await;
+        let out = page(&cache, read_of(json!({ "max_bytes": 1000 })))
+            .await
+            .unwrap();
+        let lines = out["lines"].as_u64().unwrap();
+        assert!((1..10).contains(&lines), "{lines} lines");
+        assert_eq!(out["end"], false);
+        let notice = out["notices"][0].as_str().unwrap();
+        assert!(
+            notice.contains("20-second") && notice.contains("next_cursor"),
+            "{notice}"
+        );
+    }
+
+    /// PR #941 review (Greptile): one named pod whose stream sends nothing
+    /// more gives back what it read, and says the stream stalled.
+    #[tokio::test(start_paused = true)]
+    async fn a_single_pod_that_stalls_gives_back_what_it_read() {
         let cluster = one_pod(log_of(3, 30));
         cluster.pods.lock().unwrap()[0].stalls = true;
         let cache = cache_for(cluster).await;
@@ -2538,9 +2811,200 @@ mod tests {
         assert_eq!(out["lines"], 3);
         assert_eq!(out["end"], false);
         let notice = out["notices"][0].as_str().unwrap();
+        assert!(notice.contains("sent nothing"), "{notice}");
+    }
+
+    /// PR #941 review (Greptile): a pod whose stream opens and then sends
+    /// nothing is set aside, so it cannot hold back the others.
+    #[tokio::test(start_paused = true)]
+    async fn a_stalled_pod_is_set_aside_and_the_others_are_read() {
+        let cluster = two_pods();
+        {
+            let mut pods = cluster.pods.lock().unwrap();
+            pods[1].current.clear();
+            pods[1].stalls = true;
+        }
+        let cache = cache_for(cluster).await;
+        let out = page(&cache, by_selector(json!({}))).await.unwrap();
+        assert_eq!(out["logs"], "[cmi-a] a0\n[cmi-a] a2\n[cmi-a] a4\n");
+        assert_eq!(out["end"], false, "the stalled pod is not read to its end");
+        let notices: Vec<&str> = out["notices"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|n| n.as_str().unwrap())
+            .collect();
         assert!(
-            notice.contains("20-second") && notice.contains("next_cursor"),
+            notices
+                .iter()
+                .any(|n| n.starts_with("cmi-b: ") && n.contains("sent nothing")),
+            "{notices:?}"
+        );
+    }
+
+    /// PR #941 review (Greptile): `grep` searches a line longer than the
+    /// page in full, not only the part a page could show.
+    #[tokio::test]
+    async fn grep_searches_a_line_past_the_page_size() {
+        let mut long = "x".repeat(4_000);
+        long.push_str(" NEEDLE ");
+        long.push_str(&"y".repeat(1_000));
+        let log = vec![
+            (at(0, 0), "before".to_string()),
+            (at(1, 0), long),
+            (at(2, 0), "after".to_string()),
+        ];
+        let cache = cache_for(one_pod(log)).await;
+        let out = page(
+            &cache,
+            read_of(json!({ "grep": "NEEDLE", "max_bytes": 1000 })),
+        )
+        .await
+        .unwrap();
+        assert_eq!(out["lines"], 1, "{out}");
+        assert!(
+            out["logs"].as_str().unwrap().ends_with(&format!("{CUT}\n")),
+            "{out}"
+        );
+    }
+
+    /// A line longer than srelens reads of one line is searched in what it
+    /// read, and the page says how many lines that was.
+    #[tokio::test]
+    async fn a_line_too_long_to_search_whole_is_counted_in_a_notice() {
+        let mut long = "z".repeat(70_000);
+        long.push_str("NEEDLE");
+        let cache = cache_for(one_pod(vec![(at(0, 0), long)])).await;
+        let out = page(
+            &cache,
+            read_of(json!({ "grep": "NEEDLE", "max_bytes": 1000 })),
+        )
+        .await
+        .unwrap();
+        assert_eq!(out["lines"], 0);
+        let notice = out["notices"][0].as_str().unwrap();
+        assert!(
+            notice.contains("1 line") && notice.contains("64 KiB"),
             "{notice}"
+        );
+    }
+
+    /// PR #941 review (Greptile): `tail_lines: 0` reads nothing, and its
+    /// cursor still starts the next call from now, not the whole history.
+    #[tokio::test]
+    async fn a_tail_of_nothing_reads_on_from_now() {
+        let cluster = one_pod(log_of(5, 30));
+        let cache = cache_for(cluster.clone()).await;
+        let first = page(
+            &cache,
+            read_of(json!({ "tail_lines": 0, "max_bytes": 1000 })),
+        )
+        .await
+        .unwrap();
+        assert_eq!(first["logs"], "");
+        cluster.pods.lock().unwrap()[0].current.push((
+            Timestamp::now() + SignedDuration::from_hours(1),
+            "new".into(),
+        ));
+        let next = page(
+            &cache,
+            read_of(json!({ "max_bytes": 1000, "cursor": first["next_cursor"] })),
+        )
+        .await
+        .unwrap();
+        assert_eq!(next["logs"], "new\n");
+    }
+
+    /// PR #941 review (Greptile): a tail that starts inside a group of lines
+    /// sharing one stamp counts that group from the start of its second, as
+    /// a cursor does, so the next page repeats none of it.
+    #[tokio::test]
+    async fn a_tail_start_repeats_no_line_of_its_first_stamp() {
+        let log: Vec<_> = ["a", "b", "c", "d"]
+            .iter()
+            .map(|text| (at(0, 500), text.to_string()))
+            .collect();
+        let cache = cache_for(one_pod(log)).await;
+        let first = page(
+            &cache,
+            read_of(json!({ "tail_lines": 2, "max_bytes": 1000 })),
+        )
+        .await
+        .unwrap();
+        assert_eq!(first["logs"], "c\nd\n");
+        let next = page(
+            &cache,
+            read_of(json!({ "max_bytes": 1000, "cursor": first["next_cursor"] })),
+        )
+        .await
+        .unwrap();
+        assert_eq!(next["logs"], "", "c and d were read");
+        // A page that fills inside that group: one line a page.
+        let log: Vec<_> = (0..4)
+            .map(|i| (at(0, 500), format!("{i} {}", "y".repeat(600))))
+            .collect();
+        let cache = cache_for(one_pod(log.clone())).await;
+        let (read, _) = read_to_end(
+            &cache,
+            read_of(json!({ "tail_lines": 3, "max_bytes": 1000 })),
+        )
+        .await;
+        assert_eq!(read, joined(&log[1..]));
+    }
+
+    /// PR #941 review (Greptile): when one restart ended an instance whose
+    /// log the kubelet no longer has, the read says so and goes on in the
+    /// new instance rather than retry the old one for ever.
+    #[tokio::test]
+    async fn a_restart_whose_old_log_is_gone_reads_on_in_the_new_instance() {
+        let cluster = one_pod(log_of(10, 60));
+        let cache = cache_for(cluster.clone()).await;
+        let first = page(&cache, read_of(json!({ "max_bytes": MAX_PAGE_BYTES })))
+            .await
+            .unwrap();
+        let new: Vec<_> = log_of(3, 40)
+            .into_iter()
+            .map(|(ts, text)| (ts + SignedDuration::from_hours(1), text))
+            .collect();
+        {
+            let mut pods = cluster.pods.lock().unwrap();
+            pods[0].restarts = 1;
+            pods[0].previous_gone = true;
+            pods[0].current = new.clone();
+        }
+        let next = page(
+            &cache,
+            read_of(json!({ "max_bytes": MAX_PAGE_BYTES, "cursor": first["next_cursor"] })),
+        )
+        .await
+        .unwrap();
+        assert_eq!(next["logs"], joined(&new));
+        let notices = next["notices"].to_string();
+        assert!(notices.contains("gone"), "{notices}");
+    }
+
+    /// PR #941 review (Greptile): the lines kept before a match keep the
+    /// page in time order across pods.
+    #[tokio::test]
+    async fn context_lines_keep_a_page_in_time_order_across_pods() {
+        let cluster = Arc::new(Cluster::default());
+        cluster.pods.lock().unwrap().extend([
+            pod(
+                "cmi-a",
+                vec![(at(1, 0), "a before".into()), (at(3, 0), "a MATCH".into())],
+            ),
+            pod("cmi-b", vec![(at(2, 0), "b MATCH".into())]),
+        ]);
+        let cache = cache_for(cluster).await;
+        let out = page(
+            &cache,
+            by_selector(json!({ "grep": "MATCH", "context_lines": 1 })),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            out["logs"],
+            "[cmi-a] a before\n[cmi-b] b MATCH\n[cmi-a] a MATCH\n"
         );
     }
 
