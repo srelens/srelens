@@ -711,6 +711,22 @@ impl PodRead {
         Ok(())
     }
 
+    /// Open the stream again with `follow`, from where the read stands.
+    async fn reopen(&mut self, pods: &Api<Pod>, req: &PageRequest) -> Result<(), CapabilityError> {
+        self.ended = false;
+        let instance = *self
+            .instances
+            .front()
+            .expect("a read keeps the instance it last read");
+        match self.open(pods, instance, req, true).await {
+            Ok(lines) => {
+                self.lines = Some(lines);
+                Ok(())
+            }
+            Err(why) => self.fail(why, req),
+        }
+    }
+
     /// Read the next line into `head`, unless one is there or the read ended.
     async fn fill(
         &mut self,
@@ -887,6 +903,54 @@ async fn merge(
         }
         reads[i].took(&line);
         reads[i].fill(pods, req, false).await?;
+    }
+}
+
+/// Phase 2, the follow: lines as they arrive until the page is full
+/// (`false`) or `req.wait` runs out (`true`: the read caught up).
+async fn follow(
+    reads: &mut [PodRead],
+    pods: &Api<Pod>,
+    req: &PageRequest,
+    page: &mut PageText,
+) -> Result<bool, CapabilityError> {
+    let deadline = tokio::time::Instant::now() + req.wait;
+    // Every stream reopened at once, so a line on one pod does not cancel
+    // another's half-made request.
+    futures::future::try_join_all(
+        reads
+            .iter_mut()
+            .filter(|read| !read.failed)
+            .map(|read| read.reopen(pods, req)),
+    )
+    .await?;
+    loop {
+        if reads.iter().all(|read| read.ended) {
+            return Ok(true);
+        }
+        // `LineReader::next` is cancel-safe, so the reads still waiting lose
+        // nothing.
+        let arrived = futures::future::select_all(
+            reads
+                .iter_mut()
+                .filter(|read| !read.ended)
+                .map(|read| Box::pin(read.fill(pods, req, true))),
+        );
+        match tokio::time::timeout_at(deadline, arrived).await {
+            Err(_) => return Ok(true),
+            Ok((filled, _, _)) => filled?,
+        }
+        while let Some(i) = (0..reads.len())
+            .filter(|&i| reads[i].head.is_some())
+            .min_by_key(|&i| reads[i].head.as_ref().map(|line| line.ts))
+        {
+            let line = reads[i].head.take().expect("picked for its head");
+            if !page.offer(&mut reads[i], &line, req) {
+                reads[i].head = Some(line);
+                return Ok(false);
+            }
+            reads[i].took(&line);
+        }
     }
 }
 
@@ -1079,9 +1143,14 @@ pub(crate) async fn read_page(
     let api: Api<Pod> = Api::namespaced(client, &input.namespace);
     let mut page = PageText::new(req.max_bytes, !req.target.single(), req.timestamps);
     // Phase 1, the backlog. The deadline hands back the page as it stands.
-    let end = tokio::time::timeout(BACKLOG, merge(&mut reads, &api, &req, &mut page))
+    let mut end = tokio::time::timeout(BACKLOG, merge(&mut reads, &api, &req, &mut page))
         .await
         .unwrap_or(Ok(false))?;
+    // Phase 2, the follow: only once every log is read to its end and the
+    // page has room.
+    if end && !req.wait.is_zero() {
+        end = follow(&mut reads, &api, &req, &mut page).await?;
+    }
     for read in &reads {
         notices.extend(read.notices.iter().cloned());
     }
@@ -2152,5 +2221,58 @@ mod tests {
         .unwrap();
         assert_eq!(out["logs"], "");
         assert_eq!(out["end"], true);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn wait_seconds_returns_lines_written_after_the_backlog() {
+        let cluster = one_pod(log_of(3, 30));
+        cluster.pods.lock().unwrap()[0].later = vec![
+            (at(100, 0), "later one".to_string()),
+            (at(101, 0), "later two".to_string()),
+        ];
+        let cache = cache_for(cluster).await;
+        let first = page(&cache, read_of(json!({ "max_bytes": 1000 })))
+            .await
+            .unwrap();
+        assert_eq!(first["end"], true);
+        let next = page(
+            &cache,
+            read_of(json!({ "max_bytes": 1000, "wait_seconds": 5, "cursor": first["next_cursor"] })),
+        )
+        .await
+        .unwrap();
+        assert_eq!(next["logs"], "later one\nlater two\n");
+        assert_eq!(next["end"], true);
+        // The follow's own cursor reads on past what it handed out.
+        let after = page(
+            &cache,
+            read_of(json!({ "max_bytes": 1000, "cursor": next["next_cursor"] })),
+        )
+        .await
+        .unwrap();
+        assert_eq!(after["logs"], "");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_follow_of_several_pods_hands_on_each_ones_new_lines() {
+        let cluster = two_pods();
+        {
+            let mut pods = cluster.pods.lock().unwrap();
+            pods[0].later = vec![(at(50, 0), "a50".into())];
+            pods[1].later = vec![(at(51, 0), "b51".into())];
+        }
+        let cache = cache_for(cluster).await;
+        let first = page(&cache, by_selector(json!({}))).await.unwrap();
+        let next = page(
+            &cache,
+            by_selector(json!({ "wait_seconds": 3, "cursor": first["next_cursor"] })),
+        )
+        .await
+        .unwrap();
+        let shown = next["logs"].as_str().unwrap();
+        assert!(
+            shown.contains("[cmi-a] a50\n") && shown.contains("[cmi-b] b51\n"),
+            "{shown}"
+        );
     }
 }
