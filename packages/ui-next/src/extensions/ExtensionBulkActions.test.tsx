@@ -397,4 +397,23 @@ describe("bulk actions on a protected cluster (#101)", () => {
     fireEvent.click(run());
     await waitFor(() => expect(actOnExtensionResource).toHaveBeenCalledTimes(3));
   });
+
+  it("asks for the name again when a new selection reaches a review left open by an emptied one", async () => {
+    const a: BulkResource[] = [{ namespace: "team", name: "a" }];
+    const b: BulkResource[] = [{ namespace: "team", name: "b" }];
+    const { rerender } = render(<ExtensionBulkActions target={target} selection={a} onClear={vi.fn()} />);
+    await openConfirmation();
+    fireEvent.change(screen.getByRole("textbox", { name: "Type cluster/a to confirm" }), { target: { value: "cluster/a" } });
+    expect((screen.getByRole("button", { name: "Reconcile 1 resource" }) as HTMLButtonElement).disabled).toBe(false);
+
+    // The bar draws nothing for an empty selection, but stays mounted with the review open.
+    rerender(<ExtensionBulkActions target={target} selection={[]} onClear={vi.fn()} />);
+    expect(screen.queryByTestId("bulk-count")).toBeNull();
+    rerender(<ExtensionBulkActions target={target} selection={b} onClear={vi.fn()} />);
+    // Settled, so a disabled Run below is the name's doing and not "Loading actions…".
+    await waitFor(() => expect(screen.queryByText("Loading actions…")).toBeNull());
+
+    expect((screen.getByRole("textbox", { name: "Type cluster/a to confirm" }) as HTMLInputElement).value).toBe("");
+    expect((screen.getByRole("button", { name: "Reconcile 1 resource" }) as HTMLButtonElement).disabled).toBe(true);
+  });
 });

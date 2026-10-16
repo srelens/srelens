@@ -156,12 +156,16 @@ export function ExtensionBulkActions({ target, selection, onClear, available }: 
   // On a protected cluster the run waits for the cluster's name, typed (#101).
   const typed = useProtectedConfirm(target.context);
   // Each review is its own question: a name typed for one answers nothing else.
-  // Cleared DURING render when the action under review changes, not in an
-  // effect, so no render of the next review is committed with the last one's
-  // name typed and the run live (see AgentConsent).
-  const [typedFor, setTypedFor] = useState(pending);
-  if (typedFor !== pending) {
-    setTypedFor(pending);
+  // A review is the action AND the selection it covers: this component stays
+  // mounted, with the review open, while the selection is emptied and filled
+  // again, and the new selection must not inherit the last one's name.
+  // Cleared DURING render when the review changes, not in an effect, so no
+  // render of the next review is committed with the last one's name typed and
+  // the run live (see AgentConsent).
+  const reviewKey = pending === null ? null : `${pending}\n${selectionKey}`;
+  const [typedFor, setTypedFor] = useState(reviewKey);
+  if (typedFor !== reviewKey) {
+    setTypedFor(reviewKey);
     typed.reset();
   }
   const abort = useRef<AbortController | null>(null);
