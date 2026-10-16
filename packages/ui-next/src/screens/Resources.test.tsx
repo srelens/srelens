@@ -1933,6 +1933,41 @@ describe("the detail pane's two hosts", () => {
     expect(fromTab).toEqual(subject);
   });
 
+  it("reads a grouped detail tab in its own group, and hands the group to the tab (#919)", async () => {
+    listCrds.mockResolvedValue({
+      crds: [
+        { name: "deployments.acme.io", group: "acme.io", version: "v1", kind: "Deployment", plural: "deployments", namespaced: true },
+      ],
+    });
+    getObject.mockResolvedValue({ object: { kind: "Deployment", metadata: { name: "api", namespace: "default" } } });
+    openDetailTab("/k/prod-eu/acme.io%2FDeployment/default/api");
+    await waitFor(() =>
+      expect(getObject).toHaveBeenCalledWith("prod-eu", "Deployment", "default", "api", undefined, {
+        group: "acme.io",
+        version: "v1",
+        plural: "deployments",
+      }),
+    );
+    expect(tabProps.at(-1)).toMatchObject({ kind: "Deployment", group: "acme.io" });
+  });
+
+  it("hands a custom resource's group to its peek and to the tab it opens (#919)", async () => {
+    listCrds.mockResolvedValue({ crds: [WIDGETS] });
+    listCustomResource.mockResolvedValue({
+      items: [{ name: "left", namespace: "default", age: "1d", columns: ["Ready"] }],
+    });
+    open("/k/widgets.example.com");
+    await waitFor(() => expect(rowNames()).toEqual(["left"]));
+
+    fireEvent.click(row("left"));
+    await waitFor(() =>
+      expect(lastDetailProps()).toMatchObject({ kind: "Widget", group: "example.com", name: "left" }),
+    );
+
+    fireEvent.doubleClick(row("left"));
+    await waitFor(() => expect(tabFor("/k/prod-eu/example.com%2FWidget/default/left")).toBeTruthy());
+  });
+
   it("promotes the peeked row to its own tab, at the very route a double click opens", async () => {
     open("/k/pods");
     await waitFor(() => expect(rowNames()).toEqual(["web-1", "api-7"]));

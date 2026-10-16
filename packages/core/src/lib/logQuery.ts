@@ -198,11 +198,25 @@ interface ClauseBase {
   readonly span: readonly [number, number];
 }
 
+export type CompareOp = ">" | ">=" | "<" | "<=";
+
 export type QueryClause = ClauseBase &
   (
     | { readonly match: "text" | "equals"; readonly value: string }
     | { readonly match: "phrase"; readonly value: string; readonly words: string }
     | { readonly match: "regex"; readonly value: string; readonly regex: RegExp }
+    /**
+     * `field>5`, `field<=1.5s`. `value` is the right side as typed, for the pill
+     * and for editing by span; `target` is the number, or the duration in seconds.
+     */
+    | {
+        readonly match: "compare";
+        readonly field: string;
+        readonly op: CompareOp;
+        readonly kind: "number" | "duration";
+        readonly target: number;
+        readonly value: string;
+      }
   );
 
 export type ParsedQuery =
@@ -239,16 +253,95 @@ export function isQueryableKey(key: string): boolean {
 
 const isSpace = (ch: string) => /\s/.test(ch);
 
+const NUMBER = /^[+-]?(\d+(\.\d*)?|\.\d+)([eE][+-]?\d+)?$/;
+/**
+ * Go spells micro with U+00B5 or U+03BC, and a logger can use either. The
+ * order matters to `readMeasure`: `ms` has to come before `m`, which it starts
+ * with, so `Object.keys` (insertion order for these keys) is also the search order.
+ */
+const UNIT_SECONDS: Readonly<Record<string, number>> = {
+  ns: 1e-9,
+  us: 1e-6,
+  "µs": 1e-6,
+  "μs": 1e-6,
+  ms: 1e-3,
+  s: 1,
+  m: 60,
+  h: 3600,
+};
+const UNITS = Object.keys(UNIT_SECONDS);
+
+const isDigit = (ch: string) => ch >= "0" && ch <= "9";
+
+/** Index just past the run of digits that starts at `from`. */
+function digitsEnd(s: string, from: number): number {
+  let j = from;
+  while (j < s.length && isDigit(s[j])) j += 1;
+  return j;
+}
+
+/**
+ * Index just past the `12`, `1.5`, `1.` or `.5` that starts at `from`, or `from`
+ * when no number does. Scanned by index, not by a regex, which CodeQL reads as
+ * polynomial on a long run of digits (js/polynomial-redos, as for `keyEnd`);
+ * `readMeasure` is exported and fed every line's field values.
+ */
+function partEnd(s: string, from: number): number {
+  const whole = digitsEnd(s, from);
+  if (s[whole] !== ".") return whole;
+  const end = digitsEnd(s, whole + 1);
+  return whole > from || end > whole + 1 ? end : from;
+}
+
+/**
+ * A number, or a Go-style duration in seconds (`350ms`, `1h2m3s`), or undefined
+ * when `s` is neither. The query's right side and a line's field value are read
+ * by this one function, so they cannot disagree about what a measure is.
+ */
+export function readMeasure(s: string): { kind: "number" | "duration"; value: number } | undefined {
+  if (NUMBER.test(s)) return { kind: "number", value: Number(s) };
+  let i = s[0] === "-" || s[0] === "+" ? 1 : 0;
+  const sign = s[0] === "-" ? -1 : 1;
+  if (i >= s.length) return undefined;
+  let total = 0;
+  while (i < s.length) {
+    const end = partEnd(s, i);
+    const unit = end > i ? UNITS.find((u) => s.startsWith(u, end)) : undefined;
+    if (unit === undefined) return undefined;
+    total += Number(s.slice(i, end)) * UNIT_SECONDS[unit];
+    i = end + unit.length;
+  }
+  return { kind: "duration", value: sign * total };
+}
+
+/**
+ * `key>v`, `key>=v`, `key<v` or `key<=v` at `i`, when `v` reads as a number or a
+ * duration; otherwise undefined and the token stays text, so `a->b` and `x>y`
+ * still search for what they say.
+ */
+function readComparison(q: string, i: number) {
+  const keyStop = keyEnd(q, i);
+  if (keyStop === i || (q[keyStop] !== ">" && q[keyStop] !== "<")) return undefined;
+  const op = (q[keyStop + 1] === "=" ? `${q[keyStop]}=` : q[keyStop]) as CompareOp;
+  const from = keyStop + op.length;
+  let end = from;
+  while (end < q.length && !isSpace(q[end])) end += 1;
+  const measure = readMeasure(q.slice(from, end));
+  if (measure === undefined) return undefined;
+  return { field: q.slice(i, keyStop), op, kind: measure.kind, target: measure.value, value: q.slice(from, end), end };
+}
+
 type Term =
   | { readonly kind: "bare" | "quoted" | "regex"; readonly value: string; readonly end: number }
   | { readonly error: string; readonly at: number };
 
 /**
  * Whitespace-separated clauses: `word`, `"phrase"`, `/regex/`, `field:value`,
- * `field:"value"`, `field:/regex/`, each optionally `-`-negated. Values are
- * lowercased here once (a regex is made case-insensitive instead), so matching
- * 5,000 lines does no case folding of the query. Field names keep their
- * spelling and compare case-insensitively at match time.
+ * `field:"value"`, `field:/regex/`, `field>5`, `field<=1.5s`, each optionally
+ * `-`-negated. Values are lowercased here once (a regex is made
+ * case-insensitive instead), so matching 5,000 lines does no case folding of
+ * the query. Field names keep their spelling and compare case-insensitively at
+ * match time.
  */
 export function parseLogQuery(query: string): ParsedQuery {
   const clauses: QueryClause[] = [];
@@ -263,6 +356,21 @@ export function parseLogQuery(query: string): ParsedQuery {
     if (negated) i += 1;
     if (i >= query.length || isSpace(query[i])) {
       return { ok: false, error: "A '-' needs something to exclude", at: start };
+    }
+    const cmp = readComparison(query, i);
+    if (cmp !== undefined) {
+      clauses.push({
+        match: "compare",
+        field: cmp.field,
+        op: cmp.op,
+        kind: cmp.kind,
+        target: cmp.target,
+        value: cmp.value,
+        negated,
+        span: [start, cmp.end],
+      });
+      i = cmp.end;
+      continue;
     }
     const prefixEnd = fieldPrefixEnd(query, i);
     const field = prefixEnd < 0 ? undefined : query.slice(i, prefixEnd - 1);
@@ -331,20 +439,24 @@ function toClause(
 
 /**
  * Whether a line passes. Positive clauses on ONE field OR together — so two
- * clicks on the Level facet show both levels — and everything else ANDs.
+ * clicks on the Level facet show both levels — and everything else ANDs,
+ * comparisons included, so `latency>100 latency<500` is a range.
  * `ignoreField` skips that field's clauses, which is how a facet counts its
- * own values without filtering itself down to the one already picked.
+ * own values without filtering itself down to the one already picked. A
+ * comparison is no pick, it is a bound, so it is never skipped: under
+ * `status>=500` the status facet must not offer a `200` that would show nothing.
  */
 export function matchLine(line: QueryLine, clauses: readonly QueryClause[], ignoreField?: string): boolean {
   const ignored = ignoreField?.toLowerCase();
   let anyOf: Map<string, boolean> | undefined;
   for (const clause of clauses) {
     const field = clause.field?.toLowerCase();
-    if (field !== undefined && field === ignored) continue;
+    if (field !== undefined && field === ignored && clause.match !== "compare") continue;
     const hit = hits(line, clause);
     if (clause.negated) {
       if (hit) return false;
-    } else if (field === undefined) {
+    } else if (field === undefined || clause.match === "compare") {
+      // A comparison narrows, so two on one field are a range and not an either-or.
       if (!hit) return false;
     } else {
       anyOf ??= new Map();
@@ -360,6 +472,22 @@ function hits(line: QueryLine, clause: QueryClause): boolean {
     if (clause.match === "regex") return clause.regex.test(line.text);
     if (line.haystack.includes(clause.value)) return true;
     return clause.match === "phrase" && clause.words !== "" && ` ${line.words} `.includes(` ${clause.words} `);
+  }
+  if (clause.match === "compare") {
+    // Like compares with like: `5` is no answer to `took>1s`, and `30.1s` none to `took>5`.
+    const raw = fieldValue(line, clause.field);
+    const got = raw === undefined ? undefined : readMeasure(raw.trim());
+    if (got === undefined || got.kind !== clause.kind) return false;
+    switch (clause.op) {
+      case ">":
+        return got.value > clause.target;
+      case ">=":
+        return got.value >= clause.target;
+      case "<":
+        return got.value < clause.target;
+      case "<=":
+        return got.value <= clause.target;
+    }
   }
   const value = fieldValue(line, clause.field);
   if (value === undefined) return false;
@@ -389,14 +517,21 @@ export function clauseState(clauses: readonly QueryClause[], target: ClauseTarge
  * The query after a facet click: absent → appended; same mode → removed;
  * other mode → flipped in place. Every other character of what was typed is
  * left alone — the box is the reader's, and a click must not rewrite it.
+ *
+ * A target typed twice (`level:error level:error`) is one filter to the facet,
+ * so a click acts on every copy: the first one decides the mode it is read in,
+ * and when the click flips it the rest go, or the facet would stay lit.
  */
 export function toggleClause(query: string, target: ClauseTarget, mode: ClauseMode): string {
   const parsed = parseLogQuery(query);
-  const found = parsed.ok ? parsed.clauses.find((c) => sameTarget(c, target)) : undefined;
+  const found = parsed.ok ? parsed.clauses.filter((c) => sameTarget(c, target)) : [];
   const spelled = mode === "exclude" ? `-${spell(target)}` : spell(target);
-  if (found === undefined) return append(query, spelled);
-  if ((mode === "exclude") === found.negated) return removeSpan(query, found.span);
-  return query.slice(0, found.span[0]) + spelled + query.slice(found.span[1]);
+  if (found.length === 0) return append(query, spelled);
+  const [first, ...rest] = found;
+  // From the end backwards, so the spans still to come are where they were parsed.
+  const flip = (mode === "exclude") !== first.negated;
+  const without = (flip ? rest : found).reduceRight((q, c) => removeSpan(q, c.span), query);
+  return flip ? without.slice(0, first.span[0]) + spelled + without.slice(first.span[1]) : without;
 }
 
 /** The query without `clause`, which must come from parsing this same text. */
@@ -686,9 +821,17 @@ export function inRange(line: QueryLine, range: TimeRange): boolean {
  * (`f:/re/`, and the exact-regex form a quote-containing facet value is written
  * in) are not marked either: their regex tests the value, not the text a row
  * shows. A field clause marks its whole `key=value` token.
+ *
+ * A free-text regex is the user's own pattern, and one that backtracks
+ * catastrophically would freeze the thread it runs on, so it is never run
+ * here: its marks are worked out in the regex worker and come in as `extra`.
  */
-export function highlightRanges(text: string, clauses: readonly QueryClause[]): [number, number][] {
-  const found: [number, number][] = [];
+export function highlightRanges(
+  text: string,
+  clauses: readonly QueryClause[],
+  extra: readonly (readonly [number, number])[] = [],
+): [number, number][] {
+  const found: [number, number][] = extra.map(([start, end]) => [start, end]);
   for (const clause of clauses) {
     if (clause.negated) continue;
     const mark = highlightPattern(clause);
@@ -726,8 +869,9 @@ interface Mark {
 }
 
 function highlightPattern(clause: QueryClause): Mark | undefined {
+  // A regex is the user's, and is never run on the main thread (see `highlightRanges`).
+  if (clause.match === "regex") return undefined;
   if (clause.field === undefined) {
-    if (clause.match === "regex") return { pattern: clause.regex.source, prefixed: false };
     if (clause.match === "phrase") return phrasePattern(clause.value, clause.words);
     return { pattern: escapeRegex(clause.value), prefixed: false };
   }

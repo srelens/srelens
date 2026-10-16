@@ -12,6 +12,9 @@ services:
       # kubectl/helm/kube-rs to read as real files. Back it with RAM (tmpfs) so
       # this plaintext never lands on the persistent volume — it stays private
       # to the container user (uid/gid 10001, mode 0700) and vanishes on restart.
+      # Open log streams keep their history here too (up to SRELENS_LOG_SPOOL_MB
+      # each, 64 by default), so that RAM counts against any memory limit you set
+      # on this service; size it for them, or set SRELENS_LOG_SPOOL_MB=0 for none.
       - /data/runtime:mode=0700,uid=10001,gid=10001
     environment:
       # Public URL the browser uses; REQUIRED for a non-loopback deployment so

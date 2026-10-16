@@ -52,13 +52,15 @@ import {
   statusTone,
   toneColor,
   toneWash,
+  usePortalShowing,
 } from "@srelens/ui-kit";
 import { useConsole } from "../console";
 import { useLogProviderSource, useLogProviders } from "../extensions/logProviders";
 import { useActiveContext } from "../lib/clusters";
 import { FailureAlert, FailureState } from "../lib/errorCopy";
 import { Icons } from "../lib/icons";
-import { useLogStream, type LogStreamStatus } from "../lib/logStream";
+import { EARLIER_PAGE, MAX_LOADED_LINES, useLogStream, type LogStreamStatus } from "../lib/logStream";
+import { logHistoryMb, megabytes } from "../lib/logHistory";
 import { useThrottledValue } from "../lib/useThrottledValue";
 import { groupNumber } from "../lib/numbers";
 import { saveOrDownload } from "../lib/saveOrDownload";
@@ -72,7 +74,7 @@ import {
 import { recentKey, rememberLogSubject, useOfferedRecents } from "../lib/logRecents";
 import { useMarkLogStream } from "../lib/liveLogStreams";
 import { useTabScope } from "../lib/tabScope";
-import { openTab } from "../lib/tabsStore";
+import { openTab, setTabView, useTabView } from "../lib/tabsStore";
 import { FilterPills } from "./logs/FilterPills";
 import { LineDetail } from "./logs/LineDetail";
 import { renderMessage } from "./logs/LogMessage";
@@ -82,6 +84,7 @@ import {
   type StreamPod,
 } from "./logs/StreamRail";
 import { clockTime } from "./logs/time";
+import { keepMatching, useRegexGate } from "./logs/useRegexGate";
 import { VolumeHistogram } from "./logs/VolumeHistogram";
 import { NoClusterScreen } from "./resourceShell";
 
@@ -166,6 +169,17 @@ const EXPORT_RANGES: { label: string; slug: string; seconds?: number }[] = [
 ];
 
 /**
+ * What Export offers from the history kept on disk (#914): every line since the
+ * stream opened, including those the kubelet has already rotated away, which a
+ * span of the cluster's cannot bring back on a busy workload.
+ */
+const KEPT_RANGES: { label: string; slug: string; seconds?: number }[] = [
+  { label: "Last 10 min", slug: "disk-last-10m", seconds: 600 },
+  { label: "Last 1 h", slug: "disk-last-1h", seconds: 3600 },
+  { label: "All", slug: "disk-all" },
+];
+
+/**
  * How many trailing lines a connect asks for.
  *
  * A ceiling rather than a preference. `since=all` on a container that has been
@@ -208,6 +222,13 @@ const RECOUNT_MS = 250;
 
 /** How long the view must be held before the filter bar says so: longer than a click's press. */
 const HELD_NOTE_MS = 300;
+
+/**
+ * The next row's id, for the life of the module. A row's id is its element's key, so it must never be given to a
+ * second line: numbered again from 0 whenever the rows are rebuilt, a line would take the id of one the ring
+ * has since dropped, and with it that line's element, under the reader's pointer or selection.
+ */
+let nextRowId = 0;
 
 /**
  * The one state this readout can be in that the CONNECTION is not.
@@ -833,7 +854,13 @@ function LogsStream({
   terminated: PreviousInstance[];
 }) {
   const { ask } = useConsole();
-  const [text, setText] = useState("");
+  const tabId = useTabScope();
+  // The box starts from what the tab was left with, read once: it is this
+  // screen's to edit after that, so a later change to the saved value does not
+  // reset it. Outside a tab there is no id, and `""` is one no tab has — the
+  // empty view comes back, as it does for `useResourceTabView`.
+  const savedQuery = useTabView(tabId ?? "").query;
+  const [text, setText] = useState(savedQuery ?? "");
   /** The window picked off the histogram, if any. The one filter that isn't query text. */
   const [range, setRange] = useState<TimeRange | undefined>(undefined);
   /** Where focus goes when a pill is removed: the × that had it is about to unmount. */
@@ -865,6 +892,8 @@ function LogsStream({
   const [exportFailure, setExportFailure] = useState<{ title: string; error: unknown } | undefined>(undefined);
   /** Whether a range is being read from the cluster for an export. */
   const [exporting, setExporting] = useState(false);
+  /** Read once, when the screen opens its stream: a change applies to the next one, never restarts this. */
+  const [spoolMaxBytes] = useState(() => megabytes(logHistoryMb()));
   /** The line the detail panel is open on. The Row itself, so the panel outlives the line leaving the view. */
   const [selected, setSelected] = useState<Row | null>(null);
 
@@ -928,16 +957,25 @@ function LogsStream({
   );
 
   const sinceSeconds = SINCE.find((s) => s.value === since)?.seconds;
+  // A tab behind another stays mounted under `display: none` while the document is visible; its screen draws every
+  // row at 0px, so the stream is told not to give it any to draw until it is the tab on screen.
+  const showing = usePortalShowing();
   const stream = useLogStream(context, namespace, provider.targets ?? targets, {
+    visible: showing,
     // Always on: the design gives the time its own column, so the stamp is not
     // an option the reader turns on — it is where the first column comes from.
     timestamps: true,
     sinceSeconds: chosen ? (sinceSeconds ?? PROVIDER_ALL_SECONDS) : sinceSeconds,
     tailLines: TAIL_LINES,
     source: provider.source,
+    // The cluster's own stream keeps its history on disk (#914); an app's source keeps its own.
+    spoolMaxBytes: provider.source ? undefined : spoolMaxBytes,
   });
+  /** Whether the stream keeps a history the screen can load from and export (#914). */
+  const spooled =
+    !previous && stream.history !== undefined && stream.history.failed === undefined && stream.exportSpool !== undefined;
   // Home's "Live now" lists this tab only while the stream is actually running.
-  useMarkLogStream(useTabScope(), stream.status !== "error" && stream.status !== "completed");
+  useMarkLogStream(tabId, stream.status !== "error" && stream.status !== "completed");
   // A provider's stream that ended sends no more statuses, so the hook's last one
   // would go on saying it follows: the ending is what the readout says instead.
   const ended = chosen ? provider.end : null;
@@ -963,7 +1001,11 @@ function LogsStream({
         selection !== null &&
         !selection.isCollapsed &&
         viewport !== null &&
-        (viewport.contains(selection.anchorNode) || viewport.contains(selection.focusNode));
+        // Either end in the log, or the log inside it: Ctrl+A, or a drag from the filter bar past the whole log. A
+        // selection that only reaches into the log has an end in it, so the whole log is all there is left to ask.
+        (viewport.contains(selection.anchorNode) ||
+          viewport.contains(selection.focusNode) ||
+          selection.containsNode(viewport));
       syncHold();
     };
     // Anywhere on the window: a drag that started in the log can end anywhere, and a press the browser takes back,
@@ -1008,6 +1050,8 @@ function LogsStream({
     const timer = setTimeout(() => setHeldLong(true), HELD_NOTE_MS);
     return () => clearTimeout(timer);
   }, [stream.held]);
+  /** Whether the filter bar says the view is held: a following pane, held long enough to name. */
+  const heldNoted = !previous && !stream.paused && stream.held && heldLong;
   /**
    * The restarts the "Scrollback cleared" notice is not about. That notice says a
    * change of window reopened the stream and nothing already sent comes back. A change
@@ -1032,11 +1076,10 @@ function LogsStream({
    */
   const rowOf = useMemo(() => {
     const cache = new WeakMap<StreamLine, Row>();
-    let next = 0;
     return (line: StreamLine): Row => {
       let row = cache.get(line);
       if (row === undefined) {
-        row = toRow(line, byLabel, next++);
+        row = toRow(line, byLabel, nextRowId++);
         cache.set(line, row);
       }
       return row;
@@ -1138,7 +1181,21 @@ function LogsStream({
    */
   const deferredText = useDeferredValue(text);
   const applied = useMemo(() => parseLogQuery(deferredText), [deferredText]);
-  const clauses = applied.ok ? applied.clauses : NO_CLAUSES;
+  /**
+   * What the screen filters by, and the rows it may filter. A regex in the query is never run on this thread: a
+   * worker answers each row. A regex applies once its worker has answered the buffer, the query applying without it
+   * until then, and after that `answered` holds a later row back until it has. With no regex, `answered` is `rows`
+   * itself. A regex too slow on some line, or with no worker to run it, is left out the same way and named, for a
+   * typed query and for one restored with the tab alike. Every filter and count below reads `answered`, not `rows`.
+   */
+  const gate = useRegexGate(applied, rows);
+  const clauses = gate.clauses;
+  const answered = gate.rows;
+  // Saved from the deferred text, which lags the typed one by a render but does not wait for typing to stop, so this
+  // can run on many keystrokes in a row. tabsPersist's debounced save is what keeps that from being a file write each time.
+  useEffect(() => {
+    if (tabId !== null) setTabView(tabId, { query: deferredText });
+  }, [tabId, deferredText]);
 
   /** The pod boxes and the container select: the scope every view starts from. */
   const inScope = useCallback(
@@ -1148,21 +1205,22 @@ function LogsStream({
   /** Every filter applied: what the body draws, from every batch. */
   const filtered = useMemo(
     () =>
-      rows.filter(
+      answered.filter(
         (row) =>
           inScope(row) &&
           (clauses.length === 0 || matchLine(row, clauses)) &&
           (range === undefined || inRange(row, range)),
       ),
-    [rows, inScope, clauses, range],
+    [answered, inScope, clauses, range],
   );
   /**
    * The rows the rail, the facets and the histogram count. Each count is a pass over the whole buffer, and a busy
    * stream commits every frame: while lines are arriving these take the stream's rows at most four times a second,
    * the last batch always landing. A filter still applies at once, over the rows they have. Paused or reading a
-   * snapshot, nothing is arriving to hold back.
+   * snapshot, nothing is arriving to hold back, and neither is an empty buffer (a restart or a clear): it has nothing
+   * to count, and must not go on showing the old buffer's counts for the wait.
    */
-  const counted = useThrottledValue(rows, following ? RECOUNT_MS : 0);
+  const counted = useThrottledValue(answered, following && rows.length > 0 ? RECOUNT_MS : 0);
   const scoped = useMemo(() => counted.filter(inScope), [counted, inScope]);
   /** The query applied, but not the window: what the histogram counts, so it can shade the window instead of cropping to it. */
   const queried = useMemo(
@@ -1316,6 +1374,8 @@ function LogsStream({
    * pane the reader paused. That is the point: someone who pauses on a
    * failure and exports means "this, the thing I stopped on", not "this plus
    * the nine hundred lines that arrived while I was reading it".
+   *
+   * With history on disk, the picker beside Export chooses the history instead (#914).
    */
   function exportView() {
     setExportFailure(undefined);
@@ -1342,6 +1402,12 @@ function LogsStream({
    */
   async function exportRange(range: (typeof EXPORT_RANGES)[number]) {
     setExportFailure(undefined);
+    // The screen has left that regex out, and the file must not quietly do the same under a box that still holds it.
+    if (gate.slow !== undefined || gate.unavailable) {
+      const said = gate.slow !== undefined ? `Too slow to run on these lines: ${gate.slow}` : "Regex search is unavailable here";
+      setExportFailure({ title: SAVE_FAILED, error: new Error(said) });
+      return;
+    }
     setExporting(true);
     try {
       const read = await readRange(
@@ -1356,9 +1422,10 @@ function LogsStream({
         setExportFailure({ title: `Could not read the logs of ${read.where}`, error: read.error });
         return;
       }
-      const kept = read.lines
-        .map((l, i) => toRow(l, byLabel, i))
-        .filter((row) => clauses.length === 0 || matchLine(row, clauses))
+      // The query as applied, not the screen's clauses, which leave out a regex still answering the buffer. These
+      // lines are not the buffer's anyway, so a regex is answered for them by workers of their own.
+      const query = applied.ok ? applied.clauses : NO_CLAUSES;
+      const kept = (await keepMatching(query, read.lines.map((l, i) => toRow(l, byLabel, i))))
         // Stable, so lines of one container that share a stamp keep the order they were written in.
         .sort((a, b) => (a.at ?? 0) - (b.at ?? 0) || subMillisecond(a.raw) - subMillisecond(b.raw));
       await saveOrDownload(`${name}-${range.slug}.log`, exportContent(kept));
@@ -1369,12 +1436,36 @@ function LogsStream({
     }
   }
 
+  /**
+   * Export the history kept on disk (#914): all of it, or a span of it back from
+   * now. The stream writes it as it was kept — every line, unfiltered — through
+   * the native save on the desktop and a download on the web.
+   */
+  async function exportKept(range: (typeof KEPT_RANGES)[number]) {
+    setExportFailure(undefined);
+    setExporting(true);
+    try {
+      await stream.exportSpool?.(`${name}-${range.slug}.log`, range.seconds);
+    } catch (e) {
+      setExportFailure({ title: SAVE_FAILED, error: e });
+    } finally {
+      setExporting(false);
+    }
+  }
+
   // Sample the viewport and one row so the render can window the list. Both
   // degrade to 0 in jsdom, which `computeLogWindow` reads as "render
   // everything" — one of the bail-outs that make it correct.
+  const showingRef = useRef(showing);
+  showingRef.current = showing;
   const measure = useCallback(() => {
     const viewport = viewportRef.current;
     if (!viewport) return;
+    // A tab behind another is `display: none`, and a hidden document may lay out nothing: the viewport and its rows
+    // measure 0px, and 0 reads as "draw every row" to the window. So hiding a tab with 50,000 lines drew all of
+    // them once (a freeze of seconds), and so did showing it. The size it had stands until it is seen again.
+    // Only a zero-height viewport that is not showing is passed over: one that is showing is as small as it is.
+    if (viewport.clientHeight === 0 && (document.hidden || !showingRef.current)) return;
     const firstRow = rowsRef.current?.querySelector<HTMLElement>(".logline");
     const rowHeight = firstRow ? firstRow.getBoundingClientRect().height : 0;
     setMetrics((m) =>
@@ -1659,6 +1750,8 @@ function LogsStream({
               A range of the cluster's history is offered beside it (#915),
               except over a provider's stream, which `podLogs` cannot read, and
               a previous instance, whose last ten minutes before now are empty.
+              So is the history kept on disk (#914), while it is whole. A history
+              on disk is something to export even when the view is empty.
               A range still being read keeps either one busy: switching source
               does not stop it, and its save is still to come. */}
           {previous || chosen ? (
@@ -1695,6 +1788,25 @@ function LogsStream({
                   >
                     Current view
                   </button>
+                  {spooled && (
+                    <>
+                      <Eyebrow className="rule-t mt-[2px] px-2 pt-1.5 pb-0.5">kept on disk</Eyebrow>
+                      {KEPT_RANGES.map((range) => (
+                        <button
+                          key={range.slug}
+                          type="button"
+                          className="ns-row rounded-[5px]"
+                          aria-label={`${range.label} kept on disk`}
+                          onClick={() => {
+                            close();
+                            void exportKept(range);
+                          }}
+                        >
+                          {range.label}
+                        </button>
+                      ))}
+                    </>
+                  )}
                   <Eyebrow className="rule-t mt-[2px] px-2 pt-1.5 pb-0.5">from the cluster</Eyebrow>
                   {EXPORT_RANGES.map((range) => (
                     <button
@@ -1839,11 +1951,16 @@ function LogsStream({
             </Eyebrow>
           )}
           {/* Why a following pane stopped moving under a press or a selection, and what waits for its release. */}
-          {!previous && !stream.paused && stream.held && heldLong && (
+          {heldNoted && (
             <Eyebrow>
               {`Held while you select${stream.pendingWhilePaused > 0 ? ` · ${groupNumber(stream.pendingWhilePaused)} new lines` : ""}`}
             </Eyebrow>
           )}
+          {/* The same for a screen reader, which the note's coming and going does not reach. Always mounted, so the
+              words are a change to a region it already has, and without the count: that moves with every batch. */}
+          <span className="sr-only" role="status" aria-live="polite" aria-atomic="true" data-slot="held-live">
+            {heldNoted ? "View held while you select" : ""}
+          </span>
           {!previous && (
             <LiveSignal
               label={connectionLabel(
@@ -1861,6 +1978,16 @@ function LogsStream({
           // problem an invalid regular expression. An unclosed quote is not one.
           <div role="alert" className="mx-3 mt-2 text-[0.75rem]" style={{ color: toneColor("sev") }}>
             {typed.error}
+          </div>
+        )}
+        {typed.ok && gate.slow !== undefined && (
+          <div role="alert" className="mx-3 mt-2 text-[0.75rem]" style={{ color: toneColor("sev") }}>
+            Too slow to run on these lines: {gate.slow}
+          </div>
+        )}
+        {typed.ok && gate.unavailable && (
+          <div role="alert" className="mx-3 mt-2 text-[0.75rem]" style={{ color: toneColor("sev") }}>
+            Regex search is unavailable here
           </div>
         )}
         <FilterPills
@@ -1975,6 +2102,12 @@ function LogsStream({
           />
         )}
 
+        {/* Only while the history is in play: over the previous instance, or once the history stopped, the
+            error belongs to a load the reader can no longer retry. */}
+        {spooled && stream.loadError !== undefined && (
+          <FailureAlert title="Could not load earlier lines" error={stream.loadError} className="mx-3 mt-3" />
+        )}
+
         <div
           ref={viewportRef}
           onScroll={trackScroll}
@@ -2032,16 +2165,60 @@ function LogsStream({
             />
           ) : (
             <div ref={rowsRef}>
-              {!previous && stream.dropped > 0 && (
-                // The ring bit. A reader who scrolls to the top of a capped
-                // buffer is not at the beginning of the log, and silence here
-                // would let them believe they are. It is a fact about the LIVE
-                // ring, though: the previous instance's buffer arrived whole,
-                // in one fetch, and nothing has pushed anything out of it.
-                <div data-slot="dropped-banner" className="px-2.5 py-1 text-muted">
-                  Showing the newest {groupNumber(filtered.length)} lines ·{" "}
-                  {groupNumber(stream.dropped)} earlier lines dropped
-                </div>
+              {spooled && stream.history !== undefined ? (
+                (() => {
+                  const onDisk = stream.dropped + 1 - stream.history.first;
+                  const passed = stream.history.first - 1;
+                  if (onDisk <= 0 && passed <= 0) return null;
+                  // The lines before the first one shown are on disk, not gone (#914):
+                  // the banner says how many and fetches them a page at a time.
+                  return (
+                    <div
+                      data-slot="dropped-banner"
+                      // Its button is no press "in the log" to hold the view for: its click pauses the view itself.
+                      onPointerDown={(e) => e.stopPropagation()}
+                      className="flex flex-wrap items-center gap-x-2 px-2.5 py-1 text-muted"
+                    >
+                      {onDisk > 0 && <span>{groupNumber(onDisk)} earlier lines on disk</span>}
+                      {onDisk > 0 &&
+                        (stream.lines.length >= MAX_LOADED_LINES ? (
+                          <span>{groupNumber(MAX_LOADED_LINES)} lines loaded · Export for the rest</span>
+                        ) : (
+                          // `aria-disabled`, not `disabled`: a disabled button drops the keyboard focus it has, and
+                          // the reader would have to find the button again for the next page.
+                          <Button
+                            variant="secondary"
+                            size="sm"
+                            aria-disabled={stream.loadingEarlier || undefined}
+                            className="aria-disabled:cursor-not-allowed aria-disabled:opacity-50"
+                            onClick={() => {
+                              if (stream.loadingEarlier) return;
+                              // A following view moves every frame, and a busy stream pushes the page it is reading
+                              // straight back out of it (or past the lines it must join), so the page goes into a view
+                              // that holds still. Following again is the reader's to ask for.
+                              stream.pause();
+                              void stream.loadEarlier();
+                            }}
+                          >
+                            {stream.loadingEarlier ? "Loading…" : `Load ${groupNumber(EARLIER_PAGE)} earlier`}
+                          </Button>
+                        ))}
+                      {passed > 0 && <span>{groupNumber(passed)} oldest lines passed the history limit</span>}
+                    </div>
+                  );
+                })()
+              ) : (
+                !previous && stream.dropped > 0 && (
+                  // The ring bit. A reader who scrolls to the top of a capped
+                  // buffer is not at the beginning of the log, and silence here
+                  // would let them believe they are. It is a fact about the LIVE
+                  // ring, though: the previous instance's buffer arrived whole,
+                  // in one fetch, and nothing has pushed anything out of it.
+                  <div data-slot="dropped-banner" className="px-2.5 py-1 text-muted">
+                    Showing the newest {groupNumber(filtered.length)} lines ·{" "}
+                    {groupNumber(stream.dropped)} earlier lines dropped
+                  </div>
+                )
               )}
               {window_.topPad > 0 && (
                 <div style={{ height: window_.topPad }} aria-hidden="true" />
@@ -2080,7 +2257,7 @@ function LogsStream({
                     // screen; an override belongs to a line singled out for some
                     // reason OTHER than its level, and none is.
                     level={row.level}
-                    message={renderMessage(row, clauses)}
+                    message={renderMessage(row, clauses, gate.rangesFor(row))}
                   />
                 </div>
               ))}

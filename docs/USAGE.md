@@ -129,6 +129,32 @@ The selection belongs to the tab. In the new design a tab opened from another, s
 as Deployments from the sidebar while you are on Pods, starts with that tab's
 selection and is independent from then on.
 
+**Namespace collections.** In the new design the namespace selector also offers
+*collections*: saved groups of namespaces, on a **Collections** tab beside the
+**Namespaces** tab, most recently used first. Each tab counts what is chosen on
+it. A collection is any mix of:
+
+- **members**: namespaces that are always included;
+- **patterns**: names with `*` for any run of characters (`prod-*`, `*-canary`,
+  `team-*-staging`), case-sensitive;
+- **a label selector**, as `kubectl get -l` takes it (`env=prod`,
+  `team in (shop,data)`).
+
+A namespace is in the collection if it is a member, or if it matches the patterns
+and the selector (both, when both are set). Choosing one or more collections
+scopes the list to whatever they match on the cluster you are looking at — their
+union — so one collection works on every cluster; picking namespaces by hand
+replaces it again. If a collection matches nothing there, the list is empty and
+says so, rather than falling back to all namespaces.
+
+Pick namespaces and choose **Save as collection…** in the selector to save them
+as one, or manage them all in **Settings → Collections**, where the editor checks
+each pattern and selector as you type and previews what the collection matches on
+the cluster in focus, marking each member found or not found. Tick a namespace in
+the preview to keep it as a member. Members can be
+pasted as a list separated by commas or new lines. Collections are kept with your
+settings, so they are the same in every window and survive a restart.
+
 **Bulk actions.** Select rows with their checkboxes to reveal a bar with **Delete**,
 **Evict** (Pods), and **Rollout restart** (Deployments, StatefulSets, DaemonSets).
 Each is confirmation-gated and reports partial failures.
@@ -476,8 +502,15 @@ AI clients, using your locally authenticated cluster contexts. Open
   is never sent anywhere.
 
 Both transports support **resource subscriptions** (`resources/subscribe` on
-`k8s://` object URIs): the server pushes a `notifications/resources/updated`
-when the watched object changes, and the client re-reads. Over stdio,
+`k8s://` object URIs, including `/events`): the server pushes a
+`notifications/resources/updated` when the watched object or its matching Event
+collection changes, and the client re-reads. An `/events` subscription watches
+Events filtered by the involved object's name and kind, in its namespace (or
+across namespaces for a cluster-scoped object). A change to the parent object
+alone does not trigger an event-list notification. Initial lists and relists
+also notify, so changes between reading and subscribing are not missed. The
+32-subscription limit and existing resource restrictions still apply; pod log
+resources remain readable but cannot be subscribed to. Over stdio,
 notifications arrive on the server's stdout. Over HTTP, the client first opens
 the push channel — `GET /mcp` with `Accept: text/event-stream`, same bearer
 token — and notifications arrive as SSE events on that stream; subscribing

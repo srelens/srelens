@@ -4,6 +4,26 @@
  * string so the tab/settings interface stays a plain string.
  */
 
+/**
+ * The selection that names no namespace at all.
+ *
+ * An empty selection means "all namespaces", so a filter that matches nothing
+ * — a namespace collection none of whose rules or members is on this cluster
+ * (#881) — cannot be written as one: the list would quietly widen to every
+ * namespace. It is this instead: one name no namespace can have (a NUL is not
+ * a DNS label), which every list and watch over a selection recognises and
+ * asks nothing for. Hand it around by {@link selectsNothing}, not by value.
+ */
+export const NO_NAMESPACE = "\u0000none";
+
+/** The selection that asks for nothing. Frozen, so its identity is stable. */
+export const SELECTS_NOTHING: readonly string[] = Object.freeze([NO_NAMESPACE]);
+
+/** Whether a selection names no namespace at all — see {@link NO_NAMESPACE}. */
+export function selectsNothing(selection: readonly string[]): boolean {
+  return selection.length > 0 && selection.every((ns) => ns === NO_NAMESPACE);
+}
+
 /** Parse the persisted comma string into a deduped set (empty = all). */
 export function parseNamespaceSelection(value: string): string[] {
   const seen = new Set<string>();
@@ -29,6 +49,9 @@ export function serializeNamespaceSelection(selection: string[]): string {
  * fallback, an app column's scope — where "several" genuinely means none.
  */
 export function watchNamespaceForSelection(selection: string[]): string {
+  // A selection of nothing has no namespace to hint at, and its marker must
+  // never reach a request as a namespace name.
+  if (selectsNothing(selection)) return "";
   return selection.length === 1 ? selection[0] : "";
 }
 

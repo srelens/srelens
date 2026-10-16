@@ -7,11 +7,11 @@ Everything this server exposes over MCP, generated from the live registry so it 
 
 ## Tools
 
-132 tools, grouped by area and then by how a call is gated. Argument schemas are not reproduced here — call `tools/list` for those, which cannot go stale.
+135 tools, grouped by area and then by how a call is gated. Argument schemas are not reproduced here — call `tools/list` for those, which cannot go stale.
 
 **Impact** is how much a successful call disturbs — `low`, `medium` or `high` — and is a different question from the section heading, which is how the call is gated. A capability that accepts several named operations carries the highest level any of them reaches; the per-operation level travels with the resource.
 
-### Kubernetes — read-only (60)
+### Kubernetes — read-only (63)
 
 | Tool | Impact | Summary |
 | --- | --- | --- |
@@ -47,7 +47,7 @@ Everything this server exposes over MCP, generated from the live registry so it 
 | `k8s.listPersistentVolumes` | low | list PersistentVolumes of a connected kube context (cluster-scoped) |
 | `k8s.listPods` | low | list pods in a namespace of a connected kube context |
 | `k8s.listReplicaSets` | low | list the ReplicaSets owned by a Deployment (its rollout revisions) |
-| `k8s.listResource` | low | list any supported resource kind (name + namespace), optionally filtered by `labelSelector`/`fieldSelector`. Pass `fields` (kubectl-style JSONPath such as .status.allocatable or .spec.taints) to get those paths for every item in one call, keyed by path in each row's `fields`, with null where an item has none. Prefer this over one getObject call per item when a summary tool lacks a field you need. |
+| `k8s.listResource` | low | list resources of a kind (name + namespace), optionally filtered by `labelSelector`/`fieldSelector`. For a custom resource, pass its `group`, `version` and `plural` as well as `kind` (e.g. traefik.io / v1alpha1 / ingressroutes for IngressRoute), as getObject takes them. Pass `fields` (kubectl-style JSONPath such as .status.allocatable or .spec.taints) to get those paths for every item in one call, keyed by path in each row's `fields`, with null where an item has none. Prefer this over one getObject call per item when a summary tool lacks a field you need. |
 | `k8s.listResourceQuotas` | low | list ResourceQuotas in a namespace of a connected kube context |
 | `k8s.listRoleBindings` | low | list RoleBindings in a namespace of a connected kube context |
 | `k8s.listRoles` | low | list Roles in a namespace of a connected kube context |
@@ -71,10 +71,13 @@ Everything this server exposes over MCP, generated from the live registry so it 
 | `k8s.prometheusDiscover` | low | find a Prometheus-compatible query API running in the cluster |
 | `k8s.prometheusQuery` | low | run a PromQL instant query against an in-cluster Prometheus |
 | `k8s.queryPodEndpoint` | low | Query an HTTP endpoint (such as /metrics, /healthz, or custom app endpoints) inside any running pod via an on-demand API port-forward tunnel. Automatically resolves pod by selector or name, auto-detects metric/service ports, and supports line filtering. |
+| `k8s.serviceHealthProbe` | low | evaluates service port mapping, targetPort alignment with containerPorts, and EndpointSlice readiness |
 | `k8s.synthesizeClusterKubeconfig` | low | synthesize a one-context kubeconfig from Add-cluster form fields |
 | `k8s.testClusterConnection` | low | probe a kubeconfig context's server reachability (no exec plugins run) |
 | `k8s.topologyGraph` | low | graph the ingresses, services, workloads and dependencies of one or more namespaces |
 | `k8s.validateManifest` | low | validate a resource manifest against the API server (dry-run, strict) |
+| `k8s.whyNotReady` | low | assembles structured root-cause evidence for unready or crashing pods (container states, exit codes, failing probes, warning events, and capped log tail) |
+| `k8s.whyPending` | low | diagnoses why a pod is stuck pending by evaluating scheduler node rejection counts, pod resource requests, unbound PVCs, and scheduling events |
 
 ### Kubernetes — sensitive read (6)
 

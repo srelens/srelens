@@ -30,6 +30,13 @@ export interface Storage {
 const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
 const isString = (v: unknown): v is string => typeof v === "string";
 
+/**
+ * The longest Logs query a tab restores. A longer one is still written with the tab, because the save does not look
+ * inside a view; it is dropped on load, so a pasted stack trace is not worth restoring but does sit in the settings
+ * file until the query changes.
+ */
+export const MAX_SAVED_QUERY = 2000;
+
 const isTableSort = (v: unknown): v is TableSort =>
   isRecord(v) && isString(v.key) && (v.direction === "asc" || v.direction === "desc");
 
@@ -50,6 +57,9 @@ function parseView(v: unknown): Tab["view"] | undefined {
   if (v.filterKey === null) view.filterKey = null;
   else if (isString(v.filterKey)) view.filterKey = v.filterKey;
   if (typeof v.regex === "boolean") view.regex = v.regex;
+  // Too long is dropped, not cut: half a query filters differently from the
+  // one that was typed, and a restored tab should show what it was left with.
+  if (isString(v.query) && v.query.length <= MAX_SAVED_QUERY) view.query = v.query;
   return view;
 }
 
@@ -70,7 +80,7 @@ function parseTab(v: unknown): Tab | null {
   // back showing what it showed; with no `sub` it follows the rail as before.
   const detail = parseDetailRoute(tab.route);
   if (detail && !detail.cluster && tab.sub) {
-    tab.route = detailRoute(detail.kind, detail.namespace, detail.name, { cluster: tab.sub });
+    tab.route = detailRoute(detail.kind, detail.namespace, detail.name, { cluster: tab.sub, group: detail.group });
   }
   // The former Control room route is now app-wide; retain the tab's identity
   // and pin preference while dropping its obsolete cluster label.
@@ -86,6 +96,11 @@ function parseTab(v: unknown): Tab | null {
   if (view !== undefined) tab.view = view;
   const namespaces = parseNamespaces(v.namespaces);
   if (namespaces !== undefined) tab.namespaces = namespaces;
+  // The same shape: per cluster, a list of names (collection names here).
+  const namespaceCollections = parseNamespaces(v.namespaceCollections);
+  if (namespaceCollections !== undefined && Object.keys(namespaceCollections).length > 0) {
+    tab.namespaceCollections = namespaceCollections;
+  }
   if (typeof v.closedAt === "number" && Number.isFinite(v.closedAt)) tab.closedAt = v.closedAt;
   return tab;
 }

@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { VOLUME_STEPS } from "@srelens/core";
+import { VOLUME_STEPS, wallClock } from "@srelens/core";
 import { clockTime, DAY, dateTime, MINUTE, niceCeil, rangeLabel, spansDays, stepLabel, tickLabels, timeTicks } from "./time";
 
 // Local-time constructors, so these hold in every zone.
@@ -197,6 +197,20 @@ describe("timeTicks", () => {
     expect([...ticks].sort((a, b) => a - b)).toEqual(ticks);
   });
 
+  // West of UTC the Date's first local day is before its first instant, so counting it has no answer.
+  it.each(["America/New_York", "Pacific/Honolulu", "Pacific/Auckland", "Pacific/Kiritimati"])(
+    "keeps a span as wide as a Date can hold to a handful of ticks in %s too",
+    (zone) => {
+      inZone(zone, () => {
+        const ticks = timeTicks(-8.64e15, 8.64e15);
+        expect(ticks.length).toBeGreaterThan(1);
+        expect(ticks.length).toBeLessThanOrEqual(6);
+        expect(ticks.every((t) => Number.isFinite(t))).toBe(true);
+        expect([...ticks].sort((a, b) => a - b)).toEqual(ticks);
+      });
+    },
+  );
+
   it("returns nothing for an empty or backwards span", () => {
     expect(timeTicks(at(12), at(12))).toEqual([]);
     expect(timeTicks(at(12, 1), at(12))).toEqual([]);
@@ -224,6 +238,173 @@ describe("timeTicks", () => {
   });
 });
 
+describe("timeTicks, past a day", () => {
+  const ZONES = ["UTC", "Europe/Berlin", "America/New_York", "Asia/Kathmandu", "Pacific/Auckland"];
+  const local = (y: number, m: number, d: number, h = 0) => new Date(y, m - 1, d, h).getTime();
+  /** The local calendar day a tick falls on, as a count of days: DST-proof where a difference of instants is not. */
+  const dayOf = (t: number) => {
+    const d = new Date(t);
+    return Date.UTC(d.getFullYear(), d.getMonth(), d.getDate()) / DAY;
+  };
+  const monthOf = (t: number) => new Date(t).getFullYear() * 12 + new Date(t).getMonth();
+  const gaps = (ticks: number[], of: (t: number) => number) => ticks.slice(1).map((t, i) => of(t) - of(ticks[i]));
+
+  type Stamp = readonly [y: number, m: number, d: number, h: number];
+  /** The ticks of `[from, to]` in each zone, the stamps read on that zone's clock. */
+  const everywhere = (from: Stamp, to: Stamp, check: (ticks: number[], zone: string) => void) => {
+    for (const zone of ZONES) {
+      inZone(zone, () => {
+        const ticks = timeTicks(local(...from), local(...to));
+        expect(ticks.length, zone).toBeGreaterThan(1);
+        expect(ticks.length, zone).toBeLessThanOrEqual(6);
+        for (const t of ticks) {
+          expect(clockTime(t), zone).toBe("00:00:00");
+          expect(t, zone).toBeGreaterThanOrEqual(local(...from));
+          expect(t, zone).toBeLessThanOrEqual(local(...to));
+        }
+        check(ticks, zone);
+      });
+    }
+  };
+
+  // Mondays, `weeks` apart: the smallest that puts at most six in the span.
+  it.each([
+    [[2026, 9, 2, 13], [2026, 10, 7, 9], 1],
+    [[2026, 9, 2, 13], [2026, 11, 11, 9], 2],
+    [[2026, 9, 2, 13], [2027, 1, 20, 9], 4],
+  ] as const)("puts a span of weeks on local Mondays, equally far apart (%#)", (from, to, weeks) => {
+    everywhere(from, to, (ticks, zone) => {
+      for (const t of ticks) expect(new Date(t).getDay(), `${zone} ${new Date(t).toString()}`).toBe(1);
+      expect(gaps(ticks, dayOf), zone).toEqual(ticks.slice(1).map(() => weeks * 7));
+    });
+  });
+
+  // The 1st of a month, `months` apart: the smallest that puts at most six in the span.
+  it.each([
+    [[2026, 1, 15, 8], [2026, 10, 15, 8], 2],
+    [[2025, 3, 17, 8], [2027, 3, 17, 8], 6],
+    [[2025, 3, 17, 8], [2030, 3, 17, 8], 12],
+  ] as const)("puts a span of months on the 1st, equally far apart (%#)", (from, to, months) => {
+    everywhere(from, to, (ticks, zone) => {
+      for (const t of ticks) expect(new Date(t).getDate(), `${zone} ${new Date(t).toString()}`).toBe(1);
+      expect(gaps(ticks, monthOf), zone).toEqual(ticks.slice(1).map(() => months));
+    });
+  });
+
+  it("honours a smaller maxTicks by taking wider weeks, then months", () => {
+    inZone("UTC", () => {
+      const ticks = timeTicks(local(2026, 9, 2, 13), local(2027, 1, 20, 9), 3);
+      expect(ticks.length).toBeGreaterThan(1);
+      expect(ticks.length).toBeLessThanOrEqual(3);
+      expect(ticks.every((t) => new Date(t).getDate() === 1)).toBe(true);
+    });
+  });
+
+  it("keeps its Mondays where they were as the window slides, so a live axis does not shuffle", () => {
+    inZone("UTC", () => {
+      const from = local(2026, 9, 2, 13);
+      const to = local(2026, 11, 11, 9);
+      const ticks = timeTicks(from, to);
+      // A week on, so a grid counted from `from` would swap its Mondays for the ones between.
+      const slid = timeTicks(from + 7 * DAY, to + 7 * DAY);
+      const kept = ticks.filter((tick) => tick >= from + 7 * DAY);
+      expect(kept.length).toBeGreaterThan(1);
+      for (const t of kept) expect(slid).toContain(t);
+    });
+  });
+
+  it("cuts a step of under seven days on whole days, as it always has", () => {
+    for (const zone of ZONES) {
+      inZone(zone, () => {
+        // Fifteen days, six ticks at most: a three-day step, counted from the epoch on the reader's clock.
+        const ticks = timeTicks(local(2026, 10, 1), local(2026, 10, 16));
+        expect(ticks.length, zone).toBeGreaterThan(1);
+        for (const t of ticks) expect(wallClock(t) % (3 * DAY), zone).toBe(0);
+      });
+    }
+  });
+
+  it("changes over to weeks at a step of seven days, and not before", () => {
+    inZone("UTC", () => {
+      // Thirty days over five gaps is six days a tick; thirty-one is seven.
+      const sixDays = timeTicks(local(2026, 10, 1), local(2026, 10, 31));
+      expect(sixDays.length).toBeGreaterThan(1);
+      for (const t of sixDays) expect(wallClock(t) % (6 * DAY)).toBe(0);
+      const sevenDays = timeTicks(local(2026, 10, 1), local(2026, 11, 1));
+      expect(sevenDays.length).toBeGreaterThan(1);
+      for (const t of sevenDays) expect(new Date(t).getDay()).toBe(1);
+    });
+  });
+
+  it("leaves a span of three days on its midnights, as it always has", () => {
+    inZone("UTC", () => {
+      expect(timeTicks(local(2026, 10, 12), local(2026, 10, 15))).toEqual([
+        local(2026, 10, 12),
+        local(2026, 10, 13),
+        local(2026, 10, 14),
+        local(2026, 10, 15),
+      ]);
+    });
+  });
+
+  it("tells a Monday or a 1st by its date", () => {
+    inZone("UTC", () => {
+      const weeks = timeTicks(local(2026, 9, 2, 13), local(2026, 11, 11, 9));
+      expect(tickLabels(weeks)).toEqual(["09-14", "09-28", "10-12", "10-26", "11-09"]);
+      const months = timeTicks(local(2025, 3, 17, 8), local(2027, 3, 17, 8));
+      expect(tickLabels(months)).toEqual(months.map((t) => dateTime(t).slice(0, 10)));
+    });
+  });
+
+  it("dates a 1st whose midnight the clocks skipped, rather than showing a bare 01:00", () => {
+    // Paraguay put its clocks forward at 00:00 on 1 October 2023, so that day has no midnight.
+    inZone("America/Asuncion", () => {
+      const oct = new Date(2023, 9, 1).getTime();
+      expect(new Date(oct).getHours()).toBe(1);
+      const ticks = timeTicks(local(2023, 8, 1), local(2024, 8, 1), 4);
+      expect(ticks).toEqual([oct, local(2024, 1, 1), local(2024, 4, 1), local(2024, 7, 1)]);
+      // Every tick starts a day, so the axis names days and leaves the clock off: the 01:00 is not shown either.
+      expect(tickLabels(ticks)).toEqual(["2023-10-01", "2024-01-01", "2024-04-01", "2024-07-01"]);
+      // Among hours, the same tick keeps its clock, and is dated all the same.
+      expect(tickLabels([oct - 3_600_000, oct, oct + 3_600_000])).toEqual(["23:00", "10-01 01:00", "02:00"]);
+    });
+  });
+
+  describe("the year on a date", () => {
+    it("is on every dated label once the ticks run into a second year, so no two read alike", () => {
+      for (const zone of ZONES) {
+        inZone(zone, () => {
+          // Six months a tick across two years: the same 01-01 and 07-01 twice over without it.
+          const labels = tickLabels(timeTicks(local(2025, 3, 17, 8), local(2027, 3, 17, 8)));
+          expect(labels, zone).toEqual(["2025-07-01", "2026-01-01", "2026-07-01", "2027-01-01"]);
+        });
+      }
+    });
+
+    it("dates an hourly axis's New Year midnight with its year, and leaves the other hours bare", () => {
+      for (const zone of ZONES) {
+        inZone(zone, () => {
+          const ticks = timeTicks(local(2026, 12, 31, 22), local(2027, 1, 1, 2));
+          expect(tickLabels(ticks), zone).toEqual(["22:00", "23:00", "2027-01-01 00:00", "01:00", "02:00"]);
+        });
+      }
+    });
+
+    it("is left off while the ticks stay within one year", () => {
+      for (const zone of ZONES) {
+        inZone(zone, () => {
+          // Weeks apart, and a New Year's Eve axis that has not reached the new year yet.
+          const weeks = tickLabels(timeTicks(local(2026, 9, 2, 13), local(2026, 11, 11, 9)));
+          expect(weeks.length, zone).toBeGreaterThan(1);
+          expect(weeks.every((label) => /^\d\d-\d\d$/.test(label)), zone).toBe(true);
+          const evening = tickLabels(timeTicks(local(2026, 12, 30, 20), local(2026, 12, 31, 23)));
+          expect(evening, zone).toEqual(["12-31 00:00", "06:00", "12:00", "18:00"]);
+        });
+      }
+    });
+  });
+});
+
 describe("tickLabels", () => {
   it("names a tick that starts a local day by its date", () => {
     const ticks = timeTicks(at(12, 23), at(13, 1));
@@ -236,7 +417,11 @@ describe("tickLabels", () => {
     expect(tickLabels(ticks)[0]).toMatch(/^10:00:[0-9]{2}$/);
   });
 
-  it("dates each tick of a span of days", () => {
-    expect(tickLabels([at(12), at(13), at(14)])).toEqual(["10-12 00:00", "10-13 00:00", "10-14 00:00"]);
+  it("gives each tick of a span of days its date alone, with no clock to repeat", () => {
+    expect(tickLabels([at(12), at(13), at(14)])).toEqual(["10-12", "10-13", "10-14"]);
+  });
+
+  it("keeps the clock on a day's tick that sits among hours", () => {
+    expect(tickLabels([at(12, 22), at(13), at(13, 2)])).toEqual(["22:00", "10-13 00:00", "02:00"]);
   });
 });

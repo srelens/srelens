@@ -68,6 +68,12 @@ export function pickerFilter(value: string, search: string, keywords?: string[])
 }
 
 export interface PickerProps {
+  /** Under the search box, above the list — tabs between two kinds of row. */
+  header?: ReactNode;
+  /** What an empty list says; "No results" unless the caller knows better. */
+  empty?: ReactNode;
+  /** Told when the popover opens or closes. */
+  onOpenChange?: (open: boolean) => void;
   /** A row under the list, ruled off from it — counts and list-wide actions. */
   footer?: ReactNode;
   /** What the trigger says about the current state — a value, a count, a stand-in. */
@@ -113,8 +119,12 @@ export interface PickerProps {
  * search box holds a filter rather than anything the reader would mind losing.
  * Outside a scope nothing changes at all. (#357)
  */
-export function Picker({ summary, ariaLabel, ariaInvalid, ariaRequired, ariaDescribedBy, searchPlaceholder = "Search…", className, footer, children }: PickerProps) {
-  const [open, setOpen] = useState(false);
+export function Picker({ summary, ariaLabel, ariaInvalid, ariaRequired, ariaDescribedBy, searchPlaceholder = "Search…", className, footer, header, empty, onOpenChange, children }: PickerProps) {
+  const [open, setOpenState] = useState(false);
+  const setOpen = (next: boolean) => {
+    setOpenState(next);
+    onOpenChange?.(next);
+  };
   const container = usePortalContainer();
 
   return (
@@ -158,21 +168,35 @@ export function Picker({ summary, ariaLabel, ariaInvalid, ariaRequired, ariaDesc
                 className="w-full bg-transparent text-[0.8125rem] outline-none placeholder:text-faint"
               />
             </div>
+            {filled(header) && <div className="rule-b px-2 py-1.5">{header}</div>}
             {/* Capped and scrolling: the whole reason to reach for this over a
                 plain select is that the option set is too long to show. */}
             <Command.List className="scroll max-h-[240px]">
-              <Command.Empty className="px-3 py-4 text-center text-[0.75rem] text-faint">No results</Command.Empty>
+              <Command.Empty className="px-3 py-4 text-center text-[0.75rem] text-faint">{empty ?? "No results"}</Command.Empty>
               {children(() => setOpen(false))}
             </Command.List>
             {filled(footer) && (
               // Ruled off above rather than below: it belongs to the list, and
               // the rule is what stops it reading as one more option.
-              <div className="rule-t flex items-center gap-1.5 px-2 py-1.5">{footer}</div>
+              <div className="rule-t flex flex-wrap items-center gap-1.5 px-2 py-1.5">{footer}</div>
             )}
           </Command>
         </Popover.Content>
       </Popover.Portal>
     </Popover.Root>
+  );
+}
+
+/**
+ * Rows under a heading — a picker that offers two kinds of thing, such as
+ * namespace collections above namespaces. A search that leaves a group no
+ * rows hides its heading with them.
+ */
+export function PickerGroup({ heading, children }: { heading: string; children: ReactNode }) {
+  return (
+    <Command.Group heading={heading} className="picker-group">
+      {children}
+    </Command.Group>
   );
 }
 

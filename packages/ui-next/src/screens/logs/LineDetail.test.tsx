@@ -120,9 +120,10 @@ describe("LineDetail", () => {
       expect(onToggle).toHaveBeenCalledWith({ field: "level", value: "error" }, "exclude");
     });
 
-    it("offers no filter when the line has no level word to filter on, as a numeric level has none", () => {
-      detail({ line: lineWith('{"level":30,"msg":"hello"}', "", { level: "30", msg: "hello" }) });
-      expect(screen.getByText("30")).toBeTruthy();
+    it("offers no filter when the line has no level word to filter on, as a number that names no level has none", () => {
+      // Not 30: core reads that pino number as info. 35 sits between two levels and names neither.
+      detail({ line: lineWith('{"level":35,"msg":"hello"}', "", { level: "35", msg: "hello" }) });
+      expect(screen.getByText("35")).toBeTruthy();
       expect(screen.queryByRole("button", { name: /level/i })).toBeNull();
       // The other fields are unaffected.
       expect(screen.getByRole("button", { name: "Filter for msg = hello" })).toBeTruthy();

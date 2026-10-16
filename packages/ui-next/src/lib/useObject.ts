@@ -1,10 +1,13 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { getObject, type K8sObject } from "@srelens/core";
+import { getObject, type CrdRef, type K8sObject } from "@srelens/core";
+import { isCustomKind, resolveCrdGvk } from "./crdGvk";
 
 export type ObjectStatus = "loading" | "ready" | "error";
 
 export interface ObjectResource {
   object?: K8sObject;
+  /** The CustomResourceDefinition the object was read through — a custom kind only. */
+  crd?: CrdRef;
   status: ObjectStatus;
   error?: string;
   reload(): void;
@@ -22,10 +25,10 @@ export interface ObjectResource {
   refresh(): void;
 }
 
-/** The four values that identify what is being loaded, as one comparable
- *  string. Same shape `ResourceDetailView` already builds for its own reset. */
-function keyFor(context: string, kind: string, namespace: string | null, name: string): string {
-  return `${context}|${kind}|${namespace ?? ""}|${name}`;
+/** The values that identify what is being loaded, as one comparable string.
+ *  The group is one of them: two CRDs sharing a kind are two subjects. */
+function keyFor(context: string, kind: string, namespace: string | null, name: string, group?: string): string {
+  return `${context}|${group ?? ""}|${kind}|${namespace ?? ""}|${name}`;
 }
 
 /**
@@ -56,8 +59,15 @@ function keyFor(context: string, kind: string, namespace: string | null, name: s
  * holds on the very first commit after the target changes, and it cannot be
  * undone by a future refactor reordering effects.
  */
-export function useObject(context: string, kind: string, namespace: string | null, name: string): ObjectResource {
-  const targetKey = keyFor(context, kind, namespace, name);
+export function useObject(
+  context: string,
+  kind: string,
+  namespace: string | null,
+  name: string,
+  /** The API group, for a custom kind only — see `isCustomKind`. */
+  group?: string,
+): ObjectResource {
+  const targetKey = keyFor(context, kind, namespace, name, group);
   const [state, setState] = useState<Omit<ObjectResource, "reload" | "refresh"> & { targetKey: string }>({
     status: "loading",
     targetKey,
@@ -82,7 +92,18 @@ export function useObject(context: string, kind: string, namespace: string | nul
     const keeps = (prev: { status: string; targetKey: string }) =>
       quiet && prev.status === "ready" && prev.targetKey === targetKey;
     setState((prev) => (keeps(prev) ? prev : { status: "loading", targetKey }));
-    getObject(context, kind, namespace, name).then(
+    // A custom kind is read through its CustomResourceDefinition: the host
+    // resolves built-in kinds by name and refuses anything else (#919). The
+    // lookup's refusal — none, or more than one claiming the kind — is this
+    // read's error. A built-in is read exactly as before, four arguments.
+    const read = async (): Promise<{ object?: K8sObject; crd?: CrdRef; error?: string }> => {
+      if (!isCustomKind(kind, group)) return getObject(context, kind, namespace, name);
+      const resolved = await resolveCrdGvk(context, kind, group);
+      if (resolved.error) return { error: resolved.error };
+      const result = await getObject(context, kind, namespace, name, undefined, resolved.crd);
+      return { ...result, crd: resolved.ref };
+    };
+    read().then(
       (result) => {
         if (gen.current !== mine) return;
         if (result.error) {
@@ -90,7 +111,7 @@ export function useObject(context: string, kind: string, namespace: string | nul
           setState((prev) => (keeps(prev) ? prev : { status: "error", error, targetKey }));
           return;
         }
-        setState({ status: "ready", object: result.object, targetKey });
+        setState({ status: "ready", object: result.object, crd: result.crd, targetKey });
       },
       (e: unknown) => {
         if (gen.current !== mine) return;
@@ -99,10 +120,10 @@ export function useObject(context: string, kind: string, namespace: string | nul
       },
     );
     return () => { if (gen.current === mine) gen.current++; };
-    // `targetKey` is derived from the four values already listed, so it never
+    // `targetKey` is derived from the values already listed, so it never
     // changes without one of them changing.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [context, kind, namespace, name, tick]);
+  }, [context, kind, namespace, name, group, tick]);
 
   // The gate itself. `reload` is handed back either way: it is stable, and a
   // caller must be able to retry the target it is asking about right now.

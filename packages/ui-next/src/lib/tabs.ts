@@ -17,8 +17,9 @@ export interface Tab {
    * A resource list's sort, filter string and active filter column. Belongs
    * to the tab, not the screen, so it survives a restart the way the rest of
    * the tab does. Absent until the user sorts or filters — see `setTabView`.
+   * A Logs tab keeps its search box here, as `query`.
    */
-  view?: { sort?: TableSort | null; filter?: string; filterKey?: string | null; regex?: boolean };
+  view?: { sort?: TableSort | null; filter?: string; filterKey?: string | null; regex?: boolean; query?: string };
   /**
    * The namespace selection this tab is narrowed to, per cluster, keyed by
    * `ClusterContext.stableId`. On the tab, not the cluster: narrowing one tab
@@ -31,6 +32,14 @@ export interface Tab {
    * default-namespace preference.
    */
   namespaces?: Record<string, string[]>;
+  /**
+   * The namespace collections this tab is scoped to, per cluster, by name
+   * (#881). Where a cluster has any, they stand in for its `namespaces`
+   * entry: the selection is whatever they resolve to on that cluster, worked
+   * out again whenever the collections or the namespace listing change. The
+   * two are never both set for one cluster — choosing either clears the other.
+   */
+  namespaceCollections?: Record<string, string[]>;
   /**
    * When the tab was closed, on a tab in a recently closed list only. It is
    * what orders that list when a cluster's own closed tabs are brought back

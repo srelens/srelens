@@ -804,9 +804,15 @@ async fn log_lines_and_status_markers_for_the_open_log_stream_are_appended() {
     );
     app.active_view = ActiveView::Logs(logs);
 
-    app.handle_stream_event("logs:web-0:1".into(), json!({ "line": "hello world" }));
+    app.handle_stream_event(
+        "logs:web-0:1".into(),
+        json!({ "seq": 1, "lines": [{ "source": "", "line": "hello world" }] }),
+    );
     app.handle_stream_event("logs:web-0:1".into(), json!({ "status": "closed" }));
-    app.handle_stream_event("logs:other:2".into(), json!({ "line": "ignored" }));
+    app.handle_stream_event(
+        "logs:other:2".into(),
+        json!({ "seq": 2, "lines": [{ "source": "", "line": "ignored" }] }),
+    );
 
     let ActiveView::Logs(l) = &app.active_view else {
         panic!("logs")

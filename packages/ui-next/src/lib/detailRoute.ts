@@ -18,6 +18,15 @@
 /** Stands in for a cluster-scoped kind's namespace, which does not exist. */
 export const CLUSTER_SCOPED_SEGMENT = "-";
 
+/**
+ * A namespace as its route segment. Empty reads as none: a custom resource's
+ * list row carries `""` for a cluster-scoped kind, and an empty segment is one
+ * the parser refuses, so its tab would never open (#940).
+ */
+function namespaceSegment(namespace: string | null): string {
+  return namespace ? encodeURIComponent(namespace) : CLUSTER_SCOPED_SEGMENT;
+}
+
 export function detailRoute(
   kind: string,
   namespace: string | null,
@@ -25,10 +34,12 @@ export function detailRoute(
   on: {
     /** The cluster's context name: the tab shows this cluster's object, whatever the rail does. */
     cluster: string;
+    /** The API group, for a custom kind only — see {@link DetailRouteParts.group}. */
+    group?: string;
   },
 ): string {
-  const ns = namespace === null ? CLUSTER_SCOPED_SEGMENT : encodeURIComponent(namespace);
-  return `/k/${encodeURIComponent(on.cluster)}/${encodeURIComponent(kind)}/${ns}/${encodeURIComponent(name)}`;
+  const qualified = on.group ? `${on.group}/${kind}` : kind;
+  return `/k/${encodeURIComponent(on.cluster)}/${encodeURIComponent(qualified)}/${namespaceSegment(namespace)}/${encodeURIComponent(name)}`;
 }
 
 export interface DetailRouteParts {
@@ -38,6 +49,9 @@ export interface DetailRouteParts {
   /** The cluster the tab is pinned to. Absent only on the shape an earlier
    *  build persisted, which had no cluster in it; such a tab follows the rail. */
   cluster?: string;
+  /** Set only for a custom kind, whose name alone does not identify it — the
+   *  reason {@link EditRouteParts} carries it, word for word (#919). */
+  group?: string;
 }
 
 /**
@@ -73,9 +87,8 @@ export function editRoute(
     group?: string;
   },
 ): string {
-  const ns = namespace === null ? CLUSTER_SCOPED_SEGMENT : encodeURIComponent(namespace);
   const qualified = on.group ? `${on.group}/${kind}` : kind;
-  return `/edit/${encodeURIComponent(on.cluster)}/${encodeURIComponent(qualified)}/${ns}/${encodeURIComponent(name)}`;
+  return `/edit/${encodeURIComponent(on.cluster)}/${encodeURIComponent(qualified)}/${namespaceSegment(namespace)}/${encodeURIComponent(name)}`;
 }
 
 /**
@@ -219,5 +232,6 @@ function splitGroup(parts: DetailRouteParts): EditRouteParts | null {
  * `screenFor` can tell the two apart.
  */
 export function parseDetailRoute(route: string): DetailRouteParts | null {
-  return parsePinnedRoute(route, "k");
+  const parts = parsePinnedRoute(route, "k");
+  return parts ? splitGroup(parts) : null;
 }

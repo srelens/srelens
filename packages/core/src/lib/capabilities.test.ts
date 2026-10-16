@@ -238,9 +238,17 @@ describe("renderConfirmTemplate", () => {
 });
 
 describe("UI-only capabilities (#575)", () => {
-  it("are native app operations, log and metrics, read-only, marked only where true", () => {
+  it("are native app operations, log and metrics, and collection matching, read-only, marked only where true", () => {
     const uiOnly = CAPABILITY_CATALOG.filter((c) => c.uiOnly).map((c) => c.id);
-    expect(uiOnly).toEqual(["extensions.callOperation", "extensions.inspect", "extensions.logs"]);
+    // Collections (#881) are kept in the UI's settings, so an agent would
+    // have nothing to pass these.
+    expect(uiOnly).toEqual([
+      "collections.resolveNamespaces",
+      "collections.validate",
+      "extensions.callOperation",
+      "extensions.inspect",
+      "extensions.logs",
+    ]);
     expect(CAPABILITY_CATALOG.filter((c) => c.uiOnly).every((c) => c.readOnly && !c.requiresConfirm)).toBe(true);
     // Every other row leaves the field out rather than writing `false`.
     expect(catalog.filter((row) => "uiOnly" in row).map((row) => row.id)).toEqual(uiOnly);

@@ -65,7 +65,7 @@ impl Scope {
             namespace,
         )?;
         let dir = std::env::temp_dir().join(format!("srelens-term-{}-{}", std::process::id(), id));
-        make_private_dir(&dir)?;
+        make_private_dir(&dir).map_err(|e| e.to_string())?;
         let scope = Scope {
             kubeconfig: dir.join("kubeconfig"),
             bin: cfg!(unix).then(|| dir.join("bin")),
@@ -81,7 +81,7 @@ impl Scope {
     fn write(&self, context: &str, yaml: &str) -> Result<(), String> {
         write_private(&self.kubeconfig, yaml, false)?;
         let Some(bin) = &self.bin else { return Ok(()) };
-        make_private_dir(bin)?;
+        make_private_dir(bin).map_err(|e| e.to_string())?;
         for tool in [Tool::Kubectl, Tool::Helm] {
             let script = guard_script(tool, context, bin, &self.kubeconfig);
             write_private(&bin.join(tool.name()), &script, true)?;
@@ -93,7 +93,7 @@ impl Scope {
         )?;
         write_private(&self.dir.join("bashrc"), &bashrc(&self.dir), false)?;
         let zsh = self.dir.join("zsh");
-        make_private_dir(&zsh)?;
+        make_private_dir(&zsh).map_err(|e| e.to_string())?;
         write_private(&zsh.join(".zshenv"), &zshenv(&zsh), false)?;
         write_private(&zsh.join(".zshrc"), &zshrc(&self.dir), false)
     }
@@ -402,14 +402,14 @@ unset SRELENS_USER_ZDOTDIR
     )
 }
 
-fn make_private_dir(path: &Path) -> Result<(), String> {
+pub(crate) fn make_private_dir(path: &Path) -> std::io::Result<()> {
     let mut builder = std::fs::DirBuilder::new();
     #[cfg(unix)]
     {
         use std::os::unix::fs::DirBuilderExt;
         builder.mode(0o700);
     }
-    builder.create(path).map_err(|e| e.to_string())
+    builder.create(path)
 }
 
 /// Created with `O_EXCL` and its final mode, so a path that already exists is

@@ -40,11 +40,23 @@ const h = vi.hoisted(() => {
       reconnecting: 0,
       total: 4,
       restarts: 0,
+      /** The history the stream keeps on disk (#914): where it starts, and why it stopped, if it did. */
+      history: undefined as { first: number; failed?: string } | undefined,
+      loadingEarlier: false,
+      loadError: undefined as unknown,
     },
     /** Whether the app believes it is inside the Tauri shell. */
     tauri: true,
     /** Every `saveTextFile` the screen has asked for. */
     saved: vi.fn(),
+    /** The most lines the mocked module says the view holds (#914): small, so the cap is reached in milliseconds. */
+    cap: 300,
+    /** Every "Load earlier" the screen has asked the hook for (#914). */
+    loadEarlier: vi.fn(),
+    /** The pauses and loads the screen asked the hook for, in the order it asked (#914). */
+    calls: [] as ("togglePause" | "pause" | "loadEarlier")[],
+    /** Every export of the history on disk the screen has asked the hook for (#914). */
+    exportSpool: vi.fn(),
     /** Every one-shot `podLogs` fetch the previous-instance toggle has made. */
     fetched: vi.fn(),
     /** Every `listResource` the bare route's recents have been checked with. */
@@ -60,6 +72,8 @@ const h = vi.hoisted(() => {
         sinceSeconds?: number;
         tailLines?: number;
         timestamps?: boolean;
+        spoolMaxBytes?: number;
+        visible?: boolean;
         source?: { key: string; open: (...a: never[]) => Promise<unknown> };
       };
     }[],
@@ -84,14 +98,19 @@ vi.mock("../lib/logSubject", async (orig) => ({
   resolveLogSubject: (...a: unknown[]) => h.resolve(...a),
 }));
 
-vi.mock("../lib/logStream", async () => {
+vi.mock("../lib/logStream", async (orig) => {
+  // Every export is the real module's but the hook, and the cap on loaded lines: the screen reads it, and the real
+  // fifty thousand would make the test that reaches it build fifty thousand rows.
+  const actual = await orig<typeof import("../lib/logStream")>();
   const { useSyncExternalStore } = await import("react");
   return {
+    ...actual,
+    MAX_LOADED_LINES: h.cap,
     useLogStream: (
       context: string,
       namespace: string,
       targets: { pod: string; container?: string; label?: string }[],
-      options: { sinceSeconds?: number; tailLines?: number; timestamps?: boolean; source?: never } = {},
+      options: { sinceSeconds?: number; tailLines?: number; timestamps?: boolean; spoolMaxBytes?: number; visible?: boolean; source?: never } = {},
     ) => {
       useSyncExternalStore(
         h.subscribe,
@@ -113,7 +132,16 @@ vi.mock("../lib/logStream", async () => {
         reconnectingTargets: h.state.reconnecting,
         totalTargets: h.state.total,
         togglePause: () => {
+          h.calls.push("togglePause");
           h.state.paused = !h.state.paused;
+          h.state.pending = 0;
+          notify();
+        },
+        // As the real hook has it: pauses a following view, and leaves one that is paused as it is.
+        pause: () => {
+          h.calls.push("pause");
+          if (h.state.paused) return;
+          h.state.paused = true;
           h.state.pending = 0;
           notify();
         },
@@ -122,6 +150,13 @@ vi.mock("../lib/logStream", async () => {
           notify();
         },
         restartCount: h.state.restarts,
+        history: h.state.history,
+        loadEarlier: h.loadEarlier,
+        loadingEarlier: h.state.loadingEarlier,
+        loadError: h.state.loadError,
+        // As the real hook has it: a stream that opened a history can export it, even once the history has stopped,
+        // so it is the screen that must not offer an export of a history that is no longer whole.
+        exportSpool: h.state.history ? h.exportSpool : undefined,
       };
     },
   };
@@ -167,6 +202,12 @@ vi.mock("@srelens/core", async (orig) => {
   };
 });
 
+/**
+ * A regex is answered by a worker, and jsdom has none. Each oracle the screen makes is a fake the test answers:
+ * see `regexWorker.fake`.
+ */
+vi.mock("../lib/regexWorker", () => import("../lib/regexWorker.fake"));
+
 vi.mock("../extensions/inventoryStore", async (orig) => ({
   ...(await orig<typeof import("../extensions/inventoryStore")>()),
   useExtensions: () =>
@@ -186,12 +227,14 @@ if (!("ResizeObserver" in globalThis)) {
 import type { ClusterContext, LogTarget } from "@srelens/core";
 import type { LogSubjectPod, PreviousInstance } from "../lib/logSubject";
 import { absoluteTimestamp, describeError } from "@srelens/core";
-import { toneColor } from "@srelens/ui-kit";
+import { PortalScopeProvider, toneColor } from "@srelens/ui-kit";
 import { Logs, logsRoute, parseLogsRoute } from "./Logs";
 import { ConsoleProvider, useConsole } from "../console";
 import { resetContexts, setContexts, setKubeconfigFiles } from "../lib/clusters";
 import { loadRecentLogSubjects, recentLogSubjects, rememberLogSubject } from "../lib/logRecents";
 import { liveLogStreams } from "../lib/liveLogStreams";
+import type { RegexAnswer } from "../lib/regexMatch";
+import { oracleFor, oracles, resetFakeOracles, workerIsRunning } from "../lib/regexWorker.fake";
 import { defaultState } from "../lib/tabs";
 import { TabScope } from "../lib/tabScope";
 import * as store from "../lib/tabsStore";
@@ -314,9 +357,11 @@ beforeEach(() => {
   h.listeners.clear();
   h.version = 0;
   h.seen = [];
+  h.calls = [];
   h.plugins = [];
   h.inventoryError = undefined;
   h.views = [];
+  resetFakeOracles();
   h.state = {
     lines: [],
     dropped: 0,
@@ -331,9 +376,16 @@ beforeEach(() => {
     reconnecting: 0,
     total: 4,
     restarts: 0,
+    history: undefined,
+    loadingEarlier: false,
+    loadError: undefined,
   };
   h.tauri = true;
   h.saved.mockResolvedValue("/home/u/checkout-api.log");
+  h.loadEarlier.mockImplementation(async () => {
+    h.calls.push("loadEarlier");
+  });
+  h.exportSpool.mockResolvedValue("/home/u/checkout-api.log");
   h.fetched.mockResolvedValue({ logs: PREVIOUS_BLOB });
   // Everything the recents name is still there unless a test says otherwise.
   h.listed.mockResolvedValue({ items: [{ name: "checkout-api", namespace: "checkout", age: "1d" }] });
@@ -376,6 +428,15 @@ function draw(route = ROUTE) {
     <ConsoleProvider>
       <AskSpy />
       <Logs route={route} />
+    </ConsoleProvider>,
+  );
+}
+
+/** The screen as `Window` mounts it: inside the tab whose id it is given. */
+function drawInTab(tabId: string) {
+  return render(
+    <ConsoleProvider>
+      <TabScope.Provider value={tabId}><Logs route={ROUTE} /></TabScope.Provider>
     </ConsoleProvider>,
   );
 }
@@ -456,13 +517,14 @@ const lastOptions = () => h.seen[h.seen.length - 1].options;
  * call this runs against the "render everything" bail-out, where the drawn
  * window and the filtered buffer are the same array and nothing can tell them
  * apart. Only `.logline` is given a height, so the measurement path under test
- * is the real one: the screen finds the first row itself.
+ * is the real one: the screen finds the first row itself. `height` is read on
+ * each measurement, so a test can take it away, as `display: none` does.
  */
-function measurableRows() {
+function measurableRows(height: () => number = () => 20) {
   const proto = window.HTMLElement.prototype;
   const original = proto.getBoundingClientRect;
   proto.getBoundingClientRect = function (this: HTMLElement) {
-    if (this.classList.contains("logline")) return { height: 20 } as DOMRect;
+    if (this.classList.contains("logline")) return { height: height() } as DOMRect;
     return original.call(this);
   };
   return () => {
@@ -977,6 +1039,102 @@ describe("Logs", () => {
       } finally {
         restore();
       }
+    });
+
+    describe("when its viewport has no size", () => {
+      /**
+       * A tab behind another is `display: none`: its viewport and its rows measure 0px, and the viewport's
+       * ResizeObserver says so. 0 reads as "draw every row" to the window, so a 50,000-line tab hiding drew all of
+       * them once, a freeze of seconds.
+       */
+      async function measured(visible: boolean) {
+        let size = 100;
+        const restore = measurableRows(() => (size === 0 ? 0 : 20));
+        const resized: (() => void)[] = [];
+        const realObserver = globalThis.ResizeObserver;
+        globalThis.ResizeObserver = class {
+          constructor(callback: () => void) {
+            resized.push(callback);
+          }
+          observe() {}
+          unobserve() {}
+          disconnect() {}
+        } as unknown as typeof ResizeObserver;
+        const inTab = (visible: boolean) => (
+          <PortalScopeProvider scope={{ container: undefined, visible, hold: () => () => {} }}>
+            <ConsoleProvider>
+              <Logs route={ROUTE} />
+            </ConsoleProvider>
+          </PortalScopeProvider>
+        );
+        const view = render(inTab(visible));
+        const region = await body();
+        Object.defineProperty(region, "clientHeight", { configurable: true, get: () => size });
+        push(...many(300));
+        const drawn = () => region.querySelectorAll(".logline").length;
+        return {
+          region,
+          drawn,
+          /** The viewport goes to 0px (and its rows with it), and its observer says so. */
+          collapse: (stillVisible = false) => {
+            size = 0;
+            view.rerender(inTab(stillVisible));
+            act(() => resized.forEach((callback) => callback()));
+          },
+          /** And comes back. */
+          comeBack: () => {
+            size = 100;
+            view.rerender(inTab(true));
+            act(() => resized.forEach((callback) => callback()));
+          },
+          done: () => {
+            restore(); // the row heights
+            globalThis.ResizeObserver = realObserver;
+          },
+        };
+      }
+
+      it("keeps the window it had while the tab is hidden, rather than drawing every row", async () => {
+        const tab = await measured(true);
+        try {
+          const before = tab.drawn();
+          expect(before).toBeGreaterThan(0);
+          expect(before).toBeLessThan(300);
+          tab.collapse();
+          expect(tab.drawn()).toBe(before);
+          // Back on screen, it measures what is there again.
+          tab.comeBack();
+          expect(tab.drawn()).toBeGreaterThan(0);
+          expect(tab.drawn()).toBeLessThan(300);
+        } finally {
+          tab.done();
+        }
+      });
+
+      it("keeps it while the document is hidden too", async () => {
+        const tab = await measured(true);
+        try {
+          const before = tab.drawn();
+          Object.defineProperty(document, "hidden", { configurable: true, get: () => true });
+          tab.collapse(true);
+          expect(tab.drawn()).toBe(before);
+        } finally {
+          delete (document as { hidden?: boolean }).hidden;
+          tab.done();
+        }
+      });
+
+      it("still measures a viewport that is 0px tall while it is showing: that is a real size", async () => {
+        const tab = await measured(true);
+        try {
+          expect(tab.drawn()).toBeLessThan(300);
+          // Showing, in a showing document, with a viewport that has collapsed: no fixed rows to window by.
+          tab.collapse(true);
+          expect(tab.drawn()).toBe(300);
+        } finally {
+          tab.done();
+        }
+      });
     });
 
     it("draws everything once lines wrap, because a wrapped row has no fixed height", async () => {
@@ -1620,6 +1778,61 @@ describe("exporting a time range (#915)", () => {
       "api-8/api | 2026-08-24T13:25:00.000000000Z error pool timeout on api-8",
       "api-7/api | 2026-08-24T14:07:41.208000000Z error pool timeout on api-7",
     ]);
+  });
+
+  it("writes the range through a regex answered by a worker of its own, never run on this thread", async () => {
+    const watch = mainThreadRuns("timeout.on");
+    try {
+      draw();
+      await body();
+      push(...LINES);
+      await userEvent.type(filterField(), "/timeout.on/");
+      await waitFor(() => expect(oracleFor("timeout.on").asks).toHaveLength(1));
+      await act(async () => oracleFor("timeout.on").reply());
+      await pick("Last 6 h");
+      // The range's lines are not the buffer's: a worker is made for them, apart from the screen's.
+      await waitFor(() => expect(oracles).toHaveLength(2));
+      await act(async () => oracles[1].reply());
+      await waitFor(() => expect(h.saved).toHaveBeenCalledTimes(1));
+      expect(written()).toEqual([
+        "api-8/api | 2026-08-24T13:25:00.000000000Z error pool timeout on api-8",
+        "api-7/api | 2026-08-24T14:07:41.208000000Z error pool timeout on api-7",
+      ]);
+      expect(oracles[1].disposed).toBe(true);
+    } finally {
+      watch.restore();
+    }
+    expect(watch.runs).toEqual([]);
+  });
+
+  it("writes the range through the regex in the box while its worker still has the buffer", async () => {
+    draw();
+    await body();
+    push(...LINES);
+    await userEvent.type(filterField(), "/timeout.on/");
+    await waitFor(() => expect(oracleFor("timeout.on").asks).toHaveLength(1));
+    // Not answered yet: the screen keeps what it had, but the file is what the box says.
+    await pick("Last 6 h");
+    await waitFor(() => expect(oracles).toHaveLength(2));
+    await act(async () => oracles[1].reply());
+    await waitFor(() => expect(h.saved).toHaveBeenCalledTimes(1));
+    expect(written()).toEqual([
+      "api-8/api | 2026-08-24T13:25:00.000000000Z error pool timeout on api-8",
+      "api-7/api | 2026-08-24T14:07:41.208000000Z error pool timeout on api-7",
+    ]);
+  });
+
+  it("refuses to write a range through a regex too slow to run, in the alert's words", async () => {
+    draw();
+    await body();
+    push(...LINES);
+    await userEvent.type(filterField(), "/timeout.on/");
+    await waitFor(() => expect(oracleFor("timeout.on").asks).toHaveLength(1));
+    await act(async () => oracleFor("timeout.on").fail("slow"));
+    await pick("Last 6 h");
+    const failure = await screen.findByText("Could not save this stream");
+    expect(failure.closest('[role="status"]')?.textContent).toContain("Too slow to run on these lines: /timeout.on/");
+    expect(h.saved).not.toHaveBeenCalled();
   });
 
   it("orders two containers' lines inside one millisecond by the whole stamp", async () => {
@@ -2338,14 +2551,6 @@ describe("log sources (#569)", () => {
  * alone says a tab is open, not that a stream started or is still running.
  */
 describe("the running-stream registry", () => {
-  function drawInTab(tabId: string) {
-    return render(
-      <ConsoleProvider>
-        <TabScope.Provider value={tabId}><Logs route={ROUTE} /></TabScope.Provider>
-      </ConsoleProvider>,
-    );
-  }
-
   it("marks the tab while its stream runs, and unmarks it when the tab goes", async () => {
     const view = drawInTab("tab-1");
     await body();
@@ -2367,6 +2572,209 @@ describe("the running-stream registry", () => {
     drawInTab("tab-3");
     await screen.findByText("Nothing to follow");
     expect(liveLogStreams().has("tab-3")).toBe(false);
+  });
+});
+
+/**
+ * The search box is the tab's to keep (#898): a restart reopens each Logs tab
+ * with the query it was left with. The tab store stands in for the settings
+ * file, the way `resourceShell`'s tests seed it for sort and filter.
+ */
+describe("a Logs tab's saved query (#898)", () => {
+  /** A tab on the logs route, as a previous launch left it: with `query` saved, or with no view at all. */
+  function tabLeftWith(query?: string) {
+    store.openTab(ROUTE);
+    const id = store.currentWorkspace().tabs.find((t) => t.route === ROUTE)!.id;
+    if (query !== undefined) store.setTabView(id, { query });
+    return id;
+  }
+  const tabView = (id: string) => store.currentWorkspace().tabs.find((t) => t.id === id)?.view;
+
+  it("opens with the box, the pills and the body showing the saved query", async () => {
+    const id = tabLeftWith("level:error");
+    drawInTab(id);
+    const region = await body();
+    push(...LINES);
+    expect(filterField()).toHaveProperty("value", "level:error");
+    expect(screen.getByRole("button", { name: "Remove filter level:error" })).toBeTruthy();
+    expect(messages(region)).toEqual(["error pool timeout waited=30.0s in_use=5"]);
+  });
+
+  it("writes the query back to its tab once it is typed", async () => {
+    const id = tabLeftWith();
+    drawInTab(id);
+    await body();
+    await userEvent.type(filterField(), "level:error pool");
+    await waitFor(() => expect(tabView(id)?.query).toBe("level:error pool"));
+  });
+
+  it("writes an emptied box as an empty query, so the old one does not come back", async () => {
+    const id = tabLeftWith("level:error");
+    drawInTab(id);
+    await body();
+    await userEvent.clear(filterField());
+    await waitFor(() => expect(tabView(id)?.query).toBe(""));
+  });
+
+  it("leaves a tab with no saved query untouched until something is typed", async () => {
+    const id = tabLeftWith();
+    drawInTab(id);
+    await body();
+    expect(tabView(id)).toBeUndefined();
+  });
+
+  it("starts empty, and writes nothing, when it is not in a tab", async () => {
+    // The tab it would borrow if it fell back to the active one: it holds a query this screen must not read or touch.
+    const id = tabLeftWith("level:error");
+    const region = await (draw(), body());
+    const before = store.getState();
+    expect(filterField()).toHaveProperty("value", "");
+    push(...LINES);
+    await userEvent.type(filterField(), "pool");
+    await waitFor(() => expect(messages(region)).toEqual(["error pool timeout waited=30.0s in_use=5"]));
+    expect(store.getState()).toBe(before);
+    expect(tabView(id)?.query).toBe("level:error");
+  });
+
+  it("puts a saved regex through its worker like a typed one: a slow one opens with the alert, never run here", async () => {
+    const watch = mainThreadRuns("(a+)+$");
+    try {
+      const id = tabLeftWith("/(a+)+$/");
+      drawInTab(id);
+      const region = await body();
+      push(...LINES);
+      expect(filterField()).toHaveProperty("value", "/(a+)+$/");
+      await waitFor(() => expect(oracleFor("(a+)+$").asks).toHaveLength(1));
+      // The regex met an empty buffer, so it applied at once: these lines came after, and wait on the worker.
+      expect(rendered(region)).toHaveLength(0);
+      await act(async () => oracleFor("(a+)+$").fail("slow"));
+      expect(screen.getByText("Too slow to run on these lines: /(a+)+$/").closest('[role="alert"]')).not.toBeNull();
+      expect(rendered(region)).toHaveLength(4);
+    } finally {
+      watch.restore();
+    }
+    expect(watch.runs).toEqual([]);
+  });
+});
+
+/**
+ * Every run of a regex whose source is `source` that is not a fake worker's,
+ * from now until `restore`: the main thread must make none. Parsing compiles
+ * the pattern, and compiling is not running it.
+ */
+function mainThreadRuns(source: string) {
+  const runs: string[] = [];
+  const realTest = RegExp.prototype.test;
+  const realExec = RegExp.prototype.exec;
+  const test = vi.spyOn(RegExp.prototype, "test").mockImplementation(function (this: RegExp, s: string) {
+    if (this.source === source && !workerIsRunning()) runs.push(`test ${s}`);
+    return realTest.call(this, s);
+  });
+  const exec = vi.spyOn(RegExp.prototype, "exec").mockImplementation(function (this: RegExp, s: string) {
+    if (this.source === source && !workerIsRunning()) runs.push(`exec ${s}`);
+    return realExec.call(this, s);
+  });
+  return {
+    runs,
+    restore: () => {
+      test.mockRestore();
+      exec.mockRestore();
+    },
+  };
+}
+
+describe("a regex in the query (#898)", () => {
+  /** Type `query` and wait for the screen to ask the worker for `source` about the buffer. */
+  async function typeRegex(query: string, source: string) {
+    await userEvent.type(filterField(), query);
+    await waitFor(() => expect(oracleFor(source).asks).toHaveLength(1));
+  }
+
+  /** The worker for `source` answers what it has been asked: with its own code, or with `given` for every line. */
+  const reply = (source: string, given?: RegexAnswer) => act(async () => oracleFor(source).reply(given));
+
+  it("filters by what the worker answers, holding each later line back until it has", async () => {
+    const region = await (draw(), body());
+    push(...LINES);
+    await typeRegex("/po+l/", "po+l");
+    // Not an empty body while the worker has the buffer: the lines it had stay.
+    expect(rendered(region)).toHaveLength(4);
+    await reply("po+l");
+    expect(messages(region)).toEqual(["error pool timeout waited=30.0s in_use=5"]);
+    expect(screen.queryByText(/Too slow to run/)).toBeNull();
+    // A line that lands later is asked about, and shown once it is answered.
+    push(line("api-8/api", "14:07:45.000000000", "warn pool drained"));
+    await waitFor(() => expect(oracleFor("po+l").asks).toHaveLength(2));
+    expect(oracleFor("po+l").asks[1].map((item) => item.test)).toEqual(["warn pool drained"]);
+    expect(messages(region)).toEqual(["error pool timeout waited=30.0s in_use=5"]);
+    await reply("po+l");
+    expect(messages(region)).toEqual(["error pool timeout waited=30.0s in_use=5", "warn pool drained"]);
+  });
+
+  it("goes back to the filter it had when a later line is too slow, never having run the pattern itself", async () => {
+    // What froze the app: a pattern that passed over the first lines, then met a line of the bad kind.
+    const watch = mainThreadRuns("(a+)+$");
+    // Short enough that the pattern, run here by mistake, takes a moment and the spy says so, rather than hanging.
+    const bad = `error ${"a".repeat(20)}!`;
+    try {
+      const region = await (draw(), body());
+      push(...LINES);
+      await userEvent.type(filterField(), "level:error");
+      await waitFor(() => expect(messages(region)).toEqual(["error pool timeout waited=30.0s in_use=5"]));
+      await userEvent.type(filterField(), " /(a+)+$/");
+      await waitFor(() => expect(oracleFor("(a+)+$").asks).toHaveLength(1));
+      // The buffer comes back in time: the query is applied, and no line matches it.
+      await reply("(a+)+$");
+      expect(messages(region)).toEqual([]);
+      push(line("api-8/api", "14:07:45.000000000", bad));
+      await waitFor(() => expect(oracleFor("(a+)+$").asks).toHaveLength(2));
+      await act(async () => oracleFor("(a+)+$").fail("slow"));
+      expect(screen.getByText("Too slow to run on these lines: /(a+)+$/").closest('[role="alert"]')).not.toBeNull();
+      expect(messages(region)).toEqual(["error pool timeout waited=30.0s in_use=5", bad]);
+    } finally {
+      watch.restore();
+    }
+    expect(watch.runs).toEqual([]);
+  });
+
+  it("marks a line where the worker says the pattern falls", async () => {
+    const region = await (draw(), body());
+    push(...LINES);
+    await typeRegex("/pool/", "pool");
+    // Ranges the pattern itself would not give: the marks can only have come from the answer.
+    await reply("pool", { hit: true, ranges: [[0, 5]] });
+    expect(rendered(region)).toHaveLength(4);
+    const log = screen.getByRole("log", { name: /logs/i });
+    expect([...log.querySelectorAll("mark")].map((m) => m.textContent)).toEqual(["info ", "warn ", "error", "GET /"]);
+  });
+
+  it("says a regex is too slow, applies nothing, and drops the alert once the box is cleared", async () => {
+    const region = await (draw(), body());
+    push(...LINES);
+    await typeRegex("/(a+)+$/", "(a+)+$");
+    await act(async () => oracleFor("(a+)+$").fail("slow"));
+    const alert = screen.getByText("Too slow to run on these lines: /(a+)+$/");
+    expect(alert.closest('[role="alert"]')).not.toBeNull();
+    expect(rendered(region)).toHaveLength(4);
+    await userEvent.clear(filterField());
+    await waitFor(() => expect(screen.queryByText(/Too slow to run/)).toBeNull());
+  });
+
+  it("says when no worker can run a regex, and applies nothing", async () => {
+    const region = await (draw(), body());
+    push(...LINES);
+    await typeRegex("/po+l/", "po+l");
+    await act(async () => oracleFor("po+l").fail("unavailable"));
+    expect(screen.getByText("Regex search is unavailable here").closest('[role="alert"]')).not.toBeNull();
+    expect(rendered(region)).toHaveLength(4);
+  });
+
+  it("makes no worker for a query that holds no regex, and filters by it at once", async () => {
+    const region = await (draw(), body());
+    push(...LINES);
+    await userEvent.type(filterField(), "level:error pool");
+    await waitFor(() => expect(messages(region)).toEqual(["error pool timeout waited=30.0s in_use=5"]));
+    expect(oracles).toHaveLength(0);
   });
 });
 
@@ -3237,6 +3645,27 @@ describe("under a busy stream (#898)", () => {
     expect(drawn.textContent).toContain("line 10");
   });
 
+  it("keeps a drawn line on its own element when the targets are resolved again, after the ring has dropped lines", async () => {
+    // A row's id belongs to the module, not to one indexing of the targets: numbered afresh from 0 by place in the
+    // buffer, a rebuilt row takes the id of a line the ring has since dropped, and that line's element with it.
+    const region = await (draw(), body());
+    push(...many(30));
+    ring(5, 30);
+    const drawn = lineRow(10);
+    // The same stream under a renamed context: the subject is resolved again, to targets the screen indexes afresh.
+    // The answer lands in the request's own tick, so React takes the loading state and the new targets as one render
+    // and the screen is rebuilt in place; an answer a network later unmounts it, and with it every drawn element.
+    const again = TARGETS.map((t) => ({ ...t }));
+    const answer = { status: "resolved", targets: again, pods: PODS, previous: [] };
+    h.resolve.mockReturnValue({ then: (done: (a: typeof answer) => void) => done(answer) });
+    act(() => setContexts([{ ...CTX, name: "prod-eu-2" }]));
+    expect(h.seen[h.seen.length - 1].targets).toBe(again);
+    expect(region.isConnected).toBe(true);
+    expect(rendered(region)).toHaveLength(30);
+    // Replaced by an element of its own, or still its own line: never another's.
+    expect(drawn.isConnected ? drawn.textContent : "line 10").toContain("line 10");
+  });
+
   it("recounts the rail, the facets and the histogram at most four times a second, and the last batch always lands", async () => {
     // The quarter second is read off the clock; stopped, a slow machine cannot run it out between two batches.
     vi.useFakeTimers({ toFake: ["Date"] });
@@ -3258,6 +3687,32 @@ describe("under a busy stream (#898)", () => {
         expect(screen.getByRole("button", { name: "error 2" })).toBeTruthy();
         expect(caption()).toMatch(/^5 lines · /);
       });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("empties the counts at once when the buffer is emptied, though a recount is waiting", async () => {
+    // A restart leaves nothing to count: the old buffer's tallies must not go on being read for the quarter second a
+    // recount waits. The clock is stopped, so that quarter second cannot run out inside the test.
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      const region = await (draw(), body());
+      push(...LINES);
+      expect(screen.getByText("1 error")).toBeTruthy();
+      push(anotherError);
+      // The recount is waiting: the counts still hold the last one.
+      expect(screen.getByText("1 error")).toBeTruthy();
+      act(() => {
+        // What the hook does on a restart: a fresh buffer and a bumped restart count.
+        h.state.lines = [];
+        h.state.restarts = 1;
+        notify();
+      });
+      expect(rendered(region)).toHaveLength(0);
+      expect(screen.queryByText("1 error")).toBeNull();
+      expect(screen.queryByRole("button", { name: "error 1" })).toBeNull();
+      expect(caption()).toBe("");
     } finally {
       vi.useRealTimers();
     }
@@ -3392,6 +3847,30 @@ describe("under a busy stream (#898)", () => {
       expect(rendered(region)).toHaveLength(10);
     });
 
+    it.each([
+      ["Ctrl+A", () => select(document.body)],
+      [
+        "a drag from the filter bar to past the log",
+        () =>
+          act(() => {
+            const wrap = screen.getByRole("button", { name: "Wrap" });
+            (document.getSelection() as Selection).setBaseAndExtent(wrap, 0, document.body, document.body.childNodes.length);
+            document.dispatchEvent(new Event("selectionchange"));
+          }),
+      ],
+    ])("holds the view while %s selects the log, though neither end of the selection is in it", async (_, enclose) => {
+      // The text under the selection is rewritten as surely as under one that starts in the log.
+      const region = await (draw(), body());
+      push(...many(5));
+      enclose();
+      const selection = document.getSelection() as Selection;
+      expect(region.contains(selection.anchorNode) || region.contains(selection.focusNode)).toBe(false);
+      push(...many(3, 5));
+      expect(rendered(region)).toHaveLength(5);
+      select(null);
+      expect(rendered(region)).toHaveLength(8);
+    });
+
     it("says the view is held only once a hold has lasted, never for an ordinary click", async () => {
       // Every click holds the view for as long as the button is down; a note that flashed on each one would be noise.
       await (draw(), body());
@@ -3420,6 +3899,37 @@ describe("under a busy stream (#898)", () => {
         expect(heldNote()).toBeNull();
         lift(lineRow(2));
         act(() => vi.advanceTimersByTime(0));
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("tells a screen reader the view is held while the note shows, without the count that changes under it", async () => {
+      await (draw(), body());
+      push(...many(5));
+      const live = () => document.querySelector('[data-slot="held-live"]') as HTMLElement;
+      // Mounted before anything is held, so the first announcement is a change to a region the reader already has.
+      expect(live().textContent).toBe("");
+      expect(live().getAttribute("role")).toBe("status");
+      expect(live().getAttribute("aria-live")).toBe("polite");
+      expect(live().getAttribute("aria-atomic")).toBe("true");
+      expect(live().className).toContain("sr-only");
+      vi.useFakeTimers();
+      try {
+        select(lineRow(3));
+        h.state.pending = 3;
+        push(...many(3, 5));
+        act(() => vi.advanceTimersByTime(299));
+        expect(live().textContent).toBe("");
+        act(() => vi.advanceTimersByTime(1));
+        expect(heldNote()?.textContent).toBe("Held while you select · 3 new lines");
+        // The count is the visible note's alone: said here, it would be read out again on every batch.
+        expect(live().textContent).toBe("View held while you select");
+        h.state.pending = 40;
+        push(...many(1, 8));
+        expect(live().textContent).toBe("View held while you select");
+        select(null);
+        expect(live().textContent).toBe("");
       } finally {
         vi.useRealTimers();
       }
@@ -3470,5 +3980,339 @@ describe("under a busy stream (#898)", () => {
     push(anotherError);
     expect(screen.getByText("2 errors")).toBeTruthy();
     expect(caption()).toMatch(/^5 lines · /);
+  });
+});
+
+describe("history on disk (#914)", () => {
+  /** The stream reports a history: `first` is the oldest line kept, `dropped` every line before the first in memory. */
+  function keepHistory(history: { first: number; failed?: string }, dropped: number) {
+    act(() => {
+      h.state.history = history;
+      h.state.dropped = dropped;
+      notify();
+    });
+  }
+
+  it("asks the cluster's stream to keep the chosen history", async () => {
+    draw();
+    await body();
+    expect(lastOptions().spoolMaxBytes).toBe(256 * 1024 * 1024);
+  });
+
+  it("leaves history to an app's own source", async () => {
+    h.plugins = [observability()];
+    draw();
+    const picker = await screen.findByRole("combobox", { name: "Logs from" });
+    expect(lastOptions().spoolMaxBytes).toBe(256 * 1024 * 1024);
+    fireEvent.change(picker, { target: { value: "org.example.observability/loki" } });
+    await waitFor(() => expect(lastOptions().source).toBeDefined());
+    expect(lastOptions().spoolMaxBytes).toBeUndefined();
+    fireEvent.change(picker, { target: { value: "kubernetes" } });
+    await waitFor(() => expect(lastOptions().source).toBeUndefined());
+    expect(lastOptions().spoolMaxBytes).toBe(256 * 1024 * 1024);
+  });
+
+  it("offers the lines on disk and loads the page before the oldest shown", async () => {
+    draw();
+    await body();
+    act(() => {
+      h.state.history = { first: 1 };
+      h.state.dropped = 182_340;
+      notify();
+    });
+    push(...LINES);
+    expect(screen.getByText(/182\s?340 earlier lines on disk/)).toBeTruthy();
+    // The screen's measuring code reads this slot's height to hold the view still.
+    expect(document.querySelector('[data-slot="dropped-banner"]')?.textContent).toMatch(/earlier lines on disk/);
+    await userEvent.click(screen.getByRole("button", { name: /Load 5\s?000 earlier/ }));
+    expect(h.loadEarlier).toHaveBeenCalledTimes(1);
+  });
+
+  it("pauses a followed view before loading earlier lines, so the page is not pushed out of it as it lands", async () => {
+    draw();
+    await body();
+    keepHistory({ first: 1 }, 182_340);
+    push(...LINES);
+    expect(h.state.paused).toBe(false);
+    await userEvent.click(screen.getByRole("button", { name: /Load 5\s?000 earlier/ }));
+    // In this order: the load reads the view it finds, and a view that is still moving is one the page leaves.
+    expect(h.calls).toEqual(["pause", "loadEarlier"]);
+    expect(h.state.paused).toBe(true);
+  });
+
+  it("loads into a view the reader has already paused, and leaves it paused", async () => {
+    draw();
+    await body();
+    keepHistory({ first: 1 }, 182_340);
+    push(...LINES);
+    await userEvent.click(screen.getByRole("button", { name: "Pause" }));
+    h.calls = [];
+    await userEvent.click(screen.getByRole("button", { name: /Load 5\s?000 earlier/ }));
+    // A toggle here would resume it, and let the stream run on over the page.
+    expect(h.calls).toEqual(["pause", "loadEarlier"]);
+    expect(h.state.paused).toBe(true);
+  });
+
+  it("tells the stream whether its tab is the one showing, so a tab behind another draws nothing", async () => {
+    // Inactive tabs stay mounted under `display: none` while the document is visible: only the surface knows.
+    const inTab = (visible: boolean) => (
+      <PortalScopeProvider scope={{ container: undefined, visible, hold: () => () => {} }}>
+        <ConsoleProvider>
+          <AskSpy />
+          <Logs route={ROUTE} />
+        </ConsoleProvider>
+      </PortalScopeProvider>
+    );
+    const view = render(inTab(false));
+    await body();
+    expect(lastOptions().visible).toBe(false);
+    view.rerender(inTab(true));
+    await waitFor(() => expect(lastOptions().visible).toBe(true));
+    view.unmount();
+    // And outside any tab surface the screen is showing.
+    draw();
+    await body();
+    expect(lastOptions().visible).toBe(true);
+  });
+
+  it("does not offer a second load while one is under way", async () => {
+    draw();
+    await body();
+    keepHistory({ first: 1 }, 182_340);
+    h.state.loadingEarlier = true;
+    push(...LINES);
+    const loading = screen.getByRole("button", { name: "Loading…" });
+    // Not `disabled`: a disabled button drops keyboard focus, and the reader presses it again from where they are.
+    expect(loading.getAttribute("aria-disabled")).toBe("true");
+    expect(loading).toHaveProperty("disabled", false);
+    expect(screen.queryByRole("button", { name: /Load 5\s?000 earlier/ })).toBeNull();
+    loading.focus();
+    await userEvent.click(loading);
+    expect(h.loadEarlier).not.toHaveBeenCalled();
+    // And no pause for a load that is not made.
+    expect(h.calls).toEqual([]);
+    expect(document.activeElement).toBe(loading);
+  });
+
+  it("sends the reader to Export once the screen holds as many lines as it will", async () => {
+    draw();
+    await body();
+    const lines = (count: number) =>
+      Array.from({ length: count }, (_, i) => line("api-7/api", "14:07:41.208000000", `info line ${i}`));
+    keepHistory({ first: 1 }, 60_000);
+    // One short of the cap, there is still room for a page.
+    push(...lines(h.cap - 1));
+    expect(screen.getByRole("button", { name: /Load 5\s?000 earlier/ })).toBeTruthy();
+    expect(screen.queryByText(/lines loaded/)).toBeNull();
+    // At the cap there is not, and the cap is the module's, not a number of the screen's own.
+    push(...lines(1));
+    expect(screen.getByText(`${h.cap} lines loaded · Export for the rest`)).toBeTruthy();
+    expect(screen.getByText(/60\s?000 earlier lines on disk/)).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /Load 5\s?000 earlier/ })).toBeNull();
+  });
+
+  it("says how many of the oldest lines passed the history limit", async () => {
+    draw();
+    await body();
+    act(() => {
+      h.state.history = { first: 1001 };
+      h.state.dropped = 5000;
+      notify();
+    });
+    push(...LINES);
+    expect(screen.getByText(/1\s?000 oldest lines passed the history limit/)).toBeTruthy();
+    expect(screen.getByText(/4\s?000 earlier lines on disk/)).toBeTruthy();
+  });
+
+  it("says only what passed the limit when nothing older is on disk", async () => {
+    draw();
+    await body();
+    keepHistory({ first: 1001 }, 1000);
+    push(...LINES);
+    expect(screen.getByText(/1\s?000 oldest lines passed the history limit/)).toBeTruthy();
+    expect(screen.queryByText(/earlier lines on disk/)).toBeNull();
+    expect(screen.queryByRole("button", { name: /Load 5\s?000 earlier/ })).toBeNull();
+  });
+
+  it("draws no banner while every line is still in memory", async () => {
+    draw();
+    await body();
+    keepHistory({ first: 1 }, 0);
+    push(...LINES);
+    expect(document.querySelector('[data-slot="dropped-banner"]')).toBeNull();
+  });
+
+  it("says why earlier lines could not be loaded", async () => {
+    draw();
+    await body();
+    act(() => {
+      h.state.history = { first: 1 };
+      h.state.dropped = 10;
+      h.state.loadError = new Error("this log stream has ended");
+      notify();
+    });
+    push(...LINES);
+    expect(screen.getByText("Could not load earlier lines")).toBeTruthy();
+    // The button stays: trying again is how the reader recovers.
+    expect(screen.getByRole("button", { name: /Load 5\s?000 earlier/ })).toBeTruthy();
+  });
+
+  it("shows no load error over the previous instance, whose lines never came from the disk", async () => {
+    h.resolve.mockResolvedValue({ status: "resolved", targets: TARGETS, pods: PODS, previous: TERMINATED });
+    const region = await (draw(), body());
+    act(() => {
+      h.state.history = { first: 1 };
+      h.state.dropped = 10;
+      h.state.loadError = new Error("this log stream has ended");
+      notify();
+    });
+    push(...LINES);
+    expect(screen.getByText("Could not load earlier lines")).toBeTruthy();
+    await userEvent.click(screen.getByRole("button", { name: /previous instance/i }));
+    await waitFor(() => expect(rendered(region)).toHaveLength(4));
+    expect(screen.queryByText("Could not load earlier lines")).toBeNull();
+  });
+
+  it("shows no load error once history stops, as there is nothing left to load from", async () => {
+    draw();
+    await body();
+    act(() => {
+      h.state.history = { first: 1 };
+      h.state.dropped = 10;
+      h.state.loadError = new Error("this log stream has ended");
+      notify();
+    });
+    push(...LINES);
+    expect(screen.getByText("Could not load earlier lines")).toBeTruthy();
+    keepHistory({ first: 1, failed: "No space left on device" }, 10);
+    expect(screen.queryByText("Could not load earlier lines")).toBeNull();
+  });
+
+  it("never draws a negative count when more lines passed the limit than are in memory", async () => {
+    draw();
+    await body();
+    // `dropped` is 500 but the oldest line kept is the 1001st: none of the lines before the first shown is on disk.
+    keepHistory({ first: 1001 }, 500);
+    push(...LINES);
+    expect(document.querySelector('[data-slot="dropped-banner"]')?.textContent).toMatch(
+      /^1\s?000 oldest lines passed the history limit$/,
+    );
+  });
+
+  /** A row of Export's menu by its accessible name; the history's rows say "kept on disk" beside the cluster's. */
+  const nameOf = (b: HTMLElement) => b.getAttribute("aria-label") ?? b.textContent;
+  const pickKept = async (range: string) =>
+    userEvent.click(within(await exportMenu()).getByRole("button", { name: `${range} kept on disk` }));
+
+  it("offers the history kept on disk between the view and the cluster's spans", async () => {
+    draw();
+    await body();
+    keepHistory({ first: 1 }, 0);
+    push(...LINES);
+    const panel = await exportMenu();
+    expect(within(panel).getByText("kept on disk")).toBeTruthy();
+    expect(within(panel).getAllByRole("button").map(nameOf)).toEqual([
+      "Current view",
+      "Last 10 min kept on disk",
+      "Last 1 h kept on disk",
+      "All kept on disk",
+      "Last 10 min",
+      "Last 1 h",
+      "Last 6 h",
+      "Last 24 h",
+      "All",
+    ]);
+  });
+
+  it("exports the history kept on disk, a span back from now or all of it, under its own name", async () => {
+    draw();
+    await body();
+    keepHistory({ first: 1 }, 0);
+    push(...LINES);
+    await pickKept("Last 10 min");
+    await waitFor(() => expect(h.exportSpool).toHaveBeenCalledWith("checkout-api-disk-last-10m.log", 600));
+    await pickKept("All");
+    await waitFor(() => expect(h.exportSpool).toHaveBeenLastCalledWith("checkout-api-disk-all.log", undefined));
+    // The disk, not this buffer and not the cluster.
+    expect(h.saved).not.toHaveBeenCalled();
+    expect(h.fetched).not.toHaveBeenCalled();
+  });
+
+  it("writes the view, not the history, from Current view", async () => {
+    draw();
+    await body();
+    keepHistory({ first: 1 }, 0);
+    push(...LINES);
+    await exportCurrentView();
+    await waitFor(() => expect(h.saved).toHaveBeenCalledTimes(1));
+    expect(h.exportSpool).not.toHaveBeenCalled();
+  });
+
+  it("offers the history to export even when the view is empty", async () => {
+    draw();
+    await body();
+    keepHistory({ first: 1 }, 0);
+    // No lines on screen: the view has nothing to write, the history on disk may have.
+    const panel = await exportMenu();
+    expect(within(panel).getByRole("button", { name: "Current view" })).toHaveProperty("disabled", true);
+    expect(within(panel).getByRole("button", { name: "All kept on disk" })).toHaveProperty("disabled", false);
+  });
+
+  it("reads Exporting… while the history is written, and Export once it is", async () => {
+    let finish: (path: string | null) => void = () => {};
+    h.exportSpool.mockReturnValue(new Promise<string | null>((resolve) => (finish = resolve)));
+    draw();
+    await body();
+    keepHistory({ first: 1 }, 0);
+    push(...LINES);
+    await pickKept("All");
+    expect(await screen.findByText("Exporting…")).toBeTruthy();
+    await act(async () => finish("/home/u/checkout-api-disk-all.log"));
+    expect(screen.queryByText("Exporting…")).toBeNull();
+  });
+
+  it("says why the history could not be saved", async () => {
+    h.exportSpool.mockRejectedValue("save_text_file failed: Permission denied (os error 13)");
+    draw();
+    await body();
+    keepHistory({ first: 1 }, 0);
+    push(...LINES);
+    await pickKept("All");
+    expect((await screen.findByText(/could not save this stream/i)).textContent).toBe("Could not save this stream");
+  });
+
+  it("stops offering the history once it stops, and keeps the dropped-lines banner", async () => {
+    draw();
+    await body();
+    keepHistory({ first: 1 }, 0);
+    push(...LINES);
+    // The hook goes on offering an export of a history that is no longer whole; the screen must not take it up.
+    act(() => {
+      h.state.history = { first: 1, failed: "No space left on device" };
+      h.state.dropped = 1200;
+      notify();
+    });
+    const panel = await exportMenu();
+    expect(within(panel).queryByText("kept on disk")).toBeNull();
+    expect(within(panel).queryByRole("button", { name: /kept on disk/ })).toBeNull();
+    expect(screen.getByText(/1\s?200 earlier lines dropped/)).toBeTruthy();
+  });
+
+  it("writes the previous instance, not the live history, and offers neither the history nor its banner there", async () => {
+    h.resolve.mockResolvedValue({ status: "resolved", targets: TARGETS, pods: PODS, previous: TERMINATED });
+    const region = await (draw(), body());
+    keepHistory({ first: 1 }, 182_340);
+    push(...LINES);
+    expect(within(await exportMenu()).getByRole("button", { name: "All kept on disk" })).toBeTruthy();
+    await userEvent.keyboard("{Escape}");
+    await userEvent.click(screen.getByRole("button", { name: /previous instance/i }));
+    await waitFor(() => expect(rendered(region)).toHaveLength(4));
+    expect(within(region).queryByText(/earlier lines on disk/)).toBeNull();
+    expect(screen.queryByRole("button", { name: /Load 5\s?000 earlier/ })).toBeNull();
+    // A previous instance keeps the one-click Export (#915): it writes that buffer.
+    await userEvent.click(screen.getByRole("button", { name: "Export" }));
+    await waitFor(() => expect(h.saved).toHaveBeenCalledTimes(1));
+    expect(h.saved.mock.calls[0][0]).toBe("checkout-api-previous.log");
+    expect(h.exportSpool).not.toHaveBeenCalled();
   });
 });

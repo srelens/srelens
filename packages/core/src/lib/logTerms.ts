@@ -236,6 +236,28 @@ function stringField(obj: LogObject, fields: readonly string[]): string | undefi
   return undefined;
 }
 
+/**
+ * The six levels pino and bunyan share, which they write as numbers. Any other
+ * number names nothing and is left to the text scan.
+ */
+const NUMERIC_LEVELS: Readonly<Record<number, string>> = {
+  10: "trace",
+  20: "debug",
+  30: "info",
+  40: "warn",
+  50: "error",
+  60: "fatal",
+};
+
+/** The first of `fields` the object carries as one of {@link NUMERIC_LEVELS}, as its name. */
+function numericLevel(obj: LogObject, fields: readonly string[]): string | undefined {
+  for (const field of fields) {
+    const value = obj[field];
+    if (typeof value === "number" && NUMERIC_LEVELS[value] !== undefined) return NUMERIC_LEVELS[value];
+  }
+  return undefined;
+}
+
 /** Peel every structural prefix off the front of a line; see {@link STRUCTURAL_PREFIXES}. */
 function skipStructure(text: string): string {
   let rest = text.trim();
@@ -416,8 +438,12 @@ function termOf(
  * a non-word character — so an `error` key holding an empty object repainted
  * the whole line. Same family as `informant` reading as `info`: a word scan
  * reading a word in the wrong context. `level` and `severity` are read, in
- * that order, and only as strings: pino writes `"level":30`, which is no word
- * to print, so a numeric level falls through to the scan below.
+ * that order. A string is read as written; failing that, pino and bunyan's
+ * `"level":30` is read as `info` (see {@link NUMERIC_LEVELS}), because the
+ * number is the application's answer too and the scan below would otherwise
+ * read `error pool timeout` out of its message. A number that is not one of
+ * the six falls through to the scan. The string `"30"` is not a number: it is
+ * the application's own word and is printed as written.
  *
  * The declared word is returned VERBATIM, so the column prints what the
  * application called it. A level outside {@link LEVEL_HEALTH} — an
@@ -450,7 +476,8 @@ export function logLineLevel(text: string): string | undefined {
 }
 
 function levelOf(text: string, obj: LogObject | null): string | undefined {
-  const declared = obj === null ? undefined : stringField(obj, LEVEL_FIELDS);
+  const declared =
+    obj === null ? undefined : (stringField(obj, LEVEL_FIELDS) ?? numericLevel(obj, LEVEL_FIELDS));
   if (declared !== undefined) return declared;
   return (
     DANGER_WORD.exec(text)?.[0] ??

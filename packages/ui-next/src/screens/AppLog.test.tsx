@@ -174,7 +174,8 @@ describe("AppLog", () => {
     render(<AppLog route="/logs" />);
 
     const alert = await screen.findByRole("alert");
-    expect(within(alert).getByText(/rejected your credentials/i)).toBeTruthy();
+    // A local read's refusal, not the cluster's (#926).
+    expect(within(alert).getByText(/credentials this operation used were rejected/i)).toBeTruthy();
     // The struct is inside the disclosure, never the sentence.
     const raw = alert.querySelector('[data-slot="raw"]');
     expect(raw?.textContent).toContain("ApiError");

@@ -154,6 +154,14 @@ struct LogStart {
     since_seconds: Option<i64>,
     #[serde(default)]
     tail_lines: Option<i64>,
+    #[serde(default)]
+    spool_max_bytes: Option<u64>,
+}
+#[derive(Deserialize)]
+struct SpoolRead {
+    channel: String,
+    before: u64,
+    limit: usize,
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -261,6 +269,7 @@ async fn run(
                     a.timestamps,
                     a.since_seconds,
                     a.tail_lines,
+                    a.spool_max_bytes,
                 )
                 .await
                 .map_err(|e| command_error(&e))?;
@@ -270,6 +279,16 @@ async fn run(
             let a: ChannelArg = parse(body)?;
             env.streams.logs.stop(&a.channel);
             json!(null)
+        }
+        "read_log_spool" => {
+            let a: SpoolRead = parse(body)?;
+            let page = env
+                .streams
+                .logs
+                .read(&a.channel, a.before, a.limit)
+                .await
+                .map_err(|e| command_error(&e))?;
+            json!(page)
         }
         "start_pod_exec" => {
             let a: ExecStart = parse(body)?;
@@ -462,6 +481,50 @@ mod tests {
             .as_str()
             .unwrap()
             .starts_with("unknown command"));
+    }
+
+    #[tokio::test]
+    async fn a_spooled_stream_reads_back_its_history_and_an_unspooled_one_says_it_has_none() {
+        let state = AppState::for_tests(Arc::new(Registry::new())).await;
+        let start = |channel: &str, spool: Option<u64>| {
+            json!({ "context": "c", "namespace": "n", "channel": channel,
+                    "targets": [{ "pod": "web-1", "label": "" }], "spoolMaxBytes": spool })
+        };
+        let (status, _) =
+            authed_post(&state, "start_log_stream", start("logs:1", Some(64 << 20))).await;
+        assert_eq!(status, StatusCode::OK);
+        let mut lines = json!([]);
+        for _ in 0..300 {
+            let (status, body) = authed_post(
+                &state,
+                "read_log_spool",
+                json!({ "channel": "logs:1", "before": u64::MAX, "limit": 10 }),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            lines = body["lines"].clone();
+            if lines.as_array().is_some_and(|l| !l.is_empty()) {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert!(
+            lines[0]["line"].as_str().unwrap().starts_with("[error:"),
+            "{lines}"
+        );
+
+        authed_post(&state, "start_log_stream", start("logs:2", None)).await;
+        let (status, body) = authed_post(
+            &state,
+            "read_log_spool",
+            json!({ "channel": "logs:2", "before": 10, "limit": 10 }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_GATEWAY);
+        assert!(
+            body["error"].as_str().unwrap().contains("keeps no history"),
+            "{body}"
+        );
     }
 
     #[tokio::test]

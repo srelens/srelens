@@ -34,6 +34,7 @@ vi.mock("@srelens/core", async (orig) => ({
   watchNamespaces,
 }));
 
+import { SELECTS_NOTHING } from "@srelens/core";
 import { useResourceList, resetListCache } from "./resourceList";
 import { rowKey, type KindDescriptor, type ListRow, type RowKey } from "./kinds/types";
 
@@ -60,6 +61,22 @@ describe("useResourceList", () => {
     act(() => mockState.emitRows!([{ name: "a" }]));
     expect(result.current.status).toBe("ready");
     expect(result.current.rows).toHaveLength(1);
+  });
+
+  /**
+   * A namespace collection that matches nothing (#881) is a selection of
+   * nothing: an empty list at once, and nothing asked of the cluster, polled
+   * or watched — never the empty selection's "every namespace".
+   */
+  it("lists nothing, and asks the cluster nothing, for a selection of nothing", async () => {
+    const load = vi.fn();
+    const polled: KindDescriptor<ListRow> = { ...watched, source: "poll", load };
+    const watchedList = renderHook(() => useResourceList("prod", "pods", watched, [...SELECTS_NOTHING], []));
+    const polledList = renderHook(() => useResourceList("prod", "configmaps", polled, [...SELECTS_NOTHING], []));
+    await waitFor(() => expect(watchedList.result.current.status).toBe("empty"));
+    expect(polledList.result.current.status).toBe("empty");
+    expect(watchNamespaces).not.toHaveBeenCalled();
+    expect(load).not.toHaveBeenCalled();
   });
 
   it("settles on error, not stuck loading, when the watch fails to start", async () => {

@@ -80,6 +80,8 @@ function toBarActions(items: ContextMenuItem[]): ActionBarAction[] {
 export interface DetailActionsProps {
   context: string;
   kind: string;
+  /** The API group, for a custom kind — Edit's route carries it (see `editRoute`). */
+  group?: string;
   namespace: string | null;
   name: string;
   /**
@@ -153,9 +155,10 @@ export function DetailActions({
   unschedulable,
   onChanged,
   host = "peek",
+  group,
 }: DetailActionsProps) {
   const { ask } = useConsole();
-  const { items, dialog } = useRowMenu({ context, kind, actions, onChanged });
+  const { items, dialog } = useRowMenu({ context, kind, actions, group, onChanged });
 
   // What a table would have handed the hook. `suspended` is not on `ListRow`
   // — `useRowMenu` reads it off the row with the same cast a `CronJobSummary`

@@ -7323,6 +7323,7 @@ dependencies = [
 name = "srelens-streams"
 version = "0.16.0"
 dependencies = [
+ "chrono",
  "portable-pty",
  "schemars 0.8.22",
  "serde",

@@ -286,14 +286,31 @@ export function openTab(route: string, opts: { preview?: boolean; clusterName?: 
  * `openTab` reads to decide whether anything changed.
  */
 function inheritNamespaces(target: Tab, source: Tab | undefined): Tab {
-  if (!source?.namespaces || source.id === target.id) return target;
-  const missing = Object.entries(source.namespaces).filter(([clusterId]) => !(clusterId in (target.namespaces ?? {})));
-  if (missing.length === 0) return target;
-  const namespaces = { ...target.namespaces };
-  // A copy of each list, not the list: the two tabs must not share an array
-  // one of them could be handed back to mutate.
-  for (const [clusterId, selection] of missing) namespaces[clusterId] = [...selection];
-  return { ...target, namespaces };
+  if (!source || source.id === target.id) return target;
+  // A cluster the target has made its own choice for, either way, keeps it.
+  const chosen = (clusterId: string) =>
+    clusterId in (target.namespaces ?? {}) || clusterId in (target.namespaceCollections ?? {});
+  const missing = Object.entries(source.namespaces ?? {}).filter(([clusterId]) => !chosen(clusterId));
+  // A collection scope travels the same way (#881): Deployments opened from
+  // Pods scoped to "prod" is Deployments in prod.
+  const scoped = Object.entries(source.namespaceCollections ?? {}).filter(
+    ([clusterId, names]) => names.length > 0 && !chosen(clusterId),
+  );
+  if (missing.length === 0 && scoped.length === 0) return target;
+  const next: Tab = { ...target };
+  if (missing.length > 0) {
+    const namespaces = { ...target.namespaces };
+    // A copy of each list, not the list: the two tabs must not share an array
+    // one of them could be handed back to mutate.
+    for (const [clusterId, selection] of missing) namespaces[clusterId] = [...selection];
+    next.namespaces = namespaces;
+  }
+  if (scoped.length > 0) {
+    const namespaceCollections = { ...target.namespaceCollections };
+    for (const [clusterId, names] of scoped) namespaceCollections[clusterId] = [...names];
+    next.namespaceCollections = namespaceCollections;
+  }
+  return next;
 }
 
 /**
@@ -533,7 +550,10 @@ export function setTabView(tabId: string, patch: Partial<NonNullable<Tab["view"]
       sortEqual(current.sort, next.sort) &&
       current.filter === next.filter &&
       current.filterKey === next.filterKey &&
-      current.regex === next.regex
+      current.regex === next.regex &&
+      // An empty box and no query at all are the same query: a Logs tab writes
+      // its box when it opens, and that must not give it a view.
+      (current.query ?? "") === (next.query ?? "")
     ) {
       return w;
     }
@@ -564,23 +584,123 @@ export function setTabNamespaces(tabId: string, clusterId: string, namespaces: r
   patchCurrent((w) => {
     const at = w.tabs.findIndex((t) => t.id === tabId);
     if (at < 0) return w;
-    const current = w.tabs[at].namespaces?.[clusterId];
-    if (current && current.length === namespaces.length && current.every((x, i) => x === namespaces[i])) return w;
-    const tabs = w.tabs.map((t, i) =>
-      i === at ? { ...t, namespaces: { ...t.namespaces, [clusterId]: [...namespaces] } } : t);
-    return { ...w, tabs };
+    const tab = w.tabs[at];
+    const current = tab.namespaces?.[clusterId];
+    const scoped = (tab.namespaceCollections?.[clusterId]?.length ?? 0) > 0;
+    if (!scoped && current && sameList(current, namespaces)) return w;
+    // Picking namespaces by hand replaces a collection scope (#881): the two
+    // are one choice, made one way or the other.
+    const next: Tab = { ...tab, namespaces: { ...tab.namespaces, [clusterId]: [...namespaces] } };
+    if (scoped) next.namespaceCollections = withoutCluster(tab.namespaceCollections, clusterId);
+    if (next.namespaceCollections === undefined) delete next.namespaceCollections;
+    return { ...w, tabs: w.tabs.map((t, i) => (i === at ? next : t)) };
   });
+}
+
+/**
+ * The namespace collections a tab is scoped to on a cluster, by name, or
+ * `undefined` when it has none there (#881).
+ */
+export function tabNamespaceCollections(tabId: string, clusterId: string): string[] | undefined {
+  const names = currentWorkspace().tabs.find((t) => t.id === tabId)?.namespaceCollections?.[clusterId];
+  return names && names.length > 0 ? names : undefined;
+}
+
+/**
+ * Scope a tab to namespace collections on one cluster, replacing the
+ * namespaces it had picked there — or, with none, drop the scope and go back
+ * to all namespaces. Guarded like `setTabNamespaces`.
+ */
+export function setTabNamespaceCollections(tabId: string, clusterId: string, names: readonly string[]): void {
+  patchCurrent((w) => {
+    const at = w.tabs.findIndex((t) => t.id === tabId);
+    if (at < 0) return w;
+    const tab = w.tabs[at];
+    const current = tab.namespaceCollections?.[clusterId] ?? [];
+    const picked = tab.namespaces !== undefined && clusterId in tab.namespaces;
+    if (sameList(current, names) && (names.length === 0 || !picked)) return w;
+    // The namespaces picked by hand go: the collections replace them, and
+    // with no entry left the cluster follows the default-namespace
+    // preference again should every one of those collections be deleted.
+    const namespaces = withoutCluster(tab.namespaces, clusterId);
+    const next: Tab = { ...tab };
+    if (namespaces === undefined) delete next.namespaces;
+    else next.namespaces = namespaces;
+    if (names.length > 0) next.namespaceCollections = { ...tab.namespaceCollections, [clusterId]: [...names] };
+    else next.namespaceCollections = withoutCluster(tab.namespaceCollections, clusterId);
+    if (next.namespaceCollections === undefined) delete next.namespaceCollections;
+    return { ...w, tabs: w.tabs.map((t, i) => (i === at ? next : t)) };
+  });
+}
+
+/**
+ * Move every tab scoped to the namespace collection `from` onto `to`, in
+ * every workspace, open, recently closed or put away with another cluster's
+ * tabs (#881). A collection renamed in Settings is the same collection, and a
+ * tab scoped to it must not read the old name as "deleted" and fall back.
+ */
+export function renameNamespaceCollection(from: string, to: string): void {
+  if (from === to) return;
+  const move = (tabs: Tab[]) => {
+    if (!tabs.some((t) => Object.values(t.namespaceCollections ?? {}).some((names) => names.includes(from)))) return tabs;
+    return tabs.map((t) => {
+      if (!t.namespaceCollections) return t;
+      const namespaceCollections = Object.fromEntries(
+        Object.entries(t.namespaceCollections).map(([clusterId, names]) => [
+          clusterId,
+          [...new Set(names.map((n) => (n === from ? to : n)))],
+        ]),
+      );
+      return { ...t, namespaceCollections };
+    });
+  };
+  const state = cur();
+  let changed = false;
+  const workspaces = state.workspaces.map((w) => {
+    const tabs = move(w.tabs);
+    const closed = move(w.closed);
+    let shelved = w.shelved;
+    for (const [id, strip] of Object.entries(w.shelved ?? {})) {
+      const put = { tabs: move(strip.tabs), closed: move(strip.closed) };
+      if (put.tabs !== strip.tabs || put.closed !== strip.closed) shelved = { ...shelved, [id]: { ...strip, ...put } };
+    }
+    if (tabs === w.tabs && closed === w.closed && shelved === w.shelved) return w;
+    changed = true;
+    return { ...w, tabs, closed, ...(shelved ? { shelved } : {}) };
+  });
+  if (changed) emit({ ...state, workspaces });
+}
+
+function sameList(a: readonly string[], b: readonly string[]): boolean {
+  return a.length === b.length && a.every((x, i) => x === b[i]);
+}
+
+/** A per-cluster record less one cluster, or `undefined` once it is empty. */
+function withoutCluster(record: Record<string, string[]> | undefined, clusterId: string) {
+  if (!record || !(clusterId in record)) return record;
+  const next = { ...record };
+  delete next[clusterId];
+  return Object.keys(next).length > 0 ? next : undefined;
 }
 
 /** Forget a removed cluster's selection in every tab of every workspace, open or recently closed. */
 export function forgetClusterNamespaces(clusterId: string): void {
+  const holds = (t: Tab) =>
+    (t.namespaces !== undefined && clusterId in t.namespaces) ||
+    (t.namespaceCollections !== undefined && clusterId in t.namespaceCollections);
   const strip = (tabs: Tab[]) => {
-    if (!tabs.some((t) => t.namespaces && clusterId in t.namespaces)) return tabs;
+    if (!tabs.some(holds)) return tabs;
     return tabs.map((t) => {
-      if (!t.namespaces || !(clusterId in t.namespaces)) return t;
-      const namespaces = { ...t.namespaces };
-      delete namespaces[clusterId];
-      return { ...t, namespaces };
+      if (!holds(t)) return t;
+      const next: Tab = { ...t };
+      if (t.namespaces && clusterId in t.namespaces) {
+        const namespaces = { ...t.namespaces };
+        delete namespaces[clusterId];
+        next.namespaces = namespaces;
+      }
+      next.namespaceCollections = withoutCluster(t.namespaceCollections, clusterId);
+      if (next.namespaceCollections === undefined) delete next.namespaceCollections;
+      return next;
     });
   };
   const state = cur();

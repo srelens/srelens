@@ -7649,24 +7649,27 @@ mod tests {
         app.handle_stream_event(
             ch.clone(),
             serde_json::json!({
-                "source": "api-server-abc",
-                "line": "GET /health 200"
+                "seq": 1,
+                "lines": [{ "source": "api-server-abc", "line": "GET /health 200" }]
             }),
         );
         app.handle_stream_event(
             ch.clone(),
             serde_json::json!({
-                "source": "api-server-def",
-                "line": "POST /order 201"
+                "seq": 2,
+                "lines": [{ "source": "api-server-def", "line": "POST /order 201" }]
             }),
         );
         // A line the host cut arrives marked, and the mark reaches the view (#747).
         app.handle_stream_event(
             ch.clone(),
             serde_json::json!({
-                "source": "api-server-abc",
-                "line": "the start of a long one",
-                "truncated": true
+                "seq": 3,
+                "lines": [{
+                    "source": "api-server-abc",
+                    "line": "the start of a long one",
+                    "truncated": true
+                }]
             }),
         );
 

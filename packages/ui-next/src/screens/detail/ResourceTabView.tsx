@@ -46,6 +46,8 @@ export interface ResourceTabViewProps {
   context: string;
   /** The Kubernetes kind, as the route carries it — not the list's slug. */
   kind: string;
+  /** The API group — a custom kind only; see `detailRoute`. */
+  group?: string;
   namespace: string | null;
   name: string;
 }
@@ -194,15 +196,16 @@ function TabFacts({ facts }: { facts: DetailFact[] }) {
  * Each needs something that does not exist yet, and a tab named after an empty
  * pane is worse than an absent one.
  */
-export function ResourceTabView({ context, kind, namespace, name }: ResourceTabViewProps) {
-  const subject = useDetailSubject({ context, kind, namespace, name });
+export function ResourceTabView({ context, kind, group, namespace, name }: ResourceTabViewProps) {
+  const subject = useDetailSubject({ context, kind, namespace, name, group });
   const { object, status, error, descriptor, statusLine, hasMetrics } = subject;
 
   // THIS SCREEN'S STRIP: `Overview YAML Events Metrics`. Overview rather than
   // the peek's Details, and no Containers tab at all — the design puts that
   // table inline, which a page has the room for and a 352px column does not.
   const tabs: TabItem[] = [
-    { id: PANE_DETAILS, label: "Overview" },
+    // #919: a custom resource's first pane is its status.
+    { id: PANE_DETAILS, label: subject.custom ? "Status" : "Overview" },
     { id: PANE_YAML, label: "YAML" },
     { id: PANE_EVENTS, label: "Events" },
     ...(hasMetrics ? [{ id: PANE_METRICS, label: "Metrics" }] : []),
@@ -213,12 +216,14 @@ export function ResourceTabView({ context, kind, namespace, name }: ResourceTabV
     namespace,
     name,
     tabs,
+    group,
   });
 
   // Hooks before any early return, so the fetch below is never conditional on
   // the object having arrived. Only a Pod is looked up — see `usageTiles`.
   const target = [context, kind, namespace, name] as const;
-  const wantsUsage = kind === "Pod" && namespace !== null;
+  // Never for a custom kind called Pod: the usage would be the built-in pod's (#919).
+  const wantsUsage = !subject.custom && kind === "Pod" && namespace !== null;
   const usage = useLoad<{ cpu: number; memory: number } | null>(wantsUsage, target, async () => {
     const result = await podMetrics(context, namespace ?? "");
     const mine = result.metrics?.find((m) => m.name === name);
@@ -295,6 +300,7 @@ export function ResourceTabView({ context, kind, namespace, name }: ResourceTabV
             host="tab"
             context={context}
             kind={kind}
+            group={group}
             namespace={namespace}
             name={name}
             // A kind outside `K8S_KIND` has no descriptor at all — the

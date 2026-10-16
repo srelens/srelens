@@ -94,6 +94,13 @@ describe("parseStoredState", () => {
     expect(parsed.workspaces[0].closed[0]).toMatchObject({ route: "/k/staging/Pod/default/web", sub: "staging" });
   });
 
+  it("keeps a custom kind's group when it pins an earlier build's detail tab", () => {
+    const state = valid();
+    state.workspaces[0].tabs.push({ ...makeTab("/k/example.com%2FWidget/default/w-1"), sub: "prod" });
+    const parsed = parseStoredState(JSON.stringify({ version: STORAGE_VERSION, ...state }))!;
+    expect(parsed.workspaces[0].tabs[2].route).toBe("/k/prod/example.com%2FWidget/default/w-1");
+  });
+
   it("keeps an earlier build's detail tab with no label as it was, following the rail", () => {
     const state = valid();
     state.workspaces[0].tabs.push(makeTab("/k/Node/-/worker-1"));
@@ -297,6 +304,28 @@ describe("parseStoredState", () => {
     });
   });
 
+  it("keeps a Logs tab's query through a save and a load, up to 2000 characters", () => {
+    for (const query of ["level:error -pool", "", "a".repeat(2000)]) {
+      const s = valid();
+      s.workspaces[0].tabs[1].view = { query };
+      const storage = memory();
+      saveTabsState(s, storage);
+      const parsed = parseStoredState(storage.getItem(BASE_STORAGE_KEY));
+      expect(parsed!.workspaces[0].tabs[1].view).toEqual({ query });
+    }
+  });
+
+  it.each([
+    ["is not a string", 5],
+    ["is longer than 2000 characters", "a".repeat(2001)],
+  ])("drops a query that %s, keeping the rest of the view", (_why, query) => {
+    const s = valid();
+    s.workspaces[0].tabs[1].view = { filter: "crash" };
+    const doc = JSON.parse(JSON.stringify({ version: 1, ...s }));
+    doc.workspaces[0].tabs[1].view.query = query;
+    expect(parseStoredState(JSON.stringify(doc))!.workspaces[0].tabs[1].view).toEqual({ filter: "crash" });
+  });
+
   it("drops a non-boolean regex mode without losing the rest of the view", () => {
     const s = valid();
     s.workspaces[0].tabs[1].view = { filter: "crash" };
@@ -358,6 +387,17 @@ describe("parseStoredState", () => {
     const parsed = parseStoredState(storage.getItem(BASE_STORAGE_KEY));
     expect(parsed!.workspaces[0].tabs[1].namespaces).toEqual({ prod: ["billing", "shop"], dev: [] });
     expect(parsed!.workspaces[0].tabs[0].namespaces).toBeUndefined();
+  });
+
+  it("round-trips a tab's namespace collections per cluster, and drops a malformed entry (#881)", () => {
+    const s = valid();
+    s.workspaces[0].tabs[1].namespaceCollections = { a: ["prod", "staging"], b: ["dev"] };
+    expect(parseStoredState(JSON.stringify({ version: 1, ...s }))?.workspaces[0].tabs[1].namespaceCollections).toEqual({
+      a: ["prod", "staging"],
+      b: ["dev"],
+    });
+    const raw = JSON.stringify({ version: 1, ...s }).replace('"b":["dev"]', '"b":"dev"');
+    expect(parseStoredState(raw)?.workspaces[0].tabs[1].namespaceCollections).toEqual({ a: ["prod", "staging"] });
   });
 
   it("drops one cluster's malformed namespace entry without losing the others or the tab", () => {
