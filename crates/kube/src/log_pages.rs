@@ -48,7 +48,13 @@ pub const MAX_WAIT_SECONDS: u32 = 60;
 pub const MAX_CONTEXT_LINES: u32 = 10;
 /// The most a `grep` pattern may compile to.
 const GREP_SIZE_LIMIT: usize = 1 << 20;
-const WORKLOAD_KINDS: [&str; 5] = ["Deployment", "StatefulSet", "DaemonSet", "ReplicaSet", "Job"];
+const WORKLOAD_KINDS: [&str; 5] = [
+    "Deployment",
+    "StatefulSet",
+    "DaemonSet",
+    "ReplicaSet",
+    "Job",
+];
 
 /// Where a page-mode read stopped, and what happened to the logs on the way.
 #[derive(Debug, Serialize, JsonSchema)]
@@ -135,9 +141,7 @@ impl Cursor {
             v: u32,
         }
         let garbled = || invalid(format!("`cursor` is not one srelens wrote; {AGAIN}"));
-        let bytes = URL_SAFE_NO_PAD
-            .decode(text.trim())
-            .map_err(|_| garbled())?;
+        let bytes = URL_SAFE_NO_PAD.decode(text.trim()).map_err(|_| garbled())?;
         let Version { v } = serde_json::from_slice(&bytes).map_err(|_| garbled())?;
         if v != CURSOR_VERSION {
             return Err(invalid(format!(
@@ -212,7 +216,9 @@ fn within(name: &str, value: u32, min: u32, max: u32) -> Result<u32, CapabilityE
     if (min..=max).contains(&value) {
         Ok(value)
     } else {
-        Err(invalid(format!("`{name}` must be {min}–{max}, not {value}")))
+        Err(invalid(format!(
+            "`{name}` must be {min}–{max}, not {value}"
+        )))
     }
 }
 
@@ -896,8 +902,7 @@ async fn merge(
     req: &PageRequest,
     page: &mut PageText,
 ) -> Result<bool, CapabilityError> {
-    futures::future::try_join_all(reads.iter_mut().map(|read| read.fill(pods, req, false)))
-        .await?;
+    futures::future::try_join_all(reads.iter_mut().map(|read| read.fill(pods, req, false))).await?;
     loop {
         // The oldest head; on a tie, the pod first by name.
         let Some(i) = (0..reads.len())
@@ -987,26 +992,41 @@ async fn workload_selector(
     let what = format!("reading {} {}", workload.kind, workload.name);
     let name = workload.name.as_str();
     let selector = match workload.kind.as_str() {
-        "Deployment" => timed(&what, Api::<Deployment>::namespaced(client.clone(), namespace).get(name))
-            .await?
-            .spec
-            .map(|s| s.selector),
-        "StatefulSet" => timed(&what, Api::<StatefulSet>::namespaced(client.clone(), namespace).get(name))
-            .await?
-            .spec
-            .map(|s| s.selector),
-        "DaemonSet" => timed(&what, Api::<DaemonSet>::namespaced(client.clone(), namespace).get(name))
-            .await?
-            .spec
-            .map(|s| s.selector),
-        "ReplicaSet" => timed(&what, Api::<ReplicaSet>::namespaced(client.clone(), namespace).get(name))
-            .await?
-            .spec
-            .map(|s| s.selector),
-        "Job" => timed(&what, Api::<Job>::namespaced(client.clone(), namespace).get(name))
-            .await?
-            .spec
-            .and_then(|s| s.selector),
+        "Deployment" => timed(
+            &what,
+            Api::<Deployment>::namespaced(client.clone(), namespace).get(name),
+        )
+        .await?
+        .spec
+        .map(|s| s.selector),
+        "StatefulSet" => timed(
+            &what,
+            Api::<StatefulSet>::namespaced(client.clone(), namespace).get(name),
+        )
+        .await?
+        .spec
+        .map(|s| s.selector),
+        "DaemonSet" => timed(
+            &what,
+            Api::<DaemonSet>::namespaced(client.clone(), namespace).get(name),
+        )
+        .await?
+        .spec
+        .map(|s| s.selector),
+        "ReplicaSet" => timed(
+            &what,
+            Api::<ReplicaSet>::namespaced(client.clone(), namespace).get(name),
+        )
+        .await?
+        .spec
+        .map(|s| s.selector),
+        "Job" => timed(
+            &what,
+            Api::<Job>::namespaced(client.clone(), namespace).get(name),
+        )
+        .await?
+        .spec
+        .and_then(|s| s.selector),
         _ => None,
     };
     selector.ok_or_else(|| {
@@ -1136,8 +1156,7 @@ fn plan_reads(
             ));
             at = None;
         }
-        if at.is_none() && req.cursor.is_some() && !req.target.single() && notices_here.is_empty()
-        {
+        if at.is_none() && req.cursor.is_some() && !req.target.single() && notices_here.is_empty() {
             notices_here.push(format!(
                 "{name}: new since the cursor; read from its first line"
             ));
@@ -1321,7 +1340,10 @@ mod tests {
             "context": "c", "namespace": "n", "pod": "a",
             "grep": "x", "max_bytes": 2000, "wait_seconds": 5
         }));
-        assert_eq!(fingerprint(&plain, &target), fingerprint(&filtered, &target));
+        assert_eq!(
+            fingerprint(&plain, &target),
+            fingerprint(&filtered, &target)
+        );
     }
 
     fn parse(v: Value) -> Result<PageRequest, String> {
@@ -1368,19 +1390,40 @@ mod tests {
     #[test]
     fn page_inputs_out_of_range_or_in_conflict_are_refused_in_one_line() {
         let cases = [
-            (json!({ "since_time": "2026-10-16T00:00:00Z", "since_seconds": 60 }), "not both"),
+            (
+                json!({ "since_time": "2026-10-16T00:00:00Z", "since_seconds": 60 }),
+                "not both",
+            ),
             (json!({ "context_lines": 2 }), "needs `grep`"),
-            (json!({ "grep": "x", "context_lines": 11 }), "`context_lines` must be 0–10"),
-            (json!({ "max_bytes": 999 }), "`max_bytes` must be 1000–40000"),
-            (json!({ "max_bytes": 40001 }), "`max_bytes` must be 1000–40000"),
+            (
+                json!({ "grep": "x", "context_lines": 11 }),
+                "`context_lines` must be 0–10",
+            ),
+            (
+                json!({ "max_bytes": 999 }),
+                "`max_bytes` must be 1000–40000",
+            ),
+            (
+                json!({ "max_bytes": 40001 }),
+                "`max_bytes` must be 1000–40000",
+            ),
             (json!({ "wait_seconds": 61 }), "`wait_seconds` must be 0–60"),
             (json!({ "grep": "(unclosed" }), "`grep` is not a regex"),
-            (json!({ "since_time": "yesterday" }), "`since_time` is not an RFC 3339 time"),
-            (json!({ "max_bytes": 2000, "since_seconds": -5 }), "`since_seconds` must not be negative"),
+            (
+                json!({ "since_time": "yesterday" }),
+                "`since_time` is not an RFC 3339 time",
+            ),
+            (
+                json!({ "max_bytes": 2000, "since_seconds": -5 }),
+                "`since_seconds` must not be negative",
+            ),
         ];
         for (extra, want) in cases {
-            let err = parse(with(json!({ "context": "c", "namespace": "n", "pod": "a" }), extra.clone()))
-                .unwrap_err();
+            let err = parse(with(
+                json!({ "context": "c", "namespace": "n", "pod": "a" }),
+                extra.clone(),
+            ))
+            .unwrap_err();
             assert!(err.contains(want), "{extra}: {err}");
             assert_eq!(err.lines().count(), 1, "{err}");
         }
@@ -1392,7 +1435,10 @@ mod tests {
             "context": "c", "namespace": "n", "workload": { "kind": "CronJob", "name": "x" }
         }))
         .unwrap_err();
-        assert!(err.contains("Deployment, StatefulSet, DaemonSet, ReplicaSet, Job"), "{err}");
+        assert!(
+            err.contains("Deployment, StatefulSet, DaemonSet, ReplicaSet, Job"),
+            "{err}"
+        );
     }
 
     #[test]
@@ -1407,7 +1453,10 @@ mod tests {
         };
         assert_eq!(start(json!({})), Start::Beginning);
         assert_eq!(start(json!({ "tail_lines": 50 })), Start::Tail(50));
-        assert_eq!(start(json!({ "tail_lines": 50, "all_lines": true })), Start::Beginning);
+        assert_eq!(
+            start(json!({ "tail_lines": 50, "all_lines": true })),
+            Start::Beginning
+        );
         assert_eq!(
             start(json!({ "since_time": "2026-10-16T10:00:00.25Z" })),
             Start::At("2026-10-16T10:00:00.25Z".parse().unwrap())
@@ -1475,7 +1524,10 @@ mod tests {
         // A start time with nothing read yet (`k: 0`) takes its own second's
         // lines from it on.
         assert_eq!(
-            admitted(Resume::new(at(1, 500), 0), &[at(1, 0), at(1, 500), at(2, 0)]),
+            admitted(
+                Resume::new(at(1, 500), 0),
+                &[at(1, 0), at(1, 500), at(2, 0)]
+            ),
             ["skip", "take", "take"]
         );
     }
@@ -1507,16 +1559,34 @@ mod tests {
             previous: true,
             restarts: r,
         };
-        assert_eq!(plan_instances(3, false, None), (vec![current(3)], Moved::Stayed));
-        assert_eq!(plan_instances(3, false, Some(3)), (vec![current(3)], Moved::Stayed));
+        assert_eq!(
+            plan_instances(3, false, None),
+            (vec![current(3)], Moved::Stayed)
+        );
+        assert_eq!(
+            plan_instances(3, false, Some(3)),
+            (vec![current(3)], Moved::Stayed)
+        );
         assert_eq!(
             plan_instances(3, false, Some(2)),
             (vec![last(2), current(3)], Moved::Restarted)
         );
-        assert_eq!(plan_instances(3, false, Some(1)), (vec![current(3)], Moved::Lost));
-        assert_eq!(plan_instances(3, true, None), (vec![last(2)], Moved::Stayed));
-        assert_eq!(plan_instances(3, true, Some(2)), (vec![last(2)], Moved::Stayed));
-        assert_eq!(plan_instances(3, true, Some(1)), (vec![last(2)], Moved::Lost));
+        assert_eq!(
+            plan_instances(3, false, Some(1)),
+            (vec![current(3)], Moved::Lost)
+        );
+        assert_eq!(
+            plan_instances(3, true, None),
+            (vec![last(2)], Moved::Stayed)
+        );
+        assert_eq!(
+            plan_instances(3, true, Some(2)),
+            (vec![last(2)], Moved::Stayed)
+        );
+        assert_eq!(
+            plan_instances(3, true, Some(1)),
+            (vec![last(2)], Moved::Lost)
+        );
     }
 
     fn pod_object(containers: &[&str], init: &[&str], restarts: i32) -> Pod {
@@ -1537,16 +1607,25 @@ mod tests {
     fn the_container_a_read_covers() {
         let one = pod_object(&["app"], &["setup"], 0);
         assert_eq!(container_of(&one, None).ok().as_deref(), Some("app"));
-        assert_eq!(container_of(&one, Some("setup")).ok().as_deref(), Some("setup"));
+        assert_eq!(
+            container_of(&one, Some("setup")).ok().as_deref(),
+            Some("setup")
+        );
         let Err(NoContainer::Missing(why)) = container_of(&one, Some("sidecar")) else {
             panic!("a container the pod lacks is missing")
         };
-        assert!(why.contains("cmi-0") && why.contains("\"sidecar\""), "{why}");
+        assert!(
+            why.contains("cmi-0") && why.contains("\"sidecar\""),
+            "{why}"
+        );
         let two = pod_object(&["app", "proxy"], &[], 0);
         let Err(NoContainer::Ambiguous(why)) = container_of(&two, None) else {
             panic!("two containers and none named is ambiguous")
         };
-        assert!(why.contains("app, proxy") && why.contains("`container`"), "{why}");
+        assert!(
+            why.contains("app, proxy") && why.contains("`container`"),
+            "{why}"
+        );
         assert_eq!(restarts_of(&pod_object(&["app"], &[], 4), "app"), 4);
         assert_eq!(restarts_of(&pod_object(&["app"], &[], 4), "missing"), 0);
     }
@@ -1733,8 +1812,11 @@ mod tests {
         });
         let stream = futures::stream::iter(frames);
         let body = if follow {
-            StreamBody::new(futures::StreamExt::chain(stream, futures::stream::pending()))
-                .boxed_unsync()
+            StreamBody::new(futures::StreamExt::chain(
+                stream,
+                futures::stream::pending(),
+            ))
+            .boxed_unsync()
         } else {
             StreamBody::new(stream).boxed_unsync()
         };
@@ -1751,8 +1833,8 @@ mod tests {
         (0..n)
             .map(|i| {
                 let j = i - usize::from(i % 7 == 6);
-                let ts = Timestamp::new(BASE + (j / 50) as i64, ((j % 50) * 20_000_000) as i32)
-                    .unwrap();
+                let ts =
+                    Timestamp::new(BASE + (j / 50) as i64, ((j % 50) * 20_000_000) as i32).unwrap();
                 let mut text = format!("line {i:06} ");
                 text.push_str(&"x".repeat(bytes.saturating_sub(text.len())));
                 (ts, text)
@@ -1835,15 +1917,21 @@ mod tests {
 
     #[tokio::test]
     async fn stamps_are_shown_only_when_asked_for() {
-        let log = vec![(at(0, 250), "one".to_string()), (at(1, 0), "two".to_string())];
+        let log = vec![
+            (at(0, 250), "one".to_string()),
+            (at(1, 0), "two".to_string()),
+        ];
         let cache = cache_for(one_pod(log)).await;
         let plain = page(&cache, read_of(json!({ "max_bytes": 1000 })))
             .await
             .unwrap();
         assert_eq!(plain["logs"], "one\ntwo\n");
-        let stamped = page(&cache, read_of(json!({ "max_bytes": 1000, "timestamps": true })))
-            .await
-            .unwrap();
+        let stamped = page(
+            &cache,
+            read_of(json!({ "max_bytes": 1000, "timestamps": true })),
+        )
+        .await
+        .unwrap();
         assert_eq!(
             stamped["logs"],
             format!("{} one\n{} two\n", at(0, 250), at(1, 0))
@@ -1921,9 +2009,12 @@ mod tests {
     async fn a_cursor_wins_over_the_start_fields_resent_with_it() {
         let log = log_of(40, 50);
         let cache = cache_for(one_pod(log.clone())).await;
-        let first = page(&cache, read_of(json!({ "max_bytes": 1000, "tail_lines": 30 })))
-            .await
-            .unwrap();
+        let first = page(
+            &cache,
+            read_of(json!({ "max_bytes": 1000, "tail_lines": 30 })),
+        )
+        .await
+        .unwrap();
         let shown = first["lines"].as_u64().unwrap() as usize;
         let next = page(
             &cache,
@@ -1935,7 +2026,10 @@ mod tests {
         .await
         .unwrap();
         assert!(
-            next["logs"].as_str().unwrap().starts_with(&log[10 + shown].1),
+            next["logs"]
+                .as_str()
+                .unwrap()
+                .starts_with(&log[10 + shown].1),
             "{next}"
         );
     }
@@ -2129,7 +2223,11 @@ mod tests {
         cluster.pods.lock().unwrap().extend([
             pod(
                 "cmi-a",
-                vec![(t(0), "a0".into()), (t(2), "a2".into()), (t(4), "a4".into())],
+                vec![
+                    (t(0), "a0".into()),
+                    (t(2), "a2".into()),
+                    (t(4), "a4".into()),
+                ],
             ),
             pod("cmi-b", vec![(t(1), "b1".into()), (t(3), "b3".into())]),
         ]);
@@ -2150,11 +2248,10 @@ mod tests {
     #[tokio::test]
     async fn a_workloads_pods_are_read_through_its_selector() {
         let cluster = two_pods();
-        cluster
-            .deployments
-            .lock()
-            .unwrap()
-            .insert("cmi".into(), [("app".to_string(), "cmi".to_string())].into());
+        cluster.deployments.lock().unwrap().insert(
+            "cmi".into(),
+            [("app".to_string(), "cmi".to_string())].into(),
+        );
         let cache = cache_for(cluster).await;
         let out = page(
             &cache,
@@ -2195,7 +2292,8 @@ mod tests {
         assert_eq!(out["logs"], "[cmi-a] a0\n[cmi-a] a2\n[cmi-a] a4\n");
         let notice = out["notices"][0].as_str().unwrap();
         assert!(
-            notice.starts_with("cmi-b: could not read its log") && notice.contains("waiting to start"),
+            notice.starts_with("cmi-b: could not read its log")
+                && notice.contains("waiting to start"),
             "{notice}"
         );
     }
@@ -2208,10 +2306,13 @@ mod tests {
         cluster.pods.lock().unwrap()[0].fails = Some(
             "container \"app\" in pod \"cmi-0\" is waiting to start: ContainerCreating".into(),
         );
-        let err = page(&*cache_for(cluster).await, read_of(json!({ "max_bytes": 1000 })))
-            .await
-            .unwrap_err()
-            .to_string();
+        let err = page(
+            &*cache_for(cluster).await,
+            read_of(json!({ "max_bytes": 1000 })),
+        )
+        .await
+        .unwrap_err()
+        .to_string();
         assert!(err.contains("waiting to start"), "{err}");
     }
 
@@ -2225,9 +2326,12 @@ mod tests {
             pods.retain(|p| p.name != "cmi-b");
             pods.push(pod("cmi-c", vec![(at(10, 0), "c10".into())]));
         }
-        let next = page(&cache, by_selector(json!({ "cursor": first["next_cursor"] })))
-            .await
-            .unwrap();
+        let next = page(
+            &cache,
+            by_selector(json!({ "cursor": first["next_cursor"] })),
+        )
+        .await
+        .unwrap();
         assert_eq!(next["logs"], "[cmi-c] c10\n");
         let notices: Vec<&str> = next["notices"]
             .as_array()
@@ -2235,8 +2339,14 @@ mod tests {
             .iter()
             .map(|n| n.as_str().unwrap())
             .collect();
-        assert!(notices.iter().any(|n| n.starts_with("cmi-b: gone")), "{notices:?}");
-        assert!(notices.iter().any(|n| n.starts_with("cmi-c: new")), "{notices:?}");
+        assert!(
+            notices.iter().any(|n| n.starts_with("cmi-b: gone")),
+            "{notices:?}"
+        );
+        assert!(
+            notices.iter().any(|n| n.starts_with("cmi-c: new")),
+            "{notices:?}"
+        );
     }
 
     #[tokio::test]
@@ -2248,7 +2358,10 @@ mod tests {
             .await
             .unwrap_err()
             .to_string();
-        assert!(err.contains("app, sidecar") && err.contains("`container`"), "{err}");
+        assert!(
+            err.contains("app, sidecar") && err.contains("`container`"),
+            "{err}"
+        );
         let out = page(&cache, by_selector(json!({ "container": "sidecar" })))
             .await
             .unwrap();
@@ -2289,7 +2402,9 @@ mod tests {
         assert_eq!(first["end"], true);
         let next = page(
             &cache,
-            read_of(json!({ "max_bytes": 1000, "wait_seconds": 5, "cursor": first["next_cursor"] })),
+            read_of(
+                json!({ "max_bytes": 1000, "wait_seconds": 5, "cursor": first["next_cursor"] }),
+            ),
         )
         .await
         .unwrap();
@@ -2339,7 +2454,10 @@ mod tests {
         let name = |i: usize| format!("{}-{i:02}", "c".repeat(60));
         let line = "\"\u{1b}[31m".repeat(40);
         for i in 0..20 {
-            let mut p = pod(&name(i), (0..200).map(|j| (at(j, 0), line.clone())).collect());
+            let mut p = pod(
+                &name(i),
+                (0..200).map(|j| (at(j, 0), line.clone())).collect(),
+            );
             if i % 2 == 1 {
                 p.fails = Some("x".repeat(1_500));
             }
