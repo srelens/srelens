@@ -1,5 +1,6 @@
 //! The `k8s.podLogs` capability — fetch recent logs for a pod via kube-rs.
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use futures::{AsyncBufRead, AsyncBufReadExt};
@@ -12,6 +13,7 @@ use srelens_capability::{Annotations, Capability, CapabilityError};
 
 use crate::client_cache::ClientCache;
 use crate::connect::request_timeout;
+use crate::workloads::LabelSelectorRequirement;
 
 const DEFAULT_TAIL_LINES: i64 = 200;
 
@@ -413,7 +415,10 @@ pub async fn stream_pod_logs_resilient<F, G>(
 pub struct PodLogsIn {
     pub context: String,
     pub namespace: String,
-    pub pod: String,
+    /// The pod. Give exactly one of `pod`, `selector` (with
+    /// `matchExpressions`) or `workload`; a read without page mode needs `pod`.
+    #[serde(default)]
+    pub pod: Option<String>,
     /// Container name. May be omitted only when the pod has exactly one
     /// container — the Kubernetes log API rejects an omitted container name
     /// for any pod with more than one (it does not pick one for you).
@@ -439,11 +444,76 @@ pub struct PodLogsIn {
     /// Only logs newer than this many seconds ago.
     #[serde(default)]
     pub since_seconds: Option<i64>,
+    /// Page mode: start at this RFC 3339 time. Not with `since_seconds`.
+    #[serde(default)]
+    pub since_time: Option<String>,
+    /// Page mode: every pod this equality label selector matches, e.g.
+    /// `{ "app": "cmi" }` — at most 20, merged in time order, each line
+    /// prefixed `[pod] `.
+    #[serde(default)]
+    pub selector: Option<BTreeMap<String, String>>,
+    /// Page mode: the set-based half of the selector, as `k8s.podsForSelector`
+    /// takes it.
+    #[serde(default, rename = "matchExpressions")]
+    pub match_expressions: Option<Vec<LabelSelectorRequirement>>,
+    /// Page mode: every pod of this Deployment, StatefulSet, DaemonSet,
+    /// ReplicaSet or Job, read as `selector` would read them.
+    #[serde(default)]
+    pub workload: Option<WorkloadRef>,
+    /// Page mode: read on from the page this came with (its `next_cursor`).
+    /// With one, `tail_lines`, `all_lines`, `since_seconds` and `since_time`
+    /// are ignored.
+    #[serde(default)]
+    pub cursor: Option<String>,
+    /// Page mode: keep only lines matching this regex (Rust `regex` syntax;
+    /// `(?i)` ignores case), searched on the server across the whole log.
+    #[serde(default)]
+    pub grep: Option<String>,
+    /// Page mode: lines kept before and after each `grep` match, 0–10.
+    #[serde(default)]
+    pub context_lines: Option<u32>,
+    /// Page mode: the most bytes of `logs` one page holds, 1,000–40,000
+    /// (default 12,000). Every page-mode answer fits srelens' 50,000-byte cap.
+    #[serde(default)]
+    pub max_bytes: Option<u32>,
+    /// Page mode: once the end of the log is reached and the page has room,
+    /// wait up to this many seconds (0–60) for new lines — a bounded follow.
+    #[serde(default)]
+    pub wait_seconds: Option<u32>,
 }
 
+impl PodLogsIn {
+    /// Any field page mode adds turns it on; without one, the call is the
+    /// blob it always was.
+    pub fn page_mode(&self) -> bool {
+        self.since_time.is_some()
+            || self.selector.is_some()
+            || self.match_expressions.is_some()
+            || self.workload.is_some()
+            || self.cursor.is_some()
+            || self.grep.is_some()
+            || self.context_lines.is_some()
+            || self.max_bytes.is_some()
+            || self.wait_seconds.is_some()
+    }
+}
+
+/// A workload whose pods a page-mode read covers.
+#[derive(Debug, Clone, PartialEq, Deserialize, JsonSchema)]
+pub struct WorkloadRef {
+    /// `Deployment`, `StatefulSet`, `DaemonSet`, `ReplicaSet` or `Job`.
+    pub kind: String,
+    pub name: String,
+}
+
+/// A pod's log: all of what was asked for, or — in page mode — one page of
+/// it and where the page stopped.
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct PodLogsOut {
     pub logs: String,
+    /// Page mode only: where the page stopped, and what happened on the way.
+    #[serde(flatten)]
+    pub page: Option<crate::log_pages::Page>,
 }
 
 /// `k8s.podLogs` — return the last N lines of a pod's logs, or all of them.
@@ -455,6 +525,11 @@ pub fn pod_logs_capability(cache: Arc<ClientCache>) -> Capability {
         move |input: PodLogsIn| {
             let cache = cache.clone();
             async move {
+                let pod = input.pod.clone().ok_or_else(|| {
+                    CapabilityError::InvalidInput(
+                        "`pod` is required unless a page-mode field (`selector`, `workload`, `cursor`, `grep`, `max_bytes`, …) is given".into(),
+                    )
+                })?;
                 let client = cache
                     .get(&input.context)
                     .await
@@ -468,11 +543,11 @@ pub fn pod_logs_capability(cache: Arc<ClientCache>) -> Capability {
                     input.timestamps,
                     input.previous,
                 );
-                let logs = tokio::time::timeout(request_timeout(), api.logs(&input.pod, &params))
+                let logs = tokio::time::timeout(request_timeout(), api.logs(&pod, &params))
                     .await
                     .map_err(|_| CapabilityError::Handler("fetch logs timed out".into()))?
                     .map_err(|e| CapabilityError::Handler(e.to_string()))?;
-                Ok(PodLogsOut { logs })
+                Ok(PodLogsOut { logs, page: None })
             }
         },
     )
@@ -846,6 +921,67 @@ mod tests {
         // unchanged: omit both and you still get the last 200 lines.
         assert_eq!(effective_tail_lines(false, None), Some(DEFAULT_TAIL_LINES));
         assert_eq!(effective_tail_lines(false, Some(50)), Some(50));
+    }
+
+    /// A blob read's answer is what it always was: `logs` and nothing else.
+    #[test]
+    fn a_blob_answer_carries_logs_alone() {
+        let out = PodLogsOut {
+            logs: "a\n".into(),
+            page: None,
+        };
+        assert_eq!(
+            serde_json::to_value(&out).unwrap(),
+            serde_json::json!({ "logs": "a\n" })
+        );
+    }
+
+    /// Any field page mode adds turns it on; the blob fields alone never do.
+    #[test]
+    fn every_field_page_mode_adds_turns_it_on_and_the_blob_fields_do_not() {
+        use serde_json::json;
+        let with = |extra: serde_json::Value| {
+            let mut v = json!({ "context": "c", "namespace": "n", "pod": "p" });
+            v.as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            serde_json::from_value::<PodLogsIn>(v).unwrap()
+        };
+        for blob in [
+            json!({}),
+            json!({ "container": "app" }),
+            json!({ "tail_lines": 5 }),
+            json!({ "all_lines": true }),
+            json!({ "previous": true }),
+            json!({ "timestamps": true }),
+            json!({ "since_seconds": 60 }),
+        ] {
+            assert!(!with(blob.clone()).page_mode(), "{blob}");
+        }
+        for page in [
+            json!({ "cursor": "x" }),
+            json!({ "grep": "x" }),
+            json!({ "context_lines": 1 }),
+            json!({ "max_bytes": 2000 }),
+            json!({ "wait_seconds": 1 }),
+            json!({ "since_time": "2026-10-16T00:00:00Z" }),
+            json!({ "selector": { "app": "x" } }),
+            json!({ "matchExpressions": [] }),
+            json!({ "workload": { "kind": "Deployment", "name": "x" } }),
+        ] {
+            assert!(with(page.clone()).page_mode(), "{page}");
+        }
+    }
+
+    /// `pod` became optional for page mode; a blob read without one is
+    /// refused naming what to give, as serde's "missing field" used to.
+    #[tokio::test]
+    async fn a_blob_read_without_a_pod_is_refused() {
+        let cap = pod_logs_capability(ClientCache::new(PathBuf::from("/x")));
+        let err = (cap.handler)(serde_json::json!({ "context": "c", "namespace": "n" }))
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("`pod`"), "{err}");
     }
 
     #[test]
