@@ -36,6 +36,10 @@ uuid = { version = "1", features = ["v4"] }
 flate2 = "1"
 http = "1"
 similar = "2"
+# `k8s.podLogs`' page mode filters lines with `grep`: linear time, and its
+# compiled size is capped. Already in the lockfile through the workspace, so
+# no new crate is built.
+regex = "1"
 sha2 = "0.10"
 hex = "0.4"
 tar = "0.4"
