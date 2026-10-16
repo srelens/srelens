@@ -830,6 +830,16 @@ impl PodRead {
         let first = match (self.tail_from.take(), self.head.as_ref()) {
             // Past its first stamp, the read counted every later one whole.
             (Some(first), _) if self.last != Some(first) => return Ok(()),
+            // The stream was dropped before it finished (it stalled): what
+            // it held past the read is unknown, so the count stays where the
+            // tail began. The next page may repeat lines, but skips none.
+            (Some(first), _) if self.failed && self.lines.is_none() => {
+                self.notices.push(format!(
+                    "{}: its tail stopped partway through the lines stamped {}; the next page may repeat some of them",
+                    self.name, first
+                ));
+                return Ok(());
+            }
             (Some(first), _) => first,
             // Nothing taken yet, a line waiting (other pods filled the
             // page): the read stands just before that line.
@@ -1952,6 +1962,9 @@ mod tests {
         /// A `previous` read fails for a passing reason (a 500), its log
         /// still there.
         previous_flaky: bool,
+        /// A `tail_lines` read hands out this many lines and then stalls,
+        /// the rest of its tail undelivered; other reads are whole.
+        tail_stalls_after: Option<usize>,
     }
 
     fn pod(name: &str, lines: Vec<(Timestamp, String)>) -> FakePod {
@@ -2119,6 +2132,13 @@ mod tests {
             lines = lines.split_off(lines.len().saturating_sub(n));
         }
         let stamped = flag("timestamps");
+        let tail_stall = query
+            .contains_key("tailLines")
+            .then_some(p.tail_stalls_after)
+            .flatten();
+        if let Some(delivered) = tail_stall {
+            lines.truncate(delivered);
+        }
         let frames = lines.into_iter().map(move |(ts, text)| {
             let line = if stamped {
                 format!("{ts} {text}\n")
@@ -2135,7 +2155,7 @@ mod tests {
                 }
                 frame
             });
-        let body = if follow || p.stalls {
+        let body = if follow || p.stalls || tail_stall.is_some() {
             StreamBody::new(futures::StreamExt::chain(
                 stream,
                 futures::stream::pending(),
@@ -3228,6 +3248,41 @@ mod tests {
         assert_eq!(
             next["logs"].as_str().unwrap(),
             joined(&old[10..]) + &joined(&new)
+        );
+    }
+
+    /// PR #941 review (Greptile): a tail that stalls partway through a group
+    /// of lines sharing one stamp has not seen the rest of that group, so its
+    /// position may not count those lines as read: the next page may repeat
+    /// a line, and says so, but skips none.
+    #[tokio::test(start_paused = true)]
+    async fn a_tail_that_stalls_inside_a_stamp_group_skips_none_of_it() {
+        let log: Vec<_> = ["a", "b", "c", "d"]
+            .iter()
+            .map(|text| (at(0, 500), text.to_string()))
+            .collect();
+        let cluster = one_pod(log);
+        cluster.pods.lock().unwrap()[0].tail_stalls_after = Some(1);
+        let cache = cache_for(cluster).await;
+        let first = page(
+            &cache,
+            read_of(json!({ "tail_lines": 3, "max_bytes": 1000 })),
+        )
+        .await
+        .unwrap();
+        assert_eq!(first["logs"], "b\n");
+        let notices = first["notices"].to_string();
+        assert!(notices.contains("may repeat"), "{notices}");
+        let next = page(
+            &cache,
+            read_of(json!({ "max_bytes": 1000, "cursor": first["next_cursor"] })),
+        )
+        .await
+        .unwrap();
+        let shown = next["logs"].as_str().unwrap();
+        assert!(
+            shown.ends_with("c\nd\n"),
+            "c and d were never delivered, so they are read now: {shown}"
         );
     }
 }
