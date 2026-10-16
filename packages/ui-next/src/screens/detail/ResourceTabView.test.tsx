@@ -3,7 +3,7 @@ import { render, screen, waitFor, within, type RenderOptions } from "@testing-li
 import { render as renderBare } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { ReactElement, ReactNode } from "react";
-import type { K8sObject, PodMetric } from "@srelens/core";
+import type { CrdRef, K8sObject, PodMetric } from "@srelens/core";
 import type { KindDescriptor, ListRow } from "../../lib/kinds/types";
 
 // The reads behind the tab: the object itself, the pod usage its CPU and
@@ -14,7 +14,7 @@ const { getObject, getManifest, listEvents, listCrds, podMetrics, podsForSelecto
   getObject: vi.fn(async (): Promise<{ object?: K8sObject; error?: string }> => ({})),
   getManifest: vi.fn(async (): Promise<{ yaml?: string; error?: string }> => ({ yaml: "" })),
   listEvents: vi.fn(async () => ({ events: [] })),
-  listCrds: vi.fn(async () => ({ crds: [] })),
+  listCrds: vi.fn(async (): Promise<{ crds?: CrdRef[]; error?: string }> => ({ crds: [] })),
   podMetrics: vi.fn(async (): Promise<{ metrics?: PodMetric[]; error?: string }> => ({ metrics: [] })),
   podsForSelector: vi.fn(async () => ({ pods: [] })),
   podsOnNode: vi.fn(async () => ({ pods: [] })),
@@ -172,6 +172,28 @@ describe("ResourceTabView — the full tab the design draws", () => {
     // would still be open in the next one.
     localStorage.clear();
     loadSectionFolds();
+  });
+
+  it("heads a custom resource's first pane Status, opened from a route with no group (#919)", async () => {
+    listCrds.mockResolvedValue({
+      crds: [{ name: "widgets.example.com", group: "example.com", version: "v1", kind: "Widget", plural: "widgets", namespaced: true }],
+    });
+    getObject.mockResolvedValue({ object: { kind: "Widget", metadata: { name: "w-1", namespace: "default" } } });
+    descriptorFor.mockReturnValue(undefined);
+    await openPod({ kind: "Widget", namespace: "default", name: "w-1" });
+    expect(screen.getAllByRole("tab").map((t) => t.textContent)).toEqual(["Status", "YAML", "Events"]);
+  });
+
+  it("reads no pod usage for a custom kind that happens to be called Pod (#919)", async () => {
+    listCrds.mockResolvedValue({
+      crds: [{ name: "pods.acme.io", group: "acme.io", version: "v1", kind: "Pod", plural: "pods", namespaced: true }],
+    });
+    getObject.mockResolvedValue({ object: { kind: "Pod", metadata: { name: "p-1", namespace: "default" } } });
+    descriptorFor.mockReturnValue(undefined);
+    render_(<ResourceTabView context="prod-eu" kind="Pod" group="acme.io" namespace="default" name="p-1" />);
+    await waitFor(() => expect(screen.getAllByRole("tab").map((t) => t.textContent)).toEqual(["Status", "YAML", "Events"]));
+    // The built-in pod of the same name's usage is not this resource's.
+    expect(podMetrics).not.toHaveBeenCalled();
   });
 
   describe("the breadcrumb header", () => {

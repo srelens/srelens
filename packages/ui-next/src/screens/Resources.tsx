@@ -414,6 +414,9 @@ function KindList({
   // declaration closes over the widest type `descriptor` ever has, so the
   // narrowing the guard above performed is not in scope within one.
   const k8sKind = descriptor.k8sKind;
+  // Set only by `customDescriptor`: a custom kind's name alone does not
+  // identify it, so the peek and the tab route carry its group (#919).
+  const group = descriptor.group;
 
   /**
    * Promote a row to a tab of its own — the row's double click and the peek
@@ -423,7 +426,7 @@ function KindList({
    * to stop.
    */
   function openRowTab(rowNamespace: string | null, rowName: string) {
-    openTab(detailRoute(k8sKind, rowNamespace, rowName, { cluster: name }), { clusterName: name });
+    openTab(detailRoute(k8sKind, rowNamespace, rowName, { cluster: name, group }), { clusterName: name });
   }
 
   // Loading and error each replace the table with their own state below; the
@@ -517,6 +520,7 @@ function KindList({
           <ResourceDetailView
             context={name}
             kind={descriptor.k8sKind}
+            group={group}
             namespace={peek.namespace}
             name={peek.name}
             // The one prop the tab host does not pass, carrying both of the
@@ -751,6 +755,7 @@ export function ResourceDetailScreen({ route }: { route: string }) {
         <ResourceTabView
           context={context.name}
           kind={parts.kind}
+          group={parts.group}
           namespace={parts.namespace}
           name={parts.name}
         />

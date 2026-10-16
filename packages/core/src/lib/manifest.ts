@@ -251,6 +251,8 @@ export async function getObject(
   namespace: string | null,
   name: string,
   invoke: Invoker = invokeCapability,
+  /** A custom resource's group/version/plural — `getManifest`'s same seam. */
+  crd?: DynamicGvk,
 ): Promise<{ object?: K8sObject; error?: string }> {
   try {
     const out = await invoke<{ object: K8sObject }>("k8s.getObject", {
@@ -258,6 +260,7 @@ export async function getObject(
       kind,
       namespace,
       name,
+      ...(crd && { group: crd.group, version: crd.version, plural: crd.plural }),
     });
     return { object: out.object };
   } catch (e) {
