@@ -520,7 +520,7 @@ pub struct PodLogsOut {
 pub fn pod_logs_capability(cache: Arc<ClientCache>) -> Capability {
     Capability::typed::<PodLogsIn, PodLogsOut, _, _>(
         "k8s.podLogs",
-        "fetch logs for a pod in a connected kube context: the last 200 lines by default (tail_lines to change), or set all_lines to get everything the runtime still retains (can be large)",
+        "fetch logs for a pod in a connected kube context: the last 200 lines by default (tail_lines to change), or set all_lines to get everything the runtime still retains (can be large). For a log bigger than one answer, use page mode — any of max_bytes, cursor, grep, wait_seconds, since_time, selector or workload: each answer fits under 50,000 bytes and carries next_cursor to read on, search or follow; a selector or workload reads up to 20 pods merged in time order",
         Annotations::READ_ONLY,
         move |input: PodLogsIn| {
             let cache = cache.clone();

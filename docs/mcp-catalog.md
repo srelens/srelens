@@ -61,7 +61,7 @@ Everything this server exposes over MCP, generated from the live registry so it 
 | `k8s.nodeMetrics` | low | node CPU/memory usage (requires metrics-server) |
 | `k8s.openApiSchema` | low | fetch the OpenAPI schema for a resource kind (for field autocomplete) |
 | `k8s.podCount` | low | running vs total pod counts for a cluster, counted without listing pod bodies |
-| `k8s.podLogs` | low | fetch logs for a pod in a connected kube context: the last 200 lines by default (tail_lines to change), or set all_lines to get everything the runtime still retains (can be large) |
+| `k8s.podLogs` | low | fetch logs for a pod in a connected kube context: the last 200 lines by default (tail_lines to change), or set all_lines to get everything the runtime still retains (can be large). For a log bigger than one answer, use page mode — any of max_bytes, cursor, grep, wait_seconds, since_time, selector or workload: each answer fits under 50,000 bytes and carries next_cursor to read on, search or follow; a selector or workload reads up to 20 pods merged in time order |
 | `k8s.podMetrics` | low | pod CPU/memory usage (requires metrics-server) |
 | `k8s.podOverview` | low | pod totals, per-node counts and the pods that are not running, without listing pod bodies |
 | `k8s.podsForPvc` | low | list pods in a namespace that mount a given PersistentVolumeClaim |
