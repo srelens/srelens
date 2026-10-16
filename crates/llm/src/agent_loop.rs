@@ -224,6 +224,9 @@ pub fn cap_tool_result_content(tool_name: &str, content: &str) -> String {
     if content.len() <= MAX_AGENT_TOOL_RESULT_BYTES {
         return content.to_string();
     }
+    if let Some(refusal) = page_over_cap(content) {
+        return refusal;
+    }
 
     if is_log_tool(tool_name) {
         // Log streams: keep the newest lines at the tail where panics, errors, and crashes appear.
@@ -263,6 +266,22 @@ pub fn cap_tool_result_content(tool_name: &str, content: &str) -> String {
         truncated.push_str(&notice);
         truncated
     }
+}
+
+/// A page of `k8s.podLogs` over the cap, refused whole: cut to its tail it
+/// would keep `next_cursor` and lose its first lines, which the agent would
+/// then never read. `None` for any other answer.
+fn page_over_cap(content: &str) -> Option<String> {
+    let page: serde_json::Value = serde_json::from_str(content).ok()?;
+    page.get("next_cursor")?;
+    let logs = page.get("logs")?.as_str()?.len();
+    let over = content.len() - MAX_AGENT_TOOL_RESULT_BYTES;
+    // The page's own fields stay; `logs` shrinks, with room to spare.
+    let fits = logs.saturating_sub(over + 512).max(1_000);
+    Some(format!(
+        "The log page was {} bytes, over the {MAX_AGENT_TOOL_RESULT_BYTES} bytes this agent keeps of one result, so none of it was read. Call again with the same arguments and max_bytes: {fits}.",
+        content.len()
+    ))
 }
 
 /// Compact earlier intermediate tool results from previous user turns when sending
@@ -935,6 +954,32 @@ mod tests {
         assert!(capped.contains("[Earlier log lines truncated (kept newest"));
         assert!(capped.contains("CRITICAL_PANIC_AT_TAIL"));
         assert!(!capped.contains("OLD_STARTUP_LOG"));
+    }
+
+    /// A page of `k8s.podLogs` cut to its tail would keep its cursor and lose
+    /// its first lines, which the agent would then never read. It is refused
+    /// whole, naming a `max_bytes` that fits.
+    #[test]
+    fn test_cap_tool_result_content_refuses_a_log_page_whole() {
+        let logs = "x".repeat(20 * 1024);
+        let page = serde_json::json!({
+            "logs": logs, "next_cursor": "abc", "end": false, "lines": 1, "scanned": 1
+        })
+        .to_string();
+        let capped = cap_tool_result_content("k8s_podLogs", &page);
+        assert!(
+            !capped.contains("next_cursor") && !capped.contains("abc"),
+            "a cut page keeps its cursor: {capped}"
+        );
+        let fits: usize = capped
+            .split("max_bytes: ")
+            .nth(1)
+            .and_then(|rest| rest.trim_end_matches('.').parse().ok())
+            .unwrap_or_else(|| panic!("names a max_bytes: {capped}"));
+        assert!(
+            fits + (page.len() - logs.len()) <= MAX_AGENT_TOOL_RESULT_BYTES,
+            "{fits}"
+        );
     }
 
     #[test]
