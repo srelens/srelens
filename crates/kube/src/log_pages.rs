@@ -123,6 +123,10 @@ pub(crate) struct Pos {
     /// How many lines stamped `t` were read.
     #[serde(default, skip_serializing_if = "is_zero")]
     k: u32,
+    /// A read that has not begun (no `t`) starts at the last `n` lines, as
+    /// the `tail_lines` it was asked with.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    n: Option<i64>,
 }
 
 fn is_zero(k: &u32) -> bool {
@@ -579,9 +583,14 @@ impl PodRead {
             r: restarts,
             t,
             k: 0,
+            n: None,
         };
         let (pos, tail) = match (at, req.cursor.is_some(), req.start) {
-            (Some(pos), _, _) => (pos, None),
+            // A read the cursor kept but that has not begun starts at its tail.
+            (Some(pos), _, _) => {
+                let tail = if pos.t.is_none() { pos.n } else { None };
+                (pos, tail)
+            }
             // A pod a cursor has not seen yet is read from its first line.
             (None, true, _) | (None, false, Start::Beginning) => (fresh(None), None),
             (None, false, Start::Tail(n)) => (fresh(None), Some(n)),
@@ -656,6 +665,7 @@ impl PodRead {
             r: self.instances[0].restarts,
             t: None,
             k: 0,
+            n: None,
         };
         self.last = None;
         self.tail = None;
@@ -690,21 +700,22 @@ impl PodRead {
             if self.lines.is_none() {
                 match self.open(pods, instance, req, follow).await {
                     Ok(lines) => self.lines = Some(lines),
-                    Err(why) if self.instances.len() > 1 => {
+                    // Only a log the kubelet says is gone is given up on; a
+                    // passing failure keeps the read where it stands.
+                    Err(why) if self.instances.len() > 1 && log_is_gone(&why) => {
                         self.lose_instance(&why);
                         continue;
                     }
                     Err(why) => return Err(why),
                 }
             }
-            let read = match self.lines.as_mut().expect("opened above").next().await {
-                Ok(read) => read,
-                Err(why) if self.instances.len() > 1 => {
-                    self.lose_instance(&why.to_string());
-                    continue;
-                }
-                Err(why) => return Err(why.to_string()),
-            };
+            let read = self
+                .lines
+                .as_mut()
+                .expect("opened above")
+                .next()
+                .await
+                .map_err(|e| e.to_string())?;
             let Some(line) = read else {
                 self.lines = None;
                 if let Some(resume) = self.resume.take().filter(Resume::lost_at_end) {
@@ -764,6 +775,7 @@ impl PodRead {
         if self.tail_open && self.tail_from.is_none() {
             self.tail_from = Some(line.ts);
         }
+        self.pos.n = None;
         if self.last == Some(line.ts) {
             self.pos.k += 1;
         } else {
@@ -812,21 +824,35 @@ impl PodRead {
     /// the difference is how many of its lines are read. A tail that read
     /// nothing has no stamp at all: it goes on from when this call began.
     async fn settle_tail(&mut self, pods: &Api<Pod>, started: Timestamp) -> Result<(), String> {
-        if self.tail.take().is_none() || self.failed {
+        let Some(tail) = self.tail.take() else {
             return Ok(());
-        }
-        let Some(first) = self.tail_from.take() else {
-            if self.last.is_none() {
+        };
+        let first = match (self.tail_from.take(), self.head.as_ref()) {
+            // Past its first stamp, the read counted every later one whole.
+            (Some(first), _) if self.last != Some(first) => return Ok(()),
+            (Some(first), _) => first,
+            // Nothing taken yet, a line waiting (other pods filled the
+            // page): the read stands just before that line.
+            (None, Some(head)) => {
+                self.last = Some(head.ts);
+                self.pos.t = Some(head.raw.clone());
+                head.ts
+            }
+            // The tail held nothing: the read goes on from when this call
+            // began.
+            (None, None) if self.ended && !self.failed => {
                 self.last = Some(started);
                 self.pos.t = Some(started.to_string());
                 self.pos.k = 0;
+                return Ok(());
             }
-            return Ok(());
+            // Not begun at all (it failed, stalled or ran out of time
+            // first): the next page starts at the same tail.
+            (None, None) => {
+                self.pos.n = Some(tail);
+                return Ok(());
+            }
         };
-        if self.last != Some(first) {
-            // Past its first stamp, the read counted every later one whole.
-            return Ok(());
-        }
         // The lines at `first` the tail holds past what was read: the one
         // left unread, then the rest of the stream.
         let mut rest = 0;
@@ -845,6 +871,13 @@ impl PodRead {
             .instances
             .front()
             .expect("a read keeps the instance it last read");
+        // The count stops at the first later stamp, and a line appended after
+        // the tail lands after every line the tail saw, so when anything
+        // later than `first` was in the log the count is exact.
+        // ponytail: while `first` is the newest stamp, a line stamped with
+        // that same nanosecond and appended between the tail and this count
+        // (a runtime still writing one chunk) would count as read; compare
+        // the tail's last line with the count's if that ever bites.
         let all = count_at(pods, &self.name, &self.container, instance.previous, first).await?;
         self.pos.k = all.saturating_sub(rest);
         Ok(())
@@ -883,6 +916,12 @@ impl PodRead {
         }
         Ok(())
     }
+}
+
+/// The kubelet's answer when a previous instance's log is no longer kept:
+/// `previous terminated container "…" in pod "…" not found`.
+fn log_is_gone(why: &str) -> bool {
+    why.contains("previous terminated container") && why.contains("not found")
 }
 
 /// The kubelet's stamp at the start of `line`, if it has one.
@@ -1299,6 +1338,7 @@ fn envelope_bound(reads: &[PodRead]) -> usize {
                         r: i32::MIN,
                         t: Some("9".repeat(40)),
                         k: u32::MAX,
+                        n: Some(i64::MIN),
                     },
                 )
             })
@@ -1375,6 +1415,7 @@ fn plan_reads(
                     r: instances[0].restarts,
                     t: None,
                     k: 0,
+                    n: None,
                 });
             }
         }
@@ -1524,6 +1565,7 @@ mod tests {
                     r: 2,
                     t: Some("2026-10-16T10:00:00.5Z".into()),
                     k: 3,
+                    n: None,
                 },
             )]
             .into(),
@@ -1907,6 +1949,9 @@ mod tests {
         /// The previous instance's log is gone, as after the kubelet
         /// collects it: a `previous` read answers 400.
         previous_gone: bool,
+        /// A `previous` read fails for a passing reason (a 500), its log
+        /// still there.
+        previous_flaky: bool,
     }
 
     fn pod(name: &str, lines: Vec<(Timestamp, String)>) -> FakePod {
@@ -2034,6 +2079,13 @@ mod tests {
     /// `later` and stays open.
     fn log_reply(p: &FakePod, query: &BTreeMap<String, String>) -> http::Response<Body> {
         let flag = |k: &str| query.get(k).is_some_and(|v| v == "true");
+        if flag("previous") && p.previous_flaky {
+            return status(
+                500,
+                "InternalError",
+                "the server is currently unable to handle the request",
+            );
+        }
         if flag("previous") && p.previous_gone {
             return status(
                 400,
@@ -2778,6 +2830,7 @@ mod tests {
                             r: 0,
                             t: Some(at(0, 0).to_string()),
                             k: 1,
+                            n: None,
                         },
                     )
                 })
@@ -3090,5 +3143,91 @@ mod tests {
             Some("debugger")
         );
         assert_eq!(restarts_of(&pod, "debugger"), 2);
+    }
+
+    /// PR #941 review (Greptile): with `tail_lines` over several pods, one
+    /// pod can fill the page before another shows a line. That pod's tail is
+    /// read on the next page, not skipped.
+    #[tokio::test]
+    async fn a_pods_tail_that_did_not_fit_is_read_on_the_next_page() {
+        let line = |name: &str, i: i64| (at(i, 0), format!("{name}{i} {}", "x".repeat(400)));
+        let cluster = Arc::new(Cluster::default());
+        cluster.pods.lock().unwrap().extend([
+            pod("cmi-a", (0..10).map(|i| line("a", i)).collect()),
+            pod("cmi-b", (20..22).map(|i| line("b", i)).collect()),
+        ]);
+        let cache = cache_for(cluster).await;
+        let (read, _) = read_to_end(
+            &cache,
+            by_selector(json!({ "tail_lines": 2, "max_bytes": 1000 })),
+        )
+        .await;
+        let shown: Vec<&str> = read
+            .lines()
+            .map(|l| l.split(' ').take(2).collect::<Vec<_>>()[1])
+            .collect();
+        assert_eq!(shown, ["a8", "a9", "b20", "b21"], "{read}");
+    }
+
+    /// The same for a tail no line of which was read at all: it stalled
+    /// first. The next page starts at the same tail, not the whole history.
+    #[tokio::test(start_paused = true)]
+    async fn a_tail_that_stalled_before_its_first_line_keeps_its_tail() {
+        let cluster = one_pod(vec![]);
+        cluster.pods.lock().unwrap()[0].stalls = true;
+        let cache = cache_for(cluster.clone()).await;
+        let first = page(
+            &cache,
+            read_of(json!({ "tail_lines": 2, "max_bytes": 1000 })),
+        )
+        .await
+        .unwrap();
+        assert_eq!(first["logs"], "");
+        let log = log_of(10, 30);
+        {
+            let mut pods = cluster.pods.lock().unwrap();
+            pods[0].stalls = false;
+            pods[0].current = log.clone();
+        }
+        let next = page(
+            &cache,
+            read_of(json!({ "max_bytes": 1000, "cursor": first["next_cursor"] })),
+        )
+        .await
+        .unwrap();
+        assert_eq!(next["logs"], joined(&log[8..]));
+    }
+
+    /// PR #941 review (Greptile): a passing failure reading the instance a
+    /// restart ended keeps its place, so the next call reads the rest of it;
+    /// only a log that is gone is given up on.
+    #[tokio::test]
+    async fn a_passing_failure_on_the_old_instance_keeps_its_place() {
+        let old = log_of(30, 60);
+        let new: Vec<_> = log_of(5, 40)
+            .into_iter()
+            .map(|(ts, text)| (ts + SignedDuration::from_hours(1), format!("new {text}")))
+            .collect();
+        let cluster = one_pod(old[..10].to_vec());
+        let cache = cache_for(cluster.clone()).await;
+        let first = page(&cache, read_of(json!({ "max_bytes": MAX_PAGE_BYTES })))
+            .await
+            .unwrap();
+        {
+            let mut pods = cluster.pods.lock().unwrap();
+            pods[0].previous = old.clone();
+            pods[0].current = new.clone();
+            pods[0].restarts = 1;
+            pods[0].previous_flaky = true;
+        }
+        let args = read_of(json!({ "max_bytes": MAX_PAGE_BYTES, "cursor": first["next_cursor"] }));
+        let err = page(&cache, args.clone()).await.unwrap_err().to_string();
+        assert!(err.contains("unable to handle"), "{err}");
+        cluster.pods.lock().unwrap()[0].previous_flaky = false;
+        let next = page(&cache, args).await.unwrap();
+        assert_eq!(
+            next["logs"].as_str().unwrap(),
+            joined(&old[10..]) + &joined(&new)
+        );
     }
 }
