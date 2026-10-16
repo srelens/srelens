@@ -552,8 +552,6 @@ struct PodRead {
     ended: bool,
     /// The read failed; its position stays where it was.
     failed: bool,
-    /// The stream sent nothing for [`STALL`]: set aside for this call.
-    stalled: bool,
     /// The stream being read was opened at `tail_lines`.
     tail_open: bool,
     /// The first stamp that stream handed out: the read counts the lines at
@@ -602,7 +600,6 @@ impl PodRead {
             head: None,
             ended: false,
             failed: false,
-            stalled: false,
             tail_open: false,
             tail_from: None,
             before: VecDeque::new(),
@@ -804,7 +801,6 @@ impl PodRead {
         self.lines = None;
         self.ended = true;
         self.failed = true;
-        self.stalled = true;
     }
 
     /// Put a read that began at `tail_lines` in a cursor's terms.
@@ -1430,8 +1426,9 @@ pub(crate) async fn read_page(
             false
         }
     };
-    // A stalled pod was not read to its end.
-    end &= !reads.iter().any(|read| read.stalled);
+    // A pod that failed or stalled was not read to its end: the next page
+    // tries it again from where it stands.
+    end &= !reads.iter().any(|read| read.failed);
     // Positions a tail began are put in a cursor's terms before a follow
     // reopens from them, and before the cursor is written.
     let settled = futures::future::join_all(
@@ -2571,6 +2568,31 @@ mod tests {
                 && notice.contains("waiting to start"),
             "{notice}"
         );
+        // PR #941 review (Greptile): cmi-b's log was not read to its end.
+        assert_eq!(out["end"], false);
+    }
+
+    /// PR #941 review (Greptile): a follow of several pods hands lines on as
+    /// they arrive, and the page still comes back in time order.
+    #[tokio::test(start_paused = true)]
+    async fn a_follow_of_several_pods_comes_back_in_time_order() {
+        let cluster = two_pods();
+        {
+            let mut pods = cluster.pods.lock().unwrap();
+            // cmi-a's later line arrives first, cmi-b's earlier one a second after.
+            pods[0].later = vec![(at(60, 0), "a60".into())];
+            pods[1].later = vec![(at(55, 0), "b55".into())];
+            pods[1].slow = Some(Duration::from_secs(1));
+        }
+        let cache = cache_for(cluster).await;
+        let first = page(&cache, by_selector(json!({}))).await.unwrap();
+        let next = page(
+            &cache,
+            by_selector(json!({ "wait_seconds": 5, "cursor": first["next_cursor"] })),
+        )
+        .await
+        .unwrap();
+        assert_eq!(next["logs"], "[cmi-b] b55\n[cmi-a] a60\n");
     }
 
     /// Review focus 4: one named pod that cannot be read is the call's error,

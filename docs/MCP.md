@@ -451,7 +451,8 @@ container instance (by restart count) and the last line read.
   the lines in between are lost.
 - The pod was replaced (same name, new uid), or a selector's pod is gone or
   new. A new pod is read from its first line.
-- One pod of several could not be read. The others still are.
+- One pod of several could not be read. The others still are, `end` stays
+  `false`, and the next page tries that pod again.
 - A pod's stream sent nothing for 10 seconds, or the 20-second backlog
   deadline passed. The page holds what was read by then, `end` is `false`,
   and the next page reads on from the cursor.
