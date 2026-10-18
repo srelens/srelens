@@ -302,7 +302,9 @@ export function ConsoleDock({
           {open && !composerOnly && (
             <>
               <div
-                className="rule-b flex items-center justify-between gap-3 px-2.5 py-1"
+                // `.pane-head`'s side padding, so the controls end where the
+                // terminal panel's above them do.
+                className="rule-b flex items-center justify-between gap-3 px-[0.6rem] py-1"
                 style={{ background: "var(--ground-sunk)" }}
               >
                 <div className="flex min-w-0 items-center gap-2">
@@ -324,8 +326,10 @@ export function ConsoleDock({
                 </div>
                 {/* Icons, as the terminal panel beside it has them (#944): the
                     two panes do the same jobs and should look it. Each is
-                    named for assistive technology and titled for the pointer. */}
-                <div className="flex shrink-0 items-center gap-0.5" data-slot="dock-controls">
+                    named for assistive technology and titled for the pointer.
+                    Spaced as `.pane-head` spaces the terminal's (0.5rem), so
+                    stacked under it the two rows of icons line up. */}
+                <div className="flex shrink-0 items-center gap-2" data-slot="dock-controls">
                   {/* The prompt's chevron does the same, but it is a glyph at
                       the far end of the window from this header, where the
                       reader looks for the controls of what they are reading.

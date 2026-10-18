@@ -435,6 +435,10 @@ describe("ConsoleDock clearing", () => {
       "Open console in the full view",
       "Clear console",
     ]);
+    // The pane head's gap and side padding, so the icons line up under the
+    // terminal panel's.
+    expect(controls.className).toContain("gap-2");
+    expect(controls.parentElement?.className).toContain("px-[0.6rem]");
     for (const b of buttons) {
       expect(b.className).toContain("icon-btn");
       expect(b.querySelector("svg")).not.toBeNull();
