@@ -5,6 +5,8 @@ import {
   Bot,
   Box,
   BriefcaseBusiness,
+  ChevronDown,
+  ChevronUp,
   Circle,
   Clock3,
   Compass,
@@ -193,6 +195,9 @@ export const Icons = {
   // The terminal panel's own pair (#942): fill the page, and back to the split.
   maximizePanel: Maximize2,
   restorePanel: Minimize2,
+  // Down to its head, and back up.
+  minimizePanel: ChevronDown,
+  raisePanel: ChevronUp,
 
   /** Hand what is on screen to the agent — the row's ask chip wears its own
    *  inline glyph (the kit takes no icon-set dependency), so this is for the

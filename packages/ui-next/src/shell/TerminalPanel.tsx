@@ -9,6 +9,7 @@ import {
   requestTerminalsFocus,
   saveTerminalPanelShare,
   setTerminalPanelMaximized,
+  setTerminalPanelMinimized,
   setTerminalPanelShare,
   useTerminalPanel,
   useTerminalPanelShare,
@@ -24,7 +25,9 @@ import { TerminalView } from "../screens/terminals/TerminalView";
  * from the Pods list sits under the Pods list. Half the page until the reader
  * drags its top edge; Maximize fills the page with it and leaves the page
  * mounted behind; Open in tab moves the same session — scrollback and all —
- * to the Terminals tab. Closing it hides the panel and leaves the shell
+ * to the Terminals tab. Minimize folds it to its head, giving the page (and
+ * an agent answer in the dock below) the room back while the shell runs on.
+ * Closing it hides the panel and leaves the shell
  * running, listed in Terminals, where Detach ends it; Detach here does the
  * same.
  *
@@ -63,6 +66,7 @@ export function TerminalPanel({ tabId }: { tabId: string }) {
   if (!open || !panel || !session) return null;
   const verdict = SESSION_VERDICT[session.state];
   const maximized = panel.maximized;
+  const minimized = panel.minimized;
   const height = Math.round(share * room);
   const maxHeight = Math.max(MIN_TERMINAL_PANEL_PX, room - MIN_TERMINAL_PANEL_PX);
   const toShare = (px: number) => (room > 0 ? px / room : share);
@@ -73,14 +77,16 @@ export function TerminalPanel({ tabId }: { tabId: string }) {
       aria-label={`Terminal: ${session.title}`}
       data-slot="terminal-panel"
       data-maximized={maximized || undefined}
+      data-minimized={minimized || undefined}
       className={
         maximized
           ? "relative flex min-h-0 min-w-0 flex-1 flex-col"
           : "relative flex min-h-0 min-w-0 shrink-0 flex-col border-t border-rule"
       }
-      style={maximized ? undefined : { height: `${share * 100}%` }}
+      // Minimized is the head alone, at its own height.
+      style={maximized || minimized ? undefined : { height: `${share * 100}%` }}
     >
-      {!maximized && room > 0 && (
+      {!maximized && !minimized && room > 0 && (
         <ResizeHandle
           label="the terminal"
           edge="top"
@@ -106,6 +112,13 @@ export function TerminalPanel({ tabId }: { tabId: string }) {
         <span className="flex-1" />
         <Badge tone={statusTone(verdict.kind)}>{verdict.word}</Badge>
         <IconButton
+          icon={minimized ? Icons.raisePanel : Icons.minimizePanel}
+          label={minimized ? "Restore terminal" : "Minimize terminal"}
+          title={minimized ? "Restore" : "Minimize — the shell keeps running"}
+          aria-expanded={!minimized}
+          onClick={() => setTerminalPanelMinimized(tabId, !minimized)}
+        />
+        <IconButton
           icon={maximized ? Icons.restorePanel : Icons.maximizePanel}
           label={maximized ? "Restore terminal size" : "Maximize terminal"}
           title={maximized ? "Restore" : "Maximize"}
@@ -128,6 +141,9 @@ export function TerminalPanel({ tabId }: { tabId: string }) {
           onClick={() => closeTerminalPanel(tabId)}
         />
       </div>
+      {/* Hidden, not unmounted, while minimized: the pane takes its emulator
+          back and fits it when it has a size again. */}
+      <div data-slot="terminal-panel-body" hidden={minimized} className="flex min-h-0 min-w-0 flex-1 flex-col">
       {session.error && (
         <Alert tone="sev" title="This session ended" className="m-3 mb-0">
           {session.error}
@@ -143,6 +159,7 @@ export function TerminalPanel({ tabId }: { tabId: string }) {
         <Button variant="danger" size="xs" onClick={() => endSession(session.id)}>
           Detach
         </Button>
+      </div>
       </div>
     </section>
   );

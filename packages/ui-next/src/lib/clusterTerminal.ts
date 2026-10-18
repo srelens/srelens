@@ -1,6 +1,6 @@
 import { isTauri, type ClusterContext } from "@srelens/core";
 import { getSessions, startLocalSession } from "./sessions";
-import { closeTerminalPanel, showTerminalPanel, terminalPanel } from "./terminalPanel";
+import { closeTerminalPanel, setTerminalPanelMinimized, showTerminalPanel, terminalPanel } from "./terminalPanel";
 import { currentWorkspace, isClusterPaused, openTab, tabNamespaces } from "./tabsStore";
 
 /**
@@ -38,7 +38,7 @@ function isTerminalsRoute(route: string | undefined): boolean {
  * in it refuse to be pointed at another.
  *
  * **A toggle, per tab.** With the panel open, the same act closes it, leaving
- * the shell running. With it closed, it opens again on the shell it last
+ * the shell running; minimized, it brings it back up. With it closed, it opens again on the shell it last
  * showed, if that is still on the same cluster and has not ended — so the
  * reader gets their shell back rather than a second one. Otherwise a new shell
  * is started. On the Terminals tab itself there is no panel: the new session
@@ -61,6 +61,12 @@ export async function openClusterTerminal(cluster: ClusterContext): Promise<void
   if (inPanel) {
     const panel = terminalPanel(tab);
     const kept = panel && getSessions().find((s) => s.id === panel.shellId);
+    // Minimized is still open, but not what the reader is asking to close:
+    // the act brings it back up.
+    if (panel?.open && kept && panel.minimized) {
+      setTerminalPanelMinimized(tab, false);
+      return;
+    }
     if (panel?.open && kept) {
       closeTerminalPanel(tab);
       return;

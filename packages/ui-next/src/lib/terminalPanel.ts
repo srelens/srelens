@@ -32,6 +32,12 @@ export interface TerminalPanelState {
   open: boolean;
   /** Filling the page, with the page's own content behind it. */
   maximized: boolean;
+  /**
+   * Down to its head, the page given back nearly whole: for reading a long
+   * agent answer, or the list, without closing the shell. Never at once with
+   * `maximized`.
+   */
+  minimized: boolean;
 }
 
 export const TERMINAL_PANEL_SHARE_KEY = "srelens.next.terminalPanelShare";
@@ -79,13 +85,14 @@ export function useTerminalPanel(tabId: string): TerminalPanelState | undefined 
 /** Show `shellId` in the tab's panel, opening it at the reader's size. */
 export function showTerminalPanel(tabId: string, shellId: number): void {
   const current = panels[tabId];
-  put(tabId, { shellId, open: true, maximized: current?.shellId === shellId ? current.maximized : false });
+  const same = current?.shellId === shellId && current.open;
+  put(tabId, { shellId, open: true, maximized: same ? current.maximized : false, minimized: false });
 }
 
 /** Hide the tab's panel. The shell keeps running and is shown again next time. */
 export function closeTerminalPanel(tabId: string): void {
   const current = panels[tabId];
-  if (current?.open) put(tabId, { ...current, open: false, maximized: false });
+  if (current?.open) put(tabId, { ...current, open: false, maximized: false, minimized: false });
 }
 
 /** Forget the tab's panel: its session has ended, or moved to the Terminals tab. */
@@ -95,7 +102,12 @@ export function forgetTerminalPanel(tabId: string): void {
 
 export function setTerminalPanelMaximized(tabId: string, maximized: boolean): void {
   const current = panels[tabId];
-  if (current && current.maximized !== maximized) put(tabId, { ...current, maximized });
+  if (current && current.maximized !== maximized) put(tabId, { ...current, maximized, minimized: false });
+}
+
+export function setTerminalPanelMinimized(tabId: string, minimized: boolean): void {
+  const current = panels[tabId];
+  if (current && current.minimized !== minimized) put(tabId, { ...current, minimized, maximized: false });
 }
 
 export function parseStoredTerminalPanelShare(raw: string | null): number | null {

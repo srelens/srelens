@@ -112,13 +112,31 @@ describe("PageWithTerminal", () => {
     expect(shown(screen.getByText("Pods list"))).toBe(true);
   });
 
+  it("minimizes to its head, giving the page its room back, and restores (#942)", () => {
+    act(() => panels.showTerminalPanel("pods", 7));
+    renderPage();
+    fireEvent.click(screen.getByRole("button", { name: "Minimize terminal" }));
+    const panel = screen.getByRole("region", { name: /Terminal/ });
+    expect(panel.getAttribute("data-minimized")).toBe("true");
+    // The head alone: no share of the page, no grip, the transcript hidden.
+    expect(panel.style.height).toBe("");
+    expect(screen.queryByRole("separator")).toBeNull();
+    expect(shown(screen.getByTestId("terminal-view"))).toBe(false);
+    expect(shown(screen.getByText("Pods list"))).toBe(true);
+    expect(endSession).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole("button", { name: "Restore terminal" }));
+    expect(shown(screen.getByTestId("terminal-view"))).toBe(true);
+    expect(panel.style.height).toBe("50%");
+  });
+
   it("closes without ending the shell", () => {
     act(() => panels.showTerminalPanel("pods", 7));
     renderPage();
     fireEvent.click(screen.getByRole("button", { name: "Close terminal panel" }));
     expect(screen.queryByRole("region", { name: /Terminal/ })).toBeNull();
     expect(endSession).not.toHaveBeenCalled();
-    expect(panels.terminalPanel("pods")).toEqual({ shellId: 7, open: false, maximized: false });
+    expect(panels.terminalPanel("pods")).toEqual({ shellId: 7, open: false, maximized: false, minimized: false });
   });
 
   it("moves the session to the Terminals tab, asking that tab to show it", () => {

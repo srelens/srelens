@@ -172,6 +172,20 @@ describe("ConsoleDock collapsing", () => {
     expect(onOpenChange).toHaveBeenCalledWith(false);
   });
 
+  it("minimizes from its header, where the reader is looking (#942)", async () => {
+    const { onOpenChange } = setup();
+    const minimize = screen.getByRole("button", { name: "Minimize console" });
+    expect(minimize.className).toContain("text-btn");
+    expect(minimize.getAttribute("aria-controls")).toBe(screen.getByRole("log").id);
+    await userEvent.click(minimize);
+    expect(onOpenChange).toHaveBeenCalledWith(false);
+  });
+
+  it("has no header to minimize from while collapsed", () => {
+    setup({ open: false });
+    expect(screen.queryByRole("button", { name: "Minimize console" })).toBeNull();
+  });
+
   it("points the toggle at the output it opens, and only while there is one", () => {
     const { rerender, onOpenChange, onValueChange, onSubmit } = setup({ open: false });
     expect(screen.getByRole("button", { name: "Expand console" }).getAttribute("aria-controls")).toBeNull();

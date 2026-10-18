@@ -318,6 +318,10 @@ that is where you are — so the list stays in view while you type.
 - The panel takes half the page. Drag its top edge (or focus the edge and use the
   arrow keys) to resize it; the size is kept.
 - **Maximize** fills the page with the terminal; **Restore** brings the page back.
+- **Minimize** folds the panel down to its header, giving the page (and an agent
+  answer in the console below) the room back; the shell keeps running.
+  **Terminal** or **Cmd/Ctrl-J** brings it back up. The agent console has its own
+  **minimize** in its header; typing in its prompt opens it again.
 - **Open in tab** moves the shell to the Terminals tab, scrollback and all.
 - **Close** hides the panel and leaves the shell running. **Terminal** or
   **Cmd/Ctrl-J** on the same tab shows it again; the shell is also listed in

@@ -9,6 +9,7 @@ import {
   parseStoredTerminalPanelShare,
   saveTerminalPanelShare,
   setTerminalPanelMaximized,
+  setTerminalPanelMinimized,
   showTerminalPanel,
   TERMINAL_PANEL_SHARE_KEY,
   terminalPanel,
@@ -31,7 +32,7 @@ describe("a tab's terminal panel", () => {
   it("is each tab's own", () => {
     showTerminalPanel("pods", 1);
     showTerminalPanel("services", 2);
-    expect(terminalPanel("pods")).toEqual({ shellId: 1, open: true, maximized: false });
+    expect(terminalPanel("pods")).toEqual({ shellId: 1, open: true, maximized: false, minimized: false });
     expect(terminalPanel("services")?.shellId).toBe(2);
     expect(terminalPanel("events")).toBeUndefined();
   });
@@ -41,9 +42,22 @@ describe("a tab's terminal panel", () => {
     setTerminalPanelMaximized("pods", true);
     closeTerminalPanel("pods");
     // Closed restores the split: reopened, it is under the page again.
-    expect(terminalPanel("pods")).toEqual({ shellId: 1, open: false, maximized: false });
+    expect(terminalPanel("pods")).toEqual({ shellId: 1, open: false, maximized: false, minimized: false });
     forgetTerminalPanel("pods");
     expect(terminalPanel("pods")).toBeUndefined();
+  });
+
+  it("minimizes to its head and back, never maximized at the same time", () => {
+    showTerminalPanel("pods", 1);
+    setTerminalPanelMaximized("pods", true);
+    setTerminalPanelMinimized("pods", true);
+    expect(terminalPanel("pods")).toEqual({ shellId: 1, open: true, maximized: false, minimized: true });
+    setTerminalPanelMaximized("pods", true);
+    expect(terminalPanel("pods")?.minimized).toBe(false);
+    setTerminalPanelMinimized("pods", true);
+    // Shown again, as Terminal does, it is up again.
+    showTerminalPanel("pods", 1);
+    expect(terminalPanel("pods")?.minimized).toBe(false);
   });
 
   it("keeps a maximized panel maximized when the same session is shown again, not a new one", () => {

@@ -20,7 +20,7 @@ const { activeRoute, currentWorkspace, openTab, setClusterPaused, setState, setT
   "./tabsStore"
 );
 const { defaultState } = await import("./tabs");
-const { __resetTerminalPanelsForTests, closeTerminalPanel, terminalPanel } = await import("./terminalPanel");
+const { __resetTerminalPanelsForTests, closeTerminalPanel, setTerminalPanelMinimized, terminalPanel } = await import("./terminalPanel");
 
 const dev = {
   name: "dev-cluster", stableId: "dev", key: "dev", cluster: "c", server: "", isCurrent: false,
@@ -83,7 +83,7 @@ describe("openClusterTerminal", () => {
     expect(startLocalSession).toHaveBeenCalledWith({ context: "dev-cluster", namespace: undefined });
     // The reader stays where they were; the shell is in that tab's panel.
     expect(activeRoute()).toBe("/pods");
-    expect(terminalPanel(tab)).toEqual({ shellId: 1, open: true, maximized: false });
+    expect(terminalPanel(tab)).toEqual({ shellId: 1, open: true, maximized: false, minimized: false });
   });
 
   it("shows the session in the Terminals tab when that is where it was asked for", async () => {
@@ -125,13 +125,22 @@ describe("openClusterTerminal", () => {
     expect(startLocalSession).toHaveBeenCalledTimes(1);
   });
 
+  it("brings a minimized panel back up rather than closing it", async () => {
+    const tab = onPods();
+    await openClusterTerminal(dev);
+    sessions = [{ id: 1, context: "dev-cluster", state: "attached" }];
+    setTerminalPanelMinimized(tab, true);
+    await openClusterTerminal(dev);
+    expect(terminalPanel(tab)).toEqual({ shellId: 1, open: true, maximized: false, minimized: false });
+  });
+
   it("opens again on the shell it last showed, rather than starting a second", async () => {
     const tab = onPods();
     await openClusterTerminal(dev);
     sessions = [{ id: 1, context: "dev-cluster", state: "idle" }];
     closeTerminalPanel(tab);
     await openClusterTerminal(dev);
-    expect(terminalPanel(tab)).toEqual({ shellId: 1, open: true, maximized: false });
+    expect(terminalPanel(tab)).toEqual({ shellId: 1, open: true, maximized: false, minimized: false });
     expect(startLocalSession).toHaveBeenCalledTimes(1);
   });
 
