@@ -605,7 +605,7 @@ export function Console({ fullView }: { fullView?: boolean }) {
     // log region, polite or off, around whichever children it is given
     // (`dockLive` below) — a second one nested inside it would announce
     // inconsistently and often twice (I7).
-    children = <Transcript compact live={false} turns={turns} gates={gates} />;
+    children = <Transcript compact live={false} busy={busy} turns={turns} gates={gates} />;
   }
 
   // Run-level, above whichever of the three modes is showing. The store held
