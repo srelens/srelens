@@ -1641,9 +1641,28 @@
     border-top: 2px solid var(--accent);
   }
   /* The grip sits on that frame; its own hairline would draw a second rule
-     over it. */
-  .console-dock > .resize-handle[data-edge="top"] { border-top-color: transparent; }
-  .console-dock > .resize-handle[data-edge="top"]:hover { border-top-color: var(--accent-line); }
+     over it. It straddles the frame so the pointer finds it from either side,
+     and it carries a visible bar at its centre: a 5px band with nothing drawn
+     in it was reported as "not resizable" — the drag worked, but nothing said
+     it was there. */
+  .console-dock > .resize-handle[data-edge="top"] {
+    top: -4px;
+    height: 9px;
+    border-top-color: transparent;
+  }
+  .console-dock > .resize-handle[data-edge="top"]::after {
+    content: "";
+    position: absolute;
+    top: 3px;
+    left: 50%;
+    width: 40px;
+    height: 3px;
+    margin-left: -20px;
+    border-radius: 2px;
+    background: var(--accent-line);
+  }
+  .console-dock > .resize-handle[data-edge="top"]:hover::after,
+  .console-dock > .resize-handle[data-edge="top"]:focus-visible::after { background: var(--accent); }
 
   /* --- console (signature) -------------------------------------- */
   .console-shell {

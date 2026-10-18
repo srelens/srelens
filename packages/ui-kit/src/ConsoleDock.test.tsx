@@ -517,6 +517,16 @@ describe("ConsoleDock clearing", () => {
     expect(body).toContain("position: relative");
   });
 
+  it("draws a bar where its grip is, so the drag can be found", async () => {
+    const { readFileSync } = await import("node:fs");
+    const { join } = await import("node:path");
+    const css = readFileSync(join(__dirname, "styles", "kit.css"), "utf8");
+    const rule = css.slice(css.indexOf('.console-dock > .resize-handle[data-edge="top"]::after {'));
+    const body = rule.slice(0, rule.indexOf("}"));
+    expect(body).toContain('content: ""');
+    expect(body).toContain("background: var(--accent-line)");
+  });
+
   /**
    * The only Stop in the app. The agent screen's own composer carried one and
    * that composer is deleted — the dock is the prompt on every screen — so a
