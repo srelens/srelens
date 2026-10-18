@@ -1580,6 +1580,19 @@
     border-right: none;
     border-left: 1px solid var(--rule);
   }
+  /* The vertical grip: a pane docked at the bottom of a page (the terminal
+     panel, #942) resizes from its top edge, so the rule is drawn there. */
+  .resize-handle[data-edge="top"] {
+    top: 0;
+    right: 0;
+    left: 0;
+    width: auto;
+    height: 5px;
+    cursor: row-resize;
+    border-right: none;
+    border-top: 1px solid var(--rule);
+  }
+  .resize-handle[data-edge="top"]:hover { border-top-color: var(--accent); }
   .resize-handle[data-edge="left"]:hover { border-left-color: var(--accent); }
 
   /* --- context menu ----------------------------------------------- */

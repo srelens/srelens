@@ -50,6 +50,7 @@ import {
   startPodSession,
   terminalFor,
 } from "../lib/sessions";
+import { requestTerminalsFocus, terminalsFocusRequest } from "../lib/terminalPanel";
 import { defaultState } from "../lib/tabs";
 import * as tabs from "../lib/tabsStore";
 import { Terminals } from "./Terminals";
@@ -235,6 +236,17 @@ describe("Terminals", () => {
 
     expect(sessionName().textContent).toBe("search-indexer-0 · indexer");
     expect(attached()).toEqual([terminalFor(newest)?.element]);
+  });
+
+  it("shows the session a page's terminal panel moved here, not the newest (#942)", async () => {
+    const moved = await openPod("checkout-api-5c8b7f2d9-mk3wl");
+    await openPod("search-indexer-0", "search", "indexer");
+    draw();
+    act(() => requestTerminalsFocus(moved));
+
+    expect(sessionName().textContent).toBe("checkout-api-5c8b7f2d9-mk3wl · api");
+    // Taken once: the next new session is followed as before.
+    expect(terminalsFocusRequest()).toBeNull();
   });
 
   it("keeps the active session when the rows around it come and go", async () => {

@@ -95,6 +95,12 @@ function fakeResizeObserver() {
   return { fire: () => callbacks.forEach((cb) => cb()) };
 }
 
+/** Give a pane the size jsdom never lays out, as a pane on screen has. */
+function sized(el: HTMLElement, width = 640, height = 320) {
+  Object.defineProperty(el, "clientWidth", { configurable: true, value: width });
+  Object.defineProperty(el, "clientHeight", { configurable: true, value: height });
+}
+
 /** A session with a backend double that never resolves anything further —
  *  enough for the store to hand out a live emulator to attach to. */
 async function openSession(): Promise<number> {
@@ -140,12 +146,53 @@ describe("TerminalView", () => {
   it("re-fits when the pane resizes", async () => {
     const observer = fakeResizeObserver();
     const id = await openSession();
-    render(<TerminalView sessionId={id} />);
+    const { container } = render(<TerminalView sessionId={id} />);
+    sized(container.firstElementChild as HTMLElement);
     fitSpy.mockClear();
 
     observer.fire();
 
     expect(fitSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it("leaves a hidden pane alone: it measures nothing, so there is nothing to fit to", async () => {
+    const observer = fakeResizeObserver();
+    const id = await openSession();
+    render(<TerminalView sessionId={id} />);
+    fitSpy.mockClear();
+
+    observer.fire();
+
+    expect(fitSpy).not.toHaveBeenCalled();
+  });
+
+  it("takes the emulator back when it is showing again, from another pane that had it (#942)", async () => {
+    const observer = fakeResizeObserver();
+    const id = await openSession();
+    const term = terminalFor(id);
+    const panel = render(<TerminalView sessionId={id} />);
+    const tab = render(<TerminalView sessionId={id} />);
+    const panelPane = panel.container.firstElementChild as HTMLElement;
+    // The last pane opened has it: the Terminals tab, here.
+    expect(term?.element?.parentElement).toBe(tab.container.firstElementChild);
+
+    // The panel's tab is selected again: only its pane has a size now.
+    sized(panelPane);
+    observer.fire();
+
+    expect(term?.element?.parentElement).toBe(panelPane);
+  });
+
+  it("dresses the emulator in the app's monospace size, not xterm's own 15px (#942)", async () => {
+    const id = await openSession();
+    const root = document.documentElement;
+    root.style.setProperty("--text-label", "0.8125rem");
+    try {
+      render(<TerminalView sessionId={id} />);
+      expect(terminalFor(id)?.options.fontSize).toBe(13);
+    } finally {
+      root.style.removeProperty("--text-label");
+    }
   });
 
   it("does not dispose the emulator on unmount, and a remount shows what was already written", async () => {

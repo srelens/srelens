@@ -1,8 +1,12 @@
 import { useEffect, useRef, type KeyboardEvent, type MouseEvent } from "react";
 import { cx } from "./cx";
 
-/** Which edge of the pane the grip sits on, and so which way widens it. */
-export type ResizeEdge = "left" | "right";
+/**
+ * Which edge of the pane the grip sits on, and so which way widens it. `top`
+ * is the one vertical grip: a pane docked at the bottom of a page grows as its
+ * top edge goes up, and its "width" is then its height (#942).
+ */
+export type ResizeEdge = "left" | "right" | "top";
 
 export interface ResizeHandleProps {
   /**
@@ -76,18 +80,20 @@ export function ResizeHandle({
 
   function onMouseDown(event: MouseEvent) {
     event.preventDefault();
-    const startX = event.clientX;
+    const vertical = edge === "top";
+    const startAt = vertical ? event.clientY : event.clientX;
     const startWidth = widthRef.current;
     // Tracked here rather than read back off `widthRef` at release: the host
     // is free to ignore a step, and what settled is what this handle last
     // asked for.
     let settled = startWidth;
     const move = (e: globalThis.MouseEvent) => {
-      const travelled = e.clientX - startX;
+      const travelled = (vertical ? e.clientY : e.clientX) - startAt;
       // The whole of the difference between the two edges: on a left-edge
       // grip the pane widens as the pointer goes left, because that is the
-      // direction its edge moves.
-      settled = clamp(edge === "left" ? startWidth - travelled : startWidth + travelled);
+      // direction its edge moves — and on a top-edge one it grows as the
+      // pointer goes up.
+      settled = clamp(edge === "right" ? startWidth + travelled : startWidth - travelled);
       onResize(settled);
     };
     const detach = () => {
@@ -109,8 +115,8 @@ export function ResizeHandle({
   function onKeyDown(event: KeyboardEvent<HTMLDivElement>) {
     // Inverted with the edge, for the same reason the drag is: the key that
     // moves the edge outward is the one that widens the pane.
-    const wider = edge === "left" ? "ArrowLeft" : "ArrowRight";
-    const narrower = edge === "left" ? "ArrowRight" : "ArrowLeft";
+    const wider = edge === "top" ? "ArrowUp" : edge === "left" ? "ArrowLeft" : "ArrowRight";
+    const narrower = edge === "top" ? "ArrowDown" : edge === "left" ? "ArrowRight" : "ArrowLeft";
     let next: number | null = null;
     if (event.key === wider) next = width + STEP;
     else if (event.key === narrower) next = width - STEP;
@@ -129,7 +135,9 @@ export function ResizeHandle({
   return (
     <div
       role="separator"
-      aria-orientation="vertical"
+      // A separator's orientation is the line it draws: a side grip is a
+      // vertical line, a top grip a horizontal one.
+      aria-orientation={edge === "top" ? "horizontal" : "vertical"}
       aria-label={`Resize ${label}`}
       aria-valuenow={width}
       aria-valuemin={minWidth}

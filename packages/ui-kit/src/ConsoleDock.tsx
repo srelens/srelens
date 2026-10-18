@@ -261,6 +261,22 @@ export function ConsoleDock({
                   )}
                 </div>
                 <div className="flex shrink-0 items-center gap-1">
+                  {/* The prompt's chevron does the same, but it is a glyph at
+                      the far end of the window from this header, where the
+                      reader looks for the controls of what they are reading.
+                      A conversation folded away is kept: the prompt opens it
+                      again (#942). */}
+                  <button
+                    type="button"
+                    className="text-btn shrink-0"
+                    aria-label={`Minimize ${label.toLowerCase()}`}
+                    aria-controls={bodyId}
+                    onClick={() => onOpenChange(false)}
+                  >
+                    <span className="eyebrow whitespace-nowrap text-[0.5625rem]">
+                      minimize
+                    </span>
+                  </button>
                   {onExpand && (
                     <button
                       type="button"
