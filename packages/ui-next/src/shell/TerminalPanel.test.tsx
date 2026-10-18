@@ -118,7 +118,7 @@ describe("PageWithTerminal", () => {
     fireEvent.click(screen.getByRole("button", { name: "Close terminal panel" }));
     expect(screen.queryByRole("region", { name: /Terminal/ })).toBeNull();
     expect(endSession).not.toHaveBeenCalled();
-    expect(panels.terminalPanel("pods")).toEqual({ sessionId: 7, open: false, maximized: false });
+    expect(panels.terminalPanel("pods")).toEqual({ shellId: 7, open: false, maximized: false });
   });
 
   it("moves the session to the Terminals tab, asking that tab to show it", () => {

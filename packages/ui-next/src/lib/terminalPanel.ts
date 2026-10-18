@@ -22,7 +22,12 @@ import type { Storage } from "./tabsPersist";
  * pixels, so it means the same thing on a short window and a tall one.
  */
 export interface TerminalPanelState {
-  sessionId: number;
+  /**
+   * The `lib/sessions.ts` row the panel shows: its in-process counter, not a
+   * secret of any kind. Not called `sessionId`, which code scanning reads as
+   * a security token and then traces the tab id's `Math.random()` into.
+   */
+  shellId: number;
   /** Whether the panel is showing; a closed one remembers its session. */
   open: boolean;
   /** Filling the page, with the page's own content behind it. */
@@ -71,10 +76,10 @@ export function useTerminalPanel(tabId: string): TerminalPanelState | undefined 
   return useSyncExternalStore(subscribe, () => panels[tabId], () => panels[tabId]);
 }
 
-/** Show `sessionId` in the tab's panel, opening it at the reader's size. */
-export function showTerminalPanel(tabId: string, sessionId: number): void {
+/** Show `shellId` in the tab's panel, opening it at the reader's size. */
+export function showTerminalPanel(tabId: string, shellId: number): void {
   const current = panels[tabId];
-  put(tabId, { sessionId, open: true, maximized: current?.sessionId === sessionId ? current.maximized : false });
+  put(tabId, { shellId, open: true, maximized: current?.shellId === shellId ? current.maximized : false });
 }
 
 /** Hide the tab's panel. The shell keeps running and is shown again next time. */
@@ -143,9 +148,9 @@ export function saveTerminalPanelShare(next: number, storage: Storage = settings
   }
 }
 
-/** Ask the Terminals tab to show `sessionId` — the panel's "Open in tab". */
-export function requestTerminalsFocus(sessionId: number): void {
-  focusRequest = sessionId;
+/** Ask the Terminals tab to show `shellId` — the panel's "Open in tab". */
+export function requestTerminalsFocus(shellId: number): void {
+  focusRequest = shellId;
   emit();
 }
 

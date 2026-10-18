@@ -83,7 +83,7 @@ describe("openClusterTerminal", () => {
     expect(startLocalSession).toHaveBeenCalledWith({ context: "dev-cluster", namespace: undefined });
     // The reader stays where they were; the shell is in that tab's panel.
     expect(activeRoute()).toBe("/pods");
-    expect(terminalPanel(tab)).toEqual({ sessionId: 1, open: true, maximized: false });
+    expect(terminalPanel(tab)).toEqual({ shellId: 1, open: true, maximized: false });
   });
 
   it("shows the session in the Terminals tab when that is where it was asked for", async () => {
@@ -131,7 +131,7 @@ describe("openClusterTerminal", () => {
     sessions = [{ id: 1, context: "dev-cluster", state: "idle" }];
     closeTerminalPanel(tab);
     await openClusterTerminal(dev);
-    expect(terminalPanel(tab)).toEqual({ sessionId: 1, open: true, maximized: false });
+    expect(terminalPanel(tab)).toEqual({ shellId: 1, open: true, maximized: false });
     expect(startLocalSession).toHaveBeenCalledTimes(1);
   });
 
@@ -142,13 +142,13 @@ describe("openClusterTerminal", () => {
     closeTerminalPanel(tab);
     startLocalSession.mockResolvedValue(2);
     await openClusterTerminal(dev);
-    expect(terminalPanel(tab)?.sessionId).toBe(2);
+    expect(terminalPanel(tab)?.shellId).toBe(2);
 
     sessions = [{ id: 2, context: "dev-cluster", state: "attached" }];
     closeTerminalPanel(tab);
     startLocalSession.mockResolvedValue(3);
     await openClusterTerminal(other);
     expect(startLocalSession).toHaveBeenLastCalledWith({ context: "other-cluster", namespace: undefined });
-    expect(terminalPanel(tab)?.sessionId).toBe(3);
+    expect(terminalPanel(tab)?.shellId).toBe(3);
   });
 });

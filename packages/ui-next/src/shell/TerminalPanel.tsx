@@ -35,7 +35,7 @@ import { TerminalView } from "../screens/terminals/TerminalView";
 export function TerminalPanel({ tabId }: { tabId: string }) {
   const panel = useTerminalPanel(tabId);
   const sessions = useSyncExternalStore(subscribeSessions, getSessions, getSessions);
-  const session = panel ? sessions.find((s) => s.id === panel.sessionId) : undefined;
+  const session = panel ? sessions.find((s) => s.id === panel.shellId) : undefined;
   const share = useTerminalPanelShare();
   const ref = useRef<HTMLDivElement>(null);
   // The height of the surface the panel shares, for the grip's pixel bounds.
@@ -156,7 +156,7 @@ export function TerminalPanel({ tabId }: { tabId: string }) {
 export function PageWithTerminal({ tabId, children }: { tabId: string; children: ReactNode }) {
   const panel = useTerminalPanel(tabId);
   const sessions = useSyncExternalStore(subscribeSessions, getSessions, getSessions);
-  const maximized = panel?.open === true && panel.maximized && sessions.some((s) => s.id === panel.sessionId);
+  const maximized = panel?.open === true && panel.maximized && sessions.some((s) => s.id === panel.shellId);
   return (
     <>
       <div data-slot="tab-page" hidden={maximized} className="flex min-h-0 min-w-0 flex-1 flex-col">

@@ -31,8 +31,8 @@ describe("a tab's terminal panel", () => {
   it("is each tab's own", () => {
     showTerminalPanel("pods", 1);
     showTerminalPanel("services", 2);
-    expect(terminalPanel("pods")).toEqual({ sessionId: 1, open: true, maximized: false });
-    expect(terminalPanel("services")?.sessionId).toBe(2);
+    expect(terminalPanel("pods")).toEqual({ shellId: 1, open: true, maximized: false });
+    expect(terminalPanel("services")?.shellId).toBe(2);
     expect(terminalPanel("events")).toBeUndefined();
   });
 
@@ -41,7 +41,7 @@ describe("a tab's terminal panel", () => {
     setTerminalPanelMaximized("pods", true);
     closeTerminalPanel("pods");
     // Closed restores the split: reopened, it is under the page again.
-    expect(terminalPanel("pods")).toEqual({ sessionId: 1, open: false, maximized: false });
+    expect(terminalPanel("pods")).toEqual({ shellId: 1, open: false, maximized: false });
     forgetTerminalPanel("pods");
     expect(terminalPanel("pods")).toBeUndefined();
   });

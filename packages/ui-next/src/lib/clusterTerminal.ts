@@ -60,7 +60,7 @@ export async function openClusterTerminal(cluster: ClusterContext): Promise<void
   const inPanel = !isTerminalsRoute(route);
   if (inPanel) {
     const panel = terminalPanel(tab);
-    const kept = panel && getSessions().find((s) => s.id === panel.sessionId);
+    const kept = panel && getSessions().find((s) => s.id === panel.shellId);
     if (panel?.open && kept) {
       closeTerminalPanel(tab);
       return;
