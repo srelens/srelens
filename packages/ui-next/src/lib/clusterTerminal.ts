@@ -61,17 +61,18 @@ export async function openClusterTerminal(cluster: ClusterContext): Promise<void
   if (inPanel) {
     const panel = terminalPanel(tab);
     const kept = panel && getSessions().find((s) => s.id === panel.shellId);
-    // Minimized is still open, but not what the reader is asking to close:
-    // the act brings it back up.
-    if (panel?.open && kept && panel.minimized) {
-      setTerminalPanelMinimized(tab, false);
+    // Only a live shell on the cluster asked for is the reader's to toggle or
+    // bring back. One on another cluster, or one that has ended, is replaced
+    // by a new shell on this one — the act asked for a terminal on `cluster`.
+    const reusable = kept && kept.state !== "closed" && kept.context === cluster.name;
+    if (panel?.open && reusable) {
+      // Minimized is still open, but not what the reader is asking to close:
+      // the act brings it back up.
+      if (panel.minimized) setTerminalPanelMinimized(tab, false);
+      else closeTerminalPanel(tab);
       return;
     }
-    if (panel?.open && kept) {
-      closeTerminalPanel(tab);
-      return;
-    }
-    if (kept && kept.state !== "closed" && kept.context === cluster.name) {
+    if (reusable) {
       showTerminalPanel(tab, kept.id);
       return;
     }

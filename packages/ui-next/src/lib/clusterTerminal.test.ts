@@ -134,6 +134,24 @@ describe("openClusterTerminal", () => {
     expect(terminalPanel(tab)).toEqual({ shellId: 1, open: true, maximized: false, minimized: false });
   });
 
+  it("opens the asked-for cluster's shell over an open panel on another cluster, or one that ended", async () => {
+    const tab = onPods();
+    await openClusterTerminal(dev);
+    sessions = [{ id: 1, context: "dev-cluster", state: "attached" }];
+    startLocalSession.mockResolvedValue(2);
+    // Open, and minimized: neither is the reader's to toggle on another cluster.
+    setTerminalPanelMinimized(tab, true);
+    await openClusterTerminal(other);
+    expect(startLocalSession).toHaveBeenLastCalledWith({ context: "other-cluster", namespace: undefined });
+    expect(terminalPanel(tab)).toEqual({ shellId: 2, open: true, maximized: false, minimized: false });
+
+    // An open panel whose shell has ended is replaced, not closed.
+    sessions = [{ id: 2, context: "other-cluster", state: "closed" }];
+    startLocalSession.mockResolvedValue(3);
+    await openClusterTerminal(other);
+    expect(terminalPanel(tab)).toEqual({ shellId: 3, open: true, maximized: false, minimized: false });
+  });
+
   it("opens again on the shell it last showed, rather than starting a second", async () => {
     const tab = onPods();
     await openClusterTerminal(dev);

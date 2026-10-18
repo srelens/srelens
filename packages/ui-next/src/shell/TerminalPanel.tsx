@@ -67,8 +67,12 @@ export function TerminalPanel({ tabId }: { tabId: string }) {
   const verdict = SESSION_VERDICT[session.state];
   const maximized = panel.maximized;
   const minimized = panel.minimized;
-  const height = Math.round(share * room);
   const maxHeight = Math.max(MIN_TERMINAL_PANEL_PX, room - MIN_TERMINAL_PANEL_PX);
+  // The saved share, held to the grip's pixel bounds on this page: a share
+  // kept from a tall window would otherwise leave a short one a panel with
+  // no room for a line of transcript. The share itself is left as saved, so
+  // the window growing again gives the reader back their size.
+  const height = Math.min(maxHeight, Math.max(MIN_TERMINAL_PANEL_PX, Math.round(share * room)));
   const toShare = (px: number) => (room > 0 ? px / room : share);
 
   return (
@@ -84,7 +88,8 @@ export function TerminalPanel({ tabId }: { tabId: string }) {
           : "relative flex min-h-0 min-w-0 shrink-0 flex-col border-t border-rule"
       }
       // Minimized is the head alone, at its own height.
-      style={maximized || minimized ? undefined : { height: `${share * 100}%` }}
+      // A share until the page has been measured, then pixels within bounds.
+      style={maximized || minimized ? undefined : { height: room > 0 ? height : `${share * 100}%` }}
     >
       {!maximized && !minimized && room > 0 && (
         <ResizeHandle

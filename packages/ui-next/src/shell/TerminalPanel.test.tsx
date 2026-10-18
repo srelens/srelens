@@ -101,6 +101,23 @@ describe("PageWithTerminal", () => {
     }
   });
 
+  it("holds a saved share to the grip's minimum on a short page, keeping the share", () => {
+    act(() => {
+      panels.showTerminalPanel("pods", 7);
+      panels.setTerminalPanelShare(0.15);
+    });
+    Object.defineProperty(HTMLElement.prototype, "clientHeight", { configurable: true, get: () => 400 });
+    try {
+      renderPage();
+      const panel = screen.getByRole("region", { name: /Terminal/ });
+      // 15% of 400px is 60px, under the 96px the grip allows.
+      expect(panel.style.height).toBe(`${panels.MIN_TERMINAL_PANEL_PX}px`);
+      expect(panels.terminalPanelShare()).toBe(0.15);
+    } finally {
+      delete (HTMLElement.prototype as { clientHeight?: number }).clientHeight;
+    }
+  });
+
   it("fills the page when maximized, keeping the page mounted behind it, and restores", () => {
     act(() => panels.showTerminalPanel("pods", 7));
     renderPage();
