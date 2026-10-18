@@ -665,7 +665,9 @@ export function Console({ fullView }: { fullView?: boolean }) {
       onOpenChange={setOpen}
       maximized={maximized && !isFullView}
       onMaximizedChange={isFullView ? undefined : setConsoleMaximized}
-      bodyHeight={bodyHeight ?? undefined}
+      // Not in the full view: it has no grip to undo a height dragged on the
+      // dock, and its body is only a command list or an error, sized to fit.
+      bodyHeight={isFullView ? undefined : bodyHeight ?? undefined}
       bodyBounds={consoleHeightBounds(windowHeight)}
       onBodyResize={isFullView ? undefined : setConsoleHeight}
       onBodyResizeCommit={saveConsoleHeight}

@@ -226,6 +226,13 @@ describe("Console", () => {
     expect(screen.queryByRole("separator")).toBeNull();
   });
 
+  it("keeps a dragged height off the full view's command list, which it could not shrink", async () => {
+    layout.setConsoleHeight(500);
+    render(<ConsoleProvider onToggleTheme={() => {}}><Console fullView /></ConsoleProvider>);
+    await userEvent.type(screen.getByRole("textbox", { name: "Console prompt" }), "/");
+    expect(screen.getByRole("log").style.height).toBe("");
+  });
+
   it("asks the agent with what was typed at the prompt, and clears it", async () => {
     const user = userEvent.setup();
     setup();
