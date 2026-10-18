@@ -511,6 +511,27 @@ describe("ConsoleDock clearing", () => {
     expect(screen.getByRole("log").className).toContain("max-h-[42vh]");
   });
 
+  it("grows no further than the room the host above can spare (#948)", () => {
+    const onBodyResize = vi.fn();
+    // Drawn at 400 and the page above can give 50 more: 450 is the most.
+    setup({ onBodyResize, bodyHeight: 400, bodyBounds: { min: 100, max: 900 }, spareAbove: 50 });
+    const grip = screen.getByRole("separator", { name: "Resize console" });
+    expect(grip.getAttribute("aria-valuemax")).toBe("450");
+    fireEvent.keyDown(grip, { key: "End" });
+    expect(onBodyResize).toHaveBeenLastCalledWith(450);
+  });
+
+  it("gives room back when the page above is already below its floor", () => {
+    setup({ onBodyResize: () => {}, bodyHeight: 400, bodyBounds: { min: 100, max: 900 }, spareAbove: -100 });
+    expect(screen.getByRole("log").style.height).toBe("300px");
+  });
+
+  it("holds an output sized by its content to the room above as well", () => {
+    setup({ spareAbove: 20 });
+    // jsdom draws nothing, so the room is the spare alone; the old ceiling stays.
+    expect(screen.getByRole("log").style.maxHeight).toBe("min(42vh, 96px)");
+  });
+
   it("frames itself in the accent, heavier than a pane's hairline (#944)", async () => {
     const { readFileSync } = await import("node:fs");
     const { join } = await import("node:path");

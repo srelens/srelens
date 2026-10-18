@@ -220,6 +220,20 @@ describe("Console", () => {
     expect(layout.consoleMaximized()).toBe(false);
   });
 
+  it("hands the room the page above can spare to the dock (#948)", async () => {
+    const user = userEvent.setup();
+    useAgentRun.mockReturnValue(runState({ turns: [{ id: 1, role: "user", text: "q", calls: [], at: 1 }] }));
+    useRun.mockReturnValue(runState({ turns: [{ id: 1, role: "user", text: "q", calls: [], at: 1 }] }));
+    render(
+      <ConsoleProvider onToggleTheme={() => {}}>
+        <Elsewhere />
+        <Console spareAbove={40} />
+      </ConsoleProvider>,
+    );
+    await user.click(screen.getByRole("button", { name: "Ask from elsewhere" }));
+    expect(screen.getByRole("log").style.maxHeight).toContain("px)");
+  });
+
   it("offers neither Maximize nor a grip in the full view, where the screen is the conversation", () => {
     render(<ConsoleProvider onToggleTheme={() => {}}><Console fullView /></ConsoleProvider>);
     expect(screen.queryByRole("button", { name: "Maximize console" })).toBeNull();

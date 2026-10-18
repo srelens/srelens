@@ -66,7 +66,13 @@ export function TerminalPanel({ tabId }: { tabId: string }) {
   if (!open || !panel || !session) return null;
   const verdict = SESSION_VERDICT[session.state];
   const maximized = panel.maximized;
-  const minimized = panel.minimized;
+  // Folded to its head, by the reader (Minimize) or by the page: a content
+  // area too short for the panel's least height and the page's together —
+  // an agent conversation dragged tall below it — gets the head alone rather
+  // than a panel overflowing the page it shares (#948). The reader's own
+  // choice is left as it was, so the room coming back unfolds it.
+  const squeezed = !maximized && room > 0 && room < 2 * MIN_TERMINAL_PANEL_PX;
+  const minimized = panel.minimized || squeezed;
   const maxHeight = Math.max(MIN_TERMINAL_PANEL_PX, room - MIN_TERMINAL_PANEL_PX);
   // The saved share, held to the grip's pixel bounds on this page: a share
   // kept from a tall window would otherwise leave a short one a panel with
@@ -82,10 +88,11 @@ export function TerminalPanel({ tabId }: { tabId: string }) {
       data-slot="terminal-panel"
       data-maximized={maximized || undefined}
       data-minimized={minimized || undefined}
+      data-squeezed={squeezed || undefined}
       className={
         maximized
-          ? "relative flex min-h-0 min-w-0 flex-1 flex-col"
-          : "relative flex min-h-0 min-w-0 shrink-0 flex-col border-t border-rule"
+          ? "relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden"
+          : "relative flex min-h-0 min-w-0 shrink-0 flex-col overflow-hidden border-t border-rule"
       }
       // Minimized is the head alone, at its own height.
       // A share until the page has been measured, then pixels within bounds.
@@ -117,11 +124,17 @@ export function TerminalPanel({ tabId }: { tabId: string }) {
         <span className="flex-1" />
         <Badge tone={statusTone(verdict.kind)}>{verdict.word}</Badge>
         <IconButton
-          icon={minimized ? Icons.raisePanel : Icons.minimizePanel}
-          label={minimized ? "Restore terminal" : "Minimize terminal"}
-          title={minimized ? "Restore" : "Minimize — the shell keeps running"}
+          icon={panel.minimized ? Icons.raisePanel : Icons.minimizePanel}
+          label={panel.minimized ? "Restore terminal" : "Minimize terminal"}
+          title={
+            squeezed && !panel.minimized
+              ? "Folded: no room on this page — shorten the agent console to unfold"
+              : panel.minimized
+                ? "Restore"
+                : "Minimize — the shell keeps running"
+          }
           aria-expanded={!minimized}
-          onClick={() => setTerminalPanelMinimized(tabId, !minimized)}
+          onClick={() => setTerminalPanelMinimized(tabId, !panel.minimized)}
         />
         <IconButton
           icon={maximized ? Icons.restorePanel : Icons.maximizePanel}
@@ -181,7 +194,9 @@ export function PageWithTerminal({ tabId, children }: { tabId: string; children:
   const maximized = panel?.open === true && panel.maximized && sessions.some((s) => s.id === panel.shellId);
   return (
     <>
-      <div data-slot="tab-page" hidden={maximized} className="flex min-h-0 min-w-0 flex-1 flex-col">
+      {/* Clipped, as the panel is: a region squeezed short never paints
+          its rows over its neighbour's (#948). */}
+      <div data-slot="tab-page" hidden={maximized} className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
         {children}
       </div>
       <TerminalPanel tabId={tabId} />

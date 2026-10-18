@@ -18,6 +18,18 @@ export const CONSOLE_HEIGHT_KEY = "srelens.next.consoleHeight";
 export const MIN_CONSOLE_HEIGHT = 96;
 /** What the console leaves of the window for the page, tabs and chrome above it. */
 export const CONSOLE_PAGE_ROOM = 240;
+/**
+ * The least the content area above the console keeps while the console is
+ * dragged taller (#948): a page's header, its filter row and a few rows, or
+ * those and a terminal panel folded to its head. The window bound above
+ * cannot know what is drawn there; this is counted from the area itself.
+ */
+export const MIN_PAGE_ROOM = 160;
+
+/** What the content area above can give the console, measured at `bandHeight`. */
+export function consoleSpareAbove(bandHeight: number): number {
+  return Math.round(bandHeight - MIN_PAGE_ROOM);
+}
 
 let height: number | null | undefined;
 let maximized = false;

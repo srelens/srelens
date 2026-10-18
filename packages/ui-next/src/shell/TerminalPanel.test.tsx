@@ -118,6 +118,31 @@ describe("PageWithTerminal", () => {
     }
   });
 
+  it("folds to its head when the page is too short for it, leaving the reader's choice as it was (#948)", () => {
+    act(() => panels.showTerminalPanel("pods", 7));
+    Object.defineProperty(HTMLElement.prototype, "clientHeight", { configurable: true, get: () => 150 });
+    try {
+      renderPage();
+      const panel = screen.getByRole("region", { name: /Terminal/ });
+      expect(panel.getAttribute("data-squeezed")).toBe("true");
+      expect(panel.style.height).toBe("");
+      expect(shown(screen.getByTestId("terminal-view"))).toBe(false);
+      expect(screen.queryByRole("separator")).toBeNull();
+      expect(panels.terminalPanel("pods")?.minimized).toBe(false);
+      // The control still says what the reader chose.
+      expect(screen.getByRole("button", { name: "Minimize terminal" }).title).toMatch(/no room/);
+    } finally {
+      delete (HTMLElement.prototype as { clientHeight?: number }).clientHeight;
+    }
+  });
+
+  it("clips the page and the panel, so neither paints over the other", () => {
+    act(() => panels.showTerminalPanel("pods", 7));
+    renderPage();
+    expect(screen.getByRole("region", { name: /Terminal/ }).className).toContain("overflow-hidden");
+    expect(document.querySelector('[data-slot="tab-page"]')?.className).toContain("overflow-hidden");
+  });
+
   it("fills the page when maximized, keeping the page mounted behind it, and restores", () => {
     act(() => panels.showTerminalPanel("pods", 7));
     renderPage();

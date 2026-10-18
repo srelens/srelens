@@ -6,6 +6,8 @@ import {
   consoleHeight,
   consoleHeightBounds,
   consoleMaximized,
+  consoleSpareAbove,
+  MIN_PAGE_ROOM,
   MIN_CONSOLE_HEIGHT,
   parseStoredConsoleHeight,
   saveConsoleHeight,
@@ -81,5 +83,12 @@ describe("a maximized console", () => {
     expect(consoleMaximized()).toBe(true);
     __resetConsoleLayoutForTests();
     expect(consoleMaximized()).toBe(false);
+  });
+});
+
+describe("the room above the console (#948)", () => {
+  it("is the content area less the floor a page needs", () => {
+    expect(consoleSpareAbove(500)).toBe(500 - MIN_PAGE_ROOM);
+    expect(consoleSpareAbove(100)).toBeLessThan(0);
   });
 });

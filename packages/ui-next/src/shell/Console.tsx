@@ -118,7 +118,7 @@ function CommandRows({ commands, onRun }: { commands: readonly Command[]; onRun:
  * `useActiveContext()`'s own answer and nothing this component derives from
  * the label.
  */
-export function Console({ fullView }: { fullView?: boolean }) {
+export function Console({ fullView, spareAbove }: { fullView?: boolean; spareAbove?: number }) {
   const sealed = useWorkspaceSealed();
   // From context, not props: this mounts in two places now — the window's
   // bottom edge on most screens, and the foot of `/agent`'s own main column so
@@ -671,6 +671,9 @@ export function Console({ fullView }: { fullView?: boolean }) {
       bodyBounds={consoleHeightBounds(windowHeight)}
       onBodyResize={isFullView ? undefined : setConsoleHeight}
       onBodyResizeCommit={saveConsoleHeight}
+      // What the page above can give up (#948); the window's own bound alone
+      // let a dragged console squeeze it until its rows overlapped.
+      spareAbove={isFullView ? undefined : spareAbove}
       value={value}
       onValueChange={setValue}
       onSubmit={onSubmit}

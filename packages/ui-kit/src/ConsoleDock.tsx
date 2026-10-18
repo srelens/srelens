@@ -111,6 +111,15 @@ export interface ConsoleDockProps {
   onBodyResize?: (height: number) => void;
   /** Once, when the drag settles — the moment worth persisting. */
   onBodyResizeCommit?: (height: number) => void;
+  /**
+   * How many more pixels the host can give the output from what sits above
+   * the dock — its content area less the floor that area needs to stay
+   * readable (#948). The output never grows past its drawn height plus this,
+   * whether dragged or sized by its content, so a tall conversation cannot
+   * squeeze the page above it until the page's rows are drawn over each
+   * other. Negative gives room back. Absent, only `bodyBounds` applies.
+   */
+  spareAbove?: number;
   /** The output — a transcript, a command list, suggestions. */
   children?: ReactNode;
   /** What to say when there is no output yet. */
@@ -201,6 +210,7 @@ export function ConsoleDock({
   bodyBounds = { min: 96, max: 640 },
   onBodyResize,
   onBodyResizeCommit,
+  spareAbove,
   children,
   emptyLabel,
   composerOnly,
@@ -254,17 +264,26 @@ export function ConsoleDock({
   const hasBody = open && (filled(children) || filled(emptyLabel));
   // Only over a body: a grip above a bare prompt would resize nothing.
   const resizable = onBodyResize !== undefined && hasBody && !composerOnly && !maximized;
+  // Measured whenever the output is in the strip, sized or not: the room the
+  // host can spare is counted from what is drawn now.
+  const measured = (resizable || spareAbove !== undefined) && hasBody && !composerOnly && !maximized;
   useLayoutEffect(() => {
     const body = bodyRef.current;
-    if (!resizable || !body) return undefined;
+    if (!measured || !body) return undefined;
     const measure = () => setDrawnHeight(body.clientHeight);
     measure();
     if (typeof ResizeObserver === "undefined") return undefined;
     const observer = new ResizeObserver(measure);
     observer.observe(body);
     return () => observer.disconnect();
-  }, [resizable]);
-  const clampBody = (h: number) => Math.max(bodyBounds.min, Math.min(bodyBounds.max, h));
+  }, [measured]);
+  // The tallest the output may be now: its own bound, and no more than what
+  // is drawn plus what the host above can spare (#948).
+  const roomMax =
+    spareAbove === undefined
+      ? bodyBounds.max
+      : Math.max(bodyBounds.min, Math.min(bodyBounds.max, Math.round((drawnHeight || bodyHeight || 0) + spareAbove)));
+  const clampBody = (h: number) => Math.max(bodyBounds.min, Math.min(roomMax, h));
 
   /** Returns true for a key this host has dealt with, so `ConsolePrompt`
    *  leaves it alone — Enter it handles itself. */
@@ -292,7 +311,7 @@ export function ConsoleDock({
           edge="top"
           width={clampBody(bodyHeight ?? drawnHeight)}
           minWidth={bodyBounds.min}
-          maxWidth={bodyBounds.max}
+          maxWidth={roomMax}
           onResize={onBodyResize}
           onCommit={onBodyResizeCommit}
         />
@@ -388,7 +407,17 @@ export function ConsoleDock({
                 maximized ? "min-h-0 flex-1" : bodyHeight === undefined && "max-h-[42vh]",
                 !composerOnly && !maximized && bodyHeight === undefined && "min-h-[132px]",
               )}
-              style={!maximized && bodyHeight !== undefined ? { height: clampBody(bodyHeight) } : undefined}
+              style={
+                maximized
+                  ? undefined
+                  : bodyHeight !== undefined
+                    ? { height: clampBody(bodyHeight) }
+                    : spareAbove !== undefined
+                      ? // Sized by its content, up to its old ceiling or the room
+                        // above, whichever is less.
+                        { maxHeight: `min(42vh, ${roomMax}px)` }
+                      : undefined
+              }
               role="log"
               aria-live={live ? "polite" : "off"}
               aria-label={`${label} output`}
