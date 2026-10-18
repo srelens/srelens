@@ -117,6 +117,7 @@ import { Rail } from "./Rail";
 import { Status } from "./Status";
 import { TabSurface } from "./TabSurface";
 import { PageWithTerminal } from "./TerminalPanel";
+import { setConsoleMaximized, useConsoleMaximized } from "../lib/consoleLayout";
 import { useDeepLinks } from "./useDeepLinks";
 
 /** One toast in the window's queue: a host notice, or a `notify` call. */
@@ -229,6 +230,12 @@ export function Window({
   // cluster's name; `Console` itself only reads `scope` back off the provider.
   const activeTabRoute = tabs.find((t) => t.id === activeId)?.route ?? "/";
   const activeTab = tabs.find((t) => t.id === activeId);
+  const consoleMaximized = useConsoleMaximized();
+  // A tab picked while the console fills the content area is a page the
+  // reader wants to see: the console steps back to its size (#944).
+  useEffect(() => {
+    setConsoleMaximized(false);
+  }, [activeId]);
   const routeCluster = parseEditRoute(activeTabRoute)?.cluster ?? parseNewRoute(activeTabRoute)?.cluster ?? activeTab?.sub;
   const probeContext = isClusterScopedRoute(activeTabRoute)
     ? (routeCluster ? contexts.find(c => c.name === routeCluster) : activeCtx)
@@ -922,7 +929,10 @@ export function Window({
             label="Open tabs"
           />
         )}
-        <div className="relative min-h-0 flex-1">
+        {/* Hidden, not unmounted, while the agent console fills the content
+            area (#944): every tab keeps its page, scroll and watches for when
+            the console is restored. */}
+        <div className="relative min-h-0 flex-1" hidden={consoleMaximized && activeTabRoute !== "/agent"}>
           {tabs.map((tab) => {
             // An editor's target is pinned in its route. Its tab label follows
             // the rail, so it cannot decide whether the editor's readers are

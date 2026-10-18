@@ -320,13 +320,19 @@ that is where you are — so the list stays in view while you type.
 - **Maximize** fills the page with the terminal; **Restore** brings the page back.
 - **Minimize** folds the panel down to its header, giving the page (and an agent
   answer in the console below) the room back; the shell keeps running.
-  **Terminal** or **Cmd/Ctrl-J** brings it back up. The agent console has its own
-  **minimize** in its header; typing in its prompt opens it again.
+  **Terminal** or **Cmd/Ctrl-J** brings it back up.
 - **Open in tab** moves the shell to the Terminals tab, scrollback and all.
 - **Close** hides the panel and leaves the shell running. **Terminal** or
   **Cmd/Ctrl-J** on the same tab shows it again; the shell is also listed in
   Terminals. **Detach** ends it.
 - Each tab has its own panel, kept while you are on other tabs.
+
+The agent console along the bottom of the window (framed in the accent colour,
+so it is easy to tell apart) has the same controls in its header: **Minimize**
+folds it down to its prompt (typing in the prompt opens it again), **Maximize**
+fills the content area with the conversation, **Open in full view** opens the
+Agent tab, and **Clear** clears the conversation. Drag its top edge to make the
+conversation taller or shorter; the size is kept.
 
 Terminals are drawn in the app's own monospace font and size, in the panel and
 in the Terminals tab alike.

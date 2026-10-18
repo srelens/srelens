@@ -1,11 +1,15 @@
 import {
   useEffect,
   useId,
+  useLayoutEffect,
   useRef,
+  useState,
   type KeyboardEvent,
   type ReactNode,
 } from "react";
 import { ConsolePrompt } from "./ConsolePrompt";
+import { IconButton } from "./IconButton";
+import { ResizeHandle } from "./ResizeHandle";
 import { EmptyState } from "./EmptyState";
 import { Eyebrow } from "./Eyebrow";
 import { Spinner } from "./Spinner";
@@ -88,6 +92,25 @@ export interface ConsoleDockProps {
    * dock with no fuller view has nothing to offer here.
    */
   onExpand?: () => void;
+  /**
+   * The output filling the host's content area rather than a strip under it
+   * (#944). The dock draws the control and grows to fill its own box; the
+   * host hides whatever it stacks above. Absent means no Maximize control.
+   */
+  maximized?: boolean;
+  onMaximizedChange?: (maximized: boolean) => void;
+  /**
+   * The output's height, once the reader has dragged it (#944). Absent, the
+   * output is as tall as its content up to 42% of the viewport, as before.
+   * The height is the host's to keep: the kit reports it, never stores it.
+   */
+  bodyHeight?: number;
+  /** The drag's bounds, in pixels. */
+  bodyBounds?: { min: number; max: number };
+  /** Every step of a drag on the dock's top edge. Absent means no grip. */
+  onBodyResize?: (height: number) => void;
+  /** Once, when the drag settles — the moment worth persisting. */
+  onBodyResizeCommit?: (height: number) => void;
   /** The output — a transcript, a command list, suggestions. */
   children?: ReactNode;
   /** What to say when there is no output yet. */
@@ -172,6 +195,12 @@ export function ConsoleDock({
   onPickImages,
   onClear,
   onExpand,
+  maximized = false,
+  onMaximizedChange,
+  bodyHeight,
+  bodyBounds = { min: 96, max: 640 },
+  onBodyResize,
+  onBodyResizeCommit,
   children,
   emptyLabel,
   composerOnly,
@@ -184,6 +213,9 @@ export function ConsoleDock({
   // A textarea now: the prompt is a multi-line composer, not a one-line input.
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const bodyRef = useRef<HTMLDivElement>(null);
+  // The output's drawn height, for the grip to start a drag from while the
+  // host has not set one — the content decides it until the first drag.
+  const [drawnHeight, setDrawnHeight] = useState(0);
   // Seeded with the current state so a dock that mounts open leaves focus
   // where it was. Only the transition from closed to open is an act of the
   // user's that focus should follow.
@@ -219,6 +251,21 @@ export function ConsoleDock({
     if (body) body.scrollTop = body.scrollHeight;
   }, [children, open]);
 
+  const hasBody = open && (filled(children) || filled(emptyLabel));
+  // Only over a body: a grip above a bare prompt would resize nothing.
+  const resizable = onBodyResize !== undefined && hasBody && !composerOnly && !maximized;
+  useLayoutEffect(() => {
+    const body = bodyRef.current;
+    if (!resizable || !body) return undefined;
+    const measure = () => setDrawnHeight(body.clientHeight);
+    measure();
+    if (typeof ResizeObserver === "undefined") return undefined;
+    const observer = new ResizeObserver(measure);
+    observer.observe(body);
+    return () => observer.disconnect();
+  }, [resizable]);
+  const clampBody = (h: number) => Math.max(bodyBounds.min, Math.min(bodyBounds.max, h));
+
   /** Returns true for a key this host has dealt with, so `ConsolePrompt`
    *  leaves it alone — Enter it handles itself. */
   function onPromptKeyDown(event: KeyboardEvent<HTMLTextAreaElement>): boolean {
@@ -234,9 +281,24 @@ export function ConsoleDock({
   }
 
   return (
-    <section aria-label={label} className={cx("console-dock", className)}>
-      <div className="flex min-w-0">
-        <div className="flex min-w-0 flex-1 flex-col">
+    <section
+      aria-label={label}
+      data-maximized={maximized || undefined}
+      className={cx("console-dock", maximized && "flex min-h-0 flex-1 flex-col", className)}
+    >
+      {resizable && (
+        <ResizeHandle
+          label={label.toLowerCase()}
+          edge="top"
+          width={clampBody(bodyHeight ?? drawnHeight)}
+          minWidth={bodyBounds.min}
+          maxWidth={bodyBounds.max}
+          onResize={onBodyResize}
+          onCommit={onBodyResizeCommit}
+        />
+      )}
+      <div className={cx("flex min-w-0", maximized && "min-h-0 flex-1")}>
+        <div className={cx("flex min-w-0 flex-1 flex-col", maximized && "min-h-0")}>
           {open && !composerOnly && (
             <>
               <div
@@ -260,53 +322,51 @@ export function ConsoleDock({
                     <Eyebrow className="text-[0.5625rem]">{status}</Eyebrow>
                   )}
                 </div>
-                <div className="flex shrink-0 items-center gap-1">
+                {/* Icons, as the terminal panel beside it has them (#944): the
+                    two panes do the same jobs and should look it. Each is
+                    named for assistive technology and titled for the pointer. */}
+                <div className="flex shrink-0 items-center gap-0.5" data-slot="dock-controls">
                   {/* The prompt's chevron does the same, but it is a glyph at
                       the far end of the window from this header, where the
                       reader looks for the controls of what they are reading.
                       A conversation folded away is kept: the prompt opens it
                       again (#942). */}
-                  <button
-                    type="button"
-                    className="text-btn shrink-0"
-                    aria-label={`Minimize ${label.toLowerCase()}`}
+                  <IconButton
+                    icon={ChevronDownGlyph}
+                    label={`Minimize ${label.toLowerCase()}`}
+                    title="Minimize"
                     aria-controls={bodyId}
-                    onClick={() => onOpenChange(false)}
-                  >
-                    <span className="eyebrow whitespace-nowrap text-[0.5625rem]">
-                      minimize
-                    </span>
-                  </button>
+                    onClick={() => {
+                      onMaximizedChange?.(false);
+                      onOpenChange(false);
+                    }}
+                  />
+                  {onMaximizedChange && (
+                    <IconButton
+                      icon={maximized ? RestoreGlyph : MaximizeGlyph}
+                      label={maximized ? `Restore ${label.toLowerCase()} size` : `Maximize ${label.toLowerCase()}`}
+                      title={maximized ? "Restore" : "Maximize"}
+                      onClick={() => onMaximizedChange(!maximized)}
+                    />
+                  )}
                   {onExpand && (
-                    <button
-                      type="button"
-                      className="text-btn shrink-0"
-                      aria-label={`Open ${label.toLowerCase()} in the full view`}
+                    <IconButton
+                      icon={OpenGlyph}
+                      label={`Open ${label.toLowerCase()} in the full view`}
+                      title="Open in full view"
                       onClick={onExpand}
-                    >
-                      <span className="eyebrow whitespace-nowrap text-[0.5625rem]">
-                        full view
-                      </span>
-                    </button>
+                    />
                   )}
                   {onClear && (
-                    <button
-                      type="button"
-                      className="text-btn shrink-0"
-                      aria-label={`Clear ${label.toLowerCase()}`}
+                    <IconButton
+                      icon={ClearGlyph}
+                      label={`Clear ${label.toLowerCase()}`}
+                      title="Clear the conversation"
                       onClick={onClear}
-                    >
-                      {/* The class rather than `Eyebrow`, which renders a div: a
-                    button holds phrasing content, and a block inside one is
-                    markup no browser is obliged to lay out sensibly. */}
-                      <span className="eyebrow whitespace-nowrap text-[0.5625rem]">
-                        clear
-                      </span>
-                    </button>
+                    />
                   )}
                 </div>
               </div>
-
             </>
           )}
 
@@ -315,11 +375,16 @@ export function ConsoleDock({
               and for an error, both of which have nowhere else to go. What it
               must NOT do is hold a floor of blank space under a transcript the
               screen is already drawing. */}
-          {open && (filled(children) || filled(emptyLabel)) && (
+          {hasBody && (
             <div
               id={bodyId}
               ref={bodyRef}
-              className={cx("scroll max-h-[42vh] px-3 py-2.5", !composerOnly && "min-h-[132px]")}
+              className={cx(
+                "scroll px-3 py-2.5",
+                maximized ? "min-h-0 flex-1" : bodyHeight === undefined && "max-h-[42vh]",
+                !composerOnly && !maximized && bodyHeight === undefined && "min-h-[132px]",
+              )}
+              style={!maximized && bodyHeight !== undefined ? { height: clampBody(bodyHeight) } : undefined}
               role="log"
               aria-live={live ? "polite" : "off"}
               aria-label={`${label} output`}
@@ -411,3 +476,38 @@ export function ConsoleDock({
     </section>
   );
 }
+
+/**
+ * The header's glyphs, inline: the kit takes no dependency on an icon set,
+ * and these are the shapes the app's terminal panel draws for the same four
+ * jobs (#944).
+ */
+function glyph(paths: string[]) {
+  function Glyph({ size = 14, className }: { size?: number; className?: string }) {
+    return (
+      <svg
+        width={size}
+        height={size}
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="2"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        aria-hidden="true"
+        className={className}
+      >
+        {paths.map((d) => (
+          <path key={d} d={d} />
+        ))}
+      </svg>
+    );
+  }
+  return Glyph;
+}
+
+const ChevronDownGlyph = glyph(["m6 9 6 6 6-6"]);
+const MaximizeGlyph = glyph(["M15 3h6v6", "M9 21H3v-6", "M21 3l-7 7", "M3 21l7-7"]);
+const RestoreGlyph = glyph(["M4 14h6v6", "M20 10h-6V4", "M14 10l7-7", "M3 21l7-7"]);
+const OpenGlyph = glyph(["M15 3h6v6", "M10 14 21 3", "M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"]);
+const ClearGlyph = glyph(["M3 6h18", "M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6", "M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"]);

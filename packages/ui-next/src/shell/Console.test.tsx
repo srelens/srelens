@@ -1,4 +1,5 @@
 import { useEffect } from "react";
+import * as layout from "../lib/consoleLayout";
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import fluxManifest from "../../../../examples/extensions/flux.json";
 import { takeExtensionAction } from "../extensions/actionRequests";
@@ -191,9 +192,40 @@ beforeEach(() => {
   stopAgentRun.mockReset();
   chooseAgent.mockReset();
   useActiveRunKey.mockReset().mockReturnValue(null);
+  layout.__resetConsoleLayoutForTests();
 });
 
 describe("Console", () => {
+  it("is resized from its top edge, the reader's height kept by the app (#944)", async () => {
+    const user = userEvent.setup();
+    useAgentRun.mockReturnValue(runState({ turns: [{ id: 1, role: "user", text: "how many pods fit?", calls: [], at: 1 }] }));
+    useRun.mockReturnValue(runState({ turns: [{ id: 1, role: "user", text: "how many pods fit?", calls: [], at: 1 }] }));
+    setup();
+    await user.click(screen.getByRole("button", { name: "Ask from elsewhere" }));
+    const grip = screen.getByRole("separator", { name: "Resize console" });
+    fireEvent.keyDown(grip, { key: "End" });
+    // The window's height less the room the page always keeps.
+    expect(layout.consoleHeight()).toBe(layout.consoleHeightBounds(window.innerHeight).max);
+    expect(screen.getByRole("log").style.height).toBe(`${layout.consoleHeight()}px`);
+  });
+
+  it("fills the content area when maximized, and steps back when it is folded away (#944)", async () => {
+    const user = userEvent.setup();
+    setup();
+    await user.click(screen.getByRole("button", { name: "Ask from elsewhere" }));
+    await user.click(screen.getByRole("button", { name: "Maximize console" }));
+    expect(layout.consoleMaximized()).toBe(true);
+    expect(screen.queryByRole("separator")).toBeNull();
+    await user.click(screen.getByRole("button", { name: "Minimize console" }));
+    expect(layout.consoleMaximized()).toBe(false);
+  });
+
+  it("offers neither Maximize nor a grip in the full view, where the screen is the conversation", () => {
+    render(<ConsoleProvider onToggleTheme={() => {}}><Console fullView /></ConsoleProvider>);
+    expect(screen.queryByRole("button", { name: "Maximize console" })).toBeNull();
+    expect(screen.queryByRole("separator")).toBeNull();
+  });
+
   it("asks the agent with what was typed at the prompt, and clears it", async () => {
     const user = userEvent.setup();
     setup();

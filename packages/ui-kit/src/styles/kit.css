@@ -1630,11 +1630,20 @@
   .ctx-sep { height: 1px; margin: 4px 2px; background: var(--rule); }
 
   /* --- docked console --------------------------------------------- */
+  /* The agent's own frame (#944): its rule is drawn in the accent — the
+     agent's colour across the app — and heavier than a pane's hairline, so
+     with a list, a terminal and the console stacked the console is found at
+     a glance. `position: relative` holds its top-edge grip. */
   .console-dock {
+    position: relative;
     flex-shrink: 0;
     background: var(--ground-surface);
-    border-top: 1px solid var(--rule);
+    border-top: 2px solid var(--accent);
   }
+  /* The grip sits on that frame; its own hairline would draw a second rule
+     over it. */
+  .console-dock > .resize-handle[data-edge="top"] { border-top-color: transparent; }
+  .console-dock > .resize-handle[data-edge="top"]:hover { border-top-color: var(--accent-line); }
 
   /* --- console (signature) -------------------------------------- */
   .console-shell {
