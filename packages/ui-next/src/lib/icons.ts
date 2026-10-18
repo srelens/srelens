@@ -28,6 +28,8 @@ import {
   ListOrdered,
   LogOut,
   Maximize,
+  Maximize2,
+  Minimize2,
   Moon,
   Network,
   Pause,
@@ -188,6 +190,9 @@ export const Icons = {
   /** Promote what is on screen into a tab of its own — the detail peek's
    *  "Open tab". */
   openTab: ExternalLink,
+  // The terminal panel's own pair (#942): fill the page, and back to the split.
+  maximizePanel: Maximize2,
+  restorePanel: Minimize2,
 
   /** Hand what is on screen to the agent — the row's ask chip wears its own
    *  inline glyph (the kit takes no icon-set dependency), so this is for the

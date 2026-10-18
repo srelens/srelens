@@ -7,17 +7,20 @@ vi.mock("@srelens/core", async (orig) => ({
 }));
 
 const startLocalSession = vi.fn();
+let sessions: Array<{ id: number; context: string; state: string }> = [];
 vi.mock("./sessions", () => ({
   startLocalSession: (...args: unknown[]) => startLocalSession(...args),
+  getSessions: () => sessions,
 }));
 
 const { canOpenClusterTerminal, openClusterTerminal, terminalNamespace } = await import(
   "./clusterTerminal"
 );
-const { activeRoute, currentWorkspace, setClusterPaused, setState, setTabNamespaces } = await import(
+const { activeRoute, currentWorkspace, openTab, setClusterPaused, setState, setTabNamespaces } = await import(
   "./tabsStore"
 );
 const { defaultState } = await import("./tabs");
+const { __resetTerminalPanelsForTests, closeTerminalPanel, terminalPanel } = await import("./terminalPanel");
 
 const dev = {
   name: "dev-cluster", stableId: "dev", key: "dev", cluster: "c", server: "", isCurrent: false,
@@ -29,7 +32,15 @@ beforeEach(() => {
   isTauri.mockReturnValue(true);
   startLocalSession.mockReset().mockResolvedValue(1);
   setState(defaultState([dev, other]));
+  sessions = [];
+  __resetTerminalPanelsForTests();
 });
+
+/** Put the active tab on a page other than Terminals, as the reader would be. */
+function onPods(): string {
+  openTab("/pods");
+  return currentWorkspace().activeId;
+}
 
 describe("terminalNamespace", () => {
   it("is the tab's namespace when the tab is looking at exactly one", () => {
@@ -66,10 +77,20 @@ describe("canOpenClusterTerminal", () => {
 });
 
 describe("openClusterTerminal", () => {
-  it("starts a local shell for the cluster it was given, then shows it", async () => {
+  it("starts a local shell for the cluster it was given, under the page it was opened on (#942)", async () => {
+    const tab = onPods();
     await openClusterTerminal(dev);
     expect(startLocalSession).toHaveBeenCalledWith({ context: "dev-cluster", namespace: undefined });
+    // The reader stays where they were; the shell is in that tab's panel.
+    expect(activeRoute()).toBe("/pods");
+    expect(terminalPanel(tab)).toEqual({ sessionId: 1, open: true, maximized: false });
+  });
+
+  it("shows the session in the Terminals tab when that is where it was asked for", async () => {
+    openTab("/terminals");
+    await openClusterTerminal(dev);
     expect(activeRoute()).toBe("/terminals");
+    expect(terminalPanel(currentWorkspace().activeId)).toBeUndefined();
   });
 
   it("starts in the active tab's namespace for that cluster when it has exactly one", async () => {
@@ -84,14 +105,50 @@ describe("openClusterTerminal", () => {
     expect(startLocalSession).toHaveBeenCalledWith({ context: "dev-cluster", namespace: undefined });
   });
 
-  it("shows the terminals screen only once the session exists", async () => {
+  it("opens the panel only once the session exists", async () => {
+    const tab = onPods();
     let started!: () => void;
     startLocalSession.mockReturnValue(new Promise<number>((resolve) => (started = () => resolve(1))));
-    const before = activeRoute();
     const opening = openClusterTerminal(dev);
-    expect(activeRoute()).toBe(before);
+    expect(terminalPanel(tab)).toBeUndefined();
     started();
     await opening;
-    expect(activeRoute()).toBe("/terminals");
+    expect(terminalPanel(tab)?.open).toBe(true);
+  });
+
+  it("closes an open panel, leaving its shell running", async () => {
+    const tab = onPods();
+    await openClusterTerminal(dev);
+    sessions = [{ id: 1, context: "dev-cluster", state: "attached" }];
+    await openClusterTerminal(dev);
+    expect(terminalPanel(tab)?.open).toBe(false);
+    expect(startLocalSession).toHaveBeenCalledTimes(1);
+  });
+
+  it("opens again on the shell it last showed, rather than starting a second", async () => {
+    const tab = onPods();
+    await openClusterTerminal(dev);
+    sessions = [{ id: 1, context: "dev-cluster", state: "idle" }];
+    closeTerminalPanel(tab);
+    await openClusterTerminal(dev);
+    expect(terminalPanel(tab)).toEqual({ sessionId: 1, open: true, maximized: false });
+    expect(startLocalSession).toHaveBeenCalledTimes(1);
+  });
+
+  it("starts a new shell when the one it last showed has ended, or is on another cluster", async () => {
+    const tab = onPods();
+    await openClusterTerminal(dev);
+    sessions = [{ id: 1, context: "dev-cluster", state: "closed" }];
+    closeTerminalPanel(tab);
+    startLocalSession.mockResolvedValue(2);
+    await openClusterTerminal(dev);
+    expect(terminalPanel(tab)?.sessionId).toBe(2);
+
+    sessions = [{ id: 2, context: "dev-cluster", state: "attached" }];
+    closeTerminalPanel(tab);
+    startLocalSession.mockResolvedValue(3);
+    await openClusterTerminal(other);
+    expect(startLocalSession).toHaveBeenLastCalledWith({ context: "other-cluster", namespace: undefined });
+    expect(terminalPanel(tab)?.sessionId).toBe(3);
   });
 });

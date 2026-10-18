@@ -298,7 +298,8 @@ srelens opens interactive sessions in the dock:
 - **Local terminal** — your own shell on your machine, bound to one cluster. Open
   it with **Terminal** in the status bar (or **Cmd/Ctrl-J**) for the cluster you
   are looking at, or from **Terminals → New session → Local shell**. See
-  [A terminal bound to one cluster](#a-terminal-bound-to-one-cluster).
+  [A terminal bound to one cluster](#a-terminal-bound-to-one-cluster) and
+  [The terminal panel](#the-terminal-panel).
 - **Node shell** — a privileged debug pod pinned to a node that enters the host
   namespaces (via `nsenter`), for node-level troubleshooting. Open it from a
   Node's **Node shell** action; the pod is deleted automatically when you close the
@@ -307,6 +308,24 @@ srelens opens interactive sessions in the dock:
 Dock sessions stay alive when you switch tabs, so scrollback and live streams are
 preserved. Resize the dock by dragging its top edge; close individual sessions or
 the whole dock.
+
+### The terminal panel
+
+In the new design, **Terminal** in the status bar (or **Cmd/Ctrl-J**) opens the
+shell in a panel at the bottom of the page you are on — under the Pods list, if
+that is where you are — so the list stays in view while you type.
+
+- The panel takes half the page. Drag its top edge (or focus the edge and use the
+  arrow keys) to resize it; the size is kept.
+- **Maximize** fills the page with the terminal; **Restore** brings the page back.
+- **Open in tab** moves the shell to the Terminals tab, scrollback and all.
+- **Close** hides the panel and leaves the shell running. **Terminal** or
+  **Cmd/Ctrl-J** on the same tab shows it again; the shell is also listed in
+  Terminals. **Detach** ends it.
+- Each tab has its own panel, kept while you are on other tabs.
+
+Terminals are drawn in the app's own monospace font and size, in the panel and
+in the Terminals tab alike.
 
 ### A terminal bound to one cluster
 

@@ -116,6 +116,7 @@ import { Nav } from "./Nav";
 import { Rail } from "./Rail";
 import { Status } from "./Status";
 import { TabSurface } from "./TabSurface";
+import { PageWithTerminal } from "./TerminalPanel";
 import { useDeepLinks } from "./useDeepLinks";
 
 /** One toast in the window's queue: a host notice, or a `notify` call. */
@@ -941,6 +942,7 @@ export function Window({
             return (
             <TabSurface key={tab.id} visible={tab.id === activeId}>
               <TabScope.Provider value={tab.id}>
+              <PageWithTerminal tabId={tab.id}>
               {/* A placeholder tab without a cluster of its own still leaves
                   via the cluster this window is looking at — that is the
                   context classic reopens onto. */}
@@ -959,6 +961,7 @@ export function Window({
                 // non-throwing and idempotent: the whole of the contract.
                 onLocked={lockWorkspace}
               />
+              </PageWithTerminal>
               </TabScope.Provider>
             </TabSurface>
             );

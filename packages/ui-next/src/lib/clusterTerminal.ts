@@ -1,5 +1,6 @@
 import { isTauri, type ClusterContext } from "@srelens/core";
-import { startLocalSession } from "./sessions";
+import { getSessions, startLocalSession } from "./sessions";
+import { closeTerminalPanel, showTerminalPanel, terminalPanel } from "./terminalPanel";
 import { currentWorkspace, isClusterPaused, openTab, tabNamespaces } from "./tabsStore";
 
 /**
@@ -22,27 +23,57 @@ export function canOpenClusterTerminal(cluster: ClusterContext | undefined): clu
   return cluster !== undefined && isTauri() && !isClusterPaused(cluster.stableId);
 }
 
+/** Whether a route is the Terminals tab, which shows sessions itself. */
+function isTerminalsRoute(route: string | undefined): boolean {
+  return route === "/terminals" || route?.startsWith("/terminals?") === true;
+}
+
 /**
- * Open a shell on this machine that is bound to `cluster`, and show it (#846).
+ * Open a shell on this machine that is bound to `cluster`, and show it (#846)
+ * — under the page the reader is on, in that tab's terminal panel (#942).
  *
  * One act from anywhere in the window — the status bar, a chord — rather than
  * a screen change and a dialog. The shell is confined to this one cluster by
  * the host: its kubeconfig holds only this context, and `kubectl` and `helm`
  * in it refuse to be pointed at another.
  *
+ * **A toggle, per tab.** With the panel open, the same act closes it, leaving
+ * the shell running. With it closed, it opens again on the shell it last
+ * showed, if that is still on the same cluster and has not ended — so the
+ * reader gets their shell back rather than a second one. Otherwise a new shell
+ * is started. On the Terminals tab itself there is no panel: the new session
+ * is shown there, as before.
+ *
  * `cluster` is the caller's, read when the reader acted. Nothing here re-reads
  * the active cluster after the await, for the reason `NewSessionMenu` pins its
  * own: a shell opened on whatever the rail says by then is a shell on a cluster
- * the reader did not ask for.
+ * the reader did not ask for. The tab is the one the reader acted on, too, so
+ * the panel opens under the page that asked for it.
  *
  * Started, then shown, as the node actions do: a shell that could not be opened
- * is a `closed` row on `/terminals` saying why, which is worth landing on.
+ * is a `closed` session saying why, which is worth landing on.
  */
 export async function openClusterTerminal(cluster: ClusterContext): Promise<void> {
-  const tab = currentWorkspace().activeId;
-  await startLocalSession({
+  const workspace = currentWorkspace();
+  const tab = workspace.activeId;
+  const route = workspace.tabs.find((t) => t.id === tab)?.route;
+  const inPanel = !isTerminalsRoute(route);
+  if (inPanel) {
+    const panel = terminalPanel(tab);
+    const kept = panel && getSessions().find((s) => s.id === panel.sessionId);
+    if (panel?.open && kept) {
+      closeTerminalPanel(tab);
+      return;
+    }
+    if (kept && kept.state !== "closed" && kept.context === cluster.name) {
+      showTerminalPanel(tab, kept.id);
+      return;
+    }
+  }
+  const id = await startLocalSession({
     context: cluster.name,
     namespace: terminalNamespace(tabNamespaces(tab, cluster.stableId)),
   });
-  openTab("/terminals", { clusterName: cluster.name });
+  if (inPanel) showTerminalPanel(tab, id);
+  else openTab("/terminals", { clusterName: cluster.name });
 }
