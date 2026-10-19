@@ -183,6 +183,25 @@ describe("TerminalView", () => {
     expect(term?.element?.parentElement).toBe(panelPane);
   });
 
+  it("leaves the emulator in a pane that is showing it when a hidden pane mounts the same session", async () => {
+    const observer = fakeResizeObserver();
+    const id = await openSession();
+    const term = terminalFor(id);
+    const panel = render(<TerminalView sessionId={id} />);
+    const panelPane = panel.container.firstElementChild as HTMLElement;
+    sized(panelPane);
+    // A hidden Terminals tab falls back to the same session and mounts it.
+    const hidden = render(<TerminalView sessionId={id} />);
+    expect(term?.element?.parentElement).toBe(panelPane);
+
+    // Selected, the hidden pane has a size, and takes it then.
+    const hiddenPane = hidden.container.firstElementChild as HTMLElement;
+    sized(hiddenPane);
+    sized(panelPane, 0, 0);
+    observer.fire();
+    expect(term?.element?.parentElement).toBe(hiddenPane);
+  });
+
   it("dresses the emulator in the app's monospace size, not xterm's own 15px (#942)", async () => {
     const id = await openSession();
     const root = document.documentElement;

@@ -36,6 +36,14 @@ import { openOnNamedCluster } from "../lib/openCluster";
 import { logsRoute } from "../screens/Logs";
 import { Transcript } from "../screens/agent/Transcript";
 import { useWorkspaceSealed } from "./LockGate";
+import {
+  consoleHeightBounds,
+  saveConsoleHeight,
+  setConsoleHeight,
+  setConsoleMaximized,
+  useConsoleHeight,
+  useConsoleMaximized,
+} from "../lib/consoleLayout";
 import { isContextPaused } from "../lib/pausedContext";
 import { extensionLabel, useExtensions } from "../extensions/inventoryStore";
 import { requestExtensionAction } from "../extensions/actionRequests";
@@ -110,7 +118,7 @@ function CommandRows({ commands, onRun }: { commands: readonly Command[]; onRun:
  * `useActiveContext()`'s own answer and nothing this component derives from
  * the label.
  */
-export function Console({ fullView }: { fullView?: boolean }) {
+export function Console({ fullView, spareAbove }: { fullView?: boolean; spareAbove?: number }) {
   const sealed = useWorkspaceSealed();
   // From context, not props: this mounts in two places now — the window's
   // bottom edge on most screens, and the foot of `/agent`'s own main column so
@@ -141,6 +149,21 @@ export function Console({ fullView }: { fullView?: boolean }) {
     noCluster,
     setNoCluster,
   } = useConsole();
+  // The reader's size for the conversation, and whether it fills the content
+  // area (#944). Not in the full view, where the screen is the conversation.
+  const bodyHeight = useConsoleHeight();
+  const maximized = useConsoleMaximized() && !fullView;
+  const [windowHeight, setWindowHeight] = useState(() => (typeof window === "undefined" ? 800 : window.innerHeight));
+  useEffect(() => {
+    const onResize = () => setWindowHeight(window.innerHeight);
+    window.addEventListener("resize", onResize);
+    return () => window.removeEventListener("resize", onResize);
+  }, []);
+  // A console folded away (Esc, the chevron, a picked command) is not one
+  // filling the window: unfolded, it comes back at its size.
+  useEffect(() => {
+    if (!open) setConsoleMaximized(false);
+  }, [open]);
   /**
    * Screenshots waiting to go with the next question, as data URIs so they can
    * be shown before they are sent.
@@ -640,6 +663,17 @@ export function Console({ fullView }: { fullView?: boolean }) {
       composerOnly={isFullView}
       open={open}
       onOpenChange={setOpen}
+      maximized={maximized && !isFullView}
+      onMaximizedChange={isFullView ? undefined : setConsoleMaximized}
+      // Not in the full view: it has no grip to undo a height dragged on the
+      // dock, and its body is only a command list or an error, sized to fit.
+      bodyHeight={isFullView ? undefined : bodyHeight ?? undefined}
+      bodyBounds={consoleHeightBounds(windowHeight)}
+      onBodyResize={isFullView ? undefined : setConsoleHeight}
+      onBodyResizeCommit={saveConsoleHeight}
+      // What the page above can give up (#948); the window's own bound alone
+      // let a dragged console squeeze it until its rows overlapped.
+      spareAbove={isFullView ? undefined : spareAbove}
       value={value}
       onValueChange={setValue}
       onSubmit={onSubmit}

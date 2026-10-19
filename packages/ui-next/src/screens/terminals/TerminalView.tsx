@@ -45,7 +45,13 @@ export function TerminalView({ sessionId }: { sessionId: number }) {
       // which window it thinks it is in), so the existing node — with its
       // rendered scrollback — is moved into this pane by hand instead of
       // asking xterm to build a new one it would silently refuse to move.
-      container.appendChild(term.element);
+      //
+      // Unless another pane is showing it and this one is not: a hidden
+      // Terminals tab that falls back to a session on screen in a page's
+      // panel would otherwise take it out of the panel, and the panel —
+      // whose size has not changed — would never ask for it back. This pane
+      // takes it when it is shown, through the observer below.
+      if (showing(container) || !showing(term.element.parentElement)) container.appendChild(term.element);
     } else {
       term.open(container);
     }
@@ -61,7 +67,7 @@ export function TerminalView({ sessionId }: { sessionId: number }) {
     // A size change is also how a pane learns it is showing again: a hidden
     // tab's pane measures nothing, and measures its own size once selected.
     const onResize = () => {
-      if (container.clientWidth === 0 && container.clientHeight === 0) return;
+      if (!showing(container)) return;
       if (term.element && term.element.parentElement !== container) container.appendChild(term.element);
       fit.fit();
     };
@@ -87,4 +93,12 @@ export function TerminalView({ sessionId }: { sessionId: number }) {
   // this box's whole height and width and subtracts only the padding of the
   // element inside it, so padding here would fit a row and a column too many.
   return <div ref={ref} className="min-h-0 min-w-0 flex-1 [&>.xterm]:px-2 [&>.xterm]:py-1" />;
+}
+
+/**
+ * Whether a pane is on screen: in the document and laid out with a size. A
+ * pane in a hidden tab measures nothing; one torn down is not connected.
+ */
+function showing(el: HTMLElement | null): boolean {
+  return el !== null && el.isConnected && (el.clientWidth > 0 || el.clientHeight > 0);
 }

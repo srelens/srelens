@@ -175,7 +175,6 @@ describe("ConsoleDock collapsing", () => {
   it("minimizes from its header, where the reader is looking (#942)", async () => {
     const { onOpenChange } = setup();
     const minimize = screen.getByRole("button", { name: "Minimize console" });
-    expect(minimize.className).toContain("text-btn");
     expect(minimize.getAttribute("aria-controls")).toBe(screen.getByRole("log").id);
     await userEvent.click(minimize);
     expect(onOpenChange).toHaveBeenCalledWith(false);
@@ -426,18 +425,131 @@ describe("ConsoleDock clearing", () => {
     expect(input.parentElement?.contains(collapse)).toBe(true);
   });
 
-  it("sizes the header's word controls by their content, not as icon boxes", () => {
-    setup({ onExpand: () => {}, onClear: () => {} });
-    const full = screen.getByRole("button", { name: /full view/i });
-    const clear = screen.getByRole("button", { name: /clear console/i });
-    // `.icon-btn` is `width: 24px` — a box for a glyph. These hold words, and
-    // text in a 24px box overflows it, so the two overlapped. jsdom computes
-    // no layout, so the class IS the assertion here; there is nothing else to
-    // look at.
-    for (const b of [full, clear]) {
-      expect(b.className).toContain("text-btn");
-      expect(b.className).not.toContain("icon-btn");
+  it("draws the header's controls as titled icons, as the terminal panel does (#944)", () => {
+    setup({ onExpand: () => {}, onClear: () => {}, onMaximizedChange: () => {} });
+    const controls = document.querySelector('[data-slot="dock-controls"]') as HTMLElement;
+    const buttons = Array.from(controls.querySelectorAll("button"));
+    expect(buttons.map((b) => b.getAttribute("aria-label"))).toEqual([
+      "Minimize console",
+      "Maximize console",
+      "Open console in the full view",
+      "Clear console",
+    ]);
+    // The pane head's gap and side padding, so the icons line up under the
+    // terminal panel's.
+    expect(controls.className).toContain("gap-2");
+    expect(controls.parentElement?.className).toContain("px-[0.6rem]");
+    for (const b of buttons) {
+      expect(b.className).toContain("icon-btn");
+      expect(b.querySelector("svg")).not.toBeNull();
+      expect(b.title).not.toBe("");
+      // No words in the header any more.
+      expect(b.textContent).toBe("");
     }
+  });
+
+  it("maximizes and restores through the caller, and leaves it un-maximized when minimized", async () => {
+    const onMaximizedChange = vi.fn();
+    const { rerender, onOpenChange, onValueChange, onSubmit } = setup({ onMaximizedChange });
+    await userEvent.click(screen.getByRole("button", { name: "Maximize console" }));
+    expect(onMaximizedChange).toHaveBeenLastCalledWith(true);
+    rerender(
+      <ConsoleDock open maximized onMaximizedChange={onMaximizedChange} onOpenChange={onOpenChange} value="" onValueChange={onValueChange} onSubmit={onSubmit}>
+        <p>transcript</p>
+      </ConsoleDock>,
+    );
+    const dock = screen.getByRole("region", { name: "Console" });
+    expect(dock.getAttribute("data-maximized")).toBe("true");
+    expect(screen.getByRole("log").className).toContain("flex-1");
+    await userEvent.click(screen.getByRole("button", { name: "Restore console size" }));
+    expect(onMaximizedChange).toHaveBeenLastCalledWith(false);
+    await userEvent.click(screen.getByRole("button", { name: "Minimize console" }));
+    expect(onMaximizedChange).toHaveBeenLastCalledWith(false);
+    expect(onOpenChange).toHaveBeenLastCalledWith(false);
+  });
+
+  it("offers no Maximize to a host that cannot fill its area", () => {
+    setup();
+    expect(screen.queryByRole("button", { name: "Maximize console" })).toBeNull();
+  });
+
+  it("resizes its output from its top edge, reporting the height to the host (#944)", () => {
+    const onBodyResize = vi.fn();
+    const onBodyResizeCommit = vi.fn();
+    setup({ onBodyResize, onBodyResizeCommit, bodyHeight: 200, bodyBounds: { min: 100, max: 400 } });
+    const grip = screen.getByRole("separator", { name: "Resize console" });
+    expect(grip.getAttribute("aria-orientation")).toBe("horizontal");
+    expect(grip.getAttribute("aria-valuenow")).toBe("200");
+    expect(screen.getByRole("log").style.height).toBe("200px");
+    fireEvent.keyDown(grip, { key: "ArrowUp" });
+    expect(onBodyResize).toHaveBeenLastCalledWith(216);
+    expect(onBodyResizeCommit).toHaveBeenLastCalledWith(216);
+  });
+
+  it("holds the output to its bounds, and has no grip collapsed, maximized or without a host to keep the height", () => {
+    const { rerender, onOpenChange, onValueChange, onSubmit } = setup({ onBodyResize: () => {}, bodyHeight: 900, bodyBounds: { min: 100, max: 400 } });
+    expect(screen.getByRole("log").style.height).toBe("400px");
+    rerender(
+      <ConsoleDock open={false} onBodyResize={() => {}} onOpenChange={onOpenChange} value="" onValueChange={onValueChange} onSubmit={onSubmit}>
+        <p>transcript</p>
+      </ConsoleDock>,
+    );
+    expect(screen.queryByRole("separator")).toBeNull();
+    rerender(
+      <ConsoleDock open maximized onMaximizedChange={() => {}} onBodyResize={() => {}} onOpenChange={onOpenChange} value="" onValueChange={onValueChange} onSubmit={onSubmit}>
+        <p>transcript</p>
+      </ConsoleDock>,
+    );
+    expect(screen.queryByRole("separator")).toBeNull();
+    rerender(
+      <ConsoleDock open onOpenChange={onOpenChange} value="" onValueChange={onValueChange} onSubmit={onSubmit}>
+        <p>transcript</p>
+      </ConsoleDock>,
+    );
+    expect(screen.queryByRole("separator")).toBeNull();
+    // Unsized, it is as tall as its content up to its old ceiling.
+    expect(screen.getByRole("log").className).toContain("max-h-[42vh]");
+  });
+
+  it("grows no further than the room the host above can spare (#948)", () => {
+    const onBodyResize = vi.fn();
+    // Drawn at 400 and the page above can give 50 more: 450 is the most.
+    setup({ onBodyResize, bodyHeight: 400, bodyBounds: { min: 100, max: 900 }, spareAbove: 50 });
+    const grip = screen.getByRole("separator", { name: "Resize console" });
+    expect(grip.getAttribute("aria-valuemax")).toBe("450");
+    fireEvent.keyDown(grip, { key: "End" });
+    expect(onBodyResize).toHaveBeenLastCalledWith(450);
+  });
+
+  it("gives room back when the page above is already below its floor", () => {
+    setup({ onBodyResize: () => {}, bodyHeight: 400, bodyBounds: { min: 100, max: 900 }, spareAbove: -100 });
+    expect(screen.getByRole("log").style.height).toBe("300px");
+  });
+
+  it("holds an output sized by its content to the room above as well", () => {
+    setup({ spareAbove: 20 });
+    // jsdom draws nothing, so the room is the spare alone; the old ceiling stays.
+    expect(screen.getByRole("log").style.maxHeight).toBe("min(42vh, 96px)");
+  });
+
+  it("frames itself in the accent, heavier than a pane's hairline (#944)", async () => {
+    const { readFileSync } = await import("node:fs");
+    const { join } = await import("node:path");
+    const css = readFileSync(join(__dirname, "styles", "kit.css"), "utf8");
+    const rule = css.slice(css.indexOf(".console-dock {"));
+    const body = rule.slice(0, rule.indexOf("}"));
+    expect(body).toMatch(/border-top:\s*2px solid var\(--accent\)/);
+    expect(body).toContain("position: relative");
+  });
+
+  it("draws a bar where its grip is, so the drag can be found", async () => {
+    const { readFileSync } = await import("node:fs");
+    const { join } = await import("node:path");
+    const css = readFileSync(join(__dirname, "styles", "kit.css"), "utf8");
+    const rule = css.slice(css.indexOf('.console-dock > .resize-handle[data-edge="top"]::after {'));
+    const body = rule.slice(0, rule.indexOf("}"));
+    expect(body).toContain('content: ""');
+    expect(body).toContain("background: var(--accent-line)");
   });
 
   /**
