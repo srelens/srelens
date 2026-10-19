@@ -1591,6 +1591,15 @@ export const AssistantConversation = forwardRef<
               : "No coding agent available. Install one to use the assistant."}
           </p>
         )}
+        {/* Send is gated on a picked context (see `canSend`); without this the
+            gate was silent — a dead Send and an Enter that did nothing. */}
+        {agentReady && multiContextMode && selectedContexts.length === 0 && (
+          <p className="mb-2 px-1 text-xs text-muted-foreground">
+            {availableContexts.length > 0
+              ? "Pick at least one context under Contexts to ask about."
+              : "Add a kubeconfig under Settings → Contexts to ask about a cluster."}
+          </p>
+        )}
         {/* Composer card: a chip row (context / skills / pending images) and a
             borderless input sit above a compact toolbar (attach, agent picker,
             contexts, Send/Stop) — one grouped surface, Cursor-style. */}
