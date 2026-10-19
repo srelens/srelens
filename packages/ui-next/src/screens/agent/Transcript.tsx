@@ -1,5 +1,6 @@
 import { parseAssistantMarkdown, type CapabilityImpact, type MdBlock, type NoteSpan } from "@srelens/core";
-import { AgentMark, Badge, CopyButton, cx, toneWash, type Tone } from "@srelens/ui-kit";
+import { useId, useState } from "react";
+import { AgentMark, Badge, CopyButton, Spinner, cx, toneWash, type Tone } from "@srelens/ui-kit";
 import type { GateRecord, ToolCallRecord, Turn } from "../../lib/agentRun";
 import { CAPABILITY_CATALOG } from "@srelens/core";
 import { IMPACT_LABEL } from "../../confirm/HostConfirmation";
@@ -26,6 +27,12 @@ import { pad2 } from "../../lib/numbers";
  * the only caller of `respondToConfirm` in the new design; this component
  * only ever reads `outcome` and shows a `Badge` for it. No button here
  * answers anything, and none should ever be added.
+ *
+ * **The app's type scale, not the framework's (#946).** Text is set in the
+ * `--text-body` / `--text-label` / `--text-meta` tokens every other screen
+ * uses, so an answer reads at the size of the list beside it and its tables
+ * at the size of the app's own. Tailwind's `text-sm`/`text-xs` are 14px and
+ * 12px, sizes nothing else in the app is set in.
  */
 
 const GATE_TONE: Record<GateRecord["outcome"], Tone> = {
@@ -92,6 +99,94 @@ function ToolCallRow({ call }: { call: ToolCallRecord }) {
       {outcome !== undefined && <span className={cx("shrink-0", result)}>{outcome}</span>}
       {call.summary !== undefined && <span className={cx("min-w-0 shrink truncate", result)}>{call.summary}</span>}
       {call.ms !== undefined && <span className="ml-auto shrink-0 text-faint">{Math.round(call.ms)}ms</span>}
+    </div>
+  );
+}
+
+/**
+ * A tool's name as a reader says it: the MCP server prefix an agent's client
+ * puts on every call (`mcp__srelens__k8s_listPods`) dropped, since in this
+ * app every tool is srelens's. The expanded rows keep the name as called.
+ */
+export function shortToolName(tool: string): string {
+  const match = /^mcp__[^_]+(?:_[^_]+)*?__(.+)$/.exec(tool);
+  return match ? match[1] : tool;
+}
+
+/** `850ms`, or `1.9s` from a second up — for a sum of round trips. */
+function duration(ms: number): string {
+  return ms < 1000 ? `${Math.round(ms)}ms` : `${(ms / 1000).toFixed(1)}s`;
+}
+
+/**
+ * An agent turn's tool calls, folded into one line until the reader asks for
+ * them (#946) — the way Claude's own interfaces show them. The calls are how
+ * an answer was reached, not the answer, and drawn in full they put boxes of
+ * JSON between a question and what was asked for.
+ *
+ * **Folded, the line still says what is going on.** While the turn is
+ * working, the call in flight: `Running k8s_listPods…`, beside a spinner.
+ * Once it is done: how many tools it used, the last one and what it came
+ * back with, and the time the calls took. A failed or refused call is counted
+ * in words and in its tone on the folded line too, because a missing fact in
+ * the answer is often explained by one.
+ *
+ * Open per turn and local to it: a reader opening one turn's calls is not
+ * asking to see every turn's.
+ */
+function ToolCalls({ calls, working }: { calls: readonly ToolCallRecord[]; working: boolean }) {
+  const [open, setOpen] = useState(false);
+  const listId = useId();
+  // A call with no status has not returned. Only while the turn is still
+  // working is that "running": a restored conversation can hold calls whose
+  // result was never recorded, and those are not running now.
+  const running = working ? calls.find((c) => c.status === null) : undefined;
+  const failed = calls.filter((c) => c.status === "error").length;
+  const denied = calls.filter((c) => c.status === "denied").length;
+  const took = calls.reduce((sum, c) => sum + (c.ms ?? 0), 0);
+  const last = calls[calls.length - 1];
+  const count = `${calls.length} tool${calls.length === 1 ? "" : "s"}`;
+  return (
+    <div className="flex min-w-0 flex-col gap-1" data-slot="tool-calls">
+      <button
+        type="button"
+        className="flex min-w-0 items-center gap-1.5 self-start rounded-tile py-0.5 pr-1 text-left text-[length:var(--text-label)] text-muted hover:text-ink"
+        aria-expanded={open}
+        aria-controls={open ? listId : undefined}
+        onClick={() => setOpen((o) => !o)}
+      >
+        <svg width="10" height="10" viewBox="0 0 24 24" fill="none" aria-hidden="true" className={cx("shrink-0 transition-transform", open && "rotate-90")}>
+          <path d="m9 6 6 6-6 6" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" />
+        </svg>
+        {running ? (
+          <>
+            {/* The words say it; the spinner is only motion. */}
+            <span aria-hidden="true" className="flex shrink-0"><Spinner className="size-2.5" /></span>
+            <span className="min-w-0 truncate whitespace-nowrap">
+              Running <span className="font-mono text-ink">{shortToolName(running.tool)}</span>…
+            </span>
+            {calls.length > 1 && <span className="shrink-0 whitespace-nowrap text-faint">{count}</span>}
+          </>
+        ) : (
+          <>
+            <span className="shrink-0 whitespace-nowrap">Used {count}</span>
+            <span className="min-w-0 truncate whitespace-nowrap text-faint">
+              · <span className="font-mono">{shortToolName(last.tool)}</span>
+              {last.summary !== undefined && <> → {last.summary}</>}
+            </span>
+            {took > 0 && <span className="shrink-0 whitespace-nowrap text-faint">· {duration(took)}</span>}
+          </>
+        )}
+        {failed > 0 && <span className="shrink-0 whitespace-nowrap text-sev">· {failed} failed</span>}
+        {denied > 0 && <span className="shrink-0 whitespace-nowrap text-warn">· {denied} denied</span>}
+      </button>
+      {open && (
+        <div id={listId} className="flex min-w-0 flex-col gap-1">
+          {calls.map((call) => (
+            <ToolCallRow key={call.id} call={call} />
+          ))}
+        </div>
+      )}
     </div>
   );
 }
@@ -163,9 +258,9 @@ function GateRow({ gate }: { gate: GateRecord }) {
         style={{ background: toneWash(GATE_TONE[gate.outcome]) }}
       >
         <div className="min-w-0">
-          <p className="min-w-0 break-words font-mono text-[0.8125rem] font-medium text-ink">{gate.tool}</p>
+          <p className="min-w-0 break-words font-mono text-[length:var(--text-label)] font-medium text-ink">{gate.tool}</p>
           {gate.prompt !== undefined && (
-            <p className="mt-0.5 min-w-0 break-words text-sm text-ink">{gate.prompt}</p>
+            <p className="mt-0.5 min-w-0 break-words text-[length:var(--text-body)] text-ink">{gate.prompt}</p>
           )}
           {/* The TIME only. `gateLabel` is word-plus-time, and the badge
               already carries the word — printing both put "Applied" on the
@@ -179,7 +274,7 @@ function GateRow({ gate }: { gate: GateRecord }) {
         </div>
       </div>
       {args !== "" && (
-        <pre className="scroll m-0 max-h-40 overflow-auto whitespace-pre-wrap break-words rounded-b-card bg-canvas-deep px-3 py-2 font-mono text-[0.6875rem] leading-relaxed text-faint">
+        <pre className="scroll m-0 max-h-40 overflow-auto whitespace-pre-wrap break-words rounded-b-card bg-canvas-deep px-3 py-2 font-mono text-[length:var(--text-meta)] leading-relaxed text-faint">
           {args}
         </pre>
       )}
@@ -195,7 +290,7 @@ function Spans({ spans }: { spans: NoteSpan[] }) {
       {spans.map((span, i) => {
         if (span.kind === "code") {
           return (
-            <code key={i} className="break-words rounded-tile bg-sunk px-1 py-0.5 font-mono text-[0.8em]">
+            <code key={i} className="break-words rounded-tile bg-sunk px-1 py-0.5 font-mono text-[length:var(--text-label)]">
               {span.text}
             </code>
           );
@@ -222,10 +317,10 @@ function Block({ block }: { block: MdBlock }) {
     // is this design's own token for the same idea.
     const headingClass =
       block.level <= 1
-        ? "text-base font-semibold"
+        ? "text-[0.9375rem] font-semibold"
         : block.level === 2
-          ? "text-[0.95rem] font-semibold"
-          : "text-sm font-semibold text-muted";
+          ? "text-[length:var(--text-body)] font-semibold"
+          : "text-[length:var(--text-body)] font-semibold text-muted";
     return (
       <p className={cx("break-words", headingClass)}>
         <Spans spans={block.spans} />
@@ -256,7 +351,7 @@ function Block({ block }: { block: MdBlock }) {
   }
   if (block.kind === "code") {
     return (
-      <pre className="min-w-0 overflow-x-auto rounded-tile border border-rule bg-sunk p-2 font-mono text-xs">
+      <pre className="min-w-0 overflow-x-auto rounded-tile border border-rule bg-sunk p-2 font-mono text-[length:var(--text-label)]">
         <code>{block.text}</code>
       </pre>
     );
@@ -264,13 +359,13 @@ function Block({ block }: { block: MdBlock }) {
   if (block.kind === "table") {
     return (
       <div className="min-w-0 overflow-x-auto">
-        <table className="w-full border-collapse text-xs">
+        <table className="w-full border-collapse text-[length:var(--text-body)]">
           <thead>
             <tr>
               {block.headers.map((h, j) => (
                 <th
                   key={j}
-                  className="break-words border-b border-rule px-2 py-1 text-left font-medium text-faint"
+                  className="break-words border-b border-rule px-2 py-1 text-left text-[length:var(--text-label)] font-medium text-faint"
                 >
                   <Spans spans={h} />
                 </th>
@@ -307,7 +402,7 @@ function Answer({ text }: { text: string }) {
   const blocks = parseAssistantMarkdown(text);
   if (blocks.length === 0) return null;
   return (
-    <div className="flex min-w-0 flex-col gap-2 text-sm leading-relaxed">
+    <div className="flex min-w-0 flex-col gap-2 text-[length:var(--text-body)] leading-relaxed">
       {blocks.map((block, i) => (
         <Block key={i} block={block} />
       ))}
@@ -329,7 +424,7 @@ function Answer({ text }: { text: string }) {
 function TurnClock({ at, className }: { at: number; className?: string }) {
   const d = new Date(at);
   return (
-    <span className={cx("text-[0.6875rem] tabular-nums text-faint", className)}>
+    <span className={cx("text-[length:var(--text-meta)] tabular-nums text-faint", className)}>
       {`${pad2(d.getHours())}:${pad2(d.getMinutes())}:${pad2(d.getSeconds())}`}
     </span>
   );
@@ -343,7 +438,7 @@ function UserTurn({ turn }: { turn: Turn }) {
     // exchange is the canvas; the question is told apart by weight and by
     // sitting right, not by having a surface of its own.
     <div className="flex justify-end">
-      <div className="min-w-0 max-w-[85%] px-0 py-0 text-right text-sm font-medium text-ink">
+      <div className="min-w-0 max-w-[85%] px-0 py-0 text-right text-[length:var(--text-body)] font-medium text-ink">
         {turn.images && turn.images.length > 0 && (
           <div className="mb-1.5 flex flex-wrap justify-end gap-1.5">
             {turn.images.map((src, i) => (
@@ -379,30 +474,24 @@ function UserTurn({ turn }: { turn: Turn }) {
  * be timed (see `lib/agentRun.ts`'s `Turn.thoughts` doc) — `undefined` is the
  * ordinary case, not a gap to paper over with a header and nothing under it.
  */
-function AgentTurn({ turn, compact }: { turn: Turn; compact?: boolean }) {
+function AgentTurn({ turn, compact, working }: { turn: Turn; compact?: boolean; working?: boolean }) {
   return (
     <div className="flex min-w-0 items-start gap-2.5">
       {!compact && <AgentMark size={20} label="Agent" className="mt-0.5" />}
       <div className="flex min-w-0 flex-1 flex-col gap-2">
         {turn.thoughts && (
-          <p className="min-w-0 whitespace-pre-wrap break-words text-xs text-faint">
+          <p className="min-w-0 whitespace-pre-wrap break-words text-[length:var(--text-label)] text-faint">
             <span className="font-medium text-muted">Thoughts</span> · {turn.thoughts}
           </p>
         )}
-        {turn.calls.length > 0 && (
-          <div className="flex min-w-0 flex-col gap-1">
-            {turn.calls.map((call) => (
-              <ToolCallRow key={call.id} call={call} />
-            ))}
-          </div>
-        )}
+        {turn.calls.length > 0 && <ToolCalls calls={turn.calls} working={working === true} />}
         {/* A warning the stream raised and then carried on past — an
             unsupported attachment, an image it could not decode. Shown
             because the reader's attachment did not arrive, and NOT allowed to
             turn the answer below it red: an answer that came back is a real
             answer. */}
         {turn.notes?.map((note, i) => (
-          <p key={i} className="min-w-0 break-words text-xs text-sev">
+          <p key={i} className="min-w-0 break-words text-[length:var(--text-label)] text-sev">
             {note}
           </p>
         ))}
@@ -427,7 +516,7 @@ function ErrorTurn({ turn, compact }: { turn: Turn; compact?: boolean }) {
   return (
     <div className="flex min-w-0 items-start gap-2.5">
       {!compact && <AgentMark size={20} label="Agent" className="mt-0.5" />}
-      <p className="min-w-0 flex-1 break-words text-sm text-sev">{turn.text}</p>
+      <p className="min-w-0 flex-1 break-words text-[length:var(--text-body)] text-sev">{turn.text}</p>
     </div>
   );
 }
@@ -485,11 +574,14 @@ export function Transcript({
   turns,
   gates,
   compact,
+  busy = false,
   live = true,
 }: {
   turns: readonly Turn[];
   gates: readonly GateRecord[];
   compact?: boolean;
+  /** The run is answering: its last agent turn is the one still working. */
+  busy?: boolean;
   /**
    * Whether THIS component declares its own `role="log"` live region.
    * Defaults true — right for `/agent`, where this is the screen's only live
@@ -522,7 +614,7 @@ export function Transcript({
               ) : turn.role === "error" ? (
                 <ErrorTurn turn={turn} compact={compact} />
               ) : (
-                <AgentTurn turn={turn} compact={compact} />
+                <AgentTurn turn={turn} compact={compact} working={busy && turn === turns[turns.length - 1]} />
               )}
             </div>
           ))}
