@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
   checkForUpdateAndNotify,
   cleanErrorMessage,
@@ -118,6 +118,8 @@ import { ProtectedStrip, protectedStripCluster } from "./ProtectedStrip";
 import { Rail } from "./Rail";
 import { Status } from "./Status";
 import { TabSurface } from "./TabSurface";
+import { PageWithTerminal } from "./TerminalPanel";
+import { consoleSpareAbove, setConsoleMaximized, useConsoleMaximized } from "../lib/consoleLayout";
 import { useDeepLinks } from "./useDeepLinks";
 
 /** One toast in the window's queue: a host notice, or a `notify` call. */
@@ -230,6 +232,26 @@ export function Window({
   // cluster's name; `Console` itself only reads `scope` back off the provider.
   const activeTabRoute = tabs.find((t) => t.id === activeId)?.route ?? "/";
   const activeTab = tabs.find((t) => t.id === activeId);
+  const consoleMaximized = useConsoleMaximized();
+  // The content area's height, so the console under it is held to what it
+  // can actually spare (#948). Measured, because what it holds — tab strip,
+  // page header, a terminal panel — is not something the window knows.
+  const bandRef = useRef<HTMLDivElement>(null);
+  const [bandHeight, setBandHeight] = useState(0);
+  useLayoutEffect(() => {
+    const band = bandRef.current;
+    if (!band || typeof ResizeObserver === "undefined") return undefined;
+    const measure = () => setBandHeight(band.clientHeight);
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(band);
+    return () => observer.disconnect();
+  }, [booted, active]);
+  // A tab picked while the console fills the content area is a page the
+  // reader wants to see: the console steps back to its size (#944).
+  useEffect(() => {
+    setConsoleMaximized(false);
+  }, [activeId]);
   const routeCluster = parseEditRoute(activeTabRoute)?.cluster ?? parseNewRoute(activeTabRoute)?.cluster ?? activeTab?.sub;
   const probeContext = isClusterScopedRoute(activeTabRoute)
     ? (routeCluster ? contexts.find(c => c.name === routeCluster) : activeCtx)
@@ -930,7 +952,11 @@ export function Window({
         )}
         {/* #101: between the strip and the tab, about the active tab's own cluster. */}
         {active && <ProtectedStrip contextName={protectedStripCluster(activeTabRoute, activeCtx?.name ?? null, contexts)} />}
-        <div className="relative min-h-0 flex-1">
+        {/* Hidden, not unmounted, while the agent console fills the content
+            area (#944): every tab keeps its page, scroll and watches for when
+            the console is restored. */}
+        <div ref={bandRef} className="relative min-h-0 flex-1" hidden={consoleMaximized && activeTabRoute !== "/agent"}>
+
           {tabs.map((tab) => {
             // An editor's target is pinned in its route. Its tab label follows
             // the rail, so it cannot decide whether the editor's readers are
@@ -950,6 +976,7 @@ export function Window({
             return (
             <TabSurface key={tab.id} visible={tab.id === activeId}>
               <TabScope.Provider value={tab.id}>
+              <PageWithTerminal tabId={tab.id}>
               {/* A placeholder tab without a cluster of its own still leaves
                   via the cluster this window is looking at — that is the
                   context classic reopens onto. */}
@@ -968,6 +995,7 @@ export function Window({
                 // non-throwing and idempotent: the whole of the contract.
                 onLocked={lockWorkspace}
               />
+              </PageWithTerminal>
               </TabScope.Provider>
             </TabSurface>
             );
@@ -982,7 +1010,9 @@ export function Window({
             while its tab is the one showing, because `TabSurface` keeps hidden
             tabs mounted and a hidden `/agent` otherwise kept a second console
             alive behind this one. */}
-        {active && activeTabRoute !== "/agent" && <Console />}
+        {active && activeTabRoute !== "/agent" && (
+          <Console spareAbove={bandHeight > 0 ? consoleSpareAbove(bandHeight) : undefined} />
+        )}
       </div>
       <Drawer open={creating} title="New workspace" onClose={() => setCreating(false)}>
         <div className="flex flex-col gap-3 px-3 py-3">

@@ -1,5 +1,6 @@
 import { ContextLabel } from "../lib/contextLabel";
-import { CollectionScopeNotice, NamespaceScopePicker } from "./collections/NamespaceScope";
+import { useCollectionNameFilter } from "../lib/collectionNameFilter";
+import { CollectionNameNotice, CollectionScopeNotice, NamespaceScopePicker } from "./collections/NamespaceScope";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   describeError,
@@ -185,10 +186,24 @@ function KindList({
   // for several — its contract is a single namespace, not the list's scopes.
   const namespace = clusterScoped ? "" : watchNamespaceForSelection(selection);
 
-  const rows = useMemo(
+  const scoped = useMemo(
     () => clusterScoped ? list.rows : list.rows.filter((row) => rowInSelection(row.namespace ?? "", selection)),
     [list.rows, clusterScoped, selection],
   );
+  // A collection the tab is scoped to may also narrow this kind's list to the
+  // names matching its expression (#885). Narrowed here, ahead of everything
+  // that reads `rows`, so the count, the columns, the bulk actions and the
+  // table all agree about what is listed.
+  const listKind = useMemo(
+    () => (descriptor ? { kind: descriptor.k8sKind, ...(descriptor.group ? { group: descriptor.group } : {}) } : undefined),
+    [descriptor],
+  );
+  const nameFilter = useCollectionNameFilter(context.stableId, listKind, scoped);
+  const narrow = nameFilter.apply;
+  // Keyed on `apply`, which changes only with the answer: the hook's result is
+  // a new object every render, and a new `rows` every render would re-run
+  // everything downstream of it.
+  const rows = useMemo(() => narrow(scoped), [narrow, scoped]);
   const inventory = useExtensions();
   const appColumns = useResolvedColumns({
     plugins: inventory.data?.plugins ?? [], context: name, contextId: context.key, namespace,
@@ -620,6 +635,9 @@ function KindList({
         </Alert>
       )}
 
+      {/* Outside the namespaced guard: a cluster-scoped list (Nodes, a
+          cluster-scoped custom kind) is narrowed by name too, and says so. */}
+      <CollectionNameNotice filter={nameFilter} noun={lower} />
       {!clusterScoped && (
         <>
           <CollectionScopeNotice context={context} />

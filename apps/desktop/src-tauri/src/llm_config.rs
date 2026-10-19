@@ -13,11 +13,16 @@ use srelens_llm::ProviderConfig;
 
 use crate::vault::Vault;
 /// Anthropic requires an explicit `max_tokens`; a sane default for cluster Q&A.
-const DEFAULT_MAX_TOKENS: u32 = 4096;
+const DEFAULT_MAX_TOKENS: u32 = 8192;
 
 /// The four providers, in picker order.
 pub fn all_providers() -> [ProviderKind; 4] {
-    [ProviderKind::Anthropic, ProviderKind::OpenAi, ProviderKind::Gemini, ProviderKind::OpenAiCompatible]
+    [
+        ProviderKind::Anthropic,
+        ProviderKind::OpenAi,
+        ProviderKind::Gemini,
+        ProviderKind::OpenAiCompatible,
+    ]
 }
 
 /// Stable, filesystem/keychain-safe slug for a provider, used for the keychain
@@ -40,7 +45,12 @@ fn legacy_key_file(dir: &Path, kind: ProviderKind) -> PathBuf {
 
 /// Read a provider's API key from the vault.
 pub fn get_key(vault: &Vault, kind: ProviderKind) -> Option<String> {
-    vault.load().llm_keys.get(slug(kind)).cloned().filter(|s| !s.is_empty())
+    vault
+        .load()
+        .llm_keys
+        .get(slug(kind))
+        .cloned()
+        .filter(|s| !s.is_empty())
 }
 
 /// Store a provider's API key in the vault. Also best-effort deletes the
@@ -110,7 +120,10 @@ impl Default for LlmSettings {
 /// Load settings from `path`, returning defaults for a missing or corrupt file
 /// (never an error — a bad settings file must not brick the assistant).
 pub fn load_settings(path: &Path) -> LlmSettings {
-    std::fs::read_to_string(path).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default()
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default()
 }
 
 /// Persist settings to `path` (pretty JSON), creating the parent dir.
@@ -126,7 +139,11 @@ pub fn save_settings(path: &Path, settings: &LlmSettings) -> Result<(), String> 
 /// configured. The base URL defaults per provider (the custom provider must
 /// supply one via settings); the model comes from settings (empty if unset —
 /// the caller surfaces "choose a model").
-pub fn provider_config(vault: &Vault, settings: &LlmSettings, kind: ProviderKind) -> Option<ProviderConfig> {
+pub fn provider_config(
+    vault: &Vault,
+    settings: &LlmSettings,
+    kind: ProviderKind,
+) -> Option<ProviderConfig> {
     let api_key = get_key(vault, kind)?;
     let base_url = settings
         .base_urls
@@ -135,7 +152,13 @@ pub fn provider_config(vault: &Vault, settings: &LlmSettings, kind: ProviderKind
         .cloned()
         .unwrap_or_else(|| ProviderConfig::default_base_url(kind).to_string());
     let model = settings.models.get(slug(kind)).cloned().unwrap_or_default();
-    Some(ProviderConfig { kind, api_key, base_url, model, max_tokens: settings.max_tokens })
+    Some(ProviderConfig {
+        kind,
+        api_key,
+        base_url,
+        model,
+        max_tokens: settings.max_tokens,
+    })
 }
 
 #[cfg(test)]
@@ -143,7 +166,11 @@ mod tests {
     use super::*;
 
     fn temp() -> PathBuf {
-        let d = std::env::temp_dir().join(format!("srelens-llmcfg-{}-{:?}", std::process::id(), std::thread::current().id()));
+        let d = std::env::temp_dir().join(format!(
+            "srelens-llmcfg-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
         std::fs::create_dir_all(&d).unwrap();
         d
     }
@@ -156,7 +183,10 @@ mod tests {
         assert!(!has_key(&vault, ProviderKind::Anthropic));
 
         set_key(&vault, &dir, ProviderKind::Anthropic, "sk-ant-1").unwrap();
-        assert_eq!(get_key(&vault, ProviderKind::Anthropic).as_deref(), Some("sk-ant-1"));
+        assert_eq!(
+            get_key(&vault, ProviderKind::Anthropic).as_deref(),
+            Some("sk-ant-1")
+        );
         assert!(has_key(&vault, ProviderKind::Anthropic));
         // Providers are isolated.
         assert!(get_key(&vault, ProviderKind::OpenAi).is_none());
@@ -173,15 +203,24 @@ mod tests {
         // A pre-vault build left the key as a plaintext file.
         std::fs::write(legacy_key_file(&dir, ProviderKind::Gemini), "old-plaintext").unwrap();
         set_key(&vault, &dir, ProviderKind::Gemini, "g-new").unwrap();
-        assert!(!legacy_key_file(&dir, ProviderKind::Gemini).exists(), "stale plaintext copy removed");
-        assert_eq!(get_key(&vault, ProviderKind::Gemini).as_deref(), Some("g-new"));
+        assert!(
+            !legacy_key_file(&dir, ProviderKind::Gemini).exists(),
+            "stale plaintext copy removed"
+        );
+        assert_eq!(
+            get_key(&vault, ProviderKind::Gemini).as_deref(),
+            Some("g-new")
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn each_provider_has_a_distinct_stable_slug() {
         let slugs: Vec<_> = all_providers().iter().map(|k| slug(*k)).collect();
-        assert_eq!(slugs, vec!["anthropic", "openai", "gemini", "openai-compatible"]);
+        assert_eq!(
+            slugs,
+            vec!["anthropic", "openai", "gemini", "openai-compatible"]
+        );
     }
 
     #[test]
@@ -201,7 +240,10 @@ mod tests {
 
         // Corrupt → defaults, not a panic.
         std::fs::write(&path, "{not json").unwrap();
-        assert_eq!(load_settings(&path).default_provider, ProviderKind::Anthropic);
+        assert_eq!(
+            load_settings(&path).default_provider,
+            ProviderKind::Anthropic
+        );
     }
 
     #[test]
@@ -215,7 +257,10 @@ mod tests {
         set_key(&vault, &dir, ProviderKind::OpenAi, "sk-test").unwrap();
         let cfg = provider_config(&vault, &settings, ProviderKind::OpenAi).unwrap();
         assert_eq!(cfg.api_key, "sk-test");
-        assert_eq!(cfg.base_url, ProviderConfig::default_base_url(ProviderKind::OpenAi));
+        assert_eq!(
+            cfg.base_url,
+            ProviderConfig::default_base_url(ProviderKind::OpenAi)
+        );
         assert_eq!(cfg.max_tokens, DEFAULT_MAX_TOKENS);
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -225,7 +270,10 @@ mod tests {
         let dir = temp();
         let vault = crate::vault::test_vault(&dir);
         let mut settings = LlmSettings::default();
-        settings.base_urls.insert("openai-compatible".into(), "http://localhost:11434/v1".into());
+        settings.base_urls.insert(
+            "openai-compatible".into(),
+            "http://localhost:11434/v1".into(),
+        );
         set_key(&vault, &dir, ProviderKind::OpenAiCompatible, "k").unwrap();
         let cfg = provider_config(&vault, &settings, ProviderKind::OpenAiCompatible).unwrap();
         assert_eq!(cfg.base_url, "http://localhost:11434/v1");

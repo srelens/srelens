@@ -4,7 +4,8 @@ import { listNamespaces, selectsNothing, type ClusterContext, type Collection } 
 /** How often a collection-scoped view reads the namespaces again. */
 export const RELIST_MS = 30_000;
 import type { NamespaceOptions } from "@srelens/core/react";
-import { Alert, Button, MultiSelect, PickerRow, Spinner } from "@srelens/ui-kit";
+import { Alert, Button, MultiSelect, PickerRow, RawError, Spinner } from "@srelens/ui-kit";
+import { friendly } from "../../lib/errorCopy";
 import { byRecentUse, useCollections } from "../../lib/collections";
 import { noteNamespaceListing, useCollectionScope, useListing } from "../../lib/collectionScope";
 import { openSettings } from "../../lib/settingsRequest";
@@ -14,6 +15,7 @@ import {
   useSetNamespaceCollections,
   useSetNamespaces,
 } from "../../lib/workspace";
+import type { CollectionNameFilter } from "../../lib/collectionNameFilter";
 import { CollectionDialog } from "./CollectionEditor";
 
 /**
@@ -260,4 +262,57 @@ export function CollectionScopeNotice({ context }: { context: ClusterContext }) 
     );
   }
   return null;
+}
+
+/**
+ * What a list narrowed by its collections' resource filters (#885) needs said
+ * above it: that it shows only the names matching an expression, and which;
+ * that nothing here matches; or that an expression could not be used.
+ */
+export function CollectionNameNotice({ filter, noun }: { filter: CollectionNameFilter; noun: string }) {
+  const { state, narrowing } = filter;
+  if (state.status === "off") return null;
+  const rules = narrowing.map((c) => `${c.resources?.nameRegex} (${c.name})`).join(" or ");
+  if (state.status === "failed") {
+    const copy = friendly(state.error);
+    return (
+      <Alert
+        tone="warn"
+        title={`Could not narrow ${noun} by collection`}
+        className="mx-3 mt-3 mb-3"
+        onDismiss={filter.retry}
+        dismissLabel="Try again"
+      >
+        {copy.detail}
+        <RawError text={copy.raw ?? ""} className="mt-1" />
+      </Alert>
+    );
+  }
+  if (state.status === "matching") {
+    return (
+      <p className="mx-3 mt-2 flex items-center gap-1.5 text-[0.75rem] text-muted" role="status">
+        <Spinner label="Matching names" />
+        Narrowing {noun} to names matching {rules}…
+      </p>
+    );
+  }
+  if (state.problems.length > 0) {
+    return (
+      <Alert tone="warn" title={`A collection's name expression could not be used`} className="mx-3 mt-3 mb-3">
+        {state.problems.join(" ")}
+      </Alert>
+    );
+  }
+  if (state.shown.size === 0) {
+    return (
+      <Alert tone="info" title={`No ${noun} here match ${rules}`} className="mx-3 mt-3 mb-3">
+        The collection shows only {noun} whose name matches its expression, inside its namespaces.
+      </Alert>
+    );
+  }
+  return (
+    <p className="mx-3 mt-2 text-[0.75rem] text-muted" role="status" data-slot="name-filter">
+      Showing only {noun} whose name matches <span className="font-mono">{rules}</span>.
+    </p>
+  );
 }

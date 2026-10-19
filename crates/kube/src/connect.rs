@@ -1168,7 +1168,12 @@ mod tests {
         .unwrap();
         let namespace_of = |yaml: &str| {
             let config = Kubeconfig::from_yaml(yaml).unwrap();
-            config.contexts[0].context.as_ref().unwrap().namespace.clone()
+            config.contexts[0]
+                .context
+                .as_ref()
+                .unwrap()
+                .namespace
+                .clone()
         };
 
         let given =

@@ -233,7 +233,7 @@ export function Agent(_props: { route: string }) {
                 </p>
               </div>
             ) : (
-              <Transcript turns={turns} gates={gates} />
+              <Transcript turns={turns} gates={gates} busy={busy} />
             )}
           </div>
           {/*

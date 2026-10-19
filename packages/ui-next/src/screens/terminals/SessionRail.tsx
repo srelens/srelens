@@ -28,6 +28,21 @@ export function sessionRailHead(sessions: readonly TerminalSessionRow[]): string
 }
 
 /**
+ * §14's footer eyebrow, verbatim.
+ *
+ * **Do not soften this and do not move it into documentation.** Every other
+ * write path in srelens is gated — a confirm dialog with the kubectl
+ * equivalent printed in it, for a delete, a drain, a scale. A shell is
+ * deliberately not: srelens cannot tell `ls` from `rm -rf /` inside a PTY, and
+ * pretending to would be a gate that gates nothing. Saying so where the shell
+ * IS, rather than in a document nobody has open at the moment it matters, is
+ * the honest place for it — the Terminals tab and a page's terminal panel
+ * (#942) both carry it.
+ */
+export const NOT_GATED =
+  "Destructive commands inside a shell are not gated — the shell is your own session";
+
+/**
  * The word and tone this rail draws for each session state.
  *
  * THE ONE HAND-PAIRED WORD/TONE TABLE IN THIS FILE, AND IT IS MARKED BECAUSE

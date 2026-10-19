@@ -142,7 +142,7 @@ export function byRecentUse(collections: readonly Collection[], type: Collection
 }
 
 /** The fields the editor owns: a save replaces these whole, set or not. */
-const EDITED = ["name", "description", "kinds", "members", "patterns", "labelSelector"] as const;
+const EDITED = ["name", "description", "kinds", "members", "patterns", "labelSelector", "resources"] as const;
 
 /**
  * Save a collection, replacing the one called `replacing` (its name before an

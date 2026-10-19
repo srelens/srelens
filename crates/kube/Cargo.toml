@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
+regex = "1"
 srelens-capability = { path = "../capability" }
 async-trait = "0.1"
 # Locates the app's own kubeconfig folder (see connect::default_kubeconfig_dir).

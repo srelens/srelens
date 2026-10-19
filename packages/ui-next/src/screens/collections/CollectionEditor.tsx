@@ -1,14 +1,18 @@
 import { useEffect, useId, useMemo, useState } from "react";
 import {
+  apiKindName,
+  listApiKinds,
   parseMemberList,
   resolveNamespaceCollections,
   validateCollection,
+  type ApiKind,
   type Collection,
   type CollectionProblem,
   type NamespaceResolution,
 } from "@srelens/core";
-import { Button, Checkbox, Dialog, Field, TextInput } from "@srelens/ui-kit";
+import { Button, Checkbox, Dialog, Field, MultiSelect, Switch, TextInput } from "@srelens/ui-kit";
 import { useCollections, saveCollection } from "../../lib/collections";
+import { friendly } from "../../lib/errorCopy";
 import { useListing } from "../../lib/collectionScope";
 
 /** How long typing settles before the backend is asked to check or preview. */
@@ -28,6 +32,7 @@ function draftCollection(fields: Draft): Collection {
   const patterns = parseMemberList(fields.patterns);
   if (patterns.length > 0) collection.patterns = patterns;
   if (fields.labelSelector.trim()) collection.labelSelector = fields.labelSelector.trim();
+  if (fields.filterResources) collection.resources = { kinds: fields.kinds, nameRegex: fields.nameRegex };
   return collection;
 }
 
@@ -37,6 +42,10 @@ interface Draft {
   members: string;
   patterns: string;
   labelSelector: string;
+  /** Whether the collection also narrows resource lists (#885). */
+  filterResources: boolean;
+  kinds: string[];
+  nameRegex: string;
 }
 
 function draftOf(collection: Collection | undefined, members: readonly string[] = []): Draft {
@@ -46,6 +55,9 @@ function draftOf(collection: Collection | undefined, members: readonly string[] 
     members: (collection?.members ?? members).join("\n"),
     patterns: (collection?.patterns ?? []).join("\n"),
     labelSelector: collection?.labelSelector ?? "",
+    filterResources: collection?.resources !== undefined,
+    kinds: collection?.resources?.kinds ?? [],
+    nameRegex: collection?.resources?.nameRegex ?? "",
   };
 }
 
@@ -95,7 +107,7 @@ export function CollectionDialog({ editing, members, clusterId, clusterName, onC
     () => all.filter((c) => c.type === "namespace" && c.name !== editing?.name).map((c) => c.name),
     [all, editing?.name],
   );
-  const ids = { members: useId(), patterns: useId(), selector: useId() };
+  const ids = { members: useId(), patterns: useId(), selector: useId(), kinds: useId() };
 
   useEffect(() => {
     let current = true;
@@ -122,7 +134,8 @@ export function CollectionDialog({ editing, members, clusterId, clusterName, onC
     };
   }, [collection, taken]);
 
-  const set = (field: keyof Draft) => (value: string) => setDraft((d) => ({ ...d, [field]: value }));
+  const set = (field: "name" | "description" | "members" | "patterns" | "labelSelector" | "nameRegex") => (value: string) =>
+    setDraft((d) => ({ ...d, [field]: value }));
   // An empty name is a problem the reader has not made yet: it is not shown
   // until they have typed one or tried to save.
   const shown = (problems ?? []).filter((p) => p.field !== "name" || touchedName);
@@ -130,7 +143,10 @@ export function CollectionDialog({ editing, members, clusterId, clusterName, onC
   // The preview needs the rules to be sound, not the whole collection: a
   // pattern typed before the name is worth seeing at once.
   const previewable =
-    problems !== null && checkError === null && problems.every((p) => p.field === "name" || p.field === "description");
+    problems !== null &&
+    checkError === null &&
+    // The preview is of namespaces; the resource filter does not change it.
+    problems.every((p) => p.field === "name" || p.field === "description" || p.field.startsWith("resources."));
 
   function save() {
     setTouchedName(true);
@@ -214,6 +230,45 @@ export function CollectionDialog({ editing, members, clusterId, clusterName, onC
             placeholder="env=prod"
           />
         </Field>
+        {/* The resource half (#885): in the lists of these kinds, inside the
+            namespaces above, only the names this expression is found in. */}
+        <Switch
+          on={draft.filterResources}
+          onChange={(on) => setDraft((d) => ({ ...d, filterResources: on }))}
+          label="Filter resources"
+          hint="Also narrow the lists of chosen kinds, in these namespaces, to names matching a regular expression."
+          // Label and hint across the dialog, the switch at the end of the line.
+          className="!flex w-full justify-between gap-4"
+        />
+        {draft.filterResources && (
+          <>
+            {/* Not a Field: a Field wraps its control in a <label>, and a click
+                on a button inside one is delivered to it twice — the picker
+                opened and closed at once. Same markup otherwise. */}
+            <div className="py-1">
+              <span className="field-label mb-0.5" id={ids.kinds}>
+                Kinds
+              </span>
+              <KindsPicker
+                clusterName={clusterName}
+                kinds={draft.kinds}
+                onChange={(kinds) => setDraft((d) => ({ ...d, kinds }))}
+              />
+              {problemText(shown, "resources.kinds") && (
+                <div className="mt-1 text-[0.75rem]" style={{ color: "var(--sev)" }}>
+                  {problemText(shown, "resources.kinds")}
+                </div>
+              )}
+            </div>
+            <Field
+              label="Name expression"
+              hint="A regular expression searched for in each name: ^payment- for names that start so, canary for names that contain it."
+              error={problemText(shown, "resources.nameRegex")}
+            >
+              <TextInput value={draft.nameRegex} onValueChange={set("nameRegex")} placeholder="^payment-" />
+            </Field>
+          </>
+        )}
         {checkError !== null && (
           <p role="alert" style={{ color: "var(--sev)" }}>
             The collection could not be checked: {checkError}
@@ -270,7 +325,10 @@ function Preview({
     const timer = setTimeout(() => {
       // Resolved under a stand-in name when it has none yet: the backend
       // refuses a nameless collection, and the name decides nothing here.
-      resolveNamespaceCollections([{ ...collection, name: collection.name || "preview" }], listing.items, listing.complete).then(
+      // Without the resource filter: it does not change which namespaces
+      // match, and an unfinished one would have the whole draft refused.
+      const { resources: _resources, ...namespaces } = collection;
+      resolveNamespaceCollections([{ ...namespaces, name: collection.name || "preview" }], listing.items, listing.complete).then(
         (r) => current && setResult(r),
         (e: unknown) => current && setError(e instanceof Error ? e.message : String(e)),
       );
@@ -355,5 +413,66 @@ function Preview({
       <p className="eyebrow mb-1">Preview</p>
       {body}
     </section>
+  );
+}
+
+/**
+ * The kinds a resource filter narrows, chosen from what the cluster in focus
+ * serves (its API discovery), as `group/Kind` — or the bare kind of the core
+ * group. Kinds already chosen stay offered even where this cluster lacks them:
+ * a collection works across clusters.
+ */
+function KindsPicker({
+  clusterName,
+  kinds,
+  onChange,
+}: {
+  clusterName?: string;
+  kinds: string[];
+  onChange: (kinds: string[]) => void;
+}) {
+  const [served, setServed] = useState<ApiKind[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [attempt, setAttempt] = useState(0);
+  useEffect(() => {
+    let live = true;
+    setServed(null);
+    setError(null);
+    if (!clusterName) return;
+    listApiKinds(clusterName).then(
+      (found) => live && setServed(found),
+      (e: unknown) => live && setError(e instanceof Error ? e.message : String(e)),
+    );
+    return () => {
+      live = false;
+    };
+  }, [clusterName, attempt]);
+  const names = [...new Set([...(served ?? []).map(apiKindName), ...kinds])];
+  const empty = !clusterName
+    ? "Pick a cluster to choose from the kinds it serves."
+    : error !== null
+      ? (
+          <>
+            {`Could not read the kinds ${clusterName} serves. ${friendly(error).detail} `}
+            <button type="button" className="btn !py-0" onClick={() => setAttempt((n) => n + 1)}>
+              Try again
+            </button>
+          </>
+        )
+      : served === null
+        ? `Reading the kinds ${clusterName} serves…`
+        : "This cluster serves no kinds that can be listed.";
+  return (
+    <MultiSelect
+      options={names.map((value) => ({ value }))}
+      selection={kinds}
+      onChange={onChange}
+      placeholder="Choose kinds…"
+      searchPlaceholder="Find a kind…"
+      ariaLabel="Kinds"
+      className="w-full"
+      selectAll={false}
+      empty={empty}
+    />
   );
 }

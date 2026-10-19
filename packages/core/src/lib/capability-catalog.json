@@ -1,5 +1,15 @@
 [
   {
+    "id": "collections.matchNames",
+    "readOnly": true,
+    "destructive": false,
+    "requiresConfirm": false,
+    "sensitive": false,
+    "impact": "low",
+    "confirm": null,
+    "uiOnly": true
+  },
+  {
     "id": "collections.resolveNamespaces",
     "readOnly": true,
     "destructive": false,
@@ -527,6 +537,16 @@
     "confirm": null
   },
   {
+    "id": "k8s.listApiKinds",
+    "readOnly": true,
+    "destructive": false,
+    "requiresConfirm": false,
+    "sensitive": false,
+    "impact": "low",
+    "confirm": null,
+    "uiOnly": true
+  },
+  {
     "id": "k8s.listCRDs",
     "readOnly": true,
     "destructive": false,
@@ -840,6 +860,15 @@
     "sensitive": false,
     "impact": "high",
     "confirm": "Apply the change this action declares[ to {resource}][ in cluster {cluster}]? It can start work the controller runs straight away, including replacing what is running."
+  },
+  {
+    "id": "k8s.nodeCapacityOverview",
+    "readOnly": true,
+    "destructive": false,
+    "requiresConfirm": false,
+    "sensitive": false,
+    "impact": "low",
+    "confirm": null
   },
   {
     "id": "k8s.nodeInspect",

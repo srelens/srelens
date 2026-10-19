@@ -422,14 +422,17 @@ function register(row: Pick<TerminalSessionRow, "kind" | "title" | "context" | "
   const id = ++seq;
   const now = Date.now();
   const stamp = wholeSecond(now);
-  // No theme and no font here: those are the pane's, and come from tokens
+  // No theme and no font family here: those are the pane's, and come from tokens
   // where there is a DOM to read them from. `convertEol` matches the classic
   // pane — a backend that sends a bare newline still starts the next line at
   // column zero.
   // `allowTransparency` because the pane clears the emulator's background for a
   // see-through window (`terminalDress`), and xterm only honours an alpha in
   // its background when it was built with this.
-  emulators.set(id, new Terminal({ convertEol: true, scrollback: 10_000, allowTransparency: true }));
+  // `fontSize` is the app's monospace size at the default root
+  // (`TERMINAL_FONT_SIZE`), so the first paint is not xterm's own 15px; the
+  // pane re-reads it from the token when it dresses the emulator (#942).
+  emulators.set(id, new Terminal({ convertEol: true, scrollback: 10_000, allowTransparency: true, fontSize: 12 }));
   sessions = [
     ...sessions,
     { id, ...row, state: "attached", startedAt: now, lastOutputAt: stamp },

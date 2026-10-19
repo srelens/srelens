@@ -155,6 +155,16 @@ the preview to keep it as a member. Members can be
 pasted as a list separated by commas or new lines. Collections are kept with your
 settings, so they are the same in every window and survive a restart.
 
+A collection can also **filter resources**. Switch on *Filter resources* in its
+editor, choose the kinds it applies to from the ones the cluster serves, and give
+a regular expression for resource names (`^payment-` for names that start so,
+`canary` for names that contain it). With the collection chosen in the namespace
+selector, the lists of those kinds show only the resources, inside its
+namespaces, whose name matches; a line above the list says so. Other kinds' lists
+are only scoped to the namespaces. With several collections chosen, a list is
+narrowed only when each of them filters its kind, and shows a name any of their
+expressions matches.
+
 **Bulk actions.** Select rows with their checkboxes to reveal a bar with **Delete**,
 **Evict** (Pods), and **Rollout restart** (Deployments, StatefulSets, DaemonSets).
 Each is confirmation-gated and reports partial failures.
@@ -288,7 +298,8 @@ srelens opens interactive sessions in the dock:
 - **Local terminal** — your own shell on your machine, bound to one cluster. Open
   it with **Terminal** in the status bar (or **Cmd/Ctrl-J**) for the cluster you
   are looking at, or from **Terminals → New session → Local shell**. See
-  [A terminal bound to one cluster](#a-terminal-bound-to-one-cluster).
+  [A terminal bound to one cluster](#a-terminal-bound-to-one-cluster) and
+  [The terminal panel](#the-terminal-panel).
 - **Node shell** — a privileged debug pod pinned to a node that enters the host
   namespaces (via `nsenter`), for node-level troubleshooting. Open it from a
   Node's **Node shell** action; the pod is deleted automatically when you close the
@@ -297,6 +308,34 @@ srelens opens interactive sessions in the dock:
 Dock sessions stay alive when you switch tabs, so scrollback and live streams are
 preserved. Resize the dock by dragging its top edge; close individual sessions or
 the whole dock.
+
+### The terminal panel
+
+In the new design, **Terminal** in the status bar (or **Cmd/Ctrl-J**) opens the
+shell in a panel at the bottom of the page you are on — under the Pods list, if
+that is where you are — so the list stays in view while you type.
+
+- The panel takes half the page. Drag its top edge (or focus the edge and use the
+  arrow keys) to resize it; the size is kept.
+- **Maximize** fills the page with the terminal; **Restore** brings the page back.
+- **Minimize** folds the panel down to its header, giving the page (and an agent
+  answer in the console below) the room back; the shell keeps running.
+  **Terminal** or **Cmd/Ctrl-J** brings it back up.
+- **Open in tab** moves the shell to the Terminals tab, scrollback and all.
+- **Close** hides the panel and leaves the shell running. **Terminal** or
+  **Cmd/Ctrl-J** on the same tab shows it again; the shell is also listed in
+  Terminals. **Detach** ends it.
+- Each tab has its own panel, kept while you are on other tabs.
+
+The agent console along the bottom of the window (framed in the accent colour,
+so it is easy to tell apart) has the same controls in its header: **Minimize**
+folds it down to its prompt (typing in the prompt opens it again), **Maximize**
+fills the content area with the conversation, **Open in full view** opens the
+Agent tab, and **Clear** clears the conversation. Drag its top edge to make the
+conversation taller or shorter; the size is kept.
+
+Terminals are drawn in the app's own monospace font and size, in the panel and
+in the Terminals tab alike.
 
 ### A terminal bound to one cluster
 

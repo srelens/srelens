@@ -155,6 +155,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let cli = Cli::parse();
+    srelens_kube::connect::init_timeout_from_env();
 
     // Resolved BEFORE the subcommand match, because those arms return early.
     // `info` used to call `all_kubeconfig_paths()` itself and so ignored

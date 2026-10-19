@@ -1,7 +1,7 @@
 import { describe, it, expect, vi } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { Transcript } from "./Transcript";
+import { shortToolName, Transcript } from "./Transcript";
 import type { Turn } from "../../lib/agentRun";
 
 const turn = (over: Partial<Turn> = {}): Turn => ({
@@ -12,6 +12,9 @@ const turn = (over: Partial<Turn> = {}): Turn => ({
   at: 0,
   ...over,
 });
+
+/** Open a turn's folded tool calls, as the reader does. */
+const expandCalls = () => fireEvent.click(screen.getByRole("button", { name: /^(Used|Running)/ }));
 
 // `gates` is a required prop (Ruling A/D: gates live on `AgentRun`, not on
 // `Turn`, so every render below supplies its own — empty unless a test is
@@ -87,6 +90,7 @@ describe("a run's transcript", () => {
         gates={[]}
       />,
     );
+    expandCalls();
     expect(screen.getByText("12 pods")).toBeTruthy();
   });
 
@@ -105,6 +109,7 @@ describe("a run's transcript", () => {
         gates={[]}
       />,
     );
+    expandCalls();
     const rows = [...document.querySelectorAll(".tool-call")].map((r) => r.textContent ?? "");
     expect(rows[0]).not.toMatch(/Failed|Denied/);
     expect(rows[1]).toContain("Failed");
@@ -170,8 +175,9 @@ describe("a run's transcript", () => {
     expect(h1).toBeTruthy();
     expect(h3).toBeTruthy();
     expect(h1!.className).not.toBe(h3!.className);
-    expect(h1!.className).toContain("text-base");
-    expect(h3!.className).toContain("text-sm");
+    // Stepped from the app's body size, not the framework's 16px/14px (#946).
+    expect(h1!.className).toContain("text-[0.9375rem]");
+    expect(h3!.className).toContain("text-[length:var(--text-body)]");
   });
 
   it("omits the thoughts row entirely for an agent that streamed none", () => {
@@ -372,5 +378,101 @@ describe("a run's transcript", () => {
     // Still distinguishable, or it is just more prose.
     const asked = screen.getByText("why 5xx");
     expect(asked.closest(".font-medium")).not.toBeNull();
+  });
+
+});
+
+describe("an agent turn's tool calls (#946)", () => {
+  const calls = [
+    { id: "a", tool: "ToolSearch", args: { query: "select:k8s" }, status: "ok" as const, ms: 580 },
+    { id: "b", tool: "mcp__srelens__k8s_listResource", args: { kind: "Node" }, status: "ok" as const, ms: 658, summary: "3 items" },
+    { id: "c", tool: "mcp__srelens__k8s_nodeCapacityOverview", args: {}, status: "ok" as const, ms: 612, summary: "3 nodes" },
+  ];
+
+  it("folds them into one line by default, saying how many, the last and what it returned, and the time", () => {
+    render(<Transcript turns={[turn({ calls, text: "Each node can run 110 pods." })]} gates={[]} />);
+    expect(document.querySelector(".tool-call")).toBeNull();
+    const summary = screen.getByRole("button", { name: /^Used 3 tools/ });
+    expect(summary.getAttribute("aria-expanded")).toBe("false");
+    expect(summary.textContent).toContain("k8s_nodeCapacityOverview → 3 nodes");
+    expect(summary.textContent).toContain("1.9s");
+    // The prefix is dropped on the folded line only.
+    expect(summary.textContent).not.toContain("mcp__srelens__");
+    // The answer is right under it.
+    expect(screen.getByText("Each node can run 110 pods.")).toBeTruthy();
+  });
+
+  it("opens to every call as it was called, and folds again", () => {
+    render(<Transcript turns={[turn({ calls })]} gates={[]} />);
+    expandCalls();
+    const summary = screen.getByRole("button", { name: /^Used 3 tools/ });
+    expect(summary.getAttribute("aria-expanded")).toBe("true");
+    const rows = [...document.querySelectorAll(".tool-call")];
+    expect(rows).toHaveLength(3);
+    expect(rows[1].textContent).toContain("mcp__srelens__k8s_listResource");
+    expect(document.getElementById(summary.getAttribute("aria-controls") ?? "")).not.toBeNull();
+    fireEvent.click(summary);
+    expect(document.querySelector(".tool-call")).toBeNull();
+  });
+
+  it("says which call is running while the turn is working", () => {
+    const working = [calls[0], { id: "b", tool: "mcp__srelens__k8s_listPods", args: {}, status: null }];
+    render(<Transcript turns={[turn({ calls: working })]} gates={[]} busy />);
+    const summary = screen.getByRole("button", { name: /^Running/ });
+    expect(summary.textContent).toContain("Running k8s_listPods…");
+    expect(summary.textContent).toContain("2 tools");
+  });
+
+  it("does not call a call with no result running once the turn is over, as in a restored conversation", () => {
+    const restored = [{ id: "b", tool: "k8s.listPods", args: {}, status: null }];
+    render(<Transcript turns={[turn({ calls: restored })]} gates={[]} />);
+    expect(screen.queryByRole("button", { name: /^Running/ })).toBeNull();
+    expect(screen.getByRole("button", { name: /^Used 1 tool/ })).toBeTruthy();
+  });
+
+  it("counts failed and refused calls on the folded line, in words", () => {
+    const mixed = [
+      { id: "a", tool: "k8s.listPods", args: {}, status: "error" as const, ms: 9 },
+      { id: "b", tool: "k8s.scale", args: {}, status: "denied" as const, ms: 3 },
+    ];
+    render(<Transcript turns={[turn({ calls: mixed })]} gates={[]} />);
+    const summary = screen.getByRole("button", { name: /^Used 2 tools/ });
+    expect(summary.textContent).toContain("1 failed");
+    expect(summary.textContent).toContain("1 denied");
+  });
+
+  it("keeps each turn's calls folded on their own", () => {
+    render(
+      <Transcript
+        turns={[turn({ id: 1, calls: [calls[0]] }), turn({ id: 2, role: "user", text: "and now?" }), turn({ id: 3, calls: [calls[1]] })]}
+        gates={[]}
+      />,
+    );
+    const [first, second] = screen.getAllByRole("button", { name: /^Used 1 tool/ });
+    fireEvent.click(first);
+    expect(first.getAttribute("aria-expanded")).toBe("true");
+    expect(second.getAttribute("aria-expanded")).toBe("false");
+  });
+
+  it("names a tool as a reader says it", () => {
+    expect(shortToolName("mcp__srelens__k8s_listPods")).toBe("k8s_listPods");
+    expect(shortToolName("mcp__my_server__thing")).toBe("thing");
+    expect(shortToolName("k8s.listPods")).toBe("k8s.listPods");
+    expect(shortToolName("ToolSearch")).toBe("ToolSearch");
+  });
+});
+
+describe("the transcript's type", () => {
+  it("is set in the app's tokens, not the framework's sizes (#946)", () => {
+    render(
+      <Transcript
+        turns={[turn({ id: 1, role: "user", text: "how many?" }), turn({ id: 2, text: "| a | b |\n|---|---|\n| 1 | 2 |\n\nPlain words." })]}
+        gates={[]}
+      />,
+    );
+    const html = document.body.innerHTML;
+    expect(html).not.toMatch(/\btext-(sm|xs|base)\b/);
+    expect(screen.getByText("how many?").closest("div")?.className).toContain("text-[length:var(--text-body)]");
+    expect(document.querySelector("table")?.className).toContain("text-[length:var(--text-body)]");
   });
 });
