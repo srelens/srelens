@@ -166,7 +166,7 @@ export function describeError(
     if (missing) {
       return {
         title: `${missing} not found`,
-        detail: `This context authenticates through ${missing}, and srelens couldn't find it on its PATH. If a terminal finds it (which ${missing}), add that folder to PATH in your shell profile (~/.zprofile or ~/.zshrc) and restart srelens, or set the full path as the kubeconfig's exec command.`,
+        detail: `This context authenticates through ${missing}, and srelens couldn't find it on the PATH it started with. If a terminal finds it, add that folder to PATH where apps read it (your shell profile on macOS and Linux, the environment variables on Windows) and restart srelens, or set the full path as the kubeconfig's exec command.`,
         raw,
       };
     }

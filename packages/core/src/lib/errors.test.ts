@@ -41,6 +41,9 @@ describe("isExecAuthError", () => {
 
     expect(result.title).toContain("gke-gcloud-auth-plugin");
     expect(result.detail).toContain("gke-gcloud-auth-plugin");
+    // A shell profile is the fix on macOS and Linux only; a Windows app gets
+    // PATH from the environment variables.
+    expect(result.detail).toMatch(/environment variables on Windows/);
     expect(result.raw).toContain("/usr/bin:/bin:/usr/sbin:/sbin");
     // A plugin that was found but failed is not called missing.
     expect(

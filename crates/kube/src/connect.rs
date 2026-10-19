@@ -471,9 +471,13 @@ pub(crate) async fn build_client(paths: &[PathBuf], context: &str) -> Result<Cli
         // kube-rs runs the exec plugin here, and a missing one reads only
         // "unable to run auth exec: No such file or directory". Name it, and
         // the PATH srelens searched — on macOS that is the login shell's PATH
-        // read at startup, which can differ from a terminal's.
+        // read at startup, which can differ from a terminal's. NotFound also
+        // comes from a plugin that is there but can't start (a script whose
+        // interpreter is gone), so only a plugin the lookup can't find either
+        // is called missing.
         (kube::Error::Auth(kube::client::AuthError::AuthExecStart(io)), Some(cmd))
-            if io.kind() == std::io::ErrorKind::NotFound =>
+            if io.kind() == std::io::ErrorKind::NotFound
+                && crate::path_lookup::find_on_path(&cmd).is_none() =>
         {
             let path = std::env::var("PATH").unwrap_or_default();
             format!("exec plugin '{cmd}' was not found on srelens's PATH ({path}): {e}")
@@ -1292,6 +1296,32 @@ mod tests {
             ),
             "got {err}"
         );
+        let _ = std::fs::remove_file(&file);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_installed_plugin_that_cannot_start_is_not_reported_as_missing() {
+        // The file is there, yet starting it fails with NotFound: on Unix a
+        // script whose interpreter is gone, on Windows a `.cmd` named without
+        // its extension. A PATH change would fix neither.
+        let dir = tempfile::tempdir().unwrap();
+        let plugin = dir.path().join("srelens-test-plugin");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::write(&plugin, "#!/nonexistent/srelens-test-interpreter\n").unwrap();
+            std::fs::set_permissions(&plugin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        #[cfg(windows)]
+        std::fs::write(plugin.with_extension("cmd"), "@echo off\r\n").unwrap();
+        let file = exec_kubeconfig("unstartable-plugin", &plugin.to_string_lossy());
+
+        let err = match build_client(std::slice::from_ref(&file), "ctx").await {
+            Ok(_) => panic!("a plugin that cannot start built a client"),
+            Err(e) => e,
+        };
+
+        assert!(!err.contains("was not found"), "got {err}");
         let _ = std::fs::remove_file(&file);
     }
 
