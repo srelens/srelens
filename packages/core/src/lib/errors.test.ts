@@ -32,6 +32,25 @@ describe("isExecAuthError", () => {
     );
     delete (window as unknown as { __TAURI_INTERNALS__?: object }).__TAURI_INTERNALS__;
   });
+  it("names a plugin the backend could not find on PATH, keeping the PATH in the original", () => {
+    (window as unknown as { __TAURI_INTERNALS__?: object }).__TAURI_INTERNALS__ = {};
+    const raw =
+      "handler error: exec plugin 'gke-gcloud-auth-plugin' was not found on srelens's PATH (/usr/bin:/bin:/usr/sbin:/sbin): auth error: unable to run auth exec: No such file or directory (os error 2)";
+
+    const result = describeError(raw);
+
+    expect(result.title).toContain("gke-gcloud-auth-plugin");
+    expect(result.detail).toContain("gke-gcloud-auth-plugin");
+    // A shell profile is the fix on macOS and Linux only; a Windows app gets
+    // PATH from the environment variables.
+    expect(result.detail).toMatch(/environment variables on Windows/);
+    expect(result.raw).toContain("/usr/bin:/bin:/usr/sbin:/sbin");
+    // A plugin that was found but failed is not called missing.
+    expect(
+      describeError("auth exec command 'gke-gcloud-auth-plugin' failed with status exit status: 1").title,
+    ).toBe("Auth plugin couldn't run");
+    delete (window as unknown as { __TAURI_INTERNALS__?: object }).__TAURI_INTERNALS__;
+  });
 });
 
 describe("cleanErrorMessage", () => {
