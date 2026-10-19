@@ -1016,6 +1016,14 @@ describe("AssistantConversation multi-context (global tab)", () => {
     expect(screen.queryByText(/pick at least one context/i)).toBeFalsy();
   });
 
+  it("with no contexts configured, says to add one rather than pick from an empty menu", async () => {
+    render(<AssistantConversation availableContexts={[]} />);
+    await screen.findByRole("combobox", { name: /agent/i });
+
+    expect(screen.getByText(/add a kubeconfig under settings → contexts/i)).toBeTruthy();
+    expect(screen.queryByText(/pick at least one context/i)).toBeFalsy();
+  });
+
   it("selecting two contexts shows two removable chips and prefaces the outgoing prompt enumerating both", async () => {
     vi.mocked(chat.sendChat).mockImplementation(async (_s, _p, _a, onEvent) => {
       onEvent({ type: "turnDone" });

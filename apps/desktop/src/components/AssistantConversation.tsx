@@ -1595,7 +1595,9 @@ export const AssistantConversation = forwardRef<
             gate was silent — a dead Send and an Enter that did nothing. */}
         {agentReady && multiContextMode && selectedContexts.length === 0 && (
           <p className="mb-2 px-1 text-xs text-muted-foreground">
-            Pick at least one context under Contexts to ask about.
+            {availableContexts.length > 0
+              ? "Pick at least one context under Contexts to ask about."
+              : "Add a kubeconfig under Settings → Contexts to ask about a cluster."}
           </p>
         )}
         {/* Composer card: a chip row (context / skills / pending images) and a
