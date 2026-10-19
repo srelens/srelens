@@ -986,6 +986,7 @@ describe("AssistantConversation multi-context (global tab)", () => {
     expect(screen.queryByRole("button", { name: /contexts \(/i })).toBeFalsy();
     fireEvent.change(screen.getByPlaceholderText(/ask/i), { target: { value: "hi" } });
     expect((screen.getByRole("button", { name: /^send$/i }) as HTMLButtonElement).disabled).toBe(false);
+    expect(screen.queryByText(/pick at least one context/i)).toBeFalsy();
   });
 
   it("global tab shows a Contexts control and disables Send until at least one context is selected", async () => {
@@ -999,6 +1000,20 @@ describe("AssistantConversation multi-context (global tab)", () => {
     fireEvent.click(screen.getByRole("button", { name: /contexts \(0\)/i }));
     fireEvent.click(await screen.findByText("a"));
     expect((screen.getByRole("button", { name: /^send$/i }) as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  it("says why Send waits while no context is picked, and stops once one is", async () => {
+    // Reported from use: a ready agent, a typed question, a dead Send and a
+    // silent Enter — nothing on screen named the missing context.
+    render(<AssistantConversation availableContexts={["a", "b", "c"]} />);
+    await screen.findByRole("combobox", { name: /agent/i });
+    fireEvent.change(screen.getByPlaceholderText(/ask/i), { target: { value: "hi" } });
+
+    expect(screen.getByText(/pick at least one context/i)).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: /contexts \(0\)/i }));
+    fireEvent.click(await screen.findByText("a"));
+    expect(screen.queryByText(/pick at least one context/i)).toBeFalsy();
   });
 
   it("selecting two contexts shows two removable chips and prefaces the outgoing prompt enumerating both", async () => {
