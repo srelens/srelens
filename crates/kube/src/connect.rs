@@ -462,7 +462,24 @@ pub(crate) async fn config_for_context(paths: &[PathBuf], context: &str) -> Resu
 
 pub(crate) async fn build_client(paths: &[PathBuf], context: &str) -> Result<Client, String> {
     let config = config_for_context(paths, context).await?;
-    Client::try_from(config).map_err(|e| e.to_string())
+    let plugin = config
+        .auth_info
+        .exec
+        .as_ref()
+        .and_then(|exec| exec.command.clone());
+    Client::try_from(config).map_err(|e| match (&e, plugin) {
+        // kube-rs runs the exec plugin here, and a missing one reads only
+        // "unable to run auth exec: No such file or directory". Name it, and
+        // the PATH srelens searched — on macOS that is the login shell's PATH
+        // read at startup, which can differ from a terminal's.
+        (kube::Error::Auth(kube::client::AuthError::AuthExecStart(io)), Some(cmd))
+            if io.kind() == std::io::ErrorKind::NotFound =>
+        {
+            let path = std::env::var("PATH").unwrap_or_default();
+            format!("exec plugin '{cmd}' was not found on srelens's PATH ({path}): {e}")
+        }
+        _ => e.to_string(),
+    })
 }
 
 /// Rewrite `kc` so the user of `in_config_ctx` authenticates with a static
@@ -1247,6 +1264,51 @@ mod tests {
         ));
         std::fs::write(&path, contents).unwrap();
         path
+    }
+
+    fn exec_kubeconfig(tag: &str, command: &str) -> PathBuf {
+        write_temp_kubeconfig(
+            tag,
+            &format!(
+                "apiVersion: v1\nkind: Config\nclusters:\n  - name: c\n    cluster: {{ server: https://exec.example:6443 }}\nusers:\n  - name: u\n    user:\n      exec:\n        apiVersion: client.authentication.k8s.io/v1beta1\n        command: {command}\n        interactiveMode: Never\ncontexts:\n  - name: ctx\n    context: {{ cluster: c, user: u }}\n"
+            ),
+        )
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_bare_exec_plugin_that_is_not_on_path_is_named_when_the_client_is_built() {
+        // kube-rs only runs the plugin on the first request, and then reports
+        // "unable to run auth exec: No such file or directory" — naming nothing.
+        let file = exec_kubeconfig("missing-plugin", "srelens-test-no-such-auth-plugin");
+
+        let err = match build_client(std::slice::from_ref(&file), "ctx").await {
+            Ok(_) => panic!("built a client whose auth plugin is not installed"),
+            Err(e) => e,
+        };
+
+        assert!(
+            err.contains(
+                "exec plugin 'srelens-test-no-such-auth-plugin' was not found on srelens's PATH"
+            ),
+            "got {err}"
+        );
+        let _ = std::fs::remove_file(&file);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_plugin_that_runs_but_fails_is_not_reported_as_missing() {
+        // On PATH, runs, prints no ExecCredential — a failing plugin, not a
+        // missing one (an expired gcloud login looks like this).
+        let on_path = if cfg!(windows) { "cmd" } else { "sh" };
+        let file = exec_kubeconfig("failing-plugin", on_path);
+
+        let err = match build_client(std::slice::from_ref(&file), "ctx").await {
+            Ok(_) => panic!("a plugin with no credential output built a client"),
+            Err(e) => e,
+        };
+
+        assert!(!err.contains("was not found"), "got {err}");
+        let _ = std::fs::remove_file(&file);
     }
 
     #[tokio::test(flavor = "multi_thread")]

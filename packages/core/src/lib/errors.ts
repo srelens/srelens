@@ -160,6 +160,16 @@ export function describeError(
         raw,
       };
     }
+    // The backend names a plugin it could not find (`connect::build_client`).
+    // The PATH it searched stays in `raw`, behind "Original error".
+    const missing = /exec plugin '([^']+)' was not found on srelens's PATH/.exec(raw)?.[1];
+    if (missing) {
+      return {
+        title: `${missing} not found`,
+        detail: `This context authenticates through ${missing}, and srelens couldn't find it on its PATH. If a terminal finds it (which ${missing}), add that folder to PATH in your shell profile (~/.zprofile or ~/.zshrc) and restart srelens, or set the full path as the kubeconfig's exec command.`,
+        raw,
+      };
+    }
     return {
       title: "Auth plugin couldn't run",
       detail:
