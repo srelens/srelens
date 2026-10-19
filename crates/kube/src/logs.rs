@@ -1,5 +1,6 @@
 //! The `k8s.podLogs` capability — fetch recent logs for a pod via kube-rs.
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use futures::{AsyncBufRead, AsyncBufReadExt};
@@ -12,6 +13,7 @@ use srelens_capability::{Annotations, Capability, CapabilityError};
 
 use crate::client_cache::ClientCache;
 use crate::connect::request_timeout;
+use crate::workloads::LabelSelectorRequirement;
 
 const DEFAULT_TAIL_LINES: i64 = 200;
 
@@ -66,6 +68,63 @@ impl Line {
     }
 }
 
+/// [`read_lines`] one line at a time, for a reader that stops between lines:
+/// a page of `k8s.podLogs` stops when it is full and reads on later.
+/// Cancel-safe — everything read so far lives here, not in the future `next`
+/// returns.
+pub struct LineReader<R> {
+    reader: R,
+    max: usize,
+    line: Vec<u8>,
+    dropped: bool,
+    done: bool,
+}
+
+impl<R: AsyncBufRead + Unpin> LineReader<R> {
+    pub fn new(reader: R, max: usize) -> Self {
+        Self {
+            reader,
+            max,
+            line: Vec::new(),
+            dropped: false,
+            done: false,
+        }
+    }
+
+    /// The next line, held to `max` bytes as [`read_lines`] holds it, or
+    /// `None` at the end of the stream.
+    pub async fn next(&mut self) -> std::io::Result<Option<Line>> {
+        if self.done {
+            return Ok(None);
+        }
+        // One byte over `max`, so a `\r` just past it is a line ending and not a cut.
+        let keep = self.max.saturating_add(1);
+        loop {
+            let chunk = self.reader.fill_buf().await?;
+            if chunk.is_empty() {
+                self.done = true;
+                if self.line.is_empty() && !self.dropped {
+                    return Ok(None);
+                }
+                let dropped = std::mem::take(&mut self.dropped);
+                return Ok(Some(finish(&mut self.line, dropped, false, self.max)));
+            }
+            let (part, used, ends) = match chunk.iter().position(|&b| b == b'\n') {
+                Some(at) => (&chunk[..at], at + 1, true),
+                None => (chunk, chunk.len(), false),
+            };
+            let room = keep.saturating_sub(self.line.len()).min(part.len());
+            self.line.extend_from_slice(&part[..room]);
+            self.dropped |= room < part.len();
+            self.reader.consume_unpin(used);
+            if ends {
+                let dropped = std::mem::take(&mut self.dropped);
+                return Ok(Some(finish(&mut self.line, dropped, true, self.max)));
+            }
+        }
+    }
+}
+
 /// Read `reader` a line at a time, handing each to `on_line`, holding at most
 /// `max` bytes of any one line (#747).
 ///
@@ -75,36 +134,16 @@ impl Line {
 /// `max` are read and dropped until the newline, the line is cut on a
 /// character boundary and marked, and bytes that are not UTF-8 are decoded
 /// lossily. A last line with no newline is still a line.
-pub async fn read_lines<R, F>(mut reader: R, max: usize, mut on_line: F) -> std::io::Result<()>
+pub async fn read_lines<R, F>(reader: R, max: usize, mut on_line: F) -> std::io::Result<()>
 where
     R: AsyncBufRead + Unpin,
     F: FnMut(Line),
 {
-    // One byte over `max`, so a `\r` just past it is a line ending and not a cut.
-    let keep = max.saturating_add(1);
-    let mut line = Vec::new();
-    let mut dropped = false;
-    loop {
-        let chunk = reader.fill_buf().await?;
-        if chunk.is_empty() {
-            if !line.is_empty() || dropped {
-                on_line(finish(&mut line, dropped, false, max));
-            }
-            return Ok(());
-        }
-        let (part, used, ends) = match chunk.iter().position(|&b| b == b'\n') {
-            Some(at) => (&chunk[..at], at + 1, true),
-            None => (chunk, chunk.len(), false),
-        };
-        let room = keep.saturating_sub(line.len()).min(part.len());
-        line.extend_from_slice(&part[..room]);
-        dropped |= room < part.len();
-        reader.consume_unpin(used);
-        if ends {
-            on_line(finish(&mut line, dropped, true, max));
-            dropped = false;
-        }
+    let mut lines = LineReader::new(reader, max);
+    while let Some(line) = lines.next().await? {
+        on_line(line);
     }
+    Ok(())
 }
 
 /// The line `bytes` holds, emptying it: its `\r\n` ending stripped, cut to
@@ -376,7 +415,10 @@ pub async fn stream_pod_logs_resilient<F, G>(
 pub struct PodLogsIn {
     pub context: String,
     pub namespace: String,
-    pub pod: String,
+    /// The pod. Give exactly one of `pod`, `selector` (with
+    /// `matchExpressions`) or `workload`; a read without page mode needs `pod`.
+    #[serde(default)]
+    pub pod: Option<String>,
     /// Container name. May be omitted only when the pod has exactly one
     /// container — the Kubernetes log API rejects an omitted container name
     /// for any pod with more than one (it does not pick one for you).
@@ -402,22 +444,95 @@ pub struct PodLogsIn {
     /// Only logs newer than this many seconds ago.
     #[serde(default)]
     pub since_seconds: Option<i64>,
+    /// Page mode: start at this RFC 3339 time. Not with `since_seconds`.
+    #[serde(default)]
+    pub since_time: Option<String>,
+    /// Page mode: every pod this equality label selector matches, e.g.
+    /// `{ "app": "cmi" }` — at most 20, merged in time order, each line
+    /// prefixed `[pod] `.
+    #[serde(default)]
+    pub selector: Option<BTreeMap<String, String>>,
+    /// Page mode: the set-based half of the selector, as `k8s.podsForSelector`
+    /// takes it.
+    #[serde(default, rename = "matchExpressions")]
+    pub match_expressions: Option<Vec<LabelSelectorRequirement>>,
+    /// Page mode: every pod of this Deployment, StatefulSet, DaemonSet,
+    /// ReplicaSet or Job, read as `selector` would read them.
+    #[serde(default)]
+    pub workload: Option<WorkloadRef>,
+    /// Page mode: read on from the page this came with (its `next_cursor`).
+    /// With one, `tail_lines`, `all_lines`, `since_seconds` and `since_time`
+    /// are ignored.
+    #[serde(default)]
+    pub cursor: Option<String>,
+    /// Page mode: keep only lines matching this regex (Rust `regex` syntax;
+    /// `(?i)` ignores case), searched on the server across the whole log.
+    #[serde(default)]
+    pub grep: Option<String>,
+    /// Page mode: lines kept before and after each `grep` match, 0–10.
+    #[serde(default)]
+    pub context_lines: Option<u32>,
+    /// Page mode: the most bytes of `logs` one page holds, 1,000–40,000
+    /// (default 12,000). Every page-mode answer fits srelens' 50,000-byte cap.
+    #[serde(default)]
+    pub max_bytes: Option<u32>,
+    /// Page mode: once the end of the log is reached and the page has room,
+    /// wait up to this many seconds (0–60) for new lines — a bounded follow.
+    #[serde(default)]
+    pub wait_seconds: Option<u32>,
 }
 
+impl PodLogsIn {
+    /// Any field page mode adds turns it on; without one, the call is the
+    /// blob it always was.
+    pub fn page_mode(&self) -> bool {
+        self.since_time.is_some()
+            || self.selector.is_some()
+            || self.match_expressions.is_some()
+            || self.workload.is_some()
+            || self.cursor.is_some()
+            || self.grep.is_some()
+            || self.context_lines.is_some()
+            || self.max_bytes.is_some()
+            || self.wait_seconds.is_some()
+    }
+}
+
+/// A workload whose pods a page-mode read covers.
+#[derive(Debug, Clone, PartialEq, Deserialize, JsonSchema)]
+pub struct WorkloadRef {
+    /// `Deployment`, `StatefulSet`, `DaemonSet`, `ReplicaSet` or `Job`.
+    pub kind: String,
+    pub name: String,
+}
+
+/// A pod's log: all of what was asked for, or — in page mode — one page of
+/// it and where the page stopped.
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct PodLogsOut {
     pub logs: String,
+    /// Page mode only: where the page stopped, and what happened on the way.
+    #[serde(flatten)]
+    pub page: Option<crate::log_pages::Page>,
 }
 
 /// `k8s.podLogs` — return the last N lines of a pod's logs, or all of them.
 pub fn pod_logs_capability(cache: Arc<ClientCache>) -> Capability {
     Capability::typed::<PodLogsIn, PodLogsOut, _, _>(
         "k8s.podLogs",
-        "fetch logs for a pod in a connected kube context: the last 200 lines by default (tail_lines to change), or set all_lines to get everything the runtime still retains (can be large)",
+        "fetch logs for a pod in a connected kube context: the last 200 lines by default (tail_lines to change), or set all_lines to get everything the runtime still retains (can be large). For a log bigger than one answer, use page mode — any of max_bytes, cursor, grep, wait_seconds, since_time, selector or workload: each answer fits under 50,000 bytes and carries next_cursor to read on, search or follow; a selector or workload reads up to 20 pods merged in time order",
         Annotations::READ_ONLY,
         move |input: PodLogsIn| {
             let cache = cache.clone();
             async move {
+                if input.page_mode() {
+                    return crate::log_pages::read_page(&cache, input).await;
+                }
+                let pod = input.pod.clone().ok_or_else(|| {
+                    CapabilityError::InvalidInput(
+                        "`pod` is required unless a page-mode field (`selector`, `workload`, `cursor`, `grep`, `max_bytes`, …) is given".into(),
+                    )
+                })?;
                 let client = cache
                     .get(&input.context)
                     .await
@@ -431,11 +546,11 @@ pub fn pod_logs_capability(cache: Arc<ClientCache>) -> Capability {
                     input.timestamps,
                     input.previous,
                 );
-                let logs = tokio::time::timeout(request_timeout(), api.logs(&input.pod, &params))
+                let logs = tokio::time::timeout(request_timeout(), api.logs(&pod, &params))
                     .await
                     .map_err(|_| CapabilityError::Handler("fetch logs timed out".into()))?
                     .map_err(|e| CapabilityError::Handler(e.to_string()))?;
-                Ok(PodLogsOut { logs })
+                Ok(PodLogsOut { logs, page: None })
             }
         },
     )
@@ -631,6 +746,22 @@ mod tests {
         lines
     }
 
+    /// A page stops between lines and reads on later: `next` hands out one
+    /// line per call, however the bytes arrive, and `None` from the end on.
+    #[tokio::test]
+    async fn a_line_reader_hands_out_one_line_a_call() {
+        let reader = futures::io::BufReader::with_capacity(
+            3,
+            futures::io::Cursor::new(b"one\ntwo\nthree".to_vec()),
+        );
+        let mut lines = LineReader::new(reader, 64);
+        assert_eq!(lines.next().await.unwrap(), Some(whole("one")));
+        assert_eq!(lines.next().await.unwrap(), Some(whole("two")));
+        assert_eq!(lines.next().await.unwrap(), Some(whole("three")));
+        assert_eq!(lines.next().await.unwrap(), None);
+        assert_eq!(lines.next().await.unwrap(), None);
+    }
+
     fn whole(text: &str) -> Line {
         Line {
             text: text.into(),
@@ -793,6 +924,67 @@ mod tests {
         // unchanged: omit both and you still get the last 200 lines.
         assert_eq!(effective_tail_lines(false, None), Some(DEFAULT_TAIL_LINES));
         assert_eq!(effective_tail_lines(false, Some(50)), Some(50));
+    }
+
+    /// A blob read's answer is what it always was: `logs` and nothing else.
+    #[test]
+    fn a_blob_answer_carries_logs_alone() {
+        let out = PodLogsOut {
+            logs: "a\n".into(),
+            page: None,
+        };
+        assert_eq!(
+            serde_json::to_value(&out).unwrap(),
+            serde_json::json!({ "logs": "a\n" })
+        );
+    }
+
+    /// Any field page mode adds turns it on; the blob fields alone never do.
+    #[test]
+    fn every_field_page_mode_adds_turns_it_on_and_the_blob_fields_do_not() {
+        use serde_json::json;
+        let with = |extra: serde_json::Value| {
+            let mut v = json!({ "context": "c", "namespace": "n", "pod": "p" });
+            v.as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            serde_json::from_value::<PodLogsIn>(v).unwrap()
+        };
+        for blob in [
+            json!({}),
+            json!({ "container": "app" }),
+            json!({ "tail_lines": 5 }),
+            json!({ "all_lines": true }),
+            json!({ "previous": true }),
+            json!({ "timestamps": true }),
+            json!({ "since_seconds": 60 }),
+        ] {
+            assert!(!with(blob.clone()).page_mode(), "{blob}");
+        }
+        for page in [
+            json!({ "cursor": "x" }),
+            json!({ "grep": "x" }),
+            json!({ "context_lines": 1 }),
+            json!({ "max_bytes": 2000 }),
+            json!({ "wait_seconds": 1 }),
+            json!({ "since_time": "2026-10-16T00:00:00Z" }),
+            json!({ "selector": { "app": "x" } }),
+            json!({ "matchExpressions": [] }),
+            json!({ "workload": { "kind": "Deployment", "name": "x" } }),
+        ] {
+            assert!(with(page.clone()).page_mode(), "{page}");
+        }
+    }
+
+    /// `pod` became optional for page mode; a blob read without one is
+    /// refused naming what to give, as serde's "missing field" used to.
+    #[tokio::test]
+    async fn a_blob_read_without_a_pod_is_refused() {
+        let cap = pod_logs_capability(ClientCache::new(PathBuf::from("/x")));
+        let err = (cap.handler)(serde_json::json!({ "context": "c", "namespace": "n" }))
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("`pod`"), "{err}");
     }
 
     #[test]

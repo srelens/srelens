@@ -394,12 +394,85 @@ warnings](https://code.claude.com/docs/en/mcp.md)); srelens' agent cannot read
 files, so a larger answer was lost to it. A tool that is not read-only always
 has its answer sent, at any size: refusing the output of a change that
 happened would tell the agent it did not, and invite it to make the change
-again.
+again. For a log, page mode (below) makes every answer fit.
 
 Not covered: `resources/read`, which renders its text separately, and the
 YAML string `k8s.getManifest` returns, which is sent as it is (the size limit
 still applies to it). The audit log's `resultBytes`, where it records one, is the
 answer's size before trimming.
+
+### Reading a large log
+
+`k8s.podLogs` answers in one of two ways. Asked only for a `pod` and,
+optionally, `container`, `tail_lines`, `all_lines`, `since_seconds`,
+`previous` or `timestamps`, it returns the log as one string. For a busy pod
+that is often over the size limit above, and is refused. Any of the fields
+below switches it to **page mode**, where every answer fits:
+
+| Field | What it does |
+| --- | --- |
+| `max_bytes` | Size of one page's `logs`: 1,000–40,000 bytes, default 12,000. |
+| `cursor` | Read on from where the last page stopped: pass back its `next_cursor`. |
+| `grep` | Keep only lines matching a regex (Rust `regex` syntax; `(?i)` ignores case), searched on the server across the whole log. |
+| `context_lines` | 0–10 lines kept before and after each match. |
+| `wait_seconds` | Once the end of the log is reached, wait up to 60 seconds for new lines: a bounded follow. |
+| `since_time` | Start at an RFC 3339 time. |
+| `selector`, `matchExpressions` | Read every pod a label selector matches (at most 20), merged in time order, each line prefixed `[pod] `. |
+| `workload` | `{ "kind": …, "name": … }` of a Deployment, StatefulSet, DaemonSet, ReplicaSet or Job: its pods, read as `selector` would read them. |
+
+A page answers with `logs` and:
+
+- `next_cursor`: pass it back as `cursor` to read on.
+- `end`: every log was read to its end as of this call. Call again with
+  `wait_seconds` to follow.
+- `lines` and `scanned`: the lines returned, and the lines read to find them.
+- `notices`: what happened to the logs under the cursor (below).
+
+Without a cursor, a page starts at `since_time`, `since_seconds` or
+`tail_lines`, or else at the oldest line the kubelet still holds. So `grep`
+alone searches everything that can be read. With a cursor those fields are
+ignored, so an agent can resend its arguments with the cursor added.
+
+```json
+{ "context": "prod", "namespace": "payments",
+  "workload": { "kind": "Deployment", "name": "cmi" },
+  "grep": "webhook.*(5[0-9][0-9]|timeout)", "context_lines": 2 }
+```
+
+**When the log moves on under a cursor**, the next page carries on and says
+what happened in `notices`. The cursor records, per pod, the pod's uid, the
+container instance (by restart count) and the last line read.
+
+- The kubelet rotated the log past the cursor. The lines between the cursor
+  and the oldest line still readable are gone: the API cannot read rotated
+  files.
+- The container restarted. The page reads the rest of the instance that
+  ended, then the new one from its first line. After more than one restart,
+  the lines in between are lost.
+- The pod was replaced (same name, new uid), or a selector's pod is gone or
+  new. A new pod is read from its first line.
+- One pod of several could not be read. The others still are, `end` stays
+  `false`, and the next page tries that pod again.
+- A pod's stream sent nothing for 10 seconds, or the 20-second backlog
+  deadline passed. The page holds what was read by then, `end` is `false`,
+  and the next page reads on from the cursor.
+- The instance a restart ended has no log any more. The read goes on in the
+  new one.
+
+A cursor the call cannot use is refused, in one line ending "call again
+without `cursor`". That covers a cursor srelens did not write, one from
+another version, and one from another read (another pod, selector, workload,
+container, or `previous`). Changing `grep` keeps a cursor usable.
+
+**Bounds.** A page stops reading the API server as soon as it is full, so no
+log is held whole. It reads the backlog for at most 20 seconds, then follows
+for at most `wait_seconds`. `grep` searches each line whole, up to 64 KiB;
+a page shows a line longer than itself cut and marked, and counts in
+`notices` any longer line it could search only in part.
+
+srelens' own agent keeps at most 16 KB of one result. It refuses a bigger
+page whole and names a `max_bytes` that fits, rather than cut the page and
+skip its lines.
 
 ## Installed apps' tools
 

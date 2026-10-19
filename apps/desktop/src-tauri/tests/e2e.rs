@@ -2019,6 +2019,27 @@ async fn run_suite() {
         out["logs"].as_str().unwrap_or_default().contains("hello"),
         "expected the busybox loop's output: {out}"
     );
+    // Page mode: a workload's pods, filtered on the server, and a cursor that
+    // reads on — every answer under the MCP cap.
+    let by_workload = json!({
+        "context": ctx, "namespace": NS,
+        "workload": { "kind": "Deployment", "name": DEPLOY },
+        "grep": "hello", "max_bytes": 2000
+    });
+    let first = h.ok("k8s.podLogs", by_workload.clone()).await;
+    let shown = first["logs"].as_str().unwrap_or_default();
+    assert!(
+        shown.lines().count() > 0
+            && shown
+                .lines()
+                .all(|l| l.contains("hello") && l.starts_with('[')),
+        "{first}"
+    );
+    assert!(first.to_string().len() <= 50_000, "{first}");
+    let mut next = by_workload;
+    next["cursor"] = first["next_cursor"].clone();
+    let next = h.ok("k8s.podLogs", next).await;
+    assert!(next["next_cursor"].is_string(), "{next}");
 
     // === MCP resources (#24) ===================================================
     // srelens's k8s:// resource-addressing feature, exercised end to end

@@ -12,7 +12,7 @@ use serde_json::Value;
 /// runs with `Read` disallowed, so such an answer is lost to it; better it
 /// learns that and asks for less. Bytes, not characters, so a non-ASCII
 /// answer is refused a little early rather than lost.
-pub(crate) const MAX_RESULT_BYTES: usize = 50_000;
+pub const MAX_RESULT_BYTES: usize = 50_000;
 
 const LAST_APPLIED: &str = "kubectl.kubernetes.io/last-applied-configuration";
 

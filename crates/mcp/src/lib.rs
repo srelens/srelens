@@ -13,6 +13,9 @@ pub mod resources;
 pub mod stdio;
 pub mod subscriptions;
 
+/// The largest answer a read-only tool sends; see `agent_text`.
+pub use agent_text::MAX_RESULT_BYTES;
+
 use std::sync::Arc;
 
 use srelens_capability::{CapabilityError, Registry};

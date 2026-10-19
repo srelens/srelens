@@ -58,3 +58,9 @@ test-support = ["dep:tower"]
 tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "test-util"] }
 tempfile = "3"
 tower = { version = "0.5", features = ["util"] }
+# A fake API server whose log answers stream, for `log_pages`' tests. All four
+# are already in the lockfile through kube and hyper; no new crate is built.
+bytes = "1"
+form_urlencoded = "1"
+http-body = "1"
+http-body-util = "0.1"

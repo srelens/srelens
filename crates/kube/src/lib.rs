@@ -157,6 +157,7 @@ pub mod limitranges;
 pub mod lineage;
 pub mod list_cap;
 pub mod local_cluster;
+pub mod log_pages;
 pub mod logs;
 pub mod manifest;
 pub mod metrics;
