@@ -1,5 +1,5 @@
 import { parseAssistantMarkdown, type CapabilityImpact, type MdBlock, type NoteSpan } from "@srelens/core";
-import { useId, useState } from "react";
+import { createContext, useCallback, useContext, useId, useMemo, useState } from "react";
 import { AgentMark, Badge, CopyButton, Spinner, cx, toneWash, type Tone } from "@srelens/ui-kit";
 import type { GateRecord, ToolCallRecord, Turn } from "../../lib/agentRun";
 import { CAPABILITY_CATALOG } from "@srelens/core";
@@ -134,7 +134,16 @@ function duration(ms: number): string {
  * Open per turn and local to it: a reader opening one turn's calls is not
  * asking to see every turn's.
  */
-function ToolCalls({ calls, working }: { calls: readonly ToolCallRecord[]; working: boolean }) {
+function ToolCalls({
+  calls,
+  working,
+  gates = [],
+}: {
+  calls: readonly ToolCallRecord[];
+  working: boolean;
+  /** This turn's gates (#959): under the folded line, or each under its call. */
+  gates?: readonly GateRecord[];
+}) {
   const [open, setOpen] = useState(false);
   const listId = useId();
   // A call with no status has not returned. Only while the turn is still
@@ -180,11 +189,20 @@ function ToolCalls({ calls, working }: { calls: readonly ToolCallRecord[]; worki
         {failed > 0 && <span className="shrink-0 whitespace-nowrap text-sev">· {failed} failed</span>}
         {denied > 0 && <span className="shrink-0 whitespace-nowrap text-warn">· {denied} denied</span>}
       </button>
+      {/* The turn's gates stay in sight while its calls are folded: a gate
+          waiting for an answer, or one the reader gave, is the step in this
+          turn the reader took part in (#959). */}
+      {!open && <GateList gates={gates} />}
       {open && (
         <div id={listId} className="flex min-w-0 flex-col gap-1">
           {calls.map((call) => (
-            <ToolCallRow key={call.id} call={call} />
+            <div key={call.id} className="flex min-w-0 flex-col gap-1">
+              <ToolCallRow call={call} />
+              <GateList gates={gates.filter((g) => g.callId === call.id)} />
+            </div>
           ))}
+          {/* Gates no call in the turn could be matched to, after its calls. */}
+          <GateList gates={gates.filter((g) => !calls.some((c) => c.id === g.callId))} />
         </div>
       )}
     </div>
@@ -248,36 +266,78 @@ function prettyArgs(args: unknown): string {
  * registry, so this reads it rather than guessing from the tool's name, and
  * the impact is the host's, named in the confirmation's own words.
  */
+/**
+ * Which gates the reader has opened, held by the transcript rather than by
+ * each row (#959 review). A turn's gates are drawn under its folded tool-call
+ * line or under each call once the calls are open — two places, so a row's
+ * own state would reset every time the calls were folded or opened, closing
+ * the question and arguments the reader was reading.
+ */
+const OpenGates = createContext<{ isOpen: (id: string) => boolean; toggle: (id: string) => void } | null>(null);
+
+function useGateOpen(id: string): [boolean, () => void] {
+  const shared = useContext(OpenGates);
+  // Outside a transcript (a row drawn on its own), the row keeps its own.
+  const [own, setOwn] = useState(false);
+  if (shared) return [shared.isOpen(id), () => shared.toggle(id)];
+  return [own, () => setOwn((o) => !o)];
+}
+
 function GateRow({ gate }: { gate: GateRecord }) {
+  // Folded by default (#959): one line saying what was asked, how much it
+  // disturbs and what came of it. The question and the arguments are the
+  // record's detail, opened when the reader wants them — drawn in full they
+  // took as much room as the answer, and the arguments name the very things
+  // a reader may not want on screen.
+  const [open, toggle] = useGateOpen(gate.id);
+  const detailsId = useId();
   const facts = CAPABILITY_CATALOG.find((c) => c.id === gate.tool);
   const args = prettyArgs(gate.args);
   return (
-    <div className="min-w-0 rounded-card border border-rule">
-      <div
-        className="flex min-w-0 items-start justify-between gap-3 rounded-t-card px-3 py-2"
+    <div className="min-w-0 rounded-card border border-rule" data-slot="gate" data-outcome={gate.outcome}>
+      <button
+        type="button"
+        className={cx("flex w-full min-w-0 items-center gap-2 px-3 py-1.5 text-left", open ? "rounded-t-card" : "rounded-card")}
         style={{ background: toneWash(GATE_TONE[gate.outcome]) }}
+        aria-expanded={open}
+        aria-controls={open ? detailsId : undefined}
+        onClick={toggle}
       >
-        <div className="min-w-0">
-          <p className="min-w-0 break-words font-mono text-[length:var(--text-label)] font-medium text-ink">{gate.tool}</p>
+        <svg width="10" height="10" viewBox="0 0 24 24" fill="none" aria-hidden="true" className={cx("shrink-0 text-muted transition-transform", open && "rotate-90")}>
+          <path d="m9 6 6 6-6 6" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" />
+        </svg>
+        <span className="min-w-0 truncate whitespace-nowrap font-mono text-[length:var(--text-label)] font-medium text-ink">{gate.tool}</span>
+        <span className="flex-1" />
+        {gate.impact !== undefined && <Badge tone={IMPACT_TONE[gate.impact]}>{IMPACT_LABEL[gate.impact]}</Badge>}
+        {facts?.destructive === true && <Badge tone="sev">destructive</Badge>}
+        <Badge tone={GATE_TONE[gate.outcome]}>{GATE_WORD[gate.outcome]}</Badge>
+        {/* The TIME only: the badge already carries the word. */}
+        {gate.at !== undefined && <TurnClock at={gate.at} className="shrink-0" />}
+      </button>
+      {open && (
+        <div id={detailsId} className="min-w-0">
           {gate.prompt !== undefined && (
-            <p className="mt-0.5 min-w-0 break-words text-[length:var(--text-body)] text-ink">{gate.prompt}</p>
+            <p className="min-w-0 break-words px-3 py-2 text-[length:var(--text-body)] text-ink">{gate.prompt}</p>
           )}
-          {/* The TIME only. `gateLabel` is word-plus-time, and the badge
-              already carries the word — printing both put "Applied" on the
-              card twice. */}
-          {gate.at !== undefined && <TurnClock at={gate.at} className="mt-0.5 block" />}
+          {args !== "" && (
+            <pre className="scroll m-0 max-h-40 overflow-auto whitespace-pre-wrap break-words rounded-b-card bg-canvas-deep px-3 py-2 font-mono text-[length:var(--text-meta)] leading-relaxed text-faint">
+              {args}
+            </pre>
+          )}
         </div>
-        <div className="flex shrink-0 items-center gap-1.5">
-          {gate.impact !== undefined && <Badge tone={IMPACT_TONE[gate.impact]}>{IMPACT_LABEL[gate.impact]}</Badge>}
-          {facts?.destructive === true && <Badge tone="sev">destructive</Badge>}
-          <Badge tone={GATE_TONE[gate.outcome]}>{GATE_WORD[gate.outcome]}</Badge>
-        </div>
-      </div>
-      {args !== "" && (
-        <pre className="scroll m-0 max-h-40 overflow-auto whitespace-pre-wrap break-words rounded-b-card bg-canvas-deep px-3 py-2 font-mono text-[length:var(--text-meta)] leading-relaxed text-faint">
-          {args}
-        </pre>
       )}
+    </div>
+  );
+}
+
+/** Gates, one under the other. */
+function GateList({ gates }: { gates: readonly GateRecord[] }) {
+  if (gates.length === 0) return null;
+  return (
+    <div className="flex min-w-0 flex-col gap-1">
+      {gates.map((gate) => (
+        <GateRow key={gate.id} gate={gate} />
+      ))}
     </div>
   );
 }
@@ -474,7 +534,17 @@ function UserTurn({ turn }: { turn: Turn }) {
  * be timed (see `lib/agentRun.ts`'s `Turn.thoughts` doc) — `undefined` is the
  * ordinary case, not a gap to paper over with a header and nothing under it.
  */
-function AgentTurn({ turn, compact, working }: { turn: Turn; compact?: boolean; working?: boolean }) {
+function AgentTurn({
+  turn,
+  compact,
+  working,
+  gates = [],
+}: {
+  turn: Turn;
+  compact?: boolean;
+  working?: boolean;
+  gates?: readonly GateRecord[];
+}) {
   return (
     <div className="flex min-w-0 items-start gap-2.5">
       {!compact && <AgentMark size={20} label="Agent" className="mt-0.5" />}
@@ -484,7 +554,11 @@ function AgentTurn({ turn, compact, working }: { turn: Turn; compact?: boolean; 
             <span className="font-medium text-muted">Thoughts</span> · {turn.thoughts}
           </p>
         )}
-        {turn.calls.length > 0 && <ToolCalls calls={turn.calls} working={working === true} />}
+        {turn.calls.length > 0 ? (
+          <ToolCalls calls={turn.calls} working={working === true} gates={gates} />
+        ) : (
+          <GateList gates={gates} />
+        )}
         {/* A warning the stream raised and then carried on past — an
             unsupported attachment, an image it could not decode. Shown
             because the reader's attachment did not arrive, and NOT allowed to
@@ -512,11 +586,17 @@ function AgentTurn({ turn, compact, working }: { turn: Turn; compact?: boolean; 
  * sentence already; running it through the classifier a second time here
  * would be redundant, not safer.
  */
-function ErrorTurn({ turn, compact }: { turn: Turn; compact?: boolean }) {
+function ErrorTurn({ turn, compact, gates = [] }: { turn: Turn; compact?: boolean; gates?: readonly GateRecord[] }) {
   return (
     <div className="flex min-w-0 items-start gap-2.5">
       {!compact && <AgentMark size={20} label="Agent" className="mt-0.5" />}
-      <p className="min-w-0 flex-1 break-words text-[length:var(--text-body)] text-sev">{turn.text}</p>
+      <div className="flex min-w-0 flex-1 flex-col gap-2">
+        {/* A turn that asked for approval and then failed is still where the
+            approval was given: its gates stay with it (#959 review), above
+            the reason it stopped. */}
+        <GateList gates={gates} />
+        <p className="min-w-0 break-words text-[length:var(--text-body)] text-sev">{turn.text}</p>
+      </div>
     </div>
   );
 }
@@ -593,7 +673,34 @@ export function Transcript({
    */
   live?: boolean;
 }) {
+  // Each gate at the turn that asked for it (#959); one whose turn is not in
+  // this transcript — recorded before gates kept their place, or raised with
+  // no answer in progress — after everything, as before.
+  const [openGates, setOpenGates] = useState<ReadonlySet<string>>(new Set());
+  const toggleGate = useCallback(
+    (id: string) =>
+      setOpenGates((current) => {
+        const next = new Set(current);
+        if (!next.delete(id)) next.add(id);
+        return next;
+      }),
+    [],
+  );
+  const gateOpen = useMemo(() => ({ isOpen: (id: string) => openGates.has(id), toggle: toggleGate }), [openGates, toggleGate]);
+  // A user turn is never where a gate was asked; one stamped with it (by
+  // hand, or a file from elsewhere) goes to the end rather than nowhere.
+  const turnIds = new Set(turns.filter((t) => t.role !== "user").map((t) => t.id));
+  const placed = new Map<number, GateRecord[]>();
+  const trailing: GateRecord[] = [];
+  for (const gate of gates) {
+    if (gate.turnId !== undefined && turnIds.has(gate.turnId)) {
+      placed.set(gate.turnId, [...(placed.get(gate.turnId) ?? []), gate]);
+    } else {
+      trailing.push(gate);
+    }
+  }
   return (
+    <OpenGates.Provider value={gateOpen}>
     <div
       {...(live ? { role: "log" as const, "aria-live": "polite" as const } : {})}
       className="flex min-w-0 flex-col gap-3"
@@ -612,9 +719,14 @@ export function Transcript({
               {turn.role === "user" ? (
                 <UserTurn turn={turn} />
               ) : turn.role === "error" ? (
-                <ErrorTurn turn={turn} compact={compact} />
+                <ErrorTurn turn={turn} compact={compact} gates={placed.get(turn.id)} />
               ) : (
-                <AgentTurn turn={turn} compact={compact} working={busy && turn === turns[turns.length - 1]} />
+                <AgentTurn
+                  turn={turn}
+                  compact={compact}
+                  working={busy && turn === turns[turns.length - 1]}
+                  gates={placed.get(turn.id)}
+                />
               )}
             </div>
           ))}
@@ -628,13 +740,8 @@ export function Transcript({
           )}
         </div>
       ))}
-      {gates.length > 0 && (
-        <div className="flex min-w-0 flex-col gap-1">
-          {gates.map((gate) => (
-            <GateRow key={gate.id} gate={gate} />
-          ))}
-        </div>
-      )}
+      <GateList gates={trailing} />
     </div>
+    </OpenGates.Provider>
   );
 }

@@ -31,6 +31,8 @@ import {
   getRunSubject,
   selectRun,
   forgetRun,
+  gateToolKey,
+  placeGate,
   type Turn,
 } from "./agentRun";
 
@@ -175,6 +177,25 @@ describe("the run store", () => {
     const gates = getAgentRun().gates;
     expect(gates).toHaveLength(1);
     expect(gates[0].outcome).toBe("approved");
+  });
+
+  it("records where a gate was asked: the turn answering, and the call that raised it (#959)", async () => {
+    sendChat.mockImplementation(async (_s: string, _p: string, _a: string, onEvent: (e: unknown) => void) => {
+      onEvent({ type: "toolCallStart", id: "t1", tool: "mcp__srelens__k8s_listPods", args: {} });
+      onEvent({ type: "toolResult", id: "t1", status: "ok" });
+      onEvent({ type: "toolCallStart", id: "t2", tool: "mcp__srelens__k8s_scale", args: { replicas: 3 } });
+      return new Promise<string | null>(() => {});
+    });
+    void askAgent("q", { about: { cluster: "prod-eu" }, route: "/overview" });
+    await untilSendChatCalledTimes(1);
+
+    noteGate({ id: "g1", tool: "k8s.scale", args: { replicas: 3 }, outcome: "pending" }, OURS);
+    const answering = getAgentRun().turns.at(-1)!;
+    expect(getAgentRun().gates[0]).toMatchObject({ turnId: answering.id, callId: "t2" });
+
+    // The outcome is news about the same request: its place is kept.
+    noteGate({ id: "g1", tool: "k8s.scale", args: { replicas: 3 }, outcome: "approved", at: 5 }, OURS);
+    expect(getAgentRun().gates[0]).toMatchObject({ outcome: "approved", turnId: answering.id, callId: "t2" });
   });
 
   it("records no gate for a confirm no srelens chat raised — an external client's", async () => {
@@ -1310,6 +1331,39 @@ describe("the run store", () => {
       expect(getRunSummaries().filter((r) => r.savedId === "s1")).toEqual([]);
     });
 
+    it("keeps each gate at its turn when a conversation is reopened under fresh ids (#959)", async () => {
+      listSessions.mockResolvedValue([{ id: "s1", title: "scale it", createdAt: 1, updatedAt: 2 }]);
+      loadSession.mockResolvedValue({
+        id: "s1", title: "scale it", createdAt: 1, updatedAt: 2,
+        contexts: [], skills: [], cliSessionId: "cli-1", agentKind: "claude",
+        messages: [
+          {
+            v: 1,
+            key: "prod-eu|/overview",
+            label: "Overview",
+            turns: [
+              { id: 40, role: "user", text: "scale it", calls: [], at: 1 },
+              { id: 41, role: "agent", text: "Scaled.", calls: [{ id: "c2", tool: "k8s.scale", args: {}, status: "ok" }], at: 2 },
+            ],
+            gates: [
+              { id: "g1", tool: "k8s.scale", args: {}, outcome: "approved", at: 2, turnId: 41, callId: "c2" },
+              { id: "g2", tool: "k8s.scale", args: {}, outcome: "approved", at: 2, turnId: 99, callId: "zz" },
+            ],
+          },
+        ],
+      });
+
+      await restoreRuns();
+      await openSavedRun("s1");
+      const run = getAgentRun();
+      const answer = run.turns.find((t) => t.text === "Scaled.")!;
+      expect(run.gates.find((g) => g.id === "g1")).toMatchObject({ turnId: answer.id, callId: "c2" });
+      // One whose turn is not in the file goes back to the end, unplaced.
+      const lost = run.gates.find((g) => g.id === "g2")!;
+      expect(lost.turnId).toBeUndefined();
+      expect(lost.callId).toBeUndefined();
+    });
+
     it("sends a reopened conversation's turns under the id it was saved with (#952)", async () => {
       listAgents.mockResolvedValue([
         { kind: "cursor", label: "Cursor", available: true, path: "/cu", version: "1", installUrl: "", gated: false },
@@ -2233,5 +2287,31 @@ describe("the run store", () => {
       const failure = getAgentRun().error;
       expect(failure).not.toMatch(/still answering/i);
     });
+  });
+});
+
+describe("placing a gate (#959)", () => {
+  const call = (id: string, tool: string, status: "ok" | null = "ok") => ({ id, tool, args: {}, status });
+  const agent = (id: number, calls: ReturnType<typeof call>[]): Turn => ({ id, role: "agent", text: "", calls, at: 0 });
+
+  it("names a capability and a client's prefixed tool alike", () => {
+    expect(gateToolKey("k8s.scale")).toBe("k8s_scale");
+    expect(gateToolKey("mcp__srelens__k8s_scale")).toBe("k8s_scale");
+    expect(gateToolKey("mcp__my_server__k8s_scale")).toBe("k8s_scale");
+  });
+
+  it("prefers the matching call still waiting on its result", () => {
+    const turns = [agent(4, [call("a", "mcp__srelens__k8s_scale"), call("b", "mcp__srelens__k8s_scale", null), call("c", "k8s.listPods")])];
+    expect(placeGate(turns, "k8s.scale")).toEqual({ turnId: 4, callId: "b" });
+  });
+
+  it("takes the last matching call when none is waiting, and the turn alone when none matches", () => {
+    expect(placeGate([agent(4, [call("a", "k8s.scale"), call("b", "k8s.scale")])], "k8s.scale")).toEqual({ turnId: 4, callId: "b" });
+    expect(placeGate([agent(4, [call("a", "k8s.listPods")])], "k8s.scale")).toEqual({ turnId: 4 });
+  });
+
+  it("places nothing when no answer is in progress", () => {
+    expect(placeGate([], "k8s.scale")).toEqual({});
+    expect(placeGate([{ id: 1, role: "user", text: "q", calls: [], at: 0 }], "k8s.scale")).toEqual({});
   });
 });
