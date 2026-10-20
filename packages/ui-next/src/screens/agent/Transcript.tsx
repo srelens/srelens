@@ -1,5 +1,5 @@
 import { parseAssistantMarkdown, type CapabilityImpact, type MdBlock, type NoteSpan } from "@srelens/core";
-import { useId, useState } from "react";
+import { createContext, useCallback, useContext, useId, useMemo, useState } from "react";
 import { AgentMark, Badge, CopyButton, Spinner, cx, toneWash, type Tone } from "@srelens/ui-kit";
 import type { GateRecord, ToolCallRecord, Turn } from "../../lib/agentRun";
 import { CAPABILITY_CATALOG } from "@srelens/core";
@@ -266,13 +266,30 @@ function prettyArgs(args: unknown): string {
  * registry, so this reads it rather than guessing from the tool's name, and
  * the impact is the host's, named in the confirmation's own words.
  */
+/**
+ * Which gates the reader has opened, held by the transcript rather than by
+ * each row (#959 review). A turn's gates are drawn under its folded tool-call
+ * line or under each call once the calls are open — two places, so a row's
+ * own state would reset every time the calls were folded or opened, closing
+ * the question and arguments the reader was reading.
+ */
+const OpenGates = createContext<{ isOpen: (id: string) => boolean; toggle: (id: string) => void } | null>(null);
+
+function useGateOpen(id: string): [boolean, () => void] {
+  const shared = useContext(OpenGates);
+  // Outside a transcript (a row drawn on its own), the row keeps its own.
+  const [own, setOwn] = useState(false);
+  if (shared) return [shared.isOpen(id), () => shared.toggle(id)];
+  return [own, () => setOwn((o) => !o)];
+}
+
 function GateRow({ gate }: { gate: GateRecord }) {
   // Folded by default (#959): one line saying what was asked, how much it
   // disturbs and what came of it. The question and the arguments are the
   // record's detail, opened when the reader wants them — drawn in full they
   // took as much room as the answer, and the arguments name the very things
   // a reader may not want on screen.
-  const [open, setOpen] = useState(false);
+  const [open, toggle] = useGateOpen(gate.id);
   const detailsId = useId();
   const facts = CAPABILITY_CATALOG.find((c) => c.id === gate.tool);
   const args = prettyArgs(gate.args);
@@ -284,7 +301,7 @@ function GateRow({ gate }: { gate: GateRecord }) {
         style={{ background: toneWash(GATE_TONE[gate.outcome]) }}
         aria-expanded={open}
         aria-controls={open ? detailsId : undefined}
-        onClick={() => setOpen((o) => !o)}
+        onClick={toggle}
       >
         <svg width="10" height="10" viewBox="0 0 24 24" fill="none" aria-hidden="true" className={cx("shrink-0 text-muted transition-transform", open && "rotate-90")}>
           <path d="m9 6 6 6-6 6" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" />
@@ -569,11 +586,17 @@ function AgentTurn({
  * sentence already; running it through the classifier a second time here
  * would be redundant, not safer.
  */
-function ErrorTurn({ turn, compact }: { turn: Turn; compact?: boolean }) {
+function ErrorTurn({ turn, compact, gates = [] }: { turn: Turn; compact?: boolean; gates?: readonly GateRecord[] }) {
   return (
     <div className="flex min-w-0 items-start gap-2.5">
       {!compact && <AgentMark size={20} label="Agent" className="mt-0.5" />}
-      <p className="min-w-0 flex-1 break-words text-[length:var(--text-body)] text-sev">{turn.text}</p>
+      <div className="flex min-w-0 flex-1 flex-col gap-2">
+        {/* A turn that asked for approval and then failed is still where the
+            approval was given: its gates stay with it (#959 review), above
+            the reason it stopped. */}
+        <GateList gates={gates} />
+        <p className="min-w-0 break-words text-[length:var(--text-body)] text-sev">{turn.text}</p>
+      </div>
     </div>
   );
 }
@@ -653,7 +676,20 @@ export function Transcript({
   // Each gate at the turn that asked for it (#959); one whose turn is not in
   // this transcript — recorded before gates kept their place, or raised with
   // no answer in progress — after everything, as before.
-  const turnIds = new Set(turns.map((t) => t.id));
+  const [openGates, setOpenGates] = useState<ReadonlySet<string>>(new Set());
+  const toggleGate = useCallback(
+    (id: string) =>
+      setOpenGates((current) => {
+        const next = new Set(current);
+        if (!next.delete(id)) next.add(id);
+        return next;
+      }),
+    [],
+  );
+  const gateOpen = useMemo(() => ({ isOpen: (id: string) => openGates.has(id), toggle: toggleGate }), [openGates, toggleGate]);
+  // A user turn is never where a gate was asked; one stamped with it (by
+  // hand, or a file from elsewhere) goes to the end rather than nowhere.
+  const turnIds = new Set(turns.filter((t) => t.role !== "user").map((t) => t.id));
   const placed = new Map<number, GateRecord[]>();
   const trailing: GateRecord[] = [];
   for (const gate of gates) {
@@ -664,6 +700,7 @@ export function Transcript({
     }
   }
   return (
+    <OpenGates.Provider value={gateOpen}>
     <div
       {...(live ? { role: "log" as const, "aria-live": "polite" as const } : {})}
       className="flex min-w-0 flex-col gap-3"
@@ -682,7 +719,7 @@ export function Transcript({
               {turn.role === "user" ? (
                 <UserTurn turn={turn} />
               ) : turn.role === "error" ? (
-                <ErrorTurn turn={turn} compact={compact} />
+                <ErrorTurn turn={turn} compact={compact} gates={placed.get(turn.id)} />
               ) : (
                 <AgentTurn
                   turn={turn}
@@ -705,5 +742,6 @@ export function Transcript({
       ))}
       <GateList gates={trailing} />
     </div>
+    </OpenGates.Provider>
   );
 }

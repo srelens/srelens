@@ -537,6 +537,31 @@ describe("a gate in the conversation (#959)", () => {
     expect(screen.queryByRole("button", { name: /approve|deny/i })).toBeNull();
   });
 
+  it("stays with a turn that failed after asking, above the reason it stopped (#959 review)", () => {
+    render(
+      <Transcript
+        turns={[turn({ id: 1, role: "user", text: "scale it" }), turn({ id: 2, role: "error", text: "The agent stopped." })]}
+        gates={[{ ...gate, turnId: 2 }]}
+      />,
+    );
+    const gateEl = document.querySelector('[data-slot="gate"]');
+    expect(gateEl).not.toBeNull();
+    expect(gateEl!.textContent).toContain("Applied");
+    expect(gateEl!.compareDocumentPosition(screen.getByText("The agent stopped.")) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
+  it("stays open while the turn's calls are opened and folded around it (#959 review)", () => {
+    render(<Transcript turns={conversation} gates={[gate]} />);
+    fireEvent.click(screen.getByRole("button", { name: /k8s\.scale/ }));
+    expect(screen.getByText("Scale the deployment to 3?")).toBeTruthy();
+    const calls = screen.getByRole("button", { name: /^Used 2 tools/ });
+    fireEvent.click(calls);
+    expect(screen.getByText("Scale the deployment to 3?")).toBeTruthy();
+    fireEvent.click(calls);
+    expect(screen.getByText("Scale the deployment to 3?")).toBeTruthy();
+    expect(screen.getByRole("button", { name: /k8s\.scale/ }).getAttribute("aria-expanded")).toBe("true");
+  });
+
   it("goes after everything when its turn is not in the transcript", () => {
     render(<Transcript turns={conversation} gates={[{ ...gate, turnId: 99 }, { ...gate, id: "g2", turnId: undefined }]} />);
     const gates = [...document.querySelectorAll('[data-slot="gate"]')];
