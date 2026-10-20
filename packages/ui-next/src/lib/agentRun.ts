@@ -1108,6 +1108,9 @@ export async function askAgent(
       resolvedKind,
       myGeneration,
       state.resume,
+      // The file this conversation is saved under, which outlives `started`:
+      // reopened, it gets a new session but keeps this id (#952).
+      state.id,
     );
     countUse();
     // A later question already moved this conversation on; this answer no

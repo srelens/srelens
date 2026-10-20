@@ -265,6 +265,35 @@ pub struct ChatManager {
     /// turn nonce), so `chat_send` can consume a Stop meant for ITS turn while
     /// dropping a stale one left over from a previous turn.
     pending_cancels: std::sync::Mutex<std::collections::HashMap<String, u64>>,
+    pub(crate) cursor_chats: CursorChatsInUse,
+}
+
+/// The Cursor chats a turn or a delete is using right now. A chat's directory
+/// is one per conversation (#952), and two windows can hold one saved
+/// conversation, each streaming on its own session and seeing only its own
+/// turns as busy. Without this, the second turn would empty the first one's
+/// workspace and either turn's guard would remove the other's files.
+#[derive(Default, Clone)]
+pub struct CursorChatsInUse(Arc<std::sync::Mutex<std::collections::HashSet<String>>>);
+
+/// One holder's use of a Cursor chat, released when dropped.
+pub(crate) struct CursorChatClaim {
+    in_use: CursorChatsInUse,
+    chat: String,
+}
+
+impl CursorChatsInUse {
+    /// Claim `chat`, or `None` while something else holds it.
+    pub(crate) fn claim(&self, chat: &str) -> Option<CursorChatClaim> {
+        let fresh = self.0.lock().unwrap().insert(chat.to_string());
+        fresh.then(|| CursorChatClaim { in_use: self.clone(), chat: chat.to_string() })
+    }
+}
+
+impl Drop for CursorChatClaim {
+    fn drop(&mut self) {
+        self.in_use.0.lock().unwrap().remove(&self.chat);
+    }
 }
 
 impl ChatManager {
@@ -413,36 +442,72 @@ struct CursorTurn {
     cmd: srelens_agent::adapter::AgentCommand,
     workspace: std::path::PathBuf,
     _workspace_guard: TempDir,
+    // Declared after the guard, so it is dropped after it: the chat is
+    // released only once its workspace is gone.
+    _claim: CursorChatClaim,
 }
 
-/// Where Cursor's chats live while srelens runs (see `prepare_cursor_turn`):
-/// the per-user cache dir, never the shared temp dir. Cleared at launch and at
-/// quit, so Cursor's chats last no longer than the srelens run that held them.
-fn cursor_state_dir(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
+/// Where Cursor's chats live (see `prepare_cursor_turn`): the per-user data
+/// dir, never the shared temp dir, and not the cache dir either — a saved
+/// conversation's chat must outlive the run, and goes only with the chat
+/// (`chat_history_delete`, #952).
+pub(crate) fn cursor_state_dir(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
     use tauri::Manager;
-    Ok(app.path().app_cache_dir().map_err(|e| e.to_string())?.join("cursor-chats"))
+    Ok(app.path().app_local_data_dir().map_err(|e| e.to_string())?.join("cursor-chats"))
 }
 
-/// Remove every Cursor chat srelens kept: at quit, and at launch for what a
-/// crashed or killed run left behind. They hold prompts and tool results, so
-/// a failure is logged: it is why they are still on disk.
-pub fn clear_cursor_state(app: &tauri::AppHandle) {
-    match cursor_state_dir(app) {
-        Ok(dir) => {
-            if let Err(error) = remove_cursor_chats(&dir) {
-                log::warn!("could not delete the Cursor chats in {}: {error}", dir.display());
-            }
+/// At launch, before any turn runs: see `sweep_cursor_chats`.
+pub fn sweep_cursor_state(app: &tauri::AppHandle) {
+    let dirs = cursor_state_dir(app).and_then(|root| Ok((root, crate::assistant_history::resolve_sessions_dir(app)?)));
+    match dirs {
+        Ok((root, sessions)) => sweep_cursor_chats(&root, |id| crate::assistant_history::is_saved(&sessions, id)),
+        Err(error) => log::warn!("could not find the Cursor chats to sweep them: {error}"),
+    }
+}
+
+/// Remove the Cursor chats no saved conversation holds — a one-shot turn's,
+/// or one whose save never landed — and, from those that stay, the workspace
+/// a killed turn left behind (its guard never ran). They hold prompts and
+/// tool results, so a failure is logged: it is why they are still on disk.
+fn sweep_cursor_chats(root: &std::path::Path, saved: impl Fn(&str) -> bool) {
+    let entries = match std::fs::read_dir(root) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return,
+        Err(error) => {
+            log::warn!("could not list the Cursor chats in {}: {error}", root.display());
+            return;
         }
-        Err(error) => log::warn!("could not find the Cursor chats to delete them: {error}"),
+    };
+    for entry in entries.flatten() {
+        let chat = entry.path();
+        let stale = if entry.file_name().to_str().is_some_and(&saved) { chat.join("workspace") } else { chat };
+        if let Err(error) = remove_cursor_chats(&stale) {
+            log::warn!("could not delete {}: {error}", stale.display());
+        }
     }
 }
 
 /// `remove_dir_all`, where chats already gone are not a failure.
-fn remove_cursor_chats(dir: &std::path::Path) -> std::io::Result<()> {
+pub(crate) fn remove_cursor_chats(dir: &std::path::Path) -> std::io::Result<()> {
     match std::fs::remove_dir_all(dir) {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
         result => result,
     }
+}
+
+/// The directory under `root` that one Cursor chat is kept in. Its workspace
+/// is emptied before each turn and the whole of it removed with the chat, so
+/// `chat` must be one plain component — never `.` or `..`, which pass the
+/// charset `chat_send` and `chat_history` check.
+pub(crate) fn cursor_chat_dir(root: &std::path::Path, chat: &str) -> Result<std::path::PathBuf, String> {
+    let one_name = matches!(
+        std::path::Path::new(chat).components().collect::<Vec<_>>()[..],
+        [std::path::Component::Normal(_)]
+    );
+    if !one_name {
+        return Err(format!("invalid session id {chat:?}"));
+    }
+    Ok(root.join(chat))
 }
 
 /// Lay out a Cursor turn under `root` and build its command.
@@ -450,8 +515,8 @@ fn remove_cursor_chats(dir: &std::path::Path) -> std::io::Result<()> {
 /// cursor-agent keeps a chat at `CURSOR_CONFIG_DIR/chats/<md5 of the absolute
 /// --workspace>/<chatId>` (its bundled `paths.js`), so `--resume` finds the
 /// previous turn's chat only when both paths are the same on every turn and
-/// the config dir outlives the turn (#952). Both are fixed per chat session
-/// under `root`, and the config dir is kept between turns.
+/// the config dir outlives the turn (#952). Both are fixed per conversation
+/// under `root`, and the config dir is kept between turns and across runs.
 ///
 /// What it keeps must not loosen the box. Unlike `codex exec resume` (#215),
 /// `--resume` takes every flag a fresh turn does, so `cursor_command` is
@@ -465,25 +530,27 @@ fn remove_cursor_chats(dir: &std::path::Path) -> std::io::Result<()> {
 /// `CURSOR_CONFIG_DIR` (verified live: an mcp.json in CURSOR_CONFIG_DIR is
 /// silently ignored, so the server never connects). So the deny-list goes in
 /// the config dir and the MCP server goes in `<workspace>/.cursor/mcp.json`.
+#[allow(clippy::too_many_arguments)]
 fn prepare_cursor_turn(
     root: &std::path::Path,
+    in_use: &CursorChatsInUse,
     session: &str,
+    conversation: Option<&str>,
     agent_path: &str,
     prompt: &str,
     url: &str,
     token: &str,
     resume: Option<&str>,
 ) -> Result<CursorTurn, String> {
-    // `session` names a directory under `root`, and the workspace in it is
-    // emptied below: one plain component, never `.` or `..`, which pass the
-    // charset `chat_send` checks.
-    let one_name = matches!(
-        std::path::Path::new(session).components().collect::<Vec<_>>()[..],
-        [std::path::Component::Normal(_)]
-    );
-    if !one_name {
-        return Err(format!("invalid session id {session:?}"));
-    }
+    // The saved conversation names the chat, so a reopened one — on a new
+    // session — finds it again. A turn with no conversation (a one-shot
+    // generation) has only its session.
+    let chat = conversation.unwrap_or(session);
+    let dir = cursor_chat_dir(root, chat)?;
+    // Held for the whole turn, before the workspace below is emptied.
+    let claim = in_use
+        .claim(chat)
+        .ok_or("This conversation is answering in another window. Wait for it to finish, then ask again.")?;
     // Fixed names are safe here, unlike in the shared temp dir (see
     // `create_private_dir`): `root` is in the user's own cache dir, and
     // owner-only so no other account can read the chats kept under it.
@@ -493,8 +560,8 @@ fn prepare_cursor_turn(
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(root, std::fs::Permissions::from_mode(0o700)).map_err(|e| e.to_string())?;
     }
-    let config = root.join(session).join("config");
-    let workspace = root.join(session).join("workspace");
+    let config = dir.join("config");
+    let workspace = dir.join("workspace");
     std::fs::create_dir_all(&config).map_err(|e| e.to_string())?;
     // Emptied first: a turn whose guard never ran (srelens was killed) left
     // its files here, and a project `.cursor/cli.json` among them would widen
@@ -523,7 +590,7 @@ fn prepare_cursor_turn(
         &workspace.to_string_lossy(),
         resume,
     );
-    Ok(CursorTurn { cmd, workspace, _workspace_guard: workspace_guard })
+    Ok(CursorTurn { cmd, workspace, _workspace_guard: workspace_guard, _claim: claim })
 }
 
 /// Parse the frontend's serialized `AgentKind` tag — the exact camelCase
@@ -552,6 +619,10 @@ fn parse_agent_kind(kind: &str) -> Result<AgentKind, String> {
 /// clean or was cancelled without yielding one, or `None` — meaning CLEAR —
 /// for agents with no id (native, Codex) and for a crashed resume, so a
 /// dead session id can't wedge the conversation in a retry loop.
+///
+/// `conversation` is the saved conversation's chat-history id, when the caller
+/// has one. Cursor keeps its chat under it rather than under `session`, which
+/// is new each time a conversation is reopened (#952).
 #[tauri::command]
 pub async fn chat_send(
     session: String,
@@ -561,6 +632,7 @@ pub async fn chat_send(
     agent_kind: String,
     turn: Option<u64>,
     resume: Option<String>,
+    conversation: Option<String>,
     app: tauri::AppHandle,
     mcp: tauri::State<'_, crate::mcp::McpHttpManager>,
     chats: tauri::State<'_, ChatManager>,
@@ -583,6 +655,11 @@ pub async fn chat_send(
         || !session.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
     {
         return Err(format!("invalid session id {session:?}"));
+    }
+    // The saved conversation's id names a directory too (Cursor's chat, see
+    // `prepare_cursor_turn`). It is a chat-history id, so it is checked as one.
+    if let Some(id) = &conversation {
+        crate::assistant_history::validate_id(id)?;
     }
 
     // The resume id lands in the agent's argv (`--resume <id>`). Real ids are
@@ -649,7 +726,9 @@ pub async fn chat_send(
     let cursor_turn = match kind {
         AgentKind::Cursor => Some(prepare_cursor_turn(
             &cursor_state_dir(&app)?,
+            &chats.cursor_chats,
             &session,
+            conversation.as_deref(),
             &agent_path,
             &prompt,
             &url,
@@ -1364,7 +1443,9 @@ mod tests {
     fn cursor_turn(root: &TempDir, session: &str, resume: Option<&str>) -> CursorTurn {
         prepare_cursor_turn(
             &root.0,
+            &CursorChatsInUse::default(),
             session,
+            None,
             "cursor-agent",
             "in which node that pod is running?",
             "http://127.0.0.1:1/mcp",
@@ -1390,6 +1471,87 @@ mod tests {
             Some("cpu and ram of pod nic-ring-audit-sz2vb"),
             "turn 2's --resume must reach the chat turn 1 kept (#952)"
         );
+    }
+
+    #[test]
+    fn a_cursor_turn_for_a_reopened_conversation_finds_the_chat_it_kept_before() {
+        let root = cursor_test_root();
+        let first =
+            prepare_cursor_turn(&root.0, &CursorChatsInUse::default(), "run-1", Some("conv-1"), "cursor-agent", "hi", "http://127.0.0.1:1/mcp", "t", None)
+                .unwrap();
+        let store = cursor_chat_store(&first.cmd, "chat-1");
+        std::fs::create_dir_all(store.parent().unwrap()).unwrap();
+        std::fs::write(&store, "cpu and ram of pod nic-ring-audit-sz2vb").unwrap();
+        drop(first);
+
+        // Reopened after a restart: the conversation is the same, the session
+        // `chat_send` streams on is new.
+        let reopened = prepare_cursor_turn(
+            &root.0,
+            &CursorChatsInUse::default(),
+            "run-2",
+            Some("conv-1"),
+            "cursor-agent",
+            "and its node?",
+            "http://127.0.0.1:1/mcp",
+            "t",
+            Some("chat-1"),
+        )
+        .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(cursor_chat_store(&reopened.cmd, "chat-1")).ok().as_deref(),
+            Some("cpu and ram of pod nic-ring-audit-sz2vb"),
+            "a reopened conversation's --resume must reach the chat it kept (#952)"
+        );
+    }
+
+    #[test]
+    fn a_conversation_answering_in_one_window_refuses_a_turn_from_another() {
+        let root = cursor_test_root();
+        let in_use = CursorChatsInUse::default();
+        // Each window streams on its own session; the conversation is one.
+        let turn = |session: &str| {
+            prepare_cursor_turn(&root.0, &in_use, session, Some("conv-1"), "cursor-agent", "hi", "http://127.0.0.1:1/mcp", "t", None)
+        };
+        let first = turn("window-1").unwrap();
+
+        assert!(turn("window-2").is_err(), "a second turn would empty the first one's workspace");
+        assert!(first.workspace.join(".cursor").join("mcp.json").exists());
+        drop(first);
+        assert!(turn("window-2").is_ok(), "once the turn has ended, the conversation is free again");
+    }
+
+    #[test]
+    fn a_cursor_chat_outlives_a_restart_only_while_a_saved_conversation_holds_it() {
+        let root = cursor_test_root();
+        let saved =
+            prepare_cursor_turn(&root.0, &CursorChatsInUse::default(), "run-1", Some("saved"), "cursor-agent", "hi", "http://127.0.0.1:1/mcp", "t", None)
+                .unwrap();
+        let store = cursor_chat_store(&saved.cmd, "chat-1");
+        std::fs::create_dir_all(store.parent().unwrap()).unwrap();
+        std::fs::write(&store, "kept").unwrap();
+        drop(saved);
+        // A one-shot turn has no conversation, so nothing saved holds its chat.
+        drop(cursor_turn(&root, "run-1-generation", None));
+
+        sweep_cursor_chats(&root.0, |id| id == "saved");
+
+        assert!(store.exists(), "a saved conversation keeps its chat across a restart (#952)");
+        assert!(!root.0.join("run-1-generation").exists());
+    }
+
+    #[test]
+    fn a_restart_removes_the_workspace_a_killed_cursor_turn_left() {
+        let root = cursor_test_root();
+        let turn =
+            prepare_cursor_turn(&root.0, &CursorChatsInUse::default(), "run-1", Some("saved"), "cursor-agent", "hi", "http://127.0.0.1:1/mcp", "t", None)
+                .unwrap();
+        let workspace = turn.workspace.clone();
+        std::mem::forget(turn); // srelens was killed: the guard never ran
+
+        sweep_cursor_chats(&root.0, |id| id == "saved");
+
+        assert!(!workspace.exists(), "a turn's workspace, bearer token and all, never outlives the run");
     }
 
     #[test]
@@ -1463,7 +1625,7 @@ mod tests {
         // well-formed id there — and the workspace under it gets emptied.
         for session in ["..", ".", "a/../.."] {
             let turn =
-                prepare_cursor_turn(&root, session, "cursor-agent", "hi", "http://127.0.0.1:1/mcp", "turn-token", None);
+                prepare_cursor_turn(&root, &CursorChatsInUse::default(), session, None, "cursor-agent", "hi", "http://127.0.0.1:1/mcp", "turn-token", None);
             assert!(turn.is_err(), "{session:?} must be refused");
         }
         assert!(!base.0.join("config").exists());
@@ -1493,7 +1655,7 @@ mod tests {
         // Not there yet, as on the first Cursor turn after launch.
         let root = base.0.join("cursor-chats");
         let _turn =
-            prepare_cursor_turn(&root, "s1", "cursor-agent", "hi", "http://127.0.0.1:1/mcp", "turn-token", None).unwrap();
+            prepare_cursor_turn(&root, &CursorChatsInUse::default(), "s1", None, "cursor-agent", "hi", "http://127.0.0.1:1/mcp", "turn-token", None).unwrap();
         assert_eq!(std::fs::metadata(&root).unwrap().permissions().mode() & 0o777, 0o700);
     }
 

@@ -623,6 +623,8 @@ describe("AssistantConversation session persistence", () => {
     // Reopening never re-mints a channel session — `startChat` (which only
     // fires when `sessionRef.current` is empty) must not have been called.
     expect(chat.startChat).not.toHaveBeenCalled();
+    // And the turn names the conversation, which Cursor keeps its chat under (#952).
+    expect(vi.mocked(chat.sendChat).mock.calls[0][8]).toBe("old-1");
   });
 
   it("selecting a session loads it and replays its messages read-only into state", async () => {

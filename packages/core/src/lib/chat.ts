@@ -112,6 +112,10 @@ export function startChat(): Promise<string> {
  * agent, Codex) and for a crashed resume (the CLI lost the session; retrying
  * the same id would fail forever). A REJECTION, by contrast, says nothing
  * about the stored id — keep it.
+ *
+ * `conversation` is the id the conversation is saved under (`saveSession`).
+ * Cursor keeps its chat under it, so a reopened conversation, which gets a new
+ * `session`, still resumes (#952). Callers with nothing saved omit it.
  */
 export async function sendChat(
   session: string,
@@ -122,13 +126,23 @@ export async function sendChat(
   agentKind: string = "claude",
   turn: number = 0,
   resume: string | null = null,
+  conversation: string | null = null,
 ): Promise<string | null> {
   const unsub = await subscribe(`chat://${session}`, (payload: unknown) => {
     const e = parseAgentEvent(payload);
     if (e) onEvent(e);
   });
   try {
-    return await invokeCommand("chat_send", { session, prompt, images: images ?? [], agentPath, agentKind, turn, resume });
+    return await invokeCommand("chat_send", {
+      session,
+      prompt,
+      images: images ?? [],
+      agentPath,
+      agentKind,
+      turn,
+      resume,
+      conversation,
+    });
   } finally {
     unsub();
   }
