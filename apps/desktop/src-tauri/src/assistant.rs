@@ -407,6 +407,101 @@ fn write_private_file(path: &std::path::Path, contents: &[u8]) -> std::io::Resul
     }
 }
 
+/// One Cursor turn, ready to spawn: its command, and the workspace to spawn it
+/// in, which is removed (bearer token and all) when the turn ends.
+struct CursorTurn {
+    cmd: srelens_agent::adapter::AgentCommand,
+    workspace: std::path::PathBuf,
+    _workspace_guard: TempDir,
+}
+
+/// Where Cursor's chats live while srelens runs (see `prepare_cursor_turn`):
+/// the per-user cache dir, never the shared temp dir. Cleared at launch and at
+/// quit, so Cursor's chats last no longer than the srelens run that held them.
+fn cursor_state_dir(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
+    use tauri::Manager;
+    Ok(app.path().app_cache_dir().map_err(|e| e.to_string())?.join("cursor-chats"))
+}
+
+/// Remove every Cursor chat srelens kept: at quit, and at launch for what a
+/// crashed or killed run left behind.
+pub fn clear_cursor_state(app: &tauri::AppHandle) {
+    if let Ok(dir) = cursor_state_dir(app) {
+        let _ = std::fs::remove_dir_all(dir);
+    }
+}
+
+/// Lay out a Cursor turn under `root` and build its command.
+///
+/// cursor-agent keeps a chat at `CURSOR_CONFIG_DIR/chats/<md5 of the absolute
+/// --workspace>/<chatId>` (its bundled `paths.js`), so `--resume` finds the
+/// previous turn's chat only when both paths are the same on every turn and
+/// the config dir outlives the turn (#952). Both are fixed per chat session
+/// under `root`, and the config dir is kept between turns.
+///
+/// What it keeps must not loosen the box. Unlike `codex exec resume` (#215),
+/// `--resume` takes every flag a fresh turn does, so `cursor_command` is
+/// unchanged; and nothing a turn leaves carries into the next: the deny-list
+/// is rewritten every turn, and the workspace is emptied before the turn and
+/// removed after it, taking the bearer token with it.
+///
+/// Cursor loads permissions and MCP servers from DIFFERENT places: the
+/// deny-list is read from `CURSOR_CONFIG_DIR/cli-config.json`, but MCP servers
+/// are read from the WORKSPACE's `.cursor/mcp.json` (project config), NOT from
+/// `CURSOR_CONFIG_DIR` (verified live: an mcp.json in CURSOR_CONFIG_DIR is
+/// silently ignored, so the server never connects). So the deny-list goes in
+/// the config dir and the MCP server goes in `<workspace>/.cursor/mcp.json`.
+fn prepare_cursor_turn(
+    root: &std::path::Path,
+    session: &str,
+    agent_path: &str,
+    prompt: &str,
+    url: &str,
+    token: &str,
+    resume: Option<&str>,
+) -> Result<CursorTurn, String> {
+    // Fixed names are safe here, unlike in the shared temp dir (see
+    // `create_private_dir`): `root` is in the user's own cache dir, and
+    // owner-only so no other account can read the chats kept under it.
+    std::fs::create_dir_all(root).map_err(|e| e.to_string())?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(root, std::fs::Permissions::from_mode(0o700)).map_err(|e| e.to_string())?;
+    }
+    let config = root.join(session).join("config");
+    let workspace = root.join(session).join("workspace");
+    std::fs::create_dir_all(&config).map_err(|e| e.to_string())?;
+    // Emptied first: a turn whose guard never ran (srelens was killed) left
+    // its files here, and a project `.cursor/cli.json` among them would widen
+    // the box. Refuse the turn rather than run it in a workspace that can't be.
+    match std::fs::remove_dir_all(&workspace) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e.to_string()),
+        _ => {}
+    }
+    let cursor_dir = workspace.join(".cursor");
+    std::fs::create_dir_all(&cursor_dir).map_err(|e| e.to_string())?;
+    let workspace_guard = TempDir(workspace.clone());
+    std::fs::write(config.join("cli-config.json"), srelens_agent::adapter::cursor_cli_config_json())
+        .map_err(|e| e.to_string())?;
+    // `mcp.json` carries the bearer token. The workspace guard removes it with
+    // the workspace when the turn ends, and the model can't read it back —
+    // the deny-list blocks `Read`.
+    write_private_file(
+        &cursor_dir.join("mcp.json"),
+        srelens_agent::adapter::cursor_mcp_json(url, token).as_bytes(),
+    )
+    .map_err(|e| e.to_string())?;
+    let cmd = srelens_agent::adapter::cursor_command(
+        agent_path,
+        prompt,
+        &config.to_string_lossy(),
+        &workspace.to_string_lossy(),
+        resume,
+    );
+    Ok(CursorTurn { cmd, workspace, _workspace_guard: workspace_guard })
+}
+
 /// Parse the frontend's serialized `AgentKind` tag — the exact camelCase
 /// string serde emits for the enum ("claude"/"codex"/"cursor") — back into
 /// the enum. Errors on anything else rather than silently defaulting: an
@@ -525,9 +620,25 @@ pub async fn chat_send(
     // Removed on every exit from this function. This is also Codex's `-C`
     // workspace (see `codex_command`): genuinely empty, per-turn, and torn
     // down here — that emptiness is the whole box, so this guard must never
-    // be pointed at anything else.
-    let cwd_path = create_private_dir(&dir, &format!("srelens-agent-cwd-{session}"))?;
-    let _cwd_guard = TempDir(cwd_path.clone());
+    // be pointed at anything else. Cursor's is its workspace, laid out with
+    // the rest of its turn by `prepare_cursor_turn`, which guards it.
+    let cursor_turn = match kind {
+        AgentKind::Cursor => Some(prepare_cursor_turn(
+            &cursor_state_dir(&app)?,
+            &session,
+            &agent_path,
+            &prompt,
+            &url,
+            &token,
+            resume.as_deref(),
+        )?),
+        _ => None,
+    };
+    let cwd_path = match &cursor_turn {
+        Some(turn) => turn.workspace.clone(),
+        None => create_private_dir(&dir, &format!("srelens-agent-cwd-{session}"))?,
+    };
+    let _cwd_guard = cursor_turn.is_none().then(|| TempDir(cwd_path.clone()));
 
     // Decode each attached image to its own temp file under the same dir,
     // guarded by a `TempFile` per image so every one is cleaned up on any
@@ -597,13 +708,8 @@ pub async fn chat_send(
     // `Drop` (removing the cleartext-token file) still runs at the end of
     // this function on every exit, exactly like `_cwd_guard` above — a guard
     // built and dropped inside the match arm itself would be gone before the
-    // agent ever read the file. `_cursor_cfg_dir_guard` is Cursor's
-    // equivalent: unlike Claude's single file, Cursor reads a whole config
-    // *directory* (`cli-config.json` + `mcp.json`, the latter carrying the
-    // bearer token) pointed to by `CURSOR_CONFIG_DIR`, so it needs a `TempDir`
-    // guard rather than a `TempFile` one — same reasoning, same lifecycle.
+    // agent ever read the file. Cursor's files are `cursor_turn`'s, above.
     let mut _cfg_guard: Option<TempFile> = None;
-    let mut _cursor_cfg_dir_guard: Option<TempDir> = None;
     let cmd = match kind {
         AgentKind::Claude => {
             let cfg = srelens_agent::adapter::McpConfig::http(&url, &token);
@@ -632,40 +738,10 @@ pub async fn chat_send(
             &cwd_path.to_string_lossy(),
             &image_paths,
         ),
-        AgentKind::Cursor => {
-            // Cursor loads permissions and MCP servers from DIFFERENT places:
-            // the deny-list is read from `CURSOR_CONFIG_DIR/cli-config.json`,
-            // but MCP servers are read from the WORKSPACE's `.cursor/mcp.json`
-            // (project config), NOT from `CURSOR_CONFIG_DIR` (verified live:
-            // an mcp.json in CURSOR_CONFIG_DIR is silently ignored, so the
-            // server never connects). So the deny-list goes in the config dir
-            // and the MCP server goes in `<workspace>/.cursor/mcp.json`.
-            let cursor_cfg_dir = create_private_dir(&dir, &format!("srelens-cursor-cfg-{session}"))?;
-            _cursor_cfg_dir_guard = Some(TempDir(cursor_cfg_dir.clone()));
-            std::fs::write(
-                cursor_cfg_dir.join("cli-config.json"),
-                srelens_agent::adapter::cursor_cli_config_json(),
-            )
-            .map_err(|e| e.to_string())?;
-            // `mcp.json` (carrying the bearer token) goes under the per-turn
-            // empty workspace's `.cursor/`; the `_cwd_guard` TempDir removes
-            // the whole workspace (and this token file) on every exit. The
-            // model can't read it back — the deny-list blocks `Read`.
-            let cursor_dir = cwd_path.join(".cursor");
-            std::fs::create_dir_all(&cursor_dir).map_err(|e| e.to_string())?;
-            write_private_file(
-                &cursor_dir.join("mcp.json"),
-                srelens_agent::adapter::cursor_mcp_json(&url, &token).as_bytes(),
-            )
-            .map_err(|e| e.to_string())?;
-            srelens_agent::adapter::cursor_command(
-                &agent_path,
-                &prompt,
-                &cursor_cfg_dir.to_string_lossy(),
-                &cwd_path.to_string_lossy(),
-                resume.as_deref(),
-            )
-        }
+        AgentKind::Cursor => cursor_turn
+            .as_ref()
+            .map(|turn| turn.cmd.clone())
+            .expect("a Cursor turn is prepared before its command is needed"),
         // Handled by the early return above, before any CLI machinery.
         AgentKind::Srelens => unreachable!("native agent dispatched before the CLI path"),
     };
@@ -1232,6 +1308,139 @@ mod tests {
             assert!(path.exists());
         }
         assert!(!path.exists());
+    }
+
+    /// Where cursor-agent keeps a chat: `$CURSOR_CONFIG_DIR/chats/<md5 of the
+    /// absolute --workspace>/<chatId>/store.db`, per its bundled `paths.js`.
+    /// Read from the command a turn would run. Any function of the workspace
+    /// path stands in for the md5: a workspace that moves moves the store.
+    fn cursor_chat_store(cmd: &srelens_agent::adapter::AgentCommand, chat: &str) -> std::path::PathBuf {
+        let at = cmd.args.iter().position(|a| a == "--workspace").expect("a Cursor turn passes --workspace");
+        let hash: String =
+            cmd.args[at + 1].chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '_' }).collect();
+        cursor_config_dir(cmd).join("chats").join(hash).join(chat).join("store.db")
+    }
+
+    fn cursor_config_dir(cmd: &srelens_agent::adapter::AgentCommand) -> std::path::PathBuf {
+        let (_, dir) = cmd
+            .env
+            .iter()
+            .find(|(k, _)| k == srelens_agent::adapter::CURSOR_CONFIG_DIR_ENV)
+            .expect("a Cursor turn sets CURSOR_CONFIG_DIR");
+        dir.into()
+    }
+
+    /// A root of this test's own for its Cursor turns, removed when it ends.
+    fn cursor_test_root() -> TempDir {
+        let root = std::env::temp_dir().join(format!("srelens-cursor-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        TempDir(root)
+    }
+
+    fn cursor_turn(root: &TempDir, session: &str, resume: Option<&str>) -> CursorTurn {
+        prepare_cursor_turn(
+            &root.0,
+            session,
+            "cursor-agent",
+            "in which node that pod is running?",
+            "http://127.0.0.1:1/mcp",
+            "turn-token",
+            resume,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn a_second_cursor_turn_finds_the_chat_its_first_turn_stored() {
+        let root = cursor_test_root();
+        let first = cursor_turn(&root, "s1", None);
+        // What cursor-agent does during the turn: it keeps the chat.
+        let store = cursor_chat_store(&first.cmd, "chat-1");
+        std::fs::create_dir_all(store.parent().unwrap()).unwrap();
+        std::fs::write(&store, "cpu and ram of pod nic-ring-audit-sz2vb").unwrap();
+        drop(first); // the turn ends
+
+        let second = cursor_turn(&root, "s1", Some("chat-1"));
+        assert_eq!(
+            std::fs::read_to_string(cursor_chat_store(&second.cmd, "chat-1")).ok().as_deref(),
+            Some("cpu and ram of pod nic-ring-audit-sz2vb"),
+            "turn 2's --resume must reach the chat turn 1 kept (#952)"
+        );
+    }
+
+    #[test]
+    fn a_cursor_turn_takes_its_bearer_token_with_it() {
+        let root = cursor_test_root();
+        let turn = cursor_turn(&root, "s1", None);
+        let token_file = turn.workspace.join(".cursor").join("mcp.json");
+        assert!(std::fs::read_to_string(&token_file).unwrap().contains("Bearer turn-token"));
+        drop(turn);
+        assert!(!token_file.exists(), "the turn's bearer token must not outlive it");
+    }
+
+    #[test]
+    fn every_cursor_turn_starts_from_srelens_deny_list() {
+        let root = cursor_test_root();
+        let first = cursor_turn(&root, "s1", None);
+        // Whatever rewrote it during the turn — Cursor itself, say — must not
+        // carry into the next one: this file is the only thing boxing Cursor.
+        std::fs::write(
+            cursor_config_dir(&first.cmd).join("cli-config.json"),
+            r#"{"version":1,"permissions":{"allow":["Shell(**)"],"deny":[]}}"#,
+        )
+        .unwrap();
+        drop(first);
+
+        let second = cursor_turn(&root, "s1", Some("chat-1"));
+        let config: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(cursor_config_dir(&second.cmd).join("cli-config.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(config["permissions"]["allow"], serde_json::json!([]));
+        let deny = config["permissions"]["deny"].as_array().unwrap();
+        for tool in ["Read(**)", "Write(**)", "Shell(**)", "Fetch(**)"] {
+            assert!(deny.contains(&serde_json::json!(tool)), "{tool} must be denied again");
+        }
+    }
+
+    #[test]
+    fn every_cursor_turn_starts_in_an_empty_workspace() {
+        let root = cursor_test_root();
+        let first = cursor_turn(&root, "s1", None);
+        // Left behind by a turn whose cleanup never ran (srelens was killed):
+        // project permissions in the workspace would widen the box.
+        std::fs::write(first.workspace.join(".cursor").join("cli.json"), r#"{"permissions":{"allow":["Shell(**)"]}}"#)
+            .unwrap();
+        std::fs::write(first.workspace.join("notes.txt"), "left over").unwrap();
+        std::mem::forget(first);
+
+        let second = cursor_turn(&root, "s1", Some("chat-1"));
+        assert!(!second.workspace.join(".cursor").join("cli.json").exists());
+        assert!(!second.workspace.join("notes.txt").exists());
+        assert!(second.workspace.join(".cursor").join("mcp.json").exists());
+    }
+
+    #[test]
+    fn two_chats_never_share_cursor_state() {
+        let root = cursor_test_root();
+        let a = cursor_turn(&root, "s1", None);
+        let b = cursor_turn(&root, "s2", None);
+        // Each turn's workspace carries its own bearer token, so a shared one
+        // would hand one chat's gates to the other (#393).
+        assert_ne!(a.workspace, b.workspace);
+        assert_ne!(cursor_config_dir(&a.cmd), cursor_config_dir(&b.cmd));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_root_cursor_chats_are_kept_in_is_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let base = cursor_test_root();
+        // Not there yet, as on the first Cursor turn after launch.
+        let root = base.0.join("cursor-chats");
+        let _turn =
+            prepare_cursor_turn(&root, "s1", "cursor-agent", "hi", "http://127.0.0.1:1/mcp", "turn-token", None).unwrap();
+        assert_eq!(std::fs::metadata(&root).unwrap().permissions().mode() & 0o777, 0o700);
     }
 
     #[test]

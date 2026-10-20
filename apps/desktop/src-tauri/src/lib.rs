@@ -373,6 +373,8 @@ pub fn run() {
             // And log histories (#914) a crashed or killed run left behind;
             // a running srelens holds its own, so they stay.
             srelens_streams::log_spool::sweep_stale(&std::env::temp_dir());
+            // And the Cursor chats it kept (#952): they last one run.
+            assistant::clear_cursor_state(app.handle());
 
             // Use Tauri's managed async runtime — `tokio::spawn` here panics
             // ("no reactor running") because `setup` runs before/outside a Tokio
@@ -611,6 +613,7 @@ pub fn run() {
                 // The log histories go while the node pods are being deleted,
                 // so removing them can't delay or skip that (#734).
                 quit_logs(app);
+                assistant::clear_cursor_state(app);
                 let deadline =
                     node_shells::quit_deadline(srelens_kube::connect::request_timeout());
                 if finished.recv_timeout(deadline).is_err() {
