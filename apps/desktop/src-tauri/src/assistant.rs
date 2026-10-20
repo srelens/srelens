@@ -460,6 +460,16 @@ fn prepare_cursor_turn(
     token: &str,
     resume: Option<&str>,
 ) -> Result<CursorTurn, String> {
+    // `session` names a directory under `root`, and the workspace in it is
+    // emptied below: one plain component, never `.` or `..`, which pass the
+    // charset `chat_send` checks.
+    let one_name = matches!(
+        std::path::Path::new(session).components().collect::<Vec<_>>()[..],
+        [std::path::Component::Normal(_)]
+    );
+    if !one_name {
+        return Err(format!("invalid session id {session:?}"));
+    }
     // Fixed names are safe here, unlike in the shared temp dir (see
     // `create_private_dir`): `root` is in the user's own cache dir, and
     // owner-only so no other account can read the chats kept under it.
@@ -1429,6 +1439,21 @@ mod tests {
         // would hand one chat's gates to the other (#393).
         assert_ne!(a.workspace, b.workspace);
         assert_ne!(cursor_config_dir(&a.cmd), cursor_config_dir(&b.cmd));
+    }
+
+    #[test]
+    fn a_session_id_cannot_take_a_cursor_turn_out_of_its_root() {
+        let base = cursor_test_root();
+        let root = base.0.join("cursor-chats");
+        // `chat_send` lets `.` through its session-id charset, so `..` is a
+        // well-formed id there — and the workspace under it gets emptied.
+        for session in ["..", ".", "a/../.."] {
+            let turn =
+                prepare_cursor_turn(&root, session, "cursor-agent", "hi", "http://127.0.0.1:1/mcp", "turn-token", None);
+            assert!(turn.is_err(), "{session:?} must be refused");
+        }
+        assert!(!base.0.join("config").exists());
+        assert!(!base.0.join("workspace").exists());
     }
 
     #[cfg(unix)]
