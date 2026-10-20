@@ -424,10 +424,24 @@ fn cursor_state_dir(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String
 }
 
 /// Remove every Cursor chat srelens kept: at quit, and at launch for what a
-/// crashed or killed run left behind.
+/// crashed or killed run left behind. They hold prompts and tool results, so
+/// a failure is logged: it is why they are still on disk.
 pub fn clear_cursor_state(app: &tauri::AppHandle) {
-    if let Ok(dir) = cursor_state_dir(app) {
-        let _ = std::fs::remove_dir_all(dir);
+    match cursor_state_dir(app) {
+        Ok(dir) => {
+            if let Err(error) = remove_cursor_chats(&dir) {
+                log::warn!("could not delete the Cursor chats in {}: {error}", dir.display());
+            }
+        }
+        Err(error) => log::warn!("could not find the Cursor chats to delete them: {error}"),
+    }
+}
+
+/// `remove_dir_all`, where chats already gone are not a failure.
+fn remove_cursor_chats(dir: &std::path::Path) -> std::io::Result<()> {
+    match std::fs::remove_dir_all(dir) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        result => result,
     }
 }
 
@@ -1454,6 +1468,21 @@ mod tests {
         }
         assert!(!base.0.join("config").exists());
         assert!(!base.0.join("workspace").exists());
+    }
+
+    #[test]
+    fn cursor_chats_already_gone_are_not_a_failure_to_remove_them() {
+        let base = cursor_test_root();
+        assert!(remove_cursor_chats(&base.0.join("cursor-chats")).is_ok());
+    }
+
+    #[test]
+    fn cursor_chats_that_could_not_be_removed_are_reported() {
+        let base = cursor_test_root();
+        // Not a directory, so it can't be removed as one.
+        let file = base.0.join("cursor-chats");
+        std::fs::write(&file, "kept").unwrap();
+        assert!(remove_cursor_chats(&file).is_err());
     }
 
     #[cfg(unix)]
