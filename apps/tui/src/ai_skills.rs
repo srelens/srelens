@@ -2,135 +2,186 @@
 //!
 //! Provides battle-tested Kubernetes diagnostic playbooks (matching GUI assistant_skills.rs)
 //! with interactive slash-command autocomplete, zero-argument discovery fallbacks,
-//! and contextual resource prompts.
+//! and contextual resource prompts. Also manages disk-backed user custom skills
+//! stored in `~/.config/srelens/assistant/skills/*.md`.
 
-use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
+use std::borrow::Cow;
+use std::path::{Path, PathBuf};
+
+/// A full skill: its instructions plus the metadata used to pick it.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct Skill {
+    pub name: String,
+    pub description: String,
+    pub body: String,
+}
+
+/// Picker metadata only — everything but `body`, matching GUI assistant_skills.rs.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SkillMeta {
+    pub name: String,
+    pub description: String,
+    #[serde(default)]
+    pub builtin: bool,
+    #[serde(default)]
+    pub path: Option<String>,
+    #[serde(default)]
+    pub overrides_builtin: bool,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SkillDef {
-    pub name: &'static str,
-    pub command: &'static str,
+    pub name: Cow<'static, str>,
+    pub command: Cow<'static, str>,
     pub aliases: &'static [&'static str],
-    pub description: &'static str,
-    pub target_kind: Option<&'static str>,
-    pub instructions: &'static str,
+    pub description: Cow<'static, str>,
+    pub target_kind: Option<Cow<'static, str>>,
+    pub instructions: Cow<'static, str>,
     pub is_utility: bool,
+    pub is_user_defined: bool,
 }
 
 impl SkillDef {
-    pub fn target_placeholder(&self) -> &'static str {
-        self.target_kind.unwrap_or("")
+    pub fn target_placeholder(&self) -> &str {
+        self.target_kind.as_deref().unwrap_or("")
+    }
+}
+
+const fn builtin_playbook(
+    name: &'static str,
+    command: &'static str,
+    aliases: &'static [&'static str],
+    description: &'static str,
+    target_kind: Option<&'static str>,
+    instructions: &'static str,
+    is_utility: bool,
+) -> SkillDef {
+    let target = match target_kind {
+        Some(t) => Some(Cow::Borrowed(t)),
+        None => None,
+    };
+    SkillDef {
+        name: Cow::Borrowed(name),
+        command: Cow::Borrowed(command),
+        aliases,
+        description: Cow::Borrowed(description),
+        target_kind: target,
+        instructions: Cow::Borrowed(instructions),
+        is_utility,
+        is_user_defined: false,
     }
 }
 
 pub const BUILTIN_PLAYBOOKS: &[SkillDef] = &[
-    SkillDef {
-        name: "crashloop-triage",
-        command: "crashloop",
-        aliases: &["crash", "crashloop-triage"],
-        description: "Triage pod stuck in CrashLoopBackOff (previous logs, exit code, events)",
-        target_kind: Some("Pod"),
-        instructions: "When a pod keeps restarting (CrashLoopBackOff):\n\
+    builtin_playbook(
+        "crashloop-triage",
+        "crashloop",
+        &["crash", "crashloop-triage"],
+        "Triage pod stuck in CrashLoopBackOff (previous logs, exit code, events)",
+        Some("Pod"),
+        "When a pod keeps restarting (CrashLoopBackOff):\n\
 1. Read the pod's recent events for the restart reason.\n\
 2. Fetch the PREVIOUS container's logs (the crashed instance, not the live one) — that's where the real error is.\n\
 3. Check the container's last exit code and termination reason (e.g. Error vs OOMKilled).\n\
 4. Compare the container's resource requests/limits against its actual usage.\n\
 5. Check recent rollout history for a bad image or config change.\n\n\
 Report the most likely root cause and one concrete next remediation step.",
-        is_utility: false,
-    },
-    SkillDef {
-        name: "pending-pod",
-        command: "pending",
-        aliases: &["pend", "pending-pod", "unschedulable"],
-        description: "Diagnose pod stuck in Pending or unschedulable (capacity, taints, PVCs)",
-        target_kind: Some("Pod"),
-        instructions: "When a pod stays in Pending status:\n\
+        false,
+    ),
+    builtin_playbook(
+        "pending-pod",
+        "pending",
+        &["pend", "pending-pod", "unschedulable"],
+        "Diagnose pod stuck in Pending or unschedulable (capacity, taints, PVCs)",
+        Some("Pod"),
+        "When a pod stays in Pending status:\n\
 1. Read the pod's events — the scheduler explains why (Insufficient cpu/memory, no nodes match, taints, volume binding).\n\
 2. Check node allocatable vs requested capacity across the cluster.\n\
 3. Check the pod's nodeSelector, affinity, and tolerations against the nodes' labels and taints.\n\
 4. If it mounts a PVC, check the PVC is Bound and its StorageClass can provision volume.\n\n\
 Report which constraint blocks scheduling and how to relieve it.",
-        is_utility: false,
-    },
-    SkillDef {
-        name: "oomkilled",
-        command: "oom",
-        aliases: &["oomkilled", "memory-leak"],
-        description: "Investigate container OOMKilled events and memory limit sizing",
-        target_kind: Some("Pod"),
-        instructions: "When a container is being OOMKilled:\n\
+        false,
+    ),
+    builtin_playbook(
+        "oomkilled",
+        "oom",
+        &["oomkilled", "memory-leak"],
+        "Investigate container OOMKilled events and memory limit sizing",
+        Some("Pod"),
+        "When a container is being OOMKilled:\n\
 1. Confirm the OOMKill from the pod's last-state and events.\n\
 2. Compare the container's memory limit against its working-set usage over time.\n\
 3. Check whether the limit is set too low, or usage is genuinely growing (memory leak).\n\
 4. Look for a recent image/config change that raised memory use.\n\n\
 Report whether to raise the limit or fix the workload, with a suggested memory value.",
-        is_utility: false,
-    },
-    SkillDef {
-        name: "node-pressure",
-        command: "nodepressure",
-        aliases: &["node", "node-pressure", "drain-check"],
-        description: "Investigate node under CPU / Memory / Disk pressure or NotReady",
-        target_kind: Some("Node"),
-        instructions: "When a node is under pressure or NotReady:\n\
+        false,
+    ),
+    builtin_playbook(
+        "node-pressure",
+        "nodepressure",
+        &["node", "node-pressure", "drain-check"],
+        "Investigate node under CPU / Memory / Disk pressure or NotReady",
+        Some("Node"),
+        "When a node is under pressure or NotReady:\n\
 1. Check the node's conditions (MemoryPressure, DiskPressure, PIDPressure) and events.\n\
 2. Review the node's allocatable capacity vs the sum of pod requests and actual usage.\n\
 3. Find the top resource-consuming pods on that node.\n\
 4. Check for evicted pods as a symptom.\n\n\
 Report the pressure source and whether to rebalance, scale, or cordon/drain the node.",
-        is_utility: false,
-    },
-    SkillDef {
-        name: "service-no-endpoints",
-        command: "endpoints",
-        aliases: &["service-no-endpoints", "no-endpoints", "svc"],
-        description: "Debug Service that has no ready endpoints or connection refused",
-        target_kind: Some("Service"),
-        instructions: "When a Service is unreachable or has zero endpoints:\n\
+        false,
+    ),
+    builtin_playbook(
+        "service-no-endpoints",
+        "endpoints",
+        &["service-no-endpoints", "no-endpoints", "svc"],
+        "Debug Service that has no ready endpoints or connection refused",
+        Some("Service"),
+        "When a Service is unreachable or has zero endpoints:\n\
 1. Compare the Service's selector against the target pods' labels — a mismatch yields zero endpoints.\n\
 2. Check the backing pods are Ready (failing readiness probes are excluded from endpoints).\n\
 3. Confirm the Service targetPort matches the container's listening port.\n\
 4. Inspect the EndpointSlices for the Service.\n\n\
 Report why endpoints are empty and provide the exact fix.",
-        is_utility: false,
-    },
-    SkillDef {
-        name: "rollout-stuck",
-        command: "rollout",
-        aliases: &["rollout-stuck", "stuck-deploy"],
-        description: "Diagnose Deployment rollout that is stalled or failing progression",
-        target_kind: Some("Deployment"),
-        instructions: "When a Deployment rollout is stuck:\n\
+        false,
+    ),
+    builtin_playbook(
+        "rollout-stuck",
+        "rollout",
+        &["rollout-stuck", "stuck-deploy"],
+        "Diagnose Deployment rollout that is stalled or failing progression",
+        Some("Deployment"),
+        "When a Deployment rollout is stuck:\n\
 1. Check the Deployment's status conditions (Progressing, Available) and the active ReplicaSets.\n\
 2. Inspect the new pods — ImagePullBackOff, CrashLoopBackOff, or failing readiness all stall a rollout.\n\
 3. Verify replica counts: desired vs updated vs available.\n\
 4. Check events for quota limits, scheduling blockers, or probe failures.\n\n\
 Report what blocks the rollout and whether to fix forward or roll back.",
-        is_utility: false,
-    },
-    SkillDef {
-        name: "cluster-summary",
-        command: "summarise",
-        aliases: &["summary", "cluster-summary", "health"],
-        description: "Generate an executive SRE health and incident briefing for the cluster",
-        target_kind: None,
-        instructions: "Perform an executive SRE health assessment of the active cluster:\n\
+        false,
+    ),
+    builtin_playbook(
+        "cluster-summary",
+        "summarise",
+        &["summary", "cluster-summary", "health"],
+        "Generate an executive SRE health and incident briefing for the cluster",
+        None,
+        "Perform an executive SRE health assessment of the active cluster:\n\
 1. Query cluster-wide pod counts and identify all pods in non-Running phases (CrashLoop, Pending, Error, Evicted).\n\
 2. Inspect nodes for any NotReady states or pressure conditions (Memory/Disk pressure).\n\
 3. Review cluster warning events from the last 30 minutes to identify emerging incident patterns.\n\
 4. Check for stalled Deployments or StatefulSets with unmet replica requirements.\n\n\
 Synthesize the findings into an executive briefing with high-priority risks and suggested remediation actions.",
-        is_utility: false,
-    },
-    SkillDef {
-        name: "argo-triage",
-        command: "argo",
-        aliases: &["argo-triage", "argocd", "progressing"],
-        description: "Diagnose ArgoCD application stuck in Progressing, Degraded, or OutOfSync",
-        target_kind: Some("Application"),
-        instructions: "When an ArgoCD application is stuck in Progressing, Degraded, or failing to sync:\n\
+        false,
+    ),
+    builtin_playbook(
+        "argo-triage",
+        "argo",
+        &["argo-triage", "argocd", "progressing"],
+        "Diagnose ArgoCD application stuck in Progressing, Degraded, or OutOfSync",
+        Some("Application"),
+        "When an ArgoCD application is stuck in Progressing, Degraded, or failing to sync:\n\
 1. Check the Application's sync status, health status, and health message.\n\
 2. Inspect the operation phase and error message of the last sync.\n\
 3. Identify which specific child resources are Degraded, Progressing, or Missing.\n\
@@ -138,54 +189,485 @@ Synthesize the findings into an executive briefing with high-priority risks and 
 5. Inspect SyncHook jobs or PreSync/PostSync failures.\n\
 6. Check the target namespace and cluster destination connectivity.\n\n\
 Report the root cause why the application is stuck or degraded and provide concrete remediation steps (sync flags, manifest fix, or controller action).",
-        is_utility: false,
-    },
-    SkillDef {
-        name: "clear-chat",
-        command: "clear",
-        aliases: &["cls", "reset"],
-        description: "Clear conversation history and reset assistant state",
-        target_kind: None,
-        instructions: "",
-        is_utility: true,
-    },
-    SkillDef {
-        name: "save-chat",
-        command: "save",
-        aliases: &["export"],
-        description: "Export current conversation to a markdown file",
-        target_kind: None,
-        instructions: "",
-        is_utility: true,
-    },
-    SkillDef {
-        name: "ai-settings",
-        command: "settings",
-        aliases: &["config", "model"],
-        description: "Open AI model, API key, and provider configuration",
-        target_kind: None,
-        instructions: "",
-        is_utility: true,
-    },
-    SkillDef {
-        name: "caveman",
-        command: "caveman",
-        aliases: &["cave", "terse"],
-        description: "Set ultra-compressed caveman mode to cut token usage ~75% (lite|full|ultra|wenyan-*|off)",
-        target_kind: Some("lite|full|ultra|wenyan|off"),
-        instructions: "",
-        is_utility: true,
-    },
+        false,
+    ),
+    builtin_playbook(
+        "clear-chat",
+        "clear",
+        &["cls", "reset"],
+        "Clear conversation history and reset assistant state",
+        None,
+        "",
+        true,
+    ),
+    builtin_playbook(
+        "save-chat",
+        "save",
+        &["export"],
+        "Export current conversation to a markdown file",
+        None,
+        "",
+        true,
+    ),
+    builtin_playbook(
+        "ai-settings",
+        "settings",
+        &["config", "model"],
+        "Open AI model, API key, and provider configuration",
+        None,
+        "",
+        true,
+    ),
+    builtin_playbook(
+        "caveman",
+        "caveman",
+        &["cave", "terse"],
+        "Set ultra-compressed caveman mode to cut token usage ~75% (lite|full|ultra|wenyan-*|off)",
+        Some("lite|full|ultra|wenyan|off"),
+        "",
+        true,
+    ),
 ];
 
-/// Finds all slash commands matching the user's current input.
-/// Input starts with `/`.
-pub fn match_slash_commands(input: &str) -> Vec<&'static SkillDef> {
+// ============================================================================
+// Disk-backed User Skills Management (GUI Parity)
+// ============================================================================
+
+/// Reject any name that isn't `^[A-Za-z0-9._-]+$` — in particular, one
+/// containing `/` or `\`, so a skill can never resolve outside `skills_dir`
+/// via a crafted name like `../evil` or `a/b`.
+pub fn validate_name(name: &str) -> Result<(), String> {
+    let valid = !name.is_empty()
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'));
+    if valid {
+        Ok(())
+    } else {
+        Err(format!(
+            "invalid skill name {name:?}: must match ^[A-Za-z0-9._-]+$ (no `/`, `\\`, or other separators)"
+        ))
+    }
+}
+
+/// Parses a skill from markdown text. Supports YAML frontmatter:
+/// ```text
+/// ---
+/// name: my-skill
+/// description: Quick description
+/// ---
+/// <body>
+/// ```
+/// If frontmatter is missing or fields are empty, falls back to `fallback_name` and `fallback_desc`.
+pub fn parse_skill_content(
+    text: &str,
+    fallback_name: Option<&str>,
+    fallback_desc: Option<&str>,
+) -> Result<Skill, String> {
+    let normalized = text.replace("\r\n", "\n");
+
+    let (mut name, mut description, body) = if let Some(rest) = normalized.strip_prefix("---\n") {
+        if let Some((header, body_content)) = rest.split_once("\n---\n") {
+            let mut parsed_name = None;
+            let mut parsed_desc = None;
+            for line in header.lines() {
+                if let Some(val) = line.strip_prefix("name:") {
+                    parsed_name = Some(val.trim().to_string());
+                } else if let Some(val) = line.strip_prefix("description:") {
+                    parsed_desc = Some(val.trim().to_string());
+                }
+            }
+            (parsed_name, parsed_desc, body_content.to_string())
+        } else {
+            (None, None, normalized.clone())
+        }
+    } else {
+        (None, None, normalized.clone())
+    };
+
+    if name.as_deref().unwrap_or("").is_empty() {
+        if let Some(fb) = fallback_name {
+            name = Some(fb.to_string());
+        }
+    }
+
+    if description.as_deref().unwrap_or("").is_empty() {
+        if let Some(fb) = fallback_desc {
+            description = Some(fb.to_string());
+        }
+    }
+
+    let final_name = name.ok_or_else(|| {
+        "skill name is required (specify frontmatter `name:` or pass [NAME] on the command line)"
+            .to_string()
+    })?;
+
+    validate_name(&final_name)?;
+
+    Ok(Skill {
+        name: final_name,
+        description: description.unwrap_or_default(),
+        body,
+    })
+}
+
+/// Strict parser for files already on disk: requires valid frontmatter header.
+pub fn parse_skill(text: &str) -> Result<Skill, String> {
+    let normalized = text.replace("\r\n", "\n");
+    let rest = normalized
+        .strip_prefix("---\n")
+        .ok_or("missing front matter: the file must start with `---`")?;
+    let (header, body) = rest
+        .split_once("\n---\n")
+        .ok_or("unterminated front matter: no closing `---` line")?;
+
+    let mut name = None;
+    let mut description = None;
+    for line in header.lines() {
+        if let Some(val) = line.strip_prefix("name:") {
+            name = Some(val.trim().to_string());
+        } else if let Some(val) = line.strip_prefix("description:") {
+            description = Some(val.trim().to_string());
+        }
+    }
+
+    let name = match name {
+        Some(n) if !n.is_empty() => n,
+        _ => return Err("front matter `name` must not be empty".to_string()),
+    };
+    validate_name(&name)?;
+
+    Ok(Skill {
+        name,
+        description: description.unwrap_or_default(),
+        body: body.to_string(),
+    })
+}
+
+/// Renders a skill back to its on-disk markdown format with frontmatter.
+pub fn to_markdown(skill: &Skill) -> String {
+    format!(
+        "---\nname: {}\ndescription: {}\n---\n{}",
+        skill.name, skill.description, skill.body
+    )
+}
+
+pub fn skill_path(dir: &Path, name: &str) -> PathBuf {
+    dir.join(format!("{name}.md"))
+}
+
+pub fn skill_files(dir: &Path) -> Vec<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut files: Vec<PathBuf> = entries
+        .filter_map(|entry| entry.ok().map(|e| e.path()))
+        .filter(|path| {
+            path.extension()
+                .is_some_and(|e| e.eq_ignore_ascii_case("md"))
+        })
+        .collect();
+    files.sort();
+    files
+}
+
+pub fn user_skill_file(dir: &Path, name: &str) -> Option<PathBuf> {
+    let named = skill_path(dir, name);
+    if named.exists() {
+        return Some(named);
+    }
+    skill_files(dir).into_iter().find(|path| {
+        std::fs::read_to_string(path)
+            .ok()
+            .and_then(|raw| parse_skill(&raw).ok())
+            .is_some_and(|skill| skill.name == name)
+    })
+}
+
+pub fn write_skill_atomic(dir: &Path, skill: &Skill) -> Result<PathBuf, String> {
+    validate_name(&skill.name)?;
+    std::fs::create_dir_all(dir).map_err(|e| format!("could not create {}: {e}", dir.display()))?;
+    let path = skill_path(dir, &skill.name);
+    let tmp = dir.join(format!("{}.md.tmp", skill.name));
+    std::fs::write(&tmp, to_markdown(skill))
+        .map_err(|e| format!("could not write {}: {e}", tmp.display()))?;
+    std::fs::rename(&tmp, &path)
+        .map_err(|e| format!("could not finalize {}: {e}", path.display()))?;
+    Ok(path)
+}
+
+pub fn read_skill(dir: &Path, name: &str) -> Result<Skill, String> {
+    validate_name(name)?;
+    let path =
+        user_skill_file(dir, name).ok_or_else(|| format!("no skill found named {name:?}"))?;
+    let raw =
+        std::fs::read_to_string(&path).map_err(|_| format!("no skill found named {name:?}"))?;
+    parse_skill(&raw)
+}
+
+pub fn delete_skill(dir: &Path, name: &str) -> Result<bool, String> {
+    validate_name(name)?;
+    let Some(path) = user_skill_file(dir, name) else {
+        return Ok(false);
+    };
+    match std::fs::remove_file(&path) {
+        Ok(()) => Ok(true),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(e) => Err(format!("could not delete {}: {e}", path.display())),
+    }
+}
+
+pub fn list_skills(dir: &Path) -> Result<Vec<SkillMeta>, String> {
+    match std::fs::read_dir(dir) {
+        Ok(_) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(format!("could not read {}: {e}", dir.display())),
+    }
+
+    let mut metas = Vec::new();
+    for path in skill_files(dir) {
+        let Ok(raw) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let Ok(skill) = parse_skill(&raw) else {
+            continue;
+        };
+        metas.push(SkillMeta {
+            name: skill.name,
+            description: skill.description,
+            builtin: false,
+            path: Some(path.display().to_string()),
+            overrides_builtin: false,
+        });
+    }
+    metas.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(metas)
+}
+
+/// Shipped default diagnostic skills (matching GUI assistant_skills.rs).
+pub fn builtin_skills() -> Vec<Skill> {
+    BUILTIN_PLAYBOOKS
+        .iter()
+        .filter(|s| !s.is_utility)
+        .map(|s| Skill {
+            name: s.name.to_string(),
+            description: s.description.to_string(),
+            body: s.instructions.to_string(),
+        })
+        .collect()
+}
+
+/// List all skills: default built-ins merged with user files.
+pub fn list_all_skills(dir: &Path) -> Result<Vec<SkillMeta>, String> {
+    use std::collections::{BTreeMap, BTreeSet};
+    let mut by_name: BTreeMap<String, SkillMeta> = BTreeMap::new();
+    for b in builtin_skills() {
+        by_name.insert(
+            b.name.clone(),
+            SkillMeta {
+                name: b.name,
+                description: b.description,
+                builtin: true,
+                path: None,
+                overrides_builtin: false,
+            },
+        );
+    }
+    let shipped: BTreeSet<String> = by_name.keys().cloned().collect();
+    let mut from_user: BTreeSet<String> = BTreeSet::new();
+    for m in list_skills(dir)? {
+        if !from_user.insert(m.name.clone()) {
+            let named = skill_path(dir, &m.name).display().to_string();
+            if m.path.as_deref() != Some(named.as_str()) {
+                continue;
+            }
+        }
+        let overrides_builtin = shipped.contains(&m.name);
+        by_name.insert(
+            m.name.clone(),
+            SkillMeta {
+                overrides_builtin,
+                ..m
+            },
+        );
+    }
+    Ok(by_name.into_values().collect())
+}
+
+pub fn load_skill_or_builtin(dir: &Path, name: &str) -> Result<Skill, String> {
+    validate_name(name)?;
+    if user_skill_file(dir, name).is_some() {
+        return read_skill(dir, name);
+    }
+    builtin_skills()
+        .into_iter()
+        .find(|s| s.name == name)
+        .ok_or_else(|| format!("no skill found named {name:?}"))
+}
+
+pub fn read_user_skills(dir: &Path) -> Vec<Skill> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut skills = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path
+            .extension()
+            .is_some_and(|e| e.eq_ignore_ascii_case("md"))
+        {
+            if let Ok(raw) = std::fs::read_to_string(&path) {
+                if let Ok(skill) = parse_skill(&raw) {
+                    skills.push(skill);
+                }
+            }
+        }
+    }
+    skills.sort_by(|a, b| a.name.cmp(&b.name));
+    skills
+}
+
+/// Scans `~/.config/srelens/assistant/skills/*.md` for user-defined skills.
+pub fn load_user_skills_dir() -> PathBuf {
+    dirs::config_dir()
+        .map(|d| d.join("srelens").join("assistant").join("skills"))
+        .unwrap_or_else(|| PathBuf::from(".srelens/skills"))
+}
+
+// ============================================================================
+// Remote Ingestion & GitHub Translation
+// ============================================================================
+
+/// Translates GitHub web blob URLs into direct raw URLs.
+/// Example: `https://github.com/owner/repo/blob/main/skills/triage.md`
+/// -> `https://raw.githubusercontent.com/owner/repo/main/skills/triage.md`
+pub fn resolve_fetch_url(url: &str) -> String {
+    let trimmed = url.trim();
+    if let Some(rest) = trimmed
+        .strip_prefix("https://github.com/")
+        .or_else(|| trimmed.strip_prefix("http://github.com/"))
+    {
+        let (path_part, query_part) = match rest.split_once('?') {
+            Some((p, q)) => (p, Some(q)),
+            None => (rest, None),
+        };
+        let parts: Vec<&str> = path_part.split('/').collect();
+        // parts: [owner, repo, "blob", git_ref, ...rest_path]
+        if parts.len() >= 5 && parts[2] == "blob" {
+            let owner = parts[0];
+            let repo = parts[1];
+            let git_ref = parts[3];
+            let subpath = parts[4..].join("/");
+            let mut resolved =
+                format!("https://raw.githubusercontent.com/{owner}/{repo}/{git_ref}/{subpath}");
+            if let Some(q) = query_part {
+                resolved.push('?');
+                resolved.push_str(q);
+            }
+            return resolved;
+        }
+    }
+    trimmed.to_string()
+}
+
+/// Derives a fallback skill name from a URL's filename stem.
+pub fn fallback_name_from_url(url: &str) -> Option<String> {
+    let path = url.split('?').next().unwrap_or(url);
+    let path = path.split('#').next().unwrap_or(path);
+    let last_segment = path.trim_end_matches('/').rsplit('/').next()?;
+    let stem = last_segment.strip_suffix(".md").unwrap_or(last_segment);
+    if stem.is_empty() {
+        None
+    } else {
+        Some(stem.to_string())
+    }
+}
+
+/// Fetches skill markdown from an HTTP/HTTPS URL, translating GitHub blob URLs
+/// and passing `GITHUB_TOKEN` / `GH_TOKEN` authentication if available.
+pub fn fetch_skill_url(url: &str) -> Result<String, String> {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let resolved_url = resolve_fetch_url(url);
+
+    let client = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .user_agent(concat!("srectl/", env!("CARGO_PKG_VERSION")))
+        .build()
+        .map_err(|e| format!("could not initialize HTTP client: {e}"))?;
+
+    let mut req = client.get(&resolved_url);
+
+    if resolved_url.contains("github.com") || resolved_url.contains("githubusercontent.com") {
+        if let Ok(token) = std::env::var("GITHUB_TOKEN").or_else(|_| std::env::var("GH_TOKEN")) {
+            let trimmed = token.trim();
+            if !trimmed.is_empty() {
+                req = req.header("Authorization", format!("Bearer {trimmed}"));
+            }
+        }
+    }
+
+    let res = req
+        .send()
+        .map_err(|e| format!("failed to fetch from {resolved_url}: {e}"))?;
+    if !res.status().is_success() {
+        return Err(format!(
+            "failed to fetch skill from {resolved_url}: HTTP {}",
+            res.status()
+        ));
+    }
+
+    res.text()
+        .map_err(|e| format!("failed to read response body from {resolved_url}: {e}"))
+}
+
+// ============================================================================
+// Interactive TUI Slash Command Resolution & Dynamic Autocomplete
+// ============================================================================
+
+/// Loads all available playbooks, merging built-in playbooks with user-defined
+/// skills from `dir`. User playbooks override built-in playbooks of the same name.
+pub fn load_all_playbooks_from(dir: &Path) -> Vec<SkillDef> {
+    let mut playbooks: Vec<SkillDef> = BUILTIN_PLAYBOOKS.to_vec();
+
+    let user_skills = read_user_skills(dir);
+    for skill in user_skills {
+        if let Some(existing) = playbooks.iter_mut().find(|p| p.name == skill.name) {
+            existing.description = Cow::Owned(skill.description);
+            existing.instructions = Cow::Owned(skill.body);
+            existing.is_user_defined = true;
+        } else {
+            playbooks.push(SkillDef {
+                name: Cow::Owned(skill.name.clone()),
+                command: Cow::Owned(skill.name.clone()),
+                aliases: &[],
+                description: Cow::Owned(skill.description),
+                target_kind: None,
+                instructions: Cow::Owned(skill.body),
+                is_utility: false,
+                is_user_defined: true,
+            });
+        }
+    }
+
+    playbooks
+}
+
+pub fn load_all_playbooks() -> Vec<SkillDef> {
+    load_all_playbooks_from(&load_user_skills_dir())
+}
+
+/// Finds all slash commands matching the user's current input, dynamically
+/// discovering both built-in playbooks and custom user skills.
+pub fn match_slash_commands(input: &str) -> Vec<SkillDef> {
+    match_slash_commands_from(input, &load_user_skills_dir())
+}
+
+pub fn match_slash_commands_from(input: &str, dir: &Path) -> Vec<SkillDef> {
     let clean = input.trim_start_matches('/');
     let query = clean.split_whitespace().next().unwrap_or("").to_lowercase();
 
-    BUILTIN_PLAYBOOKS
-        .iter()
+    load_all_playbooks_from(dir)
+        .into_iter()
         .filter(|s| {
             if query.is_empty() {
                 return true;
@@ -204,7 +686,24 @@ pub fn expand_slash_command(
     active_context: &str,
     active_namespace: &str,
 ) -> Option<String> {
-    let skill = BUILTIN_PLAYBOOKS.iter().find(|s| {
+    expand_slash_command_from(
+        command_name,
+        target_arg,
+        active_context,
+        active_namespace,
+        &load_user_skills_dir(),
+    )
+}
+
+pub fn expand_slash_command_from(
+    command_name: &str,
+    target_arg: Option<&str>,
+    active_context: &str,
+    active_namespace: &str,
+    dir: &Path,
+) -> Option<String> {
+    let playbooks = load_all_playbooks_from(dir);
+    let skill = playbooks.iter().find(|s| {
         s.command == command_name
             || s.aliases.iter().any(|a| *a == command_name)
             || s.name == command_name
@@ -222,10 +721,11 @@ pub fn expand_slash_command(
 
     let target_statement = match target_arg {
         Some(target) => {
-            let kind = skill.target_kind.unwrap_or("resource");
+            let placeholder = skill.target_placeholder();
+            let kind = if placeholder.is_empty() { "resource" } else { placeholder };
             format!("Focus on {} '{}' in {}.", kind, target, ns_desc)
         }
-        None => match skill.target_kind {
+        None => match skill.target_kind.as_deref() {
             Some("Pod") => format!("Scan {} for any pods experiencing this issue and triage them.", ns_desc),
             Some("Node") => "Scan the cluster for any nodes experiencing pressure or unreadiness and triage them.".to_string(),
             Some("Deployment") => format!("Scan {} for any stalled or degraded rollouts and triage them.", ns_desc),
@@ -237,15 +737,15 @@ pub fn expand_slash_command(
 
     let prompt = format!(
         "Playbook: {}\nContext: Cluster '{}', {}\n{}\n\nGuidelines:\n{}",
-        skill.description,
-        active_context,
-        ns_desc,
-        target_statement,
-        skill.instructions
+        skill.description, active_context, ns_desc, target_statement, skill.instructions
     );
 
     Some(prompt)
 }
+
+// ============================================================================
+// Caveman Mode
+// ============================================================================
 
 /// Supported caveman compression levels matching SKILL.md.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -278,7 +778,9 @@ impl CavemanLevel {
             "full" | "" => Some(CavemanLevel::Full),
             "ultra" => Some(CavemanLevel::Ultra),
             "wenyan-lite" | "wenyan_lite" | "wenyanlite" => Some(CavemanLevel::WenyanLite),
-            "wenyan-full" | "wenyan_full" | "wenyanfull" | "wenyan" => Some(CavemanLevel::WenyanFull),
+            "wenyan-full" | "wenyan_full" | "wenyanfull" | "wenyan" => {
+                Some(CavemanLevel::WenyanFull)
+            }
             "wenyan-ultra" | "wenyan_ultra" | "wenyanultra" => Some(CavemanLevel::WenyanUltra),
             _ => None,
         }
@@ -417,13 +919,6 @@ pub fn parse_caveman_command(args: &str) -> CavemanCommandAction {
     }
 }
 
-/// Scans `~/.config/srelens/assistant/skills/*.md` for user-defined skills.
-pub fn load_user_skills_dir() -> PathBuf {
-    dirs::config_dir()
-        .map(|d| d.join("srelens").join("assistant").join("skills"))
-        .unwrap_or_else(|| PathBuf::from(".srelens/skills"))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -455,7 +950,8 @@ mod tests {
 
     #[test]
     fn test_expand_slash_command_targeted() {
-        let expanded = expand_slash_command("crashloop", Some("auth-service-xyz"), "prod", "default").unwrap();
+        let expanded =
+            expand_slash_command("crashloop", Some("auth-service-xyz"), "prod", "default").unwrap();
         assert!(expanded.contains("auth-service-xyz"));
         assert!(expanded.contains("default"));
         assert!(expanded.contains("crashed instance"));
@@ -482,10 +978,22 @@ mod tests {
         assert_eq!(CavemanLevel::parse("lite"), Some(CavemanLevel::Lite));
         assert_eq!(CavemanLevel::parse("full"), Some(CavemanLevel::Full));
         assert_eq!(CavemanLevel::parse("ultra"), Some(CavemanLevel::Ultra));
-        assert_eq!(CavemanLevel::parse("wenyan-lite"), Some(CavemanLevel::WenyanLite));
-        assert_eq!(CavemanLevel::parse("wenyan-full"), Some(CavemanLevel::WenyanFull));
-        assert_eq!(CavemanLevel::parse("wenyan"), Some(CavemanLevel::WenyanFull));
-        assert_eq!(CavemanLevel::parse("wenyan-ultra"), Some(CavemanLevel::WenyanUltra));
+        assert_eq!(
+            CavemanLevel::parse("wenyan-lite"),
+            Some(CavemanLevel::WenyanLite)
+        );
+        assert_eq!(
+            CavemanLevel::parse("wenyan-full"),
+            Some(CavemanLevel::WenyanFull)
+        );
+        assert_eq!(
+            CavemanLevel::parse("wenyan"),
+            Some(CavemanLevel::WenyanFull)
+        );
+        assert_eq!(
+            CavemanLevel::parse("wenyan-ultra"),
+            Some(CavemanLevel::WenyanUltra)
+        );
         assert_eq!(CavemanLevel::parse(""), Some(CavemanLevel::Full));
         assert_eq!(CavemanLevel::parse("unknown"), None);
     }
@@ -496,7 +1004,10 @@ mod tests {
         assert_eq!(parse_caveman_command("   "), CavemanCommandAction::Status);
         assert_eq!(parse_caveman_command("off"), CavemanCommandAction::Disable);
         assert_eq!(parse_caveman_command("stop"), CavemanCommandAction::Disable);
-        assert_eq!(parse_caveman_command("normal"), CavemanCommandAction::Disable);
+        assert_eq!(
+            parse_caveman_command("normal"),
+            CavemanCommandAction::Disable
+        );
 
         assert_eq!(
             parse_caveman_command("ultra"),

@@ -120,7 +120,7 @@ pub struct AssistantViewState {
     pub last_viewport_rect: Cell<Rect>,
     pub plain_lines: RefCell<Vec<String>>,
     pub tool_chip_lines: RefCell<Vec<usize>>,
-    pub slash_suggestions: Vec<&'static crate::ai_skills::SkillDef>,
+    pub slash_suggestions: Vec<crate::ai_skills::SkillDef>,
     pub slash_suggestion_idx: usize,
     pub caveman_level: Option<crate::ai_skills::CavemanLevel>,
     pub task: Option<tokio::task::AbortHandle>,
@@ -217,7 +217,7 @@ impl AssistantViewState {
         if self.slash_suggestions.is_empty() {
             return false;
         }
-        let chosen = self.slash_suggestions[self.slash_suggestion_idx];
+        let chosen = self.slash_suggestions[self.slash_suggestion_idx].clone();
         self.input = format!("/{} ", chosen.command);
         self.input_cursor = None;
         self.slash_suggestions.clear();
