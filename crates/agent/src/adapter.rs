@@ -307,9 +307,10 @@ pub fn codex_command(
 }
 
 /// Environment variable the desktop sets to point the Cursor CLI at a
-/// per-turn config directory instead of its real `~/.cursor` config. The
-/// desktop writes `cursor_cli_config_json()` and `cursor_mcp_json()` into
-/// that directory before spawning; never passed via argv.
+/// per-chat config directory instead of its real `~/.cursor` config. The
+/// desktop rewrites `cursor_cli_config_json()` there before every turn
+/// (`cursor_mcp_json()` goes in the workspace's `.cursor/`), and Cursor keeps
+/// its chats there, which `--resume` reads (#952). Never passed via argv.
 pub const CURSOR_CONFIG_DIR_ENV: &str = "CURSOR_CONFIG_DIR";
 
 /// Build the Cursor CLI (`cursor-agent`) argv. These exact flags were
@@ -378,8 +379,8 @@ pub fn cursor_command(
     }
 }
 
-/// The Cursor CLI config content (`cli-config.json`, written into the
-/// per-turn config dir pointed to by `CURSOR_CONFIG_DIR_ENV`) that denies its
+/// The Cursor CLI config content (`cli-config.json`, rewritten every turn into
+/// the config dir pointed to by `CURSOR_CONFIG_DIR_ENV`) that denies its
 /// built-in local tools. Cursor's `-p` mode ships with full local
 /// read/write/shell/fetch access; since `cursor_command` passes `--force`
 /// (required so MCP calls run), this deny-list is the ONLY thing boxing Cursor
@@ -411,7 +412,7 @@ pub fn cursor_cli_config_json() -> String {
 }
 
 /// The srelens MCP server entry Cursor reads from `mcp.json`, written into
-/// the same per-turn config dir. Built with `serde_json` (not hand-formatted)
+/// the turn's workspace `.cursor/`. Built with `serde_json` (not hand-formatted)
 /// so `url`/`token` are always properly JSON-escaped rather than risking a
 /// malformed or attacker-controlled value breaking out of a hand-built
 /// string.
