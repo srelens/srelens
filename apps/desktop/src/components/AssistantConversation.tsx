@@ -1432,7 +1432,9 @@ export const AssistantConversation = forwardRef<
       // Resume the CLI's own session only when this turn runs on the same
       // agent the stored id came from (see `cliSessionRef`).
       const resume = cliSessionRef.current?.kind === usedKind ? cliSessionRef.current.id : null;
-      const cliId = await sendChat(session, outgoing, agentPath, applyEvent, rawImages, usedKind, turnNonceRef.current, resume);
+      // `session` is also the disk id here (see `persistSession`), restored on
+      // reopen, so it names the conversation too.
+      const cliId = await sendChat(session, outgoing, agentPath, applyEvent, rawImages, usedKind, turnNonceRef.current, resume, session);
       // The return IS what to store now (see chat_send): a cancelled or
       // drifty-but-clean turn echoes the resumed id back, so `null` with an
       // id on hand always means CLEAR — either the turn ran on an agent

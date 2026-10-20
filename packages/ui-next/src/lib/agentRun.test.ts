@@ -904,6 +904,7 @@ describe("the run store", () => {
         "codex",
         1,
         null,
+        expect.any(String),
       );
       // The picker agrees with what actually ran.
       expect(getAgentRun().agentKind).toBe("codex");
@@ -962,6 +963,7 @@ describe("the run store", () => {
         "claude",
         1,
         null,
+        expect.any(String),
       );
       // The reader's own turn holds exactly what they typed — the guidance
       // block is TRANSMITTED, never RECORDED.
@@ -1306,6 +1308,28 @@ describe("the run store", () => {
       expect(getActiveRunKey()).toBe("prod-eu|Pod|ns|mongodb-0");
       // And no longer listed as merely on disk.
       expect(getRunSummaries().filter((r) => r.savedId === "s1")).toEqual([]);
+    });
+
+    it("sends a reopened conversation's turns under the id it was saved with (#952)", async () => {
+      listAgents.mockResolvedValue([
+        { kind: "cursor", label: "Cursor", available: true, path: "/cu", version: "1", installUrl: "", gated: false },
+      ]);
+      listSessions.mockResolvedValue([{ id: "s1", title: "check mongodb", createdAt: 1, updatedAt: 2 }]);
+      loadSession.mockResolvedValue({
+        id: "s1", title: "check mongodb", createdAt: 1, updatedAt: 2,
+        contexts: [], skills: [], cliSessionId: "cursor-chat-1", agentKind: "cursor",
+        messages: [{ v: 1, key: "prod-eu|Pod|ns|mongodb-0", label: "Pod/mongodb-0",
+          turns: [{ id: 1, role: "user", text: "check mongodb", calls: [], at: 1 }], gates: [] }],
+      });
+      await restoreRuns();
+      await openSavedRun("s1");
+
+      sendChat.mockResolvedValue("cursor-chat-1");
+      await askAgent("and its node?", { key: getActiveRunKey()! });
+      expect(sendChat.mock.calls.at(-1)?.[7]).toBe("cursor-chat-1");
+      // Cursor keeps the chat that `--resume` reads under this id. The session
+      // `startChat` minted for this run is new, and finds nothing.
+      expect(sendChat.mock.calls.at(-1)?.[8]).toBe("s1");
     });
 
     /**
