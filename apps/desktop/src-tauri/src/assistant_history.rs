@@ -190,7 +190,16 @@ pub(crate) fn is_saved(dir: &Path, id: &str) -> bool {
 /// conversation, tool results included, lasts exactly as long as the saved
 /// chat. Removing an id that has no file is not an error — deleting is
 /// idempotent.
-fn delete_session(dir: &Path, cursor_chats: &Path, id: &str) -> Result<(), String> {
+///
+/// Except while another window has a turn running in that chat: its files
+/// stay with the turn, and the launch sweep removes them once no saved
+/// session holds them.
+fn delete_session(
+    dir: &Path,
+    cursor_chats: &Path,
+    in_use: &crate::assistant::CursorChatsInUse,
+    id: &str,
+) -> Result<(), String> {
     let path = session_path(dir, id)?;
     // Before anything goes: `.` and `..` pass `validate_id`.
     let cursor_chat = crate::assistant::cursor_chat_dir(cursor_chats, id)?;
@@ -202,6 +211,11 @@ fn delete_session(dir: &Path, cursor_chats: &Path, id: &str) -> Result<(), Strin
     let mut metas = read_index(dir)?;
     metas.retain(|m| m.id != id);
     write_index(dir, &metas)?;
+    // Held while removing, so no turn starts in the chat half-deleted.
+    let Some(_claim) = in_use.claim(id) else {
+        log::warn!("kept {} for the turn running in it", cursor_chat.display());
+        return Ok(());
+    };
     crate::assistant::remove_cursor_chats(&cursor_chat)
         .map_err(|e| format!("could not delete {}: {e}", cursor_chat.display()))
 }
@@ -260,8 +274,12 @@ pub fn chat_history_save(app: AppHandle, session: Session) -> Result<(), String>
 
 /// Delete a chat session's file, its index entry, and its Cursor chat.
 #[tauri::command]
-pub fn chat_history_delete(app: AppHandle, id: String) -> Result<(), String> {
-    delete_session(&resolve_sessions_dir(&app)?, &crate::assistant::cursor_state_dir(&app)?, &id)
+pub fn chat_history_delete(
+    app: AppHandle,
+    id: String,
+    chats: tauri::State<'_, crate::assistant::ChatManager>,
+) -> Result<(), String> {
+    delete_session(&resolve_sessions_dir(&app)?, &crate::assistant::cursor_state_dir(&app)?, &chats.cursor_chats, &id)
 }
 
 #[cfg(test)]
@@ -429,7 +447,7 @@ mod tests {
         save_session(&dir, &sample_session("gone", 1)).unwrap();
         save_session(&dir, &sample_session("stays", 2)).unwrap();
 
-        delete_session(&dir, &tmp.path().join("cursor-chats"), "gone").unwrap();
+        delete_session(&dir, &tmp.path().join("cursor-chats"), &crate::assistant::CursorChatsInUse::default(), "gone").unwrap();
 
         assert!(!session_path(&dir, "gone").unwrap().exists(), "session file should be removed");
         let remaining_ids: Vec<String> = read_index(&dir).unwrap().into_iter().map(|m| m.id).collect();
@@ -446,10 +464,30 @@ mod tests {
             fs::create_dir_all(cursor_chats.join(id).join("config")).unwrap();
         }
 
-        delete_session(&dir, &cursor_chats, "gone").unwrap();
+        delete_session(&dir, &cursor_chats, &crate::assistant::CursorChatsInUse::default(), "gone").unwrap();
 
         assert!(!cursor_chats.join("gone").exists(), "Cursor's store, tool results and all, goes with the chat (#952)");
         assert!(cursor_chats.join("stays").exists());
+    }
+
+    #[test]
+    fn deleting_a_chat_mid_turn_leaves_the_turn_its_cursor_chat() {
+        let tmp = TempDir::new();
+        let dir = sessions_dir(tmp.path());
+        let cursor_chats = tmp.path().join("cursor-chats");
+        save_session(&dir, &sample_session("busy", 1)).unwrap();
+        fs::create_dir_all(cursor_chats.join("busy").join("workspace")).unwrap();
+        let in_use = crate::assistant::CursorChatsInUse::default();
+        // Another window is answering in it.
+        let _turn = in_use.claim("busy").unwrap();
+
+        delete_session(&dir, &cursor_chats, &in_use, "busy").unwrap();
+
+        assert!(!session_path(&dir, "busy").unwrap().exists());
+        assert!(
+            cursor_chats.join("busy").join("workspace").exists(),
+            "the running turn keeps its files; the next launch sweeps them"
+        );
     }
 
     #[test]
@@ -461,7 +499,7 @@ mod tests {
         // Both pass `validate_id`'s charset, and joined to the root they name
         // the root itself and the app's whole data dir.
         for id in [".", ".."] {
-            assert!(delete_session(&dir, &cursor_chats, id).is_err(), "{id:?} must be refused");
+            assert!(delete_session(&dir, &cursor_chats, &crate::assistant::CursorChatsInUse::default(), id).is_err(), "{id:?} must be refused");
         }
         assert!(cursor_chats.exists());
     }
@@ -489,7 +527,7 @@ mod tests {
         for bad in ["../evil", "a/b", "a\\b", "/etc/passwd", "../../secret", ""] {
             assert!(read_session(&dir, bad).is_err(), "read({bad:?}) must be rejected");
             assert!(
-                delete_session(&dir, &tmp.path().join("cursor-chats"), bad).is_err(),
+                delete_session(&dir, &tmp.path().join("cursor-chats"), &crate::assistant::CursorChatsInUse::default(), bad).is_err(),
                 "delete({bad:?}) must be rejected"
             );
             let mut s = sample_session("valid", 1);

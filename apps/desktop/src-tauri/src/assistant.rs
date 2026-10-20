@@ -265,6 +265,35 @@ pub struct ChatManager {
     /// turn nonce), so `chat_send` can consume a Stop meant for ITS turn while
     /// dropping a stale one left over from a previous turn.
     pending_cancels: std::sync::Mutex<std::collections::HashMap<String, u64>>,
+    pub(crate) cursor_chats: CursorChatsInUse,
+}
+
+/// The Cursor chats a turn or a delete is using right now. A chat's directory
+/// is one per conversation (#952), and two windows can hold one saved
+/// conversation, each streaming on its own session and seeing only its own
+/// turns as busy. Without this, the second turn would empty the first one's
+/// workspace and either turn's guard would remove the other's files.
+#[derive(Default, Clone)]
+pub struct CursorChatsInUse(Arc<std::sync::Mutex<std::collections::HashSet<String>>>);
+
+/// One holder's use of a Cursor chat, released when dropped.
+pub(crate) struct CursorChatClaim {
+    in_use: CursorChatsInUse,
+    chat: String,
+}
+
+impl CursorChatsInUse {
+    /// Claim `chat`, or `None` while something else holds it.
+    pub(crate) fn claim(&self, chat: &str) -> Option<CursorChatClaim> {
+        let fresh = self.0.lock().unwrap().insert(chat.to_string());
+        fresh.then(|| CursorChatClaim { in_use: self.clone(), chat: chat.to_string() })
+    }
+}
+
+impl Drop for CursorChatClaim {
+    fn drop(&mut self) {
+        self.in_use.0.lock().unwrap().remove(&self.chat);
+    }
 }
 
 impl ChatManager {
@@ -413,6 +442,9 @@ struct CursorTurn {
     cmd: srelens_agent::adapter::AgentCommand,
     workspace: std::path::PathBuf,
     _workspace_guard: TempDir,
+    // Declared after the guard, so it is dropped after it: the chat is
+    // released only once its workspace is gone.
+    _claim: CursorChatClaim,
 }
 
 /// Where Cursor's chats live (see `prepare_cursor_turn`): the per-user data
@@ -498,8 +530,10 @@ pub(crate) fn cursor_chat_dir(root: &std::path::Path, chat: &str) -> Result<std:
 /// `CURSOR_CONFIG_DIR` (verified live: an mcp.json in CURSOR_CONFIG_DIR is
 /// silently ignored, so the server never connects). So the deny-list goes in
 /// the config dir and the MCP server goes in `<workspace>/.cursor/mcp.json`.
+#[allow(clippy::too_many_arguments)]
 fn prepare_cursor_turn(
     root: &std::path::Path,
+    in_use: &CursorChatsInUse,
     session: &str,
     conversation: Option<&str>,
     agent_path: &str,
@@ -511,7 +545,12 @@ fn prepare_cursor_turn(
     // The saved conversation names the chat, so a reopened one — on a new
     // session — finds it again. A turn with no conversation (a one-shot
     // generation) has only its session.
-    let dir = cursor_chat_dir(root, conversation.unwrap_or(session))?;
+    let chat = conversation.unwrap_or(session);
+    let dir = cursor_chat_dir(root, chat)?;
+    // Held for the whole turn, before the workspace below is emptied.
+    let claim = in_use
+        .claim(chat)
+        .ok_or("This conversation is answering in another window. Wait for it to finish, then ask again.")?;
     // Fixed names are safe here, unlike in the shared temp dir (see
     // `create_private_dir`): `root` is in the user's own cache dir, and
     // owner-only so no other account can read the chats kept under it.
@@ -551,7 +590,7 @@ fn prepare_cursor_turn(
         &workspace.to_string_lossy(),
         resume,
     );
-    Ok(CursorTurn { cmd, workspace, _workspace_guard: workspace_guard })
+    Ok(CursorTurn { cmd, workspace, _workspace_guard: workspace_guard, _claim: claim })
 }
 
 /// Parse the frontend's serialized `AgentKind` tag — the exact camelCase
@@ -687,6 +726,7 @@ pub async fn chat_send(
     let cursor_turn = match kind {
         AgentKind::Cursor => Some(prepare_cursor_turn(
             &cursor_state_dir(&app)?,
+            &chats.cursor_chats,
             &session,
             conversation.as_deref(),
             &agent_path,
@@ -1403,6 +1443,7 @@ mod tests {
     fn cursor_turn(root: &TempDir, session: &str, resume: Option<&str>) -> CursorTurn {
         prepare_cursor_turn(
             &root.0,
+            &CursorChatsInUse::default(),
             session,
             None,
             "cursor-agent",
@@ -1436,7 +1477,7 @@ mod tests {
     fn a_cursor_turn_for_a_reopened_conversation_finds_the_chat_it_kept_before() {
         let root = cursor_test_root();
         let first =
-            prepare_cursor_turn(&root.0, "run-1", Some("conv-1"), "cursor-agent", "hi", "http://127.0.0.1:1/mcp", "t", None)
+            prepare_cursor_turn(&root.0, &CursorChatsInUse::default(), "run-1", Some("conv-1"), "cursor-agent", "hi", "http://127.0.0.1:1/mcp", "t", None)
                 .unwrap();
         let store = cursor_chat_store(&first.cmd, "chat-1");
         std::fs::create_dir_all(store.parent().unwrap()).unwrap();
@@ -1447,6 +1488,7 @@ mod tests {
         // `chat_send` streams on is new.
         let reopened = prepare_cursor_turn(
             &root.0,
+            &CursorChatsInUse::default(),
             "run-2",
             Some("conv-1"),
             "cursor-agent",
@@ -1464,10 +1506,26 @@ mod tests {
     }
 
     #[test]
+    fn a_conversation_answering_in_one_window_refuses_a_turn_from_another() {
+        let root = cursor_test_root();
+        let in_use = CursorChatsInUse::default();
+        // Each window streams on its own session; the conversation is one.
+        let turn = |session: &str| {
+            prepare_cursor_turn(&root.0, &in_use, session, Some("conv-1"), "cursor-agent", "hi", "http://127.0.0.1:1/mcp", "t", None)
+        };
+        let first = turn("window-1").unwrap();
+
+        assert!(turn("window-2").is_err(), "a second turn would empty the first one's workspace");
+        assert!(first.workspace.join(".cursor").join("mcp.json").exists());
+        drop(first);
+        assert!(turn("window-2").is_ok(), "once the turn has ended, the conversation is free again");
+    }
+
+    #[test]
     fn a_cursor_chat_outlives_a_restart_only_while_a_saved_conversation_holds_it() {
         let root = cursor_test_root();
         let saved =
-            prepare_cursor_turn(&root.0, "run-1", Some("saved"), "cursor-agent", "hi", "http://127.0.0.1:1/mcp", "t", None)
+            prepare_cursor_turn(&root.0, &CursorChatsInUse::default(), "run-1", Some("saved"), "cursor-agent", "hi", "http://127.0.0.1:1/mcp", "t", None)
                 .unwrap();
         let store = cursor_chat_store(&saved.cmd, "chat-1");
         std::fs::create_dir_all(store.parent().unwrap()).unwrap();
@@ -1486,7 +1544,7 @@ mod tests {
     fn a_restart_removes_the_workspace_a_killed_cursor_turn_left() {
         let root = cursor_test_root();
         let turn =
-            prepare_cursor_turn(&root.0, "run-1", Some("saved"), "cursor-agent", "hi", "http://127.0.0.1:1/mcp", "t", None)
+            prepare_cursor_turn(&root.0, &CursorChatsInUse::default(), "run-1", Some("saved"), "cursor-agent", "hi", "http://127.0.0.1:1/mcp", "t", None)
                 .unwrap();
         let workspace = turn.workspace.clone();
         std::mem::forget(turn); // srelens was killed: the guard never ran
@@ -1567,7 +1625,7 @@ mod tests {
         // well-formed id there — and the workspace under it gets emptied.
         for session in ["..", ".", "a/../.."] {
             let turn =
-                prepare_cursor_turn(&root, session, None, "cursor-agent", "hi", "http://127.0.0.1:1/mcp", "turn-token", None);
+                prepare_cursor_turn(&root, &CursorChatsInUse::default(), session, None, "cursor-agent", "hi", "http://127.0.0.1:1/mcp", "turn-token", None);
             assert!(turn.is_err(), "{session:?} must be refused");
         }
         assert!(!base.0.join("config").exists());
@@ -1597,7 +1655,7 @@ mod tests {
         // Not there yet, as on the first Cursor turn after launch.
         let root = base.0.join("cursor-chats");
         let _turn =
-            prepare_cursor_turn(&root, "s1", None, "cursor-agent", "hi", "http://127.0.0.1:1/mcp", "turn-token", None).unwrap();
+            prepare_cursor_turn(&root, &CursorChatsInUse::default(), "s1", None, "cursor-agent", "hi", "http://127.0.0.1:1/mcp", "turn-token", None).unwrap();
         assert_eq!(std::fs::metadata(&root).unwrap().permissions().mode() & 0o777, 0o700);
     }
 
