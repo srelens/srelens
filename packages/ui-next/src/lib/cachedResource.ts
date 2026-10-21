@@ -239,7 +239,14 @@ export function useCachedResource<T>(
     // here: a second TTL check in this effect would be a rule with two homes
     // that no test can tell apart — disabling either one on its own left the
     // suite green, which is how the duplicate was found.
-    setState(hit ? settled(hit, key) : { status: "loading", stale: false, forKey: key });
+    //
+    // A retry of an answer whose refresh already failed keeps it stale: asking
+    // again refreshes nothing until the answer lands, and a retry against a
+    // cluster that stopped answering can wait out its whole budget (#402).
+    setState((prev) => {
+      if (!hit) return { status: "loading", stale: false, forKey: key };
+      return prev.forKey === key && prev.stale && prev.updatedAt === hit.at ? prev : settled(hit, key);
+    });
 
     request(key, () => loadRef.current(), force).then(
       (entry) => {

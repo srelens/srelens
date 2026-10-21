@@ -116,6 +116,31 @@ describe("useCachedResource — stale data says it is stale", () => {
     expect(result.current.stale).toBe(false);
     expect(result.current.error).toBeUndefined();
   });
+
+  /**
+   * #402 review: the sidebar retries on a timer, and a retry against a
+   * cluster that has stopped answering can wait out the whole request budget.
+   * The answer on screen has not been refreshed by asking again — it is stale
+   * until a refresh actually lands, so the retry must not repaint it as current.
+   */
+  it("stays stale while a retry of the failed refresh is still on its way", async () => {
+    const load = vi
+      .fn()
+      .mockResolvedValueOnce(["a"])
+      .mockRejectedValueOnce(new Error("the cluster did not answer"))
+      .mockReturnValueOnce(new Promise(() => {}));
+    const { result } = renderHook(() => useCachedResource("nodes|prod", load));
+    await waitFor(() => expect(result.current.data).toEqual(["a"]));
+    act(() => result.current.reload());
+    await waitFor(() => expect(result.current.stale).toBe(true));
+
+    act(() => result.current.reload());
+    await act(() => new Promise((r) => setTimeout(r, 20)));
+    expect(load).toHaveBeenCalledTimes(3);
+    expect(result.current.data).toEqual(["a"]);
+    expect(result.current.stale).toBe(true);
+    expect(result.current.error).toContain("did not answer");
+  });
 });
 
 describe("useCachedResource — a late answer is never believed", () => {
