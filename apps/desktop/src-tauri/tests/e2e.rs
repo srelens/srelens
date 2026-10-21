@@ -1635,6 +1635,36 @@ async fn run_suite() {
         .await;
     assert!(err.contains("not a supported path"), "{err}");
 
+    // === k8s.countResources (#402) ===========================================
+    // Counted with `limit=1` + `remainingItemCount`, so cross-checked here
+    // against plain lists of the same kinds rather than trusted on its own.
+    // Node is cluster-scoped and ignores `namespaces`; a kind the cluster does
+    // not have is that row's error while the rest are still counted.
+    let config_maps = h
+        .ok(
+            "k8s.listResource",
+            json!({ "context": ctx, "kind": "ConfigMap", "namespace": NS }),
+        )
+        .await["items"]
+        .as_array()
+        .unwrap()
+        .len() as i64;
+    let out = h
+        .ok(
+            "k8s.countResources",
+            json!({
+                "context": ctx,
+                "kinds": [{ "kind": "ConfigMap" }, { "kind": "Node" }, { "kind": "NoSuchKindForSrelens" }],
+                "namespaces": [NS],
+            }),
+        )
+        .await;
+    let counts = out["counts"].as_array().unwrap();
+    assert_eq!(counts[0]["count"].as_i64(), Some(config_maps), "{out}");
+    assert_eq!(counts[1]["count"].as_i64(), Some(nodes.len() as i64), "{out}");
+    assert!(counts[2]["count"].is_null(), "{out}");
+    assert!(counts[2]["error"].is_string(), "{out}");
+
     // === 2. Object / manifest ================================================
     println!("=== object/manifest ===");
     let out = h

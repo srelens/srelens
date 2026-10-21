@@ -32,6 +32,8 @@ import { onSessionSettled, startLocalSession, startPodSession } from "../lib/ses
 import { openTab } from "../lib/tabsStore";
 import { openOnNamedCluster } from "../lib/openCluster";
 import { isContextPaused, useDismissOnPause } from "../lib/pausedContext";
+import { protectionFor } from "../lib/protection";
+import { useProtectedConfirm } from "../lib/protectedConfirm";
 import { NewForwardDialog } from "./forwards/NewForwardDialog";
 import { logsRoute } from "./Logs";
 import { RevisionPicker } from "./RevisionPicker";
@@ -72,7 +74,9 @@ type Ask =
   | { type: "suspend"; row: ListRow; suspend: boolean }
   /** `unschedulable: true` cordons the node; `false` uncordons it (#820). */
   | { type: "cordon"; row: ListRow; unschedulable: boolean }
-  | { type: "drain"; row: ListRow };
+  | { type: "drain"; row: ListRow }
+  /** Run now — asked only on a protected cluster; elsewhere it is one click (#101). */
+  | { type: "trigger"; row: ListRow };
 
 /**
  * An {@link Ask}, plus the cluster it was asked ON.
@@ -102,6 +106,7 @@ function verbOf(pending: Pending | null): string {
   if (pending.type === "suspend") return pending.suspend ? "suspend" : "resume";
   if (pending.type === "cordon") return pending.unschedulable ? "cordon" : "uncordon";
   if (pending.type === "rollback") return "roll back";
+  if (pending.type === "trigger") return "run";
   return pending.type;
 }
 
@@ -131,8 +136,13 @@ function isCordoned(row: ListRow): boolean {
  * under `/bin/sh`, which a Windows desktop does not have, and `toKubectl`
  * writes it there in cmd/PowerShell quoting that `sh` would not read anyway. A
  * confirmed drain that cannot start is worse than one that reports in a toast.
+ *
+ * And not on a protected cluster (#101). The terminal is a shell on that
+ * cluster that nothing after this confirm guards; the call is exactly the one
+ * write the typed name agreed to.
  */
-function runsInTerminal(): boolean {
+function runsInTerminal(context: string): boolean {
+  if (protectionFor(context)) return false;
   return isTauri() && !(typeof navigator !== "undefined" && navigator.userAgent.includes("Windows"));
 }
 
@@ -164,7 +174,8 @@ interface Forwarding {
 }
 
 /** What `Open shell` is waiting on, once the pod turned out to run more than
- *  one container worth asking about. See {@link startShell}. */
+ *  one container worth asking about, or to be on a protected cluster (#101).
+ *  See {@link startShell}. */
 interface ShellPick {
   row: ListRow;
   namespace: string;
@@ -202,8 +213,9 @@ interface ShellPick {
  * makes "no write happens without a confirm" true by construction rather than
  * by every call site remembering to check. Suspend/Resume also goes through
  * `pending` (it is a real write with a kubectl equivalent) but is never
- * `danger`, and Run now skips `pending` entirely — it is a call, not a
- * mutation of anything already running.
+ * `danger`, and Run now skips `pending` — it is a call, not a mutation of
+ * anything already running — except on a protected cluster, where it asks
+ * for the cluster's name like every other write here (#101).
  */
 export function useRowMenu({ context, kind, actions, group, onChanged }: UseRowMenuArgs): {
   items: (row: ListRow) => ContextMenuItem[];
@@ -241,11 +253,21 @@ export function useRowMenu({ context, kind, actions, group, onChanged }: UseRowM
   /**
    * The pod `Open shell` was picked on, waiting on which container to attach
    * to — set only when {@link startShell} found more than one candidate worth
-   * asking about. A one-container pod never reaches this: it starts straight
-   * away. A slot of its own for the same reason `forwarding` has one: this is
-   * a question with its own fields, not a `Pending` variant.
+   * asking about, or the cluster is protected. A one-container pod starts
+   * straight away, except on a protected cluster, where it asks for the typed
+   * name here (#101). A slot of its own for the same reason `forwarding` has
+   * one: this is a question with its own fields, not a `Pending` variant.
    */
   const [shellPick, setShellPick] = useState<ShellPick | null>(null);
+  /**
+   * On a protected cluster, its name before a shell opens there (#101) —
+   * asked in the container picker, which then opens for a one-container pod
+   * too. The hook rather than the whole gate: this picker states a moved rail
+   * and asks no tick for it (see `shellMoved` below). Its state lives here, in
+   * the hook, so `startShell` resets it for each new question.
+   */
+  const shellConfirm = useProtectedConfirm(shellPick?.context ?? null);
+  const [shellError, setShellError] = useState("");
   const targetPaused = useDismissOnPause(pending?.context ?? forwarding?.context ?? shellPick?.context, () => {
     setPending(null);
     setForwarding(null);
@@ -329,7 +351,8 @@ export function useRowMenu({ context, kind, actions, group, onChanged }: UseRowM
    * comma-joined image string and a ready count), and `kubectl exec` with no
    * `-c` lands on the manifest's FIRST container — often a sidecar with no
    * shell at all — not the one the reader meant. A pod with exactly one
-   * candidate starts right away; a pod with more than one is asked, because
+   * candidate starts right away, unless its cluster is protected, which asks
+   * for the typed name first (#101); a pod with more than one is asked, because
    * landing in the wrong container silently is worse than one extra click.
    */
   async function startShell(row: ListRow) {
@@ -350,7 +373,9 @@ export function useRowMenu({ context, kind, actions, group, onChanged }: UseRowM
       notify.error(`Couldn't open a shell in ${row.name}`, "No running container to attach to.");
       return;
     }
-    if (choices.length > 1) {
+    if (choices.length > 1 || protectionFor(target)) {
+      shellConfirm.reset();
+      setShellError("");
       setShellPick({
         row,
         namespace,
@@ -375,6 +400,10 @@ export function useRowMenu({ context, kind, actions, group, onChanged }: UseRowM
 
   async function confirmShell() {
     if (!shellPick) return;
+    if (shellConfirm.refusal) {
+      setShellError(shellConfirm.refusal);
+      return;
+    }
     setShellBusy(true);
     await launchShell(shellPick.row, shellPick.namespace, shellPick.container, shellPick.context);
     setShellBusy(false);
@@ -422,7 +451,7 @@ export function useRowMenu({ context, kind, actions, group, onChanged }: UseRowM
     // Started, then shown, as `launchShell` does and for its reason: a shell
     // that could not be opened is a `closed` row on `/terminals` saying why,
     // which is worth landing on rather than hiding behind a dialog.
-    if ((pending.type === "cordon" || pending.type === "drain") && runsInTerminal()) {
+    if ((pending.type === "cordon" || pending.type === "drain") && runsInTerminal(target)) {
       const session = await startLocalSession({
         context: target,
         title: `${nodeLabel(pending)} ${row.name}`,
@@ -455,6 +484,8 @@ export function useRowMenu({ context, kind, actions, group, onChanged }: UseRowM
           return cordonNode(target, row.name, pending.unschedulable);
         case "drain":
           return drainNode(target, row.name);
+        case "trigger":
+          return cronjobTriggerNow(target, ns, row.name);
       }
     })();
     setBusy(false);
@@ -472,6 +503,10 @@ export function useRowMenu({ context, kind, actions, group, onChanged }: UseRowM
       notify.success(`Drained ${row.name}`, `${out.evicted ?? 0} evicted, ${out.skipped ?? 0} skipped`);
     } else if (pending.type === "cordon") {
       notify.success(`${pending.unschedulable ? "Cordoned" : "Uncordoned"} ${row.name}`);
+    } else if (pending.type === "trigger") {
+      // The same words the one-click path says (`runNow`): which Job it made.
+      const out = result as { jobName?: string };
+      notify.success(`Triggered ${row.name}`, out.jobName ? `Created job ${out.jobName}` : undefined);
     }
     close();
     if (pending.type !== "delete") onChanged?.();
@@ -550,7 +585,13 @@ export function useRowMenu({ context, kind, actions, group, onChanged }: UseRowM
       });
     }
     if (actions.trigger) {
-      list.push({ label: ROW_ACTION_LABEL.trigger, onPick: () => void runNow(row) });
+      list.push({
+        label: ROW_ACTION_LABEL.trigger,
+        onPick: () => {
+          if (protectionFor(context)) open({ type: "trigger", row });
+          else void runNow(row);
+        },
+      });
     }
     if (actions.cordon) {
       // A cordoned node is offered the other direction rather than the same
@@ -613,7 +654,7 @@ export function useRowMenu({ context, kind, actions, group, onChanged }: UseRowM
       moved={gate.alert}
       busy={busy}
       error={error}
-      inTerminal={runsInTerminal()}
+      inTerminal={runsInTerminal(pending.context)}
       replicas={replicas}
       onReplicasChange={setReplicas}
       revision={revision}
@@ -656,15 +697,25 @@ export function useRowMenu({ context, kind, actions, group, onChanged }: UseRowM
               {` Cancel and open a shell again from ${context} to attach there.`}
             </ClusterMovedAlert>
           )}
-          <p style={{ marginTop: 0 }}>
-            <code>{shellPick.row.name}</code> runs more than one container — which one?
-          </p>
-          <Select
-            value={shellPick.container}
-            onValueChange={(container) => setShellPick((prev) => (prev ? { ...prev, container } : prev))}
-            options={shellPick.choices.map((c) => ({ value: c.name, label: c.name }))}
-            aria-label="Container"
-          />
+          {shellConfirm.field}
+          {shellPick.choices.length > 1 ? (
+            <>
+              <p style={{ marginTop: 0 }}>
+                <code>{shellPick.row.name}</code> runs more than one container — which one?
+              </p>
+              <Select
+                value={shellPick.container}
+                onValueChange={(container) => setShellPick((prev) => (prev ? { ...prev, container } : prev))}
+                options={shellPick.choices.map((c) => ({ value: c.name, label: c.name }))}
+                aria-label="Container"
+              />
+            </>
+          ) : (
+            <p style={{ marginTop: 0 }}>
+              Open a shell in <code>{shellPick.row.name}</code>?
+            </p>
+          )}
+          {shellError && <FailureLine error={shellError} className="text-sev" />}
         </>
       }
     />
@@ -683,6 +734,7 @@ const TITLES: Record<Exclude<Pending["type"], "suspend" | "cordon">, (kind: stri
   rollback: (kind) => `Roll back ${kind}`,
   evict: () => "Evict pod?",
   drain: () => "Drain node?",
+  trigger: (kind) => `Run ${kind} now?`,
 };
 
 function messageFor(pending: Pending): ReactNode {
@@ -759,6 +811,13 @@ function messageFor(pending: Pending): ReactNode {
           scheduled to it.
         </>
       );
+    case "trigger":
+      return (
+        <>
+          Run <code>{row.name}</code>
+          {where} now? This creates a Job from its template, outside the schedule.
+        </>
+      );
   }
 }
 
@@ -808,6 +867,8 @@ function kubectlFor(
     case "cordon":
     case "drain":
       return { command: toKubectl({ action: nodeVerb(pending), kind, name: row.name, namespace, context }) };
+    case "trigger":
+      return { command: toKubectl({ action: "cronjob-trigger", kind, name: row.name, namespace, context }) };
   }
 }
 
@@ -864,9 +925,11 @@ function PendingDialog({
             ? "Roll back"
             : pending.type === "evict"
               ? "Evict"
-              : pending.suspend
-                ? "Suspend"
-                : "Resume";
+              : pending.type === "trigger"
+                ? "Run now"
+                : pending.suspend
+                  ? "Suspend"
+                  : "Resume";
   const { command, note } = kubectlFor(pending, kind, context, replicas, revision);
 
   return (
@@ -876,7 +939,8 @@ function PendingDialog({
       // ruling), and so is cordon/uncordon: it moves no pod, and the entry
       // beside it undoes it. Every other entry that reaches this dialog is
       // destructive.
-      danger={pending.type !== "suspend" && pending.type !== "cordon"}
+      // Nor is Run now (#101): it starts one Job and stops nothing.
+      danger={pending.type !== "suspend" && pending.type !== "cordon" && pending.type !== "trigger"}
       busy={busy}
       confirmLabel={confirmLabel}
       onConfirm={onConfirm}

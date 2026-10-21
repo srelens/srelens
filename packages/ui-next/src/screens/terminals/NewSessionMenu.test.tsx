@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 
@@ -37,6 +37,10 @@ const sessions = vi.hoisted(() => ({
 vi.mock("../../lib/sessions", () => sessions);
 
 import { NewSessionMenu } from "./NewSessionMenu";
+import type { ClusterContext } from "@srelens/core";
+import { resetContexts, setContexts } from "../../lib/clusters";
+import { defaultState } from "../../lib/tabs";
+import { getState, setState, setWorkspaceProtected } from "../../lib/tabsStore";
 
 const CONTEXT = "prod-eu";
 const NAMESPACE = "checkout";
@@ -211,5 +215,67 @@ describe("NewSessionMenu", () => {
     );
     expect(onStarted).toHaveBeenCalledWith(11);
     expect(onClose).toHaveBeenCalledTimes(1);
+  });
+});
+
+/**
+ * On a protected cluster (#101) a pod or node shell opens only after the
+ * cluster's name is typed: a shell there is a way to change it that no other
+ * confirm reaches. The local shell's guard is the read-only terminal (Phase
+ * 3b), so it asks nothing here.
+ */
+describe("NewSessionMenu — on a protected cluster (#101)", () => {
+  const PROD: ClusterContext = { name: CONTEXT, stableId: "prod", key: "prod", cluster: "prod", server: "", isCurrent: true, sourceFile: "", authKind: "token" };
+  const start = () => screen.getByRole("button", { name: "Start session" });
+  const typed = () => screen.getByRole("textbox", { name: `Type ${CONTEXT} to confirm` });
+
+  beforeEach(() => {
+    setContexts([PROD]);
+    setState(defaultState([PROD]));
+    setWorkspaceProtected(getState().currentId, true);
+  });
+  afterEach(() => {
+    resetContexts();
+    setState(defaultState([]));
+  });
+
+  it("starts no pod shell until the cluster's name is typed", async () => {
+    const user = userEvent.setup();
+    render(<NewSessionMenu context={CONTEXT} namespace={NAMESPACE} onStarted={onStarted} onClose={onClose} />);
+    await pickPodAndContainer(user);
+    expect(screen.getByText(`${CONTEXT} is protected (workspace Default).`)).toBeTruthy();
+    expect(start().hasAttribute("disabled")).toBe(true);
+    await user.click(start());
+    expect(sessions.startPodSession).not.toHaveBeenCalled();
+
+    await user.type(typed(), CONTEXT);
+    expect(start().hasAttribute("disabled")).toBe(false);
+    await user.click(start());
+    await waitFor(() => expect(sessions.startPodSession).toHaveBeenCalledTimes(1));
+  });
+
+  it("creates no debug pod for a node shell until the cluster's name is typed", async () => {
+    const user = userEvent.setup();
+    render(<NewSessionMenu context={CONTEXT} namespace={NAMESPACE} onStarted={onStarted} onClose={onClose} />);
+    await user.click(screen.getByRole("button", { name: "Node" }));
+    await waitFor(() => expect((screen.getByLabelText("Node") as HTMLSelectElement).disabled).toBe(false));
+    await user.selectOptions(screen.getByLabelText("Node"), "eu-w4-c3-standard-a1");
+    expect(start().hasAttribute("disabled")).toBe(true);
+    await user.click(start());
+    expect(core.createNodeDebugPod).not.toHaveBeenCalled();
+
+    await user.type(typed(), CONTEXT);
+    await user.click(start());
+    await waitFor(() => expect(sessions.startPodSession).toHaveBeenCalledTimes(1));
+    expect(core.createNodeDebugPod).toHaveBeenCalledWith(CONTEXT, "eu-w4-c3-standard-a1");
+  });
+
+  it("asks nothing of the local shell, whose guard is the read-only terminal", async () => {
+    const user = userEvent.setup();
+    render(<NewSessionMenu context={CONTEXT} namespace={NAMESPACE} onStarted={onStarted} onClose={onClose} />);
+    await user.click(screen.getByRole("button", { name: "Local shell" }));
+    expect(screen.queryByRole("textbox", { name: `Type ${CONTEXT} to confirm` })).toBeNull();
+    await user.click(start());
+    await waitFor(() => expect(sessions.startLocalSession).toHaveBeenCalledTimes(1));
   });
 });

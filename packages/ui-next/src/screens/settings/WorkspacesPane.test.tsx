@@ -6,7 +6,7 @@ import { resetContexts, setContexts } from "../../lib/clusters";
 import { loadMarks, setMark } from "../../lib/marks";
 import { PALETTE } from "../../lib/markSymbols";
 import { defaultState } from "../../lib/tabs";
-import { createWorkspace, getState, openTab, setActiveCluster, setState, setWorkspaceClusters, switchWorkspace } from "../../lib/tabsStore";
+import { createWorkspace, getState, openTab, setActiveCluster, setState, setWorkspaceClusters, setWorkspaceProtected, switchWorkspace } from "../../lib/tabsStore";
 import { WorkspacesPane } from "./WorkspacesPane";
 
 // jsdom has neither, and the add-cluster picker is a Radix popover over a cmdk
@@ -260,4 +260,35 @@ it("does not offer to delete the last workspace", () => {
   setState(defaultState(contexts));
   paint();
   expect((screen.getByRole("button", { name: "Delete Default" }) as HTMLButtonElement).disabled).toBe(true);
+});
+
+/** The Protected switch in a workspace's row (#101). */
+const protectedSwitch = (name: string) => within(row(name)).getByRole("switch", { name: "Protected" });
+
+it("protects a workspace from its switch, and stops", async () => {
+  const user = paint();
+  expect(protectedSwitch("Team").getAttribute("aria-checked")).toBe("false");
+  await user.click(protectedSwitch("Team"));
+  expect(stored(team)?.protected).toBe(true);
+  expect(protectedSwitch("Team").getAttribute("aria-checked")).toBe("true");
+  await user.click(protectedSwitch("Team"));
+  expect(stored(team)).not.toHaveProperty("protected");
+});
+
+it("names the clusters a protected workspace covers, by their mark, and only while it is on", async () => {
+  setMark("prod-id", { name: "Production", short: "Pr", color: "#123456", mark: "text", withText: true });
+  setWorkspaceClusters(team, ["prod-id", "staging-id"]);
+  const user = paint();
+  expect(within(row("Team")).queryByText(/^Protects/)).toBeNull();
+  await user.click(protectedSwitch("Team"));
+  const hint = within(row("Team")).getByText("Protects Production, staging.");
+  // Read with the switch, not only beside it.
+  expect(protectedSwitch("Team").getAttribute("aria-describedby")).toBe(hint.id);
+});
+
+it("says a protected workspace with no clusters protects none yet", () => {
+  setWorkspaceClusters(team, []);
+  setWorkspaceProtected(team, true);
+  paint();
+  expect(within(row("Team")).getByText("Protects no clusters yet.")).toBeTruthy();
 });

@@ -312,6 +312,15 @@
     "confirm": "Change scheduling[ on {resource}][ in cluster {cluster}]?"
   },
   {
+    "id": "k8s.countResources",
+    "readOnly": true,
+    "destructive": false,
+    "requiresConfirm": false,
+    "sensitive": false,
+    "impact": "low",
+    "confirm": null
+  },
+  {
     "id": "k8s.createNodeDebugPod",
     "readOnly": false,
     "destructive": true,

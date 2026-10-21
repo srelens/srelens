@@ -1819,3 +1819,26 @@ describe("Overview — app cards", () => {
     expect((await screen.findByTestId("app-cards")).textContent).toBe(CTX.stableId);
   });
 });
+
+/** On a protected cluster (#101) a node action asks for the cluster's name too. */
+describe("Overview — a node action on a protected cluster (#101)", () => {
+  beforeEach(() => {
+    store.setWorkspaceProtected(store.getState().currentId, true);
+  });
+
+  it("drains nothing until the cluster's name is typed", async () => {
+    open();
+    await waitFor(() => expect(rowFor("n1")).toBeTruthy());
+    await userEvent.click(within(rowFor("n1")).getByRole("button", { name: "Drain" }));
+    const box = dialog() as HTMLElement;
+    expect(within(box).getByText("prod-eu is protected (workspace Default).")).toBeTruthy();
+
+    await userEvent.click(within(box).getByRole("button", { name: "Drain" }));
+    expect(core.drainNode).not.toHaveBeenCalled();
+    expect(within(box).getByText("Type prod-eu to confirm.")).toBeTruthy();
+
+    await userEvent.type(within(box).getByRole("textbox", { name: "Type prod-eu to confirm" }), "prod-eu");
+    await userEvent.click(within(box).getByRole("button", { name: "Drain" }));
+    await waitFor(() => expect(core.drainNode).toHaveBeenCalledWith("prod-eu", "n1"));
+  });
+});

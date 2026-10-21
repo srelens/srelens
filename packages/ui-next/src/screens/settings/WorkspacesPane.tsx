@@ -1,13 +1,13 @@
 import { useId, useState } from "react";
 import { describeError, plural, type ClusterContext } from "@srelens/core";
-import { Button, Combobox, ConfirmDialog, IconButton, TextInput } from "@srelens/ui-kit";
+import { Button, Combobox, ConfirmDialog, IconButton, Switch, TextInput } from "@srelens/ui-kit";
 import { useContexts, useContextsError, useContextsStatus } from "../../lib/clusters";
 import { useOrderedContexts } from "../../lib/contextOrder";
 import { Icons } from "../../lib/icons";
 import { getMark, useMark } from "../../lib/marks";
 import { PALETTE } from "../../lib/markSymbols";
 import { workspaceTabCount, type Workspace } from "../../lib/tabs";
-import { removeWorkspace, renameWorkspace, setWorkspaceClusters, setWorkspaceColor, useTabs } from "../../lib/tabsStore";
+import { removeWorkspace, renameWorkspace, setWorkspaceClusters, setWorkspaceColor, setWorkspaceProtected, useTabs } from "../../lib/tabsStore";
 
 const COLOURS: ReadonlyArray<{ value: string | undefined; label: string }> = [{ value: undefined, label: "None" }, ...PALETTE];
 
@@ -74,6 +74,15 @@ function WorkspaceRow({ workspace, contexts, current, lone, onDelete }: {
           </span>}
       </>}
     </div>
+    {/* The hint says what the switch covers, in the names the rail shows, and
+        only while it is on: off, it covers nothing. */}
+    <Switch label="Protected" on={workspace.protected === true}
+      onChange={(on) => setWorkspaceProtected(workspace.id, on)}
+      hint={workspace.protected
+        ? workspace.clusters.length
+          ? `Protects ${workspace.clusters.map(nameOf).join(", ")}.`
+          : "Protects no clusters yet."
+        : undefined} />
   </li>;
 }
 

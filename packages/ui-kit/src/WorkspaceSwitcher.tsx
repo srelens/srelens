@@ -9,6 +9,8 @@ export interface WorkspaceSummary {
   name: string;
   /** A CSS colour drawn beside the name. Decorative: the name already identifies the workspace. */
   color?: string;
+  /** Draws a shield after the name and says "Protected": its clusters ask for their name before a change. */
+  protected?: boolean;
   /** How many clusters it holds, and how many tabs are open in it. */
   clusters: number;
   tabs: number;
@@ -53,6 +55,27 @@ const Swatch = ({ color }: { color?: string }) =>
   color ? (
     <span data-slot="workspace-color" aria-hidden="true" className="h-2 w-2 shrink-0 rounded-full" style={{ background: color }} />
   ) : null;
+
+/**
+ * A protected workspace's shield, after its name (#101). The glyph is hidden
+ * and the word is not, so the name reads "Production Protected". Lucide's
+ * shield path, as the chevron and cross above are lucide's paths, so the
+ * shell's own `Icons.shield` draws the same shape on the sealed chip.
+ */
+const ProtectedGlyph = () => (
+  <>
+    <svg data-slot="workspace-protected" width="11" height="11" viewBox="0 0 24 24" fill="none" aria-hidden="true" className="shrink-0">
+      <path
+        d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z"
+        stroke="currentColor"
+        strokeWidth="2"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>{" "}
+    <span className="sr-only">Protected</span>
+  </>
+);
 
 /** "2 clusters · 11 tabs", and "1 cluster · 1 tab". */
 function summarize({ clusters, tabs }: WorkspaceSummary): string {
@@ -110,6 +133,7 @@ export function WorkspaceSwitcher({
           {Icon && <Icon size={12} aria-hidden="true" />}
           <Swatch color={active?.color} />
           <span className="max-w-[110px] truncate">{active?.name ?? emptyLabel}</span>
+          {active?.protected && <ProtectedGlyph />}
           <ChevronGlyph />
         </span>
       }
@@ -141,8 +165,15 @@ export function WorkspaceSwitcher({
                     <OptionCheck checked={current} />
                     <Swatch color={workspace.color} />
                     <span className="min-w-0 flex-1 text-left">
-                      <span className="block truncate">{workspace.name}</span>
-                      <span className="path block truncate text-faint">{summarize(workspace)}</span>
+                      <span className="flex min-w-0 items-center gap-1">
+                        <span className="truncate">{workspace.name}</span>
+                        {workspace.protected && <ProtectedGlyph />}
+                      </span>
+                      <span className="path block truncate text-faint">
+                        {summarize(workspace)}
+                        {/* Hidden: the word after the name already says it to a screen reader. */}
+                        {workspace.protected && <span aria-hidden="true"> · Protected</span>}
+                      </span>
                     </span>
                   </button>
                   {removable && (

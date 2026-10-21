@@ -1,3 +1,4 @@
+import type { ReactNode } from "react";
 import { RESOURCE_LABELS, type CrdRef, type ResourceKind } from "@srelens/core";
 import type { IconComponent, ResourceNode } from "@srelens/ui-kit";
 import { Icons } from "./icons";
@@ -96,28 +97,41 @@ export function glyph(name: string): IconComponent {
   return (Icons as Record<string, IconComponent | undefined>)[name] ?? Icons.fallback;
 }
 
-const kindNode = (kind: ResourceKind): ResourceNode => ({
+/**
+ * What the sidebar shows at the end of a row, by node id (#402): `kind:pods`,
+ * `crd:<name>`, `route:/forwards`. Only leaves read it — a group's row is a
+ * fold, not a list, and has nothing to count.
+ */
+export type NodeCounts = ReadonlyMap<string, ReactNode>;
+
+/** The node's `count` from `counts`, or nothing at all — not a `count: undefined` key. */
+const counted = (id: string, counts?: NodeCounts): { count?: ReactNode } =>
+  counts?.has(id) ? { count: counts.get(id) } : {};
+
+const kindNode = (kind: ResourceKind, counts?: NodeCounts): ResourceNode => ({
   id: `kind:${kind}`,
   label: RESOURCE_LABELS[kind],
   icon: glyph(kind),
+  ...counted(`kind:${kind}`, counts),
 });
 
-const routeNode = (kind: ResourceKind, route: string): ResourceNode => ({
+const routeNode = (kind: ResourceKind, route: string, counts?: NodeCounts): ResourceNode => ({
   id: `route:${route}`,
   label: RESOURCE_LABELS[kind],
   icon: glyph(kind),
+  ...counted(`route:${route}`, counts),
 });
 
 /** The built-in half of the tree: the six groups, open to begin with. */
-export function kindNodes(): ResourceNode[] {
+export function kindNodes(counts?: NodeCounts): ResourceNode[] {
   return NAV_GROUPS.map((group) => {
-    const kinds = group.kinds.map(kindNode);
+    const kinds = group.kinds.map((kind) => kindNode(kind, counts));
     const children =
       group.id === "cluster"
         ? [
-            ...CLUSTER_ROUTES.filter((r) => r.before).map((r) => routeNode(r.kind, r.route)),
+            ...CLUSTER_ROUTES.filter((r) => r.before).map((r) => routeNode(r.kind, r.route, counts)),
             ...kinds,
-            ...CLUSTER_ROUTES.filter((r) => !r.before).map((r) => routeNode(r.kind, r.route)),
+            ...CLUSTER_ROUTES.filter((r) => !r.before).map((r) => routeNode(r.kind, r.route, counts)),
           ]
         : kinds;
     return { id: group.id, label: group.label, icon: glyph(group.id), children };
@@ -136,7 +150,7 @@ export function kindNodes(): ResourceNode[] {
  * Every group starts folded shut. Expanding all of them by default would drown
  * the built-in kinds above them the moment one operator is installed.
  */
-export function crdNodes(crds: CrdRef[]): ResourceNode[] {
+export function crdNodes(crds: CrdRef[], counts?: NodeCounts): ResourceNode[] {
   const groups = new Map<string, CrdRef[]>();
   for (const crd of crds) {
     const key = crd.group || "core";
@@ -153,7 +167,7 @@ export function crdNodes(crds: CrdRef[]): ResourceNode[] {
       defaultExpanded: false,
       children: [...list]
         .sort((a, b) => a.kind.localeCompare(b.kind))
-        .map((crd) => ({ id: `crd:${crd.name}`, label: crd.kind, icon: Icons.fallback })),
+        .map((crd) => ({ id: `crd:${crd.name}`, label: crd.kind, icon: Icons.fallback, ...counted(`crd:${crd.name}`, counts) })),
     }));
 }
 

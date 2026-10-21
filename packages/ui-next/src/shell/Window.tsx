@@ -58,6 +58,7 @@ import { loadSectionFolds } from "../lib/sectionFolds";
 import { loadExpanded } from "../lib/workspace";
 import { TabScope } from "../lib/tabScope";
 import { getInfo, probeCluster } from "../lib/probe";
+import { followMainProtection } from "../lib/protection";
 import { defaultState, makeTab, reconcile, type TabsState } from "../lib/tabs";
 import { parseEditRoute, parseNewRoute } from "../lib/detailRoute";
 import { isClusterScopedRoute, keepsManagementWhenPaused, tabDetail } from "../lib/routes";
@@ -113,6 +114,7 @@ import { Chrome, zoom } from "./Chrome";
 import { Console } from "./Console";
 import { isWorkspaceSealed, LockGate, lockWorkspace, useWorkspaceSealed } from "./LockGate";
 import { Nav } from "./Nav";
+import { ProtectedStrip, protectedStripCluster } from "./ProtectedStrip";
 import { Rail } from "./Rail";
 import { Status } from "./Status";
 import { TabSurface } from "./TabSurface";
@@ -572,6 +574,11 @@ export function Window({
     };
   }, [booted]);
 
+  // #101: a context window copied main's workspaces when it opened. It reads
+  // main's save again whenever it is focused, so protection turned on in main
+  // since then applies here before the reader acts.
+  useEffect(() => followMainProtection(windowLabel), [windowLabel]);
+
   useEffect(() => {
     return onWindowCloseRequested(async () => {
       flushSave();
@@ -943,10 +950,13 @@ export function Window({
             label="Open tabs"
           />
         )}
+        {/* #101: between the strip and the tab, about the active tab's own cluster. */}
+        {active && <ProtectedStrip contextName={protectedStripCluster(activeTabRoute, activeCtx?.name ?? null, contexts)} />}
         {/* Hidden, not unmounted, while the agent console fills the content
             area (#944): every tab keeps its page, scroll and watches for when
             the console is restored. */}
         <div ref={bandRef} className="relative min-h-0 flex-1" hidden={consoleMaximized && activeTabRoute !== "/agent"}>
+
           {tabs.map((tab) => {
             // An editor's target is pinned in its route. Its tab label follows
             // the rail, so it cannot decide whether the editor's readers are

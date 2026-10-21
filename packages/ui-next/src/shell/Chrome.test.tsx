@@ -12,6 +12,7 @@ import {
   setActiveCluster,
   setState,
   setWorkspaceColor,
+  setWorkspaceProtected,
   switchWorkspace,
   togglePin,
 } from "../lib/tabsStore";
@@ -176,6 +177,16 @@ describe("Chrome", () => {
     await openSwitcher();
     const row = screen.getAllByRole("button", { name: /^Default/ }).find((el) => el.classList.contains("ns-row"))!;
     expect(row.querySelector<HTMLElement>('[data-slot="workspace-color"]')?.style.background).toBe("var(--mark-teal)");
+  });
+
+  it("marks a protected workspace on the chip and on its row", async () => {
+    setWorkspaceProtected(getState().currentId, true);
+    chrome();
+    const chip = screen.getByRole("button", { name: /Default/ });
+    expect(chip.querySelector('[data-slot="workspace-protected"]')).not.toBeNull();
+    await openSwitcher();
+    const row = screen.getAllByRole("button", { name: /^Default/ }).find((el) => el.classList.contains("ns-row"))!;
+    expect(row.textContent).toContain("· Protected");
   });
 
   it("opens Settings on Workspaces from the switcher", async () => {
@@ -359,6 +370,21 @@ describe("Chrome", () => {
       const { container } = chrome();
       const swatch = container.querySelector<HTMLElement>('[data-sealed="true"] [data-slot="workspace-color"]');
       expect(swatch?.style.background).toBe("var(--mark-teal)");
+    });
+
+    it("keeps the shield, and the word, on the sealed chip", () => {
+      setWorkspaceProtected(getState().currentId, true);
+      lockWorkspace();
+      const { container } = chrome();
+      const chip = container.querySelector('[data-sealed="true"]')!;
+      expect(chip.querySelector('[data-slot="workspace-protected"]')?.getAttribute("aria-hidden")).toBe("true");
+      expect(chip.textContent).toContain("Default Protected");
+    });
+
+    it("draws no shield on the sealed chip of a workspace that is not protected", () => {
+      lockWorkspace();
+      const { container } = chrome();
+      expect(container.querySelector('[data-sealed="true"] [data-slot="workspace-protected"]')).toBeNull();
     });
 
     it("disables the way into Settings, and says why", async () => {

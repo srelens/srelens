@@ -11,10 +11,14 @@ import { resolveContext } from "../lib/clusters";
 import { openTab, useActiveCluster, useTabs } from "../lib/tabsStore";
 import { crdNodes, glyph, INVESTIGATE, kindNodes, routeForNode } from "../lib/tree";
 import { useResource } from "../lib/useResource";
+import { useSidebarCounts } from "../lib/sidebarCounts";
 import { toggleExpanded, useWorkspaceView, type LinkState } from "../lib/workspace";
 
 /** The one leaf the "Custom resources" group holds when discovery has failed. */
 const CRD_ERROR_ID = "crd-error";
+
+/** No folds open, as one array, so a cluster with none saved asks the same question every render. */
+const NO_FOLDS: string[] = [];
 
 export interface NavProps {
   /** Every cluster the machine knows. The active one is looked up in here by `stableId`. */
@@ -97,6 +101,8 @@ export function Nav({ contexts }: NavProps) {
     [name, paused],
   );
   const crds = useMemo(() => discovery.data ?? [], [discovery.data]);
+  // How many of each kind, for the rows under an open fold (#402).
+  const counts = useSidebarCounts({ ctx, paused, expanded: ctx ? view.expanded[ctx.stableId] ?? NO_FOLDS : NO_FOLDS, crds });
 
   // A failed discovery is not rendered as the tree-level `error` — that kit
   // prop replaces the whole tree with an announced failure, and CRD discovery
@@ -107,16 +113,17 @@ export function Nav({ contexts }: NavProps) {
   const crdChildren: ResourceNode[] =
     discovery.status === "error"
       ? [{ id: CRD_ERROR_ID, label: "Custom resources unavailable — retry", icon: Icons.warn }]
-      : crdNodes(crds);
+      : crdNodes(crds, counts);
 
   const nodes = useMemo<ResourceNode[]>(() => {
     // App routes and app scope both name the cluster by its key, which no two contexts share
     // (#623, #695); a window opened for one of two sharing a stable ID pins its key.
     const apps = ctx && extensions.data ? appNavigation(extensions.data.plugins, ctx.key) : null;
+    const kinds = kindNodes(counts);
     return [
-      ...kindNodes().slice(0, 1),
+      ...kinds.slice(0, 1),
       ...(apps ? [apps] : []),
-      ...kindNodes().slice(1),
+      ...kinds.slice(1),
       { id: "crds", label: "Custom resources", icon: Icons.crds, defaultExpanded: false, children: crdChildren },
       {
         id: "investigate",
@@ -125,7 +132,7 @@ export function Nav({ contexts }: NavProps) {
         children: INVESTIGATE.map((i) => ({ id: `route:${i.route}`, label: i.label, icon: glyph(i.id) })),
       },
     ];
-  }, [crds, crdChildren, ctx, extensions.data]);
+  }, [crdChildren, ctx, extensions.data, counts]);
 
   const link = ctx
     ? (paused ? { word: "Paused", kind: "neutral" as const } : view.links[ctx.stableId] ? LINK[view.links[ctx.stableId].state] : UNKNOWN)

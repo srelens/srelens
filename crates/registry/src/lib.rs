@@ -717,6 +717,9 @@ fn build_with(
     reg.register(srelens_kube::manifest::list_resource_capability(
         cache.clone(),
     ));
+    reg.register(srelens_kube::count::count_resources_capability(
+        cache.clone(),
+    ));
 
     let mut app_streams = None;
     if let Some(apps) = apps {
