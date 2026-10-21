@@ -165,10 +165,19 @@ pub(crate) fn write_private(path: &Path, contents: &str) -> std::io::Result<()> 
 fn write_session_atomic(dir: &Path, session: &Session) -> Result<(), String> {
     let path = session_path(dir, &session.id)?;
     fs::create_dir_all(dir).map_err(|e| format!("could not create {}: {e}", dir.display()))?;
-    let tmp = dir.join(format!("{}.json.tmp", session.id));
     let raw = serde_json::to_string_pretty(session).map_err(|e| e.to_string())?;
-    write_private(&tmp, &raw).map_err(|e| format!("could not write {}: {e}", tmp.display()))?;
-    fs::rename(&tmp, &path).map_err(|e| format!("could not finalize {}: {e}", path.display()))
+    write_private_atomic(&path, &raw).map_err(|e| format!("could not write {}: {e}", path.display()))
+}
+
+/// `write_private` to `<path>.tmp`, then rename it onto `path`, so the file is
+/// replaced in one step: a reader, or a crash, finds the old contents or the
+/// new, never a truncated file. Shared with the srelens agent's history.
+pub(crate) fn write_private_atomic(path: &Path, contents: &str) -> std::io::Result<()> {
+    let mut tmp = path.as_os_str().to_owned();
+    tmp.push(".tmp");
+    let tmp = PathBuf::from(tmp);
+    write_private(&tmp, contents)?;
+    fs::rename(&tmp, path)
 }
 
 /// Read one session's full file back off disk. A missing file (unknown id)

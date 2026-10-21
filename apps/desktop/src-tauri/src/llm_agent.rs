@@ -108,11 +108,13 @@ fn sweep_native_chats(dir: &std::path::Path, saved: impl Fn(&str) -> bool) {
     }
 }
 
-/// Keep `chat`'s history, owner-only: it holds tool results.
+/// Keep `chat`'s history, owner-only (it holds tool results), replacing the
+/// old one in one step: a save cut short must not lose the history the next
+/// turn needs (PR #962 review). A `.tmp` left by a crash is swept at launch.
 fn save_history(dir: &std::path::Path, chat: &str, turns: &[srelens_llm::types::Turn]) -> std::io::Result<()> {
     std::fs::create_dir_all(dir)?;
     let raw = serde_json::to_string(turns).map_err(std::io::Error::other)?;
-    crate::assistant_history::write_private(&native_chat_path(dir, chat), &raw)
+    crate::assistant_history::write_private_atomic(&native_chat_path(dir, chat), &raw)
 }
 
 /// Distill and trim conversation history using the shared srelens_llm engine.
@@ -591,6 +593,36 @@ mod tests {
 
         assert!(native_chat_path(dir.path(), "saved").exists());
         assert!(!native_chat_path(dir.path(), "one-shot").exists(), "a history no saved conversation holds goes at launch");
+    }
+
+    /// A save replaces the kept history in one step (PR #962 review): a
+    /// reader — or a crash — mid-save must find the old history or the new
+    /// one, never a truncated file that `load_history` reads as no history.
+    #[test]
+    fn a_reader_never_sees_a_half_written_history() {
+        use srelens_llm::types::Turn;
+        let dir = tempfile::tempdir().unwrap();
+        let big = |tag: &str| vec![Turn::User(format!("{tag}{}", "x".repeat(2_000_000)))];
+        save_history(dir.path(), "conv-1", &big("a")).unwrap();
+        let path = dir.path().to_path_buf();
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let reader = {
+            let stop = stop.clone();
+            std::thread::spawn(move || {
+                let mut empty = 0;
+                while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                    if load_history(&path, "conv-1").is_empty() {
+                        empty += 1;
+                    }
+                }
+                empty
+            })
+        };
+        for i in 0..60 {
+            save_history(dir.path(), "conv-1", &big(if i % 2 == 0 { "b" } else { "a" })).unwrap();
+        }
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        assert_eq!(reader.join().unwrap(), 0, "a read mid-save found no history");
     }
 
     #[test]
