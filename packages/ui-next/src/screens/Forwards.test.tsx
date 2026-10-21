@@ -53,7 +53,7 @@ vi.mock("@srelens/core", async (orig) => ({
 import { type ActiveForward, type ClusterContext, kindToForwardTarget, toKubectl } from "@srelens/core";
 import { Forwards } from "./Forwards";
 import { resetContexts, setContexts } from "../lib/clusters";
-import { currentWorkspace, setClusterPaused, setActiveCluster, setState } from "../lib/tabsStore";
+import { currentWorkspace, getState, setClusterPaused, setActiveCluster, setState, setWorkspaceProtected } from "../lib/tabsStore";
 import { defaultState } from "../lib/tabs";
 
 const ROUTE = "/forwards";
@@ -908,3 +908,63 @@ describe("Forwards — the Local cell opens", () => {
 function setForwardsBeforeMount(next: ActiveForward[]) {
   store.list = next;
 }
+
+/** The screen's own door into the forward dialog, on a protected cluster (#101). */
+describe("Forwards — a new forward on a protected cluster (#101)", () => {
+  /** Open the dialog on protected `prod-eu` and fill §A.4's fields, leaving only the cluster's name unsaid. */
+  async function fillOnProtectedProd() {
+    withClusters();
+    setWorkspaceProtected(getState().currentId, true);
+    core.listServices.mockResolvedValue({ services: [{ name: "checkout-api", namespace: "checkout" }] });
+    open();
+    const actions = document.querySelector('[data-slot="screen-actions"]') as HTMLElement;
+    await userEvent.click(within(actions).getByRole("button", { name: "New forward" }));
+    await screen.findByRole("dialog");
+    await waitFor(() => expect(core.listNamespaces).toHaveBeenCalledWith("prod-eu"));
+    await userEvent.selectOptions(screen.getByLabelText("Namespace"), "checkout");
+    await waitFor(() =>
+      expect(within(screen.getByLabelText("Target")).queryByRole("option", { name: "svc/checkout-api" })).toBeTruthy(),
+    );
+    await userEvent.selectOptions(screen.getByLabelText("Target"), "svc/checkout-api");
+    await userEvent.clear(screen.getByLabelText("Local port"));
+    await userEvent.type(screen.getByLabelText("Local port"), "9099");
+    await userEvent.clear(screen.getByLabelText("Remote port"));
+    await userEvent.type(screen.getByLabelText("Remote port"), "8080");
+  }
+
+  it("starts no forward until the cluster's name is typed", async () => {
+    await fillOnProtectedProd();
+    expect(screen.getByText("prod-eu is protected (workspace Default).")).toBeTruthy();
+
+    await userEvent.click(screen.getByRole("button", { name: "Start forward" }));
+    expect(core.startPortForward).not.toHaveBeenCalled();
+    expect(screen.getByText("Type prod-eu to confirm.")).toBeTruthy();
+
+    await userEvent.type(screen.getByRole("textbox", { name: "Type prod-eu to confirm" }), "prod-eu");
+    await userEvent.click(screen.getByRole("button", { name: "Start forward" }));
+    await waitFor(() => expect(core.startPortForward).toHaveBeenCalledTimes(1));
+  });
+
+  it("keeps asking for the name when the rail loses its selection under the dialog", async () => {
+    await fillOnProtectedProd();
+    expect(screen.getByText("prod-eu is protected (workspace Default).")).toBeTruthy();
+
+    // The rail has nothing selected now; the forward still runs on prod-eu,
+    // which is what the dialog was pinned to, and prod-eu is still protected.
+    // (`setActiveCluster(null)`, not `resetContexts()`: the latter removes the
+    // cluster from the contexts store, and a cluster nobody declares has no
+    // protection to look up.)
+    act(() => setActiveCluster(null));
+
+    expect(screen.queryByText(/This still runs against/)).toBeNull();
+    expect(screen.getByText("prod-eu is protected (workspace Default).")).toBeTruthy();
+    await userEvent.click(screen.getByRole("button", { name: "Start forward" }));
+    expect(core.startPortForward).not.toHaveBeenCalled();
+    expect(screen.getByText("Type prod-eu to confirm.")).toBeTruthy();
+
+    await userEvent.type(screen.getByRole("textbox", { name: "Type prod-eu to confirm" }), "prod-eu");
+    await userEvent.click(screen.getByRole("button", { name: "Start forward" }));
+    await waitFor(() => expect(core.startPortForward).toHaveBeenCalledTimes(1));
+    expect(core.startPortForward).toHaveBeenCalledWith(expect.objectContaining({ context: "prod-eu" }));
+  });
+});

@@ -36,6 +36,7 @@ import {
 } from "@srelens/core";
 import { Button, Combobox, usePortalShowing } from "@srelens/ui-kit";
 import { HostConfirmation } from "../confirm/HostConfirmation";
+import { useProtectedConfirm } from "../lib/protectedConfirm";
 import { useConfirmationApp } from "../confirm/confirmationApp";
 import { confirmFields } from "../confirm/confirmRequest";
 import { EXEC_CONFIRM } from "./ExtensionBindings";
@@ -438,6 +439,18 @@ function ExecReview({
   onRun(): void;
 }) {
   const app = useConfirmationApp({ id: plugin.manifest.id, revision: plugin.revision });
+  // On a protected cluster the command waits for the cluster's name (#101).
+  const typed = useProtectedConfirm(context);
+  // Each command is its own question. The Run buttons stay live under an open
+  // review, so another command can replace this one without unmounting it: the
+  // name is cleared DURING render when `pending` changes, not in an effect, so
+  // the next command is never committed with the last one's name typed and Run
+  // live (see AgentConsent). `pending` is a new object per command.
+  const [typedFor, setTypedFor] = useState(pending);
+  if (typedFor !== pending) {
+    setTypedFor(pending);
+    typed.reset();
+  }
   const region = useRef<HTMLDivElement>(null);
   // Focus moves in, and goes back to what opened it when the review closes —
   // on Cancel, Escape or Run alike — rather than falling to the page.
@@ -470,12 +483,13 @@ function ExecReview({
         subject={{ kind: "object", namespace, name: pending.pod }}
         app={app}
         command={{ container: pending.container, argv: pending.command }}
+        details={typed.field}
         actions={
           <>
             <Button type="button" variant="ghost" onClick={onCancel}>
               Cancel
             </Button>
-            <Button type="button" variant="danger" onClick={onRun}>
+            <Button type="button" variant="danger" onClick={onRun} disabled={!typed.ready}>
               Run command
             </Button>
           </>

@@ -14,6 +14,7 @@ import {
 import { Alert, Button, Dialog, Field, Select } from "@srelens/ui-kit";
 import { FailureAlert } from "../../lib/errorCopy";
 import { startLocalSession, startPodSession } from "../../lib/sessions";
+import { useProtectedConfirm } from "../../lib/protectedConfirm";
 
 /** §14's dialog width — narrow, three fields deep at most. */
 const WIDTH = 420;
@@ -126,6 +127,13 @@ export function NewSessionMenu({ context, namespace: initial, moved, onStarted, 
 
   const [busy, setBusy] = useState(false);
   const [failure, setFailure] = useState<{ title: string; error: unknown } | null>(null);
+  /**
+   * On a protected cluster, its name before a pod or node shell starts (#101).
+   * A shell there is a way to change the cluster that no other confirm
+   * reaches. Not the local shell: its guard is the read-only terminal.
+   */
+  const typed = useProtectedConfirm(context);
+  const guarded = kind !== "local";
 
   // Namespaces, up front: the pod kind is where the menu opens, and a
   // namespace picked before the pod kind is even shown would waste the round
@@ -264,6 +272,7 @@ export function NewSessionMenu({ context, namespace: initial, moved, onStarted, 
    */
   const ready =
     !busy &&
+    (!guarded || typed.ready) &&
     (kind === "pod"
       ? Boolean(namespace && pod)
       : kind === "node"
@@ -405,6 +414,8 @@ export function NewSessionMenu({ context, namespace: initial, moved, onStarted, 
             deletes it when the session ends.
           </div>
         )}
+
+        {guarded && typed.field}
 
         {kind === "local" && (
           <div className="text-[0.75rem] text-muted">

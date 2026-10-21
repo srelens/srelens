@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 
@@ -15,8 +15,11 @@ vi.mock("../../lib/helmOps", async (orig) => ({
   startHelmOperation: store.startHelmOperation,
 }));
 
-import type { HelmRevision } from "@srelens/core";
+import type { ClusterContext, HelmRevision } from "@srelens/core";
 import { HelmOpDialog, helmArgv, helmCommand, releaseNameError } from "./HelmOpDialog";
+import { resetContexts, setContexts } from "../../lib/clusters";
+import { defaultState } from "../../lib/tabs";
+import { getState, setState, setWorkspaceProtected } from "../../lib/tabsStore";
 
 const CONTEXT = "prod-eu";
 const NAMESPACE = "checkout";
@@ -816,6 +819,83 @@ describe("HelmOpDialog — the cluster it was opened against", () => {
     expect(button("Uninstall").disabled).toBe(true);
     await userEvent.clear(field(`Type ${RELEASE} to confirm`));
     await userEvent.type(field(`Type ${RELEASE} to confirm`), RELEASE);
+    expect(button("Uninstall").disabled).toBe(false);
+  });
+});
+
+/**
+ * On a protected cluster (#101) every operation waits for the cluster's name,
+ * typed — on top of whatever gate the operation already has. Uninstall keeps
+ * its release name: both must match.
+ */
+describe("HelmOpDialog — on a protected cluster (#101)", () => {
+  const PROD: ClusterContext = { name: CONTEXT, stableId: "prod", key: "prod", cluster: "prod", server: "", isCurrent: true, sourceFile: "", authKind: "token" };
+  const clusterField = () => field(`Type ${CONTEXT} to confirm`);
+
+  beforeEach(() => {
+    setContexts([PROD]);
+    setState(defaultState([PROD]));
+    setWorkspaceProtected(getState().currentId, true);
+  });
+  afterEach(() => {
+    resetContexts();
+    setState(defaultState([]));
+  });
+
+  it.each([
+    ["install", "Install"],
+    ["upgrade", "Upgrade"],
+  ] as const)("holds %s until the cluster's name is typed", async (kind, label) => {
+    // The rail has moved to a cluster nobody protects; the operation still
+    // runs on `context`, so that is the name asked for.
+    open({ kind, activeContext: "stage-eu" });
+    await screen.findByRole("dialog");
+    expect(screen.getByText(`${CONTEXT} is protected (workspace Default).`)).toBeTruthy();
+    expect(button(label).disabled).toBe(true);
+
+    await userEvent.type(clusterField(), "prod-e");
+    expect(button(label).disabled).toBe(true);
+    await userEvent.type(clusterField(), "u");
+    expect(button(label).disabled).toBe(false);
+
+    await userEvent.click(button(label));
+    expect(store.startHelmOperation).toHaveBeenCalledWith(expect.objectContaining({ kind, context: CONTEXT }));
+  });
+
+  it("holds a rollback until both its tick and the cluster's name are given", async () => {
+    open({ kind: "rollback", history: HISTORY, revision: 4 });
+    await screen.findByRole("dialog");
+    await userEvent.click(screen.getByRole("checkbox"));
+    expect(button("Roll back to 3").disabled).toBe(true);
+
+    await userEvent.type(clusterField(), CONTEXT);
+    expect(button("Roll back to 3").disabled).toBe(false);
+  });
+
+  it("holds an uninstall until both the release's name and the cluster's are typed", async () => {
+    open({ kind: "uninstall" });
+    await screen.findByRole("dialog");
+
+    await userEvent.type(clusterField(), CONTEXT);
+    expect(button("Uninstall").disabled).toBe(true);
+
+    await userEvent.type(field(`Type ${RELEASE} to confirm`), RELEASE);
+    expect(button("Uninstall").disabled).toBe(false);
+
+    await userEvent.click(button("Uninstall"));
+    expect(store.startHelmOperation).toHaveBeenCalledWith(expect.objectContaining({ kind: "uninstall", context: CONTEXT }));
+  });
+
+  // The release's name first: the cluster's is then the only gate left, so a
+  // dialog that stopped asking for it would open here.
+  it("does not let the release's name alone release an uninstall", async () => {
+    open({ kind: "uninstall" });
+    await screen.findByRole("dialog");
+
+    await userEvent.type(field(`Type ${RELEASE} to confirm`), RELEASE);
+    expect(button("Uninstall").disabled).toBe(true);
+
+    await userEvent.type(clusterField(), CONTEXT);
     expect(button("Uninstall").disabled).toBe(false);
   });
 });

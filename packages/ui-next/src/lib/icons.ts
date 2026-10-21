@@ -113,6 +113,8 @@ export const Icons = {
   // screen was drawing its own inline SVG. One entry, so the mark and any
   // later lock affordance draw the same padlock.
   lock: Lock,
+  /** A protected workspace and cluster (#101): the sealed chip and the strip above a protected tab. */
+  shield: Shield,
   add: Plus,
   close: X,
   search: Search,

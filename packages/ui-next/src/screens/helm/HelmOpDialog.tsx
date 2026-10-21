@@ -15,6 +15,7 @@ import {
   TextInput,
 } from "@srelens/ui-kit";
 import { type HelmOpKind, startHelmOperation } from "../../lib/helmOps";
+import { useProtectedConfirm } from "../../lib/protectedConfirm";
 
 /** §A.5's width, in px. */
 const WIDTH = 620;
@@ -400,6 +401,13 @@ export function HelmOpDialog({
    * attention, and every softening of the comparison gives that moment back.
    */
   const [typed, setTyped] = useState("");
+  /**
+   * On a protected cluster, the cluster's name as well (#101) — the typed
+   * confirmation every write in the app asks for there, of `context`, the
+   * cluster this dialog was opened against. Every operation takes it, on top
+   * of its own gate; uninstall's release name still has to match too.
+   */
+  const guard = useProtectedConfirm(context);
 
   const target = revisionOf(targetText);
 
@@ -470,7 +478,7 @@ export function HelmOpDialog({
       : kind === "rollback"
         ? target !== null && acknowledgedFor === target
         : true;
-  const ready = complete && confirmed;
+  const ready = complete && confirmed && guard.ready;
 
   function submit() {
     if (!ready) return;
@@ -699,6 +707,8 @@ export function HelmOpDialog({
             <TextInput value={typed} onValueChange={setTyped} autoFocus />
           </Field>
         )}
+
+        {guard.field}
 
         <div className="min-w-0">
           <SubHead variant="caps">Equivalent command</SubHead>

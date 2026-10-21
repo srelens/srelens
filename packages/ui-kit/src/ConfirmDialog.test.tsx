@@ -61,6 +61,17 @@ describe("ConfirmDialog", () => {
     expect((screen.getByRole("button", { name: "Cancel" }) as HTMLButtonElement).disabled).toBe(true);
   });
 
+  it("holds only the confirm button when asked, and confirms nothing from it", () => {
+    const onConfirm = vi.fn();
+    open({ confirmLabel: "Approve", cancelLabel: "Deny", confirmDisabled: true, onConfirm });
+    const approve = screen.getByRole("button", { name: "Approve" }) as HTMLButtonElement;
+    expect(approve.disabled).toBe(true);
+    // Saying no needs nothing.
+    expect((screen.getByRole("button", { name: "Deny" }) as HTMLButtonElement).disabled).toBe(false);
+    fireEvent.click(approve);
+    expect(onConfirm).not.toHaveBeenCalled();
+  });
+
   it("shows a working spinner in place of the confirm label while busy", () => {
     open({ busy: true, confirmLabel: "Apply" });
     expect(screen.queryByText("Apply")).toBeNull();
@@ -240,6 +251,23 @@ describe("ConfirmDialog focus", () => {
 
     rerender(
       <ConfirmDialog title="t" message="m" busy confirmLabel="Apply" onConfirm={() => {}} onCancel={() => {}} />,
+    );
+    const dialog = screen.getByRole("dialog");
+    expect(dialog.contains(document.activeElement), "focus must stay in the modal").toBe(true);
+  });
+
+  it("keeps focus inside when the caller holds the focused confirm button", () => {
+    // The same blur, from `confirmDisabled` rather than `busy`: a typed name
+    // edited back out of match disables Approve while it has focus.
+    const { rerender } = render(
+      <ConfirmDialog title="t" message="m" confirmLabel="Approve" onConfirm={() => {}} onCancel={() => {}} />,
+    );
+    const confirm = screen.getByRole("button", { name: "Approve" });
+    confirm.focus();
+    confirm.blur(); // as above: what the browser does when the button is disabled
+
+    rerender(
+      <ConfirmDialog title="t" message="m" confirmDisabled confirmLabel="Approve" onConfirm={() => {}} onCancel={() => {}} />,
     );
     const dialog = screen.getByRole("dialog");
     expect(dialog.contains(document.activeElement), "focus must stay in the modal").toBe(true);

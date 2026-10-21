@@ -12,6 +12,12 @@ export interface ConfirmDialogProps {
   cancelLabel?: string;
   danger?: boolean;
   busy?: boolean;
+  /**
+   * Holds the confirm button disabled while the rest of the dialog stays
+   * live: a question the caller has not had answered yet, such as a typed
+   * name. Cancel is never held, because saying no needs nothing.
+   */
+  confirmDisabled?: boolean;
   onConfirm: () => void;
   onCancel: () => void;
 }
@@ -69,6 +75,7 @@ export function ConfirmDialog({
   cancelLabel = "Cancel",
   danger = false,
   busy = false,
+  confirmDisabled = false,
   onConfirm,
   onCancel,
 }: ConfirmDialogProps) {
@@ -100,10 +107,12 @@ export function ConfirmDialog({
   // disabled control produces, and its recovery watches for removed nodes
   // rather than changed attributes. So watch the transition here. The content
   // can hold focus: Radix's focus scope gives it `tabindex="-1"`. (#324 review)
+  // `confirmDisabled` blurs the confirm button the same way, when a caller
+  // holds it while it has focus.
   useEffect(() => {
     const content = contentRef.current;
     if (content && !content.contains(document.activeElement)) content.focus();
-  }, [busy]);
+  }, [busy, confirmDisabled]);
 
   return (
     <Dialog.Root
@@ -225,7 +234,7 @@ export function ConfirmDialog({
             <Button variant="secondary" onClick={onCancel} disabled={busy}>
               {cancelLabel}
             </Button>
-            <Button variant={danger ? "danger" : "primary"} onClick={onConfirm} disabled={busy}>
+            <Button variant={danger ? "danger" : "primary"} onClick={onConfirm} disabled={busy || confirmDisabled}>
               {busy ? <Spinner label="Working" /> : confirmLabel}
             </Button>
           </div>

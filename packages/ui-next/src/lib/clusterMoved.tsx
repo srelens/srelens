@@ -1,5 +1,6 @@
 import { useCallback, useState, type ReactNode } from "react";
 import { Alert, Checkbox } from "@srelens/ui-kit";
+import { useProtectedConfirm } from "./protectedConfirm";
 
 /**
  * What a dialog says, and asks again, when the cluster rail moves out from
@@ -87,17 +88,26 @@ export interface ClusterGate {
    *
    * Checked by the confirm handler and shown as the dialog's own error line —
    * the same path a validation message this side wrote takes today. It is
-   * `null` in the ordinary case, so a dialog nobody moved the rail under
-   * behaves exactly as it did before.
+   * `null` in the ordinary case, so a dialog nobody moved the rail under, on a
+   * cluster that is not protected, behaves exactly as it did before.
    */
   refusal: string | null;
-  /** Forget any acknowledgement. Called when a dialog opens and when it closes. */
+  /**
+   * `refusal === null`, for a dialog that would rather disable its button
+   * than show the refusal line.
+   */
+  ready: boolean;
+  /**
+   * Forget any acknowledgement, and any name typed. Called when a dialog opens
+   * and when it closes. The same function on every render: `Overview` builds
+   * its node columns off it.
+   */
   reset: () => void;
 }
 
 /**
- * The divergence banner, its acknowledgement, and the refusal that keeps the
- * two honest — see this module's note.
+ * The divergence banner, its acknowledgement, the protected cluster's typed
+ * name (#101), and the refusal that keeps them honest — see this module's note.
  *
  * `pinned` is `null` while nothing is open, which is also how a caller says
  * "there is nothing to compare": `moved` is false, the alert is nothing, and
@@ -120,25 +130,47 @@ export function useClusterGate({
   verb: string;
 }): ClusterGate {
   const [acknowledgedFor, setAcknowledgedFor] = useState<string | null>(null);
-  const reset = useCallback(() => setAcknowledgedFor(null), []);
+  /**
+   * On a protected cluster, its name, typed (#101). Asked of the cluster the
+   * action runs ON — the pinned one — never the one in focus: a write to
+   * production from a dialog opened there still asks, wherever the rail has
+   * gone since. Nothing pinned, nothing asked.
+   */
+  const typed = useProtectedConfirm(pinned);
+  const resetTyped = typed.reset;
+  const reset = useCallback(() => {
+    setAcknowledgedFor(null);
+    resetTyped();
+  }, [resetTyped]);
 
   const moved = pinned !== null && pinned !== live;
   const acknowledged = moved && acknowledgedFor === live;
+  const movedAlert =
+    pinned !== null && moved ? (
+      <ClusterMovedAlert pinned={pinned} live={live}>
+        <Checkbox
+          className="mt-2"
+          checked={acknowledged}
+          onChange={(next) => setAcknowledgedFor(next ? live : null)}
+          label={`Yes, still ${verb} on ${pinned}.`}
+        />
+      </ClusterMovedAlert>
+    ) : null;
+  // Which cluster first, then its name: the first answer changes what the
+  // second one is about.
+  const refusal = moved && !acknowledged ? clusterMovedRefusal(pinned, live) : typed.refusal;
 
   return {
     moved,
     alert:
-      pinned !== null && moved ? (
-        <ClusterMovedAlert pinned={pinned} live={live}>
-          <Checkbox
-            className="mt-2"
-            checked={acknowledged}
-            onChange={(next) => setAcknowledgedFor(next ? live : null)}
-            label={`Yes, still ${verb} on ${pinned}.`}
-          />
-        </ClusterMovedAlert>
+      movedAlert || typed.field ? (
+        <>
+          {movedAlert}
+          {typed.field}
+        </>
       ) : null,
-    refusal: moved && !acknowledged ? clusterMovedRefusal(pinned, live) : null,
+    refusal,
+    ready: refusal === null,
     reset,
   };
 }
