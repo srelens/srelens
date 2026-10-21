@@ -135,6 +135,7 @@ pub mod collections;
 pub mod connections;
 pub mod context_resolve;
 pub mod contexts;
+pub mod count;
 pub mod crds;
 pub mod cronjobs;
 pub mod daemonsets;

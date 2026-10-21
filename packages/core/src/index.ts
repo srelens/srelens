@@ -69,6 +69,7 @@ export * from "./lib/overviewSnapshot";
 export * from "./lib/paletteActions";
 export * from "./lib/podContainers";
 export * from "./lib/podCount";
+export * from "./lib/countResources";
 export * from "./lib/podOverview";
 export * from "./lib/prompts";
 export * from "./lib/rbac";

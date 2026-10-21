@@ -7,11 +7,11 @@ Everything this server exposes over MCP, generated from the live registry so it 
 
 ## Tools
 
-136 tools, grouped by area and then by how a call is gated. Argument schemas are not reproduced here — call `tools/list` for those, which cannot go stale.
+137 tools, grouped by area and then by how a call is gated. Argument schemas are not reproduced here — call `tools/list` for those, which cannot go stale.
 
 **Impact** is how much a successful call disturbs — `low`, `medium` or `high` — and is a different question from the section heading, which is how the call is gated. A capability that accepts several named operations carries the highest level any of them reaches; the per-operation level travels with the resource.
 
-### Kubernetes — read-only (64)
+### Kubernetes — read-only (65)
 
 | Tool | Impact | Summary |
 | --- | --- | --- |
@@ -19,6 +19,7 @@ Everything this server exposes over MCP, generated from the live registry so it 
 | `k8s.canI` | low | check whether the current user can perform actions (SelfSubjectAccessReview, batched) |
 | `k8s.clusterFacts` | low | report a cluster's provider, region and metrics-server availability |
 | `k8s.clusterInfo` | low | connect to a kube context and report server version and reachability |
+| `k8s.countResources` | low | how many objects of each kind there are, counted without listing them: one metadata-only request per kind (and per namespace) asking for a single object, plus the API server's remainingItemCount. Omit `namespaces` to count all namespaces; cluster-scoped kinds ignore it. For a custom resource pass `group`, `version`, `plural` and `namespaced` as well as `kind`. A kind that could not be counted (refused, timed out, or the server did not say) has `count: null` and an `error`, never 0. |
 | `k8s.diffManifest` | low | diff a manifest against the cluster via server dry-run apply (per document) |
 | `k8s.getCustomResource` | low | Inspect one custom resource and its events |
 | `k8s.getManifest` | low | fetch a resource's manifest as YAML (any supported kind) |
