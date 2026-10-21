@@ -3,6 +3,7 @@ import {
   CAPABILITY_IMPACT_ORDER,
   cancelChat,
   describeError,
+  handoffPreface,
   listAgents,
   loadSkill,
   listSessions,
@@ -954,6 +955,8 @@ export async function askAgent(
   // conversation's token to Claude while the picker — which shows
   // `run.agentKind` — still said Codex.
   const myAgentKind = state.run.agentKind;
+  // What was said before this question, for an agent with no record of it.
+  const earlier = state.run.turns;
 
   commitTo(key, {
     ...state.run,
@@ -1114,9 +1117,13 @@ export async function askAgent(
       counted = true;
       recordSkillUses(skills);
     };
+    // No resume id: this agent has none of the earlier turns — it was just
+    // switched to (here or in `chooseAgent`), or never returned an id. Read
+    // after the fallback above, which drops `resume` too.
+    const handoff = state.resume === null ? handoffPreface(earlier) : "";
     const result = await sendChat(
       started,
-      `${preface}${guidance}${question}`,
+      `${handoff}${preface}${guidance}${question}`,
       agentPath,
       (e) => {
         countUse();

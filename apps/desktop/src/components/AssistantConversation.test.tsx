@@ -385,6 +385,51 @@ describe("AssistantConversation session persistence", () => {
     expect(vi.mocked(chat.sendChat).mock.calls[2][7]).toBeNull();
   });
 
+  it("tells the agent switched to what was said, until it has a session of its own", async () => {
+    vi.mocked(chat.listAgents).mockResolvedValue([
+      { kind: "claude", label: "Claude Code", available: true, path: "/usr/bin/claude", version: null, installUrl: "", gated: false },
+      { kind: "codex", label: "Codex", available: true, path: "/usr/bin/codex", version: null, installUrl: "", gated: false },
+    ]);
+    vi.mocked(chat.sendChat).mockImplementation(async (_s, _p, _a, onEvent) => {
+      onEvent({ type: "toolCallStart", id: "t1", tool: "k8s.listStatefulSets", args: { namespace: "shop" } });
+      onEvent({ type: "toolResult", id: "t1", status: "ok" });
+      onEvent({ type: "textDelta", text: "orders uses orders-db, a Postgres StatefulSet." });
+      onEvent({ type: "turnDone" });
+      return "cli-abc";
+    });
+    render(<AssistantConversation />);
+    fireEvent.change(await screen.findByPlaceholderText(/ask/i), { target: { value: "which database does orders use?" } });
+    fireEvent.click(screen.getByRole("button", { name: /send/i }));
+    await waitFor(() => expect(chat.sendChat).toHaveBeenCalledTimes(1));
+    await screen.findByRole("button", { name: /^send$/i });
+
+    vi.mocked(chat.sendChat).mockImplementation(async (_s, _p, _a, onEvent) => {
+      onEvent({ type: "turnDone" });
+      return "codex-thread";
+    });
+    fireEvent.click(screen.getByRole("combobox", { name: /agent/i }));
+    fireEvent.click(await screen.findByRole("option", { name: /codex/i }));
+    fireEvent.change(screen.getByPlaceholderText(/ask/i), { target: { value: "which index should I create?" } });
+    fireEvent.click(screen.getByRole("button", { name: /^send$/i }));
+    await waitFor(() => expect(chat.sendChat).toHaveBeenCalledTimes(2));
+    await screen.findByRole("button", { name: /^send$/i });
+
+    const sent = vi.mocked(chat.sendChat).mock.calls[1][1];
+    expect(vi.mocked(chat.sendChat).mock.calls[1][7]).toBeNull();
+    expect(sent).toMatch(/another agent/i);
+    expect(sent.indexOf("which database does orders use?")).toBeGreaterThanOrEqual(0);
+    expect(sent.indexOf("orders uses orders-db")).toBeGreaterThan(sent.indexOf("which database does orders use?"));
+    expect(sent.endsWith("which index should I create?")).toBe(true);
+    expect(sent).not.toContain("k8s.listStatefulSets");
+
+    // Codex has its own thread now: not told again.
+    fireEvent.change(screen.getByPlaceholderText(/ask/i), { target: { value: "how big will it get?" } });
+    fireEvent.click(screen.getByRole("button", { name: /^send$/i }));
+    await waitFor(() => expect(chat.sendChat).toHaveBeenCalledTimes(3));
+    expect(vi.mocked(chat.sendChat).mock.calls[2][7]).toBe("codex-thread");
+    expect(vi.mocked(chat.sendChat).mock.calls[2][1]).toBe("how big will it get?");
+  });
+
   it("clears the stored id when a resume crashes (null return), so the next turn starts fresh", async () => {
     // Turn 1 captures an id; turn 2 resumes it but the backend reports a
     // crashed resume by returning null (the CLI lost the session). Turn 3

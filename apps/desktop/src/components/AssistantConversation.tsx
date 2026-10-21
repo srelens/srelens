@@ -3,7 +3,7 @@ import { Bot, Check, ChevronDown, ChevronRight, Copy, Paperclip, Sparkles, Wrenc
 import { listen } from "@tauri-apps/api/event";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Badge, Button, Spinner, TextInput } from "../ui";
-import { cancelChat, listAgents, startChat, sendChat, type AgentEvent, type AgentInfo } from "@srelens/core";
+import { cancelChat, handoffPreface, listAgents, startChat, sendChat, type AgentEvent, type AgentInfo } from "@srelens/core";
 // Named the same as toolbox's ToolStatus, so taken from its own module.
 import type { ToolStatus } from "@srelens/core/lib/chat";
 import { isTauri, respondToConfirm, type ConfirmRequest } from "@srelens/core";
@@ -1388,6 +1388,8 @@ export const AssistantConversation = forwardRef<
         : "";
     const attachedImages = pendingImages;
     const rawImages = attachedImages.map(stripDataUri);
+    // What was said before this question, for an agent with no record of it.
+    const earlier = messagesRef.current;
     setInput("");
     setPendingImages([]);
     setMessagesTracked((msgs) => [
@@ -1432,9 +1434,12 @@ export const AssistantConversation = forwardRef<
       // Resume the CLI's own session only when this turn runs on the same
       // agent the stored id came from (see `cliSessionRef`).
       const resume = cliSessionRef.current?.kind === usedKind ? cliSessionRef.current.id : null;
+      // Nothing to resume: this agent has none of the earlier turns, so they go
+      // with the question instead — never another CLI's id.
+      const handoff = resume === null ? handoffPreface(earlier) : "";
       // `session` is also the disk id here (see `persistSession`), restored on
       // reopen, so it names the conversation too.
-      const cliId = await sendChat(session, outgoing, agentPath, applyEvent, rawImages, usedKind, turnNonceRef.current, resume, session);
+      const cliId = await sendChat(session, `${handoff}${outgoing}`, agentPath, applyEvent, rawImages, usedKind, turnNonceRef.current, resume, session);
       // The return IS what to store now (see chat_send): a cancelled or
       // drifty-but-clean turn echoes the resumed id back, so `null` with an
       // id on hand always means CLEAR: the resume itself crashed (the CLI

@@ -20,6 +20,7 @@ export * from "./lib/bulk";
 export * from "./lib/capabilities";
 export * from "./lib/chat";
 export * from "./lib/chatHistory";
+export * from "./lib/handoff";
 export * from "./lib/clusterLogin";
 export * from "./lib/clusters";
 export * from "./lib/contextIdentity";
