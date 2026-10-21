@@ -164,13 +164,17 @@ async fn count_one(api: Api<DynamicObject>, deadline: Instant) -> Outcome {
     }
 }
 
+/// A kind as asked, with what it resolved to (`namespaced` alongside) or why
+/// it could not be.
+type Target = (CountKind, Result<(ApiResource, bool), String>);
+
 /// Count every resolved target against one client, under one budget. A
 /// namespaced kind is summed over `namespaces` (deduplicated; none means all
 /// namespaces), and one namespace's failure leaves the whole kind unknown —
 /// a sum missing a namespace looks exact and is not.
 async fn count_kinds(
     client: kube::Client,
-    targets: Vec<(CountKind, Result<(ApiResource, bool), String>)>,
+    targets: Vec<Target>,
     namespaces: &[String],
     budget: Duration,
 ) -> Result<Vec<KindCount>, String> {
