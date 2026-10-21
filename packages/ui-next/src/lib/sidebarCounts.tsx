@@ -148,7 +148,18 @@ export function useSidebarCounts({ ctx, paused, expanded, crds }: SidebarCountAr
     data?.forEach((c, i) => {
       const id = ask[i]?.id;
       if (id === undefined || c.count === null) return;
-      map.set(id, why ? <span className="opacity-60" title={why}>{groupNumber(c.count)}</span> : groupNumber(c.count));
+      map.set(
+        id,
+        why ? (
+          // The dimming and the title reach no screen reader; the words do.
+          <span className="opacity-60" title={why}>
+            {groupNumber(c.count)}
+            <span className="sr-only">, not refreshed</span>
+          </span>
+        ) : (
+          groupNumber(c.count)
+        ),
+      );
     });
     if (live && ctx && folds.split("\u0000").includes("cluster")) {
       map.set("route:/forwards", groupNumber(forwards.filter((f) => f.context === ctx.name && !isForwardEnded(f)).length));

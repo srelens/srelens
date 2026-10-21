@@ -157,7 +157,10 @@ describe("useSidebarCounts", () => {
     await waitFor(() => expect(typeof result.current.get("kind:pods")).toBe("object"));
     render(<>{result.current.get("kind:pods")}</>);
     const shown = screen.getByTitle(/^Counted at .+; could not refresh$/);
-    expect(shown.textContent).toBe("38");
+    expect(shown.textContent).toMatch(/^38/);
+    // Opacity and a hover title reach no screen reader: the row's name has to
+    // say it too, or a stale number is read out as current.
+    expect(shown.querySelector(".sr-only")?.textContent).toMatch(/not refreshed/);
   });
 
   it("a selection change recounts, a reordered one does not", async () => {
