@@ -7096,6 +7096,7 @@ dependencies = [
  "log",
  "objc2",
  "reqwest 0.13.4",
+ "rustls",
  "serde",
  "serde_json",
  "srelens-agent",

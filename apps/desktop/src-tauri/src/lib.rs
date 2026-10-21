@@ -78,6 +78,16 @@ pub use capabilities::{
     build_registry_with_paths_and_settings, default_settings_path,
 };
 
+/// Install ring as the process's rustls crypto provider.
+///
+/// reqwest is built with `rustls-no-provider`, so the first client built
+/// without one panics: the native agent's `HttpProvider`, the Toolbox
+/// download. Call it first thing in `main`, so no run mode depends on a
+/// cluster call having installed one first. A second install is a no-op.
+pub fn install_tls_provider() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+}
+
 /// Size the main window to a comfortable default, clamped to the screen it
 /// opens on: on a large display it stays at the preferred ~16" size (centered),
 /// on a smaller display it shrinks to fit the available work area. A margin
