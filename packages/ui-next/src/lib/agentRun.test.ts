@@ -522,6 +522,23 @@ describe("the run store", () => {
     expect(sendChat.mock.calls.at(-1)?.[7]).toBe("claude-conversation-id");
   });
 
+  // #215: srelens's own agent is listed with no path (it is no binary on
+  // PATH), so "no path" must not read as "not installed". The fallback nulled
+  // `resume` on every one of its turns, and it continues its history only
+  // when handed the id its last turn returned.
+  it("hands srelens's own agent the resume id its last turn returned", async () => {
+    listAgents.mockResolvedValue([
+      { kind: "srelens", label: "srelens", available: true, gated: false, path: null },
+      { kind: "claude", label: "Claude Code", available: true, gated: false, path: "/claude" },
+    ]);
+    chooseAgent("srelens");
+    sendChat.mockResolvedValue("conv-1");
+    await askAgent("q1");
+    await askAgent("q2");
+    expect(sendChat.mock.calls.at(-1)?.[5]).toBe("srelens");
+    expect(sendChat.mock.calls.at(-1)?.[7]).toBe("conv-1");
+  });
+
   // P2 (#392 review): `resume` is the PREVIOUS CLI's own conversation id.
   describe("switching agent CLIs", () => {
     it("does not hand one CLI's resume token to another", async () => {

@@ -1437,12 +1437,11 @@ export const AssistantConversation = forwardRef<
       const cliId = await sendChat(session, outgoing, agentPath, applyEvent, rawImages, usedKind, turnNonceRef.current, resume, session);
       // The return IS what to store now (see chat_send): a cancelled or
       // drifty-but-clean turn echoes the resumed id back, so `null` with an
-      // id on hand always means CLEAR — either the turn ran on an agent
-      // with no id (native, Codex: the stored session is now missing turns
-      // the transcript visibly contains) or the resume itself crashed (the
-      // CLI lost the session; keeping the id would retry the same failing
-      // --resume forever). A transport rejection skips this entirely (the
-      // catch below) and keeps the stored id.
+      // id on hand always means CLEAR: the resume itself crashed (the CLI
+      // lost the session; keeping the id would retry the same failing
+      // --resume forever). Every agent returns an id now, srelens's own
+      // included (it names its kept history, #215). A transport rejection
+      // skips this entirely (the catch below) and keeps the stored id.
       const prev = cliSessionRef.current;
       if (cliId ? prev?.id !== cliId || prev?.kind !== usedKind : prev !== null) {
         cliSessionRef.current = cliId ? { kind: usedKind, id: cliId } : null;

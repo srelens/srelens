@@ -617,8 +617,9 @@ fn parse_agent_kind(kind: &str) -> Result<AgentKind, String> {
 /// should now store as the conversation's id (see `next_resume_id`): the id
 /// captured from this turn's stream, the echoed `resume` when the turn ran
 /// clean or was cancelled without yielding one, or `None` — meaning CLEAR —
-/// for agents with no id (native, Codex) and for a crashed resume, so a
-/// dead session id can't wedge the conversation in a retry loop.
+/// for a crashed resume, so a dead session id can't wedge the conversation
+/// in a retry loop. The native agent's id names its own kept history (see
+/// `llm_agent::prior_history`).
 ///
 /// `conversation` is the saved conversation's chat-history id, when the caller
 /// has one. Cursor keeps its chat under it rather than under `session`, which
@@ -678,11 +679,11 @@ pub async fn chat_send(
     // the same consent/audit server the CLIs reach over HTTP. Handle it here so
     // the CLI machinery below only ever sees the three CLI kinds.
     if matches!(kind, AgentKind::Srelens) {
-        // The native agent carries its own conversation history in-process
-        // (see `llm_agent`), so it has no CLI session id to resume or return.
-        return crate::llm_agent::run_native_agent(app, &chats, session, prompt, !images.is_empty(), turn)
-            .await
-            .map(|()| None);
+        // The native agent keeps its own conversation history, under the
+        // saved conversation, and its id is the resume id it returns (see
+        // `llm_agent::prior_history`).
+        return crate::llm_agent::run_native_agent(app, &chats, session, conversation, resume, prompt, !images.is_empty(), turn)
+            .await;
     }
 
     let channel = format!("chat://{session}");
@@ -827,12 +828,10 @@ pub async fn chat_send(
                 resume.as_deref(),
             )
         }
-        // Codex deliberately gets no `resume`: `codex exec resume` does not
-        // accept `-s read-only` or `-C <dir>` (verified live, codex-cli
-        // 0.144), and those two flags ARE the sandbox box `codex_command`
-        // documents — resuming without being able to re-assert them would
-        // trade context continuity for an unverified sandbox. Follow-ups
-        // start fresh until a verified resume path exists (#215).
+        // A follow-up resumes the conversation's Codex thread with the whole
+        // box re-asserted in front of `resume` (see `codex_command`), in this
+        // turn's own fresh empty `-C` workspace: the thread is found by id in
+        // `CODEX_HOME`, whatever directory it was started in (#215).
         AgentKind::Codex => srelens_agent::adapter::codex_command(
             &agent_path,
             &prompt,
@@ -840,6 +839,7 @@ pub async fn chat_send(
             &token,
             &cwd_path.to_string_lossy(),
             &image_paths,
+            resume.as_deref(),
         ),
         AgentKind::Cursor => cursor_turn
             .as_ref()
@@ -924,11 +924,10 @@ pub async fn chat_send(
     let mut lines = BufReader::new(stdout).lines();
     let mut saw_done = false;
     // The CLI's own session id for this turn, captured from the stream so the
-    // NEXT turn can `--resume` it. Claude and Cursor stamp it on every line;
-    // for Codex (different shape, resume scoped out — see its arm above) this
-    // simply never matches and stays `None`. Captured fresh each turn rather
-    // than reusing `resume`: Claude forks a resumed session under a NEW id,
-    // so the stored id must follow the stream, not the input.
+    // NEXT turn can resume it. Claude and Cursor stamp it on every line;
+    // Codex names its thread on the first (`thread.started`). Captured fresh
+    // each turn rather than reusing `resume`: Claude forks a resumed session
+    // under a NEW id, so the stored id must follow the stream, not the input.
     let mut agent_session: Option<String> = None;
     while let Ok(Some(line)) = lines.next_line().await {
         if agent_session.is_none() {

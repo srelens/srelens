@@ -234,13 +234,19 @@ pub const CODEX_TOKEN_ENV: &str = "SRELENS_MCP_TOKEN";
 /// exact flags were verified live against the real `codex` CLI to box it to
 /// srelens's MCP tools with no other escape.
 ///
-/// `--disable shell_tool --disable unified_exec` removes Codex's shell — its
-/// only whole-disk-read escape hatch. What remains is Codex's internal file
-/// tool, which is confined to the empty directory passed via `-C` under
-/// `-s read-only` (so it can read nothing outside that empty workspace and
-/// write nothing at all). MCP tools (srelens's own) still work normally,
-/// configured via the two `-c mcp_servers.srelens.*` TOML overrides below.
-/// Do not change these flags without re-verifying against the real CLI.
+/// `--disable shell_tool --disable unified_exec` removes Codex's shell, and
+/// the feature switches below remove every other default tool surface, so no
+/// tool the model gets can read a file: `-s read-only` itself still grants
+/// reads of the whole disk (its recorded profile is `root: read`), so the
+/// absence of a reading tool, not the sandbox, is what keeps reads in. The
+/// sandbox refuses every write, and `-C` points the turn at an empty
+/// directory. MCP tools (srelens's own) still work normally, configured via
+/// the two `-c mcp_servers.srelens.*` TOML overrides below. Known gap:
+/// `apply_patch` reads a target file to verify a patch before the sandbox
+/// refuses the write, so a model can test guesses about a file's existence
+/// and lines (never see its content); dropping the tool takes a whole
+/// replacement model catalog. Do not change these flags without
+/// re-verifying against the real CLI.
 ///
 /// The bearer token is passed only via `env` (`CODEX_TOKEN_ENV`), never as an
 /// argv value — argv is visible to anyone who can list processes on the
@@ -252,6 +258,7 @@ pub fn codex_command(
     token: &str,
     empty_cwd: &str,
     image_paths: &[String],
+    resume: Option<&str>,
 ) -> AgentCommand {
     let mut args = vec![
         "exec".to_string(),
@@ -267,6 +274,29 @@ pub fn codex_command(
         "shell_tool".to_string(),
         "--disable".to_string(),
         "unified_exec".to_string(),
+    ];
+    // Tool surfaces Codex turns on by default that `--ignore-user-config`
+    // does not reach: ChatGPT connectors (`apps`: GitHub commits and merges,
+    // site deploys, …), goals, image viewing and generation, plugins and
+    // their skills, sub-agents, web search, and the user's own skills catalog
+    // (with its local paths). Without these a codex-cli 0.149.1 turn offered
+    // the model 221 tools; with them, srelens's MCP tools plus `apply_patch`
+    // (writes refused by `-s read-only`), `update_plan` and the MCP-resource
+    // tools (srelens's server only). An unknown feature name makes Codex
+    // refuse to start, so a renamed flag fails closed (#215, verified live).
+    for feature in ["apps", "goals", "view_image", "image_generation", "plugins"] {
+        args.push("--disable".to_string());
+        args.push(feature.to_string());
+    }
+    for value in [
+        "agents.enabled=false",
+        "web_search=\"disabled\"",
+        "skills.include_instructions=false",
+    ] {
+        args.push("-c".to_string());
+        args.push(value.to_string());
+    }
+    args.extend([
         "-s".to_string(),
         "read-only".to_string(),
         "-C".to_string(),
@@ -287,7 +317,18 @@ pub fn codex_command(
         // no reasoning items at all.
         "-c".to_string(),
         "model_reasoning_summary=\"detailed\"".to_string(),
-    ];
+    ]);
+    // A follow-up continues the turn's thread. Everything above is `exec`'s,
+    // so it must stay ahead of the subcommand: `codex exec resume` keeps
+    // nothing of the box from the thread it resumes (a bare resume gets the
+    // shell back) and its own options take neither `-s` nor `-C`. Images go
+    // after it, to `resume`'s own `-i`: `exec`'s takes several values and
+    // would swallow `resume <thread>`, silently starting a new thread
+    // (#215, verified live).
+    if let Some(thread) = resume {
+        args.push("resume".to_string());
+        args.push(thread.to_string());
+    }
     for path in image_paths {
         args.push("-i".to_string());
         args.push(path.clone());
@@ -581,6 +622,7 @@ mod tests {
             "deadbeef",
             "/tmp/srelens-empty-cwd",
             &[],
+            None,
         )
     }
 
@@ -595,6 +637,32 @@ mod tests {
             .args
             .windows(2)
             .any(|w| w == ["--disable", "unified_exec"]));
+    }
+
+    /// Codex turns these on by default, and `--ignore-user-config` reaches
+    /// none of them: on codex-cli 0.149.1 a turn without them offered the
+    /// model 221 tools, 210 of them ChatGPT connectors (GitHub commits and
+    /// merges, site deploys…), plus web search, image tools, plugins,
+    /// sub-agents and the user's own skills (#215, measured live).
+    #[test]
+    fn codex_command_switches_off_every_tool_surface_beyond_srelens() {
+        let cmd = codex_cmd();
+        for feature in ["apps", "goals", "view_image", "image_generation", "plugins"] {
+            assert!(
+                cmd.args.windows(2).any(|w| w == ["--disable", feature]),
+                "missing --disable {feature}"
+            );
+        }
+        for value in [
+            "agents.enabled=false",
+            "web_search=\"disabled\"",
+            "skills.include_instructions=false",
+        ] {
+            assert!(
+                cmd.args.windows(2).any(|w| w == ["-c", value]),
+                "missing -c {value}"
+            );
+        }
     }
 
     #[test]
@@ -645,6 +713,7 @@ mod tests {
             "deadbeef",
             "/tmp/srelens-empty-cwd",
             &["/tmp/img1.png".to_string(), "/tmp/img2.png".to_string()],
+            None,
         );
         let i_pairs: Vec<&[String]> = cmd.args.windows(2).filter(|w| w[0] == "-i").collect();
         assert_eq!(i_pairs.len(), 2);
@@ -661,6 +730,7 @@ mod tests {
             "deadbeef",
             "/tmp/srelens-empty-cwd",
             &["/tmp/img1.png".to_string()],
+            None,
         );
         assert_eq!(cmd.args.last().unwrap(), "Why is web-0 failing?");
     }
@@ -697,6 +767,7 @@ mod tests {
             "deadbeef",
             "/tmp/srelens-empty-cwd",
             &[],
+            None,
         );
         assert_eq!(cmd.args[cmd.args.len() - 2], "--");
         assert_eq!(cmd.args[cmd.args.len() - 1], prompt);
@@ -712,9 +783,78 @@ mod tests {
             "deadbeef",
             "/tmp/srelens-empty-cwd",
             &["/tmp/img1.png".to_string()],
+            None,
         );
         assert_eq!(cmd.args[cmd.args.len() - 2], "--");
         assert_eq!(cmd.args[cmd.args.len() - 1], prompt);
+    }
+
+    /// `codex exec resume` keeps nothing of the box from the turn it resumes
+    /// (a bare resume got Codex's shell back, measured live), and its own
+    /// options take neither `-s` nor `-C`. `exec`'s do, ahead of the
+    /// subcommand, so a follow-up carries the fresh turn's box unchanged and
+    /// only then `resume <thread>` (#215).
+    #[test]
+    fn a_codex_follow_up_resumes_its_thread_inside_the_whole_box() {
+        let thread = "01a15e68-1088-75f3-b71b-519eef75cd43";
+        let prompt = "-s danger-full-access which index?";
+        let fresh = codex_command(
+            "/usr/bin/codex",
+            prompt,
+            "http://127.0.0.1:8765/mcp",
+            "deadbeef",
+            "/tmp/srelens-empty-cwd",
+            &[],
+            None,
+        );
+        let resumed = codex_command(
+            "/usr/bin/codex",
+            prompt,
+            "http://127.0.0.1:8765/mcp",
+            "deadbeef",
+            "/tmp/srelens-empty-cwd",
+            &[],
+            Some(thread),
+        );
+        let the_box = &fresh.args[..fresh.args.len() - 2];
+        assert_eq!(&resumed.args[..the_box.len()], the_box);
+        assert_eq!(
+            resumed.args[the_box.len()..],
+            ["resume", thread, "--", prompt]
+        );
+        assert_eq!(resumed.env, fresh.env);
+    }
+
+    /// `exec`'s `-i` takes several values, so placed before `resume` it
+    /// swallows `resume <thread>` as image paths and Codex silently starts a
+    /// new thread (measured live). A follow-up's images are `resume`'s own.
+    #[test]
+    fn a_codex_follow_up_attaches_its_images_after_the_thread_it_resumes() {
+        let thread = "01a15e68-1088-75f3-b71b-519eef75cd43";
+        let cmd = codex_command(
+            "/usr/bin/codex",
+            "and this one?",
+            "http://127.0.0.1:8765/mcp",
+            "deadbeef",
+            "/tmp/srelens-empty-cwd",
+            &["/tmp/img1.png".to_string(), "/tmp/img2.png".to_string()],
+            Some(thread),
+        );
+        let resume = cmd.args.iter().position(|a| a == "resume").unwrap();
+        assert_eq!(
+            cmd.args[resume..],
+            [
+                "resume",
+                thread,
+                "-i",
+                "/tmp/img1.png",
+                "-i",
+                "/tmp/img2.png",
+                "--",
+                "and this one?"
+            ]
+        );
+        assert!(!cmd.args[..resume].contains(&"-i".to_string()));
     }
 
     #[test]
@@ -726,6 +866,7 @@ mod tests {
             "deadbeef",
             "/tmp/srelens-empty-cwd",
             &[],
+            None,
         );
         let expected = "mcp_servers.srelens.url=\"http://127.0.0.1:8765/mcp?x=\\\"evil\\\"\\\\\"";
         assert!(cmd
