@@ -62,6 +62,19 @@ fn load_history(dir: &std::path::Path, chat: &str) -> Vec<srelens_llm::types::Tu
     })
 }
 
+/// What a native turn continues from. Its history id travels as the
+/// conversation's resume id, as the CLIs' do: `run_native_agent` returns it,
+/// and switching agents drops it. So only a turn handed its own id continues
+/// the history; any other starts afresh, because the history kept would skip
+/// whatever another agent answered in between.
+fn prior_history(dir: &std::path::Path, chat: &str, resume: Option<&str>) -> Vec<srelens_llm::types::Turn> {
+    if resume == Some(chat) {
+        load_history(dir, chat)
+    } else {
+        Vec::new()
+    }
+}
+
 /// At launch, before any turn runs: see `sweep_native_chats`.
 pub fn sweep_native_state(app: &tauri::AppHandle) {
     let dirs = native_state_dir(app).and_then(|dir| Ok((dir, crate::assistant_history::resolve_sessions_dir(app)?)));
@@ -257,16 +270,19 @@ pub fn llm_dir(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
 /// session's `chat://` channel. The loop runs as a task whose `AbortHandle` is
 /// parked in `ChatManager`, so `chat_cancel` stops it just like a CLI child.
 /// `conversation` is the saved conversation's id, which names its history
-/// (see `chat_id`).
+/// (see `chat_id`), and `resume` what the last turn returned (see
+/// `prior_history`). Returns the id to resume from next time.
+#[allow(clippy::too_many_arguments)]
 pub async fn run_native_agent(
     app: tauri::AppHandle,
     chats: &ChatManager,
     session: String,
     conversation: Option<String>,
+    resume: Option<String>,
     prompt: String,
     has_images: bool,
     turn: u64,
-) -> Result<(), String> {
+) -> Result<Option<String>, String> {
     let channel = format!("chat://{session}");
     let sink: Arc<dyn EventSink> = Arc::new(crate::sink::TauriSink(app.clone()));
     let emit = |ev: AgentEvent| sink.emit(&channel, serde_json::to_value(&ev).unwrap());
@@ -277,9 +293,11 @@ pub async fn run_native_agent(
     // frontend only settles and persists on a terminal event. A stale
     // pending-cancel from a previous turn has a different generation and is
     // dropped by the same take.
+    // Nothing runs on any early return below, so the stored id is handed back
+    // as it came, like `chat_send` does for a cancel.
     if chats.take_pending_cancel(&session, turn) {
         emit(AgentEvent::TurnDone);
-        return Ok(());
+        return Ok(resume);
     }
 
     // Image input isn't wired for the native agent yet; tell the user rather
@@ -297,7 +315,7 @@ pub async fn run_native_agent(
         Err(e) => {
             emit(AgentEvent::Error { message: e });
             emit(AgentEvent::TurnDone);
-            return Ok(());
+            return Ok(resume);
         }
     };
     let settings = crate::llm_config::load_settings(&dir.join("settings.json"));
@@ -309,14 +327,14 @@ pub async fn run_native_agent(
                 message: "Choose a model for the srelens agent in Settings → Assistant.".into(),
             });
             emit(AgentEvent::TurnDone);
-            return Ok(());
+            return Ok(resume);
         }
         None => {
             emit(AgentEvent::Error {
                 message: "Add an API key for the srelens agent in Settings → Assistant.".into(),
             });
             emit(AgentEvent::TurnDone);
-            return Ok(());
+            return Ok(resume);
         }
     };
 
@@ -337,11 +355,11 @@ pub async fn run_native_agent(
         Err(e) => {
             emit(AgentEvent::Error { message: e });
             emit(AgentEvent::TurnDone);
-            return Ok(());
+            return Ok(resume);
         }
     };
     let chat = chat_id(&session, conversation.as_deref()).to_string();
-    let prior = load_history(&history_dir, &chat);
+    let prior = prior_history(&history_dir, &chat, resume.as_deref());
 
     // Run the loop as a task so `chat_cancel` can abort it. `run` emits a
     // `TurnDone` on every non-cancelled path; on cancellation the task is dropped
@@ -370,6 +388,7 @@ pub async fn run_native_agent(
             if let Err(error) = save_history(&history_dir, &chat, &trim_history(updated, MAX_HISTORY_TURNS)) {
                 log::warn!("could not keep the srelens agent's history for {chat}: {error}");
             }
+            Ok(Some(chat))
         }
         // `run` failed — setup (tools couldn't be listed) or a transport error
         // mid-stream (connection died before the provider's terminal marker).
@@ -378,12 +397,15 @@ pub async fn run_native_agent(
         Ok(Err(e)) => {
             emit(AgentEvent::Error { message: e.to_string() });
             emit(AgentEvent::TurnDone);
+            Ok(resume)
         }
         // Cancelled (aborted) mid-flight: re-enable the composer; history for the
         // discarded turn is left as it was.
-        Err(_) => emit(AgentEvent::TurnDone),
+        Err(_) => {
+            emit(AgentEvent::TurnDone);
+            Ok(resume)
+        }
     }
-    Ok(())
 }
 
 // ---- Tauri commands backing the Settings → Assistant section ----
@@ -539,6 +561,23 @@ mod tests {
         // Reopened after a restart: a new session, nothing in memory.
         assert_eq!(load_history(dir.path(), chat_id("run-2", Some("conv-1"))), turns);
         assert!(load_history(dir.path(), chat_id("run-2", Some("conv-2"))).is_empty());
+    }
+
+    /// Switching agents drops the conversation's resume id (`chooseAgent`;
+    /// classic keeps one only for the agent that issued it), so the next
+    /// srelens-agent turn arrives without its own id and starts afresh: the
+    /// history it kept would skip the turns another agent answered in
+    /// between. Its follow-ups, and a reopened conversation, hand it back.
+    #[test]
+    fn a_native_turn_resumes_its_history_only_when_handed_its_id() {
+        use srelens_llm::types::Turn;
+        let dir = tempfile::tempdir().unwrap();
+        let turns = vec![Turn::User("why is qa mongo slow?".into())];
+        save_history(dir.path(), "conv-1", &turns).unwrap();
+
+        assert_eq!(prior_history(dir.path(), "conv-1", Some("conv-1")), turns);
+        assert!(prior_history(dir.path(), "conv-1", None).is_empty(), "after an agent switch");
+        assert!(prior_history(dir.path(), "conv-1", Some("01a15e95-a7fa-7843-8127-54338b81787c")).is_empty(), "another agent's id");
     }
 
     #[test]

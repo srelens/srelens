@@ -617,8 +617,9 @@ fn parse_agent_kind(kind: &str) -> Result<AgentKind, String> {
 /// should now store as the conversation's id (see `next_resume_id`): the id
 /// captured from this turn's stream, the echoed `resume` when the turn ran
 /// clean or was cancelled without yielding one, or `None` — meaning CLEAR —
-/// for the native agent (no CLI id) and for a crashed resume, so a dead
-/// session id can't wedge the conversation in a retry loop.
+/// for a crashed resume, so a dead session id can't wedge the conversation
+/// in a retry loop. The native agent's id names its own kept history (see
+/// `llm_agent::prior_history`).
 ///
 /// `conversation` is the saved conversation's chat-history id, when the caller
 /// has one. Cursor keeps its chat under it rather than under `session`, which
@@ -679,11 +680,10 @@ pub async fn chat_send(
     // the CLI machinery below only ever sees the three CLI kinds.
     if matches!(kind, AgentKind::Srelens) {
         // The native agent keeps its own conversation history, under the
-        // saved conversation (see `llm_agent`), so it has no CLI session id
-        // to resume or return.
-        return crate::llm_agent::run_native_agent(app, &chats, session, conversation, prompt, !images.is_empty(), turn)
-            .await
-            .map(|()| None);
+        // saved conversation, and its id is the resume id it returns (see
+        // `llm_agent::prior_history`).
+        return crate::llm_agent::run_native_agent(app, &chats, session, conversation, resume, prompt, !images.is_empty(), turn)
+            .await;
     }
 
     let channel = format!("chat://{session}");
