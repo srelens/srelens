@@ -20,7 +20,12 @@ describe("countResources", () => {
     expect(outcome.error).toContain("did not answer");
   });
 
-  it("splits kinds so each call stays within 1024 requests, one call after another", async () => {
+  /**
+   * 256, well under the backend's 1024: each call has one time budget and
+   * runs 8 requests at a time, and 1024 requests at 80 ms each would need
+   * ~10 s — the kinds at the end of a full chunk would time out every cycle.
+   */
+  it("splits kinds so each call stays within 256 requests, one call after another", async () => {
     const order: string[] = [];
     const invoke = vi.fn(async (_id: string, input: { kinds: CountKindRef[] }) => {
       order.push(`start ${input.kinds.length}`);
@@ -30,8 +35,8 @@ describe("countResources", () => {
     });
     const kinds = Array.from({ length: 600 }, (_, i) => ({ kind: `K${i}` }));
     const outcome = await countResources("prod", kinds, ["a", "b"], invoke as never);
-    expect(invoke.mock.calls.map((c) => (c[1] as { kinds: unknown[] }).kinds.length)).toEqual([512, 88]);
-    expect(order).toEqual(["start 512", "end 512", "start 88", "end 88"]);
+    expect(invoke.mock.calls.map((c) => (c[1] as { kinds: unknown[] }).kinds.length)).toEqual([128, 128, 128, 128, 88]);
+    expect(order).toEqual(["start 128", "end 128", "start 128", "end 128", "start 128", "end 128", "start 128", "end 128", "start 88", "end 88"]);
     expect(outcome.counts?.map((c) => c.count)).toEqual(kinds.map((_, i) => i));
   });
 

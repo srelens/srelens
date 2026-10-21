@@ -34,12 +34,20 @@ export const COUNT_MAX_NAMESPACES = 128;
 export const COUNT_MAX_REQUESTS = 1024;
 
 /**
+ * How many requests this sends per call — well under {@link COUNT_MAX_REQUESTS}.
+ * Each call has one time budget (8 s by default) and runs 8 requests at a
+ * time, so a full 1024 at 80 ms each would need ~10 s, and the kinds at the
+ * end of every call would time out on every refresh. 256 fits with room.
+ */
+const REQUESTS_PER_CALL = 256;
+
+/**
  * How many objects of each kind there are, via `k8s.countResources`: one
  * small request per kind and namespace rather than a list (#402).
  *
  * Kept inside the backend's bounds rather than letting a big ask fail whole:
- * kinds are split into calls of at most {@link COUNT_MAX_REQUESTS} requests,
- * run one after another so a large CRD group does not land on the cluster at
+ * kinds are split into calls small enough for one call's time budget (see
+ * {@link REQUESTS_PER_CALL}), run one after another so a large CRD group does not land on the cluster at
  * once; and a selection of more than {@link COUNT_MAX_NAMESPACES} namespaces
  * counts only the cluster-scoped kinds, the namespaced ones coming back with
  * no number. One failed call fails the outcome — a partial set of counts
@@ -54,7 +62,7 @@ export async function countResources(
   const tooMany = namespaces.length > COUNT_MAX_NAMESPACES;
   const asked = tooMany ? kinds.filter((k) => k.namespaced === false) : kinds;
   const scope = tooMany ? [] : namespaces;
-  const perCall = Math.max(1, Math.floor(COUNT_MAX_REQUESTS / Math.max(1, scope.length)));
+  const perCall = Math.max(1, Math.floor(REQUESTS_PER_CALL / Math.max(1, scope.length)));
 
   const answered: KindCountResult[] = [];
   try {
