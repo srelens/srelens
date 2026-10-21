@@ -560,6 +560,78 @@ describe("the run store", () => {
       chooseAgent("cursor");
       expect(getAgentRun().turns).toHaveLength(before);
     });
+
+    // The switch drops `resume`, so the agent switched to starts with nothing,
+    // and "which index should I create?" got "which database do you mean?".
+    // The visible conversation goes with the first question instead — never
+    // another CLI's resume id.
+    it("tells the agent switched to what was said, once, without tool payloads", async () => {
+      listAgents.mockResolvedValue([
+        { kind: "codex", label: "Codex", available: true, gated: false, path: "/codex" },
+        { kind: "cursor", label: "Cursor", available: true, gated: false, path: "/cursor" },
+      ]);
+      chooseAgent("codex");
+      sendChat.mockImplementationOnce(async (_s: string, _p: string, _a: string, onEvent: (e: unknown) => void) => {
+        onEvent({ type: "thinking", text: "private reasoning" });
+        onEvent({ type: "toolCallStart", id: "t1", tool: "k8s.listStatefulSets", args: { namespace: "shop" } });
+        onEvent({ type: "toolResult", id: "t1", status: "ok", summary: "orders-db" });
+        onEvent({ type: "textDelta", text: "orders uses orders-db, a Postgres 15 StatefulSet." });
+        return null;
+      });
+      await askAgent("which database does orders use?");
+      // A fresh conversation has nothing to hand over.
+      expect(sendChat.mock.calls.at(-1)?.[1]).toBe("which database does orders use?");
+
+      chooseAgent("cursor");
+      sendChat.mockResolvedValue("cursor-chat");
+      await askAgent("which index should I create?");
+
+      const sent = sendChat.mock.calls.at(-1)?.[1] as string;
+      expect(sendChat.mock.calls.at(-1)?.[7]).toBeNull();
+      expect(sent).toMatch(/another agent/i);
+      // Oldest first, and the new question last and only once.
+      const asked = sent.indexOf("which database does orders use?");
+      const answered = sent.indexOf("orders uses orders-db, a Postgres 15 StatefulSet.");
+      expect(asked).toBeGreaterThanOrEqual(0);
+      expect(answered).toBeGreaterThan(asked);
+      expect(sent.endsWith("which index should I create?")).toBe(true);
+      expect(sent.split("which index should I create?")).toHaveLength(2);
+      // Questions and final answers only.
+      expect(sent).not.toContain("k8s.listStatefulSets");
+      expect(sent).not.toContain("shop");
+      expect(sent).not.toContain("private reasoning");
+
+      // The agent has its own conversation now; it is not told twice.
+      await askAgent("how big will it get?");
+      expect(sendChat.mock.calls.at(-1)?.[7]).toBe("cursor-chat");
+      expect(sendChat.mock.calls.at(-1)?.[1]).toBe("how big will it get?");
+    });
+
+    it("hands over only the newest turns, each clipped, however long the conversation", async () => {
+      // A resume id on every turn, so nothing is handed over until the switch.
+      sendChat.mockResolvedValue("claude-conversation-id");
+      for (let i = 1; i <= 30; i++) {
+        sendChat.mockImplementationOnce(async (_s: string, _p: string, _a: string, onEvent: (e: unknown) => void) => {
+          onEvent({ type: "textDelta", text: `answer #${i}. ${"x".repeat(3000)}` });
+          return "claude-conversation-id";
+        });
+        await askAgent(`question #${i}.`);
+      }
+
+      chooseAgent("cursor");
+      listAgents.mockResolvedValue([
+        { kind: "cursor", label: "Cursor", available: true, gated: false, path: "/cursor" },
+      ]);
+      await askAgent("and now?");
+
+      const sent = sendChat.mock.calls.at(-1)?.[1] as string;
+      // 30 questions and 90,000 characters of answers asked; a bounded preface sent.
+      expect(sent.length).toBeLessThan(10_000);
+      expect(sent).toContain("question #30.");
+      expect(sent).toContain("answer #30.");
+      expect(sent).not.toContain("question #1.");
+      expect(sent.indexOf("question #29.")).toBeLessThan(sent.indexOf("question #30."));
+    });
   });
 
   // P1 (#392 review): `clearAgentRun` preserved `run.generation`, so every
@@ -791,7 +863,9 @@ describe("the run store", () => {
       for (let i = 0; i < 50; i++) await Promise.resolve();
 
       const asked = sendChat.mock.calls.map((c) => c[1] as string);
-      expect(asked).toContain("the replacement");
+      // Ends with: the stopped question is still in the transcript, so with no
+      // resume id yet the replacement carries it as earlier context.
+      expect(asked.some((a) => a.endsWith("the replacement"))).toBe(true);
       expect(asked).not.toContain("the abandoned one");
     });
 
