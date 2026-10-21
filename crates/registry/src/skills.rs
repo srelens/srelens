@@ -2,13 +2,11 @@
 //!
 //! Exposes:
 //! - `skills.get`: Retrieve an SRE playbook or diagnostic skill by name.
-//! - `skills.list`: List all available SRE playbooks and diagnostic skills.
 //!
 //! Provides built-in battle-tested Kubernetes diagnostic playbooks and discovers
 //! custom user skills stored in `~/.config/srelens/assistant/skills/*.md`
 //! (and GUI config directory `app.srelens.desktop/assistant/skills/*.md`).
 
-use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -36,30 +34,6 @@ pub struct SkillGetOut {
     pub path: Option<String>,
     #[serde(default, rename = "overridesBuiltin")]
     pub overrides_builtin: bool,
-}
-
-/// Input for listing available diagnostic playbooks and skills.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq, Default)]
-pub struct SkillListIn {}
-
-/// Picker metadata for a diagnostic skill (instructions body omitted for lightweight listing).
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct SkillMeta {
-    pub name: String,
-    pub description: String,
-    #[serde(default)]
-    pub builtin: bool,
-    #[serde(default)]
-    pub path: Option<String>,
-    #[serde(default, rename = "overridesBuiltin")]
-    pub overrides_builtin: bool,
-}
-
-/// Output listing all available diagnostic skills and playbooks.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
-pub struct SkillListOut {
-    pub skills: Vec<SkillMeta>,
 }
 
 /// Reject any name that isn't `^[A-Za-z0-9._-]+$` — in particular, one
@@ -341,63 +315,6 @@ pub fn load_skill_or_builtin(dirs: &[PathBuf], name: &str) -> Result<SkillGetOut
     )))
 }
 
-/// List all skills: default built-ins merged with user files, sorted alphabetically by name.
-pub fn list_all_skills(dirs: &[PathBuf]) -> Vec<SkillMeta> {
-    let mut by_name: BTreeMap<String, SkillMeta> = BTreeMap::new();
-
-    for b in builtin_skills() {
-        by_name.insert(
-            b.name.clone(),
-            SkillMeta {
-                name: b.name,
-                description: b.description,
-                builtin: true,
-                path: None,
-                overrides_builtin: false,
-            },
-        );
-    }
-
-    let shipped_names: BTreeSet<String> = by_name.keys().cloned().collect();
-
-    for dir in dirs {
-        if !dir.is_dir() {
-            continue;
-        }
-        let Ok(entries) = fs::read_dir(dir) else {
-            continue;
-        };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path
-                .extension()
-                .is_some_and(|e| e.eq_ignore_ascii_case("md"))
-            {
-                let Ok(raw) = fs::read_to_string(&path) else {
-                    continue;
-                };
-                let fallback = path.file_stem().and_then(|s| s.to_str());
-                let Ok((name, desc, _body)) = parse_skill(&raw, fallback) else {
-                    continue;
-                };
-                let overrides_builtin = shipped_names.contains(&name);
-                by_name.insert(
-                    name.clone(),
-                    SkillMeta {
-                        name,
-                        description: desc,
-                        builtin: false,
-                        path: Some(path.display().to_string()),
-                        overrides_builtin,
-                    },
-                );
-            }
-        }
-    }
-
-    by_name.into_values().collect()
-}
-
 /// Build the `skills.get` capability.
 pub fn skills_get_capability(skills_dir: Option<PathBuf>) -> Capability {
     Capability::typed::<SkillGetIn, SkillGetOut, _, _>(
@@ -409,23 +326,6 @@ pub fn skills_get_capability(skills_dir: Option<PathBuf>) -> Capability {
             async move {
                 let dirs = candidate_skills_dirs(skills_dir.as_deref());
                 load_skill_or_builtin(&dirs, &input.name)
-            }
-        },
-    )
-}
-
-/// Build the `skills.list` capability.
-pub fn skills_list_capability(skills_dir: Option<PathBuf>) -> Capability {
-    Capability::typed::<SkillListIn, SkillListOut, _, _>(
-        "skills.list",
-        "list available SRE playbooks and diagnostic skills (both built-in and user-defined)",
-        Annotations::READ_ONLY,
-        move |_input: SkillListIn| {
-            let skills_dir = skills_dir.clone();
-            async move {
-                let dirs = candidate_skills_dirs(skills_dir.as_deref());
-                let skills = list_all_skills(&dirs);
-                Ok(SkillListOut { skills })
             }
         },
     )
@@ -540,66 +440,8 @@ mod tests {
         assert_eq!(override_out.path, Some(override_file.display().to_string()));
     }
 
-    #[tokio::test]
-    async fn test_skills_list_includes_builtins_and_user_skills() {
-        let dir = tempdir().unwrap();
-        fs::write(
-            dir.path().join("redis-triage.md"),
-            "---\nname: redis-triage\ndescription: Triage redis latency\n---\nCheck redis-cli ping\n",
-        )
-        .unwrap();
-        fs::write(
-            dir.path().join("crashloop-triage.md"),
-            "---\nname: crashloop-triage\ndescription: Overridden crashloop\n---\nCustom crashloop\n",
-        )
-        .unwrap();
-
-        let cap = skills_list_capability(Some(dir.path().to_path_buf()));
-        let resp = cap.handler.as_ref()(serde_json::json!({}))
-            .await
-            .expect("skills.list succeeds");
-
-        let out: SkillListOut = serde_json::from_value(resp).expect("valid SkillListOut");
-        assert_eq!(out.skills.len(), 9); // 8 built-ins + 1 custom (redis-triage)
-
-        let redis = out
-            .skills
-            .iter()
-            .find(|s| s.name == "redis-triage")
-            .unwrap();
-        assert_eq!(redis.description, "Triage redis latency");
-        assert!(!redis.builtin);
-        assert!(!redis.overrides_builtin);
-
-        let crashloop = out
-            .skills
-            .iter()
-            .find(|s| s.name == "crashloop-triage")
-            .unwrap();
-        assert_eq!(crashloop.description, "Overridden crashloop");
-        assert!(!crashloop.builtin);
-        assert!(crashloop.overrides_builtin);
-
-        // Verify sorted alphabetically
-        let names: Vec<String> = out.skills.iter().map(|s| s.name.clone()).collect();
-        let mut sorted_names = names.clone();
-        sorted_names.sort();
-        assert_eq!(names, sorted_names);
-    }
-
     #[test]
     fn test_wire_serialization_camel_case() {
-        let meta = SkillMeta {
-            name: "test-skill".into(),
-            description: "desc".into(),
-            builtin: false,
-            path: Some("/path/to/skill.md".into()),
-            overrides_builtin: true,
-        };
-        let val = serde_json::to_value(&meta).unwrap();
-        assert_eq!(val["overridesBuiltin"], true);
-        assert!(val.get("overrides_builtin").is_none());
-
         let out = SkillGetOut {
             name: "test-skill".into(),
             description: "desc".into(),
@@ -611,5 +453,17 @@ mod tests {
         let val_out = serde_json::to_value(&out).unwrap();
         assert_eq!(val_out["overridesBuiltin"], false);
         assert!(val_out.get("overrides_builtin").is_none());
+
+        let out_override = SkillGetOut {
+            name: "override-skill".into(),
+            description: "desc".into(),
+            body: "echo override".into(),
+            builtin: false,
+            path: Some("/path/to/skill.md".into()),
+            overrides_builtin: true,
+        };
+        let val_override = serde_json::to_value(&out_override).unwrap();
+        assert_eq!(val_override["overridesBuiltin"], true);
+        assert!(val_override.get("overrides_builtin").is_none());
     }
 }

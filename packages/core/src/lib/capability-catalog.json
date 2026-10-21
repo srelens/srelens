@@ -1222,15 +1222,6 @@
     "confirm": null
   },
   {
-    "id": "skills.list",
-    "readOnly": true,
-    "destructive": false,
-    "requiresConfirm": false,
-    "sensitive": false,
-    "impact": "low",
-    "confirm": null
-  },
-  {
     "id": "toolbox.diagnoseContext",
     "readOnly": true,
     "destructive": false,

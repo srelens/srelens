@@ -420,7 +420,6 @@ fn build_with(
         |input| async move { Ok(json!({ "pong": input })) },
     ));
     reg.register(skills::skills_get_capability(None));
-    reg.register(skills::skills_list_capability(None));
 
     reg.register(match kubeconfigs {
         Kubeconfigs::Local => srelens_kube::contexts::list_contexts_capability(
