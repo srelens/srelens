@@ -73,6 +73,19 @@ describe("countResources", () => {
     expect(outcome.counts?.[1]).toEqual({ kind: "Node", group: "", count: 3 });
   });
 
+  /** The backend counts a namespace once and ignores "", so the limit and the chunk size must too (PR #961 review). */
+  it("counts repeated and empty namespaces once, before the limit and the chunking", async () => {
+    const invoke = vi.fn(async (_id: string, input: { kinds: CountKindRef[] }) => answer(input.kinds));
+    const namespaces = [...Array.from({ length: COUNT_MAX_NAMESPACES + 1 }, () => "a"), "", "b"];
+    const outcome = await countResources("prod", [{ kind: "Pod", namespaced: true }], namespaces, invoke as never);
+    expect(invoke).toHaveBeenCalledExactlyOnceWith("k8s.countResources", {
+      context: "prod",
+      kinds: [{ kind: "Pod", namespaced: true }],
+      namespaces: ["a", "b"],
+    });
+    expect(outcome.counts?.[0].count).toBe(0);
+  });
+
   it("no kinds, no call", async () => {
     const invoke = vi.fn();
     expect(await countResources("prod", [], [], invoke)).toEqual({ counts: [] });

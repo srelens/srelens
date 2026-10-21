@@ -59,9 +59,11 @@ export async function countResources(
   namespaces: string[],
   invoke: Invoker = invokeCapability,
 ): Promise<CountResourcesOutcome> {
-  const tooMany = namespaces.length > COUNT_MAX_NAMESPACES;
+  // Counted the way the backend counts them: once each, and "" not at all.
+  const unique = [...new Set(namespaces.filter((ns) => ns !== ""))];
+  const tooMany = unique.length > COUNT_MAX_NAMESPACES;
   const asked = tooMany ? kinds.filter((k) => k.namespaced === false) : kinds;
-  const scope = tooMany ? [] : namespaces;
+  const scope = tooMany ? [] : unique;
   const perCall = Math.max(1, Math.floor(REQUESTS_PER_CALL / Math.max(1, scope.length)));
 
   const answered: KindCountResult[] = [];
