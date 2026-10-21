@@ -32,7 +32,7 @@ pub struct ToolDef {
 
 /// A tool call the model requested, with fully-assembled arguments (adapters
 /// accumulate any streamed partial-JSON argument deltas before emitting this).
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct ToolCall {
     /// Correlates the call with its result across the wire and in `AgentEvent`s.
     pub id: String,
@@ -49,7 +49,7 @@ pub struct ToolCall {
 /// Carries both the call `id` (Anthropic/OpenAI correlate by id) and the tool
 /// `name` (Gemini's `functionResponse` correlates by name) so every adapter has
 /// what it needs.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ToolOutcome {
     pub id: String,
     pub name: String,
@@ -59,8 +59,9 @@ pub struct ToolOutcome {
 
 /// One turn of the conversation, in the shape the loop accumulates and each
 /// adapter serializes. A provider request is built from `system` plus a slice
-/// of these.
-#[derive(Debug, Clone, PartialEq)]
+/// of these. Serde is for keeping a conversation between runs (the desktop's
+/// native-agent history), not a wire format.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Turn {
     /// A user message (the visible prompt, already prefaced/guided upstream).
     User(String),

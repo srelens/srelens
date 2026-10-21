@@ -17,44 +17,89 @@ use tauri::Manager;
 
 use crate::assistant::ChatManager;
 
-/// How many conversation turns to keep per session before trimming the oldest.
-/// Bounds both memory and the tokens re-sent on every follow-up.
+/// How many conversation turns to keep per chat before trimming the oldest.
+/// Bounds both the history file and the tokens re-sent on every follow-up.
 const MAX_HISTORY_TURNS: usize = 40;
 
-/// How many sessions' histories to retain at once. Nothing ever deletes an
-/// in-memory history (New chat just mints a fresh session id, and deleting a
-/// saved session only removes the disk record), so without this cap every
-/// abandoned transcript — including large MCP results — would accumulate for
-/// the process lifetime.
-const MAX_HISTORY_SESSIONS: usize = 32;
+/// The chat a native turn's history is kept under: the saved conversation's
+/// id, which a reopened conversation keeps while its session is new (#952),
+/// else the session (a turn with nothing saved).
+fn chat_id<'a>(session: &'a str, conversation: Option<&'a str>) -> &'a str {
+    conversation.unwrap_or(session)
+}
 
-/// In-memory native-agent conversation history, keyed by chat session id, so
-/// follow-up messages in the same session carry the earlier exchange as context
-/// (the CLIs are stateless per turn; the native agent runs in-process, so it
-/// can hold this). Not persisted: reopening a saved session starts a fresh
-/// native context. A "New chat" mints a new session id, so its history is empty.
-///
-/// Stored as a write-ordered list (every turn rewrites its session's entry, so
-/// order == recency): beyond `MAX_HISTORY_SESSIONS` the least-recently-written
-/// session is evicted. Linear scans are fine at this size.
-#[derive(Default)]
-pub struct NativeHistory(std::sync::Mutex<Vec<(String, Vec<srelens_llm::types::Turn>)>>);
+/// Where the native agent keeps each chat's history, so a follow-up carries
+/// the earlier exchange — across a reopened conversation and a restart, as
+/// the CLIs keep theirs (#215). The per-user data dir, like Cursor's chats:
+/// a saved conversation's history goes only with the chat
+/// (`chat_history_delete`), and the launch sweep removes the rest.
+pub(crate) fn native_state_dir(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
+    Ok(app.path().app_local_data_dir().map_err(|e| e.to_string())?.join("native-chats"))
+}
 
-impl NativeHistory {
-    fn get(&self, session: &str) -> Vec<srelens_llm::types::Turn> {
-        let entries = self.0.lock().unwrap();
-        entries.iter().find(|(id, _)| id == session).map(|(_, turns)| turns.clone()).unwrap_or_default()
+/// `<dir>/<chat>.json`. A session or conversation id is `[A-Za-z0-9._-]`
+/// by the time a turn runs, so with the suffix (even for `.` or `..`) this
+/// is always one plain file in `dir`.
+pub(crate) fn native_chat_path(dir: &std::path::Path, chat: &str) -> std::path::PathBuf {
+    dir.join(format!("{chat}.json"))
+}
+
+/// The history kept for `chat`: none for a new chat, and none — logged, not a
+/// failed turn — for one that cannot be read back.
+fn load_history(dir: &std::path::Path, chat: &str) -> Vec<srelens_llm::types::Turn> {
+    let path = native_chat_path(dir, chat);
+    let raw = match std::fs::read_to_string(&path) {
+        Ok(raw) => raw,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Vec::new(),
+        Err(error) => {
+            log::warn!("could not read {}: {error}", path.display());
+            return Vec::new();
+        }
+    };
+    serde_json::from_str(&raw).unwrap_or_else(|error| {
+        log::warn!("starting {chat} afresh: {} is unreadable: {error}", path.display());
+        Vec::new()
+    })
+}
+
+/// At launch, before any turn runs: see `sweep_native_chats`.
+pub fn sweep_native_state(app: &tauri::AppHandle) {
+    let dirs = native_state_dir(app).and_then(|dir| Ok((dir, crate::assistant_history::resolve_sessions_dir(app)?)));
+    match dirs {
+        Ok((dir, sessions)) => sweep_native_chats(&dir, |id| crate::assistant_history::is_saved(&sessions, id)),
+        Err(error) => log::warn!("could not find the srelens agent's histories to sweep them: {error}"),
     }
+}
 
-    fn set(&self, session: String, turns: Vec<srelens_llm::types::Turn>) {
-        let mut entries = self.0.lock().unwrap();
-        entries.retain(|(id, _)| *id != session);
-        entries.push((session, turns));
-        if entries.len() > MAX_HISTORY_SESSIONS {
-            let excess = entries.len() - MAX_HISTORY_SESSIONS;
-            entries.drain(0..excess);
+/// Remove the histories no saved conversation holds — a turn's with nothing
+/// saved, or one whose save never landed. They hold tool results, so a
+/// failure is logged: it is why they are still on disk.
+fn sweep_native_chats(dir: &std::path::Path, saved: impl Fn(&str) -> bool) {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return,
+        Err(error) => {
+            log::warn!("could not list the srelens agent's histories in {}: {error}", dir.display());
+            return;
+        }
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let held = path.extension().is_some_and(|ext| ext == "json")
+            && path.file_stem().and_then(|stem| stem.to_str()).is_some_and(&saved);
+        if !held {
+            if let Err(error) = std::fs::remove_file(&path) {
+                log::warn!("could not delete {}: {error}", path.display());
+            }
         }
     }
+}
+
+/// Keep `chat`'s history, owner-only: it holds tool results.
+fn save_history(dir: &std::path::Path, chat: &str, turns: &[srelens_llm::types::Turn]) -> std::io::Result<()> {
+    std::fs::create_dir_all(dir)?;
+    let raw = serde_json::to_string(turns).map_err(std::io::Error::other)?;
+    crate::assistant_history::write_private(&native_chat_path(dir, chat), &raw)
 }
 
 /// Distill and trim conversation history using the shared srelens_llm engine.
@@ -211,10 +256,13 @@ pub fn llm_dir(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
 /// Run one native-agent turn end to end, streaming `AgentEvent`s on the
 /// session's `chat://` channel. The loop runs as a task whose `AbortHandle` is
 /// parked in `ChatManager`, so `chat_cancel` stops it just like a CLI child.
+/// `conversation` is the saved conversation's id, which names its history
+/// (see `chat_id`).
 pub async fn run_native_agent(
     app: tauri::AppHandle,
     chats: &ChatManager,
     session: String,
+    conversation: Option<String>,
     prompt: String,
     has_images: bool,
     turn: u64,
@@ -282,10 +330,18 @@ pub async fn run_native_agent(
     let filtered_invoker = srelens_llm::invoker::FilteredToolInvoker::new(invoker, srelens_llm::invoker::CORE_SRE_TOOLS);
     let provider = srelens_llm::HttpProvider::new(cfg);
 
-    // Seed the turn with this session's prior conversation so follow-ups have
+    // Seed the turn with this chat's prior conversation so follow-ups have
     // context. `run` returns the conversation to continue from next time.
-    let history_state = app.state::<NativeHistory>();
-    let prior = history_state.get(&session);
+    let history_dir = match native_state_dir(&app) {
+        Ok(d) => d,
+        Err(e) => {
+            emit(AgentEvent::Error { message: e });
+            emit(AgentEvent::TurnDone);
+            return Ok(());
+        }
+    };
+    let chat = chat_id(&session, conversation.as_deref()).to_string();
+    let prior = load_history(&history_dir, &chat);
 
     // Run the loop as a task so `chat_cancel` can abort it. `run` emits a
     // `TurnDone` on every non-cancelled path; on cancellation the task is dropped
@@ -308,7 +364,13 @@ pub async fn run_native_agent(
 
     match joined {
         // Normal/handled finish: persist the continued conversation (trimmed).
-        Ok(Ok(updated)) => history_state.set(session, trim_history(updated, MAX_HISTORY_TURNS)),
+        // The answer is already on screen, so a failure to keep it is logged:
+        // it only costs the next turn its context.
+        Ok(Ok(updated)) => {
+            if let Err(error) = save_history(&history_dir, &chat, &trim_history(updated, MAX_HISTORY_TURNS)) {
+                log::warn!("could not keep the srelens agent's history for {chat}: {error}");
+            }
+        }
         // `run` failed — setup (tools couldn't be listed) or a transport error
         // mid-stream (connection died before the provider's terminal marker).
         // Surface it and keep the prior history untouched; any partial deltas
@@ -446,32 +508,62 @@ mod tests {
         assert_eq!(aliases.get(&other).map(String::as_str), Some("k8s_scale"));
     }
 
+    /// A reopened conversation gets a new session, and a restart empties
+    /// memory, so the native agent's history is kept under the conversation,
+    /// on disk — as Claude, Codex and Cursor keep theirs (#215).
     #[test]
-    fn native_history_round_trips_per_session_and_defaults_to_empty() {
-        use srelens_llm::types::Turn;
-        let h = NativeHistory::default();
-        assert!(h.get("s1").is_empty());
-        h.set("s1".into(), vec![Turn::User("hi".into())]);
-        assert_eq!(h.get("s1"), vec![Turn::User("hi".into())]);
-        // Sessions are isolated.
-        assert!(h.get("s2").is_empty());
+    fn a_reopened_native_conversation_finds_the_history_an_earlier_run_kept() {
+        use srelens_llm::types::{ToolCall, ToolOutcome, Turn};
+        let dir = tempfile::tempdir().unwrap();
+        let turns = vec![
+            Turn::User("why is qa mongo slow?".into()),
+            Turn::Assistant {
+                text: String::new(),
+                tool_calls: vec![ToolCall {
+                    id: "c1".into(),
+                    name: "k8s_listPods".into(),
+                    arguments: json!({"namespace": "qa"}),
+                    thought_signature: Some("sig".into()),
+                }],
+            },
+            Turn::ToolResults(vec![ToolOutcome {
+                id: "c1".into(),
+                name: "k8s_listPods".into(),
+                content: "mongo-0 Running".into(),
+                is_error: false,
+            }]),
+            Turn::Assistant { text: "fix the quota lookup's index".into(), tool_calls: Vec::new() },
+        ];
+        save_history(dir.path(), chat_id("run-1", Some("conv-1")), &turns).unwrap();
+
+        // Reopened after a restart: a new session, nothing in memory.
+        assert_eq!(load_history(dir.path(), chat_id("run-2", Some("conv-1"))), turns);
+        assert!(load_history(dir.path(), chat_id("run-2", Some("conv-2"))).is_empty());
     }
 
     #[test]
-    fn abandoned_session_histories_are_evicted_beyond_the_cap() {
-        use srelens_llm::types::Turn;
-        let h = NativeHistory::default();
-        for i in 0..=MAX_HISTORY_SESSIONS {
-            h.set(format!("s{i}"), vec![Turn::User(format!("q{i}"))]);
+    fn a_restart_keeps_only_the_histories_a_saved_conversation_holds() {
+        let dir = tempfile::tempdir().unwrap();
+        for chat in ["saved", "one-shot"] {
+            std::fs::write(native_chat_path(dir.path(), chat), "[]").unwrap();
         }
-        // One over the cap: the least-recently-written session is gone, the
-        // newest survives.
-        assert!(h.get("s0").is_empty(), "oldest session should have been evicted");
-        assert!(!h.get(&format!("s{MAX_HISTORY_SESSIONS}")).is_empty());
-        // Rewriting an old session refreshes its recency instead of duplicating.
-        h.set("s1".into(), vec![Turn::User("again".into())]);
-        h.set("extra".into(), vec![Turn::User("x".into())]);
-        assert_eq!(h.get("s1"), vec![Turn::User("again".into())]);
+
+        sweep_native_chats(dir.path(), |id| id == "saved");
+
+        assert!(native_chat_path(dir.path(), "saved").exists());
+        assert!(!native_chat_path(dir.path(), "one-shot").exists(), "a history no saved conversation holds goes at launch");
+    }
+
+    #[test]
+    fn a_native_turn_with_no_saved_conversation_keeps_its_history_under_its_session() {
+        assert_eq!(chat_id("run-1", None), "run-1");
+    }
+
+    #[test]
+    fn a_native_history_that_cannot_be_read_starts_the_conversation_afresh() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("conv-1.json"), "{ not json").unwrap();
+        assert!(load_history(dir.path(), "conv-1").is_empty());
     }
 
     #[test]

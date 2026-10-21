@@ -185,27 +185,31 @@ pub(crate) fn is_saved(dir: &Path, id: &str) -> bool {
     session_path(dir, id).is_ok_and(|path| path.exists())
 }
 
-/// Remove a session's file, its `index.json` entry, and the Cursor chat kept
-/// for it under `cursor_chats` (#952) — Cursor's own store of the
+/// Remove a session's file, its `index.json` entry, the srelens agent's
+/// history kept for it under `native_chats` (#215), and the Cursor chat kept
+/// for it under `cursor_chats` (#952) — each agent's own store of the
 /// conversation, tool results included, lasts exactly as long as the saved
 /// chat. Removing an id that has no file is not an error — deleting is
 /// idempotent.
 ///
-/// Except while another window has a turn running in that chat: its files
-/// stay with the turn, and the launch sweep removes them once no saved
-/// session holds them.
+/// Except while another window has a turn running in that chat: its Cursor
+/// files stay with the turn, and the launch sweep removes them (and any
+/// history that turn writes back) once no saved session holds them.
 fn delete_session(
     dir: &Path,
     cursor_chats: &Path,
+    native_chats: &Path,
     in_use: &crate::assistant::CursorChatsInUse,
     id: &str,
 ) -> Result<(), String> {
     let path = session_path(dir, id)?;
     // Before anything goes: `.` and `..` pass `validate_id`.
     let cursor_chat = crate::assistant::cursor_chat_dir(cursor_chats, id)?;
-    if let Err(e) = fs::remove_file(&path) {
-        if e.kind() != std::io::ErrorKind::NotFound {
-            return Err(format!("could not delete {}: {e}", path.display()));
+    for file in [path, crate::llm_agent::native_chat_path(native_chats, id)] {
+        if let Err(e) = fs::remove_file(&file) {
+            if e.kind() != std::io::ErrorKind::NotFound {
+                return Err(format!("could not delete {}: {e}", file.display()));
+            }
         }
     }
     let mut metas = read_index(dir)?;
@@ -279,7 +283,13 @@ pub fn chat_history_delete(
     id: String,
     chats: tauri::State<'_, crate::assistant::ChatManager>,
 ) -> Result<(), String> {
-    delete_session(&resolve_sessions_dir(&app)?, &crate::assistant::cursor_state_dir(&app)?, &chats.cursor_chats, &id)
+    delete_session(
+        &resolve_sessions_dir(&app)?,
+        &crate::assistant::cursor_state_dir(&app)?,
+        &crate::llm_agent::native_state_dir(&app)?,
+        &chats.cursor_chats,
+        &id,
+    )
 }
 
 #[cfg(test)]
@@ -447,7 +457,7 @@ mod tests {
         save_session(&dir, &sample_session("gone", 1)).unwrap();
         save_session(&dir, &sample_session("stays", 2)).unwrap();
 
-        delete_session(&dir, &tmp.path().join("cursor-chats"), &crate::assistant::CursorChatsInUse::default(), "gone").unwrap();
+        delete_session(&dir, &tmp.path().join("cursor-chats"), &tmp.path().join("native-chats"), &crate::assistant::CursorChatsInUse::default(), "gone").unwrap();
 
         assert!(!session_path(&dir, "gone").unwrap().exists(), "session file should be removed");
         let remaining_ids: Vec<String> = read_index(&dir).unwrap().into_iter().map(|m| m.id).collect();
@@ -464,10 +474,31 @@ mod tests {
             fs::create_dir_all(cursor_chats.join(id).join("config")).unwrap();
         }
 
-        delete_session(&dir, &cursor_chats, &crate::assistant::CursorChatsInUse::default(), "gone").unwrap();
+        delete_session(&dir, &cursor_chats, &tmp.path().join("native-chats"), &crate::assistant::CursorChatsInUse::default(), "gone").unwrap();
 
         assert!(!cursor_chats.join("gone").exists(), "Cursor's store, tool results and all, goes with the chat (#952)");
         assert!(cursor_chats.join("stays").exists());
+    }
+
+    #[test]
+    fn deleting_a_chat_deletes_the_srelens_agent_history_kept_for_it() {
+        let tmp = TempDir::new();
+        let dir = sessions_dir(tmp.path());
+        let cursor_chats = tmp.path().join("cursor-chats");
+        let native_chats = tmp.path().join("native-chats");
+        fs::create_dir_all(&native_chats).unwrap();
+        for id in ["gone", "stays"] {
+            save_session(&dir, &sample_session(id, 1)).unwrap();
+            fs::write(crate::llm_agent::native_chat_path(&native_chats, id), "[]").unwrap();
+        }
+
+        delete_session(&dir, &cursor_chats, &native_chats, &crate::assistant::CursorChatsInUse::default(), "gone").unwrap();
+
+        assert!(
+            !crate::llm_agent::native_chat_path(&native_chats, "gone").exists(),
+            "the srelens agent's history, tool results and all, goes with the chat (#215)"
+        );
+        assert!(crate::llm_agent::native_chat_path(&native_chats, "stays").exists());
     }
 
     #[test]
@@ -481,7 +512,7 @@ mod tests {
         // Another window is answering in it.
         let _turn = in_use.claim("busy").unwrap();
 
-        delete_session(&dir, &cursor_chats, &in_use, "busy").unwrap();
+        delete_session(&dir, &cursor_chats, &tmp.path().join("native-chats"), &in_use, "busy").unwrap();
 
         assert!(!session_path(&dir, "busy").unwrap().exists());
         assert!(
@@ -499,7 +530,7 @@ mod tests {
         // Both pass `validate_id`'s charset, and joined to the root they name
         // the root itself and the app's whole data dir.
         for id in [".", ".."] {
-            assert!(delete_session(&dir, &cursor_chats, &crate::assistant::CursorChatsInUse::default(), id).is_err(), "{id:?} must be refused");
+            assert!(delete_session(&dir, &cursor_chats, &tmp.path().join("native-chats"), &crate::assistant::CursorChatsInUse::default(), id).is_err(), "{id:?} must be refused");
         }
         assert!(cursor_chats.exists());
     }
@@ -527,7 +558,7 @@ mod tests {
         for bad in ["../evil", "a/b", "a\\b", "/etc/passwd", "../../secret", ""] {
             assert!(read_session(&dir, bad).is_err(), "read({bad:?}) must be rejected");
             assert!(
-                delete_session(&dir, &tmp.path().join("cursor-chats"), &crate::assistant::CursorChatsInUse::default(), bad).is_err(),
+                delete_session(&dir, &tmp.path().join("cursor-chats"), &tmp.path().join("native-chats"), &crate::assistant::CursorChatsInUse::default(), bad).is_err(),
                 "delete({bad:?}) must be rejected"
             );
             let mut s = sample_session("valid", 1);

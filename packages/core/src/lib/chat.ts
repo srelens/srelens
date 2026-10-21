@@ -108,14 +108,15 @@ export function startChat(): Promise<string> {
  * follow-up turns keep their context. Resolves to what the caller should now
  * store as the conversation's id: the id captured from this turn's stream, the
  * echoed `resume` when the turn was cancelled or ran clean without yielding
- * one, or `null` — meaning CLEAR — for agents with no id (native srelens
- * agent, Codex) and for a crashed resume (the CLI lost the session; retrying
- * the same id would fail forever). A REJECTION, by contrast, says nothing
+ * one, or `null` — meaning CLEAR — for the native srelens agent (no CLI id)
+ * and for a crashed resume (the CLI lost the session; retrying the same id
+ * would fail forever). A REJECTION, by contrast, says nothing
  * about the stored id — keep it.
  *
  * `conversation` is the id the conversation is saved under (`saveSession`).
- * Cursor keeps its chat under it, so a reopened conversation, which gets a new
- * `session`, still resumes (#952). Callers with nothing saved omit it.
+ * Cursor keeps its chat and the srelens agent its history under it, so a
+ * reopened conversation, which gets a new `session`, still resumes (#952,
+ * #215). Callers with nothing saved omit it.
  */
 export async function sendChat(
   session: string,

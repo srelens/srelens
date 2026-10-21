@@ -376,6 +376,8 @@ pub fn run() {
             // And the Cursor chats no saved conversation holds (#952). A saved
             // one keeps its chat across runs and loses it with the chat.
             assistant::sweep_cursor_state(app.handle());
+            // Likewise the srelens agent's histories (#215).
+            llm_agent::sweep_native_state(app.handle());
 
             // Use Tauri's managed async runtime — `tokio::spawn` here panics
             // ("no reactor running") because `setup` runs before/outside a Tokio
@@ -489,7 +491,6 @@ pub fn run() {
         .manage(ForwardManager::new(cache.clone()))
         .manage(McpHttpManager::new(cache.clone()))
         .manage(assistant::ChatManager::default())
-        .manage(llm_agent::NativeHistory::default())
         .manage(LogStreamManager::new(cache).with_spools(
             srelens_streams::log_spool::SpoolDirs::per_process(
                 std::env::temp_dir(),
