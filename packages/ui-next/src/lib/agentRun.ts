@@ -1056,8 +1056,13 @@ export async function askAgent(
     // a kind nothing in `offered` matches.
     const offered = agents.filter((a) => a.available && !a.gated);
     let resolvedKind = myAgentKind;
-    let agentPath = offered.find((a) => a.kind === myAgentKind)?.path ?? "";
-    if (!agentPath) {
+    // Found by kind, not by path: srelens's own agent runs in-process and is
+    // listed with no path, and reading that as "not installed" sent every one
+    // of its turns through the fallback below, which drops `resume` — the id
+    // its history is kept under (#215).
+    const chosen = offered.find((a) => a.kind === myAgentKind);
+    let agentPath = chosen?.path ?? "";
+    if (!chosen) {
       if (offered.length === 0) {
         // No agent this run could possibly reach — fail the turn rather than
         // handing `sendChat` an empty path it can only fail to spawn. §F's
