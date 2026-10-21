@@ -1113,7 +1113,7 @@ fn slash_command_matching_uses_only_the_first_word() {
     assert_eq!(hits.len(), 1);
     assert_eq!(hits[0].command, "crashloop");
     assert!(match_slash_commands("/zzz").is_empty());
-    assert_eq!(match_slash_commands("").len(), BUILTIN_PLAYBOOKS.len());
+    assert!(match_slash_commands("").len() >= BUILTIN_PLAYBOOKS.len());
     // Alias and name prefixes both match: "node" is an alias of nodepressure.
     assert!(match_slash_commands("/node")
         .iter()

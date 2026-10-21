@@ -17,6 +17,7 @@ pub use catalog::{catalog_of, CatalogEntry};
 mod extensions;
 pub mod github;
 mod settings;
+pub mod skills;
 /// The extension readers' fuzz entry points, for the targets in `fuzz/`. Not an API.
 #[cfg(feature = "fuzzing")]
 #[doc(hidden)]
@@ -418,6 +419,8 @@ fn build_with(
         "health check; echoes the input back as { pong: <input> }",
         |input| async move { Ok(json!({ "pong": input })) },
     ));
+    reg.register(skills::skills_get_capability(None));
+    reg.register(skills::skills_list_capability(None));
 
     reg.register(match kubeconfigs {
         Kubeconfigs::Local => srelens_kube::contexts::list_contexts_capability(
@@ -662,7 +665,9 @@ fn build_with(
     reg.register(srelens_kube::collections::match_names_capability().only_in_the_ui());
     // The kinds a collection's resource filter may name (#885), offered by
     // its editor.
-    reg.register(srelens_kube::collections::list_api_kinds_capability(cache.clone()).only_in_the_ui());
+    reg.register(
+        srelens_kube::collections::list_api_kinds_capability(cache.clone()).only_in_the_ui(),
+    );
     reg.register(srelens_kube::schema::open_api_schema_capability(
         cache.clone(),
     ));
@@ -827,9 +832,10 @@ mod tests {
     async fn every_listed_tool_has_an_object_input_schema() {
         let server = McpServer::new(Arc::new(build_registry()));
         let request = json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"});
-        let resp = srelens_mcp::stdio::handle_request(&server, &request, srelens_mcp::Transport::Http)
-            .await
-            .unwrap();
+        let resp =
+            srelens_mcp::stdio::handle_request(&server, &request, srelens_mcp::Transport::Http)
+                .await
+                .unwrap();
         let tools = resp["result"]["tools"].as_array().unwrap();
         assert_eq!(
             srelens_mcp::completeness::assert_every_input_schema_is_an_object(tools),
@@ -977,9 +983,10 @@ mod tests {
             Ok(())
         );
         let request = json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"});
-        let resp = srelens_mcp::stdio::handle_request(&server, &request, srelens_mcp::Transport::Http)
-            .await
-            .unwrap();
+        let resp =
+            srelens_mcp::stdio::handle_request(&server, &request, srelens_mcp::Transport::Http)
+                .await
+                .unwrap();
         assert_eq!(
             srelens_mcp::completeness::assert_every_input_schema_is_an_object(
                 resp["result"]["tools"].as_array().unwrap()
@@ -1633,8 +1640,8 @@ mod tests {
             ("cm", "ConfigMap", "ns"),
             ("nodes", "Node", "-"),
         ] {
-            let uri = ResourceUri::parse(&format!("k8s://c/{namespace}/{alias}/web-0/events"))
-                .unwrap();
+            let uri =
+                ResourceUri::parse(&format!("k8s://c/{namespace}/{alias}/web-0/events")).unwrap();
             let read = plan_read(&uri, kinds.as_ref()).unwrap();
             let (gvk, _) = srelens_kube::manifest::gvk_for(alias).unwrap();
             assert_eq!(gvk.kind, canonical);

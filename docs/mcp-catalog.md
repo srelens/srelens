@@ -7,7 +7,7 @@ Everything this server exposes over MCP, generated from the live registry so it 
 
 ## Tools
 
-136 tools, grouped by area and then by how a call is gated. Argument schemas are not reproduced here — call `tools/list` for those, which cannot go stale.
+138 tools, grouped by area and then by how a call is gated. Argument schemas are not reproduced here — call `tools/list` for those, which cannot go stale.
 
 **Impact** is how much a successful call disturbs — `low`, `medium` or `high` — and is a different question from the section heading, which is how the call is gated. A capability that accepts several named operations carries the highest level any of them reaches; the per-operation level travels with the resource.
 
@@ -168,7 +168,7 @@ Everything this server exposes over MCP, generated from the live registry so it 
 | `toolbox.removePlugin` | medium | remove an installed krew plugin |
 | `toolbox.upgradePlugin` | medium | upgrade an installed krew plugin |
 
-### Server — read-only (19)
+### Server — read-only (21)
 
 | Tool | Impact | Summary |
 | --- | --- | --- |
@@ -191,6 +191,8 @@ Everything this server exposes over MCP, generated from the live registry so it 
 | `github.rolloutCause` | low | why an Argo sync rolled out: the github.com commits between the previous and the synced revision that touched the app's path, and the pull requests they came from |
 | `ping` | low | health check; echoes the input back as { pong: <input> } |
 | `settings.get` | low | read durable desktop settings; omit key to return the complete map |
+| `skills.get` | low | retrieve an SRE playbook or diagnostic skill by name (e.g. crashloop-triage, pending-pod, oomkilled, node-pressure, service-no-endpoints, rollout-stuck, cluster-summary, argo-triage) |
+| `skills.list` | low | list available SRE playbooks and diagnostic skills (both built-in and user-defined) |
 
 ### Server — needs confirmation (5)
 

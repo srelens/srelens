@@ -92,6 +92,14 @@ async fn mcp_stdio_initialize_and_tools_list() {
         names.contains(&"k8s.helmUninstall"),
         "expected k8s.helmUninstall tool, got {names:?}"
     );
+    assert!(
+        names.contains(&"skills.get"),
+        "expected skills.get tool, got {names:?}"
+    );
+    assert!(
+        names.contains(&"skills.list"),
+        "expected skills.list tool, got {names:?}"
+    );
 
     drop(client_write);
     let _ = server_task.await;
@@ -430,8 +438,7 @@ async fn mcp_stdio_sensitive_reads_policy_allows_with_flag_and_confirm() {
 #[test]
 fn cli_parses_mcp_subcommand_and_flags() {
     // 1. Subcommand default
-    let cli =
-        srectl::Cli::try_parse_from(["srectl", "mcp"]).expect("parse mcp subcommand");
+    let cli = srectl::Cli::try_parse_from(["srectl", "mcp"]).expect("parse mcp subcommand");
     match cli.command {
         Some(srectl::CliCommand::Mcp {
             allow_destructive,
@@ -579,4 +586,131 @@ async fn mcp_binary_flag_startup_initializes() {
         .and_then(|info| info.get("name"))
         .and_then(serde_json::Value::as_str);
     assert_eq!(server_name, Some("srelens"));
+}
+
+#[tokio::test]
+async fn mcp_stdio_skills_list_and_get() {
+    init_crypto_provider();
+    let server = build_stdio_mcp_server(vec![], false, true);
+
+    let (client_read, server_write) = tokio::io::duplex(64 * 1024);
+    let (server_read, mut client_write) = tokio::io::duplex(64 * 1024);
+
+    let server_task = tokio::spawn(async move {
+        let _ = run_mcp_stdio(server, server_read, server_write).await;
+    });
+
+    let mut lines = tokio::io::BufReader::new(client_read);
+    use tokio::io::AsyncBufReadExt;
+
+    // 1. Call skills.list
+    let list_req = json!({
+        "jsonrpc": "2.0",
+        "id": 20,
+        "method": "tools/call",
+        "params": {
+            "name": "skills.list",
+            "arguments": {}
+        }
+    });
+    client_write
+        .write_all(format!("{}\n", list_req).as_bytes())
+        .await
+        .unwrap();
+
+    let mut resp_line = String::new();
+    lines.read_line(&mut resp_line).await.unwrap();
+    let resp: Value = serde_json::from_str(&resp_line).expect("valid json response");
+    assert_eq!(resp.get("id").and_then(Value::as_i64), Some(20));
+
+    let text = resp
+        .get("result")
+        .and_then(|r| r.get("content"))
+        .and_then(Value::as_array)
+        .and_then(|arr| arr.first())
+        .and_then(|item| item.get("text"))
+        .and_then(Value::as_str)
+        .expect("text content in skills.list result");
+
+    let list_data: Value = serde_json::from_str(text).expect("valid json parsed from text");
+    let skills_arr = list_data
+        .get("skills")
+        .and_then(Value::as_array)
+        .expect("skills array");
+    assert!(skills_arr.len() >= 8, "expected at least 8 built-in skills");
+    let skill_names: Vec<&str> = skills_arr
+        .iter()
+        .filter_map(|s| s.get("name").and_then(Value::as_str))
+        .collect();
+    assert!(skill_names.contains(&"crashloop-triage"));
+    assert!(skill_names.contains(&"pending-pod"));
+    assert!(skill_names.contains(&"oomkilled"));
+    assert!(skill_names.contains(&"node-pressure"));
+
+    // 2. Call skills.get with crashloop-triage
+    let get_req = json!({
+        "jsonrpc": "2.0",
+        "id": 21,
+        "method": "tools/call",
+        "params": {
+            "name": "skills.get",
+            "arguments": { "name": "crashloop-triage" }
+        }
+    });
+    client_write
+        .write_all(format!("{}\n", get_req).as_bytes())
+        .await
+        .unwrap();
+
+    resp_line.clear();
+    lines.read_line(&mut resp_line).await.unwrap();
+    let get_resp: Value = serde_json::from_str(&resp_line).expect("valid json response");
+    assert_eq!(get_resp.get("id").and_then(Value::as_i64), Some(21));
+
+    let get_text = get_resp
+        .get("result")
+        .and_then(|r| r.get("content"))
+        .and_then(Value::as_array)
+        .and_then(|arr| arr.first())
+        .and_then(|item| item.get("text"))
+        .and_then(Value::as_str)
+        .expect("text content in skills.get result");
+
+    let get_data: Value = serde_json::from_str(get_text).expect("valid json parsed from text");
+    assert_eq!(get_data["name"], "crashloop-triage");
+    assert_eq!(get_data["builtin"], true);
+    assert_eq!(get_data["overridesBuiltin"], false);
+    let body = get_data["body"].as_str().expect("body string");
+    assert!(body.contains("CrashLoopBackOff"));
+    assert!(body.contains("PREVIOUS"));
+
+    // 3. Call skills.get with non-existent skill
+    let bad_req = json!({
+        "jsonrpc": "2.0",
+        "id": 22,
+        "method": "tools/call",
+        "params": {
+            "name": "skills.get",
+            "arguments": { "name": "does-not-exist" }
+        }
+    });
+    client_write
+        .write_all(format!("{}\n", bad_req).as_bytes())
+        .await
+        .unwrap();
+
+    resp_line.clear();
+    lines.read_line(&mut resp_line).await.unwrap();
+    let bad_resp: Value = serde_json::from_str(&resp_line).expect("valid json response");
+    assert_eq!(bad_resp.get("id").and_then(Value::as_i64), Some(22));
+    assert!(
+        bad_resp.get("error").is_some()
+            || bad_resp
+                .get("result")
+                .is_some_and(|r| r.get("isError") == Some(&Value::Bool(true))),
+        "expected error response for non-existent skill, got: {bad_resp:?}"
+    );
+
+    drop(client_write);
+    let _ = server_task.await;
 }

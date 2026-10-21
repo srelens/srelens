@@ -529,6 +529,12 @@ pub fn read_user_skills(dir: &Path) -> Vec<Skill> {
 
 /// Scans `~/.config/srelens/assistant/skills/*.md` for user-defined skills.
 pub fn load_user_skills_dir() -> PathBuf {
+    if let Ok(dir) = std::env::var("SRELENS_SKILLS_DIR") {
+        let trimmed = dir.trim();
+        if !trimmed.is_empty() {
+            return PathBuf::from(trimmed);
+        }
+    }
     dirs::config_dir()
         .map(|d| d.join("srelens").join("assistant").join("skills"))
         .unwrap_or_else(|| PathBuf::from(".srelens/skills"))
