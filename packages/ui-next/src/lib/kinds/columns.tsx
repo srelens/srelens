@@ -297,6 +297,7 @@ export const podColumns: Column<PodRow>[] = [
   {
     key: "podIp",
     header: "IP",
+    sortable: false,
     render: (p) => p.podIp || "—",
   },
   // One square per container, in place of the `1/2` the Ready column printed
@@ -632,11 +633,13 @@ export const nodeColumns: Column<NodeRow>[] = [
   {
     key: "internalIp",
     header: "Internal IP",
+    sortable: false,
     render: (n) => n.internalIp || "—",
   },
   {
     key: "externalIp",
     header: "External IP",
+    sortable: false,
     defaultHidden: true,
     render: (n) => n.externalIp || "—",
   },

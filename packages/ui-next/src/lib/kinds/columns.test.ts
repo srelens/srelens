@@ -697,7 +697,7 @@ describe("pod columns", () => {
   it("shows pod IP, or a dash when absent", () => {
     const ip = podColumns.find((c) => c.key === "podIp")!;
     expect(ip.header).toBe("IP");
-    expect(ip.sortable).toBeFalsy();
+    expect(ip.sortable).toBe(false);
     expect(ip.render!(pod({ podIp: "10.244.0.12" }))).toBe("10.244.0.12");
     expect(ip.render!(pod({}))).toBe("—");
   });
@@ -717,14 +717,14 @@ describe("node columns", () => {
     const internal = nodeColumns.find((c) => c.key === "internalIp")!;
     expect(internal.header).toBe("Internal IP");
     expect(internal.defaultHidden).toBeFalsy();
-    expect(internal.sortable).toBeFalsy();
+    expect(internal.sortable).toBe(false);
     expect(internal.render!({ ...node, internalIp: "192.168.1.10" })).toBe("192.168.1.10");
     expect(internal.render!(node)).toBe("—");
 
     const external = nodeColumns.find((c) => c.key === "externalIp")!;
     expect(external.header).toBe("External IP");
     expect(external.defaultHidden).toBe(true);
-    expect(external.sortable).toBeFalsy();
+    expect(external.sortable).toBe(false);
     expect(external.render!({ ...node, externalIp: "54.1.2.3" })).toBe("54.1.2.3");
     expect(external.render!(node)).toBe("—");
   });
