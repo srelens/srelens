@@ -294,6 +294,12 @@ export const podColumns: Column<PodRow>[] = [
     // none, and a dash that opened nothing would be a link to nowhere.
     render: (p) => (p.node ? <NodeLink name={p.node} /> : "—"),
   },
+  {
+    key: "podIp",
+    header: "IP",
+    sortable: false,
+    render: (p) => p.podIp || "—",
+  },
   // One square per container, in place of the `1/2` the Ready column printed
   // (#878): which container, in what state. Sorted worst first, so the pods
   // with a container in trouble gather at one end; searched by the names,
@@ -624,6 +630,19 @@ export const nodeColumns: Column<NodeRow>[] = [
     ),
   },
   { key: "roles", header: "Roles" },
+  {
+    key: "internalIp",
+    header: "Internal IP",
+    sortable: false,
+    render: (n) => n.internalIp || "—",
+  },
+  {
+    key: "externalIp",
+    header: "External IP",
+    sortable: false,
+    defaultHidden: true,
+    render: (n) => n.externalIp || "—",
+  },
   {
     key: "cpu",
     header: "CPU",

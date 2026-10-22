@@ -818,11 +818,11 @@ describe("ResourceBrowser", () => {
       expect(screen.queryByRole("columnheader", { name: /Version/ })).toBeNull(),
     );
     // …and the choice is persisted.
-    // "taints" rides along: since #426 the Taints column starts hidden, and the
+    // "externalIp" and "taints" ride along: defaultHidden columns start hidden, and the
     // first toggle of ANY column on this view is what turns "no choice yet"
     // into a stored choice — so the default it was showing is written down.
     expect(JSON.parse(localStorage.getItem("srelens.hiddenColumns")!)).toEqual({
-      nodes: ["taints", "version"],
+      nodes: ["externalIp", "taints", "version"],
     });
 
     // Remounting the nodes view keeps the column hidden.

@@ -35,6 +35,10 @@ export interface NodeSummary {
    * containers rather than cloud machines — not a guessed placeholder.
    */
   instanceType: string;
+  /** Primary node internal IP from status.addresses (InternalIP). */
+  internalIp?: string;
+  /** Optional node external IP from status.addresses (ExternalIP). */
+  externalIp?: string;
 }
 
 /** Dynamic GVK + plural for a custom resource (CRD-backed kinds). */
