@@ -945,9 +945,18 @@ async fn run_suite() {
         .iter()
         .map(|n| n.as_str().unwrap())
         .collect();
-    assert!(names.contains(&"kube-system") && names.contains(&NS), "{resolved}");
-    assert!(!names.contains(&"kube-node-lease"), "the selector narrows the pattern: {resolved}");
-    assert_eq!(resolved["collections"][0]["members"][1]["status"], "missing", "{resolved}");
+    assert!(
+        names.contains(&"kube-system") && names.contains(&NS),
+        "{resolved}"
+    );
+    assert!(
+        !names.contains(&"kube-node-lease"),
+        "the selector narrows the pattern: {resolved}"
+    );
+    assert_eq!(
+        resolved["collections"][0]["members"][1]["status"], "missing",
+        "{resolved}"
+    );
     let checked = h
         .ok(
             "collections.validate",
@@ -965,7 +974,10 @@ async fn run_suite() {
         .iter()
         .map(|k| (k["group"].as_str().unwrap(), k["kind"].as_str().unwrap()))
         .collect();
-    assert!(served.contains(&("apps", "Deployment")) && served.contains(&("", "ConfigMap")), "{kinds}");
+    assert!(
+        served.contains(&("apps", "Deployment")) && served.contains(&("", "ConfigMap")),
+        "{kinds}"
+    );
     let matched = h
         .ok(
             "collections.matchNames",
@@ -1319,6 +1331,13 @@ async fn run_suite() {
     assert_eq!(shp["namespace"].as_str().unwrap(), NS);
     assert!(shp["portMappings"].as_array().is_some());
 
+    let skill = h
+        .ok("skills.get", json!({ "name": "crashloop-triage" }))
+        .await;
+    assert_eq!(skill["name"], "crashloop-triage");
+    assert!(skill["builtin"].as_bool().unwrap() || skill["overridesBuiltin"].as_bool().unwrap());
+    assert!(!skill["body"].as_str().unwrap().is_empty());
+
     let out = h
         .ok(
             "k8s.listIngresses",
@@ -1661,7 +1680,11 @@ async fn run_suite() {
         .await;
     let counts = out["counts"].as_array().unwrap();
     assert_eq!(counts[0]["count"].as_i64(), Some(config_maps), "{out}");
-    assert_eq!(counts[1]["count"].as_i64(), Some(nodes.len() as i64), "{out}");
+    assert_eq!(
+        counts[1]["count"].as_i64(),
+        Some(nodes.len() as i64),
+        "{out}"
+    );
     assert!(counts[2]["count"].is_null(), "{out}");
     assert!(counts[2]["error"].is_string(), "{out}");
 
@@ -4642,7 +4665,10 @@ async fn mcp_resource_subscription(ctx: &str, pod: &str) {
 async fn mcp_events_subscription_live() {
     let ctx = std::env::var("SRELENS_E2E_CONTEXT")
         .expect("set SRELENS_E2E_CONTEXT to an explicitly selected disposable cluster");
-    assert!(!ctx.trim().is_empty(), "SRELENS_E2E_CONTEXT must not be empty");
+    assert!(
+        !ctx.trim().is_empty(),
+        "SRELENS_E2E_CONTEXT must not be empty"
+    );
     let namespace = "srelens-mcp-events-e2e";
     let created = tokio::time::timeout(
         Duration::from_secs(60),

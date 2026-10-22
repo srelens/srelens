@@ -1842,6 +1842,10 @@ fn a_long_single_line_prompt_wraps_inside_the_input_box() {
 
 #[test]
 fn typing_a_slash_pops_up_every_playbook_with_the_first_selected() {
+    let mut env = common::env::lock();
+    let temp = tempfile::tempdir().unwrap();
+    env.set("SRELENS_SKILLS_DIR", temp.path());
+
     let mut state = fresh_state();
     state.input = "/".into();
     state.update_slash_suggestions();
@@ -1879,6 +1883,10 @@ fn typing_a_slash_pops_up_every_playbook_with_the_first_selected() {
 
 #[test]
 fn the_suggestion_popup_windows_around_a_selection_past_the_seventh_row() {
+    let mut env = common::env::lock();
+    let temp = tempfile::tempdir().unwrap();
+    env.set("SRELENS_SKILLS_DIR", temp.path());
+
     let mut state = fresh_state();
     state.input = "/".into();
     state.update_slash_suggestions();
@@ -2404,11 +2412,11 @@ async fn the_app_renders_the_assistant_view_with_the_active_context_in_its_title
 
 #[tokio::test]
 async fn the_app_renders_helm_and_helm_detail_views_across_all_tabs() {
-    use srelens_kube::helm::{HelmReleaseDetail, HelmRevision};
     use srectl::views::helm_detail_view::{
         render_helm_detail_view, HelmDetailTab, HelmDetailViewState,
     };
     use srectl::views::helm_view::{render_helm_view, HelmReleaseItem, HelmViewState};
+    use srelens_kube::helm::{HelmReleaseDetail, HelmRevision};
 
     // 1. render_helm_view states
     let mut helm_state = HelmViewState::new();

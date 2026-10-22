@@ -58,6 +58,11 @@ pub enum CliCommand {
     },
     /// Check toolbox diagnostics (kubectl, helm, krew)
     Toolbox,
+    /// Manage SRE playbooks and custom diagnostic skills
+    Skill {
+        #[command(subcommand)]
+        subcommand: Option<SkillSubcommand>,
+    },
     /// Print version information
     Version,
     /// Update srectl to the latest release
@@ -76,4 +81,44 @@ pub enum CliCommand {
         #[arg(long, value_parser = ["stable", "dev"])]
         channel: Option<String>,
     },
+}
+
+#[derive(Subcommand, Debug, Clone, PartialEq, Eq)]
+pub enum SkillSubcommand {
+    /// List all skills (built-ins and installed custom skills)
+    List {
+        /// Output skills list as JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show skill details and instructions
+    Show {
+        /// Name of the skill
+        name: String,
+        /// Print raw markdown content directly
+        #[arg(long)]
+        raw: bool,
+    },
+    /// Add / install a new custom skill from a GitHub/web URL, local file, or stdin
+    Add {
+        /// Name override for the skill (optional; read from markdown front-matter by default)
+        name: Option<String>,
+        /// Read skill markdown from a local file
+        #[arg(short, long)]
+        file: Option<PathBuf>,
+        /// Download skill markdown from a GitHub or web URL
+        #[arg(short, long)]
+        url: Option<String>,
+        /// Short description override (used if markdown lacks front-matter)
+        #[arg(short, long)]
+        desc: Option<String>,
+    },
+    /// Delete a custom skill or user override
+    #[command(alias = "remove", alias = "rm")]
+    Delete {
+        /// Name of the skill to delete
+        name: String,
+    },
+    /// Print the directory where custom skills are stored
+    Path,
 }

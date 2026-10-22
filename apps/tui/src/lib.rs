@@ -20,8 +20,8 @@ pub mod rebrand;
 pub mod views;
 
 pub use ai_config::{AiProvider, AiSettings};
-pub use ai_skills::SkillDef;
+pub use ai_skills::{Skill, SkillDef, SkillMeta};
 pub use app::App;
-pub use cli::{Cli, CliCommand};
+pub use cli::{Cli, CliCommand, SkillSubcommand};
 pub use deep_link::DeepLink;
 pub use tui_config::{CommandPopupDensity, TuiConfig};

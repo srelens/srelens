@@ -21,8 +21,6 @@ use tokio::net::TcpListener;
 use tokio::sync::mpsc::UnboundedReceiver;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use srelens_kube::lineage::{LineageNode, LineageRelation};
-use srelens_kube::node_inspector::{NodeInspectorDetails, NodePodItem};
 use srectl::app::{ActiveView, App, SuspendAction};
 use srectl::commands::{CrdMeta, ResourceKind};
 use srectl::event::AppEvent;
@@ -33,6 +31,8 @@ use srectl::views::port_forward_view::{PortForwardEntry, PortForwardViewState};
 use srectl::views::resource_table::ResourceTableState;
 use srectl::views::toolbox_view::{ToolStatusItem, ToolboxViewState};
 use srectl::views::tree_view::TreeViewState;
+use srelens_kube::lineage::{LineageNode, LineageRelation};
+use srelens_kube::node_inspector::{NodeInspectorDetails, NodePodItem};
 
 // ---------------------------------------------------------------------------
 // A loopback apiserver
@@ -2657,7 +2657,7 @@ async fn tab_in_the_assistant_completes_the_highlighted_slash_command() {
         !app.assistant_state.slash_suggestions.is_empty(),
         "'/cav' offers at least one slash command"
     );
-    let first = app.assistant_state.slash_suggestions[0].name;
+    let first = app.assistant_state.slash_suggestions[0].name.clone();
 
     app.handle_key_event(common::key(crossterm::event::KeyCode::Tab))
         .await;
