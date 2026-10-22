@@ -169,6 +169,7 @@ const podColumns: Column<PodRow>[] = [
   { key: "phase", header: "Phase", render: (p) => <StatusPill status={p.phase} kind={phaseKind(p.phase)} /> },
   { key: "restarts", header: "Restarts" },
   { key: "node", header: "Node", render: (p) => <Muted>{p.node}</Muted> },
+  { key: "podIp", header: "IP", render: (p) => <Muted><span className="font-mono text-xs">{p.podIp || "—"}</span></Muted> },
   { key: "age", header: "Age", getSortValue: ageSortValue, render: (p) => <Muted>{p.age}</Muted> },
 ];
 
@@ -398,6 +399,25 @@ const nodeColumns: Column<NodeRow>[] = [
     ),
   },
   { key: "roles", header: "Roles" },
+  {
+    key: "internalIp",
+    header: "Internal IP",
+    render: (n) => (
+      <Muted>
+        <span className="font-mono text-xs">{n.internalIp || "—"}</span>
+      </Muted>
+    ),
+  },
+  {
+    key: "externalIp",
+    header: "External IP",
+    defaultHidden: true,
+    render: (n) => (
+      <Muted>
+        <span className="font-mono text-xs">{n.externalIp || "—"}</span>
+      </Muted>
+    ),
+  },
   { key: "cpu", header: "CPU", render: (n) => <Muted>{n.cpu != null ? `${n.cpu}m` : "—"}</Muted> },
   { key: "memory", header: "Memory", render: (n) => <Muted>{n.memory != null ? `${n.memory}Mi` : "—"}</Muted> },
   { key: "version", header: "Version", render: (n) => <Muted>{n.version}</Muted> },

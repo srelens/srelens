@@ -584,8 +584,13 @@ fn node_header_lines(d: &NodeInspectorDetails) -> Vec<Line<'_>> {
     ];
 
     if let Some(ip) = &d.internal_ip {
-        row2_spans.push(Span::styled("IP: ", Theme::header_label()));
-        row2_spans.push(Span::styled(ip, Theme::header_val()));
+        row2_spans.push(Span::styled("Internal IP: ", Theme::header_label()));
+        row2_spans.push(Span::styled(format!("{ip}  "), Theme::header_val()));
+    }
+
+    if let Some(ip) = &d.external_ip {
+        row2_spans.push(Span::styled("External IP: ", Theme::header_label()));
+        row2_spans.push(Span::styled(format!("{ip}  "), Theme::header_val()));
     }
 
     vec![Line::from(row1_spans), Line::from(row2_spans)]
@@ -1500,5 +1505,33 @@ mod tests {
 
         state.select_first();
         assert_eq!(state.selected_pod_idx, 0);
+    }
+
+    #[test]
+    fn test_node_header_lines_includes_internal_and_external_ips() {
+        let mut details = NodeInspectorDetails {
+            name: "worker-node-1".to_string(),
+            status: "Ready".to_string(),
+            internal_ip: Some("10.240.0.15".to_string()),
+            external_ip: Some("34.120.55.10".to_string()),
+            ..Default::default()
+        };
+
+        let lines = node_header_lines(&details);
+        assert_eq!(lines.len(), 2);
+        let row2_text: String = lines[1].spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(row2_text.contains("Internal IP: 10.240.0.15"));
+        assert!(row2_text.contains("External IP: 34.120.55.10"));
+
+        // If external_ip is None, External IP should be omitted
+        details.external_ip = None;
+        let lines_no_ext = node_header_lines(&details);
+        let row2_no_ext: String = lines_no_ext[1]
+            .spans
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect();
+        assert!(row2_no_ext.contains("Internal IP: 10.240.0.15"));
+        assert!(!row2_no_ext.contains("External IP:"));
     }
 }

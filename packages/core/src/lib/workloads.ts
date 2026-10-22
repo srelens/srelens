@@ -17,6 +17,8 @@ export interface PodSummary {
    *  e.g. "acme/checkout-api:118a7e, envoyproxy/envoy:v1.30". Empty when the
    *  pod has no containers. */
   image: string;
+  /** Primary pod IP from status.podIP. */
+  podIp?: string;
   /**
    * Why a container is waiting, when one is — "CrashLoopBackOff",
    * "ImagePullBackOff", "ContainerCreating" — and "" when none is. `phase`

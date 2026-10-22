@@ -14,8 +14,6 @@ use ratatui::layout::Position;
 use ratatui::style::{Color, Style};
 use ratatui::{Frame, Terminal};
 use serde_json::{json, Value};
-use srelens_kube::lineage::{LineageNode, LineageRelation};
-use srelens_kube::metrics::MetricSample;
 use srectl::commands::{CrdMeta, PrinterColumn, ResourceKind};
 use srectl::theme::Theme;
 use srectl::views::argo_detail_view::{
@@ -41,6 +39,8 @@ use srectl::views::resource_table::{
 use srectl::views::toolbox_view::{render_toolbox_view, ToolStatusItem, ToolboxViewState};
 use srectl::views::tree_view::{render_tree_view, TreeViewState};
 use srectl::views::{highlight_text_matches, sanitize_span_text};
+use srelens_kube::lineage::{LineageNode, LineageRelation};
+use srelens_kube::metrics::MetricSample;
 
 /// Render one frame and hand back the raw buffer so a test can inspect cell
 /// styles (the colour a status cell was drawn in), not only the text.
@@ -1865,7 +1865,17 @@ fn default_columns_match_each_resource_kind() {
     );
     assert_eq!(
         names(&ResourceKind::Nodes),
-        ["NAME", "STATUS", "ROLES", "VERSION", "CPU", "MEMORY", "PODS", "AGE"]
+        [
+            "NAME",
+            "STATUS",
+            "ROLES",
+            "INTERNAL-IP",
+            "VERSION",
+            "CPU",
+            "MEMORY",
+            "PODS",
+            "AGE"
+        ]
     );
     assert_eq!(names(&ResourceKind::Namespaces), ["NAME", "STATUS", "AGE"]);
     assert_eq!(

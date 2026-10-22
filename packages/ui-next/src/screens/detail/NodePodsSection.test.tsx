@@ -38,6 +38,7 @@ function pod(i: number): PodSummary {
     age: "stale",
     created: new Date(NOW - 15_000).toISOString(),
     image: "example.test/app:1",
+    podIp: `10.244.0.${i + 1}`,
   };
 }
 
@@ -62,6 +63,8 @@ describe("NodePodsSection", () => {
     expect(screen.getAllByRole("row")).toHaveLength(13);
     expect(screen.getByRole("button", { name: "Sort by Pod" })).toBeDefined();
     expect(screen.getByRole("button", { name: "Sort by Namespace" })).toBeDefined();
+    expect(screen.getByText("IP")).toBeDefined();
+    expect(screen.getByText("10.244.0.1")).toBeDefined();
     expect(screen.getByRole("button", { name: "Sort by Age" })).toBeDefined();
     expect(screen.getAllByText("15s")).toHaveLength(12);
 

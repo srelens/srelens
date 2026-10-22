@@ -473,6 +473,11 @@ const NODE_POD_COLUMNS: Column<PodSummary>[] = [
     header: "Namespace",
     render: (pod) => <span className="font-mono">{pod.namespace || "—"}</span>,
   },
+  {
+    key: "podIp",
+    header: "IP",
+    render: (pod) => <span className="font-mono text-xs">{pod.podIp || "—"}</span>,
+  },
   // What each pod on this node is running, as the Pods list draws it (#878).
   {
     key: "containers",

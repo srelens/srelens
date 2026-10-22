@@ -48,6 +48,35 @@ describe("NodeDetailsBody", () => {
       render(<NodeDetailsBody object={node({ unschedulable: true })} />);
       expect(screen.getByText("Disabled (cordoned)")).toBeDefined();
     });
+
+    it("renders internal and external IPs and hostnames from status.addresses", () => {
+      render(
+        <NodeDetailsBody
+          object={node(
+            {},
+            {
+              addresses: [
+                { type: "InternalIP", address: "10.0.0.1" },
+                { type: "InternalIP", address: "fd00::1" },
+                { type: "ExternalIP", address: "35.200.1.2" },
+                { type: "Hostname", address: "worker-1.local" },
+              ],
+            },
+          )}
+        />,
+      );
+      // Dual-stack internal IPs joined with comma
+      expect(screen.getByText("10.0.0.1, fd00::1")).toBeDefined();
+      expect(screen.getByText("35.200.1.2")).toBeDefined();
+      expect(screen.getByText("worker-1.local")).toBeDefined();
+    });
+
+    it("renders dash for missing internal IP and omits absent external IP", () => {
+      render(<NodeDetailsBody object={node({}, { addresses: [] })} />);
+      expect(screen.getByText("—")).toBeDefined();
+      expect(screen.queryByText("External IP")).toBeNull();
+      expect(screen.queryByText("Hostname")).toBeNull();
+    });
   });
 
   describe("Capacity", () => {

@@ -690,8 +690,16 @@ describe("pod columns", () => {
 
   it("keeps Image last, matching the design mock's row order", () => {
     expect(podColumns.map((c) => c.key)).toEqual([
-      "name", "namespace", "node", "containers", "phase", "restarts", "cpu", "memory", "age", "image",
+      "name", "namespace", "node", "podIp", "containers", "phase", "restarts", "cpu", "memory", "age", "image",
     ]);
+  });
+
+  it("shows pod IP, or a dash when absent", () => {
+    const ip = podColumns.find((c) => c.key === "podIp")!;
+    expect(ip.header).toBe("IP");
+    expect(ip.sortable).toBeFalsy();
+    expect(ip.render!(pod({ podIp: "10.244.0.12" }))).toBe("10.244.0.12");
+    expect(ip.render!(pod({}))).toBe("—");
   });
 
   it("does not mark Image sortable — a comma-joined image list has no single natural order, and the mock renders a plain header for it", () => {
@@ -703,6 +711,22 @@ describe("pod columns", () => {
 describe("node columns", () => {
   it("keeps no namespace column, because a node has none", () => {
     expect(nodeColumns.some((c) => c.key === "namespace")).toBe(false);
+  });
+
+  it("includes Internal IP (visible) and External IP (defaultHidden) columns, not sortable", () => {
+    const internal = nodeColumns.find((c) => c.key === "internalIp")!;
+    expect(internal.header).toBe("Internal IP");
+    expect(internal.defaultHidden).toBeFalsy();
+    expect(internal.sortable).toBeFalsy();
+    expect(internal.render!({ ...node, internalIp: "192.168.1.10" })).toBe("192.168.1.10");
+    expect(internal.render!(node)).toBe("—");
+
+    const external = nodeColumns.find((c) => c.key === "externalIp")!;
+    expect(external.header).toBe("External IP");
+    expect(external.defaultHidden).toBe(true);
+    expect(external.sortable).toBeFalsy();
+    expect(external.render!({ ...node, externalIp: "54.1.2.3" })).toBe("54.1.2.3");
+    expect(external.render!(node)).toBe("—");
   });
 
   const node = {
