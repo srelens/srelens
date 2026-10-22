@@ -75,7 +75,7 @@
               inherit version pnpm;
               src = pkgs.lib.cleanSource ./.;
               fetcherVersion = 4;
-              hash = "sha256-7xawFAjRt0lqjedCpmjnXxMu9hLcKg3z7VLksvLeFr4=";
+              hash = "sha256-XZLdQYDczkq4t8qKgGfalzVM2/aefQ0svzK3xuMpNLY=";
             };
 
             buildPhase = ''
