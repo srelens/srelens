@@ -75,6 +75,7 @@ impl Drop for TerminalCleanupGuard {
                 crossterm::cursor::Show
             );
         }
+        crate::agent::cleanup_process_cursor_chats();
     }
 }
 
@@ -435,11 +436,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     };
                                     target_state.finish_tool_call(id, status);
                                 } else if action == "ai_session" {
-                                    target_state.cursor_resume_id = if msg.is_empty() {
-                                        None
+                                    let (target_conv, session_id) = if let Some((c, s)) = msg.split_once('|') {
+                                        (c, s)
                                     } else {
-                                        Some(msg)
+                                        ("", msg.as_str())
                                     };
+                                    if target_conv.is_empty() || target_conv == target_state.conversation_id {
+                                        target_state.cursor_resume_id = if session_id.is_empty() {
+                                            None
+                                        } else {
+                                            Some(session_id.to_string())
+                                        };
+                                    }
                                 } else if action == "ai_usage" {
                                     let parts: Vec<&str> = msg.split('|').collect();
                                     if parts.len() >= 4 {
@@ -774,6 +782,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     disable_raw_mode()?;
     execute!(terminal.backend_mut(), LeaveAlternateScreen, DisableMouseCapture, DisableBracketedPaste)?;
     terminal.show_cursor()?;
+    crate::agent::cleanup_process_cursor_chats();
 
     Ok(())
 }

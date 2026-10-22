@@ -779,7 +779,7 @@ async fn a_boxed_cursor_turn_reports_a_missing_binary_and_finishes() {
     assert_eq!(results.len(), 3);
     assert_eq!(
         results[0],
-        ("ai_session:kind-dev".into(), Ok(String::new()))
+        ("ai_session:kind-dev".into(), Ok("conv-1|".into()))
     );
     assert_eq!(results[1].0, "ai_chunk:kind-dev");
     let err = results[1].1.as_ref().unwrap_err();

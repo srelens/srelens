@@ -1684,8 +1684,8 @@ impl App {
             let _ = rustls::crypto::ring::default_provider().install_default();
             let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
                 let channel = crate::self_update::Channel::of_version(&current_version);
-                let exe = std::env::current_exe()
-                    .unwrap_or_else(|_| std::path::PathBuf::from("srectl"));
+                let exe =
+                    std::env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from("srectl"));
                 let target = crate::self_update::installed_path(&exe);
 
                 let client = match reqwest::blocking::Client::builder()
@@ -8187,7 +8187,7 @@ impl App {
                 let cache = self.client_cache.clone();
                 let timeout_seconds = self.ai_settings.get_timeout_seconds(provider);
                 let hub_kc_opt = argo_hub_kc.clone();
-                let chat_root = crate::agent::process_cursor_chats_root().to_path_buf();
+                let chat_root = crate::agent::process_cursor_chats_root();
                 let conv_id = ai.conversation_id.clone();
                 let resume = ai.cursor_resume_id.clone();
 

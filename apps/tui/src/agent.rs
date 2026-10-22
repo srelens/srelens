@@ -397,17 +397,50 @@ pub async fn run_native_agent_turn(
 }
 
 /// Global process-lifetime root directory for Cursor CLI agent conversations.
-/// Initialized lazily on the first turn. When srectl terminates or exits,
-/// the OS / Drop sweeps the temporary directory, leaving zero orphaned chats on disk.
-pub fn process_cursor_chats_root() -> &'static std::path::Path {
-    static ROOT: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
-    ROOT.get_or_init(|| {
-        tempfile::Builder::new()
+/// Initialized lazily on the first turn. Explicitly swept during srectl shutdown
+/// or dropped on exit, leaving zero orphaned chats on disk.
+static CURSOR_CHATS_ROOT: std::sync::Mutex<Option<tempfile::TempDir>> = std::sync::Mutex::new(None);
+
+pub fn process_cursor_chats_root() -> std::path::PathBuf {
+    let mut lock = CURSOR_CHATS_ROOT.lock().unwrap();
+    if lock.is_none() {
+        let dir = tempfile::Builder::new()
             .prefix("srelens-cursor-chats-")
             .tempdir()
-            .unwrap_or_else(|_| tempfile::tempdir().expect("failed to create cursor chats root"))
-    })
-    .path()
+            .unwrap_or_else(|_| tempfile::tempdir().expect("failed to create cursor chats root"));
+        *lock = Some(dir);
+    }
+    lock.as_ref().unwrap().path().to_path_buf()
+}
+
+pub fn cleanup_process_cursor_chats() {
+    let mut lock = CURSOR_CHATS_ROOT.lock().unwrap();
+    if let Some(dir) = lock.take() {
+        let _ = dir.close();
+    }
+}
+
+/// Synchronization lock per conversation ID to serialize workspace creation, execution,
+/// and teardown across rapid turns or turn cancellation retries.
+pub fn conversation_lock(conv_id: &str) -> std::sync::Arc<tokio::sync::Mutex<()>> {
+    static LOCKS: std::sync::OnceLock<
+        std::sync::Mutex<
+            std::collections::HashMap<String, std::sync::Weak<tokio::sync::Mutex<()>>>,
+        >,
+    > = std::sync::OnceLock::new();
+    let map = LOCKS.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+    let mut guard = map.lock().unwrap();
+    if guard.len() > 100 {
+        guard.retain(|_, v| v.strong_count() > 0);
+    }
+    if let Some(weak) = guard.get(conv_id) {
+        if let Some(arc) = weak.upgrade() {
+            return arc;
+        }
+    }
+    let arc = std::sync::Arc::new(tokio::sync::Mutex::new(()));
+    guard.insert(conv_id.to_string(), std::sync::Arc::downgrade(&arc));
+    arc
 }
 
 struct WorkspaceGuard(std::path::PathBuf);
@@ -436,16 +469,25 @@ pub async fn run_boxed_cursor_turn(
 ) {
     let start_time = std::time::Instant::now();
 
+    // Serialize turns within this conversation so an aborted turn's workspace cleanup
+    // finishes before the replacement turn recreates workspace and mcp.json.
+    let conv_lock = conversation_lock(&conversation_id);
+    let _conv_guard = conv_lock.lock().await;
+
     // 1. Bind ephemeral loopback port for MCP HTTP server
     let listener = match tokio::net::TcpListener::bind("127.0.0.1:0").await {
         Ok(l) => l,
         Err(e) => {
             let _ = event_tx.send(AppEvent::ActionResult {
-                title: "ai_chunk".to_string(),
+                title: format!("ai_session:{}", active_ctx),
+                result: Ok(format!("{}|", conversation_id)),
+            });
+            let _ = event_tx.send(AppEvent::ActionResult {
+                title: format!("ai_chunk:{}", active_ctx),
                 result: Err(format!("Failed to bind local MCP port: {}", e)),
             });
             let _ = event_tx.send(AppEvent::ActionResult {
-                title: "ai_done".to_string(),
+                title: format!("ai_done:{}", active_ctx),
                 result: Ok(String::new()),
             });
             return;
@@ -455,11 +497,15 @@ pub async fn run_boxed_cursor_turn(
         Ok(a) => a,
         Err(e) => {
             let _ = event_tx.send(AppEvent::ActionResult {
-                title: "ai_chunk".to_string(),
+                title: format!("ai_session:{}", active_ctx),
+                result: Ok(format!("{}|", conversation_id)),
+            });
+            let _ = event_tx.send(AppEvent::ActionResult {
+                title: format!("ai_chunk:{}", active_ctx),
                 result: Err(format!("Failed to get local MCP address: {}", e)),
             });
             let _ = event_tx.send(AppEvent::ActionResult {
-                title: "ai_done".to_string(),
+                title: format!("ai_done:{}", active_ctx),
                 result: Ok(String::new()),
             });
             return;
@@ -495,6 +541,10 @@ pub async fn run_boxed_cursor_turn(
         Err(e) => {
             let _ = shutdown_tx.send(());
             let _ = event_tx.send(AppEvent::ActionResult {
+                title: format!("ai_session:{}", active_ctx),
+                result: Ok(format!("{}|", conversation_id)),
+            });
+            let _ = event_tx.send(AppEvent::ActionResult {
                 title: format!("ai_chunk:{}", active_ctx),
                 result: Err(format!("Invalid conversation directory: {}", e)),
             });
@@ -511,6 +561,10 @@ pub async fn run_boxed_cursor_turn(
 
     if let Err(e) = std::fs::create_dir_all(&config) {
         let _ = shutdown_tx.send(());
+        let _ = event_tx.send(AppEvent::ActionResult {
+            title: format!("ai_session:{}", active_ctx),
+            result: Ok(format!("{}|", conversation_id)),
+        });
         let _ = event_tx.send(AppEvent::ActionResult {
             title: format!("ai_chunk:{}", active_ctx),
             result: Err(format!("Failed to create config dir: {}", e)),
@@ -536,6 +590,10 @@ pub async fn run_boxed_cursor_turn(
         Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
             let _ = shutdown_tx.send(());
             let _ = event_tx.send(AppEvent::ActionResult {
+                title: format!("ai_session:{}", active_ctx),
+                result: Ok(format!("{}|", conversation_id)),
+            });
+            let _ = event_tx.send(AppEvent::ActionResult {
                 title: format!("ai_chunk:{}", active_ctx),
                 result: Err(format!("Failed to clean workspace dir: {}", e)),
             });
@@ -551,6 +609,10 @@ pub async fn run_boxed_cursor_turn(
     let cursor_dir = workspace.join(".cursor");
     if let Err(e) = std::fs::create_dir_all(&cursor_dir) {
         let _ = shutdown_tx.send(());
+        let _ = event_tx.send(AppEvent::ActionResult {
+            title: format!("ai_session:{}", active_ctx),
+            result: Ok(format!("{}|", conversation_id)),
+        });
         let _ = event_tx.send(AppEvent::ActionResult {
             title: format!("ai_chunk:{}", active_ctx),
             result: Err(format!("Failed to create .cursor dir: {}", e)),
@@ -570,6 +632,10 @@ pub async fn run_boxed_cursor_turn(
     if let Err(e) = std::fs::write(&cfg_path, srelens_agent::adapter::cursor_cli_config_json()) {
         let _ = shutdown_tx.send(());
         let _ = event_tx.send(AppEvent::ActionResult {
+            title: format!("ai_session:{}", active_ctx),
+            result: Ok(format!("{}|", conversation_id)),
+        });
+        let _ = event_tx.send(AppEvent::ActionResult {
             title: format!("ai_chunk:{}", active_ctx),
             result: Err(format!("Failed to write cli-config.json: {}", e)),
         });
@@ -586,6 +652,10 @@ pub async fn run_boxed_cursor_turn(
         srelens_agent::adapter::cursor_mcp_json(&url, &token_str),
     ) {
         let _ = shutdown_tx.send(());
+        let _ = event_tx.send(AppEvent::ActionResult {
+            title: format!("ai_session:{}", active_ctx),
+            result: Ok(format!("{}|", conversation_id)),
+        });
         let _ = event_tx.send(AppEvent::ActionResult {
             title: format!("ai_chunk:{}", active_ctx),
             result: Err(format!("Failed to write mcp.json: {}", e)),
@@ -696,7 +766,13 @@ pub async fn run_boxed_cursor_turn(
                         Ok(Ok(Some(line))) => {
                             let trimmed = line.trim();
                             if captured_session_id.is_none() {
-                                captured_session_id = srelens_agent::stream_session_id(trimmed);
+                                if let Some(ref id) = srelens_agent::stream_session_id(trimmed) {
+                                    captured_session_id = Some(id.clone());
+                                    let _ = event_tx_clone.send(AppEvent::ActionResult {
+                                        title: format!("ai_session:{}", active_ctx_clone),
+                                        result: Ok(format!("{}|{}", conversation_id, id)),
+                                    });
+                                }
                             }
                             if let Ok(v) = serde_json::from_str::<serde_json::Value>(trimmed) {
                                 if let Some((prompt_t, comp_t, cached_t, total_t, dur_t)) =
@@ -880,7 +956,11 @@ pub async fn run_boxed_cursor_turn(
             let next_id = srelens_agent::next_resume_id(captured_session_id, resume, crashed);
             let _ = event_tx.send(AppEvent::ActionResult {
                 title: format!("ai_session:{}", active_ctx),
-                result: Ok(next_id.unwrap_or_default()),
+                result: Ok(format!(
+                    "{}|{}",
+                    conversation_id,
+                    next_id.unwrap_or_default()
+                )),
             });
 
             let _ = shutdown_tx.send(());
@@ -907,7 +987,7 @@ pub async fn run_boxed_cursor_turn(
             let _ = shutdown_tx.send(());
             let _ = event_tx.send(AppEvent::ActionResult {
                 title: format!("ai_session:{}", active_ctx),
-                result: Ok(String::new()),
+                result: Ok(format!("{}|", conversation_id)),
             });
             let _ = event_tx.send(AppEvent::ActionResult {
                 title: format!("ai_chunk:{}", active_ctx),
