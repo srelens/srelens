@@ -95,7 +95,11 @@ impl DeepLink {
                     CommandTarget::OpenUrl(u) => (namespace.as_deref(), format!("open/{}", u)),
                     CommandTarget::Update => (namespace.as_deref(), "update".to_string()),
                 };
-                let ns_str = resolved_ns.filter(|s| !s.is_empty()).unwrap_or("_");
+                let ns_str = match resolved_ns {
+                    Some("") => "*",
+                    Some(s) => s,
+                    None => "_",
+                };
                 format!("srelens://view/{}/{}/{}", ctx, ns_str, target_name)
             }
         }
@@ -148,7 +152,9 @@ impl DeepLink {
                     let raw_ctx = parts[1];
                     let context = if raw_ctx == "_" || raw_ctx.is_empty() { None } else { Some(raw_ctx.to_string()) };
                     let raw_ns = parts[2];
-                    let namespace = if raw_ns == "_" || raw_ns == "_all" || raw_ns == "-" || raw_ns.is_empty() {
+                    let namespace = if raw_ns == "*" || raw_ns == "-A" || raw_ns.eq_ignore_ascii_case("all") {
+                        Some(String::new())
+                    } else if raw_ns == "_" || raw_ns == "_all" || raw_ns == "-" || raw_ns.is_empty() {
                         None
                     } else {
                         Some(raw_ns.to_string())
@@ -331,5 +337,27 @@ mod tests {
         assert_eq!(url_scoped, "srelens://view/prod-eu/tools/pods");
         let parsed_scoped = DeepLink::parse(&url_scoped).expect("should parse");
         assert_eq!(parsed_scoped.to_url(), url_scoped);
+
+        // Test explicit all-namespaces ("*")
+        let view_all_pods = DeepLink::View {
+            context: Some("prod-eu".to_string()),
+            namespace: None,
+            target: CommandTarget::ResourceInNamespace(
+                crate::commands::ResourceKind::Pods,
+                String::new(),
+            ),
+        };
+        let url_all_pods = view_all_pods.to_url();
+        assert_eq!(url_all_pods, "srelens://view/prod-eu/*/pods");
+        let parsed_all_pods = DeepLink::parse(&url_all_pods).expect("should parse");
+        assert_eq!(parsed_all_pods.to_url(), url_all_pods);
+        assert_eq!(
+            parsed_all_pods,
+            DeepLink::View {
+                context: Some("prod-eu".to_string()),
+                namespace: Some(String::new()),
+                target: CommandTarget::Resource(crate::commands::ResourceKind::Pods),
+            }
+        );
     }
 }

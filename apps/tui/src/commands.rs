@@ -329,6 +329,8 @@ impl ResourceKind {
             | Self::CronJobs
             | Self::ConfigMaps
             | Self::Secrets
+            | Self::ResourceQuotas
+            | Self::LimitRanges
             | Self::Services
             | Self::Endpoints
             | Self::EndpointSlices
@@ -1080,20 +1082,21 @@ pub fn resolve_command_with_crds(input: &str, crds: &[CrdMeta]) -> Option<Comman
 }
 
 pub fn command_suggestions(query: &str) -> Vec<(DynamicCommandDef, usize)> {
-    command_suggestions_full(query, &[], &[])
+    command_suggestions_full(query, &[], &[], None)
 }
 
 pub fn command_suggestions_with_crds(
     query: &str,
     crds: &[CrdMeta],
 ) -> Vec<(DynamicCommandDef, usize)> {
-    command_suggestions_full(query, crds, &[])
+    command_suggestions_full(query, crds, &[], None)
 }
 
 pub fn command_suggestions_full(
     query: &str,
     crds: &[CrdMeta],
     namespaces: &[String],
+    discovery_error: Option<&str>,
 ) -> Vec<(DynamicCommandDef, usize)> {
     let raw = query.trim_start().trim_start_matches(':');
     let mut matches = Vec::new();
@@ -1109,36 +1112,6 @@ pub fn command_suggestions_full(
     }
 
     let q = raw.trim().to_lowercase();
-
-    // Direct theme name suggestions when typing ":theme <subquery>" or ":colors <subquery>"
-    if q.starts_with("theme ") || q.starts_with("colors ") {
-        let prefix = if q.starts_with("theme ") {
-            "theme "
-        } else {
-            "colors "
-        };
-        let sub = q.strip_prefix(prefix).unwrap().trim();
-        for p in crate::theme::ALL_THEMES {
-            if sub.is_empty()
-                || p.name.starts_with(sub)
-                || p.display_name.to_lowercase().starts_with(sub)
-            {
-                matches.push((
-                    DynamicCommandDef {
-                        name: format!("theme {}", p.name),
-                        aliases: vec![],
-                        description: format!("Theme: {} ({})", p.display_name, p.description),
-                        target: CommandTarget::SetTheme(p.name.to_string()),
-                    },
-                    150,
-                ));
-            }
-        }
-        if !matches.is_empty() {
-            matches.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.name.cmp(&b.0.name)));
-            return matches;
-        }
-    }
 
     // Check if the input exactly matches a multi-word static command or alias (e.g. "top pods", "top nodes")
     let is_multi_word_command = COMMAND_REGISTRY.iter().any(|cmd| {
@@ -1178,45 +1151,49 @@ pub fn command_suggestions_full(
 
         if let Some((kind_opt, is_ns, display_label)) = namespaced_target_info {
             let make_target = |ns: &str| -> CommandTarget {
+                let canonical_ns = canonicalize_namespace_arg(ns, namespaces);
                 if is_ns {
-                    CommandTarget::SwitchNamespace(ns.to_string())
+                    CommandTarget::SwitchNamespace(canonical_ns)
                 } else if let Some(ref k) = kind_opt {
                     match k {
                         ResourceKind::CustomResource(crd) => {
-                            CommandTarget::CustomResourceInNamespace(crd.clone(), ns.to_string())
+                            CommandTarget::CustomResourceInNamespace(crd.clone(), canonical_ns)
                         }
-                        other => CommandTarget::ResourceInNamespace(other.clone(), ns.to_string()),
+                        other => CommandTarget::ResourceInNamespace(other.clone(), canonical_ns),
                     }
                 } else {
-                    CommandTarget::SwitchNamespace(ns.to_string())
+                    CommandTarget::SwitchNamespace(canonical_ns)
                 }
             };
 
             let make_desc = |target_ns: &str| -> String {
+                let canonical_ns = canonicalize_namespace_arg(target_ns, namespaces);
                 if is_ns {
-                    if target_ns.is_empty() {
+                    if canonical_ns.is_empty() {
                         "Switch to all namespaces".to_string()
                     } else {
-                        format!("Switch active namespace to '{}'", target_ns)
+                        format!("Switch active namespace to '{}'", canonical_ns)
                     }
-                } else if target_ns.is_empty() {
+                } else if canonical_ns.is_empty() {
                     format!("{} across all namespaces", display_label)
                 } else {
-                    format!("{} in namespace '{}'", display_label, target_ns)
+                    format!("{} in namespace '{}'", display_label, canonical_ns)
                 }
             };
 
             if namespaces.is_empty() {
-                // Truthful M4: namespace list not loaded yet
+                // Truthful M4 & Copilot review: report loading or error state
+                let status_msg = if let Some(err) = discovery_error {
+                    format!("namespaces unavailable: {}", err)
+                } else {
+                    "namespace list not loaded yet".to_string()
+                };
                 if !sub.is_empty() {
                     matches.push((
                         DynamicCommandDef {
                             name: format!("{} {}", cmd_prefix, sub),
                             aliases: vec![],
-                            description: format!(
-                                "{} (namespace list not loaded yet)",
-                                make_desc(sub)
-                            ),
+                            description: format!("{} ({})", make_desc(sub), status_msg),
                             target: make_target(sub),
                         },
                         150,
@@ -1226,7 +1203,7 @@ pub fn command_suggestions_full(
                     DynamicCommandDef {
                         name: format!("{} *", cmd_prefix),
                         aliases: vec![],
-                        description: format!("{} (namespace list not loaded yet)", make_desc("")),
+                        description: format!("{} ({})", make_desc(""), status_msg),
                         target: make_target(""),
                     },
                     100,
@@ -1238,19 +1215,17 @@ pub fn command_suggestions_full(
             let has_literal_all = namespaces.iter().any(|n| n.eq_ignore_ascii_case("all"));
             let mut candidates: Vec<String> = namespaces.to_vec();
             candidates.push("*".to_string());
+            candidates.push("-A".to_string());
             if !has_literal_all {
                 candidates.push("all".to_string());
             }
 
             if sub.is_empty() {
                 for cand in candidates {
-                    let target_ns = if cand == "*" || (cand == "all" && !has_literal_all) {
-                        ""
-                    } else {
-                        cand.as_str()
-                    };
                     let score = if cand == "*" || cand == "all" {
                         110
+                    } else if cand == "-A" {
+                        105
                     } else {
                         100
                     };
@@ -1258,8 +1233,8 @@ pub fn command_suggestions_full(
                         DynamicCommandDef {
                             name: format!("{} {}", cmd_prefix, cand),
                             aliases: vec![],
-                            description: make_desc(target_ns),
-                            target: make_target(target_ns),
+                            description: make_desc(&cand),
+                            target: make_target(&cand),
                         },
                         score,
                     ));
@@ -1273,12 +1248,6 @@ pub fn command_suggestions_full(
 
             for cand in candidates {
                 let cand_lower = cand.to_lowercase();
-                let target_ns = if cand == "*" || (cand == "all" && !has_literal_all) {
-                    ""
-                } else {
-                    cand.as_str()
-                };
-
                 let score = if cand_lower == sub_lower {
                     has_exact = true;
                     160
@@ -1294,8 +1263,8 @@ pub fn command_suggestions_full(
                     DynamicCommandDef {
                         name: format!("{} {}", cmd_prefix, cand),
                         aliases: vec![],
-                        description: make_desc(target_ns),
-                        target: make_target(target_ns),
+                        description: make_desc(&cand),
+                        target: make_target(&cand),
                     },
                     score,
                 ));

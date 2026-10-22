@@ -192,6 +192,21 @@ mod tests {
                 "srelens://view/c/n/pods".to_string()
             ))
         );
+        // Quotas and Limits take namespace arguments
+        assert_eq!(
+            resolve_command_with_crds(":quota tools", &[]),
+            Some(CommandTarget::ResourceInNamespace(
+                ResourceKind::ResourceQuotas,
+                "tools".to_string()
+            ))
+        );
+        assert_eq!(
+            resolve_command_with_crds(":limits tools", &[]),
+            Some(CommandTarget::ResourceInNamespace(
+                ResourceKind::LimitRanges,
+                "tools".to_string()
+            ))
+        );
         // Cluster-scoped kinds do not take a namespace argument
         assert_eq!(resolve_command_with_crds(":nodes foo", &[]), None);
     }
@@ -209,19 +224,19 @@ mod tests {
         ];
 
         // 1. :ns without subquery suggests all namespaces + *
-        let ns_all = command_suggestions_full("ns ", &[], &namespaces);
+        let ns_all = command_suggestions_full("ns ", &[], &namespaces, None);
         assert!(!ns_all.is_empty());
         assert!(ns_all.iter().any(|(s, _)| s.name == "ns default"));
         assert!(ns_all.iter().any(|(s, _)| s.name == "ns *"));
 
         // 2. Active filtering: :ns defa matches default
-        let ns_defa = command_suggestions_full("ns defa", &[], &namespaces);
+        let ns_defa = command_suggestions_full("ns defa", &[], &namespaces, None);
         assert!(!ns_defa.is_empty());
         assert!(ns_defa.iter().any(|(s, _)| s.name == "ns default"));
 
         // 3. M3: Typing :ns dev when cluster has dev-tools and devops does not hijack
         let dev_cluster_ns = vec!["dev-tools".to_string(), "devops".to_string()];
-        let dev_suggs = command_suggestions_full("ns dev", &[], &dev_cluster_ns);
+        let dev_suggs = command_suggestions_full("ns dev", &[], &dev_cluster_ns, None);
         assert!(!dev_suggs.is_empty());
         assert_eq!(
             dev_suggs[0].0.target,
@@ -229,7 +244,7 @@ mod tests {
         );
 
         // 4. M4: When namespaces list is empty, say so truthfully and don't fake default/kube-system
-        let empty_suggs = command_suggestions_full("ns ", &[], &[]);
+        let empty_suggs = command_suggestions_full("ns ", &[], &[], None);
         assert!(!empty_suggs.is_empty());
         assert!(empty_suggs[0]
             .0
@@ -239,8 +254,16 @@ mod tests {
             .iter()
             .any(|(s, _)| s.name == "ns default" && !s.description.contains("not loaded")));
 
+        // 4b. When discovery fails, surface the error
+        let err_suggs = command_suggestions_full("ns ", &[], &[], Some("403 Forbidden"));
+        assert!(!err_suggs.is_empty());
+        assert!(err_suggs[0]
+            .0
+            .description
+            .contains("namespaces unavailable: 403 Forbidden"));
+
         // 5. :pods tools filters tools namespace
-        let pod_suggs = command_suggestions_full("pods tool", &[], &namespaces);
+        let pod_suggs = command_suggestions_full("pods tool", &[], &namespaces, None);
         assert!(!pod_suggs.is_empty());
         assert!(pod_suggs.iter().any(|(s, _)| s.name == "pods tools"
             && matches!(
@@ -249,7 +272,7 @@ mod tests {
             )));
 
         // 6. Alias :po tools works too
-        let po_suggs = command_suggestions_full("po tool", &[], &namespaces);
+        let po_suggs = command_suggestions_full("po tool", &[], &namespaces, None);
         assert!(!po_suggs.is_empty());
         assert!(po_suggs.iter().any(|(s, _)| s.name == "po tools"
             && matches!(
@@ -257,8 +280,23 @@ mod tests {
                 CommandTarget::ResourceInNamespace(ResourceKind::Pods, _)
             )));
 
-        // 7. Cluster-scoped resources like :nodes foo yield no namespace suggestions
-        let nodes_suggs = command_suggestions_full("nodes foo", &[], &namespaces);
+        // 7. Wildcards: -A normalizes target to all-namespaces ("")
+        let wildcard_suggs = command_suggestions_full("ns -A", &[], &namespaces, None);
+        assert!(!wildcard_suggs.is_empty());
+        assert_eq!(
+            wildcard_suggs[0].0.target,
+            CommandTarget::SwitchNamespace(String::new())
+        );
+
+        let pod_wildcard = command_suggestions_full("pods -A", &[], &namespaces, None);
+        assert!(!pod_wildcard.is_empty());
+        assert_eq!(
+            pod_wildcard[0].0.target,
+            CommandTarget::ResourceInNamespace(ResourceKind::Pods, String::new())
+        );
+
+        // 8. Cluster-scoped resources like :nodes foo yield no namespace suggestions
+        let nodes_suggs = command_suggestions_full("nodes foo", &[], &namespaces, None);
         assert!(nodes_suggs.is_empty());
     }
 
@@ -304,7 +342,7 @@ mod tests {
         );
 
         // Namespaced CRD suggestions
-        let suggs_vs = command_suggestions_full("vs istio", &crds, &namespaces);
+        let suggs_vs = command_suggestions_full("vs istio", &crds, &namespaces, None);
         assert!(!suggs_vs.is_empty());
         assert!(suggs_vs.iter().any(|(s, _)| s.name == "vs istio-system"
             && matches!(s.target, CommandTarget::CustomResourceInNamespace(_, _))));
@@ -312,6 +350,50 @@ mod tests {
         // Cluster-scoped CRD does not resolve or suggest namespace
         let res_ci = resolve_command_with_crds(":clusterissuer default", &crds);
         assert!(res_ci.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_namespace_discovery_stale_context_and_error_handling() {
+        let _settings = crate::common::env::isolate_settings();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = crate::common::theme::new_app(
+            Some("ctx-b".to_string()),
+            Some("default".to_string()),
+            false,
+            None,
+            vec![],
+            tx,
+        )
+        .await
+        .unwrap();
+
+        app.active_context = "ctx-b".to_string();
+        app.namespaces = vec!["b-ns1".to_string(), "b-ns2".to_string()];
+
+        // Stale discovery from old context "ctx-a" arrives - must NOT overwrite ctx-b's namespaces
+        app.handle_stream_event(
+            "discovery:namespaces:ctx-a".to_string(),
+            serde_json::json!([{"name": "stale-ns1"}, {"name": "stale-ns2"}]),
+        );
+        assert_eq!(app.namespaces, vec!["b-ns1", "b-ns2"]);
+
+        // Valid discovery for ctx-b arrives - must update
+        app.handle_stream_event(
+            "discovery:namespaces:ctx-b".to_string(),
+            serde_json::json!([{"name": "b-fresh1"}, {"name": "b-fresh2"}]),
+        );
+        assert_eq!(app.namespaces, vec!["b-fresh1", "b-fresh2"]);
+        assert!(app.namespace_discovery_error.is_none());
+
+        // Error for ctx-b arrives - must record error without crashing
+        app.handle_stream_event(
+            "discovery:namespaces:ctx-b".to_string(),
+            serde_json::json!({"error": "403 Forbidden"}),
+        );
+        assert_eq!(
+            app.namespace_discovery_error.as_deref(),
+            Some("403 Forbidden")
+        );
     }
 
     #[test]
@@ -374,6 +456,7 @@ mod tests {
             active_namespace: "default".to_string(),
             kubeconfig_paths: Vec::new(),
             contexts: Vec::new(),
+            namespace_discovery_error: None,
             namespaces: vec!["default".to_string()],
             active_view: ActiveView::Table(ResourceTableState::new(ResourceKind::Namespaces)),
             nav_stack: Vec::new(),
@@ -483,6 +566,7 @@ mod tests {
             active_context: "prod-cluster".to_string(),
             active_namespace: "default".to_string(),
             contexts: vec![],
+            namespace_discovery_error: None,
             namespaces: vec!["default".to_string()],
             active_view: ActiveView::Table(ResourceTableState::new(ResourceKind::Pods)),
             nav_stack: Vec::new(),
@@ -604,6 +688,7 @@ mod tests {
             active_context: "prod-cluster".to_string(),
             active_namespace: "default".to_string(),
             contexts: vec![],
+            namespace_discovery_error: None,
             namespaces: vec!["default".to_string()],
             active_view: ActiveView::Table(ResourceTableState::new(ResourceKind::Pods)),
             nav_stack: Vec::new(),
@@ -828,6 +913,7 @@ mod tests {
             active_context: "prod-cluster".to_string(),
             active_namespace: "default".to_string(),
             contexts: vec![],
+            namespace_discovery_error: None,
             namespaces: vec!["default".to_string()],
             active_view: ActiveView::Assistant,
             nav_stack: Vec::new(),
@@ -1057,6 +1143,7 @@ mod tests {
             active_context: "prod-cluster".to_string(),
             active_namespace: "default".to_string(),
             contexts: vec![],
+            namespace_discovery_error: None,
             namespaces: vec!["default".to_string()],
             active_view: ActiveView::Assistant,
             nav_stack: Vec::new(),
@@ -1287,6 +1374,7 @@ mod tests {
             active_context: "prod-cluster".to_string(),
             active_namespace: "default".to_string(),
             contexts: vec![],
+            namespace_discovery_error: None,
             namespaces: vec![
                 "default".to_string(),
                 "kube-system".to_string(),
@@ -1453,6 +1541,7 @@ mod tests {
             active_context: "prod-cluster".to_string(),
             active_namespace: "default".to_string(),
             contexts: vec![],
+            namespace_discovery_error: None,
             namespaces: vec!["default".to_string()],
             active_view: ActiveView::Table(table),
             nav_stack: Vec::new(),
@@ -1831,6 +1920,7 @@ mod tests {
             active_context: "prod-cluster".to_string(),
             active_namespace: "copy-controller".to_string(),
             contexts: vec![],
+            namespace_discovery_error: None,
             namespaces: vec!["copy-controller".to_string()],
             active_view: ActiveView::Table(table),
             nav_stack: Vec::new(),
@@ -1989,6 +2079,7 @@ mod tests {
             active_context: "kind-dev".to_string(),
             active_namespace: "default".to_string(),
             contexts: vec![],
+            namespace_discovery_error: None,
             namespaces: vec!["default".to_string()],
             active_view: ActiveView::Assistant,
             nav_stack: Vec::new(),
@@ -2098,6 +2189,7 @@ mod tests {
             active_context: "kind-dev".to_string(),
             active_namespace: "default".to_string(),
             contexts: vec![],
+            namespace_discovery_error: None,
             namespaces: vec!["default".to_string()],
             active_view: ActiveView::Assistant,
             nav_stack: Vec::new(),
@@ -2199,6 +2291,7 @@ mod tests {
             active_context: "kind-dev".to_string(),
             active_namespace: "default".to_string(),
             contexts: vec![],
+            namespace_discovery_error: None,
             namespaces: vec!["default".to_string()],
             active_view: ActiveView::Assistant,
             nav_stack: vec![ActiveView::Table(ResourceTableState::new(
@@ -2352,6 +2445,7 @@ mod tests {
                     auth_kind: "client certificate".to_string(),
                 },
             ],
+            namespace_discovery_error: None,
             namespaces: vec!["default".to_string()],
             active_view: ActiveView::Table(ResourceTableState::new(ResourceKind::Pods)),
             nav_stack: vec![],
@@ -2536,6 +2630,7 @@ mod tests {
                     auth_kind: "client certificate".to_string(),
                 },
             ],
+            namespace_discovery_error: None,
             namespaces: vec!["default".to_string(), "kube-system".to_string()],
             active_view: ActiveView::Assistant,
             nav_stack: vec![],
@@ -2727,6 +2822,7 @@ mod tests {
                     auth_kind: "token".to_string(),
                 },
             ],
+            namespace_discovery_error: None,
             namespaces: vec![
                 "default".to_string(),
                 "production".to_string(),
@@ -2859,6 +2955,7 @@ mod tests {
             active_context: "data-processing-prod-eu-dus1".to_string(),
             active_namespace: "default".to_string(),
             contexts: vec![],
+            namespace_discovery_error: None,
             namespaces: vec!["default".to_string()],
             active_view: ActiveView::Table(ResourceTableState::new(ResourceKind::Pods)),
             nav_stack: vec![],
@@ -3383,6 +3480,7 @@ mod tests {
             active_namespace: "default".to_string(),
             kubeconfig_paths: vec![],
             contexts: vec![],
+            namespace_discovery_error: None,
             namespaces: vec!["default".to_string()],
             active_view: ActiveView::Table(table),
             nav_stack: vec![],
@@ -3548,6 +3646,7 @@ mod tests {
             active_namespace: "prod".to_string(),
             kubeconfig_paths: vec![],
             contexts: vec![],
+            namespace_discovery_error: None,
             namespaces: vec!["prod".to_string()],
             active_view: ActiveView::Table(table),
             nav_stack: vec![],
@@ -3830,6 +3929,7 @@ mod tests {
             active_namespace: "prod".to_string(),
             kubeconfig_paths: vec![],
             contexts: vec![],
+            namespace_discovery_error: None,
             namespaces: vec!["prod".to_string()],
             active_view: ActiveView::Table(table),
             nav_stack: vec![],
@@ -3982,6 +4082,7 @@ mod tests {
             active_namespace: "shop".to_string(),
             kubeconfig_paths: vec![],
             contexts: vec![],
+            namespace_discovery_error: None,
             namespaces: vec!["shop".to_string()],
             active_view: ActiveView::Table(table),
             nav_stack: vec![],
@@ -4129,6 +4230,7 @@ mod tests {
             active_namespace: "default".to_string(),
             kubeconfig_paths: vec![],
             contexts: vec![],
+            namespace_discovery_error: None,
             namespaces: vec!["default".to_string(), "ai-prod".to_string()],
             active_view: ActiveView::Table(node_table),
             nav_stack: vec![],
@@ -4354,6 +4456,7 @@ mod tests {
             active_namespace: "default".to_string(),
             kubeconfig_paths: vec![],
             contexts: vec![],
+            namespace_discovery_error: None,
             namespaces: vec!["default".to_string()],
             active_view: ActiveView::Table(node_table),
             nav_stack: vec![],
@@ -4577,6 +4680,7 @@ mod tests {
             active_namespace: "default".to_string(),
             kubeconfig_paths: vec![],
             contexts: vec![],
+            namespace_discovery_error: None,
             namespaces: vec!["default".to_string()],
             active_view: ActiveView::Describe(desc_view),
             nav_stack: vec![],
@@ -5612,6 +5716,7 @@ mod tests {
             active_namespace: "default".to_string(),
             kubeconfig_paths: vec![],
             contexts: vec![],
+            namespace_discovery_error: None,
             namespaces: vec!["default".to_string(), "monitoring".to_string()],
             active_view: ActiveView::NodeInspector(ni_state),
             nav_stack: vec![],
@@ -5836,6 +5941,7 @@ mod tests {
             active_namespace: "default".to_string(),
             kubeconfig_paths: vec![],
             contexts: vec![],
+            namespace_discovery_error: None,
             namespaces: vec!["default".to_string()],
             active_view: ActiveView::NodeInspector(ni_state),
             nav_stack: vec![],
@@ -6115,6 +6221,7 @@ mod tests {
             active_namespace: "default".to_string(),
             kubeconfig_paths: vec![],
             contexts: vec![],
+            namespace_discovery_error: None,
             namespaces: vec!["default".to_string()],
             active_view: ActiveView::Table(ResourceTableState::new(ResourceKind::Workloads)),
             nav_stack: Vec::new(),
@@ -6280,6 +6387,7 @@ mod tests {
             active_namespace: "default".to_string(),
             kubeconfig_paths: vec![],
             contexts: vec![],
+            namespace_discovery_error: None,
             namespaces: vec!["default".to_string()],
             active_view: ActiveView::Table(ResourceTableState::new(ResourceKind::Workloads)),
             nav_stack: Vec::new(),
@@ -7380,6 +7488,7 @@ mod tests {
             active_namespace: "default".to_string(),
             kubeconfig_paths: vec![],
             contexts: vec![],
+            namespace_discovery_error: None,
             namespaces: vec!["default".to_string(), "ai-prod".to_string()],
             active_view: ActiveView::Topology(topo_state),
             nav_stack: vec![],
@@ -7598,6 +7707,7 @@ mod tests {
             active_namespace: "default".to_string(),
             kubeconfig_paths: vec![],
             contexts: vec![],
+            namespace_discovery_error: None,
             namespaces: vec!["default".to_string(), "ai-gen".to_string()],
             active_view: ActiveView::GpuInfo(gpu_state),
             nav_stack: vec![],
@@ -7762,6 +7872,7 @@ mod tests {
             active_namespace: "prod".to_string(),
             kubeconfig_paths: vec![],
             contexts: vec![],
+            namespace_discovery_error: None,
             namespaces: vec!["prod".to_string()],
             active_view: ActiveView::Table(table),
             nav_stack: vec![],
@@ -7974,6 +8085,7 @@ mod tests {
             active_namespace: "default".to_string(),
             kubeconfig_paths: vec![],
             contexts: vec![],
+            namespace_discovery_error: None,
             namespaces: vec!["default".to_string()],
             active_view: ActiveView::Top(top_state),
             nav_stack: vec![],

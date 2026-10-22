@@ -1792,6 +1792,43 @@ async fn namespace_colon_command_switches_namespace_directly_without_leaving_mod
     press(&mut app, key(KeyCode::Enter)).await;
     assert_eq!(app.active_namespace, "tools");
     assert!(app.modal.is_none(), "Modal must not be left open");
+
+    // :ns -A + Enter switches to all namespaces ("")
+    press(&mut app, ch(':')).await;
+    type_str(&mut app, "ns -A").await;
+    press(&mut app, key(KeyCode::Enter)).await;
+    assert_eq!(
+        app.active_namespace, "",
+        ":ns -A must select all namespaces"
+    );
+
+    // :ns * + Enter switches to all namespaces ("")
+    app.active_namespace = "tools".to_string();
+    press(&mut app, ch(':')).await;
+    type_str(&mut app, "ns *").await;
+    press(&mut app, key(KeyCode::Enter)).await;
+    assert_eq!(app.active_namespace, "", ":ns * must select all namespaces");
+
+    // :ns all + Enter switches to all namespaces ("")
+    app.active_namespace = "tools".to_string();
+    press(&mut app, ch(':')).await;
+    type_str(&mut app, "ns all").await;
+    press(&mut app, key(KeyCode::Enter)).await;
+    assert_eq!(
+        app.active_namespace, "",
+        ":ns all must select all namespaces"
+    );
+
+    // When discovery is pending (empty namespaces), :ns -A still switches to all namespaces ("")
+    app.namespaces.clear();
+    app.active_namespace = "tools".to_string();
+    press(&mut app, ch(':')).await;
+    type_str(&mut app, "ns -A").await;
+    press(&mut app, key(KeyCode::Enter)).await;
+    assert_eq!(
+        app.active_namespace, "",
+        ":ns -A with empty namespaces must select all namespaces"
+    );
 }
 
 #[tokio::test]
@@ -1826,6 +1863,17 @@ async fn resource_namespace_command_switches_namespace_and_view() {
     type_str(&mut app, "pods tools").await;
     press(&mut app, key(KeyCode::Enter)).await;
     assert_eq!(app.active_namespace, "tools");
+    assert_eq!(table(&app).kind, ResourceKind::Pods);
+    assert!(app.modal.is_none());
+
+    // :pods -A + Enter switches namespace to all ("") and view to Pods
+    press(&mut app, ch(':')).await;
+    type_str(&mut app, "pods -A").await;
+    press(&mut app, key(KeyCode::Enter)).await;
+    assert_eq!(
+        app.active_namespace, "",
+        ":pods -A must switch to all namespaces"
+    );
     assert_eq!(table(&app).kind, ResourceKind::Pods);
     assert!(app.modal.is_none());
 }

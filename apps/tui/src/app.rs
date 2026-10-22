@@ -174,6 +174,7 @@ pub struct App {
     pub kubeconfig_paths: Vec<PathBuf>,
     pub contexts: Vec<ContextDto>,
     pub namespaces: Vec<String>,
+    pub namespace_discovery_error: Option<String>,
     pub active_view: ActiveView,
     pub nav_stack: Vec<ActiveView>,
     pub input_mode: InputMode,
@@ -559,6 +560,7 @@ impl App {
             kubeconfig_paths,
             contexts,
             namespaces: Vec::new(),
+            namespace_discovery_error: None,
             active_view: ActiveView::Table(initial_table),
             nav_stack: Vec::new(),
             input_mode: InputMode::Normal,
@@ -2171,6 +2173,7 @@ impl App {
         self.crds = crate::commands::load_cached_crds(&self.active_context);
         self.refresh_crds();
         self.namespaces.clear();
+        self.namespace_discovery_error = None;
         self.refresh_namespaces();
         self.restart_active_watch().await;
     }
@@ -2227,19 +2230,32 @@ impl App {
                 Ok::<Vec<String>, String>(namespaces)
             };
 
-            if let Ok(Ok(namespaces)) =
-                tokio::time::timeout(std::time::Duration::from_secs(10), fetch).await
-            {
-                let payload = serde_json::Value::Array(
-                    namespaces
-                        .into_iter()
-                        .map(|n| serde_json::json!({ "name": n }))
-                        .collect(),
-                );
-                let _ = event_tx.send(AppEvent::StreamEvent {
-                    channel: "discovery:namespaces".to_string(),
-                    payload,
-                });
+            let ch = format!("discovery:namespaces:{}", ctx);
+            match tokio::time::timeout(std::time::Duration::from_secs(10), fetch).await {
+                Ok(Ok(namespaces)) => {
+                    let payload = serde_json::Value::Array(
+                        namespaces
+                            .into_iter()
+                            .map(|n| serde_json::json!({ "name": n }))
+                            .collect(),
+                    );
+                    let _ = event_tx.send(AppEvent::StreamEvent {
+                        channel: ch,
+                        payload,
+                    });
+                }
+                Ok(Err(err)) => {
+                    let _ = event_tx.send(AppEvent::StreamEvent {
+                        channel: ch,
+                        payload: serde_json::json!({ "error": err }),
+                    });
+                }
+                Err(_) => {
+                    let _ = event_tx.send(AppEvent::StreamEvent {
+                        channel: ch,
+                        payload: serde_json::json!({ "error": "timeout after 10s" }),
+                    });
+                }
             }
         });
     }
@@ -3655,6 +3671,16 @@ impl App {
                             self.modal = None;
                             self.switch_namespace(String::new()).await;
                         }
+                        KeyCode::Char('r') | KeyCode::Char('R')
+                            if filter.is_empty()
+                                || key.modifiers.contains(KeyModifiers::CONTROL) =>
+                        {
+                            self.refresh_namespaces();
+                            self.set_toast(
+                                "Refreshing namespaces...".to_string(),
+                                Theme::status_ok(),
+                            );
+                        }
                         _ if is_word_delete_key(&key) => {
                             delete_prev_word(&mut filter);
                             self.modal = Some(Modal::NamespacePicker {
@@ -4161,6 +4187,7 @@ impl App {
                         &self.command_buffer,
                         &self.crds,
                         &self.namespaces,
+                        self.namespace_discovery_error.as_deref(),
                     );
                     let target = if !suggestions.is_empty()
                         && self.command_suggestion_idx < suggestions.len()
@@ -4189,6 +4216,7 @@ impl App {
                         &self.command_buffer,
                         &self.crds,
                         &self.namespaces,
+                        self.namespace_discovery_error.as_deref(),
                     );
                     if !suggestions.is_empty() {
                         let idx = if self.command_suggestion_idx == 0
@@ -4213,6 +4241,7 @@ impl App {
                             &self.command_buffer,
                             &self.crds,
                             &self.namespaces,
+                            self.namespace_discovery_error.as_deref(),
                         )
                         .iter()
                         .position(|(command, _)| &command.target == target)
@@ -4224,6 +4253,7 @@ impl App {
                         &self.command_buffer,
                         &self.crds,
                         &self.namespaces,
+                        self.namespace_discovery_error.as_deref(),
                     );
                     if !suggestions.is_empty() {
                         let len = suggestions.len();
@@ -4239,6 +4269,7 @@ impl App {
                         &self.command_buffer,
                         &self.crds,
                         &self.namespaces,
+                        self.namespace_discovery_error.as_deref(),
                     );
                     if !suggestions.is_empty() {
                         self.command_suggestion_idx =
@@ -4252,6 +4283,7 @@ impl App {
                         &self.command_buffer,
                         &self.crds,
                         &self.namespaces,
+                        self.namespace_discovery_error.as_deref(),
                     );
                     if !suggestions.is_empty() {
                         let len = suggestions.len();
@@ -9418,6 +9450,9 @@ impl App {
                 self.open_add_cluster_modal();
             }
             CommandTarget::Namespaces => {
+                if self.namespaces.is_empty() {
+                    self.refresh_namespaces();
+                }
                 let initial_idx = self
                     .namespaces
                     .iter()
@@ -14373,6 +14408,28 @@ impl App {
             return;
         }
 
+        if channel.starts_with("discovery:namespaces:") {
+            let ctx = channel.strip_prefix("discovery:namespaces:").unwrap_or("");
+            if ctx == self.active_context {
+                if let Some(err_msg) = payload.get("error").and_then(|v| v.as_str()) {
+                    self.namespace_discovery_error = Some(err_msg.to_string());
+                } else if let Some(items) = payload.as_array() {
+                    let mut ns_list: Vec<String> = items
+                        .iter()
+                        .filter_map(|item| {
+                            item.get("name").and_then(|v| v.as_str()).map(String::from)
+                        })
+                        .collect();
+                    ns_list.sort();
+                    if !ns_list.is_empty() {
+                        self.namespaces = ns_list;
+                        self.namespace_discovery_error = None;
+                    }
+                }
+            }
+            return;
+        }
+
         if let Some(err_msg) = payload.get("error").and_then(|v| v.as_str()) {
             if let Some(cur_ch) = &self.current_watch_channel {
                 if *cur_ch == channel {
@@ -14501,17 +14558,24 @@ impl App {
             }
         }
 
-        if channel.contains("namespaces") {
-            if let Some(items) = payload.as_array() {
-                let mut ns_list: Vec<String> = items
-                    .iter()
-                    .filter_map(|item| item.get("name").and_then(|v| v.as_str()).map(String::from))
-                    .collect();
-                ns_list.sort();
-                if !ns_list.is_empty() {
-                    self.namespaces = ns_list;
+        if channel.starts_with("watch:") && channel.ends_with(":namespaces") {
+            let parts: Vec<&str> = channel.split(':').collect();
+            if parts.len() >= 4 && parts[1] == self.active_context {
+                if let Some(items) = payload.as_array() {
+                    let mut ns_list: Vec<String> = items
+                        .iter()
+                        .filter_map(|item| {
+                            item.get("name").and_then(|v| v.as_str()).map(String::from)
+                        })
+                        .collect();
+                    ns_list.sort();
+                    if !ns_list.is_empty() {
+                        self.namespaces = ns_list;
+                        self.namespace_discovery_error = None;
+                    }
                 }
             }
+            return;
         }
     }
 
@@ -14738,6 +14802,7 @@ impl App {
                 &self.command_buffer,
                 &self.crds,
                 &self.namespaces,
+                self.namespace_discovery_error.as_deref(),
             ))
         } else {
             None
