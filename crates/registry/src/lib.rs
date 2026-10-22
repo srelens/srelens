@@ -419,7 +419,10 @@ fn build_with(
         "health check; echoes the input back as { pong: <input> }",
         |input| async move { Ok(json!({ "pong": input })) },
     ));
-    reg.register(skills::skills_get_capability(None));
+    reg.register(match kubeconfigs {
+        Kubeconfigs::Local => skills::skills_get_capability(None),
+        Kubeconfigs::OwnOnly => skills::skills_get_builtin_only_capability(),
+    });
 
     reg.register(match kubeconfigs {
         Kubeconfigs::Local => srelens_kube::contexts::list_contexts_capability(

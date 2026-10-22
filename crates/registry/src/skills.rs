@@ -280,25 +280,28 @@ pub fn load_skill_or_builtin(dirs: &[PathBuf], name: &str) -> Result<SkillGetOut
             }
         }
         if let Ok(entries) = fs::read_dir(dir) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if path
-                    .extension()
-                    .is_some_and(|e| e.eq_ignore_ascii_case("md"))
-                {
-                    if let Ok(raw) = fs::read_to_string(&path) {
-                        let fallback_stem = path.file_stem().and_then(|s| s.to_str());
-                        if let Ok((parsed_name, desc, body)) = parse_skill(&raw, fallback_stem) {
-                            if parsed_name == name {
-                                return Ok(SkillGetOut {
-                                    name: parsed_name,
-                                    description: desc,
-                                    body,
-                                    builtin: false,
-                                    path: Some(path.display().to_string()),
-                                    overrides_builtin: is_shipped.is_some(),
-                                });
-                            }
+            let mut paths: Vec<PathBuf> = entries
+                .flatten()
+                .map(|e| e.path())
+                .filter(|path| {
+                    path.extension()
+                        .is_some_and(|e| e.eq_ignore_ascii_case("md"))
+                })
+                .collect();
+            paths.sort();
+            for path in paths {
+                if let Ok(raw) = fs::read_to_string(&path) {
+                    let fallback_stem = path.file_stem().and_then(|s| s.to_str());
+                    if let Ok((parsed_name, desc, body)) = parse_skill(&raw, fallback_stem) {
+                        if parsed_name == name {
+                            return Ok(SkillGetOut {
+                                name: parsed_name,
+                                description: desc,
+                                body,
+                                builtin: false,
+                                path: Some(path.display().to_string()),
+                                overrides_builtin: is_shipped.is_some(),
+                            });
                         }
                     }
                 }
@@ -328,6 +331,17 @@ pub fn skills_get_capability(skills_dir: Option<PathBuf>) -> Capability {
                 load_skill_or_builtin(&dirs, &input.name)
             }
         },
+    )
+}
+
+/// Build the `skills.get` capability serving strictly built-in playbooks without disk access
+/// (used for multi-tenant web sessions to prevent reading host process directories or leaking paths).
+pub fn skills_get_builtin_only_capability() -> Capability {
+    Capability::typed::<SkillGetIn, SkillGetOut, _, _>(
+        "skills.get",
+        "retrieve an SRE playbook or diagnostic skill by name (e.g. crashloop-triage, pending-pod, oomkilled, node-pressure, service-no-endpoints, rollout-stuck, cluster-summary, argo-triage)",
+        Annotations::READ_ONLY,
+        |input: SkillGetIn| async move { load_skill_or_builtin(&[], &input.name) },
     )
 }
 
@@ -465,5 +479,26 @@ mod tests {
         let val_override = serde_json::to_value(&out_override).unwrap();
         assert_eq!(val_override["overridesBuiltin"], true);
         assert!(val_override.get("overrides_builtin").is_none());
+    }
+
+    #[tokio::test]
+    async fn test_skills_get_builtin_only_capability() {
+        let cap = skills_get_builtin_only_capability();
+
+        // Built-in succeeds with no path
+        let resp = cap.handler.as_ref()(serde_json::json!({ "name": "crashloop-triage" }))
+            .await
+            .unwrap();
+        let out: SkillGetOut = serde_json::from_value(resp).unwrap();
+        assert_eq!(out.name, "crashloop-triage");
+        assert!(out.builtin);
+        assert_eq!(out.path, None);
+        assert!(!out.overrides_builtin);
+
+        // Custom skill is not found and cannot search host disk
+        let err = cap.handler.as_ref()(serde_json::json!({ "name": "custom-disk-skill" }))
+            .await
+            .unwrap_err();
+        assert!(format!("{err}").contains("no diagnostic playbook or skill found"));
     }
 }

@@ -933,7 +933,8 @@ fn run_skill_command(
     use crate::ai_skills::{
         builtin_skills, delete_skill, fallback_name_from_url, fetch_skill_url,
         list_all_skills, load_skill_or_builtin, load_user_skills_dir, parse_skill_content,
-        to_markdown, user_skill_file, validate_name, write_skill_atomic,
+        to_markdown, user_skill_file, validate_custom_skill_name, validate_name,
+        write_skill_atomic,
     };
     use crate::cli::SkillSubcommand;
     use std::io::{IsTerminal, Read};
@@ -1059,7 +1060,7 @@ fn run_skill_command(
                 skill.description = d;
             }
 
-            validate_name(&skill.name).map_err(|e| format!("{e}"))?;
+            validate_custom_skill_name(&skill.name).map_err(|e| format!("{e}"))?;
 
             let dir = load_user_skills_dir();
             let is_builtin = builtin_skills().iter().any(|b| b.name == skill.name);

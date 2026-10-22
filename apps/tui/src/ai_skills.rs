@@ -374,7 +374,13 @@ pub fn skill_files(dir: &Path) -> Vec<PathBuf> {
 pub fn user_skill_file(dir: &Path, name: &str) -> Option<PathBuf> {
     let named = skill_path(dir, name);
     if named.exists() {
-        return Some(named);
+        if let Ok(raw) = std::fs::read_to_string(&named) {
+            if let Ok(skill) = parse_skill(&raw) {
+                if skill.name == name {
+                    return Some(named);
+                }
+            }
+        }
     }
     skill_files(dir).into_iter().find(|path| {
         std::fs::read_to_string(path)
@@ -509,22 +515,30 @@ pub fn read_user_skills(dir: &Path) -> Vec<Skill> {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return Vec::new();
     };
-    let mut skills = Vec::new();
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path
-            .extension()
-            .is_some_and(|e| e.eq_ignore_ascii_case("md"))
-        {
-            if let Ok(raw) = std::fs::read_to_string(&path) {
-                if let Ok(skill) = parse_skill(&raw) {
-                    skills.push(skill);
+    let mut paths: Vec<PathBuf> = entries
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.extension().is_some_and(|e| e.eq_ignore_ascii_case("md")))
+        .collect();
+    paths.sort();
+
+    let mut by_name: std::collections::BTreeMap<String, Skill> = std::collections::BTreeMap::new();
+    for path in paths {
+        let is_canonical_file = path.file_stem().and_then(|s| s.to_str());
+        if let Ok(raw) = std::fs::read_to_string(&path) {
+            if let Ok(skill) = parse_skill(&raw) {
+                // If a skill with this name was already encountered, the canonical file (<name>.md) wins
+                if by_name.contains_key(&skill.name) {
+                    if is_canonical_file == Some(&skill.name) {
+                        by_name.insert(skill.name.clone(), skill);
+                    }
+                } else {
+                    by_name.insert(skill.name.clone(), skill);
                 }
             }
         }
     }
-    skills.sort_by(|a, b| a.name.cmp(&b.name));
-    skills
+    by_name.into_values().collect()
 }
 
 /// Scans `~/.config/srelens/assistant/skills/*.md` for user-defined skills.
@@ -589,8 +603,31 @@ pub fn fallback_name_from_url(url: &str) -> Option<String> {
     }
 }
 
+/// Returns true only if `url_str` is an HTTPS URL targeting an approved GitHub host,
+/// ensuring secret GitHub tokens are never leaked to arbitrary domains or plaintext HTTP.
+pub fn is_trusted_github_url(url_str: &str) -> bool {
+    let Ok(parsed) = reqwest::Url::parse(url_str) else {
+        return false;
+    };
+    if parsed.scheme() != "https" {
+        return false;
+    }
+    match parsed.host_str() {
+        Some(host) => {
+            let host = host.to_ascii_lowercase();
+            host == "github.com"
+                || host == "api.github.com"
+                || host == "raw.githubusercontent.com"
+                || host == "gist.githubusercontent.com"
+                || host.ends_with(".github.com")
+                || host.ends_with(".githubusercontent.com")
+        }
+        None => false,
+    }
+}
+
 /// Fetches skill markdown from an HTTP/HTTPS URL, translating GitHub blob URLs
-/// and passing `GITHUB_TOKEN` / `GH_TOKEN` authentication if available.
+/// and passing `GITHUB_TOKEN` / `GH_TOKEN` authentication only to trusted GitHub HTTPS hosts.
 pub fn fetch_skill_url(url: &str) -> Result<String, String> {
     let _ = rustls::crypto::ring::default_provider().install_default();
     let resolved_url = resolve_fetch_url(url);
@@ -603,7 +640,7 @@ pub fn fetch_skill_url(url: &str) -> Result<String, String> {
 
     let mut req = client.get(&resolved_url);
 
-    if resolved_url.contains("github.com") || resolved_url.contains("githubusercontent.com") {
+    if is_trusted_github_url(&resolved_url) {
         if let Ok(token) = std::env::var("GITHUB_TOKEN").or_else(|_| std::env::var("GH_TOKEN")) {
             let trimmed = token.trim();
             if !trimmed.is_empty() {
@@ -630,6 +667,57 @@ pub fn fetch_skill_url(url: &str) -> Result<String, String> {
 // Interactive TUI Slash Command Resolution & Dynamic Autocomplete
 // ============================================================================
 
+/// Checks if `name` collides with a reserved utility or built-in command/alias.
+pub fn is_reserved_command_or_alias(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    if lower == "clear" || lower == "help" {
+        return true;
+    }
+    for pb in BUILTIN_PLAYBOOKS {
+        if pb.name.eq_ignore_ascii_case(&lower) {
+            return false;
+        }
+        if pb.command.eq_ignore_ascii_case(&lower)
+            || pb.aliases.iter().any(|a| a.eq_ignore_ascii_case(&lower))
+        {
+            return true;
+        }
+    }
+    false
+}
+
+/// Validates that a custom skill name matches naming rules and does not collide
+/// with built-in commands or aliases (while allowing exact overrides of built-in playbooks).
+pub fn validate_custom_skill_name(name: &str) -> Result<(), String> {
+    validate_name(name)?;
+    let lower = name.to_ascii_lowercase();
+    if lower == "clear" || lower == "help" {
+        return Err(format!(
+            "cannot use reserved command name '{name}' as a skill name"
+        ));
+    }
+    for pb in BUILTIN_PLAYBOOKS {
+        if pb.name.eq_ignore_ascii_case(name) {
+            return Ok(());
+        }
+        if pb.command.eq_ignore_ascii_case(name) {
+            return Err(format!(
+                "skill name '{name}' collides with built-in command '/{}'. Use '{}' to override this playbook.",
+                pb.command, pb.name
+            ));
+        }
+        for alias in pb.aliases {
+            if alias.eq_ignore_ascii_case(name) {
+                return Err(format!(
+                    "skill name '{name}' collides with built-in alias '/{}'. Use '{}' to override this playbook.",
+                    alias, pb.name
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Loads all available playbooks, merging built-in playbooks with user-defined
 /// skills from `dir`. User playbooks override built-in playbooks of the same name.
 pub fn load_all_playbooks_from(dir: &Path) -> Vec<SkillDef> {
@@ -641,7 +729,7 @@ pub fn load_all_playbooks_from(dir: &Path) -> Vec<SkillDef> {
             existing.description = Cow::Owned(skill.description);
             existing.instructions = Cow::Owned(skill.body);
             existing.is_user_defined = true;
-        } else {
+        } else if !is_reserved_command_or_alias(&skill.name) {
             playbooks.push(SkillDef {
                 name: Cow::Owned(skill.name.clone()),
                 command: Cow::Owned(skill.name.clone()),
@@ -678,9 +766,11 @@ pub fn match_slash_commands_from(input: &str, dir: &Path) -> Vec<SkillDef> {
             if query.is_empty() {
                 return true;
             }
-            s.command.starts_with(&query)
-                || s.aliases.iter().any(|a| a.starts_with(&query))
-                || s.name.starts_with(&query)
+            s.command.to_lowercase().starts_with(&query)
+                || s.aliases
+                    .iter()
+                    .any(|a| a.to_lowercase().starts_with(&query))
+                || s.name.to_lowercase().starts_with(&query)
         })
         .collect()
 }
@@ -1054,5 +1144,96 @@ mod tests {
             assert!(!prompt.is_empty());
             assert!(prompt.contains("INSTRUCTION: CAVEMAN MODE"));
         }
+    }
+
+    #[test]
+    fn test_is_trusted_github_url() {
+        assert!(is_trusted_github_url(
+            "https://github.com/org/repo/raw/main/skill.md"
+        ));
+        assert!(is_trusted_github_url(
+            "https://raw.githubusercontent.com/org/repo/main/skill.md"
+        ));
+        assert!(is_trusted_github_url(
+            "https://gist.githubusercontent.com/user/id/raw/skill.md"
+        ));
+        assert!(is_trusted_github_url(
+            "https://api.github.com/repos/org/repo"
+        ));
+
+        // Reject plaintext HTTP
+        assert!(!is_trusted_github_url(
+            "http://github.com/org/repo/raw/main/skill.md"
+        ));
+
+        // Reject attacker domains that mention github in query, path, or subdomain
+        assert!(!is_trusted_github_url(
+            "https://attacker.example/skill.md?source=github.com"
+        ));
+        assert!(!is_trusted_github_url(
+            "https://attacker.example/github.com/skill.md"
+        ));
+        assert!(!is_trusted_github_url(
+            "https://github.com.attacker.example/skill.md"
+        ));
+    }
+
+    #[test]
+    fn test_validate_custom_skill_name() {
+        // Allowed custom names
+        assert!(validate_custom_skill_name("my-skill").is_ok());
+        assert!(validate_custom_skill_name("redis_triage").is_ok());
+
+        // Allowed exact override of built-in playbook
+        assert!(validate_custom_skill_name("crashloop-triage").is_ok());
+        assert!(validate_custom_skill_name("pending-pod").is_ok());
+
+        // Disallowed reserved commands/utilities
+        assert!(validate_custom_skill_name("clear").is_err());
+        assert!(validate_custom_skill_name("help").is_err());
+
+        // Disallowed collision with built-in command/alias
+        assert!(validate_custom_skill_name("crashloop").is_err());
+        assert!(validate_custom_skill_name("pend").is_err());
+    }
+
+    #[test]
+    fn test_user_skill_file_checks_declared_name() {
+        use tempfile::tempdir;
+        let dir = tempdir().unwrap();
+
+        // Write a file named "foo.md" that actually declares "name: bar"
+        std::fs::write(
+            dir.path().join("foo.md"),
+            "---\nname: bar\ndescription: Bar\n---\nBody\n",
+        )
+        .unwrap();
+
+        // Looking for "foo" should NOT return foo.md since its declared name is "bar"
+        assert_eq!(user_skill_file(dir.path(), "foo"), None);
+
+        // Looking for "bar" should find foo.md
+        assert_eq!(
+            user_skill_file(dir.path(), "bar"),
+            Some(dir.path().join("foo.md"))
+        );
+    }
+
+    #[test]
+    fn test_match_slash_commands_case_insensitive() {
+        use tempfile::tempdir;
+        let dir = tempdir().unwrap();
+
+        std::fs::write(
+            dir.path().join("MySkill.md"),
+            "---\nname: MySkill\ndescription: CamelCase skill\n---\nBody\n",
+        )
+        .unwrap();
+
+        let matches = match_slash_commands_from("/myskill", dir.path());
+        assert!(matches.iter().any(|s| s.name == "MySkill"));
+
+        let matches_upper = match_slash_commands_from("/MYSKILL", dir.path());
+        assert!(matches_upper.iter().any(|s| s.name == "MySkill"));
     }
 }
