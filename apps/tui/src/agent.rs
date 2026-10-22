@@ -479,10 +479,6 @@ pub async fn run_boxed_cursor_turn(
         Ok(l) => l,
         Err(e) => {
             let _ = event_tx.send(AppEvent::ActionResult {
-                title: format!("ai_session:{}", active_ctx),
-                result: Ok(format!("{}|", conversation_id)),
-            });
-            let _ = event_tx.send(AppEvent::ActionResult {
                 title: format!("ai_chunk:{}", active_ctx),
                 result: Err(format!("Failed to bind local MCP port: {}", e)),
             });
@@ -496,10 +492,6 @@ pub async fn run_boxed_cursor_turn(
     let local_addr = match listener.local_addr() {
         Ok(a) => a,
         Err(e) => {
-            let _ = event_tx.send(AppEvent::ActionResult {
-                title: format!("ai_session:{}", active_ctx),
-                result: Ok(format!("{}|", conversation_id)),
-            });
             let _ = event_tx.send(AppEvent::ActionResult {
                 title: format!("ai_chunk:{}", active_ctx),
                 result: Err(format!("Failed to get local MCP address: {}", e)),
@@ -541,10 +533,6 @@ pub async fn run_boxed_cursor_turn(
         Err(e) => {
             let _ = shutdown_tx.send(());
             let _ = event_tx.send(AppEvent::ActionResult {
-                title: format!("ai_session:{}", active_ctx),
-                result: Ok(format!("{}|", conversation_id)),
-            });
-            let _ = event_tx.send(AppEvent::ActionResult {
                 title: format!("ai_chunk:{}", active_ctx),
                 result: Err(format!("Invalid conversation directory: {}", e)),
             });
@@ -561,10 +549,6 @@ pub async fn run_boxed_cursor_turn(
 
     if let Err(e) = std::fs::create_dir_all(&config) {
         let _ = shutdown_tx.send(());
-        let _ = event_tx.send(AppEvent::ActionResult {
-            title: format!("ai_session:{}", active_ctx),
-            result: Ok(format!("{}|", conversation_id)),
-        });
         let _ = event_tx.send(AppEvent::ActionResult {
             title: format!("ai_chunk:{}", active_ctx),
             result: Err(format!("Failed to create config dir: {}", e)),
@@ -590,10 +574,6 @@ pub async fn run_boxed_cursor_turn(
         Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
             let _ = shutdown_tx.send(());
             let _ = event_tx.send(AppEvent::ActionResult {
-                title: format!("ai_session:{}", active_ctx),
-                result: Ok(format!("{}|", conversation_id)),
-            });
-            let _ = event_tx.send(AppEvent::ActionResult {
                 title: format!("ai_chunk:{}", active_ctx),
                 result: Err(format!("Failed to clean workspace dir: {}", e)),
             });
@@ -609,10 +589,6 @@ pub async fn run_boxed_cursor_turn(
     let cursor_dir = workspace.join(".cursor");
     if let Err(e) = std::fs::create_dir_all(&cursor_dir) {
         let _ = shutdown_tx.send(());
-        let _ = event_tx.send(AppEvent::ActionResult {
-            title: format!("ai_session:{}", active_ctx),
-            result: Ok(format!("{}|", conversation_id)),
-        });
         let _ = event_tx.send(AppEvent::ActionResult {
             title: format!("ai_chunk:{}", active_ctx),
             result: Err(format!("Failed to create .cursor dir: {}", e)),
@@ -632,10 +608,6 @@ pub async fn run_boxed_cursor_turn(
     if let Err(e) = std::fs::write(&cfg_path, srelens_agent::adapter::cursor_cli_config_json()) {
         let _ = shutdown_tx.send(());
         let _ = event_tx.send(AppEvent::ActionResult {
-            title: format!("ai_session:{}", active_ctx),
-            result: Ok(format!("{}|", conversation_id)),
-        });
-        let _ = event_tx.send(AppEvent::ActionResult {
             title: format!("ai_chunk:{}", active_ctx),
             result: Err(format!("Failed to write cli-config.json: {}", e)),
         });
@@ -652,10 +624,6 @@ pub async fn run_boxed_cursor_turn(
         srelens_agent::adapter::cursor_mcp_json(&url, &token_str),
     ) {
         let _ = shutdown_tx.send(());
-        let _ = event_tx.send(AppEvent::ActionResult {
-            title: format!("ai_session:{}", active_ctx),
-            result: Ok(format!("{}|", conversation_id)),
-        });
         let _ = event_tx.send(AppEvent::ActionResult {
             title: format!("ai_chunk:{}", active_ctx),
             result: Err(format!("Failed to write mcp.json: {}", e)),

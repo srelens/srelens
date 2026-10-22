@@ -645,3 +645,42 @@ async fn clear_conversation_deletes_old_chat_directory() {
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     assert!(!chat_dir.exists());
 }
+
+#[tokio::test]
+async fn setup_failure_preserves_existing_resume_id() {
+    let tmp = tempfile::tempdir().unwrap();
+    let bin = tmp.path().join("does-not-matter");
+    let (tx, mut rx) = unbounded_channel();
+
+    // Pass invalid conversation ID (e.g. empty or with path separators) to trigger early setup error
+    run_boxed_cursor_turn(
+        bin.to_string_lossy().to_string(),
+        "default".into(),
+        None,
+        "query".into(),
+        "kind-dev".into(),
+        "default".into(),
+        None,
+        ClientCache::new(PathBuf::from("/nonexistent")),
+        vec![],
+        tx,
+        30,
+        tmp.path().to_path_buf(),
+        "../invalid".into(),
+        Some("valid-existing-resume".into()),
+    )
+    .await;
+
+    let results = action_results(&mut rx);
+    // Early setup failures report errors via ai_chunk, but must NOT emit ai_session
+    // which would erase the caller's valid resume ID.
+    let has_session_event = results.iter().any(|(t, _)| t == "ai_session:kind-dev");
+    assert!(
+        !has_session_event,
+        "Setup failures must not emit ai_session"
+    );
+    let has_error_chunk = results
+        .iter()
+        .any(|(t, r)| t == "ai_chunk:kind-dev" && r.is_err());
+    assert!(has_error_chunk, "Setup failures must report an error chunk");
+}
