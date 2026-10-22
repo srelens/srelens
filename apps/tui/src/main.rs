@@ -434,6 +434,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         views::assistant_view::ToolCallStatus::Error(status_str.to_string())
                                     };
                                     target_state.finish_tool_call(id, status);
+                                } else if action == "ai_session" {
+                                    target_state.cursor_resume_id = if msg.is_empty() {
+                                        None
+                                    } else {
+                                        Some(msg)
+                                    };
                                 } else if action == "ai_usage" {
                                     let parts: Vec<&str> = msg.split('|').collect();
                                     if parts.len() >= 4 {

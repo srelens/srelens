@@ -110,6 +110,7 @@ async fn boxed_turn_against_missing_binary(
     context: &str,
 ) -> Vec<(String, Result<String, String>)> {
     let (tx, mut rx) = unbounded_channel();
+    let root = tempfile::tempdir().unwrap();
     run_boxed_cursor_turn(
         bin,
         model.to_string(),
@@ -122,6 +123,9 @@ async fn boxed_turn_against_missing_binary(
         vec![],
         tx,
         30,
+        root.path().to_path_buf(),
+        "test-conv".into(),
+        None,
     )
     .await;
     action_results(&mut rx)
@@ -233,9 +237,12 @@ async fn a_boxed_cursor_turn_that_cannot_launch_skips_the_usage_estimate_a_nativ
         boxed_turn_against_missing_binary(missing_binary(&dir), "default", None, "prod-eu").await;
 
     let titles: Vec<&str> = results.iter().map(|(t, _)| t.as_str()).collect();
-    assert_eq!(titles, vec!["ai_chunk:prod-eu", "ai_done:prod-eu"]);
+    assert_eq!(
+        titles,
+        vec!["ai_session:prod-eu", "ai_chunk:prod-eu", "ai_done:prod-eu"]
+    );
 
-    let err = results[0]
+    let err = results[1]
         .1
         .as_ref()
         .expect_err("a launch failure is an Err chunk");
@@ -291,9 +298,13 @@ async fn two_boxed_cursor_turns_at_once_each_get_their_own_port_and_channel() {
         let titles: Vec<&str> = results.iter().map(|(t, _)| t.as_str()).collect();
         assert_eq!(
             titles,
-            vec![format!("ai_chunk:{ctx}"), format!("ai_done:{ctx}")]
+            vec![
+                format!("ai_session:{ctx}"),
+                format!("ai_chunk:{ctx}"),
+                format!("ai_done:{ctx}")
+            ]
         );
-        let err = results[0]
+        let err = results[1]
             .1
             .as_ref()
             .expect_err("a launch failure is an Err chunk");
@@ -306,4 +317,117 @@ async fn two_boxed_cursor_turns_at_once_each_get_their_own_port_and_channel() {
     // Let each turn's shutdown signal reach its MCP server task before the
     // runtime is torn down underneath it.
     tokio::task::yield_now().await;
+}
+
+#[cfg(unix)]
+fn fake_cursor_agent(dir: &std::path::Path, session_id: &str, exit_code: i32) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let path = dir.join("fake-cursor-agent");
+    let script = format!(
+        "#!/bin/sh\n\
+        if [ {exit_code} -eq 0 ]; then\n\
+          echo '{{\"type\":\"user\",\"session_id\":\"{session_id}\"}}'\n\
+          echo '{{\"type\":\"assistant\",\"message\":{{\"role\":\"assistant\",\"content\":[{{\"type\":\"text\",\"text\":\"hello\"}}]}},\"session_id\":\"{session_id}\"}}'\n\
+        fi\n\
+        exit {exit_code}\n"
+    );
+    std::fs::write(&path, script).unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    path
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn boxed_cursor_turn_captures_stream_session_id_and_resumes() {
+    let tmp = tempfile::tempdir().unwrap();
+    let bin = fake_cursor_agent(tmp.path(), "sess-abc-123", 0);
+    let root = tempfile::tempdir().unwrap();
+    let (tx, mut rx) = unbounded_channel();
+
+    run_boxed_cursor_turn(
+        bin.to_string_lossy().to_string(),
+        "default".into(),
+        None,
+        "first turn".into(),
+        "kind-dev".into(),
+        "default".into(),
+        None,
+        ClientCache::new(PathBuf::from("/nonexistent")),
+        vec![],
+        tx,
+        30,
+        root.path().to_path_buf(),
+        "conv-1".into(),
+        None,
+    )
+    .await;
+
+    let results = action_results(&mut rx);
+    let session_ev = results.iter().find(|(t, _)| t == "ai_session:kind-dev");
+    assert_eq!(
+        session_ev,
+        Some(&("ai_session:kind-dev".into(), Ok("sess-abc-123".into())))
+    );
+
+    // Turn 2 with resume
+    let (tx2, mut rx2) = unbounded_channel();
+    run_boxed_cursor_turn(
+        bin.to_string_lossy().to_string(),
+        "default".into(),
+        None,
+        "second turn".into(),
+        "kind-dev".into(),
+        "default".into(),
+        None,
+        ClientCache::new(PathBuf::from("/nonexistent")),
+        vec![],
+        tx2,
+        30,
+        root.path().to_path_buf(),
+        "conv-1".into(),
+        Some("sess-abc-123".into()),
+    )
+    .await;
+
+    let results2 = action_results(&mut rx2);
+    let session_ev2 = results2.iter().find(|(t, _)| t == "ai_session:kind-dev");
+    assert_eq!(
+        session_ev2,
+        Some(&("ai_session:kind-dev".into(), Ok("sess-abc-123".into())))
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn boxed_cursor_turn_crash_clears_stale_resume_id() {
+    let tmp = tempfile::tempdir().unwrap();
+    // Exits with 1 and outputs no session_id
+    let bin = fake_cursor_agent(tmp.path(), "stale-session", 1);
+    let root = tempfile::tempdir().unwrap();
+    let (tx, mut rx) = unbounded_channel();
+
+    run_boxed_cursor_turn(
+        bin.to_string_lossy().to_string(),
+        "default".into(),
+        None,
+        "failed turn".into(),
+        "kind-dev".into(),
+        "default".into(),
+        None,
+        ClientCache::new(PathBuf::from("/nonexistent")),
+        vec![],
+        tx,
+        30,
+        root.path().to_path_buf(),
+        "conv-1".into(),
+        Some("stale-session".into()),
+    )
+    .await;
+
+    let results = action_results(&mut rx);
+    let session_ev = results.iter().find(|(t, _)| t == "ai_session:kind-dev");
+    assert_eq!(
+        session_ev,
+        Some(&("ai_session:kind-dev".into(), Ok(String::new())))
+    );
 }

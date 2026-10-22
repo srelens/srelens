@@ -124,6 +124,11 @@ pub struct AssistantViewState {
     pub slash_suggestion_idx: usize,
     pub caveman_level: Option<crate::ai_skills::CavemanLevel>,
     pub task: Option<tokio::task::AbortHandle>,
+    /// Unique identifier for the current active conversation. Assigned lazily on
+    /// turn 1 to prevent orphan directories on context switches.
+    pub conversation_id: String,
+    /// Latest session ID returned by Cursor Agent CLI for multi-turn `--resume`.
+    pub cursor_resume_id: Option<String>,
 }
 
 pub fn is_internal_meta_tool(tool: &str) -> bool {
@@ -180,6 +185,8 @@ impl AssistantViewState {
             slash_suggestion_idx: 0,
             caveman_level: None,
             task: None,
+            conversation_id: uuid::Uuid::new_v4().to_string(),
+            cursor_resume_id: None,
         }
     }
 
@@ -687,6 +694,8 @@ impl AssistantViewState {
         self.busy_start = None;
         self.scroll_offset = 0;
         self.auto_scroll = true;
+        self.conversation_id = uuid::Uuid::new_v4().to_string();
+        self.cursor_resume_id = None;
         if let Ok(mut hist) = self.native_history.try_lock() {
             hist.clear();
         }

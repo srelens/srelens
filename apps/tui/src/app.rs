@@ -8187,6 +8187,9 @@ impl App {
                 let cache = self.client_cache.clone();
                 let timeout_seconds = self.ai_settings.get_timeout_seconds(provider);
                 let hub_kc_opt = argo_hub_kc.clone();
+                let chat_root = crate::agent::process_cursor_chats_root().to_path_buf();
+                let conv_id = ai.conversation_id.clone();
+                let resume = ai.cursor_resume_id.clone();
 
                 let handle = tokio::spawn(async move {
                     if let Some(ref hub_kc) = hub_kc_opt {
@@ -8204,6 +8207,9 @@ impl App {
                         kubeconfig_paths,
                         event_tx,
                         timeout_seconds,
+                        chat_root,
+                        conv_id,
+                        resume,
                     )
                     .await;
                 });
