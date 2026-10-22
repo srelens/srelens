@@ -124,6 +124,11 @@ pub struct AssistantViewState {
     pub slash_suggestion_idx: usize,
     pub caveman_level: Option<crate::ai_skills::CavemanLevel>,
     pub task: Option<tokio::task::AbortHandle>,
+    /// Unique identifier for the current active conversation. Assigned lazily on
+    /// turn 1 to prevent orphan directories on context switches.
+    pub conversation_id: String,
+    /// Latest session ID returned by Cursor Agent CLI for multi-turn `--resume`.
+    pub cursor_resume_id: Option<String>,
 }
 
 pub fn is_internal_meta_tool(tool: &str) -> bool {
@@ -180,6 +185,8 @@ impl AssistantViewState {
             slash_suggestion_idx: 0,
             caveman_level: None,
             task: None,
+            conversation_id: uuid::Uuid::new_v4().to_string(),
+            cursor_resume_id: None,
         }
     }
 
@@ -661,10 +668,26 @@ impl AssistantViewState {
         }
     }
 
-    pub fn clear_conversation(&mut self) {
+    pub fn clear_conversation(&mut self) -> String {
         if let Some(h) = self.task.take() {
             h.abort();
         }
+        let old_id = std::mem::replace(&mut self.conversation_id, uuid::Uuid::new_v4().to_string());
+        self.cursor_resume_id = None;
+        let chat_root = crate::agent::process_cursor_chats_root();
+        let old_id_clone = old_id.clone();
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            handle.spawn(async move {
+                let lock = crate::agent::conversation_lock(&old_id_clone);
+                let _guard = lock.lock().await;
+                if let Ok(dir) = srelens_agent::cursor_chat_dir(&chat_root, &old_id_clone) {
+                    let _ = srelens_agent::remove_cursor_chats(&dir);
+                }
+            });
+        } else if let Ok(dir) = srelens_agent::cursor_chat_dir(&chat_root, &old_id_clone) {
+            let _ = srelens_agent::remove_cursor_chats(&dir);
+        }
+
         let content = if self.context_name.is_empty() {
             "Hello! I am your SRElens AI Assistant. I can analyze pod crashes, diagnose cluster events, inspect configurations, and suggest Kubernetes remediation actions. Type your prompt below:".to_string()
         } else {
@@ -690,6 +713,7 @@ impl AssistantViewState {
         if let Ok(mut hist) = self.native_history.try_lock() {
             hist.clear();
         }
+        old_id
     }
 
     pub fn export_to_markdown(&self, provider_name: &str, model_name: &str) -> String {

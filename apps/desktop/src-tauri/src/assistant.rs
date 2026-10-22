@@ -487,28 +487,7 @@ fn sweep_cursor_chats(root: &std::path::Path, saved: impl Fn(&str) -> bool) {
     }
 }
 
-/// `remove_dir_all`, where chats already gone are not a failure.
-pub(crate) fn remove_cursor_chats(dir: &std::path::Path) -> std::io::Result<()> {
-    match std::fs::remove_dir_all(dir) {
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        result => result,
-    }
-}
-
-/// The directory under `root` that one Cursor chat is kept in. Its workspace
-/// is emptied before each turn and the whole of it removed with the chat, so
-/// `chat` must be one plain component — never `.` or `..`, which pass the
-/// charset `chat_send` and `chat_history` check.
-pub(crate) fn cursor_chat_dir(root: &std::path::Path, chat: &str) -> Result<std::path::PathBuf, String> {
-    let one_name = matches!(
-        std::path::Path::new(chat).components().collect::<Vec<_>>()[..],
-        [std::path::Component::Normal(_)]
-    );
-    if !one_name {
-        return Err(format!("invalid session id {chat:?}"));
-    }
-    Ok(root.join(chat))
-}
+pub(crate) use srelens_agent::{cursor_chat_dir, next_resume_id, remove_cursor_chats};
 
 /// Lay out a Cursor turn under `root` and build its command.
 ///
@@ -956,27 +935,6 @@ pub async fn chat_send(
     finish_turn(sink.as_ref(), &channel, saw_done, crashed, &stderr_tail);
 
     Ok(next_resume_id(agent_session, resume, crashed))
-}
-
-/// What the caller should store as the conversation's CLI session id after a
-/// turn: the id captured from the stream when there is one, else the id we
-/// resumed FROM (a clean-but-drifty stream, or a cancel — `chat_cancel`
-/// reaps the child, so a user-initiated stop never counts as `crashed`) —
-/// EXCEPT after a crash that yielded no id. That is the signature of the
-/// `--resume` itself failing (the CLI GC'd or never had the session), and
-/// echoing the id back would make every subsequent turn retry the same
-/// failing resume with no way out short of a new chat. `None` there tells
-/// the caller to clear its stored id so the next turn starts fresh.
-fn next_resume_id(
-    agent_session: Option<String>,
-    resume: Option<String>,
-    crashed: bool,
-) -> Option<String> {
-    match agent_session {
-        Some(id) => Some(id),
-        None if crashed => None,
-        None => resume,
-    }
 }
 
 /// Kill a running turn's agent process, if any. `turn` is the frontend's turn

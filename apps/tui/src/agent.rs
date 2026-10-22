@@ -396,6 +396,61 @@ pub async fn run_native_agent_turn(
     }
 }
 
+/// Global process-lifetime root directory for Cursor CLI agent conversations.
+/// Initialized lazily on the first turn. Explicitly swept during srectl shutdown
+/// or dropped on exit, leaving zero orphaned chats on disk.
+static CURSOR_CHATS_ROOT: std::sync::Mutex<Option<tempfile::TempDir>> = std::sync::Mutex::new(None);
+
+pub fn process_cursor_chats_root() -> std::path::PathBuf {
+    let mut lock = CURSOR_CHATS_ROOT.lock().unwrap();
+    if lock.is_none() {
+        let dir = tempfile::Builder::new()
+            .prefix("srelens-cursor-chats-")
+            .tempdir()
+            .unwrap_or_else(|_| tempfile::tempdir().expect("failed to create cursor chats root"));
+        *lock = Some(dir);
+    }
+    lock.as_ref().unwrap().path().to_path_buf()
+}
+
+pub fn cleanup_process_cursor_chats() {
+    let mut lock = CURSOR_CHATS_ROOT.lock().unwrap();
+    if let Some(dir) = lock.take() {
+        let _ = dir.close();
+    }
+}
+
+/// Synchronization lock per conversation ID to serialize workspace creation, execution,
+/// and teardown across rapid turns or turn cancellation retries.
+pub fn conversation_lock(conv_id: &str) -> std::sync::Arc<tokio::sync::Mutex<()>> {
+    static LOCKS: std::sync::OnceLock<
+        std::sync::Mutex<
+            std::collections::HashMap<String, std::sync::Weak<tokio::sync::Mutex<()>>>,
+        >,
+    > = std::sync::OnceLock::new();
+    let map = LOCKS.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+    let mut guard = map.lock().unwrap();
+    if guard.len() > 100 {
+        guard.retain(|_, v| v.strong_count() > 0);
+    }
+    if let Some(weak) = guard.get(conv_id) {
+        if let Some(arc) = weak.upgrade() {
+            return arc;
+        }
+    }
+    let arc = std::sync::Arc::new(tokio::sync::Mutex::new(()));
+    guard.insert(conv_id.to_string(), std::sync::Arc::downgrade(&arc));
+    arc
+}
+
+struct WorkspaceGuard(std::path::PathBuf);
+
+impl Drop for WorkspaceGuard {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
 pub async fn run_boxed_cursor_turn(
     cursor_bin: String,
     model: String,
@@ -408,19 +463,27 @@ pub async fn run_boxed_cursor_turn(
     kubeconfig_paths: Vec<PathBuf>,
     event_tx: tokio::sync::mpsc::UnboundedSender<AppEvent>,
     timeout_seconds: u32,
+    chat_root: PathBuf,
+    conversation_id: String,
+    resume: Option<String>,
 ) {
     let start_time = std::time::Instant::now();
+
+    // Serialize turns within this conversation so an aborted turn's workspace cleanup
+    // finishes before the replacement turn recreates workspace and mcp.json.
+    let conv_lock = conversation_lock(&conversation_id);
+    let _conv_guard = conv_lock.lock().await;
 
     // 1. Bind ephemeral loopback port for MCP HTTP server
     let listener = match tokio::net::TcpListener::bind("127.0.0.1:0").await {
         Ok(l) => l,
         Err(e) => {
             let _ = event_tx.send(AppEvent::ActionResult {
-                title: "ai_chunk".to_string(),
+                title: format!("ai_chunk:{}", active_ctx),
                 result: Err(format!("Failed to bind local MCP port: {}", e)),
             });
             let _ = event_tx.send(AppEvent::ActionResult {
-                title: "ai_done".to_string(),
+                title: format!("ai_done:{}", active_ctx),
                 result: Ok(String::new()),
             });
             return;
@@ -430,11 +493,11 @@ pub async fn run_boxed_cursor_turn(
         Ok(a) => a,
         Err(e) => {
             let _ = event_tx.send(AppEvent::ActionResult {
-                title: "ai_chunk".to_string(),
+                title: format!("ai_chunk:{}", active_ctx),
                 result: Err(format!("Failed to get local MCP address: {}", e)),
             });
             let _ = event_tx.send(AppEvent::ActionResult {
-                title: "ai_done".to_string(),
+                title: format!("ai_done:{}", active_ctx),
                 result: Ok(String::new()),
             });
             return;
@@ -464,78 +527,109 @@ pub async fn run_boxed_cursor_turn(
         .await;
     });
 
-    // 3. Create isolated temp directories for cursor-agent
-    let temp_cfg = match tempfile::tempdir() {
+    // 3. Resolve persistent chat directory for cursor-agent under the process chat root
+    let chat_dir = match srelens_agent::cursor_chat_dir(&chat_root, &conversation_id) {
         Ok(d) => d,
         Err(e) => {
             let _ = shutdown_tx.send(());
             let _ = event_tx.send(AppEvent::ActionResult {
-                title: "ai_chunk".to_string(),
-                result: Err(format!("Failed to create config dir: {}", e)),
+                title: format!("ai_chunk:{}", active_ctx),
+                result: Err(format!("Invalid conversation directory: {}", e)),
             });
             let _ = event_tx.send(AppEvent::ActionResult {
-                title: "ai_done".to_string(),
-                result: Ok(String::new()),
-            });
-            return;
-        }
-    };
-    let temp_workspace = match tempfile::tempdir() {
-        Ok(d) => d,
-        Err(e) => {
-            let _ = shutdown_tx.send(());
-            let _ = event_tx.send(AppEvent::ActionResult {
-                title: "ai_chunk".to_string(),
-                result: Err(format!("Failed to create workspace dir: {}", e)),
-            });
-            let _ = event_tx.send(AppEvent::ActionResult {
-                title: "ai_done".to_string(),
+                title: format!("ai_done:{}", active_ctx),
                 result: Ok(String::new()),
             });
             return;
         }
     };
 
+    let config = chat_dir.join("config");
+    let workspace = chat_dir.join("workspace");
+
+    if let Err(e) = std::fs::create_dir_all(&config) {
+        let _ = shutdown_tx.send(());
+        let _ = event_tx.send(AppEvent::ActionResult {
+            title: format!("ai_chunk:{}", active_ctx),
+            result: Err(format!("Failed to create config dir: {}", e)),
+        });
+        let _ = event_tx.send(AppEvent::ActionResult {
+            title: format!("ai_done:{}", active_ctx),
+            result: Ok(String::new()),
+        });
+        return;
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&chat_dir, std::fs::Permissions::from_mode(0o700));
+        let _ = std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o700));
+    }
+
+    // Emptied first: a turn whose guard never ran (srelens was killed) left
+    // its files here, and a project `.cursor/cli.json` among them would widen
+    // the box. Refuse the turn rather than run it in a workspace that can't be.
+    match std::fs::remove_dir_all(&workspace) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+            let _ = shutdown_tx.send(());
+            let _ = event_tx.send(AppEvent::ActionResult {
+                title: format!("ai_chunk:{}", active_ctx),
+                result: Err(format!("Failed to clean workspace dir: {}", e)),
+            });
+            let _ = event_tx.send(AppEvent::ActionResult {
+                title: format!("ai_done:{}", active_ctx),
+                result: Ok(String::new()),
+            });
+            return;
+        }
+        _ => {}
+    }
+
+    let cursor_dir = workspace.join(".cursor");
+    if let Err(e) = std::fs::create_dir_all(&cursor_dir) {
+        let _ = shutdown_tx.send(());
+        let _ = event_tx.send(AppEvent::ActionResult {
+            title: format!("ai_chunk:{}", active_ctx),
+            result: Err(format!("Failed to create .cursor dir: {}", e)),
+        });
+        let _ = event_tx.send(AppEvent::ActionResult {
+            title: format!("ai_done:{}", active_ctx),
+            result: Ok(String::new()),
+        });
+        return;
+    }
+
+    // Drop guard ensures workspace (and its bearer token in mcp.json) is cleaned up with the turn
+    let _workspace_guard = WorkspaceGuard(workspace.clone());
+
     // Write cli-config.json to block shell/kubectl
-    let cfg_path = temp_cfg.path().join("cli-config.json");
+    let cfg_path = config.join("cli-config.json");
     if let Err(e) = std::fs::write(&cfg_path, srelens_agent::adapter::cursor_cli_config_json()) {
         let _ = shutdown_tx.send(());
         let _ = event_tx.send(AppEvent::ActionResult {
-            title: "ai_chunk".to_string(),
+            title: format!("ai_chunk:{}", active_ctx),
             result: Err(format!("Failed to write cli-config.json: {}", e)),
         });
         let _ = event_tx.send(AppEvent::ActionResult {
-            title: "ai_done".to_string(),
+            title: format!("ai_done:{}", active_ctx),
             result: Ok(String::new()),
         });
         return;
     }
 
     // Write .cursor/mcp.json to configure srelens MCP server
-    let cursor_dir = temp_workspace.path().join(".cursor");
-    if let Err(e) = std::fs::create_dir_all(&cursor_dir) {
-        let _ = shutdown_tx.send(());
-        let _ = event_tx.send(AppEvent::ActionResult {
-            title: "ai_chunk".to_string(),
-            result: Err(format!("Failed to create .cursor dir: {}", e)),
-        });
-        let _ = event_tx.send(AppEvent::ActionResult {
-            title: "ai_done".to_string(),
-            result: Ok(String::new()),
-        });
-        return;
-    }
     if let Err(e) = std::fs::write(
         cursor_dir.join("mcp.json"),
         srelens_agent::adapter::cursor_mcp_json(&url, &token_str),
     ) {
         let _ = shutdown_tx.send(());
         let _ = event_tx.send(AppEvent::ActionResult {
-            title: "ai_chunk".to_string(),
+            title: format!("ai_chunk:{}", active_ctx),
             result: Err(format!("Failed to write mcp.json: {}", e)),
         });
         let _ = event_tx.send(AppEvent::ActionResult {
-            title: "ai_done".to_string(),
+            title: format!("ai_done:{}", active_ctx),
             result: Ok(String::new()),
         });
         return;
@@ -547,9 +641,9 @@ pub async fn run_boxed_cursor_turn(
     let cmd_spec = srelens_agent::adapter::cursor_command(
         &cursor_bin,
         &prompt_with_context,
-        &temp_cfg.path().to_string_lossy(),
-        &temp_workspace.path().to_string_lossy(),
-        None,
+        &config.to_string_lossy(),
+        &workspace.to_string_lossy(),
+        resume.as_deref(),
     );
 
     let mut cmd = tokio::process::Command::new(&cmd_spec.program);
@@ -622,6 +716,7 @@ pub async fn run_boxed_cursor_turn(
             let mut emitted_usage = false;
             let mut first_error = None;
             let mut timed_out = false;
+            let mut captured_session_id: Option<String> = None;
 
             if let Some(stdout) = stdout_pipe {
                 use tokio::io::{AsyncBufReadExt, BufReader};
@@ -638,6 +733,15 @@ pub async fn run_boxed_cursor_turn(
                     match tokio::time::timeout(inactivity_duration, reader.next_line()).await {
                         Ok(Ok(Some(line))) => {
                             let trimmed = line.trim();
+                            if captured_session_id.is_none() {
+                                if let Some(ref id) = srelens_agent::stream_session_id(trimmed) {
+                                    captured_session_id = Some(id.clone());
+                                    let _ = event_tx_clone.send(AppEvent::ActionResult {
+                                        title: format!("ai_session:{}", active_ctx_clone),
+                                        result: Ok(format!("{}|{}", conversation_id, id)),
+                                    });
+                                }
+                            }
                             if let Ok(v) = serde_json::from_str::<serde_json::Value>(trimmed) {
                                 if let Some((prompt_t, comp_t, cached_t, total_t, dur_t)) =
                                     crate::app::extract_usage_metrics(&v)
@@ -758,6 +862,7 @@ pub async fn run_boxed_cursor_turn(
             }
 
             let stderr_lines = stderr_task.await.unwrap_or_default();
+            let mut crashed = timed_out;
 
             if timed_out {
                 // Process timed out! Kill it so it doesn't leak in the background
@@ -774,6 +879,9 @@ pub async fn run_boxed_cursor_turn(
                     tokio::time::timeout(std::time::Duration::from_secs(5), child.wait()).await;
                 match wait_res {
                     Ok(Ok(status)) => {
+                        if !status.success() {
+                            crashed = true;
+                        }
                         if !status.success() || (chars_count == 0 && first_error.is_none()) {
                             let mut err_detail = if let Some(msg) = first_error {
                                 msg
@@ -797,6 +905,7 @@ pub async fn run_boxed_cursor_turn(
                         }
                     }
                     Ok(Err(e)) => {
+                        crashed = true;
                         let _ = event_tx.send(AppEvent::ActionResult {
                             title: format!("ai_chunk:{}", active_ctx),
                             result: Ok(format!(
@@ -806,10 +915,21 @@ pub async fn run_boxed_cursor_turn(
                         });
                     }
                     Err(_) => {
+                        crashed = true;
                         let _ = child.kill().await;
                     }
                 }
             }
+
+            let next_id = srelens_agent::next_resume_id(captured_session_id, resume, crashed);
+            let _ = event_tx.send(AppEvent::ActionResult {
+                title: format!("ai_session:{}", active_ctx),
+                result: Ok(format!(
+                    "{}|{}",
+                    conversation_id,
+                    next_id.unwrap_or_default()
+                )),
+            });
 
             let _ = shutdown_tx.send(());
             if !emitted_usage {
@@ -833,6 +953,10 @@ pub async fn run_boxed_cursor_turn(
         }
         Err(err) => {
             let _ = shutdown_tx.send(());
+            let _ = event_tx.send(AppEvent::ActionResult {
+                title: format!("ai_session:{}", active_ctx),
+                result: Ok(format!("{}|", conversation_id)),
+            });
             let _ = event_tx.send(AppEvent::ActionResult {
                 title: format!("ai_chunk:{}", active_ctx),
                 result: Err(format!("Failed to launch cursor-agent: {}", err)),

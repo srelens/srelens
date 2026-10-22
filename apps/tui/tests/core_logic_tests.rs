@@ -750,6 +750,7 @@ async fn a_boxed_cursor_turn_reports_a_missing_binary_and_finishes() {
         .to_string();
     let (tx, mut rx) = unbounded_channel();
     let cache = ClientCache::new(PathBuf::from("/nonexistent"));
+    let root = tempfile::tempdir().unwrap();
 
     run_boxed_cursor_turn(
         missing,
@@ -768,15 +769,22 @@ async fn a_boxed_cursor_turn_reports_a_missing_binary_and_finishes() {
         vec![],
         tx,
         30,
+        root.path().to_path_buf(),
+        "conv-1".into(),
+        None,
     )
     .await;
 
     let results = action_results(&mut rx);
-    assert_eq!(results.len(), 2);
-    assert_eq!(results[0].0, "ai_chunk:kind-dev");
-    let err = results[0].1.as_ref().unwrap_err();
+    assert_eq!(results.len(), 3);
+    assert_eq!(
+        results[0],
+        ("ai_session:kind-dev".into(), Ok("conv-1|".into()))
+    );
+    assert_eq!(results[1].0, "ai_chunk:kind-dev");
+    let err = results[1].1.as_ref().unwrap_err();
     assert!(err.starts_with("Failed to launch cursor-agent: "), "{err}");
-    assert_eq!(results[1], ("ai_done:kind-dev".into(), Ok(String::new())));
+    assert_eq!(results[2], ("ai_done:kind-dev".into(), Ok(String::new())));
 }
 
 // ---------------------------------------------------------------------------
