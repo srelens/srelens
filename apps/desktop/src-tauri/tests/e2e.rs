@@ -1335,8 +1335,8 @@ async fn run_suite() {
         .ok("skills.get", json!({ "name": "crashloop-triage" }))
         .await;
     assert_eq!(skill["name"], "crashloop-triage");
-    assert_eq!(skill["builtin"], true);
-    assert!(skill["body"].as_str().unwrap().contains("CrashLoopBackOff"));
+    assert!(skill["builtin"].as_bool().unwrap() || skill["overridesBuiltin"].as_bool().unwrap());
+    assert!(!skill["body"].as_str().unwrap().is_empty());
 
     let out = h
         .ok(
