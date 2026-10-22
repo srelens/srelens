@@ -50,7 +50,7 @@
     "@testing-library/dom": "^10.4.1",
     "@testing-library/react": "^16.3.2",
     "@testing-library/user-event": "^14.6.1",
-    "@types/node": "^26.1.1",
+    "@types/node": "^26.6.5",
     "@types/react": "^19.2.17",
     "@types/react-dom": "^19.2.3",
     "@vitejs/plugin-react": "^4.3.0",
@@ -58,7 +58,7 @@
     "jsdom": "^24.0.0",
     "shadcn": "^4.16.1",
     "tailwindcss": "^4.3.1",
-    "typescript": "^5.4.0",
+    "typescript": "^7.0.2",
     "vite": "^6.4.4",
     "vitest": "^4.1.12"
   }
