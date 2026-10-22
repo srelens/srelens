@@ -675,7 +675,7 @@ pub fn is_reserved_command_or_alias(name: &str) -> bool {
     }
     for pb in BUILTIN_PLAYBOOKS {
         if pb.name.eq_ignore_ascii_case(&lower) {
-            return false;
+            return pb.is_utility;
         }
         if pb.command.eq_ignore_ascii_case(&lower)
             || pb.aliases.iter().any(|a| a.eq_ignore_ascii_case(&lower))
@@ -698,9 +698,20 @@ pub fn validate_custom_skill_name(name: &str) -> Result<(), String> {
     }
     for pb in BUILTIN_PLAYBOOKS {
         if pb.name.eq_ignore_ascii_case(name) {
+            if pb.is_utility {
+                return Err(format!(
+                    "cannot use reserved utility name '{name}' as a skill name"
+                ));
+            }
             return Ok(());
         }
         if pb.command.eq_ignore_ascii_case(name) {
+            if pb.is_utility {
+                return Err(format!(
+                    "skill name '{name}' collides with reserved utility command '/{}'",
+                    pb.command
+                ));
+            }
             return Err(format!(
                 "skill name '{name}' collides with built-in command '/{}'. Use '{}' to override this playbook.",
                 pb.command, pb.name
@@ -708,6 +719,12 @@ pub fn validate_custom_skill_name(name: &str) -> Result<(), String> {
         }
         for alias in pb.aliases {
             if alias.eq_ignore_ascii_case(name) {
+                if pb.is_utility {
+                    return Err(format!(
+                        "skill name '{name}' collides with reserved utility alias '/{}'",
+                        alias
+                    ));
+                }
                 return Err(format!(
                     "skill name '{name}' collides with built-in alias '/{}'. Use '{}' to override this playbook.",
                     alias, pb.name
@@ -725,7 +742,10 @@ pub fn load_all_playbooks_from(dir: &Path) -> Vec<SkillDef> {
 
     let user_skills = read_user_skills(dir);
     for skill in user_skills {
-        if let Some(existing) = playbooks.iter_mut().find(|p| p.name == skill.name) {
+        if let Some(existing) = playbooks
+            .iter_mut()
+            .find(|p| p.name == skill.name && !p.is_utility)
+        {
             existing.description = Cow::Owned(skill.description);
             existing.instructions = Cow::Owned(skill.body);
             existing.is_user_defined = true;
@@ -1184,17 +1204,83 @@ mod tests {
         assert!(validate_custom_skill_name("my-skill").is_ok());
         assert!(validate_custom_skill_name("redis_triage").is_ok());
 
-        // Allowed exact override of built-in playbook
+        // Allowed exact override of built-in diagnostic playbook
         assert!(validate_custom_skill_name("crashloop-triage").is_ok());
         assert!(validate_custom_skill_name("pending-pod").is_ok());
 
         // Disallowed reserved commands/utilities
         assert!(validate_custom_skill_name("clear").is_err());
         assert!(validate_custom_skill_name("help").is_err());
+        assert!(validate_custom_skill_name("clear-chat").is_err());
+        assert!(validate_custom_skill_name("save-chat").is_err());
+        assert!(validate_custom_skill_name("ai-settings").is_err());
+        assert!(validate_custom_skill_name("caveman").is_err());
+        assert!(validate_custom_skill_name("save").is_err());
+        assert!(validate_custom_skill_name("settings").is_err());
+        assert!(validate_custom_skill_name("cave").is_err());
+        assert!(validate_custom_skill_name("terse").is_err());
+        assert!(validate_custom_skill_name("cls").is_err());
+        assert!(validate_custom_skill_name("reset").is_err());
+        assert!(validate_custom_skill_name("export").is_err());
+        assert!(validate_custom_skill_name("config").is_err());
+        assert!(validate_custom_skill_name("model").is_err());
 
-        // Disallowed collision with built-in command/alias
+        // Disallowed collision with built-in diagnostic command/alias
         assert!(validate_custom_skill_name("crashloop").is_err());
         assert!(validate_custom_skill_name("pend").is_err());
+    }
+
+    #[test]
+    fn test_reserved_command_and_utility_collisions() {
+        assert!(is_reserved_command_or_alias("clear"));
+        assert!(is_reserved_command_or_alias("help"));
+        assert!(is_reserved_command_or_alias("clear-chat"));
+        assert!(is_reserved_command_or_alias("save-chat"));
+        assert!(is_reserved_command_or_alias("ai-settings"));
+        assert!(is_reserved_command_or_alias("caveman"));
+        assert!(is_reserved_command_or_alias("save"));
+        assert!(is_reserved_command_or_alias("export"));
+        assert!(is_reserved_command_or_alias("settings"));
+        assert!(is_reserved_command_or_alias("config"));
+        assert!(is_reserved_command_or_alias("model"));
+        assert!(is_reserved_command_or_alias("cave"));
+        assert!(is_reserved_command_or_alias("terse"));
+        assert!(is_reserved_command_or_alias("cls"));
+        assert!(is_reserved_command_or_alias("reset"));
+        assert!(is_reserved_command_or_alias("crashloop"));
+        assert!(is_reserved_command_or_alias("pend"));
+
+        // Allowed overrides and new names
+        assert!(!is_reserved_command_or_alias("crashloop-triage"));
+        assert!(!is_reserved_command_or_alias("pending-pod"));
+        assert!(!is_reserved_command_or_alias("my-skill"));
+    }
+
+    #[test]
+    fn test_load_all_playbooks_ignores_utility_overrides() {
+        use tempfile::tempdir;
+        let dir = tempdir().unwrap();
+
+        std::fs::write(
+            dir.path().join("caveman.md"),
+            "---\nname: caveman\ndescription: Custom caveman\n---\nCustom instructions\n",
+        )
+        .unwrap();
+
+        std::fs::write(
+            dir.path().join("clear-chat.md"),
+            "---\nname: clear-chat\ndescription: Custom clear\n---\nCustom instructions\n",
+        )
+        .unwrap();
+
+        let playbooks = load_all_playbooks_from(dir.path());
+        let caveman = playbooks.iter().find(|p| p.name == "caveman").unwrap();
+        assert!(caveman.is_utility);
+        assert_eq!(caveman.instructions, "");
+
+        let clear = playbooks.iter().find(|p| p.name == "clear-chat").unwrap();
+        assert!(clear.is_utility);
+        assert_eq!(clear.instructions, "");
     }
 
     #[test]
