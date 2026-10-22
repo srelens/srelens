@@ -20,7 +20,8 @@ use srelens_streams::logs::LogStreamManager;
 use srelens_streams::watch::WatchManager;
 
 use crate::commands::{
-    command_suggestions_with_crds, resolve_command_with_crds, CommandTarget, CrdMeta, ResourceKind,
+    command_suggestions_full, command_suggestions_with_crds, resolve_command_with_crds,
+    CommandTarget, CrdMeta, ResourceKind,
 };
 use crate::event::AppEvent;
 use crate::sink::TuiSink;
@@ -557,7 +558,7 @@ impl App {
             active_namespace,
             kubeconfig_paths,
             contexts,
-            namespaces: vec!["default".to_string(), "kube-system".to_string()],
+            namespaces: Vec::new(),
             active_view: ActiveView::Table(initial_table),
             nav_stack: Vec::new(),
             input_mode: InputMode::Normal,
@@ -623,6 +624,7 @@ impl App {
         app.refresh_cluster_info();
         app.refresh_cluster_overview();
         app.refresh_crds();
+        app.refresh_namespaces();
         app.restart_active_watch().await;
 
         // Pre-warm ArgoCD Hub connection in the background if configured
@@ -2168,10 +2170,12 @@ impl App {
         self.refresh_cluster_overview();
         self.crds = crate::commands::load_cached_crds(&self.active_context);
         self.refresh_crds();
+        self.namespaces.clear();
+        self.refresh_namespaces();
         self.restart_active_watch().await;
     }
 
-    pub async fn switch_namespace(&mut self, new_namespace: String) {
+    pub fn set_namespace_raw(&mut self, new_namespace: String) {
         self.stop_active_log_stream();
         if matches!(self.active_view, ActiveView::Logs(_)) {
             if let Some(prev) = self.nav_stack.pop() {
@@ -2185,7 +2189,11 @@ impl App {
         if !new_namespace.is_empty() {
             self.last_active_namespace = new_namespace.clone();
         }
-        self.active_namespace = new_namespace.clone();
+        self.active_namespace = new_namespace;
+    }
+
+    pub async fn switch_namespace(&mut self, new_namespace: String) {
+        self.set_namespace_raw(new_namespace);
         let display_ns = if self.active_namespace.is_empty() {
             "all"
         } else {
@@ -2196,6 +2204,44 @@ impl App {
             Theme::status_ok(),
         );
         self.restart_active_watch().await;
+    }
+
+    pub fn refresh_namespaces(&self) {
+        let ctx = self.active_context.clone();
+        let cache = self.client_cache.clone();
+        let event_tx = self.event_tx.clone();
+
+        tokio::spawn(async move {
+            let fetch = async {
+                let client = cache.get(&ctx).await.map_err(|e| e.to_string())?;
+                let api: kube::Api<k8s_openapi::api::core::v1::Namespace> = kube::Api::all(client);
+                let list = api
+                    .list(&kube::api::ListParams::default())
+                    .await
+                    .map_err(|e| e.to_string())?;
+                let namespaces: Vec<String> = list
+                    .items
+                    .into_iter()
+                    .filter_map(|ns| ns.metadata.name)
+                    .collect();
+                Ok::<Vec<String>, String>(namespaces)
+            };
+
+            if let Ok(Ok(namespaces)) =
+                tokio::time::timeout(std::time::Duration::from_secs(10), fetch).await
+            {
+                let payload = serde_json::Value::Array(
+                    namespaces
+                        .into_iter()
+                        .map(|n| serde_json::json!({ "name": n }))
+                        .collect(),
+                );
+                let _ = event_tx.send(AppEvent::StreamEvent {
+                    channel: "discovery:namespaces".to_string(),
+                    payload,
+                });
+            }
+        });
     }
 
     pub async fn restart_active_watch(&mut self) {
@@ -4111,8 +4157,11 @@ impl App {
                         return;
                     }
 
-                    let suggestions =
-                        command_suggestions_with_crds(&self.command_buffer, &self.crds);
+                    let suggestions = command_suggestions_full(
+                        &self.command_buffer,
+                        &self.crds,
+                        &self.namespaces,
+                    );
                     let target = if !suggestions.is_empty()
                         && self.command_suggestion_idx < suggestions.len()
                     {
@@ -4136,25 +4185,46 @@ impl App {
                     }
                 }
                 KeyCode::Tab => {
-                    let suggestions =
-                        command_suggestions_with_crds(&self.command_buffer, &self.crds);
+                    let suggestions = command_suggestions_full(
+                        &self.command_buffer,
+                        &self.crds,
+                        &self.namespaces,
+                    );
                     if !suggestions.is_empty() {
-                        let idx = self.command_suggestion_idx % suggestions.len();
+                        let idx = if self.command_suggestion_idx == 0
+                            && suggestions.len() > 1
+                            && suggestions[0].0.name == self.command_buffer
+                            && self.command_buffer.contains(char::is_whitespace)
+                            && suggestions[0]
+                                .0
+                                .description
+                                .contains("(not in cluster list)")
+                        {
+                            1
+                        } else {
+                            self.command_suggestion_idx % suggestions.len()
+                        };
                         self.command_buffer = suggestions[idx].0.name.clone();
                         // Completion changes the query and rebuilds the list.
                         // Names and aliases can collide, so follow the selected
                         // target (including its CRD group), not the old index.
                         let target = &suggestions[idx].0.target;
-                        self.command_suggestion_idx =
-                            command_suggestions_with_crds(&self.command_buffer, &self.crds)
-                                .iter()
-                                .position(|(command, _)| &command.target == target)
-                                .unwrap_or(0);
+                        self.command_suggestion_idx = command_suggestions_full(
+                            &self.command_buffer,
+                            &self.crds,
+                            &self.namespaces,
+                        )
+                        .iter()
+                        .position(|(command, _)| &command.target == target)
+                        .unwrap_or(idx);
                     }
                 }
                 KeyCode::BackTab => {
-                    let suggestions =
-                        command_suggestions_with_crds(&self.command_buffer, &self.crds);
+                    let suggestions = command_suggestions_full(
+                        &self.command_buffer,
+                        &self.crds,
+                        &self.namespaces,
+                    );
                     if !suggestions.is_empty() {
                         let len = suggestions.len();
                         let idx = (self.command_suggestion_idx + len - 1) % len;
@@ -4165,8 +4235,11 @@ impl App {
                     if key.code == KeyCode::Down
                         || key.modifiers.contains(KeyModifiers::CONTROL) =>
                 {
-                    let suggestions =
-                        command_suggestions_with_crds(&self.command_buffer, &self.crds);
+                    let suggestions = command_suggestions_full(
+                        &self.command_buffer,
+                        &self.crds,
+                        &self.namespaces,
+                    );
                     if !suggestions.is_empty() {
                         self.command_suggestion_idx =
                             (self.command_suggestion_idx + 1) % suggestions.len();
@@ -4175,8 +4248,11 @@ impl App {
                 KeyCode::Up | KeyCode::Char('p') | KeyCode::Char('P')
                     if key.code == KeyCode::Up || key.modifiers.contains(KeyModifiers::CONTROL) =>
                 {
-                    let suggestions =
-                        command_suggestions_with_crds(&self.command_buffer, &self.crds);
+                    let suggestions = command_suggestions_full(
+                        &self.command_buffer,
+                        &self.crds,
+                        &self.namespaces,
+                    );
                     if !suggestions.is_empty() {
                         let len = suggestions.len();
                         self.command_suggestion_idx = (self.command_suggestion_idx + len - 1) % len;
@@ -8976,22 +9052,19 @@ impl App {
             (trimmed, None)
         };
 
-        let resolved = resolve_command_with_crds(cmd_base, &self.crds).or_else(|| {
-            let suggestions = command_suggestions_with_crds(cmd_base, &self.crds);
-            if let Some((top, score)) = suggestions.first() {
-                if *score >= 80 {
-                    return Some(top.target.clone());
+        let resolved = resolve_command_with_crds(trimmed, &self.crds).or_else(|| {
+            resolve_command_with_crds(cmd_base, &self.crds).or_else(|| {
+                let suggestions = command_suggestions_with_crds(cmd_base, &self.crds);
+                if let Some((top, score)) = suggestions.first() {
+                    if *score >= 80 {
+                        return Some(top.target.clone());
+                    }
                 }
-            }
-            None
+                None
+            })
         });
 
         if let Some(target) = resolved {
-            if let Some(arg) = arg_opt {
-                if !arg.is_empty() {
-                    self.active_namespace = arg.to_string();
-                }
-            }
             self.execute_command_target(target).await;
             if let Some(arg) = arg_opt {
                 if !arg.is_empty() {
@@ -9302,6 +9375,40 @@ impl App {
 
     pub async fn execute_view_target(&mut self, target: CommandTarget) {
         match target {
+            CommandTarget::SwitchNamespace(new_ns) => {
+                self.switch_namespace(new_ns).await;
+                if matches!(self.active_view, ActiveView::Table(ref t) if t.kind == ResourceKind::Namespaces)
+                {
+                    self.switch_view_to_kind(ResourceKind::Pods).await;
+                }
+            }
+            CommandTarget::ResourceInNamespace(kind, target_ns) => {
+                let display_ns = if target_ns.is_empty() {
+                    "all".to_string()
+                } else {
+                    target_ns.clone()
+                };
+                self.set_namespace_raw(target_ns);
+                self.switch_view_to_kind(kind.clone()).await;
+                self.set_toast(
+                    format!("Switched to {} in [{}]", kind.display_name(), display_ns),
+                    Theme::status_ok(),
+                );
+            }
+            CommandTarget::CustomResourceInNamespace(crd, target_ns) => {
+                let display_ns = if target_ns.is_empty() {
+                    "all".to_string()
+                } else {
+                    target_ns.clone()
+                };
+                let crd_kind = crd.kind.clone();
+                self.set_namespace_raw(target_ns);
+                self.switch_view_to_crd(crd).await;
+                self.set_toast(
+                    format!("Switched to {} in [{}]", crd_kind, display_ns),
+                    Theme::status_ok(),
+                );
+            }
             CommandTarget::Resource(kind) => self.switch_view_to_kind(kind).await,
             CommandTarget::CustomResource(crd) => self.switch_view_to_crd(crd).await,
             CommandTarget::Contexts => {
@@ -14627,9 +14734,10 @@ impl App {
             .map(|(msg, _, style)| (msg.as_str(), *style));
 
         let suggestions = if self.input_mode == InputMode::Command {
-            Some(command_suggestions_with_crds(
+            Some(command_suggestions_full(
                 &self.command_buffer,
                 &self.crds,
+                &self.namespaces,
             ))
         } else {
             None

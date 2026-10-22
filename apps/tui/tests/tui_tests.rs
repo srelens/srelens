@@ -3,9 +3,7 @@ mod common;
 #[cfg(test)]
 mod tests {
     use serde_json::json;
-    use srectl::commands::{
-        command_suggestions, resolve_command, CommandTarget, ResourceKind,
-    };
+    use srectl::commands::{command_suggestions, resolve_command, CommandTarget, ResourceKind};
     use srectl::views::ResourceTableState;
 
     #[test]
@@ -70,9 +68,7 @@ mod tests {
 
     #[test]
     fn test_crd_resolution_and_matching() {
-        use srectl::commands::{
-            command_suggestions_with_crds, resolve_command_with_crds, CrdMeta,
-        };
+        use srectl::commands::{command_suggestions_with_crds, resolve_command_with_crds, CrdMeta};
 
         let cilium_crd = CrdMeta {
             crd_name: "ciliumloadbalancerippools.cilium.io".to_string(),
@@ -109,6 +105,213 @@ mod tests {
         let suggs2 = command_suggestions_with_crds("ciliumlbippool", &crds);
         assert!(!suggs2.is_empty());
         assert_eq!(suggs2[0].0.name, "ciliumloadbalancerippools");
+    }
+
+    #[test]
+    fn test_namespace_command_resolution() {
+        use srectl::commands::{resolve_command_with_crds, CommandTarget, ResourceKind};
+
+        // :ns <target> switches namespace directly
+        assert_eq!(
+            resolve_command_with_crds(":ns default", &[]),
+            Some(CommandTarget::SwitchNamespace("default".to_string()))
+        );
+        assert_eq!(
+            resolve_command_with_crds("namespace staging", &[]),
+            Some(CommandTarget::SwitchNamespace("staging".to_string()))
+        );
+        assert_eq!(
+            resolve_command_with_crds(":ns *", &[]),
+            Some(CommandTarget::SwitchNamespace(String::new()))
+        );
+        assert_eq!(
+            resolve_command_with_crds(":ns -A", &[]),
+            Some(CommandTarget::SwitchNamespace(String::new()))
+        );
+        assert_eq!(
+            resolve_command_with_crds(":ns all", &[]),
+            Some(CommandTarget::SwitchNamespace(String::new()))
+        );
+
+        // :pods <target> and aliases
+        assert_eq!(
+            resolve_command_with_crds(":pods tools", &[]),
+            Some(CommandTarget::ResourceInNamespace(
+                ResourceKind::Pods,
+                "tools".to_string()
+            ))
+        );
+        assert_eq!(
+            resolve_command_with_crds(":po kube-system", &[]),
+            Some(CommandTarget::ResourceInNamespace(
+                ResourceKind::Pods,
+                "kube-system".to_string()
+            ))
+        );
+        assert_eq!(
+            resolve_command_with_crds(":deploy prod", &[]),
+            Some(CommandTarget::ResourceInNamespace(
+                ResourceKind::Deployments,
+                "prod".to_string()
+            ))
+        );
+        assert_eq!(
+            resolve_command_with_crds(":svc default", &[]),
+            Some(CommandTarget::ResourceInNamespace(
+                ResourceKind::Services,
+                "default".to_string()
+            ))
+        );
+
+        // Protection for M1 / M2 / M5:
+        // :changed 1h must NOT resolve to ResourceInNamespace
+        assert_eq!(resolve_command_with_crds(":changed 1h", &[]), None);
+        // :argo my-app must NOT resolve to ResourceInNamespace
+        assert_eq!(resolve_command_with_crds(":argo my-app", &[]), None);
+        // Multi-word alias "top pods" and "top nodes" must resolve to TopPods / TopNodes
+        assert_eq!(
+            resolve_command_with_crds(":top pods", &[]),
+            Some(CommandTarget::Resource(ResourceKind::TopPods))
+        );
+        assert_eq!(
+            resolve_command_with_crds(":top nodes", &[]),
+            Some(CommandTarget::Resource(ResourceKind::TopNodes))
+        );
+        // Special prefixes like theme and open must resolve to SetTheme / OpenUrl
+        assert_eq!(
+            resolve_command_with_crds(":theme nord", &[]),
+            Some(CommandTarget::SetTheme("nord".to_string()))
+        );
+        assert_eq!(
+            resolve_command_with_crds(":colors tokyo-night", &[]),
+            Some(CommandTarget::SetTheme("tokyo-night".to_string()))
+        );
+        assert_eq!(
+            resolve_command_with_crds(":open srelens://view/c/n/pods", &[]),
+            Some(CommandTarget::OpenUrl(
+                "srelens://view/c/n/pods".to_string()
+            ))
+        );
+        // Cluster-scoped kinds do not take a namespace argument
+        assert_eq!(resolve_command_with_crds(":nodes foo", &[]), None);
+    }
+
+    #[test]
+    fn test_namespace_command_suggestions_and_active_filtering() {
+        use srectl::commands::{command_suggestions_full, CommandTarget, ResourceKind};
+
+        let namespaces = vec![
+            "default".to_string(),
+            "kube-system".to_string(),
+            "kube-public".to_string(),
+            "kube-node-lease".to_string(),
+            "tools".to_string(),
+        ];
+
+        // 1. :ns without subquery suggests all namespaces + *
+        let ns_all = command_suggestions_full("ns ", &[], &namespaces);
+        assert!(!ns_all.is_empty());
+        assert!(ns_all.iter().any(|(s, _)| s.name == "ns default"));
+        assert!(ns_all.iter().any(|(s, _)| s.name == "ns *"));
+
+        // 2. Active filtering: :ns defa matches default
+        let ns_defa = command_suggestions_full("ns defa", &[], &namespaces);
+        assert!(!ns_defa.is_empty());
+        assert!(ns_defa.iter().any(|(s, _)| s.name == "ns default"));
+
+        // 3. M3: Typing :ns dev when cluster has dev-tools and devops does not hijack
+        let dev_cluster_ns = vec!["dev-tools".to_string(), "devops".to_string()];
+        let dev_suggs = command_suggestions_full("ns dev", &[], &dev_cluster_ns);
+        assert!(!dev_suggs.is_empty());
+        assert_eq!(
+            dev_suggs[0].0.target,
+            CommandTarget::SwitchNamespace("dev".to_string())
+        );
+
+        // 4. M4: When namespaces list is empty, say so truthfully and don't fake default/kube-system
+        let empty_suggs = command_suggestions_full("ns ", &[], &[]);
+        assert!(!empty_suggs.is_empty());
+        assert!(empty_suggs[0]
+            .0
+            .description
+            .contains("namespace list not loaded yet"));
+        assert!(!empty_suggs
+            .iter()
+            .any(|(s, _)| s.name == "ns default" && !s.description.contains("not loaded")));
+
+        // 5. :pods tools filters tools namespace
+        let pod_suggs = command_suggestions_full("pods tool", &[], &namespaces);
+        assert!(!pod_suggs.is_empty());
+        assert!(pod_suggs.iter().any(|(s, _)| s.name == "pods tools"
+            && matches!(
+                s.target,
+                CommandTarget::ResourceInNamespace(ResourceKind::Pods, _)
+            )));
+
+        // 6. Alias :po tools works too
+        let po_suggs = command_suggestions_full("po tool", &[], &namespaces);
+        assert!(!po_suggs.is_empty());
+        assert!(po_suggs.iter().any(|(s, _)| s.name == "po tools"
+            && matches!(
+                s.target,
+                CommandTarget::ResourceInNamespace(ResourceKind::Pods, _)
+            )));
+
+        // 7. Cluster-scoped resources like :nodes foo yield no namespace suggestions
+        let nodes_suggs = command_suggestions_full("nodes foo", &[], &namespaces);
+        assert!(nodes_suggs.is_empty());
+    }
+
+    #[test]
+    fn test_crd_namespace_command_resolution_and_suggestions() {
+        use srectl::commands::{
+            command_suggestions_full, resolve_command_with_crds, CommandTarget, CrdMeta,
+        };
+
+        let namespaced_crd = CrdMeta {
+            crd_name: "virtualservices.networking.istio.io".to_string(),
+            group: "networking.istio.io".to_string(),
+            version: "v1beta1".to_string(),
+            kind: "VirtualService".to_string(),
+            plural: "virtualservices".to_string(),
+            singular: "virtualservice".to_string(),
+            namespaced: true,
+            short_names: vec!["vs".to_string()],
+            printer_columns: vec![],
+            created_at: None,
+        };
+
+        let cluster_crd = CrdMeta {
+            crd_name: "clusterissuers.cert-manager.io".to_string(),
+            group: "cert-manager.io".to_string(),
+            version: "v1".to_string(),
+            kind: "ClusterIssuer".to_string(),
+            plural: "clusterissuers".to_string(),
+            singular: "clusterissuer".to_string(),
+            namespaced: false,
+            short_names: vec![],
+            printer_columns: vec![],
+            created_at: None,
+        };
+
+        let crds = vec![namespaced_crd, cluster_crd];
+        let namespaces = vec!["istio-system".to_string(), "default".to_string()];
+
+        // Namespaced CRD resolves with namespace
+        let res_vs = resolve_command_with_crds(":vs istio-system", &crds);
+        assert!(
+            matches!(res_vs, Some(CommandTarget::CustomResourceInNamespace(_, ref ns)) if ns == "istio-system")
+        );
+
+        // Namespaced CRD suggestions
+        let suggs_vs = command_suggestions_full("vs istio", &crds, &namespaces);
+        assert!(!suggs_vs.is_empty());
+        assert!(suggs_vs.iter().any(|(s, _)| s.name == "vs istio-system"
+            && matches!(s.target, CommandTarget::CustomResourceInNamespace(_, _))));
+
+        // Cluster-scoped CRD does not resolve or suggest namespace
+        let res_ci = resolve_command_with_crds(":clusterissuer default", &crds);
+        assert!(res_ci.is_none());
     }
 
     #[test]
@@ -149,11 +352,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_informer_cache_instant_screen_switching() {
+        use srectl::app::{ActiveView, App};
+        use srectl::ui::InputMode;
         use srelens_kube::client_cache::ClientCache;
         use srelens_streams::logs::LogStreamManager;
         use srelens_streams::watch::WatchManager;
-        use srectl::app::{ActiveView, App};
-        use srectl::ui::InputMode;
         use std::collections::{HashMap, HashSet};
         use std::path::PathBuf;
         use std::sync::Arc;
@@ -257,11 +460,11 @@ mod tests {
     #[tokio::test]
     async fn test_command_mode_ctrl_w_and_word_deletion() {
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        use srectl::app::{ActiveView, App};
+        use srectl::ui::InputMode;
         use srelens_kube::client_cache::ClientCache;
         use srelens_streams::logs::LogStreamManager;
         use srelens_streams::watch::WatchManager;
-        use srectl::app::{ActiveView, App};
-        use srectl::ui::InputMode;
         use std::collections::{HashMap, HashSet};
         use std::path::PathBuf;
         use std::sync::Arc;
@@ -374,13 +577,13 @@ mod tests {
     #[tokio::test]
     async fn test_ai_settings_navigation_and_editing() {
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-        use srelens_kube::client_cache::ClientCache;
-        use srelens_streams::logs::LogStreamManager;
-        use srelens_streams::watch::WatchManager;
         use srectl::ai_config::AiProvider;
         use srectl::app::{ActiveView, App};
         use srectl::ui::InputMode;
         use srectl::views::SettingField;
+        use srelens_kube::client_cache::ClientCache;
+        use srelens_streams::logs::LogStreamManager;
+        use srelens_streams::watch::WatchManager;
         use std::collections::{HashMap, HashSet};
         use std::path::PathBuf;
         use std::sync::Arc;
@@ -602,11 +805,11 @@ mod tests {
     #[tokio::test]
     async fn test_assistant_typing_s_and_ctrl_s_shortcut() {
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        use srectl::app::{ActiveView, App};
+        use srectl::ui::InputMode;
         use srelens_kube::client_cache::ClientCache;
         use srelens_streams::logs::LogStreamManager;
         use srelens_streams::watch::WatchManager;
-        use srectl::app::{ActiveView, App};
-        use srectl::ui::InputMode;
         use std::collections::{HashMap, HashSet};
         use std::path::PathBuf;
         use std::sync::Arc;
@@ -830,12 +1033,12 @@ mod tests {
 
     #[tokio::test]
     async fn test_assistant_conversation_persistence_across_view_switches() {
-        use srelens_kube::client_cache::ClientCache;
-        use srelens_streams::logs::LogStreamManager;
-        use srelens_streams::watch::WatchManager;
         use srectl::app::{ActiveView, App};
         use srectl::ui::InputMode;
         use srectl::views::assistant_view::ToolCallStatus;
+        use srelens_kube::client_cache::ClientCache;
+        use srelens_streams::logs::LogStreamManager;
+        use srelens_streams::watch::WatchManager;
         use std::collections::{HashMap, HashSet};
         use std::path::PathBuf;
         use std::sync::Arc;
@@ -1050,12 +1253,12 @@ mod tests {
     #[tokio::test]
     async fn test_regex_search_single_item_combines_enter_to_go_to_resource() {
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-        use srelens_kube::client_cache::ClientCache;
-        use srelens_streams::logs::LogStreamManager;
-        use srelens_streams::watch::WatchManager;
         use srectl::app::{ActiveView, App};
         use srectl::ui::InputMode;
         use srectl::views::resource_table::ResourceTableState;
+        use srelens_kube::client_cache::ClientCache;
+        use srelens_streams::logs::LogStreamManager;
+        use srelens_streams::watch::WatchManager;
         use std::collections::{HashMap, HashSet};
         use std::path::PathBuf;
         use std::sync::Arc;
@@ -1211,12 +1414,12 @@ mod tests {
     #[tokio::test]
     async fn test_port_forward_keybinding_on_pods() {
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-        use srelens_kube::client_cache::ClientCache;
-        use srelens_streams::logs::LogStreamManager;
-        use srelens_streams::watch::WatchManager;
         use srectl::app::{ActiveView, App};
         use srectl::ui::{InputMode, Modal};
         use srectl::views::resource_table::ResourceTableState;
+        use srelens_kube::client_cache::ClientCache;
+        use srelens_streams::logs::LogStreamManager;
+        use srelens_streams::watch::WatchManager;
         use std::collections::{HashMap, HashSet};
         use std::path::PathBuf;
         use std::sync::Arc;
@@ -1590,12 +1793,12 @@ mod tests {
 
     #[tokio::test]
     async fn test_pod_metrics_usage_update_and_column_extraction() {
-        use srelens_kube::client_cache::ClientCache;
-        use srelens_streams::logs::LogStreamManager;
-        use srelens_streams::watch::WatchManager;
         use srectl::app::{ActiveView, App};
         use srectl::ui::InputMode;
         use srectl::views::resource_table::{extract_field_str, ResourceTableState};
+        use srelens_kube::client_cache::ClientCache;
+        use srelens_streams::logs::LogStreamManager;
+        use srelens_streams::watch::WatchManager;
         use std::collections::{HashMap, HashSet};
         use std::path::PathBuf;
         use std::sync::Arc;
@@ -1715,9 +1918,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_native_mcp_agent_invoker_and_tool_execution() {
+        use srectl::agent::{build_mcp_server, McpToolInvoker};
         use srelens_kube::client_cache::ClientCache;
         use srelens_llm::ToolInvoker;
-        use srectl::agent::{build_mcp_server, McpToolInvoker};
         use std::path::PathBuf;
 
         let client_cache = ClientCache::new(PathBuf::from("/nonexistent"));
@@ -1763,11 +1966,11 @@ mod tests {
     #[tokio::test]
     async fn test_assistant_mouse_selection_copy_and_bracketed_paste() {
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        use srectl::app::{ActiveView, App};
+        use srectl::ui::InputMode;
         use srelens_kube::client_cache::ClientCache;
         use srelens_streams::logs::LogStreamManager;
         use srelens_streams::watch::WatchManager;
-        use srectl::app::{ActiveView, App};
-        use srectl::ui::InputMode;
         use std::collections::{HashMap, HashSet};
         use std::path::PathBuf;
         use std::sync::Arc;
@@ -1872,11 +2075,11 @@ mod tests {
     #[tokio::test]
     async fn test_assistant_bottom_bar_hints_only_cmd_and_help() {
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        use srectl::app::{ActiveView, App};
+        use srectl::ui::InputMode;
         use srelens_kube::client_cache::ClientCache;
         use srelens_streams::logs::LogStreamManager;
         use srelens_streams::watch::WatchManager;
-        use srectl::app::{ActiveView, App};
-        use srectl::ui::InputMode;
         use std::collections::{HashMap, HashSet};
         use std::path::PathBuf;
         use std::sync::Arc;
@@ -1970,11 +2173,11 @@ mod tests {
             KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
         };
         use ratatui::layout::Rect;
+        use srectl::app::{ActiveView, App};
+        use srectl::ui::InputMode;
         use srelens_kube::client_cache::ClientCache;
         use srelens_streams::logs::LogStreamManager;
         use srelens_streams::watch::WatchManager;
-        use srectl::app::{ActiveView, App};
-        use srectl::ui::InputMode;
         use std::collections::{HashMap, HashSet};
         use std::path::PathBuf;
         use std::sync::Arc;
@@ -2092,14 +2295,14 @@ mod tests {
     async fn test_header_context_chips_mouse_click_and_hotbar() {
         use crossterm::event::{KeyCode, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
         use ratatui::layout::Rect;
-        use srelens_kube::client_cache::ClientCache;
-        use srelens_streams::logs::LogStreamManager;
-        use srelens_streams::watch::WatchManager;
         use srectl::app::{ActiveView, App};
         use srectl::commands::ResourceKind;
         use srectl::ui::dialogs::Modal;
         use srectl::ui::InputMode;
         use srectl::views::resource_table::ResourceTableState;
+        use srelens_kube::client_cache::ClientCache;
+        use srelens_streams::logs::LogStreamManager;
+        use srelens_streams::watch::WatchManager;
         use std::collections::{HashMap, HashSet};
         use std::path::PathBuf;
         use std::sync::Arc;
@@ -2279,11 +2482,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_per_cluster_assistant_state_isolation() {
+        use srectl::app::{ActiveView, App};
+        use srectl::ui::InputMode;
         use srelens_kube::client_cache::ClientCache;
         use srelens_streams::logs::LogStreamManager;
         use srelens_streams::watch::WatchManager;
-        use srectl::app::{ActiveView, App};
-        use srectl::ui::InputMode;
         use std::collections::{HashMap, HashSet};
         use std::path::PathBuf;
         use std::sync::Arc;
@@ -2444,14 +2647,14 @@ mod tests {
     #[tokio::test]
     async fn test_deep_link_navigation_and_copy_shortcuts() {
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-        use srelens_kube::client_cache::ClientCache;
-        use srelens_streams::logs::LogStreamManager;
-        use srelens_streams::watch::WatchManager;
         use srectl::app::{ActiveView, App};
         use srectl::commands::ResourceKind;
         use srectl::deep_link::DeepLink;
         use srectl::ui::InputMode;
         use srectl::views::resource_table::ResourceTableState;
+        use srelens_kube::client_cache::ClientCache;
+        use srelens_streams::logs::LogStreamManager;
+        use srelens_streams::watch::WatchManager;
         use std::collections::{HashMap, HashSet};
         use std::path::PathBuf;
         use std::sync::Arc;
@@ -2630,14 +2833,14 @@ mod tests {
 
     #[tokio::test]
     async fn test_live_cluster_overview_and_capacity_gauges() {
-        use srelens_kube::client_cache::ClientCache;
-        use srelens_streams::logs::LogStreamManager;
-        use srelens_streams::watch::WatchManager;
         use srectl::app::{ActiveView, App};
         use srectl::commands::ResourceKind;
         use srectl::ui::InputMode;
         use srectl::views::overview_view::ClusterOverviewData;
         use srectl::views::resource_table::ResourceTableState;
+        use srelens_kube::client_cache::ClientCache;
+        use srelens_streams::logs::LogStreamManager;
+        use srelens_streams::watch::WatchManager;
         use std::collections::{HashMap, HashSet};
         use std::path::PathBuf;
         use std::sync::Arc;
@@ -3146,11 +3349,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_table_copy_and_bulk_mark_copy() {
+        use srectl::app::{ActiveView, App};
+        use srectl::ui::InputMode;
         use srelens_kube::client_cache::ClientCache;
         use srelens_streams::logs::LogStreamManager;
         use srelens_streams::watch::WatchManager;
-        use srectl::app::{ActiveView, App};
-        use srectl::ui::InputMode;
         use std::collections::{HashMap, HashSet};
         use std::path::PathBuf;
         use std::sync::Arc;
@@ -3216,9 +3419,7 @@ mod tests {
             cluster_unreachable: false,
             ai_settings: srectl::AiSettings::default(),
             tui_config: srectl::TuiConfig::default(),
-            assistant_state: srectl::views::assistant_view::AssistantViewState::for_context(
-                "prod",
-            ),
+            assistant_state: srectl::views::assistant_view::AssistantViewState::for_context("prod"),
             assistant_states: HashMap::new(),
             pod_metrics_tick_counter: 0,
             node_metrics_tick_counter: 0,
@@ -3317,12 +3518,12 @@ mod tests {
 
     #[tokio::test]
     async fn test_delete_resource_and_rollout_restart_modal_action_format() {
-        use srelens_kube::client_cache::ClientCache;
-        use srelens_streams::logs::LogStreamManager;
-        use srelens_streams::watch::WatchManager;
         use srectl::app::{ActiveView, App};
         use srectl::ui::dialogs::Modal;
         use srectl::ui::InputMode;
+        use srelens_kube::client_cache::ClientCache;
+        use srelens_streams::logs::LogStreamManager;
+        use srelens_streams::watch::WatchManager;
         use std::collections::{HashMap, HashSet};
         use std::path::PathBuf;
         use std::sync::Arc;
@@ -3383,9 +3584,7 @@ mod tests {
             cluster_unreachable: false,
             ai_settings: srectl::AiSettings::default(),
             tui_config: srectl::TuiConfig::default(),
-            assistant_state: srectl::views::assistant_view::AssistantViewState::for_context(
-                "prod",
-            ),
+            assistant_state: srectl::views::assistant_view::AssistantViewState::for_context("prod"),
             assistant_states: HashMap::new(),
             pod_metrics_tick_counter: 0,
             node_metrics_tick_counter: 0,
@@ -3595,14 +3794,14 @@ mod tests {
 
     #[tokio::test]
     async fn test_action_palette_generation_and_execution() {
-        use srelens_kube::client_cache::ClientCache;
-        use srelens_streams::logs::LogStreamManager;
-        use srelens_streams::watch::WatchManager;
         use srectl::app::{ActiveView, App};
         use srectl::commands::ResourceKind;
         use srectl::ui::dialogs::{Modal, QuickActionId};
         use srectl::ui::InputMode;
         use srectl::views::resource_table::ResourceTableState;
+        use srelens_kube::client_cache::ClientCache;
+        use srelens_streams::logs::LogStreamManager;
+        use srelens_streams::watch::WatchManager;
         use std::collections::{HashMap, HashSet};
         use std::path::PathBuf;
         use std::sync::Arc;
@@ -3667,9 +3866,7 @@ mod tests {
             close_pf_button_rect: std::cell::RefCell::new(None),
             ai_settings: srectl::AiSettings::default(),
             tui_config: srectl::TuiConfig::default(),
-            assistant_state: srectl::views::assistant_view::AssistantViewState::for_context(
-                "prod",
-            ),
+            assistant_state: srectl::views::assistant_view::AssistantViewState::for_context("prod"),
             assistant_states: HashMap::new(),
             pod_metrics_tick_counter: 0,
             node_metrics_tick_counter: 0,
@@ -3750,14 +3947,14 @@ mod tests {
 
     #[tokio::test]
     async fn test_resource_relationship_tree_navigation() {
-        use srelens_kube::client_cache::ClientCache;
-        use srelens_kube::lineage::{LineageNode, LineageRelation};
-        use srelens_streams::logs::LogStreamManager;
-        use srelens_streams::watch::WatchManager;
         use srectl::app::{ActiveView, App};
         use srectl::commands::ResourceKind;
         use srectl::ui::InputMode;
         use srectl::views::resource_table::ResourceTableState;
+        use srelens_kube::client_cache::ClientCache;
+        use srelens_kube::lineage::{LineageNode, LineageRelation};
+        use srelens_streams::logs::LogStreamManager;
+        use srelens_streams::watch::WatchManager;
         use std::collections::{HashMap, HashSet};
         use std::path::PathBuf;
         use std::sync::Arc;
@@ -3821,9 +4018,7 @@ mod tests {
             close_pf_button_rect: std::cell::RefCell::new(None),
             ai_settings: srectl::AiSettings::default(),
             tui_config: srectl::TuiConfig::default(),
-            assistant_state: srectl::views::assistant_view::AssistantViewState::for_context(
-                "shop",
-            ),
+            assistant_state: srectl::views::assistant_view::AssistantViewState::for_context("shop"),
             assistant_states: HashMap::new(),
             pod_metrics_tick_counter: 0,
             node_metrics_tick_counter: 0,
@@ -3897,16 +4092,16 @@ mod tests {
     #[tokio::test]
     async fn test_node_inspector_enter_navigation_and_pod_jump() {
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        use srectl::app::{ActiveView, App};
+        use srectl::commands::ResourceKind;
+        use srectl::ui::{InputMode, Modal};
+        use srectl::views::resource_table::ResourceTableState;
         use srelens_kube::client_cache::ClientCache;
         use srelens_kube::node_inspector::{
             NodeConditionInfo, NodeInspectorDetails, NodePodItem, NodeTaintInfo,
         };
         use srelens_streams::logs::LogStreamManager;
         use srelens_streams::watch::WatchManager;
-        use srectl::app::{ActiveView, App};
-        use srectl::commands::ResourceKind;
-        use srectl::ui::{InputMode, Modal};
-        use srectl::views::resource_table::ResourceTableState;
         use std::collections::{HashMap, HashSet};
         use std::path::PathBuf;
         use std::sync::Arc;
@@ -4119,14 +4314,14 @@ mod tests {
     async fn test_mouse_row_selection_and_scrolling_in_table_and_node_inspector() {
         use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
         use ratatui::layout::Rect;
-        use srelens_kube::client_cache::ClientCache;
-        use srelens_kube::node_inspector::{NodeInspectorDetails, NodePodItem};
-        use srelens_streams::logs::LogStreamManager;
-        use srelens_streams::watch::WatchManager;
         use srectl::app::{ActiveView, App};
         use srectl::commands::ResourceKind;
         use srectl::ui::InputMode;
         use srectl::views::resource_table::ResourceTableState;
+        use srelens_kube::client_cache::ClientCache;
+        use srelens_kube::node_inspector::{NodeInspectorDetails, NodePodItem};
+        use srelens_streams::logs::LogStreamManager;
+        use srelens_streams::watch::WatchManager;
         use std::collections::HashMap;
         use std::path::PathBuf;
         use std::sync::Arc;
@@ -4348,14 +4543,14 @@ mod tests {
     #[tokio::test]
     async fn test_text_search_in_describe_yaml_and_logs() {
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-        use srelens_kube::client_cache::ClientCache;
-        use srelens_streams::logs::LogStreamManager;
-        use srelens_streams::watch::WatchManager;
         use srectl::app::{ActiveView, App};
         use srectl::ui::InputMode;
         use srectl::views::describe_view::DescribeViewState;
         use srectl::views::logs_view::LogsViewState;
         use srectl::views::yaml_view::YamlViewState;
+        use srelens_kube::client_cache::ClientCache;
+        use srelens_streams::logs::LogStreamManager;
+        use srelens_streams::watch::WatchManager;
         use std::collections::HashMap;
         use std::path::PathBuf;
         use std::sync::Arc;
@@ -4938,12 +5133,12 @@ mod tests {
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
         use ratatui::backend::TestBackend;
         use ratatui::Terminal;
-        use srelens_kube::metrics::MetricSample;
         use srectl::app::ActiveView;
         use srectl::commands::ResourceKind;
         use srectl::ui::dialogs::Modal;
         use srectl::views::metrics_panel_view::MetricsTimeRange;
         use srectl::views::resource_table::ResourceTableState;
+        use srelens_kube::metrics::MetricSample;
 
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         let mut app = crate::common::theme::new_app(
@@ -5307,13 +5502,13 @@ mod tests {
     #[tokio::test]
     async fn test_node_inspector_multi_container_pod_logs_picker() {
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        use srectl::app::{ActiveView, App};
+        use srectl::ui::{ContainerAction, InputMode, Modal};
+        use srectl::views::node_inspector_view::NodeInspectorState;
         use srelens_kube::client_cache::ClientCache;
         use srelens_kube::node_inspector::{NodeInspectorDetails, NodePodItem};
         use srelens_streams::logs::LogStreamManager;
         use srelens_streams::watch::WatchManager;
-        use srectl::app::{ActiveView, App};
-        use srectl::ui::{ContainerAction, InputMode, Modal};
-        use srectl::views::node_inspector_view::NodeInspectorState;
         use std::collections::{HashMap, HashSet};
         use std::path::PathBuf;
         use std::sync::Arc;
@@ -5536,13 +5731,13 @@ mod tests {
     #[tokio::test]
     async fn test_node_inspector_single_container_pod_logs_direct() {
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        use srectl::app::{ActiveView, App};
+        use srectl::ui::InputMode;
+        use srectl::views::node_inspector_view::NodeInspectorState;
         use srelens_kube::client_cache::ClientCache;
         use srelens_kube::node_inspector::{NodeInspectorDetails, NodePodItem};
         use srelens_streams::logs::LogStreamManager;
         use srelens_streams::watch::WatchManager;
-        use srectl::app::{ActiveView, App};
-        use srectl::ui::InputMode;
-        use srectl::views::node_inspector_view::NodeInspectorState;
         use std::collections::{HashMap, HashSet};
         use std::path::PathBuf;
         use std::sync::Arc;
@@ -5838,14 +6033,14 @@ mod tests {
     async fn test_workloads_rebuild_aggregation_and_status_verdicts() {
         let _theme = crate::common::theme::lock();
         use serde_json::json;
-        use srelens_kube::client_cache::ClientCache;
-        use srelens_streams::logs::LogStreamManager;
-        use srelens_streams::watch::WatchManager;
         use srectl::app::{ActiveView, App};
         use srectl::commands::ResourceKind;
         use srectl::theme::{status_style, Theme};
         use srectl::ui::InputMode;
         use srectl::views::resource_table::ResourceTableState;
+        use srelens_kube::client_cache::ClientCache;
+        use srelens_streams::logs::LogStreamManager;
+        use srelens_streams::watch::WatchManager;
         use std::collections::{HashMap, HashSet};
         use std::path::PathBuf;
         use std::sync::Arc;
@@ -6047,13 +6242,13 @@ mod tests {
     async fn test_workloads_tab_segment_cycle_and_enter_drilldown() {
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
         use serde_json::json;
-        use srelens_kube::client_cache::ClientCache;
-        use srelens_streams::logs::LogStreamManager;
-        use srelens_streams::watch::WatchManager;
         use srectl::app::{ActiveView, App};
         use srectl::commands::ResourceKind;
         use srectl::ui::InputMode;
         use srectl::views::resource_table::{ResourceTableState, WorkloadSegment};
+        use srelens_kube::client_cache::ClientCache;
+        use srelens_streams::logs::LogStreamManager;
+        use srelens_streams::watch::WatchManager;
         use std::collections::{HashMap, HashSet};
         use std::path::PathBuf;
         use std::sync::Arc;
@@ -6395,11 +6590,9 @@ mod tests {
         let mut theme = crate::common::theme::lock();
         use ratatui::backend::TestBackend;
         use ratatui::Terminal;
-        use srelens_kube::node_inspector::{NodeInspectorDetails, NodePodItem};
         use srectl::theme::Theme;
-        use srectl::views::node_inspector_view::{
-            render_node_inspector_view, NodeInspectorState,
-        };
+        use srectl::views::node_inspector_view::{render_node_inspector_view, NodeInspectorState};
+        use srelens_kube::node_inspector::{NodeInspectorDetails, NodePodItem};
 
         assert!(theme.set_by_name("solarized-dark").is_some());
         assert_ne!(
@@ -7054,16 +7247,16 @@ mod tests {
     #[tokio::test]
     async fn test_topology_command_resolution_and_flow_navigation() {
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        use srectl::app::{ActiveView, App};
+        use srectl::commands::{resolve_command, CommandTarget, ResourceKind};
+        use srectl::ui::InputMode;
+        use srectl::views::topology_view::TopologyViewState;
         use srelens_kube::client_cache::ClientCache;
         use srelens_kube::topology::{
             EdgeKind, Health, Lane, Provenance, TopologyEdge, TopologyGraphOut, TopologyNode,
         };
         use srelens_streams::logs::LogStreamManager;
         use srelens_streams::watch::WatchManager;
-        use srectl::app::{ActiveView, App};
-        use srectl::commands::{resolve_command, CommandTarget, ResourceKind};
-        use srectl::ui::InputMode;
-        use srectl::views::topology_view::TopologyViewState;
         use std::collections::{HashMap, HashSet};
         use std::path::PathBuf;
         use std::sync::Arc;
@@ -7285,14 +7478,14 @@ mod tests {
     #[tokio::test]
     async fn test_gpuinfo_command_resolution_and_node_pod_vram_selection() {
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-        use srelens_kube::client_cache::ClientCache;
-        use srelens_kube::gpu_info::{format_vram_mib, GpuClusterInfo, GpuNodeInfo, GpuPodItem};
-        use srelens_streams::logs::LogStreamManager;
-        use srelens_streams::watch::WatchManager;
         use srectl::app::{ActiveView, App};
         use srectl::commands::{resolve_command, CommandTarget, ResourceKind};
         use srectl::ui::InputMode;
         use srectl::views::gpu_view::{GpuPane, GpuViewState};
+        use srelens_kube::client_cache::ClientCache;
+        use srelens_kube::gpu_info::{format_vram_mib, GpuClusterInfo, GpuNodeInfo, GpuPodItem};
+        use srelens_streams::logs::LogStreamManager;
+        use srelens_streams::watch::WatchManager;
         use std::collections::{HashMap, HashSet};
         use std::path::PathBuf;
         use std::sync::Arc;
@@ -7522,13 +7715,13 @@ mod tests {
     #[tokio::test]
     async fn test_multi_pod_logs_from_marked_items_and_workload() {
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-        use srelens_kube::client_cache::ClientCache;
-        use srelens_streams::logs::LogStreamManager;
-        use srelens_streams::watch::WatchManager;
         use srectl::app::{ActiveView, App};
         use srectl::commands::ResourceKind;
         use srectl::ui::InputMode;
         use srectl::views::resource_table::ResourceTableState;
+        use srelens_kube::client_cache::ClientCache;
+        use srelens_streams::logs::LogStreamManager;
+        use srelens_streams::watch::WatchManager;
         use std::collections::{HashMap, HashSet};
         use std::path::PathBuf;
         use std::sync::Arc;
@@ -7605,9 +7798,7 @@ mod tests {
             toast: None,
             ai_settings: srectl::AiSettings::default(),
             tui_config: srectl::TuiConfig::default(),
-            assistant_state: srectl::views::assistant_view::AssistantViewState::for_context(
-                "prod",
-            ),
+            assistant_state: srectl::views::assistant_view::AssistantViewState::for_context("prod"),
             assistant_states: HashMap::new(),
             pod_metrics_tick_counter: 0,
             node_metrics_tick_counter: 0,
@@ -7698,13 +7889,13 @@ mod tests {
     #[tokio::test]
     async fn test_top_hotspots_commands_and_sorting() {
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-        use srelens_kube::client_cache::ClientCache;
-        use srelens_streams::logs::LogStreamManager;
-        use srelens_streams::watch::WatchManager;
         use srectl::app::{ActiveView, App};
         use srectl::commands::{resolve_command, CommandTarget, ResourceKind};
         use srectl::ui::InputMode;
         use srectl::views::top_view::{TopNodeRow, TopPodRow, TopSortBy, TopTab};
+        use srelens_kube::client_cache::ClientCache;
+        use srelens_streams::logs::LogStreamManager;
+        use srelens_streams::watch::WatchManager;
         use std::collections::{HashMap, HashSet};
         use std::path::PathBuf;
         use std::sync::Arc;
@@ -7888,10 +8079,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_helm_detail_view_state_and_values_diff() {
-        use srelens_kube::helm::{HelmReleaseDetail, HelmRevision};
         use srectl::views::helm_detail_view::{
             DiffKind, HelmDetailTab, HelmDetailViewState, ValuesDiffMode,
         };
+        use srelens_kube::helm::{HelmReleaseDetail, HelmRevision};
 
         let mut detail_state =
             HelmDetailViewState::new("ingress-nginx".to_string(), "default".to_string());
@@ -8240,8 +8431,8 @@ mod tests {
 
     #[tokio::test]
     async fn helm_detail_search_matches_and_navigates_across_tabs() {
-        use srelens_kube::helm::{HelmReleaseDetail, HelmRevision};
         use srectl::views::helm_detail_view::{HelmDetailTab, HelmDetailViewState};
+        use srelens_kube::helm::{HelmReleaseDetail, HelmRevision};
 
         let mut detail_state = HelmDetailViewState::new("app".to_string(), "default".to_string());
         let mock_detail = HelmReleaseDetail {
@@ -8322,11 +8513,11 @@ mod tests {
     async fn test_argo_views_navigation_and_interactions() {
         let _settings = crate::common::env::isolate_settings();
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-        use srelens_kube::argo::ArgoApplication;
         use srectl::app::ActiveView;
         use srectl::ui::Modal;
         use srectl::views::argo_detail_view::ArgoDetailTab;
         use srectl::views::argo_view::ArgoViewState;
+        use srelens_kube::argo::ArgoApplication;
 
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         let mut app = crate::common::theme::new_app(
@@ -8595,9 +8786,9 @@ mod tests {
         .unwrap();
         app.active_namespace = "default".to_string();
 
-        // :argo argocd should switch to Argo and set filter_query to argocd
+        // :argo argocd should switch to Argo and set filter_query to argocd without corrupting active_namespace
         app.execute_colon_command("argo argocd").await;
-        assert_eq!(app.active_namespace, "argocd");
+        assert_eq!(app.active_namespace, "default");
         match &app.active_view {
             ActiveView::Argo(state) => {
                 assert_eq!(state.filter_query, "argocd");
@@ -8680,9 +8871,9 @@ mod tests {
     #[tokio::test]
     async fn test_argo_view_renders_loading_error_empty_hub_and_table_states() {
         let _settings = crate::common::env::isolate_settings();
-        use srelens_kube::argo::ArgoApplication;
         use srectl::app::ActiveView;
         use srectl::views::argo_view::ArgoViewState;
+        use srelens_kube::argo::ArgoApplication;
 
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         let mut app = crate::common::theme::new_app(
@@ -8753,9 +8944,9 @@ mod tests {
     #[tokio::test]
     async fn test_argo_detail_view_renders_all_tabs() {
         let _settings = crate::common::env::isolate_settings();
-        use srelens_kube::argo::ArgoApplication;
         use srectl::app::ActiveView;
         use srectl::views::argo_detail_view::{ArgoDetailTab, ArgoDetailViewState};
+        use srelens_kube::argo::ArgoApplication;
 
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         let mut app = crate::common::theme::new_app(
@@ -8849,10 +9040,10 @@ mod tests {
     async fn test_argo_sync_and_toggle_auto_confirm_modals_render() {
         let _settings = crate::common::env::isolate_settings();
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-        use srelens_kube::argo::ArgoApplication;
         use srectl::app::ActiveView;
         use srectl::ui::dialogs::Modal;
         use srectl::views::argo_view::ArgoViewState;
+        use srelens_kube::argo::ArgoApplication;
 
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         let mut app = crate::common::theme::new_app(
@@ -8919,10 +9110,10 @@ mod tests {
     async fn test_argo_list_and_detail_key_handlers_exercise_side_panels_safely() {
         let _settings = crate::common::env::isolate_settings();
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-        use srelens_kube::argo::ArgoApplication;
         use srectl::app::ActiveView;
         use srectl::views::argo_detail_view::ArgoDetailTab;
         use srectl::views::argo_view::ArgoViewState;
+        use srelens_kube::argo::ArgoApplication;
 
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         let mut app = crate::common::theme::new_app(

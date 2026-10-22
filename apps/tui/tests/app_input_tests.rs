@@ -13,7 +13,6 @@ use ratatui::style::Style;
 use serde_json::{json, Value};
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver};
 
-use srelens_kube::contexts::ContextDto;
 use srectl::app::{ActiveView, App, SuspendAction};
 use srectl::commands::{
     command_suggestions_with_crds, CommandTarget, CrdMeta, PrinterColumn, ResourceKind,
@@ -27,6 +26,7 @@ use srectl::views::{
     DescribeViewState, LogsViewState, NodeInspectorState, ResourceTableState, YamlViewState,
 };
 use srectl::CommandPopupDensity;
+use srelens_kube::contexts::ContextDto;
 
 use common::{ch, ctrl, key, shift, type_str};
 
@@ -1766,6 +1766,85 @@ async fn empty_command_enter_runs_highlighted_suggestion_and_arrow_selection() {
     type_str(&mut app, "zzzz").await;
     press(&mut app, key(KeyCode::Enter)).await;
     assert!(toast(&app).starts_with("Unknown command: 'zzzz'"));
+}
+
+#[tokio::test]
+async fn namespace_colon_command_switches_namespace_directly_without_leaving_modal_open() {
+    let _settings = common::env::isolate_settings();
+    let (mut app, _rx) = common::app().await;
+    app.namespaces = vec![
+        "default".to_string(),
+        "kube-system".to_string(),
+        "tools".to_string(),
+    ];
+
+    // :ns default + Enter switches namespace directly without leaving modal open
+    press(&mut app, ch(':')).await;
+    type_str(&mut app, "ns default").await;
+    press(&mut app, key(KeyCode::Enter)).await;
+    assert_eq!(app.active_namespace, "default");
+    assert!(app.modal.is_none(), "Modal must not be left open");
+    assert_eq!(app.input_mode, InputMode::Normal);
+
+    // :ns tools + Enter switches to tools
+    press(&mut app, ch(':')).await;
+    type_str(&mut app, "ns tools").await;
+    press(&mut app, key(KeyCode::Enter)).await;
+    assert_eq!(app.active_namespace, "tools");
+    assert!(app.modal.is_none(), "Modal must not be left open");
+}
+
+#[tokio::test]
+async fn namespace_command_tab_autocompletes_namespace() {
+    let _settings = common::env::isolate_settings();
+    let (mut app, _rx) = common::app().await;
+    app.namespaces = vec![
+        "default".to_string(),
+        "kube-system".to_string(),
+        "tools".to_string(),
+    ];
+
+    // :ns defa + Tab autocompletes to "ns default"
+    press(&mut app, ch(':')).await;
+    type_str(&mut app, "ns defa").await;
+    press(&mut app, key(KeyCode::Tab)).await;
+    assert_eq!(app.command_buffer, "ns default");
+
+    press(&mut app, key(KeyCode::Enter)).await;
+    assert_eq!(app.active_namespace, "default");
+    assert!(app.modal.is_none());
+}
+
+#[tokio::test]
+async fn resource_namespace_command_switches_namespace_and_view() {
+    let _settings = common::env::isolate_settings();
+    let (mut app, _rx) = common::app().await;
+    app.namespaces = vec!["default".to_string(), "tools".to_string()];
+
+    // :pods tools + Enter switches namespace to tools and view to Pods
+    press(&mut app, ch(':')).await;
+    type_str(&mut app, "pods tools").await;
+    press(&mut app, key(KeyCode::Enter)).await;
+    assert_eq!(app.active_namespace, "tools");
+    assert_eq!(table(&app).kind, ResourceKind::Pods);
+    assert!(app.modal.is_none());
+}
+
+#[tokio::test]
+async fn changed_duration_command_does_not_corrupt_active_namespace() {
+    let _settings = common::env::isolate_settings();
+    let (mut app, _rx) = common::app().await;
+    app.active_namespace = "default".to_string();
+
+    // :changed 1h must NOT overwrite active_namespace to "1h"
+    press(&mut app, ch(':')).await;
+    type_str(&mut app, "changed 1h").await;
+    press(&mut app, key(KeyCode::Enter)).await;
+    assert_eq!(
+        app.active_namespace, "default",
+        "active_namespace must not be corrupted by duration"
+    );
+    assert!(matches!(app.active_view, ActiveView::Changed(_)));
 }
 
 #[tokio::test]
@@ -5067,10 +5146,7 @@ async fn helm_detail_manifest_search_and_navigation_input_flow() {
 
     // 1. Press '/' to enter search mode
     press(&mut app, ch('/')).await;
-    assert_eq!(
-        app.input_mode,
-        srectl::ui::statusbar::InputMode::Filter
-    );
+    assert_eq!(app.input_mode, srectl::ui::statusbar::InputMode::Filter);
 
     // 2. Type "token"
     for c in "token".chars() {
@@ -5088,10 +5164,7 @@ async fn helm_detail_manifest_search_and_navigation_input_flow() {
 
     // 3. Press Enter to return to Normal mode with search query active
     press(&mut app, key(KeyCode::Enter)).await;
-    assert_eq!(
-        app.input_mode,
-        srectl::ui::statusbar::InputMode::Normal
-    );
+    assert_eq!(app.input_mode, srectl::ui::statusbar::InputMode::Normal);
     assert_eq!(app.filter_buffer, "token");
 
     // 4. Press 'n' to go to next match
@@ -6349,8 +6422,9 @@ async fn argo_view_x_opens_action_palette_with_ai_diagnose_and_actions() {
             // Check actions
             let action_ids: Vec<_> = actions.iter().map(|a| a.id).collect();
             assert!(action_ids.contains(&srectl::ui::dialogs::QuickActionId::AskAi));
-            assert!(action_ids
-                .contains(&srectl::ui::dialogs::QuickActionId::PlaybookArgoProgressing));
+            assert!(
+                action_ids.contains(&srectl::ui::dialogs::QuickActionId::PlaybookArgoProgressing)
+            );
             assert!(action_ids.contains(&srectl::ui::dialogs::QuickActionId::ArgoSync));
             assert!(action_ids.contains(&srectl::ui::dialogs::QuickActionId::ArgoRefresh));
             assert!(action_ids.contains(&srectl::ui::dialogs::QuickActionId::ArgoOpenGit));

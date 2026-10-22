@@ -48,31 +48,55 @@ impl DeepLink {
                 target,
             } => {
                 let ctx = context.as_deref().unwrap_or("_");
-                let ns = namespace.as_deref().unwrap_or("_");
-                let target_name = match target {
-                    CommandTarget::Resource(k) => match k {
-                        crate::commands::ResourceKind::Assistant => "ai".to_string(),
-                        crate::commands::ResourceKind::Overview => "overview".to_string(),
-                        crate::commands::ResourceKind::Toolbox => "toolbox".to_string(),
-                        crate::commands::ResourceKind::Settings => "settings".to_string(),
-                        crate::commands::ResourceKind::TuiConfig => "config".to_string(),
-                        crate::commands::ResourceKind::ArgoApplications => "argo".to_string(),
-                        crate::commands::ResourceKind::BgpPeers => "bgp".to_string(),
-                        other => other.to_string().to_lowercase(),
-                    },
-                    CommandTarget::CustomResource(crd) => crd.plural.to_lowercase(),
-                    CommandTarget::Help => "help".to_string(),
-                    CommandTarget::Contexts => "contexts".to_string(),
-                    CommandTarget::AddCluster => "import".to_string(),
-                    CommandTarget::Namespaces => "namespaces".to_string(),
-                    CommandTarget::Quit => "quit".to_string(),
-                    CommandTarget::ThemePicker => "themes".to_string(),
-                    CommandTarget::SetTheme(t) => format!("theme/{}", t),
-                    CommandTarget::FeatureBanner => "features".to_string(),
-                    CommandTarget::OpenUrl(u) => format!("open/{}", u),
-                    CommandTarget::Update => "update".to_string(),
+                let (resolved_ns, target_name) = match target {
+                    CommandTarget::SwitchNamespace(ref ns) => {
+                        (Some(ns.as_str()), "namespaces".to_string())
+                    }
+                    CommandTarget::ResourceInNamespace(ref k, ref ns) => {
+                        let name = match k {
+                            crate::commands::ResourceKind::Assistant => "ai".to_string(),
+                            crate::commands::ResourceKind::Overview => "overview".to_string(),
+                            crate::commands::ResourceKind::Toolbox => "toolbox".to_string(),
+                            crate::commands::ResourceKind::Settings => "settings".to_string(),
+                            crate::commands::ResourceKind::TuiConfig => "config".to_string(),
+                            crate::commands::ResourceKind::ArgoApplications => "argo".to_string(),
+                            crate::commands::ResourceKind::BgpPeers => "bgp".to_string(),
+                            other => other.to_string().to_lowercase(),
+                        };
+                        (Some(ns.as_str()), name)
+                    }
+                    CommandTarget::CustomResourceInNamespace(ref crd, ref ns) => {
+                        (Some(ns.as_str()), crd.plural.to_lowercase())
+                    }
+                    CommandTarget::Resource(k) => {
+                        let name = match k {
+                            crate::commands::ResourceKind::Assistant => "ai".to_string(),
+                            crate::commands::ResourceKind::Overview => "overview".to_string(),
+                            crate::commands::ResourceKind::Toolbox => "toolbox".to_string(),
+                            crate::commands::ResourceKind::Settings => "settings".to_string(),
+                            crate::commands::ResourceKind::TuiConfig => "config".to_string(),
+                            crate::commands::ResourceKind::ArgoApplications => "argo".to_string(),
+                            crate::commands::ResourceKind::BgpPeers => "bgp".to_string(),
+                            other => other.to_string().to_lowercase(),
+                        };
+                        (namespace.as_deref(), name)
+                    }
+                    CommandTarget::CustomResource(crd) => {
+                        (namespace.as_deref(), crd.plural.to_lowercase())
+                    }
+                    CommandTarget::Help => (namespace.as_deref(), "help".to_string()),
+                    CommandTarget::Contexts => (namespace.as_deref(), "contexts".to_string()),
+                    CommandTarget::AddCluster => (namespace.as_deref(), "import".to_string()),
+                    CommandTarget::Namespaces => (namespace.as_deref(), "namespaces".to_string()),
+                    CommandTarget::Quit => (namespace.as_deref(), "quit".to_string()),
+                    CommandTarget::ThemePicker => (namespace.as_deref(), "themes".to_string()),
+                    CommandTarget::SetTheme(t) => (namespace.as_deref(), format!("theme/{}", t)),
+                    CommandTarget::FeatureBanner => (namespace.as_deref(), "features".to_string()),
+                    CommandTarget::OpenUrl(u) => (namespace.as_deref(), format!("open/{}", u)),
+                    CommandTarget::Update => (namespace.as_deref(), "update".to_string()),
                 };
-                format!("srelens://view/{}/{}/{}", ctx, ns, target_name)
+                let ns_str = resolved_ns.filter(|s| !s.is_empty()).unwrap_or("_");
+                format!("srelens://view/{}/{}/{}", ctx, ns_str, target_name)
             }
         }
     }
@@ -270,5 +294,42 @@ mod tests {
                 name: "my-service-pod".to_string(),
             }
         );
+    }
+
+    #[test]
+    fn test_view_deep_link_with_namespace_scoped_targets() {
+        let view_ns = DeepLink::View {
+            context: Some("prod-eu".to_string()),
+            namespace: Some("kube-system".to_string()),
+            target: CommandTarget::Namespaces,
+        };
+        let url_ns = view_ns.to_url();
+        assert_eq!(url_ns, "srelens://view/prod-eu/kube-system/namespaces");
+        let parsed_ns = DeepLink::parse(&url_ns).expect("should parse");
+        assert_eq!(parsed_ns.to_url(), url_ns);
+
+        let view_pods = DeepLink::View {
+            context: Some("prod-eu".to_string()),
+            namespace: Some("tools".to_string()),
+            target: CommandTarget::Resource(crate::commands::ResourceKind::Pods),
+        };
+        let url_pods = view_pods.to_url();
+        assert_eq!(url_pods, "srelens://view/prod-eu/tools/pods");
+        let parsed_pods = DeepLink::parse(&url_pods).expect("should parse");
+        assert_eq!(parsed_pods.to_url(), url_pods);
+
+        // Test SwitchNamespace and ResourceInNamespace targets
+        let view_scoped = DeepLink::View {
+            context: Some("prod-eu".to_string()),
+            namespace: None,
+            target: CommandTarget::ResourceInNamespace(
+                crate::commands::ResourceKind::Pods,
+                "tools".to_string(),
+            ),
+        };
+        let url_scoped = view_scoped.to_url();
+        assert_eq!(url_scoped, "srelens://view/prod-eu/tools/pods");
+        let parsed_scoped = DeepLink::parse(&url_scoped).expect("should parse");
+        assert_eq!(parsed_scoped.to_url(), url_scoped);
     }
 }

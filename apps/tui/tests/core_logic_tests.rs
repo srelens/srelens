@@ -1989,7 +1989,7 @@ fn resolve_matches_crds_by_every_name_and_by_prefix_only_from_three_characters()
 fn namespace_and_context_switch_forms_resolve_to_their_switchers() {
     assert_eq!(
         resolve_command(":ns kube-system"),
-        Some(CommandTarget::Namespaces)
+        Some(CommandTarget::SwitchNamespace("kube-system".to_string()))
     );
     assert_eq!(
         resolve_command("ctx prod-eu"),
