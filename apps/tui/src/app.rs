@@ -4208,7 +4208,12 @@ impl App {
                         if !suggestions.is_empty()
                             && self.command_suggestion_idx < suggestions.len()
                         {
-                            Some(suggestions[self.command_suggestion_idx].0.target.clone())
+                            let (sugg, _) = &suggestions[self.command_suggestion_idx];
+                            if !sugg.name.ends_with(" <namespace>") {
+                                Some(sugg.target.clone())
+                            } else {
+                                None
+                            }
                         } else {
                             None
                         }
@@ -4251,8 +4256,12 @@ impl App {
                                 (self.command_suggestion_idx + 1) % suggestions.len()
                             };
                             self.command_suggestion_idx = next_idx;
-                            self.command_buffer = suggestions[next_idx].0.name.clone();
-                            self.command_tab_target = Some(suggestions[next_idx].0.target.clone());
+                            let name = &suggestions[next_idx].0.name;
+                            if !name.ends_with(" <namespace>") {
+                                self.command_buffer = name.clone();
+                                self.command_tab_target =
+                                    Some(suggestions[next_idx].0.target.clone());
+                            }
                         }
                     } else {
                         self.command_tab_base = None;
@@ -4264,18 +4273,21 @@ impl App {
                         );
                         if !suggestions.is_empty() {
                             let idx = self.command_suggestion_idx % suggestions.len();
-                            self.command_buffer = suggestions[idx].0.name.clone();
-                            let target = &suggestions[idx].0.target;
-                            self.command_tab_target = Some(target.clone());
-                            self.command_suggestion_idx = command_suggestions_full(
-                                &self.command_buffer,
-                                &self.crds,
-                                &self.namespaces,
-                                self.namespace_discovery_error.as_deref(),
-                            )
-                            .iter()
-                            .position(|(command, _)| &command.target == target)
-                            .unwrap_or(idx);
+                            let name = &suggestions[idx].0.name;
+                            if !name.ends_with(" <namespace>") {
+                                self.command_buffer = name.clone();
+                                let target = &suggestions[idx].0.target;
+                                self.command_tab_target = Some(target.clone());
+                                self.command_suggestion_idx = command_suggestions_full(
+                                    &self.command_buffer,
+                                    &self.crds,
+                                    &self.namespaces,
+                                    self.namespace_discovery_error.as_deref(),
+                                )
+                                .iter()
+                                .position(|(command, _)| &command.target == target)
+                                .unwrap_or(idx);
+                            }
                         }
                     }
                 }
@@ -4301,8 +4313,12 @@ impl App {
                                 (self.command_suggestion_idx + len - 1) % len
                             };
                             self.command_suggestion_idx = prev_idx;
-                            self.command_buffer = suggestions[prev_idx].0.name.clone();
-                            self.command_tab_target = Some(suggestions[prev_idx].0.target.clone());
+                            let name = &suggestions[prev_idx].0.name;
+                            if !name.ends_with(" <namespace>") {
+                                self.command_buffer = name.clone();
+                                self.command_tab_target =
+                                    Some(suggestions[prev_idx].0.target.clone());
+                            }
                         }
                     } else {
                         self.command_tab_base = None;
@@ -4316,7 +4332,10 @@ impl App {
                             let len = suggestions.len();
                             let idx = (self.command_suggestion_idx + len - 1) % len;
                             self.command_suggestion_idx = idx;
-                            self.command_tab_target = Some(suggestions[idx].0.target.clone());
+                            let name = &suggestions[idx].0.name;
+                            if !name.ends_with(" <namespace>") {
+                                self.command_tab_target = Some(suggestions[idx].0.target.clone());
+                            }
                         }
                     }
                 }
@@ -4337,10 +4356,13 @@ impl App {
                     if !suggestions.is_empty() {
                         let next_idx = (self.command_suggestion_idx + 1) % suggestions.len();
                         self.command_suggestion_idx = next_idx;
-                        if self.command_tab_base.is_some() {
-                            self.command_buffer = suggestions[next_idx].0.name.clone();
+                        let name = &suggestions[next_idx].0.name;
+                        if !name.ends_with(" <namespace>") {
+                            if self.command_tab_base.is_some() {
+                                self.command_buffer = name.clone();
+                            }
+                            self.command_tab_target = Some(suggestions[next_idx].0.target.clone());
                         }
-                        self.command_tab_target = Some(suggestions[next_idx].0.target.clone());
                     }
                 }
                 KeyCode::Up | KeyCode::Char('p') | KeyCode::Char('P')
@@ -4360,10 +4382,13 @@ impl App {
                         let len = suggestions.len();
                         let prev_idx = (self.command_suggestion_idx + len - 1) % len;
                         self.command_suggestion_idx = prev_idx;
-                        if self.command_tab_base.is_some() {
-                            self.command_buffer = suggestions[prev_idx].0.name.clone();
+                        let name = &suggestions[prev_idx].0.name;
+                        if !name.ends_with(" <namespace>") {
+                            if self.command_tab_base.is_some() {
+                                self.command_buffer = name.clone();
+                            }
+                            self.command_tab_target = Some(suggestions[prev_idx].0.target.clone());
                         }
-                        self.command_tab_target = Some(suggestions[prev_idx].0.target.clone());
                     }
                 }
                 _ if is_word_delete_key(&key) => {
@@ -8940,8 +8965,11 @@ impl App {
 
     pub fn handle_paste(&mut self, text: String) {
         if self.input_mode == InputMode::Command {
+            self.command_tab_base = None;
+            self.command_tab_target = None;
             let cleaned = text.replace("\r\n", " ").replace('\n', " ");
             self.command_buffer.push_str(&cleaned);
+            self.command_suggestion_idx = 0;
             return;
         }
         if self.input_mode == InputMode::Filter {
@@ -14510,6 +14538,25 @@ impl App {
                     if !ns_list.is_empty() {
                         self.namespaces = ns_list;
                         self.namespace_discovery_error = None;
+                        if self.input_mode == InputMode::Command {
+                            if let Some(ref target) = self.command_tab_target {
+                                let query = self
+                                    .command_tab_base
+                                    .as_deref()
+                                    .unwrap_or(&self.command_buffer);
+                                let suggs = command_suggestions_full(
+                                    query,
+                                    &self.crds,
+                                    &self.namespaces,
+                                    self.namespace_discovery_error.as_deref(),
+                                );
+                                if let Some(pos) =
+                                    suggs.iter().position(|(cmd, _)| &cmd.target == target)
+                                {
+                                    self.command_suggestion_idx = pos;
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -14658,6 +14705,25 @@ impl App {
                     if !ns_list.is_empty() {
                         self.namespaces = ns_list;
                         self.namespace_discovery_error = None;
+                        if self.input_mode == InputMode::Command {
+                            if let Some(ref target) = self.command_tab_target {
+                                let query = self
+                                    .command_tab_base
+                                    .as_deref()
+                                    .unwrap_or(&self.command_buffer);
+                                let suggs = command_suggestions_full(
+                                    query,
+                                    &self.crds,
+                                    &self.namespaces,
+                                    self.namespace_discovery_error.as_deref(),
+                                );
+                                if let Some(pos) =
+                                    suggs.iter().position(|(cmd, _)| &cmd.target == target)
+                                {
+                                    self.command_suggestion_idx = pos;
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -14888,12 +14954,18 @@ impl App {
                 .command_tab_base
                 .as_deref()
                 .unwrap_or(&self.command_buffer);
-            Some(command_suggestions_full(
+            let suggs = command_suggestions_full(
                 query,
                 &self.crds,
                 &self.namespaces,
                 self.namespace_discovery_error.as_deref(),
-            ))
+            );
+            if let Some(ref target) = self.command_tab_target {
+                if let Some(pos) = suggs.iter().position(|(cmd, _)| &cmd.target == target) {
+                    self.command_suggestion_idx = pos;
+                }
+            }
+            Some(suggs)
         } else {
             None
         };

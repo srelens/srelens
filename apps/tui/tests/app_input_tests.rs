@@ -1900,6 +1900,104 @@ async fn namespace_command_tab_preserves_target_when_cluster_namespaces_update_b
 }
 
 #[tokio::test]
+async fn namespace_loading_placeholder_hint_not_completed_on_tab() {
+    let _settings = common::env::isolate_settings();
+    let (mut app, _rx) = common::app().await;
+    app.namespaces.clear();
+
+    // While namespaces are not loaded, typing ":ns " shows "<namespace>" hint.
+    // Pressing Tab must NOT copy "<namespace>" into the buffer.
+    press(&mut app, ch(':')).await;
+    type_str(&mut app, "ns ").await;
+    press(&mut app, key(KeyCode::Tab)).await;
+    assert_eq!(
+        app.command_buffer, "ns ",
+        "Tab on placeholder hint must leave buffer unchanged"
+    );
+
+    // Enter must not switch to literal namespace "<namespace>"
+    press(&mut app, key(KeyCode::Enter)).await;
+    assert_ne!(
+        app.active_namespace, "<namespace>",
+        "Must not switch to literal <namespace>"
+    );
+}
+
+#[tokio::test]
+async fn wildcard_all_selected_even_when_substring_namespace_matches() {
+    let _settings = common::env::isolate_settings();
+    let (mut app, _rx) = common::app().await;
+    app.namespaces = vec!["small".to_string(), "default".to_string()];
+
+    // Cluster contains namespace "small" (which contains "all").
+    // Typing ":pods all" + Enter must select all namespaces (""), NOT "small".
+    press(&mut app, ch(':')).await;
+    type_str(&mut app, "pods all").await;
+    press(&mut app, key(KeyCode::Enter)).await;
+    assert_eq!(
+        app.active_namespace, "",
+        ":pods all must switch to all namespaces, not small"
+    );
+    assert_eq!(table(&app).kind, ResourceKind::Pods);
+    assert!(app.modal.is_none());
+}
+
+#[tokio::test]
+async fn pasted_command_clears_tab_base_and_runs_full_pasted_query() {
+    let _settings = common::env::isolate_settings();
+    let (mut app, _rx) = common::app().await;
+    app.namespaces = vec!["prod".to_string(), "prod-blue".to_string()];
+
+    // Complete ":pods prod" with Tab
+    press(&mut app, ch(':')).await;
+    type_str(&mut app, "pods prod").await;
+    press(&mut app, key(KeyCode::Tab)).await;
+    assert_eq!(app.command_buffer, "pods prod");
+
+    // Paste "-blue"
+    app.handle_paste("-blue".to_string());
+    assert_eq!(app.command_buffer, "pods prod-blue");
+
+    // Enter must search "pods prod-blue" and open prod-blue, not cached "pods prod"
+    press(&mut app, key(KeyCode::Enter)).await;
+    assert_eq!(app.active_namespace, "prod-blue");
+    assert_eq!(table(&app).kind, ResourceKind::Pods);
+    assert!(app.modal.is_none());
+}
+
+#[tokio::test]
+async fn highlighted_row_tracks_target_when_namespaces_update() {
+    let _settings = common::env::isolate_settings();
+    let (mut app, _rx) = common::app().await;
+    app.namespaces = vec!["dev-b".to_string(), "dev-c".to_string()];
+
+    // Type ":pods dev" and press Down to select dev-c
+    press(&mut app, ch(':')).await;
+    type_str(&mut app, "pods dev").await;
+    press(&mut app, key(KeyCode::Down)).await;
+    assert_eq!(app.command_suggestion_idx, 1);
+
+    // Asynchronous discovery adds dev-a
+    let ch_name = format!("discovery:namespaces:{}", app.active_context);
+    app.handle_stream_event(
+        ch_name,
+        json!([{"name": "dev-a"}, {"name": "dev-b"}, {"name": "dev-c"}]),
+    );
+
+    // Rendering frame re-evaluates suggestions and ensures command_suggestion_idx tracks dev-c (now index 2)
+    let _ = common::render_app(&mut app, 100, 40);
+    assert_eq!(
+        app.command_suggestion_idx, 2,
+        "Highlighted row must follow dev-c to index 2"
+    );
+
+    // Enter executes dev-c
+    press(&mut app, key(KeyCode::Enter)).await;
+    assert_eq!(app.active_namespace, "dev-c");
+    assert_eq!(table(&app).kind, ResourceKind::Pods);
+}
+
+#[tokio::test]
 async fn single_matching_namespace_autoselects_on_enter() {
     let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app().await;

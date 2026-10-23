@@ -1200,6 +1200,19 @@ pub fn command_suggestions_full(
 
             let sub_lower = sub.to_lowercase();
 
+            let is_wildcard = sub == "all" || sub == "*" || sub.eq_ignore_ascii_case("-a");
+            if is_wildcard {
+                matches.push((
+                    DynamicCommandDef {
+                        name: format!("{} {}", cmd_prefix, sub),
+                        aliases: vec![],
+                        description: "All namespaces".to_string(),
+                        target: make_target(sub),
+                    },
+                    170,
+                ));
+            }
+
             for cand in candidates {
                 let cand_lower = cand.to_lowercase();
                 let score = if cand_lower == sub_lower {
