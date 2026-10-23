@@ -242,13 +242,24 @@ mod tests {
         assert!(!ns_defa.is_empty());
         assert!(ns_defa.iter().any(|(s, _)| s.name == "ns default"));
 
-        // 3. M3: Typing :ns dev when cluster has dev-tools and devops does not hijack
-        let dev_cluster_ns = vec!["dev-tools".to_string(), "devops".to_string()];
-        let dev_suggs = command_suggestions_full("ns dev", &[], &dev_cluster_ns, None);
-        assert!(!dev_suggs.is_empty());
+        // 3. Single match autoselection & prefix ranking:
+        // Cluster matches rank at the top; no typed fallback shadows real matches.
+        let airflow_cluster_ns = vec!["airflow-edge".to_string(), "monitoring".to_string()];
+        let airflo_suggs = command_suggestions_full("svc airflo", &[], &airflow_cluster_ns, None);
+        assert_eq!(airflo_suggs.len(), 1);
+        assert_eq!(airflo_suggs[0].0.name, "svc airflow-edge");
         assert_eq!(
-            dev_suggs[0].0.target,
-            CommandTarget::SwitchNamespace("dev".to_string())
+            airflo_suggs[0].0.target,
+            CommandTarget::ResourceInNamespace(ResourceKind::Services, "airflow-edge".to_string())
+        );
+
+        // When typed query does not match any cluster namespace, inject typed fallback
+        let unknown_suggs = command_suggestions_full("ns unknown", &[], &airflow_cluster_ns, None);
+        assert_eq!(unknown_suggs.len(), 1);
+        assert_eq!(unknown_suggs[0].0.name, "ns unknown");
+        assert_eq!(
+            unknown_suggs[0].0.target,
+            CommandTarget::SwitchNamespace("unknown".to_string())
         );
 
         // 4. M4: When namespaces list is empty, say so truthfully and don't fake default/kube-system
@@ -474,6 +485,7 @@ mod tests {
             input_mode: InputMode::Normal,
             command_buffer: String::new(),
             command_suggestion_idx: 0,
+            command_tab_base: None,
             filter_buffer: String::new(),
             modal: None,
             show_help: false,
@@ -584,6 +596,7 @@ mod tests {
             input_mode: InputMode::Normal,
             command_buffer: String::new(),
             command_suggestion_idx: 0,
+            command_tab_base: None,
             filter_buffer: String::new(),
             modal: None,
             show_help: false,
@@ -706,6 +719,7 @@ mod tests {
             input_mode: InputMode::Normal,
             command_buffer: String::new(),
             command_suggestion_idx: 0,
+            command_tab_base: None,
             filter_buffer: String::new(),
             modal: None,
             show_help: false,
@@ -931,6 +945,7 @@ mod tests {
             input_mode: InputMode::Normal,
             command_buffer: String::new(),
             command_suggestion_idx: 0,
+            command_tab_base: None,
             filter_buffer: String::new(),
             modal: None,
             show_help: false,
@@ -1161,6 +1176,7 @@ mod tests {
             input_mode: InputMode::Normal,
             command_buffer: String::new(),
             command_suggestion_idx: 0,
+            command_tab_base: None,
             filter_buffer: String::new(),
             modal: None,
             show_help: false,
@@ -1396,6 +1412,7 @@ mod tests {
             input_mode: InputMode::Normal,
             command_buffer: String::new(),
             command_suggestion_idx: 0,
+            command_tab_base: None,
             filter_buffer: String::new(),
             modal: None,
             show_help: false,
@@ -1559,6 +1576,7 @@ mod tests {
             input_mode: InputMode::Normal,
             command_buffer: String::new(),
             command_suggestion_idx: 0,
+            command_tab_base: None,
             filter_buffer: String::new(),
             modal: None,
             show_help: false,
@@ -1938,6 +1956,7 @@ mod tests {
             input_mode: InputMode::Normal,
             command_buffer: String::new(),
             command_suggestion_idx: 0,
+            command_tab_base: None,
             filter_buffer: String::new(),
             modal: None,
             show_help: false,
@@ -2097,6 +2116,7 @@ mod tests {
             input_mode: InputMode::Normal,
             command_buffer: String::new(),
             command_suggestion_idx: 0,
+            command_tab_base: None,
             filter_buffer: String::new(),
             modal: None,
             show_help: false,
@@ -2207,6 +2227,7 @@ mod tests {
             input_mode: InputMode::Normal,
             command_buffer: String::new(),
             command_suggestion_idx: 0,
+            command_tab_base: None,
             filter_buffer: String::new(),
             modal: None,
             show_help: false,
@@ -2311,6 +2332,7 @@ mod tests {
             input_mode: InputMode::Normal,
             command_buffer: String::new(),
             command_suggestion_idx: 0,
+            command_tab_base: None,
             filter_buffer: String::new(),
             modal: None,
             show_help: false,
@@ -2463,6 +2485,7 @@ mod tests {
             input_mode: InputMode::Normal,
             command_buffer: String::new(),
             command_suggestion_idx: 0,
+            command_tab_base: None,
             filter_buffer: String::new(),
             modal: None,
             show_help: false,
@@ -2648,6 +2671,7 @@ mod tests {
             input_mode: InputMode::Normal,
             command_buffer: String::new(),
             command_suggestion_idx: 0,
+            command_tab_base: None,
             filter_buffer: String::new(),
             modal: None,
             show_help: false,
@@ -2844,6 +2868,7 @@ mod tests {
             input_mode: InputMode::Normal,
             command_buffer: String::new(),
             command_suggestion_idx: 0,
+            command_tab_base: None,
             filter_buffer: String::new(),
             modal: None,
             show_help: false,
@@ -2973,6 +2998,7 @@ mod tests {
             input_mode: InputMode::Normal,
             command_buffer: String::new(),
             command_suggestion_idx: 0,
+            command_tab_base: None,
             filter_buffer: String::new(),
             modal: None,
             show_help: false,
@@ -3497,6 +3523,7 @@ mod tests {
             nav_stack: vec![],
             command_buffer: String::new(),
             command_suggestion_idx: 0,
+            command_tab_base: None,
             filter_buffer: String::new(),
             input_mode: InputMode::Normal,
             toast: None,
@@ -3663,6 +3690,7 @@ mod tests {
             nav_stack: vec![],
             command_buffer: String::new(),
             command_suggestion_idx: 0,
+            command_tab_base: None,
             filter_buffer: String::new(),
             input_mode: InputMode::Normal,
             toast: None,
@@ -3947,6 +3975,7 @@ mod tests {
             input_mode: InputMode::Normal,
             command_buffer: String::new(),
             command_suggestion_idx: 0,
+            command_tab_base: None,
             filter_buffer: String::new(),
             modal: None,
             show_help: false,
@@ -4100,6 +4129,7 @@ mod tests {
             input_mode: InputMode::Normal,
             command_buffer: String::new(),
             command_suggestion_idx: 0,
+            command_tab_base: None,
             filter_buffer: String::new(),
             modal: None,
             show_help: false,
@@ -4248,6 +4278,7 @@ mod tests {
             input_mode: InputMode::Normal,
             command_buffer: String::new(),
             command_suggestion_idx: 0,
+            command_tab_base: None,
             filter_buffer: String::new(),
             modal: None,
             show_help: false,
@@ -4474,6 +4505,7 @@ mod tests {
             input_mode: InputMode::Normal,
             command_buffer: String::new(),
             command_suggestion_idx: 0,
+            command_tab_base: None,
             filter_buffer: String::new(),
             modal: None,
             show_help: false,
@@ -4698,6 +4730,7 @@ mod tests {
             input_mode: InputMode::Normal,
             command_buffer: String::new(),
             command_suggestion_idx: 0,
+            command_tab_base: None,
             filter_buffer: String::new(),
             modal: None,
             show_help: false,
@@ -5734,6 +5767,7 @@ mod tests {
             input_mode: InputMode::Normal,
             command_buffer: String::new(),
             command_suggestion_idx: 0,
+            command_tab_base: None,
             filter_buffer: String::new(),
             modal: None,
             show_help: false,
@@ -5959,6 +5993,7 @@ mod tests {
             input_mode: InputMode::Normal,
             command_buffer: String::new(),
             command_suggestion_idx: 0,
+            command_tab_base: None,
             filter_buffer: String::new(),
             modal: None,
             show_help: false,
@@ -6239,6 +6274,7 @@ mod tests {
             input_mode: InputMode::Normal,
             command_buffer: String::new(),
             command_suggestion_idx: 0,
+            command_tab_base: None,
             filter_buffer: String::new(),
             modal: None,
             show_help: false,
@@ -6405,6 +6441,7 @@ mod tests {
             input_mode: InputMode::Normal,
             command_buffer: String::new(),
             command_suggestion_idx: 0,
+            command_tab_base: None,
             filter_buffer: String::new(),
             modal: None,
             show_help: false,
@@ -7506,6 +7543,7 @@ mod tests {
             input_mode: InputMode::Normal,
             command_buffer: String::new(),
             command_suggestion_idx: 0,
+            command_tab_base: None,
             filter_buffer: String::new(),
             modal: None,
             show_help: false,
@@ -7725,6 +7763,7 @@ mod tests {
             input_mode: InputMode::Normal,
             command_buffer: String::new(),
             command_suggestion_idx: 0,
+            command_tab_base: None,
             filter_buffer: String::new(),
             modal: None,
             show_help: false,
@@ -7890,6 +7929,7 @@ mod tests {
             input_mode: InputMode::Normal,
             command_buffer: String::new(),
             command_suggestion_idx: 0,
+            command_tab_base: None,
             filter_buffer: String::new(),
             modal: None,
             show_help: false,
@@ -8103,6 +8143,7 @@ mod tests {
             input_mode: InputMode::Normal,
             command_buffer: String::new(),
             command_suggestion_idx: 0,
+            command_tab_base: None,
             filter_buffer: String::new(),
             modal: None,
             show_help: false,

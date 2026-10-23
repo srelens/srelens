@@ -180,6 +180,7 @@ pub struct App {
     pub input_mode: InputMode,
     pub command_buffer: String,
     pub command_suggestion_idx: usize,
+    pub command_tab_base: Option<String>,
     pub filter_buffer: String,
     pub modal: Option<Modal>,
     pub show_help: bool,
@@ -566,6 +567,7 @@ impl App {
             input_mode: InputMode::Normal,
             command_buffer: String::new(),
             command_suggestion_idx: 0,
+            command_tab_base: None,
             filter_buffer: String::new(),
             modal: None,
             show_help: false,
@@ -4152,6 +4154,7 @@ impl App {
                     self.input_mode = InputMode::Normal;
                     self.command_buffer.clear();
                     self.command_suggestion_idx = 0;
+                    self.command_tab_base = None;
                 }
                 KeyCode::Enter => {
                     let trimmed = self.command_buffer.trim().trim_start_matches(':').trim();
@@ -4179,12 +4182,20 @@ impl App {
                         self.input_mode = InputMode::Normal;
                         self.command_buffer.clear();
                         self.command_suggestion_idx = 0;
+                        self.command_tab_base = None;
                         self.execute_colon_command(&cmd).await;
                         return;
                     }
 
+                    let query = if self.command_buffer.contains(char::is_whitespace) {
+                        self.command_tab_base
+                            .as_deref()
+                            .unwrap_or(&self.command_buffer)
+                    } else {
+                        &self.command_buffer
+                    };
                     let suggestions = command_suggestions_full(
-                        &self.command_buffer,
+                        query,
                         &self.crds,
                         &self.namespaces,
                         self.namespace_discovery_error.as_deref(),
@@ -4200,6 +4211,7 @@ impl App {
                     self.input_mode = InputMode::Normal;
                     self.command_buffer.clear();
                     self.command_suggestion_idx = 0;
+                    self.command_tab_base = None;
                     if let Some(target) = target {
                         self.execute_command_target(target).await;
                     } else if !fallback_cmd
@@ -4212,81 +4224,137 @@ impl App {
                     }
                 }
                 KeyCode::Tab => {
-                    let suggestions = command_suggestions_full(
-                        &self.command_buffer,
-                        &self.crds,
-                        &self.namespaces,
-                        self.namespace_discovery_error.as_deref(),
-                    );
-                    if !suggestions.is_empty() {
-                        let idx = if self.command_suggestion_idx == 0
-                            && suggestions.len() > 1
-                            && suggestions[0].0.name == self.command_buffer
-                            && self.command_buffer.contains(char::is_whitespace)
-                        {
-                            1
-                        } else {
-                            self.command_suggestion_idx % suggestions.len()
-                        };
-                        self.command_buffer = suggestions[idx].0.name.clone();
-                        // Completion changes the query and rebuilds the list.
-                        // Names and aliases can collide, so follow the selected
-                        // target (including its CRD group), not the old index.
-                        let target = &suggestions[idx].0.target;
-                        self.command_suggestion_idx = command_suggestions_full(
+                    let has_whitespace = self.command_buffer.contains(char::is_whitespace);
+                    if has_whitespace {
+                        let is_first_tab = self.command_tab_base.is_none();
+                        let query = self
+                            .command_tab_base
+                            .get_or_insert_with(|| self.command_buffer.clone())
+                            .clone();
+                        let suggestions = command_suggestions_full(
+                            &query,
+                            &self.crds,
+                            &self.namespaces,
+                            self.namespace_discovery_error.as_deref(),
+                        );
+                        if !suggestions.is_empty() {
+                            let next_idx = if is_first_tab {
+                                self.command_suggestion_idx % suggestions.len()
+                            } else {
+                                (self.command_suggestion_idx + 1) % suggestions.len()
+                            };
+                            self.command_suggestion_idx = next_idx;
+                            self.command_buffer = suggestions[next_idx].0.name.clone();
+                        }
+                    } else {
+                        self.command_tab_base = None;
+                        let suggestions = command_suggestions_full(
                             &self.command_buffer,
                             &self.crds,
                             &self.namespaces,
                             self.namespace_discovery_error.as_deref(),
-                        )
-                        .iter()
-                        .position(|(command, _)| &command.target == target)
-                        .unwrap_or(idx);
+                        );
+                        if !suggestions.is_empty() {
+                            let idx = self.command_suggestion_idx % suggestions.len();
+                            self.command_buffer = suggestions[idx].0.name.clone();
+                            let target = &suggestions[idx].0.target;
+                            self.command_suggestion_idx = command_suggestions_full(
+                                &self.command_buffer,
+                                &self.crds,
+                                &self.namespaces,
+                                self.namespace_discovery_error.as_deref(),
+                            )
+                            .iter()
+                            .position(|(command, _)| &command.target == target)
+                            .unwrap_or(idx);
+                        }
                     }
                 }
                 KeyCode::BackTab => {
-                    let suggestions = command_suggestions_full(
-                        &self.command_buffer,
-                        &self.crds,
-                        &self.namespaces,
-                        self.namespace_discovery_error.as_deref(),
-                    );
-                    if !suggestions.is_empty() {
-                        let len = suggestions.len();
-                        let idx = (self.command_suggestion_idx + len - 1) % len;
-                        self.command_suggestion_idx = idx;
+                    let has_whitespace = self.command_buffer.contains(char::is_whitespace);
+                    if has_whitespace {
+                        let is_first_tab = self.command_tab_base.is_none();
+                        let query = self
+                            .command_tab_base
+                            .get_or_insert_with(|| self.command_buffer.clone())
+                            .clone();
+                        let suggestions = command_suggestions_full(
+                            &query,
+                            &self.crds,
+                            &self.namespaces,
+                            self.namespace_discovery_error.as_deref(),
+                        );
+                        if !suggestions.is_empty() {
+                            let len = suggestions.len();
+                            let prev_idx = if is_first_tab {
+                                (self.command_suggestion_idx + len - 1) % len
+                            } else {
+                                (self.command_suggestion_idx + len - 1) % len
+                            };
+                            self.command_suggestion_idx = prev_idx;
+                            self.command_buffer = suggestions[prev_idx].0.name.clone();
+                        }
+                    } else {
+                        self.command_tab_base = None;
+                        let suggestions = command_suggestions_full(
+                            &self.command_buffer,
+                            &self.crds,
+                            &self.namespaces,
+                            self.namespace_discovery_error.as_deref(),
+                        );
+                        if !suggestions.is_empty() {
+                            let len = suggestions.len();
+                            let idx = (self.command_suggestion_idx + len - 1) % len;
+                            self.command_suggestion_idx = idx;
+                        }
                     }
                 }
                 KeyCode::Down | KeyCode::Char('n') | KeyCode::Char('N')
                     if key.code == KeyCode::Down
                         || key.modifiers.contains(KeyModifiers::CONTROL) =>
                 {
+                    let query = self
+                        .command_tab_base
+                        .as_deref()
+                        .unwrap_or(&self.command_buffer);
                     let suggestions = command_suggestions_full(
-                        &self.command_buffer,
+                        query,
                         &self.crds,
                         &self.namespaces,
                         self.namespace_discovery_error.as_deref(),
                     );
                     if !suggestions.is_empty() {
-                        self.command_suggestion_idx =
-                            (self.command_suggestion_idx + 1) % suggestions.len();
+                        let next_idx = (self.command_suggestion_idx + 1) % suggestions.len();
+                        self.command_suggestion_idx = next_idx;
+                        if self.command_tab_base.is_some() {
+                            self.command_buffer = suggestions[next_idx].0.name.clone();
+                        }
                     }
                 }
                 KeyCode::Up | KeyCode::Char('p') | KeyCode::Char('P')
                     if key.code == KeyCode::Up || key.modifiers.contains(KeyModifiers::CONTROL) =>
                 {
+                    let query = self
+                        .command_tab_base
+                        .as_deref()
+                        .unwrap_or(&self.command_buffer);
                     let suggestions = command_suggestions_full(
-                        &self.command_buffer,
+                        query,
                         &self.crds,
                         &self.namespaces,
                         self.namespace_discovery_error.as_deref(),
                     );
                     if !suggestions.is_empty() {
                         let len = suggestions.len();
-                        self.command_suggestion_idx = (self.command_suggestion_idx + len - 1) % len;
+                        let prev_idx = (self.command_suggestion_idx + len - 1) % len;
+                        self.command_suggestion_idx = prev_idx;
+                        if self.command_tab_base.is_some() {
+                            self.command_buffer = suggestions[prev_idx].0.name.clone();
+                        }
                     }
                 }
                 _ if is_word_delete_key(&key) => {
+                    self.command_tab_base = None;
                     if self.command_buffer.is_empty() {
                         self.input_mode = InputMode::Normal;
                     } else {
@@ -4297,10 +4365,12 @@ impl App {
                 KeyCode::Char('u') | KeyCode::Char('U')
                     if key.modifiers.contains(KeyModifiers::CONTROL) =>
                 {
+                    self.command_tab_base = None;
                     self.command_buffer.clear();
                     self.command_suggestion_idx = 0;
                 }
                 KeyCode::Backspace => {
+                    self.command_tab_base = None;
                     self.command_buffer.pop();
                     self.command_suggestion_idx = 0;
                     if self.command_buffer.is_empty() {
@@ -4310,6 +4380,7 @@ impl App {
                 KeyCode::Char('v') | KeyCode::Char('V')
                     if key.modifiers.contains(KeyModifiers::CONTROL) =>
                 {
+                    self.command_tab_base = None;
                     if let Some(clip) = get_clipboard_text() {
                         let cleaned = clip.replace("\r\n", " ").replace('\n', " ");
                         self.command_buffer.push_str(&cleaned);
@@ -4320,6 +4391,7 @@ impl App {
                     if !key.modifiers.contains(KeyModifiers::CONTROL)
                         && !key.modifiers.contains(KeyModifiers::ALT) =>
                 {
+                    self.command_tab_base = None;
                     self.command_buffer.push(c);
                     self.command_suggestion_idx = 0;
                 }
@@ -14794,8 +14866,12 @@ impl App {
             .map(|(msg, _, style)| (msg.as_str(), *style));
 
         let suggestions = if self.input_mode == InputMode::Command {
+            let query = self
+                .command_tab_base
+                .as_deref()
+                .unwrap_or(&self.command_buffer);
             Some(command_suggestions_full(
-                &self.command_buffer,
+                query,
                 &self.crds,
                 &self.namespaces,
                 self.namespace_discovery_error.as_deref(),

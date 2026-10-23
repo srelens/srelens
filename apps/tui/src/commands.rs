@@ -1199,17 +1199,15 @@ pub fn command_suggestions_full(
             }
 
             let sub_lower = sub.to_lowercase();
-            let mut has_exact = false;
 
             for cand in candidates {
                 let cand_lower = cand.to_lowercase();
                 let score = if cand_lower == sub_lower {
-                    has_exact = true;
                     160
                 } else if cand_lower.starts_with(&sub_lower) {
-                    130
+                    140
                 } else if cand_lower.contains(&sub_lower) {
-                    90
+                    100
                 } else {
                     continue;
                 };
@@ -1225,8 +1223,8 @@ pub fn command_suggestions_full(
                 ));
             }
 
-            // If subquery is not an exact match of any candidate, inject literal typed value as top suggestion
-            if !has_exact {
+            // Only inject literal typed value when no candidates matched at all
+            if matches.is_empty() {
                 matches.push((
                     DynamicCommandDef {
                         name: format!("{} {}", cmd_prefix, sub),

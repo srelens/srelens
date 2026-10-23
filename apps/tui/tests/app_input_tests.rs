@@ -1832,23 +1832,65 @@ async fn namespace_colon_command_switches_namespace_directly_without_leaving_mod
 }
 
 #[tokio::test]
-async fn namespace_command_tab_autocompletes_namespace() {
+async fn namespace_command_tab_autocompletes_and_cycles_namespaces() {
     let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app().await;
     app.namespaces = vec![
+        "cattle-fleet-system".to_string(),
+        "cattle-impersonation-system".to_string(),
+        "cattle-system".to_string(),
         "default".to_string(),
-        "kube-system".to_string(),
-        "tools".to_string(),
     ];
 
-    // :ns defa + Tab autocompletes to "ns default"
+    // :pods cattl + Tab repeatedly cycles through all cattle namespaces
     press(&mut app, ch(':')).await;
-    type_str(&mut app, "ns defa").await;
-    press(&mut app, key(KeyCode::Tab)).await;
-    assert_eq!(app.command_buffer, "ns default");
+    type_str(&mut app, "pods cattl").await;
 
+    // 1st Tab: first matching candidate
+    press(&mut app, key(KeyCode::Tab)).await;
+    assert_eq!(app.command_buffer, "pods cattle-fleet-system");
+
+    // 2nd Tab: cycles to second matching candidate
+    press(&mut app, key(KeyCode::Tab)).await;
+    assert_eq!(app.command_buffer, "pods cattle-impersonation-system");
+
+    // 3rd Tab: cycles to third matching candidate
+    press(&mut app, key(KeyCode::Tab)).await;
+    assert_eq!(app.command_buffer, "pods cattle-system");
+
+    // 4th Tab: wraps around to first candidate
+    press(&mut app, key(KeyCode::Tab)).await;
+    assert_eq!(app.command_buffer, "pods cattle-fleet-system");
+
+    // BackTab (Shift+Tab): cycles backwards to third candidate
+    press(&mut app, key(KeyCode::BackTab)).await;
+    assert_eq!(app.command_buffer, "pods cattle-system");
+
+    // Enter executes the currently cycled selection
     press(&mut app, key(KeyCode::Enter)).await;
-    assert_eq!(app.active_namespace, "default");
+    assert_eq!(app.active_namespace, "cattle-system");
+    assert_eq!(table(&app).kind, ResourceKind::Pods);
+    assert!(app.modal.is_none());
+}
+
+#[tokio::test]
+async fn single_matching_namespace_autoselects_on_enter() {
+    let _settings = common::env::isolate_settings();
+    let (mut app, _rx) = common::app().await;
+    app.namespaces = vec![
+        "airflow-edge".to_string(),
+        "monitoring".to_string(),
+        "default".to_string(),
+    ];
+
+    // :svc airflo has exactly 1 cluster match (airflow-edge).
+    // Hitting Enter directly without Down arrow must autoselect and run it.
+    press(&mut app, ch(':')).await;
+    type_str(&mut app, "svc airflo").await;
+    press(&mut app, key(KeyCode::Enter)).await;
+
+    assert_eq!(app.active_namespace, "airflow-edge");
+    assert_eq!(table(&app).kind, ResourceKind::Services);
     assert!(app.modal.is_none());
 }
 
