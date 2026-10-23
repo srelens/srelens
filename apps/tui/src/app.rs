@@ -181,6 +181,7 @@ pub struct App {
     pub command_buffer: String,
     pub command_suggestion_idx: usize,
     pub command_tab_base: Option<String>,
+    pub command_tab_target: Option<CommandTarget>,
     pub filter_buffer: String,
     pub modal: Option<Modal>,
     pub show_help: bool,
@@ -568,6 +569,7 @@ impl App {
             command_buffer: String::new(),
             command_suggestion_idx: 0,
             command_tab_base: None,
+            command_tab_target: None,
             filter_buffer: String::new(),
             modal: None,
             show_help: false,
@@ -4155,6 +4157,7 @@ impl App {
                     self.command_buffer.clear();
                     self.command_suggestion_idx = 0;
                     self.command_tab_base = None;
+                    self.command_tab_target = None;
                 }
                 KeyCode::Enter => {
                     let trimmed = self.command_buffer.trim().trim_start_matches(':').trim();
@@ -4183,35 +4186,39 @@ impl App {
                         self.command_buffer.clear();
                         self.command_suggestion_idx = 0;
                         self.command_tab_base = None;
+                        self.command_tab_target = None;
                         self.execute_colon_command(&cmd).await;
                         return;
                     }
 
-                    let query = if self.command_buffer.contains(char::is_whitespace) {
-                        self.command_tab_base
-                            .as_deref()
-                            .unwrap_or(&self.command_buffer)
-                    } else {
-                        &self.command_buffer
-                    };
-                    let suggestions = command_suggestions_full(
-                        query,
-                        &self.crds,
-                        &self.namespaces,
-                        self.namespace_discovery_error.as_deref(),
-                    );
-                    let target = if !suggestions.is_empty()
-                        && self.command_suggestion_idx < suggestions.len()
-                    {
-                        Some(suggestions[self.command_suggestion_idx].0.target.clone())
-                    } else {
-                        None
-                    };
+                    let target = self.command_tab_target.take().or_else(|| {
+                        let query = if self.command_buffer.contains(char::is_whitespace) {
+                            self.command_tab_base
+                                .as_deref()
+                                .unwrap_or(&self.command_buffer)
+                        } else {
+                            &self.command_buffer
+                        };
+                        let suggestions = command_suggestions_full(
+                            query,
+                            &self.crds,
+                            &self.namespaces,
+                            self.namespace_discovery_error.as_deref(),
+                        );
+                        if !suggestions.is_empty()
+                            && self.command_suggestion_idx < suggestions.len()
+                        {
+                            Some(suggestions[self.command_suggestion_idx].0.target.clone())
+                        } else {
+                            None
+                        }
+                    });
                     let fallback_cmd = self.command_buffer.clone();
                     self.input_mode = InputMode::Normal;
                     self.command_buffer.clear();
                     self.command_suggestion_idx = 0;
                     self.command_tab_base = None;
+                    self.command_tab_target = None;
                     if let Some(target) = target {
                         self.execute_command_target(target).await;
                     } else if !fallback_cmd
@@ -4245,6 +4252,7 @@ impl App {
                             };
                             self.command_suggestion_idx = next_idx;
                             self.command_buffer = suggestions[next_idx].0.name.clone();
+                            self.command_tab_target = Some(suggestions[next_idx].0.target.clone());
                         }
                     } else {
                         self.command_tab_base = None;
@@ -4258,6 +4266,7 @@ impl App {
                             let idx = self.command_suggestion_idx % suggestions.len();
                             self.command_buffer = suggestions[idx].0.name.clone();
                             let target = &suggestions[idx].0.target;
+                            self.command_tab_target = Some(target.clone());
                             self.command_suggestion_idx = command_suggestions_full(
                                 &self.command_buffer,
                                 &self.crds,
@@ -4293,6 +4302,7 @@ impl App {
                             };
                             self.command_suggestion_idx = prev_idx;
                             self.command_buffer = suggestions[prev_idx].0.name.clone();
+                            self.command_tab_target = Some(suggestions[prev_idx].0.target.clone());
                         }
                     } else {
                         self.command_tab_base = None;
@@ -4306,6 +4316,7 @@ impl App {
                             let len = suggestions.len();
                             let idx = (self.command_suggestion_idx + len - 1) % len;
                             self.command_suggestion_idx = idx;
+                            self.command_tab_target = Some(suggestions[idx].0.target.clone());
                         }
                     }
                 }
@@ -4329,6 +4340,7 @@ impl App {
                         if self.command_tab_base.is_some() {
                             self.command_buffer = suggestions[next_idx].0.name.clone();
                         }
+                        self.command_tab_target = Some(suggestions[next_idx].0.target.clone());
                     }
                 }
                 KeyCode::Up | KeyCode::Char('p') | KeyCode::Char('P')
@@ -4351,10 +4363,12 @@ impl App {
                         if self.command_tab_base.is_some() {
                             self.command_buffer = suggestions[prev_idx].0.name.clone();
                         }
+                        self.command_tab_target = Some(suggestions[prev_idx].0.target.clone());
                     }
                 }
                 _ if is_word_delete_key(&key) => {
                     self.command_tab_base = None;
+                    self.command_tab_target = None;
                     if self.command_buffer.is_empty() {
                         self.input_mode = InputMode::Normal;
                     } else {
@@ -4366,11 +4380,13 @@ impl App {
                     if key.modifiers.contains(KeyModifiers::CONTROL) =>
                 {
                     self.command_tab_base = None;
+                    self.command_tab_target = None;
                     self.command_buffer.clear();
                     self.command_suggestion_idx = 0;
                 }
                 KeyCode::Backspace => {
                     self.command_tab_base = None;
+                    self.command_tab_target = None;
                     self.command_buffer.pop();
                     self.command_suggestion_idx = 0;
                     if self.command_buffer.is_empty() {
@@ -4381,6 +4397,7 @@ impl App {
                     if key.modifiers.contains(KeyModifiers::CONTROL) =>
                 {
                     self.command_tab_base = None;
+                    self.command_tab_target = None;
                     if let Some(clip) = get_clipboard_text() {
                         let cleaned = clip.replace("\r\n", " ").replace('\n', " ");
                         self.command_buffer.push_str(&cleaned);
@@ -4392,6 +4409,7 @@ impl App {
                         && !key.modifiers.contains(KeyModifiers::ALT) =>
                 {
                     self.command_tab_base = None;
+                    self.command_tab_target = None;
                     self.command_buffer.push(c);
                     self.command_suggestion_idx = 0;
                 }

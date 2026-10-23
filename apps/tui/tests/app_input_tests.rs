@@ -1874,6 +1874,32 @@ async fn namespace_command_tab_autocompletes_and_cycles_namespaces() {
 }
 
 #[tokio::test]
+async fn namespace_command_tab_preserves_target_when_cluster_namespaces_update_before_enter() {
+    let _settings = common::env::isolate_settings();
+    let (mut app, _rx) = common::app().await;
+    app.namespaces = vec!["dev-b".to_string(), "dev-c".to_string()];
+
+    // Tab to dev-b
+    press(&mut app, ch(':')).await;
+    type_str(&mut app, "pods dev").await;
+    press(&mut app, key(KeyCode::Tab)).await;
+    assert_eq!(app.command_buffer, "pods dev-b");
+
+    // Asynchronous cluster discovery adds dev-a in the background before Enter
+    app.namespaces = vec![
+        "dev-a".to_string(),
+        "dev-b".to_string(),
+        "dev-c".to_string(),
+    ];
+
+    // Enter must open dev-b as shown on screen, not shift to dev-a
+    press(&mut app, key(KeyCode::Enter)).await;
+    assert_eq!(app.active_namespace, "dev-b");
+    assert_eq!(table(&app).kind, ResourceKind::Pods);
+    assert!(app.modal.is_none());
+}
+
+#[tokio::test]
 async fn single_matching_namespace_autoselects_on_enter() {
     let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app().await;
