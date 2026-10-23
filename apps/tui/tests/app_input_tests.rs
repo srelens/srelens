@@ -1943,6 +1943,44 @@ async fn wildcard_all_selected_even_when_substring_namespace_matches() {
 }
 
 #[tokio::test]
+async fn wildcard_not_triggered_by_lowercase_dash_a_and_matches_team_a() {
+    let _settings = common::env::isolate_settings();
+    let (mut app, _rx) = common::app().await;
+    app.namespaces = vec!["team-a".to_string(), "default".to_string()];
+
+    // Typing ":pods -a" must match team-a without being intercepted by a fake "All namespaces" row
+    press(&mut app, ch(':')).await;
+    type_str(&mut app, "pods -a").await;
+    press(&mut app, key(KeyCode::Enter)).await;
+    assert_eq!(
+        app.active_namespace, "team-a",
+        ":pods -a must select team-a"
+    );
+    assert_eq!(table(&app).kind, ResourceKind::Pods);
+}
+
+#[tokio::test]
+async fn literal_all_namespace_targeted_when_cluster_has_all_namespace() {
+    let _settings = common::env::isolate_settings();
+    let (mut app, _rx) = common::app().await;
+    app.namespaces = vec![
+        "all".to_string(),
+        "small".to_string(),
+        "default".to_string(),
+    ];
+
+    // When a namespace literally named "all" exists in the cluster, ":pods all" targets "all"
+    press(&mut app, ch(':')).await;
+    type_str(&mut app, "pods all").await;
+    press(&mut app, key(KeyCode::Enter)).await;
+    assert_eq!(
+        app.active_namespace, "all",
+        ":pods all must target literal namespace all when it exists"
+    );
+    assert_eq!(table(&app).kind, ResourceKind::Pods);
+}
+
+#[tokio::test]
 async fn pasted_command_clears_tab_base_and_runs_full_pasted_query() {
     let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app().await;

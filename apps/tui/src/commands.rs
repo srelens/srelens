@@ -1200,14 +1200,20 @@ pub fn command_suggestions_full(
 
             let sub_lower = sub.to_lowercase();
 
-            let is_wildcard = sub == "all" || sub == "*" || sub.eq_ignore_ascii_case("-a");
-            if is_wildcard {
+            let target = make_target(sub);
+            let target_is_all_namespaces = match &target {
+                CommandTarget::SwitchNamespace(ns) => ns.is_empty(),
+                CommandTarget::ResourceInNamespace(_, ns) => ns.is_empty(),
+                CommandTarget::CustomResourceInNamespace(_, ns) => ns.is_empty(),
+                _ => false,
+            };
+            if target_is_all_namespaces {
                 matches.push((
                     DynamicCommandDef {
                         name: format!("{} {}", cmd_prefix, sub),
                         aliases: vec![],
                         description: "All namespaces".to_string(),
-                        target: make_target(sub),
+                        target,
                     },
                     170,
                 ));
