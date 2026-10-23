@@ -4171,6 +4171,17 @@ impl App {
                     }
 
                     let target = self.command_tab_target.take().or_else(|| {
+                        let trimmed = self.command_buffer.trim().trim_start_matches(':').trim();
+                        // If input has whitespace and the argument portion is empty (e.g. ":pods " or ":prometheusrules "),
+                        // resolve the base command directly rather than picking the first candidate in the namespace list.
+                        if let Some(pos) = trimmed.find(char::is_whitespace) {
+                            let arg = trimmed[pos..].trim();
+                            if arg.is_empty() {
+                                let cmd_prefix = &trimmed[..pos];
+                                return resolve_command_with_crds(cmd_prefix, &self.crds);
+                            }
+                        }
+
                         let query = if self.command_buffer.contains(char::is_whitespace) {
                             self.command_tab_base
                                 .as_deref()
@@ -4407,6 +4418,49 @@ impl App {
                         self.command_buffer.push_str(&cleaned);
                         self.command_suggestion_idx = 0;
                     }
+                }
+                KeyCode::Char(' ')
+                    if !key.modifiers.contains(KeyModifiers::CONTROL)
+                        && !key.modifiers.contains(KeyModifiers::ALT) =>
+                {
+                    if !self.command_buffer.contains(char::is_whitespace)
+                        && self.command_tab_target.is_some()
+                    {
+                        let query = self
+                            .command_tab_base
+                            .as_deref()
+                            .unwrap_or(&self.command_buffer);
+                        let suggestions = command_suggestions_full(
+                            query,
+                            &self.crds,
+                            &self.namespaces,
+                            self.namespace_discovery_error.as_deref(),
+                        );
+                        let matched_sugg = suggestions
+                            .iter()
+                            .find(|(s, _)| Some(&s.target) == self.command_tab_target.as_ref())
+                            .or_else(|| {
+                                if self.command_suggestion_idx < suggestions.len() {
+                                    Some(&suggestions[self.command_suggestion_idx])
+                                } else {
+                                    None
+                                }
+                            });
+                        if let Some((sugg, _)) = matched_sugg {
+                            if !sugg.name.ends_with(" <namespace>") {
+                                self.command_buffer = format!("{} ", sugg.name);
+                                self.command_tab_base = None;
+                                self.command_tab_target = None;
+                                self.command_suggestion_idx = 0;
+                                return;
+                            }
+                        }
+                    }
+
+                    self.command_tab_base = None;
+                    self.command_tab_target = None;
+                    self.command_buffer.push(' ');
+                    self.command_suggestion_idx = 0;
                 }
                 KeyCode::Char(c)
                     if !key.modifiers.contains(KeyModifiers::CONTROL)

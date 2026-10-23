@@ -2100,6 +2100,134 @@ async fn changed_duration_command_does_not_corrupt_active_namespace() {
 }
 
 #[tokio::test]
+async fn crd_selection_down_arrow_then_space_commits_selected_crd() {
+    let _settings = common::env::isolate_settings();
+    let (mut app, _rx) = common::app().await;
+
+    let crd_agent = CrdMeta {
+        crd_name: "prometheusagents.monitoring.coreos.com".to_string(),
+        group: "monitoring.coreos.com".to_string(),
+        version: "v1alpha1".to_string(),
+        kind: "PrometheusAgent".to_string(),
+        plural: "prometheusagents".to_string(),
+        singular: "prometheusagent".to_string(),
+        namespaced: true,
+        short_names: vec![],
+        printer_columns: vec![],
+        created_at: None,
+    };
+    let crd_prom = CrdMeta {
+        crd_name: "prometheuses.monitoring.coreos.com".to_string(),
+        group: "monitoring.coreos.com".to_string(),
+        version: "v1".to_string(),
+        kind: "Prometheus".to_string(),
+        plural: "prometheuses".to_string(),
+        singular: "prometheus".to_string(),
+        namespaced: true,
+        short_names: vec![],
+        printer_columns: vec![],
+        created_at: None,
+    };
+    let crd_rules = CrdMeta {
+        crd_name: "prometheusrules.monitoring.coreos.com".to_string(),
+        group: "monitoring.coreos.com".to_string(),
+        version: "v1".to_string(),
+        kind: "PrometheusRule".to_string(),
+        plural: "prometheusrules".to_string(),
+        singular: "prometheusrule".to_string(),
+        namespaced: true,
+        short_names: vec![],
+        printer_columns: vec![],
+        created_at: None,
+    };
+
+    app.crds = vec![crd_agent.clone(), crd_prom.clone(), crd_rules.clone()];
+    app.namespaces = vec!["default".to_string(), "monitoring".to_string()];
+
+    // 1. Type :prome
+    press(&mut app, ch(':')).await;
+    type_str(&mut app, "prome").await;
+
+    // 2. Press Down twice to select prometheusrules (index 2)
+    press(&mut app, key(KeyCode::Down)).await;
+    assert_eq!(app.command_suggestion_idx, 1);
+    press(&mut app, key(KeyCode::Down)).await;
+    assert_eq!(app.command_suggestion_idx, 2);
+
+    // 3. Press Space: must commit "prometheusrules " into command_buffer
+    press(&mut app, ch(' ')).await;
+    assert_eq!(app.command_buffer, "prometheusrules ");
+    assert_eq!(app.command_suggestion_idx, 0);
+
+    // 4. Press Enter: must execute prometheusrules, NOT prometheusagents!
+    press(&mut app, key(KeyCode::Enter)).await;
+    assert_eq!(table(&app).kind, ResourceKind::CustomResource(crd_rules));
+}
+
+#[tokio::test]
+async fn crd_selection_down_arrow_space_then_namespace_switches_namespace() {
+    let _settings = common::env::isolate_settings();
+    let (mut app, _rx) = common::app().await;
+
+    let crd_rules = CrdMeta {
+        crd_name: "prometheusrules.monitoring.coreos.com".to_string(),
+        group: "monitoring.coreos.com".to_string(),
+        version: "v1".to_string(),
+        kind: "PrometheusRule".to_string(),
+        plural: "prometheusrules".to_string(),
+        singular: "prometheusrule".to_string(),
+        namespaced: true,
+        short_names: vec![],
+        printer_columns: vec![],
+        created_at: None,
+    };
+
+    app.crds = vec![crd_rules.clone()];
+    app.namespaces = vec!["default".to_string(), "monitoring".to_string()];
+
+    press(&mut app, ch(':')).await;
+    type_str(&mut app, "prome").await;
+    press(&mut app, key(KeyCode::Down)).await;
+    press(&mut app, ch(' ')).await;
+    assert_eq!(app.command_buffer, "prometheusrules ");
+
+    type_str(&mut app, "moni").await;
+    press(&mut app, key(KeyCode::Enter)).await;
+    assert_eq!(app.active_namespace, "monitoring");
+    assert_eq!(table(&app).kind, ResourceKind::CustomResource(crd_rules));
+}
+
+#[tokio::test]
+async fn static_command_selection_down_arrow_then_space_commits_selected_command() {
+    let _settings = common::env::isolate_settings();
+    let (mut app, _rx) = common::app().await;
+
+    // Type :po and navigate down to pdb (PodDisruptionBudgets)
+    press(&mut app, ch(':')).await;
+    type_str(&mut app, "po").await;
+    let suggestions = command_suggestions_with_crds("po", &app.crds);
+    let pdb_idx = suggestions
+        .iter()
+        .position(|(def, _)| {
+            def.target == CommandTarget::Resource(ResourceKind::PodDisruptionBudgets)
+        })
+        .expect("poddisruptionbudgets must be suggested for :po");
+
+    for _ in 0..pdb_idx {
+        press(&mut app, key(KeyCode::Down)).await;
+    }
+    assert_eq!(app.command_suggestion_idx, pdb_idx);
+
+    // Press Space: commits "pdb "
+    press(&mut app, ch(' ')).await;
+    assert_eq!(app.command_buffer, "pdb ");
+
+    // Press Enter: opens PodDisruptionBudgets
+    press(&mut app, key(KeyCode::Enter)).await;
+    assert_eq!(table(&app).kind, ResourceKind::PodDisruptionBudgets);
+}
+
+#[tokio::test]
 async fn colon_commands_that_need_a_selection_warn_when_the_table_is_empty() {
     let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app().await;
