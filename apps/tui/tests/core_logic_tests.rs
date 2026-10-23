@@ -1793,7 +1793,7 @@ fn a_crd_definition_collects_singular_short_names_and_lb_shorthands_without_dupl
             "ciliumlbippool"
         ]
     );
-    assert_eq!(def.description, "CRD: CiliumLoadBalancerIPPool (cilium.io)");
+    assert_eq!(def.description, "CiliumLoadBalancerIPPool (cilium.io)");
     assert_eq!(def.target, CommandTarget::CustomResource(cilium_pool()));
 
     // Same singular as plural, a short name equal to the singular, no "loadbalancer".

@@ -375,7 +375,7 @@ pub fn render_statusbar(f: &mut Frame, area: Rect, props: StatusBarProps) {
                                     if !cat.is_empty() && popup_inner_w >= 60 {
                                         spans.push(Span::raw(" "));
                                         spans.push(Span::styled(
-                                            format!("[{}] ", cat),
+                                            format!("[{}]", cat),
                                             if is_selected {
                                                 Style::default().fg(Theme::accent())
                                             } else {
