@@ -2219,45 +2219,24 @@ impl App {
         let event_tx = self.event_tx.clone();
 
         tokio::spawn(async move {
-            let fetch = async {
-                let client = cache.get(&ctx).await.map_err(|e| e.to_string())?;
-                let api: kube::Api<k8s_openapi::api::core::v1::Namespace> = kube::Api::all(client);
-                let list = api
-                    .list(&kube::api::ListParams::default())
-                    .await
-                    .map_err(|e| e.to_string())?;
-                let namespaces: Vec<String> = list
-                    .items
-                    .into_iter()
-                    .filter_map(|ns| ns.metadata.name)
-                    .collect();
-                Ok::<Vec<String>, String>(namespaces)
-            };
-
+            let cap = srelens_kube::workloads::list_namespaces_capability(cache);
+            let input = serde_json::json!({ "context": ctx });
             let ch = format!("discovery:namespaces:{}", ctx);
-            match tokio::time::timeout(std::time::Duration::from_secs(10), fetch).await {
-                Ok(Ok(namespaces)) => {
-                    let payload = serde_json::Value::Array(
-                        namespaces
-                            .into_iter()
-                            .map(|n| serde_json::json!({ "name": n }))
-                            .collect(),
-                    );
+            match (cap.handler)(input).await {
+                Ok(val) => {
+                    let payload = val
+                        .get("summaries")
+                        .cloned()
+                        .unwrap_or(serde_json::Value::Array(vec![]));
                     let _ = event_tx.send(AppEvent::StreamEvent {
                         channel: ch,
                         payload,
                     });
                 }
-                Ok(Err(err)) => {
+                Err(err) => {
                     let _ = event_tx.send(AppEvent::StreamEvent {
                         channel: ch,
-                        payload: serde_json::json!({ "error": err }),
-                    });
-                }
-                Err(_) => {
-                    let _ = event_tx.send(AppEvent::StreamEvent {
-                        channel: ch,
-                        payload: serde_json::json!({ "error": "timeout after 10s" }),
+                        payload: serde_json::json!({ "error": err.to_string() }),
                     });
                 }
             }
