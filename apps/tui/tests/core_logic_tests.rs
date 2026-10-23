@@ -1777,7 +1777,35 @@ fn static_commands_convert_to_dynamic_definitions_verbatim() {
     assert_eq!(dynamic.name, "pods");
     assert_eq!(dynamic.aliases, vec!["po".to_string(), "pod".to_string()]);
     assert_eq!(dynamic.description, pods.description);
+    assert_eq!(dynamic.search_terms, pods.search_terms);
     assert_eq!(dynamic.target, CommandTarget::Resource(ResourceKind::Pods));
+}
+
+#[test]
+fn command_suggestions_match_search_terms_even_when_description_is_empty() {
+    let tail_suggs = command_suggestions("tail");
+    assert!(
+        tail_suggs.iter().any(|(d, _)| d.name == "pods"),
+        "typing :tail suggests pods via search_terms: {:?}",
+        tail_suggs
+    );
+
+    let scale_suggs = command_suggestions("scale");
+    assert!(
+        scale_suggs.iter().any(|(d, _)| d.name == "deployments"),
+        "typing :scale suggests deployments via search_terms: {:?}",
+        scale_suggs
+    );
+
+    let pods = COMMAND_REGISTRY.iter().find(|c| c.name == "pods").unwrap();
+    assert!(
+        pods.description.is_empty(),
+        "pods description remains empty in popup"
+    );
+    assert!(
+        pods.search_terms.contains("tail"),
+        "search_terms contains tail"
+    );
 }
 
 #[test]
