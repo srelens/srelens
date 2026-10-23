@@ -4223,10 +4223,6 @@ impl App {
                             && suggestions.len() > 1
                             && suggestions[0].0.name == self.command_buffer
                             && self.command_buffer.contains(char::is_whitespace)
-                            && suggestions[0]
-                                .0
-                                .description
-                                .contains("(not in cluster list)")
                         {
                             1
                         } else {

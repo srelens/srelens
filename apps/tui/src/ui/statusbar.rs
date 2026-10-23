@@ -44,7 +44,10 @@ pub fn command_popup_rect(
     let visible_count = item_count.min(max_visible);
     let item_h = density.item_height();
     let content_height = visible_count.min(u16::MAX as usize) as u16;
-    let popup_height = content_height.saturating_mul(item_h).saturating_add(2).min(area.y);
+    let popup_height = content_height
+        .saturating_mul(item_h)
+        .saturating_add(2)
+        .min(area.y);
     let popup_width = area.width.saturating_sub(4).min(max_width);
     Rect {
         x: area.x + 2,
@@ -86,9 +89,14 @@ pub fn render_statusbar(f: &mut Frame, area: Rect, props: StatusBarProps) {
                     let density = props.command_popup_density.unwrap_or_default();
                     let density = if area.y.saturating_sub(2) < density.item_height() {
                         CommandPopupDensity::Compact
-                    } else { density };
-                    let popup_area = command_popup_rect(area, suggs.len(), max_width, max_visible, density);
-                    if popup_area.height < 3 || popup_area.width < 3 { return; }
+                    } else {
+                        density
+                    };
+                    let popup_area =
+                        command_popup_rect(area, suggs.len(), max_width, max_visible, density);
+                    if popup_area.height < 3 || popup_area.width < 3 {
+                        return;
+                    }
                     f.render_widget(Clear, popup_area);
                     let inner_height = popup_area.height.saturating_sub(2);
                     let item_lines = density.item_height();
@@ -102,7 +110,8 @@ pub fn render_statusbar(f: &mut Frame, area: Rect, props: StatusBarProps) {
                         0
                     };
 
-                    let visible_slice = &suggs[scroll_offset..(scroll_offset + visible_count).min(suggs.len())];
+                    let visible_slice =
+                        &suggs[scroll_offset..(scroll_offset + visible_count).min(suggs.len())];
                     let popup_inner_w = popup_area.width.saturating_sub(2) as usize;
 
                     let items: Vec<ListItem> = visible_slice
@@ -121,73 +130,113 @@ pub fn render_statusbar(f: &mut Frame, area: Rect, props: StatusBarProps) {
                                     } else {
                                         String::new()
                                     };
-                                    let cat_badge = format!("[{}]", cmd.category());
-                                    let name_text = format!("{}{}{}", prefix, cmd.name.to_uppercase(), alias_str);
+                                    let cat = cmd.category();
+                                    let cat_badge = if !cat.is_empty() {
+                                        format!("[{}]", cat)
+                                    } else {
+                                        String::new()
+                                    };
+                                    let name_text = format!(
+                                        "{}{}{}",
+                                        prefix,
+                                        cmd.name.to_uppercase(),
+                                        alias_str
+                                    );
 
-                                    let name_len = name_text.chars().count();
-                                    let badge_len = cat_badge.chars().count();
-                                    let spacer_len = popup_inner_w.saturating_sub(name_len + badge_len + 1).max(2);
-                                    let spacer = " ".repeat(spacer_len);
-
-                                    let line1 = Line::from(vec![
-                                        Span::styled(
-                                            name_text,
-                                            if is_selected {
-                                                Style::default().fg(Theme::cyan()).add_modifier(Modifier::BOLD)
-                                            } else {
-                                                Style::default().fg(Theme::fg()).add_modifier(Modifier::BOLD)
-                                            },
-                                        ),
-                                        Span::raw(spacer),
-                                        Span::styled(
+                                    let mut line1_spans = vec![Span::styled(
+                                        name_text,
+                                        if is_selected {
+                                            Style::default()
+                                                .fg(Theme::cyan())
+                                                .add_modifier(Modifier::BOLD)
+                                        } else {
+                                            Style::default()
+                                                .fg(Theme::fg())
+                                                .add_modifier(Modifier::BOLD)
+                                        },
+                                    )];
+                                    if !cat_badge.is_empty() {
+                                        let name_len = cmd.name.chars().count()
+                                            + prefix.chars().count()
+                                            + alias_str.chars().count();
+                                        let badge_len = cat_badge.chars().count();
+                                        let spacer_len = popup_inner_w
+                                            .saturating_sub(name_len + badge_len + 1)
+                                            .max(2);
+                                        let spacer = " ".repeat(spacer_len);
+                                        line1_spans.push(Span::raw(spacer));
+                                        line1_spans.push(Span::styled(
                                             cat_badge,
                                             if is_selected {
-                                                Style::default().fg(Theme::accent()).add_modifier(Modifier::BOLD)
-                                            } else {
-                                                Style::default().fg(Theme::dim())
-                                            },
-                                        ),
-                                    ]);
-
-                                    let line2 = Line::from(vec![
-                                        Span::raw("    "),
-                                        Span::styled(
-                                            cmd.description.clone(),
-                                            if is_selected {
-                                                Style::default().fg(Theme::fg())
-                                            } else {
-                                                Style::default().fg(Theme::dim())
-                                            },
-                                        ),
-                                    ]);
-
-                                    let syntax = cmd.syntax_hint();
-                                    let mut line3_spans = vec![
-                                        Span::raw("    "),
-                                        Span::styled("Usage: ", Style::default().fg(Theme::dim())),
-                                        Span::styled(
-                                            if !syntax.is_empty() { syntax.to_string() } else { format!(":{}", cmd.name) },
-                                            if is_selected {
-                                                Style::default().fg(Theme::yellow()).add_modifier(Modifier::BOLD)
-                                            } else {
-                                                Style::default().fg(Theme::yellow())
-                                            },
-                                        ),
-                                    ];
-                                    if !cmd.aliases.is_empty() {
-                                        line3_spans.push(Span::styled("  |  Aliases: ", Style::default().fg(Theme::dim())));
-                                        line3_spans.push(Span::styled(
-                                            cmd.aliases.join(", "),
-                                            if is_selected {
-                                                Style::default().fg(Theme::fg())
+                                                Style::default()
+                                                    .fg(Theme::accent())
+                                                    .add_modifier(Modifier::BOLD)
                                             } else {
                                                 Style::default().fg(Theme::dim())
                                             },
                                         ));
                                     }
-                                    let line3 = Line::from(line3_spans);
+                                    let line1 = Line::from(line1_spans);
 
-                                    ListItem::new(vec![line1, line2, line3]).style(if is_selected {
+                                    let mut lines = vec![line1];
+                                    if !cmd.description.is_empty() {
+                                        lines.push(Line::from(vec![
+                                            Span::raw("    "),
+                                            Span::styled(
+                                                cmd.description.clone(),
+                                                if is_selected {
+                                                    Style::default().fg(Theme::fg())
+                                                } else {
+                                                    Style::default().fg(Theme::dim())
+                                                },
+                                            ),
+                                        ]));
+                                    }
+
+                                    let syntax = cmd.syntax_hint();
+                                    if !syntax.is_empty() || !cmd.aliases.is_empty() {
+                                        let mut line3_spans = vec![Span::raw("    ")];
+                                        if !syntax.is_empty() {
+                                            line3_spans.push(Span::styled(
+                                                "Usage: ",
+                                                Style::default().fg(Theme::dim()),
+                                            ));
+                                            line3_spans.push(Span::styled(
+                                                syntax.to_string(),
+                                                if is_selected {
+                                                    Style::default()
+                                                        .fg(Theme::yellow())
+                                                        .add_modifier(Modifier::BOLD)
+                                                } else {
+                                                    Style::default().fg(Theme::yellow())
+                                                },
+                                            ));
+                                        }
+                                        if !cmd.aliases.is_empty() {
+                                            if !syntax.is_empty() {
+                                                line3_spans.push(Span::styled(
+                                                    "  |  Aliases: ",
+                                                    Style::default().fg(Theme::dim()),
+                                                ));
+                                            } else {
+                                                line3_spans.push(Span::styled(
+                                                    "Aliases: ",
+                                                    Style::default().fg(Theme::dim()),
+                                                ));
+                                            }
+                                            line3_spans.push(Span::styled(
+                                                cmd.aliases.join(", "),
+                                                if is_selected {
+                                                    Style::default().fg(Theme::fg())
+                                                } else {
+                                                    Style::default().fg(Theme::dim())
+                                                },
+                                            ));
+                                        }
+                                        lines.push(Line::from(line3_spans));
+                                    }
+
+                                    ListItem::new(lines).style(if is_selected {
                                         Theme::selected_row()
                                     } else {
                                         Style::default()
@@ -200,62 +249,90 @@ pub fn render_statusbar(f: &mut Frame, area: Rect, props: StatusBarProps) {
                                     } else {
                                         String::new()
                                     };
-                                    let cat_badge = format!("[{}]", cmd.category());
-                                    let name_text = format!("{}{}{}", prefix, cmd.name.to_uppercase(), alias_str);
+                                    let cat = cmd.category();
+                                    let cat_badge = if !cat.is_empty() {
+                                        format!("[{}]", cat)
+                                    } else {
+                                        String::new()
+                                    };
+                                    let name_text = format!(
+                                        "{}{}{}",
+                                        prefix,
+                                        cmd.name.to_uppercase(),
+                                        alias_str
+                                    );
 
-                                    let name_len = name_text.chars().count();
-                                    let badge_len = cat_badge.chars().count();
-                                    let spacer_len = popup_inner_w.saturating_sub(name_len + badge_len + 1).max(2);
-                                    let spacer = " ".repeat(spacer_len);
-
-                                    let line1 = Line::from(vec![
-                                        Span::styled(
-                                            name_text,
-                                            if is_selected {
-                                                Style::default().fg(Theme::cyan()).add_modifier(Modifier::BOLD)
-                                            } else {
-                                                Style::default().fg(Theme::fg()).add_modifier(Modifier::BOLD)
-                                            },
-                                        ),
-                                        Span::raw(spacer),
-                                        Span::styled(
+                                    let mut line1_spans = vec![Span::styled(
+                                        name_text,
+                                        if is_selected {
+                                            Style::default()
+                                                .fg(Theme::cyan())
+                                                .add_modifier(Modifier::BOLD)
+                                        } else {
+                                            Style::default()
+                                                .fg(Theme::fg())
+                                                .add_modifier(Modifier::BOLD)
+                                        },
+                                    )];
+                                    if !cat_badge.is_empty() {
+                                        let name_len = cmd.name.chars().count()
+                                            + prefix.chars().count()
+                                            + alias_str.chars().count();
+                                        let badge_len = cat_badge.chars().count();
+                                        let spacer_len = popup_inner_w
+                                            .saturating_sub(name_len + badge_len + 1)
+                                            .max(2);
+                                        let spacer = " ".repeat(spacer_len);
+                                        line1_spans.push(Span::raw(spacer));
+                                        line1_spans.push(Span::styled(
                                             cat_badge,
                                             if is_selected {
-                                                Style::default().fg(Theme::accent()).add_modifier(Modifier::BOLD)
+                                                Style::default()
+                                                    .fg(Theme::accent())
+                                                    .add_modifier(Modifier::BOLD)
                                             } else {
                                                 Style::default().fg(Theme::dim())
-                                            },
-                                        ),
-                                    ]);
-
-                                    let mut line2_spans = vec![
-                                        Span::raw("    "),
-                                        Span::styled(
-                                            cmd.description.clone(),
-                                            if is_selected {
-                                                Style::default().fg(Theme::fg())
-                                            } else {
-                                                Style::default().fg(Theme::dim())
-                                            },
-                                        ),
-                                    ];
-
-                                    let syntax = cmd.syntax_hint();
-                                    if !syntax.is_empty() && popup_inner_w >= 65 {
-                                        line2_spans.push(Span::styled("  •  ", Style::default().fg(Theme::dim())));
-                                        line2_spans.push(Span::styled(
-                                            syntax.to_string(),
-                                            if is_selected {
-                                                Style::default().fg(Theme::yellow()).add_modifier(Modifier::BOLD)
-                                            } else {
-                                                Style::default().fg(Theme::yellow())
                                             },
                                         ));
                                     }
+                                    let line1 = Line::from(line1_spans);
 
-                                    let line2 = Line::from(line2_spans);
+                                    let mut lines = vec![line1];
+                                    let syntax = cmd.syntax_hint();
+                                    if !cmd.description.is_empty() || !syntax.is_empty() {
+                                        let mut line2_spans = vec![Span::raw("    ")];
+                                        if !cmd.description.is_empty() {
+                                            line2_spans.push(Span::styled(
+                                                cmd.description.clone(),
+                                                if is_selected {
+                                                    Style::default().fg(Theme::fg())
+                                                } else {
+                                                    Style::default().fg(Theme::dim())
+                                                },
+                                            ));
+                                        }
+                                        if !syntax.is_empty() && popup_inner_w >= 65 {
+                                            if !cmd.description.is_empty() {
+                                                line2_spans.push(Span::styled(
+                                                    "  •  ",
+                                                    Style::default().fg(Theme::dim()),
+                                                ));
+                                            }
+                                            line2_spans.push(Span::styled(
+                                                syntax.to_string(),
+                                                if is_selected {
+                                                    Style::default()
+                                                        .fg(Theme::yellow())
+                                                        .add_modifier(Modifier::BOLD)
+                                                } else {
+                                                    Style::default().fg(Theme::yellow())
+                                                },
+                                            ));
+                                        }
+                                        lines.push(Line::from(line2_spans));
+                                    }
 
-                                    ListItem::new(vec![line1, line2]).style(if is_selected {
+                                    ListItem::new(lines).style(if is_selected {
                                         Theme::selected_row()
                                     } else {
                                         Style::default()
@@ -269,23 +346,36 @@ pub fn render_statusbar(f: &mut Frame, area: Rect, props: StatusBarProps) {
                                         String::new()
                                     };
                                     let name_col = format!("{}{}{}", prefix, cmd.name, alias_str);
+                                    let cat = cmd.category();
+                                    let syntax = cmd.syntax_hint();
+                                    let has_extra = !cat.is_empty()
+                                        || !cmd.description.is_empty()
+                                        || !syntax.is_empty();
+
                                     let pad_width = if popup_inner_w >= 90 { 26 } else { 20 };
-                                    let padded_name = format!("{:<pad_width$}", name_col, pad_width = pad_width);
+                                    let padded_name = if has_extra {
+                                        format!("{:<pad_width$}", name_col, pad_width = pad_width)
+                                    } else {
+                                        name_col
+                                    };
 
-                                    let mut spans = vec![
-                                        Span::styled(
-                                            padded_name,
-                                            if is_selected {
-                                                Style::default().fg(Theme::cyan()).add_modifier(Modifier::BOLD)
-                                            } else {
-                                                Style::default().fg(Theme::fg()).add_modifier(Modifier::BOLD)
-                                            },
-                                        ),
-                                    ];
+                                    let mut spans = vec![Span::styled(
+                                        padded_name,
+                                        if is_selected {
+                                            Style::default()
+                                                .fg(Theme::cyan())
+                                                .add_modifier(Modifier::BOLD)
+                                        } else {
+                                            Style::default()
+                                                .fg(Theme::fg())
+                                                .add_modifier(Modifier::BOLD)
+                                        },
+                                    )];
 
-                                    if popup_inner_w >= 60 {
+                                    if !cat.is_empty() && popup_inner_w >= 60 {
+                                        spans.push(Span::raw(" "));
                                         spans.push(Span::styled(
-                                            format!("[{}] ", cmd.category()),
+                                            format!("[{}] ", cat),
                                             if is_selected {
                                                 Style::default().fg(Theme::accent())
                                             } else {
@@ -294,18 +384,22 @@ pub fn render_statusbar(f: &mut Frame, area: Rect, props: StatusBarProps) {
                                         ));
                                     }
 
-                                    spans.push(Span::styled(
-                                        format!(" {}", cmd.description),
-                                        if is_selected {
-                                            Style::default().fg(Theme::fg())
-                                        } else {
-                                            Style::default().fg(Theme::dim())
-                                        },
-                                    ));
+                                    if !cmd.description.is_empty() {
+                                        spans.push(Span::styled(
+                                            format!(" {}", cmd.description),
+                                            if is_selected {
+                                                Style::default().fg(Theme::fg())
+                                            } else {
+                                                Style::default().fg(Theme::dim())
+                                            },
+                                        ));
+                                    }
 
-                                    let syntax = cmd.syntax_hint();
                                     if !syntax.is_empty() && popup_inner_w >= 85 {
-                                        spans.push(Span::styled("  |  ", Style::default().fg(Theme::dim())));
+                                        spans.push(Span::styled(
+                                            "  |  ",
+                                            Style::default().fg(Theme::dim()),
+                                        ));
                                         spans.push(Span::styled(
                                             syntax.to_string(),
                                             if is_selected {
@@ -330,31 +424,44 @@ pub fn render_statusbar(f: &mut Frame, area: Rect, props: StatusBarProps) {
                                         String::new()
                                     };
                                     let name_col = format!("{}{}{}", prefix, cmd.name, alias_str);
-                                    let pad_width = if popup_inner_w >= 90 { 24 } else { 18 };
-                                    let padded_name = format!("{:<pad_width$}", name_col, pad_width = pad_width);
+                                    let syntax = cmd.syntax_hint();
+                                    let has_extra =
+                                        !cmd.description.is_empty() || !syntax.is_empty();
 
-                                    let mut spans = vec![
-                                        Span::styled(
-                                            padded_name,
-                                            if is_selected {
-                                                Style::default().fg(Theme::cyan()).add_modifier(Modifier::BOLD)
-                                            } else {
-                                                Style::default().fg(Theme::fg())
-                                            },
-                                        ),
-                                        Span::styled(
+                                    let pad_width = if popup_inner_w >= 90 { 24 } else { 18 };
+                                    let padded_name = if has_extra {
+                                        format!("{:<pad_width$}", name_col, pad_width = pad_width)
+                                    } else {
+                                        name_col
+                                    };
+
+                                    let mut spans = vec![Span::styled(
+                                        padded_name,
+                                        if is_selected {
+                                            Style::default()
+                                                .fg(Theme::cyan())
+                                                .add_modifier(Modifier::BOLD)
+                                        } else {
+                                            Style::default().fg(Theme::fg())
+                                        },
+                                    )];
+
+                                    if !cmd.description.is_empty() {
+                                        spans.push(Span::styled(
                                             format!(" {}", cmd.description),
                                             if is_selected {
                                                 Style::default().fg(Theme::fg())
                                             } else {
                                                 Style::default().fg(Theme::dim())
                                             },
-                                        ),
-                                    ];
+                                        ));
+                                    }
 
-                                    let syntax = cmd.syntax_hint();
                                     if !syntax.is_empty() && popup_inner_w >= 95 {
-                                        spans.push(Span::styled("  |  ", Style::default().fg(Theme::dim())));
+                                        spans.push(Span::styled(
+                                            "  |  ",
+                                            Style::default().fg(Theme::dim()),
+                                        ));
                                         spans.push(Span::styled(
                                             syntax.to_string(),
                                             if is_selected {
@@ -376,7 +483,11 @@ pub fn render_statusbar(f: &mut Frame, area: Rect, props: StatusBarProps) {
                         .collect();
 
                     let title = if suggs.len() > visible_count {
-                        format!(" Commands [{}/{}] (Tab: complete, Enter: run) ", selected_idx + 1, suggs.len())
+                        format!(
+                            " Commands [{}/{}] (Tab: complete, Enter: run) ",
+                            selected_idx + 1,
+                            suggs.len()
+                        )
                     } else {
                         " Commands (Tab to complete, Enter to run) ".to_string()
                     };
@@ -453,7 +564,11 @@ pub fn render_statusbar(f: &mut Frame, area: Rect, props: StatusBarProps) {
 
             if !props.filter_input.is_empty() {
                 spans.push(Span::raw(" | "));
-                let label = if props.is_text_search { "Search: " } else { "Filter: " };
+                let label = if props.is_text_search {
+                    "Search: "
+                } else {
+                    "Filter: "
+                };
                 spans.push(Span::styled(label, Theme::header_label()));
                 let stats = if props.is_text_search {
                     if props.matched_count == 0 {
@@ -461,15 +576,18 @@ pub fn render_statusbar(f: &mut Frame, area: Rect, props: StatusBarProps) {
                     } else if props.matched_count == 1 {
                         format!("\"{}\" [1 match, n/N]", props.filter_input)
                     } else {
-                        format!("\"{}\" [{} matches, n/N]", props.filter_input, props.matched_count)
+                        format!(
+                            "\"{}\" [{} matches, n/N]",
+                            props.filter_input, props.matched_count
+                        )
                     }
                 } else {
-                    format!("\"{}\" [{}/{}]", props.filter_input, props.matched_count, props.total_count)
+                    format!(
+                        "\"{}\" [{}/{}]",
+                        props.filter_input, props.matched_count, props.total_count
+                    )
                 };
-                spans.push(Span::styled(
-                    stats,
-                    Style::default().fg(Theme::yellow()),
-                ));
+                spans.push(Span::styled(stats, Style::default().fg(Theme::yellow())));
             }
 
             if let Some((btn_label, btn_style)) = props.close_pf_button {
@@ -493,9 +611,10 @@ pub fn render_statusbar(f: &mut Frame, area: Rect, props: StatusBarProps) {
                     height: inner.height,
                 };
                 f.render_widget(Paragraph::new(Line::from(spans)), hints_area);
-                f.render_widget(Paragraph::new(Line::from(vec![
-                    Span::styled(btn_text, btn_style),
-                ])), btn_area);
+                f.render_widget(
+                    Paragraph::new(Line::from(vec![Span::styled(btn_text, btn_style)])),
+                    btn_area,
+                );
             } else {
                 if let Some(rect_cell) = props.close_pf_rect {
                     *rect_cell.borrow_mut() = None;

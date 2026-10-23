@@ -223,11 +223,19 @@ mod tests {
             "tools".to_string(),
         ];
 
-        // 1. :ns without subquery suggests all namespaces + *
+        // 1. :ns without subquery suggests all namespaces (no *, all, -A wildcards)
         let ns_all = command_suggestions_full("ns ", &[], &namespaces, None);
         assert!(!ns_all.is_empty());
         assert!(ns_all.iter().any(|(s, _)| s.name == "ns default"));
-        assert!(ns_all.iter().any(|(s, _)| s.name == "ns *"));
+        assert!(!ns_all.iter().any(|(s, _)| s.name == "ns *"));
+        assert!(!ns_all.iter().any(|(s, _)| s.name == "ns all"));
+        assert!(!ns_all.iter().any(|(s, _)| s.name == "ns -A"));
+        // Namespace completions have clean empty description, category, and syntax hint
+        for (s, _) in &ns_all {
+            assert!(s.description.is_empty());
+            assert!(s.category().is_empty());
+            assert!(s.syntax_hint().is_empty());
+        }
 
         // 2. Active filtering: :ns defa matches default
         let ns_defa = command_suggestions_full("ns defa", &[], &namespaces, None);
@@ -269,7 +277,10 @@ mod tests {
             && matches!(
                 s.target,
                 CommandTarget::ResourceInNamespace(ResourceKind::Pods, _)
-            )));
+            )
+            && s.description.is_empty()
+            && s.category().is_empty()
+            && s.syntax_hint().is_empty()));
 
         // 6. Alias :po tools works too
         let po_suggs = command_suggestions_full("po tool", &[], &namespaces, None);
