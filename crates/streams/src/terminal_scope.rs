@@ -244,13 +244,20 @@ impl Tool {
     /// The read-only check reads words the same way, so the subcommand it
     /// checks is the one the tool runs.
     ///
-    /// ponytail: a boolean global flag a later kubectl or helm adds is read
-    /// as taking a value until it is listed here, which can hide the word
-    /// after it from the check; add each one when the tools grow it.
+    /// kubectl's list includes the klog booleans that 1.25 and earlier
+    /// registered (`--logtostderr` and the rest). Newer kubectl rejects them
+    /// as unknown before it runs anything, so listing them is safe.
+    ///
+    /// ponytail: a boolean flag missing from this list hides the subcommand
+    /// from the check, because the guard reads the flag as taking the next
+    /// word as its value; with no subcommand found nothing is refused, and a
+    /// write can run (`kubectl --logtostderr apply -f x.yaml` did, before
+    /// those were listed). List each boolean global flag when kubectl or
+    /// helm adds one.
     fn bool_flags(self) -> &'static str {
         match self {
             Tool::Kubectl => {
-                "--disable-compression|--insecure-skip-tls-verify|--match-server-version|--warnings-as-errors"
+                "--add-dir-header|--alsologtostderr|--disable-compression|--insecure-skip-tls-verify|--logtostderr|--match-server-version|--one-output|--skip-headers|--skip-log-headers|--warnings-as-errors"
             }
             Tool::Helm => "--debug|--kube-insecure-skip-tls-verify",
         }
@@ -260,13 +267,16 @@ impl Tool {
     /// a flag's value (#101). The first such word is the subcommand, and it
     /// must be a read: anything nobody listed, a plugin's name included, is
     /// refused. kubectl's `rollout` and `auth` pass only for their reads,
-    /// because `rollout restart` and `auth reconcile` write.
+    /// because `rollout restart` and `auth reconcile` write. cobra's hidden
+    /// `__complete` and `__completeNoDesc` pass too: the scripts that
+    /// `completion` prints call them on every Tab, and they run the
+    /// completion functions, never the command being completed.
     fn read_only_check(self) -> &'static str {
         match self {
             Tool::Kubectl => r#"  case "$verb" in
     '')
       case "$arg" in
-        get|describe|logs|top|explain|api-resources|api-versions|version|cluster-info|events|diff|wait|completion|help|config) verb=read ;;
+        get|describe|logs|top|explain|api-resources|api-versions|version|cluster-info|events|diff|wait|completion|__complete|__completeNoDesc|help|config) verb=read ;;
         rollout|auth) verb=$arg ;;
         *) refuse_write "$arg" ;;
       esac
@@ -287,7 +297,7 @@ impl Tool {
 "#,
             Tool::Helm => r#"  if [ -z "$verb" ]; then
     case "$arg" in
-      list|ls|status|get|history|show|inspect|search|template|lint|version|env|help|completion|repo|dependency|dep) verb=read ;;
+      list|ls|status|get|history|show|inspect|search|template|lint|version|env|help|completion|__complete|__completeNoDesc|repo|dependency|dep) verb=read ;;
       *) refuse_write "$arg" ;;
     esac
   fi
@@ -980,6 +990,13 @@ contexts:
             ("kubectl", vec!["auth", "whoami"]),
             // No subcommand at all: kubectl prints its help.
             ("kubectl", vec![]),
+            // What the scripts `completion` prints call on every Tab: cobra's
+            // hidden command, which runs the completion functions and never
+            // the command being completed.
+            ("kubectl", vec!["__complete", "get", "po", ""]),
+            ("kubectl", vec!["__completeNoDesc", "delete", ""]),
+            ("helm", vec!["__complete", "uninstall", ""]),
+            ("helm", vec!["__completeNoDesc", "uninstall", ""]),
             ("helm", vec!["list", "-A"]),
             ("helm", vec!["ls"]),
             ("helm", vec!["status", "web"]),
@@ -1069,6 +1086,7 @@ contexts:
             ("kubectl", vec!["--namespace=prod", "-v=6", "get", "pods"]),
             // A flag that takes no value leaves the next word the subcommand.
             ("kubectl", vec!["--insecure-skip-tls-verify", "get", "pods"]),
+            ("kubectl", vec!["--alsologtostderr", "get", "pods"]),
             ("kubectl", vec!["rollout", "-n", "prod", "status", "deploy/web"]),
             ("helm", vec!["-n", "prod", "list"]),
             ("helm", vec!["--debug", "status", "web"]),
@@ -1087,10 +1105,26 @@ contexts:
             ("kubectl", vec!["rollout", "-n", "status", "restart", "deploy/web"], "kubectl rollout restart"),
             ("helm", vec!["-n", "list", "uninstall", "web"], "helm uninstall"),
             ("helm", vec!["--kube-as-user", "list", "uninstall", "web"], "helm uninstall"),
+            ("kubectl", vec!["--logtostderr", "apply", "-f", "web.yaml"], "kubectl apply"),
         ] {
             let out = f.run(tool, &args);
             assert_eq!(out.status.code(), Some(64), "{tool} {args:?} was not refused");
             assert_eq!(stderr(&out), read_only_refusal(said), "{tool} {args:?}");
+        }
+        // Every klog boolean kubectl 1.25 and earlier registered takes no
+        // value. Read as taking one, it swallows the subcommand after it, the
+        // check finds none, and the write runs.
+        for flag in [
+            "--add-dir-header",
+            "--alsologtostderr",
+            "--logtostderr",
+            "--one-output",
+            "--skip-headers",
+            "--skip-log-headers",
+        ] {
+            let out = f.run("kubectl", &[flag, "apply", "-f", "web.yaml"]);
+            assert_eq!(out.status.code(), Some(64), "kubectl {flag} apply was not refused");
+            assert_eq!(stderr(&out), read_only_refusal("kubectl apply"), "kubectl {flag} apply");
         }
     }
 
