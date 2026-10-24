@@ -102,6 +102,8 @@ pub enum AppEvent {
         key: String,
         result: Result<srelens_registry::github::RolloutCause, String>,
     },
+    /// A local agent's gated tool call, waiting on the user's yes or no.
+    AgentConsent(crate::consent::PendingConsent),
 }
 
 pub struct EventHandler {
