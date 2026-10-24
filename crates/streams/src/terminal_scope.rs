@@ -113,9 +113,9 @@ impl Scope {
     /// The arguments and environment that make `shell` read our init file after
     /// its own. Empty for a shell this module has no init for.
     pub fn shell_start(&self, shell: &str) -> ShellStart {
-        if self.bin.is_none() {
+        let Some(bin) = &self.bin else {
             return ShellStart::default();
-        }
+        };
         let name = Path::new(shell)
             .file_name()
             .and_then(|n| n.to_str())
@@ -140,6 +140,17 @@ impl Scope {
                 }
                 ShellStart { args: Vec::new(), env }
             }
+            // Read-only (#101), the guards must stay ahead of the real tools,
+            // and fish's config can move a directory in front of them, as
+            // `fish_add_path --move` in `brew shellenv` does. `-C` runs after
+            // the config, before the first prompt.
+            "fish" if self.read_only => ShellStart {
+                args: vec![
+                    "-C".into(),
+                    format!("set -gx PATH {} $PATH", fish_quote(&bin.to_string_lossy())),
+                ],
+                env: Vec::new(),
+            },
             _ => ShellStart::default(),
         }
     }
@@ -326,6 +337,12 @@ fn sh_quote(text: &str) -> String {
 
 fn sh_path(path: &Path) -> String {
     sh_quote(&path.to_string_lossy())
+}
+
+/// `text` as one single-quoted fish word. Inside fish's single quotes `\\`
+/// and `\'` are escapes, so [`sh_quote`]'s `'\''` does not carry over.
+fn fish_quote(text: &str) -> String {
+    format!("'{}'", text.replace('\\', "\\\\").replace('\'', "\\'"))
 }
 
 /// The guard for one tool. POSIX `sh`, with the session's paths written into
@@ -890,21 +907,22 @@ contexts:
         assert!(said.contains("b=[dev-cluster/billing] $ "), "{said}");
     }
 
-    /// zsh, where there is one: the macOS default, and absent from most Linux
-    /// CI images. `SRELENS_TEST_ZSH` names a binary that is not on `PATH`.
-    fn zsh() -> Option<String> {
-        if let Ok(path) = std::env::var("SRELENS_TEST_ZSH") {
+    /// The shell `name`, where there is one: zsh is the macOS default, and
+    /// zsh and fish are absent from most Linux CI images. `SRELENS_TEST_ZSH`
+    /// and `SRELENS_TEST_FISH` name a binary that is not on `PATH`.
+    fn shell_named(name: &str) -> Option<String> {
+        if let Ok(path) = std::env::var(format!("SRELENS_TEST_{}", name.to_uppercase())) {
             return Some(path);
         }
         std::env::split_paths(&std::env::var_os("PATH")?)
-            .map(|dir| dir.join("zsh"))
+            .map(|dir| dir.join(name))
             .find(|path| path.is_file())
             .map(|path| path.to_string_lossy().into_owned())
     }
 
     #[test]
     fn zsh_reads_the_readers_files_then_puts_the_guards_first_and_locks_the_variable() {
-        let Some(zsh) = zsh() else {
+        let Some(zsh) = shell_named("zsh") else {
             eprintln!("zsh not found; skipped");
             return;
         };
@@ -954,6 +972,61 @@ contexts:
             vec!["--rcfile".to_string(), f.scope.dir.join("bashrc").display().to_string()]
         );
         assert_eq!(f.scope.shell_start("/bin/zsh").env[0].0, "ZDOTDIR");
+    }
+
+    #[test]
+    fn a_read_only_fish_is_started_to_put_the_guards_back_first_after_its_config() {
+        let f = fixture_in_mode("dev-cluster", None, true);
+        let bin = f.scope.bin.as_ref().unwrap().display().to_string();
+        assert_eq!(
+            f.scope.shell_start("/opt/homebrew/bin/fish"),
+            ShellStart {
+                args: vec!["-C".to_string(), format!("set -gx PATH '{bin}' $PATH")],
+                env: Vec::new(),
+            }
+        );
+        // bash and zsh do it from `init.sh`, so they start as they always did.
+        assert_eq!(
+            f.scope.shell_start("/bin/bash").args,
+            vec!["--rcfile".to_string(), f.scope.dir.join("bashrc").display().to_string()]
+        );
+        assert!(f.scope.shell_start("/bin/zsh").args.is_empty());
+        // Inside fish's single quotes a backslash escapes, unlike sh's.
+        assert_eq!(fish_quote(r"it's a\dir\"), r"'it\'s a\\dir\\'");
+    }
+
+    #[test]
+    fn a_read_only_fish_refuses_a_write_after_its_config_moves_another_kubectl_ahead() {
+        let Some(fish) = shell_named("fish") else {
+            eprintln!("fish not found; skipped");
+            return;
+        };
+        let f = fixture_in_mode("dev-cluster", None, true);
+        let home = tempfile::tempdir().unwrap();
+        let config = home.path().join(".config/fish");
+        std::fs::create_dir_all(&config).unwrap();
+        // What `eval (brew shellenv)` does in fish: moves a directory that
+        // holds its own kubectl to the front.
+        std::fs::write(
+            config.join("config.fish"),
+            format!("set -gx PATH {} $PATH\n", fish_quote(&f.real.to_string_lossy())),
+        )
+        .unwrap();
+        // Started as the terminal starts it: by name.
+        let start = f.scope.shell_start("/usr/bin/fish");
+        let out = Command::new(&fish)
+            .args(&start.args)
+            .args(["-c", "kubectl delete pods --all; echo refused=$status"])
+            .env("HOME", home.path())
+            .env("XDG_CONFIG_HOME", home.path().join(".config"))
+            .env("PATH", f.path())
+            .output()
+            .unwrap();
+        let said = stdout(&out);
+        let context = format!("{said}\n{}", stderr(&out));
+        assert!(said.contains("refused=64"), "{context}");
+        assert!(!said.contains("real-kubectl"), "{context}");
+        assert!(stderr(&out).contains(&read_only_refusal("kubectl delete")), "{context}");
     }
 
     #[test]
