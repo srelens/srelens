@@ -1,0 +1,22 @@
+# TEMPLATE. See srelens.srelens.yaml.
+#
+# `nullsoft`: the release's NSIS installer, the same file the in-app updater
+# installs on Windows. Tauri builds it per-user -- installMode is left at its
+# currentUser default in apps/desktop/src-tauri/tauri.conf.json -- so it needs
+# no elevation, and winget runs it with NSIS's own /S for a silent install.
+#
+# The .msi the release also carries is not offered. Two installers for the
+# same architecture and scope only hand winget a choice nobody asked for, and
+# the updater would replace an MSI install with the NSIS one anyway.
+#
+# x64 only, matching the one Windows build the release makes.
+PackageIdentifier: srelens.srelens
+PackageVersion: 0.0.0
+InstallerType: nullsoft
+Scope: user
+Installers:
+  - Architecture: x64
+    InstallerUrl: https://github.com/srelens/srelens/releases/download/srelens-v0.0.0/srelens_0.0.0_x64-setup.exe
+    InstallerSha256: 0000000000000000000000000000000000000000000000000000000000000000
+ManifestType: installer
+ManifestVersion: 1.6.0
