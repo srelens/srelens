@@ -127,8 +127,12 @@ pub struct AssistantViewState {
     /// Unique identifier for the current active conversation. Assigned lazily on
     /// turn 1 to prevent orphan directories on context switches.
     pub conversation_id: String,
-    /// Latest session ID returned by Cursor Agent CLI for multi-turn `--resume`.
-    pub cursor_resume_id: Option<String>,
+    /// Latest session ID returned by a local agent CLI (Claude Code, Codex or
+    /// Cursor) for its multi-turn resume.
+    pub cli_resume_id: Option<String>,
+    /// The agent this conversation's resume id belongs to; `None` before the
+    /// first turn. A different agent cannot resume it, so a switch starts over.
+    pub chat_agent: Option<srelens_agent::adapter::AgentKind>,
 }
 
 pub fn is_internal_meta_tool(tool: &str) -> bool {
@@ -186,7 +190,8 @@ impl AssistantViewState {
             caveman_level: None,
             task: None,
             conversation_id: uuid::Uuid::new_v4().to_string(),
-            cursor_resume_id: None,
+            cli_resume_id: None,
+            chat_agent: None,
         }
     }
 
@@ -668,12 +673,13 @@ impl AssistantViewState {
         }
     }
 
-    pub fn clear_conversation(&mut self) -> String {
-        if let Some(h) = self.task.take() {
-            h.abort();
-        }
+    /// Start the agent's side of the conversation over: a new conversation id,
+    /// no resume id, no owning agent, and the old Cursor chat directory
+    /// removed. The transcript on screen stays. Returns the old conversation id.
+    pub fn reset_agent_chat(&mut self) -> String {
         let old_id = std::mem::replace(&mut self.conversation_id, uuid::Uuid::new_v4().to_string());
-        self.cursor_resume_id = None;
+        self.cli_resume_id = None;
+        self.chat_agent = None;
         let chat_root = crate::agent::process_cursor_chats_root();
         let old_id_clone = old_id.clone();
         if let Ok(handle) = tokio::runtime::Handle::try_current() {
@@ -687,6 +693,14 @@ impl AssistantViewState {
         } else if let Ok(dir) = srelens_agent::cursor_chat_dir(&chat_root, &old_id_clone) {
             let _ = srelens_agent::remove_cursor_chats(&dir);
         }
+        old_id
+    }
+
+    pub fn clear_conversation(&mut self) -> String {
+        if let Some(h) = self.task.take() {
+            h.abort();
+        }
+        let old_id = self.reset_agent_chat();
 
         let content = if self.context_name.is_empty() {
             "Hello! I am your SRElens AI Assistant. I can analyze pod crashes, diagnose cluster events, inspect configurations, and suggest Kubernetes remediation actions. Type your prompt below:".to_string()
@@ -1038,9 +1052,26 @@ pub fn render_assistant_view(
     state: &AssistantViewState,
     settings: &crate::ai_config::AiSettings,
 ) {
-    let prov = settings.default_provider;
-    let prov_name = crate::ai_config::provider_display_name(prov);
-    let model = settings.get_model(prov);
+    let agent = settings.agent;
+    // A local agent has its own model (or Default); srelens's own agent runs
+    // on the chosen provider.
+    let route = if agent == srelens_agent::adapter::AgentKind::Srelens {
+        let prov = settings.default_provider;
+        format!(
+            "{} · {} · {}",
+            agent.label(),
+            crate::ai_config::provider_display_name(prov),
+            settings.get_model(prov)
+        )
+    } else {
+        format!(
+            "{} · {}",
+            agent.label(),
+            settings
+                .get_agent_model(agent)
+                .unwrap_or_else(|| "Default".to_string())
+        )
+    };
     let token_hint = state
         .messages
         .iter()
@@ -1073,8 +1104,8 @@ pub fn render_assistant_view(
         "<Esc> Back"
     };
     let title = format!(
-        " SRElens AI Assistant{}{}[{} - {}] [{}{}, {}, <Ctrl+o> Save, <Ctrl+l> Clear, <Ctrl+s> Settings, {}] ",
-        cluster_tag, caveman_tag, prov_name, model, token_hint, copy_hint, tools_hint, back_or_cancel
+        " SRElens AI Assistant{}{}[{}] [{}{}, {}, <Ctrl+o> Save, <Ctrl+l> Clear, <Ctrl+s> Settings, {}] ",
+        cluster_tag, caveman_tag, route, token_hint, copy_hint, tools_hint, back_or_cancel
     );
 
     let block = Block::default()

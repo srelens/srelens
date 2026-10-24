@@ -773,29 +773,29 @@ async fn consecutive_turns_serialize_workspace_cleanup_and_reuse() {
 fn stale_ai_session_events_are_rejected_after_conversation_rotation() {
     let mut state = srectl::views::assistant_view::AssistantViewState::for_context("kind-dev");
     let conv1 = state.conversation_id.clone();
-    state.cursor_resume_id = Some("sess-1".to_string());
+    state.cli_resume_id = Some("sess-1".to_string());
 
     // Rotate conversation (e.g. user presses Ctrl+L / clear)
     let _old_conv = state.clear_conversation();
     assert_ne!(state.conversation_id, conv1);
-    assert!(state.cursor_resume_id.is_none());
+    assert!(state.cli_resume_id.is_none());
 
     // Stale session update arrives from conv1
     let stale_msg = format!("{}|sess-1", conv1);
     let (target_conv, session_id) = stale_msg.split_once('|').unwrap();
     if target_conv == state.conversation_id {
-        state.cursor_resume_id = Some(session_id.to_string());
+        state.cli_resume_id = Some(session_id.to_string());
     }
     // Rejected!
-    assert!(state.cursor_resume_id.is_none());
+    assert!(state.cli_resume_id.is_none());
 
     // Matching session update arrives for current conversation
     let valid_msg = format!("{}|sess-2", state.conversation_id);
     let (target_conv, session_id) = valid_msg.split_once('|').unwrap();
     if target_conv == state.conversation_id {
-        state.cursor_resume_id = Some(session_id.to_string());
+        state.cli_resume_id = Some(session_id.to_string());
     }
-    assert_eq!(state.cursor_resume_id.as_deref(), Some("sess-2"));
+    assert_eq!(state.cli_resume_id.as_deref(), Some("sess-2"));
 }
 
 #[tokio::test]

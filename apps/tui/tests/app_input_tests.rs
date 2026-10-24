@@ -4104,11 +4104,223 @@ async fn with_cursor_as_the_agent_the_assistant_turns_to_cursor_agent_not_the_pr
     app.submit_assistant_query("why?".to_string(), "why?".to_string());
 
     let last = &app.assistant_state.messages.last().unwrap().content;
-    assert!(last.contains("cursor-agent CLI was not found"), "{last}");
+    assert!(last.contains("Cursor CLI was not found"), "{last}");
     assert!(
         last.contains("https://docs.cursor.com/en/cli/overview"),
         "{last}"
     );
+}
+
+#[tokio::test]
+async fn asking_a_local_agent_that_is_not_installed_says_where_to_get_it() {
+    use srelens_agent::adapter::AgentKind;
+    let mut settings = common::env::isolate_settings();
+    let empty = tempfile::tempdir().unwrap();
+    settings.set_env("PATH", empty.path());
+    settings.set_env("HOME", empty.path());
+    settings.remove_env("ANTHROPIC_API_KEY");
+    let (mut app, _rx) = common::app().await;
+    app.ai_settings.api_keys.clear();
+
+    for (kind, name, url) in [
+        (
+            AgentKind::Claude,
+            "Claude Code",
+            "https://docs.anthropic.com/en/docs/claude-code/setup",
+        ),
+        (
+            AgentKind::Codex,
+            "Codex",
+            "https://developers.openai.com/codex/cli/",
+        ),
+    ] {
+        app.ai_settings.agent = kind;
+        app.submit_assistant_query("hi".to_string(), "hi".to_string());
+
+        let last = &app.assistant_state.messages.last().unwrap().content;
+        assert!(last.contains(name), "{last}");
+        assert!(last.contains(url), "{last}");
+        assert!(
+            !last.contains("No API key"),
+            "a local agent never falls back to the provider path: {last}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn clearing_the_conversation_starts_the_agent_afresh() {
+    use srelens_agent::adapter::AgentKind;
+    let _settings = common::env::isolate_settings();
+    let (mut app, _rx) = common::app().await;
+    app.active_view = ActiveView::Assistant;
+    let before = app.assistant_state.conversation_id.clone();
+    app.assistant_state.cli_resume_id = Some("s-1".to_string());
+    app.assistant_state.chat_agent = Some(AgentKind::Claude);
+
+    press(&mut app, ctrl('l')).await;
+
+    assert_eq!(app.assistant_state.cli_resume_id, None);
+    assert_ne!(app.assistant_state.conversation_id, before);
+    assert_eq!(app.assistant_state.chat_agent, None);
+}
+
+#[tokio::test]
+async fn switching_agent_starts_the_new_one_afresh() {
+    use srelens_agent::adapter::AgentKind;
+    let mut settings = common::env::isolate_settings();
+    let empty = tempfile::tempdir().unwrap();
+    settings.set_env("PATH", empty.path());
+    settings.set_env("HOME", empty.path());
+    let (mut app, _rx) = common::app().await;
+    let before = app.assistant_state.conversation_id.clone();
+    app.assistant_state.cli_resume_id = Some("claude-session".to_string());
+    app.assistant_state.chat_agent = Some(AgentKind::Claude);
+    app.assistant_state
+        .messages
+        .push(srectl::views::assistant_view::ChatMessage {
+            role: "user".to_string(),
+            content: "earlier question".to_string(),
+            timestamp: "10:00:00".to_string(),
+            tool_calls: Vec::new(),
+            token_usage: None,
+        });
+    app.ai_settings.agent = AgentKind::Codex;
+
+    app.submit_assistant_query("hi".to_string(), "hi".to_string());
+
+    let ai = &app.assistant_state;
+    assert_eq!(
+        ai.cli_resume_id, None,
+        "Codex cannot resume Claude's session"
+    );
+    assert_ne!(ai.conversation_id, before);
+    assert_eq!(ai.chat_agent, Some(AgentKind::Codex));
+    assert!(
+        ai.messages.iter().any(|m| m.content == "earlier question"),
+        "the transcript stays on screen when the agent changes"
+    );
+}
+
+#[tokio::test]
+async fn asking_the_same_agent_again_keeps_its_conversation() {
+    use srelens_agent::adapter::AgentKind;
+    let mut settings = common::env::isolate_settings();
+    let empty = tempfile::tempdir().unwrap();
+    settings.set_env("PATH", empty.path());
+    settings.set_env("HOME", empty.path());
+    let (mut app, _rx) = common::app().await;
+    app.ai_settings.agent = AgentKind::Codex;
+    let before = app.assistant_state.conversation_id.clone();
+
+    // The first turn marks the conversation as Codex's and keeps its id.
+    app.submit_assistant_query("one".to_string(), "one".to_string());
+    assert_eq!(app.assistant_state.chat_agent, Some(AgentKind::Codex));
+    assert_eq!(app.assistant_state.conversation_id, before);
+
+    // A later turn with the same agent resumes it.
+    app.assistant_state.cli_resume_id = Some("s-1".to_string());
+    app.submit_assistant_query("two".to_string(), "two".to_string());
+    assert_eq!(app.assistant_state.cli_resume_id.as_deref(), Some("s-1"));
+    assert_eq!(app.assistant_state.conversation_id, before);
+}
+
+#[tokio::test]
+async fn an_installed_local_agent_gets_the_turn_and_its_session_comes_back() {
+    use srelens_agent::adapter::AgentKind;
+    let mut settings = common::env::isolate_settings();
+    // A fake `claude` first on PATH: a batch shim on Windows (as npm installs
+    // it), a shell script elsewhere. It answers with Claude's stream-json.
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("transcript.jsonl"),
+        concat!(
+            r#"{"type":"system","subtype":"init","session_id":"s-1"}"#,
+            "\n",
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"hello"}]},"session_id":"s-1"}"#,
+            "\n",
+            r#"{"type":"result","subtype":"success","session_id":"s-1"}"#,
+            "\n",
+        ),
+    )
+    .unwrap();
+    let (name, script) = if cfg!(windows) {
+        (
+            "claude.cmd",
+            "@more > \"%~dp0stdin.txt\"\r\n@type \"%~dp0transcript.jsonl\"\r\n".to_string(),
+        )
+    } else {
+        (
+            "claude",
+            "#!/bin/sh\ncat > \"$(dirname \"$0\")/stdin.txt\"; cat \"$(dirname \"$0\")/transcript.jsonl\"\n"
+                .to_string(),
+        )
+    };
+    let bin = dir.path().join(name);
+    std::fs::write(&bin, script).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let path = std::env::join_paths(std::iter::once(dir.path().to_path_buf()).chain(
+        std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()),
+    ))
+    .unwrap();
+    settings.set_env("PATH", path);
+    settings.set_env("HOME", dir.path());
+    let (mut app, mut rx) = common::app().await;
+    app.ai_settings.agent = AgentKind::Claude;
+    let conversation = app.assistant_state.conversation_id.clone();
+
+    app.submit_assistant_query("why?".to_string(), "why?".to_string());
+
+    assert!(app.assistant_state.is_busy, "the turn is under way");
+    let mut results = Vec::new();
+    loop {
+        let ev = tokio::time::timeout(Duration::from_secs(20), rx.recv())
+            .await
+            .expect("the turn ends")
+            .expect("the channel stays open");
+        if let AppEvent::ActionResult { title, result } = ev {
+            let done = title.starts_with("ai_done:");
+            results.push((title, result));
+            if done {
+                break;
+            }
+        }
+    }
+    let ctx = &app.active_context;
+    assert!(
+        results
+            .iter()
+            .any(|(t, r)| *t == format!("ai_chunk:{ctx}") && r.as_deref() == Ok("hello")),
+        "Claude's answer reaches the Assistant: {results:?}"
+    );
+    assert!(
+        results
+            .iter()
+            .any(|(t, r)| *t == format!("ai_session:{ctx}")
+                && r.as_deref() == Ok(format!("{conversation}|s-1").as_str())),
+        "the session is kept for the next turn: {results:?}"
+    );
+}
+
+#[tokio::test]
+async fn the_title_names_the_agent_and_its_model() {
+    use srelens_agent::adapter::AgentKind;
+    let _settings = common::env::isolate_settings();
+    let (mut app, _rx) = common::app().await;
+    app.active_view = ActiveView::Assistant;
+    app.ai_settings.agent = AgentKind::Codex;
+    app.ai_settings
+        .set_agent_model(AgentKind::Codex, Some("gpt-5.6-sol".to_string()));
+
+    let text = common::render_app(&mut app, 200, 30);
+    assert!(text.contains("[Codex · gpt-5.6-sol]"), "{text}");
+
+    app.ai_settings.set_agent_model(AgentKind::Codex, None);
+    let text = common::render_app(&mut app, 200, 30);
+    assert!(text.contains("[Codex · Default]"), "{text}");
 }
 
 #[tokio::test]

@@ -443,7 +443,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         ("", msg.as_str())
                                     };
                                     if target_conv.is_empty() || target_conv == target_state.conversation_id {
-                                        target_state.cursor_resume_id = if session_id.is_empty() {
+                                        target_state.cli_resume_id = if session_id.is_empty() {
                                             None
                                         } else {
                                             Some(session_id.to_string())

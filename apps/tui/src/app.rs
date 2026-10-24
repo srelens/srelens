@@ -8484,15 +8484,25 @@ impl App {
             }
         }
 
-        // Claude Code and Codex fall through to the provider path until they are wired.
-        if self.ai_settings.agent == AgentKind::Cursor {
-            if let Some(binary) = crate::ai_config::find_agent(AgentKind::Cursor) {
+        // One agent owns a conversation's resume id. Another one cannot pick
+        // it up, so changing agent starts the conversation over (the
+        // transcript on screen stays).
+        let agent = self.ai_settings.agent;
+        if ai.chat_agent.is_some_and(|owner| owner != agent) {
+            ai.reset_agent_chat();
+        }
+        ai.chat_agent = Some(agent);
+
+        if agent != AgentKind::Srelens {
+            if let Some(binary) = crate::ai_config::find_agent(agent) {
                 let turn = crate::agent::CliTurn {
-                    kind: AgentKind::Cursor,
+                    kind: agent,
                     binary,
-                    // Cursor's own model, not the provider's: `None` is Default (no flag).
-                    model: self.ai_settings.get_agent_model(AgentKind::Cursor),
-                    cursor_key: self.ai_settings.get_cursor_key(),
+                    // The agent's own model, not the provider's: `None` is Default (no flag).
+                    model: self.ai_settings.get_agent_model(agent),
+                    cursor_key: (agent == AgentKind::Cursor)
+                        .then(|| self.ai_settings.get_cursor_key())
+                        .flatten(),
                     query,
                     active_ctx,
                     active_ns,
@@ -8502,7 +8512,7 @@ impl App {
                     event_tx: self.event_tx.clone(),
                     timeout_seconds: self.ai_settings.get_timeout_seconds(provider),
                     conversation_id: ai.conversation_id.clone(),
-                    resume: ai.cursor_resume_id.clone(),
+                    resume: ai.cli_resume_id.clone(),
                     chat_root: crate::agent::process_cursor_chats_root(),
                 };
                 let hub_kc_opt = argo_hub_kc.clone();
@@ -8515,8 +8525,9 @@ impl App {
                 ai.task = Some(handle.abort_handle());
             } else {
                 ai.add_assistant_message(format!(
-                    "cursor-agent CLI was not found on PATH. Install from {} or ensure ~/.local/bin is in your PATH.",
-                    crate::ai_config::agent_install_url(AgentKind::Cursor)
+                    "{} CLI was not found on PATH. Install it from {} or add its install folder to your PATH.",
+                    agent.label(),
+                    crate::ai_config::agent_install_url(agent)
                 ));
             }
         } else if let Some(config) = self.ai_settings.resolve_provider_config(provider) {
