@@ -165,6 +165,17 @@ pub const BASE_SYSTEM_PROMPT: &str = concat!(
     "sync status, and deployment sources for workloads on the active cluster.",
 );
 
+/// Whether `program` is a Windows batch file (`.cmd`/`.bat`, any case), as
+/// npm installs `claude` and `codex`. Rust refuses to spawn one with a newline
+/// in an argument, and cmd.exe expands `%VAR%` in the rest, so such a binary
+/// gets its prompt on stdin (`claude_command_via_stdin`,
+/// `codex_command_via_stdin`). Pure path logic, the same on every OS.
+pub fn is_batch_shim(program: &str) -> bool {
+    std::path::Path::new(program)
+        .extension()
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("cmd") || ext.eq_ignore_ascii_case("bat"))
+}
+
 /// Build the Claude Code argv. `resume` carries a prior session id for a
 /// follow-up turn. Prompt is the trailing positional so it can't be mistaken
 /// for a flag value.
@@ -174,6 +185,43 @@ pub fn claude_command(
     mcp_config_path: &str,
     resume: Option<&str>,
 ) -> AgentCommand {
+    let mut args = claude_args(mcp_config_path, ["--append-system-prompt", BASE_SYSTEM_PROMPT], resume);
+    // `--` ends option parsing so a prompt that itself looks like a flag
+    // (e.g. a pasted `--disallowedTools none`) can never be reinterpreted by
+    // clap as overriding the flags above — it is always treated as the
+    // trailing positional message. Verified live against the real CLI.
+    args.push("--".to_string());
+    args.push(prompt.to_string());
+    // Claude passes its MCP bearer token via the config file at
+    // `mcp_config_path`, never via env.
+    AgentCommand {
+        program: binary.to_string(),
+        args,
+        env: Vec::new(),
+        stdin: None,
+    }
+}
+
+/// `claude_command` for a batch shim (`is_batch_shim`): the same box, with the
+/// system prompt read from `system_prompt_file` and no prompt in argv — the
+/// caller sets `stdin` to it, which `claude -p` reads when given no positional.
+pub fn claude_command_via_stdin(
+    binary: &str,
+    mcp_config_path: &str,
+    system_prompt_file: &str,
+    resume: Option<&str>,
+) -> AgentCommand {
+    AgentCommand {
+        program: binary.to_string(),
+        args: claude_args(mcp_config_path, ["--append-system-prompt-file", system_prompt_file], resume),
+        env: Vec::new(),
+        stdin: None,
+    }
+}
+
+/// Every Claude flag but the prompt: the box both builders above share, so
+/// they cannot drift apart. `system_prompt` is the flag and its value.
+fn claude_args(mcp_config_path: &str, system_prompt: [&str; 2], resume: Option<&str>) -> Vec<String> {
     let mut args = vec![
         "-p".to_string(),
         "--output-format".to_string(),
@@ -197,27 +245,14 @@ pub fn claude_command(
         ALLOWED_TOOLS.to_string(),
         "--disallowedTools".to_string(),
         DISALLOWED_TOOLS.to_string(),
-        "--append-system-prompt".to_string(),
-        BASE_SYSTEM_PROMPT.to_string(),
+        system_prompt[0].to_string(),
+        system_prompt[1].to_string(),
     ];
     if let Some(id) = resume {
         args.push("--resume".to_string());
         args.push(id.to_string());
     }
-    // `--` ends option parsing so a prompt that itself looks like a flag
-    // (e.g. a pasted `--disallowedTools none`) can never be reinterpreted by
-    // clap as overriding the flags above — it is always treated as the
-    // trailing positional message. Verified live against the real CLI.
-    args.push("--".to_string());
-    args.push(prompt.to_string());
-    // Claude passes its MCP bearer token via the config file at
-    // `mcp_config_path`, never via env.
-    AgentCommand {
-        program: binary.to_string(),
-        args,
-        env: Vec::new(),
-        stdin: None,
-    }
+    args
 }
 
 /// Escape a string for embedding inside a double-quoted TOML value (used for
@@ -258,6 +293,34 @@ pub const CODEX_TOKEN_ENV: &str = "SRELENS_MCP_TOKEN";
 pub fn codex_command(
     binary: &str,
     prompt: &str,
+    mcp_url: &str,
+    token: &str,
+    empty_cwd: &str,
+    image_paths: &[String],
+    resume: Option<&str>,
+) -> AgentCommand {
+    codex_boxed(binary, prompt, mcp_url, token, empty_cwd, image_paths, resume)
+}
+
+/// `codex_command` for a batch shim (`is_batch_shim`): the same argv with `-`
+/// as the prompt, which tells `codex exec` to read it from stdin — the caller
+/// sets `stdin` to it.
+pub fn codex_command_via_stdin(
+    binary: &str,
+    mcp_url: &str,
+    token: &str,
+    empty_cwd: &str,
+    image_paths: &[String],
+    resume: Option<&str>,
+) -> AgentCommand {
+    codex_boxed(binary, "-", mcp_url, token, empty_cwd, image_paths, resume)
+}
+
+/// The box both Codex builders above share, so they cannot drift apart;
+/// `prompt_arg` is the trailing positional.
+fn codex_boxed(
+    binary: &str,
+    prompt_arg: &str,
     mcp_url: &str,
     token: &str,
     empty_cwd: &str,
@@ -343,7 +406,7 @@ pub fn codex_command(
     // treated as the trailing positional message. Verified live against the
     // real CLI.
     args.push("--".to_string());
-    args.push(prompt.to_string());
+    args.push(prompt_arg.to_string());
     AgentCommand {
         program: binary.to_string(),
         args,
@@ -1035,6 +1098,47 @@ mod tests {
             v["mcpServers"]["srelens"]["headers"]["Authorization"],
             format!("Bearer {token}")
         );
+    }
+
+    #[test]
+    fn a_batch_shim_is_recognised_whatever_its_case_and_path() {
+        assert!(is_batch_shim(r"C:\Program Files\nodejs\claude.CMD"));
+        assert!(is_batch_shim(r"C:\Users\First Last\bin\codex.bat"));
+        assert!(!is_batch_shim(r"C:\x\codex.exe"));
+        assert!(!is_batch_shim(r"C:\x\claude"));
+        assert!(!is_batch_shim("/usr/bin/claude"));
+    }
+
+    /// A batch shim cannot take a newline in argv (Rust refuses to spawn it),
+    /// so the system prompt goes by file and the user's prompt by stdin; the
+    /// box itself must be exactly `claude_command`'s.
+    #[test]
+    fn claude_via_stdin_keeps_the_box_and_takes_no_prompt_in_argv() {
+        for resume in [None, Some("sess-123")] {
+            let mut expected = claude_command("b", "p", "/c", resume).args;
+            expected.truncate(expected.len() - 2); // `--` and the prompt
+            let at = expected.iter().position(|a| a == "--append-system-prompt").unwrap();
+            expected.splice(at..at + 2, ["--append-system-prompt-file".to_string(), "/s".to_string()]);
+            let cmd = claude_command_via_stdin("b", "/c", "/s", resume);
+            assert_eq!(cmd.args, expected);
+            assert!(!cmd.args.iter().any(|a| a == "--" || a.contains('\n')));
+            assert_eq!(cmd.program, "b");
+            assert!(cmd.env.is_empty());
+        }
+    }
+
+    #[test]
+    fn codex_via_stdin_keeps_the_box_and_reads_the_prompt_from_stdin() {
+        let images = ["/tmp/img1.png".to_string()];
+        for resume in [None, Some("thread-1")] {
+            let mut expected =
+                codex_command("b", "PROMPT", "http://127.0.0.1:8765/mcp", "deadbeef", "/e", &images, resume);
+            *expected.args.last_mut().unwrap() = "-".to_string();
+            assert_eq!(
+                codex_command_via_stdin("b", "http://127.0.0.1:8765/mcp", "deadbeef", "/e", &images, resume),
+                expected
+            );
+        }
     }
 
     #[test]

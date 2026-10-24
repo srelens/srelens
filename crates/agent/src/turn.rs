@@ -288,6 +288,8 @@ pub struct PreparedTurn {
     pub cmd: crate::adapter::AgentCommand,
     pub cwd: std::path::PathBuf,
     _config_guard: Option<TempFile>,
+    /// A batch shim's Claude system prompt (see `is_batch_shim`).
+    _sysprompt_guard: Option<TempFile>,
     _cwd_guard: Option<TempDir>,
     _cursor_turn: Option<CursorTurn>,
 }
@@ -315,6 +317,7 @@ pub fn prepare_turn(spec: &TurnSpec) -> Result<PreparedTurn, String> {
                 cmd: turn.cmd.clone(),
                 cwd: turn.workspace.clone(),
                 _config_guard: None,
+                _sysprompt_guard: None,
                 _cwd_guard: None,
                 _cursor_turn: Some(turn),
             })
@@ -338,13 +341,47 @@ pub fn prepare_turn(spec: &TurnSpec) -> Result<PreparedTurn, String> {
             // — a guard built and dropped inside the match arm itself would be gone
             // before the agent ever read the file.
             let mut config_guard: Option<TempFile> = None;
+            let mut sysprompt_guard: Option<TempFile> = None;
+            // npm installs `claude` and `codex` as `.cmd` shims on Windows, which
+            // can't take a newline in argv and expand `%VAR%` in it: their
+            // prompt goes on stdin instead (see `is_batch_shim`).
+            let shim = crate::adapter::is_batch_shim(spec.binary);
             let cmd = if spec.kind == AgentKind::Claude {
                 let cfg = crate::adapter::McpConfig::http(spec.mcp_url, spec.token);
                 let cfg_path = spec.temp_dir.join(format!("srelens-mcp-{}.json", spec.session));
                 write_private_file(&cfg_path, &serde_json::to_vec(&cfg).unwrap()).map_err(|e| e.to_string())?;
                 config_guard = Some(TempFile(cfg_path.clone()));
                 let effective_prompt = prompt_with_images(spec.prompt, spec.image_paths);
-                crate::adapter::claude_command(spec.binary, &effective_prompt, &cfg_path.to_string_lossy(), spec.resume)
+                if shim {
+                    // The system prompt has newlines too, so it goes by file.
+                    let sys_path = spec.temp_dir.join(format!("srelens-sysprompt-{}.txt", spec.session));
+                    sysprompt_guard = Some(TempFile(sys_path.clone()));
+                    write_private_file(&sys_path, crate::adapter::BASE_SYSTEM_PROMPT.as_bytes())
+                        .map_err(|e| e.to_string())?;
+                    let mut cmd = crate::adapter::claude_command_via_stdin(
+                        spec.binary,
+                        &cfg_path.to_string_lossy(),
+                        &sys_path.to_string_lossy(),
+                        spec.resume,
+                    );
+                    cmd.stdin = Some(effective_prompt);
+                    cmd
+                } else {
+                    crate::adapter::claude_command(spec.binary, &effective_prompt, &cfg_path.to_string_lossy(), spec.resume)
+                }
+            } else if shim {
+                // Whether `exec … resume <thread> -` takes a stdin prompt is
+                // unverified, so a shim's follow-up starts a fresh thread.
+                let mut cmd = crate::adapter::codex_command_via_stdin(
+                    spec.binary,
+                    spec.mcp_url,
+                    spec.token,
+                    &cwd.to_string_lossy(),
+                    spec.image_paths,
+                    None,
+                );
+                cmd.stdin = Some(spec.prompt.to_string());
+                cmd
             } else {
                 // A follow-up resumes the conversation's Codex thread with the whole
                 // box re-asserted in front of `resume` (see `codex_command`), in this
@@ -364,6 +401,7 @@ pub fn prepare_turn(spec: &TurnSpec) -> Result<PreparedTurn, String> {
                 cmd,
                 cwd,
                 _config_guard: config_guard,
+                _sysprompt_guard: sysprompt_guard,
                 _cwd_guard: Some(cwd_guard),
                 _cursor_turn: None,
             })
@@ -811,6 +849,53 @@ mod tests {
             let turn = prepare_turn(&TurnSpec { resume: Some("prev-1"), ..f.spec(kind) }).unwrap();
             assert!(turn.cmd.args.iter().any(|a| a == "prev-1"), "{kind:?} must resume prev-1");
         }
+    }
+
+    /// Rust refuses to spawn a `.cmd`/`.bat` with a newline in argv, and cmd.exe
+    /// would expand `%VAR%` in what it is given, so a batch shim's prompt
+    /// travels on stdin; Claude's system prompt (it has newlines) by file.
+    #[test]
+    fn a_shim_turn_carries_a_hostile_prompt_only_on_stdin() {
+        let p = "100% \"quoted\" & %PATH%\nsecond line";
+        for (kind, shim) in [(AgentKind::Claude, r"x\claude.cmd"), (AgentKind::Codex, r"x\codex.cmd")] {
+            let f = TurnFixture::new();
+            let turn = prepare_turn(&TurnSpec { binary: shim, prompt: p, ..f.spec(kind) }).unwrap();
+            assert_eq!(turn.cmd.stdin.as_deref(), Some(p), "{kind:?}");
+            assert!(
+                !turn.cmd.args.iter().any(|a| a.contains("PATH%") || a.contains('\n')),
+                "{kind:?}: {:?}",
+                turn.cmd.args
+            );
+            if kind == AgentKind::Claude {
+                let sysprompt = f.root.0.join("srelens-sysprompt-s1.txt");
+                assert!(turn.cmd.args.windows(2).any(|w| w[0] == "--append-system-prompt-file"
+                    && std::path::Path::new(&w[1]) == sysprompt));
+                assert_eq!(std::fs::read_to_string(&sysprompt).unwrap(), crate::adapter::BASE_SYSTEM_PROMPT);
+                drop(turn);
+                assert!(!sysprompt.exists(), "the system-prompt file goes with the turn");
+            }
+
+            // Not a shim: the prompt stays the trailing positional, stdin closed.
+            let plain = prepare_turn(&TurnSpec { binary: "agent", prompt: p, ..f.spec(kind) }).unwrap();
+            assert_eq!(plain.cmd.stdin, None, "{kind:?}");
+            assert_eq!(plain.cmd.args.last().map(String::as_str), Some(p), "{kind:?}");
+        }
+    }
+
+    /// Whether `codex exec … resume <thread> -` accepts a stdin prompt is
+    /// unverified, so a Codex shim's follow-up starts a fresh thread. Claude's
+    /// `--resume <id>` stays in argv (ids are bare tokens, `valid_resume_id`).
+    #[test]
+    fn a_codex_shim_turn_starts_fresh_while_a_claude_shim_turn_resumes() {
+        let f = TurnFixture::new();
+        let codex =
+            prepare_turn(&TurnSpec { binary: r"x\codex.cmd", resume: Some("prev-1"), ..f.spec(AgentKind::Codex) })
+                .unwrap();
+        assert!(!codex.cmd.args.iter().any(|a| a == "resume" || a == "prev-1"), "{:?}", codex.cmd.args);
+        let claude =
+            prepare_turn(&TurnSpec { binary: r"x\claude.cmd", resume: Some("prev-1"), ..f.spec(AgentKind::Claude) })
+                .unwrap();
+        assert!(claude.cmd.args.windows(2).any(|w| w == ["--resume", "prev-1"]));
     }
 
     #[test]
