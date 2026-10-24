@@ -144,11 +144,7 @@ impl Provider for HttpProvider {
     }
 
     async fn list_models(&self) -> Result<Vec<ModelInfo>, LlmError> {
-        let url = match self.config.kind {
-            ProviderKind::Anthropic => format!("{}/v1/models", self.base()),
-            ProviderKind::OpenAi | ProviderKind::OpenAiCompatible => format!("{}/models", self.base()),
-            ProviderKind::Gemini => format!("{}/v1beta/models", self.base()),
-        };
+        let url = models_url(self.config.kind, self.base());
         let resp = self.auth(self.http.get(&url)).send().await.map_err(|e| LlmError::Http(e.to_string()))?;
         if !resp.status().is_success() {
             return Err(LlmError::Api(error_message(resp).await));
@@ -192,6 +188,17 @@ async fn error_message(resp: reqwest::Response) -> String {
         .ok()
         .and_then(|v| v.get("error").and_then(|e| e.get("message")).and_then(Value::as_str).map(str::to_string))
         .unwrap_or_else(|| if text.is_empty() { format!("HTTP {status}") } else { format!("HTTP {status}: {text}") })
+}
+
+/// The models-list URL for `base` (already trimmed of a trailing `/`). Anthropic
+/// and Gemini page their lists and return only a first page by default, so ask
+/// for as many as the API allows in one call; OpenAI-style lists are not paged.
+pub(crate) fn models_url(kind: ProviderKind, base: &str) -> String {
+    match kind {
+        ProviderKind::Anthropic => format!("{base}/v1/models?limit=1000"),
+        ProviderKind::OpenAi | ProviderKind::OpenAiCompatible => format!("{base}/models"),
+        ProviderKind::Gemini => format!("{base}/v1beta/models?pageSize=1000"),
+    }
 }
 
 /// Parse a provider's models-list response into `ModelInfo`s.
@@ -318,6 +325,16 @@ mod tests {
     fn a_models_body_of_the_wrong_shape_yields_an_empty_list() {
         assert!(parse_models(ProviderKind::OpenAi, &serde_json::json!({})).is_empty());
         assert!(parse_models(ProviderKind::Gemini, &serde_json::json!({ "models": "nope" })).is_empty());
+    }
+
+    #[test]
+    fn models_are_asked_for_in_one_full_page() {
+        // Anthropic and Gemini page their lists (20 / 50 by default), so a bare URL
+        // returns only the first page; OpenAI-style lists are not paged.
+        assert_eq!(models_url(ProviderKind::Anthropic, "https://x"), "https://x/v1/models?limit=1000");
+        assert_eq!(models_url(ProviderKind::OpenAi, "https://x"), "https://x/models");
+        assert_eq!(models_url(ProviderKind::OpenAiCompatible, "https://x"), "https://x/models");
+        assert_eq!(models_url(ProviderKind::Gemini, "https://x"), "https://x/v1beta/models?pageSize=1000");
     }
 
     #[test]
