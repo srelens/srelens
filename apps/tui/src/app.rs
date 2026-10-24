@@ -2553,7 +2553,7 @@ impl App {
                 .filter(|c| c.plural.eq_ignore_ascii_case(&crd.plural))
                 .count()
                 > 1;
-            if has_plural_collision && query_clean.eq_ignore_ascii_case(&crd.crd_name) {
+            if has_plural_collision {
                 return crd.crd_name.clone();
             }
         }

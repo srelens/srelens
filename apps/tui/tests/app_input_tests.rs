@@ -2295,6 +2295,59 @@ async fn crd_plural_collision_space_preserves_full_crd_name_with_group() {
 }
 
 #[tokio::test]
+async fn crd_plural_collision_tab_then_space_preserves_full_crd_name_with_group() {
+    let _settings = common::env::isolate_settings();
+    let (mut app, _rx) = common::app().await;
+
+    let widget_a = CrdMeta {
+        crd_name: "widgets.a.io".to_string(),
+        group: "a.io".to_string(),
+        version: "v1".to_string(),
+        kind: "Widget".to_string(),
+        plural: "widgets".to_string(),
+        singular: "widget".to_string(),
+        namespaced: true,
+        short_names: vec![],
+        printer_columns: vec![],
+        created_at: None,
+    };
+    let widget_b = CrdMeta {
+        crd_name: "widgets.b.io".to_string(),
+        group: "b.io".to_string(),
+        version: "v1".to_string(),
+        kind: "Widget".to_string(),
+        plural: "widgets".to_string(),
+        singular: "widget".to_string(),
+        namespaced: true,
+        short_names: vec![],
+        printer_columns: vec![],
+        created_at: None,
+    };
+
+    app.crds = vec![widget_a.clone(), widget_b.clone()];
+    app.namespaces = vec!["default".to_string()];
+
+    // Type ":widg" prefix
+    press(&mut app, ch(':')).await;
+    type_str(&mut app, "widg").await;
+
+    // Tab completes to common command name "widgets" while pointing to widgets.a.io
+    press(&mut app, key(KeyCode::Tab)).await;
+    assert_eq!(app.command_buffer, "widgets");
+
+    // Select the second colliding CRD (widgets.b.io) with Down arrow
+    press(&mut app, key(KeyCode::Down)).await;
+
+    // Press Space: because Tab completed "widgets" without group, Space must resolve and preserve full "widgets.b.io "
+    press(&mut app, ch(' ')).await;
+    assert_eq!(app.command_buffer, "widgets.b.io ");
+
+    // Press Enter: must open widgets.b.io
+    press(&mut app, key(KeyCode::Enter)).await;
+    assert_eq!(table(&app).kind, ResourceKind::CustomResource(widget_b));
+}
+
+#[tokio::test]
 async fn colon_commands_that_need_a_selection_warn_when_the_table_is_empty() {
     let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app().await;
