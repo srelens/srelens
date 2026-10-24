@@ -91,6 +91,10 @@ impl TerminalManager {
     ///
     /// `namespace`, when given, is the one `kubectl` uses by default in this
     /// terminal — the one the tab it was opened from is looking at (#846).
+    ///
+    /// `read_only` makes the guards refuse every `kubectl` and `helm`
+    /// subcommand that is not a read: a terminal on a protected cluster
+    /// (#101). Where there are no guards (Windows) it changes nothing.
     #[allow(clippy::too_many_arguments)]
     pub async fn start(
         &self,
@@ -102,6 +106,7 @@ impl TerminalManager {
         rows: Option<u16>,
         command: Option<String>,
         namespace: Option<String>,
+        read_only: bool,
     ) -> Result<u64, String> {
         // Refused before anything is allocated: `run_then_shell` is a POSIX
         // script for `/bin/sh`, and a platform without one would fail at the
@@ -116,7 +121,7 @@ impl TerminalManager {
         let ctx = context.clone();
         let ns = namespace.clone();
         let scope = tokio::task::spawn_blocking(move || {
-            Scope::create(overlay_id, &ctx, ns.as_deref(), &kubeconfig_paths, false)
+            Scope::create(overlay_id, &ctx, ns.as_deref(), &kubeconfig_paths, read_only)
         })
         .await
         .map_err(|e| e.to_string())??;
@@ -356,6 +361,7 @@ contexts:
                 Some(24),
                 None,
                 None,
+                false,
             )
             .await
             .expect("terminal starts");
@@ -422,6 +428,7 @@ contexts:
                 Some(24),
                 Some("printf 'srelens-first:%s\\n' $((20+22))".into()),
                 None,
+                false,
             )
             .await
             .expect("terminal starts");
@@ -452,6 +459,7 @@ contexts:
                 Some(24),
                 Some("srelens-no-such-command-820".into()),
                 None,
+                false,
             )
             .await
             .expect("terminal starts");
@@ -503,6 +511,7 @@ contexts:
                 Some(24),
                 None,
                 Some("payments".into()),
+                false,
             )
             .await
             .expect("terminal starts");
@@ -538,6 +547,7 @@ contexts:
                 Some(24),
                 None,
                 None,
+                false,
             )
             .await
             .expect("terminal starts");
@@ -549,6 +559,39 @@ contexts:
         manager.close(id);
 
         assert!(refused, "{}", output_on(&sink, "t7"));
+    }
+
+    /// A terminal started read-only, met the way the reader meets it: a write
+    /// typed at the prompt is refused by the guard (#101).
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_read_only_terminal_refuses_a_write_typed_in_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let kc = fixture_kubeconfig(dir.path());
+        let sink = Arc::new(TestSink::default());
+        let manager = TerminalManager::new();
+        let id = manager
+            .start(
+                sink.clone(),
+                "test".into(),
+                vec![kc],
+                "t8".into(),
+                Some(200),
+                Some(24),
+                None,
+                None,
+                true,
+            )
+            .await
+            .expect("terminal starts");
+
+        // Refused before any `kubectl` is looked for, so this holds on a
+        // machine that has none installed.
+        manager.input(id, "kubectl delete pods --all\n");
+        let refused = wait_for_output(&sink, "t8", "this terminal is read-only").await;
+        manager.close(id);
+
+        assert!(refused, "{}", output_on(&sink, "t8"));
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -566,6 +609,7 @@ contexts:
                 Some(24),
                 None,
                 None,
+                false,
             )
             .await;
         assert!(refused.is_err());
@@ -588,6 +632,7 @@ contexts:
                 Some(24),
                 None,
                 None,
+                false,
             )
             .await
             .expect("terminal starts");

@@ -27,7 +27,13 @@ describe("startLocalTerminal", () => {
       rows: 24,
       command: null,
       namespace: null,
+      readOnly: false,
     });
+  });
+
+  it("asks the host for a read-only shell, under the name the host reads it by (#101)", async () => {
+    await startLocalTerminal("prod", [], () => {}, () => {}, undefined, undefined, undefined, true);
+    expect(started()).toMatchObject({ readOnly: true });
   });
 
   it("hands the host the namespace the shell should start in", async () => {
