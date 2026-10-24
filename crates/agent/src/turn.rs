@@ -267,7 +267,8 @@ pub struct TurnSpec<'a> {
     /// The CLI's own session id from the conversation's previous turn,
     /// already checked with `valid_resume_id`.
     pub resume: Option<&'a str>,
-    /// The model to run the turn on; applied in a later change.
+    /// The model to run the turn on (`AgentCommand::with_model`); `None`, or
+    /// an id it refuses, runs the CLI's own default.
     pub model: Option<&'a str>,
     /// Names the turn's scratch files, so it must be one bare path component.
     pub session: &'a str,
@@ -314,7 +315,7 @@ pub fn prepare_turn(spec: &TurnSpec) -> Result<PreparedTurn, String> {
                 spec.resume,
             )?;
             Ok(PreparedTurn {
-                cmd: turn.cmd.clone(),
+                cmd: turn.cmd.clone().with_model(spec.kind, spec.model),
                 cwd: turn.workspace.clone(),
                 _config_guard: None,
                 _sysprompt_guard: None,
@@ -398,7 +399,7 @@ pub fn prepare_turn(spec: &TurnSpec) -> Result<PreparedTurn, String> {
                 )
             };
             Ok(PreparedTurn {
-                cmd,
+                cmd: cmd.with_model(spec.kind, spec.model),
                 cwd,
                 _config_guard: config_guard,
                 _sysprompt_guard: sysprompt_guard,
@@ -896,6 +897,25 @@ mod tests {
             prepare_turn(&TurnSpec { binary: r"x\claude.cmd", resume: Some("prev-1"), ..f.spec(AgentKind::Claude) })
                 .unwrap();
         assert!(claude.cmd.args.windows(2).any(|w| w == ["--resume", "prev-1"]));
+    }
+
+    /// Codex's `resume` is a subcommand with no `-m`, so the model must sit
+    /// ahead of it; an id that could pass for a flag is dropped, not passed on.
+    #[test]
+    fn a_turn_runs_on_its_model_ahead_of_resume_and_drops_one_that_could_be_a_flag() {
+        for (kind, flag) in [(AgentKind::Claude, "--model"), (AgentKind::Cursor, "--model"), (AgentKind::Codex, "-m")] {
+            let f = TurnFixture::new();
+            let turn = prepare_turn(&TurnSpec { model: Some("m-1"), resume: Some("prev-1"), ..f.spec(kind) }).unwrap();
+            assert_eq!(turn.cmd.args[1..3], [flag, "m-1"], "{kind:?}");
+            if kind == AgentKind::Codex {
+                let resume = turn.cmd.args.iter().position(|a| a == "resume").unwrap();
+                assert!(2 < resume, "{:?}", turn.cmd.args);
+            }
+            drop(turn); // a Cursor turn holds its chat until it ends
+
+            let bad = prepare_turn(&TurnSpec { model: Some("--not-a-model"), ..f.spec(kind) }).unwrap();
+            assert!(!bad.cmd.args.iter().any(|a| a == flag || a == "--not-a-model"), "{kind:?}: {:?}", bad.cmd.args);
+        }
     }
 
     #[test]

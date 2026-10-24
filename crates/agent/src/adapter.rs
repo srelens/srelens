@@ -92,6 +92,41 @@ pub struct AgentCommand {
     pub stdin: Option<String>,
 }
 
+/// Whether `id` may follow a CLI's model flag. A model id comes from a
+/// setting or a chat, so it must not be able to pass for a flag or smuggle
+/// whitespace into argv: non-empty, at most 128 characters, not starting with
+/// `-`, and only `[A-Za-z0-9._:/@\[\]-]` (`claude-fable-5[1m]`,
+/// `models/gemini-2.5-pro`). Callers drop an invalid id (the CLI's own
+/// default model) rather than failing the turn.
+pub fn valid_model_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 128
+        && !id.starts_with('-')
+        && id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | ':' | '/' | '@' | '[' | ']' | '-'))
+}
+
+impl AgentCommand {
+    /// Run on `model`: Codex takes `-m <id>`, Claude Code and Cursor
+    /// `--model <id>`, put right after the first arg (`exec` / `-p`) so the
+    /// rest of the argv, and the trailing prompt, stay as built. `None`, an
+    /// id `valid_model_id` refuses, and the native agent (it has no CLI)
+    /// leave the command unchanged.
+    pub fn with_model(mut self, kind: AgentKind, model: Option<&str>) -> Self {
+        let flag = match kind {
+            AgentKind::Codex => "-m",
+            AgentKind::Claude | AgentKind::Cursor => "--model",
+            AgentKind::Srelens => return self,
+        };
+        if let Some(id) = model.filter(|id| valid_model_id(id)) {
+            let at = self.args.len().min(1);
+            self.args.splice(at..at, [flag.to_string(), id.to_string()]);
+        }
+        self
+    }
+}
+
 /// The only tools the agent may call: srelens's own MCP tools, exposed under
 /// the `srelens` server name configured in `McpConfig::http`. Kept for
 /// documentation of intent — see `DISALLOWED_TOOLS` for the flag that
@@ -1139,6 +1174,73 @@ mod tests {
                 expected
             );
         }
+    }
+
+    #[test]
+    fn model_ids_that_could_be_flags_or_junk_are_refused() {
+        for ok in ["sonnet", "gpt-5.6-sol", "claude-fable-5[1m]", "models/gemini-2.5-pro", "a@b:c"] {
+            assert!(valid_model_id(ok), "{ok:?} must be accepted");
+        }
+        for bad in ["", "-x", "--dangerously-skip-permissions", "a b", "a\nb", &"x".repeat(129)] {
+            assert!(!valid_model_id(bad), "{bad:?} must be refused");
+        }
+        assert!(valid_model_id(&"x".repeat(128)));
+    }
+
+    /// The model flag goes in straight after the subcommand or `-p`, so
+    /// everything else — the box, the `--` guard, the prompt — is untouched.
+    #[test]
+    fn each_cli_gets_its_own_model_flag_right_after_its_first_arg() {
+        let claude = claude_command("c", "hi", "/mcp.json", None);
+        let cursor = cursor_cmd();
+        let codex = codex_cmd();
+        for (kind, plain, first, flag, model) in [
+            (AgentKind::Claude, claude, "-p", "--model", "sonnet"),
+            (AgentKind::Cursor, cursor, "-p", "--model", "sonnet"),
+            (AgentKind::Codex, codex, "exec", "-m", "gpt-5.6-luna"),
+        ] {
+            let with = plain.clone().with_model(kind, Some(model));
+            assert_eq!(with.args[..3], [first, flag, model], "{kind:?}");
+            assert_eq!([&with.args[..1], &with.args[3..]].concat(), plain.args, "{kind:?}");
+            assert_eq!(with.args.last(), plain.args.last(), "{kind:?}: the prompt stays last");
+            assert_eq!((with.program, with.env, with.stdin), (plain.program, plain.env, plain.stdin), "{kind:?}");
+        }
+    }
+
+    /// A batch shim's commands start with the same first arg, so they get the
+    /// flag in the same place.
+    #[test]
+    fn the_stdin_variants_take_the_model_flag_too() {
+        let claude = claude_command_via_stdin("c", "/mcp.json", "/sys.txt", None);
+        assert_eq!(claude.with_model(AgentKind::Claude, Some("sonnet")).args[..3], ["-p", "--model", "sonnet"]);
+        let codex = codex_command_via_stdin("c", "http://127.0.0.1:1/mcp", "t", "/e", &[], None);
+        assert_eq!(codex.with_model(AgentKind::Codex, Some("gpt-5.6-luna")).args[..3], ["exec", "-m", "gpt-5.6-luna"]);
+    }
+
+    /// `codex exec resume` has no `-m` of its own, so the model rides in
+    /// `exec`'s options, ahead of the subcommand.
+    #[test]
+    fn codex_puts_the_model_ahead_of_resume() {
+        let resumed = codex_command("c", "hi", "http://127.0.0.1:1/mcp", "t", "/e", &[], Some("thread-1"))
+            .with_model(AgentKind::Codex, Some("gpt-5.6-luna"));
+        let model = resumed.args.iter().position(|a| a == "-m").unwrap();
+        let resume = resumed.args.iter().position(|a| a == "resume").unwrap();
+        assert!(model < resume, "{:?}", resumed.args);
+    }
+
+    #[test]
+    fn no_model_a_bad_one_or_the_native_agent_leaves_the_command_alone() {
+        for (kind, plain) in [
+            (AgentKind::Claude, claude_command("c", "hi", "/mcp.json", None)),
+            (AgentKind::Cursor, cursor_cmd()),
+            (AgentKind::Codex, codex_cmd()),
+        ] {
+            assert_eq!(plain.clone().with_model(kind, None), plain, "{kind:?}");
+            assert_eq!(plain.clone().with_model(kind, Some("-x")), plain, "{kind:?}");
+            assert_eq!(plain.clone().with_model(kind, Some("")), plain, "{kind:?}");
+        }
+        let plain = codex_cmd();
+        assert_eq!(plain.clone().with_model(AgentKind::Srelens, Some("sonnet")), plain);
     }
 
     #[test]
