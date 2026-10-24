@@ -239,10 +239,12 @@ pub struct App {
     pub screen_selecting: bool,
     pub screen_selection_text: std::cell::RefCell<String>,
     /// Local agents' gated tool calls waiting on a yes or no. While any is
-    /// waiting, its prompt is drawn over everything and takes every key.
+    /// waiting, its prompt is drawn over everything and takes every key;
+    /// clicks and pastes go nowhere.
     pub consents: crate::consent::ConsentQueue,
-    /// How long a new prompt ignores keys, so one typed before it appeared
-    /// (a `y` mid-sentence in the Assistant) cannot answer it.
+    /// How long a prompt ignores keys once it is first drawn, so a key typed
+    /// before the user could see it (a `y` mid-sentence in the Assistant)
+    /// cannot answer it.
     pub consent_arm_delay: Duration,
 }
 
@@ -2576,9 +2578,23 @@ impl App {
         self.screen_selecting = false;
 
         // An agent's approval prompt is drawn over everything and takes
-        // every key, Ctrl+C included, until it is answered or gone.
+        // every key until it is answered or gone. Ctrl+C there means stop:
+        // decline, and cancel the turn that asked (srectl keeps running).
         if !self.consents.is_empty() {
-            self.consents.press(key, self.consent_arm_delay);
+            if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
+                if let Some(context) = self.consents.cancel() {
+                    let turn = if context == self.active_context {
+                        Some(&mut self.assistant_state)
+                    } else {
+                        self.assistant_states.get_mut(&context)
+                    };
+                    if let Some(turn) = turn {
+                        turn.cancel_turn();
+                    }
+                }
+            } else {
+                self.consents.press(key, self.consent_arm_delay);
+            }
             return;
         }
 
@@ -8571,6 +8587,12 @@ impl App {
     pub async fn handle_mouse(&mut self, mouse: crossterm::event::MouseEvent) {
         use crossterm::event::{MouseButton, MouseEventKind};
 
+        // Nothing under an agent's approval prompt runs while it is up. The
+        // wheel still scrolls (the event loop handles it before this).
+        if !self.consents.is_empty() {
+            return;
+        }
+
         // 0. Check if clicking on Close Port Forward button in status bar
         if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
             let clicked_close_pf = {
@@ -9040,6 +9062,10 @@ impl App {
     }
 
     pub fn handle_paste(&mut self, text: String) {
+        // Nothing under an agent's approval prompt takes input while it is up.
+        if !self.consents.is_empty() {
+            return;
+        }
         if self.input_mode == InputMode::Command {
             self.command_tab_base = None;
             self.command_tab_target = None;
@@ -15582,6 +15608,7 @@ impl App {
 
         // An agent's approval prompt, over every view and dialog. Before the
         // selection pass, so a drag still copies what is on screen.
+        self.consents.shown();
         if let Some(pending) = self.consents.front() {
             crate::ui::dialogs::render_consent(
                 f,

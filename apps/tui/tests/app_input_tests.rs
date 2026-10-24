@@ -8596,9 +8596,11 @@ async fn the_next_prompt_arms_from_when_it_is_shown() {
     let (second, mut second_answer) = delete_pod_consent("api-1");
     app.consents.push(first);
     app.consents.push(second);
+    screen(&mut app);
     tokio::time::sleep(Duration::from_millis(80)).await;
 
     press(&mut app, ch('y')).await;
+    screen(&mut app);
     press(&mut app, ch('y')).await;
 
     assert_eq!(first_answer.try_recv(), Ok(Decision::Approved));
@@ -8606,6 +8608,222 @@ async fn the_next_prompt_arms_from_when_it_is_shown() {
         second_answer.try_recv(),
         Err(TryRecvError::Empty),
         "the second prompt only just appeared"
+    );
+}
+
+/// The screen is redrawn only after a batch of events, and one event in the
+/// batch can take a while (a context switch awaits); a `y` typed before the
+/// prompt was ever drawn must not answer it, however long that took.
+#[tokio::test]
+async fn a_prompt_never_drawn_cannot_be_approved() {
+    let _settings = common::env::isolate_settings();
+    let (mut app, _rx) = common::app().await;
+    app.consent_arm_delay = Duration::from_millis(50);
+    let (prompt, mut answer) = delete_pod_consent("api-0");
+    app.consents.push(prompt);
+    tokio::time::sleep(Duration::from_millis(80)).await;
+
+    press(&mut app, ch('y')).await;
+    assert_eq!(answer.try_recv(), Err(TryRecvError::Empty), "never drawn");
+
+    screen(&mut app);
+    tokio::time::sleep(Duration::from_millis(80)).await;
+    press(&mut app, ch('y')).await;
+    assert_eq!(
+        answer.try_recv(),
+        Ok(Decision::Approved),
+        "drawn, then armed"
+    );
+}
+
+#[tokio::test]
+async fn a_click_under_the_prompt_does_nothing() {
+    let _settings = common::env::isolate_settings();
+    let (mut app, _rx) = common::app().await;
+    *app.context_chip_rects.borrow_mut() = vec![(
+        ratatui::layout::Rect::new(0, 0, 10, 1),
+        "other-cluster".to_string(),
+    )];
+    let (prompt, _answer) = delete_pod_consent("api-0");
+    app.consents.push(prompt);
+
+    app.handle_mouse(common::click(1, 0)).await;
+
+    assert_eq!(app.active_context, "test-cluster");
+}
+
+#[tokio::test]
+async fn a_paste_under_the_prompt_goes_nowhere() {
+    let _settings = common::env::isolate_settings();
+    let (mut app, _rx) = common::app().await;
+    app.consent_arm_delay = Duration::ZERO;
+    app.active_view = ActiveView::Assistant;
+    let (prompt, mut answer) = delete_pod_consent("api-0");
+    app.consents.push(prompt);
+
+    app.handle_paste("y".to_string());
+
+    assert_eq!(app.assistant_state.input, "");
+    assert_eq!(answer.try_recv(), Err(TryRecvError::Empty));
+}
+
+/// Ctrl+C on a prompt is "stop": it declines, and it cancels the turn of the
+/// chat that asked, wherever that chat is. srectl keeps running.
+#[tokio::test]
+async fn ctrl_c_declines_and_cancels_the_turn_that_asked() {
+    let _settings = common::env::isolate_settings();
+    let (mut app, _rx) = common::app().await;
+    app.assistant_state.is_busy = true;
+    let mut other = srectl::views::assistant_view::AssistantViewState::for_context("kind-dev");
+    other.is_busy = true;
+    app.assistant_states.insert("kind-dev".into(), other);
+    let (mut here, mut here_answer) = delete_pod_consent("api-0");
+    here.context = "test-cluster".into();
+    let (there, mut there_answer) = delete_pod_consent("api-1");
+    app.consents.push(here);
+    app.consents.push(there);
+
+    press(&mut app, ctrl('c')).await;
+    press(&mut app, ctrl('c')).await;
+
+    let declined = Ok(Decision::Denied("declined in srectl".into()));
+    assert_eq!(here_answer.try_recv(), declined);
+    assert_eq!(there_answer.try_recv(), declined);
+    assert!(
+        !app.assistant_state.is_busy,
+        "the active chat's turn stopped"
+    );
+    assert!(
+        !app.assistant_states["kind-dev"].is_busy,
+        "the other chat's turn stopped"
+    );
+    assert!(app.consents.is_empty());
+    assert!(app.is_running, "Ctrl+C on a prompt does not quit");
+}
+
+#[tokio::test]
+async fn ctrl_c_for_a_closed_request_stops_nothing_else() {
+    let _settings = common::env::isolate_settings();
+    let (mut app, _rx) = common::app().await;
+    app.assistant_state.is_busy = true;
+    let (gone, gone_answer) = delete_pod_consent("api-0");
+    let (mut next, mut next_answer) = delete_pod_consent("api-1");
+    next.context = "test-cluster".into();
+    app.consents.push(gone);
+    app.consents.push(next);
+
+    drop(gone_answer);
+    press(&mut app, ctrl('c')).await;
+
+    assert_eq!(
+        next_answer.try_recv(),
+        Err(TryRecvError::Empty),
+        "the Ctrl+C was meant for a prompt that had already closed"
+    );
+    assert!(app.assistant_state.is_busy, "nobody else's turn stopped");
+}
+
+/// The prompt names the chat the turn started in; the call itself may name
+/// another cluster, and that is the one it would change.
+#[tokio::test]
+async fn a_call_aimed_at_another_cluster_says_so() {
+    let _settings = common::env::isolate_settings();
+    let (mut app, _rx) = common::app().await;
+    let (prompt, _answer) = consent_for(ConsentRequest {
+        tool: "k8s.deletePod".into(),
+        args: json!({ "context": "prod-eu", "name": "api-0", "namespace": "shop" }),
+        kind: ConsentKind::Destructive,
+        impact: srelens_capability::Impact::High,
+        confirm_text: Some("Delete pod shop/api-0?".into()),
+        caller: None,
+    });
+    app.consents.push(prompt);
+
+    let buffer = common::render_app_buffer(&mut app, 120, 40);
+
+    let screen = common::buffer_lines(&buffer).join("\n");
+    assert!(screen.contains("targets prod-eu"), "screen:\n{screen}");
+    assert!(screen.contains("kind-dev"), "screen:\n{screen}");
+    let (x, y) = find_cells(&buffer, "targets prod-eu").expect("on screen");
+    let target = &buffer[(x + "targets ".len() as u16, y)];
+    assert_eq!(
+        target.fg,
+        srectl::theme::Theme::status_warn().fg.unwrap(),
+        "the cluster it would change stands out"
+    );
+}
+
+/// Where `text` starts on screen, read cell by cell.
+fn find_cells(buffer: &ratatui::buffer::Buffer, text: &str) -> Option<(u16, u16)> {
+    let area = buffer.area;
+    for y in 0..area.height {
+        for x in 0..area.width {
+            let fits = text.chars().enumerate().all(|(i, c)| {
+                let cx = x + i as u16;
+                cx < area.width && buffer[(cx, y)].symbol() == c.to_string()
+            });
+            if fits {
+                return Some((x, y));
+            }
+        }
+    }
+    None
+}
+
+#[tokio::test]
+async fn a_call_without_the_hosts_sentence_shows_what_it_acts_on() {
+    let _settings = common::env::isolate_settings();
+    let (mut app, _rx) = common::app().await;
+    let (prompt, _answer) = consent_for(ConsentRequest {
+        tool: "k8s.getSecret".into(),
+        args: json!({ "namespace": "payments", "name": "stripe-key" }),
+        kind: ConsentKind::SensitiveRead,
+        impact: srelens_capability::Impact::Medium,
+        confirm_text: None,
+        caller: None,
+    });
+    app.consents.push(prompt);
+
+    let screen = screen(&mut app);
+
+    assert!(screen.contains("payments"), "screen:\n{screen}");
+    assert!(screen.contains("stripe-key"), "screen:\n{screen}");
+}
+
+#[tokio::test]
+async fn the_arguments_shown_leave_out_the_hint_and_stay_short() {
+    let _settings = common::env::isolate_settings();
+    let (mut app, _rx) = common::app().await;
+    let mut request = delete_pod_request("api-0");
+    request.args = json!({
+        "name": "api-0",
+        "namespace": "prod",
+        "_confirm": "HINT-FOR-THE-POLICY",
+        "gracePeriodSeconds": 0,
+        "label": "a\u{202E}b",
+        // Each of these is eight characters once escaped: long, and longer
+        // still after escaping.
+        "manifest": "\u{202E}".repeat(5000),
+    });
+    let (prompt, _answer) = consent_for(request);
+    app.consents.push(prompt);
+
+    let screen = screen(&mut app);
+
+    assert!(screen.contains("gracePeriodSeconds"), "screen:\n{screen}");
+    assert!(!screen.contains("HINT-FOR-THE-POLICY"), "screen:\n{screen}");
+    assert!(!screen.contains('\u{202E}'), "screen:\n{screen}");
+    assert!(
+        screen.contains("\\u{202e}"),
+        "the hidden character is shown, not obeyed:\n{screen}"
+    );
+    let rows = screen
+        .lines()
+        .filter(|l| l.contains("\\u{202e}\\u{202e}"))
+        .count();
+    assert!(
+        (1..=4).contains(&rows),
+        "{rows} rows of arguments:\n{screen}"
     );
 }
 

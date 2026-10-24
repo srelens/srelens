@@ -31,14 +31,15 @@ pub struct PendingConsent {
     pub request: ConsentRequest,
     /// The agent that raised the call, as srectl names it.
     pub agent: String,
-    /// The cluster context the call would act on.
+    /// The context of the chat whose turn raised the call. The call may name
+    /// another in its own arguments; that is the one it would act on.
     pub context: String,
     pub reply: oneshot::Sender<Decision>,
 }
 
 /// The prompts waiting on the user, oldest first; only the front one is on
 /// screen. Each keeps when it arrived (its 60 s run from then), and the queue
-/// keeps when the front one was first shown (its keys arm from then).
+/// keeps when the front one was first drawn (its keys arm from then).
 #[derive(Debug, Default)]
 pub struct ConsentQueue {
     waiting: VecDeque<(PendingConsent, Instant)>,
@@ -47,11 +48,16 @@ pub struct ConsentQueue {
 
 impl ConsentQueue {
     pub fn push(&mut self, pending: PendingConsent) {
-        let now = Instant::now();
-        if self.waiting.is_empty() {
-            self.front_shown = Some(now);
+        self.waiting.push_back((pending, Instant::now()));
+    }
+
+    /// The front prompt is being drawn. Its keys arm from the first time, not
+    /// from when it arrived: the screen is redrawn only between batches of
+    /// events, and one event in a batch can take a while.
+    pub fn shown(&mut self) {
+        if !self.waiting.is_empty() {
+            self.front_shown.get_or_insert_with(Instant::now);
         }
-        self.waiting.push_back((pending, now));
     }
 
     pub fn front(&self) -> Option<&PendingConsent> {
@@ -74,6 +80,12 @@ impl ConsentQueue {
     /// Drops every prompt nobody waits on any more: the agent's wait timed
     /// out, or its turn was cancelled. Nothing is sent for them.
     pub fn prune_closed(&mut self) {
+        self.drop_closed();
+    }
+
+    /// [`Self::prune_closed`], saying whether the front prompt was one of
+    /// them: a key pressed for it was meant for a prompt that is gone.
+    fn drop_closed(&mut self) -> bool {
         let front_closed = self
             .front()
             .is_some_and(|pending| pending.reply.is_closed());
@@ -82,19 +94,16 @@ impl ConsentQueue {
         if front_closed {
             self.front_changed();
         }
+        front_closed
     }
 
     /// A key while a prompt is up: `y` approves, `n` or Esc declines, and
     /// every other key, Enter included, does nothing. Keys before the front
-    /// prompt has been shown for `arm_delay` are dropped, so one typed before
-    /// it appeared cannot answer it; so is a key for a prompt whose agent has
-    /// stopped waiting, which leaves instead.
+    /// prompt has been on screen for `arm_delay` are dropped, so one typed
+    /// before the user could see it cannot answer it; so is a key for a
+    /// prompt whose agent has stopped waiting, which leaves instead.
     pub fn press(&mut self, key: KeyEvent, arm_delay: Duration) {
-        let front_closed = self
-            .front()
-            .is_some_and(|pending| pending.reply.is_closed());
-        self.prune_closed();
-        if front_closed || self.ready_in(arm_delay) > 0 {
+        if self.drop_closed() || self.ready_in(arm_delay) > 0 {
             return;
         }
         let decision = match key.code {
@@ -105,13 +114,27 @@ impl ConsentQueue {
         self.answer(decision);
     }
 
+    /// Ctrl+C on a prompt: declines it at once, armed or not, and returns the
+    /// context of the chat that asked, for the app to stop that turn. `None`
+    /// when the front prompt had already gone.
+    pub fn cancel(&mut self) -> Option<String> {
+        if self.drop_closed() {
+            return None;
+        }
+        let context = self.front()?.context.clone();
+        self.answer(Decision::Denied(DECLINED.into()));
+        Some(context)
+    }
+
     /// Whole seconds, rounded up, before keys reach the front prompt; 0 once
-    /// it has been on screen for `arm_delay`.
+    /// it has been on screen for `arm_delay`. A prompt not yet drawn has the
+    /// whole delay to go.
     pub fn ready_in(&self, arm_delay: Duration) -> u64 {
-        self.front_shown.map_or(0, |shown| {
-            let left = arm_delay.saturating_sub(shown.elapsed());
-            left.as_millis().div_ceil(1000) as u64
-        })
+        let on_screen = self.front_shown.map_or(Duration::ZERO, |s| s.elapsed());
+        arm_delay
+            .saturating_sub(on_screen)
+            .as_millis()
+            .div_ceil(1000) as u64
     }
 
     /// Whole seconds before the front prompt's agent stops waiting.
@@ -121,8 +144,9 @@ impl ConsentQueue {
         })
     }
 
+    /// A new front prompt has not been drawn yet.
     fn front_changed(&mut self) {
-        self.front_shown = (!self.waiting.is_empty()).then(Instant::now);
+        self.front_shown = None;
     }
 }
 

@@ -1784,7 +1784,7 @@ pub fn render_consent(
         ConsentKind::Destructive => ("change", Theme::red()),
         ConsentKind::SensitiveRead => ("Secret read", Theme::yellow()),
     };
-    let modal_area = centered_rect(60, 40, area);
+    let modal_area = centered_rect(60, 50, area);
     f.render_widget(Clear, modal_area);
     let block = Block::default()
         .borders(Borders::ALL)
@@ -1809,12 +1809,27 @@ pub fn render_consent(
     if ready_in > 0 {
         answer.push(Span::styled(format!("   ready in {ready_in}s"), dim));
     }
-    let lines = vec![
-        Line::from(vec![
+    let fields = srelens_capability::confirm_fields(&request.args);
+    // The call can name a cluster other than the chat's own; that is the one
+    // it would change, so it is the one the user must not miss.
+    let who = match fields.get("cluster") {
+        Some(target) if *target != pending.context => Line::from(vec![
+            Span::styled(pending.agent.as_str(), value),
+            Span::styled(" targets ", dim),
+            Span::styled(target.as_str(), Theme::status_warn()),
+            Span::styled(" (asked from the ", dim),
+            Span::styled(pending.context.as_str(), value),
+            Span::styled(" chat)", dim),
+        ]),
+        _ => Line::from(vec![
             Span::styled(pending.agent.as_str(), value),
             Span::styled(" asks to act on ", dim),
             Span::styled(pending.context.as_str(), value),
         ]),
+    };
+    let inner = block.inner(modal_area);
+    let mut lines = vec![
+        who,
         Line::default(),
         Line::from(Span::styled(
             request.prompt(),
@@ -1830,7 +1845,11 @@ pub fn render_consent(
             Span::styled(what, value),
         ]),
     ];
-    let inner = block.inner(modal_area);
+    lines.extend(
+        argument_lines(&request.args, &fields, inner.width as usize, 4)
+            .into_iter()
+            .map(|line| Line::from(Span::styled(line, dim))),
+    );
     f.render_widget(block, modal_area);
     // The answer keys get their own rows, so a long prompt in a small
     // terminal is what gets cut, never how to answer it.
@@ -1846,4 +1865,60 @@ pub fn render_consent(
             area,
         );
     }
+}
+
+/// A call's arguments as at most `rows` lines of `width` characters: what it
+/// acts on first, as the host reads it (`fields`, escaped and bounded), then
+/// everything else as compact JSON with control and format characters
+/// escaped. `_confirm` is a hint to the policy, not part of the call, so it is
+/// never shown. Cut with "…" when it does not fit.
+fn argument_lines(
+    args: &serde_json::Value,
+    fields: &srelens_capability::ConfirmFields,
+    width: usize,
+    rows: usize,
+) -> Vec<String> {
+    const TARGET: [(&str, &str); 4] = [
+        ("kind", "kind"),
+        ("name", "name"),
+        ("namespace", "namespace"),
+        ("cluster", "context"),
+    ];
+    let mut parts: Vec<String> = TARGET
+        .iter()
+        .filter_map(|(field, key)| fields.get(field).map(|v| format!("{key} {v}")))
+        .collect();
+    if let Some(args) = args.as_object() {
+        // Shown above: a target field read from the top level.
+        let shown = |key: &str, value: &serde_json::Value| {
+            TARGET.iter().any(|(_, k)| *k == key) && value.as_str().is_some_and(|s| !s.is_empty())
+        };
+        let rest: std::collections::BTreeMap<&str, &serde_json::Value> = args
+            .iter()
+            .filter(|(key, value)| *key != "_confirm" && !shown(key, value))
+            .map(|(key, value)| (key.as_str(), value))
+            .collect();
+        if !rest.is_empty() {
+            parts.push(serde_json::to_string(&rest).unwrap_or_default());
+        }
+    }
+    let width = width.max(1);
+    let limit = width * rows;
+    // Escaping lengthens text, so cut before it (bounding the work) and after.
+    let text: String = parts.join("  ").chars().take(limit + 1).collect();
+    let text: Vec<char> = srelens_capability::escape_invisible(&text)
+        .chars()
+        .collect();
+    let mut lines: Vec<String> = text
+        .chunks(width)
+        .take(rows)
+        .map(|chunk| chunk.iter().collect())
+        .collect();
+    if text.len() > limit {
+        if let Some(last) = lines.last_mut() {
+            last.pop();
+            last.push('…');
+        }
+    }
+    lines
 }
