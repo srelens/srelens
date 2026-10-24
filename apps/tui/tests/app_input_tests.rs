@@ -2348,6 +2348,148 @@ async fn crd_plural_collision_tab_then_space_preserves_full_crd_name_with_group(
 }
 
 #[tokio::test]
+async fn first_suggestion_space_without_arrows_completes_deployments_and_services() {
+    let _settings = common::env::isolate_settings();
+    let (mut app, _rx) = common::app().await;
+
+    // Type ":deplo" prefix without touching arrow keys, then press Space
+    press(&mut app, ch(':')).await;
+    type_str(&mut app, "deplo").await;
+    press(&mut app, ch(' ')).await;
+    assert_eq!(
+        app.command_buffer, "deployments ",
+        "Space on highlighted index 0 must complete :deplo to :deployments "
+    );
+
+    // Escape and test :serv (serviceaccounts ranks before services alphabetically)
+    press(&mut app, key(KeyCode::Esc)).await;
+    press(&mut app, ch(':')).await;
+    type_str(&mut app, "serv").await;
+    press(&mut app, ch(' ')).await;
+    assert_eq!(
+        app.command_buffer, "serviceaccounts ",
+        "Space on highlighted index 0 must complete whatever command is highlighted at index 0"
+    );
+}
+
+#[tokio::test]
+async fn first_suggestion_space_without_arrows_completes_crd_command() {
+    let _settings = common::env::isolate_settings();
+    let (mut app, _rx) = common::app().await;
+
+    let crd = CrdMeta {
+        crd_name: "prometheuses.monitoring.coreos.com".to_string(),
+        group: "monitoring.coreos.com".to_string(),
+        version: "v1".to_string(),
+        kind: "Prometheus".to_string(),
+        plural: "prometheuses".to_string(),
+        singular: "prometheus".to_string(),
+        namespaced: true,
+        short_names: vec![],
+        printer_columns: vec![],
+        created_at: None,
+    };
+    app.crds = vec![crd.clone()];
+
+    // Type ":prome" prefix and press Space directly
+    press(&mut app, ch(':')).await;
+    type_str(&mut app, "prome").await;
+    press(&mut app, ch(' ')).await;
+    assert_eq!(
+        app.command_buffer, "prometheuses ",
+        "Space on highlighted CRD at index 0 must complete to full CRD name"
+    );
+
+    // Press Enter to verify navigation
+    press(&mut app, key(KeyCode::Enter)).await;
+    assert_eq!(table(&app).kind, ResourceKind::CustomResource(crd));
+}
+
+#[tokio::test]
+async fn negative_space_on_empty_colon_does_not_commit_themes() {
+    let _settings = common::env::isolate_settings();
+    let (mut app, _rx) = common::app().await;
+
+    // Type ":" followed immediately by Space: must NOT complete "themes "
+    press(&mut app, ch(':')).await;
+    press(&mut app, ch(' ')).await;
+    assert_ne!(
+        app.command_buffer.trim(),
+        "themes",
+        "Space on empty command bar must not commit first registry entry"
+    );
+    assert_eq!(app.command_buffer, " ");
+}
+
+#[tokio::test]
+async fn negative_space_on_exact_name_or_alias_preserves_typed_command() {
+    let _settings = common::env::isolate_settings();
+    let (mut app, _rx) = common::app().await;
+
+    // Type ":ns " - must remain ":ns " and NOT rewrite to ":namespaces "
+    press(&mut app, ch(':')).await;
+    type_str(&mut app, "ns").await;
+    press(&mut app, ch(' ')).await;
+    assert_eq!(app.command_buffer, "ns ");
+
+    // Type ":theme " - must remain ":theme " and NOT rewrite to ":themes "
+    press(&mut app, key(KeyCode::Esc)).await;
+    press(&mut app, ch(':')).await;
+    type_str(&mut app, "theme").await;
+    press(&mut app, ch(' ')).await;
+    assert_eq!(app.command_buffer, "theme ");
+
+    // Type ":ctx " - must remain ":ctx "
+    press(&mut app, key(KeyCode::Esc)).await;
+    press(&mut app, ch(':')).await;
+    type_str(&mut app, "ctx").await;
+    press(&mut app, ch(' ')).await;
+    assert_eq!(app.command_buffer, "ctx ");
+}
+
+#[tokio::test]
+async fn negative_space_on_substring_only_match_does_not_commit() {
+    let _settings = common::env::isolate_settings();
+    let (mut app, _rx) = common::app().await;
+
+    // Type ":drac" which only matches "Dracula" in theme descriptions (score < 80)
+    press(&mut app, ch(':')).await;
+    type_str(&mut app, "drac").await;
+    press(&mut app, ch(' ')).await;
+
+    // Must NOT complete "themes ", should stay literal "drac "
+    assert_eq!(app.command_buffer, "drac ");
+}
+
+#[tokio::test]
+async fn space_then_enter_parity_with_bare_enter() {
+    let _settings = common::env::isolate_settings();
+
+    for prefix in ["deplo", "serv", "ing"] {
+        // Run 1: Bare Enter on prefix
+        let (mut app1, _rx1) = common::app().await;
+        press(&mut app1, ch(':')).await;
+        type_str(&mut app1, prefix).await;
+        press(&mut app1, key(KeyCode::Enter)).await;
+        let expected_kind = table(&app1).kind.clone();
+
+        // Run 2: Space then Enter on prefix
+        let (mut app2, _rx2) = common::app().await;
+        press(&mut app2, ch(':')).await;
+        type_str(&mut app2, prefix).await;
+        press(&mut app2, ch(' ')).await;
+        press(&mut app2, key(KeyCode::Enter)).await;
+        let actual_kind = table(&app2).kind.clone();
+
+        assert_eq!(
+            actual_kind, expected_kind,
+            "Space then Enter on '{}' must yield identical view as bare Enter",
+            prefix
+        );
+    }
+}
+
+#[tokio::test]
 async fn colon_commands_that_need_a_selection_warn_when_the_table_is_empty() {
     let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app().await;

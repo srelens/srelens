@@ -20,8 +20,8 @@ use srelens_streams::logs::LogStreamManager;
 use srelens_streams::watch::WatchManager;
 
 use crate::commands::{
-    command_suggestions_full, command_suggestions_with_crds, resolve_command_with_crds,
-    CommandTarget, CrdMeta, DynamicCommandDef, ResourceKind,
+    command_suggestions_full, command_suggestions_with_crds, is_exact_name_or_alias,
+    resolve_command_with_crds, CommandTarget, CrdMeta, DynamicCommandDef, ResourceKind,
 };
 use crate::event::AppEvent;
 use crate::sink::TuiSink;
@@ -4442,9 +4442,23 @@ impl App {
                     if !key.modifiers.contains(KeyModifiers::CONTROL)
                         && !key.modifiers.contains(KeyModifiers::ALT) =>
                 {
-                    if !self.command_buffer.contains(char::is_whitespace)
-                        && self.command_tab_target.is_some()
-                    {
+                    let raw = self
+                        .command_buffer
+                        .trim_start()
+                        .trim_start_matches(':')
+                        .trim();
+                    let first_word_done = self.command_buffer.contains(char::is_whitespace);
+
+                    // Space is a literal separator when:
+                    // 1. already past the first word
+                    // 2. nothing typed yet (":" then Space)
+                    // 3. no explicit arrow selection, and the word is already an exact command name or alias (e.g. ":ns", ":theme", ":ctx")
+                    let word_is_complete = first_word_done
+                        || raw.is_empty()
+                        || (self.command_tab_target.is_none()
+                            && is_exact_name_or_alias(raw, &self.crds));
+
+                    if !word_is_complete {
                         let query = self
                             .command_tab_base
                             .as_deref()
@@ -4455,18 +4469,13 @@ impl App {
                             &self.namespaces,
                             self.namespace_discovery_error.as_deref(),
                         );
-                        let matched_sugg = suggestions
-                            .iter()
-                            .find(|(s, _)| Some(&s.target) == self.command_tab_target.as_ref())
-                            .or_else(|| {
-                                if self.command_suggestion_idx < suggestions.len() {
-                                    Some(&suggestions[self.command_suggestion_idx])
-                                } else {
-                                    None
-                                }
-                            });
-                        if let Some((sugg, _)) = matched_sugg {
-                            if !sugg.name.ends_with(" <namespace>") {
+                        let matched_sugg = match &self.command_tab_target {
+                            Some(t) => suggestions.iter().find(|(s, _)| &s.target == t),
+                            None => suggestions.get(self.command_suggestion_idx),
+                        };
+                        // Only prefix matches (score >= 80) complete on Space; substring/description hits are for browsing.
+                        if let Some((sugg, score)) = matched_sugg {
+                            if *score >= 80 && !sugg.name.ends_with(" <namespace>") {
                                 let name = self.resolve_completion_command_name(sugg, query);
                                 self.command_buffer = format!("{} ", name);
                                 self.command_tab_base = None;
