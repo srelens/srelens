@@ -116,7 +116,7 @@ impl TerminalManager {
         let ctx = context.clone();
         let ns = namespace.clone();
         let scope = tokio::task::spawn_blocking(move || {
-            Scope::create(overlay_id, &ctx, ns.as_deref(), &kubeconfig_paths)
+            Scope::create(overlay_id, &ctx, ns.as_deref(), &kubeconfig_paths, false)
         })
         .await
         .map_err(|e| e.to_string())??;
