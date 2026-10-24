@@ -92,68 +92,15 @@ fn native_agent_info(app: &tauri::AppHandle) -> AgentInfo {
 /// installed under `~/.local/bin` — in `system_path` but not `app_path` — was
 /// invisible to a packaged build even though a dev shell's inherited PATH
 /// happened to cover it.
+///
+/// Each directory is resolved the way the OS would run the name, so on Windows
+/// that is the `.cmd`/`.exe` shim and never npm's extensionless sh script beside
+/// it, and on Unix a file this user may execute.
 fn resolve_agent(bin: &str, paths: &srelens_kube::toolbox::SearchPaths) -> Option<String> {
-    which_on_path(bin, &paths.app_path).or_else(|| which_on_path(bin, &paths.system_path))
-}
-
-/// File names to probe for `bin` within a single PATH directory. On Unix a CLI
-/// is its bare name, but Windows resolves `claude` by appending each `PATHEXT`
-/// extension (`.EXE`, `.CMD`, …) — an installed `claude.cmd`/`claude.exe` is
-/// invisible if we only probe the extensionless path — so we return the bare
-/// name followed by one candidate per extension. Kept pure (PATHEXT passed in,
-/// `None` off Windows) so the extension logic is testable on any host. When the
-/// caller already named a concrete extension we don't append more.
-fn executable_candidates(bin: &str, pathext: Option<&str>) -> Vec<String> {
-    let mut names = vec![bin.to_string()];
-    if let Some(pathext) = pathext {
-        if std::path::Path::new(bin).extension().is_none() {
-            for ext in pathext.split(';').map(str::trim).filter(|e| !e.is_empty()) {
-                // Each PATHEXT entry carries its own leading dot (".EXE").
-                names.push(format!("{bin}{ext}"));
-            }
-        }
-    }
-    names
-}
-
-/// First directory on `path` (a platform-delimited PATH string) that holds an
-/// executable `bin`, as an absolute path. Uses `std::env::split_paths` rather
-/// than splitting on `:` so a Windows `;`-delimited PATH with drive-letter
-/// colons (`C:\...;D:\...`) resolves correctly instead of shredding into
-/// invalid directories, and honors `PATHEXT` so a `.exe`/`.cmd` install is found.
-fn which_on_path(bin: &str, path: &str) -> Option<String> {
-    #[cfg(windows)]
-    let pathext =
-        Some(std::env::var("PATHEXT").unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".to_string()));
-    #[cfg(not(windows))]
-    let pathext: Option<String> = None;
-
-    std::env::split_paths(path).filter(|d| !d.as_os_str().is_empty()).find_map(|dir| {
-        executable_candidates(bin, pathext.as_deref()).into_iter().find_map(|name| {
-            let candidate = dir.join(&name);
-            is_executable(&candidate).then(|| candidate.to_string_lossy().into_owned())
-        })
-    })
-}
-
-/// Whether `path` is a file we can actually run. On Unix a PATH entry only
-/// counts if it carries an execute bit — a plain `0644` file named `claude`
-/// sitting earlier on PATH would otherwise be reported as the installed agent,
-/// and every send would then fail with `Permission denied`. On Windows
-/// executability comes from the `PATHEXT` extension (handled by
-/// `executable_candidates`), so being a regular file is sufficient.
-fn is_executable(path: &std::path::Path) -> bool {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::metadata(path)
-            .map(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
-            .unwrap_or(false)
-    }
-    #[cfg(not(unix))]
-    {
-        path.is_file()
-    }
+    use srelens_kube::path_lookup::find_executable;
+    find_executable(bin, &paths.app_path)
+        .or_else(|| find_executable(bin, &paths.system_path))
+        .map(|found| found.to_string_lossy().into_owned())
 }
 
 /// Map a sequence of raw stream-json lines to channel emits, returning whether
@@ -725,50 +672,6 @@ mod tests {
     }
 
     #[test]
-    fn off_windows_a_binary_is_probed_by_its_bare_name_only() {
-        assert_eq!(executable_candidates("claude", None), vec!["claude".to_string()]);
-    }
-
-    #[test]
-    fn on_windows_pathext_extensions_are_appended_to_the_bare_name() {
-        assert_eq!(
-            executable_candidates("cursor-agent", Some(".COM;.EXE;.CMD")),
-            vec![
-                "cursor-agent".to_string(),
-                "cursor-agent.COM".to_string(),
-                "cursor-agent.EXE".to_string(),
-                "cursor-agent.CMD".to_string(),
-            ]
-        );
-    }
-
-    #[test]
-    fn an_explicit_extension_is_not_doubled_up() {
-        // A bin that already names its extension resolves as-is.
-        assert_eq!(executable_candidates("claude.exe", Some(".EXE;.CMD")), vec![
-            "claude.exe".to_string()
-        ]);
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn a_non_executable_file_on_path_is_not_treated_as_an_agent() {
-        use std::os::unix::fs::PermissionsExt;
-        let dir = std::env::temp_dir().join(format!("srelens-exec-test-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        // A plain 0644 file named `claude` must NOT be reported as the agent —
-        // spawning it would fail with EACCES.
-        let plain = dir.join("claude");
-        std::fs::write(&plain, b"#!/bin/sh\n").unwrap();
-        std::fs::set_permissions(&plain, std::fs::Permissions::from_mode(0o644)).unwrap();
-        assert_eq!(which_on_path("claude", dir.to_str().unwrap()), None);
-        // Once it carries an execute bit, it resolves.
-        std::fs::set_permissions(&plain, std::fs::Permissions::from_mode(0o755)).unwrap();
-        assert_eq!(which_on_path("claude", dir.to_str().unwrap()).as_deref(), plain.to_str());
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
     fn a_pending_cancel_is_consumed_only_by_its_own_turn_generation() {
         let chats = ChatManager::default();
         assert!(!chats.take_pending_cancel("s1", 1), "nothing armed yet");
@@ -790,17 +693,23 @@ mod tests {
         assert_eq!(parse_agent_kind("Claude"), Err("unknown agent".to_string()));
     }
 
-    /// Builds a temp dir under `std::env::temp_dir()` with a single executable
-    /// file `bin`, cleaned up on drop — the fixture `resolve_agent` tests use
-    /// to prove the search actually walks `system_path`, not just `app_path`.
+    /// Builds a temp dir under `std::env::temp_dir()` holding the one file the
+    /// OS would run as `bin` (`bin` with the execute bit on Unix, `bin.cmd` on
+    /// Windows), cleaned up on drop — the fixture `resolve_agent` tests use to
+    /// prove the search actually walks `system_path`, not just `app_path`.
     struct BinDir {
         dir: std::path::PathBuf,
+        /// The runnable file, which is what `resolve_agent` should return.
+        file: std::path::PathBuf,
     }
 
     impl BinDir {
         fn new(bin: &str) -> Self {
             let dir = std::env::temp_dir().join(format!("srelens-resolve-agent-test-{}", uuid::Uuid::new_v4()));
             std::fs::create_dir_all(&dir).unwrap();
+            #[cfg(windows)]
+            let file = dir.join(format!("{bin}.cmd"));
+            #[cfg(not(windows))]
             let file = dir.join(bin);
             std::fs::write(&file, b"#!/bin/sh\n").unwrap();
             #[cfg(unix)]
@@ -810,7 +719,7 @@ mod tests {
                 perms.set_mode(0o755);
                 std::fs::set_permissions(&file, perms).unwrap();
             }
-            BinDir { dir }
+            BinDir { dir, file }
         }
 
         fn path(&self) -> String {
@@ -832,7 +741,40 @@ mod tests {
             system_path: bin_dir.path(),
         };
         let resolved = resolve_agent("x", &paths).expect("should find x via system_path");
-        assert_eq!(resolved, bin_dir.dir.join("x").to_string_lossy());
+        assert_eq!(resolved, bin_dir.file.to_string_lossy());
+    }
+
+    /// npm installs a POSIX sh script named `claude` beside `claude.cmd`.
+    /// Windows cannot start the script, so it must never be the agent.
+    #[cfg(windows)]
+    #[test]
+    fn on_windows_the_npm_sh_script_beside_the_shim_is_never_the_agent() {
+        let bin_dir = BinDir::new("claude");
+        std::fs::write(bin_dir.dir.join("claude"), b"#!/bin/sh\n").unwrap();
+        let paths = srelens_kube::toolbox::SearchPaths {
+            app_path: bin_dir.path(),
+            system_path: "/nope".to_string(),
+        };
+        let resolved = resolve_agent("claude", &paths).expect("should find the .cmd shim");
+        assert_eq!(resolved, bin_dir.file.to_string_lossy());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn on_unix_a_file_without_the_execute_bit_is_not_the_agent() {
+        use std::os::unix::fs::PermissionsExt;
+        let bin_dir = BinDir::new("claude");
+        let paths = srelens_kube::toolbox::SearchPaths {
+            app_path: bin_dir.path(),
+            system_path: "/nope".to_string(),
+        };
+        // A plain 0644 file named `claude` must NOT be reported as the agent:
+        // spawning it would fail with EACCES.
+        std::fs::set_permissions(&bin_dir.file, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert_eq!(resolve_agent("claude", &paths), None);
+        // Once it carries an execute bit, it resolves.
+        std::fs::set_permissions(&bin_dir.file, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(resolve_agent("claude", &paths).as_deref(), bin_dir.file.to_str());
     }
 
     #[test]
@@ -853,7 +795,7 @@ mod tests {
             system_path: system_dir.path(),
         };
         let resolved = resolve_agent("x", &paths).unwrap();
-        assert_eq!(resolved, app_dir.dir.join("x").to_string_lossy());
+        assert_eq!(resolved, app_dir.file.to_string_lossy());
     }
 
     struct RecordingSink(std::sync::Mutex<Vec<(String, serde_json::Value)>>);
