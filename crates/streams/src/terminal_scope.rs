@@ -1280,6 +1280,27 @@ contexts:
     }
 
     #[test]
+    fn a_read_only_terminal_still_refuses_another_cluster_past_a_flags_double_dash() {
+        let f = fixture_in_mode("dev-cluster", None, true);
+        // `--` is `-n`'s value, so the words after it are still kubectl's,
+        // and the flags and verbs that leave the cluster are refused (#846).
+        for (args, said) in [
+            (vec!["-n", "--", "--kubeconfig=/x", "get", "pods"], "--kubeconfig=/x"),
+            (vec!["-n", "--", "config", "set-cluster", "x"], "config set-cluster"),
+        ] {
+            let out = f.run("kubectl", &args);
+            assert_eq!(out.status.code(), Some(64), "{args:?} was not refused");
+            assert_eq!(
+                stderr(&out),
+                format!(
+                    "srelens: \"{said}\" is not available here. This terminal is bound to dev-cluster; open a terminal from the other cluster to work there.\n"
+                ),
+                "{args:?}"
+            );
+        }
+    }
+
+    #[test]
     fn a_terminal_that_is_not_read_only_still_hands_writes_over() {
         let f = fixture("dev-cluster", Some("payments"));
         for (tool, args) in [
