@@ -8,8 +8,9 @@ mod common;
 
 use std::path::{Path, PathBuf};
 
-use srectl::ai_config::find_cursor_binary;
+use srectl::ai_config::find_agent;
 use srectl::views::toolbox_view::ToolboxViewState;
+use srelens_agent::adapter::AgentKind;
 
 /// Put `file` in `dir` as an executable: runnable on Unix, and named however
 /// the caller names it.
@@ -44,7 +45,7 @@ fn the_toolbox_lists_a_kubectl_that_is_on_path() {
 }
 
 #[test]
-fn the_cursor_provider_finds_the_cursor_agent_windows_would_run() {
+fn the_cursor_agent_is_found_as_windows_would_run_it() {
     let bin = tempfile::tempdir().unwrap();
     // What npm installs on Windows: a shell script Windows cannot run, and
     // the `.cmd` shim it does run. Elsewhere the script is the program.
@@ -57,8 +58,10 @@ fn the_cursor_provider_finds_the_cursor_agent_windows_would_run() {
     let mut env = common::env::lock();
     env.set("PATH", bin.path());
 
+    assert_eq!(find_agent(AgentKind::Cursor), Some(expected));
     assert_eq!(
-        find_cursor_binary().as_deref().map(Path::new),
-        Some(expected.as_path())
+        find_agent(AgentKind::Srelens),
+        None,
+        "srelens's own agent has no binary"
     );
 }

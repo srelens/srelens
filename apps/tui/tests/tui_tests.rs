@@ -836,25 +836,25 @@ mod tests {
             Some("sk-test-openai-key")
         );
 
-        // 7. Test navigating all the way to Cursor Agent
-        // Currently at OpenAi (index 1), press 'j' 3 times to get to Cursor (index 4)
+        // 7. Test navigating past the last provider, which wraps to the first
+        // Currently at OpenAi (index 1), press 'j' 3 times to get back to Anthropic (index 0)
         app.handle_key_event(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE))
             .await; // Gemini (2)
         app.handle_key_event(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE))
             .await; // OpenAICompatible (3)
         app.handle_key_event(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE))
-            .await; // Cursor (4)
+            .await; // Anthropic (0)
 
         if let ActiveView::Settings(s) = &app.active_view {
-            assert_eq!(s.current_provider(), AiProvider::Cursor);
+            assert_eq!(s.current_provider(), AiProvider::Anthropic);
         }
 
-        // Select Cursor as active provider
+        // Select Anthropic as active provider
         app.handle_key_event(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE))
             .await;
         app.handle_key_event(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE))
             .await;
-        assert_eq!(app.ai_settings.default_provider, AiProvider::Cursor);
+        assert_eq!(app.ai_settings.default_provider, AiProvider::Anthropic);
 
         // 8. Currently at ApiKey, Tab twice to get to Timeout field
         app.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
@@ -888,7 +888,10 @@ mod tests {
         app.handle_key_event(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE))
             .await;
 
-        assert_eq!(app.ai_settings.get_timeout_seconds(AiProvider::Cursor), 240);
+        assert_eq!(
+            app.ai_settings.get_timeout_seconds(AiProvider::Anthropic),
+            240
+        );
 
         // 9. Test pasting into an edit buffer
         app.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
@@ -900,17 +903,17 @@ mod tests {
         if let ActiveView::Settings(s) = &app.active_view {
             assert_eq!(s.is_editing, true);
         }
-        app.handle_paste("pasted-cursor-api-key-12345".to_string());
+        app.handle_paste("pasted-anthropic-api-key-12345".to_string());
         if let ActiveView::Settings(s) = &app.active_view {
-            assert_eq!(s.edit_buffer, "pasted-cursor-api-key-12345");
+            assert_eq!(s.edit_buffer, "pasted-anthropic-api-key-12345");
         }
         app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
             .await;
         if let ActiveView::Settings(s) = &app.active_view {
             assert_eq!(s.is_editing, false);
             assert_eq!(
-                s.settings.get_api_key(AiProvider::Cursor).as_deref(),
-                Some("pasted-cursor-api-key-12345")
+                s.settings.get_api_key(AiProvider::Anthropic).as_deref(),
+                Some("pasted-anthropic-api-key-12345")
             );
         }
     }

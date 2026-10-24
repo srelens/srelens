@@ -23,8 +23,9 @@ use srectl::agent::{
     build_mcp_server, run_boxed_cursor_turn, run_native_agent_turn, McpToolInvoker,
 };
 use srectl::ai_config::{
-    default_base_url_for_provider, default_model_for_provider, env_var_for_provider,
-    provider_display_name, provider_slug, AiProvider, AiSettings, ALL_PROVIDERS,
+    agent_install_url, agent_slug, default_base_url_for_provider, default_model_for_provider,
+    env_var_for_provider, provider_display_name, provider_slug, AiProvider, AiSettings,
+    ALL_PROVIDERS,
 };
 use srectl::ai_skills::{
     expand_slash_command, load_user_skills_dir, match_slash_commands, parse_caveman_command,
@@ -40,6 +41,7 @@ use srectl::event::{AppEvent, EventHandler};
 use srectl::sink::TuiSink;
 use srectl::theme::{status_style, Theme};
 use srectl::tui_config::{CommandPopupDensity, TuiConfig};
+use srelens_agent::adapter::AgentKind;
 
 // ---------------------------------------------------------------------------
 // Shared helpers
@@ -1180,7 +1182,6 @@ fn every_provider_maps_to_its_slug_label_defaults_and_env_var() {
             "OPENAI_COMPATIBLE_API_KEY",
             Some(ProviderKind::OpenAiCompatible),
         ),
-        (AiProvider::Cursor, "cursor", "CURSOR_API_KEY", None),
     ];
     for (provider, slug, env, kind) in table {
         assert_eq!(provider_slug(provider), slug);
@@ -1189,8 +1190,7 @@ fn every_provider_maps_to_its_slug_label_defaults_and_env_var() {
         assert!(!provider_display_name(provider).is_empty());
         assert!(!default_model_for_provider(provider).is_empty());
     }
-    assert_eq!(ALL_PROVIDERS.len(), 5);
-    assert_eq!(default_base_url_for_provider(AiProvider::Cursor), "");
+    assert_eq!(ALL_PROVIDERS.len(), 4);
     assert_eq!(
         default_base_url_for_provider(AiProvider::OpenAi),
         "https://api.openai.com/v1"
@@ -1199,7 +1199,52 @@ fn every_provider_maps_to_its_slug_label_defaults_and_env_var() {
         default_base_url_for_provider(AiProvider::Gemini),
         "https://generativelanguage.googleapis.com"
     );
-    assert!(provider_display_name(AiProvider::Cursor).contains("cursor-agent"));
+}
+
+#[test]
+fn every_agent_has_its_settings_key_and_install_page() {
+    let table = [
+        (
+            AgentKind::Claude,
+            "claude",
+            "https://docs.anthropic.com/en/docs/claude-code/setup",
+        ),
+        (
+            AgentKind::Codex,
+            "codex",
+            "https://developers.openai.com/codex/cli/",
+        ),
+        (
+            AgentKind::Cursor,
+            "cursor",
+            "https://docs.cursor.com/en/cli/overview",
+        ),
+        (AgentKind::Srelens, "srelens", ""),
+    ];
+    for (kind, slug, url) in table {
+        assert_eq!(agent_slug(kind), slug);
+        assert_eq!(agent_install_url(kind), url);
+    }
+}
+
+#[test]
+fn the_cursor_key_is_the_stored_one_else_the_environment() {
+    let mut env = common::env::lock();
+    env.remove("CURSOR_API_KEY");
+    let mut s = AiSettings::default();
+    assert_eq!(s.get_cursor_key(), None);
+    env.set("CURSOR_API_KEY", "   ");
+    assert_eq!(s.get_cursor_key(), None, "a blank variable is no key");
+    env.set("CURSOR_API_KEY", "cur-env");
+    assert_eq!(s.get_cursor_key().as_deref(), Some("cur-env"));
+    s.api_keys.insert("cursor".into(), "  ".into());
+    assert_eq!(
+        s.get_cursor_key().as_deref(),
+        Some("cur-env"),
+        "a blank stored key is no key"
+    );
+    s.api_keys.insert("cursor".into(), "cur-stored".into());
+    assert_eq!(s.get_cursor_key().as_deref(), Some("cur-stored"));
 }
 
 #[test]
@@ -1266,7 +1311,7 @@ fn caveman_level_setting_round_trips_and_clears() {
 }
 
 #[test]
-fn an_explicit_api_key_produces_a_provider_config_and_cursor_never_does() {
+fn an_explicit_api_key_produces_a_provider_config() {
     let mut s = AiSettings::default();
     s.api_keys.insert("anthropic".into(), "sk-ant-test".into());
     s.models.insert("anthropic".into(), "claude-x".into());
@@ -1279,16 +1324,6 @@ fn an_explicit_api_key_produces_a_provider_config_and_cursor_never_does() {
     assert_eq!(cfg.model, "claude-x");
     assert_eq!(cfg.base_url, "https://api.anthropic.com");
     assert_eq!(cfg.max_tokens, 999);
-
-    s.api_keys.insert("cursor".into(), "cur-key".into());
-    assert_eq!(
-        s.get_api_key(AiProvider::Cursor).as_deref(),
-        Some("cur-key")
-    );
-    assert!(
-        s.resolve_provider_config(AiProvider::Cursor).is_none(),
-        "cursor is not a native provider"
-    );
 
     s.api_keys.insert("openai".into(), "   ".into());
     assert!(s.api_keys.contains_key("openai"));

@@ -2,17 +2,18 @@
 //! path, a server URL and a token, produce the argv and MCP-config file the CLI
 //! needs. Spawning and PATH detection live in the desktop crate.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 /// Which agent backs a turn. The first three shell out to their vendor CLIs;
 /// `Srelens` is srelens's own in-process agent, which talks directly to a
 /// provider API with the user's key and needs no external binary at all.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum AgentKind {
     Claude,
     Codex,
     Cursor,
+    #[default]
     Srelens,
 }
 

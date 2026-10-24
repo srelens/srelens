@@ -935,7 +935,7 @@ fn settings_view_provider_selection_wraps_both_ways_and_freezes_while_editing() 
     let mut state = settings_state();
     assert_eq!(state.current_provider(), AiProvider::Anthropic);
     state.select_prev_provider();
-    assert_eq!(state.current_provider(), AiProvider::Cursor);
+    assert_eq!(state.current_provider(), AiProvider::OpenAiCompatible);
     state.select_next_provider();
     assert_eq!(state.current_provider(), AiProvider::Anthropic);
     state.select_next_provider();
@@ -949,7 +949,7 @@ fn settings_view_provider_selection_wraps_both_ways_and_freezes_while_editing() 
     assert_eq!(state.current_provider(), AiProvider::Anthropic);
 
     // An out-of-range index is folded back into the provider list.
-    state.selected_provider_idx = 7;
+    state.selected_provider_idx = 6;
     assert_eq!(state.current_provider(), AiProvider::Gemini);
 }
 
@@ -1030,9 +1030,12 @@ fn settings_view_enter_on_the_provider_row_activates_it_instead_of_editing() {
     assert_eq!(state.settings.default_provider, AiProvider::Gemini);
     assert!(state.edit_buffer.is_empty());
 
-    state.selected_provider_idx = 4;
+    state.selected_provider_idx = 3;
     state.set_active_provider();
-    assert_eq!(state.settings.default_provider, AiProvider::Cursor);
+    assert_eq!(
+        state.settings.default_provider,
+        AiProvider::OpenAiCompatible
+    );
 }
 
 #[test]
@@ -1202,21 +1205,16 @@ fn settings_view_renders_the_active_provider_summary_and_every_provider_card() {
         text.contains("○ 4. OpenAI-Compatible / Ollama (Local)"),
         "{text}"
     );
-    assert!(text.contains("○ 5. Cursor Agent (cursor-agent)"), "{text}");
+    assert!(
+        !text.contains("Cursor"),
+        "Cursor is an agent, not a provider: {text}"
+    );
     assert_eq!(text.matches("[ACTIVE DEFAULT]").count(), 1, "{text}");
     assert!(
         text.contains("Model:   claude-3-7-sonnet-20250219   │   Timeout: 120s"),
         "{text}"
     );
     assert!(text.contains("Model:   llama3.2"), "{text}");
-    assert!(
-        text.contains("Auth:    auto (uses logged-in cursor auth or CURSOR_API_KEY)"),
-        "{text}"
-    );
-    assert!(
-        text.contains("[installed: ") || text.contains("[not found on PATH]"),
-        "the cursor card reports whether the binary was found: {text}"
-    );
     assert!(
         text.contains("[↑/↓/j/k] Provider  [Tab/←/→] Field  [Space] Set Active"),
         "{text}"
@@ -1394,7 +1392,7 @@ fn settings_view_edit_modal_names_the_field_and_shows_the_buffer() {
         "{text}"
     );
     // The modal is drawn over the cards, which stay visible around it.
-    assert!(text.contains("5. Cursor Agent (cursor-agent)"), "{text}");
+    assert!(text.contains("1. Anthropic (Claude)"), "{text}");
 
     state.cancel_editing();
     state.selected_field = SettingField::Timeout;
@@ -1412,15 +1410,6 @@ fn settings_view_edit_modal_names_the_field_and_shows_the_buffer() {
     let text = render_settings(160, 40, &state);
     assert!(text.contains("Edit API Key for OpenAI (GPT-4o)"), "{text}");
     assert!(text.contains("Enter new value for API Key:"), "{text}");
-
-    state.cancel_editing();
-    state.selected_provider_idx = 4;
-    state.start_editing();
-    let text = render_settings(160, 40, &state);
-    assert!(
-        text.contains("Edit API Key (or leave blank for cursor login) for Cursor Agent"),
-        "{text}"
-    );
 
     state.cancel_editing();
     state.selected_provider_idx = 3;
@@ -1448,7 +1437,8 @@ fn settings_view_edit_modal_names_the_field_and_shows_the_buffer() {
 fn settings_view_narrow_terminal_still_shows_the_header_and_first_cards() {
     let _env = common::env::lock();
     let state = settings_state();
-    let text = render_settings(60, 20, &state);
+    // 19 rows: short enough that each of the four cards draws only its header.
+    let text = render_settings(60, 19, &state);
     assert!(text.contains("SRElens AI & Assistant Settings"), "{text}");
     assert!(
         text.contains("Active AI Provider: ● Anthropic (Claude)"),

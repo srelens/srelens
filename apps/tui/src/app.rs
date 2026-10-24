@@ -11,6 +11,7 @@ use ratatui::{
 };
 use tokio::sync::mpsc::UnboundedSender;
 
+use srelens_agent::adapter::AgentKind;
 use srelens_capability::Registry;
 use srelens_kube::client_cache::ClientCache;
 use srelens_kube::contexts::ContextDto;
@@ -8451,11 +8452,17 @@ impl App {
             }
         }
 
-        if provider == crate::ai_config::AiProvider::Cursor {
-            if let Some(cursor_bin) = crate::ai_config::find_cursor_binary() {
+        // Claude Code and Codex fall through to the provider path until they are wired.
+        if self.ai_settings.agent == AgentKind::Cursor {
+            if let Some(cursor_bin) = crate::ai_config::find_agent(AgentKind::Cursor) {
+                let cursor_bin = cursor_bin.display().to_string();
                 let event_tx = self.event_tx.clone();
-                let model = self.ai_settings.get_model(provider);
-                let api_key = self.ai_settings.get_api_key(provider);
+                // Cursor's own model, not the provider's: empty is Default (no flag).
+                let model = self
+                    .ai_settings
+                    .get_agent_model(AgentKind::Cursor)
+                    .unwrap_or_default();
+                let api_key = self.ai_settings.get_cursor_key();
                 let cache = self.client_cache.clone();
                 let timeout_seconds = self.ai_settings.get_timeout_seconds(provider);
                 let hub_kc_opt = argo_hub_kc.clone();
@@ -11787,24 +11794,14 @@ impl App {
             return;
         }
 
-        // Said before any request goes out, and said precisely: Cursor has a
-        // key but no HTTP path, so "no API key" would be false for it.
-        let config = if provider == crate::ai_config::AiProvider::Cursor {
-            Err(format!(
-                "Quick AI RCA needs an HTTP provider; {provider_name} runs only through the \
-                 Assistant. Press [a] for it, or pick another provider in :ai-settings."
-            ))
-        } else {
-            config.ok_or_else(|| {
-                format!(
+        // Said before any request goes out.
+        let config = match config {
+            Some(c) => c,
+            None => {
+                let msg = format!(
                     "No API key configured for {provider_name}. Add one in :ai-settings, or set {}.",
                     crate::ai_config::env_var_for_provider(provider)
-                )
-            })
-        };
-        let config = match config {
-            Ok(c) => c,
-            Err(msg) => {
+                );
                 changed
                     .ai_summaries
                     .insert(key, entry(QuickRcaStatus::Error(msg)));

@@ -8,8 +8,7 @@ use ratatui::{
 
 use crate::ai_config::{
     default_base_url_for_provider, default_model_for_provider, env_var_for_provider,
-    find_cursor_binary, provider_display_name, provider_slug, AiProvider, AiSettings,
-    ALL_PROVIDERS,
+    provider_display_name, provider_slug, AiProvider, AiSettings, ALL_PROVIDERS,
 };
 use crate::theme::Theme;
 
@@ -219,7 +218,7 @@ pub fn render_settings_view(f: &mut Frame, area: Rect, state: &SettingsViewState
             ),
         ]),
         Line::from(vec![Span::styled(
-            "Configure default provider, API keys, models, and local/CLI agents (including Cursor).",
+            "Configure default provider, API keys, models, and timeouts.",
             Style::default().fg(Theme::DIM),
         )]),
     ];
@@ -228,7 +227,7 @@ pub fn render_settings_view(f: &mut Frame, area: Rect, state: &SettingsViewState
         chunks[0],
     );
 
-    // 2. Providers List (5 providers now!)
+    // 2. Providers List
     let provider_constraints: Vec<Constraint> = ALL_PROVIDERS
         .iter()
         .map(|&p| {
@@ -305,22 +304,6 @@ pub fn render_settings_view(f: &mut Frame, area: Rect, state: &SettingsViewState
             ));
         }
 
-        if provider == AiProvider::Cursor {
-            if let Some(bin_path) = find_cursor_binary() {
-                header_spans.push(Span::raw("  "));
-                header_spans.push(Span::styled(
-                    format!("[installed: {}]", bin_path),
-                    Style::default().fg(Theme::GREEN),
-                ));
-            } else {
-                header_spans.push(Span::raw("  "));
-                header_spans.push(Span::styled(
-                    "[not found on PATH]",
-                    Style::default().fg(Theme::RED),
-                ));
-            }
-        }
-
         // Field 1: API Key / Auth Display
         let key_focus = is_selected_provider && state.selected_field == SettingField::ApiKey;
         let key_label_style = if key_focus {
@@ -347,11 +330,6 @@ pub fn render_settings_view(f: &mut Frame, area: Rect, state: &SettingsViewState
         } else if env_key.is_some() {
             Span::styled(
                 format!("[env: {} set]", env_var_for_provider(provider)),
-                Style::default().fg(Theme::CYAN),
-            )
-        } else if provider == AiProvider::Cursor {
-            Span::styled(
-                "auto (uses logged-in cursor auth or CURSOR_API_KEY)",
                 Style::default().fg(Theme::CYAN),
             )
         } else if provider == AiProvider::OpenAiCompatible {
@@ -391,14 +369,7 @@ pub fn render_settings_view(f: &mut Frame, area: Rect, state: &SettingsViewState
         let mut lines = vec![
             Line::from(header_spans),
             Line::from(vec![
-                Span::styled(
-                    if provider == AiProvider::Cursor {
-                        "   Auth:    "
-                    } else {
-                        "   API Key: "
-                    },
-                    key_label_style,
-                ),
+                Span::styled("   API Key: ", key_label_style),
                 key_value_display,
             ]),
             Line::from(vec![
@@ -507,13 +478,7 @@ pub fn render_settings_view(f: &mut Frame, area: Rect, state: &SettingsViewState
         f.render_widget(Clear, edit_area);
 
         let field_name = match state.selected_field {
-            SettingField::ApiKey => {
-                if state.current_provider() == AiProvider::Cursor {
-                    "API Key (or leave blank for cursor login)"
-                } else {
-                    "API Key"
-                }
-            }
+            SettingField::ApiKey => "API Key",
             SettingField::Model => "Model ID",
             SettingField::BaseUrl => "Base URL (e.g. http://localhost:11434/v1)",
             SettingField::Timeout => "Turn Timeout (seconds, e.g. 120)",

@@ -4089,6 +4089,29 @@ async fn tab_on_workloads_cycles_segments_and_on_wide_events_focuses_the_reason_
 }
 
 #[tokio::test]
+async fn with_cursor_as_the_agent_the_assistant_turns_to_cursor_agent_not_the_provider() {
+    let mut settings = common::env::isolate_settings();
+    // Nowhere to find cursor-agent, and no provider key to fall back on.
+    let empty = tempfile::tempdir().unwrap();
+    settings.set_env("PATH", empty.path());
+    settings.set_env("HOME", empty.path());
+    settings.remove_env("ANTHROPIC_API_KEY");
+    let (mut app, _rx) = common::app().await;
+    app.ai_settings.agent = srelens_agent::adapter::AgentKind::Cursor;
+    app.ai_settings.default_provider = srectl::AiProvider::Anthropic;
+    app.ai_settings.api_keys.clear();
+
+    app.submit_assistant_query("why?".to_string(), "why?".to_string());
+
+    let last = &app.assistant_state.messages.last().unwrap().content;
+    assert!(last.contains("cursor-agent CLI was not found"), "{last}");
+    assert!(
+        last.contains("https://docs.cursor.com/en/cli/overview"),
+        "{last}"
+    );
+}
+
+#[tokio::test]
 async fn settings_view_lets_colon_open_the_prompt_unless_a_field_is_being_edited() {
     let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app().await;
@@ -6347,29 +6370,6 @@ fn only_rca(app: &srectl::App) -> srectl::views::changed_view::QuickRca {
             c.ai_summaries.values().next().unwrap().clone()
         }
         _ => panic!("expected ActiveView::Changed"),
-    }
-}
-
-#[tokio::test]
-async fn quick_rca_with_cursor_says_it_needs_an_http_provider() {
-    use srectl::views::changed_view::QuickRcaStatus;
-    let settings = common::env::isolate_settings();
-    let (mut app, _rx) = changed_app_with_report(&settings).await;
-    app.ai_settings.default_provider = srectl::AiProvider::Cursor;
-
-    press(&mut app, ch('s')).await;
-
-    let rca = only_rca(&app);
-    match rca.status {
-        QuickRcaStatus::Error(msg) => {
-            assert!(msg.contains("needs an HTTP provider"), "{msg}");
-            assert!(msg.contains("[a]"), "points at the Assistant: {msg}");
-            assert!(
-                !msg.contains("API key"),
-                "Cursor's problem is not a key: {msg}"
-            );
-        }
-        other => panic!("expected an error, got {other:?}"),
     }
 }
 
