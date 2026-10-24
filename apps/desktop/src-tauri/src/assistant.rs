@@ -271,7 +271,7 @@ impl ChatManager {
 /// and tokio reaps a dropped `Child` on a best-effort basis only — so without
 /// this, every Stop could leave a zombie in the process table.
 fn kill_and_reap(mut child: tokio::process::Child) {
-    let _ = child.start_kill();
+    srelens_agent::turn::kill_tree(&mut child);
     tokio::spawn(async move {
         let _ = child.wait().await;
     });
@@ -568,7 +568,7 @@ pub async fn chat_send(
     // degrades to a clean turn-ending error instead of a silently hung UI —
     // every post-spawn exit re-enables input via a `TurnDone`.
     let Some(stdout) = child.stdout.take() else {
-        let _ = child.start_kill();
+        srelens_agent::turn::kill_tree(&mut child);
         let message = "the agent process had no stdout".to_string();
         sink.emit(
             &channel,
@@ -999,6 +999,36 @@ mod tests {
         let _ = child.start_kill();
         read.expect("the agent's stdin was never closed").unwrap();
         assert!(out.contains("in which node is that pod running?"), "got {out:?}");
+    }
+
+    /// Stop on an agent installed as a Windows `.cmd` shim: ending only the
+    /// shim left the agent behind holding the stdout pipe, so the stream loop
+    /// never read the end of it.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn stopping_a_turn_ends_the_program_its_shim_started() {
+        use std::time::Duration;
+        use tokio::io::AsyncReadExt;
+        let cmd = srelens_agent::adapter::AgentCommand {
+            program: "cmd".into(),
+            args: ["/c", "ping", "-n", "30", "127.0.0.1"].map(String::from).into(),
+            env: Vec::new(),
+            stdin: None,
+        };
+        let mut child = spawn_agent(&cmd, &std::env::temp_dir()).unwrap();
+        let mut stdout = child.stdout.take().unwrap();
+        // Its first line says ping is running, so there is a tree to end.
+        let mut first = [0u8; 64];
+        let read = tokio::time::timeout(Duration::from_secs(5), stdout.read(&mut first)).await;
+        assert!(read.expect("the shim started nothing").unwrap() > 0);
+
+        kill_and_reap(child);
+
+        let mut rest = Vec::new();
+        tokio::time::timeout(Duration::from_secs(5), stdout.read_to_end(&mut rest))
+            .await
+            .expect("the program the shim started still holds its stdout open")
+            .unwrap();
     }
 
     /// With nothing to write, the agent's stdin is closed from the start, not

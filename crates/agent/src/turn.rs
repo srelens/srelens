@@ -410,6 +410,30 @@ pub fn prepare_turn(spec: &TurnSpec) -> Result<PreparedTurn, String> {
     }
 }
 
+/// Begin ending `child` and everything it started; the caller reaps it.
+///
+/// On Windows an npm-installed agent is a `.cmd` shim, so `child` is only
+/// `cmd.exe`: ending that alone leaves the real agent running, spending tokens
+/// and holding the stdout pipe open. `taskkill /T` ends the whole tree. Its
+/// status is ignored (the tree may already be gone) and it gets no stdio and no
+/// console window, which the GUI desktop would otherwise flash.
+pub fn kill_tree(child: &mut tokio::process::Child) {
+    #[cfg(windows)]
+    if let Some(pid) = child.id() {
+        use std::os::windows::process::CommandExt;
+        use std::process::Stdio;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        let _ = std::process::Command::new("taskkill")
+            .args(["/T", "/F", "/PID", &pid.to_string()])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .creation_flags(CREATE_NO_WINDOW)
+            .status();
+    }
+    let _ = child.start_kill();
+}
+
 /// Prepend one `Attached image: <path>` line per path, then a blank line,
 /// then the original prompt — so the agent sees where each decoded image
 /// landed on disk before reading the user's actual question. `image_paths`
@@ -922,6 +946,39 @@ mod tests {
     fn the_native_agent_has_no_turn_to_prepare() {
         let f = TurnFixture::new();
         assert!(prepare_turn(&f.spec(AgentKind::Srelens)).is_err());
+    }
+
+    /// An npm-installed agent is a `.cmd` shim on Windows. Ending only the shim
+    /// leaves the program it started running, spending tokens and holding the
+    /// stdout pipe open, so a reader never sees the end of the stream (the
+    /// desktop's Stop hung on it).
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn ending_a_shim_also_ends_the_program_it_started() {
+        use std::time::Duration;
+        use tokio::io::AsyncReadExt;
+        let mut child = tokio::process::Command::new("cmd")
+            .args(["/c", "ping", "-n", "30", "127.0.0.1"])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let mut stdout = child.stdout.take().unwrap();
+        // Its first line says ping is running: ending the shim before the
+        // program exists would prove nothing.
+        let mut first = [0u8; 64];
+        let read = tokio::time::timeout(Duration::from_secs(5), stdout.read(&mut first)).await;
+        assert!(read.expect("the shim started nothing").unwrap() > 0);
+
+        kill_tree(&mut child);
+
+        let mut rest = Vec::new();
+        tokio::time::timeout(Duration::from_secs(5), stdout.read_to_end(&mut rest))
+            .await
+            .expect("the program the shim started still holds its stdout open")
+            .unwrap();
+        let _ = child.wait().await;
     }
 
     #[test]
