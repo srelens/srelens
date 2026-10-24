@@ -20,7 +20,7 @@ use tokio::net::TcpListener;
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver};
 
 use srectl::agent::{
-    build_mcp_server, run_boxed_cursor_turn, run_native_agent_turn, McpToolInvoker,
+    build_mcp_server, run_cli_agent_turn, run_native_agent_turn, CliTurn, McpToolInvoker,
 };
 use srectl::ai_config::{
     agent_install_url, agent_slug, default_base_url_for_provider, default_model_for_provider,
@@ -741,7 +741,7 @@ async fn a_native_turn_that_cannot_reach_the_provider_still_finishes_cleanly() {
 }
 
 // ---------------------------------------------------------------------------
-// agent.rs: run_boxed_cursor_turn without a cursor-agent binary
+// agent.rs: run_cli_agent_turn without a cursor-agent binary
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
@@ -756,27 +756,23 @@ async fn a_boxed_cursor_turn_reports_a_missing_binary_and_finishes() {
     let cache = ClientCache::new(PathBuf::from("/nonexistent"));
     let root = tempfile::tempdir().unwrap();
 
-    run_boxed_cursor_turn(
-        missing,
-        "gpt-x".into(),
-        // Deliberately None. `run_boxed_cursor_turn` calls
-        // `std::env::set_var("CURSOR_API_KEY", key)` (apps/tui/src/agent.rs:444)
-        // as well as putting the key on the child, so passing a key here would
-        // leak it into the environment of every sibling test in this binary.
-        // The key is not what this test is about.
-        None,
-        "what is wrong?".into(),
-        "kind-dev".into(),
-        "default".into(),
-        None,
+    run_cli_agent_turn(CliTurn {
+        kind: AgentKind::Cursor,
+        binary: missing.into(),
+        model: Some("gpt-x".into()),
+        cursor_key: None,
+        query: "what is wrong?".into(),
+        active_ctx: "kind-dev".into(),
+        active_ns: "default".into(),
+        argo_hub_context: None,
         cache,
-        vec![],
-        tx,
-        30,
-        root.path().to_path_buf(),
-        "conv-1".into(),
-        None,
-    )
+        kubeconfig_paths: vec![],
+        event_tx: tx,
+        timeout_seconds: 30,
+        conversation_id: "conv-1".into(),
+        resume: None,
+        chat_root: root.path().to_path_buf(),
+    })
     .await;
 
     let results = action_results(&mut rx);

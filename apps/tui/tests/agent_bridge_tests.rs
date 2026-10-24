@@ -1,36 +1,30 @@
 //! Behavioural tests for the agent bridge's timeout and process-launch edges.
 //!
 //! `core_logic_tests.rs` already drives `run_native_agent_turn` against a fake
-//! OpenAI-compatible endpoint on loopback; this file covers the two paths it
-//! leaves out: the turn that never gets an answer at all, and the boxed
-//! cursor-agent path's setup when the binary cannot be launched.
+//! OpenAI-compatible endpoint on loopback; this file covers the turn that
+//! never gets an answer at all, and the agent-CLI turn (`run_cli_agent_turn`)
+//! against a binary that is missing, and against fake agents: small scripts
+//! that print a recorded transcript or fail the way a real CLI does.
 //!
-//! What is deliberately *not* here, because no test can reach it without
-//! breaking determinism:
-//!
-//! * `agent.rs` 469-639 — everything after a successful `cmd.spawn()` of the
-//!   cursor-agent binary (stdout/stderr pumps, exit-status handling, the
-//!   fallback usage estimate). `AgentCommand::program` is the caller-supplied
-//!   binary path with no injection seam, so reaching it means really executing
-//!   an external program.
-//! * `agent.rs` 294-317 — the `bind("127.0.0.1:0")` / `local_addr()` failure
-//!   arms, which cannot be provoked on a working host.
-//! * `agent.rs` 347-418 — the `tempfile::tempdir()` and `std::fs::write`
-//!   failure arms, which need an unwritable temp directory.
+//! What is deliberately *not* here: the `bind("127.0.0.1:0")` /
+//! `local_addr()` failure arms, which cannot be provoked on a working host.
 
-use std::path::PathBuf;
+mod common;
+
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
+use srelens_agent::adapter::AgentKind;
 use srelens_kube::client_cache::ClientCache;
 use srelens_llm::types::ProviderKind;
 use srelens_llm::ProviderConfig;
 use tokio::net::TcpListener;
-use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver};
+use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 
 use srectl::agent::{
-    build_mcp_server, run_boxed_cursor_turn, run_native_agent_turn, McpToolInvoker,
+    build_mcp_server, run_cli_agent_turn, run_native_agent_turn, CliTurn, McpToolInvoker,
 };
 use srectl::event::AppEvent;
 
@@ -103,34 +97,71 @@ fn missing_binary(dir: &tempfile::TempDir) -> String {
         .to_string()
 }
 
+/// One agent-CLI turn on `kind-dev`, conversation `conv-1`, with no model,
+/// key or session to resume; tests override what they are about.
+fn cli_turn(
+    kind: AgentKind,
+    binary: impl Into<PathBuf>,
+    event_tx: UnboundedSender<AppEvent>,
+    chat_root: &Path,
+) -> CliTurn {
+    CliTurn {
+        kind,
+        binary: binary.into(),
+        model: None,
+        cursor_key: None,
+        query: "why is the api pod restarting?".into(),
+        active_ctx: "kind-dev".into(),
+        active_ns: "payments".into(),
+        argo_hub_context: None,
+        cache: ClientCache::new(PathBuf::from("/nonexistent")),
+        kubeconfig_paths: vec![],
+        event_tx,
+        timeout_seconds: 30,
+        conversation_id: "conv-1".into(),
+        resume: None,
+        chat_root: chat_root.to_path_buf(),
+    }
+}
+
 /// Run one boxed cursor turn against a binary that is not there and return the
 /// action results it emitted.
 async fn boxed_turn_against_missing_binary(
     bin: String,
-    model: &str,
+    model: Option<&str>,
     api_key: Option<String>,
     context: &str,
 ) -> Vec<(String, Result<String, String>)> {
     let (tx, mut rx) = unbounded_channel();
     let root = tempfile::tempdir().unwrap();
-    run_boxed_cursor_turn(
-        bin,
-        model.to_string(),
-        api_key,
-        "why is the api pod restarting?".into(),
-        context.to_string(),
-        "payments".into(),
-        None,
-        ClientCache::new(PathBuf::from("/nonexistent")),
-        vec![],
-        tx,
-        30,
-        root.path().to_path_buf(),
-        "test-conv".into(),
-        None,
-    )
+    run_cli_agent_turn(CliTurn {
+        model: model.map(str::to_string),
+        cursor_key: api_key,
+        active_ctx: context.to_string(),
+        conversation_id: "test-conv".into(),
+        ..cli_turn(AgentKind::Cursor, bin, tx, root.path())
+    })
     .await;
     action_results(&mut rx)
+}
+
+/// A fake Claude Code in `dir` running `windows` (a batch shim, as npm
+/// installs it there, so the turn's prompt comes on stdin) or `unix` (a
+/// shell script).
+fn fake_claude(dir: &Path, windows: &str, unix: &str) -> PathBuf {
+    let (name, script) = if cfg!(windows) {
+        ("claude.cmd", windows.to_string())
+    } else {
+        ("claude", format!("#!/bin/sh\n{unix}\n"))
+    };
+    let path = dir.join(name);
+    std::fs::write(&path, script).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    path
 }
 
 // ---------------------------------------------------------------------------
@@ -270,17 +301,16 @@ async fn a_native_turn_waiting_on_an_approval_prompt_is_not_timed_out() {
 }
 
 // ---------------------------------------------------------------------------
-// run_boxed_cursor_turn: the setup that runs before the binary is launched
+// run_cli_agent_turn: a Cursor turn whose binary cannot be launched
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
 async fn a_boxed_cursor_turn_that_cannot_launch_skips_the_usage_estimate_a_native_turn_always_sends(
 ) {
     let dir = tempfile::tempdir().expect("temp dir");
-    // No key and the sentinel "default" model: neither `--api-key` nor
-    // `--model` is appended to the argv, and the turn must still fail cleanly.
+    // No key and no model: the turn must still fail cleanly.
     let results =
-        boxed_turn_against_missing_binary(missing_binary(&dir), "default", None, "prod-eu").await;
+        boxed_turn_against_missing_binary(missing_binary(&dir), None, None, "prod-eu").await;
 
     let titles: Vec<&str> = results.iter().map(|(t, _)| t.as_str()).collect();
     assert_eq!(
@@ -308,7 +338,7 @@ async fn a_boxed_cursor_turn_tags_every_event_with_the_context_it_was_started_fo
     let dir = tempfile::tempdir().expect("temp dir");
     let results = boxed_turn_against_missing_binary(
         missing_binary(&dir),
-        "gpt-5-codex",
+        Some("gpt-5-codex"),
         Some("k-1".into()),
         "eks-staging",
     )
@@ -336,8 +366,8 @@ async fn two_boxed_cursor_turns_at_once_each_get_their_own_port_and_channel() {
     let bin = missing_binary(&dir);
 
     let (left, right) = tokio::join!(
-        boxed_turn_against_missing_binary(bin.clone(), "sonnet", None, "cluster-a"),
-        boxed_turn_against_missing_binary(bin, "sonnet", None, "cluster-b"),
+        boxed_turn_against_missing_binary(bin.clone(), Some("sonnet"), None, "cluster-a"),
+        boxed_turn_against_missing_binary(bin, Some("sonnet"), None, "cluster-b"),
     );
 
     for (results, ctx) in [(&left, "cluster-a"), (&right, "cluster-b")] {
@@ -363,6 +393,96 @@ async fn two_boxed_cursor_turns_at_once_each_get_their_own_port_and_channel() {
     // Let each turn's shutdown signal reach its MCP server task before the
     // runtime is torn down underneath it.
     tokio::task::yield_now().await;
+}
+
+// ---------------------------------------------------------------------------
+// run_cli_agent_turn: a fake Claude Code
+// ---------------------------------------------------------------------------
+
+/// What `claude -p --output-format stream-json` prints for a one-line answer:
+/// its init line, the text block `claude::parse_line` reads as a `TextDelta`,
+/// and the result that ends the turn — each stamped with the session id.
+const CLAUDE_TRANSCRIPT: &str = concat!(
+    r#"{"type":"system","subtype":"init","session_id":"s-1"}"#,
+    "\n",
+    r#"{"type":"assistant","message":{"content":[{"type":"text","text":"hello"}]},"session_id":"s-1"}"#,
+    "\n",
+    r#"{"type":"result","subtype":"success","session_id":"s-1"}"#,
+    "\n",
+);
+
+#[tokio::test]
+async fn a_cli_turn_streams_its_answer_and_keeps_the_session_for_the_next() {
+    let _settings = common::env::isolate_settings();
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("transcript.jsonl"), CLAUDE_TRANSCRIPT).unwrap();
+    let bin = fake_claude(
+        dir.path(),
+        "@more > \"%~dp0stdin.txt\"\r\n@type \"%~dp0transcript.jsonl\"\r\n",
+        r#"cat > "$(dirname "$0")/stdin.txt"; cat "$(dirname "$0")/transcript.jsonl""#,
+    );
+    let (tx, mut rx) = unbounded_channel();
+
+    run_cli_agent_turn(cli_turn(AgentKind::Claude, &bin, tx, dir.path())).await;
+
+    let results = action_results(&mut rx);
+    let hello = results
+        .iter()
+        .position(|(t, r)| t == "ai_chunk:kind-dev" && r.as_deref() == Ok("hello"));
+    let done = results.iter().position(|(t, _)| t == "ai_done:kind-dev");
+    assert!(
+        matches!((hello, done), (Some(h), Some(d)) if h < d && d == results.len() - 1),
+        "{results:?}"
+    );
+    let kept = results
+        .iter()
+        .rev()
+        .find(|(t, _)| t == "ai_session:kind-dev");
+    assert_eq!(
+        kept.map(|(_, r)| r.as_deref()),
+        Some(Ok("conv-1|s-1")),
+        "the next turn resumes the session this one ran in: {results:?}"
+    );
+    if cfg!(windows) {
+        // A batch shim cannot take the prompt in argv, so it came on stdin.
+        let stdin = std::fs::read_to_string(dir.path().join("stdin.txt")).unwrap();
+        assert!(
+            stdin.contains("why is the api pod restarting?"),
+            "{stdin:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn an_agent_that_fails_at_once_says_why_and_ends_the_turn() {
+    let _settings = common::env::isolate_settings();
+    let dir = tempfile::tempdir().unwrap();
+    let bin = fake_claude(
+        dir.path(),
+        "@echo not logged in 1>&2\r\n@exit /b 1\r\n",
+        "echo 'not logged in' >&2; exit 1",
+    );
+    let (tx, mut rx) = unbounded_channel();
+
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        run_cli_agent_turn(cli_turn(AgentKind::Claude, &bin, tx, dir.path())),
+    )
+    .await
+    .expect("the turn ends within 10 s");
+
+    let results = action_results(&mut rx);
+    assert!(
+        results.iter().any(|(t, r)| t == "ai_chunk:kind-dev"
+            && match r {
+                Ok(m) | Err(m) => m.contains("not logged in"),
+            }),
+        "{results:?}"
+    );
+    assert_eq!(
+        results.last().map(|(t, _)| t.as_str()),
+        Some("ai_done:kind-dev")
+    );
 }
 
 #[cfg(unix)]
@@ -434,23 +554,7 @@ async fn boxed_cursor_turn_captures_stream_session_id_and_resumes() {
     let root = tempfile::tempdir().unwrap();
     let (tx, mut rx) = unbounded_channel();
 
-    run_boxed_cursor_turn(
-        bin.to_string_lossy().to_string(),
-        "default".into(),
-        None,
-        "first turn".into(),
-        "kind-dev".into(),
-        "default".into(),
-        None,
-        ClientCache::new(PathBuf::from("/nonexistent")),
-        vec![],
-        tx,
-        30,
-        root.path().to_path_buf(),
-        "conv-1".into(),
-        None,
-    )
-    .await;
+    run_cli_agent_turn(cli_turn(AgentKind::Cursor, &bin, tx, root.path())).await;
 
     let results = action_results(&mut rx);
     let session_events: Vec<_> = results
@@ -464,22 +568,10 @@ async fn boxed_cursor_turn_captures_stream_session_id_and_resumes() {
 
     // Turn 2 with resume
     let (tx2, mut rx2) = unbounded_channel();
-    run_boxed_cursor_turn(
-        bin.to_string_lossy().to_string(),
-        "default".into(),
-        None,
-        "second turn".into(),
-        "kind-dev".into(),
-        "default".into(),
-        None,
-        ClientCache::new(PathBuf::from("/nonexistent")),
-        vec![],
-        tx2,
-        30,
-        root.path().to_path_buf(),
-        "conv-1".into(),
-        Some("sess-abc-123".into()),
-    )
+    run_cli_agent_turn(CliTurn {
+        resume: Some("sess-abc-123".into()),
+        ..cli_turn(AgentKind::Cursor, &bin, tx2, root.path())
+    })
     .await;
 
     let results2 = action_results(&mut rx2);
@@ -502,22 +594,10 @@ async fn boxed_cursor_turn_crash_clears_stale_resume_id() {
     let root = tempfile::tempdir().unwrap();
     let (tx, mut rx) = unbounded_channel();
 
-    run_boxed_cursor_turn(
-        bin.to_string_lossy().to_string(),
-        "default".into(),
-        None,
-        "failed turn".into(),
-        "kind-dev".into(),
-        "default".into(),
-        None,
-        ClientCache::new(PathBuf::from("/nonexistent")),
-        vec![],
-        tx,
-        30,
-        root.path().to_path_buf(),
-        "conv-1".into(),
-        Some("stale-session".into()),
-    )
+    run_cli_agent_turn(CliTurn {
+        resume: Some("stale-session".into()),
+        ..cli_turn(AgentKind::Cursor, &bin, tx, root.path())
+    })
     .await;
 
     let results = action_results(&mut rx);
@@ -545,22 +625,10 @@ sleep 5
     let root = tempfile::tempdir().unwrap();
     let (tx, mut rx) = unbounded_channel();
 
-    let task = tokio::spawn(run_boxed_cursor_turn(
-        bin.to_string_lossy().to_string(),
-        "default".into(),
-        None,
-        "first turn".into(),
-        "kind-dev".into(),
-        "default".into(),
-        None,
-        ClientCache::new(PathBuf::from("/nonexistent")),
-        vec![],
-        tx,
-        30,
-        root.path().to_path_buf(),
-        "conv-cancel".into(),
-        None,
-    ));
+    let task = tokio::spawn(run_cli_agent_turn(CliTurn {
+        conversation_id: "conv-cancel".into(),
+        ..cli_turn(AgentKind::Cursor, &bin, tx, root.path())
+    }));
 
     // Wait until the early session event arrives
     let mut captured_id = None;
@@ -594,43 +662,20 @@ async fn consecutive_turns_serialize_workspace_cleanup_and_reuse() {
 
     // Turn 1
     let (tx1, mut rx1) = unbounded_channel();
-    run_boxed_cursor_turn(
-        bin.to_string_lossy().to_string(),
-        "default".into(),
-        None,
-        "t1".into(),
-        "kind-dev".into(),
-        "default".into(),
-        None,
-        ClientCache::new(PathBuf::from("/nonexistent")),
-        vec![],
-        tx1,
-        30,
-        root.path().to_path_buf(),
-        "conv-seq".into(),
-        None,
-    )
+    run_cli_agent_turn(CliTurn {
+        conversation_id: "conv-seq".into(),
+        ..cli_turn(AgentKind::Cursor, &bin, tx1, root.path())
+    })
     .await;
     let _ = action_results(&mut rx1);
 
     // Turn 2
     let (tx2, mut rx2) = unbounded_channel();
-    run_boxed_cursor_turn(
-        bin.to_string_lossy().to_string(),
-        "default".into(),
-        None,
-        "t2".into(),
-        "kind-dev".into(),
-        "default".into(),
-        None,
-        ClientCache::new(PathBuf::from("/nonexistent")),
-        vec![],
-        tx2,
-        30,
-        root.path().to_path_buf(),
-        "conv-seq".into(),
-        Some("sess-seq-1".into()),
-    )
+    run_cli_agent_turn(CliTurn {
+        conversation_id: "conv-seq".into(),
+        resume: Some("sess-seq-1".into()),
+        ..cli_turn(AgentKind::Cursor, &bin, tx2, root.path())
+    })
     .await;
     let results2 = action_results(&mut rx2);
     let session_events: Vec<_> = results2
@@ -699,22 +744,11 @@ async fn setup_failure_preserves_existing_resume_id() {
     let (tx, mut rx) = unbounded_channel();
 
     // Pass invalid conversation ID (e.g. empty or with path separators) to trigger early setup error
-    run_boxed_cursor_turn(
-        bin.to_string_lossy().to_string(),
-        "default".into(),
-        None,
-        "query".into(),
-        "kind-dev".into(),
-        "default".into(),
-        None,
-        ClientCache::new(PathBuf::from("/nonexistent")),
-        vec![],
-        tx,
-        30,
-        tmp.path().to_path_buf(),
-        "../invalid".into(),
-        Some("valid-existing-resume".into()),
-    )
+    run_cli_agent_turn(CliTurn {
+        conversation_id: "../invalid".into(),
+        resume: Some("valid-existing-resume".into()),
+        ..cli_turn(AgentKind::Cursor, &bin, tx, tmp.path())
+    })
     .await;
 
     let results = action_results(&mut rx);

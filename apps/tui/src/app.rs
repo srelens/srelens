@@ -8486,47 +8486,38 @@ impl App {
 
         // Claude Code and Codex fall through to the provider path until they are wired.
         if self.ai_settings.agent == AgentKind::Cursor {
-            if let Some(cursor_bin) = crate::ai_config::find_agent(AgentKind::Cursor) {
-                let cursor_bin = cursor_bin.display().to_string();
-                let event_tx = self.event_tx.clone();
-                // Cursor's own model, not the provider's: empty is Default (no flag).
-                let model = self
-                    .ai_settings
-                    .get_agent_model(AgentKind::Cursor)
-                    .unwrap_or_default();
-                let api_key = self.ai_settings.get_cursor_key();
-                let cache = self.client_cache.clone();
-                let timeout_seconds = self.ai_settings.get_timeout_seconds(provider);
+            if let Some(binary) = crate::ai_config::find_agent(AgentKind::Cursor) {
+                let turn = crate::agent::CliTurn {
+                    kind: AgentKind::Cursor,
+                    binary,
+                    // Cursor's own model, not the provider's: `None` is Default (no flag).
+                    model: self.ai_settings.get_agent_model(AgentKind::Cursor),
+                    cursor_key: self.ai_settings.get_cursor_key(),
+                    query,
+                    active_ctx,
+                    active_ns,
+                    argo_hub_context: argo_hub_ctx,
+                    cache: self.client_cache.clone(),
+                    kubeconfig_paths,
+                    event_tx: self.event_tx.clone(),
+                    timeout_seconds: self.ai_settings.get_timeout_seconds(provider),
+                    conversation_id: ai.conversation_id.clone(),
+                    resume: ai.cursor_resume_id.clone(),
+                    chat_root: crate::agent::process_cursor_chats_root(),
+                };
                 let hub_kc_opt = argo_hub_kc.clone();
-                let chat_root = crate::agent::process_cursor_chats_root();
-                let conv_id = ai.conversation_id.clone();
-                let resume = ai.cursor_resume_id.clone();
-
                 let handle = tokio::spawn(async move {
                     if let Some(ref hub_kc) = hub_kc_opt {
-                        cache.ensure_paths(vec![hub_kc.clone()]).await;
+                        turn.cache.ensure_paths(vec![hub_kc.clone()]).await;
                     }
-                    crate::agent::run_boxed_cursor_turn(
-                        cursor_bin,
-                        model,
-                        api_key,
-                        query,
-                        active_ctx,
-                        active_ns,
-                        argo_hub_ctx,
-                        cache,
-                        kubeconfig_paths,
-                        event_tx,
-                        timeout_seconds,
-                        chat_root,
-                        conv_id,
-                        resume,
-                    )
-                    .await;
+                    crate::agent::run_cli_agent_turn(turn).await;
                 });
                 ai.task = Some(handle.abort_handle());
             } else {
-                ai.add_assistant_message("cursor-agent CLI was not found on PATH. Install from https://docs.cursor.com/en/cli/overview or ensure ~/.local/bin is in your PATH.".to_string());
+                ai.add_assistant_message(format!(
+                    "cursor-agent CLI was not found on PATH. Install from {} or ensure ~/.local/bin is in your PATH.",
+                    crate::ai_config::agent_install_url(AgentKind::Cursor)
+                ));
             }
         } else if let Some(config) = self.ai_settings.resolve_provider_config(provider) {
             let event_tx = self.event_tx.clone();
