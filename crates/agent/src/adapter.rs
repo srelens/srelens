@@ -107,6 +107,29 @@ pub fn valid_model_id(id: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | ':' | '/' | '@' | '[' | ']' | '-'))
 }
 
+/// One model a CLI offers: the `id` goes after its model flag, the `label` is
+/// what a picker shows.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ModelChoice {
+    pub id: String,
+    pub label: String,
+}
+
+/// Claude Code has no model-listing command, so the picker offers the aliases
+/// its `--model` flag accepts.
+pub const CLAUDE_MODEL_ALIASES: [&str; 4] = ["fable", "opus", "sonnet", "haiku"];
+
+/// The argv (after the binary) that prints `kind`'s models, or `None` when
+/// the CLI has no such command (Claude Code, and the native agent, which has
+/// no CLI at all).
+pub fn model_list_args(kind: AgentKind) -> Option<&'static [&'static str]> {
+    match kind {
+        AgentKind::Codex => Some(&["debug", "models"]),
+        AgentKind::Cursor => Some(&["models"]),
+        AgentKind::Claude | AgentKind::Srelens => None,
+    }
+}
+
 impl AgentCommand {
     /// Run on `model`: Codex takes `-m <id>`, Claude Code and Cursor
     /// `--model <id>`, put right after the first arg (`exec` / `-p`) so the
@@ -1241,6 +1264,20 @@ mod tests {
         }
         let plain = codex_cmd();
         assert_eq!(plain.clone().with_model(AgentKind::Srelens, Some("sonnet")), plain);
+    }
+
+    #[test]
+    fn only_codex_and_cursor_have_a_model_listing_command() {
+        assert_eq!(model_list_args(AgentKind::Codex), Some(&["debug", "models"][..]));
+        assert_eq!(model_list_args(AgentKind::Cursor), Some(&["models"][..]));
+        assert_eq!(model_list_args(AgentKind::Claude), None);
+        assert_eq!(model_list_args(AgentKind::Srelens), None);
+    }
+
+    #[test]
+    fn claude_aliases_are_all_valid_model_ids() {
+        assert_eq!(CLAUDE_MODEL_ALIASES, ["fable", "opus", "sonnet", "haiku"]);
+        assert!(CLAUDE_MODEL_ALIASES.iter().all(|a| valid_model_id(a)));
     }
 
     #[test]
