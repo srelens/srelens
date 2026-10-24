@@ -111,6 +111,7 @@ import { hint, matchWindowKey, type WindowAction } from "../lib/shortcuts";
 import { AgentConsent } from "./AgentConsent";
 import { Body } from "./Body";
 import { Chrome, zoom } from "./Chrome";
+import { ClusterTerminalConfirm } from "./ClusterTerminalConfirm";
 import { Console } from "./Console";
 import { isWorkspaceSealed, LockGate, lockWorkspace, useWorkspaceSealed } from "./LockGate";
 import { Nav } from "./Nav";
@@ -1039,6 +1040,10 @@ export function Window({
           </div>
         </div>
       </Drawer>
+      {/* A protected cluster's local shell, asked for from the status bar or
+          ⌘J on Windows, waits here for its typed name (#101). In the band, so
+          a raised cover takes the question down with everything else. */}
+      <ClusterTerminalConfirm />
     </>
   ) : (
     // `flex-1`, because this is now a flex item of the band's own row rather
