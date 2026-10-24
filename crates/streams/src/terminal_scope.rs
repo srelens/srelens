@@ -22,12 +22,20 @@
 //!   the reader's own rc files: put `bin` back at the front of `PATH` (rc files
 //!   commonly prepend to it), make `KUBECONFIG` read-only, and tag the prompt
 //!   with the cluster and namespace, and `read-only` when the terminal is.
+//!   Read-only, each prompt also puts `bin` back in front if a prompt hook
+//!   moved it, and fish, which reads none of these files, is started to put
+//!   it back after its config ([`Scope::shell_start`]).
 //!
 //! What is left outside, by design: a tool that is neither `kubectl` nor `helm`
-//! and is told about another kubeconfig by its own flag; a shell that is
-//! neither bash nor zsh, which gets the kubeconfig and the guards but no
-//! read-only variable and no prompt tag; and a reader who removes the guards
-//! from `PATH` on purpose. `docs/USAGE.md` says the same to the reader.
+//! and is told about another kubeconfig by its own flag, or, in a read-only
+//! terminal, changes the cluster through the session's kubeconfig (k9s, the
+//! argocd and flux CLIs, a script); a shell that is neither bash nor zsh,
+//! which gets the kubeconfig and the guards but not the read-only
+//! `KUBECONFIG` or the prompt tag; in a read-only terminal, a shell other than
+//! bash, zsh and fish, where the guards hold only while the shell's own config
+//! leaves `bin` first on `PATH`; and a reader who removes the guards from
+//! `PATH` on purpose, or runs the real tool by its full path. `docs/USAGE.md`
+//! says the same to the reader.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
