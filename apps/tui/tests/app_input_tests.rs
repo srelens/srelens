@@ -8404,3 +8404,329 @@ async fn a_github_answer_lands_on_the_changed_view_under_describe() {
         "an answer nobody asked for is dropped"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Agent approval prompts: a local agent's gated tool call, asked over every view
+// ---------------------------------------------------------------------------
+
+use srectl::consent::PendingConsent;
+use srelens_mcp::policy::{ConsentKind, ConsentRequest, Decision};
+use tokio::sync::oneshot::{self, error::TryRecvError};
+
+fn delete_pod_request(pod: &str) -> ConsentRequest {
+    ConsentRequest {
+        tool: "k8s.deletePod".into(),
+        args: json!({ "name": pod, "namespace": "prod" }),
+        kind: ConsentKind::Destructive,
+        impact: srelens_capability::Impact::High,
+        confirm_text: Some(format!("Delete pod prod/{pod}?")),
+        caller: None,
+    }
+}
+
+/// A prompt as srectl's consent policy raises it, and the end the policy
+/// waits on for the answer.
+fn consent_for(request: ConsentRequest) -> (PendingConsent, oneshot::Receiver<Decision>) {
+    let (reply, answer) = oneshot::channel();
+    let pending = PendingConsent {
+        request,
+        agent: "claude".into(),
+        context: "kind-dev".into(),
+        reply,
+    };
+    (pending, answer)
+}
+
+fn delete_pod_consent(pod: &str) -> (PendingConsent, oneshot::Receiver<Decision>) {
+    consent_for(delete_pod_request(pod))
+}
+
+fn screen(app: &mut App) -> String {
+    common::render_app(app, 120, 40)
+}
+
+#[tokio::test]
+async fn an_approval_prompt_shows_what_the_agent_wants() {
+    let _settings = common::env::isolate_settings();
+    let (mut app, _rx) = common::app().await;
+    let (prompt, _answer) = delete_pod_consent("api-0");
+
+    app.consents.push(prompt);
+
+    let screen = screen(&mut app);
+    for shown in [
+        "claude",
+        "kind-dev",
+        "Delete pod prod/api-0?",
+        "k8s.deletePod",
+        "high",
+        "change",
+        "s left",
+        "[y] Approve",
+        "[n/Esc] Decline",
+    ] {
+        assert!(screen.contains(shown), "missing {shown:?} in:\n{screen}");
+    }
+}
+
+#[tokio::test]
+async fn the_answer_keys_stay_on_screen_in_a_small_terminal() {
+    let _settings = common::env::isolate_settings();
+    let (mut app, _rx) = common::app().await;
+    let mut request = delete_pod_request("api-0");
+    request.confirm_text = Some(
+        "Delete pod prod/api-0? Its controller will start a new one, and any \
+         data the pod kept outside a volume is lost."
+            .into(),
+    );
+    let (prompt, _answer) = consent_for(request);
+
+    app.consents.push(prompt);
+
+    let screen = common::render_app(&mut app, 80, 24);
+    assert!(screen.contains("[y] Approve"), "screen:\n{screen}");
+    assert!(screen.contains("[n/Esc] Decline"), "screen:\n{screen}");
+}
+
+#[tokio::test]
+async fn a_secret_read_prompt_says_it_is_one() {
+    let _settings = common::env::isolate_settings();
+    let (mut app, _rx) = common::app().await;
+    let (prompt, _answer) = consent_for(ConsentRequest {
+        tool: "k8s.getSecret".into(),
+        args: json!({ "name": "db", "namespace": "prod" }),
+        kind: ConsentKind::SensitiveRead,
+        impact: srelens_capability::Impact::Medium,
+        confirm_text: None,
+        caller: None,
+    });
+
+    app.consents.push(prompt);
+
+    let screen = screen(&mut app);
+    assert!(screen.contains("Secret read"), "screen:\n{screen}");
+    assert!(screen.contains("k8s.getSecret"), "screen:\n{screen}");
+}
+
+#[tokio::test]
+async fn y_approves_once_the_prompt_is_armed() {
+    let _settings = common::env::isolate_settings();
+    let (mut app, _rx) = common::app().await;
+    app.consent_arm_delay = Duration::ZERO;
+
+    for y in ['y', 'Y'] {
+        let (prompt, mut answer) = delete_pod_consent("api-0");
+        app.consents.push(prompt);
+
+        press(&mut app, ch(y)).await;
+
+        assert_eq!(answer.try_recv(), Ok(Decision::Approved), "{y:?} approves");
+        assert!(app.consents.is_empty());
+        assert!(
+            !screen(&mut app).contains("[y] Approve"),
+            "the prompt is gone"
+        );
+    }
+}
+
+#[tokio::test]
+async fn n_and_esc_decline() {
+    let _settings = common::env::isolate_settings();
+    let (mut app, _rx) = common::app().await;
+    app.consent_arm_delay = Duration::ZERO;
+
+    for no in [ch('n'), ch('N'), key(KeyCode::Esc)] {
+        let (prompt, mut answer) = delete_pod_consent("api-0");
+        app.consents.push(prompt);
+
+        press(&mut app, no).await;
+
+        assert_eq!(
+            answer.try_recv(),
+            Ok(Decision::Denied("declined in srectl".into())),
+            "{no:?} declines"
+        );
+        assert!(app.consents.is_empty());
+    }
+}
+
+#[tokio::test]
+async fn enter_never_approves() {
+    let _settings = common::env::isolate_settings();
+    let (mut app, _rx) = common::app().await;
+    app.consent_arm_delay = Duration::ZERO;
+    let (prompt, mut answer) = delete_pod_consent("api-0");
+    app.consents.push(prompt);
+
+    press(&mut app, key(KeyCode::Enter)).await;
+    press(&mut app, ch('x')).await;
+
+    assert_eq!(answer.try_recv(), Err(TryRecvError::Empty));
+    assert!(screen(&mut app).contains("[y] Approve"), "still asking");
+}
+
+#[tokio::test]
+async fn a_y_typed_ahead_in_the_assistant_does_not_approve() {
+    let _settings = common::env::isolate_settings();
+    let (mut app, _rx) = common::app().await;
+    assert_eq!(app.consent_arm_delay, Duration::from_secs(1));
+    app.active_view = ActiveView::Assistant;
+    app.assistant_state.is_busy = true;
+    let (prompt, mut answer) = delete_pod_consent("api-0");
+    app.consents.push(prompt);
+
+    type_str(&mut app, "yes").await;
+
+    assert_eq!(answer.try_recv(), Err(TryRecvError::Empty));
+    assert_eq!(
+        app.assistant_state.input, "",
+        "keys during the prompt's first second go nowhere"
+    );
+    let screen = screen(&mut app);
+    assert!(screen.contains("[y] Approve"), "still asking:\n{screen}");
+    assert!(screen.contains("ready in 1s"), "screen:\n{screen}");
+}
+
+#[tokio::test]
+async fn the_next_prompt_arms_from_when_it_is_shown() {
+    let _settings = common::env::isolate_settings();
+    let (mut app, _rx) = common::app().await;
+    app.consent_arm_delay = Duration::from_millis(50);
+    let (first, mut first_answer) = delete_pod_consent("api-0");
+    let (second, mut second_answer) = delete_pod_consent("api-1");
+    app.consents.push(first);
+    app.consents.push(second);
+    tokio::time::sleep(Duration::from_millis(80)).await;
+
+    press(&mut app, ch('y')).await;
+    press(&mut app, ch('y')).await;
+
+    assert_eq!(first_answer.try_recv(), Ok(Decision::Approved));
+    assert_eq!(
+        second_answer.try_recv(),
+        Err(TryRecvError::Empty),
+        "the second prompt only just appeared"
+    );
+}
+
+#[tokio::test]
+async fn the_prompt_wins_over_an_open_dialog() {
+    let _settings = common::env::isolate_settings();
+    let (mut app, _rx) = common::app().await;
+    app.consent_arm_delay = Duration::ZERO;
+    app.modal = Some(Modal::Scale {
+        workload_name: "web".into(),
+        current_replicas: 1,
+        input: "1".into(),
+    });
+    let (approve, mut approved) = delete_pod_consent("api-0");
+    let (decline, mut declined) = delete_pod_consent("api-1");
+    app.consents.push(approve);
+    app.consents.push(decline);
+    assert!(
+        screen(&mut app).contains("[y] Approve"),
+        "drawn over the dialog"
+    );
+
+    press(&mut app, ch('y')).await;
+    press(&mut app, key(KeyCode::Esc)).await;
+
+    assert_eq!(approved.try_recv(), Ok(Decision::Approved));
+    assert_eq!(
+        declined.try_recv(),
+        Ok(Decision::Denied("declined in srectl".into()))
+    );
+    assert!(
+        matches!(app.modal, Some(Modal::Scale { ref input, .. }) if input == "1"),
+        "the dialog never saw the keys: {:?}",
+        app.modal
+    );
+}
+
+#[tokio::test]
+async fn a_closed_request_leaves_the_screen_on_the_next_tick() {
+    let _settings = common::env::isolate_settings();
+    let (mut app, _rx) = common::app().await;
+    let (prompt, answer) = delete_pod_consent("api-0");
+    app.consents.push(prompt);
+
+    drop(answer);
+    app.handle_tick();
+
+    assert!(app.consents.is_empty());
+    assert!(!screen(&mut app).contains("[y] Approve"));
+}
+
+#[tokio::test]
+async fn a_y_for_a_closed_request_approves_nothing() {
+    let _settings = common::env::isolate_settings();
+    let (mut app, _rx) = common::app().await;
+    app.consent_arm_delay = Duration::ZERO;
+    let (gone, gone_answer) = delete_pod_consent("api-0");
+    let (next, mut next_answer) = delete_pod_consent("api-1");
+    app.consents.push(gone);
+    app.consents.push(next);
+
+    drop(gone_answer);
+    press(&mut app, ch('y')).await;
+
+    assert_eq!(
+        next_answer.try_recv(),
+        Err(TryRecvError::Empty),
+        "the y was meant for a prompt that had already closed"
+    );
+    assert!(screen(&mut app).contains("Delete pod prod/api-1?"));
+}
+
+#[tokio::test]
+async fn prompts_queue_one_at_a_time() {
+    let _settings = common::env::isolate_settings();
+    let (mut app, _rx) = common::app().await;
+    app.consent_arm_delay = Duration::ZERO;
+    let (first, mut first_answer) = delete_pod_consent("api-0");
+    let (second, mut second_answer) = delete_pod_consent("api-1");
+    app.consents.push(first);
+    app.consents.push(second);
+
+    let before = screen(&mut app);
+    assert!(
+        before.contains("Delete pod prod/api-0?"),
+        "screen:\n{before}"
+    );
+    assert!(
+        !before.contains("Delete pod prod/api-1?"),
+        "screen:\n{before}"
+    );
+
+    press(&mut app, ch('y')).await;
+
+    assert_eq!(first_answer.try_recv(), Ok(Decision::Approved));
+    assert_eq!(second_answer.try_recv(), Err(TryRecvError::Empty));
+    let after = screen(&mut app);
+    assert!(after.contains("Delete pod prod/api-1?"), "screen:\n{after}");
+}
+
+#[tokio::test]
+async fn the_seconds_left_count_from_when_the_agent_asked() {
+    let _settings = common::env::isolate_settings();
+    let (mut app, _rx) = common::app().await;
+    app.consent_arm_delay = Duration::ZERO;
+    let (first, _first_answer) = delete_pod_consent("api-0");
+    let (second, _second_answer) = delete_pod_consent("api-1");
+    app.consents.push(first);
+    app.consents.push(second);
+    tokio::time::sleep(Duration::from_millis(1100)).await;
+
+    press(&mut app, ch('y')).await;
+
+    let screen = screen(&mut app);
+    assert!(
+        screen.contains("Delete pod prod/api-1?"),
+        "screen:\n{screen}"
+    );
+    assert!(screen.contains("s left"), "screen:\n{screen}");
+    assert!(
+        !screen.contains("60s left") && !screen.contains("59s left"),
+        "the second prompt has waited over a second already:\n{screen}"
+    );
+}

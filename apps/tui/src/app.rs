@@ -238,6 +238,12 @@ pub struct App {
     pub screen_selection: Option<((u16, u16), (u16, u16))>,
     pub screen_selecting: bool,
     pub screen_selection_text: std::cell::RefCell<String>,
+    /// Local agents' gated tool calls waiting on a yes or no. While any is
+    /// waiting, its prompt is drawn over everything and takes every key.
+    pub consents: crate::consent::ConsentQueue,
+    /// How long a new prompt ignores keys, so one typed before it appeared
+    /// (a `y` mid-sentence in the Assistant) cannot answer it.
+    pub consent_arm_delay: Duration,
 }
 
 pub enum SuspendAction {
@@ -618,6 +624,8 @@ impl App {
             screen_selection: None,
             screen_selecting: false,
             screen_selection_text: std::cell::RefCell::new(String::new()),
+            consents: Default::default(),
+            consent_arm_delay: Duration::from_secs(1),
         };
 
         if let Some(lvl) = app.ai_settings.get_caveman_level() {
@@ -662,6 +670,7 @@ impl App {
 
     pub fn handle_tick(&mut self) {
         self.assistant_state.tick();
+        self.consents.prune_closed();
 
         // Clear expired toasts (auto-dismiss after 3s)
         if let Some((_, created, _)) = &self.toast {
@@ -2565,6 +2574,13 @@ impl App {
         // Any keypress dismisses the drag-to-copy selection highlight.
         self.screen_selection = None;
         self.screen_selecting = false;
+
+        // An agent's approval prompt is drawn over everything and takes
+        // every key, Ctrl+C included, until it is answered or gone.
+        if !self.consents.is_empty() {
+            self.consents.press(key, self.consent_arm_delay);
+            return;
+        }
 
         // Global Ctrl+C handler -> Immediately kill/exit TUI cleanly,
         // unless in Assistant view where Ctrl+C is used to copy selection or assistant reply.
@@ -15562,6 +15578,18 @@ impl App {
             render_modal(f, size, modal);
         } else if self.show_help {
             render_help_modal(f, size);
+        }
+
+        // An agent's approval prompt, over every view and dialog. Before the
+        // selection pass, so a drag still copies what is on screen.
+        if let Some(pending) = self.consents.front() {
+            crate::ui::dialogs::render_consent(
+                f,
+                size,
+                pending,
+                self.consents.seconds_left(),
+                self.consents.ready_in(self.consent_arm_delay),
+            );
         }
 
         // 5. Global drag-to-copy selection overlay: highlight the selected

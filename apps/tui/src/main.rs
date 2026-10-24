@@ -563,9 +563,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 AppEvent::ChangedCauseResult { key, result } => {
                     app.handle_changed_cause_result(&key, result);
                 }
-                // Nothing shows the prompt yet; dropping it closes the reply,
-                // so the policy denies the call rather than leaving it waiting.
-                AppEvent::AgentConsent(_) => {}
+                AppEvent::AgentConsent(pending) => app.consents.push(pending),
             }
 
             if !app.is_running {

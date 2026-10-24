@@ -1766,3 +1766,84 @@ pub fn render_feature_banner_modal(
         chunks[2],
     );
 }
+
+/// A local agent's gated tool call, waiting on the user's yes or no. Drawn
+/// over everything, dialogs included; its keys are `ConsentQueue::press`.
+/// `ready_in` counts the seconds before keys reach it.
+pub fn render_consent(
+    f: &mut Frame,
+    area: Rect,
+    pending: &crate::consent::PendingConsent,
+    seconds_left: u64,
+    ready_in: u64,
+) {
+    use srelens_mcp::policy::ConsentKind;
+
+    let request = &pending.request;
+    let (what, color) = match request.kind {
+        ConsentKind::Destructive => ("change", Theme::red()),
+        ConsentKind::SensitiveRead => ("Secret read", Theme::yellow()),
+    };
+    let modal_area = centered_rect(60, 40, area);
+    f.render_widget(Clear, modal_area);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(Theme::border_type())
+        .border_style(Style::default().fg(color))
+        .title(Span::styled(
+            " Agent approval ",
+            Style::default().fg(color).add_modifier(Modifier::BOLD),
+        ));
+
+    let dim = Style::default().fg(Theme::dim());
+    let value = Style::default()
+        .fg(Theme::fg())
+        .add_modifier(Modifier::BOLD);
+    let mut answer = vec![
+        Span::styled("[y]", Theme::key_hint_key()),
+        Span::styled(" Approve  ", Theme::key_hint_desc()),
+        Span::styled("[n/Esc]", Theme::key_hint_key()),
+        Span::styled(" Decline", Theme::key_hint_desc()),
+        Span::styled(format!("   {seconds_left}s left"), dim),
+    ];
+    if ready_in > 0 {
+        answer.push(Span::styled(format!("   ready in {ready_in}s"), dim));
+    }
+    let lines = vec![
+        Line::from(vec![
+            Span::styled(pending.agent.as_str(), value),
+            Span::styled(" asks to act on ", dim),
+            Span::styled(pending.context.as_str(), value),
+        ]),
+        Line::default(),
+        Line::from(Span::styled(
+            request.prompt(),
+            Style::default().fg(color).add_modifier(Modifier::BOLD),
+        )),
+        Line::default(),
+        Line::from(vec![
+            Span::styled("Tool ", dim),
+            Span::styled(request.tool.as_str(), value),
+            Span::styled("   Impact ", dim),
+            Span::styled(request.impact.as_str(), value),
+            Span::styled("   ", dim),
+            Span::styled(what, value),
+        ]),
+    ];
+    let inner = block.inner(modal_area);
+    f.render_widget(block, modal_area);
+    // The answer keys get their own rows, so a long prompt in a small
+    // terminal is what gets cut, never how to answer it.
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(1), Constraint::Length(2)])
+        .split(inner);
+    for (text, area) in [(lines, chunks[0]), (vec![Line::from(answer)], chunks[1])] {
+        f.render_widget(
+            Paragraph::new(text)
+                .wrap(Wrap { trim: true })
+                .alignment(Alignment::Center),
+            area,
+        );
+    }
+}

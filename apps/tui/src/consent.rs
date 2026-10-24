@@ -7,10 +7,12 @@
 //! the agent can tell the user said no from nobody being there to ask.
 
 use crate::event::AppEvent;
+use crossterm::event::{KeyCode, KeyEvent};
 use srelens_mcp::policy::{ConfirmPolicy, ConsentRequest, Decision};
+use std::collections::VecDeque;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::oneshot;
 
@@ -32,6 +34,96 @@ pub struct PendingConsent {
     /// The cluster context the call would act on.
     pub context: String,
     pub reply: oneshot::Sender<Decision>,
+}
+
+/// The prompts waiting on the user, oldest first; only the front one is on
+/// screen. Each keeps when it arrived (its 60 s run from then), and the queue
+/// keeps when the front one was first shown (its keys arm from then).
+#[derive(Debug, Default)]
+pub struct ConsentQueue {
+    waiting: VecDeque<(PendingConsent, Instant)>,
+    front_shown: Option<Instant>,
+}
+
+impl ConsentQueue {
+    pub fn push(&mut self, pending: PendingConsent) {
+        let now = Instant::now();
+        if self.waiting.is_empty() {
+            self.front_shown = Some(now);
+        }
+        self.waiting.push_back((pending, now));
+    }
+
+    pub fn front(&self) -> Option<&PendingConsent> {
+        self.waiting.front().map(|(pending, _)| pending)
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.waiting.is_empty()
+    }
+
+    /// Answers the front prompt and shows the next.
+    pub fn answer(&mut self, decision: Decision) {
+        if let Some((pending, _)) = self.waiting.pop_front() {
+            // The policy may have stopped waiting a moment ago; it denied then.
+            let _ = pending.reply.send(decision);
+        }
+        self.front_changed();
+    }
+
+    /// Drops every prompt nobody waits on any more: the agent's wait timed
+    /// out, or its turn was cancelled. Nothing is sent for them.
+    pub fn prune_closed(&mut self) {
+        let front_closed = self
+            .front()
+            .is_some_and(|pending| pending.reply.is_closed());
+        self.waiting
+            .retain(|(pending, _)| !pending.reply.is_closed());
+        if front_closed {
+            self.front_changed();
+        }
+    }
+
+    /// A key while a prompt is up: `y` approves, `n` or Esc declines, and
+    /// every other key, Enter included, does nothing. Keys before the front
+    /// prompt has been shown for `arm_delay` are dropped, so one typed before
+    /// it appeared cannot answer it; so is a key for a prompt whose agent has
+    /// stopped waiting, which leaves instead.
+    pub fn press(&mut self, key: KeyEvent, arm_delay: Duration) {
+        let front_closed = self
+            .front()
+            .is_some_and(|pending| pending.reply.is_closed());
+        self.prune_closed();
+        if front_closed || self.ready_in(arm_delay) > 0 {
+            return;
+        }
+        let decision = match key.code {
+            KeyCode::Char('y' | 'Y') => Decision::Approved,
+            KeyCode::Char('n' | 'N') | KeyCode::Esc => Decision::Denied(DECLINED.into()),
+            _ => return,
+        };
+        self.answer(decision);
+    }
+
+    /// Whole seconds, rounded up, before keys reach the front prompt; 0 once
+    /// it has been on screen for `arm_delay`.
+    pub fn ready_in(&self, arm_delay: Duration) -> u64 {
+        self.front_shown.map_or(0, |shown| {
+            let left = arm_delay.saturating_sub(shown.elapsed());
+            left.as_millis().div_ceil(1000) as u64
+        })
+    }
+
+    /// Whole seconds before the front prompt's agent stops waiting.
+    pub fn seconds_left(&self) -> u64 {
+        self.waiting.front().map_or(0, |(_, arrived)| {
+            CONSENT_TIMEOUT.saturating_sub(arrived.elapsed()).as_secs()
+        })
+    }
+
+    fn front_changed(&mut self) {
+        self.front_shown = (!self.waiting.is_empty()).then(Instant::now);
+    }
 }
 
 pub struct TuiConsent {
