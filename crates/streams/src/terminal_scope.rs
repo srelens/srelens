@@ -248,6 +248,10 @@ impl Tool {
     /// registered (`--logtostderr` and the rest). Newer kubectl rejects them
     /// as unknown before it runs anything, so listing them is safe.
     ///
+    /// kubectl accepts `_` for `-` in flag names, so each listed name matches
+    /// both: `[-_]` stands for each separator inside a name, and a name with
+    /// none (`--logtostderr`) is listed as it is.
+    ///
     /// ponytail: a boolean flag missing from this list hides the subcommand
     /// from the check, because the guard reads the flag as taking the next
     /// word as its value; with no subcommand found nothing is refused, and a
@@ -257,7 +261,7 @@ impl Tool {
     fn bool_flags(self) -> &'static str {
         match self {
             Tool::Kubectl => {
-                "--add-dir-header|--alsologtostderr|--disable-compression|--insecure-skip-tls-verify|--logtostderr|--match-server-version|--one-output|--skip-headers|--skip-log-headers|--warnings-as-errors"
+                "--add[-_]dir[-_]header|--alsologtostderr|--disable[-_]compression|--insecure[-_]skip[-_]tls[-_]verify|--logtostderr|--match[-_]server[-_]version|--one[-_]output|--skip[-_]headers|--skip[-_]log[-_]headers|--warnings[-_]as[-_]errors"
             }
             Tool::Helm => "--debug|--kube-insecure-skip-tls-verify",
         }
@@ -1087,6 +1091,7 @@ contexts:
             // A flag that takes no value leaves the next word the subcommand.
             ("kubectl", vec!["--insecure-skip-tls-verify", "get", "pods"]),
             ("kubectl", vec!["--alsologtostderr", "get", "pods"]),
+            ("kubectl", vec!["--insecure_skip_tls_verify", "get", "pods"]),
             ("kubectl", vec!["rollout", "-n", "prod", "status", "deploy/web"]),
             ("helm", vec!["-n", "prod", "list"]),
             ("helm", vec!["--debug", "status", "web"]),
@@ -1121,6 +1126,29 @@ contexts:
             "--one-output",
             "--skip-headers",
             "--skip-log-headers",
+        ] {
+            let out = f.run("kubectl", &[flag, "apply", "-f", "web.yaml"]);
+            assert_eq!(out.status.code(), Some(64), "kubectl {flag} apply was not refused");
+            assert_eq!(stderr(&out), read_only_refusal("kubectl apply"), "kubectl {flag} apply");
+        }
+        // kubectl reads `_` in a flag name as `-`, so a boolean flag is one in
+        // either spelling, and in a mix of the two. Each global boolean with
+        // a separator inside its name, in the spellings it is typed in.
+        for flag in [
+            "--add_dir_header",
+            "--disable-compression",
+            "--disable_compression",
+            "--insecure-skip-tls-verify",
+            "--insecure_skip_tls_verify",
+            "--insecure-skip_tls-verify",
+            "--match-server-version",
+            "--match_server_version",
+            "--one_output",
+            "--skip_headers",
+            "--skip_log_headers",
+            "--skip_log-headers",
+            "--warnings-as-errors",
+            "--warnings_as_errors",
         ] {
             let out = f.run("kubectl", &[flag, "apply", "-f", "web.yaml"]);
             assert_eq!(out.status.code(), Some(64), "kubectl {flag} apply was not refused");
