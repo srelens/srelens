@@ -1332,6 +1332,35 @@ fn an_explicit_api_key_produces_a_provider_config() {
 }
 
 #[test]
+fn a_settings_file_from_when_cursor_was_a_provider_loads_with_nothing_lost() {
+    let mut env = common::env::lock();
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("ai_settings.json");
+    std::fs::write(
+        &file,
+        r#"{"defaultProvider":"cursor","apiKeys":{"anthropic":"sk-a","cursor":"cur-1"},
+            "models":{"cursor":"claude-3.5-sonnet"},"baseUrls":{"openai":"https://proxy.example/v1"}}"#,
+    )
+    .unwrap();
+    env.set("SRELENS_AI_SETTINGS_PATH", &file);
+    env.remove("SRELENS_CONFIG_DIR");
+
+    let s = AiSettings::load();
+
+    assert_eq!(s.agent, AgentKind::Cursor);
+    assert_eq!(s.default_provider, AiProvider::Anthropic);
+    assert_eq!(
+        s.api_keys.get("anthropic").map(String::as_str),
+        Some("sk-a")
+    );
+    assert_eq!(s.api_keys.get("cursor").map(String::as_str), Some("cur-1"));
+    assert_eq!(
+        s.get_base_url(AiProvider::OpenAi),
+        "https://proxy.example/v1"
+    );
+}
+
+#[test]
 fn settings_paths_and_key_lookups_follow_the_environment() {
     let mut env = common::env::lock();
 

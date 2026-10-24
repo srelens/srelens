@@ -236,14 +236,39 @@ impl AiSettings {
 
     /// Parse a settings file. A file from when Cursor was a provider
     /// (`"defaultProvider":"cursor"`) opens as the Cursor agent over the
-    /// Anthropic provider, every other field kept; without this the unknown
-    /// provider would fail the parse and `load` would drop the user's keys.
+    /// Anthropic provider, keeping its Cursor model and every other field. An
+    /// agent this build does not know reads as the default agent. Either one
+    /// would otherwise fail the parse, `load` would fall back to defaults, and
+    /// the next save would drop the user's keys.
     pub fn from_json(text: &str) -> Result<AiSettings, serde_json::Error> {
         let mut value: serde_json::Value = serde_json::from_str(text)?;
         if let Some(obj) = value.as_object_mut() {
+            if obj
+                .get("agent")
+                .is_some_and(|a| AgentKind::deserialize(a).is_err())
+            {
+                obj.remove("agent");
+            }
             if obj.get("defaultProvider").and_then(|v| v.as_str()) == Some("cursor") {
                 obj.insert("defaultProvider".into(), "anthropic".into());
                 obj.entry("agent").or_insert_with(|| "cursor".into());
+                // Only here, once: after the first save the file no longer says
+                // "cursor", so choosing Default later is not undone.
+                let legacy_model = obj
+                    .get("models")
+                    .and_then(|m| m.get("cursor"))
+                    .and_then(|m| m.as_str())
+                    .filter(|m| valid_model_id(m) && *m != "default")
+                    .map(str::to_string);
+                if let Some(model) = legacy_model {
+                    if let Some(agent_models) = obj
+                        .entry("agentModels")
+                        .or_insert_with(|| serde_json::json!({}))
+                        .as_object_mut()
+                    {
+                        agent_models.entry("cursor").or_insert(model.into());
+                    }
+                }
             }
         }
         serde_json::from_value(value)
@@ -452,6 +477,64 @@ mod tests {
         assert_eq!(s.default_provider, AiProvider::Gemini);
         assert!(s.agent_models.is_empty());
         assert_eq!(AiSettings::default().agent, AgentKind::Srelens);
+    }
+
+    #[test]
+    fn a_migrated_user_keeps_their_cursor_model() {
+        let s = AiSettings::from_json(
+            r#"{"defaultProvider":"cursor","models":{"cursor":"claude-3.5-sonnet"}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            s.get_agent_model(AgentKind::Cursor).as_deref(),
+            Some("claude-3.5-sonnet")
+        );
+        assert_eq!(
+            s.models.get("cursor").map(String::as_str),
+            Some("claude-3.5-sonnet"),
+            "the legacy entry stays"
+        );
+
+        let s =
+            AiSettings::from_json(r#"{"defaultProvider":"cursor","models":{"cursor":"default"}}"#)
+                .unwrap();
+        assert_eq!(
+            s.get_agent_model(AgentKind::Cursor),
+            None,
+            "default is Default"
+        );
+
+        let s = AiSettings::from_json(
+            r#"{"defaultProvider":"cursor","models":{"cursor":"m-legacy"},"agentModels":{"cursor":"m-chosen"}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            s.get_agent_model(AgentKind::Cursor).as_deref(),
+            Some("m-chosen"),
+            "an agent model already chosen wins"
+        );
+    }
+
+    #[test]
+    fn an_unknown_agent_reads_as_srelens_with_the_keys_kept() {
+        for agent in [r#""gemini-cli""#, r#""Cursor""#, "7"] {
+            let s = AiSettings::from_json(&format!(
+                r#"{{"defaultProvider":"anthropic","apiKeys":{{"anthropic":"sk-a"}},"agent":{agent}}}"#
+            ))
+            .unwrap();
+            assert_eq!(s.agent, AgentKind::Srelens, "{agent}");
+            assert_eq!(
+                s.api_keys.get("anthropic").map(String::as_str),
+                Some("sk-a")
+            );
+        }
+    }
+
+    #[test]
+    fn an_explicit_agent_wins_over_the_legacy_cursor_provider() {
+        let s = AiSettings::from_json(r#"{"defaultProvider":"cursor","agent":"codex"}"#).unwrap();
+        assert_eq!(s.agent, AgentKind::Codex);
+        assert_eq!(s.default_provider, AiProvider::Anthropic);
     }
 
     #[test]
