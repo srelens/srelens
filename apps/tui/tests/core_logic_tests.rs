@@ -1777,7 +1777,35 @@ fn static_commands_convert_to_dynamic_definitions_verbatim() {
     assert_eq!(dynamic.name, "pods");
     assert_eq!(dynamic.aliases, vec!["po".to_string(), "pod".to_string()]);
     assert_eq!(dynamic.description, pods.description);
+    assert_eq!(dynamic.search_terms, pods.search_terms);
     assert_eq!(dynamic.target, CommandTarget::Resource(ResourceKind::Pods));
+}
+
+#[test]
+fn command_suggestions_match_search_terms_even_when_description_is_empty() {
+    let tail_suggs = command_suggestions("tail");
+    assert!(
+        tail_suggs.iter().any(|(d, _)| d.name == "pods"),
+        "typing :tail suggests pods via search_terms: {:?}",
+        tail_suggs
+    );
+
+    let scale_suggs = command_suggestions("scale");
+    assert!(
+        scale_suggs.iter().any(|(d, _)| d.name == "deployments"),
+        "typing :scale suggests deployments via search_terms: {:?}",
+        scale_suggs
+    );
+
+    let pods = COMMAND_REGISTRY.iter().find(|c| c.name == "pods").unwrap();
+    assert!(
+        pods.description.is_empty(),
+        "pods description remains empty in popup"
+    );
+    assert!(
+        pods.search_terms.contains("tail"),
+        "search_terms contains tail"
+    );
 }
 
 #[test]
@@ -1793,7 +1821,7 @@ fn a_crd_definition_collects_singular_short_names_and_lb_shorthands_without_dupl
             "ciliumlbippool"
         ]
     );
-    assert_eq!(def.description, "CRD: CiliumLoadBalancerIPPool (cilium.io)");
+    assert_eq!(def.description, "CiliumLoadBalancerIPPool (cilium.io)");
     assert_eq!(def.target, CommandTarget::CustomResource(cilium_pool()));
 
     // Same singular as plural, a short name equal to the singular, no "loadbalancer".
@@ -1989,7 +2017,7 @@ fn resolve_matches_crds_by_every_name_and_by_prefix_only_from_three_characters()
 fn namespace_and_context_switch_forms_resolve_to_their_switchers() {
     assert_eq!(
         resolve_command(":ns kube-system"),
-        Some(CommandTarget::Namespaces)
+        Some(CommandTarget::SwitchNamespace("kube-system".to_string()))
     );
     assert_eq!(
         resolve_command("ctx prod-eu"),

@@ -13,7 +13,6 @@ use ratatui::style::Style;
 use serde_json::{json, Value};
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver};
 
-use srelens_kube::contexts::ContextDto;
 use srectl::app::{ActiveView, App, SuspendAction};
 use srectl::commands::{
     command_suggestions_with_crds, CommandTarget, CrdMeta, PrinterColumn, ResourceKind,
@@ -27,6 +26,7 @@ use srectl::views::{
     DescribeViewState, LogsViewState, NodeInspectorState, ResourceTableState, YamlViewState,
 };
 use srectl::CommandPopupDensity;
+use srelens_kube::contexts::ContextDto;
 
 use common::{ch, ctrl, key, shift, type_str};
 
@@ -1766,6 +1766,585 @@ async fn empty_command_enter_runs_highlighted_suggestion_and_arrow_selection() {
     type_str(&mut app, "zzzz").await;
     press(&mut app, key(KeyCode::Enter)).await;
     assert!(toast(&app).starts_with("Unknown command: 'zzzz'"));
+}
+
+#[tokio::test]
+async fn namespace_colon_command_switches_namespace_directly_without_leaving_modal_open() {
+    let _settings = common::env::isolate_settings();
+    let (mut app, _rx) = common::app().await;
+    app.namespaces = vec![
+        "default".to_string(),
+        "kube-system".to_string(),
+        "tools".to_string(),
+    ];
+
+    // :ns default + Enter switches namespace directly without leaving modal open
+    press(&mut app, ch(':')).await;
+    type_str(&mut app, "ns default").await;
+    press(&mut app, key(KeyCode::Enter)).await;
+    assert_eq!(app.active_namespace, "default");
+    assert!(app.modal.is_none(), "Modal must not be left open");
+    assert_eq!(app.input_mode, InputMode::Normal);
+
+    // :ns tools + Enter switches to tools
+    press(&mut app, ch(':')).await;
+    type_str(&mut app, "ns tools").await;
+    press(&mut app, key(KeyCode::Enter)).await;
+    assert_eq!(app.active_namespace, "tools");
+    assert!(app.modal.is_none(), "Modal must not be left open");
+
+    // :ns -A + Enter switches to all namespaces ("")
+    press(&mut app, ch(':')).await;
+    type_str(&mut app, "ns -A").await;
+    press(&mut app, key(KeyCode::Enter)).await;
+    assert_eq!(
+        app.active_namespace, "",
+        ":ns -A must select all namespaces"
+    );
+
+    // :ns * + Enter switches to all namespaces ("")
+    app.active_namespace = "tools".to_string();
+    press(&mut app, ch(':')).await;
+    type_str(&mut app, "ns *").await;
+    press(&mut app, key(KeyCode::Enter)).await;
+    assert_eq!(app.active_namespace, "", ":ns * must select all namespaces");
+
+    // :ns all + Enter switches to all namespaces ("")
+    app.active_namespace = "tools".to_string();
+    press(&mut app, ch(':')).await;
+    type_str(&mut app, "ns all").await;
+    press(&mut app, key(KeyCode::Enter)).await;
+    assert_eq!(
+        app.active_namespace, "",
+        ":ns all must select all namespaces"
+    );
+
+    // When discovery is pending (empty namespaces), :ns -A still switches to all namespaces ("")
+    app.namespaces.clear();
+    app.active_namespace = "tools".to_string();
+    press(&mut app, ch(':')).await;
+    type_str(&mut app, "ns -A").await;
+    press(&mut app, key(KeyCode::Enter)).await;
+    assert_eq!(
+        app.active_namespace, "",
+        ":ns -A with empty namespaces must select all namespaces"
+    );
+}
+
+#[tokio::test]
+async fn namespace_command_tab_autocompletes_and_cycles_namespaces() {
+    let _settings = common::env::isolate_settings();
+    let (mut app, _rx) = common::app().await;
+    app.namespaces = vec![
+        "cattle-fleet-system".to_string(),
+        "cattle-impersonation-system".to_string(),
+        "cattle-system".to_string(),
+        "default".to_string(),
+    ];
+
+    // :pods cattl + Tab repeatedly cycles through all cattle namespaces
+    press(&mut app, ch(':')).await;
+    type_str(&mut app, "pods cattl").await;
+
+    // 1st Tab: first matching candidate
+    press(&mut app, key(KeyCode::Tab)).await;
+    assert_eq!(app.command_buffer, "pods cattle-fleet-system");
+
+    // 2nd Tab: cycles to second matching candidate
+    press(&mut app, key(KeyCode::Tab)).await;
+    assert_eq!(app.command_buffer, "pods cattle-impersonation-system");
+
+    // 3rd Tab: cycles to third matching candidate
+    press(&mut app, key(KeyCode::Tab)).await;
+    assert_eq!(app.command_buffer, "pods cattle-system");
+
+    // 4th Tab: wraps around to first candidate
+    press(&mut app, key(KeyCode::Tab)).await;
+    assert_eq!(app.command_buffer, "pods cattle-fleet-system");
+
+    // BackTab (Shift+Tab): cycles backwards to third candidate
+    press(&mut app, key(KeyCode::BackTab)).await;
+    assert_eq!(app.command_buffer, "pods cattle-system");
+
+    // Enter executes the currently cycled selection
+    press(&mut app, key(KeyCode::Enter)).await;
+    assert_eq!(app.active_namespace, "cattle-system");
+    assert_eq!(table(&app).kind, ResourceKind::Pods);
+    assert!(app.modal.is_none());
+}
+
+#[tokio::test]
+async fn namespace_command_tab_preserves_target_when_cluster_namespaces_update_before_enter() {
+    let _settings = common::env::isolate_settings();
+    let (mut app, _rx) = common::app().await;
+    app.namespaces = vec!["dev-b".to_string(), "dev-c".to_string()];
+
+    // Tab to dev-b
+    press(&mut app, ch(':')).await;
+    type_str(&mut app, "pods dev").await;
+    press(&mut app, key(KeyCode::Tab)).await;
+    assert_eq!(app.command_buffer, "pods dev-b");
+
+    // Asynchronous cluster discovery adds dev-a in the background before Enter
+    app.namespaces = vec![
+        "dev-a".to_string(),
+        "dev-b".to_string(),
+        "dev-c".to_string(),
+    ];
+
+    // Enter must open dev-b as shown on screen, not shift to dev-a
+    press(&mut app, key(KeyCode::Enter)).await;
+    assert_eq!(app.active_namespace, "dev-b");
+    assert_eq!(table(&app).kind, ResourceKind::Pods);
+    assert!(app.modal.is_none());
+}
+
+#[tokio::test]
+async fn namespace_loading_placeholder_hint_not_completed_on_tab() {
+    let _settings = common::env::isolate_settings();
+    let (mut app, _rx) = common::app().await;
+    app.namespaces.clear();
+
+    // While namespaces are not loaded, typing ":ns " shows "<namespace>" hint.
+    // Pressing Tab must NOT copy "<namespace>" into the buffer.
+    press(&mut app, ch(':')).await;
+    type_str(&mut app, "ns ").await;
+    press(&mut app, key(KeyCode::Tab)).await;
+    assert_eq!(
+        app.command_buffer, "ns ",
+        "Tab on placeholder hint must leave buffer unchanged"
+    );
+
+    // Enter must not switch to literal namespace "<namespace>"
+    press(&mut app, key(KeyCode::Enter)).await;
+    assert_ne!(
+        app.active_namespace, "<namespace>",
+        "Must not switch to literal <namespace>"
+    );
+}
+
+#[tokio::test]
+async fn wildcard_all_selected_even_when_substring_namespace_matches() {
+    let _settings = common::env::isolate_settings();
+    let (mut app, _rx) = common::app().await;
+    app.namespaces = vec!["small".to_string(), "default".to_string()];
+
+    // Cluster contains namespace "small" (which contains "all").
+    // Typing ":pods all" + Enter must select all namespaces (""), NOT "small".
+    press(&mut app, ch(':')).await;
+    type_str(&mut app, "pods all").await;
+    press(&mut app, key(KeyCode::Enter)).await;
+    assert_eq!(
+        app.active_namespace, "",
+        ":pods all must switch to all namespaces, not small"
+    );
+    assert_eq!(table(&app).kind, ResourceKind::Pods);
+    assert!(app.modal.is_none());
+}
+
+#[tokio::test]
+async fn wildcard_not_triggered_by_lowercase_dash_a_and_matches_team_a() {
+    let _settings = common::env::isolate_settings();
+    let (mut app, _rx) = common::app().await;
+    app.namespaces = vec!["team-a".to_string(), "default".to_string()];
+
+    // Typing ":pods -a" must match team-a without being intercepted by a fake "All namespaces" row
+    press(&mut app, ch(':')).await;
+    type_str(&mut app, "pods -a").await;
+    press(&mut app, key(KeyCode::Enter)).await;
+    assert_eq!(
+        app.active_namespace, "team-a",
+        ":pods -a must select team-a"
+    );
+    assert_eq!(table(&app).kind, ResourceKind::Pods);
+}
+
+#[tokio::test]
+async fn literal_all_namespace_targeted_when_cluster_has_all_namespace() {
+    let _settings = common::env::isolate_settings();
+    let (mut app, _rx) = common::app().await;
+    app.namespaces = vec![
+        "all".to_string(),
+        "small".to_string(),
+        "default".to_string(),
+    ];
+
+    // When a namespace literally named "all" exists in the cluster, ":pods all" targets "all"
+    press(&mut app, ch(':')).await;
+    type_str(&mut app, "pods all").await;
+    press(&mut app, key(KeyCode::Enter)).await;
+    assert_eq!(
+        app.active_namespace, "all",
+        ":pods all must target literal namespace all when it exists"
+    );
+    assert_eq!(table(&app).kind, ResourceKind::Pods);
+}
+
+#[tokio::test]
+async fn pasted_command_clears_tab_base_and_runs_full_pasted_query() {
+    let _settings = common::env::isolate_settings();
+    let (mut app, _rx) = common::app().await;
+    app.namespaces = vec!["prod".to_string(), "prod-blue".to_string()];
+
+    // Complete ":pods prod" with Tab
+    press(&mut app, ch(':')).await;
+    type_str(&mut app, "pods prod").await;
+    press(&mut app, key(KeyCode::Tab)).await;
+    assert_eq!(app.command_buffer, "pods prod");
+
+    // Paste "-blue"
+    app.handle_paste("-blue".to_string());
+    assert_eq!(app.command_buffer, "pods prod-blue");
+
+    // Enter must search "pods prod-blue" and open prod-blue, not cached "pods prod"
+    press(&mut app, key(KeyCode::Enter)).await;
+    assert_eq!(app.active_namespace, "prod-blue");
+    assert_eq!(table(&app).kind, ResourceKind::Pods);
+    assert!(app.modal.is_none());
+}
+
+#[tokio::test]
+async fn highlighted_row_tracks_target_when_namespaces_update() {
+    let _settings = common::env::isolate_settings();
+    let (mut app, _rx) = common::app().await;
+    app.namespaces = vec!["dev-b".to_string(), "dev-c".to_string()];
+
+    // Type ":pods dev" and press Down to select dev-c
+    press(&mut app, ch(':')).await;
+    type_str(&mut app, "pods dev").await;
+    press(&mut app, key(KeyCode::Down)).await;
+    assert_eq!(app.command_suggestion_idx, 1);
+
+    // Asynchronous discovery adds dev-a
+    let ch_name = format!("discovery:namespaces:{}", app.active_context);
+    app.handle_stream_event(
+        ch_name,
+        json!([{"name": "dev-a"}, {"name": "dev-b"}, {"name": "dev-c"}]),
+    );
+
+    // Rendering frame re-evaluates suggestions and ensures command_suggestion_idx tracks dev-c (now index 2)
+    let _ = common::render_app(&mut app, 100, 40);
+    assert_eq!(
+        app.command_suggestion_idx, 2,
+        "Highlighted row must follow dev-c to index 2"
+    );
+
+    // Enter executes dev-c
+    press(&mut app, key(KeyCode::Enter)).await;
+    assert_eq!(app.active_namespace, "dev-c");
+    assert_eq!(table(&app).kind, ResourceKind::Pods);
+}
+
+#[tokio::test]
+async fn single_matching_namespace_autoselects_on_enter() {
+    let _settings = common::env::isolate_settings();
+    let (mut app, _rx) = common::app().await;
+    app.namespaces = vec![
+        "airflow-edge".to_string(),
+        "monitoring".to_string(),
+        "default".to_string(),
+    ];
+
+    // :svc airflo has exactly 1 cluster match (airflow-edge).
+    // Hitting Enter directly without Down arrow must autoselect and run it.
+    press(&mut app, ch(':')).await;
+    type_str(&mut app, "svc airflo").await;
+    press(&mut app, key(KeyCode::Enter)).await;
+
+    assert_eq!(app.active_namespace, "airflow-edge");
+    assert_eq!(table(&app).kind, ResourceKind::Services);
+    assert!(app.modal.is_none());
+}
+
+#[tokio::test]
+async fn resource_namespace_command_switches_namespace_and_view() {
+    let _settings = common::env::isolate_settings();
+    let (mut app, _rx) = common::app().await;
+    app.namespaces = vec!["default".to_string(), "tools".to_string()];
+
+    // :pods tools + Enter switches namespace to tools and view to Pods
+    press(&mut app, ch(':')).await;
+    type_str(&mut app, "pods tools").await;
+    press(&mut app, key(KeyCode::Enter)).await;
+    assert_eq!(app.active_namespace, "tools");
+    assert_eq!(table(&app).kind, ResourceKind::Pods);
+    assert!(app.modal.is_none());
+
+    // :pods -A + Enter switches namespace to all ("") and view to Pods
+    press(&mut app, ch(':')).await;
+    type_str(&mut app, "pods -A").await;
+    press(&mut app, key(KeyCode::Enter)).await;
+    assert_eq!(
+        app.active_namespace, "",
+        ":pods -A must switch to all namespaces"
+    );
+    assert_eq!(table(&app).kind, ResourceKind::Pods);
+    assert!(app.modal.is_none());
+}
+
+#[tokio::test]
+async fn changed_duration_command_does_not_corrupt_active_namespace() {
+    let _settings = common::env::isolate_settings();
+    let (mut app, _rx) = common::app().await;
+    app.active_namespace = "default".to_string();
+
+    // :changed 1h must NOT overwrite active_namespace to "1h"
+    press(&mut app, ch(':')).await;
+    type_str(&mut app, "changed 1h").await;
+    press(&mut app, key(KeyCode::Enter)).await;
+    assert_eq!(
+        app.active_namespace, "default",
+        "active_namespace must not be corrupted by duration"
+    );
+    assert!(matches!(app.active_view, ActiveView::Changed(_)));
+}
+
+#[tokio::test]
+async fn crd_selection_down_arrow_then_space_commits_selected_crd() {
+    let _settings = common::env::isolate_settings();
+    let (mut app, _rx) = common::app().await;
+
+    let crd_agent = CrdMeta {
+        crd_name: "prometheusagents.monitoring.coreos.com".to_string(),
+        group: "monitoring.coreos.com".to_string(),
+        version: "v1alpha1".to_string(),
+        kind: "PrometheusAgent".to_string(),
+        plural: "prometheusagents".to_string(),
+        singular: "prometheusagent".to_string(),
+        namespaced: true,
+        short_names: vec![],
+        printer_columns: vec![],
+        created_at: None,
+    };
+    let crd_prom = CrdMeta {
+        crd_name: "prometheuses.monitoring.coreos.com".to_string(),
+        group: "monitoring.coreos.com".to_string(),
+        version: "v1".to_string(),
+        kind: "Prometheus".to_string(),
+        plural: "prometheuses".to_string(),
+        singular: "prometheus".to_string(),
+        namespaced: true,
+        short_names: vec![],
+        printer_columns: vec![],
+        created_at: None,
+    };
+    let crd_rules = CrdMeta {
+        crd_name: "prometheusrules.monitoring.coreos.com".to_string(),
+        group: "monitoring.coreos.com".to_string(),
+        version: "v1".to_string(),
+        kind: "PrometheusRule".to_string(),
+        plural: "prometheusrules".to_string(),
+        singular: "prometheusrule".to_string(),
+        namespaced: true,
+        short_names: vec![],
+        printer_columns: vec![],
+        created_at: None,
+    };
+
+    app.crds = vec![crd_agent.clone(), crd_prom.clone(), crd_rules.clone()];
+    app.namespaces = vec!["default".to_string(), "monitoring".to_string()];
+
+    // 1. Type :prome
+    press(&mut app, ch(':')).await;
+    type_str(&mut app, "prome").await;
+
+    // 2. Press Down twice to select prometheusrules (index 2)
+    press(&mut app, key(KeyCode::Down)).await;
+    assert_eq!(app.command_suggestion_idx, 1);
+    press(&mut app, key(KeyCode::Down)).await;
+    assert_eq!(app.command_suggestion_idx, 2);
+
+    // 3. Press Space: must commit "prometheusrules " into command_buffer
+    press(&mut app, ch(' ')).await;
+    assert_eq!(app.command_buffer, "prometheusrules ");
+    assert_eq!(app.command_suggestion_idx, 0);
+
+    // 4. Press Enter: must execute prometheusrules, NOT prometheusagents!
+    press(&mut app, key(KeyCode::Enter)).await;
+    assert_eq!(table(&app).kind, ResourceKind::CustomResource(crd_rules));
+}
+
+#[tokio::test]
+async fn crd_selection_down_arrow_space_then_namespace_switches_namespace() {
+    let _settings = common::env::isolate_settings();
+    let (mut app, _rx) = common::app().await;
+
+    let crd_rules = CrdMeta {
+        crd_name: "prometheusrules.monitoring.coreos.com".to_string(),
+        group: "monitoring.coreos.com".to_string(),
+        version: "v1".to_string(),
+        kind: "PrometheusRule".to_string(),
+        plural: "prometheusrules".to_string(),
+        singular: "prometheusrule".to_string(),
+        namespaced: true,
+        short_names: vec![],
+        printer_columns: vec![],
+        created_at: None,
+    };
+
+    app.crds = vec![crd_rules.clone()];
+    app.namespaces = vec!["default".to_string(), "monitoring".to_string()];
+
+    press(&mut app, ch(':')).await;
+    type_str(&mut app, "prome").await;
+    press(&mut app, key(KeyCode::Down)).await;
+    press(&mut app, ch(' ')).await;
+    assert_eq!(app.command_buffer, "prometheusrules ");
+
+    type_str(&mut app, "moni").await;
+    press(&mut app, key(KeyCode::Enter)).await;
+    assert_eq!(app.active_namespace, "monitoring");
+    assert_eq!(table(&app).kind, ResourceKind::CustomResource(crd_rules));
+}
+
+#[tokio::test]
+async fn static_command_selection_down_arrow_then_space_commits_selected_command() {
+    let _settings = common::env::isolate_settings();
+    let (mut app, _rx) = common::app().await;
+
+    // Type :po and navigate down to pdb (PodDisruptionBudgets)
+    press(&mut app, ch(':')).await;
+    type_str(&mut app, "po").await;
+    let suggestions = command_suggestions_with_crds("po", &app.crds);
+    let pdb_idx = suggestions
+        .iter()
+        .position(|(def, _)| {
+            def.target == CommandTarget::Resource(ResourceKind::PodDisruptionBudgets)
+        })
+        .expect("poddisruptionbudgets must be suggested for :po");
+
+    for _ in 0..pdb_idx {
+        press(&mut app, key(KeyCode::Down)).await;
+    }
+    assert_eq!(app.command_suggestion_idx, pdb_idx);
+
+    // Press Space: commits "pdb "
+    press(&mut app, ch(' ')).await;
+    assert_eq!(app.command_buffer, "pdb ");
+
+    // Press Enter: opens PodDisruptionBudgets
+    press(&mut app, key(KeyCode::Enter)).await;
+    assert_eq!(table(&app).kind, ResourceKind::PodDisruptionBudgets);
+}
+
+#[tokio::test]
+async fn empty_argument_with_trailing_space_leaves_active_namespace_unchanged() {
+    let _settings = common::env::isolate_settings();
+    let (mut app, _rx) = common::app().await;
+    app.active_namespace = "prod".to_string();
+    app.namespaces = vec!["default".to_string(), "prod".to_string()];
+
+    // Type ":pods " with trailing space and hit Enter.
+    // Active namespace must remain "prod", NOT switch to "default"!
+    press(&mut app, ch(':')).await;
+    type_str(&mut app, "pods ").await;
+    press(&mut app, key(KeyCode::Enter)).await;
+
+    assert_eq!(
+        app.active_namespace, "prod",
+        "Empty argument with trailing space must leave active_namespace unchanged"
+    );
+    assert_eq!(table(&app).kind, ResourceKind::Pods);
+}
+
+#[tokio::test]
+async fn crd_plural_collision_space_preserves_full_crd_name_with_group() {
+    let _settings = common::env::isolate_settings();
+    let (mut app, _rx) = common::app().await;
+
+    let widget_a = CrdMeta {
+        crd_name: "widgets.a.io".to_string(),
+        group: "a.io".to_string(),
+        version: "v1".to_string(),
+        kind: "Widget".to_string(),
+        plural: "widgets".to_string(),
+        singular: "widget".to_string(),
+        namespaced: true,
+        short_names: vec![],
+        printer_columns: vec![],
+        created_at: None,
+    };
+    let widget_b = CrdMeta {
+        crd_name: "widgets.b.io".to_string(),
+        group: "b.io".to_string(),
+        version: "v1".to_string(),
+        kind: "Widget".to_string(),
+        plural: "widgets".to_string(),
+        singular: "widget".to_string(),
+        namespaced: true,
+        short_names: vec![],
+        printer_columns: vec![],
+        created_at: None,
+    };
+
+    app.crds = vec![widget_a.clone(), widget_b.clone()];
+    app.namespaces = vec!["default".to_string()];
+
+    // Type widgets.b.io and select it
+    press(&mut app, ch(':')).await;
+    type_str(&mut app, "widgets.b.io").await;
+    press(&mut app, key(KeyCode::Down)).await;
+
+    // Press Space: must preserve full CRD name "widgets.b.io " rather than stripping to ambiguous "widgets "
+    press(&mut app, ch(' ')).await;
+    assert_eq!(app.command_buffer, "widgets.b.io ");
+
+    // Press Enter: must open widgets.b.io, NOT widgets.a.io!
+    press(&mut app, key(KeyCode::Enter)).await;
+    assert_eq!(table(&app).kind, ResourceKind::CustomResource(widget_b));
+}
+
+#[tokio::test]
+async fn crd_plural_collision_tab_then_space_preserves_full_crd_name_with_group() {
+    let _settings = common::env::isolate_settings();
+    let (mut app, _rx) = common::app().await;
+
+    let widget_a = CrdMeta {
+        crd_name: "widgets.a.io".to_string(),
+        group: "a.io".to_string(),
+        version: "v1".to_string(),
+        kind: "Widget".to_string(),
+        plural: "widgets".to_string(),
+        singular: "widget".to_string(),
+        namespaced: true,
+        short_names: vec![],
+        printer_columns: vec![],
+        created_at: None,
+    };
+    let widget_b = CrdMeta {
+        crd_name: "widgets.b.io".to_string(),
+        group: "b.io".to_string(),
+        version: "v1".to_string(),
+        kind: "Widget".to_string(),
+        plural: "widgets".to_string(),
+        singular: "widget".to_string(),
+        namespaced: true,
+        short_names: vec![],
+        printer_columns: vec![],
+        created_at: None,
+    };
+
+    app.crds = vec![widget_a.clone(), widget_b.clone()];
+    app.namespaces = vec!["default".to_string()];
+
+    // Type ":widg" prefix
+    press(&mut app, ch(':')).await;
+    type_str(&mut app, "widg").await;
+
+    // Tab completes to common command name "widgets" while pointing to widgets.a.io
+    press(&mut app, key(KeyCode::Tab)).await;
+    assert_eq!(app.command_buffer, "widgets");
+
+    // Select the second colliding CRD (widgets.b.io) with Down arrow
+    press(&mut app, key(KeyCode::Down)).await;
+
+    // Press Space: because Tab completed "widgets" without group, Space must resolve and preserve full "widgets.b.io "
+    press(&mut app, ch(' ')).await;
+    assert_eq!(app.command_buffer, "widgets.b.io ");
+
+    // Press Enter: must open widgets.b.io
+    press(&mut app, key(KeyCode::Enter)).await;
+    assert_eq!(table(&app).kind, ResourceKind::CustomResource(widget_b));
 }
 
 #[tokio::test]
@@ -5067,10 +5646,7 @@ async fn helm_detail_manifest_search_and_navigation_input_flow() {
 
     // 1. Press '/' to enter search mode
     press(&mut app, ch('/')).await;
-    assert_eq!(
-        app.input_mode,
-        srectl::ui::statusbar::InputMode::Filter
-    );
+    assert_eq!(app.input_mode, srectl::ui::statusbar::InputMode::Filter);
 
     // 2. Type "token"
     for c in "token".chars() {
@@ -5088,10 +5664,7 @@ async fn helm_detail_manifest_search_and_navigation_input_flow() {
 
     // 3. Press Enter to return to Normal mode with search query active
     press(&mut app, key(KeyCode::Enter)).await;
-    assert_eq!(
-        app.input_mode,
-        srectl::ui::statusbar::InputMode::Normal
-    );
+    assert_eq!(app.input_mode, srectl::ui::statusbar::InputMode::Normal);
     assert_eq!(app.filter_buffer, "token");
 
     // 4. Press 'n' to go to next match
@@ -6349,8 +6922,9 @@ async fn argo_view_x_opens_action_palette_with_ai_diagnose_and_actions() {
             // Check actions
             let action_ids: Vec<_> = actions.iter().map(|a| a.id).collect();
             assert!(action_ids.contains(&srectl::ui::dialogs::QuickActionId::AskAi));
-            assert!(action_ids
-                .contains(&srectl::ui::dialogs::QuickActionId::PlaybookArgoProgressing));
+            assert!(
+                action_ids.contains(&srectl::ui::dialogs::QuickActionId::PlaybookArgoProgressing)
+            );
             assert!(action_ids.contains(&srectl::ui::dialogs::QuickActionId::ArgoSync));
             assert!(action_ids.contains(&srectl::ui::dialogs::QuickActionId::ArgoRefresh));
             assert!(action_ids.contains(&srectl::ui::dialogs::QuickActionId::ArgoOpenGit));

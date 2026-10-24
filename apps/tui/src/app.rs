@@ -20,7 +20,8 @@ use srelens_streams::logs::LogStreamManager;
 use srelens_streams::watch::WatchManager;
 
 use crate::commands::{
-    command_suggestions_with_crds, resolve_command_with_crds, CommandTarget, CrdMeta, ResourceKind,
+    command_suggestions_full, command_suggestions_with_crds, resolve_command_with_crds,
+    CommandTarget, CrdMeta, DynamicCommandDef, ResourceKind,
 };
 use crate::event::AppEvent;
 use crate::sink::TuiSink;
@@ -173,11 +174,14 @@ pub struct App {
     pub kubeconfig_paths: Vec<PathBuf>,
     pub contexts: Vec<ContextDto>,
     pub namespaces: Vec<String>,
+    pub namespace_discovery_error: Option<String>,
     pub active_view: ActiveView,
     pub nav_stack: Vec<ActiveView>,
     pub input_mode: InputMode,
     pub command_buffer: String,
     pub command_suggestion_idx: usize,
+    pub command_tab_base: Option<String>,
+    pub command_tab_target: Option<CommandTarget>,
     pub filter_buffer: String,
     pub modal: Option<Modal>,
     pub show_help: bool,
@@ -557,12 +561,15 @@ impl App {
             active_namespace,
             kubeconfig_paths,
             contexts,
-            namespaces: vec!["default".to_string(), "kube-system".to_string()],
+            namespaces: Vec::new(),
+            namespace_discovery_error: None,
             active_view: ActiveView::Table(initial_table),
             nav_stack: Vec::new(),
             input_mode: InputMode::Normal,
             command_buffer: String::new(),
             command_suggestion_idx: 0,
+            command_tab_base: None,
+            command_tab_target: None,
             filter_buffer: String::new(),
             modal: None,
             show_help: false,
@@ -623,6 +630,7 @@ impl App {
         app.refresh_cluster_info();
         app.refresh_cluster_overview();
         app.refresh_crds();
+        app.refresh_namespaces();
         app.restart_active_watch().await;
 
         // Pre-warm ArgoCD Hub connection in the background if configured
@@ -2168,10 +2176,13 @@ impl App {
         self.refresh_cluster_overview();
         self.crds = crate::commands::load_cached_crds(&self.active_context);
         self.refresh_crds();
+        self.namespaces.clear();
+        self.namespace_discovery_error = None;
+        self.refresh_namespaces();
         self.restart_active_watch().await;
     }
 
-    pub async fn switch_namespace(&mut self, new_namespace: String) {
+    pub fn set_namespace_raw(&mut self, new_namespace: String) {
         self.stop_active_log_stream();
         if matches!(self.active_view, ActiveView::Logs(_)) {
             if let Some(prev) = self.nav_stack.pop() {
@@ -2185,7 +2196,11 @@ impl App {
         if !new_namespace.is_empty() {
             self.last_active_namespace = new_namespace.clone();
         }
-        self.active_namespace = new_namespace.clone();
+        self.active_namespace = new_namespace;
+    }
+
+    pub async fn switch_namespace(&mut self, new_namespace: String) {
+        self.set_namespace_raw(new_namespace);
         let display_ns = if self.active_namespace.is_empty() {
             "all"
         } else {
@@ -2196,6 +2211,36 @@ impl App {
             Theme::status_ok(),
         );
         self.restart_active_watch().await;
+    }
+
+    pub fn refresh_namespaces(&self) {
+        let ctx = self.active_context.clone();
+        let cache = self.client_cache.clone();
+        let event_tx = self.event_tx.clone();
+
+        tokio::spawn(async move {
+            let cap = srelens_kube::workloads::list_namespaces_capability(cache);
+            let input = serde_json::json!({ "context": ctx });
+            let ch = format!("discovery:namespaces:{}", ctx);
+            match (cap.handler)(input).await {
+                Ok(val) => {
+                    let payload = val
+                        .get("summaries")
+                        .cloned()
+                        .unwrap_or(serde_json::Value::Array(vec![]));
+                    let _ = event_tx.send(AppEvent::StreamEvent {
+                        channel: ch,
+                        payload,
+                    });
+                }
+                Err(err) => {
+                    let _ = event_tx.send(AppEvent::StreamEvent {
+                        channel: ch,
+                        payload: serde_json::json!({ "error": err.to_string() }),
+                    });
+                }
+            }
+        });
     }
 
     pub async fn restart_active_watch(&mut self) {
@@ -2494,6 +2539,25 @@ impl App {
                 }
             }
         }
+    }
+
+    fn resolve_completion_command_name(&self, sugg: &DynamicCommandDef, query: &str) -> String {
+        if let CommandTarget::CustomResource(ref crd) = sugg.target {
+            let query_clean = query.trim_start().trim_start_matches(':').trim();
+            if query_clean.contains('.') || query_clean.contains(&crd.group) {
+                return crd.crd_name.clone();
+            }
+            let has_plural_collision = self
+                .crds
+                .iter()
+                .filter(|c| c.plural.eq_ignore_ascii_case(&crd.plural))
+                .count()
+                > 1;
+            if has_plural_collision {
+                return crd.crd_name.clone();
+            }
+        }
+        sugg.name.clone()
     }
 
     pub async fn handle_key_event(&mut self, key: KeyEvent) {
@@ -3609,6 +3673,16 @@ impl App {
                             self.modal = None;
                             self.switch_namespace(String::new()).await;
                         }
+                        KeyCode::Char('r') | KeyCode::Char('R')
+                            if filter.is_empty()
+                                || key.modifiers.contains(KeyModifiers::CONTROL) =>
+                        {
+                            self.refresh_namespaces();
+                            self.set_toast(
+                                "Refreshing namespaces...".to_string(),
+                                Theme::status_ok(),
+                            );
+                        }
                         _ if is_word_delete_key(&key) => {
                             delete_prev_word(&mut filter);
                             self.modal = Some(Modal::NamespacePicker {
@@ -4080,6 +4154,8 @@ impl App {
                     self.input_mode = InputMode::Normal;
                     self.command_buffer.clear();
                     self.command_suggestion_idx = 0;
+                    self.command_tab_base = None;
+                    self.command_tab_target = None;
                 }
                 KeyCode::Enter => {
                     let trimmed = self.command_buffer.trim().trim_start_matches(':').trim();
@@ -4107,23 +4183,56 @@ impl App {
                         self.input_mode = InputMode::Normal;
                         self.command_buffer.clear();
                         self.command_suggestion_idx = 0;
+                        self.command_tab_base = None;
+                        self.command_tab_target = None;
                         self.execute_colon_command(&cmd).await;
                         return;
                     }
 
-                    let suggestions =
-                        command_suggestions_with_crds(&self.command_buffer, &self.crds);
-                    let target = if !suggestions.is_empty()
-                        && self.command_suggestion_idx < suggestions.len()
-                    {
-                        Some(suggestions[self.command_suggestion_idx].0.target.clone())
-                    } else {
-                        None
-                    };
+                    let target = self.command_tab_target.take().or_else(|| {
+                        let raw = self.command_buffer.trim_start().trim_start_matches(':');
+                        // If input has whitespace and the argument portion is empty (e.g. ":pods " or ":prometheusrules "),
+                        // resolve the base command directly rather than picking the first candidate in the namespace list.
+                        if let Some(pos) = raw.find(char::is_whitespace) {
+                            let arg = raw[pos..].trim();
+                            if arg.is_empty() {
+                                let cmd_prefix = raw[..pos].trim();
+                                return resolve_command_with_crds(cmd_prefix, &self.crds);
+                            }
+                        }
+
+                        let query = if self.command_buffer.contains(char::is_whitespace) {
+                            self.command_tab_base
+                                .as_deref()
+                                .unwrap_or(&self.command_buffer)
+                        } else {
+                            &self.command_buffer
+                        };
+                        let suggestions = command_suggestions_full(
+                            query,
+                            &self.crds,
+                            &self.namespaces,
+                            self.namespace_discovery_error.as_deref(),
+                        );
+                        if !suggestions.is_empty()
+                            && self.command_suggestion_idx < suggestions.len()
+                        {
+                            let (sugg, _) = &suggestions[self.command_suggestion_idx];
+                            if !sugg.name.ends_with(" <namespace>") {
+                                Some(sugg.target.clone())
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        }
+                    });
                     let fallback_cmd = self.command_buffer.clone();
                     self.input_mode = InputMode::Normal;
                     self.command_buffer.clear();
                     self.command_suggestion_idx = 0;
+                    self.command_tab_base = None;
+                    self.command_tab_target = None;
                     if let Some(target) = target {
                         self.execute_command_target(target).await;
                     } else if !fallback_cmd
@@ -4136,53 +4245,164 @@ impl App {
                     }
                 }
                 KeyCode::Tab => {
-                    let suggestions =
-                        command_suggestions_with_crds(&self.command_buffer, &self.crds);
-                    if !suggestions.is_empty() {
-                        let idx = self.command_suggestion_idx % suggestions.len();
-                        self.command_buffer = suggestions[idx].0.name.clone();
-                        // Completion changes the query and rebuilds the list.
-                        // Names and aliases can collide, so follow the selected
-                        // target (including its CRD group), not the old index.
-                        let target = &suggestions[idx].0.target;
-                        self.command_suggestion_idx =
-                            command_suggestions_with_crds(&self.command_buffer, &self.crds)
+                    let has_whitespace = self.command_buffer.contains(char::is_whitespace);
+                    if has_whitespace {
+                        let is_first_tab = self.command_tab_base.is_none();
+                        let query = self
+                            .command_tab_base
+                            .get_or_insert_with(|| self.command_buffer.clone())
+                            .clone();
+                        let suggestions = command_suggestions_full(
+                            &query,
+                            &self.crds,
+                            &self.namespaces,
+                            self.namespace_discovery_error.as_deref(),
+                        );
+                        if !suggestions.is_empty() {
+                            let next_idx = if is_first_tab {
+                                self.command_suggestion_idx % suggestions.len()
+                            } else {
+                                (self.command_suggestion_idx + 1) % suggestions.len()
+                            };
+                            self.command_suggestion_idx = next_idx;
+                            let name = &suggestions[next_idx].0.name;
+                            if !name.ends_with(" <namespace>") {
+                                self.command_buffer = name.clone();
+                                self.command_tab_target =
+                                    Some(suggestions[next_idx].0.target.clone());
+                            }
+                        }
+                    } else {
+                        self.command_tab_base = None;
+                        let suggestions = command_suggestions_full(
+                            &self.command_buffer,
+                            &self.crds,
+                            &self.namespaces,
+                            self.namespace_discovery_error.as_deref(),
+                        );
+                        if !suggestions.is_empty() {
+                            let idx = self.command_suggestion_idx % suggestions.len();
+                            let sugg = &suggestions[idx].0;
+                            if !sugg.name.ends_with(" <namespace>") {
+                                self.command_buffer = sugg.name.clone();
+                                let target = &sugg.target;
+                                self.command_tab_target = Some(target.clone());
+                                self.command_suggestion_idx = command_suggestions_full(
+                                    &self.command_buffer,
+                                    &self.crds,
+                                    &self.namespaces,
+                                    self.namespace_discovery_error.as_deref(),
+                                )
                                 .iter()
                                 .position(|(command, _)| &command.target == target)
-                                .unwrap_or(0);
+                                .unwrap_or(idx);
+                            }
+                        }
                     }
                 }
                 KeyCode::BackTab => {
-                    let suggestions =
-                        command_suggestions_with_crds(&self.command_buffer, &self.crds);
-                    if !suggestions.is_empty() {
-                        let len = suggestions.len();
-                        let idx = (self.command_suggestion_idx + len - 1) % len;
-                        self.command_suggestion_idx = idx;
+                    let has_whitespace = self.command_buffer.contains(char::is_whitespace);
+                    if has_whitespace {
+                        let is_first_tab = self.command_tab_base.is_none();
+                        let query = self
+                            .command_tab_base
+                            .get_or_insert_with(|| self.command_buffer.clone())
+                            .clone();
+                        let suggestions = command_suggestions_full(
+                            &query,
+                            &self.crds,
+                            &self.namespaces,
+                            self.namespace_discovery_error.as_deref(),
+                        );
+                        if !suggestions.is_empty() {
+                            let len = suggestions.len();
+                            let prev_idx = if is_first_tab {
+                                (self.command_suggestion_idx + len - 1) % len
+                            } else {
+                                (self.command_suggestion_idx + len - 1) % len
+                            };
+                            self.command_suggestion_idx = prev_idx;
+                            let name = &suggestions[prev_idx].0.name;
+                            if !name.ends_with(" <namespace>") {
+                                self.command_buffer = name.clone();
+                                self.command_tab_target =
+                                    Some(suggestions[prev_idx].0.target.clone());
+                            }
+                        }
+                    } else {
+                        self.command_tab_base = None;
+                        let suggestions = command_suggestions_full(
+                            &self.command_buffer,
+                            &self.crds,
+                            &self.namespaces,
+                            self.namespace_discovery_error.as_deref(),
+                        );
+                        if !suggestions.is_empty() {
+                            let len = suggestions.len();
+                            let idx = (self.command_suggestion_idx + len - 1) % len;
+                            self.command_suggestion_idx = idx;
+                            let name = &suggestions[idx].0.name;
+                            if !name.ends_with(" <namespace>") {
+                                self.command_tab_target = Some(suggestions[idx].0.target.clone());
+                            }
+                        }
                     }
                 }
                 KeyCode::Down | KeyCode::Char('n') | KeyCode::Char('N')
                     if key.code == KeyCode::Down
                         || key.modifiers.contains(KeyModifiers::CONTROL) =>
                 {
-                    let suggestions =
-                        command_suggestions_with_crds(&self.command_buffer, &self.crds);
+                    let query = self
+                        .command_tab_base
+                        .as_deref()
+                        .unwrap_or(&self.command_buffer);
+                    let suggestions = command_suggestions_full(
+                        query,
+                        &self.crds,
+                        &self.namespaces,
+                        self.namespace_discovery_error.as_deref(),
+                    );
                     if !suggestions.is_empty() {
-                        self.command_suggestion_idx =
-                            (self.command_suggestion_idx + 1) % suggestions.len();
+                        let next_idx = (self.command_suggestion_idx + 1) % suggestions.len();
+                        self.command_suggestion_idx = next_idx;
+                        let name = &suggestions[next_idx].0.name;
+                        if !name.ends_with(" <namespace>") {
+                            if self.command_tab_base.is_some() {
+                                self.command_buffer = name.clone();
+                            }
+                            self.command_tab_target = Some(suggestions[next_idx].0.target.clone());
+                        }
                     }
                 }
                 KeyCode::Up | KeyCode::Char('p') | KeyCode::Char('P')
                     if key.code == KeyCode::Up || key.modifiers.contains(KeyModifiers::CONTROL) =>
                 {
-                    let suggestions =
-                        command_suggestions_with_crds(&self.command_buffer, &self.crds);
+                    let query = self
+                        .command_tab_base
+                        .as_deref()
+                        .unwrap_or(&self.command_buffer);
+                    let suggestions = command_suggestions_full(
+                        query,
+                        &self.crds,
+                        &self.namespaces,
+                        self.namespace_discovery_error.as_deref(),
+                    );
                     if !suggestions.is_empty() {
                         let len = suggestions.len();
-                        self.command_suggestion_idx = (self.command_suggestion_idx + len - 1) % len;
+                        let prev_idx = (self.command_suggestion_idx + len - 1) % len;
+                        self.command_suggestion_idx = prev_idx;
+                        let name = &suggestions[prev_idx].0.name;
+                        if !name.ends_with(" <namespace>") {
+                            if self.command_tab_base.is_some() {
+                                self.command_buffer = name.clone();
+                            }
+                            self.command_tab_target = Some(suggestions[prev_idx].0.target.clone());
+                        }
                     }
                 }
                 _ if is_word_delete_key(&key) => {
+                    self.command_tab_base = None;
+                    self.command_tab_target = None;
                     if self.command_buffer.is_empty() {
                         self.input_mode = InputMode::Normal;
                     } else {
@@ -4193,10 +4413,14 @@ impl App {
                 KeyCode::Char('u') | KeyCode::Char('U')
                     if key.modifiers.contains(KeyModifiers::CONTROL) =>
                 {
+                    self.command_tab_base = None;
+                    self.command_tab_target = None;
                     self.command_buffer.clear();
                     self.command_suggestion_idx = 0;
                 }
                 KeyCode::Backspace => {
+                    self.command_tab_base = None;
+                    self.command_tab_target = None;
                     self.command_buffer.pop();
                     self.command_suggestion_idx = 0;
                     if self.command_buffer.is_empty() {
@@ -4206,16 +4430,64 @@ impl App {
                 KeyCode::Char('v') | KeyCode::Char('V')
                     if key.modifiers.contains(KeyModifiers::CONTROL) =>
                 {
+                    self.command_tab_base = None;
+                    self.command_tab_target = None;
                     if let Some(clip) = get_clipboard_text() {
                         let cleaned = clip.replace("\r\n", " ").replace('\n', " ");
                         self.command_buffer.push_str(&cleaned);
                         self.command_suggestion_idx = 0;
                     }
                 }
+                KeyCode::Char(' ')
+                    if !key.modifiers.contains(KeyModifiers::CONTROL)
+                        && !key.modifiers.contains(KeyModifiers::ALT) =>
+                {
+                    if !self.command_buffer.contains(char::is_whitespace)
+                        && self.command_tab_target.is_some()
+                    {
+                        let query = self
+                            .command_tab_base
+                            .as_deref()
+                            .unwrap_or(&self.command_buffer);
+                        let suggestions = command_suggestions_full(
+                            query,
+                            &self.crds,
+                            &self.namespaces,
+                            self.namespace_discovery_error.as_deref(),
+                        );
+                        let matched_sugg = suggestions
+                            .iter()
+                            .find(|(s, _)| Some(&s.target) == self.command_tab_target.as_ref())
+                            .or_else(|| {
+                                if self.command_suggestion_idx < suggestions.len() {
+                                    Some(&suggestions[self.command_suggestion_idx])
+                                } else {
+                                    None
+                                }
+                            });
+                        if let Some((sugg, _)) = matched_sugg {
+                            if !sugg.name.ends_with(" <namespace>") {
+                                let name = self.resolve_completion_command_name(sugg, query);
+                                self.command_buffer = format!("{} ", name);
+                                self.command_tab_base = None;
+                                self.command_tab_target = None;
+                                self.command_suggestion_idx = 0;
+                                return;
+                            }
+                        }
+                    }
+
+                    self.command_tab_base = None;
+                    self.command_tab_target = None;
+                    self.command_buffer.push(' ');
+                    self.command_suggestion_idx = 0;
+                }
                 KeyCode::Char(c)
                     if !key.modifiers.contains(KeyModifiers::CONTROL)
                         && !key.modifiers.contains(KeyModifiers::ALT) =>
                 {
+                    self.command_tab_base = None;
+                    self.command_tab_target = None;
                     self.command_buffer.push(c);
                     self.command_suggestion_idx = 0;
                 }
@@ -8746,8 +9018,11 @@ impl App {
 
     pub fn handle_paste(&mut self, text: String) {
         if self.input_mode == InputMode::Command {
+            self.command_tab_base = None;
+            self.command_tab_target = None;
             let cleaned = text.replace("\r\n", " ").replace('\n', " ");
             self.command_buffer.push_str(&cleaned);
+            self.command_suggestion_idx = 0;
             return;
         }
         if self.input_mode == InputMode::Filter {
@@ -8976,22 +9251,19 @@ impl App {
             (trimmed, None)
         };
 
-        let resolved = resolve_command_with_crds(cmd_base, &self.crds).or_else(|| {
-            let suggestions = command_suggestions_with_crds(cmd_base, &self.crds);
-            if let Some((top, score)) = suggestions.first() {
-                if *score >= 80 {
-                    return Some(top.target.clone());
+        let resolved = resolve_command_with_crds(trimmed, &self.crds).or_else(|| {
+            resolve_command_with_crds(cmd_base, &self.crds).or_else(|| {
+                let suggestions = command_suggestions_with_crds(cmd_base, &self.crds);
+                if let Some((top, score)) = suggestions.first() {
+                    if *score >= 80 {
+                        return Some(top.target.clone());
+                    }
                 }
-            }
-            None
+                None
+            })
         });
 
         if let Some(target) = resolved {
-            if let Some(arg) = arg_opt {
-                if !arg.is_empty() {
-                    self.active_namespace = arg.to_string();
-                }
-            }
             self.execute_command_target(target).await;
             if let Some(arg) = arg_opt {
                 if !arg.is_empty() {
@@ -9302,6 +9574,40 @@ impl App {
 
     pub async fn execute_view_target(&mut self, target: CommandTarget) {
         match target {
+            CommandTarget::SwitchNamespace(new_ns) => {
+                self.switch_namespace(new_ns).await;
+                if matches!(self.active_view, ActiveView::Table(ref t) if t.kind == ResourceKind::Namespaces)
+                {
+                    self.switch_view_to_kind(ResourceKind::Pods).await;
+                }
+            }
+            CommandTarget::ResourceInNamespace(kind, target_ns) => {
+                let display_ns = if target_ns.is_empty() {
+                    "all".to_string()
+                } else {
+                    target_ns.clone()
+                };
+                self.set_namespace_raw(target_ns);
+                self.switch_view_to_kind(kind.clone()).await;
+                self.set_toast(
+                    format!("Switched to {} in [{}]", kind.display_name(), display_ns),
+                    Theme::status_ok(),
+                );
+            }
+            CommandTarget::CustomResourceInNamespace(crd, target_ns) => {
+                let display_ns = if target_ns.is_empty() {
+                    "all".to_string()
+                } else {
+                    target_ns.clone()
+                };
+                let crd_kind = crd.kind.clone();
+                self.set_namespace_raw(target_ns);
+                self.switch_view_to_crd(crd).await;
+                self.set_toast(
+                    format!("Switched to {} in [{}]", crd_kind, display_ns),
+                    Theme::status_ok(),
+                );
+            }
             CommandTarget::Resource(kind) => self.switch_view_to_kind(kind).await,
             CommandTarget::CustomResource(crd) => self.switch_view_to_crd(crd).await,
             CommandTarget::Contexts => {
@@ -9311,6 +9617,9 @@ impl App {
                 self.open_add_cluster_modal();
             }
             CommandTarget::Namespaces => {
+                if self.namespaces.is_empty() {
+                    self.refresh_namespaces();
+                }
                 let initial_idx = self
                     .namespaces
                     .iter()
@@ -14266,6 +14575,47 @@ impl App {
             return;
         }
 
+        if channel.starts_with("discovery:namespaces:") {
+            let ctx = channel.strip_prefix("discovery:namespaces:").unwrap_or("");
+            if ctx == self.active_context {
+                if let Some(err_msg) = payload.get("error").and_then(|v| v.as_str()) {
+                    self.namespace_discovery_error = Some(err_msg.to_string());
+                } else if let Some(items) = payload.as_array() {
+                    let mut ns_list: Vec<String> = items
+                        .iter()
+                        .filter_map(|item| {
+                            item.get("name").and_then(|v| v.as_str()).map(String::from)
+                        })
+                        .collect();
+                    ns_list.sort();
+                    if !ns_list.is_empty() {
+                        self.namespaces = ns_list;
+                        self.namespace_discovery_error = None;
+                        if self.input_mode == InputMode::Command {
+                            if let Some(ref target) = self.command_tab_target {
+                                let query = self
+                                    .command_tab_base
+                                    .as_deref()
+                                    .unwrap_or(&self.command_buffer);
+                                let suggs = command_suggestions_full(
+                                    query,
+                                    &self.crds,
+                                    &self.namespaces,
+                                    self.namespace_discovery_error.as_deref(),
+                                );
+                                if let Some(pos) =
+                                    suggs.iter().position(|(cmd, _)| &cmd.target == target)
+                                {
+                                    self.command_suggestion_idx = pos;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            return;
+        }
+
         if let Some(err_msg) = payload.get("error").and_then(|v| v.as_str()) {
             if let Some(cur_ch) = &self.current_watch_channel {
                 if *cur_ch == channel {
@@ -14394,17 +14744,43 @@ impl App {
             }
         }
 
-        if channel.contains("namespaces") {
-            if let Some(items) = payload.as_array() {
-                let mut ns_list: Vec<String> = items
-                    .iter()
-                    .filter_map(|item| item.get("name").and_then(|v| v.as_str()).map(String::from))
-                    .collect();
-                ns_list.sort();
-                if !ns_list.is_empty() {
-                    self.namespaces = ns_list;
+        if channel.starts_with("watch:") && channel.ends_with(":namespaces") {
+            let parts: Vec<&str> = channel.split(':').collect();
+            if parts.len() >= 4 && parts[1] == self.active_context {
+                if let Some(items) = payload.as_array() {
+                    let mut ns_list: Vec<String> = items
+                        .iter()
+                        .filter_map(|item| {
+                            item.get("name").and_then(|v| v.as_str()).map(String::from)
+                        })
+                        .collect();
+                    ns_list.sort();
+                    if !ns_list.is_empty() {
+                        self.namespaces = ns_list;
+                        self.namespace_discovery_error = None;
+                        if self.input_mode == InputMode::Command {
+                            if let Some(ref target) = self.command_tab_target {
+                                let query = self
+                                    .command_tab_base
+                                    .as_deref()
+                                    .unwrap_or(&self.command_buffer);
+                                let suggs = command_suggestions_full(
+                                    query,
+                                    &self.crds,
+                                    &self.namespaces,
+                                    self.namespace_discovery_error.as_deref(),
+                                );
+                                if let Some(pos) =
+                                    suggs.iter().position(|(cmd, _)| &cmd.target == target)
+                                {
+                                    self.command_suggestion_idx = pos;
+                                }
+                            }
+                        }
+                    }
                 }
             }
+            return;
         }
     }
 
@@ -14627,10 +15003,22 @@ impl App {
             .map(|(msg, _, style)| (msg.as_str(), *style));
 
         let suggestions = if self.input_mode == InputMode::Command {
-            Some(command_suggestions_with_crds(
-                &self.command_buffer,
+            let query = self
+                .command_tab_base
+                .as_deref()
+                .unwrap_or(&self.command_buffer);
+            let suggs = command_suggestions_full(
+                query,
                 &self.crds,
-            ))
+                &self.namespaces,
+                self.namespace_discovery_error.as_deref(),
+            );
+            if let Some(ref target) = self.command_tab_target {
+                if let Some(pos) = suggs.iter().position(|(cmd, _)| &cmd.target == target) {
+                    self.command_suggestion_idx = pos;
+                }
+            }
+            Some(suggs)
         } else {
             None
         };
