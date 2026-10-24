@@ -6,6 +6,7 @@ pub mod claude;
 pub mod codex;
 pub mod cursor;
 pub mod event;
+pub mod turn;
 
 /// The agent CLI's own session id, if `line` (one stream-json line) carries
 /// one. Claude Code and Cursor both stamp a top-level `session_id` string on

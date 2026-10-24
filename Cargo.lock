@@ -7062,8 +7062,10 @@ dependencies = [
 name = "srelens-agent"
 version = "0.16.0"
 dependencies = [
+ "log",
  "serde",
  "serde_json",
+ "uuid",
 ]
 
 [[package]]
