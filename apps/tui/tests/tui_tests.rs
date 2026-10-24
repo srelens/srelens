@@ -2071,7 +2071,8 @@ mod tests {
         use std::path::PathBuf;
 
         let client_cache = ClientCache::new(PathBuf::from("/nonexistent"));
-        let server = build_mcp_server(client_cache, vec![]);
+        let policy = std::sync::Arc::new(srelens_mcp::policy::FlagGated::new(false, true));
+        let server = build_mcp_server(client_cache, vec![], policy);
         let invoker = McpToolInvoker::new(server);
 
         // 1. Tool listing returns all k8s capabilities with provider-safe names

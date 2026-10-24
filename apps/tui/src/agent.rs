@@ -171,9 +171,12 @@ impl ToolInvoker for McpToolInvoker {
     }
 }
 
-pub fn build_mcp_server(cache: Arc<ClientCache>, kubeconfig_paths: Vec<PathBuf>) -> Arc<McpServer> {
+pub fn build_mcp_server(
+    cache: Arc<ClientCache>,
+    kubeconfig_paths: Vec<PathBuf>,
+    policy: Arc<dyn srelens_mcp::policy::ConfirmPolicy>,
+) -> Arc<McpServer> {
     let registry = srelens_registry::build_registry_with_paths(cache, kubeconfig_paths);
-    let policy = Arc::new(srelens_mcp::policy::FlagGated::new(false, true));
     let server = McpServer::new(Arc::new(registry))
         .with_policy(policy)
         .with_kind_resolver(srelens_registry::kind_resolver());
@@ -209,6 +212,20 @@ pub fn enrich_prompt_with_context(
     }
 }
 
+/// Seconds the turn has gone without a sign of life. A turn held up on the
+/// user's approval is waiting, not stalled, so every tick while a prompt is
+/// open counts as a sign of life: the model then gets its whole limit from the
+/// answer, not from the event before the question.
+fn quiet_secs(elapsed: u64, last_activity: &std::sync::atomic::AtomicU64, waiting: usize) -> u64 {
+    if waiting > 0 {
+        last_activity.store(elapsed, std::sync::atomic::Ordering::Relaxed);
+    }
+    elapsed.saturating_sub(last_activity.load(std::sync::atomic::Ordering::Relaxed))
+}
+
+/// `waiting` is the count of approval prompts open for this turn
+/// ([`crate::consent::TuiConsent::waiting`]); while it is above zero the
+/// inactivity timeout stands still. The 15-minute ceiling does not.
 pub async fn run_native_agent_turn(
     config: srelens_llm::ProviderConfig,
     invoker: Arc<McpToolInvoker>,
@@ -219,6 +236,7 @@ pub async fn run_native_agent_turn(
     argo_hub_context: Option<String>,
     event_tx: tokio::sync::mpsc::UnboundedSender<AppEvent>,
     timeout_seconds: u32,
+    waiting: Arc<std::sync::atomic::AtomicUsize>,
 ) {
     let provider = srelens_llm::HttpProvider::new(config);
     let start_time = std::time::Instant::now();
@@ -334,8 +352,11 @@ pub async fn run_native_agent_turn(
         loop {
             tokio::time::sleep(std::time::Duration::from_millis(250)).await;
             let total_elapsed = start_time.elapsed().as_secs();
-            let last = last_activity.load(std::sync::atomic::Ordering::Relaxed);
-            let inactive_secs = total_elapsed.saturating_sub(last);
+            let inactive_secs = quiet_secs(
+                total_elapsed,
+                &last_activity,
+                waiting.load(std::sync::atomic::Ordering::SeqCst),
+            );
             if inactive_secs >= inactivity_limit || total_elapsed >= max_wall_clock {
                 return;
             }
@@ -992,11 +1013,81 @@ pub fn resolve_token_usage(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use srelens_mcp::policy::{AlwaysDeny, ConfirmPolicy, ConsentKind, ConsentRequest, Decision};
+
+    /// A policy that writes down what it was asked and says no.
+    #[derive(Default)]
+    struct Recording(Mutex<Vec<ConsentRequest>>);
+
+    #[async_trait]
+    impl ConfirmPolicy for Recording {
+        async fn confirm(&self, request: &ConsentRequest) -> Decision {
+            self.0.lock().unwrap().push(request.clone());
+            Decision::Denied("recorded".into())
+        }
+    }
+
+    /// The call as the model makes it: the alias, not the dotted id. A
+    /// nonexistent kubeconfig is fine, the policy answers before any cluster call.
+    async fn call_with_recording(tool: &str, args: Value) -> (ToolCallResult, Vec<ConsentRequest>) {
+        let policy = Arc::new(Recording::default());
+        let cache = ClientCache::new(PathBuf::from("/nonexistent"));
+        let invoker = McpToolInvoker::new(build_mcp_server(cache, vec![], policy.clone()));
+        let result = invoker
+            .call_tool(tool, &args)
+            .await
+            .expect("the call completes");
+        let seen = policy.0.lock().unwrap().clone();
+        (result, seen)
+    }
+
+    #[tokio::test]
+    async fn a_gated_tool_call_from_the_native_agent_reaches_the_policy() {
+        let (result, seen) = call_with_recording(
+            "k8s_deletePod",
+            json!({ "context": "c", "namespace": "n", "name": "p" }),
+        )
+        .await;
+
+        assert!(result.denied, "a refusal is marked denied: {result:?}");
+        assert_eq!(seen.len(), 1, "the policy was asked once: {seen:?}");
+        assert_eq!(seen[0].tool, "k8s.deletePod");
+        assert_eq!(seen[0].kind, ConsentKind::Destructive);
+    }
+
+    #[tokio::test]
+    async fn a_secret_read_from_the_native_agent_reaches_the_policy() {
+        let (result, seen) = call_with_recording(
+            "k8s_getSecret",
+            json!({ "context": "c", "namespace": "n", "name": "s" }),
+        )
+        .await;
+
+        assert!(result.denied, "a refusal is marked denied: {result:?}");
+        assert_eq!(seen.len(), 1, "the policy was asked once: {seen:?}");
+        assert_eq!(seen[0].tool, "k8s.getSecret");
+        assert_eq!(seen[0].kind, ConsentKind::SensitiveRead);
+    }
+
+    #[test]
+    fn a_turn_held_up_on_the_user_is_not_counted_as_quiet() {
+        use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
+        let last_activity = AtomicU64::new(0);
+
+        // Nobody asked: the clock runs from the last event.
+        assert_eq!(quiet_secs(40, &last_activity, 0), 40);
+        // A prompt is open: the agent is waiting on the user, not stalled.
+        assert_eq!(quiet_secs(100, &last_activity, 1), 0);
+        assert_eq!(last_activity.load(Relaxed), 100);
+        // The user answers: the model gets the full limit from the answer, not
+        // from the event before the prompt.
+        assert_eq!(quiet_secs(103, &last_activity, 0), 3);
+    }
 
     #[tokio::test]
     async fn test_mcp_tool_invoker_lists_and_maps_aliases() {
         let cache = ClientCache::new(PathBuf::from("/nonexistent"));
-        let server = build_mcp_server(cache, vec![]);
+        let server = build_mcp_server(cache, vec![], Arc::new(AlwaysDeny));
         let invoker = McpToolInvoker::new(server);
 
         let tools = invoker.list_tools().await.expect("list_tools succeeds");

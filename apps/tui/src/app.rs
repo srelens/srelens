@@ -8534,12 +8534,20 @@ impl App {
             let history = ai.native_history.clone();
             let timeout_seconds = self.ai_settings.get_timeout_seconds(provider);
             let hub_kc_opt = argo_hub_kc.clone();
+            // Writes and Secret reads ask the user on screen; the count tells
+            // the turn's watchdog it is waiting on them, not stalled.
+            let consent = crate::consent::TuiConsent::new(event_tx.clone(), "srelens", &active_ctx);
+            let waiting = consent.waiting();
 
             let handle = tokio::spawn(async move {
                 if let Some(ref hub_kc) = hub_kc_opt {
                     cache.ensure_paths(vec![hub_kc.clone()]).await;
                 }
-                let server = crate::agent::build_mcp_server(cache, kubeconfig_paths);
+                let server = crate::agent::build_mcp_server(
+                    cache,
+                    kubeconfig_paths,
+                    std::sync::Arc::new(consent),
+                );
                 let invoker = std::sync::Arc::new(crate::agent::McpToolInvoker::new(server));
                 crate::agent::run_native_agent_turn(
                     config,
@@ -8551,6 +8559,7 @@ impl App {
                     argo_hub_ctx,
                     event_tx,
                     timeout_seconds,
+                    waiting,
                 )
                 .await;
             });

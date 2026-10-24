@@ -19,6 +19,7 @@
 //!   failure arms, which need an unwritable temp directory.
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -50,7 +51,8 @@ fn action_results(rx: &mut UnboundedReceiver<AppEvent>) -> Vec<(String, Result<S
 
 fn invoker() -> Arc<McpToolInvoker> {
     let cache = ClientCache::new(PathBuf::from("/nonexistent"));
-    Arc::new(McpToolInvoker::new(build_mcp_server(cache, vec![])))
+    let policy = Arc::new(srelens_mcp::policy::FlagGated::new(false, true));
+    Arc::new(McpToolInvoker::new(build_mcp_server(cache, vec![], policy)))
 }
 
 /// `HttpProvider::new` builds a `reqwest::Client` with `rustls-no-provider`,
@@ -156,6 +158,7 @@ async fn a_native_turn_that_never_gets_a_reply_times_out_and_still_reports_usage
         None,
         tx,
         1,
+        Arc::new(AtomicUsize::new(0)),
     )
     .await;
     let elapsed = started.elapsed();
@@ -221,6 +224,49 @@ async fn a_native_turn_that_never_gets_a_reply_times_out_and_still_reports_usage
 
     // 5. A timed-out turn leaves history untouched, so a retry starts clean.
     assert!(history.lock().await.is_empty());
+}
+
+/// A turn held up on an approval prompt is waiting on the user, not stalled:
+/// past its inactivity limit it is still alive, and the limit starts over from
+/// the moment the prompt closes. Costs about twelve seconds of wall clock: the
+/// 5-second floor of the limit, held for seven, then run out again.
+#[tokio::test]
+async fn a_native_turn_waiting_on_an_approval_prompt_is_not_timed_out() {
+    let base_url = stalled_endpoint().await;
+    let (tx, _rx) = unbounded_channel();
+    let history = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+    let waiting = Arc::new(AtomicUsize::new(1));
+
+    let turn = tokio::spawn(run_native_agent_turn(
+        provider_config(&base_url),
+        invoker(),
+        history,
+        "scale the api down".into(),
+        "kind-dev".into(),
+        "payments".into(),
+        None,
+        tx,
+        1,
+        waiting.clone(),
+    ));
+
+    tokio::time::sleep(Duration::from_secs(7)).await;
+    assert!(
+        !turn.is_finished(),
+        "a prompt is open, so the 5 s inactivity limit must not have fired"
+    );
+
+    waiting.store(0, Ordering::SeqCst);
+    let answered = std::time::Instant::now();
+    tokio::time::timeout(Duration::from_secs(20), turn)
+        .await
+        .expect("with no prompt open the stalled turn times out")
+        .expect("the turn did not panic");
+    assert!(
+        answered.elapsed() >= Duration::from_secs(3),
+        "the limit starts over when the prompt closes, not from the last event: {:?}",
+        answered.elapsed()
+    );
 }
 
 // ---------------------------------------------------------------------------

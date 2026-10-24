@@ -60,7 +60,8 @@ fn action_results(rx: &mut UnboundedReceiver<AppEvent>) -> Vec<(String, Result<S
 
 fn invoker() -> Arc<McpToolInvoker> {
     let cache = ClientCache::new(PathBuf::from("/nonexistent"));
-    Arc::new(McpToolInvoker::new(build_mcp_server(cache, vec![])))
+    let policy = Arc::new(srelens_mcp::policy::FlagGated::new(false, true));
+    Arc::new(McpToolInvoker::new(build_mcp_server(cache, vec![], policy)))
 }
 
 fn crd(plural: &str, singular: &str, kind: &str, group: &str, short_names: &[&str]) -> CrdMeta {
@@ -260,6 +261,7 @@ async fn native_turn(
         None,
         tx,
         30,
+        Arc::new(std::sync::atomic::AtomicUsize::new(0)),
     )
     .await;
     let events = action_results(&mut rx);
