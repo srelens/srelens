@@ -2490,6 +2490,54 @@ async fn space_then_enter_parity_with_bare_enter() {
 }
 
 #[tokio::test]
+async fn crd_plural_colliding_with_static_command_preserves_full_crd_name_on_space() {
+    let _settings = common::env::isolate_settings();
+
+    let custom_deployment = CrdMeta {
+        crd_name: "deployments.acme.io".to_string(),
+        group: "acme.io".to_string(),
+        version: "v1".to_string(),
+        kind: "Deployment".to_string(),
+        plural: "deployments".to_string(),
+        singular: "deployment".to_string(),
+        namespaced: true,
+        short_names: vec![],
+        printer_columns: vec![],
+        created_at: None,
+    };
+
+    // Run 1: Bare Enter on :deployments.acme with CRD present
+    let (mut app1, _rx1) = common::app().await;
+    app1.crds = vec![custom_deployment.clone()];
+    press(&mut app1, ch(':')).await;
+    type_str(&mut app1, "deployments.acme").await;
+    press(&mut app1, key(KeyCode::Enter)).await;
+    let expected_kind = table(&app1).kind.clone();
+    assert_eq!(
+        expected_kind,
+        ResourceKind::CustomResource(custom_deployment.clone())
+    );
+
+    // Run 2: Space then Enter on :deplo with CRD present (when selecting the CRD)
+    let (mut app2, _rx2) = common::app().await;
+    app2.crds = vec![custom_deployment.clone()];
+    press(&mut app2, ch(':')).await;
+    type_str(&mut app2, "deplo").await;
+
+    // The CRD deployments.acme.io has score 105 (crd prefix) vs 100 (static prefix), so it is at index 0.
+    // Space must expand to the full CRD name "deployments.acme.io " rather than ambiguous "deployments "
+    press(&mut app2, ch(' ')).await;
+    assert_eq!(app2.command_buffer, "deployments.acme.io ");
+    press(&mut app2, key(KeyCode::Enter)).await;
+    let actual_kind = table(&app2).kind.clone();
+
+    assert_eq!(
+        actual_kind, expected_kind,
+        "Space then Enter on CRD colliding with static command must yield identical view as bare Enter"
+    );
+}
+
+#[tokio::test]
 async fn colon_commands_that_need_a_selection_warn_when_the_table_is_empty() {
     let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app().await;

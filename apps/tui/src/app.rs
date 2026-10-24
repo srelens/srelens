@@ -22,6 +22,7 @@ use srelens_streams::watch::WatchManager;
 use crate::commands::{
     command_suggestions_full, command_suggestions_with_crds, is_exact_name_or_alias,
     resolve_command_with_crds, CommandTarget, CrdMeta, DynamicCommandDef, ResourceKind,
+    COMMAND_REGISTRY,
 };
 use crate::event::AppEvent;
 use crate::sink::TuiSink;
@@ -2547,12 +2548,20 @@ impl App {
             if query_clean.contains('.') || query_clean.contains(&crd.group) {
                 return crd.crd_name.clone();
             }
-            let has_plural_collision = self
-                .crds
-                .iter()
-                .filter(|c| c.plural.eq_ignore_ascii_case(&crd.plural))
-                .count()
-                > 1;
+            let collides_with_static = COMMAND_REGISTRY.iter().any(|cmd| {
+                cmd.name.eq_ignore_ascii_case(&crd.plural)
+                    || cmd
+                        .aliases
+                        .iter()
+                        .any(|a| a.eq_ignore_ascii_case(&crd.plural))
+            });
+            let has_plural_collision = collides_with_static
+                || self
+                    .crds
+                    .iter()
+                    .filter(|c| c.plural.eq_ignore_ascii_case(&crd.plural))
+                    .count()
+                    > 1;
             if has_plural_collision {
                 return crd.crd_name.clone();
             }
