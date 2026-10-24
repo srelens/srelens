@@ -1001,6 +1001,26 @@ mod tests {
         assert!(out.contains("in which node is that pod running?"), "got {out:?}");
     }
 
+    /// With nothing to write, the agent's stdin is closed from the start, not
+    /// the app's own: `sort` reads the end of it at once and prints nothing.
+    #[tokio::test]
+    async fn an_agent_with_nothing_for_stdin_reads_the_end_of_it_at_once() {
+        use tokio::io::AsyncReadExt;
+        let cmd = srelens_agent::adapter::AgentCommand {
+            program: "sort".into(),
+            args: Vec::new(),
+            env: Vec::new(),
+            stdin: None,
+        };
+        let mut child = spawn_agent(&cmd, &std::env::temp_dir()).unwrap();
+        let mut out = String::new();
+        let mut stdout = child.stdout.take().unwrap();
+        let read = tokio::time::timeout(std::time::Duration::from_secs(5), stdout.read_to_string(&mut out)).await;
+        let _ = child.start_kill();
+        read.expect("the agent's stdin was left open").unwrap();
+        assert_eq!(out, "");
+    }
+
     #[test]
     fn decode_base64_image_recovers_the_original_bytes() {
         // "hello" base64-encoded, hand-written rather than produced by encoding
