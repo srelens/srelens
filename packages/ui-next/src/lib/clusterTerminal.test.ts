@@ -29,9 +29,8 @@ const {
   pendingClusterTerminal,
   terminalNamespace,
 } = await import("./clusterTerminal");
-const { activeRoute, currentWorkspace, openTab, setClusterPaused, setState, setTabNamespaces } = await import(
-  "./tabsStore"
-);
+const { activeRoute, closeTab, currentWorkspace, openTab, setClusterPaused, setState, setTabNamespaces } =
+  await import("./tabsStore");
 const { defaultState } = await import("./tabs");
 const { __resetTerminalPanelsForTests, closeTerminalPanel, setTerminalPanelMinimized, terminalPanel } = await import("./terminalPanel");
 
@@ -275,6 +274,18 @@ describe("openClusterTerminal on a protected cluster (#101)", () => {
     expect(startLocalSession).toHaveBeenCalledWith({ context: "dev-cluster", namespace: undefined });
     expect(activeRoute()).toBe("/terminals");
     expect(terminalPanel(tab)).toBeUndefined();
+  });
+
+  it("shows what it held on the Terminals tab when the tab that asked was closed meanwhile", async () => {
+    onPlatform(WINDOWS);
+    const tab = onPods();
+    await openClusterTerminal(dev);
+    closeTab(tab);
+    await answerClusterTerminal(true);
+    expect(startLocalSession).toHaveBeenCalledWith({ context: "dev-cluster", namespace: undefined });
+    // Not a panel under a tab that no longer exists, where nothing would show it.
+    expect(terminalPanel(tab)).toBeUndefined();
+    expect(activeRoute()).toBe("/terminals");
   });
 
   it("opens nothing when the reader says no", async () => {

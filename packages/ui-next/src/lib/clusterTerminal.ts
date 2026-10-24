@@ -2,7 +2,7 @@ import { isTauri, type ClusterContext } from "@srelens/core";
 import { protectionFor } from "./protection";
 import { getSessions, startLocalSession } from "./sessions";
 import { closeTerminalPanel, setTerminalPanelMinimized, showTerminalPanel, terminalPanel } from "./terminalPanel";
-import { currentWorkspace, isClusterPaused, openTab, tabNamespaces } from "./tabsStore";
+import { currentWorkspace, getState, isClusterPaused, openTab, tabNamespaces } from "./tabsStore";
 
 /**
  * The namespace a terminal opened from a tab should start in: the tab's, when
@@ -140,13 +140,16 @@ export function onClusterTerminalPending(listener: () => void): () => void {
 /**
  * The reader's answer for the held shell. Either way it stops waiting. A
  * cluster paused while the question was up is not opened: pausing is the
- * reader asking this window to leave it alone.
+ * reader asking this window to leave it alone. If the tab that asked was
+ * closed meanwhile, the shell is shown on the Terminals tab instead of in a
+ * panel under a tab nothing will draw again.
  */
 export async function answerClusterTerminal(open: boolean): Promise<void> {
   const asked = pending;
   hold(null);
   if (open && asked && canOpenClusterTerminal(asked.cluster)) {
-    await start(asked.cluster, asked.namespace, asked.tab, asked.inPanel);
+    const inPanel = asked.inPanel && getState().workspaces.some((w) => w.tabs.some((t) => t.id === asked.tab));
+    await start(asked.cluster, asked.namespace, asked.tab, inPanel);
   }
 }
 
