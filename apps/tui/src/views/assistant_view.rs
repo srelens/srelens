@@ -674,12 +674,16 @@ impl AssistantViewState {
     }
 
     /// Start the agent's side of the conversation over: a new conversation id,
-    /// no resume id, no owning agent, and the old Cursor chat directory
-    /// removed. The transcript on screen stays. Returns the old conversation id.
+    /// no resume id, no owning agent, a fresh history for srelens's own agent,
+    /// and the old Cursor chat directory removed. The transcript on screen
+    /// stays. Returns the old conversation id.
     pub fn reset_agent_chat(&mut self) -> String {
         let old_id = std::mem::replace(&mut self.conversation_id, uuid::Uuid::new_v4().to_string());
         self.cli_resume_id = None;
         self.chat_agent = None;
+        // A new Arc, not the old one emptied: a native turn that was aborted
+        // but still writes lands in the old history, not the new conversation.
+        self.native_history = std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new()));
         let chat_root = crate::agent::process_cursor_chats_root();
         let old_id_clone = old_id.clone();
         if let Ok(handle) = tokio::runtime::Handle::try_current() {
@@ -724,9 +728,6 @@ impl AssistantViewState {
         self.busy_start = None;
         self.scroll_offset = 0;
         self.auto_scroll = true;
-        if let Ok(mut hist) = self.native_history.try_lock() {
-            hist.clear();
-        }
         old_id
     }
 

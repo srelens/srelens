@@ -4225,6 +4225,51 @@ async fn asking_the_same_agent_again_keeps_its_conversation() {
 }
 
 #[tokio::test]
+async fn switching_agent_leaves_the_old_agents_history_behind() {
+    use srelens_agent::adapter::AgentKind;
+    let mut settings = common::env::isolate_settings();
+    let empty = tempfile::tempdir().unwrap();
+    settings.set_env("PATH", empty.path());
+    settings.set_env("HOME", empty.path());
+    let (mut app, _rx) = common::app().await;
+    // srelens's own agent has talked here...
+    app.assistant_state.chat_agent = Some(AgentKind::Srelens);
+    let old = app.assistant_state.native_history.clone();
+    old.try_lock()
+        .unwrap()
+        .push(srelens_llm::types::Turn::User("earlier".to_string()));
+    app.ai_settings.agent = AgentKind::Claude;
+
+    // ...and the user moves to Claude.
+    app.submit_assistant_query("hi".to_string(), "hi".to_string());
+
+    let now = &app.assistant_state.native_history;
+    assert!(
+        !std::sync::Arc::ptr_eq(&old, now),
+        "a fresh history, so a late write from the old native turn lands in the old one"
+    );
+    assert!(now.try_lock().unwrap().is_empty());
+    assert_eq!(old.try_lock().unwrap().len(), 1, "the old one is untouched");
+}
+
+#[tokio::test]
+async fn clearing_the_conversation_gives_the_native_agent_a_fresh_history() {
+    let _settings = common::env::isolate_settings();
+    let (mut app, _rx) = common::app().await;
+    app.active_view = ActiveView::Assistant;
+    let old = app.assistant_state.native_history.clone();
+    old.try_lock()
+        .unwrap()
+        .push(srelens_llm::types::Turn::User("earlier".to_string()));
+
+    press(&mut app, ctrl('l')).await;
+
+    let now = &app.assistant_state.native_history;
+    assert!(!std::sync::Arc::ptr_eq(&old, now));
+    assert!(now.try_lock().unwrap().is_empty());
+}
+
+#[tokio::test]
 async fn an_installed_local_agent_gets_the_turn_and_its_session_comes_back() {
     use srelens_agent::adapter::AgentKind;
     let mut settings = common::env::isolate_settings();
@@ -4243,16 +4288,41 @@ async fn an_installed_local_agent_gets_the_turn_and_its_session_comes_back() {
         ),
     )
     .unwrap();
+    // It also records what it was started with: the Cursor key variable in
+    // `env.txt`, and one argv entry per line in `argv.txt`.
     let (name, script) = if cfg!(windows) {
         (
             "claude.cmd",
-            "@more > \"%~dp0stdin.txt\"\r\n@type \"%~dp0transcript.jsonl\"\r\n".to_string(),
+            concat!(
+                "@echo off\r\n",
+                "setlocal enabledelayedexpansion\r\n",
+                // `shift` moves %0 too, so the directory is taken first.
+                "set \"d=%~dp0\"\r\n",
+                "echo [!CURSOR_API_KEY!]> \"%d%env.txt\"\r\n",
+                ":next\r\n",
+                "if \"%~1\"==\"\" goto done\r\n",
+                "set \"arg=%~1\"\r\n",
+                "echo !arg!>> \"%d%argv.txt\"\r\n",
+                "shift\r\n",
+                "goto next\r\n",
+                ":done\r\n",
+                "more > \"%d%stdin.txt\"\r\n",
+                "type \"%d%transcript.jsonl\"\r\n",
+            )
+            .to_string(),
         )
     } else {
         (
             "claude",
-            "#!/bin/sh\ncat > \"$(dirname \"$0\")/stdin.txt\"; cat \"$(dirname \"$0\")/transcript.jsonl\"\n"
-                .to_string(),
+            concat!(
+                "#!/bin/sh\n",
+                "d=\"$(dirname \"$0\")\"\n",
+                "printf '[%s]\\n' \"$CURSOR_API_KEY\" > \"$d/env.txt\"\n",
+                "printf '%s\\n' \"$@\" > \"$d/argv.txt\"\n",
+                "cat > \"$d/stdin.txt\"\n",
+                "cat \"$d/transcript.jsonl\"\n",
+            )
+            .to_string(),
         )
     };
     let bin = dir.path().join(name);
@@ -4268,8 +4338,19 @@ async fn an_installed_local_agent_gets_the_turn_and_its_session_comes_back() {
     .unwrap();
     settings.set_env("PATH", path);
     settings.set_env("HOME", dir.path());
+    settings.remove_env("CURSOR_API_KEY");
     let (mut app, mut rx) = common::app().await;
     app.ai_settings.agent = AgentKind::Claude;
+    // A Cursor key is stored, and Claude has its own model and a session to
+    // resume. The key must stay out of Claude's environment; the model and
+    // the session must reach its command line.
+    app.ai_settings
+        .api_keys
+        .insert("cursor".to_string(), "cursor-secret-123".to_string());
+    app.ai_settings
+        .set_agent_model(AgentKind::Claude, Some("sonnet".to_string()));
+    app.assistant_state.chat_agent = Some(AgentKind::Claude);
+    app.assistant_state.cli_resume_id = Some("resume-1".to_string());
     let conversation = app.assistant_state.conversation_id.clone();
 
     app.submit_assistant_query("why?".to_string(), "why?".to_string());
@@ -4302,6 +4383,25 @@ async fn an_installed_local_agent_gets_the_turn_and_its_session_comes_back() {
             .any(|(t, r)| *t == format!("ai_session:{ctx}")
                 && r.as_deref() == Ok(format!("{conversation}|s-1").as_str())),
         "the session is kept for the next turn: {results:?}"
+    );
+
+    let seen_env = std::fs::read_to_string(dir.path().join("env.txt")).unwrap();
+    assert!(
+        !seen_env.contains("cursor-secret-123"),
+        "the Cursor key reaches only a Cursor child: {seen_env:?}"
+    );
+    let argv: Vec<String> = std::fs::read_to_string(dir.path().join("argv.txt"))
+        .unwrap()
+        .lines()
+        .map(|l| l.trim().to_string())
+        .collect();
+    assert!(
+        argv.windows(2).any(|w| w == ["--model", "sonnet"]),
+        "Claude runs on its own model: {argv:?}"
+    );
+    assert!(
+        argv.windows(2).any(|w| w == ["--resume", "resume-1"]),
+        "Claude resumes its own session: {argv:?}"
     );
 }
 
