@@ -15,6 +15,7 @@ import { Alert, Button, Dialog, Field, Select } from "@srelens/ui-kit";
 import { FailureAlert } from "../../lib/errorCopy";
 import { startLocalSession, startPodSession } from "../../lib/sessions";
 import { useProtectedConfirm } from "../../lib/protectedConfirm";
+import { localShellCanBeReadOnly } from "../../lib/clusterTerminal";
 
 /** §14's dialog width — narrow, three fields deep at most. */
 const WIDTH = 420;
@@ -128,12 +129,14 @@ export function NewSessionMenu({ context, namespace: initial, moved, onStarted, 
   const [busy, setBusy] = useState(false);
   const [failure, setFailure] = useState<{ title: string; error: unknown } | null>(null);
   /**
-   * On a protected cluster, its name before a pod or node shell starts (#101).
-   * A shell there is a way to change the cluster that no other confirm
-   * reaches. Not the local shell: its guard is the read-only terminal.
+   * On a protected cluster, its name before a shell starts (#101): a shell
+   * there is a way to change the cluster that no other confirm reaches. The
+   * local shell asks only where the host cannot make it read-only — a Windows
+   * desktop, which has no kubectl and helm guards — and asks here, in this
+   * menu, rather than in a second dialog after it.
    */
   const typed = useProtectedConfirm(context);
-  const guarded = kind !== "local";
+  const guarded = kind !== "local" || !localShellCanBeReadOnly();
 
   // Namespaces, up front: the pod kind is where the menu opens, and a
   // namespace picked before the pod kind is even shown would waste the round
@@ -415,8 +418,6 @@ export function NewSessionMenu({ context, namespace: initial, moved, onStarted, 
           </div>
         )}
 
-        {guarded && typed.field}
-
         {kind === "local" && (
           <div className="text-[0.75rem] text-muted">
             {context
@@ -427,6 +428,13 @@ export function NewSessionMenu({ context, namespace: initial, moved, onStarted, 
                 "A local shell is scoped to the cluster this menu was opened against, and there was none."}
           </div>
         )}
+
+        {kind === "local" && guarded && typed.protection && (
+          <div className="text-[0.75rem]">
+            {`On Windows this terminal can't be made read-only. kubectl in it can change ${typed.protection.name}.`}
+          </div>
+        )}
+        {guarded && typed.field}
       </div>
     </Dialog>
   );

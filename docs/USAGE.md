@@ -355,6 +355,11 @@ there does not land on another cluster by accident:
   `unset KUBECONFIG` fail instead of quietly leaving the cluster.
 - The terminal opens with a line saying which cluster it is bound to, and in bash
   and zsh the prompt starts with `[cluster/namespace]`.
+- On a cluster that a protected workspace holds, the terminal is also read-only.
+  `kubectl` and `helm` run only the subcommands that read, such as `get`,
+  `describe`, `logs`, `rollout status` and `helm list`. Anything else is refused
+  with a line saying the cluster is protected, and the prompt tag reads
+  `[cluster/namespace read-only]`. A terminal keeps the mode it opened in.
 - Opened from a tab that is looking at exactly one namespace, the terminal starts
   in that namespace.
 
@@ -371,7 +376,9 @@ a guard against accidents, not a sandbox. It does not cover:
 - prompt themes that redraw the whole prompt and drop the tag;
 - deliberately calling the real binary by its full path, or starting a new shell
   with a clean environment;
-- the Windows desktop, where the terminal gets the private kubeconfig only.
+- the Windows desktop, where the terminal gets the private kubeconfig only. A
+  protected cluster's terminal can't be made read-only there, so it opens only
+  after you type the cluster's name.
 
 ## Port forwarding
 
