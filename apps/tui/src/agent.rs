@@ -527,6 +527,25 @@ impl Drop for Agent {
 /// How much of the agent's stderr a turn keeps, for the error it shows.
 const STDERR_TAIL: usize = 8 * 1024;
 
+/// The end of an agent's stderr for the transcript: its last few non-empty
+/// lines joined by ` | `, at most 1 KiB. Not just the last line — a Node
+/// CLI's crash ends with `Node.js v22…`, its cause a line or two above.
+fn stderr_summary(tail: &[u8]) -> String {
+    let text = String::from_utf8_lossy(tail);
+    let lines: Vec<&str> = text
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .collect();
+    let joined = lines[lines.len().saturating_sub(5)..].join(" | ");
+    let start = joined
+        .char_indices()
+        .map(|(i, _)| i)
+        .find(|&i| joined.len() - i <= 1024)
+        .unwrap_or(joined.len());
+    joined[start..].to_string()
+}
+
 /// Run one agent-CLI turn: a loopback MCP server of its own whose gated calls
 /// ask the user in srectl ([`crate::consent::TuiConsent`]; an open prompt
 /// stops the inactivity clock), the CLI spawned in the turn's private
@@ -768,14 +787,15 @@ pub async fn run_cli_agent_turn(turn: CliTurn) {
                 "\n[Error: {label} timed out after {timeout_seconds} seconds. You can increase the timeout in settings (<Ctrl+s>) or try another model.]"
             )),
         );
-    } else if crashed && !said_anything {
-        let tail = String::from_utf8_lossy(&tail);
-        let why = tail
-            .lines()
-            .map(str::trim)
-            .rfind(|l| !l.is_empty())
-            .map(str::to_string)
-            .unwrap_or_else(|| format!("{label} exited without an answer"));
+    } else if !said_anything {
+        // A clean exit too: a CLI that changed its format, or reports a
+        // failure on stderr and exits 0, would otherwise end the turn blank.
+        let why = stderr_summary(&tail);
+        let why = if why.is_empty() {
+            format!("{label} finished without an answer")
+        } else {
+            why
+        };
         send("ai_chunk", Ok(format!("\n[Error: {why}]")));
     }
 

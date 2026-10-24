@@ -395,6 +395,29 @@ async fn two_boxed_cursor_turns_at_once_each_get_their_own_port_and_channel() {
     tokio::task::yield_now().await;
 }
 
+/// A turn that never started cannot have spoiled the session it was to
+/// resume, so the conversation keeps it for the next turn.
+#[tokio::test]
+async fn a_turn_that_cannot_launch_keeps_the_session_it_was_to_resume() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let root = tempfile::tempdir().unwrap();
+    let (tx, mut rx) = unbounded_channel();
+
+    run_cli_agent_turn(CliTurn {
+        resume: Some("s-9".into()),
+        ..cli_turn(AgentKind::Cursor, missing_binary(&dir), tx, root.path())
+    })
+    .await;
+
+    let results = action_results(&mut rx);
+    let session = results.iter().find(|(t, _)| t == "ai_session:kind-dev");
+    assert_eq!(
+        session.map(|(_, r)| r.as_deref()),
+        Some(Ok("conv-1|s-9")),
+        "{results:?}"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // run_cli_agent_turn: a fake Claude Code
 // ---------------------------------------------------------------------------
@@ -472,17 +495,75 @@ async fn an_agent_that_fails_at_once_says_why_and_ends_the_turn() {
     .expect("the turn ends within 10 s");
 
     let results = action_results(&mut rx);
-    assert!(
-        results.iter().any(|(t, r)| t == "ai_chunk:kind-dev"
+    assert!(shows(&results, "not logged in"), "{results:?}");
+    assert_eq!(
+        results.last().map(|(t, _)| t.as_str()),
+        Some("ai_done:kind-dev")
+    );
+}
+
+/// Whether a chunk of the transcript on `kind-dev` says `text`.
+fn shows(results: &[(String, Result<String, String>)], text: &str) -> bool {
+    results.iter().any(|(t, r)| {
+        t == "ai_chunk:kind-dev"
             && match r {
-                Ok(m) | Err(m) => m.contains("not logged in"),
-            }),
+                Ok(m) | Err(m) => m.contains(text),
+            }
+    })
+}
+
+/// A CLI that prints plain text, changes its format, or reports a failure on
+/// stderr and still exits 0 must not end the turn with nothing on screen.
+#[tokio::test]
+async fn a_turn_that_ends_without_an_answer_says_so() {
+    let _settings = common::env::isolate_settings();
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("transcript.jsonl"),
+        concat!(
+            r#"{"type":"system","subtype":"init","session_id":"s-1"}"#,
+            "\n",
+            r#"{"type":"result","subtype":"success","session_id":"s-1"}"#,
+            "\n",
+        ),
+    )
+    .unwrap();
+    let bin = fake_claude(
+        dir.path(),
+        "@type \"%~dp0transcript.jsonl\"\r\n",
+        r#"cat "$(dirname "$0")/transcript.jsonl""#,
+    );
+    let (tx, mut rx) = unbounded_channel();
+
+    run_cli_agent_turn(cli_turn(AgentKind::Claude, &bin, tx, dir.path())).await;
+
+    let results = action_results(&mut rx);
+    assert!(
+        shows(&results, "Claude Code finished without an answer"),
         "{results:?}"
     );
     assert_eq!(
         results.last().map(|(t, _)| t.as_str()),
         Some("ai_done:kind-dev")
     );
+}
+
+/// A Node CLI's crash ends with its version line; the cause is above it.
+#[tokio::test]
+async fn a_crash_shows_its_cause_not_only_its_last_stderr_line() {
+    let _settings = common::env::isolate_settings();
+    let dir = tempfile::tempdir().unwrap();
+    let bin = fake_claude(
+        dir.path(),
+        "@echo Error: not logged in 1>&2\r\n@echo Node.js v22.11.0 1>&2\r\n@exit /b 1\r\n",
+        "echo 'Error: not logged in' >&2; echo 'Node.js v22.11.0' >&2; exit 1",
+    );
+    let (tx, mut rx) = unbounded_channel();
+
+    run_cli_agent_turn(cli_turn(AgentKind::Claude, &bin, tx, dir.path())).await;
+
+    let results = action_results(&mut rx);
+    assert!(shows(&results, "not logged in"), "{results:?}");
 }
 
 #[cfg(unix)]
