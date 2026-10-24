@@ -21,7 +21,7 @@ use srelens_streams::watch::WatchManager;
 
 use crate::commands::{
     command_suggestions_full, command_suggestions_with_crds, resolve_command_with_crds,
-    CommandTarget, CrdMeta, ResourceKind,
+    CommandTarget, CrdMeta, DynamicCommandDef, ResourceKind,
 };
 use crate::event::AppEvent;
 use crate::sink::TuiSink;
@@ -2541,6 +2541,25 @@ impl App {
         }
     }
 
+    fn resolve_completion_command_name(&self, sugg: &DynamicCommandDef, query: &str) -> String {
+        if let CommandTarget::CustomResource(ref crd) = sugg.target {
+            let query_clean = query.trim_start().trim_start_matches(':').trim();
+            if query_clean.contains('.') || query_clean.contains(&crd.group) {
+                return crd.crd_name.clone();
+            }
+            let has_plural_collision = self
+                .crds
+                .iter()
+                .filter(|c| c.plural.eq_ignore_ascii_case(&crd.plural))
+                .count()
+                > 1;
+            if has_plural_collision && query_clean.eq_ignore_ascii_case(&crd.crd_name) {
+                return crd.crd_name.clone();
+            }
+        }
+        sugg.name.clone()
+    }
+
     pub async fn handle_key_event(&mut self, key: KeyEvent) {
         // Any keypress dismisses the drag-to-copy selection highlight.
         self.screen_selection = None;
@@ -4171,13 +4190,13 @@ impl App {
                     }
 
                     let target = self.command_tab_target.take().or_else(|| {
-                        let trimmed = self.command_buffer.trim().trim_start_matches(':').trim();
+                        let raw = self.command_buffer.trim_start().trim_start_matches(':');
                         // If input has whitespace and the argument portion is empty (e.g. ":pods " or ":prometheusrules "),
                         // resolve the base command directly rather than picking the first candidate in the namespace list.
-                        if let Some(pos) = trimmed.find(char::is_whitespace) {
-                            let arg = trimmed[pos..].trim();
+                        if let Some(pos) = raw.find(char::is_whitespace) {
+                            let arg = raw[pos..].trim();
                             if arg.is_empty() {
-                                let cmd_prefix = &trimmed[..pos];
+                                let cmd_prefix = raw[..pos].trim();
                                 return resolve_command_with_crds(cmd_prefix, &self.crds);
                             }
                         }
@@ -4263,10 +4282,10 @@ impl App {
                         );
                         if !suggestions.is_empty() {
                             let idx = self.command_suggestion_idx % suggestions.len();
-                            let name = &suggestions[idx].0.name;
-                            if !name.ends_with(" <namespace>") {
-                                self.command_buffer = name.clone();
-                                let target = &suggestions[idx].0.target;
+                            let sugg = &suggestions[idx].0;
+                            if !sugg.name.ends_with(" <namespace>") {
+                                self.command_buffer = sugg.name.clone();
+                                let target = &sugg.target;
                                 self.command_tab_target = Some(target.clone());
                                 self.command_suggestion_idx = command_suggestions_full(
                                     &self.command_buffer,
@@ -4448,7 +4467,8 @@ impl App {
                             });
                         if let Some((sugg, _)) = matched_sugg {
                             if !sugg.name.ends_with(" <namespace>") {
-                                self.command_buffer = format!("{} ", sugg.name);
+                                let name = self.resolve_completion_command_name(sugg, query);
+                                self.command_buffer = format!("{} ", name);
                                 self.command_tab_base = None;
                                 self.command_tab_target = None;
                                 self.command_suggestion_idx = 0;
