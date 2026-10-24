@@ -1006,6 +1006,37 @@ mod tests {
     #[tokio::test]
     async fn an_agent_with_nothing_for_stdin_reads_the_end_of_it_at_once() {
         use tokio::io::AsyncReadExt;
+        // Re-run under a stdin held open, so the guard doesn't depend on how
+        // the runner's own stdin was handed over (often already closed).
+        if std::env::var_os("SRELENS_STDIN_PROBE_CHILD").is_none() {
+            let mut probe = tokio::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "assistant::tests::an_agent_with_nothing_for_stdin_reads_the_end_of_it_at_once",
+                    "--nocapture",
+                    "--test-threads=1",
+                ])
+                .env("SRELENS_STDIN_PROBE_CHILD", "1")
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .kill_on_drop(true)
+                .spawn()
+                .unwrap();
+            // Never written, and held until the probe exits.
+            let _stdin = probe.stdin.take();
+            let output = tokio::time::timeout(std::time::Duration::from_secs(20), probe.wait_with_output())
+                .await
+                .expect("the probe hung on an open stdin")
+                .unwrap();
+            assert!(
+                output.status.success() && String::from_utf8_lossy(&output.stdout).contains("1 passed"),
+                "{}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
         let cmd = srelens_agent::adapter::AgentCommand {
             program: "sort".into(),
             args: Vec::new(),
