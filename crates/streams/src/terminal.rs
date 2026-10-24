@@ -225,7 +225,7 @@ impl TerminalManager {
         // channel whatever the shell is quick enough to print.
         sink.emit(
             &out_channel,
-            serde_json::Value::String(banner(&context, namespace.as_deref())),
+            serde_json::Value::String(banner(&context, namespace.as_deref(), scope.read_only)),
         );
         std::thread::spawn(move || {
             let mut buf = [0u8; 8192];
@@ -585,6 +585,7 @@ contexts:
             .await
             .expect("terminal starts");
 
+        let first = sink.payloads_for("term:out:t8").first().cloned();
         // Refused before any `kubectl` is looked for, so this holds on a
         // machine that has none installed.
         manager.input(id, "kubectl delete pods --all\n");
@@ -592,6 +593,9 @@ contexts:
         manager.close(id);
 
         assert!(refused, "{}", output_on(&sink, "t8"));
+        // And the line it opens with says so before anything is typed.
+        let first = first.and_then(|v| v.as_str().map(String::from)).unwrap_or_default();
+        assert!(first.contains("It is read-only"), "{first}");
     }
 
     #[tokio::test(flavor = "multi_thread")]

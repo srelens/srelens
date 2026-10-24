@@ -40,6 +40,9 @@ pub(crate) struct Scope {
     /// The guards' directory, to go first on `PATH`. `None` where there are no
     /// guards (a platform without `/bin/sh`).
     pub bin: Option<PathBuf>,
+    /// The guards refuse every subcommand that is not a read (#101). Never
+    /// where there are no guards: nothing would refuse anything there.
+    pub read_only: bool,
 }
 
 /// How to start `shell` so that it reads its own rc files and then ours.
@@ -73,9 +76,11 @@ impl Scope {
         )?;
         let dir = std::env::temp_dir().join(format!("srelens-term-{}-{}", std::process::id(), id));
         make_private_dir(&dir).map_err(|e| e.to_string())?;
+        let bin = cfg!(unix).then(|| dir.join("bin"));
         let scope = Scope {
             kubeconfig: dir.join("kubeconfig"),
-            bin: cfg!(unix).then(|| dir.join("bin")),
+            read_only: read_only && bin.is_some(),
+            bin,
             dir,
         };
         let written = scope.write(context, &yaml, read_only);
@@ -158,13 +163,17 @@ impl Scope {
 /// the terminal is bound to. Written by the host rather than printed by an rc
 /// file: it is then the same in every shell, and prompt themes that object to
 /// output during shell start-up have nothing to object to.
-pub(crate) fn banner(context: &str, namespace: Option<&str>) -> String {
+///
+/// A read-only terminal (#101) says so here as well: only bash and zsh show
+/// it in the prompt tag.
+pub(crate) fn banner(context: &str, namespace: Option<&str>, read_only: bool) -> String {
     let namespace = match namespace {
         Some(ns) if !ns.is_empty() => format!(", namespace {}", printable(ns)),
         _ => String::new(),
     };
+    let mode = if read_only { " It is read-only: kubectl and helm here only read." } else { "" };
     format!(
-        "\x1b[2msrelens: this terminal is bound to {}{namespace}. kubectl and helm here cannot be pointed at another cluster.\x1b[0m\r\n",
+        "\x1b[2msrelens: this terminal is bound to {}{namespace}. kubectl and helm here cannot be pointed at another cluster.{mode}\x1b[0m\r\n",
         printable(context)
     )
 }
@@ -958,10 +967,23 @@ contexts:
 
     #[test]
     fn the_banner_names_the_cluster_and_drops_control_characters() {
-        let line = banner("dev\x1b[31m-cluster", Some("payments"));
+        let line = banner("dev\x1b[31m-cluster", Some("payments"), false);
         assert!(line.contains("bound to dev[31m-cluster, namespace payments."));
-        assert!(banner("dev-cluster", None).contains("bound to dev-cluster. kubectl"));
-        assert!(banner("dev-cluster", Some("")).contains("bound to dev-cluster. kubectl"));
+        assert!(banner("dev-cluster", None, false).contains("bound to dev-cluster. kubectl"));
+        assert!(banner("dev-cluster", Some(""), false).contains("bound to dev-cluster. kubectl"));
+    }
+
+    #[test]
+    fn a_read_only_terminal_says_so_in_its_opening_line() {
+        assert_eq!(
+            banner("dev-cluster", Some("payments"), true),
+            "\x1b[2msrelens: this terminal is bound to dev-cluster, namespace payments. kubectl and helm here cannot be pointed at another cluster. It is read-only: kubectl and helm here only read.\x1b[0m\r\n"
+        );
+        // A terminal that is not read-only opens with the line it always did.
+        assert_eq!(
+            banner("dev-cluster", Some("payments"), false),
+            "\x1b[2msrelens: this terminal is bound to dev-cluster, namespace payments. kubectl and helm here cannot be pointed at another cluster.\x1b[0m\r\n"
+        );
     }
 
     /// The read-only refusal, word for word (#101).
@@ -1198,5 +1220,28 @@ contexts:
         let out = interactive(&f, "bash", home.path(), "PS1='$ '; __srelens_prompt; echo \"ps1=$PS1\"");
         let said = stdout(&out);
         assert!(said.contains("ps1=[dev-cluster/payments read-only] $ "), "{said}\n{}", stderr(&out));
+    }
+}
+
+#[cfg(all(test, not(unix)))]
+mod tests {
+    use super::*;
+
+    /// Where there are no guards (Windows) nothing refuses a write, so a
+    /// terminal asked to be read-only is not, and its opening line must not
+    /// say it is (#101).
+    #[test]
+    fn without_guards_a_terminal_asked_to_be_read_only_is_not() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("config");
+        std::fs::write(
+            &config,
+            "apiVersion: v1\nkind: Config\nclusters:\n- name: c\n  cluster:\n    server: https://127.0.0.1:1\n\
+             users:\n- name: u\n  user: {}\ncontexts:\n- name: ctx\n  context:\n    cluster: c\n    user: u\n",
+        )
+        .unwrap();
+        let scope = Scope::create(u64::MAX, "ctx", None, &[config], true).unwrap();
+        scope.remove();
+        assert!(!scope.read_only);
     }
 }
