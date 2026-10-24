@@ -87,6 +87,9 @@ pub struct AgentCommand {
     /// appear in argv, where they'd be visible to anyone who can list
     /// processes on the machine.
     pub env: Vec<(String, String)>,
+    /// What to write to the child's stdin before closing it; `None` spawns
+    /// it with stdin closed.
+    pub stdin: Option<String>,
 }
 
 /// The only tools the agent may call: srelens's own MCP tools, exposed under
@@ -213,6 +216,7 @@ pub fn claude_command(
         program: binary.to_string(),
         args,
         env: Vec::new(),
+        stdin: None,
     }
 }
 
@@ -344,6 +348,7 @@ pub fn codex_command(
         program: binary.to_string(),
         args,
         env: vec![(CODEX_TOKEN_ENV.to_string(), token.to_string())],
+        stdin: None,
     }
 }
 
@@ -417,6 +422,7 @@ pub fn cursor_command(
         program: binary.to_string(),
         args,
         env: vec![(CURSOR_CONFIG_DIR_ENV.to_string(), config_dir.to_string())],
+        stdin: None,
     }
 }
 

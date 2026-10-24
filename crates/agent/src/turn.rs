@@ -3,6 +3,8 @@
 //! bearer token, attached images, the agent's empty working directory) and the
 //! guards that remove them when the turn ends.
 
+use crate::adapter::AgentKind;
+
 /// Whether `id` may follow `--resume` (or `exec resume`) in an agent's argv.
 /// Real ids are CLI-minted uuids, but the one a turn resumes round-trips
 /// through a session file on disk, so a tampered store must not be able to
@@ -252,6 +254,141 @@ pub fn prepare_cursor_turn(
         resume,
     );
     Ok(CursorTurn { cmd, workspace, _workspace_guard: workspace_guard, _claim: claim })
+}
+
+/// Everything a front end knows about one agent-CLI turn before it is laid
+/// out on disk.
+pub struct TurnSpec<'a> {
+    pub kind: AgentKind,
+    pub binary: &'a str,
+    pub prompt: &'a str,
+    pub mcp_url: &'a str,
+    pub token: &'a str,
+    /// The CLI's own session id from the conversation's previous turn,
+    /// already checked with `valid_resume_id`.
+    pub resume: Option<&'a str>,
+    /// The model to run the turn on; applied in a later change.
+    pub model: Option<&'a str>,
+    /// Names the turn's scratch files, so it must be one bare path component.
+    pub session: &'a str,
+    /// The saved conversation, which names a Cursor chat (see
+    /// `prepare_cursor_turn`).
+    pub conversation: Option<&'a str>,
+    pub cursor_root: &'a std::path::Path,
+    pub cursor_chats: &'a CursorChatsInUse,
+    pub temp_dir: &'a std::path::Path,
+    /// Attached images already written to disk; only Codex can read them.
+    pub image_paths: &'a [String],
+}
+
+/// One agent-CLI turn, ready to spawn: its command and the directory to spawn
+/// it in. Everything the turn wrote — its working directory, and the files
+/// carrying the bearer token — goes when this is dropped.
+pub struct PreparedTurn {
+    pub cmd: crate::adapter::AgentCommand,
+    pub cwd: std::path::PathBuf,
+    _config_guard: Option<TempFile>,
+    _cwd_guard: Option<TempDir>,
+    _cursor_turn: Option<CursorTurn>,
+}
+
+/// Lay out one agent-CLI turn and build its command. The native agent
+/// (`Srelens`) runs in-process and has no CLI turn, so it is an error here.
+pub fn prepare_turn(spec: &TurnSpec) -> Result<PreparedTurn, String> {
+    match spec.kind {
+        AgentKind::Srelens => Err("srelens's own agent runs in-process; it has no CLI turn to prepare".into()),
+        // Cursor's working directory is its workspace, laid out with the rest
+        // of its turn by `prepare_cursor_turn`, which guards it.
+        AgentKind::Cursor => {
+            let turn = prepare_cursor_turn(
+                spec.cursor_root,
+                spec.cursor_chats,
+                spec.session,
+                spec.conversation,
+                spec.binary,
+                spec.prompt,
+                spec.mcp_url,
+                spec.token,
+                spec.resume,
+            )?;
+            Ok(PreparedTurn {
+                cmd: turn.cmd.clone(),
+                cwd: turn.workspace.clone(),
+                _config_guard: None,
+                _cwd_guard: None,
+                _cursor_turn: Some(turn),
+            })
+        }
+        AgentKind::Claude | AgentKind::Codex => {
+            // A fresh, empty scratch directory for the agent's CWD — never the
+            // srelens process's own working directory (the user's repo or home) —
+            // so a tool that tried to enumerate its surroundings would find nothing.
+            // Removed with the turn. This is also Codex's `-C`
+            // workspace (see `codex_command`): genuinely empty, per-turn, and torn
+            // down with the turn — that emptiness is the whole box, so this guard
+            // must never be pointed at anything else.
+            let cwd = create_private_dir(spec.temp_dir, &format!("srelens-agent-cwd-{}", spec.session))?;
+            let cwd_guard = TempDir(cwd.clone());
+
+            // Only Claude reads its MCP server config from a file (`--mcp-config`);
+            // Codex gets the same server via `-c` TOML overrides plus its bearer
+            // token in `env` (see `codex_command`), so no config file is written for
+            // it at all. The guard is kept on the turn, so its `Drop` (removing the
+            // cleartext-token file) runs when the turn ends, exactly like the cwd's
+            // — a guard built and dropped inside the match arm itself would be gone
+            // before the agent ever read the file.
+            let mut config_guard: Option<TempFile> = None;
+            let cmd = if spec.kind == AgentKind::Claude {
+                let cfg = crate::adapter::McpConfig::http(spec.mcp_url, spec.token);
+                let cfg_path = spec.temp_dir.join(format!("srelens-mcp-{}.json", spec.session));
+                write_private_file(&cfg_path, &serde_json::to_vec(&cfg).unwrap()).map_err(|e| e.to_string())?;
+                config_guard = Some(TempFile(cfg_path.clone()));
+                let effective_prompt = prompt_with_images(spec.prompt, spec.image_paths);
+                crate::adapter::claude_command(spec.binary, &effective_prompt, &cfg_path.to_string_lossy(), spec.resume)
+            } else {
+                // A follow-up resumes the conversation's Codex thread with the whole
+                // box re-asserted in front of `resume` (see `codex_command`), in this
+                // turn's own fresh empty `-C` workspace: the thread is found by id in
+                // `CODEX_HOME`, whatever directory it was started in (#215).
+                crate::adapter::codex_command(
+                    spec.binary,
+                    spec.prompt,
+                    spec.mcp_url,
+                    spec.token,
+                    &cwd.to_string_lossy(),
+                    spec.image_paths,
+                    spec.resume,
+                )
+            };
+            Ok(PreparedTurn {
+                cmd,
+                cwd,
+                _config_guard: config_guard,
+                _cwd_guard: Some(cwd_guard),
+                _cursor_turn: None,
+            })
+        }
+    }
+}
+
+/// Prepend one `Attached image: <path>` line per path, then a blank line,
+/// then the original prompt — so the agent sees where each decoded image
+/// landed on disk before reading the user's actual question. `image_paths`
+/// empty (the common case: no attachments) returns `prompt` unchanged,
+/// byte-identical, so a turn without images pays no cost here.
+fn prompt_with_images(prompt: &str, image_paths: &[String]) -> String {
+    if image_paths.is_empty() {
+        return prompt.to_string();
+    }
+    let mut out = String::new();
+    for path in image_paths {
+        out.push_str("Attached image: ");
+        out.push_str(path);
+        out.push('\n');
+    }
+    out.push('\n');
+    out.push_str(prompt);
+    out
 }
 
 #[cfg(test)]
@@ -591,5 +728,107 @@ mod tests {
         let _turn =
             prepare_cursor_turn(&root, &CursorChatsInUse::default(), "s1", None, "cursor-agent", "hi", "http://127.0.0.1:1/mcp", "turn-token", None).unwrap();
         assert_eq!(std::fs::metadata(&root).unwrap().permissions().mode() & 0o777, 0o700);
+    }
+
+    /// A root of the test's own for every file a turn writes, and the Cursor
+    /// chats in use there.
+    struct TurnFixture {
+        root: TempDir,
+        chats: CursorChatsInUse,
+    }
+
+    impl TurnFixture {
+        fn new() -> Self {
+            TurnFixture { root: cursor_test_root(), chats: CursorChatsInUse::default() }
+        }
+
+        fn spec(&self, kind: AgentKind) -> TurnSpec<'_> {
+            TurnSpec {
+                kind,
+                binary: "agent",
+                prompt: "in which node is that pod running?",
+                mcp_url: "http://127.0.0.1:1/mcp",
+                token: "turn-token",
+                resume: None,
+                model: None,
+                session: "s1",
+                conversation: None,
+                cursor_root: &self.root.0,
+                cursor_chats: &self.chats,
+                temp_dir: &self.root.0,
+                image_paths: &[],
+            }
+        }
+    }
+
+    #[test]
+    fn a_claude_turn_points_at_a_private_config_that_goes_with_the_turn() {
+        let f = TurnFixture::new();
+        let turn = prepare_turn(&f.spec(AgentKind::Claude)).unwrap();
+        let at = turn.cmd.args.iter().position(|a| a == "--mcp-config").expect("a Claude turn passes --mcp-config");
+        let config = std::path::PathBuf::from(&turn.cmd.args[at + 1]);
+        assert!(std::fs::read_to_string(&config).unwrap().contains("Bearer turn-token"));
+        assert!(!turn.cmd.args.iter().any(|a| a.contains("turn-token")), "the token never rides in argv");
+        let cwd = turn.cwd.clone();
+        assert!(cwd.is_dir());
+        drop(turn);
+        assert!(!config.exists(), "the turn's bearer token must not outlive it");
+        assert!(!cwd.exists());
+    }
+
+    #[test]
+    fn a_codex_turn_runs_in_an_empty_private_dir_removed_with_the_turn() {
+        let f = TurnFixture::new();
+        let images = ["/tmp/a.png".to_string()];
+        let turn = prepare_turn(&TurnSpec { image_paths: &images, ..f.spec(AgentKind::Codex) }).unwrap();
+        assert!(turn.cmd.args.windows(2).any(|w| w[0] == "-C" && std::path::Path::new(&w[1]) == turn.cwd));
+        assert_eq!(std::fs::read_dir(&turn.cwd).unwrap().count(), 0);
+        assert!(turn.cmd.args.windows(2).any(|w| w == ["-i", "/tmp/a.png"]));
+        assert!(turn.cmd.env.contains(&(crate::adapter::CODEX_TOKEN_ENV.to_string(), "turn-token".to_string())));
+        let cwd = turn.cwd.clone();
+        drop(turn);
+        assert!(!cwd.exists());
+    }
+
+    #[test]
+    fn a_cursor_turn_is_prepare_cursor_turn() {
+        let f = TurnFixture::new();
+        let turn = prepare_turn(&TurnSpec { conversation: Some("conv-1"), ..f.spec(AgentKind::Cursor) }).unwrap();
+        assert_eq!(turn.cwd, f.root.0.join("conv-1").join("workspace"));
+        assert!(turn.cmd.env.iter().any(|(k, _)| k == crate::adapter::CURSOR_CONFIG_DIR_ENV));
+        // The turn holds the workspace and the chat until it is dropped.
+        let token_file = turn.cwd.join(".cursor").join("mcp.json");
+        assert!(token_file.exists());
+        assert!(prepare_turn(&TurnSpec { conversation: Some("conv-1"), ..f.spec(AgentKind::Cursor) }).is_err());
+        drop(turn);
+        assert!(!token_file.exists(), "the turn's bearer token must not outlive it");
+    }
+
+    #[test]
+    fn every_cli_turn_resumes_the_session_it_is_given() {
+        for kind in [AgentKind::Claude, AgentKind::Codex, AgentKind::Cursor] {
+            let f = TurnFixture::new();
+            let turn = prepare_turn(&TurnSpec { resume: Some("prev-1"), ..f.spec(kind) }).unwrap();
+            assert!(turn.cmd.args.iter().any(|a| a == "prev-1"), "{kind:?} must resume prev-1");
+        }
+    }
+
+    #[test]
+    fn the_native_agent_has_no_turn_to_prepare() {
+        let f = TurnFixture::new();
+        assert!(prepare_turn(&f.spec(AgentKind::Srelens)).is_err());
+    }
+
+    #[test]
+    fn prompt_with_images_lists_each_path_then_a_blank_line_then_the_prompt() {
+        let images = vec!["/tmp/a.png".to_string(), "/tmp/b.png".to_string()];
+        let got = prompt_with_images("why?", &images);
+        assert_eq!(got, "Attached image: /tmp/a.png\nAttached image: /tmp/b.png\n\nwhy?");
+    }
+
+    #[test]
+    fn prompt_with_images_returns_the_prompt_unchanged_when_there_are_no_images() {
+        let got = prompt_with_images("why?", &[]);
+        assert_eq!(got, "why?");
     }
 }

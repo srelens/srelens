@@ -6,8 +6,7 @@ use std::sync::Arc;
 use srelens_agent::adapter::{AgentInfo, AgentKind};
 use srelens_agent::event::AgentEvent;
 use srelens_agent::turn::{
-    create_private_dir, prepare_cursor_turn, sweep_cursor_chats, valid_resume_id, write_private_file, TempDir,
-    TempFile,
+    prepare_turn, sweep_cursor_chats, valid_resume_id, write_private_file, TempFile, TurnSpec,
 };
 use srelens_streams::sink::EventSink;
 
@@ -26,7 +25,7 @@ fn install_url(kind: AgentKind) -> &'static str {
 }
 
 /// No agent is gated: Claude, Codex, and Cursor are each boxed to srelens's
-/// own MCP tools (see `chat_send`'s per-kind spawn arms) and all three connect
+/// own MCP tools (see `srelens_agent::turn::prepare_turn`) and all three connect
 /// and are selectable. Kept as a function (rather than deleted) so a future
 /// agent that isn't ready can gate from here again.
 fn is_gated(_kind: AgentKind) -> bool {
@@ -221,26 +220,6 @@ fn finish_turn(sink: &dyn EventSink, channel: &str, saw_done: bool, crashed: boo
     );
 }
 
-/// Prepend one `Attached image: <path>` line per path, then a blank line,
-/// then the original prompt — so the agent sees where each decoded image
-/// landed on disk before reading the user's actual question. `image_paths`
-/// empty (the common case: no attachments) returns `prompt` unchanged,
-/// byte-identical, so a turn without images pays no cost here.
-fn prompt_with_images(prompt: &str, image_paths: &[String]) -> String {
-    if image_paths.is_empty() {
-        return prompt.to_string();
-    }
-    let mut out = String::new();
-    for path in image_paths {
-        out.push_str("Attached image: ");
-        out.push_str(path);
-        out.push('\n');
-    }
-    out.push('\n');
-    out.push_str(prompt);
-    out
-}
-
 /// Decode one attached image's base64 body (no `data:image/...;base64,`
 /// prefix — the WebView strips that before sending) into raw bytes. A thin
 /// wrapper so `chat_send` can decode without a fallible call inline, and so
@@ -296,6 +275,38 @@ fn kill_and_reap(mut child: tokio::process::Child) {
     tokio::spawn(async move {
         let _ = child.wait().await;
     });
+}
+
+/// Spawn a prepared agent command in `cwd`, its stdout and stderr piped for
+/// the stream loop. What the command carries for stdin is written from a task
+/// of its own and the pipe then closed, so a child that reads it slowly can't
+/// hold up the stream loop; with nothing to write, stdin is closed from the
+/// start.
+fn spawn_agent(
+    cmd: &srelens_agent::adapter::AgentCommand,
+    cwd: &std::path::Path,
+) -> std::io::Result<tokio::process::Child> {
+    let mut child = tokio::process::Command::new(&cmd.program)
+        .args(&cmd.args)
+        // Required so Codex's MCP bearer token (carried in `cmd.env`, never
+        // argv) actually reaches the child; harmless for Claude, whose `env`
+        // is always empty (its token travels via the `--mcp-config` file).
+        .envs(cmd.env.iter().map(|(k, v)| (k.clone(), v.clone())))
+        .current_dir(cwd)
+        .stdin(if cmd.stdin.is_some() { std::process::Stdio::piped() } else { std::process::Stdio::null() })
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()?;
+    if let (Some(input), Some(mut stdin)) = (cmd.stdin.clone(), child.stdin.take()) {
+        tokio::spawn(async move {
+            use tokio::io::AsyncWriteExt;
+            // A child that exits before reading it all fails on its own, and
+            // its exit status says so; there is nothing to add here.
+            let _ = stdin.write_all(input.as_bytes()).await;
+            // `stdin` is dropped here, and the child reads the end of it.
+        });
+    }
+    Ok(child)
 }
 
 impl ChatManager {
@@ -395,8 +406,8 @@ pub async fn chat_send(
 
     // The session id (from IPC) becomes a `chat://` channel AND temp-path
     // components (`srelens-agent-cwd-<id>`, config/image files). A crafted id
-    // with `/`, `\`, or `..` would let `create_dir_all` — and `_cwd_guard`'s
-    // later `remove_dir_all` — resolve OUTSIDE the temp dir, so validate it to
+    // with `/`, `\`, or `..` would let `create_dir_all` — and the turn's
+    // guard's later `remove_dir_all` — resolve OUTSIDE the temp dir, so validate it to
     // a bare component before it touches any path. Real ids are startChat uuids.
     if session.is_empty()
         || !session.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
@@ -460,34 +471,6 @@ pub async fn chat_send(
 
     let dir = app.path().temp_dir().map_err(|e| e.to_string())?;
 
-    // A fresh, empty scratch directory for the agent's CWD — never the
-    // srelens process's own working directory (the user's repo or home) —
-    // so a tool that tried to enumerate its surroundings would find nothing.
-    // Removed on every exit from this function. This is also Codex's `-C`
-    // workspace (see `codex_command`): genuinely empty, per-turn, and torn
-    // down here — that emptiness is the whole box, so this guard must never
-    // be pointed at anything else. Cursor's is its workspace, laid out with
-    // the rest of its turn by `prepare_cursor_turn`, which guards it.
-    let cursor_turn = match kind {
-        AgentKind::Cursor => Some(prepare_cursor_turn(
-            &cursor_state_dir(&app)?,
-            &chats.cursor_chats,
-            &session,
-            conversation.as_deref(),
-            &agent_path,
-            &prompt,
-            &url,
-            &token,
-            resume.as_deref(),
-        )?),
-        _ => None,
-    };
-    let cwd_path = match &cursor_turn {
-        Some(turn) => turn.workspace.clone(),
-        None => create_private_dir(&dir, &format!("srelens-agent-cwd-{session}"))?,
-    };
-    let _cwd_guard = cursor_turn.is_none().then(|| TempDir(cwd_path.clone()));
-
     // Decode each attached image to its own temp file under the same dir,
     // guarded by a `TempFile` per image so every one is cleaned up on any
     // exit from this function. A decode or write failure is reported as an
@@ -549,49 +532,26 @@ pub async fn chat_send(
         }
     }
 
-    // Only Claude reads its MCP server config from a file (`--mcp-config`);
-    // Codex gets the same server via `-c` TOML overrides plus its bearer
-    // token in `env` (see `codex_command`), so no config file is written for
-    // it at all. `_cfg_guard` is declared here, outside the match, so its
-    // `Drop` (removing the cleartext-token file) still runs at the end of
-    // this function on every exit, exactly like `_cwd_guard` above — a guard
-    // built and dropped inside the match arm itself would be gone before the
-    // agent ever read the file. Cursor's files are `cursor_turn`'s, above.
-    let mut _cfg_guard: Option<TempFile> = None;
-    let cmd = match kind {
-        AgentKind::Claude => {
-            let cfg = srelens_agent::adapter::McpConfig::http(&url, &token);
-            let cfg_path = dir.join(format!("srelens-mcp-{session}.json"));
-            write_private_file(&cfg_path, &serde_json::to_vec(&cfg).unwrap()).map_err(|e| e.to_string())?;
-            _cfg_guard = Some(TempFile(cfg_path.clone()));
-            let effective_prompt = prompt_with_images(&prompt, &image_paths);
-            srelens_agent::adapter::claude_command(
-                &agent_path,
-                &effective_prompt,
-                &cfg_path.to_string_lossy(),
-                resume.as_deref(),
-            )
-        }
-        // A follow-up resumes the conversation's Codex thread with the whole
-        // box re-asserted in front of `resume` (see `codex_command`), in this
-        // turn's own fresh empty `-C` workspace: the thread is found by id in
-        // `CODEX_HOME`, whatever directory it was started in (#215).
-        AgentKind::Codex => srelens_agent::adapter::codex_command(
-            &agent_path,
-            &prompt,
-            &url,
-            &token,
-            &cwd_path.to_string_lossy(),
-            &image_paths,
-            resume.as_deref(),
-        ),
-        AgentKind::Cursor => cursor_turn
-            .as_ref()
-            .map(|turn| turn.cmd.clone())
-            .expect("a Cursor turn is prepared before its command is needed"),
-        // Handled by the early return above, before any CLI machinery.
-        AgentKind::Srelens => unreachable!("native agent dispatched before the CLI path"),
-    };
+    // The agent's empty working directory, the files carrying its bearer
+    // token, and its command (see `prepare_turn`). Held to the end of this
+    // function, so all of it is removed on every exit, including an early `?`.
+    // Only a Cursor turn keeps state under `cursor_root`.
+    let cursor_root = if kind == AgentKind::Cursor { cursor_state_dir(&app)? } else { std::path::PathBuf::new() };
+    let prepared = prepare_turn(&TurnSpec {
+        kind,
+        binary: &agent_path,
+        prompt: &prompt,
+        mcp_url: &url,
+        token: &token,
+        resume: resume.as_deref(),
+        model: None,
+        session: &session,
+        conversation: conversation.as_deref(),
+        cursor_root: &cursor_root,
+        cursor_chats: &chats.cursor_chats,
+        temp_dir: &dir,
+        image_paths: &image_paths,
+    })?;
 
     let parse_line: fn(&str) -> Vec<AgentEvent> = match kind {
         AgentKind::Claude => srelens_agent::claude::parse_line,
@@ -600,19 +560,10 @@ pub async fn chat_send(
         AgentKind::Srelens => unreachable!("native agent dispatched before the CLI path"),
     };
 
-    let mut child = tokio::process::Command::new(&cmd.program)
-        .args(&cmd.args)
-        // Required so Codex's MCP bearer token (carried in `cmd.env`, never
-        // argv) actually reaches the child; harmless for Claude, whose `env`
-        // is always empty (its token travels via the `--mcp-config` file).
-        .envs(cmd.env.iter().map(|(k, v)| (k.clone(), v.clone())))
-        .current_dir(&cwd_path)
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .map_err(|e| format!("could not start the agent: {e}"))?;
+    let mut child =
+        spawn_agent(&prepared.cmd, &prepared.cwd).map_err(|e| format!("could not start the agent: {e}"))?;
 
-    // `Stdio::piped()` above guarantees this is `Some`; still handled rather
+    // `spawn_agent`'s `Stdio::piped()` guarantees this is `Some`; still handled rather
     // than unwrapped so a future refactor that drops the `piped()` call
     // degrades to a clean turn-ending error instead of a silently hung UI —
     // every post-spawn exit re-enables input via a `TurnDone`.
@@ -1030,17 +981,24 @@ mod tests {
         assert_eq!(last_line(b""), "");
     }
 
-    #[test]
-    fn prompt_with_images_lists_each_path_then_a_blank_line_then_the_prompt() {
-        let images = vec!["/tmp/a.png".to_string(), "/tmp/b.png".to_string()];
-        let got = prompt_with_images("why?", &images);
-        assert_eq!(got, "Attached image: /tmp/a.png\nAttached image: /tmp/b.png\n\nwhy?");
-    }
-
-    #[test]
-    fn prompt_with_images_returns_the_prompt_unchanged_when_there_are_no_images() {
-        let got = prompt_with_images("why?", &[]);
-        assert_eq!(got, "why?");
+    /// What an agent command carries for stdin reaches the child, and the
+    /// pipe is then closed: `sort` prints nothing until its input ends.
+    #[tokio::test]
+    async fn an_agent_gets_its_stdin_and_then_the_end_of_it() {
+        use tokio::io::AsyncReadExt;
+        let cmd = srelens_agent::adapter::AgentCommand {
+            program: "sort".into(),
+            args: Vec::new(),
+            env: Vec::new(),
+            stdin: Some("in which node is that pod running?\n".into()),
+        };
+        let mut child = spawn_agent(&cmd, &std::env::temp_dir()).unwrap();
+        let mut out = String::new();
+        let mut stdout = child.stdout.take().unwrap();
+        let read = tokio::time::timeout(std::time::Duration::from_secs(10), stdout.read_to_string(&mut out)).await;
+        let _ = child.start_kill();
+        read.expect("the agent's stdin was never closed").unwrap();
+        assert!(out.contains("in which node is that pod running?"), "got {out:?}");
     }
 
     #[test]
