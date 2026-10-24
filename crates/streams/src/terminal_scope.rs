@@ -470,8 +470,22 @@ fn prompt_safe(text: &str) -> String {
 
 /// Sourced by bash and zsh after the reader's own rc files. Written to parse in
 /// both; each shell runs only its own branch. `read_only` adds `read-only` to
-/// the prompt tag (#101).
+/// the prompt tag (#101), and has each prompt put the guards back in front:
+/// the prompt function runs after the hooks the reader's rc files installed
+/// (mise, direnv and the like), which can move their own directories, and a
+/// kubectl in one, ahead again.
 fn init_script(context: &str, bin: &Path, kubeconfig: &Path, read_only: bool) -> String {
+    // ponytail: the later copy of `bin` is left where it is, so a hook that
+    // moves its directories ahead before every prompt adds one entry to PATH
+    // each time; strip the old copy if that grows long enough to matter.
+    let path_first = if read_only {
+        format!(
+            "    case \"$PATH\" in\n      {bin}|{bin}:*) ;;\n      *) PATH={bin}:$PATH ;;\n    esac\n",
+            bin = sh_path(bin)
+        )
+    } else {
+        String::new()
+    };
     format!(
         r#"# Written by srelens for one terminal session. See the guards beside this file.
 # rc files commonly prepend to PATH; the guards go back in front of them.
@@ -489,7 +503,7 @@ __srelens_tag() {{
 }}
 if [ -n "${{BASH_VERSION-}}" ]; then
   __srelens_prompt() {{
-    local tag
+{path_first}    local tag
     tag=$(__srelens_tag)
     case "$PS1" in
       "$tag"*) ;;
@@ -501,7 +515,7 @@ if [ -n "${{BASH_VERSION-}}" ]; then
 }}__srelens_prompt"
 elif [ -n "${{ZSH_VERSION-}}" ]; then
   __srelens_prompt() {{
-    local tag
+{path_first}    local tag
     tag=$(__srelens_tag)
     case "$PROMPT" in
       "$tag"*) ;;
@@ -1293,6 +1307,67 @@ contexts:
         let out = interactive(&f, "bash", home.path(), "PS1='$ '; __srelens_prompt; echo \"ps1=$PS1\"");
         let said = stdout(&out);
         assert!(said.contains("ps1=[dev-cluster/payments read-only] $ "), "{said}\n{}", stderr(&out));
+    }
+
+    #[test]
+    fn a_read_only_bash_puts_the_guards_back_first_after_a_prompt_hook_moves_them() {
+        let f = fixture_in_mode("dev-cluster", None, true);
+        let home = tempfile::tempdir().unwrap();
+        // A hook of the kind mise or direnv installs: before each prompt it
+        // puts its own directory, which holds a kubectl, ahead on PATH.
+        std::fs::write(
+            home.path().join(".bashrc"),
+            format!("PROMPT_COMMAND='PATH={}:$PATH'\n", f.real.display()),
+        )
+        .unwrap();
+        let out = interactive(
+            &f,
+            "bash",
+            home.path(),
+            // What bash runs before a prompt; then once more with nothing
+            // moved, which must leave PATH as it was.
+            "eval \"$PROMPT_COMMAND\"; before=$PATH; __srelens_prompt; \
+             [ \"$PATH\" = \"$before\" ] && echo stable; \
+             kubectl delete pods --all; echo refused=$?",
+        );
+        let said = stdout(&out);
+        let context = format!("{said}\n{}", stderr(&out));
+        assert!(said.contains("refused=64"), "{context}");
+        assert!(!said.contains("real-kubectl"), "{context}");
+        assert!(said.contains("stable"), "{context}");
+    }
+
+    #[test]
+    fn a_read_only_zsh_puts_the_guards_back_first_after_a_prompt_hook_moves_them() {
+        let Some(zsh) = shell_named("zsh") else {
+            eprintln!("zsh not found; skipped");
+            return;
+        };
+        let f = fixture_in_mode("dev-cluster", None, true);
+        let home = tempfile::tempdir().unwrap();
+        std::fs::write(
+            home.path().join(".zshrc"),
+            format!(
+                "__hook() {{ PATH={}:$PATH }}\nprecmd_functions+=(__hook)\n",
+                f.real.display()
+            ),
+        )
+        .unwrap();
+        let start = f.scope.shell_start("/bin/zsh");
+        let out = Command::new(&zsh)
+            .args(["-i", "-c"])
+            // What zsh runs before a prompt.
+            .arg("for fn in $precmd_functions; do $fn; done; kubectl delete pods --all; echo refused=$?")
+            .envs(start.env.iter().cloned())
+            .env("HOME", home.path())
+            .env("PATH", f.path())
+            .env("KUBECONFIG", &f.scope.kubeconfig)
+            .output()
+            .unwrap();
+        let said = stdout(&out);
+        let context = format!("{said}\n{}", stderr(&out));
+        assert!(said.contains("refused=64"), "{context}");
+        assert!(!said.contains("real-kubectl"), "{context}");
     }
 }
 
