@@ -1577,10 +1577,12 @@ pub fn render_feature_banner_modal(
             .map(|i| {
                 let mut spans = Vec::new();
 
-                // Left column
-                let (num_l, cmd_l, cat_l, desc_l, _) = &features[i];
-                let (num_style_l, cmd_style_l) =
-                    if *cmd_l == ":update" && update_available.is_some() {
+                let push_col = |spans: &mut Vec<Span>,
+                                feat: &(&str, &str, &str, String, &str),
+                                max_w: usize| {
+                    let (num, cmd, cat, desc, _) = feat;
+                    let (num_style, cmd_style) = if *cmd == ":update" && update_available.is_some()
+                    {
                         (
                             Style::default()
                                 .fg(Theme::yellow())
@@ -1600,84 +1602,74 @@ pub fn render_feature_banner_modal(
                         )
                     };
 
-                spans.push(Span::styled(format!("{num_l} "), num_style_l));
-                spans.push(Span::styled(format!("{:<11}", cmd_l), cmd_style_l));
-                spans.push(Span::styled(
-                    format!("{:<13}", cat_l),
-                    Style::default()
-                        .fg(Theme::accent())
-                        .add_modifier(Modifier::BOLD),
-                ));
+                    spans.push(Span::styled(format!("{num} "), num_style));
 
-                let prefix_l = 4 + 11 + 13;
-                if col_w > prefix_l + 4 {
-                    let avail_desc = col_w.saturating_sub(prefix_l);
-                    let clean_desc = if desc_l.chars().count() > avail_desc && avail_desc > 3 {
-                        let s: String = desc_l.chars().take(avail_desc - 3).collect();
-                        format!("{}...", s)
+                    if max_w >= 28 {
+                        spans.push(Span::styled(format!("{:<11}", cmd), cmd_style));
+                        spans.push(Span::styled(
+                            format!("{:<13}", cat),
+                            Style::default()
+                                .fg(Theme::accent())
+                                .add_modifier(Modifier::BOLD),
+                        ));
+                        let prefix = 4 + 11 + 13;
+                        if max_w > prefix + 4 {
+                            let avail_desc = max_w.saturating_sub(prefix);
+                            let clean_desc = if desc.chars().count() > avail_desc && avail_desc > 3
+                            {
+                                let s: String = desc.chars().take(avail_desc - 3).collect();
+                                format!("{}...", s)
+                            } else {
+                                desc.clone()
+                            };
+                            spans.push(Span::styled(
+                                format!("{:<avail_desc$}", clean_desc),
+                                Style::default().fg(Theme::fg()),
+                            ));
+                        } else if max_w > prefix {
+                            spans.push(Span::raw(" ".repeat(max_w.saturating_sub(prefix))));
+                        }
                     } else {
-                        desc_l.clone()
-                    };
-                    spans.push(Span::styled(
-                        format!("{:<avail_desc$}", clean_desc),
-                        Style::default().fg(Theme::fg()),
-                    ));
-                } else if col_w > prefix_l {
-                    let pad = col_w.saturating_sub(prefix_l);
-                    spans.push(Span::raw(" ".repeat(pad)));
-                }
+                        let content_w = max_w.saturating_sub(4);
+                        if content_w >= 14 {
+                            spans.push(Span::styled(format!("{:<12}", cmd), cmd_style));
+                            let cat_avail = content_w.saturating_sub(12);
+                            if cat_avail > 0 {
+                                let clean_cat = if cat.chars().count() > cat_avail {
+                                    let s: String = cat.chars().take(cat_avail).collect();
+                                    s
+                                } else {
+                                    format!("{:<cat_avail$}", cat)
+                                };
+                                spans.push(Span::styled(
+                                    clean_cat,
+                                    Style::default()
+                                        .fg(Theme::accent())
+                                        .add_modifier(Modifier::BOLD),
+                                ));
+                            }
+                        } else {
+                            let clean_cmd = if cmd.chars().count() > content_w {
+                                let s: String = cmd.chars().take(content_w).collect();
+                                s
+                            } else {
+                                format!("{:<content_w$}", cmd)
+                            };
+                            spans.push(Span::styled(clean_cmd, cmd_style));
+                        }
+                    }
+                };
+
+                // Left column
+                push_col(&mut spans, &features[i], col_w);
 
                 // Column separator
                 spans.push(Span::styled(" │ ", Style::default().fg(Theme::border())));
 
                 // Right column
                 if i + half < features.len() {
-                    let (num_r, cmd_r, cat_r, desc_r, _) = &features[i + half];
-                    let (num_style_r, cmd_style_r) =
-                        if *cmd_r == ":update" && update_available.is_some() {
-                            (
-                                Style::default()
-                                    .fg(Theme::yellow())
-                                    .add_modifier(Modifier::BOLD),
-                                Style::default()
-                                    .fg(Theme::yellow())
-                                    .add_modifier(Modifier::BOLD),
-                            )
-                        } else {
-                            (
-                                Style::default()
-                                    .fg(Theme::cyan())
-                                    .add_modifier(Modifier::BOLD),
-                                Style::default()
-                                    .fg(Theme::yellow())
-                                    .add_modifier(Modifier::BOLD),
-                            )
-                        };
-
-                    spans.push(Span::styled(format!("{num_r} "), num_style_r));
-                    spans.push(Span::styled(format!("{:<11}", cmd_r), cmd_style_r));
-                    spans.push(Span::styled(
-                        format!("{:<13}", cat_r),
-                        Style::default()
-                            .fg(Theme::accent())
-                            .add_modifier(Modifier::BOLD),
-                    ));
-
-                    let prefix_r = 4 + 11 + 13;
                     let avail_r = inner_w.saturating_sub(col_w + 3);
-                    if avail_r > prefix_r + 4 {
-                        let avail_desc = avail_r.saturating_sub(prefix_r);
-                        let clean_desc = if desc_r.chars().count() > avail_desc && avail_desc > 3 {
-                            let s: String = desc_r.chars().take(avail_desc - 3).collect();
-                            format!("{}...", s)
-                        } else {
-                            desc_r.clone()
-                        };
-                        spans.push(Span::styled(
-                            format!("{:<avail_desc$}", clean_desc),
-                            Style::default().fg(Theme::fg()),
-                        ));
-                    }
+                    push_col(&mut spans, &features[i + half], avail_r);
                 }
 
                 ListItem::new(Line::from(spans))

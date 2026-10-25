@@ -2712,6 +2712,23 @@ fn feature_banner_modal_renders_all_features_on_compact_100x25_terminal() {
 }
 
 #[test]
+fn feature_banner_modal_renders_all_features_on_narrow_60x24_terminal() {
+    let modal_enabled = Modal::FeatureBanner {
+        show_on_startup: true,
+        update_available: None,
+    };
+    let text = modal_text(60, 24, &modal_enabled);
+
+    assert!(text.contains("Welcome to srectl — Feature Highlights"));
+    assert!(text.contains(":contexts"), "shows contexts on 60x24");
+    assert!(text.contains(":top"), "shows top on 60x24");
+    assert!(text.contains("[c]"), "shows contexts shortcut on 60x24");
+    assert!(text.contains("[h]"), "shows top shortcut on 60x24");
+    assert!(text.contains(":update"), "shows update on 60x24");
+    assert!(text.contains("[u]"), "shows update shortcut on 60x24");
+}
+
+#[test]
 fn feature_banner_modal_renders_update_available_alert_and_version() {
     let modal_update = Modal::FeatureBanner {
         show_on_startup: true,
