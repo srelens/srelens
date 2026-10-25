@@ -783,7 +783,7 @@ pub const COMMAND_REGISTRY: &[CommandDef] = &[
     CommandDef {
         name: "features",
         aliases: &["banner", "guide", "welcome"],
-        description: "Show SRElens feature highlights banner (:page, :helm, :overview, :gpuinfo, :workloads, :argo, :ai, :ai-settings, :config, :import, :banner)",
+        description: "Show SRElens feature highlights banner (:page, :helm, :overview, :gpuinfo, :workloads, :argo, :ai, :ai-settings, :config, :import, :contexts, :top, :banner)",
         search_terms: "",
         target: CommandTarget::FeatureBanner,
     },

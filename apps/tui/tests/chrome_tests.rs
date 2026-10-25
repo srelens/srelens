@@ -2620,10 +2620,17 @@ fn feature_banner_modal_renders_all_highlighted_features_and_toggle_state() {
     assert!(text_enabled.contains(":bgp"), "shows bgp command");
     assert!(text_enabled.contains(":page"), "shows page command");
     assert!(text_enabled.contains(":import"), "shows import command");
+    assert!(text_enabled.contains(":contexts"), "shows contexts command");
+    assert!(text_enabled.contains(":top"), "shows top command");
     assert!(text_enabled.contains(":update"), "shows update command");
     assert!(text_enabled.contains("[b]"), "shows bgp shortcut key");
     assert!(text_enabled.contains("[p]"), "shows page shortcut key");
     assert!(text_enabled.contains("[i]"), "shows import shortcut key");
+    assert!(text_enabled.contains("[c]"), "shows contexts shortcut key");
+    assert!(
+        text_enabled.contains("[h]"),
+        "shows top / hotspots shortcut key"
+    );
     assert!(text_enabled.contains("[u]"), "shows update shortcut key");
     assert!(text_enabled.contains("[0]"), "shows jump key 0");
     assert!(text_enabled.contains("[9]"), "shows jump key 9");

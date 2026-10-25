@@ -2714,6 +2714,17 @@ impl App {
                             self.modal = None;
                             self.open_add_cluster_modal();
                         }
+                        KeyCode::Char('c') | KeyCode::Char('C') => {
+                            self.modal = None;
+                            self.open_context_picker();
+                        }
+                        KeyCode::Char('h')
+                        | KeyCode::Char('H')
+                        | KeyCode::Char('o')
+                        | KeyCode::Char('O') => {
+                            self.modal = None;
+                            self.switch_view_to_kind(ResourceKind::TopPods).await;
+                        }
                         KeyCode::Char('u') | KeyCode::Char('U') => {
                             if let Some(ref ver) = self.tui_config.update_available {
                                 self.set_toast(
