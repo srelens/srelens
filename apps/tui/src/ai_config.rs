@@ -260,6 +260,7 @@ impl AiSettings {
     /// the next save would drop the user's keys.
     pub fn from_json(text: &str) -> Result<AiSettings, serde_json::Error> {
         let mut value: serde_json::Value = serde_json::from_str(text)?;
+        let mut from_cursor = false;
         if let Some(obj) = value.as_object_mut() {
             if obj
                 .get("agent")
@@ -268,6 +269,7 @@ impl AiSettings {
                 obj.remove("agent");
             }
             if obj.get("defaultProvider").and_then(|v| v.as_str()) == Some("cursor") {
+                from_cursor = true;
                 obj.insert("defaultProvider".into(), "anthropic".into());
                 obj.entry("agent").or_insert_with(|| "cursor".into());
                 // Only here, once: after the first save the file no longer says
@@ -289,7 +291,16 @@ impl AiSettings {
                 }
             }
         }
-        serde_json::from_value(value)
+        let mut settings: AiSettings = serde_json::from_value(value)?;
+        if from_cursor {
+            // An agent's turn runs under the provider's timeout, so the
+            // provider takes the one Cursor's turns ran under.
+            let cursor = settings.timeout_for(agent_slug(AgentKind::Cursor));
+            settings
+                .timeouts
+                .insert(provider_slug(AiProvider::Anthropic).into(), cursor);
+        }
+        Ok(settings)
     }
 
     pub fn save(&self) -> Result<PathBuf, String> {
@@ -370,7 +381,10 @@ impl AiSettings {
     }
 
     pub fn get_timeout_seconds(&self, kind: AiProvider) -> u32 {
-        let slug = provider_slug(kind);
+        self.timeout_for(provider_slug(kind))
+    }
+
+    fn timeout_for(&self, slug: &str) -> u32 {
         self.timeouts
             .get(slug)
             .copied()
@@ -450,9 +464,39 @@ mod tests {
         );
         assert_eq!(s.get_cursor_key().as_deref(), Some("cur-1"));
         assert_eq!(s.get_model(AiProvider::Anthropic), "m1");
-        assert_eq!(s.get_timeout_seconds(AiProvider::Anthropic), 60);
         assert_eq!(s.theme.as_deref(), Some("dracula"));
         assert_eq!(s.caveman_level.as_deref(), Some("lite"));
+    }
+
+    /// A Cursor turn runs under the provider's timeout now, so a migrated
+    /// user's turns keep the one Cursor ran under, not Anthropic's.
+    #[test]
+    fn a_migrated_cursor_user_keeps_cursors_turn_timeout() {
+        let s = AiSettings::from_json(
+            r#"{"defaultProvider":"cursor","timeouts":{"cursor":300,"anthropic":30}}"#,
+        )
+        .unwrap();
+        assert_eq!(s.get_timeout_seconds(s.default_provider), 300);
+
+        let s = AiSettings::from_json(
+            r#"{"defaultProvider":"cursor","timeoutSeconds":200,"timeouts":{"anthropic":30}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            s.get_timeout_seconds(s.default_provider),
+            200,
+            "Cursor ran under the fallback"
+        );
+
+        let s = AiSettings::from_json(
+            r#"{"defaultProvider":"anthropic","timeouts":{"cursor":300,"anthropic":30}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            s.get_timeout_seconds(AiProvider::Anthropic),
+            30,
+            "only a migration moves it"
+        );
     }
 
     #[test]
