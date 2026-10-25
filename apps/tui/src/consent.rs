@@ -156,6 +156,7 @@ pub struct TuiConsent {
     context: String,
     timeout: Duration,
     waiting: Arc<AtomicUsize>,
+    turn: Option<tokio::sync::watch::Receiver<()>>,
 }
 
 impl TuiConsent {
@@ -166,11 +167,22 @@ impl TuiConsent {
             context: context.to_string(),
             timeout: CONSENT_TIMEOUT,
             waiting: Arc::new(AtomicUsize::new(0)),
+            turn: None,
         }
     }
 
     pub fn with_timeout(mut self, timeout: Duration) -> Self {
         self.timeout = timeout;
+        self
+    }
+
+    /// Deny what is still waiting once the turn is over, which is when the
+    /// sender of `turn` is dropped. A CLI agent's calls are answered by an
+    /// MCP server that outlives the turn's task by its graceful shutdown, so
+    /// without this a cancelled turn's prompt stayed up, and a `y` to it
+    /// still ran the call.
+    pub fn for_turn(mut self, turn: tokio::sync::watch::Receiver<()>) -> Self {
+        self.turn = Some(turn);
         self
     }
 
@@ -219,10 +231,22 @@ impl ConfirmPolicy for TuiConsent {
         if self.tx.send(AppEvent::AgentConsent(pending)).is_err() {
             return Decision::Denied("srectl could not show an approval prompt".into());
         }
-        match tokio::time::timeout(self.timeout, answer).await {
-            Ok(Ok(decision)) => decision,
-            Ok(Err(_)) => Decision::Denied("the approval prompt in srectl was closed".into()),
-            Err(_) => Decision::Denied(no_answer(self.timeout)),
+        let turn_over = async {
+            match self.turn.clone() {
+                // Nothing is ever sent: this ends when the sender is dropped.
+                Some(mut turn) => while turn.changed().await.is_ok() {},
+                None => std::future::pending().await,
+            }
+        };
+        // The losing branch is dropped, and with it the reply's receiver: the
+        // app sees the prompt closed and takes it off screen.
+        tokio::select! {
+            answered = tokio::time::timeout(self.timeout, answer) => match answered {
+                Ok(Ok(decision)) => decision,
+                Ok(Err(_)) => Decision::Denied("the approval prompt in srectl was closed".into()),
+                Err(_) => Decision::Denied(no_answer(self.timeout)),
+            },
+            () = turn_over => Decision::Denied("the turn was cancelled in srectl".into()),
         }
     }
 }

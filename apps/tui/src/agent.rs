@@ -601,20 +601,21 @@ pub async fn run_cli_agent_turn(turn: CliTurn) {
     let url = format!("http://127.0.0.1:{port}/mcp");
     let token = srelens_mcp::auth::Token::generate();
     let token_str = token.as_str().to_string();
-    let consent = crate::consent::TuiConsent::new(tx.clone(), kind.label(), &ctx);
+    // Dropped when the turn ends, however it ends, which stops the server and
+    // denies every prompt it still has open.
+    let (_turn_alive, turn_over) = tokio::sync::watch::channel(());
+    let consent = crate::consent::TuiConsent::new(tx.clone(), kind.label(), &ctx)
+        .for_turn(turn_over.clone());
     let waiting = consent.waiting();
     let registry = srelens_registry::build_registry_with_paths(cache, kubeconfig_paths);
     let server = McpServer::new(Arc::new(registry))
         .with_policy(Arc::new(consent))
         .with_kind_resolver(srelens_registry::kind_resolver());
-    // Dropped when the turn ends, however it ends, which stops the server.
-    let (_stop_server, stopped) = tokio::sync::oneshot::channel::<()>();
+    let mut stopped = turn_over;
     tokio::spawn(srelens_mcp::http::serve_http_with_shutdown(
         server,
         listener,
-        async move {
-            let _ = stopped.await;
-        },
+        async move { while stopped.changed().await.is_ok() {} },
         token,
     ));
 

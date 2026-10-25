@@ -502,6 +502,145 @@ async fn an_agent_that_fails_at_once_says_why_and_ends_the_turn() {
     );
 }
 
+/// A fake Claude Code that writes its argv to `argv.txt` in its directory,
+/// one entry per line and all at once, then stays alive until it is killed.
+fn fake_claude_that_waits(dir: &Path) -> PathBuf {
+    fake_claude(
+        dir,
+        concat!(
+            "@echo off\r\n",
+            "setlocal enabledelayedexpansion\r\n",
+            // `shift` moves %0 too, so the directory is taken first.
+            "set \"d=%~dp0\"\r\n",
+            ":next\r\n",
+            "if \"%~1\"==\"\" goto done\r\n",
+            "set \"arg=%~1\"\r\n",
+            "echo !arg!>> \"%d%argv.tmp\"\r\n",
+            "shift\r\n",
+            "goto next\r\n",
+            ":done\r\n",
+            "move /y \"%d%argv.tmp\" \"%d%argv.txt\" >nul\r\n",
+            "ping -n 60 127.0.0.1 >nul\r\n",
+        ),
+        concat!(
+            "d=\"$(dirname \"$0\")\"\n",
+            "printf '%s\\n' \"$@\" > \"$d/argv.tmp\" && mv \"$d/argv.tmp\" \"$d/argv.txt\"\n",
+            "exec sleep 60",
+        ),
+    )
+}
+
+/// The agent's MCP server, as the turn wrote it into the `--mcp-config` file
+/// named in `argv.txt`: its URL and its `Authorization` header value.
+async fn mcp_server_of(dir: &Path) -> (String, String) {
+    let argv_file = dir.join("argv.txt");
+    let argv = tokio::time::timeout(Duration::from_secs(20), async {
+        loop {
+            if let Ok(argv) = std::fs::read_to_string(&argv_file) {
+                return argv;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("the agent starts and records its command line");
+    let argv: Vec<&str> = argv.lines().map(str::trim).collect();
+    let at = argv
+        .iter()
+        .position(|a| *a == "--mcp-config")
+        .expect("Claude is given an --mcp-config file");
+    let config = std::fs::read_to_string(argv[at + 1]).expect("the config file is there");
+    let config: serde_json::Value = serde_json::from_str(&config).unwrap();
+    let server = &config["mcpServers"]["srelens"];
+    (
+        server["url"].as_str().unwrap().to_string(),
+        server["headers"]["Authorization"]
+            .as_str()
+            .unwrap()
+            .to_string(),
+    )
+}
+
+/// The whole consent path of a CLI turn, as the agent would drive it: the
+/// agent calls a write through the turn's MCP server, srectl asks the user,
+/// and when the turn is cancelled before anyone answers the call is denied
+/// and the prompt closes, so a late `y` can approve nothing.
+#[tokio::test]
+async fn a_cli_agents_write_asks_the_user_and_cancelling_the_turn_denies_it() {
+    let _settings = common::env::isolate_settings();
+    ensure_tls_provider();
+    let dir = tempfile::tempdir().unwrap();
+    let bin = fake_claude_that_waits(dir.path());
+    let (tx, mut rx) = unbounded_channel();
+    let turn = tokio::spawn(run_cli_agent_turn(cli_turn(
+        AgentKind::Claude,
+        &bin,
+        tx,
+        dir.path(),
+    )));
+
+    let (url, authorization) = mcp_server_of(dir.path()).await;
+    let call = tokio::spawn(async move {
+        let body = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {
+                "name": "k8s.deletePod",
+                "arguments": { "context": "kind-dev", "namespace": "payments", "name": "api-0" },
+            },
+        });
+        let response = reqwest::Client::new()
+            .post(url)
+            .header("Authorization", authorization)
+            .header("Content-Type", "application/json")
+            .body(body.to_string())
+            .send()
+            .await
+            .expect("the MCP server answers");
+        let status = response.status();
+        let body = response.text().await.unwrap();
+        (status, body)
+    });
+
+    let pending = tokio::time::timeout(Duration::from_secs(20), async {
+        loop {
+            match rx.recv().await.expect("the channel stays open") {
+                AppEvent::AgentConsent(pending) => return pending,
+                _ => continue,
+            }
+        }
+    })
+    .await
+    .expect("srectl is asked before the write runs");
+    assert_eq!(pending.request.tool, "k8s.deletePod");
+    assert_eq!(pending.agent, "Claude Code");
+    assert_eq!(pending.context, "kind-dev");
+    assert!(!pending.reply.is_closed(), "the call waits on the user");
+
+    turn.abort();
+    let _ = turn.await;
+
+    let closed = tokio::time::timeout(Duration::from_secs(10), async {
+        while !pending.reply.is_closed() {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await;
+    assert!(
+        closed.is_ok(),
+        "a cancelled turn closes its prompt rather than leaving it to be approved"
+    );
+    let (status, body) = tokio::time::timeout(Duration::from_secs(10), call)
+        .await
+        .expect("the call is answered once the turn is gone")
+        .unwrap();
+    assert!(status.is_success(), "{status}");
+    let answer: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(answer["result"]["isError"], true, "{answer}");
+    assert_eq!(answer["result"]["_meta"]["srelens/denied"], true, "{answer}");
+}
+
 /// Whether a chunk of the transcript on `kind-dev` says `text`.
 fn shows(results: &[(String, Result<String, String>)], text: &str) -> bool {
     results.iter().any(|(t, r)| {
