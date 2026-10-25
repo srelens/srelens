@@ -9173,6 +9173,32 @@ async fn enter_never_approves() {
     assert!(screen(&mut app).contains("[y] Approve"), "still asking");
 }
 
+/// Windows reports a key's release as well as its press. The release of the
+/// Ctrl+C that answered one prompt must not decline the next.
+#[tokio::test]
+async fn a_released_key_does_not_answer_a_prompt() {
+    use crossterm::event::KeyEventKind;
+    let _settings = common::env::isolate_settings();
+    let (mut app, _rx) = common::app().await;
+    app.consent_arm_delay = Duration::ZERO;
+    let (prompt, mut answer) = delete_pod_consent("api-0");
+    app.consents.push(prompt);
+
+    for released in [ch('y'), ch('n'), key(KeyCode::Esc), ctrl('c')] {
+        let released = KeyEvent {
+            kind: KeyEventKind::Release,
+            ..released
+        };
+        press(&mut app, released).await;
+        assert_eq!(
+            answer.try_recv(),
+            Err(TryRecvError::Empty),
+            "{released:?} answers nothing"
+        );
+    }
+    assert!(screen(&mut app).contains("[y] Approve"), "still asking");
+}
+
 #[tokio::test]
 async fn a_y_typed_ahead_in_the_assistant_does_not_approve() {
     let _settings = common::env::isolate_settings();

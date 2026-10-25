@@ -2588,7 +2588,13 @@ impl App {
         // An agent's approval prompt is drawn over everything and takes
         // every key until it is answered or gone. Ctrl+C there means stop:
         // decline, and cancel the turn that asked (srectl keeps running).
+        // Only presses answer: Windows also reports each key's release, and
+        // the release of the key that answered one prompt must not answer
+        // the next.
         if !self.consents.is_empty() {
+            if key.kind != crossterm::event::KeyEventKind::Press {
+                return;
+            }
             if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
                 if let Some(context) = self.consents.cancel() {
                     let turn = if context == self.active_context {
