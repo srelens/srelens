@@ -243,7 +243,7 @@ impl SettingsViewState {
         if self.agent_card_focused {
             self.selected_provider_idx = ALL_PROVIDERS.len() - 1;
             self.leave_agent_card();
-        } else if self.selected_provider_idx % ALL_PROVIDERS.len() == 0 {
+        } else if self.selected_provider_idx.is_multiple_of(ALL_PROVIDERS.len()) {
             self.focus_agent_card();
         } else {
             self.selected_provider_idx -= 1;
