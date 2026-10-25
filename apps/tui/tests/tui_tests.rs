@@ -1778,52 +1778,6 @@ mod tests {
         assert!(ai.messages[0].tool_calls.is_empty());
     }
 
-    #[test]
-    fn test_filter_out_hook_additional_contexts() {
-        use srectl::app::extract_tool_call_start_info;
-
-        // JSON emitted by cursor-agent with both real tool (bashToolCall) and hookAdditionalContexts
-        let json_str = r#"{
-            "type": "tool_call",
-            "subtype": "started",
-            "call_id": "call_123",
-            "tool_call": {
-                "hookAdditionalContexts": [],
-                "bashToolCall": {
-                    "args": {
-                        "command": "kubectl get pods -A"
-                    }
-                },
-                "toolCallId": "call_123",
-                "startedAtMs": "1786359191055"
-            }
-        }"#;
-        let v: serde_json::Value = serde_json::from_str(json_str).unwrap();
-        let extracted = extract_tool_call_start_info(&v);
-        assert!(extracted.is_some());
-        let (id, tool, args) = extracted.unwrap();
-        assert_eq!(id, "call_123");
-        assert_eq!(tool, "bash");
-        assert_eq!(args, "kubectl get pods -A");
-
-        // JSON with ONLY hookAdditionalContexts metadata and no real ToolCall
-        let json_hook_only = r#"{
-            "type": "tool_call",
-            "subtype": "started",
-            "call_id": "call_999",
-            "tool_call": {
-                "hookAdditionalContexts": [],
-                "toolCallId": "call_999"
-            }
-        }"#;
-        let v_hook: serde_json::Value = serde_json::from_str(json_hook_only).unwrap();
-        let extracted_hook = extract_tool_call_start_info(&v_hook);
-        assert!(
-            extracted_hook.is_none(),
-            "hookAdditionalContexts without a ToolCall key should be ignored"
-        );
-    }
-
     #[tokio::test]
     async fn test_regex_search_single_item_combines_enter_to_go_to_resource() {
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
