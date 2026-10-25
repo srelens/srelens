@@ -4198,6 +4198,52 @@ async fn agents_are_looked_for_where_the_app_is_told_not_on_the_process_path() {
     assert_eq!(result, Err("Codex is not installed".to_string()));
 }
 
+/// Sets its flag when dropped, as a turn's agent guard ends the agent.
+struct Ended(std::sync::Arc<std::sync::atomic::AtomicBool>);
+
+impl Drop for Ended {
+    fn drop(&mut self) {
+        self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+/// A turn that runs until it is stopped, and the flag its end sets.
+fn endless_turn() -> (
+    tokio::task::AbortHandle,
+    std::sync::Arc<std::sync::atomic::AtomicBool>,
+) {
+    let ended = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let guard = Ended(ended.clone());
+    let task = tokio::spawn(async move {
+        let _guard = guard;
+        std::future::pending::<()>().await;
+    });
+    (task.abort_handle(), ended)
+}
+
+/// On exit srectl removes its Cursor chat root, which a live agent may be
+/// running in (on Windows a directory in use cannot be removed): every turn,
+/// in the open context and in the background, has ended first.
+#[tokio::test]
+async fn stopping_the_assistant_turns_ends_every_one_before_returning() {
+    use std::sync::atomic::Ordering;
+    let _settings = common::env::isolate_settings();
+    let (mut app, _rx) = common::app().await;
+    let (here, here_ended) = endless_turn();
+    let (there, there_ended) = endless_turn();
+    app.assistant_state.task = Some(here);
+    let mut background =
+        srectl::views::assistant_view::AssistantViewState::for_context("other-cluster");
+    background.task = Some(there);
+    app.assistant_states
+        .insert("other-cluster".to_string(), background);
+
+    app.stop_assistant_turns().await;
+
+    assert!(here_ended.load(Ordering::SeqCst), "the open context's turn");
+    assert!(there_ended.load(Ordering::SeqCst), "a background turn");
+}
+
 #[tokio::test]
 async fn clearing_the_conversation_starts_the_agent_afresh() {
     use srelens_agent::adapter::AgentKind;

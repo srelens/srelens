@@ -8538,6 +8538,26 @@ impl App {
         }
     }
 
+    /// Stop every Assistant turn, the open context's and the background
+    /// ones', and wait (a few seconds at most) until each has ended, its
+    /// agent process with it: on exit srectl then removes the Cursor chat
+    /// root, which a live agent may still be running in.
+    pub async fn stop_assistant_turns(&mut self) {
+        let turns: Vec<_> = std::iter::once(&mut self.assistant_state)
+            .chain(self.assistant_states.values_mut())
+            .filter_map(|ai| ai.task.take())
+            .collect();
+        for turn in &turns {
+            turn.abort();
+        }
+        // A turn's task is finished once its future, and so its agent guard
+        // (which ends the agent's process tree), has been dropped.
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while turns.iter().any(|turn| !turn.is_finished()) && std::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
     pub fn cancel_assistant_turn(&mut self) {
         let ai = &mut self.assistant_state;
         if ai.is_busy {

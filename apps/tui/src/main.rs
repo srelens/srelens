@@ -786,6 +786,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     disable_raw_mode()?;
     execute!(terminal.backend_mut(), LeaveAlternateScreen, DisableMouseCapture, DisableBracketedPaste)?;
     terminal.show_cursor()?;
+    // No agent may still be running in the chat root it removes.
+    app.stop_assistant_turns().await;
     crate::agent::cleanup_process_cursor_chats();
 
     Ok(())
