@@ -1353,12 +1353,18 @@ pub fn render_feature_banner_modal(
     let inner = block.inner(modal_area);
     f.render_widget(block, modal_area);
 
+    let (header_len, list_min) = if inner.height < 25 {
+        (3, Constraint::Min(8))
+    } else {
+        (4, Constraint::Min(16))
+    };
+
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(4), // Top description & update alert, with a wrap row
-            Constraint::Min(16),   // Features list
-            Constraint::Length(3), // Checkbox and key hints
+            Constraint::Length(header_len), // Top description & update alert
+            list_min,                       // Features list
+            Constraint::Length(3),          // Checkbox and key hints
         ])
         .split(inner);
 
@@ -1561,69 +1567,187 @@ pub fn render_feature_banner_modal(
         ("[u]", ":update", "[Self Update]", update_desc, ":update"),
     ];
 
-    let items: Vec<ListItem> = features
-        .iter()
-        .map(|(num, cmd, cat, desc, syntax)| {
-            let (num_style, cmd_style) = if *cmd == ":update" && update_available.is_some() {
-                (
-                    Style::default()
-                        .fg(Theme::yellow())
-                        .add_modifier(Modifier::BOLD),
-                    Style::default()
-                        .fg(Theme::yellow())
-                        .add_modifier(Modifier::BOLD),
-                )
-            } else {
-                (
-                    Style::default()
-                        .fg(Theme::cyan())
-                        .add_modifier(Modifier::BOLD),
-                    Style::default()
-                        .fg(Theme::yellow())
-                        .add_modifier(Modifier::BOLD),
-                )
-            };
+    let use_two_columns = chunks[1].height < 16;
 
-            let prefix_w = 4 + 13 + 15; // num (4) + cmd (13) + cat (15)
-            let mut spans = vec![
-                Span::styled(format!("{num} "), num_style),
-                Span::styled(format!("{:<13}", cmd), cmd_style),
-                Span::styled(
-                    format!("{:<15}", cat),
+    let items: Vec<ListItem> = if use_two_columns {
+        let half = (features.len() + 1) / 2;
+        let col_w = (inner_w.saturating_sub(3)) / 2;
+
+        (0..half)
+            .map(|i| {
+                let mut spans = Vec::new();
+
+                // Left column
+                let (num_l, cmd_l, cat_l, desc_l, _) = &features[i];
+                let (num_style_l, cmd_style_l) =
+                    if *cmd_l == ":update" && update_available.is_some() {
+                        (
+                            Style::default()
+                                .fg(Theme::yellow())
+                                .add_modifier(Modifier::BOLD),
+                            Style::default()
+                                .fg(Theme::yellow())
+                                .add_modifier(Modifier::BOLD),
+                        )
+                    } else {
+                        (
+                            Style::default()
+                                .fg(Theme::cyan())
+                                .add_modifier(Modifier::BOLD),
+                            Style::default()
+                                .fg(Theme::yellow())
+                                .add_modifier(Modifier::BOLD),
+                        )
+                    };
+
+                spans.push(Span::styled(format!("{num_l} "), num_style_l));
+                spans.push(Span::styled(format!("{:<11}", cmd_l), cmd_style_l));
+                spans.push(Span::styled(
+                    format!("{:<13}", cat_l),
                     Style::default()
                         .fg(Theme::accent())
                         .add_modifier(Modifier::BOLD),
-                ),
-            ];
-
-            if inner_w >= 110 {
-                let syntax_str = format!("  ({})", syntax);
-                let avail_desc = inner_w.saturating_sub(prefix_w + syntax_str.len());
-                let clean_desc = if desc.chars().count() > avail_desc && avail_desc > 3 {
-                    let s: String = desc.chars().take(avail_desc - 3).collect();
-                    format!("{}...", s)
-                } else {
-                    desc.clone()
-                };
-                spans.push(Span::styled(
-                    format!("{:<avail_desc$}", clean_desc),
-                    Style::default().fg(Theme::fg()),
                 ));
-                spans.push(Span::styled(syntax_str, Style::default().fg(Theme::dim())));
-            } else {
-                let avail_desc = inner_w.saturating_sub(prefix_w);
-                let clean_desc = if desc.chars().count() > avail_desc && avail_desc > 3 {
-                    let s: String = desc.chars().take(avail_desc - 3).collect();
-                    format!("{}...", s)
-                } else {
-                    desc.clone()
-                };
-                spans.push(Span::styled(clean_desc, Style::default().fg(Theme::fg())));
-            }
 
-            ListItem::new(Line::from(spans))
-        })
-        .collect();
+                let prefix_l = 4 + 11 + 13;
+                if col_w > prefix_l + 4 {
+                    let avail_desc = col_w.saturating_sub(prefix_l);
+                    let clean_desc = if desc_l.chars().count() > avail_desc && avail_desc > 3 {
+                        let s: String = desc_l.chars().take(avail_desc - 3).collect();
+                        format!("{}...", s)
+                    } else {
+                        desc_l.clone()
+                    };
+                    spans.push(Span::styled(
+                        format!("{:<avail_desc$}", clean_desc),
+                        Style::default().fg(Theme::fg()),
+                    ));
+                } else if col_w > prefix_l {
+                    let pad = col_w.saturating_sub(prefix_l);
+                    spans.push(Span::raw(" ".repeat(pad)));
+                }
+
+                // Column separator
+                spans.push(Span::styled(" │ ", Style::default().fg(Theme::border())));
+
+                // Right column
+                if i + half < features.len() {
+                    let (num_r, cmd_r, cat_r, desc_r, _) = &features[i + half];
+                    let (num_style_r, cmd_style_r) =
+                        if *cmd_r == ":update" && update_available.is_some() {
+                            (
+                                Style::default()
+                                    .fg(Theme::yellow())
+                                    .add_modifier(Modifier::BOLD),
+                                Style::default()
+                                    .fg(Theme::yellow())
+                                    .add_modifier(Modifier::BOLD),
+                            )
+                        } else {
+                            (
+                                Style::default()
+                                    .fg(Theme::cyan())
+                                    .add_modifier(Modifier::BOLD),
+                                Style::default()
+                                    .fg(Theme::yellow())
+                                    .add_modifier(Modifier::BOLD),
+                            )
+                        };
+
+                    spans.push(Span::styled(format!("{num_r} "), num_style_r));
+                    spans.push(Span::styled(format!("{:<11}", cmd_r), cmd_style_r));
+                    spans.push(Span::styled(
+                        format!("{:<13}", cat_r),
+                        Style::default()
+                            .fg(Theme::accent())
+                            .add_modifier(Modifier::BOLD),
+                    ));
+
+                    let prefix_r = 4 + 11 + 13;
+                    let avail_r = inner_w.saturating_sub(col_w + 3);
+                    if avail_r > prefix_r + 4 {
+                        let avail_desc = avail_r.saturating_sub(prefix_r);
+                        let clean_desc = if desc_r.chars().count() > avail_desc && avail_desc > 3 {
+                            let s: String = desc_r.chars().take(avail_desc - 3).collect();
+                            format!("{}...", s)
+                        } else {
+                            desc_r.clone()
+                        };
+                        spans.push(Span::styled(
+                            format!("{:<avail_desc$}", clean_desc),
+                            Style::default().fg(Theme::fg()),
+                        ));
+                    }
+                }
+
+                ListItem::new(Line::from(spans))
+            })
+            .collect()
+    } else {
+        features
+            .iter()
+            .map(|(num, cmd, cat, desc, syntax)| {
+                let (num_style, cmd_style) = if *cmd == ":update" && update_available.is_some() {
+                    (
+                        Style::default()
+                            .fg(Theme::yellow())
+                            .add_modifier(Modifier::BOLD),
+                        Style::default()
+                            .fg(Theme::yellow())
+                            .add_modifier(Modifier::BOLD),
+                    )
+                } else {
+                    (
+                        Style::default()
+                            .fg(Theme::cyan())
+                            .add_modifier(Modifier::BOLD),
+                        Style::default()
+                            .fg(Theme::yellow())
+                            .add_modifier(Modifier::BOLD),
+                    )
+                };
+
+                let prefix_w = 4 + 13 + 15; // num (4) + cmd (13) + cat (15)
+                let mut spans = vec![
+                    Span::styled(format!("{num} "), num_style),
+                    Span::styled(format!("{:<13}", cmd), cmd_style),
+                    Span::styled(
+                        format!("{:<15}", cat),
+                        Style::default()
+                            .fg(Theme::accent())
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                ];
+
+                if inner_w >= 110 {
+                    let syntax_str = format!("  ({})", syntax);
+                    let avail_desc = inner_w.saturating_sub(prefix_w + syntax_str.len());
+                    let clean_desc = if desc.chars().count() > avail_desc && avail_desc > 3 {
+                        let s: String = desc.chars().take(avail_desc - 3).collect();
+                        format!("{}...", s)
+                    } else {
+                        desc.clone()
+                    };
+                    spans.push(Span::styled(
+                        format!("{:<avail_desc$}", clean_desc),
+                        Style::default().fg(Theme::fg()),
+                    ));
+                    spans.push(Span::styled(syntax_str, Style::default().fg(Theme::dim())));
+                } else {
+                    let avail_desc = inner_w.saturating_sub(prefix_w);
+                    let clean_desc = if desc.chars().count() > avail_desc && avail_desc > 3 {
+                        let s: String = desc.chars().take(avail_desc - 3).collect();
+                        format!("{}...", s)
+                    } else {
+                        desc.clone()
+                    };
+                    spans.push(Span::styled(clean_desc, Style::default().fg(Theme::fg())));
+                }
+
+                ListItem::new(Line::from(spans))
+            })
+            .collect()
+    };
 
     f.render_widget(List::new(items), chunks[1]);
 

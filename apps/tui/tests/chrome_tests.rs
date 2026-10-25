@@ -2659,6 +2659,59 @@ fn feature_banner_modal_renders_all_highlighted_features_and_toggle_state() {
 }
 
 #[test]
+fn feature_banner_modal_renders_all_features_on_standard_80x24_terminal() {
+    let modal_enabled = Modal::FeatureBanner {
+        show_on_startup: true,
+        update_available: None,
+    };
+    let text = modal_text(80, 24, &modal_enabled);
+
+    assert!(text.contains("Welcome to srectl — Feature Highlights"));
+    assert!(text.contains(":helm"), "shows helm on 80x24");
+    assert!(text.contains(":overview"), "shows overview on 80x24");
+    assert!(text.contains(":gpuinfo"), "shows gpuinfo on 80x24");
+    assert!(text.contains(":workloads"), "shows workloads on 80x24");
+    assert!(text.contains(":argo"), "shows argo on 80x24");
+    assert!(text.contains(":ai"), "shows ai on 80x24");
+    assert!(text.contains(":ai-settings"), "shows ai-settings on 80x24");
+    assert!(text.contains(":config"), "shows config on 80x24");
+    assert!(text.contains(":banner"), "shows banner on 80x24");
+    assert!(text.contains(":nodes"), "shows nodes on 80x24");
+    assert!(text.contains(":bgp"), "shows bgp on 80x24");
+    assert!(text.contains(":page"), "shows page on 80x24");
+    assert!(text.contains(":import"), "shows import on 80x24");
+    assert!(text.contains(":contexts"), "shows contexts on 80x24");
+    assert!(text.contains(":top"), "shows top on 80x24");
+    assert!(text.contains(":update"), "shows update on 80x24");
+    assert!(text.contains("[c]"), "shows contexts shortcut on 80x24");
+    assert!(text.contains("[h]"), "shows top shortcut on 80x24");
+    assert!(
+        text.contains("Show this feature banner on startup"),
+        "shows footer checkbox on 80x24"
+    );
+}
+
+#[test]
+fn feature_banner_modal_renders_all_features_on_compact_100x25_terminal() {
+    let modal_enabled = Modal::FeatureBanner {
+        show_on_startup: true,
+        update_available: None,
+    };
+    let text = modal_text(100, 25, &modal_enabled);
+
+    assert!(text.contains("Welcome to srectl — Feature Highlights"));
+    assert!(text.contains(":contexts"), "shows contexts on 100x25");
+    assert!(text.contains(":top"), "shows top on 100x25");
+    assert!(text.contains(":update"), "shows update on 100x25");
+    assert!(text.contains("[c]"), "shows contexts shortcut on 100x25");
+    assert!(text.contains("[h]"), "shows top shortcut on 100x25");
+    assert!(
+        text.contains("Show this feature banner on startup"),
+        "shows footer checkbox on 100x25"
+    );
+}
+
+#[test]
 fn feature_banner_modal_renders_update_available_alert_and_version() {
     let modal_update = Modal::FeatureBanner {
         show_on_startup: true,
