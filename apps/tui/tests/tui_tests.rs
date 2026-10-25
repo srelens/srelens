@@ -1087,6 +1087,84 @@ mod tests {
         assert_eq!(picker.target, PickerTarget::Agent(AgentKind::Claude));
     }
 
+    #[tokio::test]
+    async fn cursors_api_key_is_set_and_cleared_on_the_agent_card_and_shown_masked() {
+        use crossterm::event::KeyCode;
+        use srectl::views::SettingField;
+        use srelens_agent::adapter::AgentKind;
+        const KEY: &str = "cur-test-key-0123456789";
+        let mut settings = crate::common::env::isolate_settings();
+        settings.remove_env("CURSOR_API_KEY");
+        let (mut app, _rx) = crate::common::app().await;
+        open_settings(&mut app).await;
+        match &mut app.active_view {
+            srectl::app::ActiveView::Settings(s) => s.settings.agent = AgentKind::Claude,
+            _ => panic!("expected the settings view"),
+        }
+        app.handle_key_event(crate::common::ch('k')).await;
+
+        // Claude Code has no key of its own here: Agent and Model only.
+        app.handle_key_event(crate::common::key(KeyCode::Tab)).await;
+        app.handle_key_event(crate::common::key(KeyCode::Tab)).await;
+        assert_eq!(settings_view(&app).selected_field, SettingField::Agent);
+        let screen = crate::common::render_app(&mut app, 160, 40);
+        assert!(!screen.contains("cursor auth"), "{screen}");
+
+        // Cursor's card has its API Key, after its Model.
+        match &mut app.active_view {
+            srectl::app::ActiveView::Settings(s) => s.settings.agent = AgentKind::Cursor,
+            _ => panic!("expected the settings view"),
+        }
+        let screen = crate::common::render_app(&mut app, 160, 40);
+        assert!(
+            screen.contains("API Key: auto (uses logged-in cursor auth or CURSOR_API_KEY)"),
+            "{screen}"
+        );
+        app.handle_key_event(crate::common::key(KeyCode::Tab)).await;
+        app.handle_key_event(crate::common::key(KeyCode::Tab)).await;
+        assert_eq!(settings_view(&app).selected_field, SettingField::ApiKey);
+
+        app.handle_key_event(crate::common::ch('e')).await;
+        assert!(settings_view(&app).is_editing);
+        crate::common::type_str(&mut app, KEY).await;
+        app.handle_key_event(crate::common::key(KeyCode::Enter))
+            .await;
+        assert_eq!(app.ai_settings.get_cursor_key().as_deref(), Some(KEY));
+        let saved = std::fs::read_to_string(srectl::AiSettings::config_path()).unwrap();
+        let saved = srectl::AiSettings::from_json(&saved).unwrap();
+        assert_eq!(saved.api_keys.get("cursor").map(String::as_str), Some(KEY));
+        let screen = crate::common::render_app(&mut app, 160, 40);
+        assert!(
+            screen.contains("API Key: cur-••••••••6789 [stored in config]"),
+            "{screen}"
+        );
+        assert!(!screen.contains(KEY), "the key is never shown whole");
+
+        // An empty value clears it.
+        app.handle_key_event(crate::common::ch('e')).await;
+        for _ in 0..KEY.len() {
+            app.handle_key_event(crate::common::key(KeyCode::Backspace))
+                .await;
+        }
+        app.handle_key_event(crate::common::key(KeyCode::Enter))
+            .await;
+        assert_eq!(app.ai_settings.api_keys.get("cursor"), None);
+
+        // Set in the environment instead, it is named, not shown.
+        settings.set_env("CURSOR_API_KEY", KEY);
+        let screen = crate::common::render_app(&mut app, 160, 40);
+        assert!(
+            screen.contains("API Key: [env: CURSOR_API_KEY set]"),
+            "{screen}"
+        );
+        assert!(!screen.contains(KEY), "{screen}");
+
+        // Space from the key steps to an agent without one: back on Agent.
+        app.handle_key_event(crate::common::ch(' ')).await;
+        assert_eq!(app.ai_settings.agent, AgentKind::Srelens);
+        assert_eq!(settings_view(&app).selected_field, SettingField::Agent);
+    }
+
     const CLAUDE_URL: &str = "https://docs.anthropic.com/en/docs/claude-code/setup";
 
     /// The Settings view with Claude Code as the agent and no agent CLI

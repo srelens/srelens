@@ -12,7 +12,7 @@ use std::sync::LazyLock;
 use srelens_agent::adapter::{valid_model_id, AgentKind, ModelChoice};
 
 use crate::ai_config::{
-    agent_install_url, default_base_url_for_provider, default_model_for_provider,
+    agent_install_url, agent_slug, default_base_url_for_provider, default_model_for_provider,
     env_var_for_provider, find_agent_in, provider_display_name, provider_slug, AiProvider,
     AiSettings, ALL_PROVIDERS,
 };
@@ -271,7 +271,43 @@ impl SettingsViewState {
         let at = AGENTS.iter().position(|&a| a == self.settings.agent);
         let next = AGENTS[(at.unwrap_or(0) + 1) % AGENTS.len()];
         self.settings.agent = next;
+        if !self.agent_card_fields().contains(&self.selected_field) {
+            self.selected_field = SettingField::Agent;
+        }
         next
+    }
+
+    /// The Agent card's fields: the agent and its model, and for Cursor its
+    /// own API key.
+    fn agent_card_fields(&self) -> &'static [SettingField] {
+        if self.settings.agent == AgentKind::Cursor {
+            &[
+                SettingField::Agent,
+                SettingField::Model,
+                SettingField::ApiKey,
+            ]
+        } else {
+            &[SettingField::Agent, SettingField::Model]
+        }
+    }
+
+    /// Where an API key being edited is kept: the focused provider's, or on
+    /// the Agent card the active agent's (only Cursor has one).
+    fn key_slug(&self) -> &'static str {
+        if self.agent_card_focused {
+            agent_slug(self.settings.agent)
+        } else {
+            provider_slug(self.current_provider())
+        }
+    }
+
+    /// What the field being edited belongs to, for the edit box's title.
+    fn editing_for(&self) -> &'static str {
+        if self.agent_card_focused {
+            self.settings.agent.label()
+        } else {
+            provider_display_name(self.current_provider())
+        }
     }
 
     /// What the Agent card's Model field picks from: the active local agent's
@@ -283,12 +319,16 @@ impl SettingsViewState {
         }
     }
 
-    /// The card has two fields, so either direction flips between them.
-    fn toggle_agent_card_field(&mut self) {
-        self.selected_field = match self.selected_field {
-            SettingField::Agent => SettingField::Model,
-            _ => SettingField::Agent,
-        };
+    /// The next of the card's fields (`forward`) or the previous, round.
+    fn step_agent_card_field(&mut self, forward: bool) {
+        let fields = self.agent_card_fields();
+        let n = fields.len();
+        let at = fields
+            .iter()
+            .position(|f| *f == self.selected_field)
+            .unwrap_or(0);
+        let next = if forward { at + 1 } else { at + n - 1 };
+        self.selected_field = fields[next % n];
     }
 
     pub fn select_next_field(&mut self) {
@@ -296,7 +336,7 @@ impl SettingsViewState {
             return;
         }
         if self.agent_card_focused {
-            return self.toggle_agent_card_field();
+            return self.step_agent_card_field(true);
         }
         let is_custom = self.current_provider() == AiProvider::OpenAiCompatible;
         self.selected_field = match self.selected_field {
@@ -319,7 +359,7 @@ impl SettingsViewState {
             return;
         }
         if self.agent_card_focused {
-            return self.toggle_agent_card_field();
+            return self.step_agent_card_field(false);
         }
         let is_custom = self.current_provider() == AiProvider::OpenAiCompatible;
         self.selected_field = match self.selected_field {
@@ -343,7 +383,6 @@ impl SettingsViewState {
 
     pub fn start_editing(&mut self) {
         let provider = self.current_provider();
-        let slug = provider_slug(provider);
         self.edit_buffer = match self.selected_field {
             SettingField::ProviderToggle => {
                 self.set_active_provider();
@@ -354,7 +393,7 @@ impl SettingsViewState {
             SettingField::ApiKey => self
                 .settings
                 .api_keys
-                .get(slug)
+                .get(self.key_slug())
                 .cloned()
                 .unwrap_or_default(),
             SettingField::Model => self.settings.get_model(provider),
@@ -372,6 +411,7 @@ impl SettingsViewState {
         match self.selected_field {
             SettingField::ProviderToggle | SettingField::Agent => {}
             SettingField::ApiKey => {
+                let slug = self.key_slug().to_string();
                 if val.is_empty() {
                     self.settings.api_keys.remove(&slug);
                 } else {
@@ -541,12 +581,36 @@ fn with_status(
     }
 }
 
+/// An API key as a settings card shows it: masked when stored, the variable
+/// it comes from when set in the environment, else `unset`.
+fn key_display(stored: Option<&String>, env_var: &str, unset: Span<'static>) -> Span<'static> {
+    if let Some(k) = stored.filter(|s| !s.trim().is_empty()) {
+        let masked = if k.len() > 8 {
+            format!("{}••••••••{}", &k[..4], &k[k.len() - 4..])
+        } else {
+            "••••••••".to_string()
+        };
+        Span::styled(
+            format!("{} [stored in config]", masked),
+            Style::default().fg(Theme::GREEN),
+        )
+    } else if std::env::var(env_var).is_ok() {
+        Span::styled(
+            format!("[env: {} set]", env_var),
+            Style::default().fg(Theme::CYAN),
+        )
+    } else {
+        unset
+    }
+}
+
 /// The full card: a row per agent with whether its CLI is installed, then
-/// the active agent's model.
+/// the active agent's model, and Cursor's own API key.
 fn full_agent_lines(state: &SettingsViewState, width: usize) -> Vec<Line<'static>> {
     let on_card = state.agent_card_focused;
     let agent_focus = on_card && state.selected_field == SettingField::Agent;
     let model_focus = on_card && state.selected_field == SettingField::Model;
+    let key_focus = on_card && state.selected_field == SettingField::ApiKey;
     let mut lines: Vec<Line<'static>> = AGENTS
         .iter()
         .flat_map(|&kind| {
@@ -577,6 +641,20 @@ fn full_agent_lines(state: &SettingsViewState, width: usize) -> Vec<Line<'static
         Span::styled("   Model:   ", label_style(model_focus)),
         Span::styled(agent_model(state), value_style(model_focus)),
     ]));
+    if state.settings.agent == AgentKind::Cursor {
+        let unset = Span::styled(
+            "auto (uses logged-in cursor auth or CURSOR_API_KEY)",
+            Style::default().fg(Theme::DIM),
+        );
+        lines.push(Line::from(vec![
+            Span::styled("   API Key: ", label_style(key_focus)),
+            key_display(
+                state.settings.api_keys.get(agent_slug(AgentKind::Cursor)),
+                "CURSOR_API_KEY",
+                unset,
+            ),
+        ]));
+    }
     lines
 }
 
@@ -743,25 +821,7 @@ pub fn render_settings_view(f: &mut Frame, area: Rect, state: &SettingsViewState
             Style::default().fg(Theme::DIM)
         };
 
-        let raw_key = state.settings.api_keys.get(provider_slug(provider));
-        let env_key = std::env::var(env_var_for_provider(provider)).ok();
-
-        let key_value_display = if let Some(k) = raw_key.filter(|s| !s.trim().is_empty()) {
-            let masked = if k.len() > 8 {
-                format!("{}••••••••{}", &k[..4], &k[k.len() - 4..])
-            } else {
-                "••••••••".to_string()
-            };
-            Span::styled(
-                format!("{} [stored in config]", masked),
-                Style::default().fg(Theme::GREEN),
-            )
-        } else if env_key.is_some() {
-            Span::styled(
-                format!("[env: {} set]", env_var_for_provider(provider)),
-                Style::default().fg(Theme::CYAN),
-            )
-        } else if provider == AiProvider::OpenAiCompatible {
+        let unset = if provider == AiProvider::OpenAiCompatible {
             Span::styled("optional (local Ollama)", Style::default().fg(Theme::DIM))
         } else {
             Span::styled(
@@ -772,6 +832,11 @@ pub fn render_settings_view(f: &mut Frame, area: Rect, state: &SettingsViewState
                 Style::default().fg(Theme::RED),
             )
         };
+        let key_value_display = key_display(
+            state.settings.api_keys.get(provider_slug(provider)),
+            env_var_for_provider(provider),
+            unset,
+        );
 
         // Field 2: Model Display
         let model_focus = is_selected_provider && state.selected_field == SettingField::Model;
@@ -918,11 +983,7 @@ pub fn render_settings_view(f: &mut Frame, area: Rect, state: &SettingsViewState
         let edit_block = Block::default()
             .borders(Borders::ALL)
             .border_style(Style::default().fg(Theme::YELLOW))
-            .title(format!(
-                " Edit {} for {} ",
-                field_name,
-                provider_display_name(state.current_provider())
-            ));
+            .title(format!(" Edit {} for {} ", field_name, state.editing_for()));
 
         let edit_inner = edit_block.inner(edit_area);
         f.render_widget(edit_block, edit_area);

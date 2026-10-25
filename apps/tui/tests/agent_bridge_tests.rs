@@ -638,7 +638,10 @@ async fn a_cli_agents_write_asks_the_user_and_cancelling_the_turn_denies_it() {
     assert!(status.is_success(), "{status}");
     let answer: serde_json::Value = serde_json::from_str(&body).unwrap();
     assert_eq!(answer["result"]["isError"], true, "{answer}");
-    assert_eq!(answer["result"]["_meta"]["srelens/denied"], true, "{answer}");
+    assert_eq!(
+        answer["result"]["_meta"]["srelens/denied"], true,
+        "{answer}"
+    );
 }
 
 /// Whether a chunk of the transcript on `kind-dev` says `text`.

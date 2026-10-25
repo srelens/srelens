@@ -6955,9 +6955,10 @@ impl App {
                         KeyCode::BackTab | KeyCode::Left | KeyCode::Char('h') => {
                             settings.select_prev_field()
                         }
-                        // On the Agent card, Space steps the agent from either
-                        // of its fields; `e`/Enter steps it from the Agent
-                        // field and lists models from the Model field.
+                        // On the Agent card, Space steps the agent from any of
+                        // its fields; `e`/Enter steps it from the Agent field,
+                        // lists models from the Model field, and edits
+                        // Cursor's API Key like a provider's.
                         KeyCode::Char(' ' | 'e') | KeyCode::Enter
                             if settings.agent_card_focused
                                 && (key.code == KeyCode::Char(' ')
@@ -6976,7 +6977,10 @@ impl App {
                                 ),
                             }
                         }
-                        KeyCode::Char('e') | KeyCode::Enter if settings.agent_card_focused => {
+                        KeyCode::Char('e') | KeyCode::Enter
+                            if settings.agent_card_focused
+                                && settings.selected_field == SettingField::Model =>
+                        {
                             let target = settings.agent_picker_target();
                             self.open_model_picker(target);
                         }

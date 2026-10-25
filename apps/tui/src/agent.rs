@@ -604,8 +604,8 @@ pub async fn run_cli_agent_turn(turn: CliTurn) {
     // Dropped when the turn ends, however it ends, which stops the server and
     // denies every prompt it still has open.
     let (_turn_alive, turn_over) = tokio::sync::watch::channel(());
-    let consent = crate::consent::TuiConsent::new(tx.clone(), kind.label(), &ctx)
-        .for_turn(turn_over.clone());
+    let consent =
+        crate::consent::TuiConsent::new(tx.clone(), kind.label(), &ctx).for_turn(turn_over.clone());
     let waiting = consent.waiting();
     let registry = srelens_registry::build_registry_with_paths(cache, kubeconfig_paths);
     let server = McpServer::new(Arc::new(registry))
