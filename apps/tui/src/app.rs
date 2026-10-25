@@ -9177,6 +9177,11 @@ impl App {
             return;
         }
         if let ActiveView::Settings(ref mut settings) = self.active_view {
+            if let Some(picker) = settings.picker.as_mut() {
+                picker.query.push_str(&text.replace(['\r', '\n'], ""));
+                picker.selected = 0;
+                return;
+            }
             if settings.is_editing {
                 let cleaned = text.replace("\r\n", "").replace('\n', "");
                 settings.edit_buffer.push_str(&cleaned);

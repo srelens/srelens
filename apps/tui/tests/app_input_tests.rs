@@ -4553,6 +4553,32 @@ async fn a_failed_list_still_lets_you_type_a_model() {
 }
 
 #[tokio::test]
+async fn a_paste_into_the_picker_filters_by_the_pasted_id() {
+    let mut settings = common::env::isolate_settings();
+    settings.remove_env("ANTHROPIC_API_KEY");
+    let (mut app, _rx) = common::app().await;
+    open_settings_on_the_model_field(&mut app).await;
+    press(&mut app, ch('e')).await;
+    let list_key = picker(&app).key.clone();
+    app.handle_models_loaded(
+        &list_key,
+        Ok(vec![model("claude-a", "Claude A"), model("my-model", "")]),
+    );
+    press(&mut app, key(KeyCode::Down)).await;
+    assert_eq!(picker(&app).selected, 1);
+
+    app.handle_paste("my-model\r\n".to_string());
+
+    assert_eq!(picker(&app).query, "my-model");
+    assert_eq!(picker(&app).selected, 0, "the highlight goes back to the top");
+    press(&mut app, key(KeyCode::Enter)).await;
+    assert_eq!(
+        app.ai_settings.get_model(srectl::AiProvider::Anthropic),
+        "my-model"
+    );
+}
+
+#[tokio::test]
 async fn a_listed_model_picked_in_settings_is_what_the_agent_uses() {
     let mut settings = common::env::isolate_settings();
     settings.remove_env("ANTHROPIC_API_KEY");

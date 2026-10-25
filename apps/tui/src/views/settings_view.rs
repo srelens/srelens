@@ -66,17 +66,22 @@ static DEFAULT_MODEL: LazyLock<ModelChoice> = LazyLock::new(|| ModelChoice {
 
 impl ModelPicker {
     /// The rows the query matches (case-insensitive, in the id or the label);
-    /// an agent's list starts with Default.
+    /// an agent's list starts with Default. An id equal to the query comes
+    /// first, so Enter takes `llama3.2` over a `llama3.2:3b` listed above it.
     pub fn visible(&self) -> Vec<&ModelChoice> {
         let query = self.query.trim().to_lowercase();
         let default = matches!(self.target, PickerTarget::Agent(_)).then(|| &*DEFAULT_MODEL);
-        default
+        let mut rows: Vec<&ModelChoice> = default
             .into_iter()
             .chain(&self.items)
             .filter(|m| {
                 m.id.to_lowercase().contains(&query) || m.label.to_lowercase().contains(&query)
             })
-            .collect()
+            .collect();
+        if let Some(exact) = rows.iter().position(|m| m.id.to_lowercase() == query) {
+            rows[..=exact].rotate_right(1);
+        }
+        rows
     }
 
     /// The highlighted row's id (`None` for Default), or the typed id when no
@@ -1134,6 +1139,24 @@ mod tests {
         p.move_up();
         p.move_up();
         assert_eq!(p.choose(), Ok(Some("gpt-5.6-sol".to_string())));
+    }
+
+    #[test]
+    fn a_typed_id_listed_exactly_comes_first_ahead_of_longer_matches() {
+        for (items, query) in [
+            (["llama3.2:3b", "llama3.2"], "llama3.2"),
+            (["gpt-4o-audio-preview", "gpt-4o"], "GPT-4o"),
+        ] {
+            let mut p = picker(PickerTarget::Provider(AiProvider::OpenAiCompatible));
+            p.items = items.iter().map(|id| choice(id, "")).collect();
+            p.query = query.into();
+            assert_eq!(
+                p.choose(),
+                Ok(Some(query.to_lowercase())),
+                "{query} among {items:?}"
+            );
+            assert_eq!(ids(&p)[1], items[0], "the rest keep their order");
+        }
     }
 
     #[test]
