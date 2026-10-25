@@ -133,17 +133,16 @@ async fn test_all_views_render_narrow_and_wide_without_panic() {
             NARROW.1 as usize,
             "view {name} narrow height mismatch"
         );
-        // Header line must not be empty
+        // Header line must contain brand and context info
         assert!(
-            !narrow_lines[0].trim().is_empty(),
-            "view {name} rendered empty top header at 80x24"
+            narrow_lines[0].contains("SRELENS"),
+            "view {name} top header missing SRELENS brand at 80x24"
         );
-        // Status bar line (bottom 2 rows) must survive and not be blank
-        let bottom_has_content = !narrow_lines[NARROW.1 as usize - 1].trim().is_empty()
-            || !narrow_lines[NARROW.1 as usize - 2].trim().is_empty();
+        // Status bar content row (row height-1, independent of top divider) must contain key hints
+        let narrow_status_row = &narrow_lines[NARROW.1 as usize - 1];
         assert!(
-            bottom_has_content,
-            "view {name} status line was completely blank at 80x24"
+            !narrow_status_row.trim().is_empty() && narrow_status_row.contains('<'),
+            "view {name} status content row was blank or missing key hints at 80x24: '{narrow_status_row}'"
         );
 
         // Wide viewport: 200x50 wide terminal
@@ -154,14 +153,13 @@ async fn test_all_views_render_narrow_and_wide_without_panic() {
             "view {name} wide height mismatch"
         );
         assert!(
-            !wide_lines[0].trim().is_empty(),
-            "view {name} rendered empty top header at 200x50"
+            wide_lines[0].contains("SRELENS"),
+            "view {name} top header missing SRELENS brand at 200x50"
         );
-        let wide_bottom_has_content = !wide_lines[WIDE.1 as usize - 1].trim().is_empty()
-            || !wide_lines[WIDE.1 as usize - 2].trim().is_empty();
+        let wide_status_row = &wide_lines[WIDE.1 as usize - 1];
         assert!(
-            wide_bottom_has_content,
-            "view {name} status line was completely blank at 200x50"
+            !wide_status_row.trim().is_empty() && wide_status_row.contains('<'),
+            "view {name} status content row was blank or missing key hints at 200x50: '{wide_status_row}'"
         );
     }
 }
@@ -182,13 +180,19 @@ async fn test_modals_and_overlays_render_narrow_and_wide_without_panic() {
     }
     app.show_help = false;
 
-    // 2. Command Popup overlay
+    // 2. Command Popup overlay: assert popup-only box and suggestion list rendered above status bar
     app.input_mode = InputMode::Command;
     app.command_buffer = ":po".to_string();
     for &(w, h) in &[NARROW, WIDE] {
         let lines = common::render_lines(w, h, |f| app.render(f));
         assert_eq!(lines.len(), h as usize);
-        assert!(lines.iter().any(|l| l.contains(":po")));
+        // Must find popup header and suggestion content, not just the echoed input line
+        assert!(
+            lines.iter().any(|l| l.contains("Commands (Tab to complete")
+                || l.contains("▶ pods")
+                || l.contains("▶")),
+            "Command suggestion popup not rendered at {w}x{h}"
+        );
     }
     app.input_mode = InputMode::Normal;
     app.command_buffer.clear();
@@ -206,16 +210,22 @@ async fn test_modals_and_overlays_render_narrow_and_wide_without_panic() {
         assert!(lines.iter().any(|l| l.contains("Delete Pod")));
     }
 
-    // 4. Add Cluster Modal
+    // 4. Add Cluster Modal: assert modal-specific title and instruction content
     app.modal = Some(Modal::AddCluster {
         input: "server: https://127.0.0.1:6443".into(),
-        cursor_pos: 10,
+        cursor_pos: 0,
         error_message: None,
         preview_contexts: vec![],
     });
     for &(w, h) in &[NARROW, WIDE] {
         let lines = common::render_lines(w, h, |f| app.render(f));
         assert_eq!(lines.len(), h as usize);
+        assert!(
+            lines.iter().any(|l| l.contains("Kubeconfig")
+                || l.contains("127.0.0.1:6443")
+                || l.contains("Import Cluster")),
+            "AddCluster modal content not rendered at {w}x{h}"
+        );
     }
     app.modal = None;
 }
