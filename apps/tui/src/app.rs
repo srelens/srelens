@@ -12078,7 +12078,7 @@ impl App {
         };
         let key = match target {
             PickerTarget::Provider(p) => model_list::provider_cache_key(&settings.settings, p),
-            PickerTarget::Agent(kind) => model_list::agent_cache_key(kind),
+            PickerTarget::Agent(kind) => model_list::agent_cache_key(&settings.settings, kind),
         };
         let known = self.model_lists.get(&key).cloned();
         settings.open_picker(target, key.clone(), known.clone().flatten());

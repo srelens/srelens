@@ -16,19 +16,32 @@ use crate::ai_config::{agent_slug, provider_display_name, provider_slug, AiProvi
 /// How long a listing may take before the picker stops waiting for it.
 const LIST_TIMEOUT: Duration = Duration::from_secs(15);
 
-/// The cache key for `p`'s list: another base URL, or a key added or removed,
-/// is another list.
+/// The cache key for `p`'s list: another base URL, or another key (another
+/// account may list other models), is another list.
 pub fn provider_cache_key(settings: &AiSettings, p: AiProvider) -> String {
     format!(
-        "{}|{}|{}",
+        "{}|{}|{:?}",
         provider_slug(p),
         settings.get_base_url(p),
-        settings.get_api_key(p).is_some()
+        fingerprint(settings.get_api_key(p))
     )
 }
 
-pub fn agent_cache_key(kind: AgentKind) -> String {
-    format!("agent|{}", agent_slug(kind))
+/// The cache key for `kind`'s list; Cursor's depends on its key too.
+pub fn agent_cache_key(settings: &AiSettings, kind: AgentKind) -> String {
+    let key = (kind == AgentKind::Cursor)
+        .then(|| settings.get_cursor_key())
+        .flatten();
+    format!("agent|{}|{:?}", agent_slug(kind), fingerprint(key))
+}
+
+/// Tells keys apart without holding one: hashed with a salt picked once per
+/// run, so the value means nothing outside this process.
+fn fingerprint(secret: Option<String>) -> Option<u64> {
+    use std::hash::BuildHasher;
+    static SALT: std::sync::OnceLock<std::collections::hash_map::RandomState> =
+        std::sync::OnceLock::new();
+    secret.map(|s| SALT.get_or_init(Default::default).hash_one(s))
 }
 
 /// `p`'s models from its own models endpoint, with the configured key and

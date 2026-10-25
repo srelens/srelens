@@ -4616,7 +4616,11 @@ async fn a_paste_into_the_picker_filters_by_the_pasted_id() {
     app.handle_paste("my-model\r\n".to_string());
 
     assert_eq!(picker(&app).query, "my-model");
-    assert_eq!(picker(&app).selected, 0, "the highlight goes back to the top");
+    assert_eq!(
+        picker(&app).selected,
+        0,
+        "the highlight goes back to the top"
+    );
     press(&mut app, key(KeyCode::Enter)).await;
     assert_eq!(
         app.ai_settings.get_model(srectl::AiProvider::Anthropic),
@@ -4761,7 +4765,7 @@ async fn a_provider_without_a_key_says_so_without_calling_out() {
 }
 
 #[tokio::test]
-async fn a_provider_list_is_kept_per_base_url_and_key_presence() {
+async fn a_provider_list_is_kept_per_base_url_and_key() {
     use srectl::model_list::provider_cache_key;
     use srectl::AiProvider::OpenAi;
     let mut settings = common::env::isolate_settings();
@@ -4774,15 +4778,36 @@ async fn a_provider_list_is_kept_per_base_url_and_key_presence() {
     assert_ne!(no_key, with_key);
     assert!(!with_key.contains("sk-test"), "never the key itself");
     s.api_keys.insert("openai".into(), "sk-test-two".into());
-    assert_eq!(
+    assert_ne!(
         provider_cache_key(&s, OpenAi),
         with_key,
-        "only its presence"
+        "another account may list other models"
     );
+    s.api_keys.insert("openai".into(), "sk-test-one".into());
+    assert_eq!(provider_cache_key(&s, OpenAi), with_key);
 
     s.base_urls
         .insert("openai".into(), "https://proxy.example/v1".into());
     assert_ne!(provider_cache_key(&s, OpenAi), with_key);
+}
+
+#[tokio::test]
+async fn cursors_list_is_kept_per_cursor_key() {
+    use srectl::model_list::agent_cache_key;
+    use srelens_agent::adapter::AgentKind::{Codex, Cursor};
+    let mut settings = common::env::isolate_settings();
+    settings.remove_env("CURSOR_API_KEY");
+    let mut s = srectl::AiSettings::default();
+    let no_key = agent_cache_key(&s, Cursor);
+    let codex = agent_cache_key(&s, Codex);
+
+    s.api_keys.insert("cursor".into(), "cur-test-one".into());
+    let one = agent_cache_key(&s, Cursor);
+    assert_ne!(no_key, one);
+    assert!(!one.contains("cur-test"), "never the key itself");
+    s.api_keys.insert("cursor".into(), "cur-test-two".into());
+    assert_ne!(agent_cache_key(&s, Cursor), one);
+    assert_eq!(agent_cache_key(&s, Codex), codex, "not Cursor's key");
 }
 
 // ---------------------------------------------------------------------------
