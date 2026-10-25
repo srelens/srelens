@@ -1,6 +1,7 @@
 //! Per-agent identity and command construction. Pure: given a resolved binary
 //! path, a server URL and a token, produce the argv and MCP-config file the CLI
-//! needs. Spawning and PATH detection live in the desktop crate.
+//! needs. Finding the binary and spawning it are each app's (the desktop
+//! and srectl).
 
 use serde::{Deserialize, Serialize};
 
@@ -78,12 +79,12 @@ impl McpConfig {
     }
 }
 
-/// A resolved command line, ready for the desktop crate to spawn.
+/// A resolved command line, ready for an app to spawn.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AgentCommand {
     pub program: String,
     pub args: Vec<String>,
-    /// Environment variables the desktop must set on the child process.
+    /// Environment variables the app must set on the child process.
     /// Used for secrets (e.g. Codex's MCP bearer token) that must never
     /// appear in argv, where they'd be visible to anyone who can list
     /// processes on the machine.
@@ -323,7 +324,7 @@ fn escape_toml_string(s: &str) -> String {
     s.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
-/// The environment variable name the desktop must set on the Codex child
+/// The environment variable name the app must set on the Codex child
 /// process to carry the MCP bearer token. Never passed via argv (see
 /// `codex_command`).
 pub const CODEX_TOKEN_ENV: &str = "SRELENS_MCP_TOKEN";
@@ -474,9 +475,10 @@ fn codex_boxed(
     }
 }
 
-/// Environment variable the desktop sets to point the Cursor CLI at a
-/// per-chat config directory instead of its real `~/.cursor` config. The
-/// desktop rewrites `cursor_cli_config_json()` there before every turn
+/// Environment variable set on the Cursor CLI to point it at a per-chat
+/// config directory instead of its real `~/.cursor` config.
+/// `prepare_cursor_turn` rewrites `cursor_cli_config_json()` there before
+/// every turn
 /// (`cursor_mcp_json()` goes in the workspace's `.cursor/`), and Cursor keeps
 /// its chats there, which `--resume` reads (#952). Never passed via argv.
 pub const CURSOR_CONFIG_DIR_ENV: &str = "CURSOR_CONFIG_DIR";
@@ -495,7 +497,7 @@ pub const CURSOR_CONFIG_DIR_ENV: &str = "CURSOR_CONFIG_DIR";
 /// and do not drop `--force` (MCP calls stop working). NO `--verbose` — Cursor
 /// errors on that flag. Do not change these flags without re-verifying live.
 ///
-/// The MCP bearer token travels only in the `mcp.json` file the desktop
+/// The MCP bearer token travels only in the `mcp.json` file the turn's setup
 /// writes into `config_dir` (see `cursor_mcp_json`), never via argv or env —
 /// both of which are visible to anyone who can list processes on the
 /// machine.

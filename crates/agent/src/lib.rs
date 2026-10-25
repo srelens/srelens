@@ -1,5 +1,8 @@
 //! Agent-CLI bridge: normalize each supported agent CLI's streaming output
-//! into a common `AgentEvent` stream. Pure — no Tauri, no cluster I/O.
+//! into a common `AgentEvent` stream, and set up each turn for the apps that
+//! drive them. No Tauri and no cluster I/O: [`turn`] writes a turn's private
+//! files and directories and can end an agent's process tree, but spawning
+//! the agent is each app's.
 
 pub mod adapter;
 pub mod claude;

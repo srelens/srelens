@@ -428,8 +428,9 @@ pub async fn run_native_agent_turn(
 }
 
 /// Global process-lifetime root directory for Cursor CLI agent conversations.
-/// Initialized lazily on the first turn. Explicitly swept during srectl shutdown
-/// or dropped on exit, leaving zero orphaned chats on disk.
+/// Created on first use; removed by [`cleanup_process_cursor_chats`] when
+/// srectl exits (a static is never dropped). A killed srectl leaves it
+/// behind, owner-only.
 static CURSOR_CHATS_ROOT: std::sync::Mutex<Option<tempfile::TempDir>> = std::sync::Mutex::new(None);
 
 pub fn process_cursor_chats_root() -> std::path::PathBuf {

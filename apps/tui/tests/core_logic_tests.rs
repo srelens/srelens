@@ -745,7 +745,7 @@ async fn a_native_turn_that_cannot_reach_the_provider_still_finishes_cleanly() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn a_boxed_cursor_turn_reports_a_missing_binary_and_finishes() {
+async fn a_cursor_turn_reports_a_missing_binary_and_finishes() {
     let dir = tempfile::tempdir().unwrap();
     let missing = dir
         .path()

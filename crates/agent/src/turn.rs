@@ -18,8 +18,8 @@ pub fn valid_resume_id(id: &str) -> bool {
         && id.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
 }
 
-/// Removes the wrapped path when dropped. The MCP config file `chat_send`
-/// writes for a turn carries the bearer token in cleartext, so it must be
+/// Removes the wrapped path when dropped. The MCP config file written for a
+/// turn carries the bearer token in cleartext, so it must be
 /// removed on every exit — including an early `?` after a failed spawn — not
 /// just the happy path a bare `remove_file` at the end of the function would
 /// cover.
@@ -521,7 +521,8 @@ mod tests {
         assert!(!path.exists());
     }
 
-    /// Pins the ordering `chat_send`'s image loop relies on: the guard must
+    /// Pins the ordering the desktop's image loop (in its `chat_send`) relies
+    /// on: the guard must
     /// be constructed *before* `std::fs::write` is attempted, not after a
     /// successful write. This doesn't inject a real fs failure (that would be
     /// a lot of mocking for one ordering guarantee) — it just proves a guard
@@ -536,7 +537,7 @@ mod tests {
         ));
         assert!(!path.exists());
         {
-            let _guard = TempFile(path.clone()); // guard first, as in chat_send's loop
+            let _guard = TempFile(path.clone()); // guard first, as in the desktop's loop
             std::fs::write(&path, b"partial").unwrap(); // stands in for a write that landed bytes before failing
             assert!(path.exists());
         }
@@ -628,7 +629,7 @@ mod tests {
         drop(first);
 
         // Reopened after a restart: the conversation is the same, the session
-        // `chat_send` streams on is new.
+        // the app streams on is new.
         let reopened = prepare_cursor_turn(
             &root.0,
             &CursorChatsInUse::default(),
@@ -764,8 +765,9 @@ mod tests {
     fn a_session_id_cannot_take_a_cursor_turn_out_of_its_root() {
         let base = cursor_test_root();
         let root = base.0.join("cursor-chats");
-        // `chat_send` lets `.` through its session-id charset, so `..` is a
-        // well-formed id there — and the workspace under it gets emptied.
+        // A session-id charset that lets `.` through (the desktop's does)
+        // makes `..` a well-formed id — and the workspace under it gets
+        // emptied.
         for session in ["..", ".", "a/../.."] {
             let turn =
                 prepare_cursor_turn(&root, &CursorChatsInUse::default(), session, None, "cursor-agent", "hi", "http://127.0.0.1:1/mcp", "turn-token", None);

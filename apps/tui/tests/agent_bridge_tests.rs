@@ -124,9 +124,9 @@ fn cli_turn(
     }
 }
 
-/// Run one boxed cursor turn against a binary that is not there and return the
+/// Run one Cursor turn against a binary that is not there and return the
 /// action results it emitted.
-async fn boxed_turn_against_missing_binary(
+async fn cursor_turn_against_missing_binary(
     bin: String,
     model: Option<&str>,
     api_key: Option<String>,
@@ -305,12 +305,11 @@ async fn a_native_turn_waiting_on_an_approval_prompt_is_not_timed_out() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn a_boxed_cursor_turn_that_cannot_launch_skips_the_usage_estimate_a_native_turn_always_sends(
-) {
+async fn a_cursor_turn_that_cannot_launch_skips_the_usage_estimate_a_native_turn_always_sends() {
     let dir = tempfile::tempdir().expect("temp dir");
     // No key and no model: the turn must still fail cleanly.
     let results =
-        boxed_turn_against_missing_binary(missing_binary(&dir), None, None, "prod-eu").await;
+        cursor_turn_against_missing_binary(missing_binary(&dir), None, None, "prod-eu").await;
 
     let titles: Vec<&str> = results.iter().map(|(t, _)| t.as_str()).collect();
     assert_eq!(
@@ -325,7 +324,7 @@ async fn a_boxed_cursor_turn_that_cannot_launch_skips_the_usage_estimate_a_nativ
     assert!(err.starts_with("Failed to launch cursor-agent: "), "{err}");
 
     // The native path emits `ai_usage` on every outcome, success or failure;
-    // the boxed path emits it only once a child process has been started, so a
+    // a CLI turn emits it only once a child process has been started, so a
     // turn that never launches reports no token estimate at all.
     assert!(
         !titles.iter().any(|t| t.starts_with("ai_usage")),
@@ -334,9 +333,9 @@ async fn a_boxed_cursor_turn_that_cannot_launch_skips_the_usage_estimate_a_nativ
 }
 
 #[tokio::test]
-async fn a_boxed_cursor_turn_tags_every_event_with_the_context_it_was_started_for() {
+async fn a_cursor_turn_tags_every_event_with_the_context_it_was_started_for() {
     let dir = tempfile::tempdir().expect("temp dir");
-    let results = boxed_turn_against_missing_binary(
+    let results = cursor_turn_against_missing_binary(
         missing_binary(&dir),
         Some("gpt-5-codex"),
         Some("k-1".into()),
@@ -361,13 +360,13 @@ async fn a_boxed_cursor_turn_tags_every_event_with_the_context_it_was_started_fo
 /// launching the agent, so two turns in flight at once must not collide on a
 /// port or cross-talk on each other's channels.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn two_boxed_cursor_turns_at_once_each_get_their_own_port_and_channel() {
+async fn two_cursor_turns_at_once_each_get_their_own_port_and_channel() {
     let dir = tempfile::tempdir().expect("temp dir");
     let bin = missing_binary(&dir);
 
     let (left, right) = tokio::join!(
-        boxed_turn_against_missing_binary(bin.clone(), Some("sonnet"), None, "cluster-a"),
-        boxed_turn_against_missing_binary(bin, Some("sonnet"), None, "cluster-b"),
+        cursor_turn_against_missing_binary(bin.clone(), Some("sonnet"), None, "cluster-a"),
+        cursor_turn_against_missing_binary(bin, Some("sonnet"), None, "cluster-b"),
     );
 
     for (results, ctx) in [(&left, "cluster-a"), (&right, "cluster-b")] {
@@ -771,7 +770,7 @@ exit {exit_code}
 
 #[cfg(unix)]
 #[tokio::test]
-async fn boxed_cursor_turn_captures_stream_session_id_and_resumes() {
+async fn a_cursor_turn_captures_its_session_id_and_the_next_resumes_it() {
     let tmp = tempfile::tempdir().unwrap();
     let bin = fake_cursor_agent(tmp.path(), "sess-abc-123", 0);
     let root = tempfile::tempdir().unwrap();
@@ -810,7 +809,7 @@ async fn boxed_cursor_turn_captures_stream_session_id_and_resumes() {
 
 #[cfg(unix)]
 #[tokio::test]
-async fn boxed_cursor_turn_crash_clears_stale_resume_id() {
+async fn a_crashed_cursor_turn_clears_its_stale_resume_id() {
     let tmp = tempfile::tempdir().unwrap();
     // Exits with 1 and outputs no session_id
     let bin = fake_cursor_agent(tmp.path(), "stale-session", 1);
@@ -833,7 +832,7 @@ async fn boxed_cursor_turn_crash_clears_stale_resume_id() {
 
 #[cfg(unix)]
 #[tokio::test]
-async fn boxed_cursor_turn_early_session_capture_preserves_id_on_cancellation() {
+async fn a_session_captured_before_a_cancel_is_kept() {
     use std::os::unix::fs::PermissionsExt;
     let tmp = tempfile::tempdir().unwrap();
     let bin = tmp.path().join("hanging-agent");
