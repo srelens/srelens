@@ -28,15 +28,11 @@ use srectl::views::{
 use srectl::CommandPopupDensity;
 use srelens_kube::contexts::ContextDto;
 
-use common::{ch, ctrl, key, shift, type_str};
+use common::{ch, ctrl, key, press, shift, type_str};
 
 // ---------------------------------------------------------------------------
 // Local helpers
 // ---------------------------------------------------------------------------
-
-async fn press(app: &mut App, k: KeyEvent) {
-    app.handle_key_event(k).await;
-}
 
 fn table(app: &App) -> &ResourceTableState {
     match &app.active_view {

@@ -61,6 +61,11 @@ pub fn shift(code: KeyCode) -> KeyEvent {
     KeyEvent::new(code, KeyModifiers::SHIFT)
 }
 
+/// Send a single key event through `App::handle_key_event`.
+pub async fn press(app: &mut App, k: KeyEvent) {
+    app.handle_key_event(k).await;
+}
+
 /// Type a string one character at a time through `App::handle_key_event`.
 pub async fn type_str(app: &mut App, s: &str) {
     for c in s.chars() {
