@@ -1370,15 +1370,27 @@ fn a_short_terminal_folds_the_agent_card_into_one_line() {
     let tall = render_settings(160, 40, &state);
     assert!(tall.contains("not installed"), "{tall}");
 
-    // Not tall enough: the providers keep their rows, the agent is one line.
+    // Not tall enough: the agent is one line, with whether its CLI is there.
     let short = render_settings(160, 26, &state);
-    assert!(short.contains("Agent: ● Codex · gpt-5.6-sol"), "{short}");
+    assert!(
+        short.contains("Agent: ● Codex · gpt-5.6-sol · installed"),
+        "{short}"
+    );
     assert!(!short.contains("not installed"), "{short}");
     assert!(short.contains("1. Anthropic (Claude)"), "{short}");
     assert!(
         short.contains("API Key:"),
-        "the first provider keeps its rows: {short}"
+        "the first provider still has its rows: {short}"
     );
+
+    // srelens has no CLI to report on.
+    state.settings.agent = AgentKind::Srelens;
+    let short = render_settings(160, 26, &state);
+    assert!(
+        short.contains("Agent: ● srelens · Anthropic (Claude) · claude-3-7-sonnet-20250219"),
+        "{short}"
+    );
+    assert!(!short.contains("installed"), "{short}");
 }
 
 #[test]

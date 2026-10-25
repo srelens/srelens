@@ -413,10 +413,10 @@ const AGENTS: [AgentKind; 4] = [
     AgentKind::Cursor,
 ];
 
-/// Rows of the full Agent card: borders, a row per agent, the Model line.
-const AGENT_CARD_ROWS: u16 = 2 + AGENTS.len() as u16 + 1;
-/// Rows of the card folded into one line.
+/// Rows of the card folded into one line: its borders and the line.
 const AGENT_CARD_FOLDED_ROWS: u16 = 3;
+/// How far a status that did not fit beside its agent is indented below it.
+const STATUS_INDENT: &str = "  ";
 
 fn provider_card_rows(provider: AiProvider) -> u16 {
     // The custom endpoint's card has a Base URL line.
@@ -441,15 +441,9 @@ fn value_style(focused: bool) -> Style {
     Style::default().fg(if focused { Theme::YELLOW } else { Theme::FG })
 }
 
-/// Which agent answers the Assistant: one row per agent with whether its CLI
-/// is installed, then the active agent's model. Folded into a single line
-/// when `area` is too short for the rows.
-fn render_agent_card(f: &mut Frame, area: Rect, state: &SettingsViewState) {
-    let on_card = state.agent_card_focused;
-    let agent_focus = on_card && state.selected_field == SettingField::Agent;
-    let model_focus = on_card && state.selected_field == SettingField::Model;
-    let agent = state.settings.agent;
-    let model = match agent {
+/// The active agent's model; while srelens answers, the default provider's.
+fn agent_model(state: &SettingsViewState) -> String {
+    match state.settings.agent {
         AgentKind::Srelens => {
             let provider = state.settings.default_provider;
             format!(
@@ -462,71 +456,117 @@ fn render_agent_card(f: &mut Frame, area: Rect, state: &SettingsViewState) {
             .settings
             .get_agent_model(kind)
             .unwrap_or_else(|| "Default".to_string()),
-    };
+    }
+}
 
+/// Whether `kind`'s CLI is installed (`folded`: just the word, else the path)
+/// or where to get it; an active agent that is missing is an error. srelens's
+/// own agent is built in and has no CLI.
+fn agent_status(state: &SettingsViewState, kind: AgentKind, folded: bool) -> Option<Span<'static>> {
+    kind.binary()?;
+    let found = state.agent_paths.iter().find(|(k, _)| *k == kind);
+    Some(match found {
+        Some(_) if folded => Span::styled("installed", Style::default().fg(Theme::DIM)),
+        Some((_, path)) => Span::styled(
+            format!("installed: {}", path.display()),
+            Style::default().fg(Theme::GREEN),
+        ),
+        None => Span::styled(
+            format!("not installed — {}", agent_install_url(kind)),
+            if kind == state.settings.agent {
+                Theme::status_error()
+            } else {
+                Style::default().fg(Theme::DIM)
+            },
+        ),
+    })
+}
+
+/// `head` and `status` on one line (after `sep`) when `width` allows;
+/// otherwise the status alone on the line below, never clipped beside it.
+fn with_status(
+    head: Vec<Span<'static>>,
+    sep: &'static str,
+    status: Option<Span<'static>>,
+    width: usize,
+) -> Vec<Line<'static>> {
+    let mut line = Line::from(head);
+    let Some(status) = status else {
+        return vec![line];
+    };
+    let sep = Span::styled(sep, Style::default().fg(Theme::DIM));
+    if line.width() + sep.width() + status.width() <= width {
+        line.spans.push(sep);
+        line.spans.push(status);
+        vec![line]
+    } else {
+        vec![line, Line::from(vec![Span::raw(STATUS_INDENT), status])]
+    }
+}
+
+/// The full card: a row per agent with whether its CLI is installed, then
+/// the active agent's model.
+fn full_agent_lines(state: &SettingsViewState, width: usize) -> Vec<Line<'static>> {
+    let on_card = state.agent_card_focused;
+    let agent_focus = on_card && state.selected_field == SettingField::Agent;
+    let model_focus = on_card && state.selected_field == SettingField::Model;
+    let mut lines: Vec<Line<'static>> = AGENTS
+        .iter()
+        .flat_map(|&kind| {
+            let active = kind == state.settings.agent;
+            let radio = if active {
+                Span::styled(
+                    "● ",
+                    Style::default()
+                        .fg(Theme::GREEN)
+                        .add_modifier(Modifier::BOLD),
+                )
+            } else {
+                Span::styled("○ ", Style::default().fg(Theme::DIM))
+            };
+            let name_style = if active {
+                value_style(agent_focus).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Theme::FG)
+            };
+            let head = vec![
+                radio,
+                Span::styled(format!("{:<13}", kind.label()), name_style),
+            ];
+            with_status(head, "", agent_status(state, kind, false), width)
+        })
+        .collect();
+    lines.push(Line::from(vec![
+        Span::styled("   Model:   ", label_style(model_focus)),
+        Span::styled(agent_model(state), value_style(model_focus)),
+    ]));
+    lines
+}
+
+/// The card folded: the active agent and its model on one line, with whether
+/// its CLI is installed.
+fn folded_agent_lines(state: &SettingsViewState, width: usize) -> Vec<Line<'static>> {
+    let agent = state.settings.agent;
+    let head = vec![
+        Span::styled("Agent: ", label_style(false)),
+        Span::styled(
+            format!("● {}", agent.label()),
+            value_style(false).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(" · ", Style::default().fg(Theme::DIM)),
+        Span::styled(agent_model(state), value_style(false)),
+    ];
+    with_status(head, " · ", agent_status(state, agent, true), width)
+}
+
+/// The Agent card: which agent answers the Assistant, around `lines`.
+fn render_agent_card(f: &mut Frame, area: Rect, lines: Vec<Line<'static>>, focused: bool) {
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(if on_card { Theme::CYAN } else { Theme::BORDER }))
+        .border_style(Style::default().fg(if focused { Theme::CYAN } else { Theme::BORDER }))
         .title(Span::styled(" Assistant agent ", Theme::header_label()));
     let inner = block.inner(area);
     f.render_widget(block, area);
-
-    let lines: Vec<Line> = if area.height < AGENT_CARD_ROWS {
-        vec![Line::from(vec![
-            Span::styled("Agent: ", label_style(agent_focus)),
-            Span::styled(
-                format!("● {}", agent.label()),
-                value_style(agent_focus).add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(" · ", Style::default().fg(Theme::DIM)),
-            Span::styled(model, value_style(model_focus)),
-        ])]
-    } else {
-        let mut lines: Vec<Line> = AGENTS
-            .iter()
-            .map(|&kind| {
-                let active = kind == agent;
-                let radio = if active {
-                    Span::styled(
-                        "● ",
-                        Style::default()
-                            .fg(Theme::GREEN)
-                            .add_modifier(Modifier::BOLD),
-                    )
-                } else {
-                    Span::styled("○ ", Style::default().fg(Theme::DIM))
-                };
-                let name_style = if active {
-                    value_style(agent_focus).add_modifier(Modifier::BOLD)
-                } else {
-                    Style::default().fg(Theme::FG)
-                };
-                let found = state.agent_paths.iter().find(|(k, _)| *k == kind);
-                let status = match (kind.binary(), found) {
-                    // srelens's own agent is built in.
-                    (None, _) => Span::raw(""),
-                    (Some(_), Some((_, path))) => Span::styled(
-                        format!("installed: {}", path.display()),
-                        Style::default().fg(Theme::GREEN),
-                    ),
-                    (Some(_), None) => Span::styled(
-                        format!("not installed — {}", agent_install_url(kind)),
-                        Style::default().fg(if active { Theme::RED } else { Theme::DIM }),
-                    ),
-                };
-                Line::from(vec![
-                    radio,
-                    Span::styled(format!("{:<13}", kind.label()), name_style),
-                    status,
-                ])
-            })
-            .collect();
-        lines.push(Line::from(vec![
-            Span::styled("   Model:   ", label_style(model_focus)),
-            Span::styled(model, value_style(model_focus)),
-        ]));
-        lines
-    };
     f.render_widget(Paragraph::new(lines), inner);
 }
 
@@ -542,14 +582,27 @@ pub fn render_settings_view(f: &mut Frame, area: Rect, state: &SettingsViewState
     let inner = block.inner(area);
     f.render_widget(block, area);
 
-    // The Agent card takes its full height only when every provider card
-    // still fits below it; otherwise it folds into one line and the providers
-    // keep the rows they would have had without it.
+    // The Agent card is drawn in full while it has the cursor, or when every
+    // provider card still fits below it. Otherwise it folds into one line (two
+    // when its CLI's status does not fit beside it) and the providers get the
+    // rows that are left.
+    let card_width = usize::from(inner.width.saturating_sub(2));
+    let full_lines = full_agent_lines(state, card_width);
     let providers_rows: u16 = ALL_PROVIDERS.iter().map(|&p| provider_card_rows(p)).sum();
-    let agent_rows = if inner.height >= 3 + AGENT_CARD_ROWS + providers_rows + 2 {
-        AGENT_CARD_ROWS
+    let full_rows = full_lines.len() as u16 + 2;
+    let agent_lines =
+        if state.agent_card_focused || inner.height >= 3 + full_rows + providers_rows + 2 {
+            full_lines
+        } else {
+            folded_agent_lines(state, card_width)
+        };
+    let agent_rows = agent_lines.len() as u16 + 2;
+    // A card taller than its one-line fold is being acted on, or reports a
+    // missing CLI: it gets its rows before the providers get theirs.
+    let providers_min = if agent_rows > AGENT_CARD_FOLDED_ROWS {
+        0
     } else {
-        AGENT_CARD_FOLDED_ROWS
+        10
     };
 
     let chunks = Layout::default()
@@ -557,7 +610,7 @@ pub fn render_settings_view(f: &mut Frame, area: Rect, state: &SettingsViewState
         .constraints([
             Constraint::Length(3),          // Top description & instructions
             Constraint::Length(agent_rows), // Agent card
-            Constraint::Min(10),            // Provider list
+            Constraint::Min(providers_min), // Provider list
             Constraint::Length(2),          // Bottom key hints
         ])
         .split(inner);
@@ -587,7 +640,7 @@ pub fn render_settings_view(f: &mut Frame, area: Rect, state: &SettingsViewState
     );
 
     // 2. Agent card
-    render_agent_card(f, chunks[1], state);
+    render_agent_card(f, chunks[1], agent_lines, state.agent_card_focused);
 
     // 3. Providers List
     let provider_constraints: Vec<Constraint> = ALL_PROVIDERS

@@ -1075,6 +1075,93 @@ mod tests {
         assert_eq!(picker.target, PickerTarget::Agent(AgentKind::Claude));
     }
 
+    const CLAUDE_URL: &str = "https://docs.anthropic.com/en/docs/claude-code/setup";
+
+    /// The Settings view with Claude Code as the agent and no agent CLI
+    /// anywhere on `PATH` or under `HOME`.
+    async fn open_settings_with_claude_missing(
+        settings: &mut crate::common::env::SettingsGuard,
+        nowhere: &std::path::Path,
+    ) -> srectl::app::App {
+        settings.set_env("PATH", nowhere);
+        settings.set_env("HOME", nowhere);
+        let (mut app, _rx) = crate::common::app().await;
+        open_settings(&mut app).await;
+        match &mut app.active_view {
+            srectl::app::ActiveView::Settings(s) => {
+                s.settings.agent = srelens_agent::adapter::AgentKind::Claude
+            }
+            _ => panic!("expected the settings view"),
+        }
+        app
+    }
+
+    // Through the real chrome (3 header rows, 2 footer rows, the view's border)
+    // the full card needs a 40-row terminal.
+    #[tokio::test]
+    async fn a_folded_agent_card_still_says_whether_the_active_agent_is_installed() {
+        let mut settings = crate::common::env::isolate_settings();
+        let nowhere = tempfile::tempdir().unwrap();
+        let mut app = open_settings_with_claude_missing(&mut settings, nowhere.path()).await;
+
+        let full = crate::common::render_app(&mut app, 120, 40);
+        assert!(full.contains("○ Codex"), "{full}");
+
+        let folded = crate::common::render_app(&mut app, 120, 39);
+        assert!(!folded.contains("○ Codex"), "{folded}");
+        assert!(
+            folded.contains(&format!(
+                "Agent: ● Claude Code · Default · not installed — {CLAUDE_URL}"
+            )),
+            "{folded}"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_agent_card_is_drawn_in_full_while_it_has_the_cursor() {
+        let mut settings = crate::common::env::isolate_settings();
+        let nowhere = tempfile::tempdir().unwrap();
+        let mut app = open_settings_with_claude_missing(&mut settings, nowhere.path()).await;
+        app.handle_key_event(crate::common::ch('k')).await;
+
+        let screen = crate::common::render_app(&mut app, 120, 39);
+        for row in ["○ srelens", "● Claude Code", "○ Codex", "○ Cursor"] {
+            assert!(screen.contains(row), "{row}: {screen}");
+        }
+        assert!(screen.contains("Model:   Default"), "{screen}");
+
+        // Back on a provider, the card folds again.
+        app.handle_key_event(crate::common::ch('j')).await;
+        let screen = crate::common::render_app(&mut app, 120, 39);
+        assert!(!screen.contains("○ Codex"), "{screen}");
+    }
+
+    #[tokio::test]
+    async fn an_install_link_wider_than_the_card_moves_to_its_own_line() {
+        let mut settings = crate::common::env::isolate_settings();
+        let nowhere = tempfile::tempdir().unwrap();
+        let mut app = open_settings_with_claude_missing(&mut settings, nowhere.path()).await;
+
+        // The full card, with room: the row is 83 columns, the card 76.
+        let screen = crate::common::render_app(&mut app, 80, 60);
+        assert!(
+            screen.contains(&format!("not installed — {CLAUDE_URL}")),
+            "{screen}"
+        );
+
+        // The folded card on a classic 80x24 terminal.
+        let screen = crate::common::render_app(&mut app, 80, 24);
+        assert!(!screen.contains("○ Codex"), "{screen}");
+        assert!(
+            screen.contains(&format!("not installed — {CLAUDE_URL}")),
+            "{screen}"
+        );
+        assert!(
+            screen.contains("Agent: ● Claude Code · Default"),
+            "{screen}"
+        );
+    }
+
     #[tokio::test]
     async fn test_assistant_typing_s_and_ctrl_s_shortcut() {
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
