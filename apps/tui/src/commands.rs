@@ -1001,6 +1001,36 @@ pub fn resolve_command(input: &str) -> Option<CommandTarget> {
     resolve_command_with_crds(input, &[])
 }
 
+pub fn is_exact_name_or_alias(input: &str, crds: &[CrdMeta]) -> bool {
+    let q = input.trim().trim_start_matches(':').trim().to_lowercase();
+    if q.is_empty() {
+        return false;
+    }
+    for cmd in COMMAND_REGISTRY {
+        if cmd.name.eq_ignore_ascii_case(&q)
+            || cmd.aliases.iter().any(|a| a.eq_ignore_ascii_case(&q))
+        {
+            return true;
+        }
+    }
+    for crd in crds {
+        if crd.plural.eq_ignore_ascii_case(&q)
+            || crd.singular.eq_ignore_ascii_case(&q)
+            || crd.kind.eq_ignore_ascii_case(&q)
+            || crd.crd_name.eq_ignore_ascii_case(&q)
+            || crd.short_names.iter().any(|s| s.eq_ignore_ascii_case(&q))
+        {
+            return true;
+        }
+        let norm_plural = crd.plural.to_lowercase().replace("loadbalancer", "lb");
+        let norm_singular = crd.singular.to_lowercase().replace("loadbalancer", "lb");
+        if norm_plural == q || norm_singular == q {
+            return true;
+        }
+    }
+    false
+}
+
 pub fn resolve_command_with_crds(input: &str, crds: &[CrdMeta]) -> Option<CommandTarget> {
     let trimmed = input.trim().trim_start_matches(':').trim();
     if trimmed.is_empty() {
