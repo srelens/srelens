@@ -707,6 +707,96 @@ async fn a_crash_shows_its_cause_not_only_its_last_stderr_line() {
     assert!(shows(&results, "not logged in"), "{results:?}");
 }
 
+/// A fake Claude Code that prints `transcript` (one stream-json line per
+/// entry) and then `stderr`, and exits 1.
+fn fake_claude_that_fails_after(dir: &Path, transcript: &[&str], stderr: &str) -> PathBuf {
+    std::fs::write(dir.join("transcript.jsonl"), transcript.join("\n") + "\n").unwrap();
+    fake_claude(
+        dir,
+        &format!("@type \"%~dp0transcript.jsonl\"\r\n@echo {stderr} 1>&2\r\n@exit /b 1\r\n"),
+        &format!(r#"cat "$(dirname "$0")/transcript.jsonl"; echo '{stderr}' >&2; exit 1"#),
+    )
+}
+
+/// Part of an answer and then a crash must not read as a finished answer.
+#[tokio::test]
+async fn a_crash_after_part_of_an_answer_still_says_the_turn_failed() {
+    let _settings = common::env::isolate_settings();
+    let dir = tempfile::tempdir().unwrap();
+    let bin = fake_claude_that_fails_after(
+        dir.path(),
+        &[
+            r#"{"type":"system","subtype":"init","session_id":"s-1"}"#,
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"The api pod is"}]}}"#,
+        ],
+        "Error: connection reset",
+    );
+    let (tx, mut rx) = unbounded_channel();
+
+    run_cli_agent_turn(cli_turn(AgentKind::Claude, &bin, tx, dir.path())).await;
+
+    let results = action_results(&mut rx);
+    assert!(shows(&results, "The api pod is"), "{results:?}");
+    assert!(shows(&results, "connection reset"), "{results:?}");
+}
+
+/// With nothing on stderr, a crash after part of an answer still says the
+/// answer did not finish, not that there was none.
+#[tokio::test]
+async fn a_silent_crash_after_part_of_an_answer_says_it_stopped() {
+    let _settings = common::env::isolate_settings();
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("transcript.jsonl"),
+        concat!(
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"The api pod is"}]}}"#,
+            "\n",
+        ),
+    )
+    .unwrap();
+    let bin = fake_claude(
+        dir.path(),
+        "@type \"%~dp0transcript.jsonl\"\r\n@exit /b 1\r\n",
+        r#"cat "$(dirname "$0")/transcript.jsonl"; exit 1"#,
+    );
+    let (tx, mut rx) = unbounded_channel();
+
+    run_cli_agent_turn(cli_turn(AgentKind::Claude, &bin, tx, dir.path())).await;
+
+    let results = action_results(&mut rx);
+    assert!(
+        shows(&results, "Claude Code stopped before it finished"),
+        "{results:?}"
+    );
+}
+
+/// A CLI that reported its own failure and then exits 1 says so once.
+#[tokio::test]
+async fn a_failure_the_agent_reported_itself_is_not_repeated() {
+    let _settings = common::env::isolate_settings();
+    let dir = tempfile::tempdir().unwrap();
+    let bin = fake_claude_that_fails_after(
+        dir.path(),
+        &[
+            r#"{"type":"system","subtype":"init","session_id":"s-1"}"#,
+            r#"{"type":"result","subtype":"success","is_error":true,"result":"Not logged in"}"#,
+        ],
+        "Not logged in",
+    );
+    let (tx, mut rx) = unbounded_channel();
+
+    run_cli_agent_turn(cli_turn(AgentKind::Claude, &bin, tx, dir.path())).await;
+
+    let results = action_results(&mut rx);
+    let said = results
+        .iter()
+        .filter(|(t, r)| {
+            t == "ai_chunk:kind-dev" && r.as_ref().is_ok_and(|m| m.contains("Not logged in"))
+        })
+        .count();
+    assert_eq!(said, 1, "{results:?}");
+}
+
 #[cfg(unix)]
 fn fake_cursor_agent(dir: &std::path::Path, session_id: &str, exit_code: i32) -> PathBuf {
     use std::os::unix::fs::PermissionsExt;

@@ -704,6 +704,8 @@ pub async fn run_cli_agent_turn(turn: CliTurn) {
     let mut usage: Option<(usize, usize, usize, usize, Option<u64>)> = None;
     let mut out_chars = 0;
     let mut said_anything = false;
+    // The CLI ended the turn itself (its own result or error).
+    let mut ended = false;
     let read = async {
         use tokio::io::AsyncBufReadExt;
         let mut lines = tokio::io::BufReader::new(stdout).lines();
@@ -727,7 +729,11 @@ pub async fn run_cli_agent_turn(turn: CliTurn) {
                         out_chars += text.len();
                         said_anything = true;
                     }
-                    AgentEvent::Error { .. } => said_anything = true,
+                    AgentEvent::Error { .. } => {
+                        said_anything = true;
+                        ended = true;
+                    }
+                    AgentEvent::TurnDone => ended = true,
                     AgentEvent::Usage {
                         prompt_tokens,
                         completion_tokens,
@@ -789,14 +795,15 @@ pub async fn run_cli_agent_turn(turn: CliTurn) {
                 "\n[Error: {label} timed out after {timeout_seconds} seconds. You can increase the timeout in settings (<Ctrl+s>) or try another model.]"
             )),
         );
-    } else if !said_anything {
+    } else if !said_anything || (!ended && status.is_some_and(|s| !s.success())) {
         // A clean exit too: a CLI that changed its format, or reports a
         // failure on stderr and exits 0, would otherwise end the turn blank.
-        let why = stderr_summary(&tail);
-        let why = if why.is_empty() {
-            format!("{label} finished without an answer")
-        } else {
-            why
+        // A failed exit after part of an answer, unless the CLI ended the
+        // turn itself, would otherwise read as a finished answer.
+        let why = match stderr_summary(&tail) {
+            why if !why.is_empty() => why,
+            _ if said_anything => format!("{label} stopped before it finished"),
+            _ => format!("{label} finished without an answer"),
         };
         send("ai_chunk", Ok(format!("\n[Error: {why}]")));
     }
