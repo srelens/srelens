@@ -340,7 +340,11 @@ pub const CODEX_TOKEN_ENV: &str = "SRELENS_MCP_TOKEN";
 /// absence of a reading tool, not the sandbox, is what keeps reads in. The
 /// sandbox refuses every write, and `-C` points the turn at an empty
 /// directory. MCP tools (srelens's own) still work normally, configured via
-/// the two `-c mcp_servers.srelens.*` TOML overrides below. Known gap:
+/// the `-c mcp_servers.srelens.*` TOML overrides below. One of them,
+/// `default_tools_approval_mode="approve"`, is what lets a write reach
+/// srelens at all: `codex exec` cannot ask the user, so Codex would refuse
+/// every non-read-only tool itself, and srelens's own consent gate would never
+/// be asked. Codex hands the call over and srelens asks. Known gap:
 /// `apply_patch` reads a target file to verify a patch before the sandbox
 /// refuses the write, so a model can test guesses about a file's existence
 /// and lines (never see its content); dropping the tool takes a whole
@@ -435,6 +439,14 @@ fn codex_boxed(
         ),
         "-c".to_string(),
         format!("mcp_servers.srelens.bearer_token_env_var=\"{CODEX_TOKEN_ENV}\""),
+        // `codex exec` has no approver: with the default approval mode every
+        // MCP tool that is not `readOnlyHint` is refused inside Codex before
+        // srelens sees the call (codex-cli 0.149.1: "MCP tool call requires
+        // approval, but approval policy is never"). `approve` passes the call
+        // on, so srelens's own consent gate decides every write — as with
+        // Claude's `--dangerously-skip-permissions`.
+        "-c".to_string(),
+        "mcp_servers.srelens.default_tools_approval_mode=\"approve\"".to_string(),
         // Surface the model's reasoning as `reasoning` items in the JSON
         // stream (mapped to Thinking events by `codex::parse_line`) — with
         // `--ignore-user-config` above, the user's own config.toml can't
@@ -822,6 +834,39 @@ mod tests {
         assert!(cmd.args.windows(2).any(|w| {
             w[0] == "-c" && w[1] == "mcp_servers.srelens.bearer_token_env_var=\"SRELENS_MCP_TOKEN\""
         }));
+    }
+
+    /// `codex exec` has no approver, so with the default approval mode every
+    /// MCP tool that is not `readOnlyHint` is refused inside Codex ("MCP tool
+    /// call requires approval, but approval policy is never", codex-cli
+    /// 0.149.1, seen live on a rollout restart) and srelens's own consent gate
+    /// is never asked. `approve` hands the call to srelens, whose gate decides
+    /// every write.
+    #[test]
+    fn codex_command_hands_every_mcp_call_to_srelens_in_both_builders() {
+        let pair = ["-c", "mcp_servers.srelens.default_tools_approval_mode=\"approve\""];
+        let url = "http://127.0.0.1:8765/mcp";
+        let fresh = codex_cmd();
+        let resumed = codex_command("c", "hi", url, "t", "/e", &[], Some("thread-1"));
+        let stdin_fresh = codex_command_via_stdin("c", url, "t", "/e", &[], None);
+        let stdin_resumed = codex_command_via_stdin("c", url, "t", "/e", &[], Some("thread-1"));
+        for (which, cmd) in [
+            ("fresh", &fresh),
+            ("resumed", &resumed),
+            ("stdin fresh", &stdin_fresh),
+            ("stdin resumed", &stdin_resumed),
+        ] {
+            assert!(
+                cmd.args.windows(2).any(|w| w == pair),
+                "{which}: missing {pair:?} in {:?}",
+                cmd.args
+            );
+        }
+        // It is an `exec` option, so it stays ahead of `resume` (the box must
+        // not drift behind the subcommand).
+        let at = resumed.args.windows(2).position(|w| w == pair).unwrap();
+        let resume = resumed.args.iter().position(|a| a == "resume").unwrap();
+        assert!(at < resume, "the override must precede `resume`");
     }
 
     #[test]
