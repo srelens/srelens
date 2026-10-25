@@ -239,6 +239,21 @@ For other PRs (purely internal crates, dependency bumps, docs, backend fixes
 with no input surface), the author explicitly notes:
 `Matrix: N/A because <reason>` in the PR description.
 
+### Continuous Verification: Call `/qa` After Every Commit
+
+The `/qa` skill must be called after **each commit** we make touching any
+applicable interactive surface, input handling, command bar logic, or caller
+wire contract. Do not defer adversarial verification to the end of a task or
+wait for human testers to stumble on regressions:
+
+1. Commit the implementation slice or fix.
+2. Immediately run the `/qa` skill against the commit.
+3. Formulate and run journey tests in `apps/tui/tests/journeys/<feature>.rs`
+   covering the applicable matrix dimensions.
+4. Verify tests pass (`cargo test -p srectl --test journeys_tests`) before
+   moving on to the next task.
+
+
 ### The Two-Pass Model
 
 Avoid pure black-box testing (which shipped the broken `api_version` assertion)
