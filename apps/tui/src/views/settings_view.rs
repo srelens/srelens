@@ -413,8 +413,6 @@ const AGENTS: [AgentKind; 4] = [
     AgentKind::Cursor,
 ];
 
-/// Rows of the card folded into one line: its borders and the line.
-const AGENT_CARD_FOLDED_ROWS: u16 = 3;
 /// How far a status that did not fit beside its agent is indented below it.
 const STATUS_INDENT: &str = "  ";
 
@@ -425,6 +423,37 @@ fn provider_card_rows(provider: AiProvider) -> u16 {
     } else {
         5
     }
+}
+
+/// The fewest rows a provider card can have and still say which provider it
+/// is: its borders and its name line.
+const MIN_PROVIDER_CARD_ROWS: u16 = 3;
+
+/// Where the provider cards go in `area`: in order, each at its natural
+/// height, the last one cut short; a card left with fewer than
+/// [`MIN_PROVIDER_CARD_ROWS`] is not drawn rather than drawn as a bare frame.
+/// When they do not all fit, the list starts at the first card that lets the
+/// `selected` one show its name, so the cursor is never off screen.
+fn provider_card_areas(area: Rect, selected: Option<usize>) -> Vec<(usize, Rect)> {
+    let rows = |i: usize| provider_card_rows(ALL_PROVIDERS[i]);
+    let mut first = selected.map_or(0, |s| s % ALL_PROVIDERS.len());
+    let mut room = area.height.saturating_sub(MIN_PROVIDER_CARD_ROWS);
+    while first > 0 && rows(first - 1) <= room {
+        first -= 1;
+        room -= rows(first);
+    }
+    let end = area.y + area.height;
+    let mut y = area.y;
+    let mut areas = Vec::new();
+    for idx in first..ALL_PROVIDERS.len() {
+        let height = rows(idx).min(end - y);
+        if height < MIN_PROVIDER_CARD_ROWS {
+            break;
+        }
+        areas.push((idx, Rect::new(area.x, y, area.width, height)));
+        y += height;
+    }
+    areas
 }
 
 fn label_style(focused: bool) -> Style {
@@ -597,20 +626,15 @@ pub fn render_settings_view(f: &mut Frame, area: Rect, state: &SettingsViewState
             folded_agent_lines(state, card_width)
         };
     let agent_rows = agent_lines.len() as u16 + 2;
-    // A card taller than its one-line fold is being acted on, or reports a
-    // missing CLI: it gets its rows before the providers get theirs.
-    let providers_min = if agent_rows > AGENT_CARD_FOLDED_ROWS {
-        0
-    } else {
-        10
-    };
 
+    // The description, the Agent card and the hints keep their rows; the
+    // provider list takes whatever is left, however little.
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(3),          // Top description & instructions
             Constraint::Length(agent_rows), // Agent card
-            Constraint::Min(providers_min), // Provider list
+            Constraint::Min(0),             // Provider list
             Constraint::Length(2),          // Bottom key hints
         ])
         .split(inner);
@@ -643,23 +667,11 @@ pub fn render_settings_view(f: &mut Frame, area: Rect, state: &SettingsViewState
     render_agent_card(f, chunks[1], agent_lines, state.agent_card_focused);
 
     // 3. Providers List
-    let provider_constraints: Vec<Constraint> = ALL_PROVIDERS
-        .iter()
-        .map(|&p| Constraint::Length(provider_card_rows(p)))
-        .collect();
-
-    let provider_chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints(provider_constraints)
-        .split(chunks[2]);
-
-    for (idx, &provider) in ALL_PROVIDERS.iter().enumerate() {
-        if idx >= provider_chunks.len() {
-            break;
-        }
-        let is_selected_provider = !state.agent_card_focused && idx == state.selected_provider_idx;
+    let selected = (!state.agent_card_focused).then_some(state.selected_provider_idx);
+    for (idx, provider_area) in provider_card_areas(chunks[2], selected) {
+        let provider = ALL_PROVIDERS[idx];
+        let is_selected_provider = selected == Some(idx);
         let is_active_provider = provider == state.settings.default_provider;
-        let provider_area = provider_chunks[idx];
 
         let border_color = if is_selected_provider {
             Theme::CYAN

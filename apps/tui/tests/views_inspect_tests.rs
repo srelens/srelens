@@ -1601,20 +1601,41 @@ fn settings_view_edit_modal_names_the_field_and_shows_the_buffer() {
 fn settings_view_narrow_terminal_still_shows_the_header_and_first_cards() {
     let _env = common::env::lock();
     let state = settings_state();
-    // 19 rows: short enough that each of the four cards draws only its header.
+    // 19 rows leave 9 for the provider cards (the description, a one-line
+    // Agent card and the hints take the rest). They are drawn in order at
+    // their natural height and cut off at the bottom: the first in full, the
+    // second down to its API key line, the third and fourth not at all.
     let text = render_settings(60, 19, &state);
     assert!(text.contains("SRElens AI & Assistant Settings"), "{text}");
     assert!(
         text.contains("Active AI Provider: ● Anthropic (Claude)"),
         "{text}"
     );
+    assert!(text.contains("Agent: ● srelens"), "{text}");
     assert!(
         text.contains("● 1. Anthropic (Claude)  [ACTIVE DEFAULT]"),
         "{text}"
     );
-    // The cards shrink to their borders and header line: no field rows fit.
-    assert!(!text.contains("API Key:"), "{text}");
-    assert!(!text.contains("Model:"), "{text}");
+    assert!(text.contains("API Key: no key set"), "{text}");
+    assert!(text.contains("○ 2. OpenAI (GPT-4o)"), "{text}");
+    assert!(!text.contains("3. Google Gemini"), "{text}");
+}
+
+#[test]
+fn a_provider_card_too_short_to_show_its_name_is_not_drawn_as_a_bare_frame() {
+    let _env = common::env::lock();
+    let state = settings_state();
+    // 17 rows leave 7 for the providers: the first takes 5 and the 2 left
+    // are not enough for a box with a name in it.
+    let lines = common::render_lines(100, 17, |f| render_settings_view(f, f.area(), &state));
+    let text = lines.join("\n");
+    assert!(text.contains("1. Anthropic (Claude)"), "{text}");
+    assert!(!text.contains("2. OpenAI"), "{text}");
+    let frames = lines.iter().filter(|l| l.contains('┌')).count();
+    assert_eq!(
+        frames, 3,
+        "the view, the Agent card and one provider: {text}"
+    );
 }
 
 // ─────────────────────────────── overview ───────────────────────────────

@@ -1162,6 +1162,126 @@ mod tests {
         );
     }
 
+    // The classic 80x24 terminal: 17 rows inside the chrome and the view's
+    // border, of which the description takes 3 and the hints 2.
+
+    /// A fake `codex` as all of `PATH` and `HOME`, then the Settings view
+    /// with `agent` active.
+    async fn open_settings_on_a_small_terminal(
+        settings: &mut crate::common::env::SettingsGuard,
+        bin: &std::path::Path,
+        agent: srelens_agent::adapter::AgentKind,
+    ) -> srectl::app::App {
+        let (name, body) = if cfg!(windows) {
+            ("codex.cmd", "@echo off\r\n")
+        } else {
+            ("codex", "#!/bin/sh\n")
+        };
+        let codex = bin.join(name);
+        std::fs::write(&codex, body).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&codex, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        settings.set_env("PATH", bin);
+        settings.set_env("HOME", bin);
+        let (mut app, _rx) = crate::common::app().await;
+        open_settings(&mut app).await;
+        match &mut app.active_view {
+            srectl::app::ActiveView::Settings(s) => s.settings.agent = agent,
+            _ => panic!("expected the settings view"),
+        }
+        app
+    }
+
+    #[tokio::test]
+    async fn on_80x24_an_installed_agent_shows_on_the_folded_card() {
+        let mut settings = crate::common::env::isolate_settings();
+        let bin = tempfile::tempdir().unwrap();
+        let mut app = open_settings_on_a_small_terminal(
+            &mut settings,
+            bin.path(),
+            srelens_agent::adapter::AgentKind::Codex,
+        )
+        .await;
+
+        let screen = crate::common::render_app(&mut app, 80, 24);
+        assert!(
+            screen.contains("Agent: ● Codex · Default · installed"),
+            "{screen}"
+        );
+        assert!(screen.contains("1. Anthropic (Claude)"), "{screen}");
+    }
+
+    #[tokio::test]
+    async fn on_80x24_srelens_shows_on_the_folded_card_and_the_first_provider_keeps_its_fields() {
+        let mut settings = crate::common::env::isolate_settings();
+        let bin = tempfile::tempdir().unwrap();
+        let mut app = open_settings_on_a_small_terminal(
+            &mut settings,
+            bin.path(),
+            srelens_agent::adapter::AgentKind::Srelens,
+        )
+        .await;
+
+        let screen = crate::common::render_app(&mut app, 80, 24);
+        assert!(
+            screen.contains("Agent: ● srelens · Anthropic (Claude) · claude-3-7-sonnet-20250219"),
+            "{screen}"
+        );
+        // The providers fill the rows in order at their natural height; the
+        // first one has every row, and the rest are cut off at the bottom.
+        assert!(screen.contains("1. Anthropic (Claude)"), "{screen}");
+        assert!(screen.contains("API Key:"), "{screen}");
+        assert!(
+            screen.contains("Model:   claude-3-7-sonnet-20250219"),
+            "{screen}"
+        );
+    }
+
+    #[tokio::test]
+    async fn on_80x24_a_missing_agent_and_the_first_provider_are_both_readable() {
+        let mut settings = crate::common::env::isolate_settings();
+        let bin = tempfile::tempdir().unwrap();
+        let mut app = open_settings_on_a_small_terminal(
+            &mut settings,
+            bin.path(),
+            srelens_agent::adapter::AgentKind::Claude,
+        )
+        .await;
+
+        let screen = crate::common::render_app(&mut app, 80, 24);
+        assert!(
+            screen.contains(&format!("not installed — {CLAUDE_URL}")),
+            "{screen}"
+        );
+        assert!(screen.contains("1. Anthropic (Claude)"), "{screen}");
+    }
+
+    #[tokio::test]
+    async fn on_80x24_the_selected_provider_never_leaves_the_screen() {
+        let mut settings = crate::common::env::isolate_settings();
+        let bin = tempfile::tempdir().unwrap();
+        let mut app = open_settings_on_a_small_terminal(
+            &mut settings,
+            bin.path(),
+            srelens_agent::adapter::AgentKind::Srelens,
+        )
+        .await;
+
+        for name in [
+            "2. OpenAI (GPT-4o)",
+            "3. Google Gemini",
+            "4. OpenAI-Compatible / Ollama (Local)",
+        ] {
+            app.handle_key_event(crate::common::ch('j')).await;
+            let screen = crate::common::render_app(&mut app, 80, 24);
+            assert!(screen.contains(name), "{name}: {screen}");
+            assert!(screen.contains("Agent: ● srelens"), "{name}: {screen}");
+        }
+    }
+
     #[tokio::test]
     async fn test_assistant_typing_s_and_ctrl_s_shortcut() {
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
