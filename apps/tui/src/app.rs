@@ -8618,7 +8618,7 @@ impl App {
                     cache: self.client_cache.clone(),
                     kubeconfig_paths,
                     event_tx: self.event_tx.clone(),
-                    timeout_seconds: self.ai_settings.get_timeout_seconds(provider),
+                    timeout_seconds: self.ai_settings.get_agent_timeout_seconds(agent),
                     conversation_id: ai.conversation_id.clone(),
                     resume: ai.cli_resume_id.clone(),
                     chat_root: crate::agent::process_cursor_chats_root(),

@@ -4494,6 +4494,54 @@ async fn an_installed_local_agent_gets_the_turn_and_its_session_comes_back() {
     );
 }
 
+/// A local agent's turn runs under the agent's own timeout, not the
+/// provider's.
+#[tokio::test]
+async fn a_local_agents_turn_runs_under_its_own_timeout() {
+    use srelens_agent::adapter::AgentKind;
+    let _settings = common::env::isolate_settings();
+    let dir = tempfile::tempdir().unwrap();
+    let (name, script) = if cfg!(windows) {
+        ("claude.cmd", "@ping -n 60 127.0.0.1 >nul\r\n")
+    } else {
+        ("claude", "#!/bin/sh\nexec sleep 60\n")
+    };
+    let bin = dir.path().join(name);
+    std::fs::write(&bin, script).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let (mut app, mut rx) = common::app().await;
+    app.agent_search = common::agents_only_in(dir.path());
+    app.ai_settings.agent = AgentKind::Claude;
+    app.ai_settings
+        .set_agent_timeout_seconds(AgentKind::Claude, 5);
+    let provider = app.ai_settings.default_provider;
+    app.ai_settings.set_timeout_seconds(provider, 3600);
+
+    app.submit_assistant_query("why?".to_string(), "why?".to_string());
+
+    let chunk = format!("ai_chunk:{}", app.active_context);
+    loop {
+        let ev = tokio::time::timeout(Duration::from_secs(20), rx.recv())
+            .await
+            .expect("the turn times out under Claude's own timeout")
+            .expect("the channel stays open");
+        if let AppEvent::ActionResult { title, result } = ev {
+            if title == chunk
+                && result
+                    .as_deref()
+                    .is_ok_and(|m| m.contains("timed out after 5 seconds"))
+            {
+                break;
+            }
+            assert!(!title.starts_with("ai_done:"), "{title}: {result:?}");
+        }
+    }
+}
+
 #[tokio::test]
 async fn the_title_names_the_agent_and_its_model() {
     use srelens_agent::adapter::AgentKind;

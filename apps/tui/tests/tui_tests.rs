@@ -1103,9 +1103,10 @@ mod tests {
         }
         app.handle_key_event(crate::common::ch('k')).await;
 
-        // Claude Code has no key of its own here: Agent and Model only.
-        app.handle_key_event(crate::common::key(KeyCode::Tab)).await;
-        app.handle_key_event(crate::common::key(KeyCode::Tab)).await;
+        // Claude Code has no key of its own here: Agent, Model and Timeout.
+        for _ in 0..3 {
+            app.handle_key_event(crate::common::key(KeyCode::Tab)).await;
+        }
         assert_eq!(settings_view(&app).selected_field, SettingField::Agent);
         let screen = crate::common::render_app(&mut app, 160, 40);
         assert!(!screen.contains("cursor auth"), "{screen}");
@@ -1165,6 +1166,51 @@ mod tests {
         assert_eq!(settings_view(&app).selected_field, SettingField::Agent);
     }
 
+    /// A local agent's turn timeout is its own, set on the Agent card after
+    /// its model (and Cursor's key), and leaves the provider's alone.
+    #[tokio::test]
+    async fn a_local_agents_timeout_is_set_on_the_agent_card() {
+        use crossterm::event::KeyCode;
+        use srectl::views::SettingField;
+        use srelens_agent::adapter::AgentKind;
+        let _settings = crate::common::env::isolate_settings();
+        let (mut app, _rx) = crate::common::app().await;
+        open_settings(&mut app).await;
+        let provider = app.ai_settings.default_provider;
+        let provider_timeout = app.ai_settings.get_timeout_seconds(provider);
+        match &mut app.active_view {
+            srectl::app::ActiveView::Settings(s) => s.settings.agent = AgentKind::Codex,
+            _ => panic!("expected the settings view"),
+        }
+        app.handle_key_event(crate::common::ch('k')).await;
+        app.handle_key_event(crate::common::key(KeyCode::Tab)).await;
+        app.handle_key_event(crate::common::key(KeyCode::Tab)).await;
+        assert_eq!(settings_view(&app).selected_field, SettingField::Timeout);
+
+        app.handle_key_event(crate::common::ch('e')).await;
+        for _ in 0..5 {
+            app.handle_key_event(crate::common::key(KeyCode::Backspace))
+                .await;
+        }
+        crate::common::type_str(&mut app, "300").await;
+        app.handle_key_event(crate::common::key(KeyCode::Enter))
+            .await;
+
+        assert_eq!(
+            app.ai_settings.get_agent_timeout_seconds(AgentKind::Codex),
+            300
+        );
+        assert_eq!(
+            app.ai_settings.get_timeout_seconds(provider),
+            provider_timeout
+        );
+        let saved = std::fs::read_to_string(srectl::AiSettings::config_path()).unwrap();
+        let saved = srectl::AiSettings::from_json(&saved).unwrap();
+        assert_eq!(saved.get_agent_timeout_seconds(AgentKind::Codex), 300);
+        let screen = crate::common::render_app(&mut app, 160, 40);
+        assert!(screen.contains("Timeout: 300s"), "{screen}");
+    }
+
     const CLAUDE_URL: &str = "https://docs.anthropic.com/en/docs/claude-code/setup";
 
     /// The Settings view with Claude Code as the agent and no agent CLI
@@ -1185,15 +1231,15 @@ mod tests {
     }
 
     // Through the real chrome (3 header rows, 2 footer rows, the view's border)
-    // the full card needs a 40-row terminal.
+    // Claude's full card (with its timeout row) needs a 41-row terminal.
     #[tokio::test]
     async fn a_folded_agent_card_still_says_whether_the_active_agent_is_installed() {
         let (_settings, mut app) = open_settings_with_claude_missing().await;
 
-        let full = crate::common::render_app(&mut app, 120, 40);
+        let full = crate::common::render_app(&mut app, 120, 41);
         assert!(full.contains("○ Codex"), "{full}");
 
-        let folded = crate::common::render_app(&mut app, 120, 39);
+        let folded = crate::common::render_app(&mut app, 120, 40);
         assert!(!folded.contains("○ Codex"), "{folded}");
         assert!(
             folded.contains(&format!(

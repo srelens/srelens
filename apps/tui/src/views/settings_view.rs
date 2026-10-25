@@ -243,7 +243,10 @@ impl SettingsViewState {
         if self.agent_card_focused {
             self.selected_provider_idx = ALL_PROVIDERS.len() - 1;
             self.leave_agent_card();
-        } else if self.selected_provider_idx.is_multiple_of(ALL_PROVIDERS.len()) {
+        } else if self
+            .selected_provider_idx
+            .is_multiple_of(ALL_PROVIDERS.len())
+        {
             self.focus_agent_card();
         } else {
             self.selected_provider_idx -= 1;
@@ -277,17 +280,23 @@ impl SettingsViewState {
         next
     }
 
-    /// The Agent card's fields: the agent and its model, and for Cursor its
-    /// own API key.
+    /// The Agent card's fields: the agent and its model, and for a local
+    /// agent its turn timeout (after Cursor's own API key). srelens's own
+    /// agent runs under its provider's timeout.
     fn agent_card_fields(&self) -> &'static [SettingField] {
-        if self.settings.agent == AgentKind::Cursor {
-            &[
+        match self.settings.agent {
+            AgentKind::Srelens => &[SettingField::Agent, SettingField::Model],
+            AgentKind::Cursor => &[
                 SettingField::Agent,
                 SettingField::Model,
                 SettingField::ApiKey,
-            ]
-        } else {
-            &[SettingField::Agent, SettingField::Model]
+                SettingField::Timeout,
+            ],
+            AgentKind::Claude | AgentKind::Codex => &[
+                SettingField::Agent,
+                SettingField::Model,
+                SettingField::Timeout,
+            ],
         }
     }
 
@@ -398,6 +407,10 @@ impl SettingsViewState {
                 .unwrap_or_default(),
             SettingField::Model => self.settings.get_model(provider),
             SettingField::BaseUrl => self.settings.get_base_url(provider),
+            SettingField::Timeout if self.agent_card_focused => self
+                .settings
+                .get_agent_timeout_seconds(self.settings.agent)
+                .to_string(),
             SettingField::Timeout => self.settings.get_timeout_seconds(provider).to_string(),
         };
         self.is_editing = true;
@@ -434,8 +447,13 @@ impl SettingsViewState {
             }
             SettingField::Timeout => {
                 if let Ok(secs) = val.parse::<u32>() {
-                    self.settings
-                        .set_timeout_seconds(provider, secs.clamp(5, 3600));
+                    let secs = secs.clamp(5, 3600);
+                    if self.agent_card_focused {
+                        self.settings
+                            .set_agent_timeout_seconds(self.settings.agent, secs);
+                    } else {
+                        self.settings.set_timeout_seconds(provider, secs);
+                    }
                 }
             }
         }
@@ -605,7 +623,8 @@ fn key_display(stored: Option<&String>, env_var: &str, unset: Span<'static>) -> 
 }
 
 /// The full card: a row per agent with whether its CLI is installed, then
-/// the active agent's model, and Cursor's own API key.
+/// the active agent's model, Cursor's own API key, and a local agent's
+/// timeout.
 fn full_agent_lines(state: &SettingsViewState, width: usize) -> Vec<Line<'static>> {
     let on_card = state.agent_card_focused;
     let agent_focus = on_card && state.selected_field == SettingField::Agent;
@@ -652,6 +671,21 @@ fn full_agent_lines(state: &SettingsViewState, width: usize) -> Vec<Line<'static
                 state.settings.api_keys.get(agent_slug(AgentKind::Cursor)),
                 "CURSOR_API_KEY",
                 unset,
+            ),
+        ]));
+    }
+    if state.settings.agent != AgentKind::Srelens {
+        let timeout_focus = on_card && state.selected_field == SettingField::Timeout;
+        lines.push(Line::from(vec![
+            Span::styled("   Timeout: ", label_style(timeout_focus)),
+            Span::styled(
+                format!(
+                    "{}s",
+                    state
+                        .settings
+                        .get_agent_timeout_seconds(state.settings.agent)
+                ),
+                value_style(timeout_focus),
             ),
         ]));
     }
@@ -732,10 +766,15 @@ pub fn render_settings_view(f: &mut Frame, area: Rect, state: &SettingsViewState
             Span::styled("Active AI Provider: ", Theme::header_label()),
             Span::styled(
                 format!("● {} ", active_prov_name),
-                Style::default().fg(Theme::GREEN).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(Theme::GREEN)
+                    .add_modifier(Modifier::BOLD),
             ),
             Span::styled(
-                format!("(model: {})", state.settings.get_model(state.settings.default_provider)),
+                format!(
+                    "(model: {})",
+                    state.settings.get_model(state.settings.default_provider)
+                ),
                 Style::default().fg(Theme::CYAN),
             ),
         ]),
