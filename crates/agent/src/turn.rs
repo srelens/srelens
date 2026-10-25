@@ -298,8 +298,17 @@ pub struct PreparedTurn {
 /// Lay out one agent-CLI turn and build its command. The native agent
 /// (`Srelens`) runs in-process and has no CLI turn, so it is an error here.
 pub fn prepare_turn(spec: &TurnSpec) -> Result<PreparedTurn, String> {
+    // The turn's files and directories are named after it in `temp_dir`.
+    if !crate::is_one_name(spec.session) {
+        return Err(format!("invalid session id {:?}", spec.session));
+    }
     match spec.kind {
         AgentKind::Srelens => Err("srelens's own agent runs in-process; it has no CLI turn to prepare".into()),
+        // An empty or relative root would keep the chat, its token among
+        // it, in whatever directory the app was started from.
+        AgentKind::Cursor if !spec.cursor_root.is_absolute() => {
+            Err("a Cursor turn needs an absolute directory to keep its chats in".into())
+        }
         // Cursor's working directory is its workspace, laid out with the rest
         // of its turn by `prepare_cursor_turn`, which guards it.
         AgentKind::Cursor => {
@@ -865,6 +874,37 @@ mod tests {
         assert!(prepare_turn(&TurnSpec { conversation: Some("conv-1"), ..f.spec(AgentKind::Cursor) }).is_err());
         drop(turn);
         assert!(!token_file.exists(), "the turn's bearer token must not outlive it");
+    }
+
+    /// A turn's files and directories are named after its session in the
+    /// temp dir, so a session that is not one plain name could put them, and
+    /// the bearer token among them, somewhere else.
+    #[test]
+    fn a_session_that_is_not_one_plain_name_is_refused() {
+        let f = TurnFixture::new();
+        let temp = f.root.0.join("tmp");
+        std::fs::create_dir(&temp).unwrap();
+        for kind in [AgentKind::Claude, AgentKind::Codex, AgentKind::Cursor] {
+            for session in ["", ".", "..", "a/b", "x/../../out"] {
+                let turn = prepare_turn(&TurnSpec { session, temp_dir: &temp, ..f.spec(kind) });
+                assert!(turn.is_err(), "{kind:?} with session {session:?}");
+            }
+        }
+    }
+
+    /// An empty or relative root would keep the chat, and its MCP token, in
+    /// whatever directory the app happens to run in.
+    #[test]
+    fn a_cursor_turn_needs_an_absolute_root() {
+        let f = TurnFixture::new();
+        for root in ["", "srelens-relative-cursor-root"] {
+            let turn = prepare_turn(&TurnSpec {
+                cursor_root: std::path::Path::new(root),
+                conversation: Some("srelens-root-test"),
+                ..f.spec(AgentKind::Cursor)
+            });
+            assert!(turn.is_err(), "root {root:?}");
+        }
     }
 
     #[test]

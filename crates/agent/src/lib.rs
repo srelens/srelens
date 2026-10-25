@@ -48,14 +48,19 @@ pub fn next_resume_id(
 /// is emptied before each turn and the whole of it removed with the chat, so
 /// `chat` must be one plain component — never `.` or `..`.
 pub fn cursor_chat_dir(root: &std::path::Path, chat: &str) -> Result<std::path::PathBuf, String> {
-    let one_name = matches!(
-        std::path::Path::new(chat).components().collect::<Vec<_>>()[..],
-        [std::path::Component::Normal(_)]
-    );
-    if !one_name {
+    if !is_one_name(chat) {
         return Err(format!("invalid session id {chat:?}"));
     }
     Ok(root.join(chat))
+}
+
+/// Whether `name` is one plain path component: not empty, `.`, `..`, a root,
+/// or several components, so joining it onto a directory stays in it.
+pub(crate) fn is_one_name(name: &str) -> bool {
+    matches!(
+        std::path::Path::new(name).components().collect::<Vec<_>>()[..],
+        [std::path::Component::Normal(_)]
+    )
 }
 
 /// Remove one Cursor chat's directory tree under `dir`. Tolerates `NotFound`.
