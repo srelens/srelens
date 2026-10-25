@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use srelens_agent::adapter::{valid_model_id, AgentKind};
+use srelens_kube::toolbox::SearchPaths;
 use srelens_llm::types::ProviderKind;
 use srelens_llm::ProviderConfig;
 use std::collections::HashMap;
@@ -102,10 +103,27 @@ pub fn agent_install_url(kind: AgentKind) -> &'static str {
 /// runs (`cursor-agent.cmd` on Windows): the app's PATH first, then the usual
 /// install dirs. `None` for srelens's own agent, which has no binary.
 pub fn find_agent(kind: AgentKind) -> Option<PathBuf> {
+    find_agent_in(kind, &SearchPaths::from_env())
+}
+
+/// [`find_agent`] in `paths`' directories only: `app_path`, then
+/// `system_path`. A directory that is not absolute is skipped: it is what
+/// `HOME/.srelens/bin` becomes when `HOME` is unset (usual on Windows), or an
+/// empty `PATH` entry, and either would be searched in the working
+/// directory, where a cloned repository could have put a `claude.cmd`.
+pub fn find_agent_in(kind: AgentKind, paths: &SearchPaths) -> Option<PathBuf> {
     let program = kind.binary()?;
-    let paths = srelens_kube::toolbox::SearchPaths::from_env();
-    srelens_kube::path_lookup::find_executable(program, &paths.app_path)
-        .or_else(|| srelens_kube::path_lookup::find_executable(program, &paths.system_path))
+    let dirs: Vec<PathBuf> = [&paths.app_path, &paths.system_path]
+        .into_iter()
+        .flat_map(std::env::split_paths)
+        .filter(|dir| dir.is_absolute())
+        .collect();
+    if dirs.is_empty() {
+        // An empty PATH-style string is one empty, relative, entry.
+        return None;
+    }
+    let path = std::env::join_paths(dirs).ok()?;
+    srelens_kube::path_lookup::find_executable(program, path)
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

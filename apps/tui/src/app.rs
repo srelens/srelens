@@ -249,6 +249,9 @@ pub struct App {
     /// Model lists for the Settings picker, kept for the run by cache key;
     /// `None` while that list's one fetch is in flight. Failures are not kept.
     pub model_lists: HashMap<String, Option<Vec<srelens_agent::adapter::ModelChoice>>>,
+    /// Where the Assistant, the Agent card and the model picker look for
+    /// local agent CLIs; a test points it at its own directory.
+    pub agent_search: srelens_kube::toolbox::SearchPaths,
 }
 
 pub enum SuspendAction {
@@ -632,6 +635,7 @@ impl App {
             consents: Default::default(),
             consent_arm_delay: Duration::from_secs(1),
             model_lists: HashMap::new(),
+            agent_search: srelens_kube::toolbox::SearchPaths::from_env(),
         };
 
         if let Some(lvl) = app.ai_settings.get_caveman_level() {
@@ -8568,7 +8572,7 @@ impl App {
         ai.chat_agent = Some(agent);
 
         if agent != AgentKind::Srelens {
-            if let Some(binary) = crate::ai_config::find_agent(agent) {
+            if let Some(binary) = crate::ai_config::find_agent_in(agent, &self.agent_search) {
                 let turn = crate::agent::CliTurn {
                     kind: agent,
                     binary,
@@ -10122,7 +10126,9 @@ impl App {
             }
             ResourceKind::Toolbox => ActiveView::Toolbox(ToolboxViewState::new()),
             ResourceKind::Assistant => ActiveView::Assistant,
-            ResourceKind::Settings => ActiveView::Settings(SettingsViewState::new()),
+            ResourceKind::Settings => {
+                ActiveView::Settings(SettingsViewState::new(&self.agent_search))
+            }
             ResourceKind::TuiConfig => {
                 let mut cfg = TuiConfigViewState::new();
                 cfg.available_contexts = self.contexts.iter().map(|c| c.name.clone()).collect();
@@ -12046,12 +12052,15 @@ impl App {
         }
         self.model_lists.insert(key.clone(), None);
         let snapshot = settings.settings.clone();
+        let binary = match target {
+            PickerTarget::Agent(kind) => crate::ai_config::find_agent_in(kind, &self.agent_search),
+            PickerTarget::Provider(_) => None,
+        };
         let event_tx = self.event_tx.clone();
         tokio::spawn(async move {
             let result = match target {
                 PickerTarget::Provider(p) => model_list::provider_models(&snapshot, p).await,
                 PickerTarget::Agent(kind) => {
-                    let binary = crate::ai_config::find_agent(kind);
                     let cursor_key = snapshot.get_cursor_key();
                     model_list::agent_models(kind, binary.as_deref(), cursor_key).await
                 }

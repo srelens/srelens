@@ -4091,10 +4091,8 @@ async fn tab_on_workloads_cycles_segments_and_on_wide_events_focuses_the_reason_
 #[tokio::test]
 async fn with_cursor_as_the_agent_the_assistant_turns_to_cursor_agent_not_the_provider() {
     let mut settings = common::env::isolate_settings();
-    // Nowhere to find cursor-agent, and no provider key to fall back on.
-    let empty = tempfile::tempdir().unwrap();
-    settings.set_env("PATH", empty.path());
-    settings.set_env("HOME", empty.path());
+    // Nowhere to find cursor-agent (`common::app` looks for no agent), and
+    // no provider key to fall back on.
     settings.remove_env("ANTHROPIC_API_KEY");
     let (mut app, _rx) = common::app().await;
     app.ai_settings.agent = srelens_agent::adapter::AgentKind::Cursor;
@@ -4115,9 +4113,6 @@ async fn with_cursor_as_the_agent_the_assistant_turns_to_cursor_agent_not_the_pr
 async fn asking_a_local_agent_that_is_not_installed_says_where_to_get_it() {
     use srelens_agent::adapter::AgentKind;
     let mut settings = common::env::isolate_settings();
-    let empty = tempfile::tempdir().unwrap();
-    settings.set_env("PATH", empty.path());
-    settings.set_env("HOME", empty.path());
     settings.remove_env("ANTHROPIC_API_KEY");
     let (mut app, _rx) = common::app().await;
     app.ai_settings.api_keys.clear();
@@ -4147,6 +4142,62 @@ async fn asking_a_local_agent_that_is_not_installed_says_where_to_get_it() {
     }
 }
 
+/// A do-nothing `program` in `dir`, named as this platform runs it.
+fn plant_fake_agent(dir: &std::path::Path, program: &str) {
+    let (name, body) = if cfg!(windows) {
+        (format!("{program}.cmd"), "@echo off\r\n")
+    } else {
+        (program.to_string(), "#!/bin/sh\n")
+    };
+    let path = dir.join(name);
+    std::fs::write(&path, body).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+}
+
+#[tokio::test]
+async fn agents_are_looked_for_where_the_app_is_told_not_on_the_process_path() {
+    use srectl::views::settings_view::PickerTarget;
+    use srelens_agent::adapter::AgentKind;
+    let mut settings = common::env::isolate_settings();
+    // Claude Code and Codex on PATH, as on a dev box or CI image with them...
+    let installed = tempfile::tempdir().unwrap();
+    plant_fake_agent(installed.path(), "claude");
+    plant_fake_agent(installed.path(), "codex");
+    settings.set_env("PATH", installed.path());
+    settings.set_env("HOME", installed.path());
+    let (mut app, mut rx) = common::app().await;
+    // ...but the app is told to look in an empty directory.
+    let empty = tempfile::tempdir().unwrap();
+    app.agent_search = common::agents_only_in(empty.path());
+
+    // The Assistant does not run the one on PATH.
+    app.ai_settings.agent = AgentKind::Claude;
+    app.submit_assistant_query("hi".to_string(), "hi".to_string());
+    let last = &app.assistant_state.messages.last().unwrap().content;
+    assert!(last.contains("Claude Code CLI was not found"), "{last}");
+
+    // The Agent card does not list it.
+    app.switch_view_to_kind(ResourceKind::Settings).await;
+    assert_eq!(settings_view(&app).agent_paths, Vec::new());
+
+    // The model picker does not run it to list models.
+    app.open_model_picker(PickerTarget::Agent(AgentKind::Codex));
+    let result = loop {
+        let ev = tokio::time::timeout(Duration::from_secs(20), rx.recv())
+            .await
+            .expect("the list comes back")
+            .expect("the channel stays open");
+        if let AppEvent::ModelsLoaded { result, .. } = ev {
+            break result;
+        }
+    };
+    assert_eq!(result, Err("Codex is not installed".to_string()));
+}
+
 #[tokio::test]
 async fn clearing_the_conversation_starts_the_agent_afresh() {
     use srelens_agent::adapter::AgentKind;
@@ -4167,10 +4218,7 @@ async fn clearing_the_conversation_starts_the_agent_afresh() {
 #[tokio::test]
 async fn switching_agent_starts_the_new_one_afresh() {
     use srelens_agent::adapter::AgentKind;
-    let mut settings = common::env::isolate_settings();
-    let empty = tempfile::tempdir().unwrap();
-    settings.set_env("PATH", empty.path());
-    settings.set_env("HOME", empty.path());
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app().await;
     let before = app.assistant_state.conversation_id.clone();
     app.assistant_state.cli_resume_id = Some("claude-session".to_string());
@@ -4204,10 +4252,7 @@ async fn switching_agent_starts_the_new_one_afresh() {
 #[tokio::test]
 async fn asking_the_same_agent_again_keeps_its_conversation() {
     use srelens_agent::adapter::AgentKind;
-    let mut settings = common::env::isolate_settings();
-    let empty = tempfile::tempdir().unwrap();
-    settings.set_env("PATH", empty.path());
-    settings.set_env("HOME", empty.path());
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app().await;
     app.ai_settings.agent = AgentKind::Codex;
     let before = app.assistant_state.conversation_id.clone();
@@ -4227,10 +4272,7 @@ async fn asking_the_same_agent_again_keeps_its_conversation() {
 #[tokio::test]
 async fn switching_agent_leaves_the_old_agents_history_behind() {
     use srelens_agent::adapter::AgentKind;
-    let mut settings = common::env::isolate_settings();
-    let empty = tempfile::tempdir().unwrap();
-    settings.set_env("PATH", empty.path());
-    settings.set_env("HOME", empty.path());
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app().await;
     // srelens's own agent has talked here...
     app.assistant_state.chat_agent = Some(AgentKind::Srelens);
@@ -4340,6 +4382,7 @@ async fn an_installed_local_agent_gets_the_turn_and_its_session_comes_back() {
     settings.set_env("HOME", dir.path());
     settings.remove_env("CURSOR_API_KEY");
     let (mut app, mut rx) = common::app().await;
+    app.agent_search = common::agents_only_in(dir.path());
     app.ai_settings.agent = AgentKind::Claude;
     // A Cursor key is stored, and Claude has its own model and a session to
     // resume. The key must stay out of Claude's environment; the model and

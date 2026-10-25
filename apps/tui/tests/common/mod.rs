@@ -16,6 +16,7 @@ use ratatui::buffer::Buffer;
 use ratatui::{Frame, Terminal};
 use srectl::app::App;
 use srectl::event::AppEvent;
+use srelens_kube::toolbox::SearchPaths;
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver};
 
 /// An `App` with no kubeconfig, no cluster, and the given context/namespace,
@@ -23,7 +24,7 @@ use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver};
 /// app emitted.
 pub async fn app_with(context: &str, namespace: &str) -> (App, UnboundedReceiver<AppEvent>) {
     let (tx, rx) = unbounded_channel();
-    let app = theme::new_app(
+    let mut app = theme::new_app(
         Some(context.to_string()),
         Some(namespace.to_string()),
         false,
@@ -33,12 +34,32 @@ pub async fn app_with(context: &str, namespace: &str) -> (App, UnboundedReceiver
     )
     .await
     .expect("App::new never needs a cluster");
+    // No agent CLI installed on the machine running the tests is ever found
+    // (or run); a test that wants one puts it in a directory of its own.
+    app.agent_search = no_agents();
     (app, rx)
 }
 
 /// `app_with("test-cluster", "default")`.
 pub async fn app() -> (App, UnboundedReceiver<AppEvent>) {
     app_with("test-cluster", "default").await
+}
+
+/// Agent search paths holding only `dir`, so a test finds exactly the agent
+/// CLIs it put there and never one installed on the machine running it.
+pub fn agents_only_in(dir: &std::path::Path) -> SearchPaths {
+    SearchPaths {
+        app_path: dir.to_string_lossy().into_owned(),
+        system_path: String::new(),
+    }
+}
+
+/// Agent search paths that find no agent at all.
+pub fn no_agents() -> SearchPaths {
+    SearchPaths {
+        app_path: String::new(),
+        system_path: String::new(),
+    }
 }
 
 /// A plain key press.

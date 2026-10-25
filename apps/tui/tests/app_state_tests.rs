@@ -2408,8 +2408,9 @@ async fn settings_keys_navigate_toggle_edit_and_save() {
     // 'q' returns to the previous view; with no history it opens Pods.
     app.handle_key_event(common::ch('q')).await;
     assert!(matches!(app.active_view, ActiveView::Table(_)));
-    app.active_view =
-        ActiveView::Settings(srectl::views::settings_view::SettingsViewState::new());
+    app.active_view = ActiveView::Settings(srectl::views::settings_view::SettingsViewState::new(
+        &common::no_agents(),
+    ));
     app.nav_stack.clear();
     app.handle_key_event(common::key(KeyCode::Esc)).await;
     assert!(matches!(&app.active_view, ActiveView::Table(t) if t.kind == ResourceKind::Pods));
@@ -2722,7 +2723,7 @@ async fn pasted_text_lands_in_the_active_input() {
         "the Assistant composer is multi-line: a paste keeps its lines"
     );
 
-    let mut settings = srectl::views::settings_view::SettingsViewState::new();
+    let mut settings = srectl::views::settings_view::SettingsViewState::new(&common::no_agents());
     settings.is_editing = true;
     app.active_view = ActiveView::Settings(settings);
     app.handle_paste("sk-\nabc".into());

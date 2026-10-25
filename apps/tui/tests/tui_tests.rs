@@ -537,6 +537,10 @@ mod tests {
             consents: Default::default(),
             consent_arm_delay: std::time::Duration::from_secs(1),
             model_lists: Default::default(),
+            agent_search: srelens_kube::toolbox::SearchPaths {
+                app_path: String::new(),
+                system_path: String::new(),
+            },
         };
 
         // 1. Simulate streaming snapshot arrival for pods
@@ -652,6 +656,10 @@ mod tests {
             consents: Default::default(),
             consent_arm_delay: std::time::Duration::from_secs(1),
             model_lists: Default::default(),
+            agent_search: srelens_kube::toolbox::SearchPaths {
+                app_path: String::new(),
+                system_path: String::new(),
+            },
         };
 
         // 1. Enter command mode by typing ':'
@@ -779,6 +787,10 @@ mod tests {
             consents: Default::default(),
             consent_arm_delay: std::time::Duration::from_secs(1),
             model_lists: Default::default(),
+            agent_search: srelens_kube::toolbox::SearchPaths {
+                app_path: String::new(),
+                system_path: String::new(),
+            },
         };
 
         // 1. Switch to settings view via :settings command
@@ -1078,13 +1090,11 @@ mod tests {
     const CLAUDE_URL: &str = "https://docs.anthropic.com/en/docs/claude-code/setup";
 
     /// The Settings view with Claude Code as the agent and no agent CLI
-    /// anywhere on `PATH` or under `HOME`.
+    /// found (`common::app` looks for none), and the settings guard the app
+    /// was made under.
     async fn open_settings_with_claude_missing(
-        settings: &mut crate::common::env::SettingsGuard,
-        nowhere: &std::path::Path,
-    ) -> srectl::app::App {
-        settings.set_env("PATH", nowhere);
-        settings.set_env("HOME", nowhere);
+    ) -> (crate::common::env::SettingsGuard, srectl::app::App) {
+        let settings = crate::common::env::isolate_settings();
         let (mut app, _rx) = crate::common::app().await;
         open_settings(&mut app).await;
         match &mut app.active_view {
@@ -1093,16 +1103,14 @@ mod tests {
             }
             _ => panic!("expected the settings view"),
         }
-        app
+        (settings, app)
     }
 
     // Through the real chrome (3 header rows, 2 footer rows, the view's border)
     // the full card needs a 40-row terminal.
     #[tokio::test]
     async fn a_folded_agent_card_still_says_whether_the_active_agent_is_installed() {
-        let mut settings = crate::common::env::isolate_settings();
-        let nowhere = tempfile::tempdir().unwrap();
-        let mut app = open_settings_with_claude_missing(&mut settings, nowhere.path()).await;
+        let (_settings, mut app) = open_settings_with_claude_missing().await;
 
         let full = crate::common::render_app(&mut app, 120, 40);
         assert!(full.contains("○ Codex"), "{full}");
@@ -1119,9 +1127,7 @@ mod tests {
 
     #[tokio::test]
     async fn the_agent_card_is_drawn_in_full_while_it_has_the_cursor() {
-        let mut settings = crate::common::env::isolate_settings();
-        let nowhere = tempfile::tempdir().unwrap();
-        let mut app = open_settings_with_claude_missing(&mut settings, nowhere.path()).await;
+        let (_settings, mut app) = open_settings_with_claude_missing().await;
         app.handle_key_event(crate::common::ch('k')).await;
 
         let screen = crate::common::render_app(&mut app, 120, 39);
@@ -1138,9 +1144,7 @@ mod tests {
 
     #[tokio::test]
     async fn an_install_link_wider_than_the_card_moves_to_its_own_line() {
-        let mut settings = crate::common::env::isolate_settings();
-        let nowhere = tempfile::tempdir().unwrap();
-        let mut app = open_settings_with_claude_missing(&mut settings, nowhere.path()).await;
+        let (_settings, mut app) = open_settings_with_claude_missing().await;
 
         // The full card, with room: the row is 83 columns, the card 76.
         let screen = crate::common::render_app(&mut app, 80, 60);
@@ -1165,10 +1169,9 @@ mod tests {
     // The classic 80x24 terminal: 17 rows inside the chrome and the view's
     // border, of which the description takes 3 and the hints 2.
 
-    /// A fake `codex` as all of `PATH` and `HOME`, then the Settings view
-    /// with `agent` active.
+    /// A fake `codex` as the only agent CLI the app finds, then the Settings
+    /// view with `agent` active.
     async fn open_settings_on_a_small_terminal(
-        settings: &mut crate::common::env::SettingsGuard,
         bin: &std::path::Path,
         agent: srelens_agent::adapter::AgentKind,
     ) -> srectl::app::App {
@@ -1184,9 +1187,8 @@ mod tests {
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(&codex, std::fs::Permissions::from_mode(0o755)).unwrap();
         }
-        settings.set_env("PATH", bin);
-        settings.set_env("HOME", bin);
         let (mut app, _rx) = crate::common::app().await;
+        app.agent_search = crate::common::agents_only_in(bin);
         open_settings(&mut app).await;
         match &mut app.active_view {
             srectl::app::ActiveView::Settings(s) => s.settings.agent = agent,
@@ -1197,14 +1199,11 @@ mod tests {
 
     #[tokio::test]
     async fn on_80x24_an_installed_agent_shows_on_the_folded_card() {
-        let mut settings = crate::common::env::isolate_settings();
+        let _settings = crate::common::env::isolate_settings();
         let bin = tempfile::tempdir().unwrap();
-        let mut app = open_settings_on_a_small_terminal(
-            &mut settings,
-            bin.path(),
-            srelens_agent::adapter::AgentKind::Codex,
-        )
-        .await;
+        let mut app =
+            open_settings_on_a_small_terminal(bin.path(), srelens_agent::adapter::AgentKind::Codex)
+                .await;
 
         let screen = crate::common::render_app(&mut app, 80, 24);
         assert!(
@@ -1216,10 +1215,9 @@ mod tests {
 
     #[tokio::test]
     async fn on_80x24_srelens_shows_on_the_folded_card_and_the_first_provider_keeps_its_fields() {
-        let mut settings = crate::common::env::isolate_settings();
+        let _settings = crate::common::env::isolate_settings();
         let bin = tempfile::tempdir().unwrap();
         let mut app = open_settings_on_a_small_terminal(
-            &mut settings,
             bin.path(),
             srelens_agent::adapter::AgentKind::Srelens,
         )
@@ -1242,10 +1240,9 @@ mod tests {
 
     #[tokio::test]
     async fn on_80x24_a_missing_agent_and_the_first_provider_are_both_readable() {
-        let mut settings = crate::common::env::isolate_settings();
+        let _settings = crate::common::env::isolate_settings();
         let bin = tempfile::tempdir().unwrap();
         let mut app = open_settings_on_a_small_terminal(
-            &mut settings,
             bin.path(),
             srelens_agent::adapter::AgentKind::Claude,
         )
@@ -1261,10 +1258,9 @@ mod tests {
 
     #[tokio::test]
     async fn on_80x24_the_selected_provider_never_leaves_the_screen() {
-        let mut settings = crate::common::env::isolate_settings();
+        let _settings = crate::common::env::isolate_settings();
         let bin = tempfile::tempdir().unwrap();
         let mut app = open_settings_on_a_small_terminal(
-            &mut settings,
             bin.path(),
             srelens_agent::adapter::AgentKind::Srelens,
         )
@@ -1367,6 +1363,10 @@ mod tests {
             consents: Default::default(),
             consent_arm_delay: std::time::Duration::from_secs(1),
             model_lists: Default::default(),
+            agent_search: srelens_kube::toolbox::SearchPaths {
+                app_path: String::new(),
+                system_path: String::new(),
+            },
         };
 
         // 1. In Assistant view, typing 's' when input is empty should type 's' into prompt, NOT jump to settings!
@@ -1602,6 +1602,10 @@ mod tests {
             consents: Default::default(),
             consent_arm_delay: std::time::Duration::from_secs(1),
             model_lists: Default::default(),
+            agent_search: srelens_kube::toolbox::SearchPaths {
+                app_path: String::new(),
+                system_path: String::new(),
+            },
         };
 
         // 1. User starts turn in Assistant view
@@ -1842,6 +1846,10 @@ mod tests {
             consents: Default::default(),
             consent_arm_delay: std::time::Duration::from_secs(1),
             model_lists: Default::default(),
+            agent_search: srelens_kube::toolbox::SearchPaths {
+                app_path: String::new(),
+                system_path: String::new(),
+            },
         };
 
         // 1. Enter filter mode with '/'
@@ -2010,6 +2018,10 @@ mod tests {
             consents: Default::default(),
             consent_arm_delay: std::time::Duration::from_secs(1),
             model_lists: Default::default(),
+            agent_search: srelens_kube::toolbox::SearchPaths {
+                app_path: String::new(),
+                system_path: String::new(),
+            },
         };
 
         // Press 'f' (or 'F') on the selected pod -> opens PortForward modal with detected port 3000
@@ -2394,6 +2406,10 @@ mod tests {
             consents: Default::default(),
             consent_arm_delay: std::time::Duration::from_secs(1),
             model_lists: Default::default(),
+            agent_search: srelens_kube::toolbox::SearchPaths {
+                app_path: String::new(),
+                system_path: String::new(),
+            },
         };
 
         // Initially without metrics, extract_field_str returns "-"
@@ -2559,6 +2575,10 @@ mod tests {
             consents: Default::default(),
             consent_arm_delay: std::time::Duration::from_secs(1),
             model_lists: Default::default(),
+            agent_search: srelens_kube::toolbox::SearchPaths {
+                app_path: String::new(),
+                system_path: String::new(),
+            },
         };
 
         // 1. Test paste handling into Assistant input
@@ -2674,6 +2694,10 @@ mod tests {
             consents: Default::default(),
             consent_arm_delay: std::time::Duration::from_secs(1),
             model_lists: Default::default(),
+            agent_search: srelens_kube::toolbox::SearchPaths {
+                app_path: String::new(),
+                system_path: String::new(),
+            },
         };
 
         // When input is empty, typing '?' opens help modal
@@ -2783,6 +2807,10 @@ mod tests {
             consents: Default::default(),
             consent_arm_delay: std::time::Duration::from_secs(1),
             model_lists: Default::default(),
+            agent_search: srelens_kube::toolbox::SearchPaths {
+                app_path: String::new(),
+                system_path: String::new(),
+            },
         };
 
         // Set viewport and simulate tool chip line at index 2
@@ -2940,6 +2968,10 @@ mod tests {
             consents: Default::default(),
             consent_arm_delay: std::time::Duration::from_secs(1),
             model_lists: Default::default(),
+            agent_search: srelens_kube::toolbox::SearchPaths {
+                app_path: String::new(),
+                system_path: String::new(),
+            },
         };
 
         // Simulate header chips at columns 12..25 (prod-eu) and 26..40 (kind-dev) on row 0
@@ -3132,6 +3164,10 @@ mod tests {
             consents: Default::default(),
             consent_arm_delay: std::time::Duration::from_secs(1),
             model_lists: Default::default(),
+            agent_search: srelens_kube::toolbox::SearchPaths {
+                app_path: String::new(),
+                system_path: String::new(),
+            },
         };
 
         // 1. In data-processing-prod-eu-dus1, user has a conversation
@@ -3333,6 +3369,10 @@ mod tests {
             consents: Default::default(),
             consent_arm_delay: std::time::Duration::from_secs(1),
             model_lists: Default::default(),
+            agent_search: srelens_kube::toolbox::SearchPaths {
+                app_path: String::new(),
+                system_path: String::new(),
+            },
         };
 
         // 1. Pressing 'c' on the selected row copies the resource name!
@@ -3465,6 +3505,10 @@ mod tests {
             consents: Default::default(),
             consent_arm_delay: std::time::Duration::from_secs(1),
             model_lists: Default::default(),
+            agent_search: srelens_kube::toolbox::SearchPaths {
+                app_path: String::new(),
+                system_path: String::new(),
+            },
         };
 
         // 1. Switch view to Overview
@@ -3995,6 +4039,10 @@ mod tests {
             consents: Default::default(),
             consent_arm_delay: std::time::Duration::from_secs(1),
             model_lists: Default::default(),
+            agent_search: srelens_kube::toolbox::SearchPaths {
+                app_path: String::new(),
+                system_path: String::new(),
+            },
         };
 
         // 1. Press 'c' -> Copies selected pod name
@@ -4166,6 +4214,10 @@ mod tests {
             consents: Default::default(),
             consent_arm_delay: std::time::Duration::from_secs(1),
             model_lists: Default::default(),
+            agent_search: srelens_kube::toolbox::SearchPaths {
+                app_path: String::new(),
+                system_path: String::new(),
+            },
         };
 
         // 1. Press 'Ctrl+d' on Deployment -> Delete confirmation modal
@@ -4454,6 +4506,10 @@ mod tests {
             consents: Default::default(),
             consent_arm_delay: std::time::Duration::from_secs(1),
             model_lists: Default::default(),
+            agent_search: srelens_kube::toolbox::SearchPaths {
+                app_path: String::new(),
+                system_path: String::new(),
+            },
         };
 
         // 1. Press 'x' on Deployment -> Opens Action Palette
@@ -4612,6 +4668,10 @@ mod tests {
             consents: Default::default(),
             consent_arm_delay: std::time::Duration::from_secs(1),
             model_lists: Default::default(),
+            agent_search: srelens_kube::toolbox::SearchPaths {
+                app_path: String::new(),
+                system_path: String::new(),
+            },
         };
 
         // 1. Press 't' on Pod -> Opens Tree View
@@ -4767,6 +4827,10 @@ mod tests {
             consents: Default::default(),
             consent_arm_delay: std::time::Duration::from_secs(1),
             model_lists: Default::default(),
+            agent_search: srelens_kube::toolbox::SearchPaths {
+                app_path: String::new(),
+                system_path: String::new(),
+            },
         };
 
         // 1. Pressing 'x' on Node table opens Action Palette with 'InspectNode'
@@ -4998,6 +5062,10 @@ mod tests {
             consents: Default::default(),
             consent_arm_delay: std::time::Duration::from_secs(1),
             model_lists: Default::default(),
+            agent_search: srelens_kube::toolbox::SearchPaths {
+                app_path: String::new(),
+                system_path: String::new(),
+            },
         };
 
         // 1. Click on row at y = 3 + 2 + 5 = 10 -> row 5
@@ -5227,6 +5295,10 @@ mod tests {
             consents: Default::default(),
             consent_arm_delay: std::time::Duration::from_secs(1),
             model_lists: Default::default(),
+            agent_search: srelens_kube::toolbox::SearchPaths {
+                app_path: String::new(),
+                system_path: String::new(),
+            },
         };
 
         // 1. In Describe mode: press '/' to enter search mode
@@ -6268,6 +6340,10 @@ mod tests {
             consents: Default::default(),
             consent_arm_delay: std::time::Duration::from_secs(1),
             model_lists: Default::default(),
+            agent_search: srelens_kube::toolbox::SearchPaths {
+                app_path: String::new(),
+                system_path: String::new(),
+            },
         };
 
         // 1. Press 'l' on the highlighted pod in NodeInspector
@@ -6498,6 +6574,10 @@ mod tests {
             consents: Default::default(),
             consent_arm_delay: std::time::Duration::from_secs(1),
             model_lists: Default::default(),
+            agent_search: srelens_kube::toolbox::SearchPaths {
+                app_path: String::new(),
+                system_path: String::new(),
+            },
         };
 
         // Press 'l' on single-container pod
@@ -6783,6 +6863,10 @@ mod tests {
             consents: Default::default(),
             consent_arm_delay: std::time::Duration::from_secs(1),
             model_lists: Default::default(),
+            agent_search: srelens_kube::toolbox::SearchPaths {
+                app_path: String::new(),
+                system_path: String::new(),
+            },
         };
 
         // Rebuild table
@@ -6954,6 +7038,10 @@ mod tests {
             consents: Default::default(),
             consent_arm_delay: std::time::Duration::from_secs(1),
             model_lists: Default::default(),
+            agent_search: srelens_kube::toolbox::SearchPaths {
+                app_path: String::new(),
+                system_path: String::new(),
+            },
         };
 
         app.rebuild_workloads_table();
@@ -8060,6 +8148,10 @@ mod tests {
             consents: Default::default(),
             consent_arm_delay: std::time::Duration::from_secs(1),
             model_lists: Default::default(),
+            agent_search: srelens_kube::toolbox::SearchPaths {
+                app_path: String::new(),
+                system_path: String::new(),
+            },
         };
 
         // Initially selected on Workloads (cart-deploy)
@@ -8284,6 +8376,10 @@ mod tests {
             consents: Default::default(),
             consent_arm_delay: std::time::Duration::from_secs(1),
             model_lists: Default::default(),
+            agent_search: srelens_kube::toolbox::SearchPaths {
+                app_path: String::new(),
+                system_path: String::new(),
+            },
         };
 
         // 3. Initially selected on gpu-node-alpha on the left
@@ -8452,6 +8548,10 @@ mod tests {
             consents: Default::default(),
             consent_arm_delay: std::time::Duration::from_secs(1),
             model_lists: Default::default(),
+            agent_search: srelens_kube::toolbox::SearchPaths {
+                app_path: String::new(),
+                system_path: String::new(),
+            },
         };
 
         // Populate resource cache with pods
@@ -8672,6 +8772,10 @@ mod tests {
             consents: Default::default(),
             consent_arm_delay: std::time::Duration::from_secs(1),
             model_lists: Default::default(),
+            agent_search: srelens_kube::toolbox::SearchPaths {
+                app_path: String::new(),
+                system_path: String::new(),
+            },
         };
 
         // Verify initial CPU sort puts high-cpu-pod first

@@ -925,7 +925,7 @@ fn render_settings(width: u16, height: u16, state: &SettingsViewState) -> String
 fn settings_view_new_selects_the_configured_default_provider() {
     let _settings = common::env::isolate_settings();
     // The cursor starts on the default provider loaded from isolated settings.
-    let state = SettingsViewState::new();
+    let state = SettingsViewState::new(&common::no_agents());
     assert_eq!(state.current_provider(), state.settings.default_provider);
     assert_eq!(state.selected_field, SettingField::ProviderToggle);
     assert!(!state.is_editing);
@@ -1270,11 +1270,10 @@ fn settings_view_renders_the_active_provider_summary_and_every_provider_card() {
     );
 }
 
-/// Put a fake `codex` in a scratch directory that is all of `PATH` and `HOME`,
-/// so no other agent can be found. Keep the returned directory alive.
-fn install_only_a_fake_codex(
-    settings: &mut common::env::SettingsGuard,
-) -> (tempfile::TempDir, std::path::PathBuf) {
+/// Put a fake `codex` in a scratch directory; look for agents there and
+/// nowhere else ([`common::agents_only_in`]), so no other agent can be found.
+/// Keep the returned directory alive.
+fn install_only_a_fake_codex() -> (tempfile::TempDir, std::path::PathBuf) {
     let dir = tempfile::tempdir().expect("scratch bin dir");
     let (name, body) = if cfg!(windows) {
         ("codex.cmd", "@echo off\r\n")
@@ -1288,16 +1287,14 @@ fn install_only_a_fake_codex(
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&codex, std::fs::Permissions::from_mode(0o755)).unwrap();
     }
-    settings.set_env("PATH", dir.path());
-    settings.set_env("HOME", dir.path());
     (dir, codex)
 }
 
 #[test]
 fn the_agent_card_lists_each_agent_and_whether_it_is_installed() {
-    let mut settings = common::env::isolate_settings();
-    let (_bin, codex) = install_only_a_fake_codex(&mut settings);
-    let state = SettingsViewState::new();
+    let _settings = common::env::isolate_settings();
+    let (bin, codex) = install_only_a_fake_codex();
+    let state = SettingsViewState::new(&common::agents_only_in(bin.path()));
     // Wide enough for the scratch path, so nothing is cut off.
     let lines = common::render_lines(240, 40, |f| render_settings_view(f, f.area(), &state));
     let text = lines.join("\n");
@@ -1358,9 +1355,9 @@ fn the_agent_card_shows_the_active_agents_model() {
 #[test]
 fn a_short_terminal_folds_the_agent_card_into_one_line() {
     use srelens_agent::adapter::AgentKind;
-    let mut settings = common::env::isolate_settings();
-    let (_bin, _codex) = install_only_a_fake_codex(&mut settings);
-    let mut state = SettingsViewState::new();
+    let _settings = common::env::isolate_settings();
+    let (bin, _codex) = install_only_a_fake_codex();
+    let mut state = SettingsViewState::new(&common::agents_only_in(bin.path()));
     state.settings.agent = AgentKind::Codex;
     state
         .settings

@@ -13,10 +13,11 @@ use srelens_agent::adapter::{valid_model_id, AgentKind, ModelChoice};
 
 use crate::ai_config::{
     agent_install_url, default_base_url_for_provider, default_model_for_provider,
-    env_var_for_provider, find_agent, provider_display_name, provider_slug, AiProvider, AiSettings,
-    ALL_PROVIDERS,
+    env_var_for_provider, find_agent_in, provider_display_name, provider_slug, AiProvider,
+    AiSettings, ALL_PROVIDERS,
 };
 use crate::theme::Theme;
+use srelens_kube::toolbox::SearchPaths;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SettingField {
@@ -119,7 +120,9 @@ pub struct SettingsViewState {
 }
 
 impl SettingsViewState {
-    pub fn new() -> Self {
+    /// The view on the saved settings, with each local agent CLI looked up
+    /// in `agent_search`.
+    pub fn new(agent_search: &SearchPaths) -> Self {
         let settings = AiSettings::load();
         let default_idx = ALL_PROVIDERS
             .iter()
@@ -137,7 +140,7 @@ impl SettingsViewState {
             agent_card_focused: false,
             agent_paths: AGENTS
                 .iter()
-                .filter_map(|&kind| Some((kind, find_agent(kind)?)))
+                .filter_map(|&kind| Some((kind, find_agent_in(kind, agent_search)?)))
                 .collect(),
         }
     }
