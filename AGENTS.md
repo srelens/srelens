@@ -239,15 +239,21 @@ For other PRs (purely internal crates, dependency bumps, docs, backend fixes
 with no input surface), the author explicitly notes:
 `Matrix: N/A because <reason>` in the PR description.
 
-### Continuous Verification: Call `/qa` After Every Commit
+### Continuous Verification: Call `/qa` (or Run Two-Pass Checks) After Every Commit
 
-The `/qa` skill must be called after **each commit** we make touching any
-applicable interactive surface, input handling, command bar logic, or caller
-wire contract. Do not defer adversarial verification to the end of a task or
-wait for human testers to stumble on regressions:
+Adversarial verification must be performed after **each commit** we make
+touching any applicable interactive surface, input handling, command bar logic,
+or caller wire contract. Do not defer adversarial verification to the end of a
+task or wait for human testers to stumble on regressions:
 
 1. Commit the implementation slice or fix.
-2. Immediately run the `/qa` skill against the commit.
+2. If available in your assistant environment, invoke the `/qa` skill (located
+   at `~/.gemini/config/skills/qa/SKILL.md` or tool equivalent). Otherwise,
+   execute the documented Two-Pass Model directly against the diff:
+   - **Pass 1 (Finger Chaos)**: identify non-linear sequences (hesitations,
+     arrows, spaces, rapid double keys).
+   - **Pass 2 (Wire & Buffer Truth)**: verify caller payloads and render the screen
+     via `common::render_app` before asserting on rendered strings.
 3. Formulate and run journey tests in `apps/tui/tests/journeys/<feature>.rs`
    covering the applicable matrix dimensions.
 4. Verify tests pass (`cargo test -p srectl --test journeys_tests`) before
