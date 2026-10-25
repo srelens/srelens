@@ -912,7 +912,6 @@ fn settings_state() -> SettingsViewState {
         edit_buffer: String::new(),
         toast: None,
         picker: None,
-        model_cache: Default::default(),
     }
 }
 

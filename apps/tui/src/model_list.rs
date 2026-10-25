@@ -60,10 +60,12 @@ pub async fn provider_models(
 }
 
 /// `kind`'s models: Claude Code's aliases, or what the CLI at `binary` lists
-/// (stdout only, no secrets, at most [`LIST_TIMEOUT`]).
+/// (stdout only, at most [`LIST_TIMEOUT`]). Cursor gets `cursor_key` as
+/// `CURSOR_API_KEY` in its env, as a Cursor turn does, never in its argv.
 pub async fn agent_models(
     kind: AgentKind,
     binary: Option<&Path>,
+    cursor_key: Option<String>,
 ) -> Result<Vec<ModelChoice>, String> {
     let label = kind.label();
     let Some(args) = model_list_args(kind) else {
@@ -81,6 +83,11 @@ pub async fn agent_models(
     let binary = binary.ok_or_else(|| format!("{label} is not installed"))?;
     let mut child = tokio::process::Command::new(binary)
         .args(args)
+        .envs(
+            cursor_key
+                .filter(|_| kind == AgentKind::Cursor)
+                .map(|key| ("CURSOR_API_KEY", key)),
+        )
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -134,7 +141,8 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
 
-    /// A stand-in CLI that prints `out` (one line, no `'`) and exits `code`.
+    /// A stand-in CLI that prints `out` (one line; the shell expands its
+    /// variables) and exits `code`.
     fn fake_cli(dir: &Path, out: &str, code: i32) -> PathBuf {
         #[cfg(windows)]
         {
@@ -150,7 +158,8 @@ mod tests {
         {
             use std::os::unix::fs::PermissionsExt;
             let path = dir.join("fake.sh");
-            std::fs::write(&path, format!("#!/bin/sh\necho '{out}'\nexit {code}\n")).unwrap();
+            let out = out.replace('"', "\\\"");
+            std::fs::write(&path, format!("#!/bin/sh\necho \"{out}\"\nexit {code}\n")).unwrap();
             std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
             path
         }
@@ -158,7 +167,7 @@ mod tests {
 
     #[tokio::test]
     async fn claude_offers_its_aliases() {
-        let models = agent_models(AgentKind::Claude, None).await.unwrap();
+        let models = agent_models(AgentKind::Claude, None, None).await.unwrap();
         let ids: Vec<&str> = models.iter().map(|m| m.id.as_str()).collect();
         assert_eq!(ids, CLAUDE_MODEL_ALIASES);
         assert!(models.iter().all(|m| m.label == m.id));
@@ -166,7 +175,9 @@ mod tests {
 
     #[tokio::test]
     async fn an_agent_that_is_not_installed_says_so() {
-        let err = agent_models(AgentKind::Codex, None).await.unwrap_err();
+        let err = agent_models(AgentKind::Codex, None, None)
+            .await
+            .unwrap_err();
         assert_eq!(err, "Codex is not installed");
     }
 
@@ -174,7 +185,9 @@ mod tests {
     async fn a_cli_listing_becomes_the_choices() {
         let dir = tempfile::tempdir().unwrap();
         let cli = fake_cli(dir.path(), "m-1 - Model One", 0);
-        let models = agent_models(AgentKind::Cursor, Some(&cli)).await.unwrap();
+        let models = agent_models(AgentKind::Cursor, Some(&cli), None)
+            .await
+            .unwrap();
         assert_eq!(
             models,
             [ModelChoice {
@@ -185,10 +198,31 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn cursor_lists_with_its_key_in_its_env_never_in_its_argv() {
+        // The id echoes the key from the env; the label echoes the argv.
+        #[cfg(windows)]
+        const LINE: &str = "m-%CURSOR_API_KEY% - %*";
+        #[cfg(unix)]
+        const LINE: &str = "m-$CURSOR_API_KEY - $*";
+        let dir = tempfile::tempdir().unwrap();
+        let cli = fake_cli(dir.path(), LINE, 0);
+        let models = agent_models(AgentKind::Cursor, Some(&cli), Some("cur-test-1".into()))
+            .await
+            .unwrap();
+        assert_eq!(
+            models,
+            [ModelChoice {
+                id: "m-cur-test-1".into(),
+                label: "models".into()
+            }]
+        );
+    }
+
+    #[tokio::test]
     async fn a_listing_with_no_models_is_an_error_not_an_empty_list() {
         let dir = tempfile::tempdir().unwrap();
         let cli = fake_cli(dir.path(), r#"{"models":[]}"#, 0);
-        let err = agent_models(AgentKind::Codex, Some(&cli))
+        let err = agent_models(AgentKind::Codex, Some(&cli), None)
             .await
             .unwrap_err();
         assert_eq!(err, "Codex listed no models");
@@ -198,7 +232,7 @@ mod tests {
     async fn a_listing_that_fails_says_what_the_cli_printed() {
         let dir = tempfile::tempdir().unwrap();
         let cli = fake_cli(dir.path(), "Not logged in", 3);
-        let err = agent_models(AgentKind::Cursor, Some(&cli))
+        let err = agent_models(AgentKind::Cursor, Some(&cli), None)
             .await
             .unwrap_err();
         assert!(err.starts_with("Cursor could not list its models"), "{err}");

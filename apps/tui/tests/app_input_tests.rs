@@ -4564,6 +4564,74 @@ async fn an_open_picker_reuses_the_list_it_already_has() {
 }
 
 #[tokio::test]
+async fn a_list_outlives_leaving_settings() {
+    use srectl::views::settings_view::PickerLoad;
+    let mut settings = common::env::isolate_settings();
+    settings.remove_env("ANTHROPIC_API_KEY");
+    let (mut app, _rx) = common::app().await;
+    open_settings_on_the_model_field(&mut app).await;
+    press(&mut app, ch('e')).await;
+    let list_key = picker(&app).key.clone();
+    app.handle_models_loaded(&list_key, Ok(vec![model("claude-a", "Claude A")]));
+    press(&mut app, key(KeyCode::Esc)).await;
+    press(&mut app, key(KeyCode::Esc)).await;
+    assert!(!matches!(app.active_view, ActiveView::Settings(_)));
+
+    open_settings_on_the_model_field(&mut app).await;
+    press(&mut app, ch('e')).await;
+    assert_eq!(picker(&app).load, PickerLoad::Ready);
+    assert_eq!(picker(&app).items, [model("claude-a", "Claude A")]);
+}
+
+#[tokio::test]
+async fn a_failed_list_is_fetched_again_next_time() {
+    use srectl::views::settings_view::PickerLoad;
+    let mut settings = common::env::isolate_settings();
+    settings.remove_env("ANTHROPIC_API_KEY");
+    let (mut app, _rx) = common::app().await;
+    open_settings_on_the_model_field(&mut app).await;
+    press(&mut app, ch('e')).await;
+    let list_key = picker(&app).key.clone();
+    app.handle_models_loaded(&list_key, Err("offline".into()));
+    press(&mut app, key(KeyCode::Esc)).await;
+
+    press(&mut app, ch('e')).await;
+    assert_eq!(
+        picker(&app).load,
+        PickerLoad::Loading,
+        "a failure is not kept"
+    );
+    app.handle_models_loaded(&list_key, Ok(vec![model("claude-a", "Claude A")]));
+    press(&mut app, key(KeyCode::Esc)).await;
+    press(&mut app, ch('e')).await;
+    assert_eq!(picker(&app).load, PickerLoad::Ready, "a list is kept");
+}
+
+#[tokio::test]
+async fn reopening_while_a_list_loads_does_not_fetch_it_twice() {
+    use srectl::views::settings_view::PickerLoad;
+    let mut settings = common::env::isolate_settings();
+    settings.remove_env("ANTHROPIC_API_KEY");
+    let (mut app, mut rx) = common::app().await;
+    open_settings_on_the_model_field(&mut app).await;
+
+    press(&mut app, ch('e')).await;
+    press(&mut app, key(KeyCode::Esc)).await;
+    press(&mut app, ch('e')).await;
+    assert_eq!(picker(&app).load, PickerLoad::Loading);
+
+    // With no key a fetch ends at once; count the fetches that reported.
+    let deadline = tokio::time::Instant::now() + Duration::from_millis(500);
+    let mut fetches = 0;
+    while let Ok(Some(event)) = tokio::time::timeout_at(deadline, rx.recv()).await {
+        if matches!(event, AppEvent::ModelsLoaded { .. }) {
+            fetches += 1;
+        }
+    }
+    assert_eq!(fetches, 1);
+}
+
+#[tokio::test]
 async fn a_provider_without_a_key_says_so_without_calling_out() {
     let mut settings = common::env::isolate_settings();
     settings.remove_env("ANTHROPIC_API_KEY");

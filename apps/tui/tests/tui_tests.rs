@@ -536,6 +536,7 @@ mod tests {
             screen_selection_text: std::cell::RefCell::new(String::new()),
             consents: Default::default(),
             consent_arm_delay: std::time::Duration::from_secs(1),
+            model_lists: Default::default(),
         };
 
         // 1. Simulate streaming snapshot arrival for pods
@@ -650,6 +651,7 @@ mod tests {
             screen_selection_text: std::cell::RefCell::new(String::new()),
             consents: Default::default(),
             consent_arm_delay: std::time::Duration::from_secs(1),
+            model_lists: Default::default(),
         };
 
         // 1. Enter command mode by typing ':'
@@ -776,6 +778,7 @@ mod tests {
             screen_selection_text: std::cell::RefCell::new(String::new()),
             consents: Default::default(),
             consent_arm_delay: std::time::Duration::from_secs(1),
+            model_lists: Default::default(),
         };
 
         // 1. Switch to settings view via :settings command
@@ -1008,6 +1011,7 @@ mod tests {
             screen_selection_text: std::cell::RefCell::new(String::new()),
             consents: Default::default(),
             consent_arm_delay: std::time::Duration::from_secs(1),
+            model_lists: Default::default(),
         };
 
         // 1. In Assistant view, typing 's' when input is empty should type 's' into prompt, NOT jump to settings!
@@ -1242,6 +1246,7 @@ mod tests {
             screen_selection_text: std::cell::RefCell::new(String::new()),
             consents: Default::default(),
             consent_arm_delay: std::time::Duration::from_secs(1),
+            model_lists: Default::default(),
         };
 
         // 1. User starts turn in Assistant view
@@ -1481,6 +1486,7 @@ mod tests {
             screen_selection_text: std::cell::RefCell::new(String::new()),
             consents: Default::default(),
             consent_arm_delay: std::time::Duration::from_secs(1),
+            model_lists: Default::default(),
         };
 
         // 1. Enter filter mode with '/'
@@ -1648,6 +1654,7 @@ mod tests {
             screen_selection_text: std::cell::RefCell::new(String::new()),
             consents: Default::default(),
             consent_arm_delay: std::time::Duration::from_secs(1),
+            model_lists: Default::default(),
         };
 
         // Press 'f' (or 'F') on the selected pod -> opens PortForward modal with detected port 3000
@@ -2031,6 +2038,7 @@ mod tests {
             screen_selection_text: std::cell::RefCell::new(String::new()),
             consents: Default::default(),
             consent_arm_delay: std::time::Duration::from_secs(1),
+            model_lists: Default::default(),
         };
 
         // Initially without metrics, extract_field_str returns "-"
@@ -2195,6 +2203,7 @@ mod tests {
             screen_selection_text: std::cell::RefCell::new(String::new()),
             consents: Default::default(),
             consent_arm_delay: std::time::Duration::from_secs(1),
+            model_lists: Default::default(),
         };
 
         // 1. Test paste handling into Assistant input
@@ -2309,6 +2318,7 @@ mod tests {
             screen_selection_text: std::cell::RefCell::new(String::new()),
             consents: Default::default(),
             consent_arm_delay: std::time::Duration::from_secs(1),
+            model_lists: Default::default(),
         };
 
         // When input is empty, typing '?' opens help modal
@@ -2417,6 +2427,7 @@ mod tests {
             screen_selection_text: std::cell::RefCell::new(String::new()),
             consents: Default::default(),
             consent_arm_delay: std::time::Duration::from_secs(1),
+            model_lists: Default::default(),
         };
 
         // Set viewport and simulate tool chip line at index 2
@@ -2573,6 +2584,7 @@ mod tests {
             screen_selection_text: std::cell::RefCell::new(String::new()),
             consents: Default::default(),
             consent_arm_delay: std::time::Duration::from_secs(1),
+            model_lists: Default::default(),
         };
 
         // Simulate header chips at columns 12..25 (prod-eu) and 26..40 (kind-dev) on row 0
@@ -2764,6 +2776,7 @@ mod tests {
             screen_selection_text: std::cell::RefCell::new(String::new()),
             consents: Default::default(),
             consent_arm_delay: std::time::Duration::from_secs(1),
+            model_lists: Default::default(),
         };
 
         // 1. In data-processing-prod-eu-dus1, user has a conversation
@@ -2964,6 +2977,7 @@ mod tests {
             screen_selection_text: std::cell::RefCell::new(String::new()),
             consents: Default::default(),
             consent_arm_delay: std::time::Duration::from_secs(1),
+            model_lists: Default::default(),
         };
 
         // 1. Pressing 'c' on the selected row copies the resource name!
@@ -3095,6 +3109,7 @@ mod tests {
             screen_selection_text: std::cell::RefCell::new(String::new()),
             consents: Default::default(),
             consent_arm_delay: std::time::Duration::from_secs(1),
+            model_lists: Default::default(),
         };
 
         // 1. Switch view to Overview
@@ -3624,6 +3639,7 @@ mod tests {
             screen_selection_text: std::cell::RefCell::new(String::new()),
             consents: Default::default(),
             consent_arm_delay: std::time::Duration::from_secs(1),
+            model_lists: Default::default(),
         };
 
         // 1. Press 'c' -> Copies selected pod name
@@ -3794,6 +3810,7 @@ mod tests {
             screen_selection_text: std::cell::RefCell::new(String::new()),
             consents: Default::default(),
             consent_arm_delay: std::time::Duration::from_secs(1),
+            model_lists: Default::default(),
         };
 
         // 1. Press 'Ctrl+d' on Deployment -> Delete confirmation modal
@@ -4081,6 +4098,7 @@ mod tests {
             screen_selection_text: std::cell::RefCell::new(String::new()),
             consents: Default::default(),
             consent_arm_delay: std::time::Duration::from_secs(1),
+            model_lists: Default::default(),
         };
 
         // 1. Press 'x' on Deployment -> Opens Action Palette
@@ -4238,6 +4256,7 @@ mod tests {
             screen_selection_text: std::cell::RefCell::new(String::new()),
             consents: Default::default(),
             consent_arm_delay: std::time::Duration::from_secs(1),
+            model_lists: Default::default(),
         };
 
         // 1. Press 't' on Pod -> Opens Tree View
@@ -4392,6 +4411,7 @@ mod tests {
             screen_selection_text: std::cell::RefCell::new(String::new()),
             consents: Default::default(),
             consent_arm_delay: std::time::Duration::from_secs(1),
+            model_lists: Default::default(),
         };
 
         // 1. Pressing 'x' on Node table opens Action Palette with 'InspectNode'
@@ -4622,6 +4642,7 @@ mod tests {
             screen_selection_text: std::cell::RefCell::new(String::new()),
             consents: Default::default(),
             consent_arm_delay: std::time::Duration::from_secs(1),
+            model_lists: Default::default(),
         };
 
         // 1. Click on row at y = 3 + 2 + 5 = 10 -> row 5
@@ -4850,6 +4871,7 @@ mod tests {
             screen_selection_text: std::cell::RefCell::new(String::new()),
             consents: Default::default(),
             consent_arm_delay: std::time::Duration::from_secs(1),
+            model_lists: Default::default(),
         };
 
         // 1. In Describe mode: press '/' to enter search mode
@@ -5890,6 +5912,7 @@ mod tests {
             screen_selection_text: std::cell::RefCell::new(String::new()),
             consents: Default::default(),
             consent_arm_delay: std::time::Duration::from_secs(1),
+            model_lists: Default::default(),
         };
 
         // 1. Press 'l' on the highlighted pod in NodeInspector
@@ -6119,6 +6142,7 @@ mod tests {
             screen_selection_text: std::cell::RefCell::new(String::new()),
             consents: Default::default(),
             consent_arm_delay: std::time::Duration::from_secs(1),
+            model_lists: Default::default(),
         };
 
         // Press 'l' on single-container pod
@@ -6403,6 +6427,7 @@ mod tests {
             screen_selection_text: std::cell::RefCell::new(String::new()),
             consents: Default::default(),
             consent_arm_delay: std::time::Duration::from_secs(1),
+            model_lists: Default::default(),
         };
 
         // Rebuild table
@@ -6573,6 +6598,7 @@ mod tests {
             screen_selection_text: std::cell::RefCell::new(String::new()),
             consents: Default::default(),
             consent_arm_delay: std::time::Duration::from_secs(1),
+            model_lists: Default::default(),
         };
 
         app.rebuild_workloads_table();
@@ -7678,6 +7704,7 @@ mod tests {
             screen_selection_text: std::cell::RefCell::new(String::new()),
             consents: Default::default(),
             consent_arm_delay: std::time::Duration::from_secs(1),
+            model_lists: Default::default(),
         };
 
         // Initially selected on Workloads (cart-deploy)
@@ -7901,6 +7928,7 @@ mod tests {
             screen_selection_text: std::cell::RefCell::new(String::new()),
             consents: Default::default(),
             consent_arm_delay: std::time::Duration::from_secs(1),
+            model_lists: Default::default(),
         };
 
         // 3. Initially selected on gpu-node-alpha on the left
@@ -8068,6 +8096,7 @@ mod tests {
             screen_selection_text: std::cell::RefCell::new(String::new()),
             consents: Default::default(),
             consent_arm_delay: std::time::Duration::from_secs(1),
+            model_lists: Default::default(),
         };
 
         // Populate resource cache with pods
@@ -8287,6 +8316,7 @@ mod tests {
             screen_selection_text: std::cell::RefCell::new(String::new()),
             consents: Default::default(),
             consent_arm_delay: std::time::Duration::from_secs(1),
+            model_lists: Default::default(),
         };
 
         // Verify initial CPU sort puts high-cpu-pod first

@@ -6,7 +6,6 @@ use ratatui::{
     Frame,
 };
 
-use std::collections::HashMap;
 use std::sync::LazyLock;
 
 use srelens_agent::adapter::{valid_model_id, AgentKind, ModelChoice};
@@ -108,8 +107,6 @@ pub struct SettingsViewState {
     pub edit_buffer: String,
     pub toast: Option<String>,
     pub picker: Option<ModelPicker>,
-    /// Model lists fetched this visit, by cache key; failures are not kept.
-    pub model_cache: HashMap<String, Vec<ModelChoice>>,
 }
 
 impl SettingsViewState {
@@ -128,36 +125,40 @@ impl SettingsViewState {
             edit_buffer: String::new(),
             toast: None,
             picker: None,
-            model_cache: HashMap::new(),
         }
     }
 
-    /// Open the picker on `target`'s list under `key`; true when that list
-    /// is not cached and must be fetched.
-    pub fn open_picker(&mut self, target: PickerTarget, key: String) -> bool {
-        let cached = self.model_cache.get(&key).cloned();
-        let fetch = cached.is_none();
+    /// Open the picker on `target`'s list under `key`: Ready on a `cached`
+    /// list, else Loading until [`Self::models_loaded`].
+    pub fn open_picker(
+        &mut self,
+        target: PickerTarget,
+        key: String,
+        cached: Option<Vec<ModelChoice>>,
+    ) {
+        let load = if cached.is_some() {
+            PickerLoad::Ready
+        } else {
+            PickerLoad::Loading
+        };
         self.picker = Some(ModelPicker {
             target,
             key,
             query: String::new(),
             items: cached.unwrap_or_default(),
-            load: if fetch {
-                PickerLoad::Loading
-            } else {
-                PickerLoad::Ready
-            },
+            load,
             selected: 0,
         });
-        fetch
     }
 
-    /// A fetched list (or why there is none) for `key`.
+    /// A fetched list (or why there is none) for `key`. A picker that is
+    /// already Ready keeps its list and highlight.
     pub fn models_loaded(&mut self, key: &str, result: Result<Vec<ModelChoice>, String>) {
-        if let Ok(models) = &result {
-            self.model_cache.insert(key.to_string(), models.clone());
-        }
-        let Some(picker) = self.picker.as_mut().filter(|p| p.key == key) else {
+        let Some(picker) = self
+            .picker
+            .as_mut()
+            .filter(|p| p.key == key && p.load != PickerLoad::Ready)
+        else {
             return;
         };
         match result {
@@ -823,7 +824,6 @@ mod tests {
             edit_buffer: String::new(),
             toast: None,
             picker: None,
-            model_cache: HashMap::new(),
         }
     }
 
@@ -882,10 +882,13 @@ mod tests {
     }
 
     #[test]
-    fn a_failed_list_is_fetched_again_next_time() {
+    fn a_list_or_its_failure_lands_on_its_own_picker_only() {
         let mut s = state();
         let target = PickerTarget::Provider(AiProvider::OpenAi);
-        assert!(s.open_picker(target, "k".into()), "nothing cached yet");
+        s.open_picker(target, "k".into(), None);
+        assert_eq!(s.picker.as_ref().unwrap().load, PickerLoad::Loading);
+
+        s.models_loaded("other", Ok(vec![choice("m-0", "Zero")]));
         assert_eq!(s.picker.as_ref().unwrap().load, PickerLoad::Loading);
 
         s.models_loaded("k", Err("offline".into()));
@@ -893,12 +896,29 @@ mod tests {
             s.picker.as_ref().unwrap().load,
             PickerLoad::Failed("offline".into())
         );
-        assert!(s.open_picker(target, "k".into()), "a failure is not kept");
 
         s.models_loaded("k", Ok(vec![choice("m-1", "One")]));
-        assert!(!s.open_picker(target, "k".into()), "a list is kept");
         let p = s.picker.as_ref().unwrap();
         assert_eq!((&p.load, ids(p)), (&PickerLoad::Ready, vec!["m-1"]));
+
+        s.open_picker(target, "k".into(), Some(vec![choice("m-1", "One")]));
+        assert_eq!(s.picker.as_ref().unwrap().load, PickerLoad::Ready);
+    }
+
+    #[test]
+    fn a_late_result_does_not_disturb_a_ready_list() {
+        let mut s = state();
+        s.open_picker(PickerTarget::Provider(AiProvider::OpenAi), "k".into(), None);
+        s.models_loaded("k", Ok(vec![choice("m-1", "One"), choice("m-2", "Two")]));
+        s.picker.as_mut().unwrap().move_down();
+
+        s.models_loaded("k", Ok(vec![choice("m-3", "Three")]));
+        let p = s.picker.as_ref().unwrap();
+        assert_eq!(p.choose(), Ok(Some("m-2".to_string())), "highlight kept");
+
+        s.models_loaded("k", Err("boom".into()));
+        let p = s.picker.as_ref().unwrap();
+        assert_eq!((&p.load, ids(p)), (&PickerLoad::Ready, vec!["m-1", "m-2"]));
     }
 
     #[test]
@@ -906,7 +926,7 @@ mod tests {
         let mut s = state();
         s.settings
             .set_agent_model(AgentKind::Codex, Some("gpt-5.6-sol".into()));
-        s.open_picker(PickerTarget::Agent(AgentKind::Codex), "a".into());
+        s.open_picker(PickerTarget::Agent(AgentKind::Codex), "a".into(), None);
         assert_eq!(s.pick_model(), Ok(None));
         assert_eq!(s.settings.get_agent_model(AgentKind::Codex), None);
         assert!(s.picker.is_none());
@@ -915,7 +935,7 @@ mod tests {
     #[test]
     fn a_refused_id_keeps_the_picker_open_and_the_model_unchanged() {
         let mut s = state();
-        s.open_picker(PickerTarget::Provider(AiProvider::OpenAi), "p".into());
+        s.open_picker(PickerTarget::Provider(AiProvider::OpenAi), "p".into(), None);
         s.picker.as_mut().unwrap().query = "-x".into();
         assert!(s.pick_model().is_err());
         assert!(s.picker.is_some());

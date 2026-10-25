@@ -246,6 +246,9 @@ pub struct App {
     /// before the user could see it (a `y` mid-sentence in the Assistant)
     /// cannot answer it.
     pub consent_arm_delay: Duration,
+    /// Model lists for the Settings picker, kept for the run by cache key;
+    /// `None` while that list's one fetch is in flight. Failures are not kept.
+    pub model_lists: HashMap<String, Option<Vec<srelens_agent::adapter::ModelChoice>>>,
 }
 
 pub enum SuspendAction {
@@ -628,6 +631,7 @@ impl App {
             screen_selection_text: std::cell::RefCell::new(String::new()),
             consents: Default::default(),
             consent_arm_delay: Duration::from_secs(1),
+            model_lists: HashMap::new(),
         };
 
         if let Some(lvl) = app.ai_settings.get_caveman_level() {
@@ -11997,8 +12001,9 @@ impl App {
         });
     }
 
-    /// Open the settings view's model picker on `target`: its cached list,
-    /// or "Loading models…" while the list is fetched off the UI thread.
+    /// Open the settings view's model picker on `target`: its list from
+    /// [`App::model_lists`], or "Loading models…" while the list is fetched
+    /// off the UI thread (once per key, however often the picker reopens).
     pub fn open_model_picker(&mut self, target: settings_view::PickerTarget) {
         use crate::model_list;
         use settings_view::PickerTarget;
@@ -12009,9 +12014,12 @@ impl App {
             PickerTarget::Provider(p) => model_list::provider_cache_key(&settings.settings, p),
             PickerTarget::Agent(kind) => model_list::agent_cache_key(kind),
         };
-        if !settings.open_picker(target, key.clone()) {
-            return;
+        let known = self.model_lists.get(&key).cloned();
+        settings.open_picker(target, key.clone(), known.clone().flatten());
+        if known.is_some() {
+            return; // listed already, or being listed
         }
+        self.model_lists.insert(key.clone(), None);
         let snapshot = settings.settings.clone();
         let event_tx = self.event_tx.clone();
         tokio::spawn(async move {
@@ -12019,20 +12027,30 @@ impl App {
                 PickerTarget::Provider(p) => model_list::provider_models(&snapshot, p).await,
                 PickerTarget::Agent(kind) => {
                     let binary = crate::ai_config::find_agent(kind);
-                    model_list::agent_models(kind, binary.as_deref()).await
+                    let cursor_key = snapshot.get_cursor_key();
+                    model_list::agent_models(kind, binary.as_deref(), cursor_key).await
                 }
             };
             let _ = event_tx.send(AppEvent::ModelsLoaded { key, result });
         });
     }
 
-    /// A fetched model list (or why there is none) for the settings view;
-    /// dropped once the user has left it.
+    /// A fetched model list (or why there is none): kept for the run when it
+    /// is a list, and shown if the settings view's picker is waiting for it.
     pub fn handle_models_loaded(
         &mut self,
         key: &str,
         result: Result<Vec<srelens_agent::adapter::ModelChoice>, String>,
     ) {
+        match &result {
+            Ok(models) => {
+                self.model_lists
+                    .insert(key.to_string(), Some(models.clone()));
+            }
+            Err(_) => {
+                self.model_lists.remove(key);
+            }
+        }
         if let ActiveView::Settings(settings) = &mut self.active_view {
             settings.models_loaded(key, result);
         }
