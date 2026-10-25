@@ -6951,6 +6951,31 @@ impl App {
                         KeyCode::BackTab | KeyCode::Left | KeyCode::Char('h') => {
                             settings.select_prev_field()
                         }
+                        // On the Agent card, Space steps the agent from either
+                        // of its fields; `e`/Enter steps it from the Agent
+                        // field and lists models from the Model field.
+                        KeyCode::Char(' ' | 'e') | KeyCode::Enter
+                            if settings.agent_card_focused
+                                && (key.code == KeyCode::Char(' ')
+                                    || settings.selected_field == SettingField::Agent) =>
+                        {
+                            let agent = settings.cycle_agent();
+                            self.ai_settings = settings.settings.clone();
+                            match settings.save() {
+                                Ok(_) => self.set_toast(
+                                    format!("✓ Assistant agent set to {}", agent.label()),
+                                    Theme::status_ok(),
+                                ),
+                                Err(e) => self.set_toast(
+                                    format!("Failed to save settings: {}", e),
+                                    Theme::status_error(),
+                                ),
+                            }
+                        }
+                        KeyCode::Char('e') | KeyCode::Enter if settings.agent_card_focused => {
+                            let target = settings.agent_picker_target();
+                            self.open_model_picker(target);
+                        }
                         KeyCode::Char(' ') => {
                             settings.set_active_provider();
                             self.ai_settings = settings.settings.clone();

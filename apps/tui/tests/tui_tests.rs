@@ -845,17 +845,25 @@ mod tests {
             Some("sk-test-openai-key")
         );
 
-        // 7. Test navigating past the last provider, which wraps to the first
-        // Currently at OpenAi (index 1), press 'j' 3 times to get back to Anthropic (index 0)
+        // 7. Test navigating past the last provider, which reaches the Agent
+        // card above the list, and then the first provider again.
+        // Currently at OpenAi (index 1), press 'j' 4 times to get back to Anthropic (index 0)
         app.handle_key_event(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE))
             .await; // Gemini (2)
         app.handle_key_event(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE))
             .await; // OpenAICompatible (3)
         app.handle_key_event(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE))
+            .await; // the Agent card
+        if let ActiveView::Settings(s) = &app.active_view {
+            assert!(s.agent_card_focused);
+        }
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE))
             .await; // Anthropic (0)
 
         if let ActiveView::Settings(s) = &app.active_view {
+            assert!(!s.agent_card_focused);
             assert_eq!(s.current_provider(), AiProvider::Anthropic);
+            assert_eq!(s.selected_field, SettingField::ProviderToggle);
         }
 
         // Select Anthropic as active provider
@@ -865,7 +873,9 @@ mod tests {
             .await;
         assert_eq!(app.ai_settings.default_provider, AiProvider::Anthropic);
 
-        // 8. Currently at ApiKey, Tab twice to get to Timeout field
+        // 8. Currently at the provider row, Tab three times to get to Timeout field
+        app.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
+            .await; // ApiKey
         app.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
             .await; // Model
         app.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
@@ -925,6 +935,144 @@ mod tests {
                 Some("pasted-anthropic-api-key-12345")
             );
         }
+    }
+
+    fn settings_view(app: &srectl::app::App) -> &srectl::views::SettingsViewState {
+        match &app.active_view {
+            srectl::app::ActiveView::Settings(s) => s,
+            _ => panic!("expected the settings view"),
+        }
+    }
+
+    /// The Settings view with the cursor on Anthropic, the first provider.
+    async fn open_settings(app: &mut srectl::app::App) {
+        app.switch_view_to_kind(ResourceKind::Settings).await;
+        match &mut app.active_view {
+            srectl::app::ActiveView::Settings(s) => s.selected_provider_idx = 0,
+            _ => panic!("expected the settings view"),
+        }
+    }
+
+    #[tokio::test]
+    async fn k_from_the_first_provider_reaches_the_agent_card() {
+        use crossterm::event::KeyCode;
+        use srectl::ai_config::AiProvider;
+        use srectl::views::SettingField;
+        let _settings = crate::common::env::isolate_settings();
+        let (mut app, _rx) = crate::common::app().await;
+        open_settings(&mut app).await;
+
+        app.handle_key_event(crate::common::ch('k')).await;
+        let s = settings_view(&app);
+        assert!(s.agent_card_focused);
+        assert_eq!(s.selected_field, SettingField::Agent);
+
+        // Up again wraps to the last provider; down comes back to the card
+        // and down once more to the first provider.
+        app.handle_key_event(crate::common::key(KeyCode::Up)).await;
+        assert_eq!(
+            settings_view(&app).current_provider(),
+            AiProvider::OpenAiCompatible
+        );
+        app.handle_key_event(crate::common::key(KeyCode::Down))
+            .await;
+        assert!(settings_view(&app).agent_card_focused);
+        app.handle_key_event(crate::common::ch('j')).await;
+        let s = settings_view(&app);
+        assert!(!s.agent_card_focused);
+        assert_eq!(s.current_provider(), AiProvider::Anthropic);
+    }
+
+    #[tokio::test]
+    async fn space_on_the_agent_field_moves_to_the_next_agent_and_saves() {
+        use crossterm::event::KeyCode;
+        use srectl::views::SettingField;
+        use srelens_agent::adapter::AgentKind;
+        let _settings = crate::common::env::isolate_settings();
+        let (mut app, _rx) = crate::common::app().await;
+        open_settings(&mut app).await;
+        app.handle_key_event(crate::common::ch('k')).await;
+        assert_eq!(settings_view(&app).selected_field, SettingField::Agent);
+        assert_eq!(app.ai_settings.agent, AgentKind::Srelens);
+
+        // Space, Enter and `e` each take one step: srelens, Claude Code,
+        // Codex, Cursor, and round to srelens.
+        let keys = [
+            crate::common::ch(' '),
+            crate::common::key(KeyCode::Enter),
+            crate::common::ch('e'),
+            crate::common::ch(' '),
+        ];
+        let agents = [
+            AgentKind::Claude,
+            AgentKind::Codex,
+            AgentKind::Cursor,
+            AgentKind::Srelens,
+        ];
+        for (k, agent) in keys.into_iter().zip(agents) {
+            app.handle_key_event(k).await;
+            assert_eq!(app.ai_settings.agent, agent, "the Assistant follows");
+            assert_eq!(settings_view(&app).settings.agent, agent);
+            let saved = std::fs::read_to_string(srectl::AiSettings::config_path())
+                .expect("the choice is saved at once");
+            assert_eq!(
+                srectl::AiSettings::from_json(&saved).unwrap().agent,
+                agent,
+                "{saved}"
+            );
+            assert!(!settings_view(&app).is_editing, "no edit box for an agent");
+            // The default provider is not what Space changed.
+            assert_eq!(
+                app.ai_settings.default_provider,
+                srectl::AiSettings::default().default_provider
+            );
+        }
+
+        app.handle_key_event(crate::common::ch(' ')).await;
+        let screen = crate::common::render_app(&mut app, 160, 40);
+        assert!(
+            screen.contains("Assistant agent set to Claude Code"),
+            "{screen}"
+        );
+        let saved = std::fs::read_to_string(srectl::AiSettings::config_path()).unwrap();
+        let saved: serde_json::Value = serde_json::from_str(&saved).unwrap();
+        assert_eq!(saved["agent"], "claude");
+    }
+
+    #[tokio::test]
+    async fn e_on_the_agent_cards_model_field_opens_the_active_agents_picker() {
+        use crossterm::event::KeyCode;
+        use srectl::ai_config::AiProvider;
+        use srectl::views::settings_view::PickerTarget;
+        use srelens_agent::adapter::AgentKind;
+        let mut settings = crate::common::env::isolate_settings();
+        // No provider key to ask a provider with.
+        settings.remove_env("ANTHROPIC_API_KEY");
+        let (mut app, _rx) = crate::common::app().await;
+        open_settings(&mut app).await;
+        app.handle_key_event(crate::common::ch('k')).await;
+        app.handle_key_event(crate::common::key(KeyCode::Tab)).await;
+        assert_eq!(
+            settings_view(&app).selected_field,
+            srectl::views::SettingField::Model
+        );
+
+        // srelens answers through the default provider: its models.
+        app.handle_key_event(crate::common::ch('e')).await;
+        let picker = settings_view(&app).picker.as_ref().expect("a picker");
+        assert_eq!(picker.target, PickerTarget::Provider(AiProvider::Anthropic));
+        assert!(!settings_view(&app).is_editing);
+        app.handle_key_event(crate::common::key(KeyCode::Esc)).await;
+        assert!(settings_view(&app).picker.is_none());
+
+        // Space on the card steps the agent whichever of its fields is
+        // focused; the Model field then lists that agent's models.
+        app.handle_key_event(crate::common::ch(' ')).await;
+        assert_eq!(app.ai_settings.agent, AgentKind::Claude);
+        app.handle_key_event(crate::common::key(KeyCode::Enter))
+            .await;
+        let picker = settings_view(&app).picker.as_ref().expect("a picker");
+        assert_eq!(picker.target, PickerTarget::Agent(AgentKind::Claude));
     }
 
     #[tokio::test]

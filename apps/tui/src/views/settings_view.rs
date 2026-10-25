@@ -6,18 +6,22 @@ use ratatui::{
     Frame,
 };
 
+use std::path::PathBuf;
 use std::sync::LazyLock;
 
 use srelens_agent::adapter::{valid_model_id, AgentKind, ModelChoice};
 
 use crate::ai_config::{
-    default_base_url_for_provider, default_model_for_provider, env_var_for_provider,
-    provider_display_name, provider_slug, AiProvider, AiSettings, ALL_PROVIDERS,
+    agent_install_url, default_base_url_for_provider, default_model_for_provider,
+    env_var_for_provider, find_agent, provider_display_name, provider_slug, AiProvider, AiSettings,
+    ALL_PROVIDERS,
 };
 use crate::theme::Theme;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SettingField {
+    /// The Agent card's agent row; its other field is [`SettingField::Model`].
+    Agent,
     ProviderToggle,
     ApiKey,
     Model,
@@ -107,6 +111,11 @@ pub struct SettingsViewState {
     pub edit_buffer: String,
     pub toast: Option<String>,
     pub picker: Option<ModelPicker>,
+    /// The cursor is on the Agent card above the provider cards.
+    pub agent_card_focused: bool,
+    /// Where each local agent CLI was found, looked up once when the view
+    /// opens; an agent missing here is not installed.
+    pub agent_paths: Vec<(AgentKind, PathBuf)>,
 }
 
 impl SettingsViewState {
@@ -125,6 +134,11 @@ impl SettingsViewState {
             edit_buffer: String::new(),
             toast: None,
             picker: None,
+            agent_card_focused: false,
+            agent_paths: AGENTS
+                .iter()
+                .filter_map(|&kind| Some((kind, find_agent(kind)?)))
+                .collect(),
         }
     }
 
@@ -196,25 +210,85 @@ impl SettingsViewState {
         ALL_PROVIDERS[self.selected_provider_idx % ALL_PROVIDERS.len()]
     }
 
+    /// Down: the next provider; past the last one, the Agent card; from the
+    /// card, the first provider.
     pub fn select_next_provider(&mut self) {
-        if !self.is_editing {
-            self.selected_provider_idx = (self.selected_provider_idx + 1) % ALL_PROVIDERS.len();
+        if self.is_editing {
+            return;
+        }
+        if self.agent_card_focused {
+            self.selected_provider_idx = 0;
+            self.leave_agent_card();
+        } else if self.selected_provider_idx % ALL_PROVIDERS.len() == ALL_PROVIDERS.len() - 1 {
+            self.focus_agent_card();
+        } else {
+            self.selected_provider_idx += 1;
         }
     }
 
+    /// Up: the previous provider; above the first one, the Agent card; from
+    /// the card, the last provider.
     pub fn select_prev_provider(&mut self) {
-        if !self.is_editing {
-            if self.selected_provider_idx > 0 {
-                self.selected_provider_idx -= 1;
-            } else {
-                self.selected_provider_idx = ALL_PROVIDERS.len() - 1;
-            }
+        if self.is_editing {
+            return;
         }
+        if self.agent_card_focused {
+            self.selected_provider_idx = ALL_PROVIDERS.len() - 1;
+            self.leave_agent_card();
+        } else if self.selected_provider_idx % ALL_PROVIDERS.len() == 0 {
+            self.focus_agent_card();
+        } else {
+            self.selected_provider_idx -= 1;
+        }
+    }
+
+    /// Model is the one field both kinds of card have, so it stays put as the
+    /// cursor crosses; any other field lands on the card's Agent row.
+    fn focus_agent_card(&mut self) {
+        self.agent_card_focused = true;
+        if self.selected_field != SettingField::Model {
+            self.selected_field = SettingField::Agent;
+        }
+    }
+
+    fn leave_agent_card(&mut self) {
+        self.agent_card_focused = false;
+        if self.selected_field == SettingField::Agent {
+            self.selected_field = SettingField::ProviderToggle;
+        }
+    }
+
+    /// Step the Assistant's agent: srelens, Claude Code, Codex, Cursor, round.
+    pub fn cycle_agent(&mut self) -> AgentKind {
+        let at = AGENTS.iter().position(|&a| a == self.settings.agent);
+        let next = AGENTS[(at.unwrap_or(0) + 1) % AGENTS.len()];
+        self.settings.agent = next;
+        next
+    }
+
+    /// What the Agent card's Model field picks from: the active local agent's
+    /// own list, or the default provider's when srelens answers.
+    pub fn agent_picker_target(&self) -> PickerTarget {
+        match self.settings.agent {
+            AgentKind::Srelens => PickerTarget::Provider(self.settings.default_provider),
+            kind => PickerTarget::Agent(kind),
+        }
+    }
+
+    /// The card has two fields, so either direction flips between them.
+    fn toggle_agent_card_field(&mut self) {
+        self.selected_field = match self.selected_field {
+            SettingField::Agent => SettingField::Model,
+            _ => SettingField::Agent,
+        };
     }
 
     pub fn select_next_field(&mut self) {
         if self.is_editing {
             return;
+        }
+        if self.agent_card_focused {
+            return self.toggle_agent_card_field();
         }
         let is_custom = self.current_provider() == AiProvider::OpenAiCompatible;
         self.selected_field = match self.selected_field {
@@ -228,7 +302,7 @@ impl SettingsViewState {
                 }
             }
             SettingField::BaseUrl => SettingField::Timeout,
-            SettingField::Timeout => SettingField::ProviderToggle,
+            SettingField::Timeout | SettingField::Agent => SettingField::ProviderToggle,
         };
     }
 
@@ -236,9 +310,12 @@ impl SettingsViewState {
         if self.is_editing {
             return;
         }
+        if self.agent_card_focused {
+            return self.toggle_agent_card_field();
+        }
         let is_custom = self.current_provider() == AiProvider::OpenAiCompatible;
         self.selected_field = match self.selected_field {
-            SettingField::ProviderToggle => SettingField::Timeout,
+            SettingField::ProviderToggle | SettingField::Agent => SettingField::Timeout,
             SettingField::Timeout => {
                 if is_custom {
                     SettingField::BaseUrl
@@ -264,6 +341,8 @@ impl SettingsViewState {
                 self.set_active_provider();
                 return;
             }
+            // The agent is stepped through, not typed.
+            SettingField::Agent => return,
             SettingField::ApiKey => self
                 .settings
                 .api_keys
@@ -283,7 +362,7 @@ impl SettingsViewState {
         let val = self.edit_buffer.trim().to_string();
 
         match self.selected_field {
-            SettingField::ProviderToggle => {}
+            SettingField::ProviderToggle | SettingField::Agent => {}
             SettingField::ApiKey => {
                 if val.is_empty() {
                     self.settings.api_keys.remove(&slug);
@@ -326,6 +405,131 @@ impl SettingsViewState {
     }
 }
 
+/// The Assistant's agents, in the order Space steps through them.
+const AGENTS: [AgentKind; 4] = [
+    AgentKind::Srelens,
+    AgentKind::Claude,
+    AgentKind::Codex,
+    AgentKind::Cursor,
+];
+
+/// Rows of the full Agent card: borders, a row per agent, the Model line.
+const AGENT_CARD_ROWS: u16 = 2 + AGENTS.len() as u16 + 1;
+/// Rows of the card folded into one line.
+const AGENT_CARD_FOLDED_ROWS: u16 = 3;
+
+fn provider_card_rows(provider: AiProvider) -> u16 {
+    // The custom endpoint's card has a Base URL line.
+    if provider == AiProvider::OpenAiCompatible {
+        6
+    } else {
+        5
+    }
+}
+
+fn label_style(focused: bool) -> Style {
+    if focused {
+        Style::default()
+            .fg(Theme::YELLOW)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Theme::DIM)
+    }
+}
+
+fn value_style(focused: bool) -> Style {
+    Style::default().fg(if focused { Theme::YELLOW } else { Theme::FG })
+}
+
+/// Which agent answers the Assistant: one row per agent with whether its CLI
+/// is installed, then the active agent's model. Folded into a single line
+/// when `area` is too short for the rows.
+fn render_agent_card(f: &mut Frame, area: Rect, state: &SettingsViewState) {
+    let on_card = state.agent_card_focused;
+    let agent_focus = on_card && state.selected_field == SettingField::Agent;
+    let model_focus = on_card && state.selected_field == SettingField::Model;
+    let agent = state.settings.agent;
+    let model = match agent {
+        AgentKind::Srelens => {
+            let provider = state.settings.default_provider;
+            format!(
+                "{} · {}",
+                provider_display_name(provider),
+                state.settings.get_model(provider)
+            )
+        }
+        kind => state
+            .settings
+            .get_agent_model(kind)
+            .unwrap_or_else(|| "Default".to_string()),
+    };
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(if on_card { Theme::CYAN } else { Theme::BORDER }))
+        .title(Span::styled(" Assistant agent ", Theme::header_label()));
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    let lines: Vec<Line> = if area.height < AGENT_CARD_ROWS {
+        vec![Line::from(vec![
+            Span::styled("Agent: ", label_style(agent_focus)),
+            Span::styled(
+                format!("● {}", agent.label()),
+                value_style(agent_focus).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(" · ", Style::default().fg(Theme::DIM)),
+            Span::styled(model, value_style(model_focus)),
+        ])]
+    } else {
+        let mut lines: Vec<Line> = AGENTS
+            .iter()
+            .map(|&kind| {
+                let active = kind == agent;
+                let radio = if active {
+                    Span::styled(
+                        "● ",
+                        Style::default()
+                            .fg(Theme::GREEN)
+                            .add_modifier(Modifier::BOLD),
+                    )
+                } else {
+                    Span::styled("○ ", Style::default().fg(Theme::DIM))
+                };
+                let name_style = if active {
+                    value_style(agent_focus).add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(Theme::FG)
+                };
+                let found = state.agent_paths.iter().find(|(k, _)| *k == kind);
+                let status = match (kind.binary(), found) {
+                    // srelens's own agent is built in.
+                    (None, _) => Span::raw(""),
+                    (Some(_), Some((_, path))) => Span::styled(
+                        format!("installed: {}", path.display()),
+                        Style::default().fg(Theme::GREEN),
+                    ),
+                    (Some(_), None) => Span::styled(
+                        format!("not installed — {}", agent_install_url(kind)),
+                        Style::default().fg(if active { Theme::RED } else { Theme::DIM }),
+                    ),
+                };
+                Line::from(vec![
+                    radio,
+                    Span::styled(format!("{:<13}", kind.label()), name_style),
+                    status,
+                ])
+            })
+            .collect();
+        lines.push(Line::from(vec![
+            Span::styled("   Model:   ", label_style(model_focus)),
+            Span::styled(model, value_style(model_focus)),
+        ]));
+        lines
+    };
+    f.render_widget(Paragraph::new(lines), inner);
+}
+
 pub fn render_settings_view(f: &mut Frame, area: Rect, state: &SettingsViewState) {
     let block = Block::default()
         .borders(Borders::ALL)
@@ -338,12 +542,23 @@ pub fn render_settings_view(f: &mut Frame, area: Rect, state: &SettingsViewState
     let inner = block.inner(area);
     f.render_widget(block, area);
 
+    // The Agent card takes its full height only when every provider card
+    // still fits below it; otherwise it folds into one line and the providers
+    // keep the rows they would have had without it.
+    let providers_rows: u16 = ALL_PROVIDERS.iter().map(|&p| provider_card_rows(p)).sum();
+    let agent_rows = if inner.height >= 3 + AGENT_CARD_ROWS + providers_rows + 2 {
+        AGENT_CARD_ROWS
+    } else {
+        AGENT_CARD_FOLDED_ROWS
+    };
+
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(3), // Top description & instructions
-            Constraint::Min(10),   // Provider list
-            Constraint::Length(2), // Bottom key hints
+            Constraint::Length(3),          // Top description & instructions
+            Constraint::Length(agent_rows), // Agent card
+            Constraint::Min(10),            // Provider list
+            Constraint::Length(2),          // Bottom key hints
         ])
         .split(inner);
 
@@ -371,28 +586,25 @@ pub fn render_settings_view(f: &mut Frame, area: Rect, state: &SettingsViewState
         chunks[0],
     );
 
-    // 2. Providers List
+    // 2. Agent card
+    render_agent_card(f, chunks[1], state);
+
+    // 3. Providers List
     let provider_constraints: Vec<Constraint> = ALL_PROVIDERS
         .iter()
-        .map(|&p| {
-            if p == AiProvider::OpenAiCompatible {
-                Constraint::Length(6)
-            } else {
-                Constraint::Length(5)
-            }
-        })
+        .map(|&p| Constraint::Length(provider_card_rows(p)))
         .collect();
 
     let provider_chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints(provider_constraints)
-        .split(chunks[1]);
+        .split(chunks[2]);
 
     for (idx, &provider) in ALL_PROVIDERS.iter().enumerate() {
         if idx >= provider_chunks.len() {
             break;
         }
-        let is_selected_provider = idx == state.selected_provider_idx;
+        let is_selected_provider = !state.agent_card_focused && idx == state.selected_provider_idx;
         let is_active_provider = provider == state.settings.default_provider;
         let provider_area = provider_chunks[idx];
 
@@ -564,7 +776,7 @@ pub fn render_settings_view(f: &mut Frame, area: Rect, state: &SettingsViewState
         f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: true }), card_inner);
     }
 
-    // 3. Bottom Key Hints
+    // 4. Bottom Key Hints
     let hints_line = Line::from(vec![
         Span::styled(
             "[↑/↓/j/k]",
@@ -613,10 +825,10 @@ pub fn render_settings_view(f: &mut Frame, area: Rect, state: &SettingsViewState
         Paragraph::new(hints_line)
             .wrap(Wrap { trim: true })
             .alignment(Alignment::Center),
-        chunks[2],
+        chunks[3],
     );
 
-    // 4. Modal Edit Input Dialog (when editing)
+    // 5. Modal Edit Input Dialog (when editing)
     if state.is_editing {
         let edit_area = crate::ui::help::centered_rect(60, 25, area);
         f.render_widget(Clear, edit_area);
@@ -627,6 +839,7 @@ pub fn render_settings_view(f: &mut Frame, area: Rect, state: &SettingsViewState
             SettingField::BaseUrl => "Base URL (e.g. http://localhost:11434/v1)",
             SettingField::Timeout => "Turn Timeout (seconds, e.g. 120)",
             SettingField::ProviderToggle => "Provider",
+            SettingField::Agent => "Agent",
         };
 
         let edit_block = Block::default()
@@ -824,6 +1037,8 @@ mod tests {
             edit_buffer: String::new(),
             toast: None,
             picker: None,
+            agent_card_focused: false,
+            agent_paths: Vec::new(),
         }
     }
 

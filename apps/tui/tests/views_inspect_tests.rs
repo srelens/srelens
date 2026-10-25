@@ -912,6 +912,8 @@ fn settings_state() -> SettingsViewState {
         edit_buffer: String::new(),
         toast: None,
         picker: None,
+        agent_card_focused: false,
+        agent_paths: Vec::new(),
     }
 }
 
@@ -929,29 +931,67 @@ fn settings_view_new_selects_the_configured_default_provider() {
     assert!(!state.is_editing);
     assert!(state.edit_buffer.is_empty());
     assert!(state.toast.is_none());
+    assert!(!state.agent_card_focused, "the cursor starts on a provider");
 }
 
 #[test]
-fn settings_view_provider_selection_wraps_both_ways_and_freezes_while_editing() {
+fn settings_view_provider_selection_runs_through_the_agent_card_and_freezes_while_editing() {
     let mut state = settings_state();
-    assert_eq!(state.current_provider(), AiProvider::Anthropic);
-    state.select_prev_provider();
-    assert_eq!(state.current_provider(), AiProvider::OpenAiCompatible);
-    state.select_next_provider();
     assert_eq!(state.current_provider(), AiProvider::Anthropic);
     state.select_next_provider();
     assert_eq!(state.current_provider(), AiProvider::OpenAi);
     state.select_prev_provider();
     assert_eq!(state.current_provider(), AiProvider::Anthropic);
+    assert!(!state.agent_card_focused);
+
+    // Up from the first provider reaches the Agent card above it.
+    state.select_prev_provider();
+    assert!(state.agent_card_focused);
+    assert_eq!(state.selected_field, SettingField::Agent);
+    // Up from the card wraps to the last provider; down from there is the card.
+    state.select_prev_provider();
+    assert!(!state.agent_card_focused);
+    assert_eq!(state.current_provider(), AiProvider::OpenAiCompatible);
+    assert_eq!(state.selected_field, SettingField::ProviderToggle);
+    state.select_next_provider();
+    assert!(state.agent_card_focused);
+    // Down from the card is the first provider.
+    state.select_next_provider();
+    assert!(!state.agent_card_focused);
+    assert_eq!(state.current_provider(), AiProvider::Anthropic);
+    assert_eq!(state.selected_field, SettingField::ProviderToggle);
 
     state.is_editing = true;
     state.select_next_provider();
     state.select_prev_provider();
     assert_eq!(state.current_provider(), AiProvider::Anthropic);
+    assert!(!state.agent_card_focused);
 
     // An out-of-range index is folded back into the provider list.
     state.selected_provider_idx = 6;
     assert_eq!(state.current_provider(), AiProvider::Gemini);
+}
+
+#[test]
+fn settings_view_fields_on_the_agent_card_are_agent_and_model() {
+    let mut state = settings_state();
+    state.select_prev_provider();
+    assert_eq!(state.selected_field, SettingField::Agent);
+    state.select_next_field();
+    assert_eq!(state.selected_field, SettingField::Model);
+    state.select_next_field();
+    assert_eq!(state.selected_field, SettingField::Agent);
+    state.select_prev_field();
+    assert_eq!(state.selected_field, SettingField::Model);
+
+    // Model is the field both kinds of card share: it stays put when the
+    // cursor leaves the card, as it does from one provider to the next.
+    state.select_next_provider();
+    assert!(!state.agent_card_focused);
+    assert_eq!(state.selected_field, SettingField::Model);
+    state.select_prev_provider();
+    assert!(state.agent_card_focused);
+    assert_eq!(state.selected_field, SettingField::Model);
 }
 
 #[test]
@@ -1207,8 +1247,8 @@ fn settings_view_renders_the_active_provider_summary_and_every_provider_card() {
         "{text}"
     );
     assert!(
-        !text.contains("Cursor"),
-        "Cursor is an agent, not a provider: {text}"
+        !text.contains("5. Cursor"),
+        "Cursor is an agent, not a provider card: {text}"
     );
     assert_eq!(text.matches("[ACTIVE DEFAULT]").count(), 1, "{text}");
     assert!(
@@ -1227,6 +1267,117 @@ fn settings_view_renders_the_active_provider_summary_and_every_provider_card() {
     assert!(
         !text.contains("Enter new value"),
         "no modal unless editing: {text}"
+    );
+}
+
+/// Put a fake `codex` in a scratch directory that is all of `PATH` and `HOME`,
+/// so no other agent can be found. Keep the returned directory alive.
+fn install_only_a_fake_codex(
+    settings: &mut common::env::SettingsGuard,
+) -> (tempfile::TempDir, std::path::PathBuf) {
+    let dir = tempfile::tempdir().expect("scratch bin dir");
+    let (name, body) = if cfg!(windows) {
+        ("codex.cmd", "@echo off\r\n")
+    } else {
+        ("codex", "#!/bin/sh\n")
+    };
+    let codex = dir.path().join(name);
+    std::fs::write(&codex, body).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&codex, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    settings.set_env("PATH", dir.path());
+    settings.set_env("HOME", dir.path());
+    (dir, codex)
+}
+
+#[test]
+fn the_agent_card_lists_each_agent_and_whether_it_is_installed() {
+    let mut settings = common::env::isolate_settings();
+    let (_bin, codex) = install_only_a_fake_codex(&mut settings);
+    let state = SettingsViewState::new();
+    // Wide enough for the scratch path, so nothing is cut off.
+    let lines = common::render_lines(240, 40, |f| render_settings_view(f, f.area(), &state));
+    let text = lines.join("\n");
+
+    let row = |agent: &str| lines[row_of(&lines, agent)].to_lowercase();
+    assert!(
+        row("srelens").contains('●'),
+        "srelens is the active agent: {text}"
+    );
+    assert!(
+        row("Claude Code")
+            .contains("not installed — https://docs.anthropic.com/en/docs/claude-code/setup"),
+        "{text}"
+    );
+    let codex_row = row("Codex");
+    // Windows may spell the extension in PATHEXT's case.
+    assert!(
+        codex_row.contains(&format!("installed: {}", codex.display()).to_lowercase()),
+        "{text}"
+    );
+    assert!(!codex_row.contains("not installed"), "{text}");
+    assert!(
+        row("Cursor").contains("not installed — https://docs.cursor.com/en/cli/overview"),
+        "{text}"
+    );
+    assert!(
+        row_of(&lines, "Claude Code") < row_of(&lines, "1. Anthropic (Claude)"),
+        "the Agent card sits above the provider cards: {text}"
+    );
+}
+
+#[test]
+fn the_agent_card_shows_the_active_agents_model() {
+    use srelens_agent::adapter::AgentKind;
+    let _env = common::env::lock();
+    let mut state = settings_state();
+    state.settings.default_provider = AiProvider::Gemini;
+    let text = render_settings(160, 40, &state);
+    assert!(
+        text.contains("Model:   Google Gemini · gemini-2.5-flash"),
+        "srelens answers through the active provider: {text}"
+    );
+
+    state.settings.agent = AgentKind::Codex;
+    let text = render_settings(160, 40, &state);
+    assert!(text.contains("● Codex"), "{text}");
+    assert!(text.contains("○ srelens"), "{text}");
+    assert!(text.contains("Model:   Default"), "{text}");
+    assert!(!text.contains("Google Gemini ·"), "{text}");
+
+    state
+        .settings
+        .set_agent_model(AgentKind::Codex, Some("gpt-5.6-sol".to_string()));
+    let text = render_settings(160, 40, &state);
+    assert!(text.contains("Model:   gpt-5.6-sol"), "{text}");
+}
+
+#[test]
+fn a_short_terminal_folds_the_agent_card_into_one_line() {
+    use srelens_agent::adapter::AgentKind;
+    let mut settings = common::env::isolate_settings();
+    let (_bin, _codex) = install_only_a_fake_codex(&mut settings);
+    let mut state = SettingsViewState::new();
+    state.settings.agent = AgentKind::Codex;
+    state
+        .settings
+        .set_agent_model(AgentKind::Codex, Some("gpt-5.6-sol".to_string()));
+
+    // Tall enough for every card: the agent list, one row per agent.
+    let tall = render_settings(160, 40, &state);
+    assert!(tall.contains("not installed"), "{tall}");
+
+    // Not tall enough: the providers keep their rows, the agent is one line.
+    let short = render_settings(160, 26, &state);
+    assert!(short.contains("Agent: ● Codex · gpt-5.6-sol"), "{short}");
+    assert!(!short.contains("not installed"), "{short}");
+    assert!(short.contains("1. Anthropic (Claude)"), "{short}");
+    assert!(
+        short.contains("API Key:"),
+        "the first provider keeps its rows: {short}"
     );
 }
 
