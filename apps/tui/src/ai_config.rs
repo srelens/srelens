@@ -1,8 +1,10 @@
 use serde::{Deserialize, Serialize};
+use srelens_agent::adapter::{valid_model_id, AgentKind};
+use srelens_kube::toolbox::SearchPaths;
 use srelens_llm::types::ProviderKind;
 use srelens_llm::ProviderConfig;
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -11,7 +13,6 @@ pub enum AiProvider {
     OpenAi,
     Gemini,
     OpenAiCompatible,
-    Cursor,
 }
 
 impl AiProvider {
@@ -21,18 +22,16 @@ impl AiProvider {
             AiProvider::OpenAi => Some(ProviderKind::OpenAi),
             AiProvider::Gemini => Some(ProviderKind::Gemini),
             AiProvider::OpenAiCompatible => Some(ProviderKind::OpenAiCompatible),
-            AiProvider::Cursor => None,
         }
     }
 }
 
 /// All supported AI providers in order of display.
-pub const ALL_PROVIDERS: [AiProvider; 5] = [
+pub const ALL_PROVIDERS: [AiProvider; 4] = [
     AiProvider::Anthropic,
     AiProvider::OpenAi,
     AiProvider::Gemini,
     AiProvider::OpenAiCompatible,
-    AiProvider::Cursor,
 ];
 
 pub fn provider_slug(kind: AiProvider) -> &'static str {
@@ -41,7 +40,6 @@ pub fn provider_slug(kind: AiProvider) -> &'static str {
         AiProvider::OpenAi => "openai",
         AiProvider::Gemini => "gemini",
         AiProvider::OpenAiCompatible => "openai-compatible",
-        AiProvider::Cursor => "cursor",
     }
 }
 
@@ -51,7 +49,6 @@ pub fn provider_display_name(kind: AiProvider) -> &'static str {
         AiProvider::OpenAi => "OpenAI (GPT-4o)",
         AiProvider::Gemini => "Google Gemini",
         AiProvider::OpenAiCompatible => "OpenAI-Compatible / Ollama (Local)",
-        AiProvider::Cursor => "Cursor Agent (cursor-agent)",
     }
 }
 
@@ -61,7 +58,6 @@ pub fn default_model_for_provider(kind: AiProvider) -> &'static str {
         AiProvider::OpenAi => "gpt-4o",
         AiProvider::Gemini => "gemini-2.5-flash",
         AiProvider::OpenAiCompatible => "llama3.2",
-        AiProvider::Cursor => "default",
     }
 }
 
@@ -71,7 +67,6 @@ pub fn default_base_url_for_provider(kind: AiProvider) -> &'static str {
         AiProvider::OpenAi => "https://api.openai.com/v1",
         AiProvider::Gemini => "https://generativelanguage.googleapis.com",
         AiProvider::OpenAiCompatible => "http://localhost:11434/v1",
-        AiProvider::Cursor => "",
     }
 }
 
@@ -81,31 +76,65 @@ pub fn env_var_for_provider(kind: AiProvider) -> &'static str {
         AiProvider::OpenAi => "OPENAI_API_KEY",
         AiProvider::Gemini => "GEMINI_API_KEY",
         AiProvider::OpenAiCompatible => "OPENAI_COMPATIBLE_API_KEY",
-        AiProvider::Cursor => "CURSOR_API_KEY",
     }
 }
 
-pub fn find_cursor_binary() -> Option<String> {
-    if let Some(path) = srelens_kube::path_lookup::find_on_path("cursor-agent") {
-        return Some(path.display().to_string());
+/// The key an agent's settings are stored under (`agentModels`).
+pub fn agent_slug(kind: AgentKind) -> &'static str {
+    match kind {
+        AgentKind::Claude => "claude",
+        AgentKind::Codex => "codex",
+        AgentKind::Cursor => "cursor",
+        AgentKind::Srelens => "srelens",
     }
-    let home = std::env::var("HOME").unwrap_or_default();
-    let candidates = [
-        format!("{}/.local/bin/cursor-agent", home),
-        "/usr/local/bin/cursor-agent".to_string(),
-        "/opt/homebrew/bin/cursor-agent".to_string(),
-    ];
-    for c in candidates {
-        if Path::new(&c).exists() {
-            return Some(c);
-        }
+}
+
+/// Where to install a local agent from; srelens's own agent needs no install.
+pub fn agent_install_url(kind: AgentKind) -> &'static str {
+    match kind {
+        AgentKind::Claude => "https://docs.anthropic.com/en/docs/claude-code/setup",
+        AgentKind::Codex => "https://developers.openai.com/codex/cli/",
+        AgentKind::Cursor => "https://docs.cursor.com/en/cli/overview",
+        AgentKind::Srelens => "",
     }
-    None
+}
+
+/// The installed program for a local agent, under the name this platform
+/// runs (`cursor-agent.cmd` on Windows): the app's PATH first, then the usual
+/// install dirs. `None` for srelens's own agent, which has no binary.
+pub fn find_agent(kind: AgentKind) -> Option<PathBuf> {
+    find_agent_in(kind, &SearchPaths::from_env())
+}
+
+/// [`find_agent`] in `paths`' directories only: `app_path`, then
+/// `system_path`. A directory that is not absolute is skipped: it is what
+/// `HOME/.srelens/bin` becomes when `HOME` is unset (usual on Windows), or an
+/// empty `PATH` entry, and either would be searched in the working
+/// directory, where a cloned repository could have put a `claude.cmd`.
+pub fn find_agent_in(kind: AgentKind, paths: &SearchPaths) -> Option<PathBuf> {
+    let program = kind.binary()?;
+    let dirs: Vec<PathBuf> = [&paths.app_path, &paths.system_path]
+        .into_iter()
+        .flat_map(std::env::split_paths)
+        .filter(|dir| dir.is_absolute())
+        .collect();
+    if dirs.is_empty() {
+        // An empty PATH-style string is one empty, relative, entry.
+        return None;
+    }
+    let path = std::env::join_paths(dirs).ok()?;
+    srelens_kube::path_lookup::find_executable(program, path)
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AiSettings {
+    /// Which agent the Assistant talks through; srelens's own by default.
+    #[serde(default)]
+    pub agent: AgentKind,
+    /// One model per local agent, keyed by [`agent_slug`]; absent = Default.
+    #[serde(default)]
+    pub agent_models: HashMap<String, String>,
     pub default_provider: AiProvider,
     #[serde(default)]
     pub api_keys: HashMap<String, String>,
@@ -152,6 +181,8 @@ impl Default for AiSettings {
         }
 
         Self {
+            agent: AgentKind::default(),
+            agent_models: HashMap::new(),
             default_provider: AiProvider::Anthropic,
             api_keys: HashMap::new(),
             models,
@@ -185,7 +216,7 @@ impl AiSettings {
     pub fn load() -> Self {
         let path = Self::config_path();
         if let Ok(content) = std::fs::read_to_string(&path) {
-            if let Ok(settings) = serde_json::from_str::<AiSettings>(&content) {
+            if let Ok(settings) = Self::from_json(&content) {
                 return settings;
             }
         }
@@ -221,6 +252,46 @@ impl AiSettings {
         Self::default()
     }
 
+    /// Parse a settings file. A file from when Cursor was a provider
+    /// (`"defaultProvider":"cursor"`) opens as the Cursor agent over the
+    /// Anthropic provider, keeping its Cursor model and every other field. An
+    /// agent this build does not know reads as the default agent. Either one
+    /// would otherwise fail the parse, `load` would fall back to defaults, and
+    /// the next save would drop the user's keys.
+    pub fn from_json(text: &str) -> Result<AiSettings, serde_json::Error> {
+        let mut value: serde_json::Value = serde_json::from_str(text)?;
+        if let Some(obj) = value.as_object_mut() {
+            if obj
+                .get("agent")
+                .is_some_and(|a| AgentKind::deserialize(a).is_err())
+            {
+                obj.remove("agent");
+            }
+            if obj.get("defaultProvider").and_then(|v| v.as_str()) == Some("cursor") {
+                obj.insert("defaultProvider".into(), "anthropic".into());
+                obj.entry("agent").or_insert_with(|| "cursor".into());
+                // Only here, once: after the first save the file no longer says
+                // "cursor", so choosing Default later is not undone.
+                let legacy_model = obj
+                    .get("models")
+                    .and_then(|m| m.get("cursor"))
+                    .and_then(|m| m.as_str())
+                    .filter(|m| valid_model_id(m) && *m != "default")
+                    .map(str::to_string);
+                if let Some(model) = legacy_model {
+                    if let Some(agent_models) = obj
+                        .entry("agentModels")
+                        .or_insert_with(|| serde_json::json!({}))
+                        .as_object_mut()
+                    {
+                        agent_models.entry("cursor").or_insert(model.into());
+                    }
+                }
+            }
+        }
+        serde_json::from_value(value)
+    }
+
     pub fn save(&self) -> Result<PathBuf, String> {
         let path = Self::config_path();
         if let Some(parent) = path.parent() {
@@ -247,6 +318,39 @@ impl AiSettings {
         None
     }
 
+    /// Cursor's own key, optional (cursor-agent's login works without one):
+    /// the stored `apiKeys.cursor`, else `CURSOR_API_KEY`. Blank is no key.
+    pub fn get_cursor_key(&self) -> Option<String> {
+        self.api_keys
+            .get(agent_slug(AgentKind::Cursor))
+            .filter(|k| !k.trim().is_empty())
+            .cloned()
+            .or_else(|| {
+                std::env::var("CURSOR_API_KEY")
+                    .ok()
+                    .filter(|k| !k.trim().is_empty())
+            })
+    }
+
+    /// The model chosen for a local agent; `None` is Default (no model flag),
+    /// and so is a stored id that is not a valid model id, so a tampered file
+    /// cannot put a flag on the agent's command line.
+    pub fn get_agent_model(&self, kind: AgentKind) -> Option<String> {
+        self.agent_models
+            .get(agent_slug(kind))
+            .filter(|m| valid_model_id(m))
+            .cloned()
+    }
+
+    /// Store an agent's model; `None` goes back to Default.
+    pub fn set_agent_model(&mut self, kind: AgentKind, model: Option<String>) {
+        let slug = agent_slug(kind).to_string();
+        match model {
+            Some(m) => self.agent_models.insert(slug, m),
+            None => self.agent_models.remove(&slug),
+        };
+    }
+
     pub fn get_model(&self, kind: AiProvider) -> String {
         let slug = provider_slug(kind);
         self.models
@@ -266,7 +370,20 @@ impl AiSettings {
     }
 
     pub fn get_timeout_seconds(&self, kind: AiProvider) -> u32 {
-        let slug = provider_slug(kind);
+        self.timeout_for(provider_slug(kind))
+    }
+
+    /// A local agent's turn timeout: its own, else the one a provider without
+    /// its own gets. srelens's own agent runs under its provider's instead.
+    pub fn get_agent_timeout_seconds(&self, kind: AgentKind) -> u32 {
+        self.timeout_for(agent_slug(kind))
+    }
+
+    pub fn set_agent_timeout_seconds(&mut self, kind: AgentKind, seconds: u32) {
+        self.timeouts.insert(agent_slug(kind).into(), seconds);
+    }
+
+    fn timeout_for(&self, slug: &str) -> u32 {
         self.timeouts
             .get(slug)
             .copied()
@@ -332,6 +449,148 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_settings_file_with_cursor_as_provider_opens_as_the_cursor_agent_with_nothing_lost() {
+        let s = AiSettings::from_json(
+            r#"{"defaultProvider":"cursor","apiKeys":{"anthropic":"sk-a","cursor":"cur-1"},
+          "models":{"anthropic":"m1"},"timeouts":{"anthropic":60},"theme":"dracula","cavemanLevel":"lite"}"#,
+        )
+        .unwrap();
+        assert_eq!(s.agent, AgentKind::Cursor);
+        assert_eq!(s.default_provider, AiProvider::Anthropic);
+        assert_eq!(
+            s.get_api_key(AiProvider::Anthropic).as_deref(),
+            Some("sk-a")
+        );
+        assert_eq!(s.get_cursor_key().as_deref(), Some("cur-1"));
+        assert_eq!(s.get_model(AiProvider::Anthropic), "m1");
+        assert_eq!(s.theme.as_deref(), Some("dracula"));
+        assert_eq!(s.caveman_level.as_deref(), Some("lite"));
+    }
+
+    /// A migrated user's Cursor turns keep the timeout they ran under, and
+    /// Anthropic keeps its own.
+    #[test]
+    fn a_migrated_cursor_user_keeps_both_timeouts() {
+        let s = AiSettings::from_json(
+            r#"{"defaultProvider":"cursor","timeouts":{"cursor":300,"anthropic":30}}"#,
+        )
+        .unwrap();
+        assert_eq!(s.get_agent_timeout_seconds(AgentKind::Cursor), 300);
+        assert_eq!(s.get_timeout_seconds(AiProvider::Anthropic), 30);
+
+        let s = AiSettings::from_json(
+            r#"{"defaultProvider":"cursor","timeoutSeconds":200,"timeouts":{"anthropic":30}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            s.get_agent_timeout_seconds(AgentKind::Cursor),
+            200,
+            "Cursor ran under the fallback"
+        );
+        assert_eq!(s.get_timeout_seconds(AiProvider::Anthropic), 30);
+    }
+
+    #[test]
+    fn a_stored_agent_model_that_could_be_a_flag_is_treated_as_default() {
+        let s = AiSettings::from_json(
+            r#"{"defaultProvider":"anthropic","agentModels":{"claude":"--dangerously-skip-permissions"}}"#,
+        )
+        .unwrap();
+        assert_eq!(s.get_agent_model(AgentKind::Claude), None);
+    }
+
+    #[test]
+    fn agent_and_agent_models_survive_a_save() {
+        let mut s = AiSettings::default();
+        s.agent = AgentKind::Codex;
+        s.set_agent_model(AgentKind::Codex, Some("gpt-5.6-sol".to_string()));
+        let json = serde_json::to_string(&s).unwrap();
+        assert!(json.contains(r#""agent":"codex""#), "{json}");
+        assert!(
+            json.contains(r#""agentModels":{"codex":"gpt-5.6-sol"}"#),
+            "{json}"
+        );
+
+        let back = AiSettings::from_json(&json).unwrap();
+        assert_eq!(back, s);
+        assert_eq!(
+            back.get_agent_model(AgentKind::Codex).as_deref(),
+            Some("gpt-5.6-sol")
+        );
+
+        s.set_agent_model(AgentKind::Codex, None);
+        assert_eq!(s.get_agent_model(AgentKind::Codex), None, "None is Default");
+        assert!(s.agent_models.is_empty());
+    }
+
+    #[test]
+    fn settings_from_before_agents_default_to_srelens() {
+        let s = AiSettings::from_json(r#"{"defaultProvider":"gemini"}"#).unwrap();
+        assert_eq!(s.agent, AgentKind::Srelens);
+        assert_eq!(s.default_provider, AiProvider::Gemini);
+        assert!(s.agent_models.is_empty());
+        assert_eq!(AiSettings::default().agent, AgentKind::Srelens);
+    }
+
+    #[test]
+    fn a_migrated_user_keeps_their_cursor_model() {
+        let s = AiSettings::from_json(
+            r#"{"defaultProvider":"cursor","models":{"cursor":"claude-3.5-sonnet"}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            s.get_agent_model(AgentKind::Cursor).as_deref(),
+            Some("claude-3.5-sonnet")
+        );
+        assert_eq!(
+            s.models.get("cursor").map(String::as_str),
+            Some("claude-3.5-sonnet"),
+            "the legacy entry stays"
+        );
+
+        let s =
+            AiSettings::from_json(r#"{"defaultProvider":"cursor","models":{"cursor":"default"}}"#)
+                .unwrap();
+        assert_eq!(
+            s.get_agent_model(AgentKind::Cursor),
+            None,
+            "default is Default"
+        );
+
+        let s = AiSettings::from_json(
+            r#"{"defaultProvider":"cursor","models":{"cursor":"m-legacy"},"agentModels":{"cursor":"m-chosen"}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            s.get_agent_model(AgentKind::Cursor).as_deref(),
+            Some("m-chosen"),
+            "an agent model already chosen wins"
+        );
+    }
+
+    #[test]
+    fn an_unknown_agent_reads_as_srelens_with_the_keys_kept() {
+        for agent in [r#""gemini-cli""#, r#""Cursor""#, "7"] {
+            let s = AiSettings::from_json(&format!(
+                r#"{{"defaultProvider":"anthropic","apiKeys":{{"anthropic":"sk-a"}},"agent":{agent}}}"#
+            ))
+            .unwrap();
+            assert_eq!(s.agent, AgentKind::Srelens, "{agent}");
+            assert_eq!(
+                s.api_keys.get("anthropic").map(String::as_str),
+                Some("sk-a")
+            );
+        }
+    }
+
+    #[test]
+    fn an_explicit_agent_wins_over_the_legacy_cursor_provider() {
+        let s = AiSettings::from_json(r#"{"defaultProvider":"cursor","agent":"codex"}"#).unwrap();
+        assert_eq!(s.agent, AgentKind::Codex);
+        assert_eq!(s.default_provider, AiProvider::Anthropic);
+    }
+
+    #[test]
     fn test_default_ai_settings() {
         let s = AiSettings::default();
         assert_eq!(s.default_provider, AiProvider::Anthropic);
@@ -344,9 +603,7 @@ mod tests {
             s.get_base_url(AiProvider::OpenAiCompatible),
             "http://localhost:11434/v1"
         );
-        assert_eq!(s.get_model(AiProvider::Cursor), "default");
         assert_eq!(s.get_timeout_seconds(AiProvider::Anthropic), 120);
-        assert_eq!(s.get_timeout_seconds(AiProvider::Cursor), 120);
         assert_eq!(
             s.get_caveman_level(),
             Some(crate::ai_skills::CavemanLevel::Ultra),
@@ -384,28 +641,25 @@ mod tests {
     #[test]
     fn test_serialization_round_trip() {
         let mut s = AiSettings::default();
-        s.default_provider = AiProvider::Cursor;
+        s.default_provider = AiProvider::Gemini;
         s.api_keys
-            .insert("cursor".to_string(), "cur-test-12345".to_string());
+            .insert("gemini".to_string(), "g-test-12345".to_string());
         s.models
-            .insert("cursor".to_string(), "claude-3.5-sonnet".to_string());
-        s.set_timeout_seconds(AiProvider::Cursor, 180);
+            .insert("gemini".to_string(), "gemini-2.5-pro".to_string());
+        s.set_timeout_seconds(AiProvider::Gemini, 180);
         s.set_timeout_seconds(AiProvider::Anthropic, 60);
         s.set_caveman_level(Some(crate::ai_skills::CavemanLevel::Ultra));
 
         let json = serde_json::to_string(&s).unwrap();
         let deserialized: AiSettings = serde_json::from_str(&json).unwrap();
 
-        assert_eq!(deserialized.default_provider, AiProvider::Cursor);
+        assert_eq!(deserialized.default_provider, AiProvider::Gemini);
         assert_eq!(
-            deserialized.get_api_key(AiProvider::Cursor).as_deref(),
-            Some("cur-test-12345")
+            deserialized.get_api_key(AiProvider::Gemini).as_deref(),
+            Some("g-test-12345")
         );
-        assert_eq!(
-            deserialized.get_model(AiProvider::Cursor),
-            "claude-3.5-sonnet"
-        );
-        assert_eq!(deserialized.get_timeout_seconds(AiProvider::Cursor), 180);
+        assert_eq!(deserialized.get_model(AiProvider::Gemini), "gemini-2.5-pro");
+        assert_eq!(deserialized.get_timeout_seconds(AiProvider::Gemini), 180);
         assert_eq!(deserialized.get_timeout_seconds(AiProvider::Anthropic), 60);
         assert_eq!(deserialized.get_timeout_seconds(AiProvider::OpenAi), 120);
         assert_eq!(

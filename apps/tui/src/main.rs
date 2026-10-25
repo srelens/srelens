@@ -85,9 +85,11 @@ mod ai_skills;
 mod app;
 mod cli;
 mod commands;
+mod consent;
 mod deep_link;
 mod event;
 mod mcp_server;
+mod model_list;
 mod sink;
 mod theme;
 mod tui_config;
@@ -442,7 +444,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         ("", msg.as_str())
                                     };
                                     if target_conv.is_empty() || target_conv == target_state.conversation_id {
-                                        target_state.cursor_resume_id = if session_id.is_empty() {
+                                        target_state.cli_resume_id = if session_id.is_empty() {
                                             None
                                         } else {
                                             Some(session_id.to_string())
@@ -562,6 +564,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 AppEvent::ChangedCauseResult { key, result } => {
                     app.handle_changed_cause_result(&key, result);
                 }
+                AppEvent::AgentConsent(pending) => app.consents.push(pending),
+                AppEvent::ModelsLoaded { key, result } => app.handle_models_loaded(&key, result),
             }
 
             if !app.is_running {
@@ -782,6 +786,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     disable_raw_mode()?;
     execute!(terminal.backend_mut(), LeaveAlternateScreen, DisableMouseCapture, DisableBracketedPaste)?;
     terminal.show_cursor()?;
+    // No agent may still be running in the chat root it removes.
+    app.stop_assistant_turns().await;
     crate::agent::cleanup_process_cursor_chats();
 
     Ok(())

@@ -5,6 +5,9 @@ use std::sync::Arc;
 
 use srelens_agent::adapter::{AgentInfo, AgentKind};
 use srelens_agent::event::AgentEvent;
+use srelens_agent::turn::{
+    prepare_turn, sweep_cursor_chats, valid_resume_id, write_private_file, TempFile, TurnSpec,
+};
 use srelens_streams::sink::EventSink;
 
 const CLAUDE_INSTALL: &str = "https://docs.anthropic.com/en/docs/claude-code/setup";
@@ -22,7 +25,7 @@ fn install_url(kind: AgentKind) -> &'static str {
 }
 
 /// No agent is gated: Claude, Codex, and Cursor are each boxed to srelens's
-/// own MCP tools (see `chat_send`'s per-kind spawn arms) and all three connect
+/// own MCP tools (see `srelens_agent::turn::prepare_turn`) and all three connect
 /// and are selectable. Kept as a function (rather than deleted) so a future
 /// agent that isn't ready can gate from here again.
 fn is_gated(_kind: AgentKind) -> bool {
@@ -89,68 +92,15 @@ fn native_agent_info(app: &tauri::AppHandle) -> AgentInfo {
 /// installed under `~/.local/bin` — in `system_path` but not `app_path` — was
 /// invisible to a packaged build even though a dev shell's inherited PATH
 /// happened to cover it.
+///
+/// Each directory is resolved the way the OS would run the name, so on Windows
+/// that is the `.cmd`/`.exe` shim and never npm's extensionless sh script beside
+/// it, and on Unix a file this user may execute.
 fn resolve_agent(bin: &str, paths: &srelens_kube::toolbox::SearchPaths) -> Option<String> {
-    which_on_path(bin, &paths.app_path).or_else(|| which_on_path(bin, &paths.system_path))
-}
-
-/// File names to probe for `bin` within a single PATH directory. On Unix a CLI
-/// is its bare name, but Windows resolves `claude` by appending each `PATHEXT`
-/// extension (`.EXE`, `.CMD`, …) — an installed `claude.cmd`/`claude.exe` is
-/// invisible if we only probe the extensionless path — so we return the bare
-/// name followed by one candidate per extension. Kept pure (PATHEXT passed in,
-/// `None` off Windows) so the extension logic is testable on any host. When the
-/// caller already named a concrete extension we don't append more.
-fn executable_candidates(bin: &str, pathext: Option<&str>) -> Vec<String> {
-    let mut names = vec![bin.to_string()];
-    if let Some(pathext) = pathext {
-        if std::path::Path::new(bin).extension().is_none() {
-            for ext in pathext.split(';').map(str::trim).filter(|e| !e.is_empty()) {
-                // Each PATHEXT entry carries its own leading dot (".EXE").
-                names.push(format!("{bin}{ext}"));
-            }
-        }
-    }
-    names
-}
-
-/// First directory on `path` (a platform-delimited PATH string) that holds an
-/// executable `bin`, as an absolute path. Uses `std::env::split_paths` rather
-/// than splitting on `:` so a Windows `;`-delimited PATH with drive-letter
-/// colons (`C:\...;D:\...`) resolves correctly instead of shredding into
-/// invalid directories, and honors `PATHEXT` so a `.exe`/`.cmd` install is found.
-fn which_on_path(bin: &str, path: &str) -> Option<String> {
-    #[cfg(windows)]
-    let pathext =
-        Some(std::env::var("PATHEXT").unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".to_string()));
-    #[cfg(not(windows))]
-    let pathext: Option<String> = None;
-
-    std::env::split_paths(path).filter(|d| !d.as_os_str().is_empty()).find_map(|dir| {
-        executable_candidates(bin, pathext.as_deref()).into_iter().find_map(|name| {
-            let candidate = dir.join(&name);
-            is_executable(&candidate).then(|| candidate.to_string_lossy().into_owned())
-        })
-    })
-}
-
-/// Whether `path` is a file we can actually run. On Unix a PATH entry only
-/// counts if it carries an execute bit — a plain `0644` file named `claude`
-/// sitting earlier on PATH would otherwise be reported as the installed agent,
-/// and every send would then fail with `Permission denied`. On Windows
-/// executability comes from the `PATHEXT` extension (handled by
-/// `executable_candidates`), so being a regular file is sufficient.
-fn is_executable(path: &std::path::Path) -> bool {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::metadata(path)
-            .map(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
-            .unwrap_or(false)
-    }
-    #[cfg(not(unix))]
-    {
-        path.is_file()
-    }
+    use srelens_kube::path_lookup::find_executable;
+    find_executable(bin, &paths.app_path)
+        .or_else(|| find_executable(bin, &paths.system_path))
+        .map(|found| found.to_string_lossy().into_owned())
 }
 
 /// Map a sequence of raw stream-json lines to channel emits, returning whether
@@ -217,26 +167,6 @@ fn finish_turn(sink: &dyn EventSink, channel: &str, saw_done: bool, crashed: boo
     );
 }
 
-/// Prepend one `Attached image: <path>` line per path, then a blank line,
-/// then the original prompt — so the agent sees where each decoded image
-/// landed on disk before reading the user's actual question. `image_paths`
-/// empty (the common case: no attachments) returns `prompt` unchanged,
-/// byte-identical, so a turn without images pays no cost here.
-fn prompt_with_images(prompt: &str, image_paths: &[String]) -> String {
-    if image_paths.is_empty() {
-        return prompt.to_string();
-    }
-    let mut out = String::new();
-    for path in image_paths {
-        out.push_str("Attached image: ");
-        out.push_str(path);
-        out.push('\n');
-    }
-    out.push('\n');
-    out.push_str(prompt);
-    out
-}
-
 /// Decode one attached image's base64 body (no `data:image/...;base64,`
 /// prefix — the WebView strips that before sending) into raw bytes. A thin
 /// wrapper so `chat_send` can decode without a fallible call inline, and so
@@ -268,34 +198,6 @@ pub struct ChatManager {
     pub(crate) cursor_chats: CursorChatsInUse,
 }
 
-/// The Cursor chats a turn or a delete is using right now. A chat's directory
-/// is one per conversation (#952), and two windows can hold one saved
-/// conversation, each streaming on its own session and seeing only its own
-/// turns as busy. Without this, the second turn would empty the first one's
-/// workspace and either turn's guard would remove the other's files.
-#[derive(Default, Clone)]
-pub struct CursorChatsInUse(Arc<std::sync::Mutex<std::collections::HashSet<String>>>);
-
-/// One holder's use of a Cursor chat, released when dropped.
-pub(crate) struct CursorChatClaim {
-    in_use: CursorChatsInUse,
-    chat: String,
-}
-
-impl CursorChatsInUse {
-    /// Claim `chat`, or `None` while something else holds it.
-    pub(crate) fn claim(&self, chat: &str) -> Option<CursorChatClaim> {
-        let fresh = self.0.lock().unwrap().insert(chat.to_string());
-        fresh.then(|| CursorChatClaim { in_use: self.clone(), chat: chat.to_string() })
-    }
-}
-
-impl Drop for CursorChatClaim {
-    fn drop(&mut self) {
-        self.in_use.0.lock().unwrap().remove(&self.chat);
-    }
-}
-
 impl ChatManager {
     /// Record that a cancel for the given turn generation arrived before
     /// anything cancellable was registered.
@@ -316,10 +218,42 @@ impl ChatManager {
 /// and tokio reaps a dropped `Child` on a best-effort basis only — so without
 /// this, every Stop could leave a zombie in the process table.
 fn kill_and_reap(mut child: tokio::process::Child) {
-    let _ = child.start_kill();
+    srelens_agent::turn::kill_tree(&mut child);
     tokio::spawn(async move {
         let _ = child.wait().await;
     });
+}
+
+/// Spawn a prepared agent command in `cwd`, its stdout and stderr piped for
+/// the stream loop. What the command carries for stdin is written from a task
+/// of its own and the pipe then closed, so a child that reads it slowly can't
+/// hold up the stream loop; with nothing to write, stdin is closed from the
+/// start.
+fn spawn_agent(
+    cmd: &srelens_agent::adapter::AgentCommand,
+    cwd: &std::path::Path,
+) -> std::io::Result<tokio::process::Child> {
+    let mut child = tokio::process::Command::new(&cmd.program)
+        .args(&cmd.args)
+        // Required so Codex's MCP bearer token (carried in `cmd.env`, never
+        // argv) actually reaches the child; harmless for Claude, whose `env`
+        // is always empty (its token travels via the `--mcp-config` file).
+        .envs(cmd.env.iter().map(|(k, v)| (k.clone(), v.clone())))
+        .current_dir(cwd)
+        .stdin(if cmd.stdin.is_some() { std::process::Stdio::piped() } else { std::process::Stdio::null() })
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()?;
+    if let (Some(input), Some(mut stdin)) = (cmd.stdin.clone(), child.stdin.take()) {
+        tokio::spawn(async move {
+            use tokio::io::AsyncWriteExt;
+            // A child that exits before reading it all fails on its own, and
+            // its exit status says so; there is nothing to add here.
+            let _ = stdin.write_all(input.as_bytes()).await;
+            // `stdin` is dropped here, and the child reads the end of it.
+        });
+    }
+    Ok(child)
 }
 
 impl ChatManager {
@@ -342,111 +276,6 @@ pub async fn chat_start() -> Result<String, String> {
     Ok(uuid::Uuid::new_v4().to_string())
 }
 
-/// Removes the wrapped path when dropped. The MCP config file `chat_send`
-/// writes for a turn carries the bearer token in cleartext, so it must be
-/// removed on every exit — including an early `?` after a failed spawn — not
-/// just the happy path a bare `remove_file` at the end of the function would
-/// cover.
-struct TempFile(std::path::PathBuf);
-
-impl Drop for TempFile {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.0);
-    }
-}
-
-/// Removes the wrapped directory (and everything under it) when dropped. The
-/// agent is spawned with this as its working directory so it has no code or
-/// files of ours to enumerate even if a tool tried; the directory is created
-/// empty per turn and torn down when the turn ends, same lifecycle as
-/// `TempFile` above.
-struct TempDir(std::path::PathBuf);
-
-impl Drop for TempDir {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
-    }
-}
-
-/// Create a fresh private directory under `base` — the directory analogue of
-/// `write_private_file`. The shared system temp dir is world-writable on a
-/// multi-user Unix host, and a predictable name could be pre-created by
-/// another account (as a symlink or an attacker-writable directory) to read
-/// or replace what a turn writes inside — e.g. swapping Cursor's
-/// `cli-config.json` deny-list, or seeding Codex's supposedly-empty `-C`
-/// workspace. So: a randomized suffix (unguessable), `DirBuilder::create`
-/// rather than `create_dir_all` (anything pre-existing — including a planted
-/// symlink — is an error, never accepted), and `0700` at creation on Unix.
-fn create_private_dir(base: &std::path::Path, prefix: &str) -> Result<std::path::PathBuf, String> {
-    for _ in 0..8 {
-        let path = base.join(format!("{prefix}-{}", uuid::Uuid::new_v4()));
-        // Only the Unix branch below mutates it; on Windows the `mut` is
-        // unused and rustc says so on every build.
-        #[cfg_attr(not(unix), allow(unused_mut))]
-        let mut builder = std::fs::DirBuilder::new();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::DirBuilderExt;
-            builder.mode(0o700);
-        }
-        match builder.create(&path) {
-            Ok(()) => return Ok(path),
-            // A uuid collision is practically impossible; treat it as the
-            // race it would be and try a fresh name.
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
-            Err(e) => return Err(e.to_string()),
-        }
-    }
-    Err("could not create a private temp directory".into())
-}
-
-/// Write a per-turn scratch file with owner-only permissions (`0600` on Unix),
-/// so another local account can't read it out of the world-readable shared temp
-/// dir while a turn runs. Used for everything sensitive we drop there: the MCP
-/// bearer-token configs (Claude `--mcp-config`, Cursor `mcp.json`) and attached
-/// image files (their paths are visible in Codex's `-i` argv). On non-Unix the
-/// default per-user temp permissions apply.
-fn write_private_file(path: &std::path::Path, contents: &[u8]) -> std::io::Result<()> {
-    #[cfg(unix)]
-    {
-        use std::io::Write;
-        use std::os::unix::fs::OpenOptionsExt;
-        // Remove any leftover of OUR own from a prior turn, then `create_new`
-        // (O_CREAT|O_EXCL): the open refuses if anything exists at `path` —
-        // including a symlink another local account pre-created at a
-        // predictable/reused scratch path to redirect the write or read the
-        // token. Removing a symlink drops the link, not its target; if the
-        // attacker re-creates it in the race window the exclusive open fails,
-        // so we never follow it. `.mode(0o600)` only governs a fresh file.
-        let _ = std::fs::remove_file(path);
-        let mut f = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(path)?;
-        f.write_all(contents)
-    }
-    #[cfg(not(unix))]
-    {
-        // Match the fail-closed semantics on other platforms too.
-        use std::io::Write;
-        let _ = std::fs::remove_file(path);
-        let mut f = std::fs::OpenOptions::new().write(true).create_new(true).open(path)?;
-        f.write_all(contents)
-    }
-}
-
-/// One Cursor turn, ready to spawn: its command, and the workspace to spawn it
-/// in, which is removed (bearer token and all) when the turn ends.
-struct CursorTurn {
-    cmd: srelens_agent::adapter::AgentCommand,
-    workspace: std::path::PathBuf,
-    _workspace_guard: TempDir,
-    // Declared after the guard, so it is dropped after it: the chat is
-    // released only once its workspace is gone.
-    _claim: CursorChatClaim,
-}
-
 /// Where Cursor's chats live (see `prepare_cursor_turn`): the per-user data
 /// dir, never the shared temp dir, and not the cache dir either — a saved
 /// conversation's chat must outlive the run, and goes only with the chat
@@ -465,112 +294,8 @@ pub fn sweep_cursor_state(app: &tauri::AppHandle) {
     }
 }
 
-/// Remove the Cursor chats no saved conversation holds — a one-shot turn's,
-/// or one whose save never landed — and, from those that stay, the workspace
-/// a killed turn left behind (its guard never ran). They hold prompts and
-/// tool results, so a failure is logged: it is why they are still on disk.
-fn sweep_cursor_chats(root: &std::path::Path, saved: impl Fn(&str) -> bool) {
-    let entries = match std::fs::read_dir(root) {
-        Ok(entries) => entries,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return,
-        Err(error) => {
-            log::warn!("could not list the Cursor chats in {}: {error}", root.display());
-            return;
-        }
-    };
-    for entry in entries.flatten() {
-        let chat = entry.path();
-        let stale = if entry.file_name().to_str().is_some_and(&saved) { chat.join("workspace") } else { chat };
-        if let Err(error) = remove_cursor_chats(&stale) {
-            log::warn!("could not delete {}: {error}", stale.display());
-        }
-    }
-}
-
+pub(crate) use srelens_agent::turn::CursorChatsInUse;
 pub(crate) use srelens_agent::{cursor_chat_dir, next_resume_id, remove_cursor_chats};
-
-/// Lay out a Cursor turn under `root` and build its command.
-///
-/// cursor-agent keeps a chat at `CURSOR_CONFIG_DIR/chats/<md5 of the absolute
-/// --workspace>/<chatId>` (its bundled `paths.js`), so `--resume` finds the
-/// previous turn's chat only when both paths are the same on every turn and
-/// the config dir outlives the turn (#952). Both are fixed per conversation
-/// under `root`, and the config dir is kept between turns and across runs.
-///
-/// What it keeps must not loosen the box. Unlike `codex exec resume` (#215),
-/// `--resume` takes every flag a fresh turn does, so `cursor_command` is
-/// unchanged; and nothing a turn leaves carries into the next: the deny-list
-/// is rewritten every turn, and the workspace is emptied before the turn and
-/// removed after it, taking the bearer token with it.
-///
-/// Cursor loads permissions and MCP servers from DIFFERENT places: the
-/// deny-list is read from `CURSOR_CONFIG_DIR/cli-config.json`, but MCP servers
-/// are read from the WORKSPACE's `.cursor/mcp.json` (project config), NOT from
-/// `CURSOR_CONFIG_DIR` (verified live: an mcp.json in CURSOR_CONFIG_DIR is
-/// silently ignored, so the server never connects). So the deny-list goes in
-/// the config dir and the MCP server goes in `<workspace>/.cursor/mcp.json`.
-#[allow(clippy::too_many_arguments)]
-fn prepare_cursor_turn(
-    root: &std::path::Path,
-    in_use: &CursorChatsInUse,
-    session: &str,
-    conversation: Option<&str>,
-    agent_path: &str,
-    prompt: &str,
-    url: &str,
-    token: &str,
-    resume: Option<&str>,
-) -> Result<CursorTurn, String> {
-    // The saved conversation names the chat, so a reopened one — on a new
-    // session — finds it again. A turn with no conversation (a one-shot
-    // generation) has only its session.
-    let chat = conversation.unwrap_or(session);
-    let dir = cursor_chat_dir(root, chat)?;
-    // Held for the whole turn, before the workspace below is emptied.
-    let claim = in_use
-        .claim(chat)
-        .ok_or("This conversation is answering in another window. Wait for it to finish, then ask again.")?;
-    // Fixed names are safe here, unlike in the shared temp dir (see
-    // `create_private_dir`): `root` is in the user's own cache dir, and
-    // owner-only so no other account can read the chats kept under it.
-    std::fs::create_dir_all(root).map_err(|e| e.to_string())?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(root, std::fs::Permissions::from_mode(0o700)).map_err(|e| e.to_string())?;
-    }
-    let config = dir.join("config");
-    let workspace = dir.join("workspace");
-    std::fs::create_dir_all(&config).map_err(|e| e.to_string())?;
-    // Emptied first: a turn whose guard never ran (srelens was killed) left
-    // its files here, and a project `.cursor/cli.json` among them would widen
-    // the box. Refuse the turn rather than run it in a workspace that can't be.
-    match std::fs::remove_dir_all(&workspace) {
-        Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e.to_string()),
-        _ => {}
-    }
-    let cursor_dir = workspace.join(".cursor");
-    std::fs::create_dir_all(&cursor_dir).map_err(|e| e.to_string())?;
-    let workspace_guard = TempDir(workspace.clone());
-    std::fs::write(config.join("cli-config.json"), srelens_agent::adapter::cursor_cli_config_json())
-        .map_err(|e| e.to_string())?;
-    // `mcp.json` carries the bearer token. The workspace guard removes it with
-    // the workspace when the turn ends, and the model can't read it back —
-    // the deny-list blocks `Read`.
-    write_private_file(
-        &cursor_dir.join("mcp.json"),
-        srelens_agent::adapter::cursor_mcp_json(url, token).as_bytes(),
-    )
-    .map_err(|e| e.to_string())?;
-    let cmd = srelens_agent::adapter::cursor_command(
-        agent_path,
-        prompt,
-        &config.to_string_lossy(),
-        &workspace.to_string_lossy(),
-        resume,
-    );
-    Ok(CursorTurn { cmd, workspace, _workspace_guard: workspace_guard, _claim: claim })
-}
 
 /// Parse the frontend's serialized `AgentKind` tag — the exact camelCase
 /// string serde emits for the enum ("claude"/"codex"/"cursor") — back into
@@ -628,8 +353,8 @@ pub async fn chat_send(
 
     // The session id (from IPC) becomes a `chat://` channel AND temp-path
     // components (`srelens-agent-cwd-<id>`, config/image files). A crafted id
-    // with `/`, `\`, or `..` would let `create_dir_all` — and `_cwd_guard`'s
-    // later `remove_dir_all` — resolve OUTSIDE the temp dir, so validate it to
+    // with `/`, `\`, or `..` would let `create_dir_all` — and the turn's
+    // guard's later `remove_dir_all` — resolve OUTSIDE the temp dir, so validate it to
     // a bare component before it touches any path. Real ids are startChat uuids.
     if session.is_empty()
         || !session.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
@@ -644,13 +369,11 @@ pub async fn chat_send(
 
     // The resume id lands in the agent's argv (`--resume <id>`). Real ids are
     // CLI-minted uuids, but this one round-trips through the persisted
-    // session file on disk — validate it to the same bare charset as the
-    // session id above so a tampered store can't smuggle a flag-shaped or
-    // whitespace-carrying token into the command line. Invalid → dropped
-    // (fresh session), not an error: continuity is best-effort by design.
-    let resume = resume.filter(|id| {
-        !id.is_empty() && id.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
-    });
+    // session file on disk, so a tampered store must not be able to smuggle a
+    // flag-shaped or whitespace-carrying token into the command line (see
+    // `valid_resume_id`). Invalid → dropped (fresh session), not an error:
+    // continuity is best-effort by design.
+    let resume = resume.filter(|id| valid_resume_id(id));
 
     // The native agent takes an entirely different path from the CLI spawns
     // below: no process, no PATH binary, no loopback HTTP. It runs the loop
@@ -694,34 +417,6 @@ pub async fn chat_send(
     let url = mcp.status_url().ok_or("MCP server URL unavailable")?;
 
     let dir = app.path().temp_dir().map_err(|e| e.to_string())?;
-
-    // A fresh, empty scratch directory for the agent's CWD — never the
-    // srelens process's own working directory (the user's repo or home) —
-    // so a tool that tried to enumerate its surroundings would find nothing.
-    // Removed on every exit from this function. This is also Codex's `-C`
-    // workspace (see `codex_command`): genuinely empty, per-turn, and torn
-    // down here — that emptiness is the whole box, so this guard must never
-    // be pointed at anything else. Cursor's is its workspace, laid out with
-    // the rest of its turn by `prepare_cursor_turn`, which guards it.
-    let cursor_turn = match kind {
-        AgentKind::Cursor => Some(prepare_cursor_turn(
-            &cursor_state_dir(&app)?,
-            &chats.cursor_chats,
-            &session,
-            conversation.as_deref(),
-            &agent_path,
-            &prompt,
-            &url,
-            &token,
-            resume.as_deref(),
-        )?),
-        _ => None,
-    };
-    let cwd_path = match &cursor_turn {
-        Some(turn) => turn.workspace.clone(),
-        None => create_private_dir(&dir, &format!("srelens-agent-cwd-{session}"))?,
-    };
-    let _cwd_guard = cursor_turn.is_none().then(|| TempDir(cwd_path.clone()));
 
     // Decode each attached image to its own temp file under the same dir,
     // guarded by a `TempFile` per image so every one is cleaned up on any
@@ -784,49 +479,26 @@ pub async fn chat_send(
         }
     }
 
-    // Only Claude reads its MCP server config from a file (`--mcp-config`);
-    // Codex gets the same server via `-c` TOML overrides plus its bearer
-    // token in `env` (see `codex_command`), so no config file is written for
-    // it at all. `_cfg_guard` is declared here, outside the match, so its
-    // `Drop` (removing the cleartext-token file) still runs at the end of
-    // this function on every exit, exactly like `_cwd_guard` above — a guard
-    // built and dropped inside the match arm itself would be gone before the
-    // agent ever read the file. Cursor's files are `cursor_turn`'s, above.
-    let mut _cfg_guard: Option<TempFile> = None;
-    let cmd = match kind {
-        AgentKind::Claude => {
-            let cfg = srelens_agent::adapter::McpConfig::http(&url, &token);
-            let cfg_path = dir.join(format!("srelens-mcp-{session}.json"));
-            write_private_file(&cfg_path, &serde_json::to_vec(&cfg).unwrap()).map_err(|e| e.to_string())?;
-            _cfg_guard = Some(TempFile(cfg_path.clone()));
-            let effective_prompt = prompt_with_images(&prompt, &image_paths);
-            srelens_agent::adapter::claude_command(
-                &agent_path,
-                &effective_prompt,
-                &cfg_path.to_string_lossy(),
-                resume.as_deref(),
-            )
-        }
-        // A follow-up resumes the conversation's Codex thread with the whole
-        // box re-asserted in front of `resume` (see `codex_command`), in this
-        // turn's own fresh empty `-C` workspace: the thread is found by id in
-        // `CODEX_HOME`, whatever directory it was started in (#215).
-        AgentKind::Codex => srelens_agent::adapter::codex_command(
-            &agent_path,
-            &prompt,
-            &url,
-            &token,
-            &cwd_path.to_string_lossy(),
-            &image_paths,
-            resume.as_deref(),
-        ),
-        AgentKind::Cursor => cursor_turn
-            .as_ref()
-            .map(|turn| turn.cmd.clone())
-            .expect("a Cursor turn is prepared before its command is needed"),
-        // Handled by the early return above, before any CLI machinery.
-        AgentKind::Srelens => unreachable!("native agent dispatched before the CLI path"),
-    };
+    // The agent's empty working directory, the files carrying its bearer
+    // token, and its command (see `prepare_turn`). Held to the end of this
+    // function, so all of it is removed on every exit, including an early `?`.
+    // Only a Cursor turn keeps state under `cursor_root`.
+    let cursor_root = if kind == AgentKind::Cursor { cursor_state_dir(&app)? } else { std::path::PathBuf::new() };
+    let prepared = prepare_turn(&TurnSpec {
+        kind,
+        binary: &agent_path,
+        prompt: &prompt,
+        mcp_url: &url,
+        token: &token,
+        resume: resume.as_deref(),
+        model: None,
+        session: &session,
+        conversation: conversation.as_deref(),
+        cursor_root: &cursor_root,
+        cursor_chats: &chats.cursor_chats,
+        temp_dir: &dir,
+        image_paths: &image_paths,
+    })?;
 
     let parse_line: fn(&str) -> Vec<AgentEvent> = match kind {
         AgentKind::Claude => srelens_agent::claude::parse_line,
@@ -835,24 +507,15 @@ pub async fn chat_send(
         AgentKind::Srelens => unreachable!("native agent dispatched before the CLI path"),
     };
 
-    let mut child = tokio::process::Command::new(&cmd.program)
-        .args(&cmd.args)
-        // Required so Codex's MCP bearer token (carried in `cmd.env`, never
-        // argv) actually reaches the child; harmless for Claude, whose `env`
-        // is always empty (its token travels via the `--mcp-config` file).
-        .envs(cmd.env.iter().map(|(k, v)| (k.clone(), v.clone())))
-        .current_dir(&cwd_path)
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .map_err(|e| format!("could not start the agent: {e}"))?;
+    let mut child =
+        spawn_agent(&prepared.cmd, &prepared.cwd).map_err(|e| format!("could not start the agent: {e}"))?;
 
-    // `Stdio::piped()` above guarantees this is `Some`; still handled rather
+    // `spawn_agent`'s `Stdio::piped()` guarantees this is `Some`; still handled rather
     // than unwrapped so a future refactor that drops the `piped()` call
     // degrades to a clean turn-ending error instead of a silently hung UI —
     // every post-spawn exit re-enables input via a `TurnDone`.
     let Some(stdout) = child.stdout.take() else {
-        let _ = child.start_kill();
+        srelens_agent::turn::kill_tree(&mut child);
         let message = "the agent process had no stdout".to_string();
         sink.emit(
             &channel,
@@ -971,31 +634,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_captured_stream_id_always_wins() {
-        assert_eq!(
-            next_resume_id(Some("new".into()), Some("old".into()), true),
-            Some("new".into())
-        );
-        assert_eq!(next_resume_id(Some("new".into()), None, false), Some("new".into()));
-    }
-
-    #[test]
-    fn a_clean_turn_without_an_id_echoes_the_resume_back() {
-        // Shape drift or a cancel (never `crashed` — chat_cancel reaps the
-        // child): the stored session is intact, keep it.
-        assert_eq!(next_resume_id(None, Some("old".into()), false), Some("old".into()));
-        assert_eq!(next_resume_id(None, None, false), None);
-    }
-
-    #[test]
-    fn a_crash_without_an_id_clears_the_resume() {
-        // The signature of `--resume` itself failing (session GC'd/unknown):
-        // echoing "old" back would retry the same failing resume forever.
-        assert_eq!(next_resume_id(None, Some("old".into()), true), None);
-        assert_eq!(next_resume_id(None, None, true), None);
-    }
-
-    #[test]
     fn a_found_binary_is_available_with_its_path() {
         let info = detect(AgentKind::Claude, |_| Some("/usr/bin/claude".into()));
         assert!(info.available);
@@ -1034,83 +672,6 @@ mod tests {
     }
 
     #[test]
-    fn off_windows_a_binary_is_probed_by_its_bare_name_only() {
-        assert_eq!(executable_candidates("claude", None), vec!["claude".to_string()]);
-    }
-
-    #[test]
-    fn on_windows_pathext_extensions_are_appended_to_the_bare_name() {
-        assert_eq!(
-            executable_candidates("cursor-agent", Some(".COM;.EXE;.CMD")),
-            vec![
-                "cursor-agent".to_string(),
-                "cursor-agent.COM".to_string(),
-                "cursor-agent.EXE".to_string(),
-                "cursor-agent.CMD".to_string(),
-            ]
-        );
-    }
-
-    #[test]
-    fn an_explicit_extension_is_not_doubled_up() {
-        // A bin that already names its extension resolves as-is.
-        assert_eq!(executable_candidates("claude.exe", Some(".EXE;.CMD")), vec![
-            "claude.exe".to_string()
-        ]);
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn a_private_file_is_written_owner_only() {
-        use std::os::unix::fs::PermissionsExt;
-        let dir = std::env::temp_dir().join(format!("srelens-private-test-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("mcp.json");
-        write_private_file(&path, b"secret-bearer-token").unwrap();
-        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
-        // Only the owner may read/write; group and other bits must be clear.
-        assert_eq!(mode & 0o777, 0o600, "private file must be 0600, got {:o}", mode & 0o777);
-        assert_eq!(std::fs::read(&path).unwrap(), b"secret-bearer-token");
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn a_non_executable_file_on_path_is_not_treated_as_an_agent() {
-        use std::os::unix::fs::PermissionsExt;
-        let dir = std::env::temp_dir().join(format!("srelens-exec-test-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        // A plain 0644 file named `claude` must NOT be reported as the agent —
-        // spawning it would fail with EACCES.
-        let plain = dir.join("claude");
-        std::fs::write(&plain, b"#!/bin/sh\n").unwrap();
-        std::fs::set_permissions(&plain, std::fs::Permissions::from_mode(0o644)).unwrap();
-        assert_eq!(which_on_path("claude", dir.to_str().unwrap()), None);
-        // Once it carries an execute bit, it resolves.
-        std::fs::set_permissions(&plain, std::fs::Permissions::from_mode(0o755)).unwrap();
-        assert_eq!(which_on_path("claude", dir.to_str().unwrap()).as_deref(), plain.to_str());
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn private_dirs_are_freshly_created_owner_only_and_never_reused() {
-        let base = std::env::temp_dir().join(format!("srelens-test-{}", std::process::id()));
-        std::fs::create_dir_all(&base).unwrap();
-        let a = create_private_dir(&base, "cfg-s1").unwrap();
-        let b = create_private_dir(&base, "cfg-s1").unwrap();
-        // Same prefix, distinct directories — the randomized suffix is what
-        // makes pre-creation by another local account impossible.
-        assert_ne!(a, b);
-        assert!(a.is_dir() && b.is_dir());
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            assert_eq!(std::fs::metadata(&a).unwrap().permissions().mode() & 0o777, 0o700);
-        }
-        let _ = std::fs::remove_dir_all(&base);
-    }
-
-    #[test]
     fn a_pending_cancel_is_consumed_only_by_its_own_turn_generation() {
         let chats = ChatManager::default();
         assert!(!chats.take_pending_cancel("s1", 1), "nothing armed yet");
@@ -1132,17 +693,23 @@ mod tests {
         assert_eq!(parse_agent_kind("Claude"), Err("unknown agent".to_string()));
     }
 
-    /// Builds a temp dir under `std::env::temp_dir()` with a single executable
-    /// file `bin`, cleaned up on drop — the fixture `resolve_agent` tests use
-    /// to prove the search actually walks `system_path`, not just `app_path`.
+    /// Builds a temp dir under `std::env::temp_dir()` holding the one file the
+    /// OS would run as `bin` (`bin` with the execute bit on Unix, `bin.cmd` on
+    /// Windows), cleaned up on drop — the fixture `resolve_agent` tests use to
+    /// prove the search actually walks `system_path`, not just `app_path`.
     struct BinDir {
         dir: std::path::PathBuf,
+        /// The runnable file, which is what `resolve_agent` should return.
+        file: std::path::PathBuf,
     }
 
     impl BinDir {
         fn new(bin: &str) -> Self {
             let dir = std::env::temp_dir().join(format!("srelens-resolve-agent-test-{}", uuid::Uuid::new_v4()));
             std::fs::create_dir_all(&dir).unwrap();
+            #[cfg(windows)]
+            let file = dir.join(format!("{bin}.cmd"));
+            #[cfg(not(windows))]
             let file = dir.join(bin);
             std::fs::write(&file, b"#!/bin/sh\n").unwrap();
             #[cfg(unix)]
@@ -1152,7 +719,7 @@ mod tests {
                 perms.set_mode(0o755);
                 std::fs::set_permissions(&file, perms).unwrap();
             }
-            BinDir { dir }
+            BinDir { dir, file }
         }
 
         fn path(&self) -> String {
@@ -1174,7 +741,40 @@ mod tests {
             system_path: bin_dir.path(),
         };
         let resolved = resolve_agent("x", &paths).expect("should find x via system_path");
-        assert_eq!(resolved, bin_dir.dir.join("x").to_string_lossy());
+        assert_eq!(resolved, bin_dir.file.to_string_lossy());
+    }
+
+    /// npm installs a POSIX sh script named `claude` beside `claude.cmd`.
+    /// Windows cannot start the script, so it must never be the agent.
+    #[cfg(windows)]
+    #[test]
+    fn on_windows_the_npm_sh_script_beside_the_shim_is_never_the_agent() {
+        let bin_dir = BinDir::new("claude");
+        std::fs::write(bin_dir.dir.join("claude"), b"#!/bin/sh\n").unwrap();
+        let paths = srelens_kube::toolbox::SearchPaths {
+            app_path: bin_dir.path(),
+            system_path: "/nope".to_string(),
+        };
+        let resolved = resolve_agent("claude", &paths).expect("should find the .cmd shim");
+        assert_eq!(resolved, bin_dir.file.to_string_lossy());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn on_unix_a_file_without_the_execute_bit_is_not_the_agent() {
+        use std::os::unix::fs::PermissionsExt;
+        let bin_dir = BinDir::new("claude");
+        let paths = srelens_kube::toolbox::SearchPaths {
+            app_path: bin_dir.path(),
+            system_path: "/nope".to_string(),
+        };
+        // A plain 0644 file named `claude` must NOT be reported as the agent:
+        // spawning it would fail with EACCES.
+        std::fs::set_permissions(&bin_dir.file, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert_eq!(resolve_agent("claude", &paths), None);
+        // Once it carries an execute bit, it resolves.
+        std::fs::set_permissions(&bin_dir.file, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(resolve_agent("claude", &paths).as_deref(), bin_dir.file.to_str());
     }
 
     #[test]
@@ -1195,7 +795,7 @@ mod tests {
             system_path: system_dir.path(),
         };
         let resolved = resolve_agent("x", &paths).unwrap();
-        assert_eq!(resolved, app_dir.dir.join("x").to_string_lossy());
+        assert_eq!(resolved, app_dir.file.to_string_lossy());
     }
 
     struct RecordingSink(std::sync::Mutex<Vec<(String, serde_json::Value)>>);
@@ -1323,310 +923,105 @@ mod tests {
         assert_eq!(last_line(b""), "");
     }
 
-    #[test]
-    fn temp_file_guard_removes_the_file_on_drop() {
-        let path = std::env::temp_dir()
-            .join(format!("srelens-assistant-tempfile-test-{}", std::process::id()));
-        std::fs::write(&path, b"secret").unwrap();
-        {
-            let _guard = TempFile(path.clone());
-            assert!(path.exists());
-        }
-        assert!(!path.exists());
-    }
-
-    /// Pins the ordering `chat_send`'s image loop relies on: the guard must
-    /// be constructed *before* `std::fs::write` is attempted, not after a
-    /// successful write. This doesn't inject a real fs failure (that would be
-    /// a lot of mocking for one ordering guarantee) — it just proves a guard
-    /// built ahead of the write still cleans up whatever lands on disk at
-    /// that path, including a write that only partially completes, which a
-    /// guard pushed *after* `write` returns would never get the chance to do.
-    #[test]
-    fn temp_file_guard_created_before_the_write_still_cleans_up_a_partial_write() {
-        let path = std::env::temp_dir().join(format!(
-            "srelens-assistant-tempfile-partial-write-test-{}",
-            std::process::id()
-        ));
-        assert!(!path.exists());
-        {
-            let _guard = TempFile(path.clone()); // guard first, as in chat_send's loop
-            std::fs::write(&path, b"partial").unwrap(); // stands in for a write that landed bytes before failing
-            assert!(path.exists());
-        }
-        assert!(!path.exists());
-    }
-
-    #[test]
-    fn temp_dir_guard_removes_the_directory_and_its_contents_on_drop() {
-        let path = std::env::temp_dir()
-            .join(format!("srelens-assistant-tempdir-test-{}", std::process::id()));
-        std::fs::create_dir_all(&path).unwrap();
-        std::fs::write(path.join("nested.txt"), b"nothing to see here").unwrap();
-        {
-            let _guard = TempDir(path.clone());
-            assert!(path.exists());
-        }
-        assert!(!path.exists());
-    }
-
-    /// Where cursor-agent keeps a chat: `$CURSOR_CONFIG_DIR/chats/<md5 of the
-    /// absolute --workspace>/<chatId>/store.db`, per its bundled `paths.js`.
-    /// Read from the command a turn would run. Any function of the workspace
-    /// path stands in for the md5: a workspace that moves moves the store.
-    fn cursor_chat_store(cmd: &srelens_agent::adapter::AgentCommand, chat: &str) -> std::path::PathBuf {
-        let at = cmd.args.iter().position(|a| a == "--workspace").expect("a Cursor turn passes --workspace");
-        let hash: String =
-            cmd.args[at + 1].chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '_' }).collect();
-        cursor_config_dir(cmd).join("chats").join(hash).join(chat).join("store.db")
-    }
-
-    fn cursor_config_dir(cmd: &srelens_agent::adapter::AgentCommand) -> std::path::PathBuf {
-        let (_, dir) = cmd
-            .env
-            .iter()
-            .find(|(k, _)| k == srelens_agent::adapter::CURSOR_CONFIG_DIR_ENV)
-            .expect("a Cursor turn sets CURSOR_CONFIG_DIR");
-        dir.into()
-    }
-
-    /// A root of this test's own for its Cursor turns, removed when it ends.
-    fn cursor_test_root() -> TempDir {
-        let root = std::env::temp_dir().join(format!("srelens-cursor-test-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&root).unwrap();
-        TempDir(root)
-    }
-
-    fn cursor_turn(root: &TempDir, session: &str, resume: Option<&str>) -> CursorTurn {
-        prepare_cursor_turn(
-            &root.0,
-            &CursorChatsInUse::default(),
-            session,
-            None,
-            "cursor-agent",
-            "in which node that pod is running?",
-            "http://127.0.0.1:1/mcp",
-            "turn-token",
-            resume,
-        )
-        .unwrap()
-    }
-
-    #[test]
-    fn a_second_cursor_turn_finds_the_chat_its_first_turn_stored() {
-        let root = cursor_test_root();
-        let first = cursor_turn(&root, "s1", None);
-        // What cursor-agent does during the turn: it keeps the chat.
-        let store = cursor_chat_store(&first.cmd, "chat-1");
-        std::fs::create_dir_all(store.parent().unwrap()).unwrap();
-        std::fs::write(&store, "cpu and ram of pod nic-ring-audit-sz2vb").unwrap();
-        drop(first); // the turn ends
-
-        let second = cursor_turn(&root, "s1", Some("chat-1"));
-        assert_eq!(
-            std::fs::read_to_string(cursor_chat_store(&second.cmd, "chat-1")).ok().as_deref(),
-            Some("cpu and ram of pod nic-ring-audit-sz2vb"),
-            "turn 2's --resume must reach the chat turn 1 kept (#952)"
-        );
-    }
-
-    #[test]
-    fn a_cursor_turn_for_a_reopened_conversation_finds_the_chat_it_kept_before() {
-        let root = cursor_test_root();
-        let first =
-            prepare_cursor_turn(&root.0, &CursorChatsInUse::default(), "run-1", Some("conv-1"), "cursor-agent", "hi", "http://127.0.0.1:1/mcp", "t", None)
-                .unwrap();
-        let store = cursor_chat_store(&first.cmd, "chat-1");
-        std::fs::create_dir_all(store.parent().unwrap()).unwrap();
-        std::fs::write(&store, "cpu and ram of pod nic-ring-audit-sz2vb").unwrap();
-        drop(first);
-
-        // Reopened after a restart: the conversation is the same, the session
-        // `chat_send` streams on is new.
-        let reopened = prepare_cursor_turn(
-            &root.0,
-            &CursorChatsInUse::default(),
-            "run-2",
-            Some("conv-1"),
-            "cursor-agent",
-            "and its node?",
-            "http://127.0.0.1:1/mcp",
-            "t",
-            Some("chat-1"),
-        )
-        .unwrap();
-        assert_eq!(
-            std::fs::read_to_string(cursor_chat_store(&reopened.cmd, "chat-1")).ok().as_deref(),
-            Some("cpu and ram of pod nic-ring-audit-sz2vb"),
-            "a reopened conversation's --resume must reach the chat it kept (#952)"
-        );
-    }
-
-    #[test]
-    fn a_conversation_answering_in_one_window_refuses_a_turn_from_another() {
-        let root = cursor_test_root();
-        let in_use = CursorChatsInUse::default();
-        // Each window streams on its own session; the conversation is one.
-        let turn = |session: &str| {
-            prepare_cursor_turn(&root.0, &in_use, session, Some("conv-1"), "cursor-agent", "hi", "http://127.0.0.1:1/mcp", "t", None)
+    /// What an agent command carries for stdin reaches the child, and the
+    /// pipe is then closed: `sort` prints nothing until its input ends.
+    #[tokio::test]
+    async fn an_agent_gets_its_stdin_and_then_the_end_of_it() {
+        use tokio::io::AsyncReadExt;
+        let cmd = srelens_agent::adapter::AgentCommand {
+            program: "sort".into(),
+            args: Vec::new(),
+            env: Vec::new(),
+            stdin: Some("in which node is that pod running?\n".into()),
         };
-        let first = turn("window-1").unwrap();
-
-        assert!(turn("window-2").is_err(), "a second turn would empty the first one's workspace");
-        assert!(first.workspace.join(".cursor").join("mcp.json").exists());
-        drop(first);
-        assert!(turn("window-2").is_ok(), "once the turn has ended, the conversation is free again");
+        let mut child = spawn_agent(&cmd, &std::env::temp_dir()).unwrap();
+        let mut out = String::new();
+        let mut stdout = child.stdout.take().unwrap();
+        let read = tokio::time::timeout(std::time::Duration::from_secs(10), stdout.read_to_string(&mut out)).await;
+        let _ = child.start_kill();
+        read.expect("the agent's stdin was never closed").unwrap();
+        assert!(out.contains("in which node is that pod running?"), "got {out:?}");
     }
 
-    #[test]
-    fn a_cursor_chat_outlives_a_restart_only_while_a_saved_conversation_holds_it() {
-        let root = cursor_test_root();
-        let saved =
-            prepare_cursor_turn(&root.0, &CursorChatsInUse::default(), "run-1", Some("saved"), "cursor-agent", "hi", "http://127.0.0.1:1/mcp", "t", None)
-                .unwrap();
-        let store = cursor_chat_store(&saved.cmd, "chat-1");
-        std::fs::create_dir_all(store.parent().unwrap()).unwrap();
-        std::fs::write(&store, "kept").unwrap();
-        drop(saved);
-        // A one-shot turn has no conversation, so nothing saved holds its chat.
-        drop(cursor_turn(&root, "run-1-generation", None));
+    /// Stop on an agent installed as a Windows `.cmd` shim: ending only the
+    /// shim left the agent behind holding the stdout pipe, so the stream loop
+    /// never read the end of it.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn stopping_a_turn_ends_the_program_its_shim_started() {
+        use std::time::Duration;
+        use tokio::io::AsyncReadExt;
+        let cmd = srelens_agent::adapter::AgentCommand {
+            program: "cmd".into(),
+            args: ["/c", "ping", "-n", "30", "127.0.0.1"].map(String::from).into(),
+            env: Vec::new(),
+            stdin: None,
+        };
+        let mut child = spawn_agent(&cmd, &std::env::temp_dir()).unwrap();
+        let mut stdout = child.stdout.take().unwrap();
+        // Its first line says ping is running, so there is a tree to end.
+        let mut first = [0u8; 64];
+        let read = tokio::time::timeout(Duration::from_secs(5), stdout.read(&mut first)).await;
+        assert!(read.expect("the shim started nothing").unwrap() > 0);
 
-        sweep_cursor_chats(&root.0, |id| id == "saved");
+        kill_and_reap(child);
 
-        assert!(store.exists(), "a saved conversation keeps its chat across a restart (#952)");
-        assert!(!root.0.join("run-1-generation").exists());
-    }
-
-    #[test]
-    fn a_restart_removes_the_workspace_a_killed_cursor_turn_left() {
-        let root = cursor_test_root();
-        let turn =
-            prepare_cursor_turn(&root.0, &CursorChatsInUse::default(), "run-1", Some("saved"), "cursor-agent", "hi", "http://127.0.0.1:1/mcp", "t", None)
-                .unwrap();
-        let workspace = turn.workspace.clone();
-        std::mem::forget(turn); // srelens was killed: the guard never ran
-
-        sweep_cursor_chats(&root.0, |id| id == "saved");
-
-        assert!(!workspace.exists(), "a turn's workspace, bearer token and all, never outlives the run");
-    }
-
-    #[test]
-    fn a_cursor_turn_takes_its_bearer_token_with_it() {
-        let root = cursor_test_root();
-        let turn = cursor_turn(&root, "s1", None);
-        let token_file = turn.workspace.join(".cursor").join("mcp.json");
-        assert!(std::fs::read_to_string(&token_file).unwrap().contains("Bearer turn-token"));
-        drop(turn);
-        assert!(!token_file.exists(), "the turn's bearer token must not outlive it");
-    }
-
-    #[test]
-    fn every_cursor_turn_starts_from_srelens_deny_list() {
-        let root = cursor_test_root();
-        let first = cursor_turn(&root, "s1", None);
-        // Whatever rewrote it during the turn — Cursor itself, say — must not
-        // carry into the next one: this file is the only thing boxing Cursor.
-        std::fs::write(
-            cursor_config_dir(&first.cmd).join("cli-config.json"),
-            r#"{"version":1,"permissions":{"allow":["Shell(**)"],"deny":[]}}"#,
-        )
-        .unwrap();
-        drop(first);
-
-        let second = cursor_turn(&root, "s1", Some("chat-1"));
-        let config: serde_json::Value = serde_json::from_str(
-            &std::fs::read_to_string(cursor_config_dir(&second.cmd).join("cli-config.json")).unwrap(),
-        )
-        .unwrap();
-        assert_eq!(config["permissions"]["allow"], serde_json::json!([]));
-        let deny = config["permissions"]["deny"].as_array().unwrap();
-        for tool in ["Read(**)", "Write(**)", "Shell(**)", "Fetch(**)"] {
-            assert!(deny.contains(&serde_json::json!(tool)), "{tool} must be denied again");
-        }
-    }
-
-    #[test]
-    fn every_cursor_turn_starts_in_an_empty_workspace() {
-        let root = cursor_test_root();
-        let first = cursor_turn(&root, "s1", None);
-        // Left behind by a turn whose cleanup never ran (srelens was killed):
-        // project permissions in the workspace would widen the box.
-        std::fs::write(first.workspace.join(".cursor").join("cli.json"), r#"{"permissions":{"allow":["Shell(**)"]}}"#)
+        let mut rest = Vec::new();
+        tokio::time::timeout(Duration::from_secs(5), stdout.read_to_end(&mut rest))
+            .await
+            .expect("the program the shim started still holds its stdout open")
             .unwrap();
-        std::fs::write(first.workspace.join("notes.txt"), "left over").unwrap();
-        std::mem::forget(first);
-
-        let second = cursor_turn(&root, "s1", Some("chat-1"));
-        assert!(!second.workspace.join(".cursor").join("cli.json").exists());
-        assert!(!second.workspace.join("notes.txt").exists());
-        assert!(second.workspace.join(".cursor").join("mcp.json").exists());
     }
 
-    #[test]
-    fn two_chats_never_share_cursor_state() {
-        let root = cursor_test_root();
-        let a = cursor_turn(&root, "s1", None);
-        let b = cursor_turn(&root, "s2", None);
-        // Each turn's workspace carries its own bearer token, so a shared one
-        // would hand one chat's gates to the other (#393).
-        assert_ne!(a.workspace, b.workspace);
-        assert_ne!(cursor_config_dir(&a.cmd), cursor_config_dir(&b.cmd));
-    }
-
-    #[test]
-    fn a_session_id_cannot_take_a_cursor_turn_out_of_its_root() {
-        let base = cursor_test_root();
-        let root = base.0.join("cursor-chats");
-        // `chat_send` lets `.` through its session-id charset, so `..` is a
-        // well-formed id there — and the workspace under it gets emptied.
-        for session in ["..", ".", "a/../.."] {
-            let turn =
-                prepare_cursor_turn(&root, &CursorChatsInUse::default(), session, None, "cursor-agent", "hi", "http://127.0.0.1:1/mcp", "turn-token", None);
-            assert!(turn.is_err(), "{session:?} must be refused");
+    /// With nothing to write, the agent's stdin is closed from the start, not
+    /// the app's own: `sort` reads the end of it at once and prints nothing.
+    #[tokio::test]
+    async fn an_agent_with_nothing_for_stdin_reads_the_end_of_it_at_once() {
+        use tokio::io::AsyncReadExt;
+        // Re-run under a stdin held open, so the guard doesn't depend on how
+        // the runner's own stdin was handed over (often already closed).
+        if std::env::var_os("SRELENS_STDIN_PROBE_CHILD").is_none() {
+            let mut probe = tokio::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "assistant::tests::an_agent_with_nothing_for_stdin_reads_the_end_of_it_at_once",
+                    "--nocapture",
+                    "--test-threads=1",
+                ])
+                .env("SRELENS_STDIN_PROBE_CHILD", "1")
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .kill_on_drop(true)
+                .spawn()
+                .unwrap();
+            // Never written, and held until the probe exits.
+            let _stdin = probe.stdin.take();
+            let output = tokio::time::timeout(std::time::Duration::from_secs(20), probe.wait_with_output())
+                .await
+                .expect("the probe hung on an open stdin")
+                .unwrap();
+            assert!(
+                output.status.success() && String::from_utf8_lossy(&output.stdout).contains("1 passed"),
+                "{}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
         }
-        assert!(!base.0.join("config").exists());
-        assert!(!base.0.join("workspace").exists());
-    }
-
-    #[test]
-    fn cursor_chats_already_gone_are_not_a_failure_to_remove_them() {
-        let base = cursor_test_root();
-        assert!(remove_cursor_chats(&base.0.join("cursor-chats")).is_ok());
-    }
-
-    #[test]
-    fn cursor_chats_that_could_not_be_removed_are_reported() {
-        let base = cursor_test_root();
-        // Not a directory, so it can't be removed as one.
-        let file = base.0.join("cursor-chats");
-        std::fs::write(&file, "kept").unwrap();
-        assert!(remove_cursor_chats(&file).is_err());
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn the_root_cursor_chats_are_kept_in_is_owner_only() {
-        use std::os::unix::fs::PermissionsExt;
-        let base = cursor_test_root();
-        // Not there yet, as on the first Cursor turn after launch.
-        let root = base.0.join("cursor-chats");
-        let _turn =
-            prepare_cursor_turn(&root, &CursorChatsInUse::default(), "s1", None, "cursor-agent", "hi", "http://127.0.0.1:1/mcp", "turn-token", None).unwrap();
-        assert_eq!(std::fs::metadata(&root).unwrap().permissions().mode() & 0o777, 0o700);
-    }
-
-    #[test]
-    fn prompt_with_images_lists_each_path_then_a_blank_line_then_the_prompt() {
-        let images = vec!["/tmp/a.png".to_string(), "/tmp/b.png".to_string()];
-        let got = prompt_with_images("why?", &images);
-        assert_eq!(got, "Attached image: /tmp/a.png\nAttached image: /tmp/b.png\n\nwhy?");
-    }
-
-    #[test]
-    fn prompt_with_images_returns_the_prompt_unchanged_when_there_are_no_images() {
-        let got = prompt_with_images("why?", &[]);
-        assert_eq!(got, "why?");
+        let cmd = srelens_agent::adapter::AgentCommand {
+            program: "sort".into(),
+            args: Vec::new(),
+            env: Vec::new(),
+            stdin: None,
+        };
+        let mut child = spawn_agent(&cmd, &std::env::temp_dir()).unwrap();
+        let mut out = String::new();
+        let mut stdout = child.stdout.take().unwrap();
+        let read = tokio::time::timeout(std::time::Duration::from_secs(5), stdout.read_to_string(&mut out)).await;
+        let _ = child.start_kill();
+        read.expect("the agent's stdin was left open").unwrap();
+        assert_eq!(out, "");
     }
 
     #[test]

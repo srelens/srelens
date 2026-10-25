@@ -101,4 +101,10 @@ impl SettingsGuard {
     pub fn remove_env(&mut self, name: &'static str) {
         self._env.remove(name);
     }
+
+    /// Set `name` for this test, restored on drop.
+    #[allow(dead_code)]
+    pub fn set_env(&mut self, name: &'static str, value: impl AsRef<OsStr>) {
+        self._env.set(name, value);
+    }
 }

@@ -1,11 +1,15 @@
 //! Agent-CLI bridge: normalize each supported agent CLI's streaming output
-//! into a common `AgentEvent` stream. Pure — no Tauri, no cluster I/O.
+//! into a common `AgentEvent` stream, and set up each turn for the apps that
+//! drive them. No Tauri and no cluster I/O: [`turn`] writes a turn's private
+//! files and directories and can end an agent's process tree, but spawning
+//! the agent is each app's.
 
 pub mod adapter;
 pub mod claude;
 pub mod codex;
 pub mod cursor;
 pub mod event;
+pub mod turn;
 
 /// The agent CLI's own session id, if `line` (one stream-json line) carries
 /// one. Claude Code and Cursor both stamp a top-level `session_id` string on
@@ -47,14 +51,19 @@ pub fn next_resume_id(
 /// is emptied before each turn and the whole of it removed with the chat, so
 /// `chat` must be one plain component — never `.` or `..`.
 pub fn cursor_chat_dir(root: &std::path::Path, chat: &str) -> Result<std::path::PathBuf, String> {
-    let one_name = matches!(
-        std::path::Path::new(chat).components().collect::<Vec<_>>()[..],
-        [std::path::Component::Normal(_)]
-    );
-    if !one_name {
+    if !is_one_name(chat) {
         return Err(format!("invalid session id {chat:?}"));
     }
     Ok(root.join(chat))
+}
+
+/// Whether `name` is one plain path component: not empty, `.`, `..`, a root,
+/// or several components, so joining it onto a directory stays in it.
+pub(crate) fn is_one_name(name: &str) -> bool {
+    matches!(
+        std::path::Path::new(name).components().collect::<Vec<_>>()[..],
+        [std::path::Component::Normal(_)]
+    )
 }
 
 /// Remove one Cursor chat's directory tree under `dir`. Tolerates `NotFound`.

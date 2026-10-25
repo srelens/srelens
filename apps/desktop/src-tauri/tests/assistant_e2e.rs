@@ -53,16 +53,10 @@ fn kubeconfig_paths() -> Vec<PathBuf> {
     vec![PathBuf::from(home).join(".kube/config")]
 }
 
-/// First directory on `PATH` holding an executable `claude`, as an absolute
-/// path — mirrors `assistant::which_on_path`, duplicated rather than reused
-/// since that helper is private to the desktop lib and not worth exporting
-/// just for this opportunistic test.
+/// The `claude` on `PATH` under the name this platform runs (`claude.cmd`
+/// for an npm install on Windows, never its extensionless sh script).
 fn claude_on_path() -> Option<String> {
-    let path = std::env::var("PATH").ok()?;
-    std::env::split_paths(&path).find_map(|dir| {
-        let candidate = dir.join("claude");
-        candidate.is_file().then(|| candidate.to_string_lossy().into_owned())
-    })
+    srelens_kube::path_lookup::find_on_path("claude").map(|p| p.to_string_lossy().into_owned())
 }
 
 #[tokio::test(flavor = "multi_thread")]

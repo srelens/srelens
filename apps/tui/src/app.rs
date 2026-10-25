@@ -11,6 +11,7 @@ use ratatui::{
 };
 use tokio::sync::mpsc::UnboundedSender;
 
+use srelens_agent::adapter::AgentKind;
 use srelens_capability::Registry;
 use srelens_kube::client_cache::ClientCache;
 use srelens_kube::contexts::ContextDto;
@@ -238,6 +239,20 @@ pub struct App {
     pub screen_selection: Option<((u16, u16), (u16, u16))>,
     pub screen_selecting: bool,
     pub screen_selection_text: std::cell::RefCell<String>,
+    /// Local agents' gated tool calls waiting on a yes or no. While any is
+    /// waiting, its prompt is drawn over everything and takes every key;
+    /// clicks and pastes go nowhere.
+    pub consents: crate::consent::ConsentQueue,
+    /// How long a prompt ignores keys once it is first drawn, so a key typed
+    /// before the user could see it (a `y` mid-sentence in the Assistant)
+    /// cannot answer it.
+    pub consent_arm_delay: Duration,
+    /// Model lists for the Settings picker, kept for the run by cache key;
+    /// `None` while that list's one fetch is in flight. Failures are not kept.
+    pub model_lists: HashMap<String, Option<Vec<srelens_agent::adapter::ModelChoice>>>,
+    /// Where the Assistant, the Agent card and the model picker look for
+    /// local agent CLIs; a test points it at its own directory.
+    pub agent_search: srelens_kube::toolbox::SearchPaths,
 }
 
 pub enum SuspendAction {
@@ -618,6 +633,10 @@ impl App {
             screen_selection: None,
             screen_selecting: false,
             screen_selection_text: std::cell::RefCell::new(String::new()),
+            consents: Default::default(),
+            consent_arm_delay: Duration::from_secs(1),
+            model_lists: HashMap::new(),
+            agent_search: srelens_kube::toolbox::SearchPaths::from_env(),
         };
 
         if let Some(lvl) = app.ai_settings.get_caveman_level() {
@@ -662,6 +681,7 @@ impl App {
 
     pub fn handle_tick(&mut self) {
         self.assistant_state.tick();
+        self.consents.prune_closed();
 
         // Clear expired toasts (auto-dismiss after 3s)
         if let Some((_, created, _)) = &self.toast {
@@ -2573,6 +2593,33 @@ impl App {
         // Any keypress dismisses the drag-to-copy selection highlight.
         self.screen_selection = None;
         self.screen_selecting = false;
+
+        // An agent's approval prompt is drawn over everything and takes
+        // every key until it is answered or gone. Ctrl+C there means stop:
+        // decline, and cancel the turn that asked (srectl keeps running).
+        // Only presses answer: Windows also reports each key's release, and
+        // the release of the key that answered one prompt must not answer
+        // the next.
+        if !self.consents.is_empty() {
+            if key.kind != crossterm::event::KeyEventKind::Press {
+                return;
+            }
+            if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
+                if let Some(context) = self.consents.cancel() {
+                    let turn = if context == self.active_context {
+                        Some(&mut self.assistant_state)
+                    } else {
+                        self.assistant_states.get_mut(&context)
+                    };
+                    if let Some(turn) = turn {
+                        turn.cancel_turn();
+                    }
+                }
+            } else {
+                self.consents.press(key, self.consent_arm_delay);
+            }
+            return;
+        }
 
         // Global Ctrl+C handler -> Immediately kill/exit TUI cleanly,
         // unless in Assistant view where Ctrl+C is used to copy selection or assistant reply.
@@ -4575,7 +4622,9 @@ impl App {
         // 5. Settings View Dedicated Key Handling
         if matches!(self.active_view, ActiveView::Settings(_)) {
             if let ActiveView::Settings(s) = &self.active_view {
-                if !s.is_editing && key.code == KeyCode::Char(':') {
+                // A model id can hold a `:` (`llama3.2:3b`), so the picker
+                // keeps it as text too.
+                if !s.is_editing && s.picker.is_none() && key.code == KeyCode::Char(':') {
                     self.input_mode = InputMode::Command;
                     self.command_buffer.clear();
                     return;
@@ -6834,7 +6883,44 @@ impl App {
                 }
             }
             ActiveView::Settings(settings) => {
-                if settings.is_editing {
+                if let Some(picker) = settings.picker.as_mut() {
+                    match key.code {
+                        KeyCode::Esc => settings.picker = None,
+                        KeyCode::Up => picker.move_up(),
+                        KeyCode::Down => picker.move_down(),
+                        KeyCode::Backspace => {
+                            picker.query.pop();
+                            picker.selected = 0;
+                        }
+                        KeyCode::Char(c)
+                            if !key.modifiers.contains(KeyModifiers::CONTROL)
+                                && !key.modifiers.contains(KeyModifiers::ALT) =>
+                        {
+                            picker.query.push(c);
+                            picker.selected = 0;
+                        }
+                        KeyCode::Enter => match settings.pick_model() {
+                            Err(e) => self.set_toast(e, Theme::status_error()),
+                            Ok(model) => {
+                                self.ai_settings = settings.settings.clone();
+                                match settings.save() {
+                                    Ok(_) => self.set_toast(
+                                        format!(
+                                            "✓ Model set to {} and saved",
+                                            model.as_deref().unwrap_or("Default")
+                                        ),
+                                        Theme::status_ok(),
+                                    ),
+                                    Err(e) => self.set_toast(
+                                        format!("Failed to save settings: {}", e),
+                                        Theme::status_error(),
+                                    ),
+                                }
+                            }
+                        },
+                        _ => {}
+                    }
+                } else if settings.is_editing {
                     match key.code {
                         KeyCode::Esc => settings.cancel_editing(),
                         KeyCode::Enter => {
@@ -6893,6 +6979,35 @@ impl App {
                         KeyCode::BackTab | KeyCode::Left | KeyCode::Char('h') => {
                             settings.select_prev_field()
                         }
+                        // On the Agent card, Space steps the agent from any of
+                        // its fields; `e`/Enter steps it from the Agent field,
+                        // lists models from the Model field, and edits
+                        // Cursor's API Key like a provider's.
+                        KeyCode::Char(' ' | 'e') | KeyCode::Enter
+                            if settings.agent_card_focused
+                                && (key.code == KeyCode::Char(' ')
+                                    || settings.selected_field == SettingField::Agent) =>
+                        {
+                            let agent = settings.cycle_agent();
+                            self.ai_settings = settings.settings.clone();
+                            match settings.save() {
+                                Ok(_) => self.set_toast(
+                                    format!("✓ Assistant agent set to {}", agent.label()),
+                                    Theme::status_ok(),
+                                ),
+                                Err(e) => self.set_toast(
+                                    format!("Failed to save settings: {}", e),
+                                    Theme::status_error(),
+                                ),
+                            }
+                        }
+                        KeyCode::Char('e') | KeyCode::Enter
+                            if settings.agent_card_focused
+                                && settings.selected_field == SettingField::Model =>
+                        {
+                            let target = settings.agent_picker_target();
+                            self.open_model_picker(target);
+                        }
                         KeyCode::Char(' ') => {
                             settings.set_active_provider();
                             self.ai_settings = settings.settings.clone();
@@ -6904,6 +7019,12 @@ impl App {
                                 format!("✓ Active provider set to {}", prov_name),
                                 Theme::status_ok(),
                             );
+                        }
+                        KeyCode::Char('e') | KeyCode::Enter
+                            if settings.selected_field == SettingField::Model =>
+                        {
+                            let provider = settings.current_provider();
+                            self.open_model_picker(settings_view::PickerTarget::Provider(provider));
                         }
                         KeyCode::Char('e') | KeyCode::Enter => settings.start_editing(),
                         KeyCode::Char('s') => match settings.save() {
@@ -8435,6 +8556,26 @@ impl App {
         }
     }
 
+    /// Stop every Assistant turn, the open context's and the background
+    /// ones', and wait (a few seconds at most) until each has ended, its
+    /// agent process with it: on exit srectl then removes the Cursor chat
+    /// root, which a live agent may still be running in.
+    pub async fn stop_assistant_turns(&mut self) {
+        let turns: Vec<_> = std::iter::once(&mut self.assistant_state)
+            .chain(self.assistant_states.values_mut())
+            .filter_map(|ai| ai.task.take())
+            .collect();
+        for turn in &turns {
+            turn.abort();
+        }
+        // A turn's task is finished once its future, and so its agent guard
+        // (which ends the agent's process tree), has been dropped.
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while turns.iter().any(|turn| !turn.is_finished()) && std::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
     pub fn cancel_assistant_turn(&mut self) {
         let ai = &mut self.assistant_state;
         if ai.is_busy {
@@ -8469,43 +8610,51 @@ impl App {
             }
         }
 
-        if provider == crate::ai_config::AiProvider::Cursor {
-            if let Some(cursor_bin) = crate::ai_config::find_cursor_binary() {
-                let event_tx = self.event_tx.clone();
-                let model = self.ai_settings.get_model(provider);
-                let api_key = self.ai_settings.get_api_key(provider);
-                let cache = self.client_cache.clone();
-                let timeout_seconds = self.ai_settings.get_timeout_seconds(provider);
-                let hub_kc_opt = argo_hub_kc.clone();
-                let chat_root = crate::agent::process_cursor_chats_root();
-                let conv_id = ai.conversation_id.clone();
-                let resume = ai.cursor_resume_id.clone();
+        // One agent owns a conversation's resume id. Another one cannot pick
+        // it up, so changing agent starts the conversation over (the
+        // transcript on screen stays).
+        let agent = self.ai_settings.agent;
+        if ai.chat_agent.is_some_and(|owner| owner != agent) {
+            ai.reset_agent_chat();
+        }
+        ai.chat_agent = Some(agent);
 
+        if agent != AgentKind::Srelens {
+            if let Some(binary) = crate::ai_config::find_agent_in(agent, &self.agent_search) {
+                let turn = crate::agent::CliTurn {
+                    kind: agent,
+                    binary,
+                    // The agent's own model, not the provider's: `None` is Default (no flag).
+                    model: self.ai_settings.get_agent_model(agent),
+                    cursor_key: (agent == AgentKind::Cursor)
+                        .then(|| self.ai_settings.get_cursor_key())
+                        .flatten(),
+                    query,
+                    active_ctx,
+                    active_ns,
+                    argo_hub_context: argo_hub_ctx,
+                    cache: self.client_cache.clone(),
+                    kubeconfig_paths,
+                    event_tx: self.event_tx.clone(),
+                    timeout_seconds: self.ai_settings.get_agent_timeout_seconds(agent),
+                    conversation_id: ai.conversation_id.clone(),
+                    resume: ai.cli_resume_id.clone(),
+                    chat_root: crate::agent::process_cursor_chats_root(),
+                };
+                let hub_kc_opt = argo_hub_kc.clone();
                 let handle = tokio::spawn(async move {
                     if let Some(ref hub_kc) = hub_kc_opt {
-                        cache.ensure_paths(vec![hub_kc.clone()]).await;
+                        turn.cache.ensure_paths(vec![hub_kc.clone()]).await;
                     }
-                    crate::agent::run_boxed_cursor_turn(
-                        cursor_bin,
-                        model,
-                        api_key,
-                        query,
-                        active_ctx,
-                        active_ns,
-                        argo_hub_ctx,
-                        cache,
-                        kubeconfig_paths,
-                        event_tx,
-                        timeout_seconds,
-                        chat_root,
-                        conv_id,
-                        resume,
-                    )
-                    .await;
+                    crate::agent::run_cli_agent_turn(turn).await;
                 });
                 ai.task = Some(handle.abort_handle());
             } else {
-                ai.add_assistant_message("cursor-agent CLI was not found on PATH. Install from https://docs.cursor.com/en/cli/overview or ensure ~/.local/bin is in your PATH.".to_string());
+                ai.add_assistant_message(format!(
+                    "{} CLI was not found on PATH. Install it from {} or add its install folder to your PATH.",
+                    agent.label(),
+                    crate::ai_config::agent_install_url(agent)
+                ));
             }
         } else if let Some(config) = self.ai_settings.resolve_provider_config(provider) {
             let event_tx = self.event_tx.clone();
@@ -8513,12 +8662,20 @@ impl App {
             let history = ai.native_history.clone();
             let timeout_seconds = self.ai_settings.get_timeout_seconds(provider);
             let hub_kc_opt = argo_hub_kc.clone();
+            // Writes and Secret reads ask the user on screen; the count tells
+            // the turn's watchdog it is waiting on them, not stalled.
+            let consent = crate::consent::TuiConsent::new(event_tx.clone(), "srelens", &active_ctx);
+            let waiting = consent.waiting();
 
             let handle = tokio::spawn(async move {
                 if let Some(ref hub_kc) = hub_kc_opt {
                     cache.ensure_paths(vec![hub_kc.clone()]).await;
                 }
-                let server = crate::agent::build_mcp_server(cache, kubeconfig_paths);
+                let server = crate::agent::build_mcp_server(
+                    cache,
+                    kubeconfig_paths,
+                    std::sync::Arc::new(consent),
+                );
                 let invoker = std::sync::Arc::new(crate::agent::McpToolInvoker::new(server));
                 crate::agent::run_native_agent_turn(
                     config,
@@ -8530,6 +8687,7 @@ impl App {
                     argo_hub_ctx,
                     event_tx,
                     timeout_seconds,
+                    waiting,
                 )
                 .await;
             });
@@ -8565,6 +8723,12 @@ impl App {
 
     pub async fn handle_mouse(&mut self, mouse: crossterm::event::MouseEvent) {
         use crossterm::event::{MouseButton, MouseEventKind};
+
+        // Nothing under an agent's approval prompt runs while it is up. The
+        // wheel still scrolls (the event loop handles it before this).
+        if !self.consents.is_empty() {
+            return;
+        }
 
         // 0. Check if clicking on Close Port Forward button in status bar
         if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
@@ -9035,6 +9199,10 @@ impl App {
     }
 
     pub fn handle_paste(&mut self, text: String) {
+        // Nothing under an agent's approval prompt takes input while it is up.
+        if !self.consents.is_empty() {
+            return;
+        }
         if self.input_mode == InputMode::Command {
             self.command_tab_base = None;
             self.command_tab_target = None;
@@ -9057,6 +9225,11 @@ impl App {
             return;
         }
         if let ActiveView::Settings(ref mut settings) = self.active_view {
+            if let Some(picker) = settings.picker.as_mut() {
+                picker.query.push_str(&text.replace(['\r', '\n'], ""));
+                picker.selected = 0;
+                return;
+            }
             if settings.is_editing {
                 let cleaned = text.replace("\r\n", "").replace('\n', "");
                 settings.edit_buffer.push_str(&cleaned);
@@ -10006,7 +10179,9 @@ impl App {
             }
             ResourceKind::Toolbox => ActiveView::Toolbox(ToolboxViewState::new()),
             ResourceKind::Assistant => ActiveView::Assistant,
-            ResourceKind::Settings => ActiveView::Settings(SettingsViewState::new()),
+            ResourceKind::Settings => {
+                ActiveView::Settings(SettingsViewState::new(&self.agent_search))
+            }
             ResourceKind::TuiConfig => {
                 let mut cfg = TuiConfigViewState::new();
                 cfg.available_contexts = self.contexts.iter().map(|c| c.name.clone()).collect();
@@ -11805,24 +11980,14 @@ impl App {
             return;
         }
 
-        // Said before any request goes out, and said precisely: Cursor has a
-        // key but no HTTP path, so "no API key" would be false for it.
-        let config = if provider == crate::ai_config::AiProvider::Cursor {
-            Err(format!(
-                "Quick AI RCA needs an HTTP provider; {provider_name} runs only through the \
-                 Assistant. Press [a] for it, or pick another provider in :ai-settings."
-            ))
-        } else {
-            config.ok_or_else(|| {
-                format!(
+        // Said before any request goes out.
+        let config = match config {
+            Some(c) => c,
+            None => {
+                let msg = format!(
                     "No API key configured for {provider_name}. Add one in :ai-settings, or set {}.",
                     crate::ai_config::env_var_for_provider(provider)
-                )
-            })
-        };
-        let config = match config {
-            Ok(c) => c,
-            Err(msg) => {
+                );
                 changed
                     .ai_summaries
                     .insert(key, entry(QuickRcaStatus::Error(msg)));
@@ -11918,6 +12083,64 @@ impl App {
                 result,
             });
         });
+    }
+
+    /// Open the settings view's model picker on `target`: its list from
+    /// [`App::model_lists`], or "Loading models…" while the list is fetched
+    /// off the UI thread (once per key, however often the picker reopens).
+    pub fn open_model_picker(&mut self, target: settings_view::PickerTarget) {
+        use crate::model_list;
+        use settings_view::PickerTarget;
+        let ActiveView::Settings(settings) = &mut self.active_view else {
+            return;
+        };
+        let key = match target {
+            PickerTarget::Provider(p) => model_list::provider_cache_key(&settings.settings, p),
+            PickerTarget::Agent(kind) => model_list::agent_cache_key(&settings.settings, kind),
+        };
+        let known = self.model_lists.get(&key).cloned();
+        settings.open_picker(target, key.clone(), known.clone().flatten());
+        if known.is_some() {
+            return; // listed already, or being listed
+        }
+        self.model_lists.insert(key.clone(), None);
+        let snapshot = settings.settings.clone();
+        let binary = match target {
+            PickerTarget::Agent(kind) => crate::ai_config::find_agent_in(kind, &self.agent_search),
+            PickerTarget::Provider(_) => None,
+        };
+        let event_tx = self.event_tx.clone();
+        tokio::spawn(async move {
+            let result = match target {
+                PickerTarget::Provider(p) => model_list::provider_models(&snapshot, p).await,
+                PickerTarget::Agent(kind) => {
+                    let cursor_key = snapshot.get_cursor_key();
+                    model_list::agent_models(kind, binary.as_deref(), cursor_key).await
+                }
+            };
+            let _ = event_tx.send(AppEvent::ModelsLoaded { key, result });
+        });
+    }
+
+    /// A fetched model list (or why there is none): kept for the run when it
+    /// is a list, and shown if the settings view's picker is waiting for it.
+    pub fn handle_models_loaded(
+        &mut self,
+        key: &str,
+        result: Result<Vec<srelens_agent::adapter::ModelChoice>, String>,
+    ) {
+        match &result {
+            Ok(models) => {
+                self.model_lists
+                    .insert(key.to_string(), Some(models.clone()));
+            }
+            Err(_) => {
+                self.model_lists.remove(key);
+            }
+        }
+        if let ActiveView::Settings(settings) = &mut self.active_view {
+            settings.models_loaded(key, result);
+        }
     }
 
     /// Land a GitHub answer on the `:changed` view that asked, whether it is
@@ -15585,6 +15808,19 @@ impl App {
             render_help_modal(f, size);
         }
 
+        // An agent's approval prompt, over every view and dialog. Before the
+        // selection pass, so a drag still copies what is on screen.
+        self.consents.shown();
+        if let Some(pending) = self.consents.front() {
+            crate::ui::dialogs::render_consent(
+                f,
+                size,
+                pending,
+                self.consents.seconds_left(),
+                self.consents.ready_in(self.consent_arm_delay),
+            );
+        }
+
         // 5. Global drag-to-copy selection overlay: highlight the selected
         // cells on the final buffer and capture their text so mouse-up
         // copies exactly what the user sees.
@@ -15768,95 +16004,6 @@ pub fn get_clipboard_text() -> Option<String> {
         }
     }
     None
-}
-
-pub fn extract_tool_call_start_info(v: &serde_json::Value) -> Option<(String, String, String)> {
-    let call_id = v
-        .get("call_id")
-        .or_else(|| v.get("callId"))
-        .and_then(|s| s.as_str())
-        .unwrap_or("")
-        .to_string();
-
-    let tool_call_obj = v.get("tool_call").or_else(|| v.get("toolCall"))?;
-    let inner_map = tool_call_obj.as_object()?;
-    // Strictly find the payload key ending with "ToolCall" (e.g. bashToolCall, readToolCall),
-    // ignoring metadata siblings like hookAdditionalContexts, toolCallId, startedAtMs, completedAtMs.
-    let (key, inner) = inner_map.iter().find(|(k, _)| k.ends_with("ToolCall"))?;
-    let mut tool_name = key.strip_suffix("ToolCall").unwrap_or(key).to_string();
-
-    // Skip internal hooks that are not executable tools
-    if tool_name == "hookAdditionalContexts" {
-        return None;
-    }
-
-    if tool_name == "callMcpTool" || tool_name == "mcp" {
-        if let Some(t) = inner
-            .pointer("/args/tool")
-            .or_else(|| inner.pointer("/args/name"))
-            .and_then(|s| s.as_str())
-        {
-            tool_name = t.to_string();
-        }
-    }
-
-    let mut args_summary = String::new();
-    if let Some(sub_args) = inner.pointer("/args/arguments") {
-        if let Some(obj) = sub_args.as_object() {
-            args_summary = serde_json::to_string(obj).unwrap_or_default();
-        } else {
-            args_summary = sub_args.to_string();
-        }
-    } else if let Some(args) = inner.get("args") {
-        if let Some(cmd) = args.get("command").and_then(|s| s.as_str()) {
-            args_summary = cmd.to_string();
-        } else if let Some(path) = args.get("path").and_then(|s| s.as_str()) {
-            args_summary = format!("path: {}", path);
-        } else if let Some(pattern) = args.get("pattern").and_then(|s| s.as_str()) {
-            args_summary = format!("pattern: {}", pattern);
-        } else if let Some(query) = args.get("query").and_then(|s| s.as_str()) {
-            args_summary = format!("query: {}", query);
-        } else if let Some(name) = args.get("name").and_then(|s| s.as_str()) {
-            args_summary = format!("name: {}", name);
-        } else if let Some(s) = args.as_str() {
-            args_summary = s.to_string();
-        } else if let Some(obj) = args.as_object() {
-            if obj.is_empty() {
-                args_summary = String::new();
-            } else {
-                args_summary = serde_json::to_string(obj).unwrap_or_default();
-            }
-        } else {
-            args_summary = args.to_string();
-        }
-    }
-
-    Some((call_id, tool_name, args_summary))
-}
-
-pub fn extract_tool_call_completed_info(v: &serde_json::Value) -> Option<(String, bool)> {
-    let call_id = v
-        .get("call_id")
-        .or_else(|| v.get("callId"))
-        .and_then(|s| s.as_str())
-        .unwrap_or("")
-        .to_string();
-
-    // Check if this completion corresponds to an internal metadata hook that has no ToolCall
-    if let Some(tool_call_obj) = v.get("tool_call").or_else(|| v.get("toolCall")) {
-        if let Some(inner_map) = tool_call_obj.as_object() {
-            if !inner_map.iter().any(|(k, _)| k.ends_with("ToolCall")) {
-                return None;
-            }
-        }
-    }
-
-    let is_error = v
-        .get("is_error")
-        .or_else(|| v.get("isError"))
-        .and_then(|b| b.as_bool())
-        .unwrap_or(false);
-    Some((call_id, is_error))
 }
 
 pub fn parse_involved_object(item: &serde_json::Value) -> (String, String) {

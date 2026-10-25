@@ -1,7 +1,43 @@
 //! Parse Cursor CLI (`cursor-agent`) `--output-format stream-json` lines into
 //! `AgentEvent`s.
 
+use crate::adapter::{valid_model_id, ModelChoice};
 use crate::event::{AgentEvent, ToolStatus};
+
+/// The models `cursor-agent models` prints, one `<id> - <label>` per line
+/// among headings and tips. Colour codes are stripped first; a line counts
+/// only when it splits on its first ` - ` into an id `valid_model_id` accepts
+/// and a non-empty label, so anything else the CLI prints (or adds later) is
+/// skipped.
+pub fn parse_models(text: &str) -> Vec<ModelChoice> {
+    strip_ansi(text)
+        .lines()
+        .filter_map(|line| {
+            let (id, label) = line.trim().split_once(" - ")?;
+            let (id, label) = (id.trim(), label.trim());
+            (valid_model_id(id) && !label.is_empty())
+                .then(|| ModelChoice { id: id.to_string(), label: label.to_string() })
+        })
+        .collect()
+}
+
+/// `s` without ANSI CSI sequences (`ESC [` parameters, then one final byte).
+fn strip_ansi(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\x1b' && chars.next_if_eq(&'[').is_some() {
+            for c in chars.by_ref() {
+                if ('\x40'..='\x7e').contains(&c) {
+                    break;
+                }
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
 
 /// Parse one Cursor stream-json line. Never errors: an unrecognized,
 /// malformed, or non-JSON line yields an empty vec, so a future line type the
@@ -387,6 +423,28 @@ mod tests {
             r#"{"type":"result","subtype":"success","is_error":false,"result":"this text already streamed as deltas"}"#,
         );
         assert_eq!(out, vec![AgentEvent::TurnDone]);
+    }
+
+    #[test]
+    fn cursor_model_lines_become_choices_and_noise_is_skipped() {
+        let t = "\x1b[1mAvailable models\x1b[0m\n\nauto - Auto\ncomposer-1.5 - Composer 1.5\nTip: use --model\n";
+        assert_eq!(parse_models(t).iter().map(|m| m.id.as_str()).collect::<Vec<_>>(), ["auto", "composer-1.5"]);
+    }
+
+    /// Colour codes around a line, a ` - ` inside the label, `\r\n` endings,
+    /// an id that could pass for a flag, and a line with no label all behave:
+    /// the first ` - ` splits, and only a usable id plus label counts.
+    #[test]
+    fn cursor_lines_split_on_the_first_separator_after_colour_codes_are_stripped() {
+        let t = "\x1b[32mgpt-5\x1b[0m - GPT-5 - fast\r\n--evil - Flag\r\nlonely - \r\nno separator here\r\n  sonnet-4 -   Sonnet 4  \r\n";
+        assert_eq!(
+            parse_models(t),
+            vec![
+                ModelChoice { id: "gpt-5".into(), label: "GPT-5 - fast".into() },
+                ModelChoice { id: "sonnet-4".into(), label: "Sonnet 4".into() },
+            ]
+        );
+        assert!(parse_models("").is_empty());
     }
 
     #[test]

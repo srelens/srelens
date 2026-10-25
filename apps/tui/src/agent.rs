@@ -6,7 +6,9 @@
 
 use async_trait::async_trait;
 use serde_json::{json, Value};
+use srelens_agent::adapter::{AgentCommand, AgentKind};
 use srelens_agent::event::AgentEvent;
+use srelens_agent::turn::CursorChatsInUse;
 use srelens_kube::client_cache::ClientCache;
 use srelens_llm::types::{ToolDef, Turn};
 use srelens_llm::{LlmError, ToolCallResult, ToolInvoker};
@@ -171,9 +173,12 @@ impl ToolInvoker for McpToolInvoker {
     }
 }
 
-pub fn build_mcp_server(cache: Arc<ClientCache>, kubeconfig_paths: Vec<PathBuf>) -> Arc<McpServer> {
+pub fn build_mcp_server(
+    cache: Arc<ClientCache>,
+    kubeconfig_paths: Vec<PathBuf>,
+    policy: Arc<dyn srelens_mcp::policy::ConfirmPolicy>,
+) -> Arc<McpServer> {
     let registry = srelens_registry::build_registry_with_paths(cache, kubeconfig_paths);
-    let policy = Arc::new(srelens_mcp::policy::FlagGated::new(false, true));
     let server = McpServer::new(Arc::new(registry))
         .with_policy(policy)
         .with_kind_resolver(srelens_registry::kind_resolver());
@@ -209,6 +214,77 @@ pub fn enrich_prompt_with_context(
     }
 }
 
+/// Seconds the turn has gone without a sign of life. A turn held up on the
+/// user's approval is waiting, not stalled, so every tick while a prompt is
+/// open counts as a sign of life: the model then gets its whole limit from the
+/// answer, not from the event before the question.
+fn quiet_secs(elapsed: u64, last_activity: &std::sync::atomic::AtomicU64, waiting: usize) -> u64 {
+    if waiting > 0 {
+        last_activity.store(elapsed, std::sync::atomic::Ordering::Relaxed);
+    }
+    elapsed.saturating_sub(last_activity.load(std::sync::atomic::Ordering::Relaxed))
+}
+
+/// The ceiling on any one turn, prompts or not.
+const MAX_TURN_SECS: u64 = 900;
+
+/// Resolves once the turn has gone `limit` seconds without a sign of life
+/// (see [`quiet_secs`]), or has run for [`MAX_TURN_SECS`].
+async fn stalled(
+    start: std::time::Instant,
+    last_activity: &std::sync::atomic::AtomicU64,
+    waiting: &std::sync::atomic::AtomicUsize,
+    limit: u64,
+) {
+    loop {
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        let elapsed = start.elapsed().as_secs();
+        let quiet = quiet_secs(
+            elapsed,
+            last_activity,
+            waiting.load(std::sync::atomic::Ordering::SeqCst),
+        );
+        if quiet >= limit || elapsed >= MAX_TURN_SECS {
+            return;
+        }
+    }
+}
+
+/// What the Assistant shows for one agent event, as `(ActionResult title,
+/// payload)` pairs tagged with the turn's context. Usage shows nothing here:
+/// the turn reports it once, with its duration.
+pub fn agent_event_actions(ev: &AgentEvent, ctx: &str) -> Vec<(String, String)> {
+    let at = |action: &str, payload: String| (format!("{action}:{ctx}"), payload);
+    match ev {
+        AgentEvent::TextDelta { text } => vec![at("ai_chunk", text.clone())],
+        AgentEvent::Thinking { text } => vec![at("ai_status", text.clone())],
+        AgentEvent::ToolCallStart { id, tool, args } => {
+            let args = match args {
+                Value::Null => String::new(),
+                Value::String(s) => s.clone(),
+                other => other.to_string(),
+            };
+            vec![
+                at("ai_status", format!("Executing {tool}...")),
+                at("ai_tool_start", format!("{id}|{tool}|{args}")),
+            ]
+        }
+        AgentEvent::ToolResult { id, status, .. } => {
+            let status = match status {
+                srelens_agent::event::ToolStatus::Ok => "ok",
+                srelens_agent::event::ToolStatus::Error => "error",
+                srelens_agent::event::ToolStatus::Denied => "denied",
+            };
+            vec![at("ai_tool_done", format!("{id}|{status}"))]
+        }
+        AgentEvent::Error { message } => vec![at("ai_chunk", format!("\n[Error: {message}]"))],
+        AgentEvent::Usage { .. } | AgentEvent::TurnDone => vec![],
+    }
+}
+
+/// `waiting` is the count of approval prompts open for this turn
+/// ([`crate::consent::TuiConsent::waiting`]); while it is above zero the
+/// inactivity timeout stands still. The 15-minute ceiling does not.
 pub async fn run_native_agent_turn(
     config: srelens_llm::ProviderConfig,
     invoker: Arc<McpToolInvoker>,
@@ -219,6 +295,7 @@ pub async fn run_native_agent_turn(
     argo_hub_context: Option<String>,
     event_tx: tokio::sync::mpsc::UnboundedSender<AppEvent>,
     timeout_seconds: u32,
+    waiting: Arc<std::sync::atomic::AtomicUsize>,
 ) {
     let provider = srelens_llm::HttpProvider::new(config);
     let start_time = std::time::Instant::now();
@@ -251,47 +328,9 @@ pub async fn run_native_agent_turn(
             start_time_copy.elapsed().as_secs(),
             std::sync::atomic::Ordering::Relaxed,
         );
-        match ev {
+        match &ev {
             AgentEvent::TextDelta { text } => {
                 out_chars_clone.fetch_add(text.len(), std::sync::atomic::Ordering::Relaxed);
-                let _ = event_tx_clone.send(AppEvent::ActionResult {
-                    title: format!("ai_chunk:{}", ctx_tag),
-                    result: Ok(text),
-                });
-            }
-            AgentEvent::Thinking { text } => {
-                let _ = event_tx_clone.send(AppEvent::ActionResult {
-                    title: format!("ai_status:{}", ctx_tag),
-                    result: Ok(text),
-                });
-            }
-            AgentEvent::ToolCallStart { id, tool, args } => {
-                let args_preview = if args.is_null() {
-                    String::new()
-                } else if let Some(s) = args.as_str() {
-                    s.to_string()
-                } else {
-                    args.to_string()
-                };
-                let _ = event_tx_clone.send(AppEvent::ActionResult {
-                    title: format!("ai_status:{}", ctx_tag),
-                    result: Ok(format!("Executing {}...", tool)),
-                });
-                let _ = event_tx_clone.send(AppEvent::ActionResult {
-                    title: format!("ai_tool_start:{}", ctx_tag),
-                    result: Ok(format!("{}|{}|{}", id, tool, args_preview)),
-                });
-            }
-            AgentEvent::ToolResult { id, status, .. } => {
-                let status_str = match status {
-                    srelens_agent::event::ToolStatus::Ok => "ok",
-                    srelens_agent::event::ToolStatus::Error => "error",
-                    srelens_agent::event::ToolStatus::Denied => "denied",
-                };
-                let _ = event_tx_clone.send(AppEvent::ActionResult {
-                    title: format!("ai_tool_done:{}", ctx_tag),
-                    result: Ok(format!("{}|{}", id, status_str)),
-                });
             }
             AgentEvent::Usage {
                 prompt_tokens,
@@ -300,19 +339,19 @@ pub async fn run_native_agent_turn(
                 total_tokens,
             } => {
                 *real_usage_clone.lock().unwrap() = Some((
-                    prompt_tokens,
-                    completion_tokens,
-                    cached_tokens,
-                    total_tokens,
+                    *prompt_tokens,
+                    *completion_tokens,
+                    *cached_tokens,
+                    *total_tokens,
                 ));
             }
-            AgentEvent::TurnDone => {}
-            AgentEvent::Error { message } => {
-                let _ = event_tx_clone.send(AppEvent::ActionResult {
-                    title: format!("ai_chunk:{}", ctx_tag),
-                    result: Ok(format!("\n[Error: {}]", message)),
-                });
-            }
+            _ => {}
+        }
+        for (title, payload) in agent_event_actions(&ev, &ctx_tag) {
+            let _ = event_tx_clone.send(AppEvent::ActionResult {
+                title,
+                result: Ok(payload),
+            });
         }
     };
 
@@ -327,20 +366,12 @@ pub async fn run_native_agent_turn(
         enriched_prompt,
         &mut on_event,
     );
-    let inactivity_limit = timeout_seconds.max(5) as u64;
-    let max_wall_clock = 900u64; // 15-minute global ceiling
-
-    let watchdog = async {
-        loop {
-            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
-            let total_elapsed = start_time.elapsed().as_secs();
-            let last = last_activity.load(std::sync::atomic::Ordering::Relaxed);
-            let inactive_secs = total_elapsed.saturating_sub(last);
-            if inactive_secs >= inactivity_limit || total_elapsed >= max_wall_clock {
-                return;
-            }
-        }
-    };
+    let watchdog = stalled(
+        start_time,
+        &last_activity,
+        &waiting,
+        timeout_seconds.max(5) as u64,
+    );
 
     let result = tokio::select! {
         res = run_fut => res,
@@ -397,8 +428,9 @@ pub async fn run_native_agent_turn(
 }
 
 /// Global process-lifetime root directory for Cursor CLI agent conversations.
-/// Initialized lazily on the first turn. Explicitly swept during srectl shutdown
-/// or dropped on exit, leaving zero orphaned chats on disk.
+/// Created on first use; removed by [`cleanup_process_cursor_chats`] when
+/// srectl exits (a static is never dropped). A killed srectl leaves it
+/// behind, owner-only.
 static CURSOR_CHATS_ROOT: std::sync::Mutex<Option<tempfile::TempDir>> = std::sync::Mutex::new(None);
 
 pub fn process_cursor_chats_root() -> std::path::PathBuf {
@@ -443,530 +475,354 @@ pub fn conversation_lock(conv_id: &str) -> std::sync::Arc<tokio::sync::Mutex<()>
     arc
 }
 
-struct WorkspaceGuard(std::path::PathBuf);
+/// The Cursor chats a turn in this process is using (see `CursorChatsInUse`).
+static CURSOR_CHATS: std::sync::OnceLock<CursorChatsInUse> = std::sync::OnceLock::new();
 
-impl Drop for WorkspaceGuard {
+/// One turn of a local agent CLI — Claude Code, Codex or Cursor — boxed to
+/// srelens's MCP tools, every write approved in srectl.
+pub struct CliTurn {
+    pub kind: AgentKind,
+    pub binary: PathBuf,
+    /// `None` runs the CLI's own default model.
+    pub model: Option<String>,
+    /// Cursor's API key; it reaches the agent in its environment only.
+    pub cursor_key: Option<String>,
+    pub query: String,
+    pub active_ctx: String,
+    pub active_ns: String,
+    pub argo_hub_context: Option<String>,
+    pub cache: Arc<ClientCache>,
+    pub kubeconfig_paths: Vec<PathBuf>,
+    pub event_tx: tokio::sync::mpsc::UnboundedSender<AppEvent>,
+    pub timeout_seconds: u32,
+    /// The Assistant's conversation: it names the Cursor chat, and every
+    /// `ai_session` event carries it so a stale one can be told apart.
+    pub conversation_id: String,
+    /// The CLI's session id from the conversation's previous turn.
+    pub resume: Option<String>,
+    /// Where Cursor chats are kept ([`process_cursor_chats_root`]).
+    pub chat_root: PathBuf,
+}
+
+/// `cmd` with Cursor's API key in the child's environment — never in argv,
+/// where any local account could list it, and never in srectl's own.
+pub fn with_cursor_key(mut cmd: AgentCommand, key: Option<&str>) -> AgentCommand {
+    if let Some(key) = key {
+        cmd.env.push(("CURSOR_API_KEY".into(), key.into()));
+    }
+    cmd
+}
+
+/// The agent's process. Dropped before it exited — the turn's task aborted,
+/// or it timed out — it ends the whole tree, so nothing is left running.
+struct Agent(tokio::process::Child);
+
+impl Drop for Agent {
     fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
+        if !matches!(self.0.try_wait(), Ok(Some(_))) {
+            srelens_agent::turn::kill_tree(&mut self.0);
+        }
     }
 }
 
-pub async fn run_boxed_cursor_turn(
-    cursor_bin: String,
-    model: String,
-    api_key: Option<String>,
-    query: String,
-    active_ctx: String,
-    active_ns: String,
-    argo_hub_context: Option<String>,
-    cache: Arc<ClientCache>,
-    kubeconfig_paths: Vec<PathBuf>,
-    event_tx: tokio::sync::mpsc::UnboundedSender<AppEvent>,
-    timeout_seconds: u32,
-    chat_root: PathBuf,
-    conversation_id: String,
-    resume: Option<String>,
-) {
-    let start_time = std::time::Instant::now();
+/// How much of the agent's stderr a turn keeps, for the error it shows.
+const STDERR_TAIL: usize = 8 * 1024;
 
-    // Serialize turns within this conversation so an aborted turn's workspace cleanup
-    // finishes before the replacement turn recreates workspace and mcp.json.
+/// The end of an agent's stderr for the transcript: its last few non-empty
+/// lines joined by ` | `, at most 1 KiB. Not just the last line — a Node
+/// CLI's crash ends with `Node.js v22…`, its cause a line or two above.
+fn stderr_summary(tail: &[u8]) -> String {
+    let text = String::from_utf8_lossy(tail);
+    let lines: Vec<&str> = text
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .collect();
+    let joined = lines[lines.len().saturating_sub(5)..].join(" | ");
+    let start = joined
+        .char_indices()
+        .map(|(i, _)| i)
+        .find(|&i| joined.len() - i <= 1024)
+        .unwrap_or(joined.len());
+    joined[start..].to_string()
+}
+
+/// Run one agent-CLI turn: a loopback MCP server of its own whose gated calls
+/// ask the user in srectl ([`crate::consent::TuiConsent`]; an open prompt
+/// stops the inactivity clock), the CLI spawned in the turn's private
+/// directory, and its stream shown in the Assistant. The session to resume
+/// next goes back as `ai_session:<ctx>` `"<conversation_id>|<id>"`; every
+/// turn ends with `ai_done:<ctx>`.
+pub async fn run_cli_agent_turn(turn: CliTurn) {
+    let CliTurn {
+        kind,
+        binary,
+        model,
+        cursor_key,
+        query,
+        active_ctx: ctx,
+        active_ns,
+        argo_hub_context,
+        cache,
+        kubeconfig_paths,
+        event_tx: tx,
+        timeout_seconds,
+        conversation_id,
+        resume,
+        chat_root,
+    } = turn;
+    let send = |action: &str, result: Result<String, String>| {
+        let _ = tx.send(AppEvent::ActionResult {
+            title: format!("{action}:{ctx}"),
+            result,
+        });
+    };
+    // Before the agent ran: no `ai_session`, so the conversation keeps the
+    // session it had.
+    let fail = |message: String| {
+        send("ai_chunk", Err(message));
+        send("ai_done", Ok(String::new()));
+    };
+    let resume = resume.filter(|id| srelens_agent::turn::valid_resume_id(id));
+    let started = std::time::Instant::now();
+
+    // One turn at a time per conversation, so an aborted turn's workspace is
+    // gone before the next one lays it out again.
     let conv_lock = conversation_lock(&conversation_id);
-    let _conv_guard = conv_lock.lock().await;
+    let _conv = conv_lock.lock().await;
 
-    // 1. Bind ephemeral loopback port for MCP HTTP server
     let listener = match tokio::net::TcpListener::bind("127.0.0.1:0").await {
         Ok(l) => l,
-        Err(e) => {
-            let _ = event_tx.send(AppEvent::ActionResult {
-                title: format!("ai_chunk:{}", active_ctx),
-                result: Err(format!("Failed to bind local MCP port: {}", e)),
-            });
-            let _ = event_tx.send(AppEvent::ActionResult {
-                title: format!("ai_done:{}", active_ctx),
-                result: Ok(String::new()),
-            });
-            return;
-        }
+        Err(e) => return fail(format!("Failed to bind local MCP port: {e}")),
     };
-    let local_addr = match listener.local_addr() {
-        Ok(a) => a,
-        Err(e) => {
-            let _ = event_tx.send(AppEvent::ActionResult {
-                title: format!("ai_chunk:{}", active_ctx),
-                result: Err(format!("Failed to get local MCP address: {}", e)),
-            });
-            let _ = event_tx.send(AppEvent::ActionResult {
-                title: format!("ai_done:{}", active_ctx),
-                result: Ok(String::new()),
-            });
-            return;
-        }
+    let port = match listener.local_addr() {
+        Ok(a) => a.port(),
+        Err(e) => return fail(format!("Failed to get local MCP address: {e}")),
     };
-    let url = format!("http://127.0.0.1:{}/mcp", local_addr.port());
+    let url = format!("http://127.0.0.1:{port}/mcp");
     let token = srelens_mcp::auth::Token::generate();
     let token_str = token.as_str().to_string();
-
-    // 2. Build MCP server
+    // Dropped when the turn ends, however it ends, which stops the server and
+    // denies every prompt it still has open.
+    let (_turn_alive, turn_over) = tokio::sync::watch::channel(());
+    let consent =
+        crate::consent::TuiConsent::new(tx.clone(), kind.label(), &ctx).for_turn(turn_over.clone());
+    let waiting = consent.waiting();
     let registry = srelens_registry::build_registry_with_paths(cache, kubeconfig_paths);
-    let policy = Arc::new(srelens_mcp::policy::FlagGated::new(false, true));
     let server = McpServer::new(Arc::new(registry))
-        .with_policy(policy)
+        .with_policy(Arc::new(consent))
         .with_kind_resolver(srelens_registry::kind_resolver());
+    let mut stopped = turn_over;
+    tokio::spawn(srelens_mcp::http::serve_http_with_shutdown(
+        server,
+        listener,
+        async move { while stopped.changed().await.is_ok() {} },
+        token,
+    ));
 
-    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
-    tokio::spawn(async move {
-        let _ = srelens_mcp::http::serve_http_with_shutdown(
-            server,
-            listener,
-            async {
-                let _ = shutdown_rx.await;
-            },
-            token,
-        )
-        .await;
-    });
-
-    // 3. Resolve persistent chat directory for cursor-agent under the process chat root
-    let chat_dir = match srelens_agent::cursor_chat_dir(&chat_root, &conversation_id) {
-        Ok(d) => d,
-        Err(e) => {
-            let _ = shutdown_tx.send(());
-            let _ = event_tx.send(AppEvent::ActionResult {
-                title: format!("ai_chunk:{}", active_ctx),
-                result: Err(format!("Invalid conversation directory: {}", e)),
-            });
-            let _ = event_tx.send(AppEvent::ActionResult {
-                title: format!("ai_done:{}", active_ctx),
-                result: Ok(String::new()),
-            });
-            return;
-        }
+    let prompt = enrich_prompt_with_context(&query, &ctx, &active_ns, argo_hub_context.as_deref());
+    let binary = binary.to_string_lossy();
+    let session = uuid::Uuid::new_v4().to_string();
+    let temp_dir = std::env::temp_dir();
+    // Holds the turn's files (the bearer token among them) until the agent is done.
+    let prepared = match srelens_agent::turn::prepare_turn(&srelens_agent::turn::TurnSpec {
+        kind,
+        binary: &binary,
+        prompt: &prompt,
+        mcp_url: &url,
+        token: &token_str,
+        resume: resume.as_deref(),
+        model: model.as_deref(),
+        session: &session,
+        conversation: Some(&conversation_id),
+        cursor_root: &chat_root,
+        cursor_chats: CURSOR_CHATS.get_or_init(Default::default),
+        temp_dir: &temp_dir,
+        image_paths: &[],
+    }) {
+        Ok(p) => p,
+        Err(e) => return fail(format!("Could not set up the {} turn: {e}", kind.label())),
+    };
+    let parse_line: fn(&str) -> Vec<AgentEvent> = match kind {
+        AgentKind::Claude => srelens_agent::claude::parse_line,
+        AgentKind::Codex => srelens_agent::codex::parse_line,
+        // `prepare_turn` refused the native agent above.
+        AgentKind::Cursor | AgentKind::Srelens => srelens_agent::cursor::parse_line,
     };
 
-    let config = chat_dir.join("config");
-    let workspace = chat_dir.join("workspace");
-
-    if let Err(e) = std::fs::create_dir_all(&config) {
-        let _ = shutdown_tx.send(());
-        let _ = event_tx.send(AppEvent::ActionResult {
-            title: format!("ai_chunk:{}", active_ctx),
-            result: Err(format!("Failed to create config dir: {}", e)),
-        });
-        let _ = event_tx.send(AppEvent::ActionResult {
-            title: format!("ai_done:{}", active_ctx),
-            result: Ok(String::new()),
-        });
-        return;
-    }
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&chat_dir, std::fs::Permissions::from_mode(0o700));
-        let _ = std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o700));
-    }
-
-    // Emptied first: a turn whose guard never ran (srelens was killed) left
-    // its files here, and a project `.cursor/cli.json` among them would widen
-    // the box. Refuse the turn rather than run it in a workspace that can't be.
-    match std::fs::remove_dir_all(&workspace) {
-        Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
-            let _ = shutdown_tx.send(());
-            let _ = event_tx.send(AppEvent::ActionResult {
-                title: format!("ai_chunk:{}", active_ctx),
-                result: Err(format!("Failed to clean workspace dir: {}", e)),
-            });
-            let _ = event_tx.send(AppEvent::ActionResult {
-                title: format!("ai_done:{}", active_ctx),
-                result: Ok(String::new()),
-            });
-            return;
+    let cmd = with_cursor_key(prepared.cmd.clone(), cursor_key.as_deref());
+    let spawned = tokio::process::Command::new(&cmd.program)
+        .args(&cmd.args)
+        .envs(cmd.env.iter().map(|(k, v)| (k, v)))
+        .current_dir(&prepared.cwd)
+        .stdin(if cmd.stdin.is_some() {
+            std::process::Stdio::piped()
+        } else {
+            std::process::Stdio::null()
+        })
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true)
+        .spawn();
+    let mut agent = match spawned {
+        Ok(child) => Agent(child),
+        Err(e) => {
+            send(
+                "ai_session",
+                Ok(format!("{conversation_id}|{}", resume.unwrap_or_default())),
+            );
+            let program = kind.binary().unwrap_or("the agent");
+            return fail(format!("Failed to launch {program}: {e}"));
         }
-        _ => {}
+    };
+    if let (Some(input), Some(mut stdin)) = (cmd.stdin, agent.0.stdin.take()) {
+        tokio::spawn(async move {
+            use tokio::io::AsyncWriteExt;
+            // An agent that stops reading says so in its exit status.
+            let _ = stdin.write_all(input.as_bytes()).await;
+            // Dropped here: the agent reads the end of its prompt.
+        });
     }
-
-    let cursor_dir = workspace.join(".cursor");
-    if let Err(e) = std::fs::create_dir_all(&cursor_dir) {
-        let _ = shutdown_tx.send(());
-        let _ = event_tx.send(AppEvent::ActionResult {
-            title: format!("ai_chunk:{}", active_ctx),
-            result: Err(format!("Failed to create .cursor dir: {}", e)),
-        });
-        let _ = event_tx.send(AppEvent::ActionResult {
-            title: format!("ai_done:{}", active_ctx),
-            result: Ok(String::new()),
-        });
-        return;
-    }
-
-    // Drop guard ensures workspace (and its bearer token in mcp.json) is cleaned up with the turn
-    let _workspace_guard = WorkspaceGuard(workspace.clone());
-
-    // Write cli-config.json to block shell/kubectl
-    let cfg_path = config.join("cli-config.json");
-    if let Err(e) = std::fs::write(&cfg_path, srelens_agent::adapter::cursor_cli_config_json()) {
-        let _ = shutdown_tx.send(());
-        let _ = event_tx.send(AppEvent::ActionResult {
-            title: format!("ai_chunk:{}", active_ctx),
-            result: Err(format!("Failed to write cli-config.json: {}", e)),
-        });
-        let _ = event_tx.send(AppEvent::ActionResult {
-            title: format!("ai_done:{}", active_ctx),
-            result: Ok(String::new()),
-        });
-        return;
-    }
-
-    // Write .cursor/mcp.json to configure srelens MCP server
-    if let Err(e) = std::fs::write(
-        cursor_dir.join("mcp.json"),
-        srelens_agent::adapter::cursor_mcp_json(&url, &token_str),
-    ) {
-        let _ = shutdown_tx.send(());
-        let _ = event_tx.send(AppEvent::ActionResult {
-            title: format!("ai_chunk:{}", active_ctx),
-            result: Err(format!("Failed to write mcp.json: {}", e)),
-        });
-        let _ = event_tx.send(AppEvent::ActionResult {
-            title: format!("ai_done:{}", active_ctx),
-            result: Ok(String::new()),
-        });
-        return;
-    }
-
-    // 4. Construct cursor command with boxing flags
-    let prompt_with_context =
-        enrich_prompt_with_context(&query, &active_ctx, &active_ns, argo_hub_context.as_deref());
-    let cmd_spec = srelens_agent::adapter::cursor_command(
-        &cursor_bin,
-        &prompt_with_context,
-        &config.to_string_lossy(),
-        &workspace.to_string_lossy(),
-        resume.as_deref(),
-    );
-
-    let mut cmd = tokio::process::Command::new(&cmd_spec.program);
-    for (k, v) in &cmd_spec.env {
-        cmd.env(k, v);
-    }
-    let effective_key = api_key.filter(|k| !k.trim().is_empty()).or_else(|| {
-        std::env::var("CURSOR_API_KEY")
-            .ok()
-            .filter(|k| !k.trim().is_empty())
+    // Drained alongside stdout, or an agent writing past the pipe buffer
+    // would block on it and stall its stdout too.
+    let stderr = agent.0.stderr.take().map(|mut stderr| {
+        tokio::spawn(async move {
+            use tokio::io::AsyncReadExt;
+            let mut tail = Vec::new();
+            let mut buf = [0u8; 4096];
+            while let Ok(n @ 1..) = stderr.read(&mut buf).await {
+                tail.extend_from_slice(&buf[..n]);
+                tail.drain(..tail.len().saturating_sub(STDERR_TAIL));
+            }
+            tail
+        })
     });
+    let stdout = agent.0.stdout.take().expect("the agent's stdout is piped");
 
-    if let Some(ref key) = effective_key {
-        cmd.env("CURSOR_API_KEY", key);
-        std::env::set_var("CURSOR_API_KEY", key);
-    }
-
-    // Insert --api-key and --model BEFORE the trailing "--" and positional prompt
-    let mut final_args = Vec::new();
-    let dash_dash_idx = cmd_spec
-        .args
-        .iter()
-        .position(|a| a == "--")
-        .unwrap_or(cmd_spec.args.len());
-    for (i, arg) in cmd_spec.args.iter().enumerate() {
-        if i == dash_dash_idx {
-            if let Some(ref key) = effective_key {
-                final_args.push("--api-key".to_string());
-                final_args.push(key.clone());
-            }
-            if !model.is_empty() && model != "default" {
-                final_args.push("--model".to_string());
-                final_args.push(model.clone());
-            }
-        }
-        final_args.push(arg.clone());
-    }
-    cmd.args(&final_args);
-    cmd.stdout(std::process::Stdio::piped());
-    cmd.stderr(std::process::Stdio::piped());
-    cmd.kill_on_drop(true);
-
-    // 5. Spawn and stream results
-    match cmd.spawn() {
-        Ok(mut child) => {
-            let stderr_pipe = child.stderr.take();
-            let stderr_task = tokio::spawn(async move {
-                if let Some(stderr) = stderr_pipe {
-                    use tokio::io::{AsyncBufReadExt, BufReader};
-                    let mut reader = BufReader::new(stderr).lines();
-                    let mut lines = Vec::new();
-                    while let Ok(Some(l)) = reader.next_line().await {
-                        let trimmed = l.trim().to_string();
-                        if !trimmed.is_empty() {
-                            lines.push(trimmed);
-                        }
-                    }
-                    lines
-                } else {
-                    Vec::new()
-                }
-            });
-
-            let stdout_pipe = child.stdout.take();
-            let active_ctx_clone = active_ctx.clone();
-            let event_tx_clone = event_tx.clone();
-            let start_time_copy = start_time;
-
-            let mut chars_count = 0;
-            let mut emitted_usage = false;
-            let mut first_error = None;
-            let mut timed_out = false;
-            let mut captured_session_id: Option<String> = None;
-
-            if let Some(stdout) = stdout_pipe {
-                use tokio::io::{AsyncBufReadExt, BufReader};
-                let mut reader = BufReader::new(stdout).lines();
-                let inactivity_duration =
-                    std::time::Duration::from_secs(timeout_seconds.max(5) as u64);
-                let max_wall_clock = std::time::Duration::from_secs(900); // 15-minute global ceiling
-
-                loop {
-                    if start_time.elapsed() > max_wall_clock {
-                        timed_out = true;
-                        break;
-                    }
-                    match tokio::time::timeout(inactivity_duration, reader.next_line()).await {
-                        Ok(Ok(Some(line))) => {
-                            let trimmed = line.trim();
-                            if captured_session_id.is_none() {
-                                if let Some(ref id) = srelens_agent::stream_session_id(trimmed) {
-                                    captured_session_id = Some(id.clone());
-                                    let _ = event_tx_clone.send(AppEvent::ActionResult {
-                                        title: format!("ai_session:{}", active_ctx_clone),
-                                        result: Ok(format!("{}|{}", conversation_id, id)),
-                                    });
-                                }
-                            }
-                            if let Ok(v) = serde_json::from_str::<serde_json::Value>(trimmed) {
-                                if let Some((prompt_t, comp_t, cached_t, total_t, dur_t)) =
-                                    crate::app::extract_usage_metrics(&v)
-                                {
-                                    let dur_val = dur_t.unwrap_or_else(|| {
-                                        start_time_copy.elapsed().as_millis() as u64
-                                    });
-                                    let payload = format!(
-                                        "{}|{}|{}|{}|{}",
-                                        prompt_t, comp_t, cached_t, total_t, dur_val
-                                    );
-                                    let _ = event_tx_clone.send(AppEvent::ActionResult {
-                                        title: format!("ai_usage:{}", active_ctx_clone),
-                                        result: Ok(payload),
-                                    });
-                                    emitted_usage = true;
-                                }
-
-                                if let Some(t) = v.get("type").and_then(|s| s.as_str()) {
-                                    if t == "thinking" {
-                                        let _ = event_tx_clone.send(AppEvent::ActionResult {
-                                            title: format!("ai_status:{}", active_ctx_clone),
-                                            result: Ok(
-                                                "Thinking & analyzing cluster query...".to_string()
-                                            ),
-                                        });
-                                    } else if t == "tool_call" {
-                                        let subtype =
-                                            v.get("subtype").and_then(|s| s.as_str()).unwrap_or("");
-                                        if subtype == "started" {
-                                            if let Some((id, tool, args)) =
-                                                crate::app::extract_tool_call_start_info(&v)
-                                            {
-                                                let _ =
-                                                    event_tx_clone.send(AppEvent::ActionResult {
-                                                        title: format!(
-                                                            "ai_status:{}",
-                                                            active_ctx_clone
-                                                        ),
-                                                        result: Ok(format!(
-                                                            "Executing {} query on cluster...",
-                                                            tool
-                                                        )),
-                                                    });
-                                                let _ =
-                                                    event_tx_clone.send(AppEvent::ActionResult {
-                                                        title: format!(
-                                                            "ai_tool_start:{}",
-                                                            active_ctx_clone
-                                                        ),
-                                                        result: Ok(format!(
-                                                            "{}|{}|{}",
-                                                            id, tool, args
-                                                        )),
-                                                    });
-                                            }
-                                        } else if subtype == "completed" {
-                                            if let Some((id, is_err)) =
-                                                crate::app::extract_tool_call_completed_info(&v)
-                                            {
-                                                let status_str =
-                                                    if is_err { "error" } else { "ok" };
-                                                let _ =
-                                                    event_tx_clone.send(AppEvent::ActionResult {
-                                                        title: format!(
-                                                            "ai_tool_done:{}",
-                                                            active_ctx_clone
-                                                        ),
-                                                        result: Ok(format!(
-                                                            "{}|{}",
-                                                            id, status_str
-                                                        )),
-                                                    });
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-
-                            let events = srelens_agent::cursor::parse_line(&line);
-                            for ev in events {
-                                match ev {
-                                    srelens_agent::event::AgentEvent::TextDelta { text } => {
-                                        chars_count += text.len();
-                                        let _ = event_tx_clone.send(AppEvent::ActionResult {
-                                            title: format!("ai_chunk:{}", active_ctx_clone),
-                                            result: Ok(text),
-                                        });
-                                    }
-                                    srelens_agent::event::AgentEvent::Error { message } => {
-                                        if first_error.is_none() {
-                                            first_error = Some(message.clone());
-                                        }
-                                        let _ = event_tx_clone.send(AppEvent::ActionResult {
-                                            title: format!("ai_chunk:{}", active_ctx_clone),
-                                            result: Ok(format!("\n[Error: {}]", message)),
-                                        });
-                                    }
-                                    _ => {}
-                                }
-                            }
-                        }
-                        Ok(Ok(None)) => {
-                            // EOF on stdout: process finished emitting
-                            break;
-                        }
-                        Ok(Err(_)) => {
-                            // IO error reading stdout
-                            break;
-                        }
-                        Err(_) => {
-                            // Inactivity timeout expired!
-                            timed_out = true;
-                            break;
-                        }
-                    }
+    let last_activity = std::sync::atomic::AtomicU64::new(0);
+    let mut captured: Option<String> = None;
+    let mut usage: Option<(usize, usize, usize, usize, Option<u64>)> = None;
+    let mut out_chars = 0;
+    let mut said_anything = false;
+    // The CLI ended the turn itself (its own result or error).
+    let mut ended = false;
+    let read = async {
+        use tokio::io::AsyncBufReadExt;
+        let mut lines = tokio::io::BufReader::new(stdout).lines();
+        while let Ok(Some(line)) = lines.next_line().await {
+            last_activity.store(
+                started.elapsed().as_secs(),
+                std::sync::atomic::Ordering::Relaxed,
+            );
+            if captured.is_none() {
+                captured = srelens_agent::stream_session_id(&line);
+                if let Some(id) = &captured {
+                    send("ai_session", Ok(format!("{conversation_id}|{id}")));
                 }
             }
-
-            let stderr_lines = stderr_task.await.unwrap_or_default();
-            let mut crashed = timed_out;
-
-            if timed_out {
-                // Process timed out! Kill it so it doesn't leak in the background
-                let _ = child.kill().await;
-                let _ = event_tx.send(AppEvent::ActionResult {
-                    title: format!("ai_chunk:{}", active_ctx),
-                    result: Ok(format!(
-                        "\n[Error: Cursor Agent timed out after {} seconds. The upstream provider did not respond. You can increase the timeout in settings (<Ctrl+s>) or try another model.]",
-                        timeout_seconds
-                    )),
-                });
-            } else {
-                let wait_res =
-                    tokio::time::timeout(std::time::Duration::from_secs(5), child.wait()).await;
-                match wait_res {
-                    Ok(Ok(status)) => {
-                        if !status.success() {
-                            crashed = true;
-                        }
-                        if !status.success() || (chars_count == 0 && first_error.is_none()) {
-                            let mut err_detail = if let Some(msg) = first_error {
-                                msg
-                            } else if !stderr_lines.is_empty() {
-                                stderr_lines.join(" ")
-                            } else {
-                                format!("Cursor Agent exited with status: {} without generating output.", status)
-                            };
-
-                            if err_detail.contains("resource_exhausted")
-                                || err_detail.contains("503")
-                                || err_detail.contains("Provider Error")
-                            {
-                                err_detail = "Cursor model provider error (503 Service Unavailable / Resource Exhausted). Cursor's upstream API is temporarily failing. Try switching the model in settings (<Ctrl+s>) or try again in a few moments.".to_string();
-                            }
-
-                            let _ = event_tx.send(AppEvent::ActionResult {
-                                title: format!("ai_chunk:{}", active_ctx),
-                                result: Ok(format!("\n[Error: {}]", err_detail)),
-                            });
-                        }
+            if let Ok(v) = serde_json::from_str::<Value>(line.trim()) {
+                usage = crate::app::extract_usage_metrics(&v).or(usage);
+            }
+            for ev in parse_line(&line) {
+                match &ev {
+                    AgentEvent::TextDelta { text } => {
+                        out_chars += text.len();
+                        said_anything = true;
                     }
-                    Ok(Err(e)) => {
-                        crashed = true;
-                        let _ = event_tx.send(AppEvent::ActionResult {
-                            title: format!("ai_chunk:{}", active_ctx),
-                            result: Ok(format!(
-                                "\n[Error: Failed waiting for cursor-agent: {}]",
-                                e
-                            )),
-                        });
+                    AgentEvent::Error { .. } => {
+                        said_anything = true;
+                        ended = true;
                     }
-                    Err(_) => {
-                        crashed = true;
-                        let _ = child.kill().await;
+                    AgentEvent::TurnDone => ended = true,
+                    AgentEvent::Usage {
+                        prompt_tokens,
+                        completion_tokens,
+                        cached_tokens,
+                        total_tokens,
+                    } => {
+                        usage = Some((
+                            *prompt_tokens,
+                            *completion_tokens,
+                            *cached_tokens,
+                            *total_tokens,
+                            None,
+                        ))
                     }
+                    _ => {}
+                }
+                for (title, payload) in agent_event_actions(&ev, &ctx) {
+                    let _ = tx.send(AppEvent::ActionResult {
+                        title,
+                        result: Ok(payload),
+                    });
                 }
             }
-
-            let next_id = srelens_agent::next_resume_id(captured_session_id, resume, crashed);
-            let _ = event_tx.send(AppEvent::ActionResult {
-                title: format!("ai_session:{}", active_ctx),
-                result: Ok(format!(
-                    "{}|{}",
-                    conversation_id,
-                    next_id.unwrap_or_default()
-                )),
-            });
-
-            let _ = shutdown_tx.send(());
-            if !emitted_usage {
-                let dur_val = start_time.elapsed().as_millis() as u64;
-                let prompt_est = (prompt_with_context.len() + 500) / 4;
-                let comp_est = (chars_count / 4).max(1);
-                let total_est = prompt_est + comp_est;
-                let payload = format!(
-                    "{}|{}|{}|{}|{}",
-                    prompt_est, comp_est, 0, total_est, dur_val
-                );
-                let _ = event_tx.send(AppEvent::ActionResult {
-                    title: format!("ai_usage:{}", active_ctx),
-                    result: Ok(payload),
-                });
-            }
-            let _ = event_tx.send(AppEvent::ActionResult {
-                title: format!("ai_done:{}", active_ctx),
-                result: Ok(String::new()),
-            });
         }
-        Err(err) => {
-            let _ = shutdown_tx.send(());
-            let _ = event_tx.send(AppEvent::ActionResult {
-                title: format!("ai_session:{}", active_ctx),
-                result: Ok(format!("{}|", conversation_id)),
-            });
-            let _ = event_tx.send(AppEvent::ActionResult {
-                title: format!("ai_chunk:{}", active_ctx),
-                result: Err(format!("Failed to launch cursor-agent: {}", err)),
-            });
-            let _ = event_tx.send(AppEvent::ActionResult {
-                title: format!("ai_done:{}", active_ctx),
-                result: Ok(String::new()),
-            });
-        }
+    };
+    let timed_out = tokio::select! {
+        _ = read => false,
+        _ = stalled(started, &last_activity, &waiting, timeout_seconds.max(5) as u64) => true,
+    };
+
+    // An agent that closed its stdout but will not exit is ended, as is one
+    // that timed out, so its stderr closes too.
+    let status = if timed_out {
+        None
+    } else {
+        tokio::time::timeout(std::time::Duration::from_secs(5), agent.0.wait())
+            .await
+            .ok()
+            .and_then(Result::ok)
+    };
+    if status.is_none() {
+        srelens_agent::turn::kill_tree(&mut agent.0);
     }
+    let crashed = !status.is_some_and(|s| s.success());
+    let tail = match stderr {
+        Some(task) => tokio::time::timeout(std::time::Duration::from_secs(5), task)
+            .await
+            .ok()
+            .and_then(Result::ok)
+            .unwrap_or_default(),
+        None => Vec::new(),
+    };
+
+    let label = kind.label();
+    if timed_out {
+        send(
+            "ai_chunk",
+            Ok(format!(
+                "\n[Error: {label} timed out after {timeout_seconds} seconds. You can increase the timeout in settings (<Ctrl+s>) or try another model.]"
+            )),
+        );
+    } else if !said_anything || (!ended && status.is_some_and(|s| !s.success())) {
+        // A clean exit too: a CLI that changed its format, or reports a
+        // failure on stderr and exits 0, would otherwise end the turn blank.
+        // A failed exit after part of an answer, unless the CLI ended the
+        // turn itself, would otherwise read as a finished answer.
+        let why = match stderr_summary(&tail) {
+            why if !why.is_empty() => why,
+            _ if said_anything => format!("{label} stopped before it finished"),
+            _ => format!("{label} finished without an answer"),
+        };
+        send("ai_chunk", Ok(format!("\n[Error: {why}]")));
+    }
+
+    let next = srelens_agent::next_resume_id(captured, resume, crashed);
+    send(
+        "ai_session",
+        Ok(format!("{conversation_id}|{}", next.unwrap_or_default())),
+    );
+    let (p, c, cached, total) = resolve_token_usage(
+        usage.map(|(p, c, cached, total, _)| (p, c, cached, total)),
+        prompt.len(),
+        out_chars,
+    );
+    let ms = usage
+        .and_then(|u| u.4)
+        .unwrap_or_else(|| started.elapsed().as_millis() as u64);
+    send("ai_usage", Ok(format!("{p}|{c}|{cached}|{total}|{ms}")));
+    send("ai_done", Ok(String::new()));
 }
 
 /// Resolve token counts for an assistant turn: prefers provider-reported real usage,
@@ -992,11 +848,172 @@ pub fn resolve_token_usage(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use srelens_mcp::policy::{AlwaysDeny, ConfirmPolicy, ConsentKind, ConsentRequest, Decision};
+
+    /// A policy that writes down what it was asked and says no.
+    #[derive(Default)]
+    struct Recording(Mutex<Vec<ConsentRequest>>);
+
+    #[async_trait]
+    impl ConfirmPolicy for Recording {
+        async fn confirm(&self, request: &ConsentRequest) -> Decision {
+            self.0.lock().unwrap().push(request.clone());
+            Decision::Denied("recorded".into())
+        }
+    }
+
+    /// The call as the model makes it: the alias, not the dotted id. A
+    /// nonexistent kubeconfig is fine, the policy answers before any cluster call.
+    async fn call_with_recording(tool: &str, args: Value) -> (ToolCallResult, Vec<ConsentRequest>) {
+        let policy = Arc::new(Recording::default());
+        let cache = ClientCache::new(PathBuf::from("/nonexistent"));
+        let invoker = McpToolInvoker::new(build_mcp_server(cache, vec![], policy.clone()));
+        let result = invoker
+            .call_tool(tool, &args)
+            .await
+            .expect("the call completes");
+        let seen = policy.0.lock().unwrap().clone();
+        (result, seen)
+    }
+
+    #[tokio::test]
+    async fn a_gated_tool_call_from_the_native_agent_reaches_the_policy() {
+        let (result, seen) = call_with_recording(
+            "k8s_deletePod",
+            json!({ "context": "c", "namespace": "n", "name": "p" }),
+        )
+        .await;
+
+        assert!(result.denied, "a refusal is marked denied: {result:?}");
+        assert_eq!(seen.len(), 1, "the policy was asked once: {seen:?}");
+        assert_eq!(seen[0].tool, "k8s.deletePod");
+        assert_eq!(seen[0].kind, ConsentKind::Destructive);
+    }
+
+    #[tokio::test]
+    async fn a_secret_read_from_the_native_agent_reaches_the_policy() {
+        let (result, seen) = call_with_recording(
+            "k8s_getSecret",
+            json!({ "context": "c", "namespace": "n", "name": "s" }),
+        )
+        .await;
+
+        assert!(result.denied, "a refusal is marked denied: {result:?}");
+        assert_eq!(seen.len(), 1, "the policy was asked once: {seen:?}");
+        assert_eq!(seen[0].tool, "k8s.getSecret");
+        assert_eq!(seen[0].kind, ConsentKind::SensitiveRead);
+    }
+
+    #[test]
+    fn a_turn_held_up_on_the_user_is_not_counted_as_quiet() {
+        use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
+        let last_activity = AtomicU64::new(0);
+
+        // Nobody asked: the clock runs from the last event.
+        assert_eq!(quiet_secs(40, &last_activity, 0), 40);
+        // A prompt is open: the agent is waiting on the user, not stalled.
+        assert_eq!(quiet_secs(100, &last_activity, 1), 0);
+        assert_eq!(last_activity.load(Relaxed), 100);
+        // The user answers: the model gets the full limit from the answer, not
+        // from the event before the prompt.
+        assert_eq!(quiet_secs(103, &last_activity, 0), 3);
+    }
+
+    #[test]
+    fn agent_events_map_to_the_assistants_existing_titles() {
+        use srelens_agent::event::ToolStatus;
+        let pair = |t: &str, p: &str| (t.to_string(), p.to_string());
+        let cases = [
+            (
+                AgentEvent::TextDelta { text: "hi".into() },
+                vec![pair("ai_chunk:ctx", "hi")],
+            ),
+            (
+                AgentEvent::Thinking { text: "hmm".into() },
+                vec![pair("ai_status:ctx", "hmm")],
+            ),
+            (
+                AgentEvent::ToolCallStart {
+                    id: "t1".into(),
+                    tool: "k8s.listPods".into(),
+                    args: json!({ "namespace": "n" }),
+                },
+                vec![
+                    pair("ai_status:ctx", "Executing k8s.listPods..."),
+                    pair("ai_tool_start:ctx", r#"t1|k8s.listPods|{"namespace":"n"}"#),
+                ],
+            ),
+            (
+                AgentEvent::ToolResult {
+                    id: "t1".into(),
+                    status: ToolStatus::Denied,
+                    summary: None,
+                },
+                vec![pair("ai_tool_done:ctx", "t1|denied")],
+            ),
+            (
+                AgentEvent::ToolResult {
+                    id: "t2".into(),
+                    status: ToolStatus::Ok,
+                    summary: None,
+                },
+                vec![pair("ai_tool_done:ctx", "t2|ok")],
+            ),
+            // The runner sends usage once, with the turn's duration.
+            (
+                AgentEvent::Usage {
+                    prompt_tokens: 1,
+                    completion_tokens: 2,
+                    cached_tokens: 0,
+                    total_tokens: 3,
+                },
+                vec![],
+            ),
+            (AgentEvent::TurnDone, vec![]),
+            (
+                AgentEvent::Error {
+                    message: "m".into(),
+                },
+                vec![pair("ai_chunk:ctx", "\n[Error: m]")],
+            ),
+        ];
+        for (ev, want) in cases {
+            assert_eq!(agent_event_actions(&ev, "ctx"), want, "{ev:?}");
+        }
+    }
+
+    #[test]
+    fn the_cursor_key_rides_only_in_the_childs_env() {
+        let before = std::env::var_os("CURSOR_API_KEY");
+        let cmd = srelens_agent::adapter::AgentCommand {
+            program: "cursor-agent".into(),
+            args: vec!["-p".into(), "--".into(), "why?".into()],
+            env: vec![],
+            stdin: None,
+        };
+
+        let keyed = with_cursor_key(cmd.clone(), Some("cur-1"));
+
+        assert!(keyed
+            .env
+            .contains(&("CURSOR_API_KEY".to_string(), "cur-1".to_string())));
+        assert!(
+            !keyed.args.iter().any(|a| a.contains("cur-1")),
+            "{:?}",
+            keyed.args
+        );
+        assert_eq!(
+            std::env::var_os("CURSOR_API_KEY"),
+            before,
+            "srectl's own env is left alone"
+        );
+        assert_eq!(with_cursor_key(cmd.clone(), None), cmd);
+    }
 
     #[tokio::test]
     async fn test_mcp_tool_invoker_lists_and_maps_aliases() {
         let cache = ClientCache::new(PathBuf::from("/nonexistent"));
-        let server = build_mcp_server(cache, vec![]);
+        let server = build_mcp_server(cache, vec![], Arc::new(AlwaysDeny));
         let invoker = McpToolInvoker::new(server);
 
         let tools = invoker.list_tools().await.expect("list_tools succeeds");

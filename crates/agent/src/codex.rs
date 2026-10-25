@@ -1,6 +1,28 @@
 //! Parse Codex CLI `exec --json` lines into `AgentEvent`s.
 
+use crate::adapter::{valid_model_id, ModelChoice};
 use crate::event::{AgentEvent, ToolStatus};
+
+/// The models `codex debug models` offers a user: its catalog dump is
+/// `{"models":[{"slug","display_name","visibility",…}]}` with many more fields
+/// per model, which are ignored. Only `visibility: "list"` entries are
+/// offered (the rest are internal), and a slug `valid_model_id` refuses is
+/// skipped. Never errors: anything unparseable yields an empty list.
+pub fn parse_models(json: &str) -> Vec<ModelChoice> {
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(json) else {
+        return Vec::new();
+    };
+    let models = v.get("models").and_then(|m| m.as_array()).map(Vec::as_slice).unwrap_or_default();
+    models
+        .iter()
+        .filter(|m| m.get("visibility").and_then(|v| v.as_str()) == Some("list"))
+        .filter_map(|m| {
+            let id = m.get("slug")?.as_str().filter(|id| valid_model_id(id))?;
+            let label = m.get("display_name").and_then(|l| l.as_str()).filter(|l| !l.is_empty()).unwrap_or(id);
+            Some(ModelChoice { id: id.to_string(), label: label.to_string() })
+        })
+        .collect()
+}
 
 /// Parse one Codex JSONL line. Never errors: an unrecognized, malformed, or
 /// non-JSON line yields an empty vec, so a future line type the CLI adds is
@@ -291,6 +313,37 @@ mod tests {
             2
         );
         assert!(events.contains(&AgentEvent::TurnDone));
+    }
+
+    #[test]
+    fn only_models_codex_lists_for_users_are_offered() {
+        let j = r#"{"models":[{"slug":"gpt-reserve","display_name":"GPT-Reserve","visibility":"hide"},
+                              {"slug":"gpt-5.6-sol","display_name":"GPT-5.6-Sol","visibility":"list"}]}"#;
+        assert_eq!(parse_models(j), vec![ModelChoice { id: "gpt-5.6-sol".into(), label: "GPT-5.6-Sol".into() }]);
+        assert!(parse_models("not json").is_empty());
+    }
+
+    /// The real catalog dump carries dozens of fields per model; they, a
+    /// missing `display_name`, and an id that could pass for a flag are all
+    /// handled without dropping the good entries around them.
+    #[test]
+    fn extra_fields_are_ignored_and_unusable_entries_skipped() {
+        let j = r#"{"models":[
+            {"slug":"gpt-5.6-luna","visibility":"list","priority":3,"supported_reasoning_levels":[{"effort":"low"}]},
+            {"slug":"--dangerously-bypass","display_name":"Evil","visibility":"list"},
+            {"display_name":"No slug","visibility":"list"},
+            {"slug":"hidden-by-default","display_name":"Hidden"},
+            {"slug":"gpt-5.6-sol","display_name":"GPT-5.6-Sol","visibility":"list","description":"x"}
+        ]}"#;
+        assert_eq!(
+            parse_models(j),
+            vec![
+                ModelChoice { id: "gpt-5.6-luna".into(), label: "gpt-5.6-luna".into() },
+                ModelChoice { id: "gpt-5.6-sol".into(), label: "GPT-5.6-Sol".into() },
+            ]
+        );
+        assert!(parse_models(r#"{"models":"nope"}"#).is_empty());
+        assert!(parse_models("{}").is_empty());
     }
 
     #[test]

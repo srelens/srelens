@@ -534,6 +534,13 @@ mod tests {
             screen_selection: None,
             screen_selecting: false,
             screen_selection_text: std::cell::RefCell::new(String::new()),
+            consents: Default::default(),
+            consent_arm_delay: std::time::Duration::from_secs(1),
+            model_lists: Default::default(),
+            agent_search: srelens_kube::toolbox::SearchPaths {
+                app_path: String::new(),
+                system_path: String::new(),
+            },
         };
 
         // 1. Simulate streaming snapshot arrival for pods
@@ -646,6 +653,13 @@ mod tests {
             screen_selection: None,
             screen_selecting: false,
             screen_selection_text: std::cell::RefCell::new(String::new()),
+            consents: Default::default(),
+            consent_arm_delay: std::time::Duration::from_secs(1),
+            model_lists: Default::default(),
+            agent_search: srelens_kube::toolbox::SearchPaths {
+                app_path: String::new(),
+                system_path: String::new(),
+            },
         };
 
         // 1. Enter command mode by typing ':'
@@ -770,6 +784,13 @@ mod tests {
             screen_selection: None,
             screen_selecting: false,
             screen_selection_text: std::cell::RefCell::new(String::new()),
+            consents: Default::default(),
+            consent_arm_delay: std::time::Duration::from_secs(1),
+            model_lists: Default::default(),
+            agent_search: srelens_kube::toolbox::SearchPaths {
+                app_path: String::new(),
+                system_path: String::new(),
+            },
         };
 
         // 1. Switch to settings view via :settings command
@@ -836,27 +857,37 @@ mod tests {
             Some("sk-test-openai-key")
         );
 
-        // 7. Test navigating all the way to Cursor Agent
-        // Currently at OpenAi (index 1), press 'j' 3 times to get to Cursor (index 4)
+        // 7. Test navigating past the last provider, which reaches the Agent
+        // card above the list, and then the first provider again.
+        // Currently at OpenAi (index 1), press 'j' 4 times to get back to Anthropic (index 0)
         app.handle_key_event(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE))
             .await; // Gemini (2)
         app.handle_key_event(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE))
             .await; // OpenAICompatible (3)
         app.handle_key_event(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE))
-            .await; // Cursor (4)
+            .await; // the Agent card
+        if let ActiveView::Settings(s) = &app.active_view {
+            assert!(s.agent_card_focused);
+        }
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE))
+            .await; // Anthropic (0)
 
         if let ActiveView::Settings(s) = &app.active_view {
-            assert_eq!(s.current_provider(), AiProvider::Cursor);
+            assert!(!s.agent_card_focused);
+            assert_eq!(s.current_provider(), AiProvider::Anthropic);
+            assert_eq!(s.selected_field, SettingField::ProviderToggle);
         }
 
-        // Select Cursor as active provider
+        // Select Anthropic as active provider
         app.handle_key_event(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE))
             .await;
         app.handle_key_event(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE))
             .await;
-        assert_eq!(app.ai_settings.default_provider, AiProvider::Cursor);
+        assert_eq!(app.ai_settings.default_provider, AiProvider::Anthropic);
 
-        // 8. Currently at ApiKey, Tab twice to get to Timeout field
+        // 8. Currently at the provider row, Tab three times to get to Timeout field
+        app.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
+            .await; // ApiKey
         app.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
             .await; // Model
         app.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
@@ -888,7 +919,10 @@ mod tests {
         app.handle_key_event(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE))
             .await;
 
-        assert_eq!(app.ai_settings.get_timeout_seconds(AiProvider::Cursor), 240);
+        assert_eq!(
+            app.ai_settings.get_timeout_seconds(AiProvider::Anthropic),
+            240
+        );
 
         // 9. Test pasting into an edit buffer
         app.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
@@ -900,18 +934,471 @@ mod tests {
         if let ActiveView::Settings(s) = &app.active_view {
             assert_eq!(s.is_editing, true);
         }
-        app.handle_paste("pasted-cursor-api-key-12345".to_string());
+        app.handle_paste("pasted-anthropic-api-key-12345".to_string());
         if let ActiveView::Settings(s) = &app.active_view {
-            assert_eq!(s.edit_buffer, "pasted-cursor-api-key-12345");
+            assert_eq!(s.edit_buffer, "pasted-anthropic-api-key-12345");
         }
         app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
             .await;
         if let ActiveView::Settings(s) = &app.active_view {
             assert_eq!(s.is_editing, false);
             assert_eq!(
-                s.settings.get_api_key(AiProvider::Cursor).as_deref(),
-                Some("pasted-cursor-api-key-12345")
+                s.settings.get_api_key(AiProvider::Anthropic).as_deref(),
+                Some("pasted-anthropic-api-key-12345")
             );
+        }
+    }
+
+    fn settings_view(app: &srectl::app::App) -> &srectl::views::SettingsViewState {
+        match &app.active_view {
+            srectl::app::ActiveView::Settings(s) => s,
+            _ => panic!("expected the settings view"),
+        }
+    }
+
+    /// The Settings view with the cursor on Anthropic, the first provider.
+    async fn open_settings(app: &mut srectl::app::App) {
+        app.switch_view_to_kind(ResourceKind::Settings).await;
+        match &mut app.active_view {
+            srectl::app::ActiveView::Settings(s) => s.selected_provider_idx = 0,
+            _ => panic!("expected the settings view"),
+        }
+    }
+
+    #[tokio::test]
+    async fn k_from_the_first_provider_reaches_the_agent_card() {
+        use crossterm::event::KeyCode;
+        use srectl::ai_config::AiProvider;
+        use srectl::views::SettingField;
+        let _settings = crate::common::env::isolate_settings();
+        let (mut app, _rx) = crate::common::app().await;
+        open_settings(&mut app).await;
+
+        app.handle_key_event(crate::common::ch('k')).await;
+        let s = settings_view(&app);
+        assert!(s.agent_card_focused);
+        assert_eq!(s.selected_field, SettingField::Agent);
+
+        // Up again wraps to the last provider; down comes back to the card
+        // and down once more to the first provider.
+        app.handle_key_event(crate::common::key(KeyCode::Up)).await;
+        assert_eq!(
+            settings_view(&app).current_provider(),
+            AiProvider::OpenAiCompatible
+        );
+        app.handle_key_event(crate::common::key(KeyCode::Down))
+            .await;
+        assert!(settings_view(&app).agent_card_focused);
+        app.handle_key_event(crate::common::ch('j')).await;
+        let s = settings_view(&app);
+        assert!(!s.agent_card_focused);
+        assert_eq!(s.current_provider(), AiProvider::Anthropic);
+    }
+
+    #[tokio::test]
+    async fn space_on_the_agent_field_moves_to_the_next_agent_and_saves() {
+        use crossterm::event::KeyCode;
+        use srectl::views::SettingField;
+        use srelens_agent::adapter::AgentKind;
+        let _settings = crate::common::env::isolate_settings();
+        let (mut app, _rx) = crate::common::app().await;
+        open_settings(&mut app).await;
+        app.handle_key_event(crate::common::ch('k')).await;
+        assert_eq!(settings_view(&app).selected_field, SettingField::Agent);
+        assert_eq!(app.ai_settings.agent, AgentKind::Srelens);
+
+        // Space, Enter and `e` each take one step: srelens, Claude Code,
+        // Codex, Cursor, and round to srelens.
+        let keys = [
+            crate::common::ch(' '),
+            crate::common::key(KeyCode::Enter),
+            crate::common::ch('e'),
+            crate::common::ch(' '),
+        ];
+        let agents = [
+            AgentKind::Claude,
+            AgentKind::Codex,
+            AgentKind::Cursor,
+            AgentKind::Srelens,
+        ];
+        for (k, agent) in keys.into_iter().zip(agents) {
+            app.handle_key_event(k).await;
+            assert_eq!(app.ai_settings.agent, agent, "the Assistant follows");
+            assert_eq!(settings_view(&app).settings.agent, agent);
+            let saved = std::fs::read_to_string(srectl::AiSettings::config_path())
+                .expect("the choice is saved at once");
+            assert_eq!(
+                srectl::AiSettings::from_json(&saved).unwrap().agent,
+                agent,
+                "{saved}"
+            );
+            assert!(!settings_view(&app).is_editing, "no edit box for an agent");
+            // The default provider is not what Space changed.
+            assert_eq!(
+                app.ai_settings.default_provider,
+                srectl::AiSettings::default().default_provider
+            );
+        }
+
+        app.handle_key_event(crate::common::ch(' ')).await;
+        let screen = crate::common::render_app(&mut app, 160, 40);
+        assert!(
+            screen.contains("Assistant agent set to Claude Code"),
+            "{screen}"
+        );
+        let saved = std::fs::read_to_string(srectl::AiSettings::config_path()).unwrap();
+        let saved: serde_json::Value = serde_json::from_str(&saved).unwrap();
+        assert_eq!(saved["agent"], "claude");
+    }
+
+    #[tokio::test]
+    async fn e_on_the_agent_cards_model_field_opens_the_active_agents_picker() {
+        use crossterm::event::KeyCode;
+        use srectl::ai_config::AiProvider;
+        use srectl::views::settings_view::PickerTarget;
+        use srelens_agent::adapter::AgentKind;
+        let mut settings = crate::common::env::isolate_settings();
+        // No provider key to ask a provider with.
+        settings.remove_env("ANTHROPIC_API_KEY");
+        let (mut app, _rx) = crate::common::app().await;
+        open_settings(&mut app).await;
+        app.handle_key_event(crate::common::ch('k')).await;
+        app.handle_key_event(crate::common::key(KeyCode::Tab)).await;
+        assert_eq!(
+            settings_view(&app).selected_field,
+            srectl::views::SettingField::Model
+        );
+
+        // srelens answers through the default provider: its models.
+        app.handle_key_event(crate::common::ch('e')).await;
+        let picker = settings_view(&app).picker.as_ref().expect("a picker");
+        assert_eq!(picker.target, PickerTarget::Provider(AiProvider::Anthropic));
+        assert!(!settings_view(&app).is_editing);
+        app.handle_key_event(crate::common::key(KeyCode::Esc)).await;
+        assert!(settings_view(&app).picker.is_none());
+
+        // Space on the card steps the agent whichever of its fields is
+        // focused; the Model field then lists that agent's models.
+        app.handle_key_event(crate::common::ch(' ')).await;
+        assert_eq!(app.ai_settings.agent, AgentKind::Claude);
+        app.handle_key_event(crate::common::key(KeyCode::Enter))
+            .await;
+        let picker = settings_view(&app).picker.as_ref().expect("a picker");
+        assert_eq!(picker.target, PickerTarget::Agent(AgentKind::Claude));
+    }
+
+    #[tokio::test]
+    async fn cursors_api_key_is_set_and_cleared_on_the_agent_card_and_shown_masked() {
+        use crossterm::event::KeyCode;
+        use srectl::views::SettingField;
+        use srelens_agent::adapter::AgentKind;
+        const KEY: &str = "cur-test-key-0123456789";
+        let mut settings = crate::common::env::isolate_settings();
+        settings.remove_env("CURSOR_API_KEY");
+        let (mut app, _rx) = crate::common::app().await;
+        open_settings(&mut app).await;
+        match &mut app.active_view {
+            srectl::app::ActiveView::Settings(s) => s.settings.agent = AgentKind::Claude,
+            _ => panic!("expected the settings view"),
+        }
+        app.handle_key_event(crate::common::ch('k')).await;
+
+        // Claude Code has no key of its own here: Agent, Model and Timeout.
+        for _ in 0..3 {
+            app.handle_key_event(crate::common::key(KeyCode::Tab)).await;
+        }
+        assert_eq!(settings_view(&app).selected_field, SettingField::Agent);
+        let screen = crate::common::render_app(&mut app, 160, 40);
+        assert!(!screen.contains("cursor auth"), "{screen}");
+
+        // Cursor's card has its API Key, after its Model.
+        match &mut app.active_view {
+            srectl::app::ActiveView::Settings(s) => s.settings.agent = AgentKind::Cursor,
+            _ => panic!("expected the settings view"),
+        }
+        let screen = crate::common::render_app(&mut app, 160, 40);
+        assert!(
+            screen.contains("API Key: auto (uses logged-in cursor auth or CURSOR_API_KEY)"),
+            "{screen}"
+        );
+        app.handle_key_event(crate::common::key(KeyCode::Tab)).await;
+        app.handle_key_event(crate::common::key(KeyCode::Tab)).await;
+        assert_eq!(settings_view(&app).selected_field, SettingField::ApiKey);
+
+        app.handle_key_event(crate::common::ch('e')).await;
+        assert!(settings_view(&app).is_editing);
+        crate::common::type_str(&mut app, KEY).await;
+        app.handle_key_event(crate::common::key(KeyCode::Enter))
+            .await;
+        assert_eq!(app.ai_settings.get_cursor_key().as_deref(), Some(KEY));
+        let saved = std::fs::read_to_string(srectl::AiSettings::config_path()).unwrap();
+        let saved = srectl::AiSettings::from_json(&saved).unwrap();
+        assert_eq!(saved.api_keys.get("cursor").map(String::as_str), Some(KEY));
+        let screen = crate::common::render_app(&mut app, 160, 40);
+        assert!(
+            screen.contains("API Key: cur-••••••••6789 [stored in config]"),
+            "{screen}"
+        );
+        assert!(!screen.contains(KEY), "the key is never shown whole");
+
+        // An empty value clears it.
+        app.handle_key_event(crate::common::ch('e')).await;
+        for _ in 0..KEY.len() {
+            app.handle_key_event(crate::common::key(KeyCode::Backspace))
+                .await;
+        }
+        app.handle_key_event(crate::common::key(KeyCode::Enter))
+            .await;
+        assert_eq!(app.ai_settings.api_keys.get("cursor"), None);
+
+        // Set in the environment instead, it is named, not shown.
+        settings.set_env("CURSOR_API_KEY", KEY);
+        let screen = crate::common::render_app(&mut app, 160, 40);
+        assert!(
+            screen.contains("API Key: [env: CURSOR_API_KEY set]"),
+            "{screen}"
+        );
+        assert!(!screen.contains(KEY), "{screen}");
+
+        // Space from the key steps to an agent without one: back on Agent.
+        app.handle_key_event(crate::common::ch(' ')).await;
+        assert_eq!(app.ai_settings.agent, AgentKind::Srelens);
+        assert_eq!(settings_view(&app).selected_field, SettingField::Agent);
+    }
+
+    /// A local agent's turn timeout is its own, set on the Agent card after
+    /// its model (and Cursor's key), and leaves the provider's alone.
+    #[tokio::test]
+    async fn a_local_agents_timeout_is_set_on_the_agent_card() {
+        use crossterm::event::KeyCode;
+        use srectl::views::SettingField;
+        use srelens_agent::adapter::AgentKind;
+        let _settings = crate::common::env::isolate_settings();
+        let (mut app, _rx) = crate::common::app().await;
+        open_settings(&mut app).await;
+        let provider = app.ai_settings.default_provider;
+        let provider_timeout = app.ai_settings.get_timeout_seconds(provider);
+        match &mut app.active_view {
+            srectl::app::ActiveView::Settings(s) => s.settings.agent = AgentKind::Codex,
+            _ => panic!("expected the settings view"),
+        }
+        app.handle_key_event(crate::common::ch('k')).await;
+        app.handle_key_event(crate::common::key(KeyCode::Tab)).await;
+        app.handle_key_event(crate::common::key(KeyCode::Tab)).await;
+        assert_eq!(settings_view(&app).selected_field, SettingField::Timeout);
+
+        app.handle_key_event(crate::common::ch('e')).await;
+        for _ in 0..5 {
+            app.handle_key_event(crate::common::key(KeyCode::Backspace))
+                .await;
+        }
+        crate::common::type_str(&mut app, "300").await;
+        app.handle_key_event(crate::common::key(KeyCode::Enter))
+            .await;
+
+        assert_eq!(
+            app.ai_settings.get_agent_timeout_seconds(AgentKind::Codex),
+            300
+        );
+        assert_eq!(
+            app.ai_settings.get_timeout_seconds(provider),
+            provider_timeout
+        );
+        let saved = std::fs::read_to_string(srectl::AiSettings::config_path()).unwrap();
+        let saved = srectl::AiSettings::from_json(&saved).unwrap();
+        assert_eq!(saved.get_agent_timeout_seconds(AgentKind::Codex), 300);
+        let screen = crate::common::render_app(&mut app, 160, 40);
+        assert!(screen.contains("Timeout: 300s"), "{screen}");
+    }
+
+    const CLAUDE_URL: &str = "https://docs.anthropic.com/en/docs/claude-code/setup";
+
+    /// The Settings view with Claude Code as the agent and no agent CLI
+    /// found (`common::app` looks for none), and the settings guard the app
+    /// was made under.
+    async fn open_settings_with_claude_missing(
+    ) -> (crate::common::env::SettingsGuard, srectl::app::App) {
+        let settings = crate::common::env::isolate_settings();
+        let (mut app, _rx) = crate::common::app().await;
+        open_settings(&mut app).await;
+        match &mut app.active_view {
+            srectl::app::ActiveView::Settings(s) => {
+                s.settings.agent = srelens_agent::adapter::AgentKind::Claude
+            }
+            _ => panic!("expected the settings view"),
+        }
+        (settings, app)
+    }
+
+    // Through the real chrome (3 header rows, 2 footer rows, the view's border)
+    // Claude's full card (with its timeout row) needs a 41-row terminal.
+    #[tokio::test]
+    async fn a_folded_agent_card_still_says_whether_the_active_agent_is_installed() {
+        let (_settings, mut app) = open_settings_with_claude_missing().await;
+
+        let full = crate::common::render_app(&mut app, 120, 41);
+        assert!(full.contains("○ Codex"), "{full}");
+
+        let folded = crate::common::render_app(&mut app, 120, 40);
+        assert!(!folded.contains("○ Codex"), "{folded}");
+        assert!(
+            folded.contains(&format!(
+                "Agent: ● Claude Code · Default · not installed — {CLAUDE_URL}"
+            )),
+            "{folded}"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_agent_card_is_drawn_in_full_while_it_has_the_cursor() {
+        let (_settings, mut app) = open_settings_with_claude_missing().await;
+        app.handle_key_event(crate::common::ch('k')).await;
+
+        let screen = crate::common::render_app(&mut app, 120, 39);
+        for row in ["○ srelens", "● Claude Code", "○ Codex", "○ Cursor"] {
+            assert!(screen.contains(row), "{row}: {screen}");
+        }
+        assert!(screen.contains("Model:   Default"), "{screen}");
+
+        // Back on a provider, the card folds again.
+        app.handle_key_event(crate::common::ch('j')).await;
+        let screen = crate::common::render_app(&mut app, 120, 39);
+        assert!(!screen.contains("○ Codex"), "{screen}");
+    }
+
+    #[tokio::test]
+    async fn an_install_link_wider_than_the_card_moves_to_its_own_line() {
+        let (_settings, mut app) = open_settings_with_claude_missing().await;
+
+        // The full card, with room: the row is 83 columns, the card 76.
+        let screen = crate::common::render_app(&mut app, 80, 60);
+        assert!(
+            screen.contains(&format!("not installed — {CLAUDE_URL}")),
+            "{screen}"
+        );
+
+        // The folded card on a classic 80x24 terminal.
+        let screen = crate::common::render_app(&mut app, 80, 24);
+        assert!(!screen.contains("○ Codex"), "{screen}");
+        assert!(
+            screen.contains(&format!("not installed — {CLAUDE_URL}")),
+            "{screen}"
+        );
+        assert!(
+            screen.contains("Agent: ● Claude Code · Default"),
+            "{screen}"
+        );
+    }
+
+    // The classic 80x24 terminal: 17 rows inside the chrome and the view's
+    // border, of which the description takes 3 and the hints 2.
+
+    /// A fake `codex` as the only agent CLI the app finds, then the Settings
+    /// view with `agent` active.
+    async fn open_settings_on_a_small_terminal(
+        bin: &std::path::Path,
+        agent: srelens_agent::adapter::AgentKind,
+    ) -> srectl::app::App {
+        let (name, body) = if cfg!(windows) {
+            ("codex.cmd", "@echo off\r\n")
+        } else {
+            ("codex", "#!/bin/sh\n")
+        };
+        let codex = bin.join(name);
+        std::fs::write(&codex, body).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&codex, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let (mut app, _rx) = crate::common::app().await;
+        app.agent_search = crate::common::agents_only_in(bin);
+        open_settings(&mut app).await;
+        match &mut app.active_view {
+            srectl::app::ActiveView::Settings(s) => s.settings.agent = agent,
+            _ => panic!("expected the settings view"),
+        }
+        app
+    }
+
+    #[tokio::test]
+    async fn on_80x24_an_installed_agent_shows_on_the_folded_card() {
+        let _settings = crate::common::env::isolate_settings();
+        let bin = tempfile::tempdir().unwrap();
+        let mut app =
+            open_settings_on_a_small_terminal(bin.path(), srelens_agent::adapter::AgentKind::Codex)
+                .await;
+
+        let screen = crate::common::render_app(&mut app, 80, 24);
+        assert!(
+            screen.contains("Agent: ● Codex · Default · installed"),
+            "{screen}"
+        );
+        assert!(screen.contains("1. Anthropic (Claude)"), "{screen}");
+    }
+
+    #[tokio::test]
+    async fn on_80x24_srelens_shows_on_the_folded_card_and_the_first_provider_keeps_its_fields() {
+        let _settings = crate::common::env::isolate_settings();
+        let bin = tempfile::tempdir().unwrap();
+        let mut app = open_settings_on_a_small_terminal(
+            bin.path(),
+            srelens_agent::adapter::AgentKind::Srelens,
+        )
+        .await;
+
+        let screen = crate::common::render_app(&mut app, 80, 24);
+        assert!(
+            screen.contains("Agent: ● srelens · Anthropic (Claude) · claude-3-7-sonnet-20250219"),
+            "{screen}"
+        );
+        // The providers fill the rows in order at their natural height; the
+        // first one has every row, and the rest are cut off at the bottom.
+        assert!(screen.contains("1. Anthropic (Claude)"), "{screen}");
+        assert!(screen.contains("API Key:"), "{screen}");
+        assert!(
+            screen.contains("Model:   claude-3-7-sonnet-20250219"),
+            "{screen}"
+        );
+    }
+
+    #[tokio::test]
+    async fn on_80x24_a_missing_agent_and_the_first_provider_are_both_readable() {
+        let _settings = crate::common::env::isolate_settings();
+        let bin = tempfile::tempdir().unwrap();
+        let mut app = open_settings_on_a_small_terminal(
+            bin.path(),
+            srelens_agent::adapter::AgentKind::Claude,
+        )
+        .await;
+
+        let screen = crate::common::render_app(&mut app, 80, 24);
+        assert!(
+            screen.contains(&format!("not installed — {CLAUDE_URL}")),
+            "{screen}"
+        );
+        assert!(screen.contains("1. Anthropic (Claude)"), "{screen}");
+    }
+
+    #[tokio::test]
+    async fn on_80x24_the_selected_provider_never_leaves_the_screen() {
+        let _settings = crate::common::env::isolate_settings();
+        let bin = tempfile::tempdir().unwrap();
+        let mut app = open_settings_on_a_small_terminal(
+            bin.path(),
+            srelens_agent::adapter::AgentKind::Srelens,
+        )
+        .await;
+
+        for name in [
+            "2. OpenAI (GPT-4o)",
+            "3. Google Gemini",
+            "4. OpenAI-Compatible / Ollama (Local)",
+        ] {
+            app.handle_key_event(crate::common::ch('j')).await;
+            let screen = crate::common::render_app(&mut app, 80, 24);
+            assert!(screen.contains(name), "{name}: {screen}");
+            assert!(screen.contains("Agent: ● srelens"), "{name}: {screen}");
         }
     }
 
@@ -997,6 +1484,13 @@ mod tests {
             screen_selection: None,
             screen_selecting: false,
             screen_selection_text: std::cell::RefCell::new(String::new()),
+            consents: Default::default(),
+            consent_arm_delay: std::time::Duration::from_secs(1),
+            model_lists: Default::default(),
+            agent_search: srelens_kube::toolbox::SearchPaths {
+                app_path: String::new(),
+                system_path: String::new(),
+            },
         };
 
         // 1. In Assistant view, typing 's' when input is empty should type 's' into prompt, NOT jump to settings!
@@ -1229,6 +1723,13 @@ mod tests {
             screen_selection: None,
             screen_selecting: false,
             screen_selection_text: std::cell::RefCell::new(String::new()),
+            consents: Default::default(),
+            consent_arm_delay: std::time::Duration::from_secs(1),
+            model_lists: Default::default(),
+            agent_search: srelens_kube::toolbox::SearchPaths {
+                app_path: String::new(),
+                system_path: String::new(),
+            },
         };
 
         // 1. User starts turn in Assistant view
@@ -1321,52 +1822,6 @@ mod tests {
             .content
             .contains("Hello! I am your SRElens AI Assistant"));
         assert!(ai.messages[0].tool_calls.is_empty());
-    }
-
-    #[test]
-    fn test_filter_out_hook_additional_contexts() {
-        use srectl::app::extract_tool_call_start_info;
-
-        // JSON emitted by cursor-agent with both real tool (bashToolCall) and hookAdditionalContexts
-        let json_str = r#"{
-            "type": "tool_call",
-            "subtype": "started",
-            "call_id": "call_123",
-            "tool_call": {
-                "hookAdditionalContexts": [],
-                "bashToolCall": {
-                    "args": {
-                        "command": "kubectl get pods -A"
-                    }
-                },
-                "toolCallId": "call_123",
-                "startedAtMs": "1786359191055"
-            }
-        }"#;
-        let v: serde_json::Value = serde_json::from_str(json_str).unwrap();
-        let extracted = extract_tool_call_start_info(&v);
-        assert!(extracted.is_some());
-        let (id, tool, args) = extracted.unwrap();
-        assert_eq!(id, "call_123");
-        assert_eq!(tool, "bash");
-        assert_eq!(args, "kubectl get pods -A");
-
-        // JSON with ONLY hookAdditionalContexts metadata and no real ToolCall
-        let json_hook_only = r#"{
-            "type": "tool_call",
-            "subtype": "started",
-            "call_id": "call_999",
-            "tool_call": {
-                "hookAdditionalContexts": [],
-                "toolCallId": "call_999"
-            }
-        }"#;
-        let v_hook: serde_json::Value = serde_json::from_str(json_hook_only).unwrap();
-        let extracted_hook = extract_tool_call_start_info(&v_hook);
-        assert!(
-            extracted_hook.is_none(),
-            "hookAdditionalContexts without a ToolCall key should be ignored"
-        );
     }
 
     #[tokio::test]
@@ -1466,6 +1921,13 @@ mod tests {
             screen_selection: None,
             screen_selecting: false,
             screen_selection_text: std::cell::RefCell::new(String::new()),
+            consents: Default::default(),
+            consent_arm_delay: std::time::Duration::from_secs(1),
+            model_lists: Default::default(),
+            agent_search: srelens_kube::toolbox::SearchPaths {
+                app_path: String::new(),
+                system_path: String::new(),
+            },
         };
 
         // 1. Enter filter mode with '/'
@@ -1631,6 +2093,13 @@ mod tests {
             screen_selection: None,
             screen_selecting: false,
             screen_selection_text: std::cell::RefCell::new(String::new()),
+            consents: Default::default(),
+            consent_arm_delay: std::time::Duration::from_secs(1),
+            model_lists: Default::default(),
+            agent_search: srelens_kube::toolbox::SearchPaths {
+                app_path: String::new(),
+                system_path: String::new(),
+            },
         };
 
         // Press 'f' (or 'F') on the selected pod -> opens PortForward modal with detected port 3000
@@ -2012,6 +2481,13 @@ mod tests {
             screen_selection: None,
             screen_selecting: false,
             screen_selection_text: std::cell::RefCell::new(String::new()),
+            consents: Default::default(),
+            consent_arm_delay: std::time::Duration::from_secs(1),
+            model_lists: Default::default(),
+            agent_search: srelens_kube::toolbox::SearchPaths {
+                app_path: String::new(),
+                system_path: String::new(),
+            },
         };
 
         // Initially without metrics, extract_field_str returns "-"
@@ -2052,7 +2528,8 @@ mod tests {
         use std::path::PathBuf;
 
         let client_cache = ClientCache::new(PathBuf::from("/nonexistent"));
-        let server = build_mcp_server(client_cache, vec![]);
+        let policy = std::sync::Arc::new(srelens_mcp::policy::FlagGated::new(false, true));
+        let server = build_mcp_server(client_cache, vec![], policy);
         let invoker = McpToolInvoker::new(server);
 
         // 1. Tool listing returns all k8s capabilities with provider-safe names
@@ -2173,6 +2650,13 @@ mod tests {
             screen_selection: None,
             screen_selecting: false,
             screen_selection_text: std::cell::RefCell::new(String::new()),
+            consents: Default::default(),
+            consent_arm_delay: std::time::Duration::from_secs(1),
+            model_lists: Default::default(),
+            agent_search: srelens_kube::toolbox::SearchPaths {
+                app_path: String::new(),
+                system_path: String::new(),
+            },
         };
 
         // 1. Test paste handling into Assistant input
@@ -2285,6 +2769,13 @@ mod tests {
             screen_selection: None,
             screen_selecting: false,
             screen_selection_text: std::cell::RefCell::new(String::new()),
+            consents: Default::default(),
+            consent_arm_delay: std::time::Duration::from_secs(1),
+            model_lists: Default::default(),
+            agent_search: srelens_kube::toolbox::SearchPaths {
+                app_path: String::new(),
+                system_path: String::new(),
+            },
         };
 
         // When input is empty, typing '?' opens help modal
@@ -2391,6 +2882,13 @@ mod tests {
             screen_selection: None,
             screen_selecting: false,
             screen_selection_text: std::cell::RefCell::new(String::new()),
+            consents: Default::default(),
+            consent_arm_delay: std::time::Duration::from_secs(1),
+            model_lists: Default::default(),
+            agent_search: srelens_kube::toolbox::SearchPaths {
+                app_path: String::new(),
+                system_path: String::new(),
+            },
         };
 
         // Set viewport and simulate tool chip line at index 2
@@ -2545,6 +3043,13 @@ mod tests {
             screen_selection: None,
             screen_selecting: false,
             screen_selection_text: std::cell::RefCell::new(String::new()),
+            consents: Default::default(),
+            consent_arm_delay: std::time::Duration::from_secs(1),
+            model_lists: Default::default(),
+            agent_search: srelens_kube::toolbox::SearchPaths {
+                app_path: String::new(),
+                system_path: String::new(),
+            },
         };
 
         // Simulate header chips at columns 12..25 (prod-eu) and 26..40 (kind-dev) on row 0
@@ -2734,6 +3239,13 @@ mod tests {
             screen_selection: None,
             screen_selecting: false,
             screen_selection_text: std::cell::RefCell::new(String::new()),
+            consents: Default::default(),
+            consent_arm_delay: std::time::Duration::from_secs(1),
+            model_lists: Default::default(),
+            agent_search: srelens_kube::toolbox::SearchPaths {
+                app_path: String::new(),
+                system_path: String::new(),
+            },
         };
 
         // 1. In data-processing-prod-eu-dus1, user has a conversation
@@ -2932,6 +3444,13 @@ mod tests {
             screen_selection: None,
             screen_selecting: false,
             screen_selection_text: std::cell::RefCell::new(String::new()),
+            consents: Default::default(),
+            consent_arm_delay: std::time::Duration::from_secs(1),
+            model_lists: Default::default(),
+            agent_search: srelens_kube::toolbox::SearchPaths {
+                app_path: String::new(),
+                system_path: String::new(),
+            },
         };
 
         // 1. Pressing 'c' on the selected row copies the resource name!
@@ -3061,6 +3580,13 @@ mod tests {
             screen_selection: None,
             screen_selecting: false,
             screen_selection_text: std::cell::RefCell::new(String::new()),
+            consents: Default::default(),
+            consent_arm_delay: std::time::Duration::from_secs(1),
+            model_lists: Default::default(),
+            agent_search: srelens_kube::toolbox::SearchPaths {
+                app_path: String::new(),
+                system_path: String::new(),
+            },
         };
 
         // 1. Switch view to Overview
@@ -3588,6 +4114,13 @@ mod tests {
             screen_selection: None,
             screen_selecting: false,
             screen_selection_text: std::cell::RefCell::new(String::new()),
+            consents: Default::default(),
+            consent_arm_delay: std::time::Duration::from_secs(1),
+            model_lists: Default::default(),
+            agent_search: srelens_kube::toolbox::SearchPaths {
+                app_path: String::new(),
+                system_path: String::new(),
+            },
         };
 
         // 1. Press 'c' -> Copies selected pod name
@@ -3756,6 +4289,13 @@ mod tests {
             screen_selection: None,
             screen_selecting: false,
             screen_selection_text: std::cell::RefCell::new(String::new()),
+            consents: Default::default(),
+            consent_arm_delay: std::time::Duration::from_secs(1),
+            model_lists: Default::default(),
+            agent_search: srelens_kube::toolbox::SearchPaths {
+                app_path: String::new(),
+                system_path: String::new(),
+            },
         };
 
         // 1. Press 'Ctrl+d' on Deployment -> Delete confirmation modal
@@ -4041,6 +4581,13 @@ mod tests {
             screen_selection: None,
             screen_selecting: false,
             screen_selection_text: std::cell::RefCell::new(String::new()),
+            consents: Default::default(),
+            consent_arm_delay: std::time::Duration::from_secs(1),
+            model_lists: Default::default(),
+            agent_search: srelens_kube::toolbox::SearchPaths {
+                app_path: String::new(),
+                system_path: String::new(),
+            },
         };
 
         // 1. Press 'x' on Deployment -> Opens Action Palette
@@ -4196,6 +4743,13 @@ mod tests {
             screen_selection: None,
             screen_selecting: false,
             screen_selection_text: std::cell::RefCell::new(String::new()),
+            consents: Default::default(),
+            consent_arm_delay: std::time::Duration::from_secs(1),
+            model_lists: Default::default(),
+            agent_search: srelens_kube::toolbox::SearchPaths {
+                app_path: String::new(),
+                system_path: String::new(),
+            },
         };
 
         // 1. Press 't' on Pod -> Opens Tree View
@@ -4348,6 +4902,13 @@ mod tests {
             screen_selection: None,
             screen_selecting: false,
             screen_selection_text: std::cell::RefCell::new(String::new()),
+            consents: Default::default(),
+            consent_arm_delay: std::time::Duration::from_secs(1),
+            model_lists: Default::default(),
+            agent_search: srelens_kube::toolbox::SearchPaths {
+                app_path: String::new(),
+                system_path: String::new(),
+            },
         };
 
         // 1. Pressing 'x' on Node table opens Action Palette with 'InspectNode'
@@ -4576,6 +5137,13 @@ mod tests {
             screen_selection: None,
             screen_selecting: false,
             screen_selection_text: std::cell::RefCell::new(String::new()),
+            consents: Default::default(),
+            consent_arm_delay: std::time::Duration::from_secs(1),
+            model_lists: Default::default(),
+            agent_search: srelens_kube::toolbox::SearchPaths {
+                app_path: String::new(),
+                system_path: String::new(),
+            },
         };
 
         // 1. Click on row at y = 3 + 2 + 5 = 10 -> row 5
@@ -4802,6 +5370,13 @@ mod tests {
             screen_selection: None,
             screen_selecting: false,
             screen_selection_text: std::cell::RefCell::new(String::new()),
+            consents: Default::default(),
+            consent_arm_delay: std::time::Duration::from_secs(1),
+            model_lists: Default::default(),
+            agent_search: srelens_kube::toolbox::SearchPaths {
+                app_path: String::new(),
+                system_path: String::new(),
+            },
         };
 
         // 1. In Describe mode: press '/' to enter search mode
@@ -5840,6 +6415,13 @@ mod tests {
             screen_selection: None,
             screen_selecting: false,
             screen_selection_text: std::cell::RefCell::new(String::new()),
+            consents: Default::default(),
+            consent_arm_delay: std::time::Duration::from_secs(1),
+            model_lists: Default::default(),
+            agent_search: srelens_kube::toolbox::SearchPaths {
+                app_path: String::new(),
+                system_path: String::new(),
+            },
         };
 
         // 1. Press 'l' on the highlighted pod in NodeInspector
@@ -6067,6 +6649,13 @@ mod tests {
             screen_selection: None,
             screen_selecting: false,
             screen_selection_text: std::cell::RefCell::new(String::new()),
+            consents: Default::default(),
+            consent_arm_delay: std::time::Duration::from_secs(1),
+            model_lists: Default::default(),
+            agent_search: srelens_kube::toolbox::SearchPaths {
+                app_path: String::new(),
+                system_path: String::new(),
+            },
         };
 
         // Press 'l' on single-container pod
@@ -6349,6 +6938,13 @@ mod tests {
             screen_selection: None,
             screen_selecting: false,
             screen_selection_text: std::cell::RefCell::new(String::new()),
+            consents: Default::default(),
+            consent_arm_delay: std::time::Duration::from_secs(1),
+            model_lists: Default::default(),
+            agent_search: srelens_kube::toolbox::SearchPaths {
+                app_path: String::new(),
+                system_path: String::new(),
+            },
         };
 
         // Rebuild table
@@ -6517,6 +7113,13 @@ mod tests {
             screen_selection: None,
             screen_selecting: false,
             screen_selection_text: std::cell::RefCell::new(String::new()),
+            consents: Default::default(),
+            consent_arm_delay: std::time::Duration::from_secs(1),
+            model_lists: Default::default(),
+            agent_search: srelens_kube::toolbox::SearchPaths {
+                app_path: String::new(),
+                system_path: String::new(),
+            },
         };
 
         app.rebuild_workloads_table();
@@ -7620,6 +8223,13 @@ mod tests {
             screen_selection: None,
             screen_selecting: false,
             screen_selection_text: std::cell::RefCell::new(String::new()),
+            consents: Default::default(),
+            consent_arm_delay: std::time::Duration::from_secs(1),
+            model_lists: Default::default(),
+            agent_search: srelens_kube::toolbox::SearchPaths {
+                app_path: String::new(),
+                system_path: String::new(),
+            },
         };
 
         // Initially selected on Workloads (cart-deploy)
@@ -7841,6 +8451,13 @@ mod tests {
             screen_selection: None,
             screen_selecting: false,
             screen_selection_text: std::cell::RefCell::new(String::new()),
+            consents: Default::default(),
+            consent_arm_delay: std::time::Duration::from_secs(1),
+            model_lists: Default::default(),
+            agent_search: srelens_kube::toolbox::SearchPaths {
+                app_path: String::new(),
+                system_path: String::new(),
+            },
         };
 
         // 3. Initially selected on gpu-node-alpha on the left
@@ -8006,6 +8623,13 @@ mod tests {
             screen_selection: None,
             screen_selecting: false,
             screen_selection_text: std::cell::RefCell::new(String::new()),
+            consents: Default::default(),
+            consent_arm_delay: std::time::Duration::from_secs(1),
+            model_lists: Default::default(),
+            agent_search: srelens_kube::toolbox::SearchPaths {
+                app_path: String::new(),
+                system_path: String::new(),
+            },
         };
 
         // Populate resource cache with pods
@@ -8223,6 +8847,13 @@ mod tests {
             screen_selection: None,
             screen_selecting: false,
             screen_selection_text: std::cell::RefCell::new(String::new()),
+            consents: Default::default(),
+            consent_arm_delay: std::time::Duration::from_secs(1),
+            model_lists: Default::default(),
+            agent_search: srelens_kube::toolbox::SearchPaths {
+                app_path: String::new(),
+                system_path: String::new(),
+            },
         };
 
         // Verify initial CPU sort puts high-cpu-pod first
