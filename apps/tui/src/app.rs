@@ -4590,7 +4590,9 @@ impl App {
         // 5. Settings View Dedicated Key Handling
         if matches!(self.active_view, ActiveView::Settings(_)) {
             if let ActiveView::Settings(s) = &self.active_view {
-                if !s.is_editing && key.code == KeyCode::Char(':') {
+                // A model id can hold a `:` (`llama3.2:3b`), so the picker
+                // keeps it as text too.
+                if !s.is_editing && s.picker.is_none() && key.code == KeyCode::Char(':') {
                     self.input_mode = InputMode::Command;
                     self.command_buffer.clear();
                     return;
@@ -6849,7 +6851,44 @@ impl App {
                 }
             }
             ActiveView::Settings(settings) => {
-                if settings.is_editing {
+                if let Some(picker) = settings.picker.as_mut() {
+                    match key.code {
+                        KeyCode::Esc => settings.picker = None,
+                        KeyCode::Up => picker.move_up(),
+                        KeyCode::Down => picker.move_down(),
+                        KeyCode::Backspace => {
+                            picker.query.pop();
+                            picker.selected = 0;
+                        }
+                        KeyCode::Char(c)
+                            if !key.modifiers.contains(KeyModifiers::CONTROL)
+                                && !key.modifiers.contains(KeyModifiers::ALT) =>
+                        {
+                            picker.query.push(c);
+                            picker.selected = 0;
+                        }
+                        KeyCode::Enter => match settings.pick_model() {
+                            Err(e) => self.set_toast(e, Theme::status_error()),
+                            Ok(model) => {
+                                self.ai_settings = settings.settings.clone();
+                                match settings.save() {
+                                    Ok(_) => self.set_toast(
+                                        format!(
+                                            "✓ Model set to {} and saved",
+                                            model.as_deref().unwrap_or("Default")
+                                        ),
+                                        Theme::status_ok(),
+                                    ),
+                                    Err(e) => self.set_toast(
+                                        format!("Failed to save settings: {}", e),
+                                        Theme::status_error(),
+                                    ),
+                                }
+                            }
+                        },
+                        _ => {}
+                    }
+                } else if settings.is_editing {
                     match key.code {
                         KeyCode::Esc => settings.cancel_editing(),
                         KeyCode::Enter => {
@@ -6919,6 +6958,12 @@ impl App {
                                 format!("✓ Active provider set to {}", prov_name),
                                 Theme::status_ok(),
                             );
+                        }
+                        KeyCode::Char('e') | KeyCode::Enter
+                            if settings.selected_field == SettingField::Model =>
+                        {
+                            let provider = settings.current_provider();
+                            self.open_model_picker(settings_view::PickerTarget::Provider(provider));
                         }
                         KeyCode::Char('e') | KeyCode::Enter => settings.start_editing(),
                         KeyCode::Char('s') => match settings.save() {
@@ -11950,6 +11995,47 @@ impl App {
                 result,
             });
         });
+    }
+
+    /// Open the settings view's model picker on `target`: its cached list,
+    /// or "Loading models…" while the list is fetched off the UI thread.
+    pub fn open_model_picker(&mut self, target: settings_view::PickerTarget) {
+        use crate::model_list;
+        use settings_view::PickerTarget;
+        let ActiveView::Settings(settings) = &mut self.active_view else {
+            return;
+        };
+        let key = match target {
+            PickerTarget::Provider(p) => model_list::provider_cache_key(&settings.settings, p),
+            PickerTarget::Agent(kind) => model_list::agent_cache_key(kind),
+        };
+        if !settings.open_picker(target, key.clone()) {
+            return;
+        }
+        let snapshot = settings.settings.clone();
+        let event_tx = self.event_tx.clone();
+        tokio::spawn(async move {
+            let result = match target {
+                PickerTarget::Provider(p) => model_list::provider_models(&snapshot, p).await,
+                PickerTarget::Agent(kind) => {
+                    let binary = crate::ai_config::find_agent(kind);
+                    model_list::agent_models(kind, binary.as_deref()).await
+                }
+            };
+            let _ = event_tx.send(AppEvent::ModelsLoaded { key, result });
+        });
+    }
+
+    /// A fetched model list (or why there is none) for the settings view;
+    /// dropped once the user has left it.
+    pub fn handle_models_loaded(
+        &mut self,
+        key: &str,
+        result: Result<Vec<srelens_agent::adapter::ModelChoice>, String>,
+    ) {
+        if let ActiveView::Settings(settings) = &mut self.active_view {
+            settings.models_loaded(key, result);
+        }
     }
 
     /// Land a GitHub answer on the `:changed` view that asked, whether it is

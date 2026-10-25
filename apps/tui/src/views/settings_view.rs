@@ -6,6 +6,11 @@ use ratatui::{
     Frame,
 };
 
+use std::collections::HashMap;
+use std::sync::LazyLock;
+
+use srelens_agent::adapter::{valid_model_id, AgentKind, ModelChoice};
+
 use crate::ai_config::{
     default_base_url_for_provider, default_model_for_provider, env_var_for_provider,
     provider_display_name, provider_slug, AiProvider, AiSettings, ALL_PROVIDERS,
@@ -21,6 +26,80 @@ pub enum SettingField {
     Timeout,
 }
 
+/// What a model picker picks for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PickerTarget {
+    Provider(AiProvider),
+    Agent(AgentKind),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PickerLoad {
+    Loading,
+    Ready,
+    Failed(String),
+}
+
+/// The model picker drawn over the settings view: the target's list (from
+/// the cache or a fetch under `key`), filtered by what the user types.
+#[derive(Debug, Clone)]
+pub struct ModelPicker {
+    pub target: PickerTarget,
+    pub key: String,
+    pub query: String,
+    pub items: Vec<ModelChoice>,
+    pub load: PickerLoad,
+    /// Index into [`ModelPicker::visible`].
+    pub selected: usize,
+}
+
+/// An agent list's first entry: no model flag, the CLI decides. Its empty id
+/// is no model id, which is how [`ModelPicker::choose`] tells it apart.
+static DEFAULT_MODEL: LazyLock<ModelChoice> = LazyLock::new(|| ModelChoice {
+    id: String::new(),
+    label: "Default".to_string(),
+});
+
+impl ModelPicker {
+    /// The rows the query matches (case-insensitive, in the id or the label);
+    /// an agent's list starts with Default.
+    pub fn visible(&self) -> Vec<&ModelChoice> {
+        let query = self.query.trim().to_lowercase();
+        let default = matches!(self.target, PickerTarget::Agent(_)).then(|| &*DEFAULT_MODEL);
+        default
+            .into_iter()
+            .chain(&self.items)
+            .filter(|m| {
+                m.id.to_lowercase().contains(&query) || m.label.to_lowercase().contains(&query)
+            })
+            .collect()
+    }
+
+    /// The highlighted row's id (`None` for Default), or the typed id when no
+    /// row matches; a typed id that could reach argv as a flag is refused.
+    pub fn choose(&self) -> Result<Option<String>, String> {
+        if let Some(m) = self.visible().get(self.selected) {
+            return Ok((!m.id.is_empty()).then(|| m.id.clone()));
+        }
+        let typed = self.query.trim();
+        if valid_model_id(typed) {
+            Ok(Some(typed.to_string()))
+        } else {
+            Err(format!("not a model id: {typed}"))
+        }
+    }
+
+    pub fn move_up(&mut self) {
+        self.selected = self.selected.saturating_sub(1);
+    }
+
+    pub fn move_down(&mut self) {
+        if self.selected + 1 < self.visible().len() {
+            self.selected += 1;
+        }
+    }
+}
+
 pub struct SettingsViewState {
     pub settings: AiSettings,
     pub selected_provider_idx: usize,
@@ -28,6 +107,9 @@ pub struct SettingsViewState {
     pub is_editing: bool,
     pub edit_buffer: String,
     pub toast: Option<String>,
+    pub picker: Option<ModelPicker>,
+    /// Model lists fetched this visit, by cache key; failures are not kept.
+    pub model_cache: HashMap<String, Vec<ModelChoice>>,
 }
 
 impl SettingsViewState {
@@ -45,7 +127,68 @@ impl SettingsViewState {
             is_editing: false,
             edit_buffer: String::new(),
             toast: None,
+            picker: None,
+            model_cache: HashMap::new(),
         }
+    }
+
+    /// Open the picker on `target`'s list under `key`; true when that list
+    /// is not cached and must be fetched.
+    pub fn open_picker(&mut self, target: PickerTarget, key: String) -> bool {
+        let cached = self.model_cache.get(&key).cloned();
+        let fetch = cached.is_none();
+        self.picker = Some(ModelPicker {
+            target,
+            key,
+            query: String::new(),
+            items: cached.unwrap_or_default(),
+            load: if fetch {
+                PickerLoad::Loading
+            } else {
+                PickerLoad::Ready
+            },
+            selected: 0,
+        });
+        fetch
+    }
+
+    /// A fetched list (or why there is none) for `key`.
+    pub fn models_loaded(&mut self, key: &str, result: Result<Vec<ModelChoice>, String>) {
+        if let Ok(models) = &result {
+            self.model_cache.insert(key.to_string(), models.clone());
+        }
+        let Some(picker) = self.picker.as_mut().filter(|p| p.key == key) else {
+            return;
+        };
+        match result {
+            Ok(models) => {
+                picker.items = models;
+                picker.load = PickerLoad::Ready;
+            }
+            Err(e) => picker.load = PickerLoad::Failed(e),
+        }
+        picker.selected = 0;
+    }
+
+    /// Store the picker's choice where its target reads it and close the
+    /// picker; a refused typed id leaves it open.
+    pub fn pick_model(&mut self) -> Result<Option<String>, String> {
+        let Some(picker) = &self.picker else {
+            return Err("no model picker is open".to_string());
+        };
+        let model = picker.choose()?;
+        match picker.target {
+            PickerTarget::Provider(p) => {
+                let slug = provider_slug(p).to_string();
+                match model.clone() {
+                    Some(id) => self.settings.models.insert(slug, id),
+                    None => self.settings.models.remove(&slug),
+                };
+            }
+            PickerTarget::Agent(kind) => self.settings.set_agent_model(kind, model.clone()),
+        }
+        self.picker = None;
+        Ok(model)
     }
 
     pub fn current_provider(&self) -> AiProvider {
@@ -558,5 +701,228 @@ pub fn render_settings_view(f: &mut Frame, area: Rect, state: &SettingsViewState
                 .alignment(Alignment::Center),
             edit_chunks[2],
         );
+    }
+
+    if let Some(picker) = &state.picker {
+        render_model_picker(f, area, picker);
+    }
+}
+
+/// The picker overlay: the target, the filter, the list scrolled to keep
+/// the highlighted row in view, and one status line.
+fn render_model_picker(f: &mut Frame, area: Rect, picker: &ModelPicker) {
+    let rect = crate::ui::help::centered_rect(70, 70, area);
+    f.render_widget(Clear, rect);
+    let target = match picker.target {
+        PickerTarget::Provider(p) => provider_display_name(p),
+        PickerTarget::Agent(kind) => kind.label(),
+    };
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Theme::YELLOW))
+        .title(format!(" Model for {target} "))
+        .title_bottom(" ↑/↓ Move  Enter Pick (or the typed id)  Esc Cancel ");
+    let inner = block.inner(rect);
+    f.render_widget(block, rect);
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1),
+            Constraint::Min(1),
+            Constraint::Length(1),
+        ])
+        .split(inner);
+
+    f.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled("Filter: ", Theme::header_label()),
+            Span::styled(
+                picker.query.as_str(),
+                Style::default().fg(Theme::FG).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("█", Style::default().fg(Theme::CYAN)),
+        ])),
+        rows[0],
+    );
+
+    let visible = picker.visible();
+    let height = rows[1].height as usize;
+    let first = (picker.selected + 1).saturating_sub(height);
+    let lines: Vec<Line> = visible
+        .iter()
+        .enumerate()
+        .skip(first)
+        .take(height)
+        .map(|(i, m)| {
+            let text = match (m.id.as_str(), m.label.as_str()) {
+                (id, "") => id.to_string(),
+                ("", label) => label.to_string(),
+                (id, label) if id == label => id.to_string(),
+                (id, label) => format!("{label}  ({id})"),
+            };
+            if i == picker.selected {
+                Line::from(Span::styled(
+                    format!("> {text}"),
+                    Style::default()
+                        .fg(Theme::YELLOW)
+                        .add_modifier(Modifier::BOLD),
+                ))
+            } else {
+                Line::from(format!("  {text}"))
+            }
+        })
+        .collect();
+    f.render_widget(Paragraph::new(lines), rows[1]);
+
+    let (status, style) = match &picker.load {
+        PickerLoad::Loading => (
+            "Loading models…".to_string(),
+            Style::default().fg(Theme::DIM),
+        ),
+        PickerLoad::Failed(e) => (e.clone(), Style::default().fg(Theme::RED)),
+        PickerLoad::Ready if visible.is_empty() => (
+            "type a model id and press Enter".to_string(),
+            Style::default().fg(Theme::DIM),
+        ),
+        PickerLoad::Ready => (String::new(), Style::default()),
+    };
+    f.render_widget(Paragraph::new(status).style(style), rows[2]);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn choice(id: &str, label: &str) -> ModelChoice {
+        ModelChoice {
+            id: id.into(),
+            label: label.into(),
+        }
+    }
+
+    fn picker(target: PickerTarget) -> ModelPicker {
+        ModelPicker {
+            target,
+            key: "k".into(),
+            query: String::new(),
+            items: vec![
+                choice("gpt-5.6-sol", "GPT-5.6 Sol"),
+                choice("gpt-5.6-terra", "GPT-5.6 Terra"),
+            ],
+            load: PickerLoad::Ready,
+            selected: 0,
+        }
+    }
+
+    fn state() -> SettingsViewState {
+        SettingsViewState {
+            settings: AiSettings::default(),
+            selected_provider_idx: 0,
+            selected_field: SettingField::Model,
+            is_editing: false,
+            edit_buffer: String::new(),
+            toast: None,
+            picker: None,
+            model_cache: HashMap::new(),
+        }
+    }
+
+    fn ids(p: &ModelPicker) -> Vec<&str> {
+        p.visible().iter().map(|m| m.id.as_str()).collect()
+    }
+
+    #[test]
+    fn typing_filters_ids_and_labels_ignoring_case() {
+        let mut p = picker(PickerTarget::Provider(AiProvider::OpenAi));
+        p.query = "SOL".into();
+        assert_eq!(ids(&p), ["gpt-5.6-sol"]);
+        // Only the label has the space.
+        p.query = "6 TERRA".into();
+        assert_eq!(ids(&p), ["gpt-5.6-terra"]);
+    }
+
+    #[test]
+    fn enter_takes_the_highlighted_model() {
+        let mut p = picker(PickerTarget::Provider(AiProvider::OpenAi));
+        p.move_down();
+        p.move_down();
+        assert_eq!(p.selected, 1, "stops at the last row");
+        assert_eq!(p.choose(), Ok(Some("gpt-5.6-terra".to_string())));
+        p.move_up();
+        p.move_up();
+        assert_eq!(p.choose(), Ok(Some("gpt-5.6-sol".to_string())));
+    }
+
+    #[test]
+    fn enter_with_no_match_takes_the_typed_id() {
+        let mut p = picker(PickerTarget::Provider(AiProvider::OpenAi));
+        p.query = "my-model".into();
+        assert!(p.visible().is_empty());
+        assert_eq!(p.choose(), Ok(Some("my-model".to_string())));
+    }
+
+    #[test]
+    fn a_typed_id_that_could_be_a_flag_is_refused() {
+        let mut p = picker(PickerTarget::Agent(AgentKind::Codex));
+        p.query = "--x".into();
+        assert_eq!(p.choose(), Err("not a model id: --x".to_string()));
+    }
+
+    #[test]
+    fn agent_lists_offer_default_first_and_it_means_no_model() {
+        let mut p = picker(PickerTarget::Agent(AgentKind::Codex));
+        assert_eq!(p.visible()[0].label, "Default");
+        assert_eq!(p.visible().len(), 3);
+        assert_eq!(p.choose(), Ok(None));
+        p.move_down();
+        assert_eq!(p.choose(), Ok(Some("gpt-5.6-sol".to_string())));
+
+        let p = picker(PickerTarget::Provider(AiProvider::OpenAi));
+        assert_eq!(ids(&p), ["gpt-5.6-sol", "gpt-5.6-terra"], "no Default");
+    }
+
+    #[test]
+    fn a_failed_list_is_fetched_again_next_time() {
+        let mut s = state();
+        let target = PickerTarget::Provider(AiProvider::OpenAi);
+        assert!(s.open_picker(target, "k".into()), "nothing cached yet");
+        assert_eq!(s.picker.as_ref().unwrap().load, PickerLoad::Loading);
+
+        s.models_loaded("k", Err("offline".into()));
+        assert_eq!(
+            s.picker.as_ref().unwrap().load,
+            PickerLoad::Failed("offline".into())
+        );
+        assert!(s.open_picker(target, "k".into()), "a failure is not kept");
+
+        s.models_loaded("k", Ok(vec![choice("m-1", "One")]));
+        assert!(!s.open_picker(target, "k".into()), "a list is kept");
+        let p = s.picker.as_ref().unwrap();
+        assert_eq!((&p.load, ids(p)), (&PickerLoad::Ready, vec!["m-1"]));
+    }
+
+    #[test]
+    fn picking_default_for_an_agent_clears_its_model() {
+        let mut s = state();
+        s.settings
+            .set_agent_model(AgentKind::Codex, Some("gpt-5.6-sol".into()));
+        s.open_picker(PickerTarget::Agent(AgentKind::Codex), "a".into());
+        assert_eq!(s.pick_model(), Ok(None));
+        assert_eq!(s.settings.get_agent_model(AgentKind::Codex), None);
+        assert!(s.picker.is_none());
+    }
+
+    #[test]
+    fn a_refused_id_keeps_the_picker_open_and_the_model_unchanged() {
+        let mut s = state();
+        s.open_picker(PickerTarget::Provider(AiProvider::OpenAi), "p".into());
+        s.picker.as_mut().unwrap().query = "-x".into();
+        assert!(s.pick_model().is_err());
+        assert!(s.picker.is_some());
+        assert_eq!(s.settings.get_model(AiProvider::OpenAi), "gpt-4o");
+
+        s.picker.as_mut().unwrap().query = "gpt-x".into();
+        assert_eq!(s.pick_model(), Ok(Some("gpt-x".to_string())));
+        assert_eq!(s.settings.get_model(AiProvider::OpenAi), "gpt-x");
     }
 }

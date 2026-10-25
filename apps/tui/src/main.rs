@@ -89,6 +89,7 @@ mod consent;
 mod deep_link;
 mod event;
 mod mcp_server;
+mod model_list;
 mod sink;
 mod theme;
 mod tui_config;
@@ -564,6 +565,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     app.handle_changed_cause_result(&key, result);
                 }
                 AppEvent::AgentConsent(pending) => app.consents.push(pending),
+                AppEvent::ModelsLoaded { key, result } => app.handle_models_loaded(&key, result),
             }
 
             if !app.is_running {

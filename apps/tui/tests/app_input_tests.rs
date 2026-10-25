@@ -4444,6 +4444,165 @@ async fn settings_view_lets_colon_open_the_prompt_unless_a_field_is_being_edited
 }
 
 // ---------------------------------------------------------------------------
+// Settings: the model picker
+// ---------------------------------------------------------------------------
+
+/// Open the Settings view on Anthropic's Model field. Callers hold the
+/// settings guard with `ANTHROPIC_API_KEY` removed, so opening the picker
+/// never reaches the network.
+async fn open_settings_on_the_model_field(app: &mut App) {
+    app.switch_view_to_kind(ResourceKind::Settings).await;
+    let ActiveView::Settings(s) = &mut app.active_view else {
+        panic!("expected the settings view")
+    };
+    s.selected_provider_idx = 0;
+    s.selected_field = srectl::views::SettingField::Model;
+}
+
+fn settings_view(app: &App) -> &srectl::views::SettingsViewState {
+    match &app.active_view {
+        ActiveView::Settings(s) => s,
+        _ => panic!("expected the settings view"),
+    }
+}
+
+fn picker(app: &App) -> &srectl::views::settings_view::ModelPicker {
+    settings_view(app)
+        .picker
+        .as_ref()
+        .expect("the model picker is open")
+}
+
+fn model(id: &str, label: &str) -> srelens_agent::adapter::ModelChoice {
+    srelens_agent::adapter::ModelChoice {
+        id: id.into(),
+        label: label.into(),
+    }
+}
+
+#[tokio::test]
+async fn a_failed_list_still_lets_you_type_a_model() {
+    use srectl::views::settings_view::PickerLoad;
+    let mut settings = common::env::isolate_settings();
+    settings.remove_env("ANTHROPIC_API_KEY");
+    let (mut app, _rx) = common::app().await;
+    open_settings_on_the_model_field(&mut app).await;
+
+    press(&mut app, ch('e')).await;
+    assert_eq!(picker(&app).load, PickerLoad::Loading);
+    let screen = common::render_app(&mut app, 120, 40);
+    assert!(screen.contains("Loading models…"), "{screen}");
+
+    let list_key = picker(&app).key.clone();
+    app.handle_models_loaded(&list_key, Err("offline".into()));
+    let screen = common::render_app(&mut app, 120, 40);
+    assert!(screen.contains("offline"), "{screen}");
+
+    // The `:` is part of the id, not the command prompt.
+    type_str(&mut app, "my-proxy:claude").await;
+    assert_eq!(app.input_mode, InputMode::Normal);
+    press(&mut app, key(KeyCode::Enter)).await;
+    assert!(settings_view(&app).picker.is_none());
+    assert_eq!(
+        app.ai_settings.get_model(srectl::AiProvider::Anthropic),
+        "my-proxy:claude"
+    );
+}
+
+#[tokio::test]
+async fn a_listed_model_picked_in_settings_is_what_the_agent_uses() {
+    let mut settings = common::env::isolate_settings();
+    settings.remove_env("ANTHROPIC_API_KEY");
+    let (mut app, _rx) = common::app().await;
+    open_settings_on_the_model_field(&mut app).await;
+
+    press(&mut app, key(KeyCode::Enter)).await;
+    let list_key = picker(&app).key.clone();
+    app.handle_models_loaded(
+        &list_key,
+        Ok(vec![
+            model("claude-a", "Claude A"),
+            model("claude-b", "Claude B"),
+        ]),
+    );
+    let screen = common::render_app(&mut app, 120, 40);
+    assert!(screen.contains("Claude B"), "{screen}");
+
+    press(&mut app, key(KeyCode::Down)).await;
+    press(&mut app, key(KeyCode::Enter)).await;
+    assert_eq!(
+        app.ai_settings.get_model(srectl::AiProvider::Anthropic),
+        "claude-b"
+    );
+    let saved = std::fs::read_to_string(srectl::AiSettings::config_path()).expect("saved");
+    let saved = srectl::AiSettings::from_json(&saved).unwrap();
+    assert_eq!(saved.get_model(srectl::AiProvider::Anthropic), "claude-b");
+}
+
+#[tokio::test]
+async fn an_open_picker_reuses_the_list_it_already_has() {
+    use srectl::views::settings_view::PickerLoad;
+    let mut settings = common::env::isolate_settings();
+    settings.remove_env("ANTHROPIC_API_KEY");
+    let (mut app, _rx) = common::app().await;
+    open_settings_on_the_model_field(&mut app).await;
+
+    press(&mut app, ch('e')).await;
+    let list_key = picker(&app).key.clone();
+    app.handle_models_loaded(&list_key, Ok(vec![model("claude-a", "Claude A")]));
+    press(&mut app, key(KeyCode::Esc)).await;
+    assert!(settings_view(&app).picker.is_none());
+    assert_eq!(
+        app.ai_settings.get_model(srectl::AiProvider::Anthropic),
+        srectl::AiSettings::default().get_model(srectl::AiProvider::Anthropic),
+        "Esc picks nothing"
+    );
+
+    press(&mut app, ch('e')).await;
+    assert_eq!(picker(&app).load, PickerLoad::Ready);
+    assert_eq!(picker(&app).items, [model("claude-a", "Claude A")]);
+}
+
+#[tokio::test]
+async fn a_provider_without_a_key_says_so_without_calling_out() {
+    let mut settings = common::env::isolate_settings();
+    settings.remove_env("ANTHROPIC_API_KEY");
+    let err = srectl::model_list::provider_models(
+        &srectl::AiSettings::default(),
+        srectl::AiProvider::Anthropic,
+    )
+    .await
+    .unwrap_err();
+    // Any HTTP attempt would end in a network or API error instead.
+    assert_eq!(err, "Add an API key for Anthropic (Claude) first");
+}
+
+#[tokio::test]
+async fn a_provider_list_is_kept_per_base_url_and_key_presence() {
+    use srectl::model_list::provider_cache_key;
+    use srectl::AiProvider::OpenAi;
+    let mut settings = common::env::isolate_settings();
+    settings.remove_env("OPENAI_API_KEY");
+    let mut s = srectl::AiSettings::default();
+    let no_key = provider_cache_key(&s, OpenAi);
+
+    s.api_keys.insert("openai".into(), "sk-test-one".into());
+    let with_key = provider_cache_key(&s, OpenAi);
+    assert_ne!(no_key, with_key);
+    assert!(!with_key.contains("sk-test"), "never the key itself");
+    s.api_keys.insert("openai".into(), "sk-test-two".into());
+    assert_eq!(
+        provider_cache_key(&s, OpenAi),
+        with_key,
+        "only its presence"
+    );
+
+    s.base_urls
+        .insert("openai".into(), "https://proxy.example/v1".into());
+    assert_ne!(provider_cache_key(&s, OpenAi), with_key);
+}
+
+// ---------------------------------------------------------------------------
 // Table keys that open modals
 // ---------------------------------------------------------------------------
 

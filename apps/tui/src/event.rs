@@ -104,6 +104,11 @@ pub enum AppEvent {
     },
     /// A local agent's gated tool call, waiting on the user's yes or no.
     AgentConsent(crate::consent::PendingConsent),
+    /// The model list fetched for a picker under cache `key`, or why not.
+    ModelsLoaded {
+        key: String,
+        result: Result<Vec<srelens_agent::adapter::ModelChoice>, String>,
+    },
 }
 
 pub struct EventHandler {
