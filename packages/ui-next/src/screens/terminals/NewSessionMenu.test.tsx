@@ -279,3 +279,71 @@ describe("NewSessionMenu — on a protected cluster (#101)", () => {
     await waitFor(() => expect(sessions.startLocalSession).toHaveBeenCalledTimes(1));
   });
 });
+
+/**
+ * A protected cluster's local shell (#101). Real stores rather than a doubled
+ * `protectionFor`: what the menu shows is `useProtectedConfirm`'s, and that
+ * reads the workspaces and the contexts.
+ */
+describe("NewSessionMenu — a local shell on a protected cluster (#101)", () => {
+  const PROD: ClusterContext = { name: CONTEXT, stableId: "prod", key: "prod", cluster: "prod", server: "", isCurrent: true, sourceFile: "", authKind: "token" };
+  const WINDOWS = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36";
+  const MAC = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15";
+  const WARNING = `On Windows this terminal can't be made read-only. kubectl in it can change ${CONTEXT}.`;
+  const FIELD = `Type ${CONTEXT} to confirm`;
+  let agent: { mockRestore(): void };
+
+  function on(userAgent: string, protect: boolean) {
+    agent = vi.spyOn(window.navigator, "userAgent", "get").mockReturnValue(userAgent);
+    setContexts([PROD]);
+    setState(defaultState([PROD]));
+    if (protect) setWorkspaceProtected(getState().currentId, true);
+  }
+
+  afterEach(() => {
+    agent.mockRestore();
+    resetContexts();
+    setState(defaultState([]));
+  });
+
+  it("on Windows, starts only once the cluster's name is typed, and says why", async () => {
+    on(WINDOWS, true);
+    const user = userEvent.setup();
+    render(<NewSessionMenu context={CONTEXT} namespace={NAMESPACE} onStarted={onStarted} onClose={onClose} />);
+
+    await user.click(screen.getByRole("button", { name: "Local shell" }));
+    expect(screen.getByText(WARNING)).toBeTruthy();
+    const start = screen.getByRole("button", { name: "Start session" });
+    expect(start.hasAttribute("disabled")).toBe(true);
+    await user.click(start);
+    expect(sessions.startLocalSession).not.toHaveBeenCalled();
+
+    await user.type(screen.getByRole("textbox", { name: FIELD }), CONTEXT);
+    expect(start.hasAttribute("disabled")).toBe(false);
+    await user.click(start);
+    await waitFor(() =>
+      expect(sessions.startLocalSession).toHaveBeenCalledWith(expect.objectContaining({ context: CONTEXT })),
+    );
+  });
+
+  it("asks nothing where the host makes the shell read-only instead", async () => {
+    on(MAC, true);
+    const user = userEvent.setup();
+    render(<NewSessionMenu context={CONTEXT} namespace={NAMESPACE} onStarted={onStarted} onClose={onClose} />);
+
+    await user.click(screen.getByRole("button", { name: "Local shell" }));
+    expect(screen.queryByText(WARNING)).toBeNull();
+    expect(screen.queryByRole("textbox", { name: FIELD })).toBeNull();
+    expect(screen.getByRole("button", { name: "Start session" }).hasAttribute("disabled")).toBe(false);
+  });
+
+  it("asks nothing on Windows for a cluster no workspace protects", async () => {
+    on(WINDOWS, false);
+    const user = userEvent.setup();
+    render(<NewSessionMenu context={CONTEXT} namespace={NAMESPACE} onStarted={onStarted} onClose={onClose} />);
+
+    await user.click(screen.getByRole("button", { name: "Local shell" }));
+    expect(screen.queryByText(WARNING)).toBeNull();
+    expect(screen.getByRole("button", { name: "Start session" }).hasAttribute("disabled")).toBe(false);
+  });
+});

@@ -364,9 +364,10 @@ async fn run(
                 .streams
                 .terminal
                 // No command: running one first is the desktop's (#820), where
-                // the shell is the reader's own machine. This command is on
+                // the shell is the reader's own machine. Not read-only either
+                // (#101), for the same reason. This command is on
                 // `WEB_DENIED_COMMANDS`, and the web client never asks for it.
-                .start(sink(), a.context, paths, a.channel, a.cols, a.rows, None, None)
+                .start(sink(), a.context, paths, a.channel, a.cols, a.rows, None, None, false)
                 .await
                 .map_err(|e| command_error(&e))?;
             json!(id)

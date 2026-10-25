@@ -355,6 +355,13 @@ there does not land on another cluster by accident:
   `unset KUBECONFIG` fail instead of quietly leaving the cluster.
 - The terminal opens with a line saying which cluster it is bound to, and in bash
   and zsh the prompt starts with `[cluster/namespace]`.
+- On a cluster that a protected workspace holds, the terminal is also read-only
+  (on macOS and Linux; on Windows, see below). `kubectl` and `helm` run only the
+  subcommands that read, such as `get`, `describe`, `logs`, `rollout status` and
+  `helm list`. Anything else is refused with a line saying the cluster is
+  protected. The opening line says the terminal is read-only, and in bash and
+  zsh the prompt tag reads `[cluster/namespace read-only]`. A terminal keeps the
+  mode it opened in.
 - Opened from a tab that is looking at exactly one namespace, the terminal starts
   in that namespace.
 
@@ -366,12 +373,22 @@ a guard against accidents, not a sandbox. It does not cover:
 - tools other than `kubectl` and `helm` that are given another kubeconfig through
   their own flags;
 - shells other than bash and zsh (fish, for example), which get the private
-  kubeconfig and the `kubectl`/`helm` guards but not the read-only variable or the
-  prompt tag;
+  kubeconfig and the `kubectl`/`helm` guards but not the read-only `KUBECONFIG`
+  or the prompt tag;
+- in a read-only terminal, a shell other than bash, zsh and fish whose own
+  config puts another `kubectl` or `helm` ahead of srelens's guards on `PATH`.
+  bash and zsh put the guards back first at every prompt, and fish after
+  reading its config; in any other shell the read-only guard holds only while
+  the shell's own config leaves srelens's directory first on `PATH`;
+- in a read-only terminal, programs other than `kubectl` and `helm` (k9s, the
+  `argocd` and `flux` CLIs, scripts that use `$KUBECONFIG`), and `kubectl` or
+  `helm` run by their full path: these can still change a protected cluster;
 - prompt themes that redraw the whole prompt and drop the tag;
 - deliberately calling the real binary by its full path, or starting a new shell
   with a clean environment;
-- the Windows desktop, where the terminal gets the private kubeconfig only.
+- the Windows desktop, where the terminal gets the private kubeconfig only. A
+  protected cluster's terminal can't be made read-only there, so it opens only
+  after you type the cluster's name.
 
 ## Port forwarding
 

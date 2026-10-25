@@ -695,6 +695,7 @@ pub(crate) mod tests {
             None,
             None,
             None,
+            None,
             app.handle().clone(),
             window.clone(),
             app.state(),

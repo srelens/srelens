@@ -3,6 +3,7 @@ import { cleanup, render, screen, waitFor, act, within } from "@testing-library/
 import userEvent from "@testing-library/user-event";
 import { fireEvent } from "@testing-library/react";
 import type { HostNotice } from "@srelens/core";
+import type { PendingClusterTerminal } from "../lib/clusterTerminal";
 import { extensionClusterRoute, notify, saveUpdateChannel, setNotifier } from "@srelens/core";
 
 // `vi.hoisted` because `vi.mock` is hoisted above every declaration in the
@@ -165,11 +166,26 @@ vi.mock("@srelens/core", async (importOriginal) => {
 });
 
 // The terminal chord's two halves — may one be opened, and opening it — are
-// `lib/clusterTerminal`'s and tested there; here they are the boundary.
-const clusterTerminal = vi.hoisted(() => ({ can: true, open: vi.fn() }));
+// `lib/clusterTerminal`'s and tested there; here they are the boundary. So is
+// the shell it holds for a typed name (#101): nothing, unless a test says so.
+const clusterTerminal = vi.hoisted(() => ({
+  can: true,
+  open: vi.fn(),
+  pending: null as PendingClusterTerminal | null,
+  listeners: new Set<() => void>(),
+}));
 vi.mock("../lib/clusterTerminal", () => ({
   canOpenClusterTerminal: (cluster: unknown) => cluster !== undefined && clusterTerminal.can,
   openClusterTerminal: clusterTerminal.open,
+  pendingClusterTerminal: () => clusterTerminal.pending,
+  onClusterTerminalPending: (listener: () => void) => {
+    clusterTerminal.listeners.add(listener);
+    return () => {
+      clusterTerminal.listeners.delete(listener);
+    };
+  },
+  answerClusterTerminal: vi.fn(),
+  localShellCanBeReadOnly: () => true,
 }));
 
 // The star button's start-up acts reach GitHub; a test of the window must not.
@@ -1150,6 +1166,21 @@ describe("Window accelerators", () => {
     const notCancelled = fireEvent.keyDown(window, { key: "j", ctrlKey: true });
     expect(clusterTerminal.open).not.toHaveBeenCalled();
     expect(notCancelled).toBe(true);
+  });
+
+  it("draws the question a held shell waits on, in the window's band (#101)", async () => {
+    const hold = (pending: PendingClusterTerminal | null) =>
+      act(() => {
+        clusterTerminal.pending = pending;
+        for (const listener of clusterTerminal.listeners) listener();
+      });
+    await booted();
+    try {
+      hold({ cluster: ctx("prod"), namespace: undefined, tab: store.currentWorkspace().activeId, inPanel: true });
+      expect(await screen.findByRole("button", { name: "Open terminal" })).toBeDefined();
+    } finally {
+      hold(null);
+    }
   });
 
   it("counts the launch and asks for the star count once, after boot", async () => {

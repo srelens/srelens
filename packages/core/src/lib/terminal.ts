@@ -24,6 +24,11 @@ let terminalSeq = 0;
  *
  * `namespace`, when given, is the one `kubectl` uses by default in this shell
  * (#846). Left out, the kubeconfig's own default stands.
+ *
+ * `readOnly` makes `kubectl` and `helm` in the shell refuse every subcommand
+ * that is not a read: the shell of a protected cluster (#101). The host does
+ * this with guards it writes only where there is a `/bin/sh`; on Windows it
+ * changes nothing, and the caller asks the reader first instead.
  */
 export async function startLocalTerminal(
   context: string,
@@ -33,6 +38,7 @@ export async function startLocalTerminal(
   size?: { cols: number; rows: number },
   command?: string,
   namespace?: string,
+  readOnly = false,
 ): Promise<TerminalSession> {
   // Unique channel so we can subscribe BEFORE the backend spawns and emits —
   // otherwise the first prompt can race ahead of the listener.
@@ -49,6 +55,7 @@ export async function startLocalTerminal(
       rows: size?.rows ?? null,
       command: command ?? null,
       namespace: namespace ?? null,
+      readOnly,
     });
   } catch (e) {
     disposeOut();

@@ -8,6 +8,7 @@ import {
   startPodExec,
   type TerminalConnection,
 } from "@srelens/core";
+import { protectionFor } from "./protection";
 
 /**
  * The terminal sessions this window is running — what is live, the emulator
@@ -276,6 +277,9 @@ export async function startLocalSession(req: LocalSessionRequest): Promise<numbe
       size,
       req.command,
       req.namespace,
+      // A protected cluster's shell refuses kubectl and helm writes (#101).
+      // Read as it opens: a shell keeps the mode it started in.
+      protectionFor(req.context) !== null,
     ),
   );
   return id;
