@@ -147,6 +147,7 @@ proto.releasePointerCapture ??= () => {};
 import { describeError, type ClusterContext, type CrdRef, type K8sObject } from "@srelens/core";
 import { ResourceDetailScreen, Resources } from "./Resources";
 import { ConsoleProvider, useConsole } from "../console";
+import { setClusterAssistant } from "../lib/assistant";
 import * as store from "../lib/tabsStore";
 import { TabScope } from "../lib/tabScope";
 import { defaultState } from "../lib/tabs";
@@ -603,6 +604,23 @@ describe("Resources", () => {
   // Correction 3: every row gets a trailing ask chip that hands the row to
   // the console dock, naming the actual resource and its state — "Why is X
   // unhealthy?" for a bad row, a resource-use question otherwise.
+  it("draws no ask chip on rows while the AI Assistant is off for the cluster (#968)", async () => {
+    setClusterAssistant(CTX.stableId, false);
+    watchResource.mockImplementation(
+      async (_c: string, _n: string, _k: string, onRows: (rows: unknown[]) => void) => {
+        onRows([
+          { name: "bad-1", namespace: "default", ready: "0/1", phase: "CrashLoopBackOff", restarts: 9, node: "n1", age: "2d", image: "acme/checkout-worker:118a7e" },
+        ]);
+        return { stop };
+      },
+    );
+    open("/k/pods");
+    await waitFor(() => expect(rowNames()).toHaveLength(1));
+
+    const badRow = within(screen.getByText("bad-1").closest("tr")!);
+    expect(badRow.queryByRole("button", { name: /Why is bad-1 unhealthy\?/ })).toBeNull();
+  });
+
   it("offers an ask chip on each row that names the resource and its state", async () => {
     watchResource.mockImplementation(
       async (_c: string, _n: string, _k: string, onRows: (rows: unknown[]) => void) => {

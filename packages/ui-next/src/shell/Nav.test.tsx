@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { render, screen, waitFor } from "@testing-library/react";
+import { act, render, screen, waitFor } from "@testing-library/react";
+import { setAssistantEnabled, setClusterAssistant } from "../lib/assistant";
 import userEvent from "@testing-library/user-event";
 import type { ClusterContext, CrdRef } from "@srelens/core";
 import { Nav } from "./Nav";
@@ -167,6 +168,23 @@ describe("Nav", () => {
     await userEvent.click(await screen.findByRole("treeitem", { name: "Incidents" }));
 
     expect(tabFor("/incidents")?.preview).toBeFalsy();
+  });
+
+  it("lists Agent under Investigate only while the AI Assistant is on for the cluster (#968)", async () => {
+    const view = render(<Nav contexts={[PROD]} />);
+    await userEvent.click(screen.getByRole("treeitem", { name: "Investigate" }));
+    expect(await screen.findByRole("treeitem", { name: "Agent" })).toBeDefined();
+
+    act(() => setClusterAssistant(PROD.stableId, false));
+    expect(screen.queryByRole("treeitem", { name: "Agent" })).toBeNull();
+    expect(screen.getByRole("treeitem", { name: "Topology" })).toBeDefined();
+
+    act(() => {
+      setClusterAssistant(PROD.stableId, true);
+      setAssistantEnabled(false);
+    });
+    view.rerender(<Nav contexts={[PROD]} />);
+    expect(screen.queryByRole("treeitem", { name: "Agent" })).toBeNull();
   });
 
   it("names the cluster and how it is linked", async () => {

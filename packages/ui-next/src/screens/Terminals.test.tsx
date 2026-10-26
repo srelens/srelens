@@ -42,6 +42,7 @@ vi.mock("@xterm/addon-fit", () => ({
 
 import type { ClusterContext } from "@srelens/core";
 import { ConsoleProvider, useConsole } from "../console";
+import { setClusterAssistant } from "../lib/assistant";
 import { resetContexts, setContexts } from "../lib/clusters";
 import {
   __resetSessionsForTests,
@@ -545,6 +546,14 @@ describe("Terminals", () => {
     act(() => resetContexts());
 
     expect(screen.queryByText(/This still runs against/)).toBeNull();
+  });
+
+  it("offers no command drafting on a cluster the AI Assistant is off for (#968)", async () => {
+    await openPod("checkout-api-5c8b7f2d9-mk3wl");
+    setClusterAssistant(CTX.stableId, false);
+    draw();
+
+    expect(within(headerActions()).queryByRole("button", { name: /Draft a command/ })).toBeNull();
   });
 
   it("hands the console a question about the session on screen", async () => {

@@ -10,6 +10,7 @@ import { useMark } from "../lib/marks";
 import { resolveContext } from "../lib/clusters";
 import { openTab, useActiveCluster, useTabs } from "../lib/tabsStore";
 import { crdNodes, glyph, INVESTIGATE, kindNodes, routeForNode } from "../lib/tree";
+import { useAssistantAllowed } from "../lib/assistant";
 import { useResource } from "../lib/useResource";
 import { useSidebarCounts } from "../lib/sidebarCounts";
 import { toggleExpanded, useWorkspaceView, type LinkState } from "../lib/workspace";
@@ -81,6 +82,7 @@ export function Nav({ contexts }: NavProps) {
   const view = useWorkspaceView();
   const [query, setQuery] = useState("");
   const mark = useMark(ctx?.stableId ?? "", ctx?.name ?? "");
+  const assistantOn = useAssistantAllowed(ctx?.stableId);
 
   // Subscribes the sidebar to the strip: which row is highlighted is a fact
   // about the active tab, and that changes from a dozen places that are not here.
@@ -129,10 +131,13 @@ export function Nav({ contexts }: NavProps) {
         id: "investigate",
         label: "Investigate",
         icon: Icons.investigate,
-        children: INVESTIGATE.map((i) => ({ id: `route:${i.route}`, label: i.label, icon: glyph(i.id) })),
+        children: INVESTIGATE
+          // No Agent entry where the AI Assistant may not act (#968).
+          .filter((i) => assistantOn || i.id !== "agent")
+          .map((i) => ({ id: `route:${i.route}`, label: i.label, icon: glyph(i.id) })),
       },
     ];
-  }, [crdChildren, ctx, extensions.data, counts]);
+  }, [crdChildren, ctx, extensions.data, counts, assistantOn]);
 
   const link = ctx
     ? (paused ? { word: "Paused", kind: "neutral" as const } : view.links[ctx.stableId] ? LINK[view.links[ctx.stableId].state] : UNKNOWN)

@@ -26,7 +26,7 @@ import {
   Screen,
   type EditorDiagnostic,
 } from "@srelens/ui-kit";
-import { useConsole } from "../console";
+import { useAsk } from "../console";
 import { getKubeconfigFiles, useActiveContext } from "../lib/clusters";
 import { useClusterGate } from "../lib/clusterMoved";
 import { useProtection } from "../lib/protection";
@@ -297,12 +297,14 @@ function useAnalysis(pinned: string, yaml: string) {
     else setDryRun({ status: "passed", errors: [] });
   }
 
-  const { ask } = useConsole();
-  function review(what: string) {
-    ask(
-      `Review this ${what} before I apply it to ${pinned}. Say what is risky, wrong, or missing, and why.\n\n\`\`\`yaml\n${yaml}\n\`\`\``,
-    );
-  }
+  // About the cluster the editor is pinned to; absent where the AI Assistant may not act (#968).
+  const ask = useAsk(pinned);
+  const review = ask
+    ? (what: string) =>
+        ask(
+          `Review this ${what} before I apply it to ${pinned}. Say what is risky, wrong, or missing, and why.\n\n\`\`\`yaml\n${yaml}\n\`\`\``,
+        )
+    : undefined;
 
   return {
     problems: problems ?? [],
@@ -674,14 +676,16 @@ function EditExisting({ context, parts }: { context: ClusterContext; parts: Edit
           <Button variant="ghost" onClick={() => setShowChanges((v) => !v)} disabled={!dirty}>
             {showChanges ? "Hide diff" : "Diff"}
           </Button>
-          <Button
-            variant="ghost"
-            onClick={() => analysis.review(`${kind} ${name}`)}
-            disabled={!revealed || !yaml.trim() || manifest.status !== "ready"}
-            title="Hand the manifest to the assistant to look over before you apply it"
-          >
-            Review
-          </Button>
+          {analysis.review && (
+            <Button
+              variant="ghost"
+              onClick={() => analysis.review?.(`${kind} ${name}`)}
+              disabled={!revealed || !yaml.trim() || manifest.status !== "ready"}
+              title="Hand the manifest to the assistant to look over before you apply it"
+            >
+              Review
+            </Button>
+          )}
           <Button
             variant="ghost"
             onClick={() => void analysis.runDryRun()}
@@ -1005,14 +1009,16 @@ function NewResource({ context, cluster }: { context: ClusterContext; cluster?: 
             <NamespaceChoice namespaces={namespaces} value={namespace} onChange={pickNamespace} />
           </span>
           <ProblemsDot problems={analysis.problems} checked={analysis.checked} />
-          <Button
-            variant="ghost"
-            onClick={() => analysis.review("new manifest")}
-            disabled={!yaml.trim()}
-            title="Hand the manifest to the assistant to look over before you create it"
-          >
-            Review
-          </Button>
+          {analysis.review && (
+            <Button
+              variant="ghost"
+              onClick={() => analysis.review?.("new manifest")}
+              disabled={!yaml.trim()}
+              title="Hand the manifest to the assistant to look over before you create it"
+            >
+              Review
+            </Button>
+          )}
           <Button
             variant="ghost"
             onClick={() => void analysis.runDryRun()}

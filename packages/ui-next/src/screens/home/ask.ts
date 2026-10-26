@@ -1,5 +1,6 @@
 import type { ClusterContext } from "@srelens/core";
 import { useConsole } from "../../console";
+import { useAssistant } from "../../lib/assistant";
 import { openOnCluster } from "../../lib/openCluster";
 import { openTab } from "../../lib/tabsStore";
 
@@ -13,9 +14,14 @@ import { openTab } from "../../lib/tabsStore";
  *
  * A question about something on a cluster opens on that cluster, because the
  * assistant asks about the cluster in focus.
+ *
+ * `undefined` while the AI Assistant is off (#968). Home spans every cluster,
+ * so a caller asking about one checks that cluster with `isAssistantAllowed`.
  */
-export function useAskAssistant(): (question: string, context?: ClusterContext) => void {
+export function useAskAssistant(): ((question: string, context?: ClusterContext) => void) | undefined {
   const { setDraft } = useConsole();
+  const { enabled } = useAssistant();
+  if (!enabled) return undefined;
   return (question, context) => {
     setDraft(question);
     if (context) openOnCluster(context, "/agent");

@@ -3,6 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { ClusterContext } from "@srelens/core";
 import { ConsoleProvider, useConsole } from "../../console";
+import { setAssistantEnabled, setClusterAssistant } from "../../lib/assistant";
 import { resetContexts, setContexts } from "../../lib/clusters";
 import { detailRoute } from "../../lib/detailRoute";
 import { loadMarks } from "../../lib/marks";
@@ -71,6 +72,20 @@ describe("NeedsAttention", () => {
     show([PROD], { [PROD.stableId]: answered([item(PROD, { kind: "Node", namespace: "", name: "n1", problem: "Rebooted", cause: "warning" })]) });
     await userEvent.click(screen.getByRole("button", { name: "Open Node n1 on prod" }));
     expect(activeRoute()).toBe(detailRoute("Node", null, "n1", { cluster: "prod" }));
+  });
+
+  it("offers no Ask for an item on a cluster the AI Assistant is off for, and keeps the others' (#968)", () => {
+    setClusterAssistant(STAGE.stableId, false);
+    show([PROD, STAGE], { [PROD.stableId]: answered([item(PROD)]), [STAGE.stableId]: answered([item(STAGE)]) });
+    expect(screen.getByRole("button", { name: "Ask about checkout/web-7d4b on prod" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Open Pod checkout/web-7d4b on staging" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Ask about checkout/web-7d4b on staging" })).toBeNull();
+  });
+
+  it("offers no Ask at all while the AI Assistant is off (#968)", () => {
+    setAssistantEnabled(false);
+    show([PROD], { [PROD.stableId]: answered([item(PROD)]) });
+    expect(screen.queryByRole("button", { name: /^Ask about/ })).toBeNull();
   });
 
   it("offers no Ask on the web host, where the assistant cannot run", () => {

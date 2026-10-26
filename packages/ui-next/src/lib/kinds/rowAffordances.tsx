@@ -70,7 +70,8 @@ export function UnhealthyDot() {
 export function withRowAffordances<Row extends ListRow>(
   columns: Column<Row>[],
   isFlagged: (row: Row) => boolean,
-  ask: (question: string) => void,
+  // Absent where the AI Assistant may not act (#968): no chip, not a dead one.
+  ask?: (question: string) => void,
 ): Column<Row>[] {
   const decorated = columns.map((column) => {
     if (column.key !== NAME_KEY) return column;
@@ -85,6 +86,7 @@ export function withRowAffordances<Row extends ListRow>(
       ),
     };
   });
+  if (!ask) return decorated;
   return [
     ...decorated,
     {
