@@ -1,7 +1,8 @@
 import { beforeEach, expect, it, vi } from "vitest";
 import { render, screen, within, fireEvent } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { loadClusterNamespaces, loadContextProfiles, loadContextOrder, saveClusterNamespaces, saveContextProfiles, saveContextOrder, type ClusterContext } from "@srelens/core";
+import { loadClusterNamespaces, loadContextProfiles, loadContextOrder, readAssistantSetting, saveClusterNamespaces, saveContextProfiles, saveContextOrder, type ClusterContext } from "@srelens/core";
+import { setAssistantEnabled, setClusterAssistant } from "../../lib/assistant";
 import { setContexts } from "../../lib/clusters";
 import { loadMarks } from "../../lib/marks";
 import { ClustersPane } from "./ClustersPane";
@@ -188,4 +189,29 @@ it("falls back to the context name in the list while retaining an editable blank
   await user.type(input, "  Production Europe  ");
   expect(input.value).toBe("  Production Europe  ");
   expect(screen.getByRole("button", { name: "Edit Production Europe" }).textContent).toContain("Production Europe");
+});
+
+/** #968: the per-cluster switch, which can only turn the assistant off. */
+it("switches the AI Assistant off for the selected cluster, and back on", async () => {
+  const user = userEvent.setup(); render(<ClustersPane />);
+  await user.click(screen.getByRole("button", { name: "Edit Production Europe" }));
+  expect(screen.getByText("AI Assistant")).toBeTruthy();
+  const allow = screen.getByRole("switch", { name: "Allow AI Assistant" });
+  expect(allow.getAttribute("aria-checked")).toBe("true");
+  await user.click(allow);
+  expect(readAssistantSetting().disabledClusters).toEqual(["prod-id"]);
+  expect(screen.getByRole("switch", { name: "Allow AI Assistant" }).getAttribute("aria-checked")).toBe("false");
+  await user.click(screen.getByRole("switch", { name: "Allow AI Assistant" }));
+  expect(readAssistantSetting().disabledClusters).toEqual([]);
+});
+
+it("holds the cluster switch still, and says why, while the assistant is off everywhere", async () => {
+  setClusterAssistant("prod-id", false);
+  setAssistantEnabled(false);
+  const user = userEvent.setup(); render(<ClustersPane />);
+  await user.click(screen.getByRole("button", { name: "Edit Production Europe" }));
+  const allow = screen.getByRole("switch", { name: "Allow AI Assistant" }) as HTMLButtonElement;
+  expect(allow.disabled).toBe(true);
+  expect(screen.getByText("Turned off for every cluster in Settings › AI Assistant.")).toBeTruthy();
+  expect(readAssistantSetting()).toEqual({ enabled: false, disabledClusters: ["prod-id"] });
 });

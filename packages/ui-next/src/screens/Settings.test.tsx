@@ -42,7 +42,7 @@ vi.mock("@srelens/core", async (orig) => ({
   ...core,
 }));
 
-import type { VaultBiometricStatus } from "@srelens/core";
+import { readAssistantSetting, type VaultBiometricStatus } from "@srelens/core";
 import { openSettings } from "../lib/settingsRequest";
 import { defaultState } from "../lib/tabs";
 import { TabScope } from "../lib/tabScope";
@@ -70,7 +70,7 @@ const PORTED = ["Aardvark ledger", "Basalt tally", "Cinnabar dial"];
 
 /** §23's nav, in §23's order, minus the entry decision 2 removed. */
 const DESKTOP_SECTIONS = [
-  "Agent & MCP",
+  "AI Assistant",
   // #851. Desktop only: the skill store is files on this machine.
   "Skills",
   "Security",
@@ -275,6 +275,22 @@ describe("Settings", () => {
     expect(screen.getByText(/px body text/i)).toBeTruthy();
   });
 
+  // #968
+  it("opens on the AI Assistant switch, on until turned off, and keeps every pane below it", async () => {
+    const { user } = paint();
+    const toggle = await screen.findByRole("switch", { name: "AI Assistant" });
+    expect(toggle.getAttribute("aria-checked")).toBe("true");
+    expect(screen.queryByText("Turned off. These settings are kept for when it is switched back on.")).toBeNull();
+
+    await user.click(toggle);
+    expect(readAssistantSetting()).toEqual({ enabled: false, disabledClusters: [] });
+    expect(screen.getByRole("switch", { name: "AI Assistant" }).getAttribute("aria-checked")).toBe("false");
+    expect(screen.getByText("Turned off. These settings are kept for when it is switched back on.")).toBeTruthy();
+    expect(screen.getByText(/never without confirmation/i)).toBeTruthy();
+    expect(screen.getByText(/drops in-flight requests/i)).toBeTruthy();
+    expect(screen.getByText(/every change made here/i)).toBeTruthy();
+  });
+
   it("stacks the three agent panes together", async () => {
     paint();
     expect(await screen.findByText(/never without confirmation/i)).toBeTruthy();
@@ -310,7 +326,7 @@ describe("Settings", () => {
         .getAllByRole("tab")
         .filter((t) => t.getAttribute("aria-selected") === "true")
         .map((t) => t.textContent);
-    expect(selected()).toEqual(["Agent & MCP"]);
+    expect(selected()).toEqual(["AI Assistant"]);
     await user.click(screen.getByRole("tab", { name: "Shortcuts" }));
     expect(selected()).toEqual(["Shortcuts"]);
   });
@@ -329,11 +345,11 @@ describe("Settings", () => {
     await user.keyboard("{End}");
     expect(document.activeElement?.textContent).toBe("Apps");
     await user.keyboard("{ArrowDown}");
-    expect(document.activeElement?.textContent).toBe("Agent & MCP");
+    expect(document.activeElement?.textContent).toBe("AI Assistant");
     await user.keyboard("{ArrowUp}");
     expect(document.activeElement?.textContent).toBe("Apps");
     await user.keyboard("{Home}");
-    expect(document.activeElement?.textContent).toBe("Agent & MCP");
+    expect(document.activeElement?.textContent).toBe("AI Assistant");
   });
 
   it("hands Appearance the screens the host injected, not a list of its own", async () => {
@@ -419,7 +435,7 @@ describe("Settings", () => {
     it("still opens on the first section, which is not the missing one", async () => {
       paint();
       expect(await screen.findByText(/never without confirmation/i)).toBeTruthy();
-      expect(screen.getByRole("tab", { name: "Agent & MCP" }).getAttribute("aria-selected")).toBe(
+      expect(screen.getByRole("tab", { name: "AI Assistant" }).getAttribute("aria-selected")).toBe(
         "true",
       );
     });
@@ -451,7 +467,7 @@ describe("Settings", () => {
 
     it("keeps the section, because what an agent may do is true on both", async () => {
       paint();
-      expect(sections()).toContain("Agent & MCP");
+      expect(sections()).toContain("AI Assistant");
       // `AgentAccess` is static information read from srelens's own capability
       // registry, and it is the pane a web reader most wants: what a connected
       // agent may do without asking.

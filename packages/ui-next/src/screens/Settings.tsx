@@ -5,7 +5,8 @@ import { useTabScope } from "../lib/tabScope";
 import { openTab } from "../lib/tabsStore";
 import { useId, useLayoutEffect, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
 import { isTauri } from "@srelens/core";
-import { Screen } from "@srelens/ui-kit";
+import { Panel, Screen, Switch } from "@srelens/ui-kit";
+import { setAssistantEnabled, useAssistant } from "../lib/assistant";
 import type { RoutedScreenProps } from "../lib/routes";
 import { ApplicationLogsPane, KubernetesPane, WorkspacePane } from "./settings/PreferencePanes";
 import { SkillsPane } from "./settings/SkillsPane";
@@ -60,7 +61,7 @@ type SectionId = "extensions" | "collections" | "agent" | "skills" | "security" 
  * machine's disk, neither of which a browser has. There is nothing left over
  * to draw, so the entry is not drawn.
  *
- * **`Agent & MCP` keeps its entry on the web, and loses two of its four
+ * **`AI Assistant` (once `Agent & MCP`) keeps its entry on the web, and loses two of its four
  * panes.** It is the section this screen OPENS ON, and `McpServer` and
  * `AuditPane` were mounted there unconditionally — but `getMcpToken()`,
  * `mcpHttpStatus()` and `auditTail()` are direct `invoke`s from
@@ -90,7 +91,9 @@ type SectionId = "extensions" | "collections" | "agent" | "skills" | "security" 
  * web as they are on the desktop.
  */
 const SECTIONS: ReadonlyArray<{ id: SectionId; label: string; desktopOnly?: true }> = [
-  { id: "agent", label: "Agent & MCP" },
+  // The AI Assistant's switch and everything it runs on (#968). The id is older
+  // than the label and stays, so openSettings("agent") still lands here.
+  { id: "agent", label: "AI Assistant" },
   // Desktop-only: the skill store is a set of files on this machine, read
   // through commands the web server does not have.
   { id: "skills", label: "Skills", desktopOnly: true },
@@ -129,6 +132,7 @@ export type SettingsProps = RoutedScreenProps;
 export function Settings({ ported, onSwitchToClassic, onLocked }: SettingsProps) {
   const desktop = isTauri();
   const contexts = useContexts();
+  const assistant = useAssistant();
   const visible = SECTIONS.filter((s) => !s.desktopOnly || desktop);
 
   const [updatesOpened, setUpdatesOpened] = useState(false);
@@ -218,6 +222,21 @@ export function Settings({ ported, onSwitchToClassic, onLocked }: SettingsProps)
         // `isTauri` and no backend command at all.
         return (
           <div className="settings-agent flex flex-col">
+            {/* #968: first, the switch. Off keeps every pane below with its
+                values, so switching back on finds them as they were. */}
+            <Panel title="Availability">
+              <Switch
+                label="AI Assistant"
+                hint="Hides the assistant everywhere and makes srelens's MCP server refuse every tool call."
+                on={assistant.enabled}
+                onChange={setAssistantEnabled}
+              />
+              {!assistant.enabled && (
+                <p className="mt-3 text-[0.75rem] leading-relaxed text-muted">
+                  Turned off. These settings are kept for when it is switched back on.
+                </p>
+              )}
+            </Panel>
             <AgentAccess />
             {desktop ? (
               <>

@@ -20,6 +20,7 @@ vi.mock("@srelens/core", async (orig) => ({
 vi.mock("./McpClientSetup", () => ({ McpClientSetup: () => null }));
 
 import { McpServer } from "./McpServer";
+import { setAssistantEnabled } from "../../lib/assistant";
 import { mcpAutoStartSettled, mcpAutoStartStarting, resetMcpAutoStart } from "../../lib/mcpAutoStart";
 
 /**
@@ -75,6 +76,16 @@ describe("McpServer", () => {
   function address(): string {
     return screen.getByTestId("mcp-address").textContent ?? "";
   }
+
+  // #968: Start/Stop is its own thing; the pane says what the switch does to it.
+  it("says the server refuses every tool call while the AI Assistant is off", async () => {
+    render(<McpServer />);
+    await screen.findByText(/^•+$/);
+    expect(screen.queryByText("The AI Assistant is off, so the server refuses every tool call.")).toBeNull();
+    act(() => setAssistantEnabled(false));
+    expect(screen.getByText("The AI Assistant is off, so the server refuses every tool call.")).toBeTruthy();
+    expect(screen.getByRole("button", { name: /Start server|Stop server/ })).toBeTruthy();
+  });
 
   it("masks the token until the reader asks for it", async () => {
     render(<McpServer />);

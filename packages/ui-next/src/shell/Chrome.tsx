@@ -243,7 +243,7 @@ export function Chrome({ controls, clusterName, onToggleTheme, onNewWorkspace, o
               icon={Icons.settings}
               // `Settings`, and not `Appearance settings`, which is what this
               // said while it opened `/settings` — a route whose screen opens
-              // on `Agent & MCP`. A control's accessible name is a promise
+              // on `AI Assistant`. A control's accessible name is a promise
               // about where it goes, and it is the ONLY thing a keyboard or
               // screen-reader user has to go on, so it was the one reader the
               // wrong name misled.

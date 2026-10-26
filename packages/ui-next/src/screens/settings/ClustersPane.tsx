@@ -1,7 +1,8 @@
 import { useId, useRef, useState, type PointerEvent } from "react";
 import { GripVertical } from "lucide-react";
 import { deleteContext, describeError, isTauri, listContexts, removeClusterNamespace, unprefixedName, type ClusterContext } from "@srelens/core";
-import { Button, ConfirmDialog, CustomizeMark, Field, Mark, TextInput } from "@srelens/ui-kit";
+import { Button, ConfirmDialog, CustomizeMark, Field, Mark, Switch, TextInput } from "@srelens/ui-kit";
+import { setClusterAssistant, useAssistant } from "../../lib/assistant";
 import { getContexts, getKubeconfigFiles, setContexts, useContexts, useContextsError, useContextsStatus } from "../../lib/clusters";
 import { moveContext, moveContextBy, removeContextFromOrder, useOrderedContexts } from "../../lib/contextOrder";
 import { getMark, resetMark, setMark, useEditableMark, useMark } from "../../lib/marks";
@@ -11,6 +12,7 @@ import { removeNamespaces } from "../../lib/workspace";
 
 function ContextEditor({ context, onRemove }: { context: ClusterContext; onRemove: () => void }) {
   const mark = useEditableMark(context.stableId, context.name);
+  const assistant = useAssistant();
   return <section aria-label="Context details" className="scroll min-h-0 min-w-0 flex-1">
     <div className="pane-head">Context appearance</div>
     <CustomizeMark value={mark} onChange={next => setMark(context.stableId, next)}
@@ -27,6 +29,13 @@ function ContextEditor({ context, onRemove }: { context: ClusterContext; onRemov
         <dt className="text-muted">{label}</dt><dd className="overflow-x-auto whitespace-nowrap font-mono" title={value}>{value}</dd>
       </div>)}
     </dl>
+    {/* #968: off-only. Global off wins, and this cluster's choice is kept for when it is back on. */}
+    <div className="pane-head border-t border-rule">AI Assistant</div>
+    <div className="p-3">
+      <Switch label="Allow AI Assistant" on={!assistant.disabledClusters.includes(context.stableId)}
+        disabled={!assistant.enabled} hint={assistant.enabled ? undefined : "Turned off for every cluster in Settings › AI Assistant."}
+        onChange={on => setClusterAssistant(context.stableId, on)} />
+    </div>
     {isTauri() && <div className="border-t border-rule p-3"><Button variant="danger" onClick={onRemove}>Remove context</Button></div>}
   </section>;
 }
