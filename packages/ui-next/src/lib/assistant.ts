@@ -79,15 +79,32 @@ function save(change: Change): Promise<void> {
   waiting.push(change);
   changed();
   saving = saving.then(async () => {
+    // What the file held when this save began: the value to go back to when
+    // the write fails and the file cannot be read again either.
+    let confirmed: AssistantSetting | undefined;
     try {
       await refreshSetting(ASSISTANT_KEY);
-      writeAssistantSetting(change(readAssistantSetting()));
+      confirmed = readAssistantSetting();
+      writeAssistantSetting(change(confirmed));
       await flushSettingsWrites({ throwOnError: true });
       saveError = null;
     } catch (error) {
       saveError = error;
       // Show what the file holds, not what was asked for.
-      await refreshSetting(ASSISTANT_KEY).catch((cause) => console.warn("could not re-read the AI Assistant setting", cause));
+      try {
+        await refreshSetting(ASSISTANT_KEY);
+      } catch (cause) {
+        console.warn("could not re-read the AI Assistant setting", cause);
+        // The write left the unconfirmed value in memory; the file still holds
+        // the last confirmed one (its write failed), so show that.
+        if (confirmed) {
+          try {
+            writeAssistantSetting(confirmed);
+          } catch {
+            // Storage refused outright: it never took the unconfirmed value either.
+          }
+        }
+      }
     }
     waiting = waiting.filter((w) => w !== change);
     changed();

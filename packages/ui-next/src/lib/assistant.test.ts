@@ -137,6 +137,28 @@ describe("the assistant store", () => {
     expect(String(getAssistantSaveError())).toContain("settings.json is locked");
   });
 
+  // Review (PR #984): a failed save whose re-read also fails must not leave
+  // the unconfirmed value in memory.
+  it("goes back to the last confirmed value when the save and the read after it both fail", async () => {
+    let reads = 0;
+    refreshSetting.mockImplementation(async (key) => {
+      reads += 1;
+      if (reads === 1) {
+        localStorage.setItem(key, JSON.stringify({ enabled: true, disabledClusters: [] }));
+        return;
+      }
+      throw new Error("backend unreachable");
+    });
+    flushSettingsWrites.mockRejectedValue(new Error("settings.json is locked"));
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    setAssistantEnabled(false);
+    await assistantSaved();
+
+    expect(getAssistant().enabled).toBe(true);
+    expect(String(getAssistantSaveError())).toContain("settings.json is locked");
+  });
+
   it("stops the turn in flight when its cluster is switched off, and only then", () => {
     runs.busyKey = "prod|/overview";
     runs.cluster = "prod";
