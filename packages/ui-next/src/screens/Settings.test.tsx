@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, onTestFinished } from "vitest";
 import { act, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 
@@ -13,6 +13,8 @@ import userEvent from "@testing-library/user-event";
  */
 const core = vi.hoisted(() => ({
   isTauri: vi.fn(() => true),
+  // Whether a settings write reached the backend (#968 saves wait on it).
+  flushSettingsWrites: vi.fn(async (_options?: { throwOnError?: boolean }) => {}),
   appVersion: vi.fn(async () => "1.0.0"),
   checkForUpdate: vi.fn(),
   installUpdate: vi.fn(),
@@ -48,6 +50,7 @@ import { defaultState } from "../lib/tabs";
 import { TabScope } from "../lib/tabScope";
 import { activateTab, currentWorkspace, duplicateTab, moveTab, openTab, setState } from "../lib/tabsStore";
 import { Settings } from "./Settings";
+import { __resetAssistantForTests, assistantSaved } from "../lib/assistant";
 
 const ROUTE = "/settings";
 
@@ -141,6 +144,7 @@ describe("Settings", () => {
     core.llmKeyStatus.mockResolvedValue([]);
     core.llmListModels.mockResolvedValue([]);
     core.listAgents.mockResolvedValue([]);
+    core.flushSettingsWrites.mockResolvedValue(undefined);
   });
 
   it("titles itself the way the design does, and takes no header action", () => {
@@ -289,6 +293,19 @@ describe("Settings", () => {
     expect(screen.getByText(/never without confirmation/i)).toBeTruthy();
     expect(screen.getByText(/drops in-flight requests/i)).toBeTruthy();
     expect(screen.getByText(/every change made here/i)).toBeTruthy();
+  });
+
+  it("says the switch could not be saved, and shows what the file holds", async () => {
+    core.flushSettingsWrites.mockRejectedValue(new Error("settings.json is locked"));
+    const { user } = paint();
+    await user.click(await screen.findByRole("switch", { name: "AI Assistant" }));
+    await act(async () => {
+      await assistantSaved();
+    });
+    onTestFinished(__resetAssistantForTests);
+    const alert = screen.getByText(/Could not save the AI Assistant setting/);
+    expect(alert.getAttribute("role")).toBe("alert");
+    expect(alert.textContent).toContain("settings.json is locked");
   });
 
   it("stacks the three agent panes together", async () => {

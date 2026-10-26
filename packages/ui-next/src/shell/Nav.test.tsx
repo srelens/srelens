@@ -175,7 +175,7 @@ describe("Nav", () => {
     await userEvent.click(screen.getByRole("treeitem", { name: "Investigate" }));
     expect(await screen.findByRole("treeitem", { name: "Agent" })).toBeDefined();
 
-    act(() => setClusterAssistant(PROD.stableId, false));
+    act(() => { setClusterAssistant(PROD.stableId, false); });
     expect(screen.queryByRole("treeitem", { name: "Agent" })).toBeNull();
     expect(screen.getByRole("treeitem", { name: "Topology" })).toBeDefined();
 

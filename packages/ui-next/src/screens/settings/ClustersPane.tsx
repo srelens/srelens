@@ -2,7 +2,7 @@ import { useId, useRef, useState, type PointerEvent } from "react";
 import { GripVertical } from "lucide-react";
 import { deleteContext, describeError, isTauri, listContexts, removeClusterNamespace, unprefixedName, type ClusterContext } from "@srelens/core";
 import { Button, ConfirmDialog, CustomizeMark, Field, Mark, Switch, TextInput } from "@srelens/ui-kit";
-import { setClusterAssistant, useAssistant } from "../../lib/assistant";
+import { getAssistantSaveError, setClusterAssistant, useAssistant } from "../../lib/assistant";
 import { getContexts, getKubeconfigFiles, setContexts, useContexts, useContextsError, useContextsStatus } from "../../lib/clusters";
 import { moveContext, moveContextBy, removeContextFromOrder, useOrderedContexts } from "../../lib/contextOrder";
 import { getMark, resetMark, setMark, useEditableMark, useMark } from "../../lib/marks";
@@ -35,6 +35,8 @@ function ContextEditor({ context, onRemove }: { context: ClusterContext; onRemov
       <Switch label="Allow AI Assistant" on={!assistant.disabledClusters.includes(context.stableId)}
         disabled={!assistant.enabled} hint={assistant.enabled ? undefined : "Turned off for every cluster in Settings › AI Assistant."}
         onChange={on => setClusterAssistant(context.stableId, on)} />
+      {getAssistantSaveError() !== null && <p role="alert" className="mt-2 text-[0.75rem]" style={{ color: "var(--sev)" }}>
+        Could not save the AI Assistant setting: {describeError(getAssistantSaveError()).detail}</p>}
     </div>
     {isTauri() && <div className="border-t border-rule p-3"><Button variant="danger" onClick={onRemove}>Remove context</Button></div>}
   </section>;

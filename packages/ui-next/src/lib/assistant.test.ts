@@ -1,11 +1,13 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { act, renderHook } from "@testing-library/react";
-import { ASSISTANT_KEY, type ClusterContext } from "@srelens/core";
+import { ASSISTANT_KEY, readAssistantSetting, type ClusterContext } from "@srelens/core";
 
 // The one backend read this module makes: the setting, read again when a
 // window is focused. A stand-in, so each test says what the backend holds.
+// And the write: whether it reached the backend.
 const refreshSetting = vi.hoisted(() => vi.fn<(key: string) => Promise<void>>());
-vi.mock("@srelens/core", async (orig) => ({ ...(await orig<typeof import("@srelens/core")>()), refreshSetting }));
+const flushSettingsWrites = vi.hoisted(() => vi.fn<(options?: { throwOnError?: boolean }) => Promise<void>>());
+vi.mock("@srelens/core", async (orig) => ({ ...(await orig<typeof import("@srelens/core")>()), refreshSetting, flushSettingsWrites }));
 
 // The run store, reduced to what this module asks of it: which run is busy,
 // what it is about, and the Stop.
@@ -23,8 +25,11 @@ vi.mock("./agentRun", () => ({
 
 import { resetContexts, setContexts } from "./clusters";
 import {
+  __resetAssistantForTests,
+  assistantSaved,
   followAssistantSetting,
   getAssistant,
+  getAssistantSaveError,
   isAssistantAllowed,
   setAssistantEnabled,
   setClusterAssistant,
@@ -38,11 +43,16 @@ const ctx = (name: string): ClusterContext => ({
 const prod = ctx("prod");
 const dev = ctx("dev");
 
-beforeEach(() => {
-  // `settingsStorage` is plain `localStorage` in a test, cleared after each one.
+beforeEach(async () => {
+  // `settingsStorage` is plain `localStorage` in a test. A save queued by the
+  // last test lands first, then the storage is cleared under this one.
+  await assistantSaved();
+  __resetAssistantForTests();
+  localStorage.clear();
   resetContexts();
   setContexts([prod, dev]);
   refreshSetting.mockReset().mockResolvedValue(undefined);
+  flushSettingsWrites.mockReset().mockResolvedValue(undefined);
   runs.busyKey = null;
   runs.cluster = "";
   runs.stopAgentRun.mockReset();
@@ -73,9 +83,9 @@ describe("the assistant store", () => {
   it("redraws a reader when its cluster or the whole assistant is switched off", () => {
     const { result } = renderHook(() => useAssistantAllowed("dev"));
     expect(result.current).toBe(true);
-    act(() => setClusterAssistant(prod.stableId, false));
+    act(() => { setClusterAssistant(prod.stableId, false); });
     expect(result.current).toBe(true);
-    act(() => setAssistantEnabled(false));
+    act(() => { setAssistantEnabled(false); });
     expect(result.current).toBe(false);
   });
 
@@ -93,6 +103,38 @@ describe("the assistant store", () => {
     expect(refreshSetting).toHaveBeenCalledWith(ASSISTANT_KEY);
     expect(result.current).toBe(false);
     release();
+  });
+
+  // Review finding: the switch must never show a state the file — the only
+  // thing the MCP gate reads — does not hold.
+  it("writes against the setting as another window left it", async () => {
+    // Main switched dev off after this window loaded its settings.
+    refreshSetting.mockImplementation(async (key) => {
+      if (!localStorage.getItem(key)?.includes(dev.stableId)) {
+        localStorage.setItem(key, JSON.stringify({ enabled: true, disabledClusters: [dev.stableId] }));
+      }
+    });
+    setClusterAssistant(prod.stableId, false);
+    await assistantSaved();
+    expect(readAssistantSetting().disabledClusters.sort()).toEqual([dev.stableId, prod.stableId].sort());
+    expect(getAssistantSaveError()).toBeNull();
+  });
+
+  it("shows what was saved, not what was asked for, when the save fails", async () => {
+    const backend = JSON.stringify({ enabled: true, disabledClusters: [] });
+    refreshSetting.mockImplementation(async (key) => localStorage.setItem(key, backend));
+    flushSettingsWrites.mockRejectedValue(new Error("settings.json is locked"));
+    const { result } = renderHook(() => useAssistantAllowed("dev"));
+
+    act(() => { setAssistantEnabled(false); });
+    expect(result.current).toBe(false); // shown at once
+    await act(async () => {
+      await assistantSaved();
+    });
+
+    expect(result.current).toBe(true); // back to what the file holds
+    expect(getAssistant().enabled).toBe(true);
+    expect(String(getAssistantSaveError())).toContain("settings.json is locked");
   });
 
   it("stops the turn in flight when its cluster is switched off, and only then", () => {

@@ -136,7 +136,7 @@ describe("Workloads", () => {
     await waitFor(() => expect(rowNames()).toHaveLength(5));
     expect(document.querySelectorAll(".row-ask")).toHaveLength(5);
 
-    act(() => setClusterAssistant(CTX.stableId, false));
+    act(() => { setClusterAssistant(CTX.stableId, false); });
     await waitFor(() => expect(document.querySelectorAll(".row-ask")).toHaveLength(0));
     expect(rowNames()).toHaveLength(5);
   });

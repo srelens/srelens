@@ -141,7 +141,7 @@ describe("useAsk", () => {
 
   it("hands nothing for a screen whose cluster has it switched off, and follows the switch", () => {
     renderOn(prod);
-    act(() => setClusterAssistant(prod.stableId, false));
+    act(() => { setClusterAssistant(prod.stableId, false); });
     expect(screen.getByTestId("ask").textContent).toBe("none");
   });
 

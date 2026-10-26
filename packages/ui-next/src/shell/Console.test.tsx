@@ -1880,7 +1880,7 @@ describe("Console — where the AI Assistant is off", () => {
     await screen.findByAltText("Attachment 1");
     await user.type(prompt(), "why is it slow");
 
-    act(() => setClusterAssistant(HARNESS_CTX.stableId, false));
+    act(() => { setClusterAssistant(HARNESS_CTX.stableId, false); });
     fireEvent.keyDown(prompt(), { key: "Enter" });
     await act(async () => {
       for (let i = 0; i < 10; i++) await Promise.resolve();
@@ -1889,7 +1889,7 @@ describe("Console — where the AI Assistant is off", () => {
     expect(prompt().value).toBe("why is it slow");
 
     // Switched back on, the question is exactly as it was left, image and all.
-    act(() => setClusterAssistant(HARNESS_CTX.stableId, true));
+    act(() => { setClusterAssistant(HARNESS_CTX.stableId, true); });
     expect(prompt().value).toBe("why is it slow");
     expect(screen.getByAltText("Attachment 1")).toBeTruthy();
   });

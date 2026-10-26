@@ -4,9 +4,9 @@ import { onSettingsRequested, takeSettingsRequest } from "../lib/settingsRequest
 import { useTabScope } from "../lib/tabScope";
 import { openTab } from "../lib/tabsStore";
 import { useId, useLayoutEffect, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
-import { isTauri } from "@srelens/core";
+import { describeError, isTauri } from "@srelens/core";
 import { Panel, Screen, Switch } from "@srelens/ui-kit";
-import { setAssistantEnabled, useAssistant } from "../lib/assistant";
+import { getAssistantSaveError, setAssistantEnabled, useAssistant } from "../lib/assistant";
 import type { RoutedScreenProps } from "../lib/routes";
 import { ApplicationLogsPane, KubernetesPane, WorkspacePane } from "./settings/PreferencePanes";
 import { SkillsPane } from "./settings/SkillsPane";
@@ -133,6 +133,7 @@ export function Settings({ ported, onSwitchToClassic, onLocked }: SettingsProps)
   const desktop = isTauri();
   const contexts = useContexts();
   const assistant = useAssistant();
+  const saveError = getAssistantSaveError();
   const visible = SECTIONS.filter((s) => !s.desktopOnly || desktop);
 
   const [updatesOpened, setUpdatesOpened] = useState(false);
@@ -234,6 +235,13 @@ export function Settings({ ported, onSwitchToClassic, onLocked }: SettingsProps)
               {!assistant.enabled && (
                 <p className="mt-3 text-[0.75rem] leading-relaxed text-muted">
                   Turned off. These settings are kept for when it is switched back on.
+                </p>
+              )}
+              {/* The switch shows what the file holds; when a change did not
+                  reach it, say so rather than let the switch flip back silently. */}
+              {saveError !== null && (
+                <p role="alert" className="mt-3 text-[0.75rem] leading-relaxed" style={{ color: "var(--sev)" }}>
+                  Could not save the AI Assistant setting: {describeError(saveError).detail}
                 </p>
               )}
             </Panel>

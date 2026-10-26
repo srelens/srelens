@@ -82,7 +82,7 @@ describe("McpServer", () => {
     render(<McpServer />);
     await screen.findByText(/^•+$/);
     expect(screen.queryByText("The AI Assistant is off, so the server refuses every tool call.")).toBeNull();
-    act(() => setAssistantEnabled(false));
+    act(() => { setAssistantEnabled(false); });
     expect(screen.getByText("The AI Assistant is off, so the server refuses every tool call.")).toBeTruthy();
     expect(screen.getByRole("button", { name: /Start server|Stop server/ })).toBeTruthy();
   });

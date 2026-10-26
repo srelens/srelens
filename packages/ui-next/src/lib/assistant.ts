@@ -2,6 +2,7 @@ import { useSyncExternalStore } from "react";
 import {
   ASSISTANT_KEY,
   assistantAllowedFor,
+  flushSettingsWrites,
   readAssistantSetting,
   refreshSetting,
   writeAssistantSetting,
@@ -15,10 +16,22 @@ import { getContexts, useContexts } from "./clusters";
  * is on at all, and the clusters it is off for. Core parses the key; this
  * makes it reactive and keeps open windows in step.
  *
- * Read from `settingsStorage` on every call rather than cached: it is an
- * in-memory map already, and one source means a write this window could not
- * save never shows as saved.
+ * **The file is the truth, not this window.** The MCP gate reads the settings
+ * file and nothing else, so a switch that showed "off" over a file still
+ * saying "on" would be the one lie this feature cannot tell. A change shows at
+ * once, as a change waiting on top of what is stored; the save then reads the
+ * setting again (another window may have changed it — `refreshSetting`'s own
+ * rule for list writers), writes the change against that, and waits for the
+ * backend to confirm. A save that fails is dropped and the setting read again,
+ * so the switch shows what the file holds, with the error beside it — the
+ * shape `collections.ts` keeps for its list.
  */
+type Change = (setting: AssistantSetting) => AssistantSetting;
+
+/** Changes shown but not yet saved, oldest first. */
+let waiting: Change[] = [];
+let saving: Promise<void> = Promise.resolve();
+let saveError: unknown = null;
 let version = 0;
 const listeners = new Set<() => void>();
 
@@ -42,19 +55,55 @@ function changed(): void {
 }
 
 export function getAssistant(): AssistantSetting {
-  return readAssistantSetting();
+  return waiting.reduce((setting, change) => change(setting), readAssistantSetting());
 }
 
-export function setAssistantEnabled(on: boolean): void {
-  writeAssistantSetting({ ...getAssistant(), enabled: on });
-  changed();
+/** Why the last save did not land, or `null`; cleared by the next one that does. */
+export function getAssistantSaveError(): unknown {
+  return saveError;
 }
 
-export function setClusterAssistant(stableId: string, allowed: boolean): void {
-  const current = getAssistant();
-  const others = current.disabledClusters.filter((id) => id !== stableId);
-  writeAssistantSetting({ ...current, disabledClusters: allowed ? others : [...others, stableId] });
+/** Resolves when every change made so far has been saved or dropped. */
+export function assistantSaved(): Promise<void> {
+  return saving;
+}
+
+/** Forget a save error and anything waiting, between tests. */
+export function __resetAssistantForTests(): void {
+  waiting = [];
+  saving = Promise.resolve();
+  saveError = null;
+}
+
+function save(change: Change): Promise<void> {
+  waiting.push(change);
   changed();
+  saving = saving.then(async () => {
+    try {
+      await refreshSetting(ASSISTANT_KEY);
+      writeAssistantSetting(change(readAssistantSetting()));
+      await flushSettingsWrites({ throwOnError: true });
+      saveError = null;
+    } catch (error) {
+      saveError = error;
+      // Show what the file holds, not what was asked for.
+      await refreshSetting(ASSISTANT_KEY).catch((cause) => console.warn("could not re-read the AI Assistant setting", cause));
+    }
+    waiting = waiting.filter((w) => w !== change);
+    changed();
+  });
+  return saving;
+}
+
+export function setAssistantEnabled(on: boolean): Promise<void> {
+  return save((setting) => ({ ...setting, enabled: on }));
+}
+
+export function setClusterAssistant(stableId: string, allowed: boolean): Promise<void> {
+  return save((setting) => {
+    const others = setting.disabledClusters.filter((id) => id !== stableId);
+    return { ...setting, disabledClusters: allowed ? others : [...others, stableId] };
+  });
 }
 
 /** Whether the assistant may act on `cluster`, named any way the app names one. */
