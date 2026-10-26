@@ -312,7 +312,7 @@ vi.mock("./components/NewResourceEditor", () => ({
 
 import { App } from "./App";
 import { HANDOFF_KEY } from "./design";
-import { flushSaveOpenTabs } from "@srelens/core";
+import { flushSaveOpenTabs, writeAssistantSetting } from "@srelens/core";
 import { notify } from "@srelens/core/lib/notify";
 
 const context = (name: string) => ({
@@ -636,6 +636,31 @@ describe("App", () => {
     fireEvent.click(screen.getByText("open-assistant"));
     expect(screen.getAllByRole("tab", { name: /^Assistant$/ })).toHaveLength(1);
     delete (window as unknown as { __TAURI_INTERNALS__?: object }).__TAURI_INTERNALS__;
+  });
+
+  // #968: the classic design honours the AI Assistant switch too.
+  it("opens no assistant while the AI Assistant is off", () => {
+    (window as unknown as { __TAURI_INTERNALS__?: object }).__TAURI_INTERNALS__ = {};
+    onTestFinished(() => { delete (window as unknown as { __TAURI_INTERNALS__?: object }).__TAURI_INTERNALS__; });
+    writeAssistantSetting({ enabled: false, disabledClusters: [] });
+    render(<App />);
+    fireEvent.click(screen.getByText("open-assistant"));
+    expect(screen.queryByTestId("assistant-tab")).toBeNull();
+    expect(screen.queryByRole("tab", { name: /^Assistant$/ })).toBeNull();
+  });
+
+  it("says the assistant is off on an Assistant tab left open when it was switched off", () => {
+    (window as unknown as { __TAURI_INTERNALS__?: object }).__TAURI_INTERNALS__ = {};
+    onTestFinished(() => { delete (window as unknown as { __TAURI_INTERNALS__?: object }).__TAURI_INTERNALS__; });
+    render(<App />);
+    fireEvent.click(screen.getByText("open-assistant"));
+    expect(screen.getByTestId("assistant-tab")).toBeDefined();
+
+    writeAssistantSetting({ enabled: false, disabledClusters: [] });
+    fireEvent.click(screen.getByText("open-settings"));
+    fireEvent.click(screen.getByRole("tab", { name: /^Assistant$/ }));
+    expect(screen.queryByTestId("assistant-tab")).toBeNull();
+    expect(screen.getByText("AI Assistant is off")).toBeDefined();
   });
 
   it("hides the assistant entry point in a web build", () => {
