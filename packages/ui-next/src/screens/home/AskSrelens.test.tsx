@@ -70,6 +70,25 @@ describe("AskSrelens", () => {
     expect(draft()).toBe("Why is checkout/web-7d4b crash-looping on staging?");
   });
 
+  it("suggests a custom kind and the built-in of the same name apart, each under its own key", () => {
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      show([PROD], {
+        [PROD.stableId]: scan([
+          item(PROD, { kind: "Deployment", group: "acme.io", name: "api", problem: "ReconcileFailed", cause: "warning" }),
+          item(PROD, { kind: "Deployment", name: "api", problem: "ProgressDeadlineExceeded", cause: "warning" }),
+        ]),
+      });
+      expect(screen.getAllByRole("button", { name: /^Ask: / }).map((b) => b.textContent)).toEqual([
+        "What is behind the ReconcileFailed warning on acme.io/Deployment checkout/api on prod?",
+        "What is behind the ProgressDeadlineExceeded warning on Deployment checkout/api on prod?",
+      ]);
+      expect(errors.mock.calls.flat().join(" ")).not.toMatch(/same key/);
+    } finally {
+      errors.mockRestore();
+    }
+  });
+
   it("suggests nothing when nothing needs attention", () => {
     show([PROD], { [PROD.stableId]: scan([]) });
     expect(screen.queryByRole("button", { name: /^Ask: / })).toBeNull();
