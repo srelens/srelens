@@ -6896,6 +6896,25 @@ async fn feature_banner_modal_interactive_navigation_toggle_and_jump() {
 
     press(&mut app, ch('i')).await;
     assert!(matches!(app.modal, Some(Modal::AddCluster { .. })));
+
+    // Re-open via :features and test 'c' jumps to ContextPicker modal
+    app.modal = None;
+    common::type_str(&mut app, ":features").await;
+    press(&mut app, key(KeyCode::Enter)).await;
+    assert!(matches!(app.modal, Some(Modal::FeatureBanner { .. })));
+
+    press(&mut app, ch('c')).await;
+    assert!(matches!(app.modal, Some(Modal::ContextPicker { .. })));
+
+    // Re-open via :features and test 'h' jumps to Top Hotspots view
+    app.modal = None;
+    common::type_str(&mut app, ":features").await;
+    press(&mut app, key(KeyCode::Enter)).await;
+    assert!(matches!(app.modal, Some(Modal::FeatureBanner { .. })));
+
+    press(&mut app, ch('h')).await;
+    assert!(app.modal.is_none());
+    assert!(matches!(app.active_view, ActiveView::Top(_)));
 }
 
 #[tokio::test]

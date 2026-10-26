@@ -1331,7 +1331,7 @@ pub fn render_feature_banner_modal(
         .clamp(48, 118)
         .min(area.width);
     let modal_height = (area.height.saturating_sub(2))
-        .clamp(18, 30)
+        .clamp(18, 32)
         .min(area.height);
     let modal_x = area.x + (area.width.saturating_sub(modal_width)) / 2;
     let modal_y = area.y + (area.height.saturating_sub(modal_height)) / 2;
@@ -1353,12 +1353,18 @@ pub fn render_feature_banner_modal(
     let inner = block.inner(modal_area);
     f.render_widget(block, modal_area);
 
+    let (header_len, list_min) = if inner.height < 25 {
+        (3, Constraint::Min(8))
+    } else {
+        (4, Constraint::Min(16))
+    };
+
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(4), // Top description & update alert, with a wrap row
-            Constraint::Min(14),   // Features list
-            Constraint::Length(3), // Checkbox and key hints
+            Constraint::Length(header_len), // Top description & update alert
+            list_min,                       // Features list
+            Constraint::Length(3),          // Checkbox and key hints
         ])
         .split(inner);
 
@@ -1429,11 +1435,11 @@ pub fn render_feature_banner_modal(
     }
 
     let header_hint = if inner_w >= 108 {
-        "Key built-in features you should know (press [0-9, b, p, i, u] to jump directly, or type ':' for command prompt):"
+        "Key built-in features you should know (press [0-9, b, c, h, i, p, u] to jump directly, or type ':' for command prompt):"
     } else if inner_w >= 80 {
-        "Key built-in features (press [0-9, b, p, i, u] to jump directly, or ':' for commands):"
+        "Key built-in features (press [0-9, b, c, h, i, p, u] to jump directly, or ':' for commands):"
     } else {
-        "Key features (press [0-9, b, p, i, u] to jump, ':' for commands):"
+        "Key features (press [0-9, b, c, h, i, p, u] to jump, ':' for commands):"
     };
 
     header_lines.push(Line::from(vec![Span::styled(
@@ -1452,7 +1458,7 @@ pub fn render_feature_banner_modal(
         "Check for new releases & update binary ('srectl update')".to_string()
     };
 
-    let features: [(&str, &str, &str, String, &str); 14] = [
+    let features: [(&str, &str, &str, String, &str); 16] = [
         (
             "[1]",
             ":helm",
@@ -1544,72 +1550,196 @@ pub fn render_feature_banner_modal(
             "Import Kubernetes cluster / kubeconfig from clipboard or file path".to_string(),
             ":import",
         ),
+        (
+            "[c]",
+            ":contexts",
+            "[Contexts]",
+            "Kubeconfig context switcher for multi-cluster management".to_string(),
+            ":contexts",
+        ),
+        (
+            "[h]",
+            ":top",
+            "[Hotspots]",
+            "Top CPU & memory resource rankings across pods and nodes".to_string(),
+            ":top",
+        ),
         ("[u]", ":update", "[Self Update]", update_desc, ":update"),
     ];
 
-    let items: Vec<ListItem> = features
-        .iter()
-        .map(|(num, cmd, cat, desc, syntax)| {
-            let (num_style, cmd_style) = if *cmd == ":update" && update_available.is_some() {
-                (
-                    Style::default()
-                        .fg(Theme::yellow())
-                        .add_modifier(Modifier::BOLD),
-                    Style::default()
-                        .fg(Theme::yellow())
-                        .add_modifier(Modifier::BOLD),
-                )
-            } else {
-                (
-                    Style::default()
-                        .fg(Theme::cyan())
-                        .add_modifier(Modifier::BOLD),
-                    Style::default()
-                        .fg(Theme::yellow())
-                        .add_modifier(Modifier::BOLD),
-                )
-            };
+    let use_two_columns = chunks[1].height < 16;
 
-            let prefix_w = 4 + 13 + 15; // num (4) + cmd (13) + cat (15)
-            let mut spans = vec![
-                Span::styled(format!("{num} "), num_style),
-                Span::styled(format!("{:<13}", cmd), cmd_style),
-                Span::styled(
-                    format!("{:<15}", cat),
-                    Style::default()
-                        .fg(Theme::accent())
-                        .add_modifier(Modifier::BOLD),
-                ),
-            ];
+    let items: Vec<ListItem> = if use_two_columns {
+        let half = (features.len() + 1) / 2;
+        let col_w = (inner_w.saturating_sub(3)) / 2;
 
-            if inner_w >= 110 {
-                let syntax_str = format!("  ({})", syntax);
-                let avail_desc = inner_w.saturating_sub(prefix_w + syntax_str.len());
-                let clean_desc = if desc.chars().count() > avail_desc && avail_desc > 3 {
-                    let s: String = desc.chars().take(avail_desc - 3).collect();
-                    format!("{}...", s)
-                } else {
-                    desc.clone()
+        (0..half)
+            .map(|i| {
+                let mut spans = Vec::new();
+
+                let push_col = |spans: &mut Vec<Span>,
+                                feat: &(&str, &str, &str, String, &str),
+                                max_w: usize| {
+                    let (num, cmd, cat, desc, _) = feat;
+                    let (num_style, cmd_style) = if *cmd == ":update" && update_available.is_some()
+                    {
+                        (
+                            Style::default()
+                                .fg(Theme::yellow())
+                                .add_modifier(Modifier::BOLD),
+                            Style::default()
+                                .fg(Theme::yellow())
+                                .add_modifier(Modifier::BOLD),
+                        )
+                    } else {
+                        (
+                            Style::default()
+                                .fg(Theme::cyan())
+                                .add_modifier(Modifier::BOLD),
+                            Style::default()
+                                .fg(Theme::yellow())
+                                .add_modifier(Modifier::BOLD),
+                        )
+                    };
+
+                    spans.push(Span::styled(format!("{num} "), num_style));
+
+                    if max_w >= 28 {
+                        spans.push(Span::styled(format!("{:<11}", cmd), cmd_style));
+                        spans.push(Span::styled(
+                            format!("{:<13}", cat),
+                            Style::default()
+                                .fg(Theme::accent())
+                                .add_modifier(Modifier::BOLD),
+                        ));
+                        let prefix = 4 + 11 + 13;
+                        if max_w > prefix + 4 {
+                            let avail_desc = max_w.saturating_sub(prefix);
+                            let clean_desc = if desc.chars().count() > avail_desc && avail_desc > 3
+                            {
+                                let s: String = desc.chars().take(avail_desc - 3).collect();
+                                format!("{}...", s)
+                            } else {
+                                desc.clone()
+                            };
+                            spans.push(Span::styled(
+                                format!("{:<avail_desc$}", clean_desc),
+                                Style::default().fg(Theme::fg()),
+                            ));
+                        } else if max_w > prefix {
+                            spans.push(Span::raw(" ".repeat(max_w.saturating_sub(prefix))));
+                        }
+                    } else {
+                        let content_w = max_w.saturating_sub(4);
+                        if content_w >= 14 {
+                            spans.push(Span::styled(format!("{:<12}", cmd), cmd_style));
+                            let cat_avail = content_w.saturating_sub(12);
+                            if cat_avail > 0 {
+                                let clean_cat = if cat.chars().count() > cat_avail {
+                                    let s: String = cat.chars().take(cat_avail).collect();
+                                    s
+                                } else {
+                                    format!("{:<cat_avail$}", cat)
+                                };
+                                spans.push(Span::styled(
+                                    clean_cat,
+                                    Style::default()
+                                        .fg(Theme::accent())
+                                        .add_modifier(Modifier::BOLD),
+                                ));
+                            }
+                        } else {
+                            let clean_cmd = if cmd.chars().count() > content_w {
+                                let s: String = cmd.chars().take(content_w).collect();
+                                s
+                            } else {
+                                format!("{:<content_w$}", cmd)
+                            };
+                            spans.push(Span::styled(clean_cmd, cmd_style));
+                        }
+                    }
                 };
-                spans.push(Span::styled(
-                    format!("{:<avail_desc$}", clean_desc),
-                    Style::default().fg(Theme::fg()),
-                ));
-                spans.push(Span::styled(syntax_str, Style::default().fg(Theme::dim())));
-            } else {
-                let avail_desc = inner_w.saturating_sub(prefix_w);
-                let clean_desc = if desc.chars().count() > avail_desc && avail_desc > 3 {
-                    let s: String = desc.chars().take(avail_desc - 3).collect();
-                    format!("{}...", s)
-                } else {
-                    desc.clone()
-                };
-                spans.push(Span::styled(clean_desc, Style::default().fg(Theme::fg())));
-            }
 
-            ListItem::new(Line::from(spans))
-        })
-        .collect();
+                // Left column
+                push_col(&mut spans, &features[i], col_w);
+
+                // Column separator
+                spans.push(Span::styled(" │ ", Style::default().fg(Theme::border())));
+
+                // Right column
+                if i + half < features.len() {
+                    let avail_r = inner_w.saturating_sub(col_w + 3);
+                    push_col(&mut spans, &features[i + half], avail_r);
+                }
+
+                ListItem::new(Line::from(spans))
+            })
+            .collect()
+    } else {
+        features
+            .iter()
+            .map(|(num, cmd, cat, desc, syntax)| {
+                let (num_style, cmd_style) = if *cmd == ":update" && update_available.is_some() {
+                    (
+                        Style::default()
+                            .fg(Theme::yellow())
+                            .add_modifier(Modifier::BOLD),
+                        Style::default()
+                            .fg(Theme::yellow())
+                            .add_modifier(Modifier::BOLD),
+                    )
+                } else {
+                    (
+                        Style::default()
+                            .fg(Theme::cyan())
+                            .add_modifier(Modifier::BOLD),
+                        Style::default()
+                            .fg(Theme::yellow())
+                            .add_modifier(Modifier::BOLD),
+                    )
+                };
+
+                let prefix_w = 4 + 13 + 15; // num (4) + cmd (13) + cat (15)
+                let mut spans = vec![
+                    Span::styled(format!("{num} "), num_style),
+                    Span::styled(format!("{:<13}", cmd), cmd_style),
+                    Span::styled(
+                        format!("{:<15}", cat),
+                        Style::default()
+                            .fg(Theme::accent())
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                ];
+
+                if inner_w >= 110 {
+                    let syntax_str = format!("  ({})", syntax);
+                    let avail_desc = inner_w.saturating_sub(prefix_w + syntax_str.len());
+                    let clean_desc = if desc.chars().count() > avail_desc && avail_desc > 3 {
+                        let s: String = desc.chars().take(avail_desc - 3).collect();
+                        format!("{}...", s)
+                    } else {
+                        desc.clone()
+                    };
+                    spans.push(Span::styled(
+                        format!("{:<avail_desc$}", clean_desc),
+                        Style::default().fg(Theme::fg()),
+                    ));
+                    spans.push(Span::styled(syntax_str, Style::default().fg(Theme::dim())));
+                } else {
+                    let avail_desc = inner_w.saturating_sub(prefix_w);
+                    let clean_desc = if desc.chars().count() > avail_desc && avail_desc > 3 {
+                        let s: String = desc.chars().take(avail_desc - 3).collect();
+                        format!("{}...", s)
+                    } else {
+                        desc.clone()
+                    };
+                    spans.push(Span::styled(clean_desc, Style::default().fg(Theme::fg())));
+                }
+
+                ListItem::new(Line::from(spans))
+            })
+            .collect()
+    };
 
     f.render_widget(List::new(items), chunks[1]);
 
@@ -1662,7 +1792,7 @@ pub fn render_feature_banner_modal(
         ]
     };
 
-    let jump_hint = "0-9, b, p, i, u";
+    let jump_hint = "0-9, b, c, h, i, p, u";
     let footer_spans = if inner_w >= 98 {
         vec![
             Span::styled(" Press ", Style::default().fg(Theme::dim())),
