@@ -3790,7 +3790,7 @@ mod tests {
         async fn a_switch_flipped_during_consent_still_refuses() {
             let ran = Arc::new(AtomicUsize::new(0));
             let policy = Arc::new(Counting::default());
-            let on = AssistantSnapshot { enabled: true, disabled: vec![] };
+            let on = AssistantSnapshot { enabled: true, disabled: vec![], known: None };
             let server = McpServer::new(Arc::new(registry(ran.clone())))
                 .with_policy(policy.clone())
                 .with_assistant(Scripted::new(vec![

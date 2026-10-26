@@ -45,6 +45,10 @@ const CLUSTER_KEYS: [&str; 5] = ["context", "cluster", "clusterId", "hubContext"
 pub struct AssistantSnapshot {
     pub enabled: bool,
     pub disabled: Vec<DisabledCluster>,
+    /// Every name a listed context answers to, or `None` when the host lists
+    /// none. While a cluster is off, a call may name only these: a name nothing
+    /// answers to can build no client, so only a stale cached one could serve it.
+    pub known: Option<Vec<String>>,
 }
 
 /// One switched-off cluster: what to call it, and every name a call could use
@@ -72,6 +76,7 @@ impl AssistantSource for AlwaysOn {
         Ok(AssistantSnapshot {
             enabled: true,
             disabled: Vec::new(),
+            known: None,
         })
     }
 }
@@ -141,6 +146,13 @@ pub fn decide(
     if snapshot.disabled.is_empty() {
         return Ok(());
     }
+    if let Some(known) = &snapshot.known {
+        if named.iter().any(|name| !known.contains(name)) {
+            return Err(
+                "Name the cluster as srelens lists it: the AI Assistant is turned off for some clusters.".into(),
+            );
+        }
+    }
     let new_paths =
         tool == "k8s.listContexts" && args["paths"].as_array().is_some_and(|p| !p.is_empty());
     if new_paths || sets(tool, args, KUBECONFIG_FILES_KEY) {
@@ -184,6 +196,7 @@ pub(crate) fn off_for(label: &str, names: &[&str]) -> AssistantSnapshot {
             label: label.into(),
             names: names.iter().map(|n| n.to_string()).collect(),
         }],
+        known: None,
     }
 }
 
@@ -216,6 +229,7 @@ mod tests {
         AssistantSnapshot {
             enabled: true,
             disabled: vec![],
+            known: None,
         }
     }
 
@@ -231,6 +245,7 @@ mod tests {
                     "prod".into(),
                 ],
             }],
+            known: None,
         }
     }
 
@@ -260,6 +275,7 @@ mod tests {
         let off = AssistantSnapshot {
             enabled: false,
             disabled: vec![],
+            known: None,
         };
         assert_eq!(decide(&off, "ping", &json!({}), false), Err(OFF.into()));
         assert_eq!(
@@ -467,6 +483,24 @@ mod tests {
                 "{args}"
             );
         }
+    }
+
+    /// Review (PR #984): a client cached under a name no listed context answers
+    /// to any more (a stale display alias) would still serve it.
+    #[test]
+    fn a_name_no_listed_context_answers_to_is_refused_while_any_cluster_is_off() {
+        let unknown = Err(
+            "Name the cluster as srelens lists it: the AI Assistant is turned off for some clusters.".to_string(),
+        );
+        let listed = AssistantSnapshot {
+            known: Some(vec!["dev".into(), "prod".into(), "kube_a/prod".into()]),
+            ..off_for_prod()
+        };
+        assert_eq!(decide(&listed, "k8s.listPods", &json!({"context": "a/prod"}), true), unknown);
+        assert_eq!(decide(&listed, "k8s.listPods", &json!({"context": "dev"}), true), Ok(()));
+        // Nothing switched off: no name is checked.
+        let all_on = AssistantSnapshot { known: Some(vec!["dev".into()]), ..on() };
+        assert_eq!(decide(&all_on, "k8s.listPods", &json!({"context": "a/prod"}), true), Ok(()));
     }
 
     #[test]

@@ -60,10 +60,14 @@ impl AssistantSource for SettingsAssistant {
     async fn snapshot(&self) -> Result<AssistantSnapshot, String> {
         let (enabled, ids) = read_assistant(self.settings.as_deref())?;
         if !enabled || ids.is_empty() {
-            return Ok(AssistantSnapshot { enabled, disabled: Vec::new() });
+            return Ok(AssistantSnapshot { enabled, disabled: Vec::new(), known: None });
         }
         let contexts = srelens_kube::context_resolve::resolve_contexts(&self.cache.paths().await);
-        Ok(AssistantSnapshot { enabled, disabled: disabled_clusters(&ids, &contexts) })
+        Ok(AssistantSnapshot {
+            enabled,
+            disabled: disabled_clusters(&ids, &contexts),
+            known: Some(contexts.iter().flat_map(names_of).collect()),
+        })
     }
 }
 
@@ -99,6 +103,21 @@ fn stand_in(path: &str, name: &str) -> ResolvedContext {
     }
 }
 
+/// Every name a call could use for `context` — what `find_context` accepts,
+/// plus the `key()` an app's cluster scope holds (extensions.configure).
+fn names_of(context: &ResolvedContext) -> Vec<String> {
+    [
+        context.pinned_id(),
+        Some(context.stable_id()),
+        Some(context.key()),
+        Some(context.display_name.clone()),
+        Some(context.original_name.clone()),
+    ]
+    .into_iter()
+    .flatten()
+    .collect()
+}
+
 /// The switched-off clusters among `contexts`, each with every name a call
 /// could use for it. Matched by canonical file, so the same kubeconfig spelled
 /// another way — another slash, a `.`, a headless process's own `KUBECONFIG`
@@ -113,18 +132,7 @@ pub(crate) fn disabled_clusters(ids: &[String], contexts: &[ResolvedContext]) ->
             if format!("{}#{}", canonical(&context.source).display(), context.original_name) != key {
                 continue;
             }
-            let names = [
-                context.pinned_id(),
-                Some(context.stable_id()),
-                // An app's cluster scope holds this form (extensions.configure).
-                Some(context.key()),
-                Some(context.display_name.clone()),
-                Some(context.original_name.clone()),
-            ];
-            disabled.push(DisabledCluster {
-                label: context.display_name.clone(),
-                names: names.into_iter().flatten().collect(),
-            });
+            disabled.push(DisabledCluster { label: context.display_name.clone(), names: names_of(context) });
         }
         if disabled.len() == before {
             // Placed nowhere: refuse by the ID and by every name it could end
@@ -301,5 +309,8 @@ mod tests {
         assert!(snapshot.enabled);
         assert_eq!(snapshot.disabled.len(), 1);
         assert!(snapshot.disabled[0].names.contains(&"prod".to_string()));
+        // Every name a listed context answers to, so an unknown one can be refused.
+        let known = snapshot.known.expect("a host that lists contexts says what they answer to");
+        assert!(known.contains(&"dev".to_string()) && known.contains(&"prod".to_string()), "{known:?}");
     }
 }
