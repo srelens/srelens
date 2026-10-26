@@ -7,7 +7,20 @@ import { ASSISTANT_KEY, readAssistantSetting, type ClusterContext } from "@srele
 // And the write: whether it reached the backend.
 const refreshSetting = vi.hoisted(() => vi.fn<(key: string) => Promise<void>>());
 const flushSettingsWrites = vi.hoisted(() => vi.fn<(options?: { throwOnError?: boolean }) => Promise<void>>());
-vi.mock("@srelens/core", async (orig) => ({ ...(await orig<typeof import("@srelens/core")>()), refreshSetting, flushSettingsWrites }));
+// Every value this module asked to write, in order — each one reaches the backend.
+const written = vi.hoisted(() => [] as unknown[]);
+vi.mock("@srelens/core", async (orig) => {
+  const real = await orig<typeof import("@srelens/core")>();
+  return {
+    ...real,
+    refreshSetting,
+    flushSettingsWrites,
+    writeAssistantSetting: (...args: Parameters<typeof real.writeAssistantSetting>) => {
+      written.push(args[0]);
+      real.writeAssistantSetting(...args);
+    },
+  };
+});
 
 // The run store, reduced to what this module asks of it: which run is busy,
 // what it is about, and the Stop.
@@ -152,11 +165,37 @@ describe("the assistant store", () => {
     flushSettingsWrites.mockRejectedValue(new Error("settings.json is locked"));
     vi.spyOn(console, "warn").mockImplementation(() => {});
 
+    written.length = 0;
     setAssistantEnabled(false);
     await assistantSaved();
 
     expect(getAssistant().enabled).toBe(true);
     expect(String(getAssistantSaveError())).toContain("settings.json is locked");
+    // Shown, not written back: an old value written now could overwrite a
+    // newer one another window saved meanwhile (review, PR #984).
+    expect(written).toEqual([{ enabled: false, disabledClusters: [] }]);
+  });
+
+  it("drops the fallback once the file can be read again", async () => {
+    let reads = 0;
+    refreshSetting.mockImplementation(async (key) => {
+      reads += 1;
+      if (reads === 2) throw new Error("backend unreachable");
+      // The file as another window left it: off for dev.
+      localStorage.setItem(key, JSON.stringify({ enabled: true, disabledClusters: reads === 1 ? [] : [dev.stableId] }));
+    });
+    flushSettingsWrites.mockRejectedValueOnce(new Error("settings.json is locked"));
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const release = followAssistantSetting();
+    setAssistantEnabled(false);
+    await assistantSaved();
+    expect(isAssistantAllowed("dev")).toBe(true);
+
+    await act(async () => {
+      window.dispatchEvent(new Event("focus"));
+    });
+    expect(isAssistantAllowed("dev")).toBe(false);
+    release();
   });
 
   it("stops the turn in flight when its cluster is switched off, and only then", () => {

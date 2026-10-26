@@ -32,6 +32,13 @@ type Change = (setting: AssistantSetting) => AssistantSetting;
 let waiting: Change[] = [];
 let saving: Promise<void> = Promise.resolve();
 let saveError: unknown = null;
+/**
+ * What to show while memory holds a value the file never took: a save failed
+ * and the file could not be read again either. Shown, never written — an old
+ * value written back could overwrite a newer one another window saved
+ * meanwhile. Dropped by the next read or save that lands.
+ */
+let fallback: AssistantSetting | null = null;
 let version = 0;
 const listeners = new Set<() => void>();
 
@@ -55,7 +62,7 @@ function changed(): void {
 }
 
 export function getAssistant(): AssistantSetting {
-  return waiting.reduce((setting, change) => change(setting), readAssistantSetting());
+  return waiting.reduce((setting, change) => change(setting), fallback ?? readAssistantSetting());
 }
 
 /** Why the last save did not land, or `null`; cleared by the next one that does. */
@@ -73,6 +80,7 @@ export function __resetAssistantForTests(): void {
   waiting = [];
   saving = Promise.resolve();
   saveError = null;
+  fallback = null;
 }
 
 function save(change: Change): Promise<void> {
@@ -84,6 +92,7 @@ function save(change: Change): Promise<void> {
     let confirmed: AssistantSetting | undefined;
     try {
       await refreshSetting(ASSISTANT_KEY);
+      fallback = null;
       confirmed = readAssistantSetting();
       writeAssistantSetting(change(confirmed));
       await flushSettingsWrites({ throwOnError: true });
@@ -93,17 +102,12 @@ function save(change: Change): Promise<void> {
       // Show what the file holds, not what was asked for.
       try {
         await refreshSetting(ASSISTANT_KEY);
+        fallback = null;
       } catch (cause) {
         console.warn("could not re-read the AI Assistant setting", cause);
         // The write left the unconfirmed value in memory; the file still holds
-        // the last confirmed one (its write failed), so show that.
-        if (confirmed) {
-          try {
-            writeAssistantSetting(confirmed);
-          } catch {
-            // Storage refused outright: it never took the unconfirmed value either.
-          }
-        }
+        // the last confirmed one (its write failed), so show that — and only show it.
+        if (confirmed) fallback = confirmed;
       }
     }
     waiting = waiting.filter((w) => w !== change);
@@ -148,7 +152,13 @@ export function useAssistantAllowed(cluster: string | null | undefined): boolean
  */
 export function followAssistantSetting(): () => void {
   const onFocus = () => {
-    refreshSetting(ASSISTANT_KEY).then(changed, (error) => console.warn("could not re-read the AI Assistant setting", error));
+    refreshSetting(ASSISTANT_KEY).then(
+      () => {
+        fallback = null;
+        changed();
+      },
+      (error) => console.warn("could not re-read the AI Assistant setting", error),
+    );
   };
   window.addEventListener("focus", onFocus);
   return () => window.removeEventListener("focus", onFocus);
