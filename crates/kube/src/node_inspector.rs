@@ -586,24 +586,18 @@ pub fn parse_node_details(node: &Node, pods: &[Pod]) -> NodeInspectorDetails {
             .map(|cs| cs.iter().map(|c| c.restart_count as i64).sum())
             .unwrap_or(0);
 
-        // Requests computation
-        let mut pod_cpu_req = 0;
-        let mut pod_mem_req = 0;
+        // Requests computation. CPU and memory are what the pod reserves, as the
+        // scheduler counts it: the larger of its init peak and its app containers
+        // with native sidecars, plus overhead — not its app containers alone.
+        let effective = crate::why_pending::calculate_pod_resource_requests(pod.spec.as_ref());
+        let pod_cpu_req = effective.cpu_millicores;
+        let pod_mem_req = effective.memory_mib;
         let mut pod_gpu_req = 0;
         let mut pod_gpu_mem_req = 0;
 
         if let Some(spec) = &pod.spec {
             for c in &spec.containers {
                 if let Some(res) = &c.resources {
-                    if let Some(reqs) = &res.requests {
-                        if let Some(cpu) = reqs.get("cpu") {
-                            pod_cpu_req += crate::metrics::cpu_millicores(&cpu.0);
-                        }
-                        if let Some(mem) = reqs.get("memory") {
-                            pod_mem_req += crate::metrics::mem_mib(&mem.0);
-                        }
-                    }
-
                     let mut c_gpu = 0;
                     let mut c_vram = 0;
 
@@ -663,10 +657,14 @@ pub fn parse_node_details(node: &Node, pods: &[Pod]) -> NodeInspectorDetails {
             .and_then(|s| s.pod_ip.clone())
             .unwrap_or_default();
 
-        cpu_requests_millicores += pod_cpu_req;
-        mem_requests_mib += pod_mem_req;
-        gpu_requests_count += pod_gpu_req;
-        gpu_memory_requests_mib += pod_gpu_mem_req;
+        // A finished pod has released what it requested, as the scheduler and
+        // `nodes::calculate_node_capacities` see it: still listed, not allocated.
+        if p_phase != "Succeeded" && p_phase != "Failed" {
+            cpu_requests_millicores += pod_cpu_req;
+            mem_requests_mib += pod_mem_req;
+            gpu_requests_count += pod_gpu_req;
+            gpu_memory_requests_mib += pod_gpu_mem_req;
+        }
 
         pod_items.push(NodePodItem {
             name: p_name,
@@ -873,6 +871,100 @@ mod tests {
         assert!(!details.is_virtual_gpu);
         assert_eq!(details.gpu_memory_total_mib, Some(15360));
         assert_eq!(details.gpu_memory_requests_mib, 15360);
+    }
+
+    fn requesting(cpu: &str, mem: &str) -> Option<k8s_openapi::api::core::v1::ResourceRequirements> {
+        let mut r = BTreeMap::new();
+        r.insert("cpu".to_string(), Quantity(cpu.to_string()));
+        r.insert("memory".to_string(), Quantity(mem.to_string()));
+        Some(k8s_openapi::api::core::v1::ResourceRequirements { requests: Some(r), ..Default::default() })
+    }
+
+    fn container(name: &str, cpu: &str, mem: &str) -> k8s_openapi::api::core::v1::Container {
+        k8s_openapi::api::core::v1::Container {
+            name: name.to_string(),
+            resources: requesting(cpu, mem),
+            ..Default::default()
+        }
+    }
+
+    fn pod_in(name: &str, phase: &str, spec: k8s_openapi::api::core::v1::PodSpec) -> Pod {
+        Pod {
+            metadata: k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta {
+                name: Some(name.to_string()),
+                namespace: Some("default".to_string()),
+                ..Default::default()
+            },
+            spec: Some(spec),
+            status: Some(k8s_openapi::api::core::v1::PodStatus {
+                phase: Some(phase.to_string()),
+                ..Default::default()
+            }),
+        }
+    }
+
+    fn plain_node() -> Node {
+        let mut allocatable = BTreeMap::new();
+        allocatable.insert("cpu".to_string(), Quantity("4".to_string()));
+        allocatable.insert("memory".to_string(), Quantity("8Gi".to_string()));
+        Node {
+            metadata: k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta {
+                name: Some("n1".to_string()),
+                ..Default::default()
+            },
+            status: Some(k8s_openapi::api::core::v1::NodeStatus {
+                allocatable: Some(allocatable),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
+
+    /// A finished pod has released what it requested, as the scheduler sees it
+    /// (and `nodes::calculate_node_capacities` counts it): still listed, with its
+    /// own figures, but no longer part of the node's allocated total.
+    #[test]
+    fn a_finished_pod_is_listed_but_no_longer_counts_as_allocated() {
+        let pod = |name: &str, phase: &str, cpu: &str, mem: &str| {
+            pod_in(name, phase, k8s_openapi::api::core::v1::PodSpec {
+                containers: vec![container("c", cpu, mem)],
+                ..Default::default()
+            })
+        };
+        let details = parse_node_details(
+            &plain_node(),
+            &[
+                pod("web", "Running", "100m", "128Mi"),
+                pod("job-1", "Succeeded", "500m", "1Gi"),
+                pod("job-2", "Failed", "300m", "512Mi"),
+            ],
+        );
+        assert_eq!((details.cpu_requests_millicores, details.mem_requests_mib), (100, 128));
+        let mut listed: Vec<(&str, i64)> =
+            details.pods.iter().map(|p| (p.name.as_str(), p.cpu_requests_millicores)).collect();
+        listed.sort();
+        assert_eq!(listed, vec![("job-1", 500), ("job-2", 300), ("web", 100)]);
+    }
+
+    /// What a pod reserves is the scheduler's figure: the larger of its init
+    /// peak and its app containers with native sidecars, plus overhead — not
+    /// its app containers alone.
+    #[test]
+    fn a_pods_request_is_what_it_reserves_with_init_containers_sidecars_and_overhead() {
+        let mut sidecar = container("proxy", "50m", "32Mi");
+        sidecar.restart_policy = Some("Always".to_string());
+        let mut overhead = BTreeMap::new();
+        overhead.insert("cpu".to_string(), Quantity("10m".to_string()));
+        overhead.insert("memory".to_string(), Quantity("1Mi".to_string()));
+        let spec = k8s_openapi::api::core::v1::PodSpec {
+            init_containers: Some(vec![container("migrate", "2", "256Mi"), sidecar]),
+            containers: vec![container("app", "100m", "64Mi")],
+            overhead: Some(overhead),
+            ..Default::default()
+        };
+        let details = parse_node_details(&plain_node(), &[pod_in("web", "Running", spec)]);
+        assert_eq!((details.pods[0].cpu_requests_millicores, details.pods[0].mem_requests_mib), (2010, 257));
+        assert_eq!((details.cpu_requests_millicores, details.mem_requests_mib), (2010, 257));
     }
 
     #[test]
