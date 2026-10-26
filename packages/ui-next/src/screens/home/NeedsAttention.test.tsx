@@ -67,6 +67,18 @@ describe("NeedsAttention", () => {
     expect(screen.getByRole("status", { name: "Assistant draft" }).textContent).toBe("Why is checkout/web-7d4b crash-looping on prod?");
   });
 
+  it("opens a custom kind by its group, not the built-in of the same name, and names the two apart", async () => {
+    show([PROD], {
+      [PROD.stableId]: answered([
+        item(PROD, { kind: "Deployment", group: "acme.io", name: "api", problem: "ReconcileFailed", cause: "warning" }),
+        item(PROD, { kind: "Deployment", name: "api", problem: "1/3 ready", cause: "replicas" }),
+      ]),
+    });
+    expect(screen.getByRole("button", { name: "Open Deployment checkout/api on prod" })).toBeTruthy();
+    await userEvent.click(screen.getByRole("button", { name: "Open acme.io/Deployment checkout/api on prod" }));
+    expect(activeRoute()).toBe(detailRoute("Deployment", "checkout", "api", { cluster: "prod", group: "acme.io" }));
+  });
+
   it("opens a cluster-scoped object by its name alone", async () => {
     show([PROD], { [PROD.stableId]: answered([item(PROD, { kind: "Node", namespace: "", name: "n1", problem: "Rebooted", cause: "warning" })]) });
     await userEvent.click(screen.getByRole("button", { name: "Open Node n1 on prod" }));

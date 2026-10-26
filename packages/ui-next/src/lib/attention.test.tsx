@@ -31,9 +31,10 @@ const pod = (name: string, status: string, phase = "Running"): PodSummary =>
   ({ name, namespace: "checkout", phase, status, ready: "0/1", restarts: 4, node: "n1", age: "1h", image: "web:1" }) as PodSummary;
 const deployment = (name: string, ready: string): DeploymentSummary =>
   ({ name, namespace: "checkout", ready, upToDate: 1, available: 0, age: "1d" }) as DeploymentSummary;
-const warning = (object: string, reason: string, minutesAgo: number, type = "Warning"): EventSummary => ({
+const warning = (object: string, reason: string, minutesAgo: number, type = "Warning", objectApiVersion?: string): EventSummary => ({
   name: `checkout/${object}.${reason}`, namespace: "checkout", type, reason, object, message: `${reason} happened`,
   created: new Date(NOW - minutesAgo * 60_000).toISOString(), age: `${minutesAgo}m`, count: 1,
+  ...(objectApiVersion ? { objectApiVersion } : {}),
 });
 
 /** Every read answers, with nothing in it, unless a test says otherwise. */
@@ -101,6 +102,29 @@ describe("readClusterAttention", () => {
       "Service checkout/front: FailedToUpdateEndpoint",
     ]);
     expect(scan.items[1].cause).toBe("warning");
+  });
+
+  /**
+   * A CRD may reuse a built-in kind's name (AGENTS.md), so a warning about one
+   * keeps its group: without it the item opens the built-in of the same name.
+   * A built-in in its own group needs none, as `detailRoute` spells it.
+   */
+  it("keeps a custom kind's group on a warning, and leaves a built-in's off", async () => {
+    core.listEvents.mockResolvedValue({ events: [
+      warning("Deployment/api", "ReconcileFailed", 5, "Warning", "acme.io/v1"),
+      warning("Deployment/api", "FailedCreate", 6, "Warning", "apps/v1"),
+      warning("HorizontalPodAutoscaler/web", "FailedGetScale", 7, "Warning", "autoscaling/v2"),
+      warning("Widget/w1", "Broken", 8, "Warning", "example.com/v1alpha1"),
+      warning("Pod/web-1", "BackOff", 9, "Warning", "v1"),
+    ] });
+    const scan = await readClusterAttention(ctx("prod-id", "prod"), NOW);
+    expect(scan.items.map((i) => [i.group ?? null, i.kind, i.name])).toEqual([
+      ["acme.io", "Deployment", "api"],
+      [null, "Deployment", "api"],
+      [null, "HorizontalPodAutoscaler", "web"],
+      ["example.com", "Widget", "w1"],
+      [null, "Pod", "web-1"],
+    ]);
   });
 
   it("keeps a failed read as a failure beside what did answer, never as nothing to report", async () => {

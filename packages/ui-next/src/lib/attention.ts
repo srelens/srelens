@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { listEvents, podStatus, type ClusterContext, type StatusVerdict } from "@srelens/core";
+import { isBuiltInKind } from "./crdGvk";
 import { daemonSetVerdict, deploymentVerdict, statefulSetVerdict } from "./kinds/columns";
 import { involvedObject } from "./kinds/events";
 import { readOverviewPods, readOverviewWorkloads } from "./overview";
@@ -47,11 +48,37 @@ export interface AttentionItem {
   cluster: string;
   /** The Kubernetes kind, as `detailRoute` spells it. */
   kind: string;
+  /**
+   * The API group, for a custom kind only, as `detailRoute` takes it: a CRD may
+   * reuse a built-in kind's name, and without its group the item would open
+   * the built-in of that name.
+   */
+  group?: string;
   namespace: string;
   name: string;
   /** What is wrong, in its own words: kubectl's status, `1/3 ready`, an event's reason. */
   problem: string;
   cause: "crash" | "image" | "replicas" | "warning";
+}
+
+/**
+ * Whether Kubernetes serves its own kinds in `group`: the core group, the four
+ * named before the `*.k8s.io` convention, and `*.k8s.io`.
+ *
+ * ponytail: a CRD in a `*.k8s.io` group that reuses a built-in kind's name
+ * reads as the built-in here; a complete built-in kind → group table would
+ * settle it, if one ever lives in the frontend.
+ */
+function servesBuiltIns(group: string): boolean {
+  return group === "" || ["apps", "batch", "autoscaling", "policy"].includes(group) || group.endsWith(".k8s.io");
+}
+
+/** The group an event's object needs in its route, from its `apiVersion`: none for a built-in in its own group. */
+function routeGroup(kind: string, apiVersion: string | undefined): string | undefined {
+  const slash = apiVersion?.lastIndexOf("/") ?? -1;
+  const group = apiVersion && slash > 0 ? apiVersion.slice(0, slash) : "";
+  if (isBuiltInKind(kind) && servesBuiltIns(group)) return undefined;
+  return group || undefined;
 }
 
 export interface ClusterAttention {
@@ -115,7 +142,7 @@ export async function readClusterAttention(
     const add = (item: Omit<AttentionItem, "clusterId" | "cluster">) => {
       // One row per object: a crash-looping pod also raises BackOff events,
       // and the reader needs to hear about the pod once.
-      const key = `${item.kind}\u0000${item.namespace}\u0000${item.name}`;
+      const key = `${item.group ?? ""}\u0000${item.kind}\u0000${item.namespace}\u0000${item.name}`;
       if (seen.has(key)) return;
       seen.add(key);
       items.push({ clusterId: context.stableId, cluster: name, ...item });
@@ -140,7 +167,8 @@ export async function readClusterAttention(
       if (!Number.isFinite(at) || now - at > WARNING_WINDOW_MS) continue;
       const object = involvedObject(event);
       if (!object.kind || !object.name) continue;
-      add({ kind: object.kind, namespace: event.namespace, name: object.name, problem: event.reason, cause: "warning" });
+      const group = routeGroup(object.kind, event.objectApiVersion);
+      add({ kind: object.kind, ...(group ? { group } : {}), namespace: event.namespace, name: object.name, problem: event.reason, cause: "warning" });
     }
     return { items, failures, truncated: pods?.truncated ?? false, eventsTruncated: events.truncated ?? false };
   } catch (cause) {

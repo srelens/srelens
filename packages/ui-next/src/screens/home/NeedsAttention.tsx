@@ -85,17 +85,28 @@ export function NeedsAttention({ targets, scans }: NeedsAttentionProps) {
               {shown.map(({ item, context }) => {
                 const where = label(context);
                 const path = attentionPath(item);
+                // A custom kind by its group, so `acme.io/Deployment` reads, keys
+                // and opens apart from the built-in Deployment.
+                const kind = item.group ? `${item.group}/${item.kind}` : item.kind;
                 return (
-                  <li key={`${item.clusterId}/${item.kind}/${item.namespace}/${item.name}`} className="home-attention-row">
+                  <li key={`${item.clusterId}/${kind}/${item.namespace}/${item.name}`} className="home-attention-row">
                     <button
                       type="button"
                       className="home-attention-open"
-                      aria-label={`Open ${item.kind} ${path} on ${where}`}
-                      onClick={() => openOnCluster(context, detailRoute(item.kind, item.namespace || null, item.name, { cluster: context.name }))}
+                      aria-label={`Open ${kind} ${path} on ${where}`}
+                      onClick={() =>
+                        openOnCluster(
+                          context,
+                          detailRoute(item.kind, item.namespace || null, item.name, {
+                            cluster: context.name,
+                            ...(item.group ? { group: item.group } : {}),
+                          }),
+                        )
+                      }
                     >
                       <StatusPill status={item.problem} kind={item.cause === "crash" || item.cause === "image" ? "danger" : "warning"} tinted />
                       <span className="min-w-0 flex-1 truncate font-medium" title={path}>{path}</span>
-                      <span className="shrink-0 truncate text-xs text-muted">{item.kind} · {where}</span>
+                      <span className="shrink-0 truncate text-xs text-muted">{kind} · {where}</span>
                     </button>
                     {desktop && (
                       <Button variant="secondary" size="sm" aria-label={`Ask about ${path} on ${where}`} onClick={() => ask(attentionQuestion(item), context)}>
