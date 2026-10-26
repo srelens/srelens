@@ -89,6 +89,9 @@ impl DiscoveryIndex {
                 result.push(res.clone());
             }
         }
+        result.sort_by(|a, b| {
+            (&a.ar.group, &a.ar.kind, &a.ar.version).cmp(&(&b.ar.group, &b.ar.kind, &b.ar.version))
+        });
         result
     }
 }

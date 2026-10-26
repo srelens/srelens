@@ -943,17 +943,17 @@ fn collect_candidate_resources(
                     candidates.push((res.ar.kind, Some(res.ar.group), Some(res.ar.version)));
                 }
             }
-        } else {
-            // Target has no API group (or core group): add discovered CRDs up to a bounded limit
-            let mut crd_count = 0;
-            for res in disc_idx.all_resources() {
-                if !res.ar.group.is_empty() && !res.ar.group.contains("k8s.io") {
-                    if crd_count >= 15 {
-                        break;
-                    }
-                    candidates.push((res.ar.kind, Some(res.ar.group), Some(res.ar.version)));
-                    crd_count += 1;
+        }
+
+        // Add other discovered CRDs up to a bounded limit (including cross-group controllers)
+        let mut crd_count = 0;
+        for res in disc_idx.all_resources() {
+            if !res.ar.group.is_empty() && !res.ar.group.contains("k8s.io") {
+                if crd_count >= 15 {
+                    break;
                 }
+                candidates.push((res.ar.kind, Some(res.ar.group), Some(res.ar.version)));
+                crd_count += 1;
             }
         }
     }
@@ -2574,6 +2574,21 @@ mod tests {
             ),
             namespaced: true,
         });
+
+        // Insert 16 dummy third-party CRDs with group "00-dummy.io" to saturate the
+        // 15-CRD general fallback limit before "acme.cert-manager.io", guaranteeing that
+        // Order and Challenge cannot be picked up in round 1 initial candidates.
+        for i in 1..=16 {
+            disc.insert(DiscoveredResource {
+                ar: custom_api_resource(
+                    "00-dummy.io",
+                    "v1",
+                    &format!("Dummy{}", i),
+                    &format!("dummies{}", i),
+                ),
+                namespaced: true,
+            });
+        }
 
         disc.insert(DiscoveredResource {
             ar: custom_api_resource("acme.cert-manager.io", "v1", "Order", "orders"),
