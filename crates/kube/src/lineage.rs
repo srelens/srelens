@@ -934,26 +934,26 @@ fn collect_candidate_resources(
         _ => {}
     }
 
-    // 3. Same API group CRDs from cluster discovery (including cluster-scoped candidates)
+    // 3. Same API group CRDs and cluster-scoped CRDs from cluster discovery
     if let Some(disc_idx) = disc {
         if let Some(grp) = target_group.filter(|g| !g.is_empty()) {
             let grp_lower = grp.to_lowercase();
             for res in disc_idx.all_resources() {
-                if res.ar.group.to_lowercase() == grp_lower {
+                if res.ar.group.to_lowercase() == grp_lower || !res.namespaced {
                     candidates.push((res.ar.kind, Some(res.ar.group), Some(res.ar.version)));
                 }
             }
-        }
-
-        // Add other discovered CRDs up to a bounded limit (including cluster-scoped)
-        let mut crd_count = 0;
-        for res in disc_idx.all_resources() {
-            if !res.ar.group.is_empty() && !res.ar.group.contains("k8s.io") {
-                if crd_count >= 15 {
-                    break;
+        } else {
+            // Target has no API group (or core group): add discovered CRDs up to a bounded limit
+            let mut crd_count = 0;
+            for res in disc_idx.all_resources() {
+                if !res.ar.group.is_empty() && !res.ar.group.contains("k8s.io") {
+                    if crd_count >= 15 {
+                        break;
+                    }
+                    candidates.push((res.ar.kind, Some(res.ar.group), Some(res.ar.version)));
+                    crd_count += 1;
                 }
-                candidates.push((res.ar.kind, Some(res.ar.group), Some(res.ar.version)));
-                crd_count += 1;
             }
         }
     }
@@ -1247,10 +1247,24 @@ async fn discover_dependents(
         }
 
         // Dynamically extend candidate set for newly discovered child kinds
+        let mut unique_new_child_types: HashSet<(String, Option<String>)> = HashSet::new();
+        for item in new_child_types {
+            unique_new_child_types.insert(item);
+        }
+
         let mut next_candidates = Vec::new();
-        for (c_kind, c_grp) in new_child_types {
+        let mut seen_next = HashSet::new();
+        for (c_kind, c_grp) in unique_new_child_types {
             let further = collect_candidate_resources(disc.as_deref(), &c_kind, c_grp.as_deref());
-            next_candidates.extend(further);
+            for cand in further {
+                let key = (
+                    cand.0.to_lowercase(),
+                    cand.1.clone().map(|s| s.to_lowercase()),
+                );
+                if !scanned_keys.contains(&key) && seen_next.insert(key) {
+                    next_candidates.push(cand);
+                }
+            }
         }
         candidates_to_scan = next_candidates;
     }
@@ -2560,6 +2574,7 @@ mod tests {
             ),
             namespaced: true,
         });
+
         disc.insert(DiscoveredResource {
             ar: custom_api_resource("acme.cert-manager.io", "v1", "Order", "orders"),
             namespaced: true,
@@ -2568,6 +2583,19 @@ mod tests {
             ar: custom_api_resource("acme.cert-manager.io", "v1", "Challenge", "challenges"),
             namespaced: true,
         });
+
+        // Precondition: Order and Challenge MUST be absent from round 1 initial candidates
+        let initial_cands =
+            collect_candidate_resources(Some(&disc), "Certificate", Some("cert-manager.io"));
+        assert!(
+            !initial_cands.iter().any(|(k, _, _)| k == "Order"),
+            "Precondition: Order must not be in round 1 candidates"
+        );
+        assert!(
+            !initial_cands.iter().any(|(k, _, _)| k == "Challenge"),
+            "Precondition: Challenge must not be in round 1 candidates"
+        );
+
         cache.preload_discovery("test-context", disc).await;
 
         let root = resolve_resource_lineage(
