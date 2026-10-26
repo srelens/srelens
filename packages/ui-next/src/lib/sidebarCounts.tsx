@@ -57,7 +57,10 @@ const clock = (at: number) => new Date(at).toLocaleTimeString([], { hour: "2-dig
  * same select-nothing marker, and a zero then would be a guess. A kind that a
  * collection in force narrows by name is left out too: the count cannot apply
  * a name expression, and a number that ignored it would disagree with the
- * list's own header.
+ * list's own header. A built-in row does not know its group, and a collection
+ * naming `acme.io/Deployment` does not narrow the built-in Deployment, so a
+ * built-in is counted and then left out only if the group the backend counted
+ * it in is the one the collections name.
  *
  * **Freshness.** Counted on demand, then again every {@link CACHE_TTL_MS}
  * while the page is visible, and on coming back to it if the last count is
@@ -75,15 +78,18 @@ export function useSidebarCounts({ ctx, paused, expanded, crds }: SidebarCountAr
   const folds = expanded.join("\u0000");
   const live = ctx !== null && !paused;
 
-  const { zero, ask, namespaces } = useMemo(() => {
+  const { zero, ask, namespaces, narrows } = useMemo(() => {
     const open = new Set(folds.split("\u0000"));
     const inForce = scope && scope.status !== "gone" ? scope.collections : [];
     const nothing = selectsNothing(selection);
     const settled = !scope || scope.status === "ready" || scope.status === "gone";
+    // Every collection in force names this kind in this group.
+    const narrows = (kind: string, group: string) => inForce.length > 0 && inForce.every((c) => filtersKind(c, { kind, group }));
     const zero: string[] = [];
     const ask: Asked[] = [];
     const add = (id: string, ref: CountKindRef) => {
-      if (inForce.length > 0 && inForce.every((c) => filtersKind(c, { kind: ref.kind, ...(ref.group ? { group: ref.group } : {}) }))) return;
+      // A built-in asks without its group: checked once the answer names it.
+      if (ref.group !== undefined && narrows(ref.kind, ref.group)) return;
       if (ref.namespaced && nothing) {
         if (settled) zero.push(id);
         return;
@@ -105,7 +111,7 @@ export function useSidebarCounts({ ctx, paused, expanded, crds }: SidebarCountAr
     // Sorted, so the answer's order and the cache key are the same question
     // however discovery happened to order the CRDs this time.
     ask.sort((a, b) => a.id.localeCompare(b.id));
-    return { zero, ask, namespaces: nothing ? [] : [...selection].sort() };
+    return { zero, ask, namespaces: nothing ? [] : [...selection].sort(), narrows };
   }, [live, folds, crds, selection, scope]);
 
   const key = `sidebarCounts|${ctx?.name ?? ""}|${namespaces.join(",")}|${ask.map((a) => a.id).join(",")}`;
@@ -147,7 +153,7 @@ export function useSidebarCounts({ ctx, paused, expanded, crds }: SidebarCountAr
     const why = stale && at !== undefined ? `Counted at ${clock(at)}; could not refresh` : undefined;
     data?.forEach((c, i) => {
       const id = ask[i]?.id;
-      if (id === undefined || c.count === null) return;
+      if (id === undefined || c.count === null || narrows(c.kind, c.group)) return;
       map.set(
         id,
         why ? (
@@ -165,5 +171,5 @@ export function useSidebarCounts({ ctx, paused, expanded, crds }: SidebarCountAr
       map.set("route:/forwards", groupNumber(forwards.filter((f) => f.context === ctx.name && !isForwardEnded(f)).length));
     }
     return map;
-  }, [zero, ask, data, stale, at, live, ctx, folds, forwards]);
+  }, [zero, ask, narrows, data, stale, at, live, ctx, folds, forwards]);
 }

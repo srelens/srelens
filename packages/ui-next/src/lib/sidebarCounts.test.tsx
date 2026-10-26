@@ -46,10 +46,28 @@ const CERTS: CrdRef = {
   namespaced: true,
 };
 
-/** The backend answering every kind, `table[kind]` where given and 1 otherwise. */
+/** The groups the backend resolves the built-ins asked for here to. */
+const BUILT_IN_GROUP: Record<string, string> = {
+  Deployment: "apps",
+  StatefulSet: "apps",
+  DaemonSet: "apps",
+  ReplicaSet: "apps",
+  Job: "batch",
+  CronJob: "batch",
+  StorageClass: "storage.k8s.io",
+};
+
+/**
+ * The backend answering every kind, `table[kind]` where given and 1 otherwise,
+ * with the group each was counted in, as `k8s.countResources` answers.
+ */
 function answering(table: Record<string, number | null> = {}) {
   countResources.mockImplementation(async (_context: string, kinds: CountKindRef[]) => ({
-    counts: kinds.map((k) => ({ kind: k.kind, group: k.group ?? "", count: k.kind in table ? table[k.kind] : 1 })),
+    counts: kinds.map((k) => ({
+      kind: k.kind,
+      group: k.group ?? BUILT_IN_GROUP[k.kind] ?? "",
+      count: k.kind in table ? table[k.kind] : 1,
+    })),
   }));
 }
 
@@ -198,10 +216,28 @@ describe("useSidebarCounts", () => {
     scopeTo("web", ["a"], { kinds: ["Pod"], nameRegex: "^web-" });
     const { result } = counts({ expanded: ["workloads"] });
     await waitFor(() => expect(countResources).toHaveBeenCalled());
-    expect(kindsAsked()).not.toContain("Pod");
     expect(asked()[2]).toEqual(["a"]);
     await waitFor(() => expect(result.current.get("kind:deployments")).toBe("1"));
     expect(result.current.has("kind:pods")).toBe(false);
+  });
+
+  it("a collection that narrows a built-in by its group leaves that kind out", async () => {
+    scopeTo("apps", ["a"], { kinds: ["apps/Deployment"], nameRegex: "^web-" });
+    const { result } = counts({ expanded: ["workloads"] });
+    await waitFor(() => expect(result.current.get("kind:pods")).toBe("1"));
+    expect(result.current.has("kind:deployments")).toBe(false);
+  });
+
+  /**
+   * A built-in row does not know its group until the backend answers, and
+   * `acme.io/Deployment` is not the built-in Deployment: the backend leaves
+   * that list unfiltered, so its count stays.
+   */
+  it("a collection that narrows another group's kind of the same name leaves the built-in counted", async () => {
+    scopeTo("acme", ["a"], { kinds: ["acme.io/Deployment"], nameRegex: "^web-" });
+    answering({ Deployment: 4 });
+    const { result } = counts({ expanded: ["workloads"] });
+    await waitFor(() => expect(result.current.get("kind:deployments")).toBe("4"));
   });
 
   it("CRDs are sent with all four hints, only when both folds are open", async () => {
