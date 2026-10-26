@@ -159,6 +159,47 @@ pub fn decide(
     Ok(())
 }
 
+/// A source that answers a script of snapshots, repeating the last — for the
+/// request-path tests in this crate.
+#[cfg(test)]
+pub(crate) struct Scripted(std::sync::Mutex<std::collections::VecDeque<Result<AssistantSnapshot, String>>>);
+
+#[cfg(test)]
+impl Scripted {
+    pub(crate) fn new(script: Vec<Result<AssistantSnapshot, String>>) -> std::sync::Arc<Self> {
+        std::sync::Arc::new(Self(std::sync::Mutex::new(script.into())))
+    }
+
+    /// Off for one cluster called `label`, known by `names`.
+    pub(crate) fn off_for(label: &str, names: &[&str]) -> std::sync::Arc<Self> {
+        Self::new(vec![Ok(off_for(label, names))])
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn off_for(label: &str, names: &[&str]) -> AssistantSnapshot {
+    AssistantSnapshot {
+        enabled: true,
+        disabled: vec![DisabledCluster {
+            label: label.into(),
+            names: names.iter().map(|n| n.to_string()).collect(),
+        }],
+    }
+}
+
+#[cfg(test)]
+#[async_trait::async_trait]
+impl AssistantSource for Scripted {
+    async fn snapshot(&self) -> Result<AssistantSnapshot, String> {
+        let mut script = self.0.lock().unwrap();
+        if script.len() > 1 {
+            script.pop_front().unwrap()
+        } else {
+            script.front().cloned().expect("a scripted source needs one answer")
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
