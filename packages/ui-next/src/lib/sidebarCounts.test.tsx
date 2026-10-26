@@ -221,6 +221,14 @@ describe("useSidebarCounts", () => {
     expect(result.current.has("kind:pods")).toBe(false);
   });
 
+  /** A bare kind names the built-in, as the backend's list reads it, whatever its group. */
+  it("a collection that names a built-in outside the core group by its bare kind leaves that kind out", async () => {
+    scopeTo("web", ["a"], { kinds: ["Deployment"], nameRegex: "^web-" });
+    const { result } = counts({ expanded: ["workloads"] });
+    await waitFor(() => expect(result.current.get("kind:pods")).toBe("1"));
+    expect(result.current.has("kind:deployments")).toBe(false);
+  });
+
   it("a collection that narrows a built-in by its group leaves that kind out", async () => {
     scopeTo("apps", ["a"], { kinds: ["apps/Deployment"], nameRegex: "^web-" });
     const { result } = counts({ expanded: ["workloads"] });

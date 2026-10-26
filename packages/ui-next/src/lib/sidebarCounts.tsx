@@ -83,13 +83,17 @@ export function useSidebarCounts({ ctx, paused, expanded, crds }: SidebarCountAr
     const inForce = scope && scope.status !== "gone" ? scope.collections : [];
     const nothing = selectsNothing(selection);
     const settled = !scope || scope.status === "ready" || scope.status === "gone";
-    // Every collection in force names this kind in this group.
-    const narrows = (kind: string, group: string) => inForce.length > 0 && inForce.every((c) => filtersKind(c, { kind, group }));
+    // Every collection in force names this kind in this group. A built-in is
+    // named by its bare kind too, as the backend's list reads it
+    // (`collections::names_kind`), whatever group it was counted in.
+    const narrows = (kind: string, group: string, builtIn: boolean) =>
+      inForce.length > 0 &&
+      inForce.every((c) => filtersKind(c, { kind, group }) || (builtIn && filtersKind(c, { kind, group: "" })));
     const zero: string[] = [];
     const ask: Asked[] = [];
     const add = (id: string, ref: CountKindRef) => {
       // A built-in asks without its group: checked once the answer names it.
-      if (ref.group !== undefined && narrows(ref.kind, ref.group)) return;
+      if (ref.group !== undefined && narrows(ref.kind, ref.group, false)) return;
       if (ref.namespaced && nothing) {
         if (settled) zero.push(id);
         return;
@@ -153,7 +157,7 @@ export function useSidebarCounts({ ctx, paused, expanded, crds }: SidebarCountAr
     const why = stale && at !== undefined ? `Counted at ${clock(at)}; could not refresh` : undefined;
     data?.forEach((c, i) => {
       const id = ask[i]?.id;
-      if (id === undefined || c.count === null || narrows(c.kind, c.group)) return;
+      if (id === undefined || c.count === null || narrows(c.kind, c.group, ask[i].ref.group === undefined)) return;
       map.set(
         id,
         why ? (
