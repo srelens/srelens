@@ -291,7 +291,7 @@ describe("Settings", () => {
     expect(screen.getByRole("switch", { name: "AI Assistant" }).getAttribute("aria-checked")).toBe("false");
     expect(screen.getByText("Turned off. These settings are kept for when it is switched back on.")).toBeTruthy();
     expect(screen.getByText(/never without confirmation/i)).toBeTruthy();
-    expect(screen.getByText(/drops in-flight requests/i)).toBeTruthy();
+    expect(await screen.findByText(/drops in-flight requests/i)).toBeTruthy();
     expect(screen.getByText(/every change made here/i)).toBeTruthy();
   });
 
@@ -311,7 +311,7 @@ describe("Settings", () => {
   it("stacks the three agent panes together", async () => {
     paint();
     expect(await screen.findByText(/never without confirmation/i)).toBeTruthy();
-    expect(screen.getByText(/drops in-flight requests/i)).toBeTruthy();
+    expect(await screen.findByText(/drops in-flight requests/i)).toBeTruthy();
     expect(screen.getByText(/every change made here/i)).toBeTruthy();
     const nested = screen.getByText("Providers").closest(".card")?.parentElement;
     expect(nested?.className).toContain("settings-agent-groups");
@@ -545,7 +545,7 @@ describe("Settings", () => {
     it("draws all three agent panels, because every command behind them answers", async () => {
       paint();
       expect(await screen.findByText(/never without confirmation/i)).toBeTruthy();
-      expect(screen.getByText(/drops in-flight requests/i)).toBeTruthy();
+      expect(await screen.findByText(/drops in-flight requests/i)).toBeTruthy();
       expect(screen.getByText(/every change made here/i)).toBeTruthy();
       expect(screen.queryByTestId("no-agent-server")).toBeNull();
     });
