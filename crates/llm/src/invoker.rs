@@ -16,8 +16,8 @@ use crate::error::LlmError;
 use crate::provider::{ToolCallResult, ToolInvoker};
 use crate::types::ToolDef;
 
-/// Core 42 Kubernetes SRE tools essential for workload diagnosis, manifest inspection,
-/// event timeline triage, node health, networking, and safe remediation.
+/// Core 43 Kubernetes SRE tools essential for workload diagnosis, manifest inspection,
+/// event timeline triage, node health, networking, safe remediation, and dynamic playbook retrieval.
 pub const CORE_SRE_TOOLS: &[&str] = &[
     // Workloads & Pods
     "k8s.listPods",
@@ -68,6 +68,8 @@ pub const CORE_SRE_TOOLS: &[&str] = &[
     // Monitoring & Connectivity
     "k8s.prometheusQuery",
     "ping",
+    // Playbooks & Diagnostic Skills
+    "skills.get",
 ];
 
 /// A decorator that restricts `list_tools` to a permitted subset of tool names,
@@ -198,12 +200,14 @@ mod tests {
 
     #[test]
     fn test_core_sre_tools_count_and_inclusions() {
-        assert_eq!(CORE_SRE_TOOLS.len(), 42);
+        assert_eq!(CORE_SRE_TOOLS.len(), 43);
         assert!(CORE_SRE_TOOLS.contains(&"k8s.listResource"));
         assert!(CORE_SRE_TOOLS.contains(&"k8s.listCustomResource"));
         assert!(CORE_SRE_TOOLS.contains(&"k8s.listEndpoints"));
         assert!(CORE_SRE_TOOLS.contains(&"k8s.listEndpointSlices"));
         assert!(CORE_SRE_TOOLS.contains(&"k8s.podLogs"));
         assert!(CORE_SRE_TOOLS.contains(&"k8s.nodeCapacityOverview"));
+        assert!(CORE_SRE_TOOLS.contains(&"skills.get"));
+        assert!(!CORE_SRE_TOOLS.contains(&"skills.list"));
     }
 }

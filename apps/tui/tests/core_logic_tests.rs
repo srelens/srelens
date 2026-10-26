@@ -499,6 +499,7 @@ async fn a_native_turn_streams_text_thinking_usage_and_done_in_order() {
     // Must include core tools
     assert!(advertised_tools.iter().any(|t| t == "k8s_listPods"));
     assert!(advertised_tools.iter().any(|t| t == "ping"));
+    assert!(advertised_tools.iter().any(|t| t == "skills_get"));
 
     // Every advertised tool must be in CORE_SRE_TOOLS
     for tool in &advertised_tools {
@@ -513,6 +514,9 @@ async fn a_native_turn_streams_text_thinking_usage_and_done_in_order() {
     // Must NOT contain excluded non-core tools from registry
     assert!(!advertised_tools.iter().any(|t| t.contains("drainNode")));
     assert!(!advertised_tools.iter().any(|t| t.contains("helmInstall")));
+    assert!(!advertised_tools
+        .iter()
+        .any(|t| t.contains("skills_list") || t.contains("skills.list")));
 }
 
 #[tokio::test]
