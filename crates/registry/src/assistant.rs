@@ -24,7 +24,13 @@ use srelens_mcp::assistant::{AssistantSnapshot, AssistantSource, DisabledCluster
 /// turns it off, and non-string IDs are dropped.
 pub fn read_assistant(settings: Option<&Path>) -> Result<(bool, Vec<String>), String> {
     let Some(path) = settings else { return Ok((true, Vec::new())) };
-    let Some(Value::Object(doc)) = crate::settings::read_value(path, SETTING_KEY)? else {
+    // A string value is the text of the document, as `settingsStorage` hands
+    // it to the frontend — read the same way, or the two disagree.
+    let value = match crate::settings::read_value(path, SETTING_KEY)? {
+        Some(Value::String(text)) => serde_json::from_str(&text).ok(),
+        other => other,
+    };
+    let Some(Value::Object(doc)) = value else {
         return Ok((true, Vec::new()));
     };
     let enabled = doc.get("enabled") != Some(&Value::Bool(false));
@@ -92,6 +98,8 @@ pub(crate) fn disabled_clusters(ids: &[String], contexts: &[ResolvedContext]) ->
             let names = [
                 context.pinned_id(),
                 Some(context.stable_id()),
+                // An app's cluster scope holds this form (extensions.configure).
+                Some(context.key()),
                 Some(context.display_name.clone()),
                 Some(context.original_name.clone()),
             ];
@@ -164,6 +172,18 @@ mod tests {
         assert_eq!(read_assistant(Some(&path)), Ok((true, vec![])));
     }
 
+    /// Review finding: `settingsStorage` hands a string value back as the text
+    /// it holds, so the frontend parses a JSON string as the document. Read it
+    /// the same way here, or the UI hides what the gate still serves.
+    #[test]
+    fn a_string_value_is_read_as_the_frontend_reads_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = settings_with(dir.path(), r#""{\"enabled\":false,\"disabledClusters\":[\"/k#prod\"]}""#);
+        assert_eq!(read_assistant(Some(&path)), Ok((false, vec!["/k#prod".to_string()])));
+        let not_json = settings_with(dir.path(), r#""off""#);
+        assert_eq!(read_assistant(Some(&not_json)), Ok((true, vec![])));
+    }
+
     #[test]
     fn a_real_off_and_its_clusters_are_read() {
         let dir = tempfile::tempdir().unwrap();
@@ -191,6 +211,21 @@ mod tests {
             assert!(disabled[0].names.contains(&"prod".to_string()));
             assert!(!disabled[0].names.contains(&"dev".to_string()));
         }
+    }
+
+    /// Review finding: an app's cluster scope holds a context's `key()` —
+    /// its stable ID with `%` and `#` encoded — so that form names it too.
+    #[test]
+    fn a_disabled_cluster_is_known_by_its_key_too() {
+        let dir = tempfile::tempdir().unwrap();
+        let odd = dir.path().join("team%1");
+        std::fs::create_dir(&odd).unwrap();
+        let config = kubeconfig(&odd);
+        let contexts = srelens_kube::context_resolve::resolve_contexts(&[config]);
+        let prod = contexts.iter().find(|c| c.original_name == "prod").unwrap();
+        assert_ne!(prod.key(), prod.stable_id(), "the fixture must make the two forms differ");
+        let disabled = disabled_clusters(&[prod.stable_id()], &contexts);
+        assert!(disabled[0].names.contains(&prod.key()), "{:?}", disabled[0].names);
     }
 
     /// Security review: an ID this process cannot place still refuses by its
