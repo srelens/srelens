@@ -94,6 +94,46 @@ fn mock_crd_tree() -> LineageNode {
     vm
 }
 
+/// Build a synthetic CRD hierarchy with VirtualMachine as the Target root
+fn mock_vm_crd_tree() -> LineageNode {
+    let mut vm = LineageNode::new(
+        "VirtualMachine",
+        "vm-workload",
+        Some("default".into()),
+        LineageRelation::Target,
+    )
+    .with_api_version("kubevirt.io/v1")
+    .with_uid("uid-vm-1")
+    .with_status(Some("Running".into()), None)
+    .with_outcome(NodeOutcome::Healthy);
+
+    let mut vmi = LineageNode::new(
+        "VirtualMachineInstance",
+        "vm-workload",
+        Some("default".into()),
+        LineageRelation::Child,
+    )
+    .with_api_version("kubevirt.io/v1")
+    .with_uid("uid-vmi-1")
+    .with_status(Some("Running".into()), None)
+    .with_outcome(NodeOutcome::Healthy);
+
+    let pod = LineageNode::new(
+        "Pod",
+        "virt-launcher-vm-workload-abc",
+        Some("default".into()),
+        LineageRelation::Child,
+    )
+    .with_api_version("v1")
+    .with_uid("uid-pod-launcher")
+    .with_status(Some("Running".into()), None)
+    .with_outcome(NodeOutcome::Healthy);
+
+    vmi.children.push(pod);
+    vm.children.push(vmi);
+    vm
+}
+
 // ---------------------------------------------------------------------------
 // D1: Input Disorder & Interleaving (The "Messy Human")
 // Human opens tree for a Pod, navigates up to parent Deployment with 'k' / Up arrow,
@@ -457,4 +497,339 @@ async fn journey_d1_container_reroot_shows_toast_without_corrupting_state() {
     };
     assert_eq!(tree.root_kind, "Pod");
     assert_eq!(tree.root_name, "web-app-7b8c9d-x1");
+}
+
+// ---------------------------------------------------------------------------
+// D1: Input Disorder & Interleaving (CRD Finger Chaos)
+// Human re-roots from child CRD to parent CRD, then back down to child CRD,
+// verifying api_version is strictly preserved and view remains intact.
+// ---------------------------------------------------------------------------
+#[tokio::test]
+async fn journey_d1_crd_reroot_child_to_parent_and_back() {
+    let _settings = common::env::isolate_settings();
+    let (mut app, _rx) = common::app().await;
+
+    // 1. Open tree for VirtualMachineInstance
+    app.open_resource_tree(
+        "VirtualMachineInstance".into(),
+        "vm-workload".into(),
+        Some("default".into()),
+        Some("kubevirt.io/v1".into()),
+    );
+    app.handle_lineage_result("VirtualMachineInstance", "vm-workload", Ok(mock_crd_tree()));
+
+    // Target VMI is selected (VirtualMachine [0], VirtualMachineInstance [1], Pod [2])
+    let ActiveView::Tree(ref tree) = app.active_view else {
+        panic!("expected ActiveView::Tree");
+    };
+    assert_eq!(tree.selected_node().unwrap().kind, "VirtualMachineInstance");
+    assert_eq!(
+        tree.selected_node().unwrap().api_version.as_deref(),
+        Some("kubevirt.io/v1")
+    );
+
+    // 2. Navigate up with 'k' to parent VirtualMachine
+    press(&mut app, ch('k')).await;
+    let ActiveView::Tree(ref tree) = app.active_view else {
+        panic!("expected ActiveView::Tree");
+    };
+    assert_eq!(tree.selected_node().unwrap().kind, "VirtualMachine");
+
+    // 3. Re-root on parent VirtualMachine with 't'
+    press(&mut app, ch('t')).await;
+    let ActiveView::Tree(ref tree) = app.active_view else {
+        panic!("expected ActiveView::Tree");
+    };
+    assert_eq!(tree.root_kind, "VirtualMachine");
+    assert_eq!(tree.root_name, "vm-workload");
+    assert_eq!(tree.api_version.as_deref(), Some("kubevirt.io/v1"));
+    assert!(tree.is_loading);
+
+    // Provide lineage result for parent VirtualMachine
+    app.handle_lineage_result("VirtualMachine", "vm-workload", Ok(mock_vm_crd_tree()));
+
+    // 4. Navigate down with 'j' back to child VirtualMachineInstance
+    press(&mut app, ch('j')).await;
+    let ActiveView::Tree(ref tree) = app.active_view else {
+        panic!("expected ActiveView::Tree");
+    };
+    assert_eq!(tree.selected_node().unwrap().kind, "VirtualMachineInstance");
+
+    // 5. Re-root on child VirtualMachineInstance with 't'
+    press(&mut app, ch('t')).await;
+    let ActiveView::Tree(ref tree) = app.active_view else {
+        panic!("expected ActiveView::Tree");
+    };
+    assert_eq!(tree.root_kind, "VirtualMachineInstance");
+    assert_eq!(tree.root_name, "vm-workload");
+    assert_eq!(tree.api_version.as_deref(), Some("kubevirt.io/v1"));
+}
+
+// ---------------------------------------------------------------------------
+// D1: Input Disorder & Interleaving (CRD Logs Error Shielding)
+// Human presses 'l' (Logs) on a non-pod CRD node; asserts a truthful warning toast
+// without panicking, corrupting state, or exiting Tree view.
+// ---------------------------------------------------------------------------
+#[tokio::test]
+async fn journey_d1_crd_logs_attempt_warns_truthfully_without_crashing() {
+    let _settings = common::env::isolate_settings();
+    let (mut app, _rx) = common::app().await;
+
+    app.open_resource_tree(
+        "VirtualMachine".into(),
+        "vm-workload".into(),
+        Some("default".into()),
+        Some("kubevirt.io/v1".into()),
+    );
+    app.handle_lineage_result("VirtualMachine", "vm-workload", Ok(mock_crd_tree()));
+
+    // Move to root VirtualMachine
+    press(&mut app, ch('g')).await;
+    let ActiveView::Tree(ref tree) = app.active_view else {
+        panic!("expected ActiveView::Tree");
+    };
+    assert_eq!(tree.selected_node().unwrap().kind, "VirtualMachine");
+
+    // Press 'l' on VirtualMachine CRD
+    press(&mut app, ch('l')).await;
+
+    assert!(
+        app.toast.as_ref().map_or(false, |(msg, _, _)| msg
+            .contains("Logs only available for Pods (selected VirtualMachine)")),
+        "Must warn truthfully that logs are only for Pods"
+    );
+
+    // Tree view must remain intact
+    let ActiveView::Tree(ref tree) = app.active_view else {
+        panic!("expected ActiveView::Tree intact");
+    };
+    assert_eq!(tree.root_kind, "VirtualMachine");
+    assert_eq!(tree.nodes.len(), 3);
+}
+
+// ---------------------------------------------------------------------------
+// D2: Ambiguity & Collisions (CRD Colliding with Built-in Kind)
+// A Custom Resource whose kind is "Deployment" with group "acme.io/v1" preserves
+// its custom api_version in tree view, rendered buffers, and navigation.
+// ---------------------------------------------------------------------------
+#[tokio::test]
+async fn journey_d2_crd_colliding_with_builtin_kind_preserves_custom_group() {
+    let _settings = common::env::isolate_settings();
+    let (mut app, _rx) = common::app().await;
+
+    let mut custom_deploy = LineageNode::new(
+        "Deployment",
+        "custom-agent",
+        Some("custom-ns".into()),
+        LineageRelation::Owner,
+    )
+    .with_api_version("acme.io/v1")
+    .with_uid("uid-acme-deploy")
+    .with_status(Some("Synced".into()), None)
+    .with_outcome(NodeOutcome::Healthy);
+
+    let child_custom_ds = LineageNode::new(
+        "DaemonSet",
+        "custom-ds",
+        Some("custom-ns".into()),
+        LineageRelation::Target,
+    )
+    .with_api_version("acme.io/v1")
+    .with_uid("uid-acme-ds")
+    .with_status(Some("Ready".into()), None)
+    .with_outcome(NodeOutcome::Healthy);
+
+    custom_deploy.children.push(child_custom_ds);
+
+    app.open_resource_tree(
+        "Deployment".into(),
+        "custom-agent".into(),
+        Some("custom-ns".into()),
+        Some("acme.io/v1".into()),
+    );
+    app.handle_lineage_result("Deployment", "custom-agent", Ok(custom_deploy));
+
+    let ActiveView::Tree(ref tree) = app.active_view else {
+        panic!("expected ActiveView::Tree");
+    };
+
+    assert_eq!(tree.root_kind, "Deployment");
+    assert_eq!(tree.api_version.as_deref(), Some("acme.io/v1"));
+    assert_eq!(tree.nodes[0].api_version.as_deref(), Some("acme.io/v1"));
+    assert_eq!(tree.nodes[1].api_version.as_deref(), Some("acme.io/v1"));
+
+    let rendered = common::render_app(&mut app, 100, 24);
+    assert!(rendered.contains("Deployment/custom-agent custom-ns"));
+    assert!(rendered.contains("DaemonSet/custom-ds"));
+}
+
+// ---------------------------------------------------------------------------
+// D4: Boundary & Scale Extremes (Nested Same-Kind CRD Traversal)
+// ArgoCD nested Applications: Root Application -> Child Application -> Deployment
+// Verifies same-kind CRDs at different hierarchy levels resolve and display properly.
+// ---------------------------------------------------------------------------
+#[tokio::test]
+async fn journey_d4_nested_same_kind_crd_traversal() {
+    let _settings = common::env::isolate_settings();
+    let (mut app, _rx) = common::app().await;
+
+    let mut root_app = LineageNode::new(
+        "Application",
+        "root-infra",
+        Some("argocd".into()),
+        LineageRelation::Owner,
+    )
+    .with_api_version("argoproj.io/v1alpha1")
+    .with_uid("uid-app-root")
+    .with_status(Some("Synced".into()), Some("Healthy".into()))
+    .with_outcome(NodeOutcome::Healthy);
+
+    let mut sub_app = LineageNode::new(
+        "Application",
+        "sub-cluster-apps",
+        Some("argocd".into()),
+        LineageRelation::Target,
+    )
+    .with_api_version("argoproj.io/v1alpha1")
+    .with_uid("uid-app-sub")
+    .with_status(Some("Synced".into()), Some("Healthy".into()))
+    .with_outcome(NodeOutcome::Healthy);
+
+    let deploy = LineageNode::new(
+        "Deployment",
+        "frontend-proxy",
+        Some("production".into()),
+        LineageRelation::Child,
+    )
+    .with_api_version("apps/v1")
+    .with_uid("uid-deploy-proxy")
+    .with_status(Some("Ready: 2/2".into()), None)
+    .with_outcome(NodeOutcome::Healthy);
+
+    sub_app.children.push(deploy);
+    root_app.children.push(sub_app);
+
+    app.open_resource_tree(
+        "Application".into(),
+        "sub-cluster-apps".into(),
+        Some("argocd".into()),
+        Some("argoproj.io/v1alpha1".into()),
+    );
+    app.handle_lineage_result("Application", "sub-cluster-apps", Ok(root_app));
+
+    let ActiveView::Tree(ref tree) = app.active_view else {
+        panic!("expected ActiveView::Tree");
+    };
+
+    assert_eq!(tree.nodes.len(), 3);
+    assert_eq!(tree.nodes[0].kind, "Application");
+    assert_eq!(tree.nodes[0].name, "root-infra");
+    assert_eq!(tree.nodes[0].relationship, LineageRelation::Owner);
+
+    assert_eq!(tree.nodes[1].kind, "Application");
+    assert_eq!(tree.nodes[1].name, "sub-cluster-apps");
+    assert_eq!(tree.nodes[1].relationship, LineageRelation::Target);
+
+    assert_eq!(tree.nodes[2].kind, "Deployment");
+    assert_eq!(tree.nodes[2].name, "frontend-proxy");
+    assert_eq!(tree.nodes[2].relationship, LineageRelation::Child);
+
+    assert_eq!(tree.selected_node().unwrap().name, "sub-cluster-apps");
+}
+
+// ---------------------------------------------------------------------------
+// D6: Feedback & Truthfulness (CRD Child Scan 403 Forbidden)
+// Non-native child scan returning 403 Forbidden renders truthful [FORBIDDEN] badge,
+// rather than being hidden or collapsed into an empty list.
+// ---------------------------------------------------------------------------
+#[tokio::test]
+async fn journey_d6_crd_child_scan_forbidden_renders_truthful_badge() {
+    let _settings = common::env::isolate_settings();
+    let (mut app, _rx) = common::app().await;
+
+    let mut root_crd = LineageNode::new("Tenant", "tenant-finance", None, LineageRelation::Target)
+        .with_api_version("multitenancy.example.com/v1")
+        .with_uid("uid-tenant-1")
+        .with_outcome(NodeOutcome::Healthy);
+
+    let child_forbidden = LineageNode::new(
+        "TenantWorkspace",
+        "ws-finance-prod",
+        Some("tenant-finance".into()),
+        LineageRelation::Child,
+    )
+    .with_api_version("multitenancy.example.com/v1")
+    .with_uid("uid-ws-1")
+    .with_outcome(NodeOutcome::Forbidden);
+
+    root_crd.children.push(child_forbidden);
+
+    app.open_resource_tree(
+        "Tenant".into(),
+        "tenant-finance".into(),
+        None,
+        Some("multitenancy.example.com/v1".into()),
+    );
+    app.handle_lineage_result("Tenant", "tenant-finance", Ok(root_crd));
+
+    let ActiveView::Tree(ref tree) = app.active_view else {
+        panic!("expected ActiveView::Tree");
+    };
+
+    assert_eq!(tree.nodes.len(), 2);
+    assert_eq!(tree.nodes[1].fetch_outcome, Some(NodeOutcome::Forbidden));
+
+    let text = tree.tree_as_text();
+    assert!(
+        text.contains("TenantWorkspace/ws-finance-prod [CHILD] [FORBIDDEN]"),
+        "Forbidden child scan must render truthful [FORBIDDEN] outcome badge"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// D5: State Transitions & Re-Entry (CRD Describe -> Esc -> Tree -> Esc -> Table)
+// Opening Describe view on a CRD node and pressing Esc safely unwinds the nav stack
+// back to the intact Tree view, and a second Esc returns to Table view.
+// ---------------------------------------------------------------------------
+#[tokio::test]
+async fn journey_d5_crd_describe_navigation_preserves_tree_nav_stack() {
+    let _settings = common::env::isolate_settings();
+    let (mut app, _rx) = common::app().await;
+
+    app.open_resource_tree(
+        "VirtualMachine".into(),
+        "vm-workload".into(),
+        Some("default".into()),
+        Some("kubevirt.io/v1".into()),
+    );
+    app.handle_lineage_result("VirtualMachine", "vm-workload", Ok(mock_crd_tree()));
+
+    let ActiveView::Tree(ref tree) = app.active_view else {
+        panic!("expected ActiveView::Tree");
+    };
+    assert_eq!(tree.root_kind, "VirtualMachine");
+
+    // Press 'd' to open Describe view for selected CRD node
+    press(&mut app, ch('d')).await;
+
+    // View is now Describe
+    let ActiveView::Describe(ref desc) = app.active_view else {
+        panic!("expected ActiveView::Describe");
+    };
+    assert_eq!(desc.resource_kind, "VirtualMachineInstance");
+    assert_eq!(desc.resource_name, "vm-workload");
+    assert_eq!(desc.pinned_api_version.as_deref(), Some("kubevirt.io/v1"));
+
+    // Press 'Esc' to pop back from Describe to Tree view
+    press(&mut app, key(KeyCode::Esc)).await;
+
+    let ActiveView::Tree(ref tree) = app.active_view else {
+        panic!("expected restored ActiveView::Tree");
+    };
+    assert_eq!(tree.root_kind, "VirtualMachine");
+    assert_eq!(tree.nodes.len(), 3);
+
+    // Press 'Esc' again to pop back from Tree to Table view
+    press(&mut app, key(KeyCode::Esc)).await;
+    assert!(matches!(app.active_view, ActiveView::Table(_)));
 }

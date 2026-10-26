@@ -2407,4 +2407,206 @@ mod tests {
         assert_eq!(root.children[0].kind, "ChildResource");
         assert_eq!(root.children[0].namespace.as_deref(), Some("default"));
     }
+
+    #[tokio::test]
+    async fn test_fake_api_multi_group_crd_lineage_expansion() {
+        use crate::client_cache::DiscoveredResource;
+        use crate::crds::custom_api_resource;
+        use std::path::PathBuf;
+
+        let (client, _seen) = crate::test_support::fake_api_raw(|seen| {
+            if seen.path == "/apis/cert-manager.io/v1/namespaces/default/certificates/my-cert" {
+                (
+                    200,
+                    serde_json::json!({
+                        "apiVersion": "cert-manager.io/v1",
+                        "kind": "Certificate",
+                        "metadata": {
+                            "name": "my-cert",
+                            "namespace": "default",
+                            "uid": "uid-cert-1"
+                        },
+                        "status": {
+                            "conditions": [
+                                {
+                                    "type": "Ready",
+                                    "status": "True"
+                                }
+                            ]
+                        }
+                    }),
+                )
+            } else if seen.path == "/apis/cert-manager.io/v1/namespaces/default/certificaterequests"
+            {
+                (
+                    200,
+                    serde_json::json!({
+                        "apiVersion": "cert-manager.io/v1",
+                        "kind": "CertificateRequestList",
+                        "items": [
+                            {
+                                "apiVersion": "cert-manager.io/v1",
+                                "kind": "CertificateRequest",
+                                "metadata": {
+                                    "name": "my-cert-req-1",
+                                    "namespace": "default",
+                                    "uid": "uid-cr-1",
+                                    "ownerReferences": [
+                                        {
+                                            "apiVersion": "cert-manager.io/v1",
+                                            "kind": "Certificate",
+                                            "name": "my-cert",
+                                            "uid": "uid-cert-1",
+                                            "controller": true
+                                        }
+                                    ]
+                                },
+                                "status": {
+                                    "conditions": [
+                                        {
+                                            "type": "Ready",
+                                            "status": "True"
+                                        }
+                                    ]
+                                }
+                            }
+                        ]
+                    }),
+                )
+            } else if seen.path == "/apis/acme.cert-manager.io/v1/namespaces/default/orders" {
+                (
+                    200,
+                    serde_json::json!({
+                        "apiVersion": "acme.cert-manager.io/v1",
+                        "kind": "OrderList",
+                        "items": [
+                            {
+                                "apiVersion": "acme.cert-manager.io/v1",
+                                "kind": "Order",
+                                "metadata": {
+                                    "name": "my-order-1",
+                                    "namespace": "default",
+                                    "uid": "uid-order-1",
+                                    "ownerReferences": [
+                                        {
+                                            "apiVersion": "cert-manager.io/v1",
+                                            "kind": "CertificateRequest",
+                                            "name": "my-cert-req-1",
+                                            "uid": "uid-cr-1",
+                                            "controller": true
+                                        }
+                                    ]
+                                },
+                                "status": {
+                                    "state": "valid"
+                                }
+                            }
+                        ]
+                    }),
+                )
+            } else if seen.path == "/apis/acme.cert-manager.io/v1/namespaces/default/challenges" {
+                (
+                    200,
+                    serde_json::json!({
+                        "apiVersion": "acme.cert-manager.io/v1",
+                        "kind": "ChallengeList",
+                        "items": [
+                            {
+                                "apiVersion": "acme.cert-manager.io/v1",
+                                "kind": "Challenge",
+                                "metadata": {
+                                    "name": "my-chal-1",
+                                    "namespace": "default",
+                                    "uid": "uid-chal-1",
+                                    "ownerReferences": [
+                                        {
+                                            "apiVersion": "acme.cert-manager.io/v1",
+                                            "kind": "Order",
+                                            "name": "my-order-1",
+                                            "uid": "uid-order-1",
+                                            "controller": true
+                                        }
+                                    ]
+                                },
+                                "status": {
+                                    "state": "valid"
+                                }
+                            }
+                        ]
+                    }),
+                )
+            } else {
+                (
+                    200,
+                    serde_json::json!({ "apiVersion": "v1", "kind": "List", "items": [] }),
+                )
+            }
+        });
+
+        let cache = ClientCache::new(PathBuf::from("/test/kubeconfig"));
+        cache.preload("test-context", client).await;
+
+        let mut disc = crate::client_cache::DiscoveryIndex::new();
+        disc.insert(DiscoveredResource {
+            ar: custom_api_resource("cert-manager.io", "v1", "Certificate", "certificates"),
+            namespaced: true,
+        });
+        disc.insert(DiscoveredResource {
+            ar: custom_api_resource(
+                "cert-manager.io",
+                "v1",
+                "CertificateRequest",
+                "certificaterequests",
+            ),
+            namespaced: true,
+        });
+        disc.insert(DiscoveredResource {
+            ar: custom_api_resource("acme.cert-manager.io", "v1", "Order", "orders"),
+            namespaced: true,
+        });
+        disc.insert(DiscoveredResource {
+            ar: custom_api_resource("acme.cert-manager.io", "v1", "Challenge", "challenges"),
+            namespaced: true,
+        });
+        cache.preload_discovery("test-context", disc).await;
+
+        let root = resolve_resource_lineage(
+            cache,
+            "test-context",
+            "Certificate",
+            "my-cert",
+            Some("default"),
+            Some("cert-manager.io/v1"),
+            None,
+            None,
+        )
+        .await
+        .expect("lineage should resolve multi-group CRD chain");
+
+        // Level 1: Root Certificate
+        assert_eq!(root.kind, "Certificate");
+        assert_eq!(root.name, "my-cert");
+        assert_eq!(root.relationship, LineageRelation::Target);
+        assert_eq!(root.children.len(), 1);
+
+        // Level 2: Child CertificateRequest (cert-manager.io/v1)
+        let cr = &root.children[0];
+        assert_eq!(cr.kind, "CertificateRequest");
+        assert_eq!(cr.name, "my-cert-req-1");
+        assert_eq!(cr.relationship, LineageRelation::Child);
+        assert_eq!(cr.children.len(), 1);
+
+        // Level 3: Grandchild Order (acme.cert-manager.io/v1)
+        let order = &cr.children[0];
+        assert_eq!(order.kind, "Order");
+        assert_eq!(order.name, "my-order-1");
+        assert_eq!(order.relationship, LineageRelation::Child);
+        assert_eq!(order.children.len(), 1);
+
+        // Level 4: Great-grandchild Challenge (acme.cert-manager.io/v1)
+        let chal = &order.children[0];
+        assert_eq!(chal.kind, "Challenge");
+        assert_eq!(chal.name, "my-chal-1");
+        assert_eq!(chal.relationship, LineageRelation::Child);
+    }
 }
