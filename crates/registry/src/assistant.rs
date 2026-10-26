@@ -81,6 +81,24 @@ fn canonical_stored(id: &str) -> String {
         .map_or_else(|| id.to_string(), |(path, name)| format!("{}#{name}", canonical(path).display()))
 }
 
+/// A context with only its file and name, so its own `pinned_id()` and `key()`
+/// give the identities a listed context of that file and name would have.
+fn stand_in(path: &str, name: &str) -> ResolvedContext {
+    ResolvedContext {
+        display_name: name.to_string(),
+        original_name: name.to_string(),
+        source: PathBuf::from(path),
+        cluster: String::new(),
+        server: String::new(),
+        user: String::new(),
+        namespace: String::new(),
+        is_current: false,
+        exec_command: None,
+        auth_provider: None,
+        auth_kind: String::new(),
+    }
+}
+
 /// The switched-off clusters among `contexts`, each with every name a call
 /// could use for it. Matched by canonical file, so the same kubeconfig spelled
 /// another way — another slash, a `.`, a headless process's own `KUBECONFIG`
@@ -112,10 +130,18 @@ pub(crate) fn disabled_clusters(ids: &[String], contexts: &[ResolvedContext]) ->
             // Placed nowhere: refuse by the ID and by every name it could end
             // in, since a context name may itself hold `#`. Fail closed —
             // matching more can only refuse more.
-            let names = std::iter::once(id.clone())
-                .chain(id.match_indices('#').map(|(i, _)| id[i + 1..].to_string()))
-                .filter(|name| !name.is_empty())
-                .collect();
+            // Its pinned ID and key are rebuilt too, for every way the ID can
+            // split: a client cached under the pinned ID while the file was
+            // readable would otherwise still serve it.
+            let mut names = vec![id.clone()];
+            for (i, _) in id.match_indices('#') {
+                let (path, name) = (&id[..i], &id[i + 1..]);
+                names.push(name.to_string());
+                let stand_in = stand_in(path, name);
+                names.extend(stand_in.pinned_id());
+                names.push(stand_in.key());
+            }
+            names.retain(|name| !name.is_empty());
             disabled.push(DisabledCluster { label: id.clone(), names });
         }
     }
@@ -225,6 +251,27 @@ mod tests {
         let prod = contexts.iter().find(|c| c.original_name == "prod").unwrap();
         assert_ne!(prod.key(), prod.stable_id(), "the fixture must make the two forms differ");
         let disabled = disabled_clusters(&[prod.stable_id()], &contexts);
+        assert!(disabled[0].names.contains(&prod.key()), "{:?}", disabled[0].names);
+    }
+
+    /// Review (PR #984): a switched-off cluster whose kubeconfig can no longer
+    /// be read is listed nowhere, yet a client cached under its pinned ID could
+    /// still serve a call — so the pinned ID and key are rebuilt from the ID.
+    #[test]
+    fn an_unplaced_disabled_id_still_refuses_its_pinned_id_and_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let odd = dir.path().join("team%1");
+        std::fs::create_dir(&odd).unwrap();
+        let config = kubeconfig(&odd);
+        let contexts = srelens_kube::context_resolve::resolve_contexts(&[config.clone()]);
+        let prod = contexts.iter().find(|c| c.original_name == "prod").unwrap();
+
+        // The file is gone: nothing is listed any more.
+        std::fs::remove_file(&config).unwrap();
+        let disabled = disabled_clusters(&[prod.stable_id()], &[]);
+
+        assert_eq!(disabled.len(), 1);
+        assert!(disabled[0].names.contains(&prod.pinned_id().unwrap()), "{:?}", disabled[0].names);
         assert!(disabled[0].names.contains(&prod.key()), "{:?}", disabled[0].names);
     }
 
