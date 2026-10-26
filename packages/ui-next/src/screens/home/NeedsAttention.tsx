@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { isTauri, plural, type ClusterContext } from "@srelens/core";
 import { Alert, Button, EmptyState, LoadingState, RawError, StatusPill } from "@srelens/ui-kit";
-import { attentionPath, attentionQuestion, rankedAttention, type ClusterAttention } from "../../lib/attention";
+import { attentionKind, attentionPath, attentionQuestion, rankedAttention, type ClusterAttention } from "../../lib/attention";
 import { detailRoute } from "../../lib/detailRoute";
 import { summarise } from "../../lib/errorCopy";
 import { getMark } from "../../lib/marks";
@@ -87,7 +87,7 @@ export function NeedsAttention({ targets, scans }: NeedsAttentionProps) {
                 const path = attentionPath(item);
                 // A custom kind by its group, so `acme.io/Deployment` reads, keys
                 // and opens apart from the built-in Deployment.
-                const kind = item.group ? `${item.group}/${item.kind}` : item.kind;
+                const kind = attentionKind(item);
                 return (
                   <li key={`${item.clusterId}/${kind}/${item.namespace}/${item.name}`} className="home-attention-row">
                     <button

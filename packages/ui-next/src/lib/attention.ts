@@ -199,10 +199,15 @@ export function attentionPath(item: Pick<AttentionItem, "namespace" | "name">): 
   return item.namespace ? `${item.namespace}/${item.name}` : item.name;
 }
 
+/** The kind as a reader and a key tell it apart: `acme.io/Deployment` for a custom kind, the bare kind otherwise. */
+export function attentionKind(item: Pick<AttentionItem, "kind" | "group">): string {
+  return item.group ? `${item.group}/${item.kind}` : item.kind;
+}
+
 /**
  * The question an item's Ask puts in the assistant's prompt. Names the object
- * by namespace and name and the cluster by its context name, which is what the
- * agent's tools take.
+ * by kind (with a custom kind's group), namespace and name, and the cluster by
+ * its context name, which is what the agent's tools take.
  */
 export function attentionQuestion(item: AttentionItem): string {
   const path = attentionPath(item);
@@ -212,9 +217,9 @@ export function attentionQuestion(item: AttentionItem): string {
     case "image":
       return `Why can't ${path} pull its image on ${item.cluster}?`;
     case "replicas":
-      return `Why does ${item.kind} ${path} have unavailable replicas on ${item.cluster}?`;
+      return `Why does ${attentionKind(item)} ${path} have unavailable replicas on ${item.cluster}?`;
     case "warning":
-      return `What is behind the ${item.problem} warning on ${item.kind} ${path} on ${item.cluster}?`;
+      return `What is behind the ${item.problem} warning on ${attentionKind(item)} ${path} on ${item.cluster}?`;
   }
 }
 

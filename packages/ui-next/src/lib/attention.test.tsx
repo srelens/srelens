@@ -196,6 +196,8 @@ describe("attentionQuestion", () => {
     [item({ kind: "Deployment", name: "web", problem: "1/3 ready", cause: "replicas" }), "Why does Deployment checkout/web have unavailable replicas on prod?"],
     [item({ kind: "Service", name: "front", problem: "FailedToUpdateEndpoint", cause: "warning" }), "What is behind the FailedToUpdateEndpoint warning on Service checkout/front on prod?"],
     [item({ kind: "Node", namespace: "", name: "n1", problem: "Rebooted", cause: "warning" }), "What is behind the Rebooted warning on Node n1 on prod?"],
+    // A custom kind by its group, so the assistant looks at it and not the built-in of that name.
+    [item({ kind: "Deployment", group: "acme.io", name: "api", problem: "ReconcileFailed", cause: "warning" }), "What is behind the ReconcileFailed warning on acme.io/Deployment checkout/api on prod?"],
   ])("asks about %#", (subject, question) => {
     expect(attentionQuestion(subject)).toBe(question);
   });
