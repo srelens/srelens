@@ -16,6 +16,11 @@ export interface CountKindRef {
 
 export interface KindCountResult {
   kind: string;
+  /**
+   * The group this kind was counted in: `apps` for a Deployment asked for
+   * without one, `""` for the core group. A kind that could not be resolved
+   * keeps the group asked for.
+   */
   group: string;
   /** `null` when this kind could not be counted — never `0` for a refusal. */
   count: number | null;

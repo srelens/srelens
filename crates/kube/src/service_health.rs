@@ -73,7 +73,11 @@ pub struct PortMismatchEvidence {
     pub service_port: i32,
     pub target_port: String,
     pub container_ports_found: Vec<i32>,
-    pub mismatch_kind: String, // "TargetPortNotFound" | "NamedPortNotFound" | "NoMatchingPods" | "ZeroReadyEndpoints"
+    /// "TargetPortNotDeclared" | "NamedPortNotFound" | "NoMatchingPods" | "ZeroReadyEndpoints".
+    /// "TargetPortNotDeclared" is a lead, not proof: declaring a container port is
+    /// optional, and Kubernetes routes a numeric targetPort whether or not it is
+    /// declared. A named targetPort, by contrast, must be declared to resolve.
+    pub mismatch_kind: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub failing_pods: Vec<String>,
 }
@@ -186,7 +190,7 @@ pub fn analyze_service_health(
                             service_port: p.port,
                             target_port: num.to_string(),
                             container_ports_found: container_ports_found.clone(),
-                            mismatch_kind: "TargetPortNotFound".to_string(),
+                            mismatch_kind: "TargetPortNotDeclared".to_string(),
                             failing_pods: Vec::new(),
                         });
                     }
@@ -414,8 +418,12 @@ mod tests {
         assert!(serde_json::from_value::<ServiceHealthProbeIn>(extra).is_err());
     }
 
+    /// A numeric targetPort missing from the pods' declared ports is a lead, not
+    /// proof: Kubernetes routes to an undeclared port all the same, so a working
+    /// Service whose pods declare only, say, a metrics port must not be told its
+    /// target port is not found.
     #[test]
-    fn detects_target_port_mismatch_against_pod_containers() {
+    fn notes_a_numeric_target_port_the_pods_do_not_declare() {
         let mut selector = BTreeMap::new();
         selector.insert("app".to_string(), "api".to_string());
 
@@ -475,7 +483,7 @@ mod tests {
         assert_eq!(report.port_mismatches.len(), 1);
         assert_eq!(
             report.port_mismatches[0].mismatch_kind,
-            "TargetPortNotFound"
+            "TargetPortNotDeclared"
         );
         assert_eq!(report.port_mismatches[0].target_port, "8080");
         assert_eq!(report.port_mismatches[0].container_ports_found, vec![3000]);
@@ -594,11 +602,11 @@ mod tests {
         };
 
         let report = analyze_service_health("default", "mesh", &svc, &[], &[pod]);
-        // TargetPortNotFound should NOT be reported because 15021 is on the sidecar!
+        // TargetPortNotDeclared should NOT be reported because 15021 is on the sidecar!
         assert!(!report
             .port_mismatches
             .iter()
-            .any(|m| m.mismatch_kind == "TargetPortNotFound"));
+            .any(|m| m.mismatch_kind == "TargetPortNotDeclared"));
     }
 
     #[test]

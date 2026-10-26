@@ -301,6 +301,23 @@ impl Pending {
             let _ = w.tx.send(false);
         }
     }
+
+    /// Deny everything one of srelens's chats left waiting — used when its
+    /// turn is stopped, so a prompt cannot outlive the turn that raised it
+    /// even when the agent's connection does.
+    pub fn deny_chat(&self, session: &str) {
+        let mut waiting = self.0.lock().unwrap();
+        let ids: Vec<String> = waiting
+            .iter()
+            .filter(|(_, w)| w.request.caller.as_ref().is_some_and(|c| c.chat_session == session))
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in ids {
+            if let Some(w) = waiting.remove(&id) {
+                let _ = w.tx.send(false);
+            }
+        }
+    }
 }
 
 /// Generic over the runtime only so a unit test can build one — and, through
@@ -948,6 +965,28 @@ mod tests {
         assert!(p.snapshot().is_empty());
     }
 
+    /// Stopping one chat's turn denies only that chat's prompts: another
+    /// chat's, and an external client's, are still the person's to answer.
+    #[tokio::test]
+    async fn deny_chat_denies_only_that_chat_s_prompts() {
+        let p = Pending::default();
+        let from = |id: &str, chat: Option<&str>| {
+            let (tx, rx) = oneshot::channel();
+            let mut req = request(id, "k8s_deletePod");
+            req.caller = chat.map(|chat| CallerWire { chat_session: chat.into() });
+            p.register(req, tx);
+            rx
+        };
+        let stopped = from("a", Some("sess-7"));
+        let _other_chat = from("b", Some("sess-8"));
+        let _external = from("c", None);
+        p.deny_chat("sess-7");
+        assert!(!stopped.await.unwrap(), "the stopped chat's prompt is denied");
+        let mut ids: Vec<String> = p.snapshot().into_iter().map(|r| r.id).collect();
+        ids.sort();
+        assert_eq!(ids, vec!["b".to_string(), "c".to_string()]);
+    }
+
     #[tokio::test]
     async fn deny_all_empties_the_snapshot() {
         let p = Pending::default();
@@ -971,5 +1010,103 @@ mod tests {
                 ResolveOnDrop { app: app.handle().clone(), pending: pending.clone(), id: "a".into() };
         }
         assert!(pending.snapshot().is_empty(), "the dropped guard must forget its entry");
+    }
+
+    /// Stop must close the approval a CLI turn left open. Killing the agent
+    /// usually closes its connection, and the server then drops the waiting
+    /// call (and `ResolveOnDrop` the prompt). But an agent started through a
+    /// wrapper outlives that kill on macOS and Linux — npm's `codex.js` spawns
+    /// the real binary, and SIGKILL reaches only the wrapper — so its
+    /// connection stays open, and a late Approve used to run the write.
+    #[tokio::test]
+    async fn stopping_a_turn_denies_the_approval_it_left_open() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use tauri::Manager;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let app = tauri::test::mock_builder()
+            .manage(crate::assistant::ChatManager::default())
+            .manage(Arc::new(Pending::default()))
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .unwrap();
+        let _window = tauri::WebviewWindowBuilder::new(&app, "main", Default::default()).build().unwrap();
+        let pending = app.state::<Arc<Pending>>().inner().clone();
+
+        // A write that records whether it ran, behind the desktop's prompt.
+        let ran = Arc::new(AtomicBool::new(false));
+        let mut registry = srelens_capability::Registry::new();
+        let mut write = srelens_capability::Capability::read_only("k8s.deletePod", "delete a pod", {
+            let ran = ran.clone();
+            move |_| {
+                let ran = ran.clone();
+                async move {
+                    ran.store(true, Ordering::SeqCst);
+                    Ok(json!({}))
+                }
+            }
+        });
+        write.annotations = Annotations::DESTRUCTIVE;
+        registry.register(write);
+        let server = srelens_mcp::McpServer::new(Arc::new(registry)).with_policy(Arc::new(PromptUser::new(
+            app.handle().clone(),
+            pending.clone(),
+            Duration::from_secs(60),
+        )));
+        let turn = server.caller_tokens().mint("sess-7");
+        let listener = srelens_mcp::http::HttpListener::bind(
+            ([127, 0, 0, 1], 0).into(),
+            srelens_mcp::http::Exposure::Loopback,
+        )
+        .await
+        .unwrap();
+        let addr = listener.local_addr().unwrap();
+        let served = tokio::spawn(srelens_mcp::http::serve_http(
+            server,
+            listener,
+            srelens_mcp::auth::Token::generate(),
+        ));
+
+        // The turn's agent asks for the write, on a connection that stays open.
+        let body = json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+            "params": {"name": "k8s.deletePod", "arguments": {"name": "api-0"}}})
+        .to_string();
+        let mut conn = tokio::net::TcpStream::connect(addr).await.unwrap();
+        conn.write_all(
+            format!(
+                "POST /mcp HTTP/1.1\r\nHost: {addr}\r\nAuthorization: Bearer {}\r\n\
+                 Content-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                turn.token(),
+                body.len()
+            )
+            .as_bytes(),
+        )
+        .await
+        .unwrap();
+        let asked = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                if let Some(asked) = pending.snapshot().pop() {
+                    return asked;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the write waits on the person");
+        assert_eq!(asked.caller, Some(CallerWire { chat_session: "sess-7".into() }));
+
+        crate::assistant::chat_cancel("sess-7".into(), Some(1), app.state(), app.state()).await.unwrap();
+
+        assert!(
+            crate::mcp::mcp_confirm_respond(asked.id.clone(), true, app.state()).is_err(),
+            "a stopped turn's approval could still be given"
+        );
+        let mut reply = String::new();
+        tokio::time::timeout(Duration::from_secs(10), conn.read_to_string(&mut reply))
+            .await
+            .expect("the call is answered once its turn is stopped")
+            .unwrap();
+        assert!(reply.contains(r#""srelens/denied":true"#), "{reply}");
+        assert!(!ran.load(Ordering::SeqCst), "the write ran after its turn was stopped");
+        served.abort();
     }
 }

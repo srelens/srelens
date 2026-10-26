@@ -386,9 +386,7 @@ impl ClientCache {
             if let Some(idx) = lock.get(context) {
                 if let Some(res) = idx.find(kind, group) {
                     if let Some(v) = version {
-                        let mut ar = res.ar.clone();
-                        ar.version = v.to_string();
-                        return Ok((ar, res.namespaced));
+                        return Ok((at_version(res.ar, v), res.namespaced));
                     }
                     return Ok((res.ar, res.namespaced));
                 }
@@ -399,9 +397,7 @@ impl ClientCache {
         let idx = self.discover_cluster(context).await?;
         if let Some(res) = idx.find(kind, group) {
             if let Some(v) = version {
-                let mut ar = res.ar.clone();
-                ar.version = v.to_string();
-                return Ok((ar, res.namespaced));
+                return Ok((at_version(res.ar, v), res.namespaced));
             }
             Ok((res.ar, res.namespaced))
         } else {
@@ -410,6 +406,18 @@ impl ClientCache {
             ))
         }
     }
+}
+
+/// `ar` at version `v`. kube builds a request's path from `api_version`, so it
+/// changes with `version`; changing `version` alone still asks for the old one.
+fn at_version(mut ar: ApiResource, v: &str) -> ApiResource {
+    ar.api_version = if ar.group.is_empty() {
+        v.to_string()
+    } else {
+        format!("{}/{v}", ar.group)
+    };
+    ar.version = v.to_string();
+    ar
 }
 
 #[cfg(test)]
@@ -723,6 +731,33 @@ mod tests {
             .await
             .expect("resolves case-insensitively");
         assert_eq!(ar4.kind, "VirtualMachine");
+    }
+
+    /// A version asked for by name, against a resource discovery found at
+    /// another, is the version the request goes to. kube builds the path from
+    /// `api_version`, not `version`, so both must name it.
+    #[tokio::test]
+    async fn resolve_resource_requests_the_asked_version_of_a_discovered_resource() {
+        use kube::core::Resource;
+        let cache = ClientCache::new(PathBuf::from("/nonexistent"));
+        let mut index = DiscoveryIndex::new();
+        index.insert(DiscoveredResource {
+            ar: crate::crds::custom_api_resource("kubevirt.io", "v1", "VirtualMachine", "virtualmachines"),
+            namespaced: true,
+        });
+        cache.preload_discovery("cluster-a", index).await;
+
+        let (ar, _) = cache
+            .resolve_resource("cluster-a", "VirtualMachine", None, Some("v1alpha1"), None)
+            .await
+            .expect("resolves the discovered kind at the asked version");
+
+        assert_eq!(ar.version, "v1alpha1");
+        assert_eq!(ar.api_version, "kubevirt.io/v1alpha1");
+        assert_eq!(
+            kube::core::DynamicObject::url_path(&ar, Some("default")),
+            "/apis/kubevirt.io/v1alpha1/namespaces/default/virtualmachines"
+        );
     }
 
     #[tokio::test]

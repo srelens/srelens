@@ -80,7 +80,9 @@ pub struct CountResourcesIn {
 #[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
 pub struct KindCount {
     pub kind: String,
-    /// The `group` asked for, `""` when none was given.
+    /// The group this kind was counted in: `apps` for a Deployment asked for
+    /// without one, `""` for the core group. A kind that could not be resolved
+    /// keeps the `group` asked for, `""` when none was given.
     pub group: String,
     /// `null` when this kind could not be counted — never `0` for a failure.
     pub count: Option<i64>,
@@ -241,8 +243,11 @@ async fn count_kinds(
     Ok(targets
         .into_iter()
         .zip(sums)
-        .map(|((k, _), sum)| {
-            let group = k.group.unwrap_or_default();
+        .map(|((k, resolved), sum)| {
+            let group = match &resolved {
+                Ok((ar, _)) => ar.group.clone(),
+                Err(_) => k.group.unwrap_or_default(),
+            };
             match sum {
                 Ok(n) => KindCount {
                     kind: k.kind,
@@ -691,6 +696,34 @@ mod count_tests {
         let seen = seen.lock().unwrap().clone();
         assert_eq!(seen.len(), 1, "{seen:?}");
         assert!(seen[0].0.contains("/api/v1/nodes"), "{seen:?}");
+        handle.abort();
+    }
+
+    /// A built-in asked for without its group is answered with the group it was
+    /// counted in, so a caller can tell `apps/Deployment` from `acme.io/Deployment`.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_built_in_is_answered_with_the_group_it_was_counted_in() {
+        let deployments = (
+            CountKind {
+                kind: "Deployment".into(),
+                group: None,
+                version: None,
+                plural: None,
+                namespaced: None,
+            },
+            Ok((ApiResource::erase::<k8s_openapi::api::apps::v1::Deployment>(&()), true)),
+        );
+        let (client, handle, _) = fake_api(vec![
+            ok("/apis/apps/v1/deployments", holding(2)),
+            ok("/api/v1/pods", holding(1)),
+        ])
+        .await;
+        let out = count_kinds(client, vec![deployments, pods()], &[], BUDGET)
+            .await
+            .unwrap();
+        let got: Vec<(&str, &str, Option<i64>)> =
+            out.iter().map(|c| (c.kind.as_str(), c.group.as_str(), c.count)).collect();
+        assert_eq!(got, vec![("Deployment", "apps", Some(2)), ("Pod", "", Some(1))]);
         handle.abort();
     }
 

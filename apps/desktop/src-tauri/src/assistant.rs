@@ -623,7 +623,12 @@ pub async fn chat_cancel(
     session: String,
     turn: Option<u64>,
     chats: tauri::State<'_, ChatManager>,
+    pending: tauri::State<'_, Arc<crate::mcp_confirm::Pending>>,
 ) -> Result<(), String> {
+    // A killed agent's connection usually closes and takes its prompt with
+    // it, but one that outlives the kill (a wrapper's child on macOS/Linux)
+    // would leave it open to a late Approve.
+    pending.deny_chat(&session);
     let mut stopped = false;
     if let Some(child) = chats.children.lock().unwrap().remove(&session) {
         kill_and_reap(child);
