@@ -79,7 +79,7 @@ fn canonical_stored(id: &str) -> String {
 /// could use for it. Matched by canonical file, so the same kubeconfig spelled
 /// another way — another slash, a `.`, a headless process's own `KUBECONFIG`
 /// spelling — is still the cluster that was switched off. An ID nothing listed
-/// matches still refuses by that ID.
+/// matches still refuses by that ID and the context name it ends in.
 pub(crate) fn disabled_clusters(ids: &[String], contexts: &[ResolvedContext]) -> Vec<DisabledCluster> {
     let mut disabled = Vec::new();
     for id in ids {
@@ -101,7 +101,14 @@ pub(crate) fn disabled_clusters(ids: &[String], contexts: &[ResolvedContext]) ->
             });
         }
         if disabled.len() == before {
-            disabled.push(DisabledCluster { label: id.clone(), names: vec![id.clone()] });
+            // Placed nowhere: refuse by the ID and by every name it could end
+            // in, since a context name may itself hold `#`. Fail closed —
+            // matching more can only refuse more.
+            let names = std::iter::once(id.clone())
+                .chain(id.match_indices('#').map(|(i, _)| id[i + 1..].to_string()))
+                .filter(|name| !name.is_empty())
+                .collect();
+            disabled.push(DisabledCluster { label: id.clone(), names });
         }
     }
     disabled
@@ -186,11 +193,19 @@ mod tests {
         }
     }
 
+    /// Security review: an ID this process cannot place still refuses by its
+    /// context name — fail closed, since this process may spell the file
+    /// some way canonicalisation cannot reconcile.
     #[test]
-    fn a_disabled_id_no_listed_context_matches_still_refuses_by_that_id() {
+    fn a_disabled_id_no_listed_context_matches_still_refuses_by_that_id_and_its_name() {
         let disabled = disabled_clusters(&["/gone#prod".to_string()], &[]);
         assert_eq!(disabled.len(), 1);
-        assert_eq!(disabled[0].names, vec!["/gone#prod".to_string()]);
+        assert!(disabled[0].names.contains(&"/gone#prod".to_string()));
+        assert!(disabled[0].names.contains(&"prod".to_string()));
+        // A context name holding `#` is refused whole as well as by its tail.
+        let odd = disabled_clusters(&["/gone#team#prod".to_string()], &[]);
+        assert!(odd[0].names.contains(&"team#prod".to_string()));
+        assert!(odd[0].names.contains(&"prod".to_string()));
     }
 
     #[tokio::test]
