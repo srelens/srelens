@@ -1942,6 +1942,22 @@ async fn run_suite() {
     assert_eq!(deploy["desired"], json!(2), "{out}");
     assert_eq!(deploy["health"], json!("ok"), "{out}");
 
+    // --- resourceTree: traces ownerReferences and dependents for the fixture Deployment ---
+    let tree_out = h
+        .ok(
+            "k8s.resourceTree",
+            json!({
+                "context": ctx,
+                "kind": "Deployment",
+                "name": DEPLOY,
+                "namespace": NS,
+            }),
+        )
+        .await;
+    assert_eq!(tree_out["root"]["kind"], "Deployment");
+    assert_eq!(tree_out["root"]["name"], DEPLOY);
+    assert!(tree_out["totalNodes"].as_u64().unwrap_or(0) >= 1);
+
     // The probe is the same graph read with one exec per pod, and a
     // capability of its own so the consent layer can gate it. On the fixture
     // pods (busybox) it reads, and it always answers with its report.

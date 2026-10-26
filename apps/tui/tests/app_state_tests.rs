@@ -10,17 +10,10 @@ use std::time::Duration;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEventKind};
 use ratatui::layout::Rect;
 use serde_json::{json, Value};
-use srelens_kube::k8s_openapi::api::core::v1::Pod;
-use srelens_kube::lineage::{LineageNode, LineageRelation};
-use srelens_kube::metrics::MetricSample;
-use srelens_kube::node_inspector::{
-    NodeConditionInfo, NodeInspectorDetails, NodePodItem, NodeTaintInfo,
-};
-use srelens_kube::workloads::summarise_pod;
 use srectl::ai_skills::CavemanLevel;
 use srectl::app::{
-    format_event_summary, get_clipboard_text, parse_involved_object, parse_ready_ratio,
-    ActiveView, App, SuspendAction,
+    format_event_summary, get_clipboard_text, parse_involved_object, parse_ready_ratio, ActiveView,
+    App, SuspendAction,
 };
 use srectl::commands::{CommandTarget, CrdMeta, PrinterColumn, ResourceKind};
 use srectl::event::AppEvent;
@@ -39,6 +32,13 @@ use srectl::views::toolbox_view::{ToolStatusItem, ToolboxViewState};
 use srectl::views::tree_view::TreeViewState;
 use srectl::views::yaml_view::YamlViewState;
 use srectl::{AiProvider, AiSettings, DeepLink};
+use srelens_kube::k8s_openapi::api::core::v1::Pod;
+use srelens_kube::lineage::{LineageNode, LineageRelation};
+use srelens_kube::metrics::MetricSample;
+use srelens_kube::node_inspector::{
+    NodeConditionInfo, NodeInspectorDetails, NodePodItem, NodeTaintInfo,
+};
+use srelens_kube::workloads::summarise_pod;
 use tokio::sync::mpsc::UnboundedReceiver;
 
 // ---------------------------------------------------------------------------
@@ -3151,7 +3151,12 @@ async fn a_single_or_unknown_container_pod_goes_straight_to_logs_or_shell() {
 async fn opening_a_resource_tree_without_a_cluster_reports_the_error_through_the_event_loop() {
     let _settings = common::env::isolate_settings();
     let (mut app, mut rx) = common::app().await;
-    app.open_resource_tree("Deployment".into(), "web".into(), Some("default".into()));
+    app.open_resource_tree(
+        "Deployment".into(),
+        "web".into(),
+        Some("default".into()),
+        None,
+    );
     assert!(matches!(&app.active_view, ActiveView::Tree(t) if t.is_loading));
 
     let ev = wait_for(&mut rx, |e| matches!(e, AppEvent::LineageResult { .. })).await;

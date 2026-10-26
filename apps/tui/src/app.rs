@@ -5721,11 +5721,21 @@ impl App {
                             if let Some(item) = table.selected_item() {
                                 let (obj_kind, obj_name) = parse_involved_object(item);
                                 if !obj_name.is_empty() {
-                                    self.open_resource_tree(obj_kind, obj_name, sel_ns.clone());
+                                    self.open_resource_tree(
+                                        obj_kind,
+                                        obj_name,
+                                        sel_ns.clone(),
+                                        None,
+                                    );
                                 }
                             }
                         } else if let Some(name) = sel_name.clone() {
-                            self.open_resource_tree(kind_str.clone(), name, sel_ns.clone());
+                            self.open_resource_tree(
+                                kind_str.clone(),
+                                name,
+                                sel_ns.clone(),
+                                crd_api_version.clone(),
+                            );
                         }
                     }
                     KeyCode::Enter => {
@@ -7268,20 +7278,23 @@ impl App {
                         Theme::status_ok(),
                     );
                 }
-                KeyCode::Enter => {
+                KeyCode::Char('t') => {
                     if let Some(node) = tree.selected_node() {
                         let name = node.name.clone();
                         let kind = node.kind.clone();
                         let ns = node.namespace.clone();
-                        self.open_describe_view(name, kind, ns).await;
+                        let api_ver = node.api_version.clone();
+                        self.open_resource_tree(kind, name, ns, api_ver);
                     }
                 }
-                KeyCode::Char('d') => {
+                KeyCode::Enter | KeyCode::Char('d') => {
                     if let Some(node) = tree.selected_node() {
                         let name = node.name.clone();
                         let kind = node.kind.clone();
                         let ns = node.namespace.clone();
-                        self.open_describe_view(name, kind, ns).await;
+                        let api_ver = node.api_version.clone();
+                        self.open_describe_view_in_group(name, kind, ns, api_ver)
+                            .await;
                     }
                 }
                 KeyCode::Char('y') => {
@@ -7289,7 +7302,8 @@ impl App {
                         let name = node.name.clone();
                         let kind = node.kind.clone();
                         let ns = node.namespace.clone();
-                        self.open_yaml_view(name, kind, ns).await;
+                        let api_ver = node.api_version.clone();
+                        self.open_yaml_view_in_group(name, kind, ns, api_ver).await;
                     }
                 }
                 KeyCode::Char('l') => {
@@ -9352,7 +9366,7 @@ impl App {
                             Some(self.active_namespace.clone())
                         }
                     });
-                    self.open_resource_tree(kind, name, ns);
+                    self.open_resource_tree(kind, name, ns, None);
                     return;
                 }
             }
@@ -11501,9 +11515,19 @@ impl App {
         self.nav_stack.push(old_view);
     }
 
-    pub fn open_resource_tree(&mut self, kind: String, name: String, namespace: Option<String>) {
-        let tree_state =
-            tree_view::TreeViewState::new(kind.clone(), name.clone(), namespace.clone());
+    pub fn open_resource_tree(
+        &mut self,
+        kind: String,
+        name: String,
+        namespace: Option<String>,
+        api_version: Option<String>,
+    ) {
+        let tree_state = tree_view::TreeViewState::with_api_version(
+            kind.clone(),
+            name.clone(),
+            namespace.clone(),
+            api_version.clone(),
+        );
         let old_view = std::mem::replace(&mut self.active_view, ActiveView::Tree(tree_state));
         self.nav_stack.push(old_view);
 
@@ -11513,12 +11537,20 @@ impl App {
         let k = kind.clone();
         let n = name.clone();
         let ns = namespace.clone();
+        let api_ver = api_version.clone();
 
         tokio::spawn(async move {
             let res = match cache.get(&ctx).await {
-                Ok(client) => {
-                    srelens_kube::lineage::resolve_resource_lineage(client, &k, &n, ns.as_deref())
-                        .await
+                Ok(_client) => {
+                    srelens_kube::lineage::resolve_resource_lineage(
+                        cache,
+                        &ctx,
+                        &k,
+                        &n,
+                        ns.as_deref(),
+                        api_ver.as_deref(),
+                    )
+                    .await
                 }
                 Err(e) => Err(format!("Failed to connect to cluster: {}", e)),
             };
@@ -13703,7 +13735,7 @@ impl App {
                         self.nav_stack.push(old);
                     }
                     QuickActionId::RelationshipTree => {
-                        self.open_resource_tree(resource_kind, resource_name, namespace);
+                        self.open_resource_tree(resource_kind, resource_name, namespace, None);
                     }
                     QuickActionId::ViewLogs => {
                         self.prompt_pod_logs(resource_name, namespace).await;
@@ -15440,6 +15472,7 @@ impl App {
                 &[
                     ("<:>", "Cmd"),
                     ("<↑/↓>", "Move"),
+                    ("<t>", "Re-root"),
                     ("<Enter>", "Jump"),
                     ("<x>", "Actions"),
                     ("<l>", "Logs"),

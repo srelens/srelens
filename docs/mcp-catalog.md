@@ -7,11 +7,11 @@ Everything this server exposes over MCP, generated from the live registry so it 
 
 ## Tools
 
-138 tools, grouped by area and then by how a call is gated. Argument schemas are not reproduced here — call `tools/list` for those, which cannot go stale.
+139 tools, grouped by area and then by how a call is gated. Argument schemas are not reproduced here — call `tools/list` for those, which cannot go stale.
 
 **Impact** is how much a successful call disturbs — `low`, `medium` or `high` — and is a different question from the section heading, which is how the call is gated. A capability that accepts several named operations carries the highest level any of them reaches; the per-operation level travels with the resource.
 
-### Kubernetes — read-only (65)
+### Kubernetes — read-only (66)
 
 | Tool | Impact | Summary |
 | --- | --- | --- |
@@ -73,6 +73,7 @@ Everything this server exposes over MCP, generated from the live registry so it 
 | `k8s.prometheusDiscover` | low | find a Prometheus-compatible query API running in the cluster |
 | `k8s.prometheusQuery` | low | run a PromQL instant query against an in-cluster Prometheus |
 | `k8s.queryPodEndpoint` | low | Query an HTTP endpoint (such as /metrics, /healthz, or custom app endpoints) inside any running pod via an on-demand API port-forward tunnel. Automatically resolves pod by selector or name, auto-detects metric/service ports, and supports line filtering. |
+| `k8s.resourceTree` | low | fetch relationship lineage tree (ancestors via ownerReferences and dependents) for any resource |
 | `k8s.serviceHealthProbe` | low | evaluates service port mapping, targetPort alignment with containerPorts, and EndpointSlice readiness |
 | `k8s.synthesizeClusterKubeconfig` | low | synthesize a one-context kubeconfig from Add-cluster form fields |
 | `k8s.testClusterConnection` | low | probe a kubeconfig context's server reachability (no exec plugins run) |
