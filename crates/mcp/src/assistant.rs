@@ -20,14 +20,25 @@ use crate::APP_TOOL_PREFIX;
 pub const SETTING_KEY: &str = "srelens.assistant";
 const KUBECONFIG_FILES_KEY: &str = "srelens.kubeconfigFiles";
 
-/// Tools that take a node by IP or hostname, with the cluster optional — so
-/// they can reach a switched-off cluster's node while naming another.
-const BY_ADDRESS: [&str; 4] = [
+/// Tools that can reach a cluster other than the one they name: the node-SSH
+/// tools take a node by IP or hostname with the cluster optional, and the two
+/// kubeconfig tools take one the caller writes — which can point at the
+/// person's own credential files, or at any server.
+///
+/// ponytail: a hand-kept list. A new capability that picks its cluster any way
+/// but `context` belongs here (or in `CLUSTER_KEYS`); an allowlist of tools
+/// usable while some clusters are off is the upgrade if this list ever drifts.
+const REACHES_ANY: [&str; 6] = [
     "k8s.nodeServiceStatus",
     "k8s.nodeJournalLogs",
     "k8s.nodeRuntimeDiagnostics",
     "k8s.nodeServiceRestart",
+    "k8s.testClusterConnection",
+    "k8s.synthesizeClusterKubeconfig",
 ];
+
+/// The argument keys a call names a cluster under, in any scope `named_clusters` reads.
+const CLUSTER_KEYS: [&str; 5] = ["context", "cluster", "clusterId", "hubContext", "contexts"];
 
 /// What the setting says right now, as the host read it for one call.
 #[derive(Debug, Clone, PartialEq)]
@@ -81,19 +92,29 @@ pub fn guarded_setting(tool: &str, args: &Value) -> Option<String> {
         .then(|| "The AI Assistant setting can only be changed in srelens Settings.".to_string())
 }
 
-/// Every cluster a call names: `context` and `cluster`, at the top level and
-/// under `resource` — where `srelens_capability::audit::describe_target`
-/// looks. A `cluster` that is not a context name can only refuse more.
+/// Every cluster a call names, under any of `CLUSTER_KEYS` — a string, or a
+/// list of strings — at the top level, under `resource` (where
+/// `srelens_capability::audit::describe_target` looks) and under `params` (an
+/// app operation's `clusterId`). A value that is not a context name can only
+/// refuse more.
 pub fn named_clusters(args: &Value) -> Vec<String> {
-    let scopes = [args.get("resource").filter(|v| v.is_object()), Some(args)];
-    scopes
-        .into_iter()
-        .flatten()
-        .flat_map(|scope| ["context", "cluster"].map(|key| scope.get(key).and_then(Value::as_str)))
-        .flatten()
-        .filter(|name| !name.is_empty())
-        .map(str::to_owned)
-        .collect()
+    let scopes = [Some(args), args.get("resource"), args.get("params")];
+    let mut named = Vec::new();
+    for scope in scopes.into_iter().flatten().filter(|v| v.is_object()) {
+        for value in CLUSTER_KEYS.iter().filter_map(|key| scope.get(*key)) {
+            let items = value
+                .as_array()
+                .map_or_else(|| vec![value], |list| list.iter().collect());
+            named.extend(
+                items
+                    .into_iter()
+                    .filter_map(Value::as_str)
+                    .filter(|n| !n.is_empty())
+                    .map(str::to_owned),
+            );
+        }
+    }
+    named
 }
 
 /// Rules 2–6 of the design, in order. `schema_has_context`: whether the tool's
@@ -127,7 +148,7 @@ pub fn decide(
             "Kubeconfig files can't be changed by the AI Assistant while it is turned off for some clusters.".into(),
         );
     }
-    if BY_ADDRESS.contains(&tool) || tool.starts_with(APP_TOOL_PREFIX) {
+    if REACHES_ANY.contains(&tool) || tool.starts_with(APP_TOOL_PREFIX) {
         return Err(
             "This tool can reach any cluster, so it is unavailable while the AI Assistant is turned off for some clusters.".into(),
         );
@@ -361,6 +382,50 @@ mod tests {
             Err(NAME.into())
         );
         assert_eq!(decide(&on(), "k8s.listPods", &json!({}), true), Ok(()));
+    }
+
+    /// Security review: a kubeconfig the caller writes can point at the
+    /// person's own credential files, and a synthesised one at any server.
+    #[test]
+    fn tools_that_bring_their_own_kubeconfig_are_refused_while_any_cluster_is_off() {
+        for tool in [
+            "k8s.testClusterConnection",
+            "k8s.synthesizeClusterKubeconfig",
+        ] {
+            assert_eq!(
+                decide(
+                    &off_for_prod(),
+                    tool,
+                    &json!({"context": "dev", "yaml": "x"}),
+                    true
+                ),
+                Err(REACH.into())
+            );
+            assert_eq!(
+                decide(&on(), tool, &json!({"context": "dev", "yaml": "x"}), true),
+                Ok(())
+            );
+        }
+    }
+
+    /// Security review: a cluster named under another key, or in a list, is
+    /// still named.
+    #[test]
+    fn a_disabled_cluster_named_under_any_cluster_key_is_refused() {
+        let refused =
+            Err("The srelens AI Assistant is turned off for cluster kube_a/prod.".to_string());
+        for args in [
+            json!({"context": "dev", "hubContext": "prod"}),
+            json!({"context": "dev", "params": {"clusterId": "srelens-context:/k/a#prod"}}),
+            json!({"contexts": ["dev", "prod"]}),
+            json!({"resource": {"context": "dev", "clusterId": "prod"}}),
+        ] {
+            assert_eq!(
+                decide(&off_for_prod(), "x", &args, false),
+                refused,
+                "{args}"
+            );
+        }
     }
 
     #[test]
