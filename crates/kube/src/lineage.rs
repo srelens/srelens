@@ -1117,108 +1117,142 @@ async fn discover_dependents(
     let disc = cache.get_discovery(context).await.ok();
     let candidates = collect_candidate_resources(disc.as_deref(), target_kind, target_group);
 
-    let sem = Arc::new(Semaphore::new(6));
-    let mut join_set = tokio::task::JoinSet::new();
-
-    for (cand_kind, cand_group, cand_version) in candidates {
-        let sem = sem.clone();
-        let cache = cache.clone();
-        let ctx = context.to_string();
-        let client = client.clone();
-        let ns = effective_ns.map(|s| s.to_string());
-
-        join_set.spawn(async move {
-            let _permit = match sem.acquire_owned().await {
-                Ok(p) => p,
-                Err(_) => return ScanResult::Skipped,
-            };
-
-            let (api, namespaced) = match resolve_dynamic_api(
-                &cache,
-                &ctx,
-                &client,
-                &cand_kind,
-                cand_group.as_deref(),
-                cand_version.as_deref(),
-                ns.as_deref(),
-            )
-            .await
-            {
-                Ok(r) => r,
-                Err(_) => return ScanResult::Skipped,
-            };
-
-            if !namespaced && ns.is_some() {
-                return ScanResult::Skipped;
-            }
-
-            let lp = ListParams::default();
-            match crate::list_cap::list_capped_within(&api, lp, Duration::from_millis(1500)).await {
-                Ok((items, truncated)) => ScanResult::Success {
-                    cand_kind,
-                    items,
-                    truncated,
-                },
-                Err(crate::list_cap::ListCappedError::Api(kube::Error::Api(ref ae)))
-                    if ae.code == 403 =>
-                {
-                    ScanResult::Failed {
-                        cand_kind,
-                        outcome: NodeOutcome::Forbidden,
-                    }
-                }
-                Err(crate::list_cap::ListCappedError::Timeout { .. }) => ScanResult::Failed {
-                    cand_kind,
-                    outcome: NodeOutcome::TimedOut,
-                },
-                Err(e) => ScanResult::Failed {
-                    cand_kind,
-                    outcome: NodeOutcome::Error(e.to_string()),
-                },
-            }
-        });
-    }
-
+    let mut scanned_keys: HashSet<(String, Option<String>)> = HashSet::new();
+    let mut candidates_to_scan = candidates;
     let mut owner_index: HashMap<String, Vec<(String, DynamicObject)>> = HashMap::new();
     let mut owner_name_index: HashMap<(String, String), Vec<(String, DynamicObject)>> =
         HashMap::new();
     let mut truncated_kinds: HashSet<String> = HashSet::new();
     let mut failed_scans: Vec<(String, NodeOutcome)> = Vec::new();
 
-    while let Some(res) = join_set.join_next().await {
-        match res {
-            Ok(ScanResult::Success {
-                cand_kind,
-                items,
-                truncated,
-            }) => {
-                if truncated {
-                    truncated_kinds.insert(cand_kind.clone());
+    let sem = Arc::new(Semaphore::new(6));
+
+    // Iteratively expand candidate collections when newly reached child types emerge
+    for _round in 0..3 {
+        let mut batch = Vec::new();
+        for (k, g, v) in candidates_to_scan {
+            let key = (k.to_lowercase(), g.clone().map(|s| s.to_lowercase()));
+            if scanned_keys.insert(key) {
+                batch.push((k, g, v));
+            }
+        }
+
+        if batch.is_empty() {
+            break;
+        }
+
+        let mut join_set = tokio::task::JoinSet::new();
+
+        for (cand_kind, cand_group, cand_version) in batch {
+            let sem = sem.clone();
+            let cache = cache.clone();
+            let ctx = context.to_string();
+            let client = client.clone();
+            let ns = effective_ns.map(|s| s.to_string());
+
+            join_set.spawn(async move {
+                let _permit = match sem.acquire_owned().await {
+                    Ok(p) => p,
+                    Err(_) => return ScanResult::Skipped,
+                };
+
+                let (api, namespaced) = match resolve_dynamic_api(
+                    &cache,
+                    &ctx,
+                    &client,
+                    &cand_kind,
+                    cand_group.as_deref(),
+                    cand_version.as_deref(),
+                    ns.as_deref(),
+                )
+                .await
+                {
+                    Ok(r) => r,
+                    Err(_) => return ScanResult::Skipped,
+                };
+
+                if !namespaced && ns.is_some() {
+                    return ScanResult::Skipped;
                 }
-                for item in items {
-                    if let Some(owners) = &item.metadata.owner_references {
-                        for owner in owners {
-                            if !owner.uid.is_empty() {
-                                owner_index
-                                    .entry(owner.uid.clone())
-                                    .or_default()
-                                    .push((cand_kind.clone(), item.clone()));
-                            }
-                            if !owner.name.is_empty() {
-                                owner_name_index
-                                    .entry((owner.kind.to_lowercase(), owner.name.clone()))
-                                    .or_default()
-                                    .push((cand_kind.clone(), item.clone()));
+
+                let lp = ListParams::default();
+                match crate::list_cap::list_capped_within(&api, lp, Duration::from_millis(1500))
+                    .await
+                {
+                    Ok((items, truncated)) => ScanResult::Success {
+                        cand_kind,
+                        items,
+                        truncated,
+                    },
+                    Err(crate::list_cap::ListCappedError::Api(kube::Error::Api(ref ae)))
+                        if ae.code == 403 =>
+                    {
+                        ScanResult::Failed {
+                            cand_kind,
+                            outcome: NodeOutcome::Forbidden,
+                        }
+                    }
+                    Err(crate::list_cap::ListCappedError::Timeout { .. }) => ScanResult::Failed {
+                        cand_kind,
+                        outcome: NodeOutcome::TimedOut,
+                    },
+                    Err(e) => ScanResult::Failed {
+                        cand_kind,
+                        outcome: NodeOutcome::Error(e.to_string()),
+                    },
+                }
+            });
+        }
+
+        let mut new_child_types: Vec<(String, Option<String>)> = Vec::new();
+
+        while let Some(res) = join_set.join_next().await {
+            match res {
+                Ok(ScanResult::Success {
+                    cand_kind,
+                    items,
+                    truncated,
+                }) => {
+                    if truncated {
+                        truncated_kinds.insert(cand_kind.clone());
+                    }
+                    for item in items {
+                        let item_api = item.types.as_ref().map(|t| t.api_version.as_str());
+                        let (child_grp, _) = parse_api_version(item_api.unwrap_or(""));
+                        new_child_types.push((cand_kind.clone(), child_grp.map(|s| s.to_string())));
+
+                        if let Some(owners) = &item.metadata.owner_references {
+                            for owner in owners {
+                                if !owner.uid.is_empty() {
+                                    owner_index
+                                        .entry(owner.uid.clone())
+                                        .or_default()
+                                        .push((cand_kind.clone(), item.clone()));
+                                }
+                                if !owner.name.is_empty() {
+                                    owner_name_index
+                                        .entry((owner.kind.to_lowercase(), owner.name.clone()))
+                                        .or_default()
+                                        .push((cand_kind.clone(), item.clone()));
+                                }
                             }
                         }
                     }
                 }
+                Ok(ScanResult::Failed { cand_kind, outcome }) => {
+                    failed_scans.push((cand_kind, outcome));
+                }
+                _ => {}
             }
-            Ok(ScanResult::Failed { cand_kind, outcome }) => {
-                failed_scans.push((cand_kind, outcome));
-            }
-            _ => {}
         }
+
+        // Dynamically extend candidate set for newly discovered child kinds
+        let mut next_candidates = Vec::new();
+        for (c_kind, c_grp) in new_child_types {
+            let further = collect_candidate_resources(disc.as_deref(), &c_kind, c_grp.as_deref());
+            next_candidates.extend(further);
+        }
+        candidates_to_scan = next_candidates;
     }
 
     let mut generic_children = expand_dependents_from_index(
