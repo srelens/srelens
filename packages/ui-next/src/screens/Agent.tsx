@@ -15,6 +15,8 @@ import { titleFromQuestion } from "../lib/runTitle";
 import { formatAnswering, runFigures } from "../lib/runFigures";
 import { Transcript, transcriptText } from "./agent/Transcript";
 import { AGENT_RAIL_WIDTH, RunsRail } from "./agent/RunsRail";
+import { useAssistant } from "../lib/assistant";
+import { openSettings } from "../lib/settingsRequest";
 
 /** §5's own sentence, verbatim — the one line that says the dock and this
  *  screen are drawing the same conversation rather than two of them. Static
@@ -104,6 +106,7 @@ export function Agent(_props: { route: string }) {
   // derivation the rail row and the saved session use, so one conversation is
   // called one thing everywhere.
   const title = titleFromQuestion(turns.find((t) => t.role === "user")?.text ?? "");
+  const assistantEverywhere = useAssistant().enabled;
 
   // The one place a web reader is TOLD, rather than left to discover it from a
   // failed send. `askAgent` starts with `chat_start`, and the web command
@@ -115,6 +118,22 @@ export function Agent(_props: { route: string }) {
   // A paragraph, not an `Alert`: nothing has failed, and the whole point is
   // that nothing is asked to. Same treatment, and same reasoning, as the MCP
   // server's own section in Settings.
+  // #968: switched off in Settings, this screen is the notice and the way back.
+  // A cluster switched off alone needs nothing here: the dock below is then a
+  // command palette, and a past conversation stays readable.
+  if (!assistantEverywhere) {
+    return (
+      <Screen title="Agent" eyebrow={context || undefined}>
+        <p className="max-w-prose p-3 text-[0.8125rem] leading-relaxed text-muted">
+          AI Assistant is off{" "}
+          <button type="button" className="text-btn" onClick={() => openSettings("agent")}>
+            Open Settings
+          </button>
+        </p>
+      </Screen>
+    );
+  }
+
   if (!isTauri()) {
     return (
       <Screen title="Agent" eyebrow={context || undefined}>
