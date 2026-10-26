@@ -46,6 +46,11 @@ pub struct WhyNotReadyOut {
     pub previous_logs_tail: Option<String>,
     pub current_logs_tail: Option<String>,
     pub recent_warning_events: Vec<CompactEventSummary>,
+    /// Log reads that failed, each with its container and reason, so a tail
+    /// that could not be read is told apart from one that was empty: denied
+    /// `pods/log`, a timeout. Absent when every read answered.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub log_read_errors: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
@@ -322,6 +327,24 @@ pub fn analyze_pod_readiness(
         previous_logs_tail,
         current_logs_tail,
         recent_warning_events,
+        log_read_errors: Vec::new(),
+    }
+}
+
+/// Why a log read failed, or `None` when it answered — with logs or without.
+/// `read` is `None` when it timed out. The API answers 400 for a container
+/// with no previous instance, or not started yet: nothing to read, not a
+/// failure.
+fn log_read_failure(container: &str, previous: bool, read: Option<&Result<String, kube::Error>>) -> Option<String> {
+    let which = if previous { "previous" } else { "current" };
+    match read {
+        None => Some(format!("{container} ({which} logs): timed out")),
+        Some(Ok(_)) => None,
+        Some(Err(kube::Error::Api(status))) if status.code == 400 => None,
+        Some(Err(kube::Error::Api(status))) => {
+            Some(format!("{container} ({which} logs): {} ({})", status.message, status.code))
+        }
+        Some(Err(other)) => Some(format!("{container} ({which} logs): {other}")),
     }
 }
 
@@ -530,6 +553,7 @@ pub fn why_not_ready_capability(cache: Arc<ClientCache>) -> Capability {
 
                 let mut previous_logs_tail = None;
                 let mut current_logs_tail = None;
+                let mut log_read_errors = Vec::new();
 
                 for c_name in candidate_containers {
                     let log_params_prev = LogParams {
@@ -544,6 +568,7 @@ pub fn why_not_ready_capability(cache: Arc<ClientCache>) -> Capability {
                         pod_api.logs(&input.pod, &log_params_prev),
                     )
                     .await;
+                    log_read_errors.extend(log_read_failure(&c_name, true, prev_res.as_ref().ok()));
 
                     match prev_res {
                         Ok(Ok(text)) if !text.is_empty() => {
@@ -553,21 +578,23 @@ pub fn why_not_ready_capability(cache: Arc<ClientCache>) -> Capability {
                         _ => {
                             // If previous logs not found, try current logs
                             let log_params_curr = LogParams {
-                                container: Some(c_name),
+                                container: Some(c_name.clone()),
                                 tail_lines: Some(tail_lines),
                                 limit_bytes: Some(MAX_LOG_TAIL_BYTES as i64),
                                 previous: false,
                                 ..Default::default()
                             };
-                            let curr = tokio::time::timeout(
+                            let curr_res = tokio::time::timeout(
                                 request_timeout(),
                                 pod_api.logs(&input.pod, &log_params_curr),
                             )
-                            .await
-                            .ok()
-                            .and_then(|r| r.ok())
-                            .filter(|text| !text.is_empty())
-                            .map(|raw| cap_log_tail(&raw, MAX_LOG_TAIL_BYTES));
+                            .await;
+                            log_read_errors.extend(log_read_failure(&c_name, false, curr_res.as_ref().ok()));
+                            let curr = curr_res
+                                .ok()
+                                .and_then(|r| r.ok())
+                                .filter(|text| !text.is_empty())
+                                .map(|raw| cap_log_tail(&raw, MAX_LOG_TAIL_BYTES));
 
                             if curr.is_some() {
                                 current_logs_tail = curr;
@@ -577,7 +604,9 @@ pub fn why_not_ready_capability(cache: Arc<ClientCache>) -> Capability {
                     }
                 }
 
-                Ok(analyze_pod_readiness(&pod, &events, previous_logs_tail, current_logs_tail))
+                let mut out = analyze_pod_readiness(&pod, &events, previous_logs_tail, current_logs_tail);
+                out.log_read_errors = log_read_errors;
+                Ok(out)
             }
         },
     )
@@ -990,5 +1019,48 @@ mod tests {
             out.app_containers[0].failing_probes.is_empty(),
             "Container starting up without probe failure events must NOT be reported as failing probes"
         );
+    }
+
+    /// A log read that failed is said, apart from one that found nothing
+    /// (AGENTS.md: never collapse a failure into absence). The API answers 400
+    /// for a container with no previous instance, or not started yet: that is
+    /// nothing to read, not a failure.
+    #[test]
+    fn a_failed_log_read_is_told_apart_from_an_empty_one() {
+        let api = |code: u16, message: &str| -> Result<String, kube::Error> {
+            Err(kube::Error::Api(Box::new(
+                kube::core::Status::failure(message, "Failure").with_code(code),
+            )))
+        };
+        let read = |s: &str| -> Result<String, kube::Error> { Ok(s.to_string()) };
+
+        assert_eq!(log_read_failure("app", true, Some(&read("boom"))), None);
+        assert_eq!(log_read_failure("app", false, Some(&read(""))), None);
+        assert_eq!(
+            log_read_failure("app", true, Some(&api(400, "previous terminated container \"app\" not found"))),
+            None
+        );
+        assert_eq!(log_read_failure("app", false, Some(&api(400, "container \"app\" is waiting to start"))), None);
+        assert_eq!(
+            log_read_failure("app", false, Some(&api(403, "pods \"web-0\" is forbidden: cannot get resource \"pods/log\""))),
+            Some("app (current logs): pods \"web-0\" is forbidden: cannot get resource \"pods/log\" (403)".to_string())
+        );
+        assert_eq!(
+            log_read_failure("sidecar", true, None),
+            Some("sidecar (previous logs): timed out".to_string())
+        );
+    }
+
+    #[test]
+    fn log_read_errors_reach_the_caller_and_stay_out_of_the_way_when_there_are_none() {
+        let pod = Pod::default();
+        let quiet = analyze_pod_readiness(&pod, &[], None, None);
+        let json = serde_json::to_value(&quiet).unwrap();
+        assert!(json.get("logReadErrors").is_none(), "{json}");
+
+        let mut told = quiet;
+        told.log_read_errors = vec!["app (current logs): timed out".to_string()];
+        let json = serde_json::to_value(&told).unwrap();
+        assert_eq!(json["logReadErrors"], serde_json::json!(["app (current logs): timed out"]));
     }
 }
