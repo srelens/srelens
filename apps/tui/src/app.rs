@@ -7280,11 +7280,19 @@ impl App {
                 }
                 KeyCode::Char('t') => {
                     if let Some(node) = tree.selected_node() {
-                        let name = node.name.clone();
-                        let kind = node.kind.clone();
-                        let ns = node.namespace.clone();
-                        let api_ver = node.api_version.clone();
-                        self.open_resource_tree(kind, name, ns, api_ver);
+                        if node.kind.eq_ignore_ascii_case("container") {
+                            self.set_toast(
+                                "Cannot re-root tree on a container (select a Kubernetes resource)"
+                                    .to_string(),
+                                Theme::status_warn(),
+                            );
+                        } else {
+                            let name = node.name.clone();
+                            let kind = node.kind.clone();
+                            let ns = node.namespace.clone();
+                            let api_ver = node.api_version.clone();
+                            self.open_resource_tree(kind, name, ns, api_ver);
+                        }
                     }
                 }
                 KeyCode::Enter | KeyCode::Char('d') => {
@@ -11549,6 +11557,8 @@ impl App {
                         &n,
                         ns.as_deref(),
                         api_ver.as_deref(),
+                        None,
+                        None,
                     )
                     .await
                 }

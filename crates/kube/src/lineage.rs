@@ -15,7 +15,6 @@ use srelens_capability::{Annotations, Capability, CapabilityError};
 use tokio::sync::Semaphore;
 
 use crate::client_cache::ClientCache;
-use crate::list_cap::APP_LIST_CAP;
 
 /// Type of relationship in the lineage tree.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -574,7 +573,10 @@ async fn nest_in_ancestors(
     )
     .await
     {
-        Ok((api, _)) => {
+        Ok((api, namespaced)) => {
+            if !namespaced {
+                parent_node.namespace = None;
+            }
             match tokio::time::timeout(Duration::from_millis(1500), api.get(&primary_owner.name))
                 .await
             {
@@ -626,7 +628,7 @@ async fn nest_in_ancestors(
         .with_uid(&owner.uid);
 
         let (o_group, o_version) = parse_api_version(&owner.api_version);
-        if let Ok((api, _)) = resolve_dynamic_api(
+        match resolve_dynamic_api(
             cache,
             context,
             client,
@@ -637,25 +639,34 @@ async fn nest_in_ancestors(
         )
         .await
         {
-            match tokio::time::timeout(Duration::from_millis(1500), api.get(&owner.name)).await {
-                Ok(Ok(obj)) => {
-                    let (status, details) = extract_status_and_details(&owner.kind, &obj);
-                    other_node.status = status;
-                    other_node.details = details;
-                    other_node.fetch_outcome = Some(NodeOutcome::Healthy);
+            Ok((api, namespaced)) => {
+                if !namespaced {
+                    other_node.namespace = None;
                 }
-                Ok(Err(kube::Error::Api(ref ae))) if ae.code == 404 => {
-                    other_node.fetch_outcome = Some(NodeOutcome::NotFound);
+                match tokio::time::timeout(Duration::from_millis(1500), api.get(&owner.name)).await
+                {
+                    Ok(Ok(obj)) => {
+                        let (status, details) = extract_status_and_details(&owner.kind, &obj);
+                        other_node.status = status;
+                        other_node.details = details;
+                        other_node.fetch_outcome = Some(NodeOutcome::Healthy);
+                    }
+                    Ok(Err(kube::Error::Api(ref ae))) if ae.code == 404 => {
+                        other_node.fetch_outcome = Some(NodeOutcome::NotFound);
+                    }
+                    Ok(Err(kube::Error::Api(ref ae))) if ae.code == 403 => {
+                        other_node.fetch_outcome = Some(NodeOutcome::Forbidden);
+                    }
+                    Ok(Err(e)) => {
+                        other_node.fetch_outcome = Some(NodeOutcome::Error(e.to_string()));
+                    }
+                    Err(_) => {
+                        other_node.fetch_outcome = Some(NodeOutcome::TimedOut);
+                    }
                 }
-                Ok(Err(kube::Error::Api(ref ae))) if ae.code == 403 => {
-                    other_node.fetch_outcome = Some(NodeOutcome::Forbidden);
-                }
-                Ok(Err(e)) => {
-                    other_node.fetch_outcome = Some(NodeOutcome::Error(e.to_string()));
-                }
-                Err(_) => {
-                    other_node.fetch_outcome = Some(NodeOutcome::TimedOut);
-                }
+            }
+            Err(e) => {
+                other_node.fetch_outcome = Some(NodeOutcome::Error(e));
             }
         }
 
@@ -923,23 +934,21 @@ fn collect_candidate_resources(
         _ => {}
     }
 
-    // 3. Same API group CRDs from cluster discovery
+    // 3. Same API group CRDs from cluster discovery (including cluster-scoped candidates)
     if let Some(disc_idx) = disc {
         if let Some(grp) = target_group.filter(|g| !g.is_empty()) {
             let grp_lower = grp.to_lowercase();
             for res in disc_idx.all_resources() {
-                if res.namespaced && res.ar.group.to_lowercase() == grp_lower {
-                    if !res.ar.kind.eq_ignore_ascii_case(target_kind) {
-                        candidates.push((res.ar.kind, Some(res.ar.group), Some(res.ar.version)));
-                    }
+                if res.ar.group.to_lowercase() == grp_lower {
+                    candidates.push((res.ar.kind, Some(res.ar.group), Some(res.ar.version)));
                 }
             }
         }
 
-        // Add other discovered namespaced CRDs up to a bounded limit
+        // Add other discovered CRDs up to a bounded limit (including cluster-scoped)
         let mut crd_count = 0;
         for res in disc_idx.all_resources() {
-            if res.namespaced && !res.ar.group.is_empty() && !res.ar.group.contains("k8s.io") {
+            if !res.ar.group.is_empty() && !res.ar.group.contains("k8s.io") {
                 if crd_count >= 15 {
                     break;
                 }
@@ -949,7 +958,7 @@ fn collect_candidate_resources(
         }
     }
 
-    // Deduplicate candidates
+    // Deduplicate candidates (preserving same-kind CRDs so nested hierarchies are discovered)
     let mut seen = HashSet::new();
     let mut deduped = Vec::new();
     for (k, g, v) in candidates {
@@ -957,9 +966,6 @@ fn collect_candidate_resources(
             g.clone().unwrap_or_default().to_lowercase(),
             k.to_lowercase(),
         );
-        if k.eq_ignore_ascii_case(target_kind) && g.as_deref() == target_group {
-            continue;
-        }
         if k.eq_ignore_ascii_case("secret") {
             continue;
         }
@@ -971,8 +977,132 @@ fn collect_candidate_resources(
     deduped
 }
 
-/// Recursively discover child resources across the namespace using ownerReferences.
-async fn discover_dependents_recursive(
+enum ScanResult {
+    Success {
+        cand_kind: String,
+        items: Vec<DynamicObject>,
+        truncated: bool,
+    },
+    Skipped,
+    Failed {
+        cand_kind: String,
+        outcome: NodeOutcome,
+    },
+}
+
+/// Recursively expand children from the in-memory owner index.
+fn expand_dependents_from_index(
+    parent_uid: &str,
+    parent_kind: &str,
+    parent_name: &str,
+    parent_api_version: Option<&str>,
+    effective_ns: Option<&str>,
+    owner_index: &HashMap<String, Vec<(String, DynamicObject)>>,
+    owner_name_index: &HashMap<(String, String), Vec<(String, DynamicObject)>>,
+    truncated_kinds: &HashSet<String>,
+    visited_uids: &mut HashSet<String>,
+    depth: usize,
+) -> Vec<LineageNode> {
+    if depth >= 4 {
+        return Vec::new();
+    }
+
+    let candidate_items = if !parent_uid.is_empty() {
+        owner_index.get(parent_uid).cloned().unwrap_or_default()
+    } else {
+        owner_name_index
+            .get(&(parent_kind.to_lowercase(), parent_name.to_string()))
+            .cloned()
+            .unwrap_or_default()
+    };
+
+    let mut children = Vec::new();
+    let mut seen_in_this_parent = HashSet::new();
+
+    for (item_kind, item) in candidate_items {
+        let is_match = item
+            .metadata
+            .owner_references
+            .as_ref()
+            .map_or(false, |owners| {
+                owners.iter().any(|o| {
+                    is_child_of(o, parent_uid, parent_kind, parent_api_version, parent_name)
+                })
+            });
+
+        if !is_match {
+            continue;
+        }
+
+        let item_name = item.metadata.name.clone().unwrap_or_default();
+        let item_uid = item.metadata.uid.clone().unwrap_or_default();
+        let item_ns = item
+            .metadata
+            .namespace
+            .clone()
+            .or_else(|| effective_ns.map(|s| s.to_string()));
+        let item_api = item.types.as_ref().map(|t| t.api_version.clone());
+
+        let dedup_key = if !item_uid.is_empty() {
+            item_uid.clone()
+        } else {
+            format!(
+                "{}/{}/{}",
+                item_kind,
+                item_ns.as_deref().unwrap_or(""),
+                item_name
+            )
+        };
+
+        if !seen_in_this_parent.insert(dedup_key) {
+            continue;
+        }
+
+        if !item_uid.is_empty() && !visited_uids.insert(item_uid.clone()) {
+            continue;
+        }
+
+        let (status, details) = extract_status_and_details(&item_kind, &item);
+
+        let mut child_node = LineageNode::new(
+            &item_kind,
+            &item_name,
+            item_ns.clone(),
+            LineageRelation::Child,
+        )
+        .with_api_version(item_api.as_deref().unwrap_or(""))
+        .with_uid(&item_uid)
+        .with_status(status, details)
+        .with_outcome(NodeOutcome::Healthy);
+
+        if item_kind.eq_ignore_ascii_case("pod") {
+            attach_pod_internals(&mut child_node, &item, item_ns.as_deref());
+        }
+
+        if depth < 3 && (!item_uid.is_empty() || !item_name.is_empty()) {
+            let grand_children = expand_dependents_from_index(
+                &item_uid,
+                &item_kind,
+                &item_name,
+                item_api.as_deref(),
+                item_ns.as_deref(),
+                owner_index,
+                owner_name_index,
+                truncated_kinds,
+                visited_uids,
+                depth + 1,
+            );
+            child_node.children.extend(grand_children);
+        }
+
+        children.push(child_node);
+    }
+
+    children
+}
+
+/// Discovers child resources across the namespace/cluster in a single pass using ownerReferences.
+async fn discover_dependents(
     cache: Arc<ClientCache>,
     context: &str,
     client: &Client,
@@ -983,12 +1113,7 @@ async fn discover_dependents_recursive(
     target_group: Option<&str>,
     effective_ns: Option<&str>,
     visited_uids: &mut HashSet<String>,
-    depth: usize,
 ) -> Vec<LineageNode> {
-    if depth >= 4 {
-        return Vec::new();
-    }
-
     let disc = cache.get_discovery(context).await.ok();
     let candidates = collect_candidate_resources(disc.as_deref(), target_kind, target_group);
 
@@ -1001,15 +1126,11 @@ async fn discover_dependents_recursive(
         let ctx = context.to_string();
         let client = client.clone();
         let ns = effective_ns.map(|s| s.to_string());
-        let t_uid = target_uid.to_string();
-        let t_kind = target_kind.to_string();
-        let t_name = target_name.to_string();
-        let t_api = target_api_version.map(|s| s.to_string());
 
         join_set.spawn(async move {
             let _permit = match sem.acquire_owned().await {
                 Ok(p) => p,
-                Err(_) => return Vec::new(),
+                Err(_) => return ScanResult::Skipped,
             };
 
             let (api, namespaced) = match resolve_dynamic_api(
@@ -1024,92 +1145,140 @@ async fn discover_dependents_recursive(
             .await
             {
                 Ok(r) => r,
-                Err(_) => return Vec::new(),
+                Err(_) => return ScanResult::Skipped,
             };
 
             if !namespaced && ns.is_some() {
-                return Vec::new();
+                return ScanResult::Skipped;
             }
 
-            let lp = ListParams::default().limit(APP_LIST_CAP as u32);
-            let list_res = tokio::time::timeout(Duration::from_millis(1500), api.list(&lp)).await;
-            let items = match list_res {
-                Ok(Ok(l)) => l.items,
-                _ => return Vec::new(),
-            };
-
-            let mut matches = Vec::new();
-            for item in items {
-                let has_owner = item
-                    .metadata
-                    .owner_references
-                    .as_ref()
-                    .map_or(false, |owners| {
-                        owners
-                            .iter()
-                            .any(|o| is_child_of(o, &t_uid, &t_kind, t_api.as_deref(), &t_name))
-                    });
-                if has_owner {
-                    matches.push((cand_kind.clone(), item));
+            let lp = ListParams::default();
+            match crate::list_cap::list_capped_within(&api, lp, Duration::from_millis(1500)).await {
+                Ok((items, truncated)) => ScanResult::Success {
+                    cand_kind,
+                    items,
+                    truncated,
+                },
+                Err(crate::list_cap::ListCappedError::Api(kube::Error::Api(ref ae)))
+                    if ae.code == 403 =>
+                {
+                    ScanResult::Failed {
+                        cand_kind,
+                        outcome: NodeOutcome::Forbidden,
+                    }
                 }
+                Err(crate::list_cap::ListCappedError::Timeout { .. }) => ScanResult::Failed {
+                    cand_kind,
+                    outcome: NodeOutcome::TimedOut,
+                },
+                Err(e) => ScanResult::Failed {
+                    cand_kind,
+                    outcome: NodeOutcome::Error(e.to_string()),
+                },
             }
-            matches
         });
     }
 
-    let mut discovered = Vec::new();
+    let mut owner_index: HashMap<String, Vec<(String, DynamicObject)>> = HashMap::new();
+    let mut owner_name_index: HashMap<(String, String), Vec<(String, DynamicObject)>> =
+        HashMap::new();
+    let mut truncated_kinds: HashSet<String> = HashSet::new();
+    let mut failed_scans: Vec<(String, NodeOutcome)> = Vec::new();
+
     while let Some(res) = join_set.join_next().await {
-        if let Ok(matches) = res {
-            for (item_kind, item) in matches {
-                let item_name = item.metadata.name.clone().unwrap_or_default();
-                let item_uid = item.metadata.uid.clone().unwrap_or_default();
-                let item_api = item.types.as_ref().map(|t| t.api_version.clone());
-                let (status, details) = extract_status_and_details(&item_kind, &item);
-
-                if !item_uid.is_empty() && !visited_uids.insert(item_uid.clone()) {
-                    continue;
+        match res {
+            Ok(ScanResult::Success {
+                cand_kind,
+                items,
+                truncated,
+            }) => {
+                if truncated {
+                    truncated_kinds.insert(cand_kind.clone());
                 }
-
-                let mut child_node = LineageNode::new(
-                    &item_kind,
-                    &item_name,
-                    effective_ns.map(|s| s.to_string()),
-                    LineageRelation::Child,
-                )
-                .with_api_version(item_api.as_deref().unwrap_or(""))
-                .with_uid(&item_uid)
-                .with_status(status, details)
-                .with_outcome(NodeOutcome::Healthy);
-
-                if item_kind.eq_ignore_ascii_case("pod") {
-                    attach_pod_internals(&mut child_node, &item, effective_ns);
+                for item in items {
+                    if let Some(owners) = &item.metadata.owner_references {
+                        for owner in owners {
+                            if !owner.uid.is_empty() {
+                                owner_index
+                                    .entry(owner.uid.clone())
+                                    .or_default()
+                                    .push((cand_kind.clone(), item.clone()));
+                            }
+                            if !owner.name.is_empty() {
+                                owner_name_index
+                                    .entry((owner.kind.to_lowercase(), owner.name.clone()))
+                                    .or_default()
+                                    .push((cand_kind.clone(), item.clone()));
+                            }
+                        }
+                    }
                 }
-
-                if depth < 3 && !item_uid.is_empty() {
-                    let (i_group, _) = parse_api_version(item_api.as_deref().unwrap_or(""));
-                    let grand_children = Box::pin(discover_dependents_recursive(
-                        cache.clone(),
-                        context,
-                        client,
-                        &item_uid,
-                        &item_kind,
-                        &item_name,
-                        item_api.as_deref(),
-                        i_group,
-                        effective_ns,
-                        visited_uids,
-                        depth + 1,
-                    ))
-                    .await;
-                    child_node.children.extend(grand_children);
-                }
-
-                discovered.push(child_node);
             }
+            Ok(ScanResult::Failed { cand_kind, outcome }) => {
+                failed_scans.push((cand_kind, outcome));
+            }
+            _ => {}
         }
     }
 
-    discovered
+    let mut generic_children = expand_dependents_from_index(
+        target_uid,
+        target_kind,
+        target_name,
+        target_api_version,
+        effective_ns,
+        &owner_index,
+        &owner_name_index,
+        &truncated_kinds,
+        visited_uids,
+        0,
+    );
+
+    // If any potential child kind failed with Forbidden/TimedOut/Error, report it truthfully
+    for (failed_kind, outcome) in failed_scans {
+        let is_expected_child = match target_kind.to_lowercase().as_str() {
+            "deployment" => failed_kind.eq_ignore_ascii_case("replicaset"),
+            "cronjob" => failed_kind.eq_ignore_ascii_case("job"),
+            "virtualmachine" => failed_kind.eq_ignore_ascii_case("virtualmachineinstance"),
+            "certificate" => failed_kind.eq_ignore_ascii_case("certificaterequest"),
+            _ => false,
+        };
+        if is_expected_child {
+            let placeholder_name = match &outcome {
+                NodeOutcome::Forbidden => "<unauthorized>".to_string(),
+                NodeOutcome::TimedOut => "<timed out>".to_string(),
+                NodeOutcome::Error(msg) => format!("<error: {msg}>"),
+                _ => "<failed>".to_string(),
+            };
+            let mut fail_node = LineageNode::new(
+                &failed_kind,
+                placeholder_name,
+                effective_ns.map(|s| s.to_string()),
+                LineageRelation::Child,
+            );
+            fail_node.fetch_outcome = Some(outcome);
+            generic_children.push(fail_node);
+        }
+    }
+
+    // If any kind with discovered children was cut off at the cap, report truncation
+    for truncated_kind in &truncated_kinds {
+        let has_child = generic_children
+            .iter()
+            .any(|c| c.kind.eq_ignore_ascii_case(truncated_kind));
+        if has_child {
+            let mut trunc_node = LineageNode::new(
+                truncated_kind,
+                "<more items truncated at 2,000 ceiling>",
+                effective_ns.map(|s| s.to_string()),
+                LineageRelation::Child,
+            );
+            trunc_node.fetch_outcome = Some(NodeOutcome::Truncated);
+            generic_children.push(trunc_node);
+        }
+    }
+
+    generic_children
 }
 
 /// Resolve the full relationship lineage tree for any Kubernetes resource (built-in or CRD).
@@ -1120,17 +1289,27 @@ pub async fn resolve_resource_lineage(
     name: &str,
     namespace: Option<&str>,
     api_version: Option<&str>,
+    group: Option<&str>,
+    plural: Option<&str>,
 ) -> Result<LineageNode, String> {
     let client = cache.get(context).await?;
-    let (group, version) = parse_api_version(api_version.unwrap_or(""));
+    let (parsed_group, parsed_version) = parse_api_version(api_version.unwrap_or(""));
+    let effective_group = group.or(parsed_group);
+    let effective_version = parsed_version;
 
-    let (api, namespaced) =
-        resolve_dynamic_api(&cache, context, &client, kind, group, version, namespace)
-            .await
-            .map_err(|e| format!("Could not resolve resource {kind}: {e}"))?;
+    let (ar, namespaced) = cache
+        .resolve_resource(context, kind, effective_group, effective_version, plural)
+        .await
+        .map_err(|e| format!("Could not resolve resource {kind}: {e}"))?;
+
+    let api: Api<DynamicObject> = if namespaced && namespace.is_some() {
+        Api::namespaced_with(client.clone(), namespace.unwrap(), &ar)
+    } else {
+        Api::all_with(client.clone(), &ar)
+    };
 
     let get_res = tokio::time::timeout(Duration::from_secs(3), api.get(name)).await;
-    let obj = match get_res {
+    let obj: DynamicObject = match get_res {
         Ok(Ok(o)) => o,
         Ok(Err(kube::Error::Api(ref ae))) if ae.code == 404 => {
             return Err(format!("Resource '{kind}/{name}' not found"));
@@ -1158,7 +1337,19 @@ pub async fn resolve_resource_lineage(
         .types
         .as_ref()
         .map(|t| t.api_version.clone())
-        .or_else(|| api_version.map(|s| s.to_string()));
+        .or_else(|| {
+            if !ar.api_version.is_empty() {
+                Some(ar.api_version.clone())
+            } else {
+                api_version.map(|s| s.to_string())
+            }
+        });
+
+    let resolved_group = if !ar.group.is_empty() {
+        Some(ar.group.as_str())
+    } else {
+        effective_group
+    };
 
     let mut target_node = LineageNode::new(
         kind,
@@ -1227,6 +1418,72 @@ pub async fn resolve_resource_lineage(
                             }
                         }
                     }
+                }
+            }
+        }
+        "deployment" | "deployments" | "statefulset" | "statefulsets" | "daemonset"
+        | "daemonsets" => {
+            if let Some(ns) = effective_ns {
+                // Linked Services matching workload's template labels
+                if let Some(tmpl_labels) = obj
+                    .data
+                    .pointer("/spec/template/metadata/labels")
+                    .and_then(|v| v.as_object())
+                {
+                    if let Ok((svc_api, _)) = resolve_dynamic_api(
+                        &cache,
+                        context,
+                        &client,
+                        "Service",
+                        None,
+                        None,
+                        Some(ns),
+                    )
+                    .await
+                    {
+                        if let Ok(Ok(svc_list)) = tokio::time::timeout(
+                            Duration::from_millis(1500),
+                            svc_api.list(&ListParams::default()),
+                        )
+                        .await
+                        {
+                            for svc in svc_list.items {
+                                if let Some(selector) = svc
+                                    .data
+                                    .pointer("/spec/selector")
+                                    .and_then(|v| v.as_object())
+                                {
+                                    if !selector.is_empty()
+                                        && selector.iter().all(|(k, v)| {
+                                            tmpl_labels.get(k).and_then(|lv| lv.as_str())
+                                                == v.as_str()
+                                        })
+                                    {
+                                        let svc_name =
+                                            svc.metadata.name.clone().unwrap_or_default();
+                                        let (s_st, s_dt) =
+                                            extract_status_and_details("Service", &svc);
+                                        let mut s_node = LineageNode::new(
+                                            "Service",
+                                            svc_name,
+                                            Some(ns.to_string()),
+                                            LineageRelation::Service,
+                                        );
+                                        s_node.status = s_st;
+                                        s_node.details = s_dt;
+                                        s_node.fetch_outcome = Some(NodeOutcome::Healthy);
+                                        dependents.push(s_node);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Referenced ConfigMaps, Secrets, and PVCs in pod template
+                if let Some(spec) = obj.data.pointer("/spec/template/spec") {
+                    let refs = extract_pod_spec_references(spec, effective_ns);
+                    dependents.extend(refs);
                 }
             }
         }
@@ -1367,7 +1624,7 @@ pub async fn resolve_resource_lineage(
     }
 
     // Generic downward dependents search (for CRDs and native controllers)
-    let generic_children = discover_dependents_recursive(
+    let generic_children = discover_dependents(
         cache.clone(),
         context,
         &client,
@@ -1375,10 +1632,9 @@ pub async fn resolve_resource_lineage(
         kind,
         name,
         actual_api_ver.as_deref(),
-        group,
+        resolved_group,
         effective_ns,
         &mut visited_uids,
-        0,
     )
     .await;
 
@@ -1477,6 +1733,8 @@ pub fn resource_tree_capability(cache: Arc<ClientCache>) -> Capability {
                     &input.name,
                     input.namespace.as_deref(),
                     api_ver.as_deref(),
+                    input.group.as_deref(),
+                    input.plural.as_deref(),
                 )
                 .await
                 .map_err(CapabilityError::Handler)?;
@@ -1857,6 +2115,8 @@ mod tests {
             "vmi-1",
             Some("default"),
             Some("kubevirt.io/v1"),
+            None,
+            None,
         )
         .await
         .expect("lineage should resolve");
@@ -1969,6 +2229,8 @@ mod tests {
             "vmi-orphaned",
             Some("default"),
             Some("kubevirt.io/v1"),
+            None,
+            None,
         )
         .await
         .expect("lineage should resolve even if parent is deleted");
@@ -1978,5 +2240,137 @@ mod tests {
         assert_eq!(root.fetch_outcome, Some(NodeOutcome::NotFound));
         assert_eq!(root.children.len(), 1);
         assert_eq!(root.children[0].name, "vmi-orphaned");
+    }
+
+    #[test]
+    fn test_resource_tree_in_wire_hints_preservation() {
+        let raw = serde_json::json!({
+            "context": "prod-cluster",
+            "kind": "Deployment",
+            "name": "custom-app",
+            "group": "acme.io",
+            "plural": "deployments",
+            "namespace": "production"
+        });
+
+        let parsed: ResourceTreeIn = serde_json::from_value(raw).expect("must deserialize");
+        assert_eq!(parsed.group.as_deref(), Some("acme.io"));
+        assert_eq!(parsed.plural.as_deref(), Some("deployments"));
+        assert_eq!(parsed.version, None);
+    }
+
+    #[test]
+    fn test_collect_candidate_resources_includes_same_kind_and_cluster_scoped() {
+        use crate::client_cache::DiscoveredResource;
+        use crate::crds::custom_api_resource;
+
+        let mut disc = crate::client_cache::DiscoveryIndex::new();
+        // Same group, same kind (e.g. nested ArgoCD Applications)
+        disc.insert(DiscoveredResource {
+            ar: custom_api_resource("argoproj.io", "v1alpha1", "Application", "applications"),
+            namespaced: true,
+        });
+        // Cluster scoped CRD
+        disc.insert(DiscoveredResource {
+            ar: custom_api_resource("example.com", "v1", "ClusterProfile", "clusterprofiles"),
+            namespaced: false,
+        });
+
+        let candidates =
+            collect_candidate_resources(Some(&disc), "Application", Some("argoproj.io"));
+        // Must include Application itself (same-kind)
+        assert!(candidates
+            .iter()
+            .any(|(k, g, _)| k == "Application" && g.as_deref() == Some("argoproj.io")));
+        // Must include cluster-scoped CRD from discovered CRDs
+        assert!(candidates
+            .iter()
+            .any(|(k, g, _)| k == "ClusterProfile" && g.as_deref() == Some("example.com")));
+    }
+
+    #[tokio::test]
+    async fn test_fake_api_cluster_scoped_owner_clears_namespace() {
+        use crate::client_cache::DiscoveredResource;
+        use crate::crds::custom_api_resource;
+        use std::path::PathBuf;
+
+        let (client, _seen) = crate::test_support::fake_api_raw(|seen| {
+            if seen.path == "/apis/example.com/v1/namespaces/default/children/child-1" {
+                (
+                    200,
+                    serde_json::json!({
+                        "apiVersion": "example.com/v1",
+                        "kind": "ChildResource",
+                        "metadata": {
+                            "name": "child-1",
+                            "namespace": "default",
+                            "uid": "uid-child-1",
+                            "ownerReferences": [
+                                {
+                                    "apiVersion": "example.com/v1",
+                                    "kind": "ClusterOwner",
+                                    "name": "cluster-owner-1",
+                                    "uid": "uid-cluster-owner-1",
+                                    "controller": true
+                                }
+                            ]
+                        }
+                    }),
+                )
+            } else if seen.path == "/apis/example.com/v1/clusterowners/cluster-owner-1" {
+                (
+                    200,
+                    serde_json::json!({
+                        "apiVersion": "example.com/v1",
+                        "kind": "ClusterOwner",
+                        "metadata": {
+                            "name": "cluster-owner-1",
+                            "uid": "uid-cluster-owner-1"
+                        }
+                    }),
+                )
+            } else {
+                (
+                    200,
+                    serde_json::json!({ "apiVersion": "v1", "kind": "List", "items": [] }),
+                )
+            }
+        });
+
+        let cache = ClientCache::new(PathBuf::from("/test/kubeconfig"));
+        cache.preload("test-context", client).await;
+
+        let mut disc = crate::client_cache::DiscoveryIndex::new();
+        disc.insert(DiscoveredResource {
+            ar: custom_api_resource("example.com", "v1", "ChildResource", "children"),
+            namespaced: true,
+        });
+        disc.insert(DiscoveredResource {
+            ar: custom_api_resource("example.com", "v1", "ClusterOwner", "clusterowners"),
+            namespaced: false,
+        });
+        cache.preload_discovery("test-context", disc).await;
+
+        let root = resolve_resource_lineage(
+            cache,
+            "test-context",
+            "ChildResource",
+            "child-1",
+            Some("default"),
+            Some("example.com/v1"),
+            None,
+            None,
+        )
+        .await
+        .expect("lineage should resolve");
+
+        // The root is cluster-scoped ClusterOwner: its namespace MUST be None, not "default"
+        assert_eq!(root.kind, "ClusterOwner");
+        assert_eq!(root.namespace, None);
+
+        // The child is namespaced: its namespace MUST be preserved as "default"
+        assert_eq!(root.children.len(), 1);
+        assert_eq!(root.children[0].kind, "ChildResource");
+        assert_eq!(root.children[0].namespace.as_deref(), Some("default"));
     }
 }

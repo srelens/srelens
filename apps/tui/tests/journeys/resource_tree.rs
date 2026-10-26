@@ -418,3 +418,43 @@ async fn journey_d7_rendered_buffer_reality_on_80x24_terminal() {
         "Footer help bar must expose <Enter> Jump action"
     );
 }
+
+#[tokio::test]
+async fn journey_d1_container_reroot_shows_toast_without_corrupting_state() {
+    let _settings = common::env::isolate_settings();
+    let (mut app, _rx) = common::app().await;
+
+    // Open standard deployment tree
+    app.open_resource_tree(
+        "Pod".into(),
+        "web-app-7b8c9d-x1".into(),
+        Some("prod".into()),
+        None,
+    );
+    app.handle_lineage_result("Pod", "web-app-7b8c9d-x1", Ok(mock_deployment_tree()));
+
+    // Target Pod is at index 2. Move down with 'j' to index 3 (Container/nginx)
+    press(&mut app, ch('j')).await;
+
+    let ActiveView::Tree(ref tree) = app.active_view else {
+        panic!("expected ActiveView::Tree");
+    };
+    assert_eq!(tree.selected_node().unwrap().kind, "Container");
+
+    // Press 't' to attempt re-rooting on a container
+    press(&mut app, ch('t')).await;
+
+    // Verify toast is set with truthful warning
+    assert!(
+        app.toast.as_ref().map_or(false, |(msg, _, _)| msg
+            .contains("Cannot re-root tree on a container")),
+        "Must show toast explaining that containers cannot be re-rooted"
+    );
+
+    // Verify active view is still Tree for Pod and not corrupted
+    let ActiveView::Tree(ref tree) = app.active_view else {
+        panic!("ActiveView must remain Tree");
+    };
+    assert_eq!(tree.root_kind, "Pod");
+    assert_eq!(tree.root_name, "web-app-7b8c9d-x1");
+}

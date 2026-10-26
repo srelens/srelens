@@ -79,7 +79,7 @@ impl DiscoveryIndex {
     pub fn all_resources(&self) -> Vec<DiscoveredResource> {
         let mut seen = std::collections::HashSet::new();
         let mut result = Vec::new();
-        for res in self.by_name.values() {
+        for res in self.by_group_and_name.values() {
             let key = (
                 res.ar.group.clone(),
                 res.ar.version.clone(),
