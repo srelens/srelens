@@ -96,7 +96,10 @@ async fn test_all_views_render_narrow_and_wide_without_panic() {
         ("Overview", ActiveView::Overview(OverviewViewState::new())),
         ("Toolbox", ActiveView::Toolbox(ToolboxViewState::new())),
         ("Assistant", ActiveView::Assistant),
-        ("Settings", ActiveView::Settings(SettingsViewState::new())),
+        (
+            "Settings",
+            ActiveView::Settings(SettingsViewState::new(&common::no_agents())),
+        ),
         (
             "TuiConfig",
             ActiveView::TuiConfig(TuiConfigViewState::new()),
