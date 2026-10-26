@@ -3,6 +3,7 @@
 mod agent_text;
 #[cfg(test)]
 mod app_tools_tests;
+pub mod assistant;
 pub mod audit;
 pub mod auth;
 pub mod completeness;
