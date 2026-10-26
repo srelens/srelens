@@ -1,7 +1,8 @@
 import { Alert, Button, CopyButton, Screen, SideRail, usePortalShowing } from "@srelens/ui-kit";
 import { isTauri } from "@srelens/core";
 import { Console } from "../shell/Console";
-import { useActiveContext } from "../lib/clusters";
+import { getContexts, useActiveContext } from "../lib/clusters";
+import { useContextLabel } from "../lib/contextLabel";
 import {
   clearAgentRun,
   dismissAgentError,
@@ -15,7 +16,7 @@ import { titleFromQuestion } from "../lib/runTitle";
 import { formatAnswering, runFigures } from "../lib/runFigures";
 import { Transcript, transcriptText } from "./agent/Transcript";
 import { AGENT_RAIL_WIDTH, RunsRail } from "./agent/RunsRail";
-import { useAssistant } from "../lib/assistant";
+import { useAssistant, useAssistantAllowed } from "../lib/assistant";
 import { openSettings } from "../lib/settingsRequest";
 
 /** §5's own sentence, verbatim — the one line that says the dock and this
@@ -107,6 +108,8 @@ export function Agent(_props: { route: string }) {
   // called one thing everywhere.
   const title = titleFromQuestion(turns.find((t) => t.role === "user")?.text ?? "");
   const assistantEverywhere = useAssistant().enabled;
+  const clusterOn = useAssistantAllowed(runCluster);
+  const runLabel = useContextLabel(runCluster, getContexts().find((c) => c.name === runCluster)?.stableId);
 
   // The one place a web reader is TOLD, rather than left to discover it from a
   // failed send. `askAgent` starts with `chat_start`, and the web command
@@ -164,9 +167,12 @@ export function Agent(_props: { route: string }) {
       eyebrow={runCluster || undefined}
       fill
       actions={
-        <Button type="button" size="sm" onClick={() => clearAgentRun()}>
-          New question
-        </Button>
+        // No new question where the assistant is off for this conversation's cluster (#968).
+        clusterOn ? (
+          <Button type="button" size="sm" onClick={() => clearAgentRun()}>
+            New question
+          </Button>
+        ) : undefined
       }
     >
       <SideRail
@@ -224,7 +230,16 @@ export function Agent(_props: { route: string }) {
               colour as its own ground is not a card. This is the pairing the
               mock uses: light ground, white exchanges. */}
           <div className="scroll min-h-0 min-w-0 flex-1 bg-[var(--ground-canvas)] px-3 py-3">
-            {turns.length === 0 ? (
+            {turns.length === 0 && !clusterOn ? (
+              /* #968: no invitation to ask where the assistant is off. A past
+                 conversation on this cluster stays readable below. */
+              <p className="mx-auto max-w-prose pt-10 text-[0.8125rem] leading-relaxed text-muted">
+                AI Assistant is off for {runLabel}{" "}
+                <button type="button" className="text-btn" onClick={() => openSettings("agent")}>
+                  Open Settings
+                </button>
+              </p>
+            ) : turns.length === 0 ? (
               /* An empty screen said nothing at all — reported as "page looks
                  empty". What it says is what this agent can actually do,
                  because none of it is obvious from a blank pane: it drives a

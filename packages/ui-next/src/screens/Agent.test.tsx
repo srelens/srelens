@@ -7,7 +7,7 @@ import { PortalScopeProvider } from "@srelens/ui-kit";
 import { ConsoleProvider, useConsole } from "../console";
 import { resetLock, __setKnownVaultMode } from "../shell/LockGate";
 import { resetContexts, setContexts } from "../lib/clusters";
-import { setAssistantEnabled } from "../lib/assistant";
+import { setAssistantEnabled, setClusterAssistant } from "../lib/assistant";
 import { defaultState } from "../lib/tabs";
 import * as tabs from "../lib/tabsStore";
 
@@ -223,6 +223,19 @@ describe("the agent screen", () => {
     renderAgent();
     await userEvent.click(await screen.findByRole("button", { name: /new question/i }));
     expect(clearAgentRun).toHaveBeenCalledTimes(1);
+  });
+
+  // Review finding (#968): a restored /agent tab on a cluster switched off
+  // must not invite a question there.
+  it("offers no question and no intro on a cluster the AI Assistant is off for", async () => {
+    setContexts([CTX]);
+    tabs.setState(defaultState([CTX]));
+    setClusterAssistant(CTX.stableId, false);
+    renderAgent();
+    await screen.findByRole("complementary", { name: "Agent" });
+    expect(screen.queryByText("Ask about this cluster")).toBeNull();
+    expect(screen.queryByRole("button", { name: /new question/i })).toBeNull();
+    expect(screen.getAllByText(/AI Assistant is off for/).length).toBeGreaterThan(0);
   });
 
   it("gets its agent picker from the composer, not from the rail", async () => {
