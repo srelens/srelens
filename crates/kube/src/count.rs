@@ -99,7 +99,8 @@ pub struct CountResourcesOut {
 /// A custom resource addressed by its hints alone, or `None` when any of the
 /// four is missing. Without `namespaced`, `resolve_resource`'s first tier
 /// still consults discovery — a whole-cluster CRD list when its index is cold
-/// — and assumes namespaced if that fails.
+/// — and, if that cannot say, takes it as namespaced only when `namespaces`
+/// are given.
 fn hinted(k: &CountKind) -> Option<(ApiResource, bool)> {
     let (g, v, p, namespaced) = (
         k.group.as_deref()?,
@@ -302,6 +303,7 @@ pub fn count_resources_capability(cache: Arc<ClientCache>) -> Capability {
                                     k.group.as_deref(),
                                     k.version.as_deref(),
                                     k.plural.as_deref(),
+                                    !namespaces.is_empty(),
                                 )
                                 .await
                         }
