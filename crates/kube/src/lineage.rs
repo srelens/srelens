@@ -180,7 +180,7 @@ async fn resolve_dynamic_api(
     namespace: Option<&str>,
 ) -> Result<(Api<DynamicObject>, bool), String> {
     let (ar, namespaced) = cache
-        .resolve_resource(context, kind, group, version, None)
+        .resolve_resource(context, kind, group, version, None, namespace.is_some())
         .await?;
 
     let api = if namespaced && namespace.is_some() {
@@ -1346,7 +1346,14 @@ pub async fn resolve_resource_lineage(
     let effective_version = parsed_version;
 
     let (ar, namespaced) = cache
-        .resolve_resource(context, kind, effective_group, effective_version, plural)
+        .resolve_resource(
+            context,
+            kind,
+            effective_group,
+            effective_version,
+            plural,
+            namespace.is_some(),
+        )
         .await
         .map_err(|e| format!("Could not resolve resource {kind}: {e}"))?;
 
