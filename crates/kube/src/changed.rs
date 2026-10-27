@@ -3483,29 +3483,69 @@ pub fn evaluate_changed_triage_inputs(inputs: TriageInputs<'_>) -> ChangedTriage
             change_detail = Some("no nodes match selector".to_string());
         }
 
+        let in_grace = desired_replicas > ready_replicas
+            && grace_pod_count >= (desired_replicas - ready_replicas) as usize;
+
         let mut is_stalled = false;
-        let is_incomplete =
-            updated_replicas < desired_replicas || ready_replicas < desired_replicas;
-        if is_incomplete
+        let is_update_underway = updated_replicas < desired_replicas;
+        if is_update_underway
             && !is_on_delete
             && !is_zero_desired
+            && !in_grace
             && crash_loop_count == 0
             && oom_killed_count == 0
             && config_error_count == 0
             && image_error_count == 0
             && detected_failure_category == FailureCategory::None
         {
-            let in_grace = desired_replicas > ready_replicas
-                && grace_pod_count >= (desired_replicas - ready_replicas) as usize;
-            if !in_grace {
-                let update_age_secs = newest_cr_ts
-                    .or(latest_pod_created)
-                    .or_else(|| ds.metadata.creation_timestamp.as_ref().map(|t| t.0))
-                    .map(|ts| now.duration_since(ts).as_secs());
-                if let Some(age_secs) = update_age_secs {
-                    if age_secs >= 600 {
-                        is_stalled = true;
+            let unready_failure_age_secs = unready_pods
+                .iter()
+                .filter_map(|p| {
+                    let ready_cond_transition = p
+                        .status
+                        .as_ref()
+                        .and_then(|s| s.conditions.as_ref())
+                        .and_then(|conds| {
+                            conds
+                                .iter()
+                                .find(|c| c.type_ == "Ready" && c.status != "True")
+                        })
+                        .and_then(|c| c.last_transition_time.as_ref().map(|t| t.0));
+                    if let Some(transition_ts) = ready_cond_transition {
+                        return Some(now.duration_since(transition_ts).as_secs());
                     }
+                    let container_start = p
+                        .status
+                        .as_ref()
+                        .and_then(|s| s.container_statuses.as_ref())
+                        .and_then(|cs| {
+                            cs.iter()
+                                .filter_map(|c| {
+                                    c.state.as_ref()?.running.as_ref()?.started_at.as_ref()
+                                })
+                                .map(|t| t.0)
+                                .min()
+                        });
+                    container_start
+                        .or_else(|| p.metadata.creation_timestamp.as_ref().map(|t| t.0))
+                        .map(|ts| now.duration_since(ts).as_secs())
+                })
+                .max();
+
+            let update_age_secs = newest_cr_ts
+                .or(latest_pod_created)
+                .or_else(|| ds.metadata.creation_timestamp.as_ref().map(|t| t.0))
+                .map(|ts| now.duration_since(ts).as_secs());
+
+            let stall_age_secs = if !unready_pods.is_empty() {
+                unready_failure_age_secs.or(update_age_secs)
+            } else {
+                update_age_secs
+            };
+
+            if let Some(age_secs) = stall_age_secs {
+                if age_secs >= 600 {
+                    is_stalled = true;
                 }
             }
         }
@@ -3518,7 +3558,7 @@ pub fn evaluate_changed_triage_inputs(inputs: TriageInputs<'_>) -> ChangedTriage
             || (pending_deficit > 0
                 && (ready_replicas < desired_replicas
                     || detected_failure_category != FailureCategory::None))
-            || !unready_pods.is_empty()
+            || (!unready_pods.is_empty() && !in_grace)
             || probe_eval.is_probe_failure
             || probe_eval.has_active_restart_flapping;
 
@@ -3587,8 +3627,10 @@ pub fn evaluate_changed_triage_inputs(inputs: TriageInputs<'_>) -> ChangedTriage
             RolloutStatus::Complete
         } else if !failing_pod_names.is_empty() {
             RolloutStatus::Failed
-        } else {
+        } else if updated_replicas < desired_replicas {
             RolloutStatus::Progressing
+        } else {
+            RolloutStatus::Complete
         };
 
         let incident_status = if is_stalled {
@@ -3616,8 +3658,14 @@ pub fn evaluate_changed_triage_inputs(inputs: TriageInputs<'_>) -> ChangedTriage
             } else {
                 IncidentStatus::Pending
             }
-        } else if ready_replicas < desired_replicas || updated_replicas < desired_replicas {
+        } else if updated_replicas < desired_replicas {
             IncidentStatus::Rolling
+        } else if ready_replicas < desired_replicas {
+            if in_grace {
+                IncidentStatus::Healthy
+            } else {
+                IncidentStatus::Pending
+            }
         } else {
             IncidentStatus::Healthy
         };
@@ -3639,7 +3687,11 @@ pub fn evaluate_changed_triage_inputs(inputs: TriageInputs<'_>) -> ChangedTriage
         } else if image_error_count > 0 {
             FailureCategory::Image
         } else if incident_status == IncidentStatus::Pending {
-            FailureCategory::Compute
+            if pending_deficit > 0 {
+                FailureCategory::Compute
+            } else {
+                FailureCategory::App
+            }
         } else {
             FailureCategory::None
         };
@@ -3676,10 +3728,16 @@ pub fn evaluate_changed_triage_inputs(inputs: TriageInputs<'_>) -> ChangedTriage
         } else if image_error_count > 0 {
             format!("{image_error_count} pod(s) image pull failure")
         } else if incident_status == IncidentStatus::Pending {
-            if ready_replicas < desired_replicas {
-                format!("{ready_replicas}/{desired_replicas} Ready (Pod unschedulable)")
+            if pending_deficit > 0 {
+                if ready_replicas < desired_replicas {
+                    format!("{ready_replicas}/{desired_replicas} Ready (Pod unschedulable)")
+                } else {
+                    "Pod unschedulable (waiting for node placement)".to_string()
+                }
+            } else if ready_replicas < desired_replicas {
+                format!("{ready_replicas}/{desired_replicas} Ready")
             } else {
-                "Pod unschedulable (waiting for node placement)".to_string()
+                "Pod unready".to_string()
             }
         } else if ready_replicas < desired_replicas {
             format!("{ready_replicas}/{desired_replicas} Ready")
@@ -9260,5 +9318,73 @@ mod tests {
         assert_eq!(d.rollout_status, RolloutStatus::Stalled);
         assert_eq!(d.incident_status, IncidentStatus::Stalled);
         assert_eq!(d.change_kind, ChangeKind::FailingOnly);
+    }
+
+    #[test]
+    fn triage_daemonset_all_updated_brief_unready_pod_is_not_stalled() {
+        let now = Timestamp::from_second(NOW).unwrap();
+        // DaemonSet with all 28 replicas updated, but 1 pod briefly unready (2m ago)
+        let ds = daemonset("datadog-agent", 28, 28, 27, 86400); // deployed 1 day ago
+        let cr = controller_revision(
+            "datadog-agent-rev1",
+            "DaemonSet",
+            "datadog-agent",
+            1,
+            "datadog/agent:7.50",
+            86400,
+            None,
+        );
+
+        let mut unready_pod = pod("datadog-agent-unready", "datadog-agent", vec![]);
+        unready_pod.metadata.owner_references =
+            Some(vec![make_owner_ref("DaemonSet", "datadog-agent")]);
+        unready_pod.metadata.creation_timestamp = Some(
+            k8s_openapi::apimachinery::pkg::apis::meta::v1::Time(ago(120)),
+        );
+        unready_pod.status = Some(k8s_openapi::api::core::v1::PodStatus {
+            conditions: Some(vec![k8s_openapi::api::core::v1::PodCondition {
+                type_: "Ready".to_string(),
+                status: "False".to_string(),
+                last_transition_time: Some(k8s_openapi::apimachinery::pkg::apis::meta::v1::Time(
+                    ago(120),
+                )),
+                ..Default::default()
+            }]),
+            ..Default::default()
+        });
+
+        let inputs = TriageInputs {
+            deployments: &[],
+            daemonsets: &[ds],
+            statefulsets: &[],
+            cronjobs: &[],
+            jobs: &[],
+            replicasets: &[],
+            controller_revisions: &[cr],
+            configmaps: &[],
+            secrets: &[],
+            pods: &[unready_pod],
+            events: &[],
+            argo_apps: &[],
+            window: Duration::from_secs(300), // 5 min window
+            now,
+            namespace: Some("default".to_string()),
+            opts: TriageOptions {
+                include_failing: true,
+                ..Default::default()
+            },
+            omitted: Vec::new(),
+        };
+
+        let report = evaluate_changed_triage_inputs(inputs);
+        assert_eq!(report.deployments.len(), 1);
+        let d = &report.deployments[0];
+        // Not a rollout stalled! All nodes updated, brief unready pod
+        assert_ne!(d.rollout_status, RolloutStatus::Stalled);
+        assert_ne!(d.incident_status, IncidentStatus::Stalled);
+        assert_eq!(d.rollout_status, RolloutStatus::Complete);
+        assert_eq!(d.incident_status, IncidentStatus::Pending);
+        assert_eq!(d.failure_detail, "27/28 Ready");
+        assert!(!d.failure_detail.contains("stalled"));
     }
 }
