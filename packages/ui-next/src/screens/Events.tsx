@@ -24,7 +24,7 @@ import {
   tableFilterError,
   type TabItem,
 } from "@srelens/ui-kit";
-import { useConsole } from "../console";
+import { useAsk } from "../console";
 import { getKubeconfigFiles, useActiveContext } from "../lib/clusters";
 import { useHiddenColumns } from "../lib/columnPrefs";
 import { detailRoute } from "../lib/detailRoute";
@@ -149,7 +149,7 @@ function EventList({
   // never interchangeable — see `lib/clusters`.
   const name = context.name;
   const files = getKubeconfigFiles();
-  const { ask } = useConsole();
+  const ask = useAsk();
 
   const selection = useNamespaces(context.stableId);
   const setNamespaces = useSetNamespaces();
@@ -279,16 +279,18 @@ function EventList({
               toolbar. The visible word is the design's; the question goes in
               the accessible name behind it, where it says what will actually
               be sent — the same split the chip itself makes. */}
-          <Button
-            type="button"
-            size="sm"
-            aria-label={`${GROUP_BY_CAUSE_LABEL}: ${GROUP_BY_CAUSE}`}
-            title={`${GROUP_BY_CAUSE_LABEL}: ${GROUP_BY_CAUSE}`}
-            onClick={() => ask(GROUP_BY_CAUSE)}
-          >
-            <Sparkle size={12} aria-hidden="true" />
-            {GROUP_BY_CAUSE_LABEL}
-          </Button>
+          {ask && (
+            <Button
+              type="button"
+              size="sm"
+              aria-label={`${GROUP_BY_CAUSE_LABEL}: ${GROUP_BY_CAUSE}`}
+              title={`${GROUP_BY_CAUSE_LABEL}: ${GROUP_BY_CAUSE}`}
+              onClick={() => ask(GROUP_BY_CAUSE)}
+            >
+              <Sparkle size={12} aria-hidden="true" />
+              {GROUP_BY_CAUSE_LABEL}
+            </Button>
+          )}
           {/* Not in the design, which draws a screen whose fixtures never
               fail. The rows arrive on a watch that can drop to a poll, and the
               label carries that meaning; the tone only colours it. */}

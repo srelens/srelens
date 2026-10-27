@@ -56,6 +56,7 @@ import type { ClusterContext, HelmReleaseSummary, HelmRevision } from "@srelens/
 import { Helm } from "./Helm";
 import { Status } from "../shell/Status";
 import { ConsoleProvider } from "../console";
+import { setClusterAssistant } from "../lib/assistant";
 import { resetContexts, setContexts, setKubeconfigFiles } from "../lib/clusters";
 import { __resetHelmOpsForTests, startHelmOperation } from "../lib/helmOps";
 import { defaultState } from "../lib/tabs";
@@ -408,6 +409,13 @@ describe("Helm — the header", () => {
     const explain = screen.getByRole("button", { name: /^Explain: / });
     expect(explain.className).not.toContain("row-ask");
     expect(container.querySelector(".row-ask")).toBeNull();
+  });
+
+  it("offers no Explain while the AI Assistant is off for the cluster (#968)", async () => {
+    setClusterAssistant(CTX.stableId, false);
+    open();
+    await ready();
+    expect(screen.queryByRole("button", { name: /^Explain: / })).toBeNull();
   });
 
   it("asks about the release the reader is looking at", async () => {

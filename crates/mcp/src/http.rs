@@ -404,7 +404,12 @@ async fn rpc(
     // session stream. With no stream connected for that session they are
     // refused outright; accepting would promise notifications with nowhere
     // to send them.
-    let resp = if method == "resources/subscribe" || method == "resources/unsubscribe" {
+    // #968: a subscription the AI Assistant setting rules out is refused here,
+    // before the sessions lock below — reading the setting awaits.
+    let refused = crate::stdio::assistant_refuses_subscription(&st.server, &req, crate::Transport::Http).await;
+    let resp = if refused.is_some() {
+        refused
+    } else if method == "resources/subscribe" || method == "resources/unsubscribe" {
         let session = presented_session(&headers).unwrap_or_else(|| DEFAULT_SESSION.to_string());
         // The sessions lock is held across `handle_subscription`, which is
         // entirely synchronous (no await), so registration is SERIALIZED
@@ -885,6 +890,25 @@ mod tests {
             .unwrap();
         let resp = app.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    }
+
+    /// #968: a subscription to a cluster the AI Assistant is off for is refused
+    /// before any watch starts, on this transport as on stdio.
+    #[tokio::test]
+    async fn a_subscription_to_a_disabled_cluster_is_refused_over_http() {
+        let joins = Arc::new(Mutex::new(Vec::new()));
+        let app = router(
+            subscribable_server(joins.clone())
+                .with_assistant(crate::assistant::Scripted::off_for("c", &["c"])),
+        );
+        let stream_resp = app.clone().oneshot(sse_get()).await.unwrap();
+        assert_eq!(stream_resp.status(), StatusCode::OK);
+
+        let resp = app.clone().oneshot(subscribe_post("k8s://c/ns/Pod/web-0")).await.unwrap();
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let v: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["error"]["message"], json!("The srelens AI Assistant is turned off for cluster c."), "{v}");
+        assert!(joins.lock().unwrap().is_empty(), "no watch was started");
     }
 
     #[tokio::test]

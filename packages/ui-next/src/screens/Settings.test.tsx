@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, onTestFinished } from "vitest";
 import { act, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 
@@ -13,6 +13,8 @@ import userEvent from "@testing-library/user-event";
  */
 const core = vi.hoisted(() => ({
   isTauri: vi.fn(() => true),
+  // Whether a settings write reached the backend (#968 saves wait on it).
+  flushSettingsWrites: vi.fn(async (_options?: { throwOnError?: boolean }) => {}),
   appVersion: vi.fn(async () => "1.0.0"),
   checkForUpdate: vi.fn(),
   installUpdate: vi.fn(),
@@ -42,12 +44,13 @@ vi.mock("@srelens/core", async (orig) => ({
   ...core,
 }));
 
-import type { VaultBiometricStatus } from "@srelens/core";
+import { readAssistantSetting, type VaultBiometricStatus } from "@srelens/core";
 import { openSettings } from "../lib/settingsRequest";
 import { defaultState } from "../lib/tabs";
 import { TabScope } from "../lib/tabScope";
 import { activateTab, currentWorkspace, duplicateTab, moveTab, openTab, setState } from "../lib/tabsStore";
 import { Settings } from "./Settings";
+import { __resetAssistantForTests, assistantSaved } from "../lib/assistant";
 
 const ROUTE = "/settings";
 
@@ -70,7 +73,7 @@ const PORTED = ["Aardvark ledger", "Basalt tally", "Cinnabar dial"];
 
 /** §23's nav, in §23's order, minus the entry decision 2 removed. */
 const DESKTOP_SECTIONS = [
-  "Agent & MCP",
+  "AI Assistant",
   // #851. Desktop only: the skill store is files on this machine.
   "Skills",
   "Security",
@@ -141,6 +144,7 @@ describe("Settings", () => {
     core.llmKeyStatus.mockResolvedValue([]);
     core.llmListModels.mockResolvedValue([]);
     core.listAgents.mockResolvedValue([]);
+    core.flushSettingsWrites.mockResolvedValue(undefined);
   });
 
   it("titles itself the way the design does, and takes no header action", () => {
@@ -275,10 +279,39 @@ describe("Settings", () => {
     expect(screen.getByText(/px body text/i)).toBeTruthy();
   });
 
+  // #968
+  it("opens on the AI Assistant switch, on until turned off, and keeps every pane below it", async () => {
+    const { user } = paint();
+    const toggle = await screen.findByRole("switch", { name: "AI Assistant" });
+    expect(toggle.getAttribute("aria-checked")).toBe("true");
+    expect(screen.queryByText("Turned off. These settings are kept for when it is switched back on.")).toBeNull();
+
+    await user.click(toggle);
+    expect(readAssistantSetting()).toEqual({ enabled: false, disabledClusters: [] });
+    expect(screen.getByRole("switch", { name: "AI Assistant" }).getAttribute("aria-checked")).toBe("false");
+    expect(screen.getByText("Turned off. These settings are kept for when it is switched back on.")).toBeTruthy();
+    expect(screen.getByText(/never without confirmation/i)).toBeTruthy();
+    expect(await screen.findByText(/drops in-flight requests/i)).toBeTruthy();
+    expect(screen.getByText(/every change made here/i)).toBeTruthy();
+  });
+
+  it("says the switch could not be saved, and shows what the file holds", async () => {
+    core.flushSettingsWrites.mockRejectedValue(new Error("settings.json is locked"));
+    const { user } = paint();
+    await user.click(await screen.findByRole("switch", { name: "AI Assistant" }));
+    await act(async () => {
+      await assistantSaved();
+    });
+    onTestFinished(__resetAssistantForTests);
+    const alert = screen.getByText(/Could not save the AI Assistant setting/);
+    expect(alert.getAttribute("role")).toBe("alert");
+    expect(alert.textContent).toContain("settings.json is locked");
+  });
+
   it("stacks the three agent panes together", async () => {
     paint();
     expect(await screen.findByText(/never without confirmation/i)).toBeTruthy();
-    expect(screen.getByText(/drops in-flight requests/i)).toBeTruthy();
+    expect(await screen.findByText(/drops in-flight requests/i)).toBeTruthy();
     expect(screen.getByText(/every change made here/i)).toBeTruthy();
     const nested = screen.getByText("Providers").closest(".card")?.parentElement;
     expect(nested?.className).toContain("settings-agent-groups");
@@ -310,7 +343,7 @@ describe("Settings", () => {
         .getAllByRole("tab")
         .filter((t) => t.getAttribute("aria-selected") === "true")
         .map((t) => t.textContent);
-    expect(selected()).toEqual(["Agent & MCP"]);
+    expect(selected()).toEqual(["AI Assistant"]);
     await user.click(screen.getByRole("tab", { name: "Shortcuts" }));
     expect(selected()).toEqual(["Shortcuts"]);
   });
@@ -329,11 +362,11 @@ describe("Settings", () => {
     await user.keyboard("{End}");
     expect(document.activeElement?.textContent).toBe("Apps");
     await user.keyboard("{ArrowDown}");
-    expect(document.activeElement?.textContent).toBe("Agent & MCP");
+    expect(document.activeElement?.textContent).toBe("AI Assistant");
     await user.keyboard("{ArrowUp}");
     expect(document.activeElement?.textContent).toBe("Apps");
     await user.keyboard("{Home}");
-    expect(document.activeElement?.textContent).toBe("Agent & MCP");
+    expect(document.activeElement?.textContent).toBe("AI Assistant");
   });
 
   it("hands Appearance the screens the host injected, not a list of its own", async () => {
@@ -419,7 +452,7 @@ describe("Settings", () => {
     it("still opens on the first section, which is not the missing one", async () => {
       paint();
       expect(await screen.findByText(/never without confirmation/i)).toBeTruthy();
-      expect(screen.getByRole("tab", { name: "Agent & MCP" }).getAttribute("aria-selected")).toBe(
+      expect(screen.getByRole("tab", { name: "AI Assistant" }).getAttribute("aria-selected")).toBe(
         "true",
       );
     });
@@ -451,7 +484,7 @@ describe("Settings", () => {
 
     it("keeps the section, because what an agent may do is true on both", async () => {
       paint();
-      expect(sections()).toContain("Agent & MCP");
+      expect(sections()).toContain("AI Assistant");
       // `AgentAccess` is static information read from srelens's own capability
       // registry, and it is the pane a web reader most wants: what a connected
       // agent may do without asking.
@@ -512,7 +545,7 @@ describe("Settings", () => {
     it("draws all three agent panels, because every command behind them answers", async () => {
       paint();
       expect(await screen.findByText(/never without confirmation/i)).toBeTruthy();
-      expect(screen.getByText(/drops in-flight requests/i)).toBeTruthy();
+      expect(await screen.findByText(/drops in-flight requests/i)).toBeTruthy();
       expect(screen.getByText(/every change made here/i)).toBeTruthy();
       expect(screen.queryByTestId("no-agent-server")).toBeNull();
     });

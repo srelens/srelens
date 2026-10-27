@@ -178,6 +178,11 @@ impl McpHttpManager {
         };
         server
             .with_policy(prompt)
+            // #968: the AI Assistant switches, read from the settings file per call.
+            .with_assistant(std::sync::Arc::new(srelens_registry::assistant::SettingsAssistant::new(
+                crate::capabilities::default_settings_path(),
+                self.cache.clone(),
+            )))
             .with_caller_tokens(self.caller_tokens.clone())
             .with_audit(audit)
             .with_prompts(srelens_mcp::prompts::PromptLibrary::new(Some(prompts_dir.to_path_buf())))

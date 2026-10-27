@@ -3,6 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { ClusterContext } from "@srelens/core";
 import { ConsoleProvider, useConsole } from "../../console";
+import { setAssistantEnabled, setClusterAssistant } from "../../lib/assistant";
 import type { AttentionItem, ClusterAttention } from "../../lib/attention";
 import { resetContexts, setContexts } from "../../lib/clusters";
 import { defaultState } from "../../lib/tabs";
@@ -92,6 +93,24 @@ describe("AskSrelens", () => {
   it("suggests nothing when nothing needs attention", () => {
     show([PROD], { [PROD.stableId]: scan([]) });
     expect(screen.queryByRole("button", { name: /^Ask: / })).toBeNull();
+  });
+
+  // #968
+  it("is not drawn while the AI Assistant is off", () => {
+    setAssistantEnabled(false);
+    show();
+    expect(screen.queryByRole("heading", { name: "Ask srelens" })).toBeNull();
+  });
+
+  it("suggests nothing about a cluster the AI Assistant is off for", () => {
+    setClusterAssistant(STAGE.stableId, false);
+    show([PROD, STAGE], {
+      [PROD.stableId]: scan([item(PROD, { kind: "Deployment", name: "api", problem: "1/3 ready", cause: "replicas" })]),
+      [STAGE.stableId]: scan([item(STAGE, {})]),
+    });
+    expect(screen.getAllByRole("button", { name: /^Ask: / }).map((b) => b.textContent)).toEqual([
+      "Why does Deployment checkout/api have unavailable replicas on prod?",
+    ]);
   });
 
   it("is not drawn on the web host, where the assistant cannot run", () => {

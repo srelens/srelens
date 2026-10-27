@@ -2,6 +2,7 @@ import { useState } from "react";
 import { isTauri, type ClusterContext } from "@srelens/core";
 import { Button, Eyebrow, TextInput } from "@srelens/ui-kit";
 import { attentionKind, attentionQuestion, rankedAttention, type ClusterAttention } from "../../lib/attention";
+import { isAssistantAllowed } from "../../lib/assistant";
 import { useAskAssistant } from "./ask";
 
 /** Suggestions are a nudge, not a second list of what needs attention. */
@@ -21,8 +22,10 @@ export function AskSrelens({ targets, scans }: {
 }) {
   const ask = useAskAssistant();
   const [question, setQuestion] = useState("");
-  if (!isTauri()) return null;
-  const suggestions = rankedAttention(targets, scans).slice(0, SUGGESTED);
+  if (!isTauri() || !ask) return null;
+  const suggestions = rankedAttention(targets, scans)
+    .filter(({ context }) => isAssistantAllowed(context.name))
+    .slice(0, SUGGESTED);
   const submit = () => {
     const text = question.trim();
     if (!text) return;

@@ -59,6 +59,7 @@ import { loadExpanded } from "../lib/workspace";
 import { TabScope } from "../lib/tabScope";
 import { getInfo, probeCluster } from "../lib/probe";
 import { followMainProtection } from "../lib/protection";
+import { followAssistantSetting } from "../lib/assistant";
 import { defaultState, makeTab, reconcile, type TabsState } from "../lib/tabs";
 import { parseEditRoute, parseNewRoute } from "../lib/detailRoute";
 import { isClusterScopedRoute, keepsManagementWhenPaused, tabDetail } from "../lib/routes";
@@ -579,6 +580,7 @@ export function Window({
   // main's save again whenever it is focused, so protection turned on in main
   // since then applies here before the reader acts.
   useEffect(() => followMainProtection(windowLabel), [windowLabel]);
+  useEffect(() => followAssistantSetting(), []);
 
   useEffect(() => {
     return onWindowCloseRequested(async () => {

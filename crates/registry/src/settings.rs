@@ -241,6 +241,12 @@ fn read_document(path: &Path) -> Result<SettingsDocument, String> {
     Ok(document)
 }
 
+/// One value from the document at `path`, read now: `None` when the file or the
+/// key is absent, an error when the file cannot be read or parsed.
+pub(crate) fn read_value(path: &Path, key: &str) -> Result<Option<Value>, String> {
+    Ok(read_document(path)?.values.remove(key))
+}
+
 fn write_document(path: &Path, document: &SettingsDocument) -> Result<(), String> {
     let parent = path
         .parent()

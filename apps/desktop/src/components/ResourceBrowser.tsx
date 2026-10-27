@@ -508,6 +508,7 @@ export function ResourceBrowser({
   kubeconfigFiles = [],
   view,
   onViewChange,
+  assistantAllowed = true,
 }: {
   context: string;
   kind: ResourceKind;
@@ -517,6 +518,8 @@ export function ResourceBrowser({
    *  Absent means the browser keeps them itself, as it used to. */
   view?: TabViewState;
   onViewChange?: (patch: Partial<TabViewState>) => void;
+  /** False where the AI Assistant may not act on this cluster (#968): no Ask on its resources. */
+  assistantAllowed?: boolean;
   onOpenTerminal?: (s: {
     context: string;
     namespace: string;
@@ -902,7 +905,7 @@ export function ResourceBrowser({
   // The assistant is a Tauri-only feature (its agent CLIs run through desktop
   // backend commands the web server doesn't implement), so only surface the
   // "Ask assistant" action — and mount its drawer — in the desktop build.
-  const askAssistant = isTauri() ? setAssistantContext : undefined;
+  const askAssistant = isTauri() && assistantAllowed ? setAssistantContext : undefined;
 
   const detailActions = selectedPod ? (
     <PodActions

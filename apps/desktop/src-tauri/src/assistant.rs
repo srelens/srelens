@@ -269,10 +269,24 @@ impl ChatManager {
     }
 }
 
+/// Whether a turn may start (#968): not while the AI Assistant is off in
+/// Settings, nor when that setting cannot be read. A cluster switched off on
+/// its own does not stop a turn — the turn names no cluster; its tool calls do,
+/// and the MCP server refuses those.
+fn chat_allowed(settings: Option<&std::path::Path>) -> Result<(), String> {
+    let (enabled, _) = srelens_registry::assistant::read_assistant(settings)?;
+    if enabled {
+        Ok(())
+    } else {
+        Err("The srelens AI Assistant is turned off in Settings.".into())
+    }
+}
+
 /// Begin a conversation. Returns a fresh session id; the WebView subscribes to
 /// `chat://<id>` before its first `chat_send`.
 #[tauri::command]
 pub async fn chat_start() -> Result<String, String> {
+    chat_allowed(srelens_registry::default_settings_path().as_deref())?;
     Ok(uuid::Uuid::new_v4().to_string())
 }
 
@@ -349,6 +363,7 @@ pub async fn chat_send(
     use tauri::Manager;
     use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
 
+    chat_allowed(srelens_registry::default_settings_path().as_deref())?;
     let kind = parse_agent_kind(&agent_kind)?;
 
     // The session id (from IPC) becomes a `chat://` channel AND temp-path
@@ -637,6 +652,47 @@ pub async fn chat_cancel(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #968: a turn is refused while the AI Assistant is off, so a window
+    /// that has not caught up with the switch cannot start one.
+    mod assistant_switch {
+        use super::*;
+
+        fn settings_with(dir: &std::path::Path, value: &str) -> std::path::PathBuf {
+            let path = dir.join("settings.json");
+            std::fs::write(&path, format!(r#"{{"schema_version":1,"values":{{"srelens.assistant":{value}}}}}"#))
+                .unwrap();
+            path
+        }
+
+        #[test]
+        fn chat_is_refused_when_the_assistant_is_off() {
+            let dir = tempfile::tempdir().unwrap();
+            let path = settings_with(dir.path(), r#"{"enabled":false,"disabledClusters":[]}"#);
+            assert_eq!(
+                chat_allowed(Some(&path)),
+                Err("The srelens AI Assistant is turned off in Settings.".to_string())
+            );
+        }
+
+        #[test]
+        fn chat_is_allowed_by_default() {
+            let dir = tempfile::tempdir().unwrap();
+            assert_eq!(chat_allowed(Some(&dir.path().join("settings.json"))), Ok(()));
+            assert_eq!(chat_allowed(None), Ok(()));
+            // A cluster switched off alone does not stop a turn: its calls are refused one by one.
+            let path = settings_with(dir.path(), r#"{"enabled":true,"disabledClusters":["/k#prod"]}"#);
+            assert_eq!(chat_allowed(Some(&path)), Ok(()));
+        }
+
+        #[test]
+        fn an_unreadable_setting_refuses_chat() {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("settings.json");
+            std::fs::write(&path, "{ not json").unwrap();
+            assert!(chat_allowed(Some(&path)).is_err());
+        }
+    }
 
     #[test]
     fn a_found_binary_is_available_with_its_path() {

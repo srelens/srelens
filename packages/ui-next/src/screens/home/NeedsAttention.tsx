@@ -6,6 +6,7 @@ import { detailRoute } from "../../lib/detailRoute";
 import { summarise } from "../../lib/errorCopy";
 import { getMark } from "../../lib/marks";
 import { openOnCluster } from "../../lib/openCluster";
+import { isAssistantAllowed } from "../../lib/assistant";
 import { useAskAssistant } from "./ask";
 
 /** How many rows show before the reader asks for the rest — a strip, not a second resource list. */
@@ -108,7 +109,7 @@ export function NeedsAttention({ targets, scans }: NeedsAttentionProps) {
                       <span className="min-w-0 flex-1 truncate font-medium" title={path}>{path}</span>
                       <span className="shrink-0 truncate text-xs text-muted">{kind} · {where}</span>
                     </button>
-                    {desktop && (
+                    {desktop && ask && isAssistantAllowed(context.name) && (
                       <Button variant="secondary" size="sm" aria-label={`Ask about ${path} on ${where}`} onClick={() => ask(attentionQuestion(item), context)}>
                         Ask
                       </Button>

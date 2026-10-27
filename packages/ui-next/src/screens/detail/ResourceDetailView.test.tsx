@@ -75,6 +75,7 @@ vi.mock("@srelens/ui-kit", async (importOriginal) => {
 });
 
 import { ConsoleProvider, useConsole } from "../../console";
+import { setClusterAssistant } from "../../lib/assistant";
 import { loadSectionFolds, setSectionOpen } from "../../lib/sectionFolds";
 import { defaultState } from "../../lib/tabs";
 import * as tabsStore from "../../lib/tabsStore";
@@ -1599,6 +1600,17 @@ describe("ResourceDetailView", () => {
       // The same phrasing a list row's chip sends — one question per gesture,
       // not two spellings of it.
       expect(asked).toEqual(["Why is checkout-api unhealthy?"]);
+    });
+
+    it("offers no Ask on a cluster the AI Assistant is off for (#968)", async () => {
+      setClusterAssistant("ctx", false);
+      getObject.mockResolvedValue({ object: RUNNING_POD });
+      descriptorFor.mockReturnValue(podDescriptor());
+      const { getByRole } = render(
+        <ResourceDetailView context="ctx" kind="Pod" namespace="checkout" name="cart-session-store-0" />,
+      );
+      await waitFor(() => expect(getByRole("tab", { name: "Details" })).toBeDefined());
+      expect(within(footer()!).queryByRole("button", { name: /^Ask/ })).toBeNull();
     });
 
     it("asks the other question of a healthy subject", async () => {

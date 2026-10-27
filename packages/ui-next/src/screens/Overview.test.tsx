@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 
 // Only the capability wrappers are replaced. `nodeUsage`, `clusterCapacity`,
@@ -72,6 +72,7 @@ import {
 import { Overview } from "./Overview";
 import { CACHE_TTL_MS, clearResourceCache } from "../lib/cachedResource";
 import { ConsoleProvider } from "../console";
+import { setClusterAssistant } from "../lib/assistant";
 import { defaultState } from "../lib/tabs";
 import * as store from "../lib/tabsStore";
 import { resetContexts, setContexts, setKubeconfigFiles } from "../lib/clusters";
@@ -1840,5 +1841,20 @@ describe("Overview — a node action on a protected cluster (#101)", () => {
     await userEvent.type(within(box).getByRole("textbox", { name: "Type prod-eu to confirm" }), "prod-eu");
     await userEvent.click(within(box).getByRole("button", { name: "Drain" }));
     await waitFor(() => expect(core.drainNode).toHaveBeenCalledWith("prod-eu", "n1"));
+  });
+});
+
+/** #968: the header's one AI action exists only where the assistant may act. */
+describe("Overview — the Summarise action", () => {
+  it("offers Summarise while the AI Assistant is on", async () => {
+    open();
+    expect(await screen.findByRole("button", { name: /^Summarise: / })).toBeDefined();
+  });
+
+  it("offers none while the AI Assistant is off for the cluster", async () => {
+    setClusterAssistant(CTX.stableId, false);
+    open();
+    await act(async () => {});
+    expect(screen.queryByRole("button", { name: /^Summarise: / })).toBeNull();
   });
 });

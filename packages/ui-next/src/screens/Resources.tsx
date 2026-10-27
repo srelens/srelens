@@ -28,7 +28,7 @@ import {
   tableFilterError,
   type Column,
 } from "@srelens/ui-kit";
-import { useConsole } from "../console";
+import { useAsk } from "../console";
 import { getKubeconfigFiles, ScreenCluster, useActiveContext, useContexts, useContextsStatus } from "../lib/clusters";
 import { useHiddenColumns } from "../lib/columnPrefs";
 import { detailRoute, newRoute, parseDetailRoute } from "../lib/detailRoute";
@@ -122,7 +122,7 @@ function KindList({
   const name = context.name;
   const files = getKubeconfigFiles();
   const builtIn = isBuiltInKind(slug);
-  const { ask } = useConsole();
+  const ask = useAsk();
 
   // Discovery runs only for a slug that is not one of core's kinds: listing
   // pods must not cost a CRD round trip, and must not fail on a cluster whose

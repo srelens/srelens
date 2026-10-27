@@ -16,6 +16,7 @@ mod durable;
 pub use catalog::{catalog_of, CatalogEntry};
 mod extensions;
 pub mod github;
+pub mod assistant;
 mod settings;
 pub mod skills;
 /// The extension readers' fuzz entry points, for the targets in `fuzz/`. Not an API.

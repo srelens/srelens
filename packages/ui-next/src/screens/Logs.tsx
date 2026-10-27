@@ -54,7 +54,7 @@ import {
   toneWash,
   usePortalShowing,
 } from "@srelens/ui-kit";
-import { useConsole } from "../console";
+import { useAsk } from "../console";
 import { useLogProviderSource, useLogProviders } from "../extensions/logProviders";
 import { useActiveContext } from "../lib/clusters";
 import { FailureAlert, FailureState } from "../lib/errorCopy";
@@ -853,7 +853,7 @@ function LogsStream({
   pods: LogSubjectPod[];
   terminated: PreviousInstance[];
 }) {
-  const { ask } = useConsole();
+  const ask = useAsk();
   const tabId = useTabScope();
   // The box starts from what the tab was left with, read once: it is this
   // screen's to edit after that, so a later change to the saved value does not
@@ -1715,14 +1715,16 @@ function LogsStream({
               and invisible in a header, where there is no row to hover. This
               header advertised an action nobody could see from #344 until it
               was measured on a real screen. */}
-          <Button
-            type="button"
-            size="sm"
-            aria-label={`Summarise this stream: ${SUMMARISE_QUESTION}`}
-            onClick={() => ask(SUMMARISE_QUESTION)}
-          >
-            Summarise this stream
-          </Button>
+          {ask && (
+            <Button
+              type="button"
+              size="sm"
+              aria-label={`Summarise this stream: ${SUMMARISE_QUESTION}`}
+              onClick={() => ask(SUMMARISE_QUESTION)}
+            >
+              Summarise this stream
+            </Button>
+          )}
           {/* Disabled while a previous instance is on screen, and it says why
               in its own accessible name: `previous` forbids following because
               the API cannot follow a terminated container, not because this
