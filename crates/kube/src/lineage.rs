@@ -980,12 +980,14 @@ fn collect_candidate_resources(
 enum ScanResult {
     Success {
         cand_kind: String,
+        cand_group: Option<String>,
         items: Vec<DynamicObject>,
         truncated: bool,
     },
     Skipped,
     Failed {
         cand_kind: String,
+        cand_group: Option<String>,
         outcome: NodeOutcome,
     },
 }
@@ -999,7 +1001,6 @@ fn expand_dependents_from_index(
     effective_ns: Option<&str>,
     owner_index: &HashMap<String, Vec<(String, DynamicObject)>>,
     owner_name_index: &HashMap<(String, String), Vec<(String, DynamicObject)>>,
-    truncated_kinds: &HashSet<String>,
     visited_uids: &mut HashSet<String>,
     depth: usize,
 ) -> Vec<LineageNode> {
@@ -1088,7 +1089,6 @@ fn expand_dependents_from_index(
                 item_ns.as_deref(),
                 owner_index,
                 owner_name_index,
-                truncated_kinds,
                 visited_uids,
                 depth + 1,
             );
@@ -1122,8 +1122,8 @@ async fn discover_dependents(
     let mut owner_index: HashMap<String, Vec<(String, DynamicObject)>> = HashMap::new();
     let mut owner_name_index: HashMap<(String, String), Vec<(String, DynamicObject)>> =
         HashMap::new();
-    let mut truncated_kinds: HashSet<String> = HashSet::new();
-    let mut failed_scans: Vec<(String, NodeOutcome)> = Vec::new();
+    // Child kinds whose list failed or was cut off: (kind, group, outcome).
+    let mut unread: Vec<(String, Option<String>, NodeOutcome)> = Vec::new();
 
     let sem = Arc::new(Semaphore::new(6));
 
@@ -1181,6 +1181,7 @@ async fn discover_dependents(
                 {
                     Ok((items, truncated)) => ScanResult::Success {
                         cand_kind,
+                        cand_group,
                         items,
                         truncated,
                     },
@@ -1189,15 +1190,18 @@ async fn discover_dependents(
                     {
                         ScanResult::Failed {
                             cand_kind,
+                            cand_group,
                             outcome: NodeOutcome::Forbidden,
                         }
                     }
                     Err(crate::list_cap::ListCappedError::Timeout { .. }) => ScanResult::Failed {
                         cand_kind,
+                        cand_group,
                         outcome: NodeOutcome::TimedOut,
                     },
                     Err(e) => ScanResult::Failed {
                         cand_kind,
+                        cand_group,
                         outcome: NodeOutcome::Error(e.to_string()),
                     },
                 }
@@ -1210,11 +1214,12 @@ async fn discover_dependents(
             match res {
                 Ok(ScanResult::Success {
                     cand_kind,
+                    cand_group,
                     items,
                     truncated,
                 }) => {
                     if truncated {
-                        truncated_kinds.insert(cand_kind.clone());
+                        unread.push((cand_kind.clone(), cand_group, NodeOutcome::Truncated));
                     }
                     for item in items {
                         let item_api = item.types.as_ref().map(|t| t.api_version.as_str());
@@ -1239,8 +1244,12 @@ async fn discover_dependents(
                         }
                     }
                 }
-                Ok(ScanResult::Failed { cand_kind, outcome }) => {
-                    failed_scans.push((cand_kind, outcome));
+                Ok(ScanResult::Failed {
+                    cand_kind,
+                    cand_group,
+                    outcome,
+                }) => {
+                    unread.push((cand_kind, cand_group, outcome));
                 }
                 _ => {}
             }
@@ -1277,56 +1286,84 @@ async fn discover_dependents(
         effective_ns,
         &owner_index,
         &owner_name_index,
-        &truncated_kinds,
         visited_uids,
         0,
     );
 
-    // If any potential child kind failed with Forbidden/TimedOut/Error, report it truthfully
-    for (failed_kind, outcome) in failed_scans {
-        let is_expected_child = match target_kind.to_lowercase().as_str() {
-            "deployment" => failed_kind.eq_ignore_ascii_case("replicaset"),
-            "cronjob" => failed_kind.eq_ignore_ascii_case("job"),
-            "virtualmachine" => failed_kind.eq_ignore_ascii_case("virtualmachineinstance"),
-            "certificate" => failed_kind.eq_ignore_ascii_case("certificaterequest"),
-            _ => false,
-        };
-        if is_expected_child {
-            let placeholder_name = match &outcome {
-                NodeOutcome::Forbidden => "<unauthorized>".to_string(),
-                NodeOutcome::TimedOut => "<timed out>".to_string(),
-                NodeOutcome::Error(msg) => format!("<error: {msg}>"),
-                _ => "<failed>".to_string(),
-            };
-            let mut fail_node = LineageNode::new(
-                &failed_kind,
-                placeholder_name,
-                effective_ns.map(|s| s.to_string()),
-                LineageRelation::Child,
-            );
-            fail_node.fetch_outcome = Some(outcome);
-            generic_children.push(fail_node);
-        }
-    }
-
-    // If any kind with discovered children was cut off at the cap, report truncation
-    for truncated_kind in &truncated_kinds {
-        let has_child = generic_children
-            .iter()
-            .any(|c| c.kind.eq_ignore_ascii_case(truncated_kind));
-        if has_child {
-            let mut trunc_node = LineageNode::new(
-                truncated_kind,
-                "<more items truncated at 2,000 ceiling>",
-                effective_ns.map(|s| s.to_string()),
-                LineageRelation::Child,
-            );
-            trunc_node.fetch_outcome = Some(NodeOutcome::Truncated);
-            generic_children.push(trunc_node);
-        }
-    }
-
+    note_unread_children(
+        target_kind,
+        target_group,
+        effective_ns,
+        &mut generic_children,
+        &unread,
+    );
     generic_children
+}
+
+/// Whether a `parent` object can own `child` objects, so that a `child` list
+/// which failed or was cut off may be hiding some of its children.
+fn can_own(
+    parent: &str,
+    parent_group: Option<&str>,
+    child: &str,
+    child_group: Option<&str>,
+) -> bool {
+    let (parent, child) = (parent.to_lowercase(), child.to_lowercase());
+    match (parent.as_str(), child.as_str()) {
+        ("deployment", "replicaset")
+        | ("replicaset" | "statefulset" | "daemonset" | "job", "pod")
+        | ("statefulset", "persistentvolumeclaim")
+        | ("cronjob", "job")
+        | ("certificaterequest", "order")
+        | ("application", "deployment" | "statefulset" | "service") => true,
+        // A custom resource's controller owns its own group's kinds, and often Pods.
+        _ => parent_group.is_some_and(|group| {
+            let built_in = group.is_empty()
+                || group.ends_with("k8s.io")
+                || matches!(group, "apps" | "batch" | "policy" | "autoscaling");
+            !built_in
+                && (child == "pod" || child_group.is_some_and(|g| g.eq_ignore_ascii_case(group)))
+        }),
+    }
+}
+
+/// Under every node that can own a kind whose list failed or was cut off, say
+/// so: no children of that kind there is not the cluster's answer (AGENTS.md,
+/// "Never collapse API failure into absence").
+fn note_unread_children(
+    parent_kind: &str,
+    parent_group: Option<&str>,
+    namespace: Option<&str>,
+    children: &mut Vec<LineageNode>,
+    unread: &[(String, Option<String>, NodeOutcome)],
+) {
+    for child in children.iter_mut() {
+        let api_version = child.api_version.clone().unwrap_or_default();
+        let (group, _) = parse_api_version(&api_version);
+        let ns = child.namespace.clone();
+        let kind = child.kind.clone();
+        note_unread_children(&kind, group, ns.as_deref(), &mut child.children, unread);
+    }
+    for (kind, group, outcome) in unread {
+        if !can_own(parent_kind, parent_group, kind, group.as_deref()) {
+            continue;
+        }
+        let placeholder_name = match outcome {
+            NodeOutcome::Forbidden => "<unauthorized>".to_string(),
+            NodeOutcome::TimedOut => "<timed out>".to_string(),
+            NodeOutcome::Truncated => "<more items truncated at 2,000 ceiling>".to_string(),
+            NodeOutcome::Error(msg) => format!("<error: {msg}>"),
+            _ => "<failed>".to_string(),
+        };
+        let mut node = LineageNode::new(
+            kind,
+            placeholder_name,
+            namespace.map(|s| s.to_string()),
+            LineageRelation::Child,
+        );
+        node.fetch_outcome = Some(outcome.clone());
+        children.push(node);
+    }
 }
 
 /// Resolve the full relationship lineage tree for any Kubernetes resource (built-in or CRD).
@@ -2658,5 +2695,202 @@ mod tests {
         assert_eq!(chal.kind, "Challenge");
         assert_eq!(chal.name, "my-chal-1");
         assert_eq!(chal.relationship, LineageRelation::Child);
+    }
+
+    /// A cluster that serves `owner` (a GET of `owner_path`), a ReplicaSet
+    /// `api-1` owned by uid `uid-owner` when one is asked for, and answers
+    /// every Pod and Job list with `pods` and `jobs`. Anything else is an
+    /// empty list.
+    fn workload_cluster(
+        owner_path: &'static str,
+        owner: serde_json::Value,
+        pods: fn(&str) -> (u16, serde_json::Value),
+        jobs: fn(&str) -> (u16, serde_json::Value),
+    ) -> Client {
+        let (client, _seen) = crate::test_support::fake_api_raw(move |seen| {
+            if seen.path == owner_path {
+                (200, owner.clone())
+            } else if seen.path == "/api/v1/namespaces/default/pods" {
+                pods(&seen.query)
+            } else if seen.path == "/apis/batch/v1/namespaces/default/jobs" {
+                jobs(&seen.query)
+            } else if seen.path == "/apis/apps/v1/namespaces/default/replicasets" {
+                (
+                    200,
+                    serde_json::json!({ "apiVersion": "apps/v1", "kind": "ReplicaSetList", "items": [{
+                        "apiVersion": "apps/v1", "kind": "ReplicaSet",
+                        "metadata": { "name": "api-1", "namespace": "default", "uid": "uid-rs",
+                            "ownerReferences": [{ "apiVersion": "apps/v1", "kind": "Deployment",
+                                "name": "api", "uid": "uid-owner", "controller": true }] }
+                    }] }),
+                )
+            } else {
+                (
+                    200,
+                    serde_json::json!({ "apiVersion": "v1", "kind": "List", "items": [] }),
+                )
+            }
+        });
+        client
+    }
+
+    fn refused(_query: &str) -> (u16, serde_json::Value) {
+        (
+            403,
+            serde_json::json!({ "kind": "Status", "apiVersion": "v1", "status": "Failure",
+                "message": "forbidden", "reason": "Forbidden", "code": 403 }),
+        )
+    }
+
+    fn empty(_query: &str) -> (u16, serde_json::Value) {
+        (
+            200,
+            serde_json::json!({ "apiVersion": "v1", "kind": "List", "items": [] }),
+        )
+    }
+
+    async fn tree_of(client: Client, kind: &str, name: &str) -> LineageNode {
+        let cache = ClientCache::new(std::path::PathBuf::from("/test/kubeconfig"));
+        cache.preload("test-context", client).await;
+        let mut disc = crate::client_cache::DiscoveryIndex::new();
+        for (group, kind, plural) in [
+            ("apps", "Deployment", "deployments"),
+            ("apps", "StatefulSet", "statefulsets"),
+            ("apps", "ReplicaSet", "replicasets"),
+            ("batch", "Job", "jobs"),
+            ("", "Pod", "pods"),
+        ] {
+            disc.insert(crate::client_cache::DiscoveredResource {
+                ar: crate::crds::custom_api_resource(group, "v1", kind, plural),
+                namespaced: true,
+            });
+        }
+        cache.preload_discovery("test-context", disc).await;
+        resolve_resource_lineage(
+            cache,
+            "test-context",
+            kind,
+            name,
+            Some("default"),
+            Some("apps/v1"),
+            None,
+            None,
+        )
+        .await
+        .expect("lineage should resolve")
+    }
+
+    fn statefulset() -> serde_json::Value {
+        serde_json::json!({ "apiVersion": "apps/v1", "kind": "StatefulSet",
+            "metadata": { "name": "web", "namespace": "default", "uid": "uid-owner" } })
+    }
+
+    /// The outcomes of the `kind` children directly under `node`.
+    fn outcomes(node: &LineageNode, kind: &str) -> Vec<Option<NodeOutcome>> {
+        node.children
+            .iter()
+            .filter(|c| c.kind == kind)
+            .map(|c| c.fetch_outcome.clone())
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn a_refused_pod_list_shows_under_a_statefulset_instead_of_no_pods() {
+        let client = workload_cluster(
+            "/apis/apps/v1/namespaces/default/statefulsets/web",
+            statefulset(),
+            refused,
+            empty,
+        );
+        let root = tree_of(client, "StatefulSet", "web").await;
+        assert_eq!(outcomes(&root, "Pod"), vec![Some(NodeOutcome::Forbidden)]);
+    }
+
+    #[tokio::test]
+    async fn a_pod_list_cut_off_before_any_of_its_pods_still_says_so() {
+        // Full pages of someone else's pods, each with a fresh continue token,
+        // until the cap stops the walk: the StatefulSet's own may be past it.
+        fn others(query: &str) -> (u16, serde_json::Value) {
+            let page = query
+                .split("continue=page-")
+                .nth(1)
+                .and_then(|rest| rest.split('&').next()?.parse::<u32>().ok())
+                .unwrap_or(0);
+            let items: Vec<_> = (0..crate::list_cap::APP_LIST_PAGE)
+                .map(|i| {
+                    serde_json::json!({ "apiVersion": "v1", "kind": "Pod",
+                    "metadata": { "name": format!("other-{page}-{i}"), "namespace": "default" } })
+                })
+                .collect();
+            let token = format!("page-{}", page + 1);
+            (
+                200,
+                serde_json::json!({ "apiVersion": "v1", "kind": "PodList",
+                    "metadata": { "continue": token }, "items": items }),
+            )
+        }
+        let client = workload_cluster(
+            "/apis/apps/v1/namespaces/default/statefulsets/web",
+            statefulset(),
+            others,
+            empty,
+        );
+        let root = tree_of(client, "StatefulSet", "web").await;
+        assert_eq!(outcomes(&root, "Pod"), vec![Some(NodeOutcome::Truncated)]);
+    }
+
+    #[tokio::test]
+    async fn an_unread_kind_shows_under_each_node_that_can_own_it_and_nowhere_else() {
+        let deployment = serde_json::json!({ "apiVersion": "apps/v1", "kind": "Deployment",
+            "metadata": { "name": "api", "namespace": "default", "uid": "uid-owner" } });
+        let client = workload_cluster(
+            "/apis/apps/v1/namespaces/default/deployments/api",
+            deployment,
+            refused,
+            refused,
+        );
+        let root = tree_of(client, "Deployment", "api").await;
+
+        // A Deployment owns ReplicaSets, not Pods or Jobs.
+        assert_eq!(outcomes(&root, "Pod"), Vec::<Option<NodeOutcome>>::new());
+        assert_eq!(outcomes(&root, "Job"), Vec::<Option<NodeOutcome>>::new());
+        // Its ReplicaSet owns Pods, and none could be read.
+        let rs = root
+            .children
+            .iter()
+            .find(|c| c.kind == "ReplicaSet")
+            .expect("the ReplicaSet is read");
+        assert_eq!(outcomes(rs, "Pod"), vec![Some(NodeOutcome::Forbidden)]);
+        assert_eq!(outcomes(rs, "Job"), Vec::<Option<NodeOutcome>>::new());
+    }
+
+    #[test]
+    fn a_custom_resource_can_own_its_own_group_and_pods_and_a_built_in_only_its_table() {
+        assert!(can_own(
+            "Certificate",
+            Some("cert-manager.io"),
+            "CertificateRequest",
+            Some("cert-manager.io")
+        ));
+        assert!(can_own(
+            "VirtualMachineInstance",
+            Some("kubevirt.io"),
+            "Pod",
+            None
+        ));
+        assert!(!can_own(
+            "Certificate",
+            Some("cert-manager.io"),
+            "ClusterRole",
+            Some("rbac.authorization.k8s.io")
+        ));
+        assert!(!can_own("Ingress", Some("networking.k8s.io"), "Pod", None));
+        assert!(!can_own(
+            "HorizontalPodAutoscaler",
+            Some("autoscaling"),
+            "Pod",
+            None
+        ));
+        assert!(!can_own("ConfigMap", None, "Pod", None));
     }
 }
