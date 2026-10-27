@@ -4,6 +4,11 @@ mod common;
 
 use ratatui::backend::TestBackend;
 use ratatui::{Frame, Terminal};
+use srectl::commands::{resolve_command, CommandTarget, ResourceKind};
+use srectl::views::changed_view::{
+    render_changed_view, wrap_message_text, CauseLookup, ChangedTab, ChangedViewState,
+    IncidentFilter, QuickRca, QuickRcaStatus,
+};
 use srelens_kube::changed::{
     AppDeploymentChange, ArgoCoverage, ArgoCoverageState, ArgoRollout, ChangedTriageReport,
     FailureCategory, GitOpsReleaseInfo, IncidentStatus, InfraChangeItem, PodIncidentDetail,
@@ -11,11 +16,6 @@ use srelens_kube::changed::{
 };
 use srelens_kube::events::EventSummary;
 use srelens_registry::github::{CausePull, RolloutCause};
-use srectl::commands::{resolve_command, CommandTarget, ResourceKind};
-use srectl::views::changed_view::{
-    render_changed_view, wrap_message_text, CauseLookup, ChangedTab, ChangedViewState,
-    IncidentFilter, QuickRca, QuickRcaStatus,
-};
 
 fn render_lines<F>(width: u16, height: u16, draw: F) -> Vec<String>
 where
@@ -122,6 +122,8 @@ fn sample_report() -> ChangedTriageReport {
                     created_at: "".to_string(),
                     count: 4,
                 }],
+                misscheduled: None,
+                config_changes: vec![],
             },
             AppDeploymentChange {
                 app_name: "payment-worker".to_string(),
@@ -165,6 +167,8 @@ fn sample_report() -> ChangedTriageReport {
                 changed_age: String::new(),
                 change_detail: None,
                 top_events: vec![],
+                misscheduled: None,
+                config_changes: vec![],
             },
             AppDeploymentChange {
                 app_name: "frontend".to_string(),
@@ -214,6 +218,8 @@ fn sample_report() -> ChangedTriageReport {
                 changed_age: String::new(),
                 change_detail: None,
                 top_events: vec![],
+                misscheduled: None,
+                config_changes: vec![],
             },
         ],
         infra_changes: vec![
@@ -243,6 +249,7 @@ fn sample_report() -> ChangedTriageReport {
         includes_failing: false,
         includes_scaled: false,
         argo: Default::default(),
+        omitted: vec![],
     }
 }
 

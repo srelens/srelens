@@ -567,6 +567,31 @@ impl ChangedViewState {
         if q.is_empty() {
             return true;
         }
+
+        let q_kind = match q {
+            "ds" | "daemonset" | "daemonsets" => Some("daemonset"),
+            "sts" | "statefulset" | "statefulsets" => Some("statefulset"),
+            "deploy" | "deployment" | "deployments" => Some("deployment"),
+            "cj" | "cronjob" | "cronjobs" => Some("cronjob"),
+            "job" | "jobs" => Some("job"),
+            _ => None,
+        };
+        if let Some(target_kind) = q_kind {
+            return d.kind.eq_ignore_ascii_case(target_kind);
+        }
+        if let Some(stripped) = q.strip_prefix("kind:") {
+            let stripped = stripped.trim();
+            let stripped_kind = match stripped {
+                "ds" | "daemonset" | "daemonsets" => "daemonset",
+                "sts" | "statefulset" | "statefulsets" => "statefulset",
+                "deploy" | "deployment" | "deployments" => "deployment",
+                "cj" | "cronjob" | "cronjobs" => "cronjob",
+                "job" | "jobs" => "job",
+                other => other,
+            };
+            return d.kind.eq_ignore_ascii_case(stripped_kind);
+        }
+
         d.app_name.to_ascii_lowercase().contains(q)
             || d.namespace.to_ascii_lowercase().contains(q)
             || d.image_diff.to_ascii_lowercase().contains(q)
@@ -620,7 +645,11 @@ impl ChangedViewState {
         report
             .deployments
             .iter()
-            .filter(|d| d.change_kind == ChangeKind::Rollout)
+            .filter(|d| match d.change_kind {
+                ChangeKind::Rollout => true,
+                ChangeKind::Scaled => self.include_scaled,
+                ChangeKind::FailingOnly => self.include_failing,
+            })
             .filter(|d| match self.incident_filter {
                 IncidentFilter::All => true,
                 IncidentFilter::CrashingOnly => d.incident_status == IncidentStatus::CrashLoop,
@@ -1079,8 +1108,8 @@ pub fn render_guide_banner_preview(f: &mut Frame, area: Rect, enabled: bool) {
 }
 
 pub fn render_changed_view(f: &mut Frame, area: Rect, state: &ChangedViewState) {
-    let (banner_block, health, controls) = summary_banner(state);
-    let b_height = banner_height(&health, &controls, area.width);
+    let (banner_block, health, controls, coverage) = summary_banner(state);
+    let b_height = banner_height(&health, &controls, coverage.len(), area.width);
     let guide_h = if state.show_guide_banner && area.height >= 28 {
         if area.height >= 34 {
             4
@@ -1117,7 +1146,7 @@ pub fn render_changed_view(f: &mut Frame, area: Rect, state: &ChangedViewState) 
         .constraints(constraints)
         .split(area);
 
-    render_summary_banner(f, chunks[0], banner_block, health, controls);
+    render_summary_banner(f, chunks[0], banner_block, health, controls, coverage);
 
     let (main_chunk, footer_chunk) = if guide_h > 0 {
         render_guide_banner(f, chunks[1], state);
@@ -1176,10 +1205,17 @@ pub fn render_changed_view(f: &mut Frame, area: Rect, state: &ChangedViewState) 
     render_footer(f, footer_chunk, state, card_visible);
 }
 
-/// The banner's block, its health badges, and its controls (window, filter,
-/// scope, infra). They share one line when it fits and take two when not, so
-/// the controls are never clipped off a narrow terminal.
-fn summary_banner(state: &ChangedViewState) -> (Block<'static>, Line<'static>, Line<'static>) {
+/// The banner's block, its health badges, its controls (window, filter,
+/// scope, infra), and any coverage notice. They share one line when it fits and
+/// take two or three when not, so controls are never clipped off a narrow terminal.
+fn summary_banner(
+    state: &ChangedViewState,
+) -> (
+    Block<'static>,
+    Line<'static>,
+    Line<'static>,
+    Vec<Line<'static>>,
+) {
     let (crashing, oom, error, pending, probe_failures, rolling) = if let Some(r) = &state.report {
         (
             r.summary.crashing_count,
@@ -1339,17 +1375,58 @@ fn summary_banner(state: &ChangedViewState) -> (Block<'static>, Line<'static>, L
         },
     ]);
 
-    (block, line1, controls)
+    let coverage = if let Some(r) = &state.report {
+        if !r.omitted.is_empty() {
+            let mut cov_lines = Vec::new();
+            for (i, o) in r.omitted.iter().take(3).enumerate() {
+                let prefix = if i == 0 {
+                    " ⚠️ Coverage Notice: "
+                } else {
+                    "                    "
+                };
+                let clean_reason = sanitize_span_text(o.reason.trim());
+                cov_lines.push(Line::from(vec![
+                    Span::styled(
+                        prefix,
+                        Style::default()
+                            .fg(Theme::yellow())
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(
+                        format!("{} list unavailable ({})", o.kind, clean_reason),
+                        Style::default().fg(Theme::dim()),
+                    ),
+                ]));
+            }
+            if r.omitted.len() > 3 {
+                cov_lines.push(Line::from(vec![
+                    Span::styled("                    ", Style::default().fg(Theme::yellow())),
+                    Span::styled(
+                        format!("+{} more resource lists unavailable", r.omitted.len() - 3),
+                        Style::default().fg(Theme::dim()),
+                    ),
+                ]));
+            }
+            cov_lines
+        } else {
+            Vec::new()
+        }
+    } else {
+        Vec::new()
+    };
+
+    (block, line1, controls, coverage)
 }
 
-/// Rows the banner needs at `width`: one content line, or two.
-fn banner_height(health: &Line, controls: &Line, width: u16) -> u16 {
+/// Rows the banner needs at `width`: one content line, or two, plus coverage rows if present.
+fn banner_height(health: &Line, controls: &Line, coverage_lines: usize, width: u16) -> u16 {
     let inner = usize::from(width.saturating_sub(2));
-    if health.width() + 2 + controls.width() <= inner {
+    let base = if health.width() + 2 + controls.width() <= inner {
         3
     } else {
         4
-    }
+    };
+    base + coverage_lines.min(4) as u16
 }
 
 fn render_summary_banner(
@@ -1358,15 +1435,21 @@ fn render_summary_banner(
     block: Block<'static>,
     health: Line<'static>,
     controls: Line<'static>,
+    coverage: Vec<Line<'static>>,
 ) {
-    let lines = if area.height >= 4 {
-        vec![health, controls]
-    } else {
+    let inner = usize::from(area.width.saturating_sub(2));
+    let single_line = health.width() + 2 + controls.width() <= inner;
+    let mut lines = if single_line {
         let mut spans = health.spans;
         spans.push(Span::raw("  "));
         spans.extend(controls.spans);
         vec![Line::from(spans)]
+    } else {
+        vec![health, controls]
     };
+    for cov in coverage {
+        lines.push(cov);
+    }
     let p = Paragraph::new(lines).block(block);
     f.render_widget(p, area);
 }
@@ -1516,6 +1599,7 @@ fn build_workload_row(
     };
 
     let name_display = match d.kind.as_str() {
+        "DaemonSet" => format!("{} (ds)", d.app_name),
         "StatefulSet" => format!("{} (sts)", d.app_name),
         "CronJob" => format!("{} (cj)", d.app_name),
         "Job" => format!("{} (job)", d.app_name),
@@ -1555,7 +1639,9 @@ fn build_workload_row(
 
     let short_detail =
         srelens_kube::changed::condense_diagnostic(d.failure_category, &d.failure_detail);
-    let detail_text = if d.failure_category != FailureCategory::None || !short_detail.is_empty() {
+    let detail_text = if d.failure_category != FailureCategory::None
+        || (!short_detail.is_empty() && short_detail != "Healthy")
+    {
         format!("{} {}", d.failure_category.badge(), short_detail)
             .trim()
             .to_string()
@@ -1625,7 +1711,7 @@ fn build_workload_row(
 fn compute_workload_widths(deps: &[&AppDeploymentChange]) -> [Constraint; 8] {
     let workload_widths = deps.iter().map(|d| {
         let kind_tag = match d.kind.as_str() {
-            "CronJob" => 5,
+            "DaemonSet" | "CronJob" => 5,
             "StatefulSet" | "Job" => 6,
             _ => 0,
         };
@@ -1857,7 +1943,37 @@ fn render_deployment_diagnostic_card(f: &mut Frame, area: Rect, state: &ChangedV
 
     let mut lines = Vec::new();
 
-    // Line 1: Workload Identity & Replicas
+    // Line 1: Workload Identity & Replicas / Nodes
+    let (node_label, node_val) = if d.kind == "DaemonSet" {
+        let misscheduled_str = if let Some(m) = d.misscheduled {
+            if m > 0 {
+                format!(", Misscheduled: {}", m)
+            } else {
+                String::new()
+            }
+        } else {
+            String::new()
+        };
+        (
+            "Nodes: ",
+            format!(
+                "Desired: {}, Updated: {}, Ready: {}, Available: {}{}",
+                d.desired_replicas,
+                d.updated_replicas,
+                d.ready_replicas,
+                d.available_replicas,
+                misscheduled_str
+            ),
+        )
+    } else {
+        (
+            "Replicas: ",
+            format!(
+                "Desired: {}, Updated: {}, Ready: {}, Available: {}",
+                d.desired_replicas, d.updated_replicas, d.ready_replicas, d.available_replicas
+            ),
+        )
+    };
     lines.push(Line::from(vec![
         Span::styled("Workload: ", Theme::header_label()),
         Span::styled(
@@ -1875,14 +1991,8 @@ fn render_deployment_diagnostic_card(f: &mut Frame, area: Rect, state: &ChangedV
                 .add_modifier(Modifier::BOLD),
         ),
         Span::raw("   "),
-        Span::styled("Replicas: ", Theme::header_label()),
-        Span::styled(
-            format!(
-                "Desired: {}, Updated: {}, Ready: {}, Available: {}",
-                d.desired_replicas, d.updated_replicas, d.ready_replicas, d.available_replicas
-            ),
-            Theme::header_val(),
-        ),
+        Span::styled(node_label, Theme::header_label()),
+        Span::styled(node_val, Theme::header_val()),
         Span::raw("   "),
         Span::styled("Deployed: ", Theme::header_label()),
         Span::styled(
@@ -1966,6 +2076,33 @@ fn render_deployment_diagnostic_card(f: &mut Frame, area: Rect, state: &ChangedV
         }
     }
     lines.extend(why_lines(d, state));
+
+    let max_config_shown = 3;
+    for c in d.config_changes.iter().take(max_config_shown) {
+        lines.push(Line::from(vec![
+            Span::styled("⚙️ Config: ", Theme::header_label()),
+            Span::styled(
+                format!("{} {} ({})", c.kind, c.name, c.referenced_by),
+                Style::default().fg(Theme::cyan()),
+            ),
+            Span::styled(
+                format!(" — {}", c.relation),
+                Style::default().fg(Theme::dim()),
+            ),
+        ]));
+    }
+    if d.config_changes.len() > max_config_shown {
+        lines.push(Line::from(vec![
+            Span::styled("⚙️ Config: ", Theme::header_label()),
+            Span::styled(
+                format!(
+                    "+{} more recent config changes...",
+                    d.config_changes.len() - max_config_shown
+                ),
+                Style::default().fg(Theme::dim()),
+            ),
+        ]));
+    }
 
     // Why a non-rollout row is listed, with the rollout age for contrast.
     match d.change_kind {
