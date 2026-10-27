@@ -5,7 +5,12 @@ import * as ws from "./workspace";
 import { activateTab, getState, openTab, setState, subscribe as subscribeTabs } from "./tabsStore";
 import { makeTab } from "./tabs";
 import { TabScope } from "./tabScope";
-import { settingsStorage } from "@srelens/core";
+import { SELECTS_NOTHING, settingsStorage } from "@srelens/core";
+import { COLLECTIONS_KEY, __resetCollectionsForTests, deleteCollections, getCollections, saveCollection } from "./collections";
+import { __resetCollectionScopeForTests, noteNamespaceListing } from "./collectionScope";
+
+const resolveNamespaceCollections = vi.hoisted(() => vi.fn());
+vi.mock("@srelens/core", async (orig) => ({ ...(await orig<typeof import("@srelens/core")>()), resolveNamespaceCollections }));
 
 function fakeStorage() {
   const m = new Map<string, string>();
@@ -270,5 +275,121 @@ describe("persisted sidebar groups", () => {
     expect(() => ws.toggleExpanded("prod", "workloads", bad)).not.toThrow();
     expect(ws.getView().expanded.prod).toEqual(["workloads"]);
     error.mockRestore();
+  });
+});
+
+/**
+ * #881: a tab scoped to namespace collections lists whatever they resolve to
+ * on the cluster, and never "all namespaces" while that is being worked out
+ * or when they match nothing.
+ */
+describe("namespace selection by collection", () => {
+  beforeEach(() => {
+    twoTabs();
+    settingsStorage.removeItem(COLLECTIONS_KEY);
+    __resetCollectionsForTests();
+    __resetCollectionScopeForTests();
+    resolveNamespaceCollections.mockReset().mockResolvedValue({
+      namespaces: ["prod-eu", "prod-us"],
+      collections: [],
+      partial: false,
+    });
+    saveCollection({ name: "prod", type: "namespace", patterns: ["prod-*"] });
+  });
+
+  const settled = () => act(() => new Promise((resolve) => setTimeout(resolve, 0)));
+
+  it("is what the collections resolve to, once there is a listing to resolve against", async () => {
+    const seen = renderHook(() => ws.useNamespaces("prod"), { wrapper: inTab("tab-a") });
+    const choose = renderHook(() => ws.useSetNamespaceCollections(), { wrapper: inTab("tab-a") }).result.current;
+    act(() => choose("prod", ["prod"]));
+    expect(seen.result.current).toEqual(SELECTS_NOTHING);
+
+    act(() => noteNamespaceListing("prod", [{ name: "prod-eu" }, { name: "prod-us" }, { name: "dev" }], true));
+    await settled();
+    expect(seen.result.current).toEqual(["prod-eu", "prod-us"]);
+    // The tab, and only it: the other tab on the cluster keeps its own.
+    expect(renderHook(() => ws.useNamespaces("prod"), { wrapper: inTab("tab-b") }).result.current).toEqual([]);
+  });
+
+  it("replaces the namespaces picked by hand, and is replaced by them", () => {
+    ws.setNamespaces("prod", ["billing"], "tab-a");
+    const choose = renderHook(() => ws.useSetNamespaceCollections(), { wrapper: inTab("tab-a") }).result.current;
+    act(() => choose("prod", ["prod"]));
+    expect(tab("tab-a").namespaces).toBeUndefined();
+    expect(tab("tab-a").namespaceCollections).toEqual({ prod: ["prod"] });
+
+    ws.setNamespaces("prod", ["billing"], "tab-a");
+    expect(tab("tab-a").namespaceCollections).toBeUndefined();
+    expect(tab("tab-a").namespaces).toEqual({ prod: ["billing"] });
+  });
+
+  it("records that the collections were used, for the pickers' order", () => {
+    const choose = renderHook(() => ws.useSetNamespaceCollections(), { wrapper: inTab("tab-a") }).result.current;
+    act(() => choose("prod", ["prod"]));
+    expect(getCollections()[0].lastUsedAt).toEqual(expect.any(Number));
+  });
+
+  /** A rename is the same collection: the tabs scoped to it follow it. */
+  it("follows a collection renamed in Settings", () => {
+    const choose = renderHook(() => ws.useSetNamespaceCollections(), { wrapper: inTab("tab-a") }).result.current;
+    act(() => choose("prod", ["prod"]));
+    act(() => saveCollection({ name: "production", type: "namespace", patterns: ["prod-*"] }, "prod"));
+    expect(tab("tab-a").namespaceCollections).toEqual({ prod: ["production"] });
+  });
+
+  /**
+   * Restricted credentials make every list scope itself to their one
+   * namespace as it loads. That is not the reader choosing, and it must not
+   * wipe a collection the tab is scoped to.
+   */
+  it("keeps the collection when a restricted credential's namespace is applied, and takes the namespace otherwise", () => {
+    const choose = renderHook(() => ws.useSetNamespaceCollections(), { wrapper: inTab("tab-a") }).result.current;
+    act(() => choose("prod", ["prod"]));
+    renderHook(() => ws.useFallbackNamespace("prod", "team-a"), { wrapper: inTab("tab-a") });
+    expect(tab("tab-a").namespaceCollections).toEqual({ prod: ["prod"] });
+    renderHook(() => ws.useFallbackNamespace("dev", "team-a"), { wrapper: inTab("tab-a") });
+    expect(tab("tab-a").namespaces).toEqual({ dev: ["team-a"] });
+  });
+
+  /**
+   * A tab whose collections have all been deleted is not scoped any more: the
+   * credentials' namespace comes back, rather than the list asking for every
+   * namespace and being refused.
+   */
+  /**
+   * Leaving a collection for namespaces of the reader's own also leaves the
+   * tab unscoped; that is a choice, and the credentials' namespace must not
+   * replace it.
+   */
+  it("leaves namespaces picked by hand alone when the reader leaves a collection for them", () => {
+    const choose = renderHook(() => ws.useSetNamespaceCollections(), { wrapper: inTab("tab-a") }).result.current;
+    act(() => choose("prod", ["prod"]));
+    renderHook(() => ws.useFallbackNamespace("prod", "team-a"), { wrapper: inTab("tab-a") });
+    act(() => ws.setNamespaces("prod", ["team-b"], "tab-a"));
+    expect(tab("tab-a").namespaces).toEqual({ prod: ["team-b"] });
+  });
+
+  it("applies the restricted credential's namespace again once the collection is deleted", () => {
+    const choose = renderHook(() => ws.useSetNamespaceCollections(), { wrapper: inTab("tab-a") }).result.current;
+    act(() => choose("prod", ["prod"]));
+    const scoped = renderHook(() => ws.useInCollectionScope("prod"), { wrapper: inTab("tab-a") });
+    renderHook(() => ws.useFallbackNamespace("prod", "team-a"), { wrapper: inTab("tab-a") });
+    expect(scoped.result.current).toBe(true);
+    act(() => deleteCollections("namespace", ["prod"]));
+    expect(scoped.result.current).toBe(false);
+    expect(tab("tab-a").namespaces).toEqual({ prod: ["team-a"] });
+    expect(tab("tab-a").namespaceCollections).toBeUndefined();
+  });
+
+  /** #885: a collection deleted while a tab is scoped to it gives the tab back its default. */
+  it("falls back to the default namespace when every collection it named is deleted", async () => {
+    settingsStorage.setItem("srelens.defaultNamespace", "default");
+    ws.setNamespaceDefault("default");
+    const choose = renderHook(() => ws.useSetNamespaceCollections(), { wrapper: inTab("tab-a") }).result.current;
+    act(() => choose("prod", ["prod"]));
+    const seen = renderHook(() => ws.useNamespaces("prod"), { wrapper: inTab("tab-a") });
+    act(() => deleteCollections("namespace", ["prod"]));
+    expect(seen.result.current).toEqual(["default"]);
   });
 });

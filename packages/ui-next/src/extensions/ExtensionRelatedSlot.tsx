@@ -8,7 +8,7 @@ import { useExtensions } from "./inventoryStore";
 import { useContextLookup, refreshContextIds } from "./contextIds";
 import { useResource } from "../lib/useResource";
 import { openTab } from "../lib/tabsStore";
-import { useActiveContext, useContexts } from "../lib/clusters";
+import { useContexts } from "../lib/clusters";
 import { detailRoute } from "../lib/detailRoute";
 
 const RELATION: Record<ExtensionLinkRelation, string> = {
@@ -40,20 +40,22 @@ function pageFor(plugin: InstalledExtension, capability: string) {
   return (pages.find(page => !page.dashboard) ?? pages[0])?.id;
 }
 
-/** Where the Inspector's links open: the cluster it shows, and whether the rail shows it too. */
-type Opener = { contextKey?: string; clusterName?: string; onRail: boolean };
+/** Where the Inspector's links open: the cluster it shows. */
+type Opener = { contextKey?: string; clusterName?: string };
 
 /**
  * The route a linked resource opens on, or none when it cannot open truthfully.
  *
  * An app's kind opens its app page, whose route carries the cluster's key (#695). A
  * built-in kind (`capability` empty, #728) opens the host's own Inspector, whose detail
- * route follows the rail — so only when the rail shows the Inspector's cluster, or the
- * tab would show the rail cluster's namesake.
+ * route carries the cluster's name (#834) — so it opens on the Inspector's cluster,
+ * whichever one the rail shows.
  */
 function routeFor(plugin: InstalledExtension, kind: string, capability: string, target: ExtensionLinkTarget, at: Opener) {
   if (at.contextKey === undefined) return undefined;
-  if (!capability) return at.onRail ? detailRoute(kind, target.namespace, target.name) : undefined;
+  if (!capability) {
+    return at.clusterName === undefined ? undefined : detailRoute(kind, target.namespace, target.name, { cluster: at.clusterName });
+  }
   const page = pageFor(plugin, capability);
   return page && extensionClusterResourceRoute(at.contextKey, plugin.manifest.id, page, target.namespace ?? "", target.name);
 }
@@ -109,14 +111,12 @@ function RelatedLinks({ plugins, context, kind, resource }: {
   plugins: InstalledExtension[]; context: string; kind: string; resource: LinkResource;
 }) {
   const contexts = useContexts();
-  const active = useActiveContext();
   // The Inspector names its cluster by display name; an app's resource page by the pinned ID it
   // reads by. A pinned ID first: the host never resolves its reserved form to a context merely
   // named so. (While both are listed, it resolves such a string to neither, and the links fail
   // there.) The route carries the key (#695).
   const cluster = contexts.find(c => c.pinnedId === context) ?? contexts.find(c => c.name === context);
-  const at: Opener = { contextKey: cluster?.key, clusterName: cluster?.name,
-    onRail: !!cluster && active?.key === cluster.key };
+  const at: Opener = { contextKey: cluster?.key, clusterName: cluster?.name };
   const namespace = resource.metadata.namespace ?? "";
   // The resolvers read the resource's identity and metadata and nothing else: a ConfigMap's
   // data, a spec or a Secret's values never leave the Inspector. A path link's resource body

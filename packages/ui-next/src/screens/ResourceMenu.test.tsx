@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { act, render, screen, waitFor, within } from "@testing-library/react";
-import { setContexts } from "../lib/clusters";
+import { getContexts, setContexts } from "../lib/clusters";
 import userEvent from "@testing-library/user-event";
 
 // Everything this hook reaches into core for. Mocked so a test can control
@@ -247,7 +247,16 @@ describe("useRowMenu", () => {
   it("opens the resource in a tab, at its /k/<kind>/<namespace>/<name> route", async () => {
     render(<Harness args={POD_ARGS} row={POD_ROW} />);
     await userEvent.click(screen.getByRole("button", { name: "Open in new tab" }));
-    expect(store.currentWorkspace().tabs.some((t) => t.route === "/k/Pod/kube-system/web-0")).toBe(true);
+    expect(store.currentWorkspace().tabs.some((t) => t.route === "/k/prod/Pod/kube-system/web-0")).toBe(true);
+  });
+
+  it("carries a custom kind's group into Open in new tab's route (#919)", async () => {
+    const args: UseRowMenuArgs = { context: "prod", kind: "Deployment", actions: { delete: false }, group: "acme.io" };
+    render(<Harness args={args} row={{ name: "api", namespace: "default" }} />);
+    await userEvent.click(screen.getByRole("button", { name: "Open in new tab" }));
+    expect(
+      store.currentWorkspace().tabs.some((t) => t.route === "/k/prod/acme.io%2FDeployment/default/api"),
+    ).toBe(true);
   });
 
   /**
@@ -334,6 +343,20 @@ describe("useRowMenu", () => {
    * here already uses — so the peek's and the tab's action bars, which render
    * that slot too, get the door for free rather than growing a second one.
    */
+  it("brings the row's cluster into focus before Follow logs, when the rail shows another (#834)", async () => {
+    // A detail tab pinned to prod, with the rail moved on to stage: the Logs
+    // screen reads the rail's cluster, so without the focus it would follow
+    // stage's pod under a prod-labelled tab.
+    const contexts = ["prod", "stage"].map((name) => ({ name, stableId: `id-${name}`, key: `id-${name}`, cluster: name, server: "", isCurrent: false, sourceFile: "", authKind: "token" }));
+    setContexts(contexts);
+    store.setState(defaultState(contexts));
+    store.setActiveCluster("id-stage", "stage");
+    render(<Harness args={POD_ARGS} row={POD_ROW} />);
+    await userEvent.click(screen.getByRole("button", { name: "Follow logs" }));
+    expect(store.currentWorkspace().activeCluster).toBe("id-prod");
+    expect(store.activeRoute()).toBe("/logs/Pod/kube-system/web-0");
+  });
+
   it("opens §A.4's forward dialog on Port forward, rather than a placeholder tab", async () => {
     render(<Harness args={POD_ARGS} row={POD_ROW} />);
     // Nothing is mounted until the entry is picked: a dialog that were always
@@ -442,7 +465,7 @@ describe("useRowMenu", () => {
   it("opens a cluster-scoped resource with the placeholder namespace segment", async () => {
     render(<Harness args={NODE_ARGS} row={NODE_ROW} />);
     await userEvent.click(screen.getByRole("button", { name: "Open in new tab" }));
-    expect(store.currentWorkspace().tabs.some((t) => t.route === "/k/Node/-/worker-1")).toBe(true);
+    expect(store.currentWorkspace().tabs.some((t) => t.route === "/k/prod/Node/-/worker-1")).toBe(true);
   });
 
   it("asks before deleting, and calls nothing until the confirm is taken", async () => {
@@ -1279,5 +1302,196 @@ describe("useRowMenu — the cluster the row was picked on", () => {
     await screen.findByRole("dialog");
     expect(screen.queryByText(new RegExp(`This still runs against`))).toBeNull();
     expect(box().queryByRole("checkbox", { name: /Yes, still/ })).toBeNull();
+  });
+});
+
+/**
+ * On a protected cluster (#101) every write here asks for the cluster's name,
+ * typed — the rail's name for it, which for these fixtures is the context
+ * name. Delete already shares the gate; Run now, the node actions and Open
+ * shell are the entries that had no such confirm, or ran where no confirm
+ * reached.
+ */
+describe("useRowMenu — on a protected cluster (#101)", () => {
+  const box = () => within(screen.getByRole("dialog"));
+  const typed = () => box().getByRole("textbox", { name: "Type prod to confirm" });
+
+  beforeEach(() => {
+    const contexts = ["prod"].map((name) => ({ name, stableId: `id-${name}`, key: `id-${name}`, cluster: name, server: "", isCurrent: false, sourceFile: "", authKind: "token" }));
+    setContexts(contexts);
+    store.setState(defaultState(contexts));
+    store.setWorkspaceProtected(store.getState().currentId, true);
+    // One container, so Open shell would otherwise start without asking.
+    getObject.mockResolvedValue({ object: { spec: { containers: [{ name: "app" }] } } });
+  });
+
+  it("deletes nothing until the cluster's name is typed, exactly", async () => {
+    render(<Harness args={POD_ARGS} row={POD_ROW} />);
+    await userEvent.click(screen.getByRole("button", { name: "Delete" }));
+    expect(box().getByText("prod is protected (workspace Default).")).toBeTruthy();
+
+    await userEvent.click(box().getByRole("button", { name: "Delete" }));
+    expect(deleteResource).not.toHaveBeenCalled();
+    expect(box().getByText("Type prod to confirm.")).toBeTruthy();
+
+    await userEvent.type(typed(), "Prod");
+    await userEvent.click(box().getByRole("button", { name: "Delete" }));
+    expect(deleteResource).not.toHaveBeenCalled();
+
+    await userEvent.clear(typed());
+    await userEvent.type(typed(), "prod");
+    await userEvent.click(box().getByRole("button", { name: "Delete" }));
+    await waitFor(() => expect(deleteResource).toHaveBeenCalledWith("prod", "Pod", "kube-system", "web-0"));
+  });
+
+  it("puts Run now behind a confirm that asks for the cluster's name", async () => {
+    render(<Harness args={CRON_ARGS} row={CRON_ROW} />);
+    await userEvent.click(screen.getByRole("button", { name: "Run now" }));
+    await screen.findByRole("dialog");
+    expect(cronjobTriggerNow).not.toHaveBeenCalled();
+    expect(box().getByText("Run CronJob now?")).toBeTruthy();
+    expect(
+      box().getByText("kubectl create job --from=cronjob/nightly nightly-manual-$(date +%s) -n ops --context prod"),
+    ).toBeTruthy();
+    // It starts one Job and stops nothing: not a danger button.
+    expect(box().getByRole("button", { name: "Run now" }).className).not.toContain("btn-danger");
+
+    await userEvent.click(box().getByRole("button", { name: "Run now" }));
+    expect(cronjobTriggerNow).not.toHaveBeenCalled();
+    expect(box().getByText("Type prod to confirm.")).toBeTruthy();
+
+    await userEvent.type(typed(), "prod");
+    await userEvent.click(box().getByRole("button", { name: "Run now" }));
+    await waitFor(() => expect(cronjobTriggerNow).toHaveBeenCalledWith("prod", "ops", "nightly"));
+    await waitFor(() => expect(notifySuccess).toHaveBeenCalledWith("Triggered nightly", "Created job nightly-manual-1"));
+    expect(screen.queryByRole("dialog")).toBeNull();
+  });
+
+  it("on the desktop, drains through the call rather than in a terminal", async () => {
+    isTauri.mockReturnValue(true);
+    render(<Harness args={NODE_OPS_ARGS} row={NODE_ROW} />);
+    await userEvent.click(screen.getByRole("button", { name: "Drain" }));
+    // No promise of a terminal: a shell on this cluster is what is avoided.
+    expect(box().queryByText(/Runs in a terminal/)).toBeNull();
+
+    await userEvent.type(typed(), "prod");
+    await userEvent.click(box().getByRole("button", { name: "Drain" }));
+
+    await waitFor(() => expect(drainNode).toHaveBeenCalledWith("prod", "worker-1"));
+    expect(startLocalSession).not.toHaveBeenCalled();
+    expect(store.currentWorkspace().tabs.some((t) => t.route === "/terminals")).toBe(false);
+  });
+
+  it("on the desktop, cordons and uncordons through the call too", async () => {
+    isTauri.mockReturnValue(true);
+    const view = render(<Harness args={NODE_OPS_ARGS} row={NODE_ROW} />);
+    await userEvent.click(screen.getByRole("button", { name: "Cordon" }));
+    await userEvent.type(typed(), "prod");
+    await userEvent.click(box().getByRole("button", { name: "Cordon" }));
+    await waitFor(() => expect(cordonNode).toHaveBeenCalledWith("prod", "worker-1", true));
+
+    view.rerender(<Harness args={NODE_OPS_ARGS} row={CORDONED_ROW} />);
+    await userEvent.click(screen.getByRole("button", { name: "Uncordon" }));
+    // A fresh question: the name typed for the cordon went with its dialog.
+    expect((typed() as HTMLInputElement).value).toBe("");
+    await userEvent.type(typed(), "prod");
+    await userEvent.click(box().getByRole("button", { name: "Uncordon" }));
+    await waitFor(() => expect(cordonNode).toHaveBeenLastCalledWith("prod", "worker-1", false));
+    expect(startLocalSession).not.toHaveBeenCalled();
+  });
+
+  it("asks for the cluster's name before opening a shell, even in a one-container pod", async () => {
+    render(<Harness args={POD_ARGS} row={POD_ROW} />);
+    await userEvent.click(screen.getByRole("button", { name: "Open shell" }));
+    await screen.findByRole("dialog");
+    expect(box().getByText("prod is protected (workspace Default).")).toBeTruthy();
+    // One container: nothing to pick, so no picker.
+    expect(box().queryByLabelText("Container")).toBeNull();
+
+    await userEvent.click(box().getByRole("button", { name: "Open" }));
+    expect(startPodSession).not.toHaveBeenCalled();
+    expect(box().getByText("Type prod to confirm.")).toBeTruthy();
+
+    // Cancelled and asked again: what was typed, and the refusal, went with
+    // that question. The typed state lives in the hook, not in the dialog.
+    await userEvent.type(typed(), "prod");
+    await userEvent.click(box().getByRole("button", { name: "Cancel" }));
+    await userEvent.click(screen.getByRole("button", { name: "Open shell" }));
+    await screen.findByRole("dialog");
+    expect((typed() as HTMLInputElement).value).toBe("");
+    expect(box().queryByText("Type prod to confirm.")).toBeNull();
+
+    await userEvent.type(typed(), "prod");
+    await userEvent.click(box().getByRole("button", { name: "Open" }));
+    await waitFor(() =>
+      expect(startPodSession).toHaveBeenCalledWith({ context: "prod", namespace: "kube-system", pod: "web-0", container: "app" }),
+    );
+    expect(store.currentWorkspace().tabs.some((t) => t.route === "/terminals")).toBe(true);
+  });
+
+  /** `prod` is protected and in the workspace; `stage` is neither. */
+  function withUnprotectedStage() {
+    const stage = { name: "stage", stableId: "id-stage", key: "id-stage", cluster: "stage", server: "", isCurrent: false, sourceFile: "", authKind: "token" };
+    setContexts([...getContexts(), stage]);
+  }
+
+  it("keeps a node action off the terminal when the rail has moved to a cluster that is not protected", async () => {
+    // The dialog was opened on prod, and prod is what it runs on: that the
+    // cluster in focus now asks for nothing does not make it a shell.
+    isTauri.mockReturnValue(true);
+    withUnprotectedStage();
+    const view = render(<Harness args={NODE_OPS_ARGS} row={NODE_ROW} />);
+    await userEvent.click(screen.getByRole("button", { name: "Drain" }));
+    view.rerender(<Harness args={{ ...NODE_OPS_ARGS, context: "stage" }} row={NODE_ROW} />);
+    expect(box().queryByText(/Runs in a terminal/)).toBeNull();
+
+    await userEvent.click(box().getByRole("checkbox", { name: "Yes, still drain on prod." }));
+    await userEvent.type(typed(), "prod");
+    await userEvent.click(box().getByRole("button", { name: "Drain" }));
+    await waitFor(() => expect(drainNode).toHaveBeenCalledWith("prod", "worker-1"));
+    expect(startLocalSession).not.toHaveBeenCalled();
+  });
+
+  it("asks Run now's moved-rail question as well as the name, and runs it on the cluster it was picked on", async () => {
+    withUnprotectedStage();
+    const view = render(<Harness args={CRON_ARGS} row={CRON_ROW} />);
+    await userEvent.click(screen.getByRole("button", { name: "Run now" }));
+    view.rerender(<Harness args={{ ...CRON_ARGS, context: "stage" }} row={CRON_ROW} />);
+
+    await userEvent.type(typed(), "prod");
+    await userEvent.click(box().getByRole("button", { name: "Run now" }));
+    expect(cronjobTriggerNow).not.toHaveBeenCalled();
+    expect(box().getByText("This runs on prod, not stage. Confirm the cluster above, or cancel.")).toBeTruthy();
+
+    await userEvent.click(box().getByRole("checkbox", { name: "Yes, still run on prod." }));
+    await userEvent.click(box().getByRole("button", { name: "Run now" }));
+    await waitFor(() => expect(cronjobTriggerNow).toHaveBeenCalledWith("prod", "ops", "nightly"));
+  });
+});
+
+/** The row menu's door into the forward dialog, on a protected cluster (#101). */
+describe("useRowMenu — a forward on a protected cluster (#101)", () => {
+  beforeEach(() => {
+    const contexts = ["prod"].map((name) => ({ name, stableId: `id-${name}`, key: `id-${name}`, cluster: name, server: "", isCurrent: false, sourceFile: "", authKind: "token" }));
+    setContexts(contexts);
+    store.setState(defaultState(contexts));
+    store.setWorkspaceProtected(store.getState().currentId, true);
+  });
+
+  it("starts no forward until the cluster's name is typed", async () => {
+    render(<Harness args={POD_ARGS} row={POD_ROW} />);
+    await userEvent.click(screen.getByRole("button", { name: "Port forward" }));
+    await screen.findByRole("dialog");
+    await waitFor(() => expect((screen.getByLabelText("Target") as HTMLSelectElement).value).toBe("pod/web-0"));
+    await userEvent.type(screen.getByLabelText("Remote port"), "8080");
+    expect(screen.getByText("prod is protected (workspace Default).")).toBeTruthy();
+
+    await userEvent.click(screen.getByRole("button", { name: "Start forward" }));
+    expect(forwardCore.startPortForward).not.toHaveBeenCalled();
+    expect(screen.getByText("Type prod to confirm.")).toBeTruthy();
+
+    await userEvent.type(screen.getByRole("textbox", { name: "Type prod to confirm" }), "prod");
+    await userEvent.click(screen.getByRole("button", { name: "Start forward" }));
+    await waitFor(() => expect(forwardCore.startPortForward).toHaveBeenCalledTimes(1));
   });
 });

@@ -6,7 +6,7 @@ import { plainText } from "./displayText";
 import { ExtensionRequirements } from "./ExtensionRequirements";
 import { refreshContextIds, useContextLookup } from "./contextIds";
 import { ExtensionLogo } from "./ExtensionLogo";
-import { useContext, useRef, useState } from "react";
+import { useContext, useLayoutEffect, useRef, useState } from "react";
 import {
   MAX_EXTENSION_PACKAGE_BYTES,
   clearExtensionSecret,
@@ -71,10 +71,20 @@ function signatureState(review: { signature?: number[]; signedBy?: ExtensionSign
   return review.errors ? "Signature not verified" : "Checking the signature";
 }
 
-export function ExtensionManager() {
+/**
+ * `show` moves the manager to one of its tabs — `catalog` for Home's "Browse
+ * catalog" — on mount and again whenever a new request object arrives.
+ */
+export function ExtensionManager({ show }: { show?: { tab: string } } = {}) {
   const { Button, Tabs } = useContext(ExtensionControls);
   const [tab, setTab] = useState("installed");
   const [catalogOpened, setCatalogOpened] = useState(false);
+  // Before paint, so a manager opened on the catalog never shows its installed list first.
+  useLayoutEffect(() => {
+    if (!show) return;
+    setTab(show.tab);
+    if (show.tab === "catalog") setCatalogOpened(true);
+  }, [show]);
   const inventory = useExtensions();
   const [source, setSource] = useState("");
   const [error, setError] = useState("");

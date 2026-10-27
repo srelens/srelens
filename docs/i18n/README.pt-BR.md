@@ -41,6 +41,7 @@
 <p align="center">
   <a href="https://github.com/srelens/srelens/stargazers"><img alt="GitHub stars" src="https://img.shields.io/github/stars/srelens/srelens?logo=github&color=eab308"></a>
   <a href="https://www.reddit.com/r/srelens/"><img alt="Reddit: r/srelens" src="https://img.shields.io/reddit/subreddit-subscribers/srelens?label=r%2Fsrelens&logo=reddit&logoColor=white&color=FF4500"></a>
+  <a href="https://join.slack.com/t/srelens/shared_invite/zt-4cu0tzuzo-Ktei1KsVlqPi2XY~irTDAg"><img alt="Slack: srelens" src="https://img.shields.io/badge/Slack-srelens-4A154B?logo=slack&logoColor=white"></a>
   <a href="https://deepwiki.com/srelens/srelens"><img alt="Ask DeepWiki" src="https://img.shields.io/badge/Ask-DeepWiki-2563eb"></a>
 </p>
 
@@ -59,6 +60,10 @@
   <img alt="Terminal UI" src="https://img.shields.io/badge/terminal-srectl-14b8a6">
   <img alt="MCP server" src="https://img.shields.io/badge/agents-MCP-fb923c">
   <img alt="Project status: stable" src="https://img.shields.io/badge/status-stable-22c55e">
+</p>
+
+<p align="center">
+  <img alt="O aplicativo desktop do srelens lista objetos do Kubernetes em tempo real, com pesquisa e filtros de namespace" src="../assets/screenshots/srelens-demo-changes.gif" width="100%">
 </p>
 
 <p align="center">
@@ -109,11 +114,10 @@ ciclo de investigação em um único workspace local-first.
 ## Aplicativo desktop
 
 O aplicativo desktop é um workspace completo de Kubernetes em uma janela nativa.
-As capturas de tela abaixo mostram o **novo design**, que está sendo liberado tela
-por tela: ative-o em **Settings → Appearance → Design → New design**
-(Configurações → Aparência → Design → Novo design) e volte ao anterior pelo mesmo
-caminho quando quiser. São seis temas: Light, Paper, Dark, Midnight, Glass e
-High contrast.
+As capturas de tela abaixo mostram o **novo design**, que agora é o padrão. São
+seis temas: Light, Paper, Dark, Midnight, Glass e High contrast. O design clássico
+está obsoleto e será removido em uma versão futura; até lá, você pode mudar para
+ele em **Settings → Appearance → Design** (Configurações → Aparência → Design).
 
 <table>
   <tr>
@@ -401,6 +405,8 @@ quando você atualizar.
 
 - [r/srelens no Reddit](https://www.reddit.com/r/srelens/) — anúncios, perguntas
   e feedback
+- [srelens no Slack](https://join.slack.com/t/srelens/shared_invite/zt-4cu0tzuzo-Ktei1KsVlqPi2XY~irTDAg) —
+  conversa com os mantenedores e outros usuários
 - [Issues](https://github.com/srelens/srelens/issues) — bugs e pedidos de
   funcionalidades
 - [Site](https://srelens.com)

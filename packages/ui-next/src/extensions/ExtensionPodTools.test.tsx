@@ -22,9 +22,14 @@ import {
   type ExtensionStreamRequest,
   type ExtensionView,
   type InstalledExtension,
+  type ClusterContext,
 } from "@srelens/core";
+import { PortalScopeProvider } from "@srelens/ui-kit";
 import { useExtensions } from "./inventoryStore";
 import { ExtensionPodSlot, podBindingsFor } from "./ExtensionPodTools";
+import { resetContexts, setContexts } from "../lib/clusters";
+import { defaultState } from "../lib/tabs";
+import { getState, setState, setWorkspaceProtected } from "../lib/tabsStore";
 
 const COMMAND = ["cmctl", "status", "certificate", "--all-namespaces"];
 
@@ -175,6 +180,33 @@ describe("the pod tools on a Deployment (#567)", () => {
     // A failure reads as one.
     act(() => stream.opened[0].handlers.onEnd?.({ type: "error", code: "source", message: "pods \"web-1\" is forbidden" }));
     expect(await within(tools).findByText(/The stream failed: pods "web-1" is forbidden/)).toBeTruthy();
+  });
+
+  it("draws no lines while its tab is not the one showing, and draws them once it is", async () => {
+    // An inactive app tab stays mounted under `display: none`: it would draw up to 5,000 rows a frame for nobody.
+    const inTab = (visible: boolean) => (
+      <PortalScopeProvider scope={{ container: undefined, visible, hold: () => () => {} }}>
+        <ExtensionPodSlot context="kind-dev" resource={deployment} />
+      </PortalScopeProvider>
+    );
+    const view = render(inTab(false));
+    const tools = await screen.findByRole("region", { name: "cert-manager pod tools" });
+    fireEvent.click(await within(tools).findByRole("button", { name: "Logs · Controller logs (web-1)" }));
+    await waitFor(() => expect(stream.opened).toHaveLength(1));
+    act(() => {
+      stream.opened[0].handlers.onData({ event: "status", source: "web-1/controller", status: "live" }, 1);
+      stream.opened[0].handlers.onData(
+        { event: "lines", lines: [{ source: "web-1/controller", line: "certificate issued" }] },
+        2,
+      );
+    });
+    // Long enough for the frame the lines asked for.
+    await act(() => new Promise((r) => setTimeout(r, 50)));
+    const log = within(tools).getByRole("log", { name: "Logs of web-1/controller" });
+    expect(log.textContent).not.toContain("certificate issued");
+
+    view.rerender(inTab(true));
+    await waitFor(() => expect(log.textContent).toContain("certificate issued"));
   });
 
   it("runs nothing until the host confirmation naming the pod, container and exact command is approved", async () => {
@@ -379,5 +411,53 @@ describe("the pod tools when a listing fails", () => {
     fireEvent.click(within(tools).getByRole("button", { name: "Retry" }));
     await screen.findByRole("region", { name: "cert-manager pod tools" });
     expect(screen.queryByRole("region", { name: "App pod tools" })).toBeNull();
+  });
+});
+
+/** #101: an app's command on a protected cluster waits for the cluster's name. */
+describe("an app's command on a protected cluster (#101)", () => {
+  const ctx: ClusterContext = { name: "kind-dev", stableId: "kind-dev", key: "kind-dev", cluster: "kind-dev", server: "", isCurrent: true, sourceFile: "", authKind: "token" };
+
+  beforeEach(() => {
+    setContexts([ctx]);
+    setState(defaultState([ctx]));
+    setWorkspaceProtected(getState().currentId, true);
+  });
+  afterEach(() => {
+    resetContexts();
+    setState(defaultState([]));
+  });
+
+  it("runs nothing until the cluster's name is typed", async () => {
+    const tools = await openTools();
+    fireEvent.click(await within(tools).findByRole("button", { name: "Run · cmctl status (web-1)" }));
+    const review = within(within(tools).getByRole("region", { name: "Review command" }));
+    expect(review.getByText("kind-dev is protected (workspace Default).")).toBeTruthy();
+    const run = review.getByRole("button", { name: "Run command" }) as HTMLButtonElement;
+    expect(run.disabled).toBe(true);
+    fireEvent.click(run);
+    expect(stream.opened).toHaveLength(0);
+
+    fireEvent.change(review.getByRole("textbox", { name: "Type kind-dev to confirm" }), { target: { value: "kind-dev" } });
+    expect(run.disabled).toBe(false);
+    fireEvent.click(run);
+    await waitFor(() => expect(stream.opened).toHaveLength(1));
+  });
+
+  it("asks again when another pod's command replaces the review", async () => {
+    // The Run buttons stay live while a review is open, so the review is not
+    // always unmounted between two commands: the name typed for web-1's does not
+    // answer web-2's.
+    const tools = await openTools();
+    fireEvent.click(await within(tools).findByRole("button", { name: "Run · cmctl status (web-1)" }));
+    const typed = () => within(tools).getByRole("textbox", { name: "Type kind-dev to confirm" }) as HTMLInputElement;
+    const run = () => within(tools).getByRole("button", { name: "Run command" }) as HTMLButtonElement;
+    fireEvent.change(typed(), { target: { value: "kind-dev" } });
+    expect(run().disabled).toBe(false);
+
+    fireEvent.click(within(tools).getByRole("button", { name: "Run · cmctl status (web-2)" }));
+    expect(typed().value).toBe("");
+    expect(run().disabled).toBe(true);
+    expect(stream.opened).toHaveLength(0);
   });
 });

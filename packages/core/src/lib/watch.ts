@@ -1,4 +1,5 @@
 import { invokeCommand, subscribe } from "../transport/transport";
+import { selectsNothing } from "./namespaces";
 
 export interface WatchHandle {
   stop: () => void;
@@ -133,6 +134,12 @@ export async function watchNamespaces(
   onError?: (error: string, namespace: string) => void,
   kubeconfigFiles: string[] = [],
 ): Promise<WatchHandle> {
+  // Nothing selected — a collection that matches no namespace (#881): no
+  // rows, and nothing asked of the cluster.
+  if (selectsNothing(selection)) {
+    queueMicrotask(() => onRows([]));
+    return { stop: () => {} };
+  }
   const scopes = scopesFor(selection);
   if (scopes.length === 1) {
     const [only] = scopes;

@@ -449,6 +449,11 @@ mod tests {
                                 code => failure(code, "Forbidden", "pods is forbidden: user cannot delete pods"),
                             };
                             std::thread::sleep(delete_delay);
+                            // Counted before the reply goes out: once it is
+                            // out, the client can finish and look before this
+                            // thread runs again on a busy machine, as the
+                            // pause after it makes happen every time.
+                            answered.fetch_add(1, Ordering::SeqCst);
                             let reply = reply.to_string();
                             let _ = write!(
                                 conn,
@@ -456,7 +461,7 @@ mod tests {
                                  Content-Length: {}\r\nConnection: close\r\n\r\n{reply}",
                                 reply.len()
                             );
-                            answered.fetch_add(1, Ordering::SeqCst);
+                            std::thread::sleep(Duration::from_millis(100));
                             return;
                         } else {
                             (404, failure(404, "NotFound", "not found"))
@@ -493,7 +498,8 @@ mod tests {
             self.deletes.lock().unwrap().clone()
         }
 
-        /// How many deletes the server has finished answering.
+        /// How many deletes the server has answered, each counted once its
+        /// delay is over and before its reply is sent.
         fn answered(&self) -> usize {
             self.answered.load(Ordering::SeqCst)
         }

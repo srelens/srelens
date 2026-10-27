@@ -16,37 +16,39 @@ mod durable;
 pub use catalog::{catalog_of, CatalogEntry};
 mod extensions;
 pub mod github;
+pub mod assistant;
 mod settings;
+pub mod skills;
 /// The extension readers' fuzz entry points, for the targets in `fuzz/`. Not an API.
 #[cfg(feature = "fuzzing")]
 #[doc(hidden)]
 pub use extensions::fuzzing;
-pub use extensions::streams::{ExtensionStreams, OpenStreamOut, INVENTORY_CHANNEL};
 /// Installed apps' operations as MCP tools (#574), from [`ExtensionStreams::app_tools`],
 /// and what their sidecars' calls are answered with ([`AppTools::serve_sidecars`]).
 pub use extensions::sidecars::SidecarHost;
+pub use extensions::streams::{ExtensionStreams, OpenStreamOut, INVENTORY_CHANNEL};
 pub use extensions::tools::AppTools;
+pub use extensions::{
+    AppPolicy, Apps, InventoryKey, InventoryLock, InventoryStore, SharedCatalog, SharedPolicy,
+    TrustRoot, MAX_POLICY_BYTES,
+};
 /// Who confirms a sidecar's gated call (#573): a host's own, or `NoConsent`.
 pub use srelens_plugin_host::sidecar::{
     AppIdentity as SidecarApp, Consent as SidecarConsent, ConsentRequest as SidecarConsentRequest,
     NoConsent,
-};
-pub use extensions::{
-    AppPolicy, Apps, InventoryKey, InventoryLock, InventoryStore, SharedCatalog, SharedPolicy,
-    TrustRoot, MAX_POLICY_BYTES,
 };
 /// Making `.srelens-extension` packages (#562): what a publisher runs before a release, and
 /// what `cargo run -p srelens-registry --example pack-extension` wraps.
 pub mod extension_package {
     pub use crate::extensions::package::{digest_list, pack, MAX_PACKAGE_BYTES};
 }
+/// The host's metadata for `extension.secretStore`, for a host that renders
+/// its confirmation from names it has vetted (#543).
+pub use extensions::{declares_secret_setting, SECRET_STORE_ANNOTATIONS};
 pub use settings::default_settings_path;
 /// The secret store a host supplies for apps' secret settings (#543), so a
 /// host implements it against this crate alone.
 pub use srelens_plugin_host::{NoSecretStore, SecretStore, SecretValue, SECRET_STORE_PERMISSION};
-/// The host's metadata for `extension.secretStore`, for a host that renders
-/// its confirmation from names it has vetted (#543).
-pub use extensions::{declares_secret_setting, SECRET_STORE_ANNOTATIONS};
 
 // Test-only: every consumer of this module — `render_catalog` (regenerated via
 // `UPDATE_CATALOG=1 cargo test`), the doc-scan tests below, and mcp_docs.rs's
@@ -418,6 +420,10 @@ fn build_with(
         "health check; echoes the input back as { pong: <input> }",
         |input| async move { Ok(json!({ "pong": input })) },
     ));
+    reg.register(match kubeconfigs {
+        Kubeconfigs::Local => skills::skills_get_capability(None),
+        Kubeconfigs::OwnOnly => skills::skills_get_builtin_only_capability(),
+    });
 
     reg.register(match kubeconfigs {
         Kubeconfigs::Local => srelens_kube::contexts::list_contexts_capability(
@@ -531,7 +537,9 @@ fn build_with(
     reg.register(srelens_kube::ingresses::list_ingresses_capability(
         cache.clone(),
     ));
-    reg.register(srelens_kube::endpoints::list_endpoints_capability(cache.clone()));
+    reg.register(srelens_kube::endpoints::list_endpoints_capability(
+        cache.clone(),
+    ));
     reg.register(srelens_kube::endpointslices::list_endpointslices_capability(cache.clone()));
     reg.register(srelens_kube::networkpolicies::list_networkpolicies_capability(cache.clone()));
     reg.register(srelens_kube::pvcs::list_pvcs_capability(cache.clone()));
@@ -593,7 +601,17 @@ fn build_with(
     reg.register(srelens_kube::pod_overview::pod_overview_capability(
         cache.clone(),
     ));
+    reg.register(srelens_kube::service_health::service_health_probe_capability(cache.clone()));
+    reg.register(srelens_kube::why_not_ready::why_not_ready_capability(
+        cache.clone(),
+    ));
+    reg.register(srelens_kube::why_pending::why_pending_capability(
+        cache.clone(),
+    ));
     reg.register(srelens_kube::topology::topology_graph_capability(
+        cache.clone(),
+    ));
+    reg.register(srelens_kube::lineage::resource_tree_capability(
         cache.clone(),
     ));
     reg.register(srelens_kube::topology::topology_probe_capability(
@@ -609,6 +627,15 @@ fn build_with(
         cache.clone(),
     ));
     reg.register(srelens_kube::nodes::list_nodes_capability(cache.clone()));
+    reg.register(srelens_kube::nodes::node_capacity_overview_capability(
+        cache.clone(),
+    ));
+    reg.register(srelens_kube::node_inspector::node_inspect_capability(
+        cache.clone(),
+    ));
+    reg.register(srelens_kube::gpu_info::gpu_inventory_capability(
+        cache.clone(),
+    ));
     reg.register(srelens_kube::node_ssh::node_service_status_capability(
         cache.clone(),
     ));
@@ -636,6 +663,17 @@ fn build_with(
         cache.clone(),
     ));
     reg.register(srelens_kube::access::can_i_capability(cache.clone()));
+    // Collections (#881, #885): pure matching over what the caller hands in.
+    // For srelens's own views only for now: the collections live in the UI's
+    // settings, so an agent has nothing to pass them.
+    reg.register(srelens_kube::collections::validate_capability().only_in_the_ui());
+    reg.register(srelens_kube::collections::resolve_namespaces_capability().only_in_the_ui());
+    reg.register(srelens_kube::collections::match_names_capability().only_in_the_ui());
+    // The kinds a collection's resource filter may name (#885), offered by
+    // its editor.
+    reg.register(
+        srelens_kube::collections::list_api_kinds_capability(cache.clone()).only_in_the_ui(),
+    );
     reg.register(srelens_kube::schema::open_api_schema_capability(
         cache.clone(),
     ));
@@ -684,6 +722,9 @@ fn build_with(
         cache.clone(),
     ));
     reg.register(srelens_kube::manifest::list_resource_capability(
+        cache.clone(),
+    ));
+    reg.register(srelens_kube::count::count_resources_capability(
         cache.clone(),
     ));
 
@@ -756,6 +797,12 @@ pub fn build_registry_with(cache: Arc<ClientCache>) -> Registry {
 pub fn kind_resolver() -> std::sync::Arc<dyn srelens_mcp::resources::KindResolver> {
     struct GvkKinds;
     impl srelens_mcp::resources::KindResolver for GvkKinds {
+        fn canonical_kind(&self, kind: &str) -> String {
+            srelens_kube::manifest::gvk_for(kind)
+                .map(|(gvk, _)| gvk.kind)
+                .unwrap_or_else(|| kind.to_string())
+        }
+
         fn scope(&self, kind: &str) -> Option<srelens_mcp::resources::KindScope> {
             use srelens_mcp::resources::KindScope;
             if kind == "Secret" {
@@ -788,6 +835,31 @@ mod tests {
         srelens_mcp::completeness::assert_mutating_capabilities_are_gated(&reg);
     }
 
+    /// #920: Cursor drops the whole tool list when one `inputSchema` fails the MCP
+    /// SDK's validation, so every tool `tools/list` serves must pass it.
+    #[tokio::test]
+    async fn every_listed_tool_has_an_object_input_schema() {
+        let server = McpServer::new(Arc::new(build_registry()));
+        let request = json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"});
+        let resp =
+            srelens_mcp::stdio::handle_request(&server, &request, srelens_mcp::Transport::Http)
+                .await
+                .unwrap();
+        let tools = resp["result"]["tools"].as_array().unwrap();
+        assert_eq!(
+            srelens_mcp::completeness::assert_every_input_schema_is_an_object(tools),
+            Ok(())
+        );
+    }
+
+    /// A page of `k8s.podLogs` is built to fit the MCP server's cap on one
+    /// read-only answer, which `agent_text` would otherwise refuse whole.
+    #[test]
+    #[allow(clippy::assertions_on_constants)]
+    fn a_log_page_fits_the_mcp_result_cap() {
+        assert!(srelens_kube::log_pages::MAX_ANSWER_BYTES <= srelens_mcp::MAX_RESULT_BYTES);
+    }
+
     /// #574: every installed app's reader, declared action and sidecar operation is
     /// an MCP tool — and a pod binding, a session a view opens, is not — and the app
     /// tools meet every rule the host's own capabilities do: listed, gated when they
@@ -813,7 +885,10 @@ mod tests {
         .iter()
         .map(|source| {
             let mut value: serde_json::Value = serde_json::from_str(source).unwrap();
-            let id = value["id"].as_str().unwrap().replace("org.srelens.", "org.example.");
+            let id = value["id"]
+                .as_str()
+                .unwrap()
+                .replace("org.srelens.", "org.example.");
             value["id"] = json!(id);
             value
         })
@@ -840,9 +915,11 @@ mod tests {
                 .iter()
                 .map(|p| p.as_str().or(p["capability"].as_str()).unwrap().to_owned())
                 .collect();
-            configure(json!({"action": "install", "manifest": source.to_string(), "grants": grants}))
-                .await
-                .unwrap_or_else(|e| panic!("{}: {e}", source["id"]));
+            configure(
+                json!({"action": "install", "manifest": source.to_string(), "grants": grants}),
+            )
+            .await
+            .unwrap_or_else(|e| panic!("{}: {e}", source["id"]));
         }
         // An executable app, from a package carrying a binary for every platform.
         let package = tempfile::tempdir().unwrap();
@@ -886,7 +963,9 @@ mod tests {
         for app in listed["plugins"].as_array().unwrap() {
             let manifest = &app["manifest"];
             let id = manifest["id"].as_str().unwrap();
-            let named = |item: &serde_json::Value| format!("plugin/{id}/{}", item["name"].as_str().unwrap());
+            let named = |item: &serde_json::Value| {
+                format!("plugin/{id}/{}", item["name"].as_str().unwrap())
+            };
             for binding in manifest["capabilities"].as_array().unwrap() {
                 if srelens_plugin_host::is_pod_target(binding["target"].as_str().unwrap()) {
                     sessions.push(named(binding));
@@ -897,7 +976,11 @@ mod tests {
             for item in manifest["actions"].as_array().into_iter().flatten() {
                 operations.push(named(item));
             }
-            for item in manifest["sidecar"]["operations"].as_array().into_iter().flatten() {
+            for item in manifest["sidecar"]["operations"]
+                .as_array()
+                .into_iter()
+                .flatten()
+            {
                 operations.push(named(item));
             }
         }
@@ -908,9 +991,23 @@ mod tests {
             srelens_mcp::completeness::assert_every_app_operation_has_a_tool(&operations, &server),
             Ok(())
         );
+        let request = json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"});
+        let resp =
+            srelens_mcp::stdio::handle_request(&server, &request, srelens_mcp::Transport::Http)
+                .await
+                .unwrap();
+        assert_eq!(
+            srelens_mcp::completeness::assert_every_input_schema_is_an_object(
+                resp["result"]["tools"].as_array().unwrap()
+            ),
+            Ok(())
+        );
         let tool_names: Vec<String> = server.list_tools().into_iter().map(|t| t.name).collect();
         assert!(sessions.iter().all(|session| !tool_names.contains(session)));
-        assert_eq!(assert_every_capability_has_a_tool(&snapshot, &server), Ok(()));
+        assert_eq!(
+            assert_every_capability_has_a_tool(&snapshot, &server),
+            Ok(())
+        );
         srelens_mcp::completeness::assert_mutating_capabilities_are_gated(&snapshot);
         srelens_mcp::completeness::assert_impact_matches_the_gate(&snapshot);
         srelens_mcp::completeness::assert_confirm_templates_are_renderable(&snapshot);
@@ -923,7 +1020,10 @@ mod tests {
                 })
             })
             .collect();
-        assert!(silent.is_empty(), "gated with no confirmation text: {silent:?}");
+        assert!(
+            silent.is_empty(),
+            "gated with no confirmation text: {silent:?}"
+        );
     }
 
     /// An app's logs and runtime metrics are local (#575): srelens's own UI
@@ -940,7 +1040,20 @@ mod tests {
             .filter(|capability| capability.ui_only)
             .map(|capability| capability.id.as_str())
             .collect();
-        assert_eq!(ui_only, ["extensions.callOperation", "extensions.inspect", "extensions.logs"]);
+        // Collections (#881) are kept in the UI's settings, so an agent would
+        // have nothing to pass their two capabilities.
+        assert_eq!(
+            ui_only,
+            [
+                "collections.matchNames",
+                "collections.resolveNamespaces",
+                "collections.validate",
+                "extensions.callOperation",
+                "extensions.inspect",
+                "extensions.logs",
+                "k8s.listApiKinds",
+            ]
+        );
         for id in &ui_only {
             assert!(reg.get(id).unwrap().annotations.read_only, "{id}");
         }
@@ -952,7 +1065,9 @@ mod tests {
             let args = serde_json::json!({"id": "org.example.argocd"});
             for transport in [srelens_mcp::Transport::Stdio, srelens_mcp::Transport::Http] {
                 assert!(matches!(
-                    server.call_tool_audited(id, args.clone(), transport, "auto").await,
+                    server
+                        .call_tool_audited(id, args.clone(), transport, "auto")
+                        .await,
                     Err(srelens_capability::CapabilityError::NotFound(_))
                 ));
             }
@@ -997,7 +1112,15 @@ mod tests {
             include_str!("../../plugin-host/src/sidecar/metrics.rs"),
         ];
         for source in sources {
-            for client in ["reqwest", "hyper", "ureq", "std::net", "tokio::net", "TcpStream", "UdpSocket"] {
+            for client in [
+                "reqwest",
+                "hyper",
+                "ureq",
+                "std::net",
+                "tokio::net",
+                "TcpStream",
+                "UdpSocket",
+            ] {
                 assert!(!source.contains(client), "names {client}");
             }
         }
@@ -1439,7 +1562,9 @@ mod tests {
             );
             for position in &capability.settable {
                 assert!(
-                    !position.accepts.contains(&srelens_capability::settings::SettingType::SecretReference),
+                    !position
+                        .accepts
+                        .contains(&srelens_capability::settings::SettingType::SecretReference),
                     "{}.{} takes a secret",
                     capability.id,
                     position.argument
@@ -1483,10 +1608,7 @@ mod tests {
             fn retain(&self, _: &std::collections::BTreeSet<String>) -> Result<(), String> {
                 Ok(())
             }
-            fn reveal(
-                &self,
-                _: &str,
-            ) -> Result<Option<srelens_plugin_host::SecretValue>, String> {
+            fn reveal(&self, _: &str) -> Result<Option<srelens_plugin_host::SecretValue>, String> {
                 Ok(None)
             }
         }
@@ -1498,7 +1620,10 @@ mod tests {
             Some(settings.clone()),
             Arc::new(Open),
         );
-        let listed = with_store.invoke("extensions.list", json!({})).await.unwrap();
+        let listed = with_store
+            .invoke("extensions.list", json!({}))
+            .await
+            .unwrap();
         assert_eq!(listed["secretStore"], json!({"available": true}));
 
         let without = build_registry_with_paths_and_settings(
@@ -1508,7 +1633,30 @@ mod tests {
         );
         let listed = without.invoke("extensions.list", json!({})).await.unwrap();
         assert_eq!(listed["secretStore"]["available"], false);
-        assert!(without.get("extension.secretStore").is_some(), "its metadata is still the catalog's");
+        assert!(
+            without.get("extension.secretStore").is_some(),
+            "its metadata is still the catalog's"
+        );
+    }
+
+    #[test]
+    fn event_resource_aliases_read_the_same_kind_as_the_watch() {
+        use srelens_mcp::resources::{plan_read, ResourceUri};
+        let kinds = crate::kind_resolver();
+        for (alias, canonical, namespace) in [
+            ("pod", "Pod", "ns"),
+            ("pods", "Pod", "ns"),
+            ("cm", "ConfigMap", "ns"),
+            ("nodes", "Node", "-"),
+        ] {
+            let uri =
+                ResourceUri::parse(&format!("k8s://c/{namespace}/{alias}/web-0/events")).unwrap();
+            let read = plan_read(&uri, kinds.as_ref()).unwrap();
+            let (gvk, _) = srelens_kube::manifest::gvk_for(alias).unwrap();
+            assert_eq!(gvk.kind, canonical);
+            assert_eq!(read.args["objectKind"], gvk.kind);
+            assert_eq!(read.args["objectName"], "web-0");
+        }
     }
 
     #[test]

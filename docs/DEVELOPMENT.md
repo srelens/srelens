@@ -135,6 +135,7 @@ Four invariants are enforced by tests rather than by review, so "everything is e
 | --- | --- |
 | `every_capability_is_mcp_exposed` (`crates/registry`) | The registry and the MCP tool list match exactly, except for UI-only capabilities (`Capability::ui_only`), which must not be tools. `app_logs_and_metrics_never_leave_through_mcp_or_the_audit_trail` pins that set to `extensions.inspect`, `extensions.logs` and `extensions.callOperation`, the native app surfaces ([#575](https://github.com/srelens/srelens/issues/575)). |
 | `assert_mutating_capabilities_are_gated` (`crates/mcp/src/completeness.rs`) | Every capability that is not `read_only` is `requires_confirm`. Note the predicate is *mutating*, not *destructive* — a non-destructive capability can still need consent. |
+| `every_listed_tool_has_an_object_input_schema` (`crates/registry`) | Every tool `tools/list` serves has an `inputSchema` the MCP TypeScript SDK accepts: `type: "object"` at the root and an object for every property. `every_installed_apps_operation_is_mcp_exposed` holds installed apps' tools to the same check. Cursor drops the whole list when one fails ([#920](https://github.com/srelens/srelens/issues/920)), so `tools/list` adds the root type a tagged enum's `oneOf` lacks and writes a `serde_json::Value` field's `true` as `{}`. |
 | `capability_catalog_json_is_in_sync` (`crates/registry`) | The committed `packages/core/src/lib/capability-catalog.json` equals the live registry, so the frontend palette audit can cross-check without linking Rust. Regenerate with `UPDATE_CATALOG=1 cargo test -p srelens-registry`. |
 | `committed_manifest_schema_matches_the_contract` (`crates/plugin-host/tests/schema.rs`) | The committed `schemas/extension-manifest.v0.8.json` (the newest supported API line) equals `Manifest::schema()`, and Vitest validates every example manifest against it. An older line's file stays as it was when the next line was cut, and `a_field_missing_from_an_older_lines_schema_is_gated_in_api_fields` fails when the contract has a field that file lacks and `API_FIELDS` does not list. Regenerate with `UPDATE_CATALOG=1 cargo test -p srelens-plugin-host --test schema`. |
 | `committed_protocol_schema_matches_the_types` (`sdk/protocol/tests/schema.rs`) | The committed `schemas/sidecar-protocol.v0.2.json` (the newest sidecar API line) equals `srelens_sidecar_protocol::schema()`, generated from the types srelens builds its sidecar messages from. The fixtures in `sdk/protocol/tests/messages/` validate against it, `everything_srelens_writes_is_a_host_message_in_the_protocol_schema` holds what the host writes to it, and the broker's conformance test holds its `host/*` shapes to it. Regenerate with `UPDATE_CATALOG=1 cargo test -p srelens-sidecar-protocol --test schema`. |
@@ -209,8 +210,10 @@ cargo run -p srelens-server --bin srelens-server -- serve 127.0.0.1:8080 --data 
 docker compose up --build
 ```
 
-The frontend is embedded into the binary with `rust-embed`, so `pnpm build` must
-run before the server crate is compiled for release.
+The `srelens-server` binary embeds the frontend with `rust-embed`, so `pnpm build`
+must run before it is compiled for release. The library embeds none: each binary
+hands `ServerConfig` the copy it carries, and the desktop app's `serve` mode hands
+it the one Tauri embedded, so the desktop does not ship the frontend twice.
 
 Things worth knowing before you touch this crate:
 

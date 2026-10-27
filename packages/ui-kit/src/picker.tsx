@@ -1,4 +1,4 @@
-import { useState, type ReactNode } from "react";
+import { useRef, useState, type ReactNode } from "react";
 import { Popover } from "radix-ui";
 import { Command } from "cmdk";
 import { cx } from "./cx";
@@ -67,7 +67,16 @@ export function pickerFilter(value: string, search: string, keywords?: string[])
   return best;
 }
 
+/** Above a dialog's layer (z-50), for a picker opened from inside one. */
+const DIALOG_PICKER_Z = 55;
+
 export interface PickerProps {
+  /** Under the search box, above the list — tabs between two kinds of row. */
+  header?: ReactNode;
+  /** What an empty list says; "No results" unless the caller knows better. */
+  empty?: ReactNode;
+  /** Told when the popover opens or closes. */
+  onOpenChange?: (open: boolean) => void;
   /** A row under the list, ruled off from it — counts and list-wide actions. */
   footer?: ReactNode;
   /** What the trigger says about the current state — a value, a count, a stand-in. */
@@ -113,8 +122,19 @@ export interface PickerProps {
  * search box holds a filter rather than anything the reader would mind losing.
  * Outside a scope nothing changes at all. (#357)
  */
-export function Picker({ summary, ariaLabel, ariaInvalid, ariaRequired, ariaDescribedBy, searchPlaceholder = "Search…", className, footer, children }: PickerProps) {
-  const [open, setOpen] = useState(false);
+export function Picker({ summary, ariaLabel, ariaInvalid, ariaRequired, ariaDescribedBy, searchPlaceholder = "Search…", className, footer, header, empty, onOpenChange, children }: PickerProps) {
+  const [open, setOpenState] = useState(false);
+  // Opened from inside a dialog, the list has to stand above that dialog: a
+  // popover sits below a dialog's layer (45 to its 50), which is right for
+  // one opened from the page, and drew one opened from a dialog behind the
+  // dialog it came from — open, and unreachable. Read when it opens.
+  const trigger = useRef<HTMLButtonElement>(null);
+  const [inDialog, setInDialog] = useState(false);
+  const setOpen = (next: boolean) => {
+    if (next) setInDialog(trigger.current?.closest('[role="dialog"]') != null);
+    setOpenState(next);
+    onOpenChange?.(next);
+  };
   const container = usePortalContainer();
 
   return (
@@ -125,7 +145,7 @@ export function Picker({ summary, ariaLabel, ariaInvalid, ariaRequired, ariaDesc
             aria-expanded, aria-controls and data-state; the combobox role is
             ours, because a popover full of options is not the generic dialog
             Radix assumes. */}
-        <button type="button" role="combobox" aria-label={ariaLabel} aria-invalid={ariaInvalid || undefined} aria-required={ariaRequired || undefined} aria-describedby={ariaDescribedBy} className={cx("btn justify-between", className)} style={{ borderColor: "var(--control-line)" }}>
+        <button ref={trigger} type="button" role="combobox" aria-label={ariaLabel} aria-invalid={ariaInvalid || undefined} aria-required={ariaRequired || undefined} aria-describedby={ariaDescribedBy} className={cx("btn justify-between", className)} style={{ borderColor: "var(--control-line)" }}>
           <span className="min-w-0 truncate">{summary}</span>
           {/* Inline rather than an icon-set import: the kit takes no dependency
               on lucide, and these are the only two glyphs it needs. */}
@@ -145,7 +165,7 @@ export function Picker({ summary, ariaLabel, ariaInvalid, ariaRequired, ariaDesc
           // is the box the collision logic measures, so the panel would flip
           // and shift against nothing. Relative rather than static keeps the
           // stylesheet's z-index doing its job.
-          style={{ position: "relative" }}
+          style={{ position: "relative", ...(inDialog ? { zIndex: DIALOG_PICKER_Z } : {}) }}
         >
           <Command filter={pickerFilter}>
             <div className="rule-b flex items-center gap-1.5 px-2 py-1.5">
@@ -158,21 +178,35 @@ export function Picker({ summary, ariaLabel, ariaInvalid, ariaRequired, ariaDesc
                 className="w-full bg-transparent text-[0.8125rem] outline-none placeholder:text-faint"
               />
             </div>
+            {filled(header) && <div className="rule-b px-2 py-1.5">{header}</div>}
             {/* Capped and scrolling: the whole reason to reach for this over a
                 plain select is that the option set is too long to show. */}
             <Command.List className="scroll max-h-[240px]">
-              <Command.Empty className="px-3 py-4 text-center text-[0.75rem] text-faint">No results</Command.Empty>
+              <Command.Empty className="px-3 py-4 text-center text-[0.75rem] text-faint">{empty ?? "No results"}</Command.Empty>
               {children(() => setOpen(false))}
             </Command.List>
             {filled(footer) && (
               // Ruled off above rather than below: it belongs to the list, and
               // the rule is what stops it reading as one more option.
-              <div className="rule-t flex items-center gap-1.5 px-2 py-1.5">{footer}</div>
+              <div className="rule-t flex flex-wrap items-center gap-1.5 px-2 py-1.5">{footer}</div>
             )}
           </Command>
         </Popover.Content>
       </Popover.Portal>
     </Popover.Root>
+  );
+}
+
+/**
+ * Rows under a heading — a picker that offers two kinds of thing, such as
+ * namespace collections above namespaces. A search that leaves a group no
+ * rows hides its heading with them.
+ */
+export function PickerGroup({ heading, children }: { heading: string; children: ReactNode }) {
+  return (
+    <Command.Group heading={heading} className="picker-group">
+      {children}
+    </Command.Group>
   );
 }
 

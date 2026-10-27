@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { act, render, screen, waitFor } from "@testing-library/react";
+import { setAssistantEnabled, setClusterAssistant } from "../lib/assistant";
 import userEvent from "@testing-library/user-event";
 import type { ClusterContext, CrdRef } from "@srelens/core";
 import { Nav } from "./Nav";
@@ -7,15 +8,21 @@ import { currentWorkspace, openTab, setState } from "../lib/tabsStore";
 import { defaultState } from "../lib/tabs";
 import { pinContextKey } from "../lib/clusters";
 import { loadExpanded, resetView, setLink } from "../lib/workspace";
+import { clearResourceCache } from "../lib/cachedResource";
 
 // The CRD list is the one thing here that talks to a cluster. Mocked at the
 // module boundary — partially, so `RESOURCE_LABELS` and the rest of core stay
 // real and the tree is labelled the way the app labels it.
-const { listCrds, extensionState } = vi.hoisted(() => ({ listCrds: vi.fn(), extensionState: { data: undefined as any } }));
+const { listCrds, countResources, extensionState } = vi.hoisted(() => ({
+  listCrds: vi.fn(),
+  countResources: vi.fn(),
+  extensionState: { data: undefined as any },
+}));
 vi.mock("../extensions/Extensions", () => ({ useExtensions: () => extensionState }));
 vi.mock("@srelens/core", async (orig) => ({
   ...(await orig<typeof import("@srelens/core")>()),
   listCrds,
+  countResources,
 }));
 
 const ctx = (name: string): ClusterContext => ({
@@ -47,6 +54,54 @@ beforeEach(() => {
   vi.clearAllMocks();
   extensionState.data = undefined;
   listCrds.mockResolvedValue({ crds: [] });
+  countResources.mockResolvedValue({ counts: [] });
+  clearResourceCache();
+});
+
+/** The backend counting every kind asked for: `table[kind]`, or 2. */
+function counting(table: Record<string, number | null>) {
+  countResources.mockImplementation(async (_context: string, kinds: { kind: string }[]) => ({
+    counts: kinds.map((k) => ({ kind: k.kind, group: "", count: k.kind in table ? table[k.kind] : 2 })),
+  }));
+}
+
+describe("Nav counts (#402)", () => {
+  it("shows a kind's count at the end of its row", async () => {
+    counting({ Pod: 38 });
+    render(<Nav contexts={[PROD]} />);
+
+    await userEvent.click(screen.getByRole("treeitem", { name: "Workloads" }));
+    const pods = await screen.findByRole("treeitem", { name: /^Pods/ });
+    await waitFor(() => expect(pods.querySelector(".tree-count")?.textContent).toBe("38"));
+  });
+
+  /** A refused list and an empty cluster are the same picture and opposite facts. */
+  it("a refused kind shows no count, never 0", async () => {
+    counting({ Deployment: null });
+    render(<Nav contexts={[PROD]} />);
+
+    await userEvent.click(screen.getByRole("treeitem", { name: "Workloads" }));
+    const pods = await screen.findByRole("treeitem", { name: /^Pods/ });
+    await waitFor(() => expect(pods.querySelector(".tree-count")?.textContent).toBe("2"));
+    const deployments = screen.getByRole("treeitem", { name: /^Deployments/ });
+    expect(deployments.querySelector(".tree-count")).toBeNull();
+    const zeros = [...document.querySelectorAll(".tree-count")].filter((c) => c.textContent === "0");
+    expect(zeros).toHaveLength(0);
+  });
+
+  it("a paused cluster shows no counts and asks for none", async () => {
+    counting({});
+    const paused = defaultState([PROD]);
+    paused.workspaces[0].pausedClusters = [PROD.stableId];
+    setState(paused);
+    render(<Nav contexts={[PROD]} />);
+
+    await userEvent.click(screen.getByRole("treeitem", { name: "Workloads" }));
+    await screen.findByRole("treeitem", { name: "Pods" });
+    await new Promise((r) => setTimeout(r, 20));
+    expect(countResources).not.toHaveBeenCalled();
+    expect(document.querySelector(".tree-count")).toBeNull();
+  });
 });
 
 const tabFor = (route: string) => currentWorkspace().tabs.find((t) => t.route === route);
@@ -113,6 +168,23 @@ describe("Nav", () => {
     await userEvent.click(await screen.findByRole("treeitem", { name: "Incidents" }));
 
     expect(tabFor("/incidents")?.preview).toBeFalsy();
+  });
+
+  it("lists Agent under Investigate only while the AI Assistant is on for the cluster (#968)", async () => {
+    const view = render(<Nav contexts={[PROD]} />);
+    await userEvent.click(screen.getByRole("treeitem", { name: "Investigate" }));
+    expect(await screen.findByRole("treeitem", { name: "Agent" })).toBeDefined();
+
+    act(() => { setClusterAssistant(PROD.stableId, false); });
+    expect(screen.queryByRole("treeitem", { name: "Agent" })).toBeNull();
+    expect(screen.getByRole("treeitem", { name: "Topology" })).toBeDefined();
+
+    act(() => {
+      setClusterAssistant(PROD.stableId, true);
+      setAssistantEnabled(false);
+    });
+    view.rerender(<Nav contexts={[PROD]} />);
+    expect(screen.queryByRole("treeitem", { name: "Agent" })).toBeNull();
   });
 
   it("names the cluster and how it is linked", async () => {

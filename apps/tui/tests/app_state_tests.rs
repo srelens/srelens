@@ -10,17 +10,10 @@ use std::time::Duration;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEventKind};
 use ratatui::layout::Rect;
 use serde_json::{json, Value};
-use srelens_kube::k8s_openapi::api::core::v1::Pod;
-use srelens_kube::lineage::{LineageNode, LineageRelation};
-use srelens_kube::metrics::MetricSample;
-use srelens_kube::node_inspector::{
-    NodeConditionInfo, NodeInspectorDetails, NodePodItem, NodeTaintInfo,
-};
-use srelens_kube::workloads::summarise_pod;
 use srectl::ai_skills::CavemanLevel;
 use srectl::app::{
-    extract_tool_call_completed_info, extract_tool_call_start_info, format_event_summary,
-    get_clipboard_text, parse_involved_object, parse_ready_ratio, ActiveView, App, SuspendAction,
+    format_event_summary, get_clipboard_text, parse_involved_object, parse_ready_ratio, ActiveView,
+    App, SuspendAction,
 };
 use srectl::commands::{CommandTarget, CrdMeta, PrinterColumn, ResourceKind};
 use srectl::event::AppEvent;
@@ -39,6 +32,13 @@ use srectl::views::toolbox_view::{ToolStatusItem, ToolboxViewState};
 use srectl::views::tree_view::TreeViewState;
 use srectl::views::yaml_view::YamlViewState;
 use srectl::{AiProvider, AiSettings, DeepLink};
+use srelens_kube::k8s_openapi::api::core::v1::Pod;
+use srelens_kube::lineage::{LineageNode, LineageRelation};
+use srelens_kube::metrics::MetricSample;
+use srelens_kube::node_inspector::{
+    NodeConditionInfo, NodeInspectorDetails, NodePodItem, NodeTaintInfo,
+};
+use srelens_kube::workloads::summarise_pod;
 use tokio::sync::mpsc::UnboundedReceiver;
 
 // ---------------------------------------------------------------------------
@@ -423,135 +423,6 @@ fn reading_the_clipboard_never_yields_an_empty_string() {
 }
 
 #[test]
-fn a_tool_call_start_summarises_the_arguments_by_kind() {
-    let bash = json!({
-        "call_id": "c1",
-        "tool_call": { "bashToolCall": { "args": { "command": "kubectl get pods" } } }
-    });
-    assert_eq!(
-        extract_tool_call_start_info(&bash),
-        Some(("c1".into(), "bash".into(), "kubectl get pods".into()))
-    );
-
-    let read = json!({
-        "callId": "c2",
-        "toolCall": { "readToolCall": { "args": { "path": "/etc/hosts" } } }
-    });
-    assert_eq!(
-        extract_tool_call_start_info(&read),
-        Some(("c2".into(), "read".into(), "path: /etc/hosts".into()))
-    );
-
-    let grep = json!({ "toolCall": { "grepToolCall": { "args": { "pattern": "ERROR" } } } });
-    assert_eq!(
-        extract_tool_call_start_info(&grep).unwrap().2,
-        "pattern: ERROR"
-    );
-
-    let search = json!({ "toolCall": { "webSearchToolCall": { "args": { "query": "k8s" } } } });
-    assert_eq!(
-        extract_tool_call_start_info(&search).unwrap().2,
-        "query: k8s"
-    );
-
-    let named = json!({ "toolCall": { "skillToolCall": { "args": { "name": "triage" } } } });
-    assert_eq!(
-        extract_tool_call_start_info(&named).unwrap().2,
-        "name: triage"
-    );
-
-    let str_args = json!({ "toolCall": { "echoToolCall": { "args": "raw" } } });
-    assert_eq!(extract_tool_call_start_info(&str_args).unwrap().2, "raw");
-
-    let empty_obj = json!({ "toolCall": { "listToolCall": { "args": {} } } });
-    assert_eq!(extract_tool_call_start_info(&empty_obj).unwrap().2, "");
-
-    let other_obj = json!({ "toolCall": { "xToolCall": { "args": { "k": 1 } } } });
-    assert_eq!(
-        extract_tool_call_start_info(&other_obj).unwrap().2,
-        "{\"k\":1}"
-    );
-
-    let num_args = json!({ "toolCall": { "xToolCall": { "args": 42 } } });
-    assert_eq!(extract_tool_call_start_info(&num_args).unwrap().2, "42");
-
-    let no_args = json!({ "toolCall": { "xToolCall": {} } });
-    assert_eq!(extract_tool_call_start_info(&no_args).unwrap().2, "");
-}
-
-#[test]
-fn an_mcp_tool_call_start_uses_the_nested_tool_name_and_arguments() {
-    // The nested name is only unwrapped once the key strips down to exactly
-    // "callMcpTool" or "mcp".
-    let mcp = json!({
-        "call_id": "m1",
-        "tool_call": { "callMcpToolToolCall": {
-            "args": { "tool": "list_pods", "arguments": { "namespace": "default" } }
-        } }
-    });
-    assert_eq!(
-        extract_tool_call_start_info(&mcp),
-        Some((
-            "m1".into(),
-            "list_pods".into(),
-            "{\"namespace\":\"default\"}".into()
-        ))
-    );
-
-    let scalar_args = json!({
-        "tool_call": { "mcpToolCall": { "args": { "name": "get_logs", "arguments": "web-0" } } }
-    });
-    assert_eq!(
-        extract_tool_call_start_info(&scalar_args),
-        Some(("".into(), "get_logs".into(), "\"web-0\"".into()))
-    );
-
-    // Any other key keeps the stripped key as the tool name.
-    let plain = json!({
-        "tool_call": { "callMcpToolCall": { "args": { "tool": "list_pods", "arguments": {} } } }
-    });
-    assert_eq!(extract_tool_call_start_info(&plain).unwrap().1, "callMcp");
-}
-
-#[test]
-fn a_tool_call_start_without_a_tool_call_payload_is_ignored() {
-    assert_eq!(
-        extract_tool_call_start_info(&json!({ "call_id": "x" })),
-        None
-    );
-    assert_eq!(
-        extract_tool_call_start_info(&json!({ "tool_call": "not-an-object" })),
-        None
-    );
-    // Only metadata siblings, no *ToolCall key.
-    let meta_only = json!({ "tool_call": { "hookAdditionalContexts": {}, "startedAtMs": 1 } });
-    assert_eq!(extract_tool_call_start_info(&meta_only), None);
-}
-
-#[test]
-fn a_tool_call_completion_carries_its_id_and_error_flag() {
-    assert_eq!(
-        extract_tool_call_completed_info(&json!({ "call_id": "c1", "is_error": true })),
-        Some(("c1".into(), true))
-    );
-    assert_eq!(
-        extract_tool_call_completed_info(&json!({ "callId": "c2", "isError": false })),
-        Some(("c2".into(), false))
-    );
-    assert_eq!(
-        extract_tool_call_completed_info(&json!({})),
-        Some(("".into(), false))
-    );
-    let with_tool = json!({ "call_id": "c3", "toolCall": { "bashToolCall": {} } });
-    assert_eq!(
-        extract_tool_call_completed_info(&with_tool),
-        Some(("c3".into(), false))
-    );
-    let meta_only = json!({ "call_id": "c4", "tool_call": { "hookAdditionalContexts": {} } });
-    assert_eq!(extract_tool_call_completed_info(&meta_only), None);
-}
-
-#[test]
 fn an_events_involved_object_is_read_from_either_shape() {
     assert_eq!(
         parse_involved_object(&json!({ "object": "Pod/web-0" })),
@@ -804,9 +675,15 @@ async fn log_lines_and_status_markers_for_the_open_log_stream_are_appended() {
     );
     app.active_view = ActiveView::Logs(logs);
 
-    app.handle_stream_event("logs:web-0:1".into(), json!({ "line": "hello world" }));
+    app.handle_stream_event(
+        "logs:web-0:1".into(),
+        json!({ "seq": 1, "lines": [{ "source": "", "line": "hello world" }] }),
+    );
     app.handle_stream_event("logs:web-0:1".into(), json!({ "status": "closed" }));
-    app.handle_stream_event("logs:other:2".into(), json!({ "line": "ignored" }));
+    app.handle_stream_event(
+        "logs:other:2".into(),
+        json!({ "seq": 2, "lines": [{ "source": "", "line": "ignored" }] }),
+    );
 
     let ActiveView::Logs(l) = &app.active_view else {
         panic!("logs")
@@ -2402,8 +2279,9 @@ async fn settings_keys_navigate_toggle_edit_and_save() {
     // 'q' returns to the previous view; with no history it opens Pods.
     app.handle_key_event(common::ch('q')).await;
     assert!(matches!(app.active_view, ActiveView::Table(_)));
-    app.active_view =
-        ActiveView::Settings(srectl::views::settings_view::SettingsViewState::new());
+    app.active_view = ActiveView::Settings(srectl::views::settings_view::SettingsViewState::new(
+        &common::no_agents(),
+    ));
     app.nav_stack.clear();
     app.handle_key_event(common::key(KeyCode::Esc)).await;
     assert!(matches!(&app.active_view, ActiveView::Table(t) if t.kind == ResourceKind::Pods));
@@ -2716,7 +2594,7 @@ async fn pasted_text_lands_in_the_active_input() {
         "the Assistant composer is multi-line: a paste keeps its lines"
     );
 
-    let mut settings = srectl::views::settings_view::SettingsViewState::new();
+    let mut settings = srectl::views::settings_view::SettingsViewState::new(&common::no_agents());
     settings.is_editing = true;
     app.active_view = ActiveView::Settings(settings);
     app.handle_paste("sk-\nabc".into());
@@ -3273,7 +3151,12 @@ async fn a_single_or_unknown_container_pod_goes_straight_to_logs_or_shell() {
 async fn opening_a_resource_tree_without_a_cluster_reports_the_error_through_the_event_loop() {
     let _settings = common::env::isolate_settings();
     let (mut app, mut rx) = common::app().await;
-    app.open_resource_tree("Deployment".into(), "web".into(), Some("default".into()));
+    app.open_resource_tree(
+        "Deployment".into(),
+        "web".into(),
+        Some("default".into()),
+        None,
+    );
     assert!(matches!(&app.active_view, ActiveView::Tree(t) if t.is_loading));
 
     let ev = wait_for(&mut rx, |e| matches!(e, AppEvent::LineageResult { .. })).await;

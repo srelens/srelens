@@ -1,11 +1,16 @@
 import { ExtensionManager } from "../extensions/Extensions";
 import { useContexts } from "../lib/clusters";
+import { onSettingsRequested, takeSettingsRequest } from "../lib/settingsRequest";
+import { useTabScope } from "../lib/tabScope";
 import { openTab } from "../lib/tabsStore";
-import { useId, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
-import { isTauri } from "@srelens/core";
-import { Screen } from "@srelens/ui-kit";
+import { useId, useLayoutEffect, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
+import { describeError, isTauri } from "@srelens/core";
+import { Panel, Screen, Switch } from "@srelens/ui-kit";
+import { getAssistantSaveError, setAssistantEnabled, useAssistant } from "../lib/assistant";
 import type { RoutedScreenProps } from "../lib/routes";
 import { ApplicationLogsPane, KubernetesPane, WorkspacePane } from "./settings/PreferencePanes";
+import { SkillsPane } from "./settings/SkillsPane";
+import { CollectionsPane } from "./settings/CollectionsPane";
 import { UpdatesPane } from "./settings/UpdatesPane";
 import { AgentAccess } from "./settings/AgentAccess";
 import { AgentPane } from "./settings/AgentPane";
@@ -14,13 +19,14 @@ import { AuditPane } from "./settings/AuditPane";
 import { McpServer } from "./settings/McpServer";
 import { SecurityPane } from "./settings/SecurityPane";
 import { BackupPane } from "./settings/BackupPane";
+import { WorkspacesPane } from "./settings/WorkspacesPane";
 import { AccessibilityPane, ClustersPane, DeepLinksPane, ShortcutsPane } from "./settings/SmallPanes";
 
 /** Settings use the new design's stores and shared core commands. */
 /** §23's rail width for this screen, and this screen's alone (§A.1's table). */
 const NAV_WIDTH = 196;
 
-type SectionId = "extensions" | "agent" | "security" | "backup" | "appearance" | "accessibility" | "shortcuts" | "deeplinks" | "workspace" | "kubernetes" | "logs" | "updates" | "clusters";
+type SectionId = "extensions" | "collections" | "agent" | "skills" | "security" | "backup" | "appearance" | "accessibility" | "shortcuts" | "deeplinks" | "workspace" | "workspaces" | "kubernetes" | "logs" | "updates" | "clusters";
 
 /**
  * §23's nav, in §23's order.
@@ -55,7 +61,7 @@ type SectionId = "extensions" | "agent" | "security" | "backup" | "appearance" |
  * machine's disk, neither of which a browser has. There is nothing left over
  * to draw, so the entry is not drawn.
  *
- * **`Agent & MCP` keeps its entry on the web, and loses two of its four
+ * **`AI Assistant` (once `Agent & MCP`) keeps its entry on the web, and loses two of its four
  * panes.** It is the section this screen OPENS ON, and `McpServer` and
  * `AuditPane` were mounted there unconditionally — but `getMcpToken()`,
  * `mcpHttpStatus()` and `auditTail()` are direct `invoke`s from
@@ -85,17 +91,26 @@ type SectionId = "extensions" | "agent" | "security" | "backup" | "appearance" |
  * web as they are on the desktop.
  */
 const SECTIONS: ReadonlyArray<{ id: SectionId; label: string; desktopOnly?: true }> = [
-  { id: "agent", label: "Agent & MCP" },
+  // The AI Assistant's switch and everything it runs on (#968). The id is older
+  // than the label and stays, so openSettings("agent") still lands here.
+  { id: "agent", label: "AI Assistant" },
+  // Desktop-only: the skill store is a set of files on this machine, read
+  // through commands the web server does not have.
+  { id: "skills", label: "Skills", desktopOnly: true },
   { id: "security", label: "Security", desktopOnly: true },
   { id: "backup", label: "Backup", desktopOnly: true },
   { id: "appearance", label: "Appearance" },
   { id: "accessibility", label: "Accessibility" },
   { id: "shortcuts", label: "Shortcuts" },
   { id: "deeplinks", label: "Deep links", desktopOnly: true },
-  { id: "workspace", label: "Workspace" },
+  // Session restore, panel widths and the star prompt. The id is older than the label and stays, so openSettings("workspace") still lands here.
+  { id: "workspace", label: "Session & layout" },
   { id: "kubernetes", label: "Kubernetes" },
   { id: "logs", label: "Application logs" },
   { id: "updates", label: "Updates", desktopOnly: true },
+  { id: "workspaces", label: "Workspaces" },
+  // Saved namespace groups every namespace picker offers (#881).
+  { id: "collections", label: "Collections" },
   { id: "clusters", label: "Clusters" },
   // Not desktop-only: the web server keeps each user's own apps (#515).
   { id: "extensions", label: "Apps" },
@@ -117,10 +132,15 @@ export type SettingsProps = RoutedScreenProps;
 export function Settings({ ported, onSwitchToClassic, onLocked }: SettingsProps) {
   const desktop = isTauri();
   const contexts = useContexts();
+  const assistant = useAssistant();
+  const saveError = getAssistantSaveError();
   const visible = SECTIONS.filter((s) => !s.desktopOnly || desktop);
 
   const [updatesOpened, setUpdatesOpened] = useState(false);
   const [active, setActive] = useState<SectionId>(SECTIONS[0].id);
+  /** The Apps tab another screen asked for; a new object per request, so asking twice still moves it. */
+  const [appsTab, setAppsTab] = useState<{ tab: string }>();
+  const scope = useTabScope();
   const headId = useId();
   const tabBase = useId();
   const tabId = (id: SectionId) => `${tabBase}-${id}`;
@@ -129,7 +149,30 @@ export function Settings({ ported, onSwitchToClassic, onLocked }: SettingsProps)
   function select(id: SectionId) {
     if (id === "updates") setUpdatesOpened(true);
     setActive(id);
+    // A section the reader picks is not the one a request asked for: Apps opens
+    // on its own list, not on the catalog a past request left behind.
+    setAppsTab(undefined);
   }
+
+  // A section another screen asked for (`openSettings`): the one held for a
+  // Settings that was not open yet, and any asked for while it is. A layout
+  // effect, so a Settings opened on Apps never paints its first section first.
+  useLayoutEffect(() => {
+    const apply = () => {
+      // Only the request for THIS tab: another Settings tab may be open too.
+      const request = takeSettingsRequest(scope);
+      const section = visible.find((s) => s.id === request?.section)?.id;
+      if (!request || !section) return;
+      select(section);
+      // Every request says which Apps tab it wants — the installed list unless
+      // it names one — so a catalog asked for earlier cannot linger into it.
+      setAppsTab({ tab: request.tab ?? "installed" });
+    };
+    apply();
+    return onSettingsRequested(apply);
+  // `visible` and `select` are this render's; the subscription is for the life of the screen.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   function focus(id: SectionId) {
     select(id);
@@ -180,6 +223,28 @@ export function Settings({ ported, onSwitchToClassic, onLocked }: SettingsProps)
         // `isTauri` and no backend command at all.
         return (
           <div className="settings-agent flex flex-col">
+            {/* #968: first, the switch. Off keeps every pane below with its
+                values, so switching back on finds them as they were. */}
+            <Panel title="Availability">
+              <Switch
+                label="AI Assistant"
+                hint="Hides the assistant everywhere and makes srelens's MCP server refuse every tool call."
+                on={assistant.enabled}
+                onChange={setAssistantEnabled}
+              />
+              {!assistant.enabled && (
+                <p className="mt-3 text-[0.75rem] leading-relaxed text-muted">
+                  Turned off. These settings are kept for when it is switched back on.
+                </p>
+              )}
+              {/* The switch shows what the file holds; when a change did not
+                  reach it, say so rather than let the switch flip back silently. */}
+              {saveError !== null && (
+                <p role="alert" className="mt-3 text-[0.75rem] leading-relaxed" style={{ color: "var(--sev)" }}>
+                  Could not save the AI Assistant setting: {describeError(saveError).detail}
+                </p>
+              )}
+            </Panel>
             <AgentAccess />
             {desktop ? (
               <>
@@ -204,6 +269,10 @@ export function Settings({ ported, onSwitchToClassic, onLocked }: SettingsProps)
             )}
           </div>
         );
+      case "skills":
+        return <SkillsPane />;
+      case "collections":
+        return <CollectionsPane />;
       case "security":
         return <SecurityPane onLocked={onLocked} />;
       case "backup":
@@ -218,6 +287,8 @@ export function Settings({ ported, onSwitchToClassic, onLocked }: SettingsProps)
         return <DeepLinksPane />;
       case "workspace":
         return <WorkspacePane />;
+      case "workspaces":
+        return <WorkspacesPane />;
       case "kubernetes":
         return <KubernetesPane />;
       case "logs":
@@ -225,7 +296,7 @@ export function Settings({ ported, onSwitchToClassic, onLocked }: SettingsProps)
       case "updates":
         return null;
       case "extensions":
-        return <ExtensionManager />;
+        return <ExtensionManager show={appsTab} />;
       case "clusters":
         return <ClustersPane />;
     }

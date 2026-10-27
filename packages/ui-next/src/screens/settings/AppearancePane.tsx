@@ -193,7 +193,7 @@ export interface AppearancePaneProps {
    * and it must stay one: switching back has to work when this screen is the
    * thing being left. `NextApp`'s `leave` is what this is for — it saves the
    * handoff, calls `switchDesign`, and renders a refusal at the window root,
-   * because the classic toast host is not in this tree.
+   * because the toast host was not in this tree when it was written (#374).
    */
   onSwitchToClassic: () => void;
 }
@@ -535,9 +535,12 @@ export function AppearancePane({ ported, onSwitchToClassic }: AppearancePaneProp
       */}
       <Panel title="Design">
         <p className="text-[0.75rem] leading-relaxed text-muted">
-          You are in the new design. It is <strong className="text-ink">in progress</strong>: some
-          screens are not there yet, and the ones that are may still change. Switching reloads the
-          window, and the classic design has this same choice in the same place.
+          You are in the new design, the default. A few classic features have not reached it yet.
+          Switching reloads the window, and the classic design has this same choice in the same
+          place.
+        </p>
+        <p className="mt-2 text-[0.75rem] text-muted">
+          The classic design is deprecated and will be removed in a future version.
         </p>
         {ported.length > 0 && (
           <>
@@ -553,7 +556,7 @@ export function AppearancePane({ ported, onSwitchToClassic }: AppearancePaneProp
         )}
         <div className="mt-3 flex flex-wrap items-center gap-2">
           <Button variant="secondary" onClick={onSwitchToClassic}>
-            Switch to the classic design
+            Switch to Classic (deprecated)
           </Button>
         </div>
       </Panel>

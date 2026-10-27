@@ -38,6 +38,7 @@
 <p align="center">
   <a href="https://github.com/srelens/srelens/stargazers"><img alt="GitHub stars" src="https://img.shields.io/github/stars/srelens/srelens?logo=github&color=eab308"></a>
   <a href="https://www.reddit.com/r/srelens/"><img alt="Reddit: r/srelens" src="https://img.shields.io/reddit/subreddit-subscribers/srelens?label=r%2Fsrelens&logo=reddit&logoColor=white&color=FF4500"></a>
+  <a href="https://join.slack.com/t/srelens/shared_invite/zt-4cu0tzuzo-Ktei1KsVlqPi2XY~irTDAg"><img alt="Slack: srelens" src="https://img.shields.io/badge/Slack-srelens-4A154B?logo=slack&logoColor=white"></a>
   <a href="https://deepwiki.com/srelens/srelens"><img alt="Ask DeepWiki" src="https://img.shields.io/badge/Ask-DeepWiki-2563eb"></a>
 </p>
 
@@ -56,6 +57,10 @@
   <img alt="Terminal UI" src="https://img.shields.io/badge/terminal-srectl-14b8a6">
   <img alt="MCP server" src="https://img.shields.io/badge/agents-MCP-fb923c">
   <img alt="Project status: stable" src="https://img.shields.io/badge/status-stable-22c55e">
+</p>
+
+<p align="center">
+  <img alt="Die srelens-Desktop-App zeigt Kubernetes-Objekte live mit Suche und Namespace-Filtern" src="../assets/screenshots/srelens-demo-changes.gif" width="100%">
 </p>
 
 <p align="center">
@@ -106,11 +111,11 @@ diesen Untersuchungsablauf in einem einzigen Local-first-Workspace.
 ## Desktop-App
 
 Die Desktop-App ist ein vollständiger Kubernetes-Workspace in einem nativen
-Fenster. Die Screenshots unten zeigen das **neue Design**, das Bildschirm für
-Bildschirm eingeführt wird: Du schaltest es unter
-**Settings → Appearance → Design → New design** (Einstellungen → Darstellung →
-Design → Neues Design) ein und kannst jederzeit auf demselben Weg zurückwechseln.
-Es gibt sechs Themes: Light, Paper, Dark, Midnight, Glass und High contrast.
+Fenster. Die Screenshots unten zeigen das **neue Design**, das jetzt der Standard
+ist. Es gibt sechs Themes: Light, Paper, Dark, Midnight, Glass und High contrast.
+Das klassische Design ist veraltet und wird in einer künftigen Version entfernt;
+bis dahin kannst du unter **Settings → Appearance → Design** (Einstellungen →
+Darstellung → Design) zu ihm wechseln.
 
 <table>
   <tr>
@@ -399,6 +404,8 @@ also bei jedem Upgrade.
 
 - [r/srelens auf Reddit](https://www.reddit.com/r/srelens/) – Ankündigungen,
   Fragen und Feedback
+- [srelens auf Slack](https://join.slack.com/t/srelens/shared_invite/zt-4cu0tzuzo-Ktei1KsVlqPi2XY~irTDAg) –
+  Chat mit Maintainern und anderen Nutzern
 - [Issues](https://github.com/srelens/srelens/issues) – Bugs und Feature-Requests
 - [Website](https://srelens.com)
 

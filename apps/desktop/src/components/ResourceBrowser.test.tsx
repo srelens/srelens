@@ -684,6 +684,29 @@ describe("ResourceBrowser", () => {
     expect(screen.getByRole("complementary", { name: "Details" })).toBeDefined();
   });
 
+  // #968: on a cluster the AI Assistant is off for, the pod detail offers no Ask.
+  it("offers Ask assistant on a pod only where the AI Assistant may act", async () => {
+    (window as unknown as { __TAURI_INTERNALS__?: object }).__TAURI_INTERNALS__ = {};
+    try {
+      listNamespacesMock.mockResolvedValue({ namespaces: ["default"] });
+      watchResourceMock.mockImplementation(watchWith([pod]));
+      const view = render(<ResourceBrowser context="kind-dev" kind="pods" />);
+      await waitFor(() => screen.getByText("web-1"));
+      fireEvent.click(screen.getByText("web-1"));
+      await waitFor(() => expect(screen.getByRole("button", { name: "Logs" })).toBeDefined());
+      expect(screen.getByRole("button", { name: "Ask assistant" })).toBeDefined();
+      view.unmount();
+
+      render(<ResourceBrowser context="kind-dev" kind="pods" assistantAllowed={false} />);
+      await waitFor(() => screen.getByText("web-1"));
+      fireEvent.click(screen.getByText("web-1"));
+      await waitFor(() => expect(screen.getByRole("button", { name: "Logs" })).toBeDefined());
+      expect(screen.queryByRole("button", { name: "Ask assistant" })).toBeNull();
+    } finally {
+      delete (window as unknown as { __TAURI_INTERNALS__?: object }).__TAURI_INTERNALS__;
+    }
+  });
+
   it("deep-links to a resource's detail via the focus prop (global search)", async () => {
     listNamespacesMock.mockResolvedValue({ namespaces: ["default"] });
     watchResourceMock.mockImplementation(watchWith([pod]));
@@ -818,11 +841,11 @@ describe("ResourceBrowser", () => {
       expect(screen.queryByRole("columnheader", { name: /Version/ })).toBeNull(),
     );
     // …and the choice is persisted.
-    // "taints" rides along: since #426 the Taints column starts hidden, and the
+    // "externalIp" and "taints" ride along: defaultHidden columns start hidden, and the
     // first toggle of ANY column on this view is what turns "no choice yet"
     // into a stored choice — so the default it was showing is written down.
     expect(JSON.parse(localStorage.getItem("srelens.hiddenColumns")!)).toEqual({
-      nodes: ["taints", "version"],
+      nodes: ["externalIp", "taints", "version"],
     });
 
     // Remounting the nodes view keeps the column hidden.

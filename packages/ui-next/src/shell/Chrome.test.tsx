@@ -3,14 +3,20 @@ import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { Chrome } from "./Chrome";
 import {
+  activeRoute,
+  closeTab,
   createWorkspace,
   currentWorkspace,
   getState,
   openTab,
+  setActiveCluster,
   setState,
+  setWorkspaceColor,
+  setWorkspaceProtected,
   switchWorkspace,
   togglePin,
 } from "../lib/tabsStore";
+import { takeSettingsRequest } from "../lib/settingsRequest";
 import { defaultState } from "../lib/tabs";
 import { APPEARANCE_KEY } from "../lib/appearance";
 import { lockWorkspace, resetLock, __setKnownVaultMode } from "./LockGate";
@@ -163,6 +169,34 @@ describe("Chrome", () => {
     expect(currentWorkspace().id).toBe(id);
   });
 
+  it("draws the workspace's colour on the chip and on its row", async () => {
+    setWorkspaceColor(getState().currentId, "var(--mark-teal)");
+    chrome();
+    const chip = screen.getByRole("button", { name: /Default/ });
+    expect(chip.querySelector<HTMLElement>('[data-slot="workspace-color"]')?.style.background).toBe("var(--mark-teal)");
+    await openSwitcher();
+    const row = screen.getAllByRole("button", { name: /^Default/ }).find((el) => el.classList.contains("ns-row"))!;
+    expect(row.querySelector<HTMLElement>('[data-slot="workspace-color"]')?.style.background).toBe("var(--mark-teal)");
+  });
+
+  it("marks a protected workspace on the chip and on its row", async () => {
+    setWorkspaceProtected(getState().currentId, true);
+    chrome();
+    const chip = screen.getByRole("button", { name: /Default/ });
+    expect(chip.querySelector('[data-slot="workspace-protected"]')).not.toBeNull();
+    await openSwitcher();
+    const row = screen.getAllByRole("button", { name: /^Default/ }).find((el) => el.classList.contains("ns-row"))!;
+    expect(row.textContent).toContain("· Protected");
+  });
+
+  it("opens Settings on Workspaces from the switcher", async () => {
+    chrome();
+    await openSwitcher();
+    await userEvent.click(screen.getByRole("button", { name: "Manage workspaces…" }));
+    expect(activeRoute()).toBe("/settings");
+    expect(takeSettingsRequest(null)?.section).toBe("workspaces");
+  });
+
   it("asks before removing a workspace holding tabs the user opened", async () => {
     const id = createWorkspace("Team", ["prod"]);
     // `createWorkspace` switches into it, so this tab lands in Team.
@@ -201,6 +235,34 @@ describe("Chrome", () => {
     await userEvent.click(screen.getByRole("button", { name: /Remove Team/ }));
     expect(screen.getByRole("dialog", { name: /Remove Team/ })).toBeDefined();
     expect(getState().workspaces.some((w) => w.id === id)).toBe(true);
+  });
+
+  /** Team, on stage with only its home tab on screen, and a Pods tab put away under prod (#908). */
+  const teamWithAShelvedTab = () => {
+    const id = createWorkspace("Team", ["prod", "stage"]);
+    openTab("/k/pods");
+    setActiveCluster("stage");
+    closeTab(currentWorkspace().activeId); // stage's overview
+    expect(currentWorkspace().tabs.map((t) => t.route)).toEqual(["/"]);
+    expect(currentWorkspace().shelved?.prod.tabs.map((t) => t.route)).toEqual(["/k/pods"]);
+    switchWorkspace(getState().workspaces[0].id);
+    return id;
+  };
+
+  it("asks before removing a workspace whose tabs are put away under another cluster", async () => {
+    const id = teamWithAShelvedTab();
+    chrome();
+    await openSwitcher();
+    await userEvent.click(screen.getByRole("button", { name: /Remove Team/ }));
+    expect(screen.getByRole("dialog", { name: /Remove Team/ }).textContent).toContain("2 open tabs");
+    expect(getState().workspaces.some((w) => w.id === id)).toBe(true);
+  });
+
+  it("counts the tabs put away under another cluster in the switcher", async () => {
+    teamWithAShelvedTab();
+    chrome();
+    await openSwitcher();
+    expect(screen.getByRole("button", { name: /^Team/ }).textContent).toContain("2 clusters · 2 tabs");
   });
 
   it("keeps the workspace when the confirmation is dismissed", async () => {
@@ -300,6 +362,29 @@ describe("Chrome", () => {
       expect(screen.queryByRole("button", { name: /^Team/ })).toBeNull();
       expect(screen.getByText("Team")).toBeDefined();
       expect(getState().workspaces.some((w) => w.id === id)).toBe(true);
+    });
+
+    it("keeps the workspace's colour on the sealed chip", () => {
+      setWorkspaceColor(getState().currentId, "var(--mark-teal)");
+      lockWorkspace();
+      const { container } = chrome();
+      const swatch = container.querySelector<HTMLElement>('[data-sealed="true"] [data-slot="workspace-color"]');
+      expect(swatch?.style.background).toBe("var(--mark-teal)");
+    });
+
+    it("keeps the shield, and the word, on the sealed chip", () => {
+      setWorkspaceProtected(getState().currentId, true);
+      lockWorkspace();
+      const { container } = chrome();
+      const chip = container.querySelector('[data-sealed="true"]')!;
+      expect(chip.querySelector('[data-slot="workspace-protected"]')?.getAttribute("aria-hidden")).toBe("true");
+      expect(chip.textContent).toContain("Default Protected");
+    });
+
+    it("draws no shield on the sealed chip of a workspace that is not protected", () => {
+      lockWorkspace();
+      const { container } = chrome();
+      expect(container.querySelector('[data-sealed="true"] [data-slot="workspace-protected"]')).toBeNull();
     });
 
     it("disables the way into Settings, and says why", async () => {

@@ -17,6 +17,8 @@ export interface PodSummary {
    *  e.g. "acme/checkout-api:118a7e, envoyproxy/envoy:v1.30". Empty when the
    *  pod has no containers. */
   image: string;
+  /** Primary pod IP from status.podIP. */
+  podIp?: string;
   /**
    * Why a container is waiting, when one is — "CrashLoopBackOff",
    * "ImagePullBackOff", "ContainerCreating" — and "" when none is. `phase`
@@ -36,6 +38,46 @@ export interface PodSummary {
    * Optional only for the sake of fixtures: `k8s.listPods` always sends it.
    */
   status?: string;
+  /**
+   * What the pod's containers ask for and may use, summed: CPU in millicores,
+   * memory in MiB — the units metrics-server reports usage in. `0` when no
+   * container sets one. Optional only for the sake of fixtures.
+   */
+  cpuReqMillicores?: number;
+  cpuLimMillicores?: number;
+  memReqMiB?: number;
+  memLimMiB?: number;
+  /**
+   * Whether EVERY container sets the limit, so the sum above is the pod's
+   * whole ceiling. With one unlimited container the pod has no ceiling, and
+   * the partial sum is a number it can pass with nothing wrong. Read these
+   * through `podUsage`, never the sums alone. (#864)
+   */
+  cpuLimAll?: boolean;
+  memLimAll?: boolean;
+  /**
+   * Each container's own state: app containers in spec order, then init
+   * containers. `ready` says how many are ready and not which is not, or why.
+   * Read each through `containerVerdict`. Optional only for fixtures. (#878)
+   */
+  containers?: PodContainer[];
+}
+
+/** One container of a pod, as far as a list row needs it. */
+export interface PodContainer {
+  name: string;
+  /** `sidecar` is an init container that restarts always, and so runs for the
+   *  pod's whole life beside the app containers. */
+  kind: "app" | "init" | "sidecar";
+  /** `unknown` when the kubelet has reported nothing for it yet. */
+  state: "running" | "waiting" | "terminated" | "unknown";
+  /** The waiting or terminated reason, or `""`. */
+  reason: string;
+  /** The exit code of a terminated container. */
+  exitCode?: number | null;
+  ready: boolean;
+  restarts: number;
+  image: string;
 }
 
 export interface NamespacesOutcome {

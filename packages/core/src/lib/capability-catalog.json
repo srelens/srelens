@@ -1,5 +1,35 @@
 [
   {
+    "id": "collections.matchNames",
+    "readOnly": true,
+    "destructive": false,
+    "requiresConfirm": false,
+    "sensitive": false,
+    "impact": "low",
+    "confirm": null,
+    "uiOnly": true
+  },
+  {
+    "id": "collections.resolveNamespaces",
+    "readOnly": true,
+    "destructive": false,
+    "requiresConfirm": false,
+    "sensitive": false,
+    "impact": "low",
+    "confirm": null,
+    "uiOnly": true
+  },
+  {
+    "id": "collections.validate",
+    "readOnly": true,
+    "destructive": false,
+    "requiresConfirm": false,
+    "sensitive": false,
+    "impact": "low",
+    "confirm": null,
+    "uiOnly": true
+  },
+  {
     "id": "extension.secretStore",
     "readOnly": false,
     "destructive": false,
@@ -282,6 +312,15 @@
     "confirm": "Change scheduling[ on {resource}][ in cluster {cluster}]?"
   },
   {
+    "id": "k8s.countResources",
+    "readOnly": true,
+    "destructive": false,
+    "requiresConfirm": false,
+    "sensitive": false,
+    "impact": "low",
+    "confirm": null
+  },
+  {
     "id": "k8s.createNodeDebugPod",
     "readOnly": false,
     "destructive": true,
@@ -417,6 +456,15 @@
     "confirm": "Reveal secret material[ from {resource}][ in cluster {cluster}] to the caller?"
   },
   {
+    "id": "k8s.gpuInventory",
+    "readOnly": true,
+    "destructive": false,
+    "requiresConfirm": false,
+    "sensitive": false,
+    "impact": "low",
+    "confirm": null
+  },
+  {
     "id": "k8s.helmInstall",
     "readOnly": false,
     "destructive": false,
@@ -496,6 +544,16 @@
     "sensitive": false,
     "impact": "low",
     "confirm": null
+  },
+  {
+    "id": "k8s.listApiKinds",
+    "readOnly": true,
+    "destructive": false,
+    "requiresConfirm": false,
+    "sensitive": false,
+    "impact": "low",
+    "confirm": null,
+    "uiOnly": true
   },
   {
     "id": "k8s.listCRDs",
@@ -813,6 +871,24 @@
     "confirm": "Apply the change this action declares[ to {resource}][ in cluster {cluster}]? It can start work the controller runs straight away, including replacing what is running."
   },
   {
+    "id": "k8s.nodeCapacityOverview",
+    "readOnly": true,
+    "destructive": false,
+    "requiresConfirm": false,
+    "sensitive": false,
+    "impact": "low",
+    "confirm": null
+  },
+  {
+    "id": "k8s.nodeInspect",
+    "readOnly": true,
+    "destructive": false,
+    "requiresConfirm": false,
+    "sensitive": false,
+    "impact": "low",
+    "confirm": null
+  },
+  {
     "id": "k8s.nodeJournalLogs",
     "readOnly": true,
     "destructive": false,
@@ -993,6 +1069,15 @@
     "confirm": "Request a rolling restart[ of {resource}][ in cluster {cluster}]? Running pods will be replaced."
   },
   {
+    "id": "k8s.resourceTree",
+    "readOnly": true,
+    "destructive": false,
+    "requiresConfirm": false,
+    "sensitive": false,
+    "impact": "low",
+    "confirm": null
+  },
+  {
     "id": "k8s.rolloutRestart",
     "readOnly": false,
     "destructive": false,
@@ -1018,6 +1103,15 @@
     "sensitive": false,
     "impact": "medium",
     "confirm": "Change the replica count[ of {resource}][ in cluster {cluster}]?"
+  },
+  {
+    "id": "k8s.serviceHealthProbe",
+    "readOnly": true,
+    "destructive": false,
+    "requiresConfirm": false,
+    "sensitive": false,
+    "impact": "low",
+    "confirm": null
   },
   {
     "id": "k8s.setFields",
@@ -1092,6 +1186,24 @@
     "confirm": null
   },
   {
+    "id": "k8s.whyNotReady",
+    "readOnly": true,
+    "destructive": false,
+    "requiresConfirm": false,
+    "sensitive": false,
+    "impact": "low",
+    "confirm": null
+  },
+  {
+    "id": "k8s.whyPending",
+    "readOnly": true,
+    "destructive": false,
+    "requiresConfirm": false,
+    "sensitive": false,
+    "impact": "low",
+    "confirm": null
+  },
+  {
     "id": "ping",
     "readOnly": true,
     "destructive": false,
@@ -1117,6 +1229,15 @@
     "sensitive": false,
     "impact": "medium",
     "confirm": "Allow this change[ to {resource}][ in cluster {cluster}]?"
+  },
+  {
+    "id": "skills.get",
+    "readOnly": true,
+    "destructive": false,
+    "requiresConfirm": false,
+    "sensitive": false,
+    "impact": "low",
+    "confirm": null
   },
   {
     "id": "toolbox.diagnoseContext",

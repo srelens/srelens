@@ -1,18 +1,20 @@
 //! Per-agent identity and command construction. Pure: given a resolved binary
 //! path, a server URL and a token, produce the argv and MCP-config file the CLI
-//! needs. Spawning and PATH detection live in the desktop crate.
+//! needs. Finding the binary and spawning it are each app's (the desktop
+//! and srectl).
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 /// Which agent backs a turn. The first three shell out to their vendor CLIs;
 /// `Srelens` is srelens's own in-process agent, which talks directly to a
 /// provider API with the user's key and needs no external binary at all.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum AgentKind {
     Claude,
     Codex,
     Cursor,
+    #[default]
     Srelens,
 }
 
@@ -77,16 +79,77 @@ impl McpConfig {
     }
 }
 
-/// A resolved command line, ready for the desktop crate to spawn.
+/// A resolved command line, ready for an app to spawn.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AgentCommand {
     pub program: String,
     pub args: Vec<String>,
-    /// Environment variables the desktop must set on the child process.
+    /// Environment variables the app must set on the child process.
     /// Used for secrets (e.g. Codex's MCP bearer token) that must never
     /// appear in argv, where they'd be visible to anyone who can list
     /// processes on the machine.
     pub env: Vec<(String, String)>,
+    /// What to write to the child's stdin before closing it; `None` spawns
+    /// it with stdin closed.
+    pub stdin: Option<String>,
+}
+
+/// Whether `id` may follow a CLI's model flag. A model id comes from a
+/// setting or a chat, so it must not be able to pass for a flag or smuggle
+/// whitespace into argv: non-empty, at most 128 characters, not starting with
+/// `-`, and only `[A-Za-z0-9._:/@\[\]-]` (`claude-fable-5[1m]`,
+/// `models/gemini-2.5-pro`). Callers drop an invalid id (the CLI's own
+/// default model) rather than failing the turn.
+pub fn valid_model_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 128
+        && !id.starts_with('-')
+        && id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | ':' | '/' | '@' | '[' | ']' | '-'))
+}
+
+/// One model a CLI offers: the `id` goes after its model flag, the `label` is
+/// what a picker shows.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ModelChoice {
+    pub id: String,
+    pub label: String,
+}
+
+/// Claude Code has no model-listing command, so the picker offers the aliases
+/// its `--model` flag accepts.
+pub const CLAUDE_MODEL_ALIASES: [&str; 4] = ["fable", "opus", "sonnet", "haiku"];
+
+/// The argv (after the binary) that prints `kind`'s models, or `None` when
+/// the CLI has no such command (Claude Code, and the native agent, which has
+/// no CLI at all).
+pub fn model_list_args(kind: AgentKind) -> Option<&'static [&'static str]> {
+    match kind {
+        AgentKind::Codex => Some(&["debug", "models"]),
+        AgentKind::Cursor => Some(&["models"]),
+        AgentKind::Claude | AgentKind::Srelens => None,
+    }
+}
+
+impl AgentCommand {
+    /// Run on `model`: Codex takes `-m <id>`, Claude Code and Cursor
+    /// `--model <id>`, put right after the first arg (`exec` / `-p`) so the
+    /// rest of the argv, and the trailing prompt, stay as built. `None`, an
+    /// id `valid_model_id` refuses, and the native agent (it has no CLI)
+    /// leave the command unchanged.
+    pub fn with_model(mut self, kind: AgentKind, model: Option<&str>) -> Self {
+        let flag = match kind {
+            AgentKind::Codex => "-m",
+            AgentKind::Claude | AgentKind::Cursor => "--model",
+            AgentKind::Srelens => return self,
+        };
+        if let Some(id) = model.filter(|id| valid_model_id(id)) {
+            let at = self.args.len().min(1);
+            self.args.splice(at..at, [flag.to_string(), id.to_string()]);
+        }
+        self
+    }
 }
 
 /// The only tools the agent may call: srelens's own MCP tools, exposed under
@@ -162,6 +225,17 @@ pub const BASE_SYSTEM_PROMPT: &str = concat!(
     "sync status, and deployment sources for workloads on the active cluster.",
 );
 
+/// Whether `program` is a Windows batch file (`.cmd`/`.bat`, any case), as
+/// npm installs `claude` and `codex`. Rust refuses to spawn one with a newline
+/// in an argument, and cmd.exe expands `%VAR%` in the rest, so such a binary
+/// gets its prompt on stdin (`claude_command_via_stdin`,
+/// `codex_command_via_stdin`). Pure path logic, the same on every OS.
+pub fn is_batch_shim(program: &str) -> bool {
+    std::path::Path::new(program)
+        .extension()
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("cmd") || ext.eq_ignore_ascii_case("bat"))
+}
+
 /// Build the Claude Code argv. `resume` carries a prior session id for a
 /// follow-up turn. Prompt is the trailing positional so it can't be mistaken
 /// for a flag value.
@@ -171,6 +245,43 @@ pub fn claude_command(
     mcp_config_path: &str,
     resume: Option<&str>,
 ) -> AgentCommand {
+    let mut args = claude_args(mcp_config_path, ["--append-system-prompt", BASE_SYSTEM_PROMPT], resume);
+    // `--` ends option parsing so a prompt that itself looks like a flag
+    // (e.g. a pasted `--disallowedTools none`) can never be reinterpreted by
+    // clap as overriding the flags above — it is always treated as the
+    // trailing positional message. Verified live against the real CLI.
+    args.push("--".to_string());
+    args.push(prompt.to_string());
+    // Claude passes its MCP bearer token via the config file at
+    // `mcp_config_path`, never via env.
+    AgentCommand {
+        program: binary.to_string(),
+        args,
+        env: Vec::new(),
+        stdin: None,
+    }
+}
+
+/// `claude_command` for a batch shim (`is_batch_shim`): the same box, with the
+/// system prompt read from `system_prompt_file` and no prompt in argv — the
+/// caller sets `stdin` to it, which `claude -p` reads when given no positional.
+pub fn claude_command_via_stdin(
+    binary: &str,
+    mcp_config_path: &str,
+    system_prompt_file: &str,
+    resume: Option<&str>,
+) -> AgentCommand {
+    AgentCommand {
+        program: binary.to_string(),
+        args: claude_args(mcp_config_path, ["--append-system-prompt-file", system_prompt_file], resume),
+        env: Vec::new(),
+        stdin: None,
+    }
+}
+
+/// Every Claude flag but the prompt: the box both builders above share, so
+/// they cannot drift apart. `system_prompt` is the flag and its value.
+fn claude_args(mcp_config_path: &str, system_prompt: [&str; 2], resume: Option<&str>) -> Vec<String> {
     let mut args = vec![
         "-p".to_string(),
         "--output-format".to_string(),
@@ -194,26 +305,14 @@ pub fn claude_command(
         ALLOWED_TOOLS.to_string(),
         "--disallowedTools".to_string(),
         DISALLOWED_TOOLS.to_string(),
-        "--append-system-prompt".to_string(),
-        BASE_SYSTEM_PROMPT.to_string(),
+        system_prompt[0].to_string(),
+        system_prompt[1].to_string(),
     ];
     if let Some(id) = resume {
         args.push("--resume".to_string());
         args.push(id.to_string());
     }
-    // `--` ends option parsing so a prompt that itself looks like a flag
-    // (e.g. a pasted `--disallowedTools none`) can never be reinterpreted by
-    // clap as overriding the flags above — it is always treated as the
-    // trailing positional message. Verified live against the real CLI.
-    args.push("--".to_string());
-    args.push(prompt.to_string());
-    // Claude passes its MCP bearer token via the config file at
-    // `mcp_config_path`, never via env.
-    AgentCommand {
-        program: binary.to_string(),
-        args,
-        env: Vec::new(),
-    }
+    args
 }
 
 /// Escape a string for embedding inside a double-quoted TOML value (used for
@@ -225,7 +324,7 @@ fn escape_toml_string(s: &str) -> String {
     s.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
-/// The environment variable name the desktop must set on the Codex child
+/// The environment variable name the app must set on the Codex child
 /// process to carry the MCP bearer token. Never passed via argv (see
 /// `codex_command`).
 pub const CODEX_TOKEN_ENV: &str = "SRELENS_MCP_TOKEN";
@@ -234,13 +333,23 @@ pub const CODEX_TOKEN_ENV: &str = "SRELENS_MCP_TOKEN";
 /// exact flags were verified live against the real `codex` CLI to box it to
 /// srelens's MCP tools with no other escape.
 ///
-/// `--disable shell_tool --disable unified_exec` removes Codex's shell — its
-/// only whole-disk-read escape hatch. What remains is Codex's internal file
-/// tool, which is confined to the empty directory passed via `-C` under
-/// `-s read-only` (so it can read nothing outside that empty workspace and
-/// write nothing at all). MCP tools (srelens's own) still work normally,
-/// configured via the two `-c mcp_servers.srelens.*` TOML overrides below.
-/// Do not change these flags without re-verifying against the real CLI.
+/// `--disable shell_tool --disable unified_exec` removes Codex's shell, and
+/// the feature switches below remove every other default tool surface, so no
+/// tool the model gets can read a file: `-s read-only` itself still grants
+/// reads of the whole disk (its recorded profile is `root: read`), so the
+/// absence of a reading tool, not the sandbox, is what keeps reads in. The
+/// sandbox refuses every write, and `-C` points the turn at an empty
+/// directory. MCP tools (srelens's own) still work normally, configured via
+/// the `-c mcp_servers.srelens.*` TOML overrides below. One of them,
+/// `default_tools_approval_mode="approve"`, is what lets a write reach
+/// srelens at all: `codex exec` cannot ask the user, so Codex would refuse
+/// every non-read-only tool itself, and srelens's own consent gate would never
+/// be asked. Codex hands the call over and srelens asks. Known gap:
+/// `apply_patch` reads a target file to verify a patch before the sandbox
+/// refuses the write, so a model can test guesses about a file's existence
+/// and lines (never see its content); dropping the tool takes a whole
+/// replacement model catalog. Do not change these flags without
+/// re-verifying against the real CLI.
 ///
 /// The bearer token is passed only via `env` (`CODEX_TOKEN_ENV`), never as an
 /// argv value — argv is visible to anyone who can list processes on the
@@ -252,6 +361,35 @@ pub fn codex_command(
     token: &str,
     empty_cwd: &str,
     image_paths: &[String],
+    resume: Option<&str>,
+) -> AgentCommand {
+    codex_boxed(binary, prompt, mcp_url, token, empty_cwd, image_paths, resume)
+}
+
+/// `codex_command` for a batch shim (`is_batch_shim`): the same argv with `-`
+/// as the prompt, which tells `codex exec` to read it from stdin — the caller
+/// sets `stdin` to it.
+pub fn codex_command_via_stdin(
+    binary: &str,
+    mcp_url: &str,
+    token: &str,
+    empty_cwd: &str,
+    image_paths: &[String],
+    resume: Option<&str>,
+) -> AgentCommand {
+    codex_boxed(binary, "-", mcp_url, token, empty_cwd, image_paths, resume)
+}
+
+/// The box both Codex builders above share, so they cannot drift apart;
+/// `prompt_arg` is the trailing positional.
+fn codex_boxed(
+    binary: &str,
+    prompt_arg: &str,
+    mcp_url: &str,
+    token: &str,
+    empty_cwd: &str,
+    image_paths: &[String],
+    resume: Option<&str>,
 ) -> AgentCommand {
     let mut args = vec![
         "exec".to_string(),
@@ -267,6 +405,29 @@ pub fn codex_command(
         "shell_tool".to_string(),
         "--disable".to_string(),
         "unified_exec".to_string(),
+    ];
+    // Tool surfaces Codex turns on by default that `--ignore-user-config`
+    // does not reach: ChatGPT connectors (`apps`: GitHub commits and merges,
+    // site deploys, …), goals, image viewing and generation, plugins and
+    // their skills, sub-agents, web search, and the user's own skills catalog
+    // (with its local paths). Without these a codex-cli 0.149.1 turn offered
+    // the model 221 tools; with them, srelens's MCP tools plus `apply_patch`
+    // (writes refused by `-s read-only`), `update_plan` and the MCP-resource
+    // tools (srelens's server only). An unknown feature name makes Codex
+    // refuse to start, so a renamed flag fails closed (#215, verified live).
+    for feature in ["apps", "goals", "view_image", "image_generation", "plugins"] {
+        args.push("--disable".to_string());
+        args.push(feature.to_string());
+    }
+    for value in [
+        "agents.enabled=false",
+        "web_search=\"disabled\"",
+        "skills.include_instructions=false",
+    ] {
+        args.push("-c".to_string());
+        args.push(value.to_string());
+    }
+    args.extend([
         "-s".to_string(),
         "read-only".to_string(),
         "-C".to_string(),
@@ -278,6 +439,14 @@ pub fn codex_command(
         ),
         "-c".to_string(),
         format!("mcp_servers.srelens.bearer_token_env_var=\"{CODEX_TOKEN_ENV}\""),
+        // `codex exec` has no approver: with the default approval mode every
+        // MCP tool that is not `readOnlyHint` is refused inside Codex before
+        // srelens sees the call (codex-cli 0.149.1: "MCP tool call requires
+        // approval, but approval policy is never"). `approve` passes the call
+        // on, so srelens's own consent gate decides every write — as with
+        // Claude's `--dangerously-skip-permissions`.
+        "-c".to_string(),
+        "mcp_servers.srelens.default_tools_approval_mode=\"approve\"".to_string(),
         // Surface the model's reasoning as `reasoning` items in the JSON
         // stream (mapped to Thinking events by `codex::parse_line`) — with
         // `--ignore-user-config` above, the user's own config.toml can't
@@ -287,7 +456,18 @@ pub fn codex_command(
         // no reasoning items at all.
         "-c".to_string(),
         "model_reasoning_summary=\"detailed\"".to_string(),
-    ];
+    ]);
+    // A follow-up continues the turn's thread. Everything above is `exec`'s,
+    // so it must stay ahead of the subcommand: `codex exec resume` keeps
+    // nothing of the box from the thread it resumes (a bare resume gets the
+    // shell back) and its own options take neither `-s` nor `-C`. Images go
+    // after it, to `resume`'s own `-i`: `exec`'s takes several values and
+    // would swallow `resume <thread>`, silently starting a new thread
+    // (#215, verified live).
+    if let Some(thread) = resume {
+        args.push("resume".to_string());
+        args.push(thread.to_string());
+    }
     for path in image_paths {
         args.push("-i".to_string());
         args.push(path.clone());
@@ -298,18 +478,21 @@ pub fn codex_command(
     // treated as the trailing positional message. Verified live against the
     // real CLI.
     args.push("--".to_string());
-    args.push(prompt.to_string());
+    args.push(prompt_arg.to_string());
     AgentCommand {
         program: binary.to_string(),
         args,
         env: vec![(CODEX_TOKEN_ENV.to_string(), token.to_string())],
+        stdin: None,
     }
 }
 
-/// Environment variable the desktop sets to point the Cursor CLI at a
-/// per-turn config directory instead of its real `~/.cursor` config. The
-/// desktop writes `cursor_cli_config_json()` and `cursor_mcp_json()` into
-/// that directory before spawning; never passed via argv.
+/// Environment variable set on the Cursor CLI to point it at a per-chat
+/// config directory instead of its real `~/.cursor` config.
+/// `prepare_cursor_turn` rewrites `cursor_cli_config_json()` there before
+/// every turn
+/// (`cursor_mcp_json()` goes in the workspace's `.cursor/`), and Cursor keeps
+/// its chats there, which `--resume` reads (#952). Never passed via argv.
 pub const CURSOR_CONFIG_DIR_ENV: &str = "CURSOR_CONFIG_DIR";
 
 /// Build the Cursor CLI (`cursor-agent`) argv. These exact flags were
@@ -326,7 +509,7 @@ pub const CURSOR_CONFIG_DIR_ENV: &str = "CURSOR_CONFIG_DIR";
 /// and do not drop `--force` (MCP calls stop working). NO `--verbose` — Cursor
 /// errors on that flag. Do not change these flags without re-verifying live.
 ///
-/// The MCP bearer token travels only in the `mcp.json` file the desktop
+/// The MCP bearer token travels only in the `mcp.json` file the turn's setup
 /// writes into `config_dir` (see `cursor_mcp_json`), never via argv or env —
 /// both of which are visible to anyone who can list processes on the
 /// machine.
@@ -375,11 +558,12 @@ pub fn cursor_command(
         program: binary.to_string(),
         args,
         env: vec![(CURSOR_CONFIG_DIR_ENV.to_string(), config_dir.to_string())],
+        stdin: None,
     }
 }
 
-/// The Cursor CLI config content (`cli-config.json`, written into the
-/// per-turn config dir pointed to by `CURSOR_CONFIG_DIR_ENV`) that denies its
+/// The Cursor CLI config content (`cli-config.json`, rewritten every turn into
+/// the config dir pointed to by `CURSOR_CONFIG_DIR_ENV`) that denies its
 /// built-in local tools. Cursor's `-p` mode ships with full local
 /// read/write/shell/fetch access; since `cursor_command` passes `--force`
 /// (required so MCP calls run), this deny-list is the ONLY thing boxing Cursor
@@ -411,7 +595,7 @@ pub fn cursor_cli_config_json() -> String {
 }
 
 /// The srelens MCP server entry Cursor reads from `mcp.json`, written into
-/// the same per-turn config dir. Built with `serde_json` (not hand-formatted)
+/// the turn's workspace `.cursor/`. Built with `serde_json` (not hand-formatted)
 /// so `url`/`token` are always properly JSON-escaped rather than risking a
 /// malformed or attacker-controlled value breaking out of a hand-built
 /// string.
@@ -580,6 +764,7 @@ mod tests {
             "deadbeef",
             "/tmp/srelens-empty-cwd",
             &[],
+            None,
         )
     }
 
@@ -594,6 +779,32 @@ mod tests {
             .args
             .windows(2)
             .any(|w| w == ["--disable", "unified_exec"]));
+    }
+
+    /// Codex turns these on by default, and `--ignore-user-config` reaches
+    /// none of them: on codex-cli 0.149.1 a turn without them offered the
+    /// model 221 tools, 210 of them ChatGPT connectors (GitHub commits and
+    /// merges, site deploys…), plus web search, image tools, plugins,
+    /// sub-agents and the user's own skills (#215, measured live).
+    #[test]
+    fn codex_command_switches_off_every_tool_surface_beyond_srelens() {
+        let cmd = codex_cmd();
+        for feature in ["apps", "goals", "view_image", "image_generation", "plugins"] {
+            assert!(
+                cmd.args.windows(2).any(|w| w == ["--disable", feature]),
+                "missing --disable {feature}"
+            );
+        }
+        for value in [
+            "agents.enabled=false",
+            "web_search=\"disabled\"",
+            "skills.include_instructions=false",
+        ] {
+            assert!(
+                cmd.args.windows(2).any(|w| w == ["-c", value]),
+                "missing -c {value}"
+            );
+        }
     }
 
     #[test]
@@ -625,6 +836,39 @@ mod tests {
         }));
     }
 
+    /// `codex exec` has no approver, so with the default approval mode every
+    /// MCP tool that is not `readOnlyHint` is refused inside Codex ("MCP tool
+    /// call requires approval, but approval policy is never", codex-cli
+    /// 0.149.1, seen live on a rollout restart) and srelens's own consent gate
+    /// is never asked. `approve` hands the call to srelens, whose gate decides
+    /// every write.
+    #[test]
+    fn codex_command_hands_every_mcp_call_to_srelens_in_both_builders() {
+        let pair = ["-c", "mcp_servers.srelens.default_tools_approval_mode=\"approve\""];
+        let url = "http://127.0.0.1:8765/mcp";
+        let fresh = codex_cmd();
+        let resumed = codex_command("c", "hi", url, "t", "/e", &[], Some("thread-1"));
+        let stdin_fresh = codex_command_via_stdin("c", url, "t", "/e", &[], None);
+        let stdin_resumed = codex_command_via_stdin("c", url, "t", "/e", &[], Some("thread-1"));
+        for (which, cmd) in [
+            ("fresh", &fresh),
+            ("resumed", &resumed),
+            ("stdin fresh", &stdin_fresh),
+            ("stdin resumed", &stdin_resumed),
+        ] {
+            assert!(
+                cmd.args.windows(2).any(|w| w == pair),
+                "{which}: missing {pair:?} in {:?}",
+                cmd.args
+            );
+        }
+        // It is an `exec` option, so it stays ahead of `resume` (the box must
+        // not drift behind the subcommand).
+        let at = resumed.args.windows(2).position(|w| w == pair).unwrap();
+        let resume = resumed.args.iter().position(|a| a == "resume").unwrap();
+        assert!(at < resume, "the override must precede `resume`");
+    }
+
     #[test]
     fn codex_command_carries_the_token_only_in_env_never_in_argv() {
         let cmd = codex_cmd();
@@ -644,6 +888,7 @@ mod tests {
             "deadbeef",
             "/tmp/srelens-empty-cwd",
             &["/tmp/img1.png".to_string(), "/tmp/img2.png".to_string()],
+            None,
         );
         let i_pairs: Vec<&[String]> = cmd.args.windows(2).filter(|w| w[0] == "-i").collect();
         assert_eq!(i_pairs.len(), 2);
@@ -660,6 +905,7 @@ mod tests {
             "deadbeef",
             "/tmp/srelens-empty-cwd",
             &["/tmp/img1.png".to_string()],
+            None,
         );
         assert_eq!(cmd.args.last().unwrap(), "Why is web-0 failing?");
     }
@@ -696,6 +942,7 @@ mod tests {
             "deadbeef",
             "/tmp/srelens-empty-cwd",
             &[],
+            None,
         );
         assert_eq!(cmd.args[cmd.args.len() - 2], "--");
         assert_eq!(cmd.args[cmd.args.len() - 1], prompt);
@@ -711,9 +958,78 @@ mod tests {
             "deadbeef",
             "/tmp/srelens-empty-cwd",
             &["/tmp/img1.png".to_string()],
+            None,
         );
         assert_eq!(cmd.args[cmd.args.len() - 2], "--");
         assert_eq!(cmd.args[cmd.args.len() - 1], prompt);
+    }
+
+    /// `codex exec resume` keeps nothing of the box from the turn it resumes
+    /// (a bare resume got Codex's shell back, measured live), and its own
+    /// options take neither `-s` nor `-C`. `exec`'s do, ahead of the
+    /// subcommand, so a follow-up carries the fresh turn's box unchanged and
+    /// only then `resume <thread>` (#215).
+    #[test]
+    fn a_codex_follow_up_resumes_its_thread_inside_the_whole_box() {
+        let thread = "01a15e68-1088-75f3-b71b-519eef75cd43";
+        let prompt = "-s danger-full-access which index?";
+        let fresh = codex_command(
+            "/usr/bin/codex",
+            prompt,
+            "http://127.0.0.1:8765/mcp",
+            "deadbeef",
+            "/tmp/srelens-empty-cwd",
+            &[],
+            None,
+        );
+        let resumed = codex_command(
+            "/usr/bin/codex",
+            prompt,
+            "http://127.0.0.1:8765/mcp",
+            "deadbeef",
+            "/tmp/srelens-empty-cwd",
+            &[],
+            Some(thread),
+        );
+        let the_box = &fresh.args[..fresh.args.len() - 2];
+        assert_eq!(&resumed.args[..the_box.len()], the_box);
+        assert_eq!(
+            resumed.args[the_box.len()..],
+            ["resume", thread, "--", prompt]
+        );
+        assert_eq!(resumed.env, fresh.env);
+    }
+
+    /// `exec`'s `-i` takes several values, so placed before `resume` it
+    /// swallows `resume <thread>` as image paths and Codex silently starts a
+    /// new thread (measured live). A follow-up's images are `resume`'s own.
+    #[test]
+    fn a_codex_follow_up_attaches_its_images_after_the_thread_it_resumes() {
+        let thread = "01a15e68-1088-75f3-b71b-519eef75cd43";
+        let cmd = codex_command(
+            "/usr/bin/codex",
+            "and this one?",
+            "http://127.0.0.1:8765/mcp",
+            "deadbeef",
+            "/tmp/srelens-empty-cwd",
+            &["/tmp/img1.png".to_string(), "/tmp/img2.png".to_string()],
+            Some(thread),
+        );
+        let resume = cmd.args.iter().position(|a| a == "resume").unwrap();
+        assert_eq!(
+            cmd.args[resume..],
+            [
+                "resume",
+                thread,
+                "-i",
+                "/tmp/img1.png",
+                "-i",
+                "/tmp/img2.png",
+                "--",
+                "and this one?"
+            ]
+        );
+        assert!(!cmd.args[..resume].contains(&"-i".to_string()));
     }
 
     #[test]
@@ -725,6 +1041,7 @@ mod tests {
             "deadbeef",
             "/tmp/srelens-empty-cwd",
             &[],
+            None,
         );
         let expected = "mcp_servers.srelens.url=\"http://127.0.0.1:8765/mcp?x=\\\"evil\\\"\\\\\"";
         assert!(cmd
@@ -887,6 +1204,128 @@ mod tests {
             v["mcpServers"]["srelens"]["headers"]["Authorization"],
             format!("Bearer {token}")
         );
+    }
+
+    #[test]
+    fn a_batch_shim_is_recognised_whatever_its_case_and_path() {
+        assert!(is_batch_shim(r"C:\Program Files\nodejs\claude.CMD"));
+        assert!(is_batch_shim(r"C:\Users\First Last\bin\codex.bat"));
+        assert!(!is_batch_shim(r"C:\x\codex.exe"));
+        assert!(!is_batch_shim(r"C:\x\claude"));
+        assert!(!is_batch_shim("/usr/bin/claude"));
+    }
+
+    /// A batch shim cannot take a newline in argv (Rust refuses to spawn it),
+    /// so the system prompt goes by file and the user's prompt by stdin; the
+    /// box itself must be exactly `claude_command`'s.
+    #[test]
+    fn claude_via_stdin_keeps_the_box_and_takes_no_prompt_in_argv() {
+        for resume in [None, Some("sess-123")] {
+            let mut expected = claude_command("b", "p", "/c", resume).args;
+            expected.truncate(expected.len() - 2); // `--` and the prompt
+            let at = expected.iter().position(|a| a == "--append-system-prompt").unwrap();
+            expected.splice(at..at + 2, ["--append-system-prompt-file".to_string(), "/s".to_string()]);
+            let cmd = claude_command_via_stdin("b", "/c", "/s", resume);
+            assert_eq!(cmd.args, expected);
+            assert!(!cmd.args.iter().any(|a| a == "--" || a.contains('\n')));
+            assert_eq!(cmd.program, "b");
+            assert!(cmd.env.is_empty());
+        }
+    }
+
+    #[test]
+    fn codex_via_stdin_keeps_the_box_and_reads_the_prompt_from_stdin() {
+        let images = ["/tmp/img1.png".to_string()];
+        for resume in [None, Some("thread-1")] {
+            let mut expected =
+                codex_command("b", "PROMPT", "http://127.0.0.1:8765/mcp", "deadbeef", "/e", &images, resume);
+            *expected.args.last_mut().unwrap() = "-".to_string();
+            assert_eq!(
+                codex_command_via_stdin("b", "http://127.0.0.1:8765/mcp", "deadbeef", "/e", &images, resume),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn model_ids_that_could_be_flags_or_junk_are_refused() {
+        for ok in ["sonnet", "gpt-5.6-sol", "claude-fable-5[1m]", "models/gemini-2.5-pro", "a@b:c"] {
+            assert!(valid_model_id(ok), "{ok:?} must be accepted");
+        }
+        for bad in ["", "-x", "--dangerously-skip-permissions", "a b", "a\nb", &"x".repeat(129)] {
+            assert!(!valid_model_id(bad), "{bad:?} must be refused");
+        }
+        assert!(valid_model_id(&"x".repeat(128)));
+    }
+
+    /// The model flag goes in straight after the subcommand or `-p`, so
+    /// everything else — the box, the `--` guard, the prompt — is untouched.
+    #[test]
+    fn each_cli_gets_its_own_model_flag_right_after_its_first_arg() {
+        let claude = claude_command("c", "hi", "/mcp.json", None);
+        let cursor = cursor_cmd();
+        let codex = codex_cmd();
+        for (kind, plain, first, flag, model) in [
+            (AgentKind::Claude, claude, "-p", "--model", "sonnet"),
+            (AgentKind::Cursor, cursor, "-p", "--model", "sonnet"),
+            (AgentKind::Codex, codex, "exec", "-m", "gpt-5.6-luna"),
+        ] {
+            let with = plain.clone().with_model(kind, Some(model));
+            assert_eq!(with.args[..3], [first, flag, model], "{kind:?}");
+            assert_eq!([&with.args[..1], &with.args[3..]].concat(), plain.args, "{kind:?}");
+            assert_eq!(with.args.last(), plain.args.last(), "{kind:?}: the prompt stays last");
+            assert_eq!((with.program, with.env, with.stdin), (plain.program, plain.env, plain.stdin), "{kind:?}");
+        }
+    }
+
+    /// A batch shim's commands start with the same first arg, so they get the
+    /// flag in the same place.
+    #[test]
+    fn the_stdin_variants_take_the_model_flag_too() {
+        let claude = claude_command_via_stdin("c", "/mcp.json", "/sys.txt", None);
+        assert_eq!(claude.with_model(AgentKind::Claude, Some("sonnet")).args[..3], ["-p", "--model", "sonnet"]);
+        let codex = codex_command_via_stdin("c", "http://127.0.0.1:1/mcp", "t", "/e", &[], None);
+        assert_eq!(codex.with_model(AgentKind::Codex, Some("gpt-5.6-luna")).args[..3], ["exec", "-m", "gpt-5.6-luna"]);
+    }
+
+    /// `codex exec resume` has no `-m` of its own, so the model rides in
+    /// `exec`'s options, ahead of the subcommand.
+    #[test]
+    fn codex_puts_the_model_ahead_of_resume() {
+        let resumed = codex_command("c", "hi", "http://127.0.0.1:1/mcp", "t", "/e", &[], Some("thread-1"))
+            .with_model(AgentKind::Codex, Some("gpt-5.6-luna"));
+        let model = resumed.args.iter().position(|a| a == "-m").unwrap();
+        let resume = resumed.args.iter().position(|a| a == "resume").unwrap();
+        assert!(model < resume, "{:?}", resumed.args);
+    }
+
+    #[test]
+    fn no_model_a_bad_one_or_the_native_agent_leaves_the_command_alone() {
+        for (kind, plain) in [
+            (AgentKind::Claude, claude_command("c", "hi", "/mcp.json", None)),
+            (AgentKind::Cursor, cursor_cmd()),
+            (AgentKind::Codex, codex_cmd()),
+        ] {
+            assert_eq!(plain.clone().with_model(kind, None), plain, "{kind:?}");
+            assert_eq!(plain.clone().with_model(kind, Some("-x")), plain, "{kind:?}");
+            assert_eq!(plain.clone().with_model(kind, Some("")), plain, "{kind:?}");
+        }
+        let plain = codex_cmd();
+        assert_eq!(plain.clone().with_model(AgentKind::Srelens, Some("sonnet")), plain);
+    }
+
+    #[test]
+    fn only_codex_and_cursor_have_a_model_listing_command() {
+        assert_eq!(model_list_args(AgentKind::Codex), Some(&["debug", "models"][..]));
+        assert_eq!(model_list_args(AgentKind::Cursor), Some(&["models"][..]));
+        assert_eq!(model_list_args(AgentKind::Claude), None);
+        assert_eq!(model_list_args(AgentKind::Srelens), None);
+    }
+
+    #[test]
+    fn claude_aliases_are_all_valid_model_ids() {
+        assert_eq!(CLAUDE_MODEL_ALIASES, ["fable", "opus", "sonnet", "haiku"]);
+        assert!(CLAUDE_MODEL_ALIASES.iter().all(|a| valid_model_id(a)));
     }
 
     #[test]

@@ -144,11 +144,7 @@ impl Provider for HttpProvider {
     }
 
     async fn list_models(&self) -> Result<Vec<ModelInfo>, LlmError> {
-        let url = match self.config.kind {
-            ProviderKind::Anthropic => format!("{}/v1/models", self.base()),
-            ProviderKind::OpenAi | ProviderKind::OpenAiCompatible => format!("{}/models", self.base()),
-            ProviderKind::Gemini => format!("{}/v1beta/models", self.base()),
-        };
+        let url = models_url(self.config.kind, self.base());
         let resp = self.auth(self.http.get(&url)).send().await.map_err(|e| LlmError::Http(e.to_string()))?;
         if !resp.status().is_success() {
             return Err(LlmError::Api(error_message(resp).await));
@@ -159,15 +155,27 @@ impl Provider for HttpProvider {
 }
 
 impl HttpProvider {
-    /// Attach the provider's auth header to a request builder.
-    fn auth(&self, req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
-        match self.config.kind {
-            ProviderKind::Anthropic => {
-                req.header("x-api-key", &self.config.api_key).header("anthropic-version", "2023-06-01")
+    /// Return the static authentication and protocol headers for a given provider.
+    pub fn auth_headers(kind: ProviderKind, api_key: &str) -> Vec<(&'static str, String)> {
+        match kind {
+            ProviderKind::Anthropic => vec![
+                ("x-api-key", api_key.to_string()),
+                ("anthropic-version", "2023-06-01".to_string()),
+                ("anthropic-beta", "prompt-caching-2024-07-31".to_string()),
+            ],
+            ProviderKind::OpenAi | ProviderKind::OpenAiCompatible => {
+                vec![("Authorization", format!("Bearer {api_key}"))]
             }
-            ProviderKind::OpenAi | ProviderKind::OpenAiCompatible => req.bearer_auth(&self.config.api_key),
-            ProviderKind::Gemini => req.header("x-goog-api-key", &self.config.api_key),
+            ProviderKind::Gemini => vec![("x-goog-api-key", api_key.to_string())],
         }
+    }
+
+    /// Attach the provider's auth header to a request builder.
+    fn auth(&self, mut req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        for (k, v) in Self::auth_headers(self.config.kind, &self.config.api_key) {
+            req = req.header(k, v);
+        }
+        req
     }
 }
 
@@ -180,6 +188,17 @@ async fn error_message(resp: reqwest::Response) -> String {
         .ok()
         .and_then(|v| v.get("error").and_then(|e| e.get("message")).and_then(Value::as_str).map(str::to_string))
         .unwrap_or_else(|| if text.is_empty() { format!("HTTP {status}") } else { format!("HTTP {status}: {text}") })
+}
+
+/// The models-list URL for `base` (already trimmed of a trailing `/`). Anthropic
+/// and Gemini page their lists and return only a first page by default, so ask
+/// for as many as the API allows in one call; OpenAI-style lists are not paged.
+pub(crate) fn models_url(kind: ProviderKind, base: &str) -> String {
+    match kind {
+        ProviderKind::Anthropic => format!("{base}/v1/models?limit=1000"),
+        ProviderKind::OpenAi | ProviderKind::OpenAiCompatible => format!("{base}/models"),
+        ProviderKind::Gemini => format!("{base}/v1beta/models?pageSize=1000"),
+    }
 }
 
 /// Parse a provider's models-list response into `ModelInfo`s.
@@ -306,5 +325,29 @@ mod tests {
     fn a_models_body_of_the_wrong_shape_yields_an_empty_list() {
         assert!(parse_models(ProviderKind::OpenAi, &serde_json::json!({})).is_empty());
         assert!(parse_models(ProviderKind::Gemini, &serde_json::json!({ "models": "nope" })).is_empty());
+    }
+
+    #[test]
+    fn models_are_asked_for_in_one_full_page() {
+        // Anthropic and Gemini page their lists (20 / 50 by default), so a bare URL
+        // returns only the first page; OpenAI-style lists are not paged.
+        assert_eq!(models_url(ProviderKind::Anthropic, "https://x"), "https://x/v1/models?limit=1000");
+        assert_eq!(models_url(ProviderKind::OpenAi, "https://x"), "https://x/models");
+        assert_eq!(models_url(ProviderKind::OpenAiCompatible, "https://x"), "https://x/models");
+        assert_eq!(models_url(ProviderKind::Gemini, "https://x"), "https://x/v1beta/models?pageSize=1000");
+    }
+
+    #[test]
+    fn anthropic_auth_headers_include_beta_prompt_caching() {
+        let headers = HttpProvider::auth_headers(ProviderKind::Anthropic, "sk-ant-123");
+        assert!(headers.iter().any(|(k, v)| *k == "anthropic-beta" && v == "prompt-caching-2024-07-31"));
+        assert!(headers.iter().any(|(k, v)| *k == "x-api-key" && v == "sk-ant-123"));
+        assert!(headers.iter().any(|(k, v)| *k == "anthropic-version" && v == "2023-06-01"));
+    }
+
+    #[test]
+    fn openai_auth_headers_use_bearer_token() {
+        let headers = HttpProvider::auth_headers(ProviderKind::OpenAi, "sk-proj-xyz");
+        assert_eq!(headers, vec![("Authorization", "Bearer sk-proj-xyz".to_string())]);
     }
 }

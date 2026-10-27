@@ -102,6 +102,50 @@ pub struct PodSummary {
     /// Memory limit in MiB across all containers
     #[serde(rename = "memLimMiB", default)]
     pub mem_lim_mib: i64,
+    /// Whether EVERY container sets a CPU limit, so `cpuLimMillicores` is the
+    /// pod's whole ceiling and not the sum of the containers that have one.
+    ///
+    /// A pod with one limited container and one unlimited one has no CPU
+    /// ceiling at all, and its partial sum is a number it can exceed without
+    /// anything being wrong. A reader measuring usage against a limit needs to
+    /// know which of the two it was handed (srelens/srelens#864). False for a
+    /// pod with no containers.
+    #[serde(rename = "cpuLimAll", default)]
+    pub cpu_lim_all: bool,
+    /// As `cpuLimAll`, for memory — where the ceiling is an OOM kill.
+    #[serde(rename = "memLimAll", default)]
+    pub mem_lim_all: bool,
+    /// Each container's own state, in the order a reader meets them: app
+    /// containers as the spec lists them, then init containers.
+    ///
+    /// `ready` above says how many are ready and not which one is not, or why.
+    /// A list that draws one mark per container needs each one's state
+    /// (srelens/srelens#878).
+    #[serde(default)]
+    pub containers: Vec<PodContainer>,
+}
+
+/// One container of a pod, as far as a list row needs it.
+#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
+pub struct PodContainer {
+    pub name: String,
+    /// `app`, `init`, or `sidecar` — an init container that restarts always,
+    /// and so runs for the pod's whole life beside the app containers.
+    pub kind: String,
+    /// `running`, `waiting`, `terminated`, or `unknown` when the kubelet has
+    /// reported nothing for it yet. What each *means* is `containerVerdict`'s
+    /// to say, in `@srelens/core`, not this struct's.
+    pub state: String,
+    /// The waiting or terminated reason (`CrashLoopBackOff`, `OOMKilled`,
+    /// `Completed`), or `""`.
+    pub reason: String,
+    /// The exit code of a terminated container.
+    #[serde(rename = "exitCode")]
+    pub exit_code: Option<i32>,
+    pub ready: bool,
+    pub restarts: i32,
+    /// The image the spec asks for.
+    pub image: String,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -375,28 +419,62 @@ pub fn summarise_pod(pod: Pod) -> PodSummary {
         .unwrap_or_default();
 
     let (mut req_cpu, mut lim_cpu, mut req_mem, mut lim_mem) = (0i64, 0i64, 0i64, 0i64);
-    if let Some(spec) = pod.spec.as_ref() {
-        for c in &spec.containers {
-            if let Some(resources) = &c.resources {
-                if let Some(reqs) = &resources.requests {
-                    if let Some(q) = reqs.get("cpu") {
-                        req_cpu += crate::metrics::cpu_millicores(&q.0);
-                    }
-                    if let Some(q) = reqs.get("memory") {
-                        req_mem += crate::metrics::mem_mib(&q.0);
-                    }
+    // The containers that run for as long as the pod does, which are the ones
+    // metrics-server's figure for the pod adds up: the app containers, and the
+    // init containers that restart always — native sidecars. An ordinary init
+    // container has finished before the pod is running and uses nothing.
+    //
+    // A sidecar left out of this would be usage with no bound to set it
+    // against: 200m of app under a 500m limit plus 400m of an unlimited
+    // sidecar reads as 120% of a ceiling the pod does not have.
+    let running: Vec<&k8s_openapi::api::core::v1::Container> = pod
+        .spec
+        .as_ref()
+        .map(|spec| {
+            spec.containers
+                .iter()
+                .chain(
+                    spec.init_containers
+                        .iter()
+                        .flatten()
+                        .filter(|c| c.restart_policy.as_deref() == Some("Always")),
+                )
+                .collect()
+        })
+        .unwrap_or_default();
+    let limited = |resource: &str| {
+        // `all` over nothing is true; a pod with nothing in it has no ceiling.
+        !running.is_empty()
+            && running.iter().all(|c| {
+                c.resources
+                    .as_ref()
+                    .and_then(|r| r.limits.as_ref())
+                    .is_some_and(|limits| limits.contains_key(resource))
+            })
+    };
+    let (cpu_lim_all, mem_lim_all) = (limited("cpu"), limited("memory"));
+    for c in &running {
+        if let Some(resources) = &c.resources {
+            if let Some(reqs) = &resources.requests {
+                if let Some(q) = reqs.get("cpu") {
+                    req_cpu += crate::metrics::cpu_millicores(&q.0);
                 }
-                if let Some(lims) = &resources.limits {
-                    if let Some(q) = lims.get("cpu") {
-                        lim_cpu += crate::metrics::cpu_millicores(&q.0);
-                    }
-                    if let Some(q) = lims.get("memory") {
-                        lim_mem += crate::metrics::mem_mib(&q.0);
-                    }
+                if let Some(q) = reqs.get("memory") {
+                    req_mem += crate::metrics::mem_mib(&q.0);
+                }
+            }
+            if let Some(lims) = &resources.limits {
+                if let Some(q) = lims.get("cpu") {
+                    lim_cpu += crate::metrics::cpu_millicores(&q.0);
+                }
+                if let Some(q) = lims.get("memory") {
+                    lim_mem += crate::metrics::mem_mib(&q.0);
                 }
             }
         }
     }
+
+    let containers = pod_containers(&pod);
 
     PodSummary {
         name,
@@ -416,7 +494,59 @@ pub fn summarise_pod(pod: Pod) -> PodSummary {
         cpu_lim_millicores: lim_cpu,
         mem_req_mib: req_mem,
         mem_lim_mib: lim_mem,
+        cpu_lim_all,
+        mem_lim_all,
+        containers,
     }
+}
+
+/// Every container the spec names, each with what the kubelet last said of
+/// it. From the spec rather than the statuses, so a container the kubelet has
+/// not reported on yet is still listed — as `unknown` — instead of missing.
+fn pod_containers(pod: &Pod) -> Vec<PodContainer> {
+    let Some(spec) = pod.spec.as_ref() else {
+        return Vec::new();
+    };
+    let status = pod.status.as_ref();
+    let app_statuses = status
+        .and_then(|s| s.container_statuses.as_deref())
+        .unwrap_or_default();
+    let init_statuses = status
+        .and_then(|s| s.init_container_statuses.as_deref())
+        .unwrap_or_default();
+    let one = |c: &k8s_openapi::api::core::v1::Container,
+               kind: &str,
+               statuses: &[k8s_openapi::api::core::v1::ContainerStatus]| {
+        let reported = statuses.iter().find(|s| s.name == c.name);
+        let state = reported.and_then(|s| s.state.as_ref());
+        // Running first, then terminated, then waiting: the kubelet sets one
+        // of the three, and a state with none of them set says nothing.
+        let running = state.is_some_and(|s| s.running.is_some());
+        let terminated = state.and_then(|s| s.terminated.as_ref());
+        let waiting = state.and_then(|s| s.waiting.as_ref());
+        let (word, reason, exit_code) = match (running, terminated, waiting) {
+            (true, _, _) => ("running", String::new(), None),
+            (false, Some(t), _) => ("terminated", t.reason.clone().unwrap_or_default(), Some(t.exit_code)),
+            (false, None, Some(w)) => ("waiting", w.reason.clone().unwrap_or_default(), None),
+            (false, None, None) => ("unknown", String::new(), None),
+        };
+        PodContainer {
+            name: c.name.clone(),
+            kind: kind.to_string(),
+            state: word.to_string(),
+            reason,
+            exit_code,
+            ready: reported.is_some_and(|s| s.ready),
+            restarts: reported.map(|s| s.restart_count).unwrap_or(0),
+            image: c.image.clone().unwrap_or_default(),
+        }
+    };
+    let apps = spec.containers.iter().map(|c| one(c, "app", app_statuses));
+    let inits = spec.init_containers.iter().flatten().map(|c| {
+        let kind = if c.restart_policy.as_deref() == Some("Always") { "sidecar" } else { "init" };
+        one(c, kind, init_statuses)
+    });
+    apps.chain(inits).collect()
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -761,6 +891,231 @@ mod tests {
         );
         assert!(pods_on_node_params("").is_err());
         assert!(pods_on_node_params("   ").is_err());
+    }
+
+    /// A pod whose containers set the given `(cpu, memory)` limits, each
+    /// `None` for a container that sets none. Built from JSON, as the API
+    /// server would send it.
+    fn pod_with_limits(containers: &[(Option<&str>, Option<&str>)]) -> Pod {
+        let containers: Vec<serde_json::Value> = containers
+            .iter()
+            .enumerate()
+            .map(|(i, (cpu, memory))| {
+                let mut limits = serde_json::Map::new();
+                if let Some(cpu) = cpu {
+                    limits.insert("cpu".into(), serde_json::json!(cpu));
+                }
+                if let Some(memory) = memory {
+                    limits.insert("memory".into(), serde_json::json!(memory));
+                }
+                serde_json::json!({ "name": format!("c{i}"), "image": "img", "resources": { "limits": limits } })
+            })
+            .collect();
+        serde_json::from_value(serde_json::json!({
+            "metadata": { "name": "p" },
+            "spec": { "containers": containers }
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn a_limit_is_the_pods_ceiling_only_when_every_container_sets_one() {
+        let all = summarise_pod(pod_with_limits(&[
+            (Some("500m"), Some("256Mi")),
+            (Some("250m"), Some("128Mi")),
+        ]));
+        assert_eq!((all.cpu_lim_millicores, all.mem_lim_mib), (750, 384));
+        assert!(all.cpu_lim_all && all.mem_lim_all);
+
+        // One container with no CPU limit: the pod has no CPU ceiling, and
+        // the 500m the other one set is not it. Memory is still whole.
+        let partial = summarise_pod(pod_with_limits(&[
+            (Some("500m"), Some("256Mi")),
+            (None, Some("128Mi")),
+        ]));
+        assert_eq!(partial.cpu_lim_millicores, 500);
+        assert!(!partial.cpu_lim_all);
+        assert!(partial.mem_lim_all);
+    }
+
+    #[test]
+    fn a_pod_with_no_limits_or_no_containers_has_no_ceiling() {
+        let none = summarise_pod(pod_with_limits(&[(None, None)]));
+        assert!(!none.cpu_lim_all && !none.mem_lim_all);
+        // `all` over nothing is true; a pod with nothing in it has no ceiling.
+        let empty = summarise_pod(pod_with_limits(&[]));
+        assert!(!empty.cpu_lim_all && !empty.mem_lim_all);
+        let no_spec = summarise_pod(Pod::default());
+        assert!(!no_spec.cpu_lim_all && !no_spec.mem_lim_all);
+    }
+
+    /// A pod from JSON, as the API server would send it.
+    fn pod_json(value: serde_json::Value) -> Pod {
+        serde_json::from_value(value).unwrap()
+    }
+
+    #[test]
+    fn lists_each_container_with_its_own_state() {
+        let pod = pod_json(serde_json::json!({
+            "metadata": { "name": "p" },
+            "spec": {
+                "containers": [
+                    { "name": "api", "image": "acme/api:1" },
+                    { "name": "worker", "image": "acme/worker:1" },
+                    { "name": "report", "image": "acme/report:1" },
+                    { "name": "late", "image": "acme/late:1" }
+                ]
+            },
+            "status": {
+                "containerStatuses": [
+                    // Reported out of spec order, as the kubelet may.
+                    { "name": "worker", "image": "x", "imageID": "", "ready": false, "restartCount": 14,
+                      "state": { "waiting": { "reason": "CrashLoopBackOff" } } },
+                    { "name": "api", "image": "x", "imageID": "", "ready": true, "restartCount": 0,
+                      "state": { "running": {} } },
+                    { "name": "report", "image": "x", "imageID": "", "ready": false, "restartCount": 1,
+                      "state": { "terminated": { "exitCode": 137, "reason": "OOMKilled" } } }
+                ]
+            }
+        }));
+        let containers = summarise_pod(pod).containers;
+        let row = |c: &PodContainer| {
+            (c.name.clone(), c.state.clone(), c.reason.clone(), c.exit_code, c.ready, c.restarts)
+        };
+        assert_eq!(
+            containers.iter().map(row).collect::<Vec<_>>(),
+            vec![
+                ("api".into(), "running".into(), "".into(), None, true, 0),
+                ("worker".into(), "waiting".into(), "CrashLoopBackOff".into(), None, false, 14),
+                ("report".into(), "terminated".into(), "OOMKilled".into(), Some(137), false, 1),
+                // Named in the spec, not yet reported on: listed, not missing.
+                ("late".into(), "unknown".into(), "".into(), None, false, 0),
+            ]
+        );
+        assert!(containers.iter().all(|c| c.kind == "app"));
+        assert_eq!(containers[0].image, "acme/api:1");
+    }
+
+    #[test]
+    fn lists_init_containers_after_the_app_ones_and_tells_a_sidecar_from_an_init() {
+        let pod = pod_json(serde_json::json!({
+            "metadata": { "name": "p" },
+            "spec": {
+                "initContainers": [
+                    { "name": "migrate", "image": "acme/migrate:1" },
+                    { "name": "proxy", "image": "acme/proxy:1", "restartPolicy": "Always" }
+                ],
+                "containers": [{ "name": "api", "image": "acme/api:1" }]
+            },
+            "status": {
+                "initContainerStatuses": [
+                    { "name": "migrate", "image": "x", "imageID": "", "ready": true, "restartCount": 0,
+                      "state": { "terminated": { "exitCode": 0, "reason": "Completed" } } },
+                    { "name": "proxy", "image": "x", "imageID": "", "ready": true, "restartCount": 0,
+                      "state": { "running": {} } }
+                ],
+                "containerStatuses": [
+                    { "name": "api", "image": "x", "imageID": "", "ready": true, "restartCount": 0,
+                      "state": { "running": {} } }
+                ]
+            }
+        }));
+        let containers = summarise_pod(pod).containers;
+        assert_eq!(
+            containers.iter().map(|c| (c.name.as_str(), c.kind.as_str(), c.state.as_str())).collect::<Vec<_>>(),
+            vec![("api", "app", "running"), ("migrate", "init", "terminated"), ("proxy", "sidecar", "running")]
+        );
+        assert_eq!(containers[1].exit_code, Some(0));
+    }
+
+    #[test]
+    fn a_pod_with_no_spec_lists_no_containers_and_the_field_is_sent_by_name() {
+        assert!(summarise_pod(Pod::default()).containers.is_empty());
+        let json = serde_json::to_value(summarise_pod(pod_with_limits(&[(None, None)]))).unwrap();
+        assert_eq!(json["containers"][0]["name"], "c0");
+        assert_eq!(json["containers"][0]["state"], "unknown");
+        assert!(json["containers"][0]["exitCode"].is_null());
+    }
+
+    /// A pod with one app container and one init container, each given
+    /// `(cpu, memory)` limits; `sidecar` makes the init container restart
+    /// always, which is what a native sidecar is.
+    fn pod_with_init(
+        app: (Option<&str>, Option<&str>),
+        init: (Option<&str>, Option<&str>),
+        sidecar: bool,
+    ) -> Pod {
+        let limits = |(cpu, memory): (Option<&str>, Option<&str>)| {
+            let mut limits = serde_json::Map::new();
+            if let Some(cpu) = cpu {
+                limits.insert("cpu".into(), serde_json::json!(cpu));
+            }
+            if let Some(memory) = memory {
+                limits.insert("memory".into(), serde_json::json!(memory));
+            }
+            serde_json::json!({ "limits": limits.clone(), "requests": limits })
+        };
+        let mut init_container = serde_json::json!({ "name": "init", "image": "img", "resources": limits(init) });
+        if sidecar {
+            init_container["restartPolicy"] = serde_json::json!("Always");
+        }
+        serde_json::from_value(serde_json::json!({
+            "metadata": { "name": "p" },
+            "spec": {
+                "containers": [{ "name": "app", "image": "img", "resources": limits(app) }],
+                "initContainers": [init_container]
+            }
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn a_sidecar_counts_toward_the_pods_bounds_because_its_usage_counts_toward_the_pods_usage() {
+        // An unlimited sidecar beside a limited app: the pod has no CPU
+        // ceiling, whatever the app's own limit says.
+        let unlimited = summarise_pod(pod_with_init((Some("500m"), Some("256Mi")), (None, None), true));
+        assert!(!unlimited.cpu_lim_all && !unlimited.mem_lim_all);
+
+        // A limited sidecar: its limit and request are part of the pod's.
+        let limited = summarise_pod(pod_with_init(
+            (Some("500m"), Some("256Mi")),
+            (Some("100m"), Some("64Mi")),
+            true,
+        ));
+        assert!(limited.cpu_lim_all && limited.mem_lim_all);
+        assert_eq!((limited.cpu_lim_millicores, limited.mem_lim_mib), (600, 320));
+        assert_eq!((limited.cpu_req_millicores, limited.mem_req_mib), (600, 320));
+    }
+
+    #[test]
+    fn an_ordinary_init_container_does_not_count_having_finished_before_the_pod_ran() {
+        // No limit on it, and it does not take the pod's ceiling away.
+        let pod = summarise_pod(pod_with_init((Some("500m"), Some("256Mi")), (None, None), false));
+        assert!(pod.cpu_lim_all && pod.mem_lim_all);
+        // A large limit on it, and it does not raise the pod's ceiling.
+        let pod = summarise_pod(pod_with_init((Some("500m"), Some("256Mi")), (Some("4"), Some("8Gi")), false));
+        assert_eq!((pod.cpu_lim_millicores, pod.mem_lim_mib), (500, 256));
+    }
+
+    #[test]
+    fn a_limit_written_in_decimal_units_is_still_a_limit() {
+        // `500M`, not `500Mi`: read as nothing, it was a pod with no memory
+        // limit, and the list said "no request or limit set" of a pod that
+        // had one.
+        let pod = summarise_pod(pod_with_limits(&[(Some("1"), Some("500M"))]));
+        assert_eq!(pod.mem_lim_mib, 476);
+        assert!(pod.mem_lim_all);
+        let pod = summarise_pod(pod_with_limits(&[(Some("1"), Some("2G"))]));
+        assert_eq!(pod.mem_lim_mib, 1907);
+    }
+
+    #[test]
+    fn the_ceiling_flags_are_sent_under_the_names_the_frontend_reads() {
+        let json = serde_json::to_value(summarise_pod(pod_with_limits(&[(Some("1"), Some("1Gi"))]))).unwrap();
+        assert_eq!(json["cpuLimAll"], true);
+        assert_eq!(json["memLimAll"], true);
+        assert_eq!(json["cpuLimMillicores"], 1000);
+        assert_eq!(json["memLimMiB"], 1024);
     }
 
     #[test]

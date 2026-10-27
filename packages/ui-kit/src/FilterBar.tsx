@@ -1,4 +1,4 @@
-import { useId, useRef, type ReactNode } from "react";
+import { useCallback, useId, useRef, type ReactNode, type Ref } from "react";
 import { cx } from "./cx";
 import { filled } from "./slot";
 
@@ -24,6 +24,11 @@ export interface FilterBarProps {
   children?: ReactNode;
   /** Selection actions shown before the search field. */
   leading?: ReactNode;
+  /**
+   * The field itself, for a caller that must put focus back in it once a control
+   * that had it is gone. The bar's own clear button is unaffected.
+   */
+  inputRef?: Ref<HTMLInputElement>;
   className?: string;
 }
 
@@ -69,9 +74,20 @@ export function FilterBar({
   invalid = false,
   children,
   leading,
+  inputRef,
   className,
 }: FilterBarProps) {
-  const fieldRef = useRef<HTMLInputElement>(null);
+  const fieldRef = useRef<HTMLInputElement | null>(null);
+  // One ref feeding both the bar and the caller, so holding the field for one
+  // never takes it away from the other.
+  const setField = useCallback(
+    (el: HTMLInputElement | null) => {
+      fieldRef.current = el;
+      if (typeof inputRef === "function") inputRef(el);
+      else if (inputRef) inputRef.current = el;
+    },
+    [inputRef],
+  );
   const invalidId = useId();
 
   return (
@@ -124,7 +140,7 @@ export function FilterBar({
           </button>
         )}
         <input
-          ref={fieldRef}
+          ref={setField}
           type="search"
           value={value}
           onChange={(e) => onValueChange(e.target.value)}

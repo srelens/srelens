@@ -3,6 +3,7 @@ import {
   CAPABILITY_IMPACT_ORDER,
   cancelChat,
   describeError,
+  handoffPreface,
   listAgents,
   loadSkill,
   listSessions,
@@ -102,6 +103,17 @@ export type GateRecord = {
    */
   prompt?: string;
   impact?: CapabilityImpact;
+  /**
+   * Where in the conversation it was asked (#959): the agent turn answering
+   * when the request arrived, and the call in it that raised the request —
+   * so the transcript draws the record at that step rather than after the
+   * whole answer. Set once, when the request is first recorded; an outcome
+   * arriving later keeps it. Absent when no turn was answering (and on gates
+   * saved before this was kept), and `callId` absent when no call in the
+   * turn matched — the record then sits at the turn's calls, or at the end.
+   */
+  turnId?: number;
+  callId?: string;
 };
 
 /** One turn of the conversation — the reader's question, or the agent's
@@ -496,7 +508,13 @@ function sameCall(a: ToolCallRecord, b: ToolCallRecord): boolean {
 function sameGate(a: GateRecord, b: GateRecord): boolean {
   return (
     a === b ||
-    (a.id === b.id && a.tool === b.tool && a.outcome === b.outcome && a.args === b.args && a.at === b.at)
+    (a.id === b.id &&
+      a.tool === b.tool &&
+      a.outcome === b.outcome &&
+      a.args === b.args &&
+      a.at === b.at &&
+      a.turnId === b.turnId &&
+      a.callId === b.callId)
   );
 }
 
@@ -937,6 +955,8 @@ export async function askAgent(
   // conversation's token to Claude while the picker — which shows
   // `run.agentKind` — still said Codex.
   const myAgentKind = state.run.agentKind;
+  // What was said before this question, for an agent with no record of it.
+  const earlier = state.run.turns;
 
   commitTo(key, {
     ...state.run,
@@ -1039,8 +1059,13 @@ export async function askAgent(
     // a kind nothing in `offered` matches.
     const offered = agents.filter((a) => a.available && !a.gated);
     let resolvedKind = myAgentKind;
-    let agentPath = offered.find((a) => a.kind === myAgentKind)?.path ?? "";
-    if (!agentPath) {
+    // Found by kind, not by path: srelens's own agent runs in-process and is
+    // listed with no path, and reading that as "not installed" sent every one
+    // of its turns through the fallback below, which drops `resume` — the id
+    // its history is kept under (#215).
+    const chosen = offered.find((a) => a.kind === myAgentKind);
+    let agentPath = chosen?.path ?? "";
+    if (!chosen) {
       if (offered.length === 0) {
         // No agent this run could possibly reach — fail the turn rather than
         // handing `sendChat` an empty path it can only fail to spawn. §F's
@@ -1092,9 +1117,13 @@ export async function askAgent(
       counted = true;
       recordSkillUses(skills);
     };
+    // No resume id: this agent has none of the earlier turns — it was just
+    // switched to (here or in `chooseAgent`), or never returned an id. Read
+    // after the fallback above, which drops `resume` too.
+    const handoff = state.resume === null ? handoffPreface(earlier) : "";
     const result = await sendChat(
       started,
-      `${preface}${guidance}${question}`,
+      `${handoff}${preface}${guidance}${question}`,
       agentPath,
       (e) => {
         countUse();
@@ -1108,6 +1137,9 @@ export async function askAgent(
       resolvedKind,
       myGeneration,
       state.resume,
+      // The file this conversation is saved under, which outlives `started`:
+      // reopened, it gets a new session but keeps this id (#952).
+      state.id,
     );
     countUse();
     // A later question already moved this conversation on; this answer no
@@ -1434,6 +1466,43 @@ export function setSkillActive(name: string, active: boolean): void {
   emit();
 }
 
+/**
+ * A tool's name for matching a gate to the call that raised it. The host
+ * names a gate by its capability (`k8s.scale`); an agent's client names the
+ * call by its own tool, often prefixed with the MCP server
+ * (`mcp__srelens__k8s_scale`). Both reduce to `k8s_scale`.
+ */
+export function gateToolKey(tool: string): string {
+  const bare = /^mcp__[^_]+(?:_[^_]+)*?__(.+)$/.exec(tool)?.[1] ?? tool;
+  return bare.replace(/\./g, "_");
+}
+
+/**
+ * Where a gate arriving now was asked (#959): the run's last turn, when it is
+ * the agent's answer in progress, and the call in it for the same tool —
+ * preferring one still waiting on its result, since a gated call does not
+ * return until it is answered.
+ */
+export function placeGate(turns: readonly Turn[], tool: string): Pick<GateRecord, "turnId" | "callId"> {
+  const turn = turns[turns.length - 1];
+  if (!turn || turn.role !== "agent") return {};
+  const key = gateToolKey(tool);
+  const matching = turn.calls.filter((c) => gateToolKey(c.tool) === key);
+  const call = [...matching].reverse().find((c) => c.status === null) ?? matching[matching.length - 1];
+  return call ? { turnId: turn.id, callId: call.id } : { turnId: turn.id };
+}
+
+/** The record's place, kept from the one it replaces: an outcome is news about
+ *  the same request, not a second one asked somewhere else. */
+function keepPlace(record: GateRecord, existing: GateRecord): GateRecord {
+  const { turnId, callId } = existing;
+  return {
+    ...record,
+    ...(turnId !== undefined && record.turnId === undefined ? { turnId } : {}),
+    ...(callId !== undefined && record.callId === undefined ? { callId } : {}),
+  };
+}
+
 /** Record one MCP confirm request's outcome — merged by id, so a request
  *  moving from `pending` to `approved` or `denied` replaces its entry rather
  *  than sitting beside it. */
@@ -1454,7 +1523,9 @@ export function noteGate(record: GateRecord, caller: { chatSession: string } | n
   const [key, state] = entry;
   const idx = state.run.gates.findIndex((g) => g.id === record.id);
   const gates =
-    idx === -1 ? [...state.run.gates, record] : state.run.gates.map((g, i) => (i === idx ? record : g));
+    idx === -1
+      ? [...state.run.gates, { ...record, ...placeGate(state.run.turns, record.tool) }]
+      : state.run.gates.map((g, i) => (i === idx ? keepPlace(record, g) : g));
   commitTo(key, { ...state.run, gates });
   // A gate is part of the record decision 1 traded the second set of buttons
   // for, so it has to survive a restart like the turns do.
@@ -1476,7 +1547,7 @@ export function noteGateIn(key: string, record: GateRecord): void {
   if (!state) return;
   const idx = state.run.gates.findIndex((g) => g.id === record.id);
   if (idx === -1) return;
-  const gates = state.run.gates.map((g, i) => (i === idx ? record : g));
+  const gates = state.run.gates.map((g, i) => (i === idx ? keepPlace(record, g) : g));
   commitTo(key, { ...state.run, gates });
   persistRun(key);
 }
@@ -1591,10 +1662,14 @@ function isSavedTurn(value: unknown): boolean {
 /** One recorded gate. `gates` is optional; a present one must be usable. */
 function isSavedGate(value: unknown): boolean {
   if (typeof value !== "object" || value === null) return false;
-  const g = value as { id?: unknown; tool?: unknown; prompt?: unknown; impact?: unknown };
+  const g = value as { id?: unknown; tool?: unknown; prompt?: unknown; impact?: unknown; turnId?: unknown; callId?: unknown };
   return (
     typeof g.id === "string" &&
     typeof g.tool === "string" &&
+    // Its place is only read to find a turn and a call; a value of another
+    // type would match neither and lose the record.
+    (g.turnId === undefined || typeof g.turnId === "number") &&
+    (g.callId === undefined || typeof g.callId === "string") &&
     // Drawn as text and as a badge keyed by level, so each is checked to the
     // depth it is used: a level the host never sends has no badge to draw.
     (g.prompt === undefined || typeof g.prompt === "string") &&
@@ -1940,6 +2015,23 @@ export async function openSavedRun(id: string): Promise<void> {
     state.subject = { about: { cluster: savedCluster }, route: "" };
   }
   if (envelope) {
+    // Fresh ids for the turns (below), and each gate's place (#959) moved with
+    // its turn: a gate keyed by the id on disk would point at whichever turn
+    // this window happens to number the same.
+    const renumbered = new Map<number, number>();
+    const turns = envelope.turns.map((t) => {
+      const id = ++turnSeq;
+      renumbered.set(t.id, id);
+      return { ...t, id };
+    });
+    const gates = (envelope.gates ?? []).map((g) => {
+      if (g.turnId === undefined) return g;
+      const turnId = renumbered.get(g.turnId);
+      if (turnId !== undefined) return { ...g, turnId };
+      // Its turn is not in this file: the gate goes back to the end.
+      const { turnId: _gone, callId: _call, ...rest } = g;
+      return rest;
+    });
     state.run = {
       ...state.run,
       // Fresh ids, as `turnsFromClassic` takes: the ones on disk were issued by
@@ -1949,8 +2041,8 @@ export async function openSavedRun(id: string): Promise<void> {
       // appended to it ("Done.Done.") and the new question showed none. A file
       // written while that was happening holds duplicate ids, which this
       // repairs, since the transcript keys each turn by its id.
-      turns: envelope.turns.map((t) => ({ ...t, id: ++turnSeq })),
-      gates: envelope.gates ?? [],
+      turns,
+      gates,
       agentKind: session.agentKind ?? state.run.agentKind,
     };
   } else {

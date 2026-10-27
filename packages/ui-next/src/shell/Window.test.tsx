@@ -3,6 +3,8 @@ import { cleanup, render, screen, waitFor, act, within } from "@testing-library/
 import userEvent from "@testing-library/user-event";
 import { fireEvent } from "@testing-library/react";
 import type { HostNotice } from "@srelens/core";
+import type { PendingClusterTerminal } from "../lib/clusterTerminal";
+import { extensionClusterRoute, notify, saveUpdateChannel, setNotifier } from "@srelens/core";
 
 // `vi.hoisted` because `vi.mock` is hoisted above every declaration in the
 // file, and the tabsPersist factory reads these the moment `./Window` imports
@@ -36,6 +38,9 @@ const {
   takePendingDeepLinks,
   subscribeGates,
   getObjectSpy,
+  updateCheck,
+  closeCurrentWindow,
+  refreshSetting,
   bus,
 } = vi.hoisted(() => ({
   listContexts: vi.fn(),
@@ -77,6 +82,13 @@ const {
   subscribeGates: new Map<string, Promise<void>>(),
   // A spy on the detail screen's read, passed through to the real one.
   getObjectSpy: vi.fn(),
+  // The `update_check` round trip under core's automatic check: the boundary,
+  // so the window's cadence and the core helper's dedupe both run for real.
+  updateCheck: vi.fn<(channel: string) => Promise<{ version: string } | null>>(),
+  closeCurrentWindow: vi.fn<() => Promise<void>>(async () => {}),
+  // Core's re-read of one settings key: a context window asks for main's
+  // saved workspaces when it is focused (#101).
+  refreshSetting: vi.fn<(key: string) => Promise<void>>(async () => {}),
   // The backend event bus, captured per channel so a test can emit exactly
   // what `mcp_confirm.rs` emits.
   //
@@ -102,6 +114,8 @@ vi.mock("@srelens/core", async (importOriginal) => {
     subscribeForwards: (...a: Parameters<typeof subscribeForwards>) => subscribeForwards(...a),
     isApplePlatform: () => isApplePlatform(),
     isTauri: () => isTauri(),
+    closeCurrentWindow: () => closeCurrentWindow(),
+    refreshSetting: (key: string) => refreshSetting(key),
     loadKubeconfigFiles: () => loadKubeconfigFiles(),
     vaultStatus: () => vaultStatus(),
     vaultLock: () => vaultLock(),
@@ -110,6 +124,11 @@ vi.mock("@srelens/core", async (importOriginal) => {
     startMcpHttp: (port: number) => startMcpHttp(port),
     respondToConfirm: (id: string, approved: boolean) => respondToConfirm(id, approved),
     pendingConfirms: () => pendingConfirms(),
+    checkForUpdateAndNotify: (...a: Parameters<typeof real.checkForUpdateAndNotify>) =>
+      real.checkForUpdateAndNotify(a[0], a[1], {
+        ...a[2],
+        check: (channel) => updateCheck(channel) as ReturnType<typeof real.checkForUpdate>,
+      }),
     invokeCommand: <T,>(command: string, args?: Record<string, unknown>): Promise<T> =>
       command === "take_pending_deep_links"
         ? (takePendingDeepLinks() as Promise<T>)
@@ -147,22 +166,45 @@ vi.mock("@srelens/core", async (importOriginal) => {
 });
 
 // The terminal chord's two halves — may one be opened, and opening it — are
-// `lib/clusterTerminal`'s and tested there; here they are the boundary.
-const clusterTerminal = vi.hoisted(() => ({ can: true, open: vi.fn() }));
+// `lib/clusterTerminal`'s and tested there; here they are the boundary. So is
+// the shell it holds for a typed name (#101): nothing, unless a test says so.
+const clusterTerminal = vi.hoisted(() => ({
+  can: true,
+  open: vi.fn(),
+  pending: null as PendingClusterTerminal | null,
+  listeners: new Set<() => void>(),
+}));
 vi.mock("../lib/clusterTerminal", () => ({
   canOpenClusterTerminal: (cluster: unknown) => cluster !== undefined && clusterTerminal.can,
   openClusterTerminal: clusterTerminal.open,
+  pendingClusterTerminal: () => clusterTerminal.pending,
+  onClusterTerminalPending: (listener: () => void) => {
+    clusterTerminal.listeners.add(listener);
+    return () => {
+      clusterTerminal.listeners.delete(listener);
+    };
+  },
+  answerClusterTerminal: vi.fn(),
+  localShellCanBeReadOnly: () => true,
 }));
 
 // The star button's start-up acts reach GitHub; a test of the window must not.
-const starOnGitHub = vi.hoisted(() => ({ countLaunch: vi.fn(), refreshStarCount: vi.fn(async () => {}) }));
+const starOnGitHub = vi.hoisted(() => ({ countLaunch: vi.fn(), useStarCountRefresh: vi.fn() }));
 vi.mock("../lib/starOnGitHub", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../lib/starOnGitHub")>()),
   countLaunch: starOnGitHub.countLaunch,
-  refreshStarCount: starOnGitHub.refreshStarCount,
+  useStarCountRefresh: starOnGitHub.useStarCountRefresh,
 }));
 
-vi.mock("../lib/tabsPersist", () => ({ loadTabsState, scheduleSave, installFlushOnUnload, flushSave }));
+// `getStorageKey` is the real one: protection names main's saved workspaces
+// by it when a context window is focused (#101).
+vi.mock("../lib/tabsPersist", async (importOriginal) => ({
+  getStorageKey: (await importOriginal<typeof import("../lib/tabsPersist")>()).getStorageKey,
+  loadTabsState,
+  scheduleSave,
+  installFlushOnUnload,
+  flushSave,
+}));
 
 // The zoom helper lives in Chrome (shared with its buttons); spied rather than
 // replaced outright so Chrome itself still renders for real.
@@ -300,6 +342,11 @@ beforeEach(() => {
   });
   subscribeGates.clear();
   getObjectSpy.mockReset();
+  // Up to date unless a test says otherwise: an update toast would otherwise
+  // sit in front of every notice another test asserts on.
+  updateCheck.mockReset().mockResolvedValue(null);
+  closeCurrentWindow.mockClear();
+  refreshSetting.mockReset().mockResolvedValue(undefined);
   bus.clear();
   resetLock();
   resetMcpAutoStart();
@@ -315,6 +362,13 @@ beforeEach(() => {
   resetView();
   resetContexts();
 });
+
+/** What `install_macos_menu` (lib.rs) emits when the menu's Close takes ⌘W. */
+function closeFromMenu() {
+  act(() => {
+    for (const handler of bus.get("close-active-tab") ?? []) handler(null);
+  });
+}
 
 async function booted() {
   render(
@@ -346,6 +400,33 @@ describe("Window boot", () => {
     await booted();
     act(() => { store.openTab("/overview", { clusterName: "prod" }); });
     await waitFor(() => expect(connectCluster).toHaveBeenCalledWith("prod"));
+  });
+
+  it("probes a pinned detail tab's own cluster, not the rail's (#834)", async () => {
+    listContexts.mockResolvedValue({ contexts: [ctx("prod"), ctx("stage")] });
+    loadTabsState.mockReturnValue(defaultState([ctx("prod"), ctx("stage")]));
+    await booted();
+    expect(store.activeCluster()).toBe("prod");
+    act(() => { store.openTab("/k/stage/Node/-/worker-1", { clusterName: "stage" }); });
+    await waitFor(() => expect(connectCluster).toHaveBeenCalledWith("stage"));
+    expect(connectCluster).not.toHaveBeenCalledWith("prod");
+  });
+
+  it("pauses a pinned detail tab with its own cluster, not with the rail's (#834)", async () => {
+    listContexts.mockResolvedValue({ contexts: [ctx("prod"), ctx("stage")] });
+    loadTabsState.mockReturnValue(defaultState([ctx("prod"), ctx("stage")]));
+    await booted();
+    act(() => { store.openTab("/k/stage/Node/-/worker-1", { clusterName: "stage" }); });
+    // What the rail does on a pick: relabel the whole strip for its cluster.
+    act(() => { store.setActiveCluster("prod", "prod"); });
+    const workspace = store.currentWorkspace().id;
+
+    act(() => { store.setClusterPaused(workspace, "prod", true); });
+    expect(screen.queryByText("stage is paused")).toBeNull();
+    expect(screen.queryByText("prod is paused")).toBeNull();
+
+    act(() => { store.setClusterPaused(workspace, "stage", true); });
+    expect(screen.getByText("stage is paused")).toBeDefined();
   });
 
   it("keeps the agent console mounted when its explicitly scoped cluster is paused", async () => {
@@ -759,6 +840,76 @@ describe("Window strip", () => {
     await userEvent.click(screen.getByRole("button", { name: /open in classic/i }));
     expect(onOpenInClassic).toHaveBeenCalledWith("/incidents", "prod");
   });
+
+  /**
+   * #101. The strip is about the ACTIVE TAB's cluster: the one pinned in a
+   * detail route, else the rail's for a cluster-scoped route, else none.
+   * `loadTabsState` is this file's spy, so protection's read of main's save
+   * gets the same document boot did.
+   */
+  it("says above the tab when the tab's own cluster is protected", async () => {
+    listContexts.mockResolvedValue({ contexts: [ctx("prod"), ctx("stage")] });
+    const saved = defaultState([ctx("prod"), ctx("stage")]);
+    const production = defaultState([ctx("stage")]).workspaces[0];
+    production.name = "Production";
+    production.protected = true;
+    saved.workspaces.push(production);
+    loadTabsState.mockReturnValue(saved);
+    await booted();
+    const note = () => screen.queryByRole("note");
+    const copy = "stage is protected (workspace Production). Changes ask you to type its name.";
+
+    // A detail tab pinned to the protected cluster, with the rail on prod.
+    act(() => { store.openTab("/k/stage/Node/-/worker-1", { clusterName: "stage" }); });
+    expect(note()?.textContent).toBe(copy);
+    // Between the tab strip and the tab bodies.
+    const tablist = screen.getByRole("tablist", { name: "Open tabs" });
+    const home = screen.getByRole("heading", { level: 1, name: "Home", hidden: true });
+    expect(tablist.compareDocumentPosition(note()!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(note()!.compareDocumentPosition(home) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+
+    // A cluster-scoped tab on the rail's cluster, which is not protected.
+    act(() => { store.openTab("/overview", { clusterName: "prod" }); });
+    expect(note()).toBeNull();
+
+    // The reverse: the rail on the protected cluster, a detail tab pinned to the other.
+    act(() => { store.setActiveCluster("stage", "stage"); });
+    expect(note()?.textContent).toBe(copy);
+    act(() => { store.openTab("/k/prod/Node/-/worker-2", { clusterName: "prod" }); });
+    expect(note()).toBeNull();
+
+    // An app route, with the rail still on the protected cluster.
+    act(() => { store.activateTab(store.currentWorkspace().tabs.find((t) => t.route === "/")!.id); });
+    expect(note()).toBeNull();
+  });
+
+  /**
+   * #101. An app's page names its cluster in its route, independent of the
+   * rail (`ExtensionPage`), by a context key that is not the name. The strip
+   * follows the route, which `Window` can only do by handing the strip the
+   * contexts to resolve the key against.
+   */
+  it("says it over an app tab for the cluster the tab names, not the rail's", async () => {
+    listContexts.mockResolvedValue({ contexts: [ctx("prod"), { ...ctx("stage"), key: "stage-key" }] });
+    const saved = defaultState([ctx("prod"), ctx("stage")]);
+    const production = defaultState([ctx("stage")]).workspaces[0];
+    production.name = "Production";
+    production.protected = true;
+    saved.workspaces.push(production);
+    loadTabsState.mockReturnValue(saved);
+    await booted();
+    const note = () => screen.queryByRole("note");
+    const copy = "stage is protected (workspace Production). Changes ask you to type its name.";
+
+    // The protected cluster's page, with the rail on prod.
+    act(() => { store.openTab(extensionClusterRoute("stage-key", "ext", "overview"), { clusterName: "stage" }); });
+    expect(note()?.textContent).toBe(copy);
+
+    // The reverse: the rail on the protected cluster, an app tab for the other.
+    act(() => { store.setActiveCluster("stage", "stage"); });
+    act(() => { store.openTab(extensionClusterRoute("prod", "ext", "overview"), { clusterName: "prod" }); });
+    expect(note()).toBeNull();
+  });
 });
 
 describe("Window — each tab's namespace selection", () => {
@@ -813,7 +964,9 @@ describe("Window — the console dock's scope", () => {
     await bootedWithScope();
     expect(screen.getByTestId("scope-probe").textContent).toBe("prod-eu");
     act(() => store.setActiveCluster("stage", "stage-eu"));
-    await waitFor(() => expect(screen.getByTestId("scope-probe").textContent).toBe("stage-eu"));
+    // A cluster looked at for the first time opens on its overview (#908),
+    // so the dock is about that cluster's overview, not only the cluster.
+    await waitFor(() => expect(screen.getByTestId("scope-probe").textContent).toBe("stage-eu / cluster overview"));
   });
 });
 
@@ -841,6 +994,75 @@ describe("Window accelerators", () => {
     act(() => store.openTab("/k/pods"));
     fireEvent.keyDown(window, { key: "w", ctrlKey: true });
     expect(store.currentWorkspace().tabs).toHaveLength(2);
+  });
+
+  /**
+   * #374 item 4: on macOS the menu's own Close item owns ⌘W
+   * (`install_macos_menu`, lib.rs), so the webview never sees the keydown; the
+   * host says `close-active-tab` instead, as classic listens for.
+   */
+  it("closes the active tab when the macOS menu's Close says so, as ⌘W does", async () => {
+    await booted();
+    act(() => store.openTab("/k/pods"));
+    closeFromMenu();
+    expect(store.currentWorkspace().tabs.map((t) => t.route)).toEqual(["/"]);
+    expect(store.currentWorkspace().closed).toHaveLength(1);
+    expect(closeCurrentWindow).not.toHaveBeenCalled();
+  });
+
+  it("closes the window when the menu's Close lands on the last tab, as classic does", async () => {
+    await booted();
+    expect(store.currentWorkspace().tabs).toHaveLength(1);
+    closeFromMenu();
+    expect(closeCurrentWindow).toHaveBeenCalledTimes(1);
+    expect(store.currentWorkspace().tabs).toHaveLength(1);
+  });
+
+  it("logs a refused window close rather than leaving it unhandled", async () => {
+    const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      closeCurrentWindow.mockRejectedValueOnce(new Error("window close not allowed"));
+      await booted();
+      closeFromMenu();
+      await waitFor(() =>
+        expect(logged).toHaveBeenCalledWith(
+          "the window could not be closed:",
+          expect.any(String),
+          expect.objectContaining({ message: "window close not allowed" }),
+        ),
+      );
+    } finally {
+      logged.mockRestore();
+    }
+  });
+
+  it("leaves the window open when ⌘W reaches the webview on the last tab", async () => {
+    await booted();
+    fireEvent.keyDown(window, { key: "w", metaKey: true });
+    expect(closeCurrentWindow).not.toHaveBeenCalled();
+  });
+
+  it("stops hearing the menu's Close when the window goes", async () => {
+    await booted();
+    expect(bus.get("close-active-tab")?.size).toBe(1);
+    cleanup();
+    expect(bus.get("close-active-tab")?.size ?? 0).toBe(0);
+  });
+
+  it("does not hear the menu's Close while inactive, as ⌘W is not heard", async () => {
+    render(
+      <ConsoleProvider>
+        <Window ported={[]} onOpenInClassic={() => {}} active={false} />
+      </ConsoleProvider>,
+    );
+    await screen.findByRole("heading", { level: 1, name: "Home" });
+    expect(bus.get("close-active-tab")?.size ?? 0).toBe(0);
+  });
+
+  it("does not listen for the menu's Close in a browser, which has no such menu", async () => {
+    isTauri.mockReturnValue(false);
+    await booted();
+    expect(bus.get("close-active-tab")?.size ?? 0).toBe(0);
   });
 
   it("binds nothing while inactive, and takes the chrome down but not the bodies", async () => {
@@ -946,12 +1168,29 @@ describe("Window accelerators", () => {
     expect(notCancelled).toBe(true);
   });
 
+  it("draws the question a held shell waits on, in the window's band (#101)", async () => {
+    const hold = (pending: PendingClusterTerminal | null) =>
+      act(() => {
+        clusterTerminal.pending = pending;
+        for (const listener of clusterTerminal.listeners) listener();
+      });
+    await booted();
+    try {
+      hold({ cluster: ctx("prod"), namespace: undefined, tab: store.currentWorkspace().activeId, inPanel: true });
+      expect(await screen.findByRole("button", { name: "Open terminal" })).toBeDefined();
+    } finally {
+      hold(null);
+    }
+  });
+
   it("counts the launch and asks for the star count once, after boot", async () => {
     starOnGitHub.countLaunch.mockClear();
-    starOnGitHub.refreshStarCount.mockClear();
+    starOnGitHub.useStarCountRefresh.mockClear();
     await booted();
     expect(starOnGitHub.countLaunch).toHaveBeenCalledTimes(1);
-    expect(starOnGitHub.refreshStarCount).toHaveBeenCalledTimes(1);
+    // Kept current from boot on, and not before: settings are not readable yet.
+    expect(starOnGitHub.useStarCountRefresh).toHaveBeenLastCalledWith(true);
+    expect(starOnGitHub.useStarCountRefresh.mock.calls[0]).toEqual([false]);
   });
 
   it("leaves the browser's own zoom alone in web mode", async () => {
@@ -1010,6 +1249,91 @@ describe("Window contexts", () => {
   });
 });
 
+/**
+ * #374 item 3: an edit made outside srelens — `kubectl config use-context`, a
+ * file dropped into the kubeconfig folder — reaches the window only as the
+ * host watcher's `kubeconfig-changed` (`lib.rs`). Classic re-lists on it; this
+ * window kept its boot listing until a reader pressed Refresh.
+ */
+describe("Window — an outside kubeconfig edit", () => {
+  function kubeconfigChanged() {
+    act(() => {
+      for (const handler of bus.get("kubeconfig-changed") ?? []) handler(null);
+    });
+  }
+
+  it("lists the contexts again, with the configured files, when the host says the kubeconfig changed", async () => {
+    await booted();
+    listContexts.mockClear().mockResolvedValue({ contexts: [ctx("prod"), ctx("dev")] });
+    kubeconfigChanged();
+    await waitFor(() => expect(contextFor("dev")?.name).toBe("dev"));
+    expect(listContexts).toHaveBeenCalledWith(["/home/u/.kube/config", "/home/u/.kube/other"]);
+  });
+
+  it("keeps the clusters it has when that listing fails, and says why", async () => {
+    await booted();
+    listContexts.mockResolvedValue({ error: "kubeconfig unreadable" });
+    kubeconfigChanged();
+    await waitFor(() => expect(getContextsStatus()).toBe("failed"));
+    expect(getContextsError()).toBe("kubeconfig unreadable");
+    expect(contextFor("prod")?.name).toBe("prod");
+  });
+
+  it("keeps the newer listing when an older one answers after it", async () => {
+    await booted();
+    // Each listing answers only when told to, with the file as it stood when
+    // that listing began.
+    const file = { contexts: [ctx("prod"), ctx("dev")] };
+    const answers: Array<() => void> = [];
+    listContexts.mockImplementation(() => {
+      const seen = file.contexts;
+      return new Promise((resolve) => answers.push(() => resolve({ contexts: seen })));
+    });
+    kubeconfigChanged();
+    await waitFor(() => expect(answers).toHaveLength(1));
+    file.contexts = [ctx("prod"), ctx("dev"), ctx("stage")];
+    kubeconfigChanged();
+    await waitFor(() => expect(answers).toHaveLength(2));
+    await act(async () => answers[1]());
+    await act(async () => answers[0]());
+    expect(contextFor("stage")?.name).toBe("stage");
+  });
+
+  it("lists again once boot is done when the kubeconfig changed while boot was listing", async () => {
+    let answerBoot!: () => void;
+    listContexts.mockImplementationOnce(
+      () => new Promise((resolve) => (answerBoot = () => resolve({ contexts: [ctx("prod")] }))),
+    );
+    // The file after the edit.
+    listContexts.mockResolvedValue({ contexts: [ctx("prod"), ctx("dev")] });
+    render(
+      <ConsoleProvider>
+        <Window ported={[]} onOpenInClassic={() => {}} />
+      </ConsoleProvider>,
+    );
+    await waitFor(() => expect(listContexts).toHaveBeenCalledTimes(1));
+    kubeconfigChanged();
+    await act(async () => answerBoot());
+    await waitFor(() => expect(screen.getByRole("tablist", { name: "Open tabs" })).toBeDefined());
+    await waitFor(() => expect(contextFor("dev")?.name).toBe("dev"));
+    // Boot's listing and one for the edit: none started under boot's feet.
+    expect(listContexts).toHaveBeenCalledTimes(2);
+  });
+
+  it("stops listening when the window goes", async () => {
+    await booted();
+    expect(bus.get("kubeconfig-changed")?.size).toBe(1);
+    cleanup();
+    expect(bus.get("kubeconfig-changed")?.size ?? 0).toBe(0);
+  });
+
+  it("does not listen in a browser, where no host watches a kubeconfig", async () => {
+    isTauri.mockReturnValue(false);
+    await booted();
+    expect(bus.get("kubeconfig-changed")?.size ?? 0).toBe(0);
+  });
+});
+
 describe("Window — the shell's own widths", () => {
   it("lets the screen column shrink, so the tab strip scrolls instead of overflowing", async () => {
     // `TabStrip`'s tablist is `overflow-x-auto` and is meant to scroll under
@@ -1055,10 +1379,9 @@ describe("Window — what boot has to ask for", () => {
     expect(listenForHostNotices).not.toHaveBeenCalled();
   });
 
-  // This design mounts no `notify` sink, so a notice handed to one is drawn
-  // nowhere: the window draws them itself. One at a time, oldest first, each
-  // until the reader dismisses it — a failed release is not something to let
-  // fade on a timer.
+  // The window draws them itself. One at a time, oldest first, each until the
+  // reader dismisses it — a failed release is not something to let fade on a
+  // timer.
   it("draws each notice the host reports, one at a time, until it is dismissed", async () => {
     let show: (notice: HostNotice) => void = () => {};
     listenForHostNotices.mockImplementation((given) => {
@@ -1087,6 +1410,219 @@ describe("Window — what boot has to ask for", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Dismiss notice" }));
     expect(screen.queryByText("helm upgrade api finished")).toBeNull();
+  });
+});
+
+/**
+ * #374 item 2: `notify` is how screens and core modules report an outcome, and
+ * its only renderer was classic's sonner `<Toaster>` — so under this design
+ * every call drew nothing. The window draws them now, on the same surface as
+ * the host's notices, in every window and not only the main one.
+ */
+describe("Window — notify toasts (#374)", () => {
+  async function bootedAs(windowLabel: string) {
+    render(
+      <ConsoleProvider>
+        <Window ported={[]} onOpenInClassic={() => {}} windowLabel={windowLabel} />
+      </ConsoleProvider>,
+    );
+    await waitFor(() => expect(screen.getByRole("tablist", { name: "Open tabs" })).toBeDefined());
+  }
+
+  it.each(["main", "context-2"])(
+    "draws a notify.error in the %s window, and the keyboard can dismiss it",
+    async (label) => {
+      const user = userEvent.setup();
+      await bootedAs(label);
+      act(() => notify.error("Couldn't delete debug pod dbg-1", "pods is forbidden"));
+
+      const toast = screen.getByRole("alert");
+      expect(toast.textContent).toContain("Couldn't delete debug pod dbg-1");
+      expect(toast.textContent).toContain("pods is forbidden");
+
+      screen.getByRole("button", { name: "Dismiss notice" }).focus();
+      await user.keyboard("{Enter}");
+      expect(screen.queryByText("Couldn't delete debug pod dbg-1")).toBeNull();
+    },
+  );
+
+  it("draws each toast once, instead of the sink it replaced, and hands that sink back", async () => {
+    // What main.tsx installs before either design renders: classic's sonner
+    // sink. Forwarding to it as well would be a second toast wherever a
+    // Toaster exists, and leaving it replaced after unmount would point
+    // `notify` at a tree that is gone.
+    const replaced = {
+      success: vi.fn(),
+      error: vi.fn(),
+      info: vi.fn(),
+      updateAvailable: vi.fn(),
+      clusterSignIn: vi.fn(),
+    };
+    const restore = setNotifier(replaced);
+    try {
+      await booted();
+      act(() => notify.error("Failed to run nightly"));
+      expect(screen.getAllByText("Failed to run nightly")).toHaveLength(1);
+      expect(replaced.error).not.toHaveBeenCalled();
+
+      cleanup();
+      notify.error("After the window went");
+      expect(replaced.error).toHaveBeenCalledWith("After the window went", undefined);
+    } finally {
+      restore();
+    }
+  });
+
+  it("lets a success go on its own, and keeps a failure until it is dismissed", async () => {
+    await booted();
+    vi.useFakeTimers();
+    try {
+      act(() => notify.success("Copied kubectl command"));
+      expect(screen.getByText("Copied kubectl command").closest('[data-slot="toast-frame"]')).not.toBeNull();
+      act(() => vi.advanceTimersByTime(6_000));
+      expect(screen.queryByText("Copied kubectl command")).toBeNull();
+
+      act(() => notify.error("Drain failed"));
+      act(() => vi.advanceTimersByTime(60_000));
+      expect(screen.getByRole("alert").textContent).toContain("Drain failed");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("carries a sign-in prompt's action, and clears the prompt once it is taken", async () => {
+    const user = userEvent.setup();
+    await booted();
+    const onSignIn = vi.fn();
+    act(() => notify.clusterSignIn("Sign in to prod", "This cluster uses OIDC and needs you to sign in.", onSignIn));
+
+    await user.click(screen.getByRole("button", { name: "Sign in" }));
+    expect(onSignIn).toHaveBeenCalledTimes(1);
+    expect(screen.queryByText("Sign in to prod")).toBeNull();
+  });
+
+  it("draws an error that came with no words, so it can be dismissed and the queue moves on", async () => {
+    // An error stays until dismissed and the queue shows one notice at a time.
+    // Drawn with nothing in it, it had no dismiss button, and every notice
+    // behind it waited forever.
+    const user = userEvent.setup();
+    await booted();
+    act(() => notify.error(""));
+    act(() => notify.error("Drain failed"));
+
+    expect(screen.getByRole("alert").textContent).toContain("Something went wrong");
+    await user.click(screen.getByRole("button", { name: "Dismiss notice" }));
+    expect(screen.getByRole("alert").textContent).toContain("Drain failed");
+  });
+
+  it("lets an info go on its own, like a success", async () => {
+    await booted();
+    vi.useFakeTimers();
+    try {
+      act(() => notify.info("Port forward stopped"));
+      expect(screen.getByText("Port forward stopped").closest('[data-slot="toast-frame"]')).not.toBeNull();
+      act(() => vi.advanceTimersByTime(6_000));
+      expect(screen.queryByText("Port forward stopped")).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("carries an update prompt's action, and clears the prompt once it is taken", async () => {
+    const user = userEvent.setup();
+    await booted();
+    const onView = vi.fn();
+    act(() => notify.updateAvailable("0.17.0", onView));
+
+    expect(screen.getByText("Update available")).toBeDefined();
+    expect(screen.getByText(/srelens 0\.17\.0 is ready to install/)).toBeDefined();
+    await user.click(screen.getByRole("button", { name: "View update" }));
+    expect(onView).toHaveBeenCalledTimes(1);
+    expect(screen.queryByText("Update available")).toBeNull();
+  });
+});
+
+/**
+ * #374 item 6: classic checks for an update at launch and every six hours
+ * (`App.tsx`) and offers it in a toast that opens Settings on Updates. This
+ * window checked only when a reader opened Release notes and asked.
+ */
+describe("Window — the automatic update check", () => {
+  const SIX_HOURS = 6 * 60 * 60 * 1000;
+  const UPDATE = { version: "0.99.0", currentVersion: "0.98.0", notes: "", external: false, elevates: false };
+
+  it("checks the saved channel at launch, and offers what it finds on Settings' Updates", async () => {
+    saveUpdateChannel("dev");
+    updateCheck.mockResolvedValue(UPDATE);
+    const user = userEvent.setup();
+    await booted();
+    expect(await screen.findByText(/srelens 0\.99\.0 is ready to install/)).toBeDefined();
+    expect(updateCheck).toHaveBeenCalledWith("dev");
+    await user.click(screen.getByRole("button", { name: "View update" }));
+    expect(store.activeRoute()).toBe("/settings");
+    expect(await screen.findByRole("tab", { name: "Updates", selected: true })).toBeDefined();
+  });
+
+  it("checks again every six hours, and does not offer a version it already offered", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      updateCheck.mockResolvedValue(UPDATE);
+      await booted();
+      await screen.findByText("Update available");
+      fireEvent.click(screen.getByRole("button", { name: "Dismiss notice" }));
+
+      await act(async () => vi.advanceTimersByTime(SIX_HOURS - 60_000));
+      expect(updateCheck).toHaveBeenCalledTimes(1);
+      await act(async () => vi.advanceTimersByTime(60_000));
+      expect(updateCheck).toHaveBeenCalledTimes(2);
+      await act(async () => {
+        await updateCheck.mock.results[1].value;
+      });
+      expect(screen.queryByText("Update available")).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("stops checking when the window goes", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      await booted();
+      await waitFor(() => expect(updateCheck).toHaveBeenCalledTimes(1));
+      cleanup();
+      act(() => vi.advanceTimersByTime(SIX_HOURS));
+      expect(updateCheck).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("offers nothing once the window has gone, when the check answers late", async () => {
+    let answer!: (update: typeof UPDATE) => void;
+    updateCheck.mockReturnValue(new Promise((resolve) => (answer = resolve)));
+    const replaced = {
+      success: vi.fn(),
+      info: vi.fn(),
+      error: vi.fn(),
+      updateAvailable: vi.fn(),
+      clusterSignIn: vi.fn(),
+    };
+    const restore = setNotifier(replaced);
+    try {
+      await booted();
+      await waitFor(() => expect(updateCheck).toHaveBeenCalledTimes(1));
+      cleanup();
+      await act(async () => answer(UPDATE));
+      expect(replaced.updateAvailable).not.toHaveBeenCalled();
+    } finally {
+      restore();
+    }
+  });
+
+  it("does not check in a browser, which has no updater", async () => {
+    isTauri.mockReturnValue(false);
+    await booted();
+    expect(updateCheck).not.toHaveBeenCalled();
   });
 });
 
@@ -1211,6 +1747,25 @@ describe("Window — what the cover has to take with it", () => {
     expect(store.currentWorkspace().activeId).toBe(activeBefore);
   });
 
+  it("closes no tab from the macOS menu's Close while the cover is up", async () => {
+    await sealed();
+    // Positive control: the menu's Close is heard here, or its doing nothing
+    // below would prove nothing.
+    expect(bus.get("close-active-tab")?.size).toBe(1);
+    closeFromMenu();
+    closeFromMenu();
+    expect(store.currentWorkspace().tabs).toHaveLength(2);
+  });
+
+  it("closes no window from the macOS menu's Close on the last tab while the cover is up", async () => {
+    await booted();
+    fireEvent.keyDown(window, { key: "L", metaKey: true, shiftKey: true });
+    await screen.findByText("Workspace locked");
+    expect(store.currentWorkspace().tabs).toHaveLength(1);
+    closeFromMenu();
+    expect(closeCurrentWindow).not.toHaveBeenCalled();
+  });
+
   /**
    * Zoom is the exception, and the reason is not convenience. Its whole effect
    * is on the surface the reader is looking at — the lock screen — and a
@@ -1253,6 +1808,50 @@ describe("Window — what the cover has to take with it", () => {
     // The readouts themselves stay: the cluster name and the counts come from
     // files and stores the vault never sealed.
     expect(strip.textContent ?? "").toContain("prod");
+  });
+
+  /**
+   * The notice queue is drawn outside `LockGate`, so a notice stays in view
+   * over the cover — the reader still learns an update exists. Its action is
+   * another matter: "View update" opens Settings, and a tab opened behind the
+   * cover is the same workspace change the chords above are refused.
+   */
+  describe("a notice's action", () => {
+    const UPDATE = { version: "0.99.0", currentVersion: "0.98.0", notes: "", external: false, elevates: false };
+    const viewUpdate = () => screen.getByRole("button", { name: "View update" }) as HTMLButtonElement;
+
+    beforeEach(() => {
+      updateCheck.mockResolvedValue(UPDATE);
+    });
+
+    it("stays in view but is held while the cover is up", async () => {
+      await sealed();
+      await screen.findByText("Update available");
+      await userEvent.click(viewUpdate());
+      expect(store.currentWorkspace().tabs.some((t) => t.route === "/settings")).toBe(false);
+      expect(viewUpdate().disabled).toBe(true);
+      expect(screen.getByText("Update available")).toBeTruthy();
+    });
+
+    it("is given back once the vault opens again, without a reload", async () => {
+      await sealed();
+      await screen.findByText("Update available");
+      expect(viewUpdate().disabled).toBe(true);
+      vaultStatus.mockResolvedValue(VAULT_OPEN);
+      await userEvent.type(screen.getByLabelText("Master passphrase"), "aaaa1111aaaa");
+      await userEvent.click(screen.getByRole("button", { name: "Unlock workspace" }));
+      await screen.findByRole("tablist");
+      expect(viewUpdate().disabled).toBe(false);
+      await userEvent.click(viewUpdate());
+      expect(store.activeRoute()).toBe("/settings");
+    });
+
+    it("leaves the notice dismissable while the cover is up", async () => {
+      await sealed();
+      await screen.findByText("Update available");
+      await userEvent.click(screen.getByRole("button", { name: "Dismiss notice" }));
+      expect(screen.queryByText("Update available")).toBeNull();
+    });
   });
 
   /**
@@ -1904,9 +2503,9 @@ describe("Window — srelens:// deep links", () => {
     expect(store.activeCluster()).toBe("prod");
     deepLinks.queue = ["srelens://resource/stage/payments/Pod/web-7d4b"];
     nudge();
-    await waitFor(() => expect(store.activeRoute()).toBe("/k/Pod/payments/web-7d4b"));
-    expect(tabFor("/k/Pod/payments/web-7d4b")?.sub).toBe("stage");
-    // The detail reads whichever cluster is in focus, so this is what the tab
+    await waitFor(() => expect(store.activeRoute()).toBe("/k/stage/Pod/payments/web-7d4b"));
+    expect(tabFor("/k/stage/Pod/payments/web-7d4b")?.sub).toBe("stage");
+    // The detail reads the cluster in its route, so this is what the tab
     // actually shows: stage's pod, and never prod's pod of the same name.
     await waitFor(() =>
       expect(getObjectSpy).toHaveBeenCalledWith("stage", "Pod", "payments", "web-7d4b"),
@@ -1919,7 +2518,7 @@ describe("Window — srelens:// deep links", () => {
     await booted();
     deepLinks.queue = ["srelens://resource/stage/-/Node/worker-1"];
     nudge();
-    await waitFor(() => expect(store.activeRoute()).toBe("/k/Node/-/worker-1"));
+    await waitFor(() => expect(store.activeRoute()).toBe("/k/stage/Node/-/worker-1"));
     expect(store.activeCluster()).toBe("stage");
   });
 
@@ -2023,7 +2622,7 @@ describe("Window — srelens:// deep links", () => {
     );
     expect(store.activeRoute()).toBe("/overview");
     expect(store.activeCluster()).toBe("prod");
-    expect(tabFor("/k/Pod/payments/web-7d4b")).toBeUndefined();
+    expect(tabFor("/k/stage/Pod/payments/web-7d4b")).toBeUndefined();
     const notice = shownNotice() ?? "";
     expect(notice).toContain("That link will be checked once the contexts load");
     expect(notice).toContain("The kube contexts could not be listed. open /home/dana/.kube/stage: permission denied");
@@ -2038,15 +2637,34 @@ describe("Window — srelens:// deep links", () => {
     // A reload that answers cleanly — Connections' Refresh, Home's Retry —
     // judges the held links again, in the order they came.
     act(() => setContexts([ctx("prod"), ctx("stage")]));
-    await waitFor(() => expect(store.activeRoute()).toBe("/k/Node/-/worker-1"));
+    await waitFor(() => expect(store.activeRoute()).toBe("/k/stage/Node/-/worker-1"));
     expect(store.activeCluster()).toBe("stage");
-    expect(tabFor("/k/Pod/payments/web-7d4b")?.sub).toBe("stage");
+    expect(tabFor("/k/stage/Pod/payments/web-7d4b")?.sub).toBe("stage");
     expect(shownNotice()).toBeNull();
 
     // A later failure is a new one, and is said again.
     act(() => setContexts([ctx("prod")], "open /home/dana/.kube/stage: permission denied"));
     await deliver("srelens://cluster/stage");
     expect(shownNotice() ?? "").toContain("That link will be checked once the contexts load");
+  });
+
+  it("opens a link held behind a failed listing once an outside edit fixes the kubeconfig", async () => {
+    listContexts.mockResolvedValue({
+      contexts: [ctx("prod")],
+      error: "open /home/dana/.kube/stage: permission denied",
+    });
+    await booted();
+    await deliver("srelens://cluster/stage");
+    expect(store.activeCluster()).not.toBe("stage");
+
+    // The reader fixes the file in a terminal; the host's watcher says so, and
+    // nobody has to find a Refresh button for the link they already clicked.
+    listContexts.mockResolvedValue({ contexts: [ctx("prod"), ctx("stage")] });
+    act(() => {
+      for (const handler of bus.get("kubeconfig-changed") ?? []) handler(null);
+    });
+    await waitFor(() => expect(store.activeCluster()).toBe("stage"));
+    expect(store.activeRoute()).toBe("/overview");
   });
 
   it("still refuses at once, while the listing has failed, what no listing can change", async () => {
@@ -2069,5 +2687,45 @@ describe("Window — srelens:// deep links", () => {
       fireEvent.click(screen.getByRole("button", { name: "Dismiss notice" }));
     }
     expect(shownNotice()).toBeNull();
+  });
+});
+
+/**
+ * #101: a context window copied main's workspaces when it opened, so it reads
+ * main's save again each time it is focused. Main holds the workspaces itself.
+ */
+describe("Window — main's protection reaches a context window (#101)", () => {
+  async function bootedAs(windowLabel: string) {
+    render(
+      <ConsoleProvider>
+        <Window ported={[]} onOpenInClassic={() => {}} windowLabel={windowLabel} />
+      </ConsoleProvider>,
+    );
+    await waitFor(() => expect(screen.getByRole("tablist", { name: "Open tabs" })).toBeDefined());
+  }
+
+  it("re-reads main's saved workspaces when a context window is focused", async () => {
+    await bootedAs("ctx-stage");
+    await act(async () => {
+      window.dispatchEvent(new Event("focus"));
+    });
+    expect(refreshSetting).toHaveBeenCalledWith("srelens.next.workspaces");
+  });
+
+  it("asks the backend nothing when the main window is focused", async () => {
+    await bootedAs("main");
+    await act(async () => {
+      window.dispatchEvent(new Event("focus"));
+    });
+    expect(refreshSetting).not.toHaveBeenCalledWith("srelens.next.workspaces");
+  });
+
+  // #968: a switch flipped in another window reaches this one on focus.
+  it("re-reads the AI Assistant setting when the window is focused", async () => {
+    await bootedAs("ctx-stage");
+    await act(async () => {
+      window.dispatchEvent(new Event("focus"));
+    });
+    expect(refreshSetting).toHaveBeenCalledWith("srelens.assistant");
   });
 });

@@ -11,6 +11,7 @@ use ratatui::{
 };
 use tokio::sync::mpsc::UnboundedSender;
 
+use srelens_agent::adapter::AgentKind;
 use srelens_capability::Registry;
 use srelens_kube::client_cache::ClientCache;
 use srelens_kube::contexts::ContextDto;
@@ -20,7 +21,9 @@ use srelens_streams::logs::LogStreamManager;
 use srelens_streams::watch::WatchManager;
 
 use crate::commands::{
-    command_suggestions_with_crds, resolve_command_with_crds, CommandTarget, CrdMeta, ResourceKind,
+    command_suggestions_full, command_suggestions_with_crds, is_exact_name_or_alias,
+    resolve_command_with_crds, CommandTarget, CrdMeta, DynamicCommandDef, ResourceKind,
+    COMMAND_REGISTRY,
 };
 use crate::event::AppEvent;
 use crate::sink::TuiSink;
@@ -173,11 +176,14 @@ pub struct App {
     pub kubeconfig_paths: Vec<PathBuf>,
     pub contexts: Vec<ContextDto>,
     pub namespaces: Vec<String>,
+    pub namespace_discovery_error: Option<String>,
     pub active_view: ActiveView,
     pub nav_stack: Vec<ActiveView>,
     pub input_mode: InputMode,
     pub command_buffer: String,
     pub command_suggestion_idx: usize,
+    pub command_tab_base: Option<String>,
+    pub command_tab_target: Option<CommandTarget>,
     pub filter_buffer: String,
     pub modal: Option<Modal>,
     pub show_help: bool,
@@ -233,6 +239,20 @@ pub struct App {
     pub screen_selection: Option<((u16, u16), (u16, u16))>,
     pub screen_selecting: bool,
     pub screen_selection_text: std::cell::RefCell<String>,
+    /// Local agents' gated tool calls waiting on a yes or no. While any is
+    /// waiting, its prompt is drawn over everything and takes every key;
+    /// clicks and pastes go nowhere.
+    pub consents: crate::consent::ConsentQueue,
+    /// How long a prompt ignores keys once it is first drawn, so a key typed
+    /// before the user could see it (a `y` mid-sentence in the Assistant)
+    /// cannot answer it.
+    pub consent_arm_delay: Duration,
+    /// Model lists for the Settings picker, kept for the run by cache key;
+    /// `None` while that list's one fetch is in flight. Failures are not kept.
+    pub model_lists: HashMap<String, Option<Vec<srelens_agent::adapter::ModelChoice>>>,
+    /// Where the Assistant, the Agent card and the model picker look for
+    /// local agent CLIs; a test points it at its own directory.
+    pub agent_search: srelens_kube::toolbox::SearchPaths,
 }
 
 pub enum SuspendAction {
@@ -355,7 +375,27 @@ pub fn normalize_line_breaks(text: &str) -> String {
     text.replace("\r\n", "\n").replace('\r', "\n")
 }
 
+/// The command a `$BROWSER` value runs on `url`, shell-split like `$EDITOR`.
+/// `None` when the value names no program.
+pub fn browser_env_command(browser: &str, url: &str) -> Option<std::process::Command> {
+    let parts: Vec<String> = shlex::split(browser)
+        .unwrap_or_else(|| browser.split_whitespace().map(String::from).collect());
+    let (prog, args) = parts.split_first()?;
+    let mut cmd = std::process::Command::new(prog);
+    cmd.args(args).arg(url);
+    Some(cmd)
+}
+
+/// Opens `url` with `$BROWSER` when it is set, else with the platform's opener.
 pub fn open_browser_url(url: &str) -> Result<(), String> {
+    if let Ok(browser) = std::env::var("BROWSER") {
+        if let Some(mut cmd) = browser_env_command(&browser, url) {
+            return cmd
+                .spawn()
+                .map(|_| ())
+                .map_err(|e| format!("Failed to open {url} with '{browser}': {e}"));
+        }
+    }
     #[cfg(target_os = "macos")]
     {
         std::process::Command::new("open")
@@ -537,12 +577,15 @@ impl App {
             active_namespace,
             kubeconfig_paths,
             contexts,
-            namespaces: vec!["default".to_string(), "kube-system".to_string()],
+            namespaces: Vec::new(),
+            namespace_discovery_error: None,
             active_view: ActiveView::Table(initial_table),
             nav_stack: Vec::new(),
             input_mode: InputMode::Normal,
             command_buffer: String::new(),
             command_suggestion_idx: 0,
+            command_tab_base: None,
+            command_tab_target: None,
             filter_buffer: String::new(),
             modal: None,
             show_help: false,
@@ -590,6 +633,10 @@ impl App {
             screen_selection: None,
             screen_selecting: false,
             screen_selection_text: std::cell::RefCell::new(String::new()),
+            consents: Default::default(),
+            consent_arm_delay: Duration::from_secs(1),
+            model_lists: HashMap::new(),
+            agent_search: srelens_kube::toolbox::SearchPaths::from_env(),
         };
 
         if let Some(lvl) = app.ai_settings.get_caveman_level() {
@@ -603,6 +650,7 @@ impl App {
         app.refresh_cluster_info();
         app.refresh_cluster_overview();
         app.refresh_crds();
+        app.refresh_namespaces();
         app.restart_active_watch().await;
 
         // Pre-warm ArgoCD Hub connection in the background if configured
@@ -633,6 +681,7 @@ impl App {
 
     pub fn handle_tick(&mut self) {
         self.assistant_state.tick();
+        self.consents.prune_closed();
 
         // Clear expired toasts (auto-dismiss after 3s)
         if let Some((_, created, _)) = &self.toast {
@@ -1664,8 +1713,8 @@ impl App {
             let _ = rustls::crypto::ring::default_provider().install_default();
             let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
                 let channel = crate::self_update::Channel::of_version(&current_version);
-                let exe = std::env::current_exe()
-                    .unwrap_or_else(|_| std::path::PathBuf::from("srectl"));
+                let exe =
+                    std::env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from("srectl"));
                 let target = crate::self_update::installed_path(&exe);
 
                 let client = match reqwest::blocking::Client::builder()
@@ -2148,10 +2197,13 @@ impl App {
         self.refresh_cluster_overview();
         self.crds = crate::commands::load_cached_crds(&self.active_context);
         self.refresh_crds();
+        self.namespaces.clear();
+        self.namespace_discovery_error = None;
+        self.refresh_namespaces();
         self.restart_active_watch().await;
     }
 
-    pub async fn switch_namespace(&mut self, new_namespace: String) {
+    pub fn set_namespace_raw(&mut self, new_namespace: String) {
         self.stop_active_log_stream();
         if matches!(self.active_view, ActiveView::Logs(_)) {
             if let Some(prev) = self.nav_stack.pop() {
@@ -2165,7 +2217,11 @@ impl App {
         if !new_namespace.is_empty() {
             self.last_active_namespace = new_namespace.clone();
         }
-        self.active_namespace = new_namespace.clone();
+        self.active_namespace = new_namespace;
+    }
+
+    pub async fn switch_namespace(&mut self, new_namespace: String) {
+        self.set_namespace_raw(new_namespace);
         let display_ns = if self.active_namespace.is_empty() {
             "all"
         } else {
@@ -2176,6 +2232,36 @@ impl App {
             Theme::status_ok(),
         );
         self.restart_active_watch().await;
+    }
+
+    pub fn refresh_namespaces(&self) {
+        let ctx = self.active_context.clone();
+        let cache = self.client_cache.clone();
+        let event_tx = self.event_tx.clone();
+
+        tokio::spawn(async move {
+            let cap = srelens_kube::workloads::list_namespaces_capability(cache);
+            let input = serde_json::json!({ "context": ctx });
+            let ch = format!("discovery:namespaces:{}", ctx);
+            match (cap.handler)(input).await {
+                Ok(val) => {
+                    let payload = val
+                        .get("summaries")
+                        .cloned()
+                        .unwrap_or(serde_json::Value::Array(vec![]));
+                    let _ = event_tx.send(AppEvent::StreamEvent {
+                        channel: ch,
+                        payload,
+                    });
+                }
+                Err(err) => {
+                    let _ = event_tx.send(AppEvent::StreamEvent {
+                        channel: ch,
+                        payload: serde_json::json!({ "error": err.to_string() }),
+                    });
+                }
+            }
+        });
     }
 
     pub async fn restart_active_watch(&mut self) {
@@ -2476,10 +2562,64 @@ impl App {
         }
     }
 
+    fn resolve_completion_command_name(&self, sugg: &DynamicCommandDef, query: &str) -> String {
+        if let CommandTarget::CustomResource(ref crd) = sugg.target {
+            let query_clean = query.trim_start().trim_start_matches(':').trim();
+            if query_clean.contains('.') || query_clean.contains(&crd.group) {
+                return crd.crd_name.clone();
+            }
+            let collides_with_static = COMMAND_REGISTRY.iter().any(|cmd| {
+                cmd.name.eq_ignore_ascii_case(&crd.plural)
+                    || cmd
+                        .aliases
+                        .iter()
+                        .any(|a| a.eq_ignore_ascii_case(&crd.plural))
+            });
+            let has_plural_collision = collides_with_static
+                || self
+                    .crds
+                    .iter()
+                    .filter(|c| c.plural.eq_ignore_ascii_case(&crd.plural))
+                    .count()
+                    > 1;
+            if has_plural_collision {
+                return crd.crd_name.clone();
+            }
+        }
+        sugg.name.clone()
+    }
+
     pub async fn handle_key_event(&mut self, key: KeyEvent) {
         // Any keypress dismisses the drag-to-copy selection highlight.
         self.screen_selection = None;
         self.screen_selecting = false;
+
+        // An agent's approval prompt is drawn over everything and takes
+        // every key until it is answered or gone. Ctrl+C there means stop:
+        // decline, and cancel the turn that asked (srectl keeps running).
+        // Only presses answer: Windows also reports each key's release, and
+        // the release of the key that answered one prompt must not answer
+        // the next.
+        if !self.consents.is_empty() {
+            if key.kind != crossterm::event::KeyEventKind::Press {
+                return;
+            }
+            if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
+                if let Some(context) = self.consents.cancel() {
+                    let turn = if context == self.active_context {
+                        Some(&mut self.assistant_state)
+                    } else {
+                        self.assistant_states.get_mut(&context)
+                    };
+                    if let Some(turn) = turn {
+                        turn.cancel_turn();
+                    }
+                }
+            } else {
+                self.consents.press(key, self.consent_arm_delay);
+            }
+            return;
+        }
 
         // Global Ctrl+C handler -> Immediately kill/exit TUI cleanly,
         // unless in Assistant view where Ctrl+C is used to copy selection or assistant reply.
@@ -2620,6 +2760,17 @@ impl App {
                         KeyCode::Char('i') | KeyCode::Char('I') => {
                             self.modal = None;
                             self.open_add_cluster_modal();
+                        }
+                        KeyCode::Char('c') | KeyCode::Char('C') => {
+                            self.modal = None;
+                            self.open_context_picker();
+                        }
+                        KeyCode::Char('h')
+                        | KeyCode::Char('H')
+                        | KeyCode::Char('o')
+                        | KeyCode::Char('O') => {
+                            self.modal = None;
+                            self.switch_view_to_kind(ResourceKind::TopPods).await;
                         }
                         KeyCode::Char('u') | KeyCode::Char('U') => {
                             if let Some(ref ver) = self.tui_config.update_available {
@@ -3589,6 +3740,16 @@ impl App {
                             self.modal = None;
                             self.switch_namespace(String::new()).await;
                         }
+                        KeyCode::Char('r') | KeyCode::Char('R')
+                            if filter.is_empty()
+                                || key.modifiers.contains(KeyModifiers::CONTROL) =>
+                        {
+                            self.refresh_namespaces();
+                            self.set_toast(
+                                "Refreshing namespaces...".to_string(),
+                                Theme::status_ok(),
+                            );
+                        }
                         _ if is_word_delete_key(&key) => {
                             delete_prev_word(&mut filter);
                             self.modal = Some(Modal::NamespacePicker {
@@ -4060,6 +4221,8 @@ impl App {
                     self.input_mode = InputMode::Normal;
                     self.command_buffer.clear();
                     self.command_suggestion_idx = 0;
+                    self.command_tab_base = None;
+                    self.command_tab_target = None;
                 }
                 KeyCode::Enter => {
                     let trimmed = self.command_buffer.trim().trim_start_matches(':').trim();
@@ -4087,23 +4250,56 @@ impl App {
                         self.input_mode = InputMode::Normal;
                         self.command_buffer.clear();
                         self.command_suggestion_idx = 0;
+                        self.command_tab_base = None;
+                        self.command_tab_target = None;
                         self.execute_colon_command(&cmd).await;
                         return;
                     }
 
-                    let suggestions =
-                        command_suggestions_with_crds(&self.command_buffer, &self.crds);
-                    let target = if !suggestions.is_empty()
-                        && self.command_suggestion_idx < suggestions.len()
-                    {
-                        Some(suggestions[self.command_suggestion_idx].0.target.clone())
-                    } else {
-                        None
-                    };
+                    let target = self.command_tab_target.take().or_else(|| {
+                        let raw = self.command_buffer.trim_start().trim_start_matches(':');
+                        // If input has whitespace and the argument portion is empty (e.g. ":pods " or ":prometheusrules "),
+                        // resolve the base command directly rather than picking the first candidate in the namespace list.
+                        if let Some(pos) = raw.find(char::is_whitespace) {
+                            let arg = raw[pos..].trim();
+                            if arg.is_empty() {
+                                let cmd_prefix = raw[..pos].trim();
+                                return resolve_command_with_crds(cmd_prefix, &self.crds);
+                            }
+                        }
+
+                        let query = if self.command_buffer.contains(char::is_whitespace) {
+                            self.command_tab_base
+                                .as_deref()
+                                .unwrap_or(&self.command_buffer)
+                        } else {
+                            &self.command_buffer
+                        };
+                        let suggestions = command_suggestions_full(
+                            query,
+                            &self.crds,
+                            &self.namespaces,
+                            self.namespace_discovery_error.as_deref(),
+                        );
+                        if !suggestions.is_empty()
+                            && self.command_suggestion_idx < suggestions.len()
+                        {
+                            let (sugg, _) = &suggestions[self.command_suggestion_idx];
+                            if !sugg.name.ends_with(" <namespace>") {
+                                Some(sugg.target.clone())
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        }
+                    });
                     let fallback_cmd = self.command_buffer.clone();
                     self.input_mode = InputMode::Normal;
                     self.command_buffer.clear();
                     self.command_suggestion_idx = 0;
+                    self.command_tab_base = None;
+                    self.command_tab_target = None;
                     if let Some(target) = target {
                         self.execute_command_target(target).await;
                     } else if !fallback_cmd
@@ -4116,53 +4312,164 @@ impl App {
                     }
                 }
                 KeyCode::Tab => {
-                    let suggestions =
-                        command_suggestions_with_crds(&self.command_buffer, &self.crds);
-                    if !suggestions.is_empty() {
-                        let idx = self.command_suggestion_idx % suggestions.len();
-                        self.command_buffer = suggestions[idx].0.name.clone();
-                        // Completion changes the query and rebuilds the list.
-                        // Names and aliases can collide, so follow the selected
-                        // target (including its CRD group), not the old index.
-                        let target = &suggestions[idx].0.target;
-                        self.command_suggestion_idx =
-                            command_suggestions_with_crds(&self.command_buffer, &self.crds)
+                    let has_whitespace = self.command_buffer.contains(char::is_whitespace);
+                    if has_whitespace {
+                        let is_first_tab = self.command_tab_base.is_none();
+                        let query = self
+                            .command_tab_base
+                            .get_or_insert_with(|| self.command_buffer.clone())
+                            .clone();
+                        let suggestions = command_suggestions_full(
+                            &query,
+                            &self.crds,
+                            &self.namespaces,
+                            self.namespace_discovery_error.as_deref(),
+                        );
+                        if !suggestions.is_empty() {
+                            let next_idx = if is_first_tab {
+                                self.command_suggestion_idx % suggestions.len()
+                            } else {
+                                (self.command_suggestion_idx + 1) % suggestions.len()
+                            };
+                            self.command_suggestion_idx = next_idx;
+                            let name = &suggestions[next_idx].0.name;
+                            if !name.ends_with(" <namespace>") {
+                                self.command_buffer = name.clone();
+                                self.command_tab_target =
+                                    Some(suggestions[next_idx].0.target.clone());
+                            }
+                        }
+                    } else {
+                        self.command_tab_base = None;
+                        let suggestions = command_suggestions_full(
+                            &self.command_buffer,
+                            &self.crds,
+                            &self.namespaces,
+                            self.namespace_discovery_error.as_deref(),
+                        );
+                        if !suggestions.is_empty() {
+                            let idx = self.command_suggestion_idx % suggestions.len();
+                            let sugg = &suggestions[idx].0;
+                            if !sugg.name.ends_with(" <namespace>") {
+                                self.command_buffer = sugg.name.clone();
+                                let target = &sugg.target;
+                                self.command_tab_target = Some(target.clone());
+                                self.command_suggestion_idx = command_suggestions_full(
+                                    &self.command_buffer,
+                                    &self.crds,
+                                    &self.namespaces,
+                                    self.namespace_discovery_error.as_deref(),
+                                )
                                 .iter()
                                 .position(|(command, _)| &command.target == target)
-                                .unwrap_or(0);
+                                .unwrap_or(idx);
+                            }
+                        }
                     }
                 }
                 KeyCode::BackTab => {
-                    let suggestions =
-                        command_suggestions_with_crds(&self.command_buffer, &self.crds);
-                    if !suggestions.is_empty() {
-                        let len = suggestions.len();
-                        let idx = (self.command_suggestion_idx + len - 1) % len;
-                        self.command_suggestion_idx = idx;
+                    let has_whitespace = self.command_buffer.contains(char::is_whitespace);
+                    if has_whitespace {
+                        let is_first_tab = self.command_tab_base.is_none();
+                        let query = self
+                            .command_tab_base
+                            .get_or_insert_with(|| self.command_buffer.clone())
+                            .clone();
+                        let suggestions = command_suggestions_full(
+                            &query,
+                            &self.crds,
+                            &self.namespaces,
+                            self.namespace_discovery_error.as_deref(),
+                        );
+                        if !suggestions.is_empty() {
+                            let len = suggestions.len();
+                            let prev_idx = if is_first_tab {
+                                (self.command_suggestion_idx + len - 1) % len
+                            } else {
+                                (self.command_suggestion_idx + len - 1) % len
+                            };
+                            self.command_suggestion_idx = prev_idx;
+                            let name = &suggestions[prev_idx].0.name;
+                            if !name.ends_with(" <namespace>") {
+                                self.command_buffer = name.clone();
+                                self.command_tab_target =
+                                    Some(suggestions[prev_idx].0.target.clone());
+                            }
+                        }
+                    } else {
+                        self.command_tab_base = None;
+                        let suggestions = command_suggestions_full(
+                            &self.command_buffer,
+                            &self.crds,
+                            &self.namespaces,
+                            self.namespace_discovery_error.as_deref(),
+                        );
+                        if !suggestions.is_empty() {
+                            let len = suggestions.len();
+                            let idx = (self.command_suggestion_idx + len - 1) % len;
+                            self.command_suggestion_idx = idx;
+                            let name = &suggestions[idx].0.name;
+                            if !name.ends_with(" <namespace>") {
+                                self.command_tab_target = Some(suggestions[idx].0.target.clone());
+                            }
+                        }
                     }
                 }
                 KeyCode::Down | KeyCode::Char('n') | KeyCode::Char('N')
                     if key.code == KeyCode::Down
                         || key.modifiers.contains(KeyModifiers::CONTROL) =>
                 {
-                    let suggestions =
-                        command_suggestions_with_crds(&self.command_buffer, &self.crds);
+                    let query = self
+                        .command_tab_base
+                        .as_deref()
+                        .unwrap_or(&self.command_buffer);
+                    let suggestions = command_suggestions_full(
+                        query,
+                        &self.crds,
+                        &self.namespaces,
+                        self.namespace_discovery_error.as_deref(),
+                    );
                     if !suggestions.is_empty() {
-                        self.command_suggestion_idx =
-                            (self.command_suggestion_idx + 1) % suggestions.len();
+                        let next_idx = (self.command_suggestion_idx + 1) % suggestions.len();
+                        self.command_suggestion_idx = next_idx;
+                        let name = &suggestions[next_idx].0.name;
+                        if !name.ends_with(" <namespace>") {
+                            if self.command_tab_base.is_some() {
+                                self.command_buffer = name.clone();
+                            }
+                            self.command_tab_target = Some(suggestions[next_idx].0.target.clone());
+                        }
                     }
                 }
                 KeyCode::Up | KeyCode::Char('p') | KeyCode::Char('P')
                     if key.code == KeyCode::Up || key.modifiers.contains(KeyModifiers::CONTROL) =>
                 {
-                    let suggestions =
-                        command_suggestions_with_crds(&self.command_buffer, &self.crds);
+                    let query = self
+                        .command_tab_base
+                        .as_deref()
+                        .unwrap_or(&self.command_buffer);
+                    let suggestions = command_suggestions_full(
+                        query,
+                        &self.crds,
+                        &self.namespaces,
+                        self.namespace_discovery_error.as_deref(),
+                    );
                     if !suggestions.is_empty() {
                         let len = suggestions.len();
-                        self.command_suggestion_idx = (self.command_suggestion_idx + len - 1) % len;
+                        let prev_idx = (self.command_suggestion_idx + len - 1) % len;
+                        self.command_suggestion_idx = prev_idx;
+                        let name = &suggestions[prev_idx].0.name;
+                        if !name.ends_with(" <namespace>") {
+                            if self.command_tab_base.is_some() {
+                                self.command_buffer = name.clone();
+                            }
+                            self.command_tab_target = Some(suggestions[prev_idx].0.target.clone());
+                        }
                     }
                 }
                 _ if is_word_delete_key(&key) => {
+                    self.command_tab_base = None;
+                    self.command_tab_target = None;
                     if self.command_buffer.is_empty() {
                         self.input_mode = InputMode::Normal;
                     } else {
@@ -4173,10 +4480,14 @@ impl App {
                 KeyCode::Char('u') | KeyCode::Char('U')
                     if key.modifiers.contains(KeyModifiers::CONTROL) =>
                 {
+                    self.command_tab_base = None;
+                    self.command_tab_target = None;
                     self.command_buffer.clear();
                     self.command_suggestion_idx = 0;
                 }
                 KeyCode::Backspace => {
+                    self.command_tab_base = None;
+                    self.command_tab_target = None;
                     self.command_buffer.pop();
                     self.command_suggestion_idx = 0;
                     if self.command_buffer.is_empty() {
@@ -4186,16 +4497,73 @@ impl App {
                 KeyCode::Char('v') | KeyCode::Char('V')
                     if key.modifiers.contains(KeyModifiers::CONTROL) =>
                 {
+                    self.command_tab_base = None;
+                    self.command_tab_target = None;
                     if let Some(clip) = get_clipboard_text() {
                         let cleaned = clip.replace("\r\n", " ").replace('\n', " ");
                         self.command_buffer.push_str(&cleaned);
                         self.command_suggestion_idx = 0;
                     }
                 }
+                KeyCode::Char(' ')
+                    if !key.modifiers.contains(KeyModifiers::CONTROL)
+                        && !key.modifiers.contains(KeyModifiers::ALT) =>
+                {
+                    let raw = self
+                        .command_buffer
+                        .trim_start()
+                        .trim_start_matches(':')
+                        .trim();
+                    let first_word_done = self.command_buffer.contains(char::is_whitespace);
+
+                    // Space is a literal separator when:
+                    // 1. already past the first word
+                    // 2. nothing typed yet (":" then Space)
+                    // 3. no explicit arrow selection, and the word is already an exact command name or alias (e.g. ":ns", ":theme", ":ctx")
+                    let word_is_complete = first_word_done
+                        || raw.is_empty()
+                        || (self.command_tab_target.is_none()
+                            && is_exact_name_or_alias(raw, &self.crds));
+
+                    if !word_is_complete {
+                        let query = self
+                            .command_tab_base
+                            .as_deref()
+                            .unwrap_or(&self.command_buffer);
+                        let suggestions = command_suggestions_full(
+                            query,
+                            &self.crds,
+                            &self.namespaces,
+                            self.namespace_discovery_error.as_deref(),
+                        );
+                        let matched_sugg = match &self.command_tab_target {
+                            Some(t) => suggestions.iter().find(|(s, _)| &s.target == t),
+                            None => suggestions.get(self.command_suggestion_idx),
+                        };
+                        // Only prefix matches (score >= 80) complete on Space; substring/description hits are for browsing.
+                        if let Some((sugg, score)) = matched_sugg {
+                            if *score >= 80 && !sugg.name.ends_with(" <namespace>") {
+                                let name = self.resolve_completion_command_name(sugg, query);
+                                self.command_buffer = format!("{} ", name);
+                                self.command_tab_base = None;
+                                self.command_tab_target = None;
+                                self.command_suggestion_idx = 0;
+                                return;
+                            }
+                        }
+                    }
+
+                    self.command_tab_base = None;
+                    self.command_tab_target = None;
+                    self.command_buffer.push(' ');
+                    self.command_suggestion_idx = 0;
+                }
                 KeyCode::Char(c)
                     if !key.modifiers.contains(KeyModifiers::CONTROL)
                         && !key.modifiers.contains(KeyModifiers::ALT) =>
                 {
+                    self.command_tab_base = None;
+                    self.command_tab_target = None;
                     self.command_buffer.push(c);
                     self.command_suggestion_idx = 0;
                 }
@@ -4265,7 +4633,9 @@ impl App {
         // 5. Settings View Dedicated Key Handling
         if matches!(self.active_view, ActiveView::Settings(_)) {
             if let ActiveView::Settings(s) = &self.active_view {
-                if !s.is_editing && key.code == KeyCode::Char(':') {
+                // A model id can hold a `:` (`llama3.2:3b`), so the picker
+                // keeps it as text too.
+                if !s.is_editing && s.picker.is_none() && key.code == KeyCode::Char(':') {
                     self.input_mode = InputMode::Command;
                     self.command_buffer.clear();
                     return;
@@ -5351,11 +5721,21 @@ impl App {
                             if let Some(item) = table.selected_item() {
                                 let (obj_kind, obj_name) = parse_involved_object(item);
                                 if !obj_name.is_empty() {
-                                    self.open_resource_tree(obj_kind, obj_name, sel_ns.clone());
+                                    self.open_resource_tree(
+                                        obj_kind,
+                                        obj_name,
+                                        sel_ns.clone(),
+                                        None,
+                                    );
                                 }
                             }
                         } else if let Some(name) = sel_name.clone() {
-                            self.open_resource_tree(kind_str.clone(), name, sel_ns.clone());
+                            self.open_resource_tree(
+                                kind_str.clone(),
+                                name,
+                                sel_ns.clone(),
+                                crd_api_version.clone(),
+                            );
                         }
                     }
                     KeyCode::Enter => {
@@ -6524,7 +6904,44 @@ impl App {
                 }
             }
             ActiveView::Settings(settings) => {
-                if settings.is_editing {
+                if let Some(picker) = settings.picker.as_mut() {
+                    match key.code {
+                        KeyCode::Esc => settings.picker = None,
+                        KeyCode::Up => picker.move_up(),
+                        KeyCode::Down => picker.move_down(),
+                        KeyCode::Backspace => {
+                            picker.query.pop();
+                            picker.selected = 0;
+                        }
+                        KeyCode::Char(c)
+                            if !key.modifiers.contains(KeyModifiers::CONTROL)
+                                && !key.modifiers.contains(KeyModifiers::ALT) =>
+                        {
+                            picker.query.push(c);
+                            picker.selected = 0;
+                        }
+                        KeyCode::Enter => match settings.pick_model() {
+                            Err(e) => self.set_toast(e, Theme::status_error()),
+                            Ok(model) => {
+                                self.ai_settings = settings.settings.clone();
+                                match settings.save() {
+                                    Ok(_) => self.set_toast(
+                                        format!(
+                                            "✓ Model set to {} and saved",
+                                            model.as_deref().unwrap_or("Default")
+                                        ),
+                                        Theme::status_ok(),
+                                    ),
+                                    Err(e) => self.set_toast(
+                                        format!("Failed to save settings: {}", e),
+                                        Theme::status_error(),
+                                    ),
+                                }
+                            }
+                        },
+                        _ => {}
+                    }
+                } else if settings.is_editing {
                     match key.code {
                         KeyCode::Esc => settings.cancel_editing(),
                         KeyCode::Enter => {
@@ -6583,6 +7000,35 @@ impl App {
                         KeyCode::BackTab | KeyCode::Left | KeyCode::Char('h') => {
                             settings.select_prev_field()
                         }
+                        // On the Agent card, Space steps the agent from any of
+                        // its fields; `e`/Enter steps it from the Agent field,
+                        // lists models from the Model field, and edits
+                        // Cursor's API Key like a provider's.
+                        KeyCode::Char(' ' | 'e') | KeyCode::Enter
+                            if settings.agent_card_focused
+                                && (key.code == KeyCode::Char(' ')
+                                    || settings.selected_field == SettingField::Agent) =>
+                        {
+                            let agent = settings.cycle_agent();
+                            self.ai_settings = settings.settings.clone();
+                            match settings.save() {
+                                Ok(_) => self.set_toast(
+                                    format!("✓ Assistant agent set to {}", agent.label()),
+                                    Theme::status_ok(),
+                                ),
+                                Err(e) => self.set_toast(
+                                    format!("Failed to save settings: {}", e),
+                                    Theme::status_error(),
+                                ),
+                            }
+                        }
+                        KeyCode::Char('e') | KeyCode::Enter
+                            if settings.agent_card_focused
+                                && settings.selected_field == SettingField::Model =>
+                        {
+                            let target = settings.agent_picker_target();
+                            self.open_model_picker(target);
+                        }
                         KeyCode::Char(' ') => {
                             settings.set_active_provider();
                             self.ai_settings = settings.settings.clone();
@@ -6594,6 +7040,12 @@ impl App {
                                 format!("✓ Active provider set to {}", prov_name),
                                 Theme::status_ok(),
                             );
+                        }
+                        KeyCode::Char('e') | KeyCode::Enter
+                            if settings.selected_field == SettingField::Model =>
+                        {
+                            let provider = settings.current_provider();
+                            self.open_model_picker(settings_view::PickerTarget::Provider(provider));
                         }
                         KeyCode::Char('e') | KeyCode::Enter => settings.start_editing(),
                         KeyCode::Char('s') => match settings.save() {
@@ -6826,20 +7278,31 @@ impl App {
                         Theme::status_ok(),
                     );
                 }
-                KeyCode::Enter => {
+                KeyCode::Char('t') => {
                     if let Some(node) = tree.selected_node() {
-                        let name = node.name.clone();
-                        let kind = node.kind.clone();
-                        let ns = node.namespace.clone();
-                        self.open_describe_view(name, kind, ns).await;
+                        if node.kind.eq_ignore_ascii_case("container") {
+                            self.set_toast(
+                                "Cannot re-root tree on a container (select a Kubernetes resource)"
+                                    .to_string(),
+                                Theme::status_warn(),
+                            );
+                        } else {
+                            let name = node.name.clone();
+                            let kind = node.kind.clone();
+                            let ns = node.namespace.clone();
+                            let api_ver = node.api_version.clone();
+                            self.open_resource_tree(kind, name, ns, api_ver);
+                        }
                     }
                 }
-                KeyCode::Char('d') => {
+                KeyCode::Enter | KeyCode::Char('d') => {
                     if let Some(node) = tree.selected_node() {
                         let name = node.name.clone();
                         let kind = node.kind.clone();
                         let ns = node.namespace.clone();
-                        self.open_describe_view(name, kind, ns).await;
+                        let api_ver = node.api_version.clone();
+                        self.open_describe_view_in_group(name, kind, ns, api_ver)
+                            .await;
                     }
                 }
                 KeyCode::Char('y') => {
@@ -6847,7 +7310,8 @@ impl App {
                         let name = node.name.clone();
                         let kind = node.kind.clone();
                         let ns = node.namespace.clone();
-                        self.open_yaml_view(name, kind, ns).await;
+                        let api_ver = node.api_version.clone();
+                        self.open_yaml_view_in_group(name, kind, ns, api_ver).await;
                     }
                 }
                 KeyCode::Char('l') => {
@@ -8125,6 +8589,26 @@ impl App {
         }
     }
 
+    /// Stop every Assistant turn, the open context's and the background
+    /// ones', and wait (a few seconds at most) until each has ended, its
+    /// agent process with it: on exit srectl then removes the Cursor chat
+    /// root, which a live agent may still be running in.
+    pub async fn stop_assistant_turns(&mut self) {
+        let turns: Vec<_> = std::iter::once(&mut self.assistant_state)
+            .chain(self.assistant_states.values_mut())
+            .filter_map(|ai| ai.task.take())
+            .collect();
+        for turn in &turns {
+            turn.abort();
+        }
+        // A turn's task is finished once its future, and so its agent guard
+        // (which ends the agent's process tree), has been dropped.
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while turns.iter().any(|turn| !turn.is_finished()) && std::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
     pub fn cancel_assistant_turn(&mut self) {
         let ai = &mut self.assistant_state;
         if ai.is_busy {
@@ -8159,37 +8643,51 @@ impl App {
             }
         }
 
-        if provider == crate::ai_config::AiProvider::Cursor {
-            if let Some(cursor_bin) = crate::ai_config::find_cursor_binary() {
-                let event_tx = self.event_tx.clone();
-                let model = self.ai_settings.get_model(provider);
-                let api_key = self.ai_settings.get_api_key(provider);
-                let cache = self.client_cache.clone();
-                let timeout_seconds = self.ai_settings.get_timeout_seconds(provider);
-                let hub_kc_opt = argo_hub_kc.clone();
+        // One agent owns a conversation's resume id. Another one cannot pick
+        // it up, so changing agent starts the conversation over (the
+        // transcript on screen stays).
+        let agent = self.ai_settings.agent;
+        if ai.chat_agent.is_some_and(|owner| owner != agent) {
+            ai.reset_agent_chat();
+        }
+        ai.chat_agent = Some(agent);
 
+        if agent != AgentKind::Srelens {
+            if let Some(binary) = crate::ai_config::find_agent_in(agent, &self.agent_search) {
+                let turn = crate::agent::CliTurn {
+                    kind: agent,
+                    binary,
+                    // The agent's own model, not the provider's: `None` is Default (no flag).
+                    model: self.ai_settings.get_agent_model(agent),
+                    cursor_key: (agent == AgentKind::Cursor)
+                        .then(|| self.ai_settings.get_cursor_key())
+                        .flatten(),
+                    query,
+                    active_ctx,
+                    active_ns,
+                    argo_hub_context: argo_hub_ctx,
+                    cache: self.client_cache.clone(),
+                    kubeconfig_paths,
+                    event_tx: self.event_tx.clone(),
+                    timeout_seconds: self.ai_settings.get_agent_timeout_seconds(agent),
+                    conversation_id: ai.conversation_id.clone(),
+                    resume: ai.cli_resume_id.clone(),
+                    chat_root: crate::agent::process_cursor_chats_root(),
+                };
+                let hub_kc_opt = argo_hub_kc.clone();
                 let handle = tokio::spawn(async move {
                     if let Some(ref hub_kc) = hub_kc_opt {
-                        cache.ensure_paths(vec![hub_kc.clone()]).await;
+                        turn.cache.ensure_paths(vec![hub_kc.clone()]).await;
                     }
-                    crate::agent::run_boxed_cursor_turn(
-                        cursor_bin,
-                        model,
-                        api_key,
-                        query,
-                        active_ctx,
-                        active_ns,
-                        argo_hub_ctx,
-                        cache,
-                        kubeconfig_paths,
-                        event_tx,
-                        timeout_seconds,
-                    )
-                    .await;
+                    crate::agent::run_cli_agent_turn(turn).await;
                 });
                 ai.task = Some(handle.abort_handle());
             } else {
-                ai.add_assistant_message("cursor-agent CLI was not found on PATH. Install from https://docs.cursor.com/en/cli/overview or ensure ~/.local/bin is in your PATH.".to_string());
+                ai.add_assistant_message(format!(
+                    "{} CLI was not found on PATH. Install it from {} or add its install folder to your PATH.",
+                    agent.label(),
+                    crate::ai_config::agent_install_url(agent)
+                ));
             }
         } else if let Some(config) = self.ai_settings.resolve_provider_config(provider) {
             let event_tx = self.event_tx.clone();
@@ -8197,12 +8695,20 @@ impl App {
             let history = ai.native_history.clone();
             let timeout_seconds = self.ai_settings.get_timeout_seconds(provider);
             let hub_kc_opt = argo_hub_kc.clone();
+            // Writes and Secret reads ask the user on screen; the count tells
+            // the turn's watchdog it is waiting on them, not stalled.
+            let consent = crate::consent::TuiConsent::new(event_tx.clone(), "srelens", &active_ctx);
+            let waiting = consent.waiting();
 
             let handle = tokio::spawn(async move {
                 if let Some(ref hub_kc) = hub_kc_opt {
                     cache.ensure_paths(vec![hub_kc.clone()]).await;
                 }
-                let server = crate::agent::build_mcp_server(cache, kubeconfig_paths);
+                let server = crate::agent::build_mcp_server(
+                    cache,
+                    kubeconfig_paths,
+                    std::sync::Arc::new(consent),
+                );
                 let invoker = std::sync::Arc::new(crate::agent::McpToolInvoker::new(server));
                 crate::agent::run_native_agent_turn(
                     config,
@@ -8214,6 +8720,7 @@ impl App {
                     argo_hub_ctx,
                     event_tx,
                     timeout_seconds,
+                    waiting,
                 )
                 .await;
             });
@@ -8249,6 +8756,12 @@ impl App {
 
     pub async fn handle_mouse(&mut self, mouse: crossterm::event::MouseEvent) {
         use crossterm::event::{MouseButton, MouseEventKind};
+
+        // Nothing under an agent's approval prompt runs while it is up. The
+        // wheel still scrolls (the event loop handles it before this).
+        if !self.consents.is_empty() {
+            return;
+        }
 
         // 0. Check if clicking on Close Port Forward button in status bar
         if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
@@ -8719,9 +9232,16 @@ impl App {
     }
 
     pub fn handle_paste(&mut self, text: String) {
+        // Nothing under an agent's approval prompt takes input while it is up.
+        if !self.consents.is_empty() {
+            return;
+        }
         if self.input_mode == InputMode::Command {
+            self.command_tab_base = None;
+            self.command_tab_target = None;
             let cleaned = text.replace("\r\n", " ").replace('\n', " ");
             self.command_buffer.push_str(&cleaned);
+            self.command_suggestion_idx = 0;
             return;
         }
         if self.input_mode == InputMode::Filter {
@@ -8738,6 +9258,11 @@ impl App {
             return;
         }
         if let ActiveView::Settings(ref mut settings) = self.active_view {
+            if let Some(picker) = settings.picker.as_mut() {
+                picker.query.push_str(&text.replace(['\r', '\n'], ""));
+                picker.selected = 0;
+                return;
+            }
             if settings.is_editing {
                 let cleaned = text.replace("\r\n", "").replace('\n', "");
                 settings.edit_buffer.push_str(&cleaned);
@@ -8849,7 +9374,7 @@ impl App {
                             Some(self.active_namespace.clone())
                         }
                     });
-                    self.open_resource_tree(kind, name, ns);
+                    self.open_resource_tree(kind, name, ns, None);
                     return;
                 }
             }
@@ -8950,22 +9475,19 @@ impl App {
             (trimmed, None)
         };
 
-        let resolved = resolve_command_with_crds(cmd_base, &self.crds).or_else(|| {
-            let suggestions = command_suggestions_with_crds(cmd_base, &self.crds);
-            if let Some((top, score)) = suggestions.first() {
-                if *score >= 80 {
-                    return Some(top.target.clone());
+        let resolved = resolve_command_with_crds(trimmed, &self.crds).or_else(|| {
+            resolve_command_with_crds(cmd_base, &self.crds).or_else(|| {
+                let suggestions = command_suggestions_with_crds(cmd_base, &self.crds);
+                if let Some((top, score)) = suggestions.first() {
+                    if *score >= 80 {
+                        return Some(top.target.clone());
+                    }
                 }
-            }
-            None
+                None
+            })
         });
 
         if let Some(target) = resolved {
-            if let Some(arg) = arg_opt {
-                if !arg.is_empty() {
-                    self.active_namespace = arg.to_string();
-                }
-            }
             self.execute_command_target(target).await;
             if let Some(arg) = arg_opt {
                 if !arg.is_empty() {
@@ -9276,6 +9798,40 @@ impl App {
 
     pub async fn execute_view_target(&mut self, target: CommandTarget) {
         match target {
+            CommandTarget::SwitchNamespace(new_ns) => {
+                self.switch_namespace(new_ns).await;
+                if matches!(self.active_view, ActiveView::Table(ref t) if t.kind == ResourceKind::Namespaces)
+                {
+                    self.switch_view_to_kind(ResourceKind::Pods).await;
+                }
+            }
+            CommandTarget::ResourceInNamespace(kind, target_ns) => {
+                let display_ns = if target_ns.is_empty() {
+                    "all".to_string()
+                } else {
+                    target_ns.clone()
+                };
+                self.set_namespace_raw(target_ns);
+                self.switch_view_to_kind(kind.clone()).await;
+                self.set_toast(
+                    format!("Switched to {} in [{}]", kind.display_name(), display_ns),
+                    Theme::status_ok(),
+                );
+            }
+            CommandTarget::CustomResourceInNamespace(crd, target_ns) => {
+                let display_ns = if target_ns.is_empty() {
+                    "all".to_string()
+                } else {
+                    target_ns.clone()
+                };
+                let crd_kind = crd.kind.clone();
+                self.set_namespace_raw(target_ns);
+                self.switch_view_to_crd(crd).await;
+                self.set_toast(
+                    format!("Switched to {} in [{}]", crd_kind, display_ns),
+                    Theme::status_ok(),
+                );
+            }
             CommandTarget::Resource(kind) => self.switch_view_to_kind(kind).await,
             CommandTarget::CustomResource(crd) => self.switch_view_to_crd(crd).await,
             CommandTarget::Contexts => {
@@ -9285,6 +9841,9 @@ impl App {
                 self.open_add_cluster_modal();
             }
             CommandTarget::Namespaces => {
+                if self.namespaces.is_empty() {
+                    self.refresh_namespaces();
+                }
                 let initial_idx = self
                     .namespaces
                     .iter()
@@ -9653,7 +10212,9 @@ impl App {
             }
             ResourceKind::Toolbox => ActiveView::Toolbox(ToolboxViewState::new()),
             ResourceKind::Assistant => ActiveView::Assistant,
-            ResourceKind::Settings => ActiveView::Settings(SettingsViewState::new()),
+            ResourceKind::Settings => {
+                ActiveView::Settings(SettingsViewState::new(&self.agent_search))
+            }
             ResourceKind::TuiConfig => {
                 let mut cfg = TuiConfigViewState::new();
                 cfg.available_contexts = self.contexts.iter().map(|c| c.name.clone()).collect();
@@ -9993,6 +10554,7 @@ impl App {
                 Some(logs_state.timestamps),
                 None,
                 Some(200),
+                None,
             )
             .await;
 
@@ -10056,6 +10618,7 @@ impl App {
                 Some(logs_state.timestamps),
                 None,
                 Some(200),
+                None,
             )
             .await;
 
@@ -10960,9 +11523,19 @@ impl App {
         self.nav_stack.push(old_view);
     }
 
-    pub fn open_resource_tree(&mut self, kind: String, name: String, namespace: Option<String>) {
-        let tree_state =
-            tree_view::TreeViewState::new(kind.clone(), name.clone(), namespace.clone());
+    pub fn open_resource_tree(
+        &mut self,
+        kind: String,
+        name: String,
+        namespace: Option<String>,
+        api_version: Option<String>,
+    ) {
+        let tree_state = tree_view::TreeViewState::with_api_version(
+            kind.clone(),
+            name.clone(),
+            namespace.clone(),
+            api_version.clone(),
+        );
         let old_view = std::mem::replace(&mut self.active_view, ActiveView::Tree(tree_state));
         self.nav_stack.push(old_view);
 
@@ -10972,12 +11545,22 @@ impl App {
         let k = kind.clone();
         let n = name.clone();
         let ns = namespace.clone();
+        let api_ver = api_version.clone();
 
         tokio::spawn(async move {
             let res = match cache.get(&ctx).await {
-                Ok(client) => {
-                    srelens_kube::lineage::resolve_resource_lineage(client, &k, &n, ns.as_deref())
-                        .await
+                Ok(_client) => {
+                    srelens_kube::lineage::resolve_resource_lineage(
+                        cache,
+                        &ctx,
+                        &k,
+                        &n,
+                        ns.as_deref(),
+                        api_ver.as_deref(),
+                        None,
+                        None,
+                    )
+                    .await
                 }
                 Err(e) => Err(format!("Failed to connect to cluster: {}", e)),
             };
@@ -11450,24 +12033,14 @@ impl App {
             return;
         }
 
-        // Said before any request goes out, and said precisely: Cursor has a
-        // key but no HTTP path, so "no API key" would be false for it.
-        let config = if provider == crate::ai_config::AiProvider::Cursor {
-            Err(format!(
-                "Quick AI RCA needs an HTTP provider; {provider_name} runs only through the \
-                 Assistant. Press [a] for it, or pick another provider in :ai-settings."
-            ))
-        } else {
-            config.ok_or_else(|| {
-                format!(
+        // Said before any request goes out.
+        let config = match config {
+            Some(c) => c,
+            None => {
+                let msg = format!(
                     "No API key configured for {provider_name}. Add one in :ai-settings, or set {}.",
                     crate::ai_config::env_var_for_provider(provider)
-                )
-            })
-        };
-        let config = match config {
-            Ok(c) => c,
-            Err(msg) => {
+                );
                 changed
                     .ai_summaries
                     .insert(key, entry(QuickRcaStatus::Error(msg)));
@@ -11563,6 +12136,64 @@ impl App {
                 result,
             });
         });
+    }
+
+    /// Open the settings view's model picker on `target`: its list from
+    /// [`App::model_lists`], or "Loading models…" while the list is fetched
+    /// off the UI thread (once per key, however often the picker reopens).
+    pub fn open_model_picker(&mut self, target: settings_view::PickerTarget) {
+        use crate::model_list;
+        use settings_view::PickerTarget;
+        let ActiveView::Settings(settings) = &mut self.active_view else {
+            return;
+        };
+        let key = match target {
+            PickerTarget::Provider(p) => model_list::provider_cache_key(&settings.settings, p),
+            PickerTarget::Agent(kind) => model_list::agent_cache_key(&settings.settings, kind),
+        };
+        let known = self.model_lists.get(&key).cloned();
+        settings.open_picker(target, key.clone(), known.clone().flatten());
+        if known.is_some() {
+            return; // listed already, or being listed
+        }
+        self.model_lists.insert(key.clone(), None);
+        let snapshot = settings.settings.clone();
+        let binary = match target {
+            PickerTarget::Agent(kind) => crate::ai_config::find_agent_in(kind, &self.agent_search),
+            PickerTarget::Provider(_) => None,
+        };
+        let event_tx = self.event_tx.clone();
+        tokio::spawn(async move {
+            let result = match target {
+                PickerTarget::Provider(p) => model_list::provider_models(&snapshot, p).await,
+                PickerTarget::Agent(kind) => {
+                    let cursor_key = snapshot.get_cursor_key();
+                    model_list::agent_models(kind, binary.as_deref(), cursor_key).await
+                }
+            };
+            let _ = event_tx.send(AppEvent::ModelsLoaded { key, result });
+        });
+    }
+
+    /// A fetched model list (or why there is none): kept for the run when it
+    /// is a list, and shown if the settings view's picker is waiting for it.
+    pub fn handle_models_loaded(
+        &mut self,
+        key: &str,
+        result: Result<Vec<srelens_agent::adapter::ModelChoice>, String>,
+    ) {
+        match &result {
+            Ok(models) => {
+                self.model_lists
+                    .insert(key.to_string(), Some(models.clone()));
+            }
+            Err(_) => {
+                self.model_lists.remove(key);
+            }
+        }
+        if let ActiveView::Settings(settings) = &mut self.active_view {
+            settings.models_loaded(key, result);
+        }
     }
 
     /// Land a GitHub answer on the `:changed` view that asked, whether it is
@@ -13114,7 +13745,7 @@ impl App {
                         self.nav_stack.push(old);
                     }
                     QuickActionId::RelationshipTree => {
-                        self.open_resource_tree(resource_kind, resource_name, namespace);
+                        self.open_resource_tree(resource_kind, resource_name, namespace, None);
                     }
                     QuickActionId::ViewLogs => {
                         self.prompt_pod_logs(resource_name, namespace).await;
@@ -14202,15 +14833,22 @@ impl App {
         if channel.starts_with("logs:") {
             if let ActiveView::Logs(logs) = &mut self.active_view {
                 if logs.channel == channel {
-                    let source = payload
-                        .get("source")
-                        .and_then(|v| v.as_str())
-                        .map(String::from);
-                    if let Some(line) = payload.get("line").and_then(|v| v.as_str()) {
-                        let truncated =
-                            payload.get("truncated").and_then(|v| v.as_bool()) == Some(true);
-                        logs.push_log_line(source, line.to_string(), truncated);
+                    if let Some(lines) = payload.get("lines").and_then(|v| v.as_array()) {
+                        // A frame (#914): every line since the last one, in order.
+                        for l in lines {
+                            let Some(text) = l.get("line").and_then(|v| v.as_str()) else {
+                                continue;
+                            };
+                            let source = l.get("source").and_then(|v| v.as_str()).map(String::from);
+                            let truncated =
+                                l.get("truncated").and_then(|v| v.as_bool()) == Some(true);
+                            logs.push_log_line(source, text.to_string(), truncated);
+                        }
                     } else if let Some(status) = payload.get("status").and_then(|v| v.as_str()) {
+                        let source = payload
+                            .get("source")
+                            .and_then(|v| v.as_str())
+                            .map(String::from);
                         logs.push_entry(source, format!("--- log status: {} ---", status));
                     }
                 }
@@ -14226,6 +14864,47 @@ impl App {
                         format!("Port forward closed: {}", err_str),
                         Theme::status_error(),
                     );
+                }
+            }
+            return;
+        }
+
+        if channel.starts_with("discovery:namespaces:") {
+            let ctx = channel.strip_prefix("discovery:namespaces:").unwrap_or("");
+            if ctx == self.active_context {
+                if let Some(err_msg) = payload.get("error").and_then(|v| v.as_str()) {
+                    self.namespace_discovery_error = Some(err_msg.to_string());
+                } else if let Some(items) = payload.as_array() {
+                    let mut ns_list: Vec<String> = items
+                        .iter()
+                        .filter_map(|item| {
+                            item.get("name").and_then(|v| v.as_str()).map(String::from)
+                        })
+                        .collect();
+                    ns_list.sort();
+                    if !ns_list.is_empty() {
+                        self.namespaces = ns_list;
+                        self.namespace_discovery_error = None;
+                        if self.input_mode == InputMode::Command {
+                            if let Some(ref target) = self.command_tab_target {
+                                let query = self
+                                    .command_tab_base
+                                    .as_deref()
+                                    .unwrap_or(&self.command_buffer);
+                                let suggs = command_suggestions_full(
+                                    query,
+                                    &self.crds,
+                                    &self.namespaces,
+                                    self.namespace_discovery_error.as_deref(),
+                                );
+                                if let Some(pos) =
+                                    suggs.iter().position(|(cmd, _)| &cmd.target == target)
+                                {
+                                    self.command_suggestion_idx = pos;
+                                }
+                            }
+                        }
+                    }
                 }
             }
             return;
@@ -14359,17 +15038,43 @@ impl App {
             }
         }
 
-        if channel.contains("namespaces") {
-            if let Some(items) = payload.as_array() {
-                let mut ns_list: Vec<String> = items
-                    .iter()
-                    .filter_map(|item| item.get("name").and_then(|v| v.as_str()).map(String::from))
-                    .collect();
-                ns_list.sort();
-                if !ns_list.is_empty() {
-                    self.namespaces = ns_list;
+        if channel.starts_with("watch:") && channel.ends_with(":namespaces") {
+            let parts: Vec<&str> = channel.split(':').collect();
+            if parts.len() >= 4 && parts[1] == self.active_context {
+                if let Some(items) = payload.as_array() {
+                    let mut ns_list: Vec<String> = items
+                        .iter()
+                        .filter_map(|item| {
+                            item.get("name").and_then(|v| v.as_str()).map(String::from)
+                        })
+                        .collect();
+                    ns_list.sort();
+                    if !ns_list.is_empty() {
+                        self.namespaces = ns_list;
+                        self.namespace_discovery_error = None;
+                        if self.input_mode == InputMode::Command {
+                            if let Some(ref target) = self.command_tab_target {
+                                let query = self
+                                    .command_tab_base
+                                    .as_deref()
+                                    .unwrap_or(&self.command_buffer);
+                                let suggs = command_suggestions_full(
+                                    query,
+                                    &self.crds,
+                                    &self.namespaces,
+                                    self.namespace_discovery_error.as_deref(),
+                                );
+                                if let Some(pos) =
+                                    suggs.iter().position(|(cmd, _)| &cmd.target == target)
+                                {
+                                    self.command_suggestion_idx = pos;
+                                }
+                            }
+                        }
+                    }
                 }
             }
+            return;
         }
     }
 
@@ -14592,10 +15297,22 @@ impl App {
             .map(|(msg, _, style)| (msg.as_str(), *style));
 
         let suggestions = if self.input_mode == InputMode::Command {
-            Some(command_suggestions_with_crds(
-                &self.command_buffer,
+            let query = self
+                .command_tab_base
+                .as_deref()
+                .unwrap_or(&self.command_buffer);
+            let suggs = command_suggestions_full(
+                query,
                 &self.crds,
-            ))
+                &self.namespaces,
+                self.namespace_discovery_error.as_deref(),
+            );
+            if let Some(ref target) = self.command_tab_target {
+                if let Some(pos) = suggs.iter().position(|(cmd, _)| &cmd.target == target) {
+                    self.command_suggestion_idx = pos;
+                }
+            }
+            Some(suggs)
         } else {
             None
         };
@@ -14765,6 +15482,7 @@ impl App {
                 &[
                     ("<:>", "Cmd"),
                     ("<↑/↓>", "Move"),
+                    ("<t>", "Re-root"),
                     ("<Enter>", "Jump"),
                     ("<x>", "Actions"),
                     ("<l>", "Logs"),
@@ -15144,6 +15862,19 @@ impl App {
             render_help_modal(f, size);
         }
 
+        // An agent's approval prompt, over every view and dialog. Before the
+        // selection pass, so a drag still copies what is on screen.
+        self.consents.shown();
+        if let Some(pending) = self.consents.front() {
+            crate::ui::dialogs::render_consent(
+                f,
+                size,
+                pending,
+                self.consents.seconds_left(),
+                self.consents.ready_in(self.consent_arm_delay),
+            );
+        }
+
         // 5. Global drag-to-copy selection overlay: highlight the selected
         // cells on the final buffer and capture their text so mouse-up
         // copies exactly what the user sees.
@@ -15327,95 +16058,6 @@ pub fn get_clipboard_text() -> Option<String> {
         }
     }
     None
-}
-
-pub fn extract_tool_call_start_info(v: &serde_json::Value) -> Option<(String, String, String)> {
-    let call_id = v
-        .get("call_id")
-        .or_else(|| v.get("callId"))
-        .and_then(|s| s.as_str())
-        .unwrap_or("")
-        .to_string();
-
-    let tool_call_obj = v.get("tool_call").or_else(|| v.get("toolCall"))?;
-    let inner_map = tool_call_obj.as_object()?;
-    // Strictly find the payload key ending with "ToolCall" (e.g. bashToolCall, readToolCall),
-    // ignoring metadata siblings like hookAdditionalContexts, toolCallId, startedAtMs, completedAtMs.
-    let (key, inner) = inner_map.iter().find(|(k, _)| k.ends_with("ToolCall"))?;
-    let mut tool_name = key.strip_suffix("ToolCall").unwrap_or(key).to_string();
-
-    // Skip internal hooks that are not executable tools
-    if tool_name == "hookAdditionalContexts" {
-        return None;
-    }
-
-    if tool_name == "callMcpTool" || tool_name == "mcp" {
-        if let Some(t) = inner
-            .pointer("/args/tool")
-            .or_else(|| inner.pointer("/args/name"))
-            .and_then(|s| s.as_str())
-        {
-            tool_name = t.to_string();
-        }
-    }
-
-    let mut args_summary = String::new();
-    if let Some(sub_args) = inner.pointer("/args/arguments") {
-        if let Some(obj) = sub_args.as_object() {
-            args_summary = serde_json::to_string(obj).unwrap_or_default();
-        } else {
-            args_summary = sub_args.to_string();
-        }
-    } else if let Some(args) = inner.get("args") {
-        if let Some(cmd) = args.get("command").and_then(|s| s.as_str()) {
-            args_summary = cmd.to_string();
-        } else if let Some(path) = args.get("path").and_then(|s| s.as_str()) {
-            args_summary = format!("path: {}", path);
-        } else if let Some(pattern) = args.get("pattern").and_then(|s| s.as_str()) {
-            args_summary = format!("pattern: {}", pattern);
-        } else if let Some(query) = args.get("query").and_then(|s| s.as_str()) {
-            args_summary = format!("query: {}", query);
-        } else if let Some(name) = args.get("name").and_then(|s| s.as_str()) {
-            args_summary = format!("name: {}", name);
-        } else if let Some(s) = args.as_str() {
-            args_summary = s.to_string();
-        } else if let Some(obj) = args.as_object() {
-            if obj.is_empty() {
-                args_summary = String::new();
-            } else {
-                args_summary = serde_json::to_string(obj).unwrap_or_default();
-            }
-        } else {
-            args_summary = args.to_string();
-        }
-    }
-
-    Some((call_id, tool_name, args_summary))
-}
-
-pub fn extract_tool_call_completed_info(v: &serde_json::Value) -> Option<(String, bool)> {
-    let call_id = v
-        .get("call_id")
-        .or_else(|| v.get("callId"))
-        .and_then(|s| s.as_str())
-        .unwrap_or("")
-        .to_string();
-
-    // Check if this completion corresponds to an internal metadata hook that has no ToolCall
-    if let Some(tool_call_obj) = v.get("tool_call").or_else(|| v.get("toolCall")) {
-        if let Some(inner_map) = tool_call_obj.as_object() {
-            if !inner_map.iter().any(|(k, _)| k.ends_with("ToolCall")) {
-                return None;
-            }
-        }
-    }
-
-    let is_error = v
-        .get("is_error")
-        .or_else(|| v.get("isError"))
-        .and_then(|b| b.as_bool())
-        .unwrap_or(false);
-    Some((call_id, is_error))
 }
 
 pub fn parse_involved_object(item: &serde_json::Value) -> (String, String) {

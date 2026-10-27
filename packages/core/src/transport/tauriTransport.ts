@@ -309,3 +309,11 @@ export function currentWindowLabel(): string {
     return "main";
   }
 }
+
+/**
+ * Ask this window to close. `close()` rather than `destroy()`, so the handlers
+ * `onWindowCloseRequested` installed still flush what the window holds.
+ */
+export async function closeCurrentWindow(): Promise<void> {
+  await getCurrentWindow().close();
+}

@@ -1461,7 +1461,7 @@ fn the_assistant_title_names_the_provider_model_and_key_hints() {
     let text = assistant_text(200, 30, &state);
     let settings = AiSettings::default();
     let model = settings.get_model(settings.default_provider);
-    assert!(text.contains(&format!(" SRElens AI Assistant[Anthropic (Claude) - {model}] [<Ctrl+c> Copy, <Ctrl+t> Tools, <Ctrl+o> Save, <Ctrl+l> Clear, <Ctrl+s> Settings, <Esc> Back] ")), "{text}");
+    assert!(text.contains(&format!(" SRElens AI Assistant[srelens · Anthropic (Claude) · {model}] [<Ctrl+c> Copy, <Ctrl+t> Tools, <Ctrl+o> Save, <Ctrl+l> Clear, <Ctrl+s> Settings, <Esc> Back] ")), "{text}");
     assert!(text.contains("SRElens [10:00:00]:"), "{text}");
     assert!(
         text.contains("Hello! I am your SRElens AI Assistant."),
@@ -1492,7 +1492,7 @@ fn the_assistant_title_reflects_context_caveman_tokens_selection_and_folded_tool
     let text = assistant_text(220, 30, &state);
     assert!(
         text.contains(
-            " SRElens AI Assistant @prod-east  [🦖  CAVEMAN: WENYAN-ULTRA][Anthropic (Claude) - "
+            " SRElens AI Assistant @prod-east  [🦖  CAVEMAN: WENYAN-ULTRA][srelens · Anthropic (Claude) · "
         ),
         "{text}"
     );
@@ -1842,6 +1842,10 @@ fn a_long_single_line_prompt_wraps_inside_the_input_box() {
 
 #[test]
 fn typing_a_slash_pops_up_every_playbook_with_the_first_selected() {
+    let mut env = common::env::lock();
+    let temp = tempfile::tempdir().unwrap();
+    env.set("SRELENS_SKILLS_DIR", temp.path());
+
     let mut state = fresh_state();
     state.input = "/".into();
     state.update_slash_suggestions();
@@ -1879,6 +1883,10 @@ fn typing_a_slash_pops_up_every_playbook_with_the_first_selected() {
 
 #[test]
 fn the_suggestion_popup_windows_around_a_selection_past_the_seventh_row() {
+    let mut env = common::env::lock();
+    let temp = tempfile::tempdir().unwrap();
+    env.set("SRELENS_SKILLS_DIR", temp.path());
+
     let mut state = fresh_state();
     state.input = "/".into();
     state.update_slash_suggestions();
@@ -2404,11 +2412,11 @@ async fn the_app_renders_the_assistant_view_with_the_active_context_in_its_title
 
 #[tokio::test]
 async fn the_app_renders_helm_and_helm_detail_views_across_all_tabs() {
-    use srelens_kube::helm::{HelmReleaseDetail, HelmRevision};
     use srectl::views::helm_detail_view::{
         render_helm_detail_view, HelmDetailTab, HelmDetailViewState,
     };
     use srectl::views::helm_view::{render_helm_view, HelmReleaseItem, HelmViewState};
+    use srelens_kube::helm::{HelmReleaseDetail, HelmRevision};
 
     // 1. render_helm_view states
     let mut helm_state = HelmViewState::new();
@@ -2612,10 +2620,17 @@ fn feature_banner_modal_renders_all_highlighted_features_and_toggle_state() {
     assert!(text_enabled.contains(":bgp"), "shows bgp command");
     assert!(text_enabled.contains(":page"), "shows page command");
     assert!(text_enabled.contains(":import"), "shows import command");
+    assert!(text_enabled.contains(":contexts"), "shows contexts command");
+    assert!(text_enabled.contains(":top"), "shows top command");
     assert!(text_enabled.contains(":update"), "shows update command");
     assert!(text_enabled.contains("[b]"), "shows bgp shortcut key");
     assert!(text_enabled.contains("[p]"), "shows page shortcut key");
     assert!(text_enabled.contains("[i]"), "shows import shortcut key");
+    assert!(text_enabled.contains("[c]"), "shows contexts shortcut key");
+    assert!(
+        text_enabled.contains("[h]"),
+        "shows top / hotspots shortcut key"
+    );
     assert!(text_enabled.contains("[u]"), "shows update shortcut key");
     assert!(text_enabled.contains("[0]"), "shows jump key 0");
     assert!(text_enabled.contains("[9]"), "shows jump key 9");
@@ -2641,6 +2656,76 @@ fn feature_banner_modal_renders_all_highlighted_features_and_toggle_state() {
     let text_disabled = modal_text(100, 30, &modal_disabled);
     assert!(text_disabled.contains("[○]"), "shows unchecked checkbox");
     assert!(text_disabled.contains("Disabled"), "shows disabled state");
+}
+
+#[test]
+fn feature_banner_modal_renders_all_features_on_standard_80x24_terminal() {
+    let modal_enabled = Modal::FeatureBanner {
+        show_on_startup: true,
+        update_available: None,
+    };
+    let text = modal_text(80, 24, &modal_enabled);
+
+    assert!(text.contains("Welcome to srectl — Feature Highlights"));
+    assert!(text.contains(":helm"), "shows helm on 80x24");
+    assert!(text.contains(":overview"), "shows overview on 80x24");
+    assert!(text.contains(":gpuinfo"), "shows gpuinfo on 80x24");
+    assert!(text.contains(":workloads"), "shows workloads on 80x24");
+    assert!(text.contains(":argo"), "shows argo on 80x24");
+    assert!(text.contains(":ai"), "shows ai on 80x24");
+    assert!(text.contains(":ai-settings"), "shows ai-settings on 80x24");
+    assert!(text.contains(":config"), "shows config on 80x24");
+    assert!(text.contains(":banner"), "shows banner on 80x24");
+    assert!(text.contains(":nodes"), "shows nodes on 80x24");
+    assert!(text.contains(":bgp"), "shows bgp on 80x24");
+    assert!(text.contains(":page"), "shows page on 80x24");
+    assert!(text.contains(":import"), "shows import on 80x24");
+    assert!(text.contains(":contexts"), "shows contexts on 80x24");
+    assert!(text.contains(":top"), "shows top on 80x24");
+    assert!(text.contains(":update"), "shows update on 80x24");
+    assert!(text.contains("[c]"), "shows contexts shortcut on 80x24");
+    assert!(text.contains("[h]"), "shows top shortcut on 80x24");
+    assert!(
+        text.contains("Show this feature banner on startup"),
+        "shows footer checkbox on 80x24"
+    );
+}
+
+#[test]
+fn feature_banner_modal_renders_all_features_on_compact_100x25_terminal() {
+    let modal_enabled = Modal::FeatureBanner {
+        show_on_startup: true,
+        update_available: None,
+    };
+    let text = modal_text(100, 25, &modal_enabled);
+
+    assert!(text.contains("Welcome to srectl — Feature Highlights"));
+    assert!(text.contains(":contexts"), "shows contexts on 100x25");
+    assert!(text.contains(":top"), "shows top on 100x25");
+    assert!(text.contains(":update"), "shows update on 100x25");
+    assert!(text.contains("[c]"), "shows contexts shortcut on 100x25");
+    assert!(text.contains("[h]"), "shows top shortcut on 100x25");
+    assert!(
+        text.contains("Show this feature banner on startup"),
+        "shows footer checkbox on 100x25"
+    );
+}
+
+#[test]
+fn feature_banner_modal_renders_all_features_on_narrow_60x24_terminal() {
+    let modal_enabled = Modal::FeatureBanner {
+        show_on_startup: true,
+        update_available: None,
+    };
+    let text = modal_text(60, 24, &modal_enabled);
+
+    assert!(text.contains("Welcome to srectl — Feature Highlights"));
+    assert!(text.contains(":contexts"), "shows contexts on 60x24");
+    assert!(text.contains(":top"), "shows top on 60x24");
+    assert!(text.contains("[c]"), "shows contexts shortcut on 60x24");
+    assert!(text.contains("[h]"), "shows top shortcut on 60x24");
+    assert!(text.contains(":update"), "shows update on 60x24");
+    assert!(text.contains("[u]"), "shows update shortcut on 60x24");
 }
 
 #[test]

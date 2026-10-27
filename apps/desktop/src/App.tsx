@@ -7,6 +7,7 @@ import { ResourceTabs, type TabDescriptor } from "./components/ResourceTabs";
 import { Sidebar } from "./components/Sidebar";
 import { ResourceBrowser } from "./components/ResourceBrowser";
 import { K8S_KIND, RESOURCE_LABELS, type ResourceKind } from "@srelens/core";
+import { assistantAllowedFor, readAssistantSetting } from "@srelens/core";
 import { CustomResourceBrowser } from "./components/CustomResourceBrowser";
 import { ClusterOverview } from "./components/ClusterOverview";
 import { PortForwardsView } from "./components/PortForwardsView";
@@ -26,6 +27,7 @@ import { Toaster } from "./components/ui/sonner";
 import { Dock, type DockSession, type DockKind } from "./components/Dock";
 import { StatusBar } from "./components/StatusBar";
 import { LandingPage } from "./components/LandingPage";
+import { ClassicDeprecationBanner } from "./components/ClassicDeprecationBanner";
 import { getInitialTheme, applyTheme, type Theme, type ThemeMode, type ThemeName } from "./ui";
 import { listCrds, type CrdRef } from "@srelens/core";
 import { targetNamespace, type ResourceTarget } from "@srelens/core";
@@ -745,6 +747,9 @@ export function App() {
 
   const activeTab = tabs.find((t) => t.id === activeTabId) ?? null;
   const activeCluster = activeTab?.cluster ?? null;
+  // #968: read each render — the switches live in the new design, and switching design reloads.
+  const assistant = readAssistantSetting();
+  const assistantHere = assistantAllowedFor(assistant, contexts ?? [], activeCluster);
   // Sort, search text and filtered column belong to the ACTIVE tab (#254).
   // Previously sort/filter lived in the unmounted-on-switch view components
   // and the search box was one App-level value shared by every tab, so the
@@ -846,6 +851,8 @@ export function App() {
     // agent list and Send permanently disabled — don't open it there. This also
     // backstops the command-palette and search paths that funnel here.
     if (!isTauri()) return;
+    // #968: switched off in the new design's Settings, the classic design offers none either.
+    if (!readAssistantSetting().enabled) return;
     const existing = tabs.find((t) => t.kind === "assistant" && !t.cluster);
     if (existing) {
       setActiveTabId(existing.id);
@@ -982,6 +989,15 @@ export function App() {
     setTabs((current) =>
       current.map((tab) =>
         tab.id === tabId && tab.edit ? { ...tab, edit: { ...tab.edit, draft } } : tab,
+      ),
+    );
+  }
+
+  /** A fetched manifest: the working copy, and what it is compared against. */
+  function setEditResourceLoaded(tabId: number, yaml: string) {
+    setTabs((current) =>
+      current.map((tab) =>
+        tab.id === tabId && tab.edit ? { ...tab, edit: { ...tab.edit, draft: yaml, loaded: yaml } } : tab,
       ),
     );
   }
@@ -1131,7 +1147,7 @@ export function App() {
         onToggleTheme={toggleThemeMode}
         onOpenSettings={openSettings}
         onOpenToolbox={openToolbox}
-        onOpenAssistant={isTauri() ? openAssistant : undefined}
+        onOpenAssistant={isTauri() && assistant.enabled ? openAssistant : undefined}
         contextProfiles={contextProfiles}
         kubeconfigFiles={kubeconfigFiles}
         contextOrder={contextOrder}
@@ -1153,6 +1169,15 @@ export function App() {
         />
       )}
       <div className="fl-main">
+        <ClassicDeprecationBanner
+          unsavedDrafts={
+            tabs.filter(
+              (tab) =>
+                tab.create?.draft !== undefined ||
+                (tab.edit?.draft !== undefined && tab.edit.draft !== tab.edit.loaded),
+            ).length
+          }
+        />
         {tabs.length > 0 ? (
           <>
             <ResourceTabs
@@ -1191,13 +1216,17 @@ export function App() {
                   ) : activeKind === "toolbox" ? (
                     <ToolboxView key={activeTab.id} initialContext={toolboxContext} />
                   ) : activeKind === "assistant" ? (
-                    <div className="min-h-0 flex-1 overflow-hidden">
-                      <AssistantTab
-                        cluster={activeCluster}
-                        namespace={activeTab.namespace}
-                        availableContexts={contexts?.map((c) => c.name) ?? []}
-                      />
-                    </div>
+                    assistantHere ? (
+                      <div className="min-h-0 flex-1 overflow-hidden">
+                        <AssistantTab
+                          cluster={activeCluster}
+                          namespace={activeTab.namespace}
+                          availableContexts={contexts?.map((c) => c.name) ?? []}
+                        />
+                      </div>
+                    ) : (
+                      <p className="p-4 text-sm text-muted-foreground">AI Assistant is off</p>
+                    )
                   ) : activeTab.crd && activeCluster ? (
                     <CustomResourceBrowser
                       key={activeTab.id}
@@ -1253,12 +1282,14 @@ export function App() {
                       name={activeTab.edit.name}
                       draft={activeTab.edit.draft ?? null}
                       onDraftChange={(yaml) => setEditResourceDraft(activeTab.id, yaml)}
+                      onLoaded={(yaml) => setEditResourceLoaded(activeTab.id, yaml)}
                       onEdited={() => setEditResourceDraft(activeTab.id, undefined)}
                     />
                   ) : activeCluster ? (
                     <ResourceBrowser
                       key={`${activeTab.id}:${viewReloadNonce}`}
                       context={activeCluster}
+                      assistantAllowed={assistantHere}
                       kind={activeKind}
                       query={query}
                       onQueryChange={(q) => updateActiveView({ query: q })}

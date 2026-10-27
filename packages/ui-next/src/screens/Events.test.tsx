@@ -44,6 +44,7 @@ proto.releasePointerCapture ??= () => {};
 import type { ClusterContext } from "@srelens/core";
 import { Events } from "./Events";
 import { ConsoleProvider, useConsole } from "../console";
+import { setClusterAssistant } from "../lib/assistant";
 import { resetContexts, setContexts, setKubeconfigFiles } from "../lib/clusters";
 import { loadColumnPrefs, toggleColumn } from "../lib/columnPrefs";
 import { resetListCache } from "../lib/resourceList";
@@ -332,7 +333,7 @@ describe("Events", () => {
     await user.click(row("BackOff"));
     // The event's own key is `billing/api-7.17a`; what the reader wants is the
     // pod it is about, in the namespace the key carried.
-    expect(routes()).toContain("/k/Pod/billing/api-7");
+    expect(routes()).toContain("/k/prod-eu/Pod/billing/api-7");
     expect(routes().some((r) => r.includes("17a"))).toBe(false);
   });
 
@@ -342,7 +343,7 @@ describe("Events", () => {
     await waitFor(() => expect(cells().length).toBe(4));
 
     await user.click(row("NodeReady"));
-    expect(routes()).toContain("/k/Node/-/node-3");
+    expect(routes()).toContain("/k/prod-eu/Node/-/node-3");
   });
 
   it("reads its own tab's namespace selection", async () => {
@@ -374,6 +375,16 @@ describe("Events", () => {
     expect(asked).toEqual(["Explain this event: BackOff — Back-off restarting failed container api"]);
     // Asking about a row is not opening it.
     expect(routes().length).toBe(before);
+  });
+
+  // #968: no AI on a cluster it is switched off for — not on the header, not on a row.
+  it("offers no Ask anywhere while the AI Assistant is off for the cluster", async () => {
+    setClusterAssistant(CTX.stableId, false);
+    open();
+    await waitFor(() => expect(cells().length).toBe(4));
+
+    expect(screen.queryByRole("button", { name: /^Group by cause/ })).toBeNull();
+    expect(within(row("BackOff")).queryByRole("button", { name: /^Ask/ })).toBeNull();
   });
 
   it("keeps the ask column last when a column is hidden", async () => {

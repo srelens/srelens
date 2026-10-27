@@ -3,6 +3,7 @@ import { listNamespaces } from "./workloads";
 import { listContexts } from "./clusters";
 import { serviceAccountNamespace } from "./errors";
 import { isForbidden } from "./access";
+import type { NamespaceItem } from "./collections";
 
 export interface NamespaceOptions {
   /** null while loading. */
@@ -11,6 +12,17 @@ export interface NamespaceOptions {
   scope: string;
   /** Non-fatal error to surface (a real failure, not an RBAC restriction). */
   error: string;
+  /**
+   * The same namespaces with their labels, for what selects by label — a
+   * namespace collection (#881). `null` while loading.
+   */
+  items: NamespaceItem[] | null;
+  /**
+   * Whether `namespaces` is every namespace on the cluster. False when the
+   * listing was refused or failed and the view fell back to a scope: a
+   * collection's patterns then match only what is known, and it says so.
+   */
+  complete: boolean;
 }
 
 /**
@@ -22,6 +34,8 @@ export interface NamespaceOptions {
  */
 export function useNamespaceOptions(context: string, kubeconfigFiles: string[], refresh = 0): NamespaceOptions {
   const [namespaces, setNamespaces] = useState<string[] | null>(null);
+  const [items, setItems] = useState<NamespaceItem[] | null>(null);
+  const [complete, setComplete] = useState(false);
   const [nsError, setNsError] = useState("");
   // Set when namespace listing was forbidden but the kubeconfig context
   // declares a bound namespace — the view is scoped to it instead of "all".
@@ -34,9 +48,11 @@ export function useNamespaceOptions(context: string, kubeconfigFiles: string[], 
   useEffect(() => {
     let active = true;
     setNamespaces(null);
+    setItems(null);
+    setComplete(false);
     setNsError("");
     setNsScope("");
-    if (!context) { setNamespaces([]); return; }
+    if (!context) { setNamespaces([]); setItems([]); return; }
     // Ensure the client cache knows about all configured kubeconfig files (incl.
     // pasted/additional) before we build a client for this context. Otherwise a
     // restored tab for a context from an additional file races the app's initial
@@ -69,10 +85,12 @@ export function useNamespaceOptions(context: string, kubeconfigFiles: string[], 
               setNsError("");
               setNsScope(ns);
               setNamespaces([ns]);
+              setItems([{ name: ns }]);
             } else {
               setNsScope("");
               setNsError(outcome.error!);
               setNamespaces([]); // non-fatal: still render the toolbar + resource list
+              setItems([]);
             }
           });
       } else if (outcome.error) {
@@ -83,10 +101,13 @@ export function useNamespaceOptions(context: string, kubeconfigFiles: string[], 
         setNsScope("");
         setNsError(outcome.error);
         setNamespaces([]);
+        setItems([]);
       } else {
         setNsError("");
         setNsScope("");
         setNamespaces(outcome.namespaces ?? []);
+        setItems((outcome.summaries ?? []).map((s) => ({ name: s.name, labels: s.labels })));
+        setComplete(true);
       }
       // namespace stays "" = All namespaces by default
       });
@@ -96,5 +117,5 @@ export function useNamespaceOptions(context: string, kubeconfigFiles: string[], 
     };
   }, [context, kubeconfigFilesKey, refresh]);
 
-  return { namespaces, scope: nsScope, error: nsError };
+  return { namespaces, scope: nsScope, error: nsError, items, complete };
 }

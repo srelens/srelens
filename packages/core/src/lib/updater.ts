@@ -11,6 +11,8 @@ export interface UpdateMeta {
    * (e.g. pacman for the AUR package) — offer guidance, not an install button.
    */
   external: boolean;
+  /** The executable is in the Nix store and must be updated with Nix. */
+  nixManaged?: boolean;
   /**
    * Applying the update needs administrator rights — a .deb or .rpm install,
    * which runs `dpkg -i` / `rpm -U` under pkexec or sudo. Warn first, so the
@@ -24,6 +26,7 @@ interface RawUpdateMeta {
   current_version: string;
   notes: string | null;
   external?: boolean;
+  nix_managed?: boolean;
   elevates?: boolean;
 }
 
@@ -41,6 +44,7 @@ export async function checkForUpdate(channel: UpdateChannel): Promise<UpdateMeta
     currentVersion: meta.current_version,
     notes: meta.notes ?? "",
     external: meta.external ?? false,
+    nixManaged: meta.nix_managed ?? false,
     elevates: meta.elevates ?? false,
   };
 }

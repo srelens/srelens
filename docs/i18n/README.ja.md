@@ -37,6 +37,7 @@
 <p align="center">
   <a href="https://github.com/srelens/srelens/stargazers"><img alt="GitHub stars" src="https://img.shields.io/github/stars/srelens/srelens?logo=github&color=eab308"></a>
   <a href="https://www.reddit.com/r/srelens/"><img alt="Reddit: r/srelens" src="https://img.shields.io/reddit/subreddit-subscribers/srelens?label=r%2Fsrelens&logo=reddit&logoColor=white&color=FF4500"></a>
+  <a href="https://join.slack.com/t/srelens/shared_invite/zt-4cu0tzuzo-Ktei1KsVlqPi2XY~irTDAg"><img alt="Slack: srelens" src="https://img.shields.io/badge/Slack-srelens-4A154B?logo=slack&logoColor=white"></a>
   <a href="https://deepwiki.com/srelens/srelens"><img alt="Ask DeepWiki" src="https://img.shields.io/badge/Ask-DeepWiki-2563eb"></a>
 </p>
 
@@ -55,6 +56,10 @@
   <img alt="Terminal UI" src="https://img.shields.io/badge/terminal-srectl-14b8a6">
   <img alt="MCP server" src="https://img.shields.io/badge/agents-MCP-fb923c">
   <img alt="Project status: stable" src="https://img.shields.io/badge/status-stable-22c55e">
+</p>
+
+<p align="center">
+  <img alt="Kubernetes オブジェクトをリアルタイムで一覧表示し、検索と Namespace フィルターに対応する srelens デスクトップアプリ" src="../assets/screenshots/srelens-demo-changes.gif" width="100%">
 </p>
 
 <p align="center">
@@ -91,7 +96,7 @@ Kubernetes のトラブルシューティングでは、ターミナル、ダッ
 
 ## デスクトップアプリ
 
-デスクトップアプリは、ネイティブウィンドウで動く本格的な Kubernetes ワークスペースです。以下のスクリーンショットは**新デザイン**のもので、画面ごとに順次展開しています。**Settings → Appearance → Design → New design**（設定 → 外観 → デザイン → 新デザイン）で有効にでき、同じ手順でいつでも元に戻せます。テーマは Light、Paper、Dark、Midnight、Glass、High contrast の 6 種類です。
+デスクトップアプリは、ネイティブウィンドウで動く本格的な Kubernetes ワークスペースです。以下のスクリーンショットは、現在の既定である**新デザイン**のものです。テーマは Light、Paper、Dark、Midnight、Glass、High contrast の 6 種類です。クラシックデザインは非推奨となり、今後のバージョンで削除されます。それまでは **Settings → Appearance → Design**（設定 → 外観 → デザイン）でクラシックデザインに切り替えられます。
 
 <table>
   <tr>
@@ -315,6 +320,7 @@ srelens は**安定版であり、活発に開発が続いています**。macOS
 ## コミュニティ
 
 - [Reddit の r/srelens](https://www.reddit.com/r/srelens/) — お知らせ、質問、フィードバック
+- [Slack の srelens](https://join.slack.com/t/srelens/shared_invite/zt-4cu0tzuzo-Ktei1KsVlqPi2XY~irTDAg) — メンテナーや他のユーザーとのチャット
 - [Issues](https://github.com/srelens/srelens/issues) — バグ報告と機能リクエスト
 - [Web サイト](https://srelens.com)
 

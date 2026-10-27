@@ -1331,7 +1331,7 @@ pub fn render_feature_banner_modal(
         .clamp(48, 118)
         .min(area.width);
     let modal_height = (area.height.saturating_sub(2))
-        .clamp(18, 30)
+        .clamp(18, 32)
         .min(area.height);
     let modal_x = area.x + (area.width.saturating_sub(modal_width)) / 2;
     let modal_y = area.y + (area.height.saturating_sub(modal_height)) / 2;
@@ -1353,12 +1353,18 @@ pub fn render_feature_banner_modal(
     let inner = block.inner(modal_area);
     f.render_widget(block, modal_area);
 
+    let (header_len, list_min) = if inner.height < 25 {
+        (3, Constraint::Min(8))
+    } else {
+        (4, Constraint::Min(16))
+    };
+
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(4), // Top description & update alert, with a wrap row
-            Constraint::Min(14),   // Features list
-            Constraint::Length(3), // Checkbox and key hints
+            Constraint::Length(header_len), // Top description & update alert
+            list_min,                       // Features list
+            Constraint::Length(3),          // Checkbox and key hints
         ])
         .split(inner);
 
@@ -1429,11 +1435,11 @@ pub fn render_feature_banner_modal(
     }
 
     let header_hint = if inner_w >= 108 {
-        "Key built-in features you should know (press [0-9, b, p, i, u] to jump directly, or type ':' for command prompt):"
+        "Key built-in features you should know (press [0-9, b, c, h, i, p, u] to jump directly, or type ':' for command prompt):"
     } else if inner_w >= 80 {
-        "Key built-in features (press [0-9, b, p, i, u] to jump directly, or ':' for commands):"
+        "Key built-in features (press [0-9, b, c, h, i, p, u] to jump directly, or ':' for commands):"
     } else {
-        "Key features (press [0-9, b, p, i, u] to jump, ':' for commands):"
+        "Key features (press [0-9, b, c, h, i, p, u] to jump, ':' for commands):"
     };
 
     header_lines.push(Line::from(vec![Span::styled(
@@ -1452,7 +1458,7 @@ pub fn render_feature_banner_modal(
         "Check for new releases & update binary ('srectl update')".to_string()
     };
 
-    let features: [(&str, &str, &str, String, &str); 14] = [
+    let features: [(&str, &str, &str, String, &str); 16] = [
         (
             "[1]",
             ":helm",
@@ -1544,72 +1550,196 @@ pub fn render_feature_banner_modal(
             "Import Kubernetes cluster / kubeconfig from clipboard or file path".to_string(),
             ":import",
         ),
+        (
+            "[c]",
+            ":contexts",
+            "[Contexts]",
+            "Kubeconfig context switcher for multi-cluster management".to_string(),
+            ":contexts",
+        ),
+        (
+            "[h]",
+            ":top",
+            "[Hotspots]",
+            "Top CPU & memory resource rankings across pods and nodes".to_string(),
+            ":top",
+        ),
         ("[u]", ":update", "[Self Update]", update_desc, ":update"),
     ];
 
-    let items: Vec<ListItem> = features
-        .iter()
-        .map(|(num, cmd, cat, desc, syntax)| {
-            let (num_style, cmd_style) = if *cmd == ":update" && update_available.is_some() {
-                (
-                    Style::default()
-                        .fg(Theme::yellow())
-                        .add_modifier(Modifier::BOLD),
-                    Style::default()
-                        .fg(Theme::yellow())
-                        .add_modifier(Modifier::BOLD),
-                )
-            } else {
-                (
-                    Style::default()
-                        .fg(Theme::cyan())
-                        .add_modifier(Modifier::BOLD),
-                    Style::default()
-                        .fg(Theme::yellow())
-                        .add_modifier(Modifier::BOLD),
-                )
-            };
+    let use_two_columns = chunks[1].height < 16;
 
-            let prefix_w = 4 + 13 + 15; // num (4) + cmd (13) + cat (15)
-            let mut spans = vec![
-                Span::styled(format!("{num} "), num_style),
-                Span::styled(format!("{:<13}", cmd), cmd_style),
-                Span::styled(
-                    format!("{:<15}", cat),
-                    Style::default()
-                        .fg(Theme::accent())
-                        .add_modifier(Modifier::BOLD),
-                ),
-            ];
+    let items: Vec<ListItem> = if use_two_columns {
+        let half = (features.len() + 1) / 2;
+        let col_w = (inner_w.saturating_sub(3)) / 2;
 
-            if inner_w >= 110 {
-                let syntax_str = format!("  ({})", syntax);
-                let avail_desc = inner_w.saturating_sub(prefix_w + syntax_str.len());
-                let clean_desc = if desc.chars().count() > avail_desc && avail_desc > 3 {
-                    let s: String = desc.chars().take(avail_desc - 3).collect();
-                    format!("{}...", s)
-                } else {
-                    desc.clone()
+        (0..half)
+            .map(|i| {
+                let mut spans = Vec::new();
+
+                let push_col = |spans: &mut Vec<Span>,
+                                feat: &(&str, &str, &str, String, &str),
+                                max_w: usize| {
+                    let (num, cmd, cat, desc, _) = feat;
+                    let (num_style, cmd_style) = if *cmd == ":update" && update_available.is_some()
+                    {
+                        (
+                            Style::default()
+                                .fg(Theme::yellow())
+                                .add_modifier(Modifier::BOLD),
+                            Style::default()
+                                .fg(Theme::yellow())
+                                .add_modifier(Modifier::BOLD),
+                        )
+                    } else {
+                        (
+                            Style::default()
+                                .fg(Theme::cyan())
+                                .add_modifier(Modifier::BOLD),
+                            Style::default()
+                                .fg(Theme::yellow())
+                                .add_modifier(Modifier::BOLD),
+                        )
+                    };
+
+                    spans.push(Span::styled(format!("{num} "), num_style));
+
+                    if max_w >= 28 {
+                        spans.push(Span::styled(format!("{:<11}", cmd), cmd_style));
+                        spans.push(Span::styled(
+                            format!("{:<13}", cat),
+                            Style::default()
+                                .fg(Theme::accent())
+                                .add_modifier(Modifier::BOLD),
+                        ));
+                        let prefix = 4 + 11 + 13;
+                        if max_w > prefix + 4 {
+                            let avail_desc = max_w.saturating_sub(prefix);
+                            let clean_desc = if desc.chars().count() > avail_desc && avail_desc > 3
+                            {
+                                let s: String = desc.chars().take(avail_desc - 3).collect();
+                                format!("{}...", s)
+                            } else {
+                                desc.clone()
+                            };
+                            spans.push(Span::styled(
+                                format!("{:<avail_desc$}", clean_desc),
+                                Style::default().fg(Theme::fg()),
+                            ));
+                        } else if max_w > prefix {
+                            spans.push(Span::raw(" ".repeat(max_w.saturating_sub(prefix))));
+                        }
+                    } else {
+                        let content_w = max_w.saturating_sub(4);
+                        if content_w >= 14 {
+                            spans.push(Span::styled(format!("{:<12}", cmd), cmd_style));
+                            let cat_avail = content_w.saturating_sub(12);
+                            if cat_avail > 0 {
+                                let clean_cat = if cat.chars().count() > cat_avail {
+                                    let s: String = cat.chars().take(cat_avail).collect();
+                                    s
+                                } else {
+                                    format!("{:<cat_avail$}", cat)
+                                };
+                                spans.push(Span::styled(
+                                    clean_cat,
+                                    Style::default()
+                                        .fg(Theme::accent())
+                                        .add_modifier(Modifier::BOLD),
+                                ));
+                            }
+                        } else {
+                            let clean_cmd = if cmd.chars().count() > content_w {
+                                let s: String = cmd.chars().take(content_w).collect();
+                                s
+                            } else {
+                                format!("{:<content_w$}", cmd)
+                            };
+                            spans.push(Span::styled(clean_cmd, cmd_style));
+                        }
+                    }
                 };
-                spans.push(Span::styled(
-                    format!("{:<avail_desc$}", clean_desc),
-                    Style::default().fg(Theme::fg()),
-                ));
-                spans.push(Span::styled(syntax_str, Style::default().fg(Theme::dim())));
-            } else {
-                let avail_desc = inner_w.saturating_sub(prefix_w);
-                let clean_desc = if desc.chars().count() > avail_desc && avail_desc > 3 {
-                    let s: String = desc.chars().take(avail_desc - 3).collect();
-                    format!("{}...", s)
-                } else {
-                    desc.clone()
-                };
-                spans.push(Span::styled(clean_desc, Style::default().fg(Theme::fg())));
-            }
 
-            ListItem::new(Line::from(spans))
-        })
-        .collect();
+                // Left column
+                push_col(&mut spans, &features[i], col_w);
+
+                // Column separator
+                spans.push(Span::styled(" │ ", Style::default().fg(Theme::border())));
+
+                // Right column
+                if i + half < features.len() {
+                    let avail_r = inner_w.saturating_sub(col_w + 3);
+                    push_col(&mut spans, &features[i + half], avail_r);
+                }
+
+                ListItem::new(Line::from(spans))
+            })
+            .collect()
+    } else {
+        features
+            .iter()
+            .map(|(num, cmd, cat, desc, syntax)| {
+                let (num_style, cmd_style) = if *cmd == ":update" && update_available.is_some() {
+                    (
+                        Style::default()
+                            .fg(Theme::yellow())
+                            .add_modifier(Modifier::BOLD),
+                        Style::default()
+                            .fg(Theme::yellow())
+                            .add_modifier(Modifier::BOLD),
+                    )
+                } else {
+                    (
+                        Style::default()
+                            .fg(Theme::cyan())
+                            .add_modifier(Modifier::BOLD),
+                        Style::default()
+                            .fg(Theme::yellow())
+                            .add_modifier(Modifier::BOLD),
+                    )
+                };
+
+                let prefix_w = 4 + 13 + 15; // num (4) + cmd (13) + cat (15)
+                let mut spans = vec![
+                    Span::styled(format!("{num} "), num_style),
+                    Span::styled(format!("{:<13}", cmd), cmd_style),
+                    Span::styled(
+                        format!("{:<15}", cat),
+                        Style::default()
+                            .fg(Theme::accent())
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                ];
+
+                if inner_w >= 110 {
+                    let syntax_str = format!("  ({})", syntax);
+                    let avail_desc = inner_w.saturating_sub(prefix_w + syntax_str.len());
+                    let clean_desc = if desc.chars().count() > avail_desc && avail_desc > 3 {
+                        let s: String = desc.chars().take(avail_desc - 3).collect();
+                        format!("{}...", s)
+                    } else {
+                        desc.clone()
+                    };
+                    spans.push(Span::styled(
+                        format!("{:<avail_desc$}", clean_desc),
+                        Style::default().fg(Theme::fg()),
+                    ));
+                    spans.push(Span::styled(syntax_str, Style::default().fg(Theme::dim())));
+                } else {
+                    let avail_desc = inner_w.saturating_sub(prefix_w);
+                    let clean_desc = if desc.chars().count() > avail_desc && avail_desc > 3 {
+                        let s: String = desc.chars().take(avail_desc - 3).collect();
+                        format!("{}...", s)
+                    } else {
+                        desc.clone()
+                    };
+                    spans.push(Span::styled(clean_desc, Style::default().fg(Theme::fg())));
+                }
+
+                ListItem::new(Line::from(spans))
+            })
+            .collect()
+    };
 
     f.render_widget(List::new(items), chunks[1]);
 
@@ -1662,7 +1792,7 @@ pub fn render_feature_banner_modal(
         ]
     };
 
-    let jump_hint = "0-9, b, p, i, u";
+    let jump_hint = "0-9, b, c, h, i, p, u";
     let footer_spans = if inner_w >= 98 {
         vec![
             Span::styled(" Press ", Style::default().fg(Theme::dim())),
@@ -1765,4 +1895,160 @@ pub fn render_feature_banner_modal(
         Paragraph::new(footer_lines).wrap(Wrap { trim: true }),
         chunks[2],
     );
+}
+
+/// A local agent's gated tool call, waiting on the user's yes or no. Drawn
+/// over everything, dialogs included; its keys are `ConsentQueue::press`.
+/// `ready_in` counts the seconds before keys reach it.
+pub fn render_consent(
+    f: &mut Frame,
+    area: Rect,
+    pending: &crate::consent::PendingConsent,
+    seconds_left: u64,
+    ready_in: u64,
+) {
+    use srelens_mcp::policy::ConsentKind;
+
+    let request = &pending.request;
+    let (what, color) = match request.kind {
+        ConsentKind::Destructive => ("change", Theme::red()),
+        ConsentKind::SensitiveRead => ("Secret read", Theme::yellow()),
+    };
+    let modal_area = centered_rect(60, 50, area);
+    f.render_widget(Clear, modal_area);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(Theme::border_type())
+        .border_style(Style::default().fg(color))
+        .title(Span::styled(
+            " Agent approval ",
+            Style::default().fg(color).add_modifier(Modifier::BOLD),
+        ));
+
+    let dim = Style::default().fg(Theme::dim());
+    let value = Style::default()
+        .fg(Theme::fg())
+        .add_modifier(Modifier::BOLD);
+    let mut answer = vec![
+        Span::styled("[y]", Theme::key_hint_key()),
+        Span::styled(" Approve  ", Theme::key_hint_desc()),
+        Span::styled("[n/Esc]", Theme::key_hint_key()),
+        Span::styled(" Decline", Theme::key_hint_desc()),
+        Span::styled(format!("   {seconds_left}s left"), dim),
+    ];
+    if ready_in > 0 {
+        answer.push(Span::styled(format!("   ready in {ready_in}s"), dim));
+    }
+    let fields = srelens_capability::confirm_fields(&request.args);
+    // The call can name a cluster other than the chat's own; that is the one
+    // it would change, so it is the one the user must not miss.
+    let who = match fields.get("cluster") {
+        Some(target) if *target != pending.context => Line::from(vec![
+            Span::styled(pending.agent.as_str(), value),
+            Span::styled(" targets ", dim),
+            Span::styled(target.as_str(), Theme::status_warn()),
+            Span::styled(" (asked from the ", dim),
+            Span::styled(pending.context.as_str(), value),
+            Span::styled(" chat)", dim),
+        ]),
+        _ => Line::from(vec![
+            Span::styled(pending.agent.as_str(), value),
+            Span::styled(" asks to act on ", dim),
+            Span::styled(pending.context.as_str(), value),
+        ]),
+    };
+    let inner = block.inner(modal_area);
+    let mut lines = vec![
+        who,
+        Line::default(),
+        Line::from(Span::styled(
+            request.prompt(),
+            Style::default().fg(color).add_modifier(Modifier::BOLD),
+        )),
+        Line::default(),
+        Line::from(vec![
+            Span::styled("Tool ", dim),
+            Span::styled(request.tool.as_str(), value),
+            Span::styled("   Impact ", dim),
+            Span::styled(request.impact.as_str(), value),
+            Span::styled("   ", dim),
+            Span::styled(what, value),
+        ]),
+    ];
+    lines.extend(
+        argument_lines(&request.args, &fields, inner.width as usize, 4)
+            .into_iter()
+            .map(|line| Line::from(Span::styled(line, dim))),
+    );
+    f.render_widget(block, modal_area);
+    // The answer keys get their own rows, so a long prompt in a small
+    // terminal is what gets cut, never how to answer it.
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(1), Constraint::Length(2)])
+        .split(inner);
+    for (text, area) in [(lines, chunks[0]), (vec![Line::from(answer)], chunks[1])] {
+        f.render_widget(
+            Paragraph::new(text)
+                .wrap(Wrap { trim: true })
+                .alignment(Alignment::Center),
+            area,
+        );
+    }
+}
+
+/// A call's arguments as at most `rows` lines of `width` characters: what it
+/// acts on first, as the host reads it (`fields`, escaped and bounded), then
+/// everything else as compact JSON with control and format characters
+/// escaped. `_confirm` is a hint to the policy, not part of the call, so it is
+/// never shown. Cut with "…" when it does not fit.
+fn argument_lines(
+    args: &serde_json::Value,
+    fields: &srelens_capability::ConfirmFields,
+    width: usize,
+    rows: usize,
+) -> Vec<String> {
+    const TARGET: [(&str, &str); 4] = [
+        ("kind", "kind"),
+        ("name", "name"),
+        ("namespace", "namespace"),
+        ("cluster", "context"),
+    ];
+    let mut parts: Vec<String> = TARGET
+        .iter()
+        .filter_map(|(field, key)| fields.get(field).map(|v| format!("{key} {v}")))
+        .collect();
+    if let Some(args) = args.as_object() {
+        // Shown above: a target field read from the top level.
+        let shown = |key: &str, value: &serde_json::Value| {
+            TARGET.iter().any(|(_, k)| *k == key) && value.as_str().is_some_and(|s| !s.is_empty())
+        };
+        let rest: std::collections::BTreeMap<&str, &serde_json::Value> = args
+            .iter()
+            .filter(|(key, value)| *key != "_confirm" && !shown(key, value))
+            .map(|(key, value)| (key.as_str(), value))
+            .collect();
+        if !rest.is_empty() {
+            parts.push(serde_json::to_string(&rest).unwrap_or_default());
+        }
+    }
+    let width = width.max(1);
+    let limit = width * rows;
+    // Escaping lengthens text, so cut before it (bounding the work) and after.
+    let text: String = parts.join("  ").chars().take(limit + 1).collect();
+    let text: Vec<char> = srelens_capability::escape_invisible(&text)
+        .chars()
+        .collect();
+    let mut lines: Vec<String> = text
+        .chunks(width)
+        .take(rows)
+        .map(|chunk| chunk.iter().collect())
+        .collect();
+    if text.len() > limit {
+        if let Some(last) = lines.last_mut() {
+            last.pop();
+            last.push('…');
+        }
+    }
+    lines
 }

@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
+import { __resetUsageHistoryForTests } from "../usageHistory";
 import { WATCHABLE_KINDS, type ResourceKind } from "@srelens/core";
 
 // Hoisted for the same reason resourceList.test.tsx hoists its doubles:
@@ -174,6 +175,7 @@ describe("descriptors", () => {
   describe("pod metrics enrichment", () => {
     beforeEach(() => {
       podMetrics.mockReset();
+      __resetUsageHistoryForTests();
     });
 
     /**
@@ -192,8 +194,46 @@ describe("descriptors", () => {
       const out = await descriptorFor("pods")!.enrich!("prod", "");
 
       expect(out.size).toBe(2);
-      expect(out.get(rowKey({ name: "api-0", namespace: "shop" }))).toEqual({ cpu: 10, memory: 100 });
-      expect(out.get(rowKey({ name: "api-0", namespace: "billing" }))).toEqual({ cpu: 20, memory: 200 });
+      expect(out.get(rowKey({ name: "api-0", namespace: "shop" }))).toMatchObject({ cpu: 10, memory: 100 });
+      expect(out.get(rowKey({ name: "api-0", namespace: "billing" }))).toMatchObject({ cpu: 20, memory: 200 });
+    });
+
+    /**
+     * #864: metrics-server has no past, so the row's graph is drawn from the
+     * readings this window has been handed, one per poll.
+     */
+    it("hands each row its readings so far, oldest first, ending in the current one", async () => {
+      vi.useFakeTimers();
+      try {
+        const key = rowKey({ name: "api-0", namespace: "shop" });
+        const reading = (cpu: number, memory: number) =>
+          podMetrics.mockResolvedValue({ metrics: [{ name: "api-0", namespace: "shop", cpuMillicores: cpu, memoryMiB: memory }] });
+        vi.setSystemTime(new Date("2026-10-09T10:00:00Z"));
+        reading(10, 100);
+        const first = await descriptorFor("pods")!.enrich!("prod", "shop");
+        const t0 = Date.parse("2026-10-09T10:00:00Z");
+        expect(first.get(key)).toEqual({ cpu: 10, memory: 100, usageHistory: [{ at: t0, cpu: 10, memory: 100 }] });
+
+        vi.setSystemTime(new Date("2026-10-09T10:00:10Z"));
+        reading(30, 120);
+        const second = await descriptorFor("pods")!.enrich!("prod", "shop");
+        // Each with the time it was taken, so the row can place it and can tell
+        // what was read before its own pod existed.
+        expect(second.get(key)).toEqual({
+          cpu: 30,
+          memory: 120,
+          usageHistory: [
+            { at: t0, cpu: 10, memory: 100 },
+            { at: t0 + 10_000, cpu: 30, memory: 120 },
+          ],
+        });
+
+        // Another cluster's pod of the same name has its own past.
+        const other = await descriptorFor("pods")!.enrich!("staging", "shop");
+        expect(other.get(key)).toMatchObject({ usageHistory: [expect.objectContaining({ cpu: 30 })] });
+      } finally {
+        vi.useRealTimers();
+      }
     });
 
     it("lists no reading at all when the metrics call answers with nothing", async () => {

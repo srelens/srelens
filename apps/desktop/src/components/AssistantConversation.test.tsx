@@ -385,6 +385,51 @@ describe("AssistantConversation session persistence", () => {
     expect(vi.mocked(chat.sendChat).mock.calls[2][7]).toBeNull();
   });
 
+  it("tells the agent switched to what was said, until it has a session of its own", async () => {
+    vi.mocked(chat.listAgents).mockResolvedValue([
+      { kind: "claude", label: "Claude Code", available: true, path: "/usr/bin/claude", version: null, installUrl: "", gated: false },
+      { kind: "codex", label: "Codex", available: true, path: "/usr/bin/codex", version: null, installUrl: "", gated: false },
+    ]);
+    vi.mocked(chat.sendChat).mockImplementation(async (_s, _p, _a, onEvent) => {
+      onEvent({ type: "toolCallStart", id: "t1", tool: "k8s.listStatefulSets", args: { namespace: "shop" } });
+      onEvent({ type: "toolResult", id: "t1", status: "ok" });
+      onEvent({ type: "textDelta", text: "orders uses orders-db, a Postgres StatefulSet." });
+      onEvent({ type: "turnDone" });
+      return "cli-abc";
+    });
+    render(<AssistantConversation />);
+    fireEvent.change(await screen.findByPlaceholderText(/ask/i), { target: { value: "which database does orders use?" } });
+    fireEvent.click(screen.getByRole("button", { name: /send/i }));
+    await waitFor(() => expect(chat.sendChat).toHaveBeenCalledTimes(1));
+    await screen.findByRole("button", { name: /^send$/i });
+
+    vi.mocked(chat.sendChat).mockImplementation(async (_s, _p, _a, onEvent) => {
+      onEvent({ type: "turnDone" });
+      return "codex-thread";
+    });
+    fireEvent.click(screen.getByRole("combobox", { name: /agent/i }));
+    fireEvent.click(await screen.findByRole("option", { name: /codex/i }));
+    fireEvent.change(screen.getByPlaceholderText(/ask/i), { target: { value: "which index should I create?" } });
+    fireEvent.click(screen.getByRole("button", { name: /^send$/i }));
+    await waitFor(() => expect(chat.sendChat).toHaveBeenCalledTimes(2));
+    await screen.findByRole("button", { name: /^send$/i });
+
+    const sent = vi.mocked(chat.sendChat).mock.calls[1][1];
+    expect(vi.mocked(chat.sendChat).mock.calls[1][7]).toBeNull();
+    expect(sent).toMatch(/another agent/i);
+    expect(sent.indexOf("which database does orders use?")).toBeGreaterThanOrEqual(0);
+    expect(sent.indexOf("orders uses orders-db")).toBeGreaterThan(sent.indexOf("which database does orders use?"));
+    expect(sent.endsWith("which index should I create?")).toBe(true);
+    expect(sent).not.toContain("k8s.listStatefulSets");
+
+    // Codex has its own thread now: not told again.
+    fireEvent.change(screen.getByPlaceholderText(/ask/i), { target: { value: "how big will it get?" } });
+    fireEvent.click(screen.getByRole("button", { name: /^send$/i }));
+    await waitFor(() => expect(chat.sendChat).toHaveBeenCalledTimes(3));
+    expect(vi.mocked(chat.sendChat).mock.calls[2][7]).toBe("codex-thread");
+    expect(vi.mocked(chat.sendChat).mock.calls[2][1]).toBe("how big will it get?");
+  });
+
   it("clears the stored id when a resume crashes (null return), so the next turn starts fresh", async () => {
     // Turn 1 captures an id; turn 2 resumes it but the backend reports a
     // crashed resume by returning null (the CLI lost the session). Turn 3
@@ -623,6 +668,8 @@ describe("AssistantConversation session persistence", () => {
     // Reopening never re-mints a channel session — `startChat` (which only
     // fires when `sessionRef.current` is empty) must not have been called.
     expect(chat.startChat).not.toHaveBeenCalled();
+    // And the turn names the conversation, which Cursor keeps its chat under (#952).
+    expect(vi.mocked(chat.sendChat).mock.calls[0][8]).toBe("old-1");
   });
 
   it("selecting a session loads it and replays its messages read-only into state", async () => {
@@ -986,6 +1033,7 @@ describe("AssistantConversation multi-context (global tab)", () => {
     expect(screen.queryByRole("button", { name: /contexts \(/i })).toBeFalsy();
     fireEvent.change(screen.getByPlaceholderText(/ask/i), { target: { value: "hi" } });
     expect((screen.getByRole("button", { name: /^send$/i }) as HTMLButtonElement).disabled).toBe(false);
+    expect(screen.queryByText(/pick at least one context/i)).toBeFalsy();
   });
 
   it("global tab shows a Contexts control and disables Send until at least one context is selected", async () => {
@@ -999,6 +1047,28 @@ describe("AssistantConversation multi-context (global tab)", () => {
     fireEvent.click(screen.getByRole("button", { name: /contexts \(0\)/i }));
     fireEvent.click(await screen.findByText("a"));
     expect((screen.getByRole("button", { name: /^send$/i }) as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  it("says why Send waits while no context is picked, and stops once one is", async () => {
+    // Reported from use: a ready agent, a typed question, a dead Send and a
+    // silent Enter — nothing on screen named the missing context.
+    render(<AssistantConversation availableContexts={["a", "b", "c"]} />);
+    await screen.findByRole("combobox", { name: /agent/i });
+    fireEvent.change(screen.getByPlaceholderText(/ask/i), { target: { value: "hi" } });
+
+    expect(screen.getByText(/pick at least one context/i)).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: /contexts \(0\)/i }));
+    fireEvent.click(await screen.findByText("a"));
+    expect(screen.queryByText(/pick at least one context/i)).toBeFalsy();
+  });
+
+  it("with no contexts configured, says to add one rather than pick from an empty menu", async () => {
+    render(<AssistantConversation availableContexts={[]} />);
+    await screen.findByRole("combobox", { name: /agent/i });
+
+    expect(screen.getByText(/add a kubeconfig under settings → contexts/i)).toBeTruthy();
+    expect(screen.queryByText(/pick at least one context/i)).toBeFalsy();
   });
 
   it("selecting two contexts shows two removable chips and prefaces the outgoing prompt enumerating both", async () => {

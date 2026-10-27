@@ -38,6 +38,7 @@ proto.releasePointerCapture ??= () => {};
 import { describeError, resourceStatusLine, type ClusterContext, type K8sObject } from "@srelens/core";
 import { Workloads } from "./Workloads";
 import { ConsoleProvider } from "../console";
+import { setClusterAssistant } from "../lib/assistant";
 import * as store from "../lib/tabsStore";
 import { TabScope } from "../lib/tabScope";
 import { defaultState } from "../lib/tabs";
@@ -130,6 +131,16 @@ function open() {
 }
 
 describe("Workloads", () => {
+  it("draws an ask chip per row, and none while the AI Assistant is off for the cluster (#968)", async () => {
+    open();
+    await waitFor(() => expect(rowNames()).toHaveLength(5));
+    expect(document.querySelectorAll(".row-ask")).toHaveLength(5);
+
+    act(() => { setClusterAssistant(CTX.stableId, false); });
+    await waitFor(() => expect(document.querySelectorAll(".row-ask")).toHaveLength(0));
+    expect(rowNames()).toHaveLength(5);
+  });
+
   it("narrows to a namespace clicked in the table, as a kind's own list does (#821)", async () => {
     open();
     const cell = await screen.findByRole("button", { name: "Show only namespace kube-system" });
@@ -328,8 +339,8 @@ describe("Workloads", () => {
     // "/resources" route this list is itself opened at.
     fireEvent.doubleClick(screen.getByText("web-1").closest("tr")!);
 
-    await waitFor(() => expect(tabFor("/k/Pod/default/web-1")).toBeTruthy());
-    expect(store.currentWorkspace().activeId).toBe(tabFor("/k/Pod/default/web-1").id);
+    await waitFor(() => expect(tabFor("/k/prod-eu/Pod/default/web-1")).toBeTruthy());
+    expect(store.currentWorkspace().activeId).toBe(tabFor("/k/prod-eu/Pod/default/web-1").id);
   });
 
   it("keeps listing the kinds that answered when one of the five fails", async () => {

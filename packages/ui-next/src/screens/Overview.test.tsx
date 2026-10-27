@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 
 // Only the capability wrappers are replaced. `nodeUsage`, `clusterCapacity`,
@@ -72,6 +72,7 @@ import {
 import { Overview } from "./Overview";
 import { CACHE_TTL_MS, clearResourceCache } from "../lib/cachedResource";
 import { ConsoleProvider } from "../console";
+import { setClusterAssistant } from "../lib/assistant";
 import { defaultState } from "../lib/tabs";
 import * as store from "../lib/tabsStore";
 import { resetContexts, setContexts, setKubeconfigFiles } from "../lib/clusters";
@@ -635,6 +636,17 @@ describe("Overview — the node actions", () => {
     // Still open, so nothing reads as having succeeded.
     expect(dialog()).toBeTruthy();
   });
+
+  it("opens the node in a tab pinned to this cluster (#834)", async () => {
+    open();
+    await waitFor(() => expect(rowFor("n1")).toBeTruthy());
+
+    // Past the bar's two visible actions, in its overflow menu.
+    await userEvent.click(within(rowFor("n1")).getByRole("button", { name: "More actions" }));
+    await userEvent.click(within(await screen.findByRole("dialog")).getByRole("button", { name: "Open in new tab" }));
+
+    expect(store.activeRoute()).toBe("/k/prod-eu/Node/-/n1");
+  });
 });
 
 /* --------------------------------------------------------------- not ready */
@@ -893,10 +905,10 @@ describe("Overview — the not-ready list", () => {
     await waitFor(() => expect(notReadyNames()).toHaveLength(6));
 
     await userEvent.click(within(notReady()).getByRole("button", { name: /zz-checkout-api/ }));
-    expect(store.activeRoute()).toBe("/k/Deployment/checkout/zz-checkout-api");
+    expect(store.activeRoute()).toBe("/k/prod-eu/Deployment/checkout/zz-checkout-api");
 
     await userEvent.click(within(notReady()).getByRole("button", { name: /aa-worker-0/ }));
-    expect(store.activeRoute()).toBe("/k/Pod/checkout/aa-worker-0");
+    expect(store.activeRoute()).toBe("/k/prod-eu/Pod/checkout/aa-worker-0");
   });
 
   it("says that nothing is unhealthy rather than leaving a blank", async () => {
@@ -1806,5 +1818,43 @@ describe("Overview — app cards", () => {
   it("carries the app cards band, pinned to the cluster in focus", async () => {
     open();
     expect((await screen.findByTestId("app-cards")).textContent).toBe(CTX.stableId);
+  });
+});
+
+/** On a protected cluster (#101) a node action asks for the cluster's name too. */
+describe("Overview — a node action on a protected cluster (#101)", () => {
+  beforeEach(() => {
+    store.setWorkspaceProtected(store.getState().currentId, true);
+  });
+
+  it("drains nothing until the cluster's name is typed", async () => {
+    open();
+    await waitFor(() => expect(rowFor("n1")).toBeTruthy());
+    await userEvent.click(within(rowFor("n1")).getByRole("button", { name: "Drain" }));
+    const box = dialog() as HTMLElement;
+    expect(within(box).getByText("prod-eu is protected (workspace Default).")).toBeTruthy();
+
+    await userEvent.click(within(box).getByRole("button", { name: "Drain" }));
+    expect(core.drainNode).not.toHaveBeenCalled();
+    expect(within(box).getByText("Type prod-eu to confirm.")).toBeTruthy();
+
+    await userEvent.type(within(box).getByRole("textbox", { name: "Type prod-eu to confirm" }), "prod-eu");
+    await userEvent.click(within(box).getByRole("button", { name: "Drain" }));
+    await waitFor(() => expect(core.drainNode).toHaveBeenCalledWith("prod-eu", "n1"));
+  });
+});
+
+/** #968: the header's one AI action exists only where the assistant may act. */
+describe("Overview — the Summarise action", () => {
+  it("offers Summarise while the AI Assistant is on", async () => {
+    open();
+    expect(await screen.findByRole("button", { name: /^Summarise: / })).toBeDefined();
+  });
+
+  it("offers none while the AI Assistant is off for the cluster", async () => {
+    setClusterAssistant(CTX.stableId, false);
+    open();
+    await act(async () => {});
+    expect(screen.queryByRole("button", { name: /^Summarise: / })).toBeNull();
   });
 });

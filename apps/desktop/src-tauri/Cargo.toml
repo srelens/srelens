@@ -7,7 +7,10 @@ rust-version = "1.77.2"
 
 [lib]
 name = "srelens_desktop_lib"
-crate-type = ["staticlib", "cdylib", "rlib"]
+# rlib only: it is what the `srelens` binary links. The Tauri template's
+# staticlib and cdylib are for iOS and Android, which srelens does not build,
+# and every desktop build spent time and ~800 MB of disk producing them.
+crate-type = ["rlib"]
 
 # The executable is named `srelens` (not the crate name) — it's what macOS
 # shows in the dock for dev builds and what the bundles ship.
@@ -76,6 +79,9 @@ getrandom = "0.2"
 tauri-plugin-biometry = "0.2"
 # Master-password key derivation for the vault (issue #208 follow-up).
 argon2 = "0.5"
+# A log export's fresh partial file (logs.rs), and throwaway inventories in the
+# app-stream command tests (extension_streams.rs).
+tempfile = "3"
 tokio = { version = "1", features = ["rt-multi-thread", "io-std", "io-util", "macros", "process"] }
 uuid = { version = "1", features = ["v4"] }
 async-trait = "0.1"
@@ -86,6 +92,9 @@ async-trait = "0.1"
 # provider. default-tls here pulls rustls-platform-verifier -> aws-lc-rs,
 # giving two providers and a runtime "could not determine CryptoProvider" panic.
 reqwest = { version = "0.13", default-features = false, features = ["blocking", "rustls-no-provider"] }
+# `rustls-no-provider` does NOT resolve a provider on its own: the first client
+# panics unless one is installed, so `main` installs ring (`install_tls_provider`).
+rustls = { version = "0.23", default-features = false, features = ["ring"] }
 # Decodes base64 image attachments a chat turn carries (`chat_send`); also
 # used by `tests/e2e.rs` to decode a secret's value for assertions.
 base64 = "0.22"
@@ -124,5 +133,3 @@ futures = "0.3"
 # issue #30) — drives the real built app through tauri-driver. Dev-only; the
 # shipping binary never links it.
 thirtyfour = "0.32"
-# Throwaway inventories for the app-stream command tests (extension_streams.rs).
-tempfile = "3"

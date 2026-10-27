@@ -23,10 +23,10 @@ pub struct UserStreams {
 }
 
 impl UserStreams {
-    pub fn new(cache: Arc<ClientCache>) -> Self {
+    pub fn new(cache: Arc<ClientCache>, spools: srelens_streams::log_spool::SpoolDirs) -> Self {
         Self {
             watch: WatchManager::new(cache.clone()),
-            logs: LogStreamManager::new(cache.clone()),
+            logs: LogStreamManager::new(cache.clone()).with_spools(spools),
             exec: ExecManager::new(cache.clone()),
             forward: ForwardManager::new(cache),
             terminal: TerminalManager::new(),

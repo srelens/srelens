@@ -84,6 +84,42 @@ describe("the window's ground", () => {
     }
   });
 
+  /**
+   * A dialog is a card, and a card clears with the sheet. Over a see-through
+   * window the screen behind showed straight through the dialog, its labels
+   * printed across the rows underneath. A layer that floats has to hide what
+   * is under it.
+   */
+  it("keeps a dialog's card from clearing with the sheet, on every see-through theme", () => {
+    for (const role of ["dialog", "alertdialog"]) {
+      for (const theme of ["dark", "midnight"]) {
+        expect(rule(kit, `[data-theme="${theme}"][data-opacity] .card[role="${role}"]`), `${theme} ${role}`).toContain(
+          "background: var(--surface);",
+        );
+      }
+      const glass = rule(kit, `[data-theme="glass"][data-opacity] .card[role="${role}"]`);
+      // Dark glass, frosted, and nearly opaque: a form has to be readable
+      // over any desktop.
+      expect(glass).toMatch(/backdrop-filter:\s*blur\(/);
+      expect(glass).toMatch(/-webkit-backdrop-filter:\s*blur\(/);
+      const alpha = Number(glass.match(/background:\s*rgba\([^)]*,\s*([\d.]+)\)/)?.[1]);
+      expect(alpha, role).toBeGreaterThanOrEqual(0.9);
+      // And less clear than a popover, which is a few lines and not a form.
+      const popover = Number(
+        rule(kit, '[data-theme="glass"][data-opacity] .popover').match(/background:\s*rgba\([^)]*,\s*([\d.]+)\)/)?.[1],
+      );
+      expect(alpha).toBeGreaterThan(popover);
+    }
+  });
+
+  it("leaves a card in the page clear, and a dialog solid at rest: only the floating card is recoated", () => {
+    // The in-page card still paints with the ground token.
+    expect(rule(kit, ".card")).toContain("background: var(--ground-surface);");
+    // No rule recoats a dialog outside the see-through window, where the
+    // ground token is already the solid surface.
+    expect(kit).not.toMatch(/\[data-theme="[a-z]+"\] \.card\[role=/);
+  });
+
   it("makes Glass's floating layers dark glass only while the window is see-through", () => {
     const body = rule(kit, '[data-theme="glass"][data-opacity] .popover');
     expect(body).toMatch(/backdrop-filter:\s*blur\(/);

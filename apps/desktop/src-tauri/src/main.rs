@@ -29,6 +29,8 @@ fn main() {
     // stdio, and MCP HTTP — honors it (the GUI can adjust it further at runtime).
     srelens_kube::connect::init_timeout_from_env();
 
+    srelens_desktop_lib::install_tls_provider();
+
     // A release build has no console (`windows_subsystem` above), in every run
     // mode, so on Windows each exec plugin kube-rs starts (`aws eks get-token`)
     // would open a console window of its own (#775). Still single-threaded.
@@ -294,6 +296,11 @@ fn run_mcp_http(
         };
         let server = server
             .with_policy(policy)
+            // #968: the AI Assistant switches, read from the settings file per call.
+            .with_assistant(Arc::new(srelens_registry::assistant::SettingsAssistant::new(
+                srelens_desktop_lib::default_settings_path(),
+                cache.clone(),
+            )))
             .with_audit(audit)
             .with_prompts(srelens_mcp::prompts::PromptLibrary::new(Some(
                 mcp_prompts_dir(),
@@ -354,9 +361,12 @@ fn run_serve(addr: &str, data_flag: Option<&str>) {
             Arc::new(srelens_desktop_lib::build_registry_for_user);
         eprintln!("srelens web server listening on http://{addr}");
         eprintln!("srelens data directory: {}", data_dir.display());
-        if let Err(e) =
-            srelens_server::serve(factory, srelens_server::ServerConfig { addr, data_dir }).await
-        {
+        let config = srelens_server::ServerConfig {
+            addr,
+            data_dir,
+            assets: srelens_desktop_lib::web_frontend::assets(),
+        };
+        if let Err(e) = srelens_server::serve(factory, config).await {
             eprintln!("web server error: {e}");
         }
     });
@@ -412,6 +422,11 @@ fn run_mcp_stdio(allow_destructive: bool, allow_sensitive_reads: bool) {
         };
         let server = server
             .with_policy(policy)
+            // #968: the AI Assistant switches, read from the settings file per call.
+            .with_assistant(Arc::new(srelens_registry::assistant::SettingsAssistant::new(
+                srelens_desktop_lib::default_settings_path(),
+                cache.clone(),
+            )))
             .with_audit(audit)
             .with_prompts(srelens_mcp::prompts::PromptLibrary::new(Some(
                 mcp_prompts_dir(),

@@ -40,6 +40,11 @@ describe("Placeholder", () => {
     expect(onOpenInClassic).toHaveBeenCalledWith("/helm", undefined);
   });
 
+  it("labels classic as deprecated where it offers the way there", () => {
+    render(<Placeholder route="/helm" ported={[]} onOpenInClassic={() => {}} />);
+    expect(screen.getByRole("button", { name: "Open in Classic (deprecated)" })).toBeDefined();
+  });
+
   it("lists which screens are ported, when any are", () => {
     render(<Placeholder route="/helm" ported={["Application log", "Release notes"]} onOpenInClassic={() => {}} />);
     expect(screen.getByText(/Application log/)).toBeDefined();

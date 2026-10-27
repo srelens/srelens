@@ -1,6 +1,7 @@
 import { describe, it, expect, vi } from "vitest";
 import {
   getManifest,
+  getObject,
   listNodes,
   applyManifest,
   diffManifest,
@@ -29,6 +30,38 @@ describe("getManifest", () => {
       Promise.reject(new Error("not found")),
     );
     expect(out.error).toContain("not found");
+  });
+});
+
+describe("getObject", () => {
+  it("sends no group, version or plural for a built-in kind", async () => {
+    const invoke = vi.fn().mockResolvedValue({ object: { kind: "Pod" } });
+    await getObject("kind-dev", "Pod", "default", "web-1", invoke);
+    expect(invoke).toHaveBeenCalledWith("k8s.getObject", {
+      context: "kind-dev",
+      kind: "Pod",
+      namespace: "default",
+      name: "web-1",
+    });
+  });
+
+  it("forwards a custom resource's group, version and plural", async () => {
+    const invoke = vi.fn().mockResolvedValue({ object: { kind: "Application" } });
+    const out = await getObject("kind-dev", "Application", "argocd", "guestbook", invoke, {
+      group: "argoproj.io",
+      version: "v1alpha1",
+      plural: "applications",
+    });
+    expect(invoke).toHaveBeenCalledWith("k8s.getObject", {
+      context: "kind-dev",
+      kind: "Application",
+      namespace: "argocd",
+      name: "guestbook",
+      group: "argoproj.io",
+      version: "v1alpha1",
+      plural: "applications",
+    });
+    expect(out.object).toEqual({ kind: "Application" });
   });
 });
 

@@ -120,10 +120,19 @@ pub struct AssistantViewState {
     pub last_viewport_rect: Cell<Rect>,
     pub plain_lines: RefCell<Vec<String>>,
     pub tool_chip_lines: RefCell<Vec<usize>>,
-    pub slash_suggestions: Vec<&'static crate::ai_skills::SkillDef>,
+    pub slash_suggestions: Vec<crate::ai_skills::SkillDef>,
     pub slash_suggestion_idx: usize,
     pub caveman_level: Option<crate::ai_skills::CavemanLevel>,
     pub task: Option<tokio::task::AbortHandle>,
+    /// Unique identifier for the current active conversation. Assigned lazily on
+    /// turn 1 to prevent orphan directories on context switches.
+    pub conversation_id: String,
+    /// Latest session ID returned by a local agent CLI (Claude Code, Codex or
+    /// Cursor) for its multi-turn resume.
+    pub cli_resume_id: Option<String>,
+    /// The agent this conversation's resume id belongs to; `None` before the
+    /// first turn. A different agent cannot resume it, so a switch starts over.
+    pub chat_agent: Option<srelens_agent::adapter::AgentKind>,
 }
 
 pub fn is_internal_meta_tool(tool: &str) -> bool {
@@ -180,6 +189,9 @@ impl AssistantViewState {
             slash_suggestion_idx: 0,
             caveman_level: None,
             task: None,
+            conversation_id: uuid::Uuid::new_v4().to_string(),
+            cli_resume_id: None,
+            chat_agent: None,
         }
     }
 
@@ -217,7 +229,7 @@ impl AssistantViewState {
         if self.slash_suggestions.is_empty() {
             return false;
         }
-        let chosen = self.slash_suggestions[self.slash_suggestion_idx];
+        let chosen = self.slash_suggestions[self.slash_suggestion_idx].clone();
         self.input = format!("/{} ", chosen.command);
         self.input_cursor = None;
         self.slash_suggestions.clear();
@@ -661,10 +673,39 @@ impl AssistantViewState {
         }
     }
 
-    pub fn clear_conversation(&mut self) {
+    /// Start the agent's side of the conversation over: a new conversation id,
+    /// no resume id, no owning agent, a fresh history for srelens's own agent,
+    /// and the old Cursor chat directory removed. The transcript on screen
+    /// stays. Returns the old conversation id.
+    pub fn reset_agent_chat(&mut self) -> String {
+        let old_id = std::mem::replace(&mut self.conversation_id, uuid::Uuid::new_v4().to_string());
+        self.cli_resume_id = None;
+        self.chat_agent = None;
+        // A new Arc, not the old one emptied: a native turn that was aborted
+        // but still writes lands in the old history, not the new conversation.
+        self.native_history = std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let chat_root = crate::agent::process_cursor_chats_root();
+        let old_id_clone = old_id.clone();
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            handle.spawn(async move {
+                let lock = crate::agent::conversation_lock(&old_id_clone);
+                let _guard = lock.lock().await;
+                if let Ok(dir) = srelens_agent::cursor_chat_dir(&chat_root, &old_id_clone) {
+                    let _ = srelens_agent::remove_cursor_chats(&dir);
+                }
+            });
+        } else if let Ok(dir) = srelens_agent::cursor_chat_dir(&chat_root, &old_id_clone) {
+            let _ = srelens_agent::remove_cursor_chats(&dir);
+        }
+        old_id
+    }
+
+    pub fn clear_conversation(&mut self) -> String {
         if let Some(h) = self.task.take() {
             h.abort();
         }
+        let old_id = self.reset_agent_chat();
+
         let content = if self.context_name.is_empty() {
             "Hello! I am your SRElens AI Assistant. I can analyze pod crashes, diagnose cluster events, inspect configurations, and suggest Kubernetes remediation actions. Type your prompt below:".to_string()
         } else {
@@ -687,9 +728,7 @@ impl AssistantViewState {
         self.busy_start = None;
         self.scroll_offset = 0;
         self.auto_scroll = true;
-        if let Ok(mut hist) = self.native_history.try_lock() {
-            hist.clear();
-        }
+        old_id
     }
 
     pub fn export_to_markdown(&self, provider_name: &str, model_name: &str) -> String {
@@ -1014,9 +1053,26 @@ pub fn render_assistant_view(
     state: &AssistantViewState,
     settings: &crate::ai_config::AiSettings,
 ) {
-    let prov = settings.default_provider;
-    let prov_name = crate::ai_config::provider_display_name(prov);
-    let model = settings.get_model(prov);
+    let agent = settings.agent;
+    // A local agent has its own model (or Default); srelens's own agent runs
+    // on the chosen provider.
+    let route = if agent == srelens_agent::adapter::AgentKind::Srelens {
+        let prov = settings.default_provider;
+        format!(
+            "{} · {} · {}",
+            agent.label(),
+            crate::ai_config::provider_display_name(prov),
+            settings.get_model(prov)
+        )
+    } else {
+        format!(
+            "{} · {}",
+            agent.label(),
+            settings
+                .get_agent_model(agent)
+                .unwrap_or_else(|| "Default".to_string())
+        )
+    };
     let token_hint = state
         .messages
         .iter()
@@ -1049,8 +1105,8 @@ pub fn render_assistant_view(
         "<Esc> Back"
     };
     let title = format!(
-        " SRElens AI Assistant{}{}[{} - {}] [{}{}, {}, <Ctrl+o> Save, <Ctrl+l> Clear, <Ctrl+s> Settings, {}] ",
-        cluster_tag, caveman_tag, prov_name, model, token_hint, copy_hint, tools_hint, back_or_cancel
+        " SRElens AI Assistant{}{}[{}] [{}{}, {}, <Ctrl+o> Save, <Ctrl+l> Clear, <Ctrl+s> Settings, {}] ",
+        cluster_tag, caveman_tag, route, token_hint, copy_hint, tools_hint, back_or_cancel
     );
 
     let block = Block::default()

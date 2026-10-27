@@ -41,6 +41,7 @@
 <p align="center">
   <a href="https://github.com/srelens/srelens/stargazers"><img alt="GitHub stars" src="https://img.shields.io/github/stars/srelens/srelens?logo=github&color=eab308"></a>
   <a href="https://www.reddit.com/r/srelens/"><img alt="Reddit: r/srelens" src="https://img.shields.io/reddit/subreddit-subscribers/srelens?label=r%2Fsrelens&logo=reddit&logoColor=white&color=FF4500"></a>
+  <a href="https://join.slack.com/t/srelens/shared_invite/zt-4cu0tzuzo-Ktei1KsVlqPi2XY~irTDAg"><img alt="Slack: srelens" src="https://img.shields.io/badge/Slack-srelens-4A154B?logo=slack&logoColor=white"></a>
   <a href="https://deepwiki.com/srelens/srelens"><img alt="Ask DeepWiki" src="https://img.shields.io/badge/Ask-DeepWiki-2563eb"></a>
 </p>
 
@@ -59,6 +60,10 @@
   <img alt="Terminal UI" src="https://img.shields.io/badge/terminal-srectl-14b8a6">
   <img alt="MCP server" src="https://img.shields.io/badge/agents-MCP-fb923c">
   <img alt="Project status: stable" src="https://img.shields.io/badge/status-stable-22c55e">
+</p>
+
+<p align="center">
+  <img alt="L’application de bureau srelens affiche les objets Kubernetes en direct, avec recherche et filtres d’espace de noms" src="../assets/screenshots/srelens-demo-changes.gif" width="100%">
 </p>
 
 <p align="center">
@@ -111,10 +116,10 @@ d'investigation dans un seul espace de travail local-first.
 
 L'application de bureau est un espace de travail Kubernetes complet dans une
 fenêtre native. Les captures d'écran ci-dessous montrent le **nouveau design**,
-déployé écran par écran : activez-le dans **Settings → Appearance → Design → New
-design** (Paramètres → Apparence → Design → Nouveau design), et revenez en arrière
-de la même façon quand vous le souhaitez. Il propose six thèmes : Light, Paper,
-Dark, Midnight, Glass et High contrast.
+désormais celui par défaut. Il propose six thèmes : Light, Paper, Dark, Midnight,
+Glass et High contrast. Le design classique est obsolète et sera supprimé dans une
+version future ; d'ici là, vous pouvez y passer dans **Settings → Appearance →
+Design** (Paramètres → Apparence → Design).
 
 <table>
   <tr>
@@ -407,6 +412,8 @@ chaque mise à jour.
 
 - [r/srelens sur Reddit](https://www.reddit.com/r/srelens/) — annonces, questions
   et retours
+- [srelens sur Slack](https://join.slack.com/t/srelens/shared_invite/zt-4cu0tzuzo-Ktei1KsVlqPi2XY~irTDAg) —
+  discussion avec les mainteneurs et les autres utilisateurs
 - [Issues](https://github.com/srelens/srelens/issues) — bugs et demandes de
   fonctionnalités
 - [Site web](https://srelens.com)

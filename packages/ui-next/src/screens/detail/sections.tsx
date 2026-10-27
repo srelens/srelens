@@ -42,6 +42,8 @@ import { AgeCell } from "../../lib/ageCell";
 import type { WorkloadSelector } from "../../lib/workloadSelector";
 import { detailRoute } from "../../lib/detailRoute";
 import { currentWorkspace, openTab, setTabView } from "../../lib/tabsStore";
+import { openOnNamedCluster } from "../../lib/openCluster";
+import { ContainerBlocks } from "../../lib/kinds/containerBlocks";
 
 /**
  * A formatted list, one item per line — a pod's IPs, an owner reference, a
@@ -105,24 +107,64 @@ export interface ConditionsSectionProps {
  *
  * The status and reason read as one value, `False · MinimumReplicasUnavailable`,
  * with an em dash standing in when there is no reason — an empty half of a
- * two-part value reads as a rendering fault. The last-transition time the old
- * table carried is gone: the design has no column for it, and the block is
- * read for what the object is complaining about, not when it started.
+ * two-part value reads as a rendering fault. A condition's message, when it
+ * has one, reads beneath that in quiet ink: an operator puts its useful words
+ * there ("ComparisonError: repository not found"), and a custom resource's
+ * conditions are often all a reader gets of its state (#919).
+ *
+ * The last-transition time the old table carried is gone: the design has no
+ * column for it, and the block is read for what the object is complaining
+ * about, not when it started.
+ *
+ * A custom resource's conditions are its operator's shape, not Kubernetes'
+ * (#919). Argo CD writes a type and a message with no status at all: such a
+ * condition reads its reason alone, and is toned as an `Unknown` status is —
+ * without a status srelens cannot tell good from bad, and core's rule would
+ * otherwise read a status-less `ComparisonError` as healthy. An entry that is
+ * not a condition at all (no string type) is skipped, and a message that is
+ * not text is not printed: either would otherwise take the window down.
  *
  * An object reporting no conditions renders nothing at all — not an empty
  * block, which would still draw its own rule against the block below it.
  */
 export function ConditionsSection({ conditions }: ConditionsSectionProps) {
-  if (conditions.length === 0) return null;
+  const shown = conditions.filter(
+    (condition): condition is Condition => typeof condition?.type === "string" && condition.type !== "",
+  );
+  if (shown.length === 0) return null;
   return (
     <Section title="Conditions">
-      {conditions.map((condition) => (
-        <KV
-          key={condition.type}
-          k={<StatusPill status={condition.type} kind={conditionKindWithReason(condition)} tinted />}
-          v={`${condition.status} · ${condition.reason || "—"}`}
-        />
-      ))}
+      {shown.map((condition, index) => {
+        const hasStatus = typeof condition.status === "string";
+        // Text or nothing, like the message: an operator's object here would
+        // take the window down, or read "[object Object]" (#940).
+        const reason = typeof condition.reason === "string" && condition.reason ? condition.reason : "—";
+        return (
+          <KV
+            // Positional: an operator may report one type twice.
+            key={`${index}:${condition.type}`}
+            k={
+              <StatusPill
+                status={condition.type}
+                kind={conditionKindWithReason(hasStatus ? condition : { ...condition, status: "Unknown" })}
+                tinted
+              />
+            }
+            v={
+              <>
+                <span>
+                  {hasStatus ? `${condition.status} · ${reason}` : reason}
+                </span>
+                {typeof condition.message === "string" && condition.message && (
+                  <span data-slot="condition-message" className="block text-[0.75rem] text-muted">
+                    {condition.message}
+                  </span>
+                )}
+              </>
+            }
+          />
+        );
+      })}
     </Section>
   );
 }
@@ -332,7 +374,13 @@ interface RelatedPod extends PodSummary {
 const RELATED_POD_COLUMNS: Column<RelatedPod>[] = [
   { key: "name", header: "Name", render: (p) => <span className="font-mono">{p.name}</span> },
   { key: "node", header: "Node", render: (p) => <span className="font-mono">{p.node || "—"}</span> },
-  { key: "ready", header: "Ready", render: (p) => p.ready },
+  // The Pods list's own squares (#878): which container, in what state, where
+  // this printed how many were ready.
+  {
+    key: "containers",
+    header: "Containers",
+    render: (p) => <ContainerBlocks containers={p.containers} fallback={p.ready} />,
+  },
   // `formatCpu`/`formatMemory`, the same two the list and the Workloads table
   // render these very fields through. They were formatted twice: one pod read
   // "2 410m" / "3.1 Gi" in the list and "2.410" / "3174 Mi" in the workload's
@@ -426,6 +474,18 @@ const NODE_POD_COLUMNS: Column<PodSummary>[] = [
     render: (pod) => <span className="font-mono">{pod.namespace || "—"}</span>,
   },
   {
+    key: "podIp",
+    header: "IP",
+    sortable: false,
+    render: (pod) => <span className="text-xs">{pod.podIp || "—"}</span>,
+  },
+  // What each pod on this node is running, as the Pods list draws it (#878).
+  {
+    key: "containers",
+    header: "Containers",
+    render: (pod) => <ContainerBlocks containers={pod.containers} fallback={pod.ready} />,
+  },
+  {
     key: "age",
     header: "Age",
     sortable: true,
@@ -448,9 +508,11 @@ export function NodePodsSection({ context, node }: { context: string; node: stri
   const all = state.data ?? [];
   const rows = all.slice(0, NODE_POD_LIMIT);
   const openPod = (pod: PodSummary) =>
-    openTab(detailRoute("Pod", pod.namespace, pod.name), { clusterName: context });
+    openTab(detailRoute("Pod", pod.namespace, pod.name, { cluster: context }), { clusterName: context });
   const viewAll = () => {
-    openTab("/k/pods", { clusterName: context });
+    // The Pods list follows the rail: the node's cluster comes into focus
+    // first when the rail shows another (#834).
+    openOnNamedCluster(context, "/k/pods");
     setTabView(currentWorkspace().activeId, { filter: node, filterKey: "node" });
   };
 

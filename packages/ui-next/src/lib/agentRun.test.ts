@@ -31,6 +31,8 @@ import {
   getRunSubject,
   selectRun,
   forgetRun,
+  gateToolKey,
+  placeGate,
   type Turn,
 } from "./agentRun";
 
@@ -175,6 +177,25 @@ describe("the run store", () => {
     const gates = getAgentRun().gates;
     expect(gates).toHaveLength(1);
     expect(gates[0].outcome).toBe("approved");
+  });
+
+  it("records where a gate was asked: the turn answering, and the call that raised it (#959)", async () => {
+    sendChat.mockImplementation(async (_s: string, _p: string, _a: string, onEvent: (e: unknown) => void) => {
+      onEvent({ type: "toolCallStart", id: "t1", tool: "mcp__srelens__k8s_listPods", args: {} });
+      onEvent({ type: "toolResult", id: "t1", status: "ok" });
+      onEvent({ type: "toolCallStart", id: "t2", tool: "mcp__srelens__k8s_scale", args: { replicas: 3 } });
+      return new Promise<string | null>(() => {});
+    });
+    void askAgent("q", { about: { cluster: "prod-eu" }, route: "/overview" });
+    await untilSendChatCalledTimes(1);
+
+    noteGate({ id: "g1", tool: "k8s.scale", args: { replicas: 3 }, outcome: "pending" }, OURS);
+    const answering = getAgentRun().turns.at(-1)!;
+    expect(getAgentRun().gates[0]).toMatchObject({ turnId: answering.id, callId: "t2" });
+
+    // The outcome is news about the same request: its place is kept.
+    noteGate({ id: "g1", tool: "k8s.scale", args: { replicas: 3 }, outcome: "approved", at: 5 }, OURS);
+    expect(getAgentRun().gates[0]).toMatchObject({ outcome: "approved", turnId: answering.id, callId: "t2" });
   });
 
   it("records no gate for a confirm no srelens chat raised — an external client's", async () => {
@@ -501,6 +522,23 @@ describe("the run store", () => {
     expect(sendChat.mock.calls.at(-1)?.[7]).toBe("claude-conversation-id");
   });
 
+  // #215: srelens's own agent is listed with no path (it is no binary on
+  // PATH), so "no path" must not read as "not installed". The fallback nulled
+  // `resume` on every one of its turns, and it continues its history only
+  // when handed the id its last turn returned.
+  it("hands srelens's own agent the resume id its last turn returned", async () => {
+    listAgents.mockResolvedValue([
+      { kind: "srelens", label: "srelens", available: true, gated: false, path: null },
+      { kind: "claude", label: "Claude Code", available: true, gated: false, path: "/claude" },
+    ]);
+    chooseAgent("srelens");
+    sendChat.mockResolvedValue("conv-1");
+    await askAgent("q1");
+    await askAgent("q2");
+    expect(sendChat.mock.calls.at(-1)?.[5]).toBe("srelens");
+    expect(sendChat.mock.calls.at(-1)?.[7]).toBe("conv-1");
+  });
+
   // P2 (#392 review): `resume` is the PREVIOUS CLI's own conversation id.
   describe("switching agent CLIs", () => {
     it("does not hand one CLI's resume token to another", async () => {
@@ -538,6 +576,78 @@ describe("the run store", () => {
       const before = getAgentRun().turns.length;
       chooseAgent("cursor");
       expect(getAgentRun().turns).toHaveLength(before);
+    });
+
+    // The switch drops `resume`, so the agent switched to starts with nothing,
+    // and "which index should I create?" got "which database do you mean?".
+    // The visible conversation goes with the first question instead — never
+    // another CLI's resume id.
+    it("tells the agent switched to what was said, once, without tool payloads", async () => {
+      listAgents.mockResolvedValue([
+        { kind: "codex", label: "Codex", available: true, gated: false, path: "/codex" },
+        { kind: "cursor", label: "Cursor", available: true, gated: false, path: "/cursor" },
+      ]);
+      chooseAgent("codex");
+      sendChat.mockImplementationOnce(async (_s: string, _p: string, _a: string, onEvent: (e: unknown) => void) => {
+        onEvent({ type: "thinking", text: "private reasoning" });
+        onEvent({ type: "toolCallStart", id: "t1", tool: "k8s.listStatefulSets", args: { namespace: "shop" } });
+        onEvent({ type: "toolResult", id: "t1", status: "ok", summary: "orders-db" });
+        onEvent({ type: "textDelta", text: "orders uses orders-db, a Postgres 15 StatefulSet." });
+        return null;
+      });
+      await askAgent("which database does orders use?");
+      // A fresh conversation has nothing to hand over.
+      expect(sendChat.mock.calls.at(-1)?.[1]).toBe("which database does orders use?");
+
+      chooseAgent("cursor");
+      sendChat.mockResolvedValue("cursor-chat");
+      await askAgent("which index should I create?");
+
+      const sent = sendChat.mock.calls.at(-1)?.[1] as string;
+      expect(sendChat.mock.calls.at(-1)?.[7]).toBeNull();
+      expect(sent).toMatch(/another agent/i);
+      // Oldest first, and the new question last and only once.
+      const asked = sent.indexOf("which database does orders use?");
+      const answered = sent.indexOf("orders uses orders-db, a Postgres 15 StatefulSet.");
+      expect(asked).toBeGreaterThanOrEqual(0);
+      expect(answered).toBeGreaterThan(asked);
+      expect(sent.endsWith("which index should I create?")).toBe(true);
+      expect(sent.split("which index should I create?")).toHaveLength(2);
+      // Questions and final answers only.
+      expect(sent).not.toContain("k8s.listStatefulSets");
+      expect(sent).not.toContain("shop");
+      expect(sent).not.toContain("private reasoning");
+
+      // The agent has its own conversation now; it is not told twice.
+      await askAgent("how big will it get?");
+      expect(sendChat.mock.calls.at(-1)?.[7]).toBe("cursor-chat");
+      expect(sendChat.mock.calls.at(-1)?.[1]).toBe("how big will it get?");
+    });
+
+    it("hands over only the newest turns, each clipped, however long the conversation", async () => {
+      // A resume id on every turn, so nothing is handed over until the switch.
+      sendChat.mockResolvedValue("claude-conversation-id");
+      for (let i = 1; i <= 30; i++) {
+        sendChat.mockImplementationOnce(async (_s: string, _p: string, _a: string, onEvent: (e: unknown) => void) => {
+          onEvent({ type: "textDelta", text: `answer #${i}. ${"x".repeat(3000)}` });
+          return "claude-conversation-id";
+        });
+        await askAgent(`question #${i}.`);
+      }
+
+      chooseAgent("cursor");
+      listAgents.mockResolvedValue([
+        { kind: "cursor", label: "Cursor", available: true, gated: false, path: "/cursor" },
+      ]);
+      await askAgent("and now?");
+
+      const sent = sendChat.mock.calls.at(-1)?.[1] as string;
+      // 30 questions and 90,000 characters of answers asked; a bounded preface sent.
+      expect(sent.length).toBeLessThan(10_000);
+      expect(sent).toContain("question #30.");
+      expect(sent).toContain("answer #30.");
+      expect(sent).not.toContain("question #1.");
+      expect(sent.indexOf("question #29.")).toBeLessThan(sent.indexOf("question #30."));
     });
   });
 
@@ -770,7 +880,9 @@ describe("the run store", () => {
       for (let i = 0; i < 50; i++) await Promise.resolve();
 
       const asked = sendChat.mock.calls.map((c) => c[1] as string);
-      expect(asked).toContain("the replacement");
+      // Ends with: the stopped question is still in the transcript, so with no
+      // resume id yet the replacement carries it as earlier context.
+      expect(asked.some((a) => a.endsWith("the replacement"))).toBe(true);
       expect(asked).not.toContain("the abandoned one");
     });
 
@@ -904,6 +1016,7 @@ describe("the run store", () => {
         "codex",
         1,
         null,
+        expect.any(String),
       );
       // The picker agrees with what actually ran.
       expect(getAgentRun().agentKind).toBe("codex");
@@ -962,6 +1075,7 @@ describe("the run store", () => {
         "claude",
         1,
         null,
+        expect.any(String),
       );
       // The reader's own turn holds exactly what they typed — the guidance
       // block is TRANSMITTED, never RECORDED.
@@ -1306,6 +1420,61 @@ describe("the run store", () => {
       expect(getActiveRunKey()).toBe("prod-eu|Pod|ns|mongodb-0");
       // And no longer listed as merely on disk.
       expect(getRunSummaries().filter((r) => r.savedId === "s1")).toEqual([]);
+    });
+
+    it("keeps each gate at its turn when a conversation is reopened under fresh ids (#959)", async () => {
+      listSessions.mockResolvedValue([{ id: "s1", title: "scale it", createdAt: 1, updatedAt: 2 }]);
+      loadSession.mockResolvedValue({
+        id: "s1", title: "scale it", createdAt: 1, updatedAt: 2,
+        contexts: [], skills: [], cliSessionId: "cli-1", agentKind: "claude",
+        messages: [
+          {
+            v: 1,
+            key: "prod-eu|/overview",
+            label: "Overview",
+            turns: [
+              { id: 40, role: "user", text: "scale it", calls: [], at: 1 },
+              { id: 41, role: "agent", text: "Scaled.", calls: [{ id: "c2", tool: "k8s.scale", args: {}, status: "ok" }], at: 2 },
+            ],
+            gates: [
+              { id: "g1", tool: "k8s.scale", args: {}, outcome: "approved", at: 2, turnId: 41, callId: "c2" },
+              { id: "g2", tool: "k8s.scale", args: {}, outcome: "approved", at: 2, turnId: 99, callId: "zz" },
+            ],
+          },
+        ],
+      });
+
+      await restoreRuns();
+      await openSavedRun("s1");
+      const run = getAgentRun();
+      const answer = run.turns.find((t) => t.text === "Scaled.")!;
+      expect(run.gates.find((g) => g.id === "g1")).toMatchObject({ turnId: answer.id, callId: "c2" });
+      // One whose turn is not in the file goes back to the end, unplaced.
+      const lost = run.gates.find((g) => g.id === "g2")!;
+      expect(lost.turnId).toBeUndefined();
+      expect(lost.callId).toBeUndefined();
+    });
+
+    it("sends a reopened conversation's turns under the id it was saved with (#952)", async () => {
+      listAgents.mockResolvedValue([
+        { kind: "cursor", label: "Cursor", available: true, path: "/cu", version: "1", installUrl: "", gated: false },
+      ]);
+      listSessions.mockResolvedValue([{ id: "s1", title: "check mongodb", createdAt: 1, updatedAt: 2 }]);
+      loadSession.mockResolvedValue({
+        id: "s1", title: "check mongodb", createdAt: 1, updatedAt: 2,
+        contexts: [], skills: [], cliSessionId: "cursor-chat-1", agentKind: "cursor",
+        messages: [{ v: 1, key: "prod-eu|Pod|ns|mongodb-0", label: "Pod/mongodb-0",
+          turns: [{ id: 1, role: "user", text: "check mongodb", calls: [], at: 1 }], gates: [] }],
+      });
+      await restoreRuns();
+      await openSavedRun("s1");
+
+      sendChat.mockResolvedValue("cursor-chat-1");
+      await askAgent("and its node?", { key: getActiveRunKey()! });
+      expect(sendChat.mock.calls.at(-1)?.[7]).toBe("cursor-chat-1");
+      // Cursor keeps the chat that `--resume` reads under this id. The session
+      // `startChat` minted for this run is new, and finds nothing.
+      expect(sendChat.mock.calls.at(-1)?.[8]).toBe("s1");
     });
 
     /**
@@ -2209,5 +2378,31 @@ describe("the run store", () => {
       const failure = getAgentRun().error;
       expect(failure).not.toMatch(/still answering/i);
     });
+  });
+});
+
+describe("placing a gate (#959)", () => {
+  const call = (id: string, tool: string, status: "ok" | null = "ok") => ({ id, tool, args: {}, status });
+  const agent = (id: number, calls: ReturnType<typeof call>[]): Turn => ({ id, role: "agent", text: "", calls, at: 0 });
+
+  it("names a capability and a client's prefixed tool alike", () => {
+    expect(gateToolKey("k8s.scale")).toBe("k8s_scale");
+    expect(gateToolKey("mcp__srelens__k8s_scale")).toBe("k8s_scale");
+    expect(gateToolKey("mcp__my_server__k8s_scale")).toBe("k8s_scale");
+  });
+
+  it("prefers the matching call still waiting on its result", () => {
+    const turns = [agent(4, [call("a", "mcp__srelens__k8s_scale"), call("b", "mcp__srelens__k8s_scale", null), call("c", "k8s.listPods")])];
+    expect(placeGate(turns, "k8s.scale")).toEqual({ turnId: 4, callId: "b" });
+  });
+
+  it("takes the last matching call when none is waiting, and the turn alone when none matches", () => {
+    expect(placeGate([agent(4, [call("a", "k8s.scale"), call("b", "k8s.scale")])], "k8s.scale")).toEqual({ turnId: 4, callId: "b" });
+    expect(placeGate([agent(4, [call("a", "k8s.listPods")])], "k8s.scale")).toEqual({ turnId: 4 });
+  });
+
+  it("places nothing when no answer is in progress", () => {
+    expect(placeGate([], "k8s.scale")).toEqual({});
+    expect(placeGate([{ id: 1, role: "user", text: "q", calls: [], at: 0 }], "k8s.scale")).toEqual({});
   });
 });

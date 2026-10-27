@@ -318,6 +318,39 @@ impl ResourceKind {
             _ => true,
         }
     }
+
+    pub fn accepts_namespace_arg(&self) -> bool {
+        match self {
+            Self::Pods
+            | Self::Deployments
+            | Self::StatefulSets
+            | Self::DaemonSets
+            | Self::Jobs
+            | Self::CronJobs
+            | Self::ConfigMaps
+            | Self::Secrets
+            | Self::ResourceQuotas
+            | Self::LimitRanges
+            | Self::Services
+            | Self::Endpoints
+            | Self::EndpointSlices
+            | Self::Ingresses
+            | Self::NetworkPolicies
+            | Self::PersistentVolumeClaims
+            | Self::ServiceAccounts
+            | Self::Roles
+            | Self::RoleBindings
+            | Self::ReplicaSets
+            | Self::HorizontalPodAutoscalers
+            | Self::PodDisruptionBudgets
+            | Self::Leases
+            | Self::HelmReleases
+            | Self::Events
+            | Self::Workloads => true,
+            Self::CustomResource(crd) => crd.namespaced,
+            _ => false,
+        }
+    }
 }
 
 impl fmt::Display for ResourceKind {
@@ -330,6 +363,7 @@ pub struct CommandDef {
     pub name: &'static str,
     pub aliases: &'static [&'static str],
     pub description: &'static str,
+    pub search_terms: &'static str,
     pub target: CommandTarget,
 }
 
@@ -337,6 +371,9 @@ pub struct CommandDef {
 pub enum CommandTarget {
     Resource(ResourceKind),
     CustomResource(CrdMeta),
+    SwitchNamespace(String),
+    ResourceInNamespace(ResourceKind, String),
+    CustomResourceInNamespace(CrdMeta, String),
     Contexts,
     Namespaces,
     Help,
@@ -354,156 +391,182 @@ pub const COMMAND_REGISTRY: &[CommandDef] = &[
         name: "themes",
         aliases: &["theme", "colors"],
         description: "Interactive theme selector (Catppuccin, Tokyo Night, Dracula, Nord, Gruvbox, etc.)",
+        search_terms: "",
         target: CommandTarget::ThemePicker,
     },
     CommandDef {
         name: "workloads",
         aliases: &["wl", "workload"],
         description: "Unified Workloads view (Deployments, StatefulSets, DaemonSets, Pods, CronJobs)",
+        search_terms: "",
         target: CommandTarget::Resource(ResourceKind::Workloads),
     },
     CommandDef {
         name: "topology",
         aliases: &["topo", "flow"],
         description: "Workload and traffic topology flow map (:topology, :topo, :flow)",
+        search_terms: "",
         target: CommandTarget::Resource(ResourceKind::Topology),
     },
     CommandDef {
         name: "gpuinfo",
         aliases: &["gpu", "gpus"],
         description: "GPU nodes, VRAM allocation & GPU workloads (:gpuinfo, :gpu, :gpus)",
+        search_terms: "",
         target: CommandTarget::Resource(ResourceKind::GpuInfo),
     },
     CommandDef {
         name: "top",
         aliases: &["hotspots", "ranking"],
         description: "Top Hotspots ranking (Pods & Nodes) (:top, :toppods, :topnodes)",
+        search_terms: "",
         target: CommandTarget::Resource(ResourceKind::TopPods),
     },
     CommandDef {
         name: "toppods",
         aliases: &["top pods", "top-pods", "tp"],
         description: "Top Pods ranking by CPU & Memory (:toppods, :top pods)",
+        search_terms: "",
         target: CommandTarget::Resource(ResourceKind::TopPods),
     },
     CommandDef {
         name: "topnodes",
         aliases: &["top nodes", "top-nodes", "tn"],
         description: "Top Nodes ranking by CPU & Memory (:topnodes, :top nodes)",
+        search_terms: "",
         target: CommandTarget::Resource(ResourceKind::TopNodes),
     },
     CommandDef {
         name: "pods",
         aliases: &["po", "pod"],
-        description: "List, inspect, and tail Kubernetes pods across namespaces",
+        description: "",
+        search_terms: "List, inspect, and tail Kubernetes pods across namespaces",
         target: CommandTarget::Resource(ResourceKind::Pods),
     },
     CommandDef {
         name: "deployments",
         aliases: &["dp", "deploy"],
-        description: "Manage, inspect, and scale deployment workloads",
+        description: "",
+        search_terms: "Manage, inspect, and scale deployment workloads",
         target: CommandTarget::Resource(ResourceKind::Deployments),
     },
     CommandDef {
         name: "statefulsets",
         aliases: &["sts", "statefulset"],
-        description: "Stateful set workloads and distributed replicas",
+        description: "",
+        search_terms: "Stateful set workloads and distributed replicas",
         target: CommandTarget::Resource(ResourceKind::StatefulSets),
     },
     CommandDef {
         name: "daemonsets",
         aliases: &["ds", "daemonset"],
-        description: "Node-local daemonset agent workloads",
+        description: "",
+        search_terms: "Node-local daemonset agent workloads",
         target: CommandTarget::Resource(ResourceKind::DaemonSets),
     },
     CommandDef {
         name: "jobs",
         aliases: &["job"],
-        description: "Batch job runs and execution completion status",
+        description: "",
+        search_terms: "Batch job runs and execution completion status",
         target: CommandTarget::Resource(ResourceKind::Jobs),
     },
     CommandDef {
         name: "cronjobs",
         aliases: &["cj", "cronjob"],
-        description: "Scheduled cron jobs and recurring execution history",
+        description: "",
+        search_terms: "Scheduled cron jobs and recurring execution history",
         target: CommandTarget::Resource(ResourceKind::CronJobs),
     },
     CommandDef {
         name: "services",
         aliases: &["svc", "service"],
-        description: "Service routing, cluster IPs, NodePorts and LoadBalancers",
+        description: "",
+        search_terms: "Service routing, cluster IPs, NodePorts and LoadBalancers",
         target: CommandTarget::Resource(ResourceKind::Services),
     },
     CommandDef {
         name: "ingresses",
         aliases: &["ing", "ingress"],
-        description: "HTTP/HTTPS ingress routing rules and TLS certs",
+        description: "",
+        search_terms: "HTTP/HTTPS ingress routing rules and TLS certs",
         target: CommandTarget::Resource(ResourceKind::Ingresses),
     },
     CommandDef {
         name: "endpointslices",
         aliases: &["ep", "eps", "endpointslice"],
-        description: "Scalable network endpoints for Kubernetes services",
+        description: "",
+        search_terms: "Scalable network endpoints for Kubernetes services",
         target: CommandTarget::Resource(ResourceKind::EndpointSlices),
     },
     CommandDef {
         name: "networkpolicies",
         aliases: &["np", "netpol"],
-        description: "Pod network traffic filtering and isolation rules",
+        description: "",
+        search_terms: "Pod network traffic filtering and isolation rules",
         target: CommandTarget::Resource(ResourceKind::NetworkPolicies),
     },
     CommandDef {
         name: "bgp",
         aliases: &["peers", "bgppeers", "peering", "bgproutes"],
         description: "BGP control plane peering sessions, advertised VIPs & IP pools",
+        search_terms: "",
         target: CommandTarget::Resource(ResourceKind::BgpPeers),
     },
     CommandDef {
         name: "configmaps",
         aliases: &["cm", "configmap"],
-        description: "Key-value configuration maps and application data",
+        description: "",
+        search_terms: "Key-value configuration maps and application data",
         target: CommandTarget::Resource(ResourceKind::ConfigMaps),
     },
     CommandDef {
         name: "secrets",
         aliases: &["sec", "secret"],
-        description: "Kubernetes secrets with masked base64 credentials",
+        description: "",
+        search_terms: "Kubernetes secrets with masked base64 credentials",
         target: CommandTarget::Resource(ResourceKind::Secrets),
     },
     CommandDef {
         name: "persistentvolumeclaims",
         aliases: &["pvc"],
-        description: "Persistent storage volume claims by namespace",
+        description: "PersistentVolumeClaim",
+        search_terms: "Persistent storage volume claims by namespace disk",
         target: CommandTarget::Resource(ResourceKind::PersistentVolumeClaims),
     },
     CommandDef {
         name: "persistentvolumes",
         aliases: &["pv"],
-        description: "Cluster-wide persistent storage volumes",
+        description: "PersistentVolume",
+        search_terms: "Cluster-wide persistent storage volumes disk",
         target: CommandTarget::Resource(ResourceKind::PersistentVolumes),
     },
     CommandDef {
         name: "storageclasses",
         aliases: &["sc", "storageclass"],
-        description: "Storage provisioners, volume plugins & reclaim policies",
+        description: "",
+        search_terms: "Storage provisioners, volume plugins & reclaim policies",
         target: CommandTarget::Resource(ResourceKind::StorageClasses),
     },
     CommandDef {
         name: "nodes",
         aliases: &["no", "node"],
-        description: "Cluster worker and control-plane node hardware and status",
+        description: "",
+        search_terms: "Cluster worker and control-plane node hardware and status",
         target: CommandTarget::Resource(ResourceKind::Nodes),
     },
     CommandDef {
         name: "namespaces",
         aliases: &["ns", "namespace"],
-        description: "Cluster tenancy namespaces switcher and viewer",
+        description: "",
+        search_terms: "Cluster tenancy namespaces switcher and viewer",
         target: CommandTarget::Namespaces,
     },
     CommandDef {
         name: "events",
         aliases: &["ev", "event"],
-        description: "Cluster-wide event stream, errors, warnings & scheduling",
+        description: "",
+        search_terms: "Cluster-wide event stream, errors, warnings & scheduling",
         target: CommandTarget::Resource(ResourceKind::Events),
     },
     CommandDef {
@@ -518,204 +581,238 @@ pub const COMMAND_REGISTRY: &[CommandDef] = &[
             "incidents",
         ],
         description: "SRE incident investigation & change triage (:changed [duration], :page, :incident)",
+        search_terms: "",
         target: CommandTarget::Resource(ResourceKind::Changed),
     },
     CommandDef {
         name: "serviceaccounts",
         aliases: &["sa", "serviceaccount"],
-        description: "Service account identities and RBAC token bindings",
+        description: "",
+        search_terms: "Service account identities and RBAC token bindings",
         target: CommandTarget::Resource(ResourceKind::ServiceAccounts),
     },
     CommandDef {
         name: "roles",
         aliases: &["role"],
-        description: "Namespace-scoped RBAC roles and resource permissions",
+        description: "",
+        search_terms: "Namespace-scoped RBAC roles and resource permissions",
         target: CommandTarget::Resource(ResourceKind::Roles),
     },
     CommandDef {
         name: "clusterroles",
         aliases: &["cr", "clusterrole"],
-        description: "Cluster-wide RBAC roles and resource permissions",
+        description: "",
+        search_terms: "Cluster-wide RBAC roles and resource permissions",
         target: CommandTarget::Resource(ResourceKind::ClusterRoles),
     },
     CommandDef {
         name: "rolebindings",
         aliases: &["rb", "rolebinding"],
-        description: "Bindings granting roles to users and service accounts",
+        description: "",
+        search_terms: "Bindings granting roles to users and service accounts",
         target: CommandTarget::Resource(ResourceKind::RoleBindings),
     },
     CommandDef {
         name: "clusterrolebindings",
         aliases: &["crb", "clusterrolebinding"],
-        description: "Cluster-level role bindings for cluster roles",
+        description: "",
+        search_terms: "Cluster-level role bindings for cluster roles",
         target: CommandTarget::Resource(ResourceKind::ClusterRoleBindings),
     },
     CommandDef {
         name: "crds",
         aliases: &["crd", "customresourcedefinitions"],
-        description: "Custom Resource Definitions registered in cluster",
+        description: "CustomResourceDefinition",
+        search_terms: "Custom Resource Definitions registered in cluster",
         target: CommandTarget::Resource(ResourceKind::CustomResourceDefinitions),
     },
     CommandDef {
         name: "helm",
         aliases: &["helmreleases", "releases"],
         description: "Helm 3 release revisions, status, values and manifests",
+        search_terms: "",
         target: CommandTarget::Resource(ResourceKind::HelmReleases),
     },
     CommandDef {
         name: "argo",
         aliases: &["argocd", "apps", "gitops"],
         description: "ArgoCD applications, sync status, drift & GitOps control",
+        search_terms: "",
         target: CommandTarget::Resource(ResourceKind::ArgoApplications),
     },
     CommandDef {
         name: "portforwards",
         aliases: &["pf", "portforward"],
         description: "Active port forwards",
+        search_terms: "",
         target: CommandTarget::Resource(ResourceKind::PortForwards),
     },
     CommandDef {
         name: "replicasets",
         aliases: &["rs", "replicaset"],
-        description: "ReplicaSet controllers and pod replica management",
+        description: "",
+        search_terms: "ReplicaSet controllers and pod replica management",
         target: CommandTarget::Resource(ResourceKind::ReplicaSets),
     },
     CommandDef {
         name: "resourcequotas",
         aliases: &["quota", "quotas", "resourcequota"],
-        description: "Hard resource constraints and usage tracking per namespace",
+        description: "",
+        search_terms: "Hard resource constraints and usage tracking per namespace limits",
         target: CommandTarget::Resource(ResourceKind::ResourceQuotas),
     },
     CommandDef {
         name: "limitranges",
         aliases: &["limits", "limitrange"],
-        description: "Default, min, and max compute resource limits per pod",
+        description: "",
+        search_terms: "Default, min, and max compute resource limits per pod",
         target: CommandTarget::Resource(ResourceKind::LimitRanges),
     },
     CommandDef {
         name: "horizontalpodautoscalers",
         aliases: &["hpa", "autoscaler", "horizontalpodautoscaler"],
-        description: "Automatic horizontal pod scaling based on metrics",
+        description: "HorizontalPodAutoscaler",
+        search_terms: "Automatic horizontal pod scaling based on metrics",
         target: CommandTarget::Resource(ResourceKind::HorizontalPodAutoscalers),
     },
     CommandDef {
         name: "pdb",
         aliases: &["poddisruptionbudgets", "poddisruptionbudget"],
-        description: "Voluntary disruption budgets ensuring minimum pod availability",
+        description: "PodDisruptionBudget",
+        search_terms: "Voluntary disruption budgets ensuring minimum pod availability",
         target: CommandTarget::Resource(ResourceKind::PodDisruptionBudgets),
     },
     CommandDef {
         name: "priorityclasses",
         aliases: &["pc", "priorityclass"],
-        description: "Pod scheduling priority and eviction preemption mapping",
+        description: "",
+        search_terms: "Pod scheduling priority and eviction preemption mapping",
         target: CommandTarget::Resource(ResourceKind::PriorityClasses),
     },
     CommandDef {
         name: "runtimeclasses",
         aliases: &["rc", "runtimeclass"],
-        description: "Container runtime configurations and handler selections",
+        description: "",
+        search_terms: "Container runtime configurations and handler selections",
         target: CommandTarget::Resource(ResourceKind::RuntimeClasses),
     },
     CommandDef {
         name: "leases",
         aliases: &["lease"],
-        description: "Distributed leader election locks and component heartbeat leases",
+        description: "",
+        search_terms: "Distributed leader election locks and component heartbeat leases",
         target: CommandTarget::Resource(ResourceKind::Leases),
     },
     CommandDef {
         name: "mutatingwebhookconfigurations",
         aliases: &["mwc", "mutatingwebhooks"],
-        description: "Admission mutating webhook interceptors and injectors",
+        description: "MutatingWebhookConfiguration",
+        search_terms: "Admission mutating webhook interceptors and injectors",
         target: CommandTarget::Resource(ResourceKind::MutatingWebhookConfigurations),
     },
     CommandDef {
         name: "validatingwebhookconfigurations",
         aliases: &["vwc", "validatingwebhooks"],
-        description: "Admission validating webhook policies and enforcement",
+        description: "ValidatingWebhookConfiguration",
+        search_terms: "Admission validating webhook policies and enforcement",
         target: CommandTarget::Resource(ResourceKind::ValidatingWebhookConfigurations),
     },
     CommandDef {
         name: "ingressclasses",
         aliases: &["ic", "ingressclass"],
-        description: "Ingress controller implementations and routing class specs",
+        description: "",
+        search_terms: "Ingress controller implementations and routing class specs",
         target: CommandTarget::Resource(ResourceKind::IngressClasses),
     },
     CommandDef {
         name: "endpoints",
         aliases: &["endpoint", "ep-legacy"],
-        description: "Network endpoints routing traffic to service pods",
+        description: "",
+        search_terms: "Network endpoints routing traffic to service pods",
         target: CommandTarget::Resource(ResourceKind::Endpoints),
     },
     CommandDef {
         name: "contexts",
         aliases: &["ctx", "context"],
         description: "Kubeconfig context switcher for multi-cluster management",
+        search_terms: "",
         target: CommandTarget::Contexts,
     },
     CommandDef {
         name: "import",
         aliases: &["add-cluster", "import-kubeconfig", "add-ctx", "kubeconfig-add"],
         description: "Import a new Kubernetes cluster / kubeconfig from clipboard or file path",
+        search_terms: "",
         target: CommandTarget::AddCluster,
     },
     CommandDef {
         name: "overview",
         aliases: &["info", "cluster"],
         description: "Cluster overview, health summary and node/pod capacity",
+        search_terms: "",
         target: CommandTarget::Resource(ResourceKind::Overview),
     },
     CommandDef {
         name: "toolbox",
         aliases: &["tb", "tools"],
         description: "Toolbox diagnostics (kubectl, helm, krew plugins)",
+        search_terms: "",
         target: CommandTarget::Resource(ResourceKind::Toolbox),
     },
     CommandDef {
         name: "assistant",
         aliases: &["ai", "chat"],
         description: "SRElens AI Assistant Chat for troubleshooting",
+        search_terms: "",
         target: CommandTarget::Resource(ResourceKind::Assistant),
     },
     CommandDef {
         name: "ai-settings",
         aliases: &["settings", "ai-config"],
         description: "AI & Assistant Settings (provider, model, API keys)",
+        search_terms: "",
         target: CommandTarget::Resource(ResourceKind::Settings),
     },
     CommandDef {
         name: "config",
         aliases: &["tui-config", "tui"],
         description: "TUI Configuration (popup dimensions, visible rows & text size)",
+        search_terms: "",
         target: CommandTarget::Resource(ResourceKind::TuiConfig),
     },
     CommandDef {
         name: "features",
         aliases: &["banner", "guide", "welcome"],
-        description: "Show SRElens feature highlights banner (:page, :helm, :overview, :gpuinfo, :workloads, :argo, :ai, :ai-settings, :config, :import, :banner)",
+        description: "Show SRElens feature highlights banner (:page, :helm, :overview, :gpuinfo, :workloads, :argo, :ai, :ai-settings, :config, :import, :contexts, :top, :banner)",
+        search_terms: "",
         target: CommandTarget::FeatureBanner,
     },
     CommandDef {
         name: "help",
         aliases: &["?"],
         description: "Show interactive keybindings palette and command cheatsheet",
+        search_terms: "",
         target: CommandTarget::Help,
     },
     CommandDef {
         name: "quit",
         aliases: &["q", "exit"],
         description: "Quit srectl session",
+        search_terms: "",
         target: CommandTarget::Quit,
     },
     CommandDef {
         name: "open",
         aliases: &["goto", "url"],
         description: "Open deep link URL or resource (:open <url>)",
+        search_terms: "",
         target: CommandTarget::OpenUrl(String::new()),
     },
     CommandDef {
         name: "update",
         aliases: &["self-update", "upgrade"],
         description: "Check for updates or view update status",
+        search_terms: "",
         target: CommandTarget::Update,
     },
 ];
@@ -725,6 +822,7 @@ pub struct DynamicCommandDef {
     pub name: String,
     pub aliases: Vec<String>,
     pub description: String,
+    pub search_terms: String,
     pub target: CommandTarget,
 }
 
@@ -734,6 +832,7 @@ impl From<&'static CommandDef> for DynamicCommandDef {
             name: cmd.name.to_string(),
             aliases: cmd.aliases.iter().map(|a| a.to_string()).collect(),
             description: cmd.description.to_string(),
+            search_terms: cmd.search_terms.to_string(),
             target: cmd.target.clone(),
         }
     }
@@ -762,68 +861,93 @@ impl From<&CrdMeta> for DynamicCommandDef {
         Self {
             name: crd.plural.clone(),
             aliases,
-            description: format!("CRD: {} ({})", crd.kind, crd.group),
+            description: format!("{} ({})", crd.kind, crd.group),
+            search_terms: String::new(),
             target: CommandTarget::CustomResource(crd.clone()),
         }
     }
 }
 
+pub fn resource_category(kind: &ResourceKind) -> &'static str {
+    match kind {
+        ResourceKind::Pods
+        | ResourceKind::Deployments
+        | ResourceKind::StatefulSets
+        | ResourceKind::DaemonSets
+        | ResourceKind::Jobs
+        | ResourceKind::CronJobs
+        | ResourceKind::ReplicaSets
+        | ResourceKind::HorizontalPodAutoscalers
+        | ResourceKind::Workloads => "Workload",
+        ResourceKind::Services
+        | ResourceKind::Endpoints
+        | ResourceKind::EndpointSlices
+        | ResourceKind::Ingresses
+        | ResourceKind::IngressClasses
+        | ResourceKind::NetworkPolicies
+        | ResourceKind::BgpPeers => "Network",
+        ResourceKind::ConfigMaps
+        | ResourceKind::Secrets
+        | ResourceKind::ResourceQuotas
+        | ResourceKind::LimitRanges
+        | ResourceKind::PodDisruptionBudgets
+        | ResourceKind::Leases => "Config",
+        ResourceKind::PersistentVolumeClaims
+        | ResourceKind::PersistentVolumes
+        | ResourceKind::StorageClasses => "Storage",
+        ResourceKind::ServiceAccounts
+        | ResourceKind::Roles
+        | ResourceKind::ClusterRoles
+        | ResourceKind::RoleBindings
+        | ResourceKind::ClusterRoleBindings => "Auth / RBAC",
+        ResourceKind::PriorityClasses
+        | ResourceKind::RuntimeClasses
+        | ResourceKind::MutatingWebhookConfigurations
+        | ResourceKind::ValidatingWebhookConfigurations
+        | ResourceKind::Nodes
+        | ResourceKind::Namespaces
+        | ResourceKind::Events
+        | ResourceKind::CustomResourceDefinitions => "Cluster",
+        ResourceKind::HelmReleases => "Helm",
+        ResourceKind::ArgoApplications => "GitOps",
+        ResourceKind::PortForwards => "Forward",
+        ResourceKind::Overview => "Overview",
+        ResourceKind::Toolbox => "Diagnostic",
+        ResourceKind::Assistant => "AI Assistant",
+        ResourceKind::Settings => "Settings",
+        ResourceKind::TuiConfig => "Configuration",
+        ResourceKind::Topology => "Topology",
+        ResourceKind::GpuInfo => "GPU / Hardware",
+        ResourceKind::TopPods | ResourceKind::TopNodes => "Hotspots",
+        ResourceKind::Changed => "Triage",
+        ResourceKind::CustomResource(_) => "Custom Resource",
+    }
+}
+
+pub fn canonicalize_namespace_arg(arg: &str, cluster_namespaces: &[String]) -> String {
+    let clean = arg.trim();
+    if clean == "*" || clean == "-A" || clean == "_all" {
+        return String::new();
+    }
+    if clean.eq_ignore_ascii_case("all") {
+        if cluster_namespaces
+            .iter()
+            .any(|n| n.eq_ignore_ascii_case("all"))
+        {
+            return "all".to_string();
+        }
+        return String::new();
+    }
+    clean.to_string()
+}
+
 impl DynamicCommandDef {
     pub fn category(&self) -> &'static str {
         match &self.target {
-            CommandTarget::Resource(kind) => match kind {
-                ResourceKind::Pods
-                | ResourceKind::Deployments
-                | ResourceKind::StatefulSets
-                | ResourceKind::DaemonSets
-                | ResourceKind::Jobs
-                | ResourceKind::CronJobs
-                | ResourceKind::ReplicaSets
-                | ResourceKind::HorizontalPodAutoscalers
-                | ResourceKind::Workloads => "Workload",
-                ResourceKind::Services
-                | ResourceKind::Endpoints
-                | ResourceKind::EndpointSlices
-                | ResourceKind::Ingresses
-                | ResourceKind::IngressClasses
-                | ResourceKind::NetworkPolicies
-                | ResourceKind::BgpPeers => "Network",
-                ResourceKind::ConfigMaps
-                | ResourceKind::Secrets
-                | ResourceKind::ResourceQuotas
-                | ResourceKind::LimitRanges
-                | ResourceKind::PodDisruptionBudgets
-                | ResourceKind::Leases => "Config",
-                ResourceKind::PersistentVolumeClaims
-                | ResourceKind::PersistentVolumes
-                | ResourceKind::StorageClasses => "Storage",
-                ResourceKind::ServiceAccounts
-                | ResourceKind::Roles
-                | ResourceKind::ClusterRoles
-                | ResourceKind::RoleBindings
-                | ResourceKind::ClusterRoleBindings => "Auth / RBAC",
-                ResourceKind::PriorityClasses
-                | ResourceKind::RuntimeClasses
-                | ResourceKind::MutatingWebhookConfigurations
-                | ResourceKind::ValidatingWebhookConfigurations
-                | ResourceKind::Nodes
-                | ResourceKind::Namespaces
-                | ResourceKind::Events
-                | ResourceKind::CustomResourceDefinitions => "Cluster",
-                ResourceKind::HelmReleases => "Helm",
-                ResourceKind::ArgoApplications => "GitOps",
-                ResourceKind::PortForwards => "Forward",
-                ResourceKind::Overview => "Overview",
-                ResourceKind::Toolbox => "Diagnostic",
-                ResourceKind::Assistant => "AI Assistant",
-                ResourceKind::Settings => "Settings",
-                ResourceKind::TuiConfig => "Configuration",
-                ResourceKind::Topology => "Topology",
-                ResourceKind::GpuInfo => "GPU / Hardware",
-                ResourceKind::TopPods | ResourceKind::TopNodes => "Hotspots",
-                ResourceKind::Changed => "Triage",
-                ResourceKind::CustomResource(_) => "Custom Resource",
-            },
+            CommandTarget::ResourceInNamespace(_, _)
+            | CommandTarget::CustomResourceInNamespace(_, _)
+            | CommandTarget::SwitchNamespace(_) => "",
+            CommandTarget::Resource(kind) => resource_category(kind),
             CommandTarget::CustomResource(_) => "CRD",
             CommandTarget::ThemePicker | CommandTarget::SetTheme(_) => "Themes",
             CommandTarget::Contexts | CommandTarget::AddCluster => "Context",
@@ -838,6 +962,9 @@ impl DynamicCommandDef {
 
     pub fn syntax_hint(&self) -> &'static str {
         match &self.target {
+            CommandTarget::ResourceInNamespace(_, _)
+            | CommandTarget::CustomResourceInNamespace(_, _)
+            | CommandTarget::SwitchNamespace(_) => "",
             CommandTarget::Resource(ResourceKind::Changed) => ":changed [duration]",
             CommandTarget::Resource(ResourceKind::Pods) => ":pods [namespace]",
             CommandTarget::Resource(ResourceKind::Deployments) => ":deployments [ns]",
@@ -872,6 +999,36 @@ impl DynamicCommandDef {
 
 pub fn resolve_command(input: &str) -> Option<CommandTarget> {
     resolve_command_with_crds(input, &[])
+}
+
+pub fn is_exact_name_or_alias(input: &str, crds: &[CrdMeta]) -> bool {
+    let q = input.trim().trim_start_matches(':').trim().to_lowercase();
+    if q.is_empty() {
+        return false;
+    }
+    for cmd in COMMAND_REGISTRY {
+        if cmd.name.eq_ignore_ascii_case(&q)
+            || cmd.aliases.iter().any(|a| a.eq_ignore_ascii_case(&q))
+        {
+            return true;
+        }
+    }
+    for crd in crds {
+        if crd.plural.eq_ignore_ascii_case(&q)
+            || crd.singular.eq_ignore_ascii_case(&q)
+            || crd.kind.eq_ignore_ascii_case(&q)
+            || crd.crd_name.eq_ignore_ascii_case(&q)
+            || crd.short_names.iter().any(|s| s.eq_ignore_ascii_case(&q))
+        {
+            return true;
+        }
+        let norm_plural = crd.plural.to_lowercase().replace("loadbalancer", "lb");
+        let norm_singular = crd.singular.to_lowercase().replace("loadbalancer", "lb");
+        if norm_plural == q || norm_singular == q {
+            return true;
+        }
+    }
+    false
 }
 
 pub fn resolve_command_with_crds(input: &str, crds: &[CrdMeta]) -> Option<CommandTarget> {
@@ -931,7 +1088,7 @@ pub fn resolve_command_with_crds(input: &str, crds: &[CrdMeta]) -> Option<Comman
         }
     }
 
-    // 3. Exact match on static command aliases (e.g. ":po" -> pods, ":settings" -> ai-settings if no CRD exists)
+    // 3. Exact match on static command aliases (e.g. ":po" -> pods, ":top pods" -> toppods)
     for cmd in COMMAND_REGISTRY {
         for alias in cmd.aliases {
             if alias.eq_ignore_ascii_case(trimmed) {
@@ -940,7 +1097,39 @@ pub fn resolve_command_with_crds(input: &str, crds: &[CrdMeta]) -> Option<Comman
         }
     }
 
-    // 4. Prefix match on CRDs (e.g. if q is at least 3 chars)
+    // 4. Multi-token command resolution with namespace argument (<cmd> <arg>)
+    // Placed after exact aliases so "top pods" and "top nodes" match as aliases first.
+    if let Some(pos) = trimmed.find(char::is_whitespace) {
+        let cmd_base = &trimmed[..pos];
+        let arg = trimmed[pos..].trim();
+        if !arg.is_empty() {
+            if cmd_base.eq_ignore_ascii_case("ns")
+                || cmd_base.eq_ignore_ascii_case("namespace")
+                || cmd_base.eq_ignore_ascii_case("namespaces")
+            {
+                let ns_val = canonicalize_namespace_arg(arg, &[]);
+                return Some(CommandTarget::SwitchNamespace(ns_val));
+            }
+            if cmd_base.eq_ignore_ascii_case("ctx") || cmd_base.eq_ignore_ascii_case("context") {
+                return Some(CommandTarget::Contexts);
+            }
+            if let Some(target) = resolve_command_with_crds(cmd_base, crds) {
+                match target {
+                    CommandTarget::Resource(kind) if kind.accepts_namespace_arg() => {
+                        let ns_val = canonicalize_namespace_arg(arg, &[]);
+                        return Some(CommandTarget::ResourceInNamespace(kind, ns_val));
+                    }
+                    CommandTarget::CustomResource(crd) if crd.namespaced => {
+                        let ns_val = canonicalize_namespace_arg(arg, &[]);
+                        return Some(CommandTarget::CustomResourceInNamespace(crd, ns_val));
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    // 5. Prefix match on CRDs (e.g. if q is at least 3 chars)
     if q.len() >= 3 {
         for crd in crds {
             let norm_plural = crd.plural.to_lowercase().replace("loadbalancer", "lb");
@@ -955,7 +1144,7 @@ pub fn resolve_command_with_crds(input: &str, crds: &[CrdMeta]) -> Option<Comman
         }
     }
 
-    // 5. Prefix match on static commands & aliases (e.g. ":deplo" -> deployments)
+    // 6. Prefix match on static commands & aliases (e.g. ":deplo" -> deployments)
     for cmd in COMMAND_REGISTRY {
         if cmd.name.starts_with(&q) {
             return Some(cmd.target.clone());
@@ -967,35 +1156,30 @@ pub fn resolve_command_with_crds(input: &str, crds: &[CrdMeta]) -> Option<Comman
         }
     }
 
-    if let Some(ns) = trimmed.strip_prefix("ns ") {
-        let ns_clean = ns.trim();
-        if !ns_clean.is_empty() {
-            return Some(CommandTarget::Namespaces);
-        }
-    }
-
-    if let Some(ctx) = trimmed.strip_prefix("ctx ") {
-        let ctx_clean = ctx.trim();
-        if !ctx_clean.is_empty() {
-            return Some(CommandTarget::Contexts);
-        }
-    }
-
     None
 }
 
 pub fn command_suggestions(query: &str) -> Vec<(DynamicCommandDef, usize)> {
-    command_suggestions_with_crds(query, &[])
+    command_suggestions_full(query, &[], &[], None)
 }
 
 pub fn command_suggestions_with_crds(
     query: &str,
     crds: &[CrdMeta],
 ) -> Vec<(DynamicCommandDef, usize)> {
-    let q = query.trim().trim_start_matches(':').to_lowercase();
+    command_suggestions_full(query, crds, &[], None)
+}
+
+pub fn command_suggestions_full(
+    query: &str,
+    crds: &[CrdMeta],
+    namespaces: &[String],
+    discovery_error: Option<&str>,
+) -> Vec<(DynamicCommandDef, usize)> {
+    let raw = query.trim_start().trim_start_matches(':');
     let mut matches = Vec::new();
 
-    if q.is_empty() {
+    if raw.trim().is_empty() {
         for cmd in COMMAND_REGISTRY {
             matches.push((DynamicCommandDef::from(cmd), 0));
         }
@@ -1003,6 +1187,177 @@ pub fn command_suggestions_with_crds(
             matches.push((DynamicCommandDef::from(crd), 0));
         }
         return matches;
+    }
+
+    let q = raw.trim().to_lowercase();
+
+    // Check if the input exactly matches a multi-word static command or alias (e.g. "top pods", "top nodes")
+    let is_multi_word_command = COMMAND_REGISTRY.iter().any(|cmd| {
+        (cmd.name.contains(' ') && cmd.name.eq_ignore_ascii_case(raw.trim()))
+            || cmd
+                .aliases
+                .iter()
+                .any(|a| a.contains(' ') && a.eq_ignore_ascii_case(raw.trim()))
+    });
+
+    if !is_multi_word_command && raw.contains(char::is_whitespace) {
+        let pos = raw.find(char::is_whitespace).unwrap();
+        let cmd_prefix = &raw[..pos];
+        let sub = raw[pos..].trim();
+
+        let is_ns_cmd = cmd_prefix.eq_ignore_ascii_case("ns")
+            || cmd_prefix.eq_ignore_ascii_case("namespace")
+            || cmd_prefix.eq_ignore_ascii_case("namespaces");
+
+        let namespaced_target_info: Option<(Option<ResourceKind>, bool)> = if is_ns_cmd {
+            Some((None, true))
+        } else if let Some(target) = resolve_command_with_crds(cmd_prefix, crds) {
+            match target {
+                CommandTarget::Resource(kind) if kind.accepts_namespace_arg() => {
+                    Some((Some(kind), false))
+                }
+                CommandTarget::CustomResource(crd) if crd.namespaced => {
+                    Some((Some(ResourceKind::CustomResource(crd)), false))
+                }
+                _ => None,
+            }
+        } else {
+            None
+        };
+
+        if let Some((kind_opt, is_ns)) = namespaced_target_info {
+            let make_target = |ns: &str| -> CommandTarget {
+                let canonical_ns = canonicalize_namespace_arg(ns, namespaces);
+                if is_ns {
+                    CommandTarget::SwitchNamespace(canonical_ns)
+                } else if let Some(ref k) = kind_opt {
+                    match k {
+                        ResourceKind::CustomResource(crd) => {
+                            CommandTarget::CustomResourceInNamespace(crd.clone(), canonical_ns)
+                        }
+                        other => CommandTarget::ResourceInNamespace(other.clone(), canonical_ns),
+                    }
+                } else {
+                    CommandTarget::SwitchNamespace(canonical_ns)
+                }
+            };
+
+            if namespaces.is_empty() {
+                // Truthful M4: report loading or error state
+                let status_msg = if let Some(err) = discovery_error {
+                    format!("namespaces unavailable: {}", err)
+                } else {
+                    "namespace list not loaded yet".to_string()
+                };
+                if !sub.is_empty() {
+                    matches.push((
+                        DynamicCommandDef {
+                            name: format!("{} {}", cmd_prefix, sub),
+                            aliases: vec![],
+                            description: format!("({})", status_msg),
+                            search_terms: String::new(),
+                            target: make_target(sub),
+                        },
+                        150,
+                    ));
+                } else {
+                    matches.push((
+                        DynamicCommandDef {
+                            name: format!("{} <namespace>", cmd_prefix),
+                            aliases: vec![],
+                            description: format!("({})", status_msg),
+                            search_terms: String::new(),
+                            target: make_target(""),
+                        },
+                        100,
+                    ));
+                }
+                matches.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.name.cmp(&b.0.name)));
+                return matches;
+            }
+
+            let candidates: &[String] = namespaces;
+
+            if sub.is_empty() {
+                for cand in candidates {
+                    matches.push((
+                        DynamicCommandDef {
+                            name: format!("{} {}", cmd_prefix, cand),
+                            aliases: vec![],
+                            description: String::new(),
+                            search_terms: String::new(),
+                            target: make_target(cand),
+                        },
+                        100,
+                    ));
+                }
+                matches.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.name.cmp(&b.0.name)));
+                return matches;
+            }
+
+            let sub_lower = sub.to_lowercase();
+
+            let target = make_target(sub);
+            let target_is_all_namespaces = match &target {
+                CommandTarget::SwitchNamespace(ns) => ns.is_empty(),
+                CommandTarget::ResourceInNamespace(_, ns) => ns.is_empty(),
+                CommandTarget::CustomResourceInNamespace(_, ns) => ns.is_empty(),
+                _ => false,
+            };
+            if target_is_all_namespaces {
+                matches.push((
+                    DynamicCommandDef {
+                        name: format!("{} {}", cmd_prefix, sub),
+                        aliases: vec![],
+                        description: "All namespaces".to_string(),
+                        search_terms: String::new(),
+                        target,
+                    },
+                    170,
+                ));
+            }
+
+            for cand in candidates {
+                let cand_lower = cand.to_lowercase();
+                let score = if cand_lower == sub_lower {
+                    160
+                } else if cand_lower.starts_with(&sub_lower) {
+                    140
+                } else if cand_lower.contains(&sub_lower) {
+                    100
+                } else {
+                    continue;
+                };
+
+                matches.push((
+                    DynamicCommandDef {
+                        name: format!("{} {}", cmd_prefix, cand),
+                        aliases: vec![],
+                        description: String::new(),
+                        search_terms: String::new(),
+                        target: make_target(cand),
+                    },
+                    score,
+                ));
+            }
+
+            // Only inject literal typed value when no candidates matched at all
+            if matches.is_empty() {
+                matches.push((
+                    DynamicCommandDef {
+                        name: format!("{} {}", cmd_prefix, sub),
+                        aliases: vec![],
+                        description: String::new(),
+                        search_terms: String::new(),
+                        target: make_target(sub),
+                    },
+                    150,
+                ));
+            }
+
+            matches.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.name.cmp(&b.0.name)));
+            return matches;
+        }
     }
 
     // Direct theme name suggestions when typing ":theme <subquery>" or ":colors <subquery>"
@@ -1023,6 +1378,7 @@ pub fn command_suggestions_with_crds(
                         name: format!("theme {}", p.name),
                         aliases: vec![],
                         description: format!("Theme: {} ({})", p.display_name, p.description),
+                        search_terms: String::new(),
                         target: CommandTarget::SetTheme(p.name.to_string()),
                     },
                     150,
@@ -1043,7 +1399,10 @@ pub fn command_suggestions_with_crds(
             matches.push((DynamicCommandDef::from(cmd), 100));
         } else if cmd.aliases.iter().any(|a| a.starts_with(&q)) {
             matches.push((DynamicCommandDef::from(cmd), 80));
-        } else if cmd.name.contains(&q) || cmd.description.to_lowercase().contains(&q) {
+        } else if cmd.name.contains(&q)
+            || cmd.description.to_lowercase().contains(&q)
+            || (!cmd.search_terms.is_empty() && cmd.search_terms.to_lowercase().contains(&q))
+        {
             matches.push((DynamicCommandDef::from(cmd), 50));
         }
     }

@@ -915,6 +915,84 @@ async fn run_suite() {
         .iter()
         .any(|n| n == NS));
 
+    // Namespace collections (#881), resolved against this cluster's real
+    // listing, labels included: a pattern, a label selector the API server
+    // sets on every namespace, and a member the cluster does not have.
+    let listing: Vec<Value> = out["summaries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| json!({ "name": s["name"], "labels": s["labels"] }))
+        .collect();
+    let resolved = h
+        .ok(
+            "collections.resolveNamespaces",
+            json!({
+                "collections": [{
+                    "name": "e2e",
+                    "type": "namespace",
+                    "patterns": ["kube-*"],
+                    "labelSelector": "kubernetes.io/metadata.name in (kube-system,kube-public)",
+                    "members": [NS, "no-such-namespace"],
+                }],
+                "namespaces": listing,
+            }),
+        )
+        .await;
+    let names: Vec<&str> = resolved["namespaces"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|n| n.as_str().unwrap())
+        .collect();
+    assert!(
+        names.contains(&"kube-system") && names.contains(&NS),
+        "{resolved}"
+    );
+    assert!(
+        !names.contains(&"kube-node-lease"),
+        "the selector narrows the pattern: {resolved}"
+    );
+    assert_eq!(
+        resolved["collections"][0]["members"][1]["status"], "missing",
+        "{resolved}"
+    );
+    let checked = h
+        .ok(
+            "collections.validate",
+            json!({ "collection": { "name": "e2e", "type": "namespace", "patterns": ["!kube-*"] } }),
+        )
+        .await;
+    assert_eq!(checked["problems"][0]["field"], "patterns", "{checked}");
+
+    // A collection's resource filter (#885): the kinds it may name come from
+    // this cluster's API discovery, and a name expression narrows a list.
+    let kinds = h.ok("k8s.listApiKinds", json!({ "context": ctx })).await;
+    let served: Vec<(&str, &str)> = kinds["kinds"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|k| (k["group"].as_str().unwrap(), k["kind"].as_str().unwrap()))
+        .collect();
+    assert!(
+        served.contains(&("apps", "Deployment")) && served.contains(&("", "ConfigMap")),
+        "{kinds}"
+    );
+    let matched = h
+        .ok(
+            "collections.matchNames",
+            json!({
+                "collections": [{
+                    "name": "e2e", "type": "namespace", "members": [NS],
+                    "resources": { "kinds": ["ConfigMap"], "nameRegex": "^kube-root-" },
+                }],
+                "kind": "ConfigMap",
+                "names": ["kube-root-ca.crt", "app-settings"],
+            }),
+        )
+        .await;
+    assert_eq!(matched["matches"], json!([true, false]), "{matched}");
+
     let out = h
         .ok("k8s.listPods", json!({ "context": ctx, "namespace": NS }))
         .await;
@@ -1059,6 +1137,26 @@ async fn run_suite() {
         "debug container name: {dbg}",
     );
 
+    let wnr = h
+        .ok(
+            "k8s.whyNotReady",
+            json!({ "context": ctx, "namespace": NS, "pod": debug_pod }),
+        )
+        .await;
+    assert_eq!(wnr["pod"].as_str().unwrap(), debug_pod);
+    assert_eq!(wnr["namespace"].as_str().unwrap(), NS);
+    assert!(wnr["appContainers"].as_array().is_some());
+
+    let wp = h
+        .ok(
+            "k8s.whyPending",
+            json!({ "context": ctx, "namespace": NS, "pod": debug_pod }),
+        )
+        .await;
+    assert_eq!(wp["pod"].as_str().unwrap(), debug_pod);
+    assert_eq!(wp["namespace"].as_str().unwrap(), NS);
+    assert!(wp["podResourceRequests"].as_object().is_some());
+
     let out = h
         .ok(
             "k8s.listDeployments",
@@ -1071,11 +1169,26 @@ async fn run_suite() {
         .iter()
         .any(|d| d["name"] == DEPLOY));
 
-    let images = h.ok("k8s.listWorkloadImages", json!({"context":ctx,"namespace":NS,"kind":"Deployment"})).await;
-    let workload = images["items"].as_array().unwrap().iter().find(|row| row["name"] == DEPLOY).expect("deployment image identity");
+    let images = h
+        .ok(
+            "k8s.listWorkloadImages",
+            json!({"context":ctx,"namespace":NS,"kind":"Deployment"}),
+        )
+        .await;
+    let workload = images["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["name"] == DEPLOY)
+        .expect("deployment image identity");
     assert_eq!(workload["namespace"], NS);
     assert!(workload["uid"].as_str().is_some_and(|uid| !uid.is_empty()));
-    assert!(workload["containers"].as_array().unwrap().iter().any(|row| row["type"] == "regular" && row["image"].as_str().is_some_and(|image| !image.is_empty())));
+    assert!(workload["containers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|row| row["type"] == "regular"
+            && row["image"].as_str().is_some_and(|image| !image.is_empty())));
 
     let out = h
         .ok(
@@ -1208,6 +1321,23 @@ async fn run_suite() {
         "expected an Endpoint for {SVC}: {out}"
     );
 
+    let shp = h
+        .ok(
+            "k8s.serviceHealthProbe",
+            json!({ "context": ctx, "namespace": NS, "service": SVC }),
+        )
+        .await;
+    assert_eq!(shp["service"].as_str().unwrap(), SVC);
+    assert_eq!(shp["namespace"].as_str().unwrap(), NS);
+    assert!(shp["portMappings"].as_array().is_some());
+
+    let skill = h
+        .ok("skills.get", json!({ "name": "crashloop-triage" }))
+        .await;
+    assert_eq!(skill["name"], "crashloop-triage");
+    assert!(skill["builtin"].as_bool().unwrap() || skill["overridesBuiltin"].as_bool().unwrap());
+    assert!(!skill["body"].as_str().unwrap().is_empty());
+
     let out = h
         .ok(
             "k8s.listIngresses",
@@ -1301,6 +1431,25 @@ async fn run_suite() {
         .as_str()
         .unwrap()
         .to_string();
+
+    let node_details = h
+        .ok(
+            "k8s.nodeInspect",
+            json!({ "context": ctx, "node": node_name }),
+        )
+        .await;
+    assert_eq!(node_details["name"], node_name);
+
+    let node_cap = h
+        .ok(
+            "k8s.nodeCapacityOverview",
+            json!({ "context": ctx, "node": node_name }),
+        )
+        .await;
+    assert!(node_cap["nodes"].is_array());
+
+    let gpu_inv = h.ok("k8s.gpuInventory", json!({ "context": ctx })).await;
+    assert!(gpu_inv["total_gpu_nodes"].is_number() || gpu_inv["nodes"].is_array());
     let nd = h
         .ok(
             "k8s.createNodeDebugPod",
@@ -1436,9 +1585,18 @@ async fn run_suite() {
         )
         .await;
     let pods = out["items"].as_array().unwrap();
-    assert!(!pods.is_empty(), "the Deployment's pods are Running by now: {out}");
+    assert!(
+        !pods.is_empty(),
+        "the Deployment's pods are Running by now: {out}"
+    );
     for pod in pods {
-        assert!(pod["name"].as_str().unwrap().starts_with(&format!("{DEPLOY}-")), "{out}");
+        assert!(
+            pod["name"]
+                .as_str()
+                .unwrap()
+                .starts_with(&format!("{DEPLOY}-")),
+            "{out}"
+        );
         assert!(pod["fields"][".spec.nodeName"].is_string(), "{out}");
         assert_eq!(pod["fields"][".spec.nonexistent"], Value::Null, "{out}");
     }
@@ -1483,7 +1641,10 @@ async fn run_suite() {
         .await;
     let text = out.to_string();
     assert!(text.contains("password"), "{text}");
-    assert!(!text.contains("aHVudGVyMg==") && !text.contains("hunter2"), "{text}");
+    assert!(
+        !text.contains("aHVudGVyMg==") && !text.contains("hunter2"),
+        "{text}"
+    );
     // A JSON Pointer would come back null on every item; refused instead.
     let err = h
         .err(
@@ -1492,6 +1653,40 @@ async fn run_suite() {
         )
         .await;
     assert!(err.contains("not a supported path"), "{err}");
+
+    // === k8s.countResources (#402) ===========================================
+    // Counted with `limit=1` + `remainingItemCount`, so cross-checked here
+    // against plain lists of the same kinds rather than trusted on its own.
+    // Node is cluster-scoped and ignores `namespaces`; a kind the cluster does
+    // not have is that row's error while the rest are still counted.
+    let config_maps = h
+        .ok(
+            "k8s.listResource",
+            json!({ "context": ctx, "kind": "ConfigMap", "namespace": NS }),
+        )
+        .await["items"]
+        .as_array()
+        .unwrap()
+        .len() as i64;
+    let out = h
+        .ok(
+            "k8s.countResources",
+            json!({
+                "context": ctx,
+                "kinds": [{ "kind": "ConfigMap" }, { "kind": "Node" }, { "kind": "NoSuchKindForSrelens" }],
+                "namespaces": [NS],
+            }),
+        )
+        .await;
+    let counts = out["counts"].as_array().unwrap();
+    assert_eq!(counts[0]["count"].as_i64(), Some(config_maps), "{out}");
+    assert_eq!(
+        counts[1]["count"].as_i64(),
+        Some(nodes.len() as i64),
+        "{out}"
+    );
+    assert!(counts[2]["count"].is_null(), "{out}");
+    assert!(counts[2]["error"].is_string(), "{out}");
 
     // === 2. Object / manifest ================================================
     println!("=== object/manifest ===");
@@ -1747,6 +1942,22 @@ async fn run_suite() {
     assert_eq!(deploy["desired"], json!(2), "{out}");
     assert_eq!(deploy["health"], json!("ok"), "{out}");
 
+    // --- resourceTree: traces ownerReferences and dependents for the fixture Deployment ---
+    let tree_out = h
+        .ok(
+            "k8s.resourceTree",
+            json!({
+                "context": ctx,
+                "kind": "Deployment",
+                "name": DEPLOY,
+                "namespace": NS,
+            }),
+        )
+        .await;
+    assert_eq!(tree_out["root"]["kind"], "Deployment");
+    assert_eq!(tree_out["root"]["name"], DEPLOY);
+    assert!(tree_out["totalNodes"].as_u64().unwrap_or(0) >= 1);
+
     // The probe is the same graph read with one exec per pod, and a
     // capability of its own so the consent layer can gate it. On the fixture
     // pods (busybox) it reads, and it always answers with its report.
@@ -1877,6 +2088,27 @@ async fn run_suite() {
         out["logs"].as_str().unwrap_or_default().contains("hello"),
         "expected the busybox loop's output: {out}"
     );
+    // Page mode: a workload's pods, filtered on the server, and a cursor that
+    // reads on — every answer under the MCP cap.
+    let by_workload = json!({
+        "context": ctx, "namespace": NS,
+        "workload": { "kind": "Deployment", "name": DEPLOY },
+        "grep": "hello", "max_bytes": 2000
+    });
+    let first = h.ok("k8s.podLogs", by_workload.clone()).await;
+    let shown = first["logs"].as_str().unwrap_or_default();
+    assert!(
+        shown.lines().count() > 0
+            && shown
+                .lines()
+                .all(|l| l.contains("hello") && l.starts_with('[')),
+        "{first}"
+    );
+    assert!(first.to_string().len() <= 50_000, "{first}");
+    let mut next = by_workload;
+    next["cursor"] = first["next_cursor"].clone();
+    let next = h.ok("k8s.podLogs", next).await;
+    assert!(next["next_cursor"].is_string(), "{next}");
 
     // === MCP resources (#24) ===================================================
     // srelens's k8s:// resource-addressing feature, exercised end to end
@@ -1999,6 +2231,7 @@ async fn run_suite() {
     println!("=== mcp resources (#24) ===");
     mcp_resource_reads(&ctx, &pod_name).await;
     mcp_resource_subscription(&ctx, &pod_name).await;
+    mcp_event_resource_subscription(&ctx, NS).await;
 
     // === 6. Metrics ============================================================
     // A bare kind cluster ships no metrics-server, so the metrics API may be
@@ -3680,8 +3913,15 @@ async fn extensions_and_gitops(h: &mut Harness, ctx: &str, settings: &TempSettin
     let answer = h.ok("extensions.queryProvider", query).await;
     assert_eq!(answer["kind"], "metrics", "{answer}");
     assert_eq!(answer["chart"]["unit"], "cores", "{answer}");
-    assert_eq!(answer["chart"]["series"][0]["name"], "pod=\"web-1\"", "{answer}");
-    assert_eq!(answer["chart"]["series"][0]["values"][0], json!(0.5), "{answer}");
+    assert_eq!(
+        answer["chart"]["series"][0]["name"], "pod=\"web-1\"",
+        "{answer}"
+    );
+    assert_eq!(
+        answer["chart"]["series"][0]["values"][0],
+        json!(0.5),
+        "{answer}"
+    );
     let request_line = served.join().expect("the server thread");
     assert!(
         request_line.starts_with("GET /api/v1/query_range?query=sum%28rate%28container_cpu_usage_seconds_total%7Bnamespace%3D%22"),
@@ -4433,6 +4673,173 @@ async fn mcp_resource_subscription(ctx: &str, pod: &str) {
     println!("mcp resources: subscription fired on Apply after a label change");
 }
 
+/// A focused #197 live check, independent of the full capability suite's
+/// workloads, CRDs and node operations. Refuse an existing namespace so cleanup
+/// only removes fixtures this invocation owns.
+#[tokio::test]
+#[ignore = "needs an explicitly selected disposable cluster and kubectl"]
+async fn mcp_events_subscription_live() {
+    let ctx = std::env::var("SRELENS_E2E_CONTEXT")
+        .expect("set SRELENS_E2E_CONTEXT to an explicitly selected disposable cluster");
+    assert!(
+        !ctx.trim().is_empty(),
+        "SRELENS_E2E_CONTEXT must not be empty"
+    );
+    let namespace = "srelens-mcp-events-e2e";
+    let created = tokio::time::timeout(
+        Duration::from_secs(60),
+        tokio::process::Command::new("kubectl")
+            .args([
+                "--context",
+                &ctx,
+                "--request-timeout=30s",
+                "create",
+                "namespace",
+                namespace,
+            ])
+            .kill_on_drop(true)
+            .output(),
+    )
+    .await
+    .expect("namespace creation completes")
+    .expect("kubectl runs");
+    assert!(
+        created.status.success(),
+        "cannot create isolated test namespace: {}",
+        String::from_utf8_lossy(&created.stderr)
+    );
+
+    let result = std::panic::AssertUnwindSafe(mcp_event_resource_subscription(&ctx, namespace))
+        .catch_unwind()
+        .await;
+    let deleted = tokio::time::timeout(
+        Duration::from_secs(90),
+        tokio::process::Command::new("kubectl")
+            .args([
+                "--context",
+                &ctx,
+                "--request-timeout=70s",
+                "delete",
+                "namespace",
+                namespace,
+                "--ignore-not-found",
+                "--wait=true",
+                "--timeout=60s",
+            ])
+            .kill_on_drop(true)
+            .output(),
+    )
+    .await
+    .expect("namespace cleanup completes")
+    .expect("kubectl runs");
+    assert!(
+        deleted.status.success(),
+        "test namespace cleanup failed: {}",
+        String::from_utf8_lossy(&deleted.stderr)
+    );
+    if let Err(error) = result {
+        std::panic::resume_unwind(error);
+    }
+}
+
+/// #197: a real Event change invalidates the event list without a parent
+/// mutation; parent-only and unrelated Event changes do not invalidate it.
+async fn mcp_event_resource_subscription(ctx: &str, namespace: &str) {
+    let server = srelens_mcp::McpServer::new(Arc::new(build_registry_with(cache())))
+        .with_kind_resolver(srelens_registry::kind_resolver())
+        .with_watcher(Arc::new(srelens_desktop_lib::mcp_watch::CacheWatcher::new(
+            cache(),
+        )));
+    let parent = "e2e-event-parent";
+    let parent_manifest = json!({
+        "apiVersion": "v1", "kind": "ConfigMap",
+        "metadata": {"name": parent, "namespace": namespace}
+    });
+    let apply = |manifest: Value| {
+        let server = &server;
+        async move {
+            let out = server
+                .call_tool(
+                    "k8s.applyManifest",
+                    json!({
+                        "context": ctx, "yaml": manifest.to_string()
+                    }),
+                )
+                .await
+                .expect("fixture apply succeeds");
+            assert_eq!(out["applied"], true, "{out}");
+        }
+    };
+    apply(parent_manifest.clone()).await;
+
+    // An accepted alias must select ConfigMap Events on both watch and read.
+    let uri_text = format!("k8s://{ctx}/{namespace}/cm/{parent}/events");
+    let uri = srelens_mcp::resources::ResourceUri::parse(&uri_text).unwrap();
+    assert!(srelens_mcp::resources::is_subscribable(&uri).is_ok());
+    let (tx, mut changes) = tokio::sync::mpsc::unbounded_channel();
+    let dead = tx.clone();
+    let handle = srelens_mcp::resources::ObjectWatcher::watch(
+        server.watcher().as_ref(),
+        &uri,
+        Box::new(move || {
+            let _ = tx.send(Ok(()));
+        }),
+        Box::new(move |reason| {
+            let _ = dead.send(Err(reason));
+        }),
+    )
+    .expect("event watch spawns");
+    // Abort even if an assertion unwinds; namespace teardown owns the fixtures.
+    struct WatchGuard(tokio::task::AbortHandle);
+    impl Drop for WatchGuard {
+        fn drop(&mut self) {
+            self.0.abort();
+        }
+    }
+    let _guard = WatchGuard(handle);
+    tokio::time::timeout(Duration::from_secs(30), changes.recv())
+        .await
+        .expect("initial Event list completes")
+        .expect("watch stays open")
+        .expect("watch establishes successfully");
+
+    let mut changed_parent = parent_manifest;
+    changed_parent["metadata"]["labels"] = json!({"subscription-marker": "changed"});
+    apply(changed_parent).await;
+    let event = |name: &str, object: &str| {
+        json!({
+            "apiVersion": "v1", "kind": "Event",
+            "metadata": {"name": name, "namespace": namespace},
+            "involvedObject": {"apiVersion": "v1", "kind": "ConfigMap", "name": object, "namespace": namespace},
+            "reason": "SubscriptionTest", "message": "MCP event subscription fixture", "type": "Normal"
+        })
+    };
+    apply(event("e2e-unrelated-event", "another-configmap")).await;
+    assert!(
+        tokio::time::timeout(Duration::from_secs(1), changes.recv())
+            .await
+            .is_err(),
+        "parent-only or unrelated Event changes must not notify"
+    );
+
+    apply(event("e2e-matching-event", parent)).await;
+    tokio::time::timeout(Duration::from_secs(30), changes.recv())
+        .await
+        .expect("matching Event notifies without changing the parent")
+        .expect("watch stays open")
+        .expect("watch remains healthy");
+    let response = srelens_mcp::stdio::handle_request(
+        &server,
+        &json!({"jsonrpc": "2.0", "id": 197, "method": "resources/read", "params": {"uri": uri_text}}),
+        srelens_mcp::Transport::Stdio,
+    ).await.expect("resource read response");
+    let text = response["result"]["contents"][0]["text"]
+        .as_str()
+        .unwrap_or_else(|| panic!("event list re-read failed: {response}"));
+    assert!(text.contains("e2e-matching-event"), "{text}");
+    assert!(!text.contains("e2e-unrelated-event"), "{text}");
+}
+
 /// Delete the `srelens-e2e` namespace and its CRD, and make sure the node(s)
 /// end up uncordoned — runs unconditionally (even after a panic) so the suite
 /// is re-runnable back-to-back with no manual cleanup.
@@ -4536,6 +4943,285 @@ async fn teardown() {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Port-forward recovery, issue #172 (#21's acceptance)
+// ---------------------------------------------------------------------------
+/// Its own namespace, so the suite's teardown and this test's never delete
+/// each other's fixtures.
+const FWD_NS: &str = "srelens-e2e-forward";
+const FWD_APP: &str = "e2e-fwd";
+
+/// One pod behind a Service, serving its own name, so a request through the
+/// tunnel says which pod it reached.
+fn forward_fixture_yaml() -> String {
+    format!(
+        r#"apiVersion: v1
+kind: Namespace
+metadata:
+  name: {FWD_NS}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {FWD_APP}
+  namespace: {FWD_NS}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: {FWD_APP}
+  template:
+    metadata:
+      labels:
+        app: {FWD_APP}
+    spec:
+      containers:
+      - name: app
+        image: busybox:1.36
+        command: ["sh", "-c", "mkdir -p /www && hostname > /www/index.html && exec httpd -f -p 8080 -h /www"]
+        ports:
+        - name: http
+          containerPort: 8080
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {FWD_APP}
+  namespace: {FWD_NS}
+spec:
+  selector:
+    app: {FWD_APP}
+  ports:
+  - port: 80
+    targetPort: http
+"#
+    )
+}
+
+async fn kubectl_ok(ctx: &str, args: &[&str], stdin: Option<&str>) -> String {
+    use tokio::io::AsyncWriteExt;
+    let mut child = tokio::process::Command::new("kubectl")
+        .arg("--context")
+        .arg(ctx)
+        .args(args)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        // The timeout below drops the wait; without this the kubectl it gave up
+        // on would keep running past the test.
+        .kill_on_drop(true)
+        .spawn()
+        .expect("run kubectl");
+    let mut input = child.stdin.take().expect("kubectl stdin");
+    if let Some(text) = stdin {
+        input
+            .write_all(text.as_bytes())
+            .await
+            .expect("write kubectl stdin");
+    }
+    drop(input);
+    let out = tokio::time::timeout(Duration::from_secs(150), child.wait_with_output())
+        .await
+        .unwrap_or_else(|_| panic!("kubectl {args:?} timed out"))
+        .expect("kubectl output");
+    assert!(
+        out.status.success(),
+        "kubectl {args:?} failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stdout).into_owned()
+}
+
+/// The body of `GET /` through the forward's local port, or None when the
+/// tunnel does not answer within a few seconds.
+async fn get_through(port: u16) -> Option<String> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let exchange = async {
+        let mut socket = tokio::net::TcpStream::connect(("127.0.0.1", port))
+            .await
+            .ok()?;
+        socket
+            .write_all(b"GET /index.html HTTP/1.0\r\nHost: e2e\r\n\r\n")
+            .await
+            .ok()?;
+        let mut response = String::new();
+        socket.read_to_string(&mut response).await.ok()?;
+        let (head, body) = response.split_once("\r\n\r\n")?;
+        head.starts_with("HTTP/1.").then(|| body.trim().to_owned())
+    };
+    tokio::time::timeout(Duration::from_secs(10), exchange)
+        .await
+        .ok()
+        .flatten()
+}
+
+/// The pod the tunnel reaches, asked until it answers or 30 seconds pass.
+async fn pod_behind(port: u16) -> String {
+    let dl = deadline(30);
+    loop {
+        if let Some(body) = get_through(port).await.filter(|b| !b.is_empty()) {
+            return body;
+        }
+        assert!(Instant::now() < dl, "the forward on {port} never answered");
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+}
+
+/// Every `state` `forward:status:<id>` has reported, in order.
+fn forward_states(sink: &srelens_streams::test_util::TestSink, channel: &str) -> Vec<String> {
+    sink.payloads_for(channel)
+        .iter()
+        .map(|p| p["state"].as_str().unwrap_or_default().to_owned())
+        .collect()
+}
+
+/// #21's acceptance, end to end: deleting the target pod of an active Service
+/// forward recovers without user action once a replacement pod is ready. The
+/// forward must report `reconnecting`, then `active` again, and carry traffic
+/// to the replacement on the same local port.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs a live cluster and kubectl on PATH"]
+async fn service_forward_recovers_after_its_pod_is_deleted() {
+    let result = std::panic::AssertUnwindSafe(forward_recovery())
+        .catch_unwind()
+        .await;
+    // `--timeout` bounds only Kubernetes's wait for the deletion; a stuck
+    // credential helper or request would hold the process, and every live
+    // test after this one, with it. So the whole call has a deadline, and a
+    // kubectl it gives up on is killed rather than left running.
+    let ns = tokio::time::timeout(
+        Duration::from_secs(150),
+        tokio::process::Command::new("kubectl")
+            .args(["--context", &context(), "delete", "namespace", FWD_NS])
+            .args(["--ignore-not-found", "--wait=true", "--timeout=120s"])
+            .kill_on_drop(true)
+            .output(),
+    )
+    .await;
+    match ns {
+        Ok(Ok(o)) if o.status.success() => println!("teardown: namespace {FWD_NS} deleted"),
+        Ok(Ok(o)) => println!(
+            "teardown: namespace {FWD_NS} delete failed: {}",
+            String::from_utf8_lossy(&o.stderr)
+        ),
+        Ok(Err(e)) => println!("teardown: could not run kubectl: {e}"),
+        Err(_) => println!("teardown: deleting namespace {FWD_NS} did not finish within 150s"),
+    }
+    if let Err(e) = result {
+        std::panic::resume_unwind(e);
+    }
+}
+
+async fn forward_recovery() {
+    let ctx = context();
+    kubectl_ok(&ctx, &["apply", "-f", "-"], Some(&forward_fixture_yaml())).await;
+    let selector = format!("app={FWD_APP}");
+    kubectl_ok(
+        &ctx,
+        &[
+            "-n",
+            FWD_NS,
+            "rollout",
+            "status",
+            "deployment",
+            FWD_APP,
+            "--timeout=120s",
+        ],
+        None,
+    )
+    .await;
+    kubectl_ok(
+        &ctx,
+        &[
+            "-n",
+            FWD_NS,
+            "wait",
+            "--for=condition=Ready",
+            "pod",
+            "-l",
+            &selector,
+            "--timeout=120s",
+        ],
+        None,
+    )
+    .await;
+
+    let manager = srelens_streams::forward::ForwardManager::new(cache());
+    let sink = Arc::new(srelens_streams::test_util::TestSink::default());
+    let info = manager
+        .start(
+            sink.clone(),
+            ctx.clone(),
+            FWD_NS.into(),
+            "Service".into(),
+            FWD_APP.into(),
+            80,
+            None,
+        )
+        .await
+        .expect("the forward binds");
+    let status = format!("forward:status:{}", info.id);
+
+    let dl = deadline(60);
+    while !forward_states(&sink, &status).iter().any(|s| s == "active") {
+        let states = forward_states(&sink, &status);
+        assert!(
+            Instant::now() < dl && !states.iter().any(|s| s == "failed"),
+            "the forward never became active: {states:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    let first = pod_behind(info.local_port).await;
+    assert!(
+        first.starts_with(&format!("{FWD_APP}-")),
+        "the tunnel reaches the Service's pod: {first:?}"
+    );
+    println!(
+        "forward {} active on :{} -> {first}",
+        info.id, info.local_port
+    );
+
+    let before = forward_states(&sink, &status).len();
+    kubectl_ok(
+        &ctx,
+        &["-n", FWD_NS, "delete", "pod", &first, "--wait=false"],
+        None,
+    )
+    .await;
+    println!("deleted {first}");
+
+    // `reconnecting`, then `active` again, among what was reported after the
+    // delete. A `failed` means it gave up before the replacement was ready.
+    let dl = deadline(120);
+    loop {
+        let states = forward_states(&sink, &status);
+        let after = &states[before..];
+        let reconnected = after
+            .iter()
+            .position(|s| s == "reconnecting")
+            .is_some_and(|r| after[r..].iter().any(|s| s == "active"));
+        if reconnected {
+            break;
+        }
+        assert!(
+            Instant::now() < dl && !after.iter().any(|s| s == "failed"),
+            "the forward did not recover after {first} was deleted: {:?}",
+            sink.payloads_for(&status)
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+
+    let second = pod_behind(info.local_port).await;
+    assert!(
+        second.starts_with(&format!("{FWD_APP}-")) && second != first,
+        "after recovery the same local port reaches the replacement pod, not {first}: {second:?}"
+    );
+    println!(
+        "forward {} recovered on :{} -> {second}",
+        info.id, info.local_port
+    );
+    manager.stop(info.id);
+}
 // ---------------------------------------------------------------------------
 // MCP prompts, issue #25
 // ---------------------------------------------------------------------------

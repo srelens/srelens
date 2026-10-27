@@ -329,3 +329,120 @@ describe("MultiSelect matches the design's picker", () => {
     }
   });
 });
+
+/**
+ * A second kind of choice in the same picker, on its own tab — the namespace
+ * picker's collections (#881) — with a summary of the caller's own, the "all"
+ * row's state decided by the caller, and a footer row of its own.
+ */
+/**
+ * A popover sits below a dialog's layer (45 to 50), so one opened from inside
+ * a dialog was drawn behind it: open, and unreachable. It now stands above.
+ */
+describe("MultiSelect inside a dialog", () => {
+  const layer = () => (screen.getByRole("listbox").closest("[data-radix-popper-content-wrapper] > *") ?? screen.getByRole("listbox").parentElement!.parentElement!) as HTMLElement;
+
+  it("stands its list above the dialog it was opened from", async () => {
+    render(
+      <div role="dialog" aria-label="Edit">
+        <MultiSelect options={options} selection={[]} onChange={() => {}} ariaLabel="Scope" />
+      </div>,
+    );
+    await userEvent.click(trigger());
+    expect(layer().style.zIndex).toBe("55");
+  });
+
+  it("leaves a list opened from the page at its own layer", async () => {
+    open();
+    await userEvent.click(trigger());
+    expect(layer().style.zIndex).toBe("");
+  });
+});
+
+describe("MultiSelect, without Select all", () => {
+  /** For options that filter the list rather than being parts of it (#885). */
+  it("offers no Select all, and no count on the all row", async () => {
+    open({ allLabel: "All deployments", selectAll: false });
+    await userEvent.click(trigger());
+    expect(screen.queryByRole("button", { name: "Select all" })).toBeNull();
+    expect(screen.getByRole("option", { name: "All deployments" }).textContent).toBe("All deployments");
+    expect(screen.getByRole("button", { name: "Reset" })).toBeDefined();
+  });
+
+  it("says the caller's empty message once when there is no all row either", async () => {
+    open({ options: [], empty: "Nothing to offer yet" });
+    await userEvent.click(trigger());
+    expect(screen.getAllByText("Nothing to offer yet")).toHaveLength(1);
+  });
+
+  it("says the caller's empty message beside the all row when there are no options", async () => {
+    open({ allLabel: "All deployments", options: [], empty: "Nothing to offer yet" });
+    await userEvent.click(trigger());
+    expect(screen.getByText("Nothing to offer yet")).toBeDefined();
+  });
+});
+
+describe("MultiSelect, with a tab of the caller's own", () => {
+  function withTab(props: Partial<Parameters<typeof MultiSelect>[0]> = {}) {
+    const onExtra = vi.fn();
+    open({
+      allLabel: "Everything",
+      allChecked: false,
+      selection: ["alpha"],
+      optionsLabel: "Services",
+      summary: "two picked elsewhere",
+      otherTab: {
+        label: "Groups",
+        count: 2,
+        rows: () => <button type="button" onClick={onExtra}>Extra row</button>,
+        empty: "No groups yet",
+      },
+      footerExtra: <button type="button">Save these</button>,
+      ...props,
+    });
+    return onExtra;
+  }
+
+  it("opens on the options, with both tabs counting what is chosen on them", async () => {
+    withTab();
+    expect(trigger().textContent).toBe("two picked elsewhere");
+    await userEvent.click(trigger());
+    expect(screen.getByRole("tab", { name: "Services (1)" }).getAttribute("aria-selected")).toBe("true");
+    expect(screen.getByRole("tab", { name: "Groups (2)" })).toBeDefined();
+    expect(rows()).toContain("alpha");
+    expect(screen.queryByRole("button", { name: "Extra row" })).toBeNull();
+    expect(screen.getByRole("button", { name: "Save these" })).toBeDefined();
+    // The caller says "all" is not the state.
+    expect(screen.getByRole("option", { name: "Everything" }).getAttribute("aria-checked")).toBe("false");
+  });
+
+  it("shows the caller's rows, and only them, on its tab", async () => {
+    const onExtra = withTab();
+    await userEvent.click(trigger());
+    await userEvent.click(screen.getByRole("tab", { name: "Groups (2)" }));
+    expect(screen.queryByRole("option", { name: "alpha" })).toBeNull();
+    await userEvent.click(screen.getByRole("button", { name: "Extra row" }));
+    expect(onExtra).toHaveBeenCalledOnce();
+    // Its footer counts its own, and does not offer to select every option.
+    expect(screen.getByText("2 chosen")).toBeDefined();
+    expect(screen.queryByRole("button", { name: "Select all" })).toBeNull();
+    expect(screen.getByRole("button", { name: "Reset" })).toBeDefined();
+  });
+
+  it("opens on the caller's tab when told to, every time it opens", async () => {
+    withTab({ openOn: "other" });
+    await userEvent.click(trigger());
+    expect(screen.getByRole("tab", { name: "Groups (2)" }).getAttribute("aria-selected")).toBe("true");
+    await userEvent.click(screen.getByRole("tab", { name: "Services (1)" }));
+    await userEvent.keyboard("{Escape}");
+    await userEvent.click(trigger());
+    expect(screen.getByRole("tab", { name: "Groups (2)" }).getAttribute("aria-selected")).toBe("true");
+  });
+
+  it("says what the caller says on an empty tab", async () => {
+    withTab({ openOn: "other", otherTab: { label: "Groups", count: 0, rows: () => null, empty: "No groups yet" } });
+    await userEvent.click(trigger());
+    expect(screen.getByText("No groups yet")).toBeDefined();
+    expect(screen.getByRole("tab", { name: "Groups" })).toBeDefined();
+  });
+});

@@ -160,6 +160,16 @@ export function describeError(
         raw,
       };
     }
+    // The backend names a plugin it could not find (`connect::build_client`).
+    // The PATH it searched stays in `raw`, behind "Original error".
+    const missing = /exec plugin '([^']+)' was not found on srelens's PATH/.exec(raw)?.[1];
+    if (missing) {
+      return {
+        title: `${missing} not found`,
+        detail: `This context authenticates through ${missing}, and srelens couldn't find it on the PATH it started with. If a terminal finds it, add that folder to PATH where apps read it (your shell profile on macOS and Linux, the environment variables on Windows) and restart srelens, or set the full path as the kubeconfig's exec command.`,
+        raw,
+      };
+    }
     return {
       title: "Auth plugin couldn't run",
       detail:
@@ -227,11 +237,17 @@ export function describeError(
       raw,
     };
   }
+  // Kubeconfig and RBAC are only the remedy when a cluster said it: a GitHub
+  // 403 read as an RBAC problem in Settings › Updates (#926).
   if (/unauthorized|\b401\b|invalid bearer|expired token/.test(lower)) {
     return {
       title: "Not authorized",
       detail:
-        "The cluster rejected your credentials. Your token or client certificate may have expired — refresh your kubeconfig credentials and try again.",
+        domain === "cluster"
+          ? "The cluster rejected your credentials. Your token or client certificate may have expired — refresh your kubeconfig credentials and try again."
+          : domain === "http"
+            ? "The server rejected the request's credentials."
+            : "The credentials this operation used were rejected.",
       raw,
     };
   }
@@ -239,8 +255,12 @@ export function describeError(
     return {
       title: "Access denied",
       detail:
-        describeForbidden(raw) ??
-        "Your account doesn't have permission for this on the cluster. Check your RBAC roles, or switch to a context with the right access.",
+        domain === "cluster"
+          ? describeForbidden(raw) ??
+            "Your account doesn't have permission for this on the cluster. Check your RBAC roles, or switch to a context with the right access."
+          : domain === "http"
+            ? "The server refused this request. Try again later; if it keeps happening, check that your network allows it."
+            : "The operation was refused. Check that you have permission to do this on this machine.",
       raw,
     };
   }

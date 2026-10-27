@@ -1,5 +1,4 @@
 import { useEffect, useRef, useState, useSyncExternalStore } from "react";
-import type { ITheme } from "@xterm/xterm";
 import {
   Alert,
   AskChip,
@@ -10,7 +9,7 @@ import {
   SideRail,
   statusTone,
 } from "@srelens/ui-kit";
-import { useConsole } from "../console";
+import { useAsk } from "../console";
 import { useActiveContext } from "../lib/clusters";
 import { ClusterMovedAlert } from "../lib/clusterMoved";
 import { useTabs } from "../lib/tabsStore";
@@ -23,135 +22,16 @@ import {
   terminalFor,
   type TerminalSessionRow,
 } from "../lib/sessions";
+import { clearTerminalsFocusRequest, useTerminalsFocusRequest } from "../lib/terminalPanel";
 import { NewSessionMenu } from "./terminals/NewSessionMenu";
 import {
+  NOT_GATED,
   SESSION_RAIL_WIDTH,
   SESSION_VERDICT,
   SessionRail,
   sessionRailHead,
 } from "./terminals/SessionRail";
 import { TerminalView } from "./terminals/TerminalView";
-
-/**
- * §14's footer eyebrow, verbatim.
- *
- * **Do not soften this and do not move it into documentation.** Every other
- * write path in srelens is gated — a confirm dialog with the kubectl
- * equivalent printed in it, for a delete, a drain, a scale. A shell is
- * deliberately not: srelens cannot tell `ls` from `rm -rf /` inside a PTY, and
- * pretending to would be a gate that gates nothing. Saying so where the shell
- * IS, rather than in a document nobody has open at the moment it matters, is
- * the honest place for it.
- */
-const NOT_GATED =
-  "Destructive commands inside a shell are not gated — the shell is your own session";
-
-/**
- * The design tokens the emulator is dressed from.
- *
- * xterm paints its own canvas and knows nothing about this app's stylesheet,
- * so unlike every other surface here it cannot simply inherit. Left alone it
- * draws its own dark palette in a white pane, in a font that matches no other
- * monospace surface in the app — which is what a terminal that reads as
- * foreign looks like.
- *
- * **The token NAMES are here; the values are not.** They are read off the
- * document at {@link terminalDress}, so a theme change, a palette change or a
- * token edit carries into the transcript without this file knowing any colour.
- * That is the same rule `toneColor` follows for everything drawn in CSS; this
- * is the one place that has to resolve a token to a value rather than hand the
- * browser a `var()`, because a canvas cannot take one.
- *
- * The ANSI half maps only the four colours the token set has an honest answer
- * for — a program's `red` means "bad" and so does `--sev`. `cyan` is left to
- * xterm's own palette: there is no token that means cyan, and pointing it at
- * `--info` would be inventing a meaning for someone else's output. The black
- * and white ends come from the ink ramp rather than literal black and white,
- * which is what keeps a program's `white` legible on a light theme — the one
- * place a terminal's defaults are actively wrong here.
- */
-const TERMINAL_TOKENS: Readonly<Partial<Record<keyof ITheme, string>>> = {
-  // §14 draws the transcript as a SUNK surface, not the pane's own. Named by
-  // its ground token so a see-through window clears it with the rest of the
-  // sheet — a terminal left solid is a slab in the middle of the glass.
-  background: "--ground-sunk",
-  foreground: "--ink-soft",
-  // §14: "a pulsing accent block cursor sits on the last line".
-  cursor: "--accent",
-  cursorAccent: "--surface-sunk",
-  selectionBackground: "--accent-wash",
-  black: "--ink",
-  red: "--sev",
-  green: "--ok",
-  yellow: "--warn",
-  blue: "--info",
-  magenta: "--accent",
-  white: "--ink-muted",
-  brightBlack: "--ink-faint",
-  brightRed: "--sev",
-  brightGreen: "--ok",
-  brightYellow: "--warn",
-  brightBlue: "--info",
-  brightMagenta: "--accent",
-  brightWhite: "--ink",
-};
-
-/** The token the app's monospace surfaces already share. */
-const FONT_TOKEN = "--font-mono";
-
-/**
- * Resolve {@link TERMINAL_TOKENS} against the document root.
- *
- * The root rather than the pane, deliberately: `:root` is where the token
- * block is declared and `data-theme` is where the mode is written
- * (`applyNextDesignTheme` in `apps/desktop/src/design.ts`), so this reads the
- * same element both of them speak about.
- *
- * A token that resolves to nothing is left out rather than written as an empty
- * string — xterm treats `""` as a colour and throws parsing it, and a document
- * with no stylesheet attached (a unit test, a first paint) is a real state.
- * Left out, xterm keeps its own default for that one key.
- */
-function terminalDress(root: Element): { theme: ITheme; fontFamily?: string } {
-  const style = getComputedStyle(root);
-  const read = (token: string) => style.getPropertyValue(token).trim();
-  const theme: Record<string, string> = {};
-  for (const [key, token] of Object.entries(TERMINAL_TOKENS)) {
-    const value = read(token);
-    // A cleared ground resolves to the keyword, and xterm parses colours
-    // itself: it takes `rgba()` and throws on `transparent`.
-    if (value) theme[key] = value === "transparent" ? "rgba(0, 0, 0, 0)" : value;
-  }
-  const fontFamily = read(FONT_TOKEN);
-  return { theme, fontFamily: fontFamily || undefined };
-}
-
-/**
- * Keep the session on screen wearing the app's tokens.
- *
- * Re-run when the theme attribute changes, because that is a theme switch:
- * the tokens under it now resolve to different values and the emulator has
- * already read the old ones. Nothing else observes `data-theme` — the rest of
- * the app is CSS and follows on its own — which is exactly why the one canvas
- * in the app has to.
- */
-function useTokenDress(sessionId: number | null): void {
-  useEffect(() => {
-    if (sessionId === null) return undefined;
-    const root = document.documentElement;
-    const dress = () => {
-      const term = terminalFor(sessionId);
-      if (!term) return;
-      const { theme, fontFamily } = terminalDress(root);
-      term.options.theme = theme;
-      if (fontFamily) term.options.fontFamily = fontFamily;
-    };
-    dress();
-    const observer = new MutationObserver(dress);
-    observer.observe(root, { attributes: true, attributeFilter: ["data-theme", "data-opacity"] });
-    return () => observer.disconnect();
-  }, [sessionId]);
-}
 
 /**
  * §14's Ask chip, asked about the shell that is actually open.
@@ -201,7 +81,6 @@ export function Terminals(_props: { route: string }) {
   const cluster = useActiveContext();
   const { workspace } = useTabs();
   const paused = cluster !== undefined && workspace.pausedClusters?.includes(cluster.stableId) === true;
-  const { ask } = useConsole();
   const [picked, setPicked] = useState<number | null>(null);
   /**
    * The `New session` menu, and the cluster it was opened against.
@@ -235,6 +114,15 @@ export function Terminals(_props: { route: string }) {
     setPicked(newest);
   }, [newest]);
 
+  // A page's terminal panel moved its session here (#942's Open in tab): that
+  // session is the one on screen, whatever was selected before. Taken once.
+  const focusRequest = useTerminalsFocusRequest();
+  useEffect(() => {
+    if (focusRequest === null) return;
+    setPicked(focusRequest);
+    clearTerminalsFocusRequest();
+  }, [focusRequest]);
+
   // The selection, resolved against the rows that actually exist. A detached
   // session leaves an id behind that names nothing; the newest row is what a
   // reader is most likely to want next, and it is also what the effect above
@@ -242,9 +130,10 @@ export function Terminals(_props: { route: string }) {
   const active =
     sessions.find((s) => s.id === picked) ??
     (sessions.length > 0 ? sessions[sessions.length - 1] : undefined);
-  useTokenDress(active?.id ?? null);
 
   const context = active?.context ?? cluster?.name ?? "";
+  // About the session on screen, which can be on another cluster than the rail.
+  const ask = useAsk(context);
   const namespace = active?.namespace ?? cluster?.namespace ?? "";
   const verdict = active ? SESSION_VERDICT[active.state] : undefined;
 
@@ -264,14 +153,16 @@ export function Terminals(_props: { route: string }) {
               and invisible in a header, where there is no row to hover. The
               visible word is the design's; the question it will actually send
               goes in the accessible name — the same split the chip makes. */}
-          <Button
-            type="button"
-            size="sm"
-            aria-label={`Draft a command: ${askQuestion(active, context)}`}
-            onClick={() => ask(askQuestion(active, context))}
-          >
-            Draft a command
-          </Button>
+          {ask && (
+            <Button
+              type="button"
+              size="sm"
+              aria-label={`Draft a command: ${askQuestion(active, context)}`}
+              onClick={() => ask(askQuestion(active, context))}
+            >
+              Draft a command
+            </Button>
+          )}
           <Button
             variant="primary"
             size="sm"

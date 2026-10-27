@@ -2,6 +2,7 @@ import { useLayoutEffect, useRef } from "react";
 import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
 import { terminalFor } from "../../lib/sessions";
+import { dressTerminal, useTerminalDress } from "../../lib/terminalDress";
 
 /**
  * The pane a live shell is drawn in — a pod exec, a node shell, or a local
@@ -15,12 +16,23 @@ import { terminalFor } from "../../lib/sessions";
  * size (which is what makes `onResize` fire with the right numbers), and let
  * go of it on unmount.
  *
+ * **One session, more than one pane.** A session can be on screen in a page's
+ * terminal panel and in the Terminals tab (#942), and an emulator has one
+ * element, so it can only be in one of them at a time. Whichever pane is
+ * showing takes it: a pane that comes back into view (its tab selected again)
+ * moves the element back into itself before it fits. A pane with no size is
+ * hidden, and leaves it where it is.
+ *
+ * Every pane dresses the emulator in the app's tokens — colours, the
+ * monospace family and size — so a shell reads the same wherever it is.
+ *
  * **Never call `.dispose()` here.** The emulator, and its scrollback, belong
  * to the store — that is the whole reason a closed Terminals tab does not
  * lose the shell's history. Only `endSession` may dispose it.
  */
 export function TerminalView({ sessionId }: { sessionId: number }) {
   const ref = useRef<HTMLDivElement>(null);
+  useTerminalDress(sessionId);
 
   useLayoutEffect(() => {
     const term = terminalFor(sessionId);
@@ -33,19 +45,33 @@ export function TerminalView({ sessionId }: { sessionId: number }) {
       // which window it thinks it is in), so the existing node — with its
       // rendered scrollback — is moved into this pane by hand instead of
       // asking xterm to build a new one it would silently refuse to move.
-      container.appendChild(term.element);
+      //
+      // Unless another pane is showing it and this one is not: a hidden
+      // Terminals tab that falls back to a session on screen in a page's
+      // panel would otherwise take it out of the panel, and the panel —
+      // whose size has not changed — would never ask for it back. This pane
+      // takes it when it is shown, through the observer below.
+      if (showing(container) || !showing(term.element.parentElement)) container.appendChild(term.element);
     } else {
       term.open(container);
     }
 
+    // Before the fit: the font size decides how many columns fit.
+    dressTerminal(term);
     const fit = new FitAddon();
     term.loadAddon(fit);
     // Sets the emulator's cols/rows from this pane's own size, which fires
     // `onResize` — already wired, by the store, to the PTY.
     fit.fit();
 
-    const observer =
-      typeof ResizeObserver === "undefined" ? null : new ResizeObserver(() => fit.fit());
+    // A size change is also how a pane learns it is showing again: a hidden
+    // tab's pane measures nothing, and measures its own size once selected.
+    const onResize = () => {
+      if (!showing(container)) return;
+      if (term.element && term.element.parentElement !== container) container.appendChild(term.element);
+      fit.fit();
+    };
+    const observer = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(onResize);
     observer?.observe(container);
 
     return () => {
@@ -62,5 +88,17 @@ export function TerminalView({ sessionId }: { sessionId: number }) {
   // xterm sizes in explicit pixels, and a flex item's implicit
   // `min-width: auto` would refuse to shrink below it — widening the pane
   // instead of letting `FitAddon` narrow the terminal to fit.
-  return <div ref={ref} className="min-h-0 min-w-0 flex-1" />;
+  //
+  // The inset is on xterm's own element, not on this box: `FitAddon` measures
+  // this box's whole height and width and subtracts only the padding of the
+  // element inside it, so padding here would fit a row and a column too many.
+  return <div ref={ref} className="min-h-0 min-w-0 flex-1 [&>.xterm]:px-2 [&>.xterm]:py-1" />;
+}
+
+/**
+ * Whether a pane is on screen: in the document and laid out with a size. A
+ * pane in a hidden tab measures nothing; one torn down is not connected.
+ */
+function showing(el: HTMLElement | null): boolean {
+  return el !== null && el.isConnected && (el.clientWidth > 0 || el.clientHeight > 0);
 }

@@ -75,7 +75,10 @@ vi.mock("@srelens/ui-kit", async (importOriginal) => {
 });
 
 import { ConsoleProvider, useConsole } from "../../console";
+import { setClusterAssistant } from "../../lib/assistant";
 import { loadSectionFolds, setSectionOpen } from "../../lib/sectionFolds";
+import { defaultState } from "../../lib/tabs";
+import * as tabsStore from "../../lib/tabsStore";
 import { detailFacts } from "./detailData";
 import { ResourceDetailView } from "./ResourceDetailView";
 import { ResourceTabView } from "./ResourceTabView";
@@ -519,36 +522,26 @@ describe("ResourceDetailView", () => {
     });
   });
 
+  // The object itself is read through the CRD (#919), so a lookup that fails
+  // fails the whole subject — before any pane, and before any read.
   it("shows a distinct, informative error when no CRD on the cluster matches the custom resource's kind", async () => {
-    getObject.mockResolvedValue({ object: { kind: "Certificate", metadata: { name: "cert-1", namespace: "default" } } });
     listCrds.mockResolvedValue({ crds: [] });
-    const { getByRole } = render(
-      <ResourceDetailView context="ctx" kind="Certificate" namespace="default" name="cert-1" />,
-    );
-    await waitFor(() => expect(getByRole("tab", { name: "YAML" })).toBeDefined());
-    await userEvent.click(getByRole("tab", { name: "YAML" }));
-    await waitFor(() => expect(getByRole("alert")).toBeDefined());
-    const text = getByRole("alert").textContent ?? "";
-    expect(text).toContain("Certificate");
-    // Distinct from a generic manifest-fetch failure: names the real reason
-    // (no matching CustomResourceDefinition), not a bare "could not load".
+    render(<ResourceDetailView context="ctx" kind="Certificate" namespace="default" name="cert-1" />);
+    const text = (await screen.findByRole("alert")).textContent ?? "";
+    expect(text).toContain("Could not load Certificate default/cert-1");
+    // Distinct from a generic read failure: names the real reason (no
+    // matching CustomResourceDefinition), not a bare "could not load".
     expect(text.toLowerCase()).toContain("customresourcedefinition");
-    expect(getManifest).not.toHaveBeenCalled();
+    expect(getObject).not.toHaveBeenCalled();
   });
 
   it("shows a distinct error when the cluster's CRDs themselves fail to load", async () => {
-    getObject.mockResolvedValue({ object: { kind: "Certificate", metadata: { name: "cert-1", namespace: "default" } } });
     listCrds.mockResolvedValue({ error: "forbidden" });
-    const { getByRole } = render(
-      <ResourceDetailView context="ctx" kind="Certificate" namespace="default" name="cert-1" />,
-    );
-    await waitFor(() => expect(getByRole("tab", { name: "YAML" })).toBeDefined());
-    await userEvent.click(getByRole("tab", { name: "YAML" }));
-    await waitFor(() => expect(getByRole("alert")).toBeDefined());
-    const text = getByRole("alert").textContent ?? "";
+    render(<ResourceDetailView context="ctx" kind="Certificate" namespace="default" name="cert-1" />);
+    const text = (await screen.findByRole("alert")).textContent ?? "";
     expect(text).toContain("Certificate");
     expect(text).toContain("forbidden");
-    expect(getManifest).not.toHaveBeenCalled();
+    expect(getObject).not.toHaveBeenCalled();
   });
 
   it("shows a labelled empty state for a resource with no events, not a blank pane", async () => {
@@ -1227,23 +1220,19 @@ describe("ResourceDetailView", () => {
     // match would fetch a manifest from possibly the wrong group and show it
     // as if it were right — a possibly-wrong success, which is worse than a
     // failure.
-    getObject.mockResolvedValue({ object: { kind: "Widget", metadata: { name: "w-1", namespace: "default" } } });
     listCrds.mockResolvedValue({
       crds: [
         { name: "widgets.example.com", group: "example.com", version: "v1", kind: "Widget", plural: "widgets", namespaced: true },
         { name: "widgets.other.io", group: "other.io", version: "v1", kind: "Widget", plural: "widgets", namespaced: true },
       ],
     });
-    const { getByRole } = render(<ResourceDetailView context="ctx" kind="Widget" namespace="default" name="w-1" />);
-    await waitFor(() => expect(getByRole("tab", { name: "YAML" })).toBeDefined());
-    await userEvent.click(getByRole("tab", { name: "YAML" }));
-    await waitFor(() => expect(getByRole("alert")).toBeDefined());
-    const text = getByRole("alert").textContent ?? "";
+    render(<ResourceDetailView context="ctx" kind="Widget" namespace="default" name="w-1" />);
+    const text = (await screen.findByRole("alert")).textContent ?? "";
     expect(text).toContain("Widget");
     expect(text).toContain("example.com");
     expect(text).toContain("other.io");
-    // Never guessed at: no manifest is fetched from either group.
-    expect(getManifest).not.toHaveBeenCalled();
+    // Never guessed at: nothing is read from either group.
+    expect(getObject).not.toHaveBeenCalled();
   });
 
   it("still resolves a kind claimed by exactly one CustomResourceDefinition among several", async () => {
@@ -1269,6 +1258,97 @@ describe("ResourceDetailView", () => {
    * The mock's third header line — a toned dot, the state, the ready ratio and
    * the age — and the two affordances at its top right.
    */
+  describe("a custom resource (#919)", () => {
+    const WIDGET_CRD: CrdRef = {
+      name: "widgets.example.com",
+      group: "example.com",
+      version: "v1",
+      kind: "Widget",
+      plural: "widgets",
+      namespaced: true,
+      printerColumns: [{ name: "Ready", jsonPath: ".status.ready", type: "string" }],
+    };
+    const WIDGET: K8sObject = {
+      apiVersion: "example.com/v1",
+      kind: "Widget",
+      metadata: { name: "w-1", namespace: "default" },
+      status: { ready: "3/3", conditions: [{ type: "Ready", status: "True", reason: "AllGood" }] },
+    };
+
+    it("reads it through its CRD and offers Status, YAML and Events", async () => {
+      listCrds.mockResolvedValue({ crds: [WIDGET_CRD] });
+      getObject.mockResolvedValue({ object: WIDGET });
+      render(<ResourceDetailView context="ctx" kind="Widget" namespace="default" name="w-1" />);
+      await waitFor(() => expect(screen.getByRole("tab", { name: "Status" })).toBeDefined());
+      expect(screen.getAllByRole("tab").map((t) => t.textContent)).toEqual(["Status", "YAML", "Events"]);
+      expect(getObject).toHaveBeenCalledWith("ctx", "Widget", "default", "w-1", undefined, {
+        group: "example.com",
+        version: "v1",
+        plural: "widgets",
+      });
+      // The CRD's own printer column leads the pane.
+      expect(document.querySelector(".fact-list")?.textContent).toContain("3/3");
+    });
+
+    it("gives a CRD named like a built-in the custom pane, and reads its YAML in its own group", async () => {
+      const deployments: CrdRef = {
+        ...WIDGET_CRD,
+        name: "deployments.acme.io",
+        group: "acme.io",
+        kind: "Deployment",
+        plural: "deployments",
+      };
+      listCrds.mockResolvedValue({ crds: [deployments] });
+      getObject.mockResolvedValue({ object: { kind: "Deployment", metadata: { name: "api", namespace: "default" } } });
+      render(<ResourceDetailView context="ctx" kind="Deployment" group="acme.io" namespace="default" name="api" />);
+      await waitFor(() => expect(screen.getByRole("tab", { name: "Status" })).toBeDefined());
+      // The built-in Deployment's descriptor is never consulted for it.
+      expect(descriptorFor).not.toHaveBeenCalled();
+      await userEvent.click(screen.getByRole("tab", { name: "YAML" }));
+      await waitFor(() =>
+        expect(getManifest).toHaveBeenCalledWith("ctx", "Deployment", "default", "api", undefined, {
+          group: "acme.io",
+          version: "v1",
+          plural: "deployments",
+        }),
+      );
+    });
+
+    it("opens Edit on the custom resource in its own group, not on the built-in of the same name", async () => {
+      tabsStore.setState(defaultState([]));
+      const deployments: CrdRef = {
+        ...WIDGET_CRD,
+        name: "deployments.acme.io",
+        group: "acme.io",
+        kind: "Deployment",
+        plural: "deployments",
+      };
+      listCrds.mockResolvedValue({ crds: [deployments] });
+      getObject.mockResolvedValue({ object: { kind: "Deployment", metadata: { name: "api", namespace: "default" } } });
+      render(<ResourceDetailView context="ctx" kind="Deployment" group="acme.io" namespace="default" name="api" />);
+      await waitFor(() => expect(screen.getByRole("tab", { name: "Status" })).toBeDefined());
+      await userEvent.click(screen.getByRole("button", { name: "Edit" }));
+      expect(tabsStore.currentWorkspace().tabs.map((t) => t.route)).toContain("/edit/ctx/acme.io%2FDeployment/default/api");
+    });
+
+    it("opens Edit in the custom resource's own group from the full tab's header too", async () => {
+      tabsStore.setState(defaultState([]));
+      const deployments: CrdRef = {
+        ...WIDGET_CRD,
+        name: "deployments.acme.io",
+        group: "acme.io",
+        kind: "Deployment",
+        plural: "deployments",
+      };
+      listCrds.mockResolvedValue({ crds: [deployments] });
+      getObject.mockResolvedValue({ object: { kind: "Deployment", metadata: { name: "api", namespace: "default" } } });
+      render(<ResourceTabView context="ctx" kind="Deployment" group="acme.io" namespace="default" name="api" />);
+      await waitFor(() => expect(screen.getByRole("tab", { name: "Status" })).toBeDefined());
+      await userEvent.click(screen.getByRole("button", { name: "Edit" }));
+      expect(tabsStore.currentWorkspace().tabs.map((t) => t.route)).toContain("/edit/ctx/acme.io%2FDeployment/default/api");
+    });
+  });
+
   describe("the header the design draws", () => {
     it("reads the state, the ready ratio and the age across one line", async () => {
       getObject.mockResolvedValue({ object: DEGRADED_DEPLOYMENT });
@@ -1522,6 +1602,17 @@ describe("ResourceDetailView", () => {
       expect(asked).toEqual(["Why is checkout-api unhealthy?"]);
     });
 
+    it("offers no Ask on a cluster the AI Assistant is off for (#968)", async () => {
+      setClusterAssistant("ctx", false);
+      getObject.mockResolvedValue({ object: RUNNING_POD });
+      descriptorFor.mockReturnValue(podDescriptor());
+      const { getByRole } = render(
+        <ResourceDetailView context="ctx" kind="Pod" namespace="checkout" name="cart-session-store-0" />,
+      );
+      await waitFor(() => expect(getByRole("tab", { name: "Details" })).toBeDefined());
+      expect(within(footer()!).queryByRole("button", { name: /^Ask/ })).toBeNull();
+    });
+
     it("asks the other question of a healthy subject", async () => {
       getObject.mockResolvedValue({ object: RUNNING_POD });
       descriptorFor.mockReturnValue(podDescriptor());
@@ -1593,6 +1684,9 @@ describe("ResourceDetailView", () => {
 
     it("withholds Delete from a custom resource, whose GVK the backend cannot resolve", async () => {
       getObject.mockResolvedValue({ object: { kind: "Widget", metadata: { name: "w-1", namespace: "default" } } });
+      listCrds.mockResolvedValue({
+        crds: [{ name: "widgets.example.com", group: "example.com", version: "v1", kind: "Widget", plural: "widgets", namespaced: true }],
+      });
       // No descriptor is exactly what a kind outside `K8S_KIND` gets, and it is
       // the same verdict `customDescriptor` reaches: Delete would always fail,
       // and an action that cannot work is worse than an absent one.
@@ -1600,7 +1694,7 @@ describe("ResourceDetailView", () => {
       const { getByRole, queryByRole } = render(
         <ResourceDetailView context="ctx" kind="Widget" namespace="default" name="w-1" />,
       );
-      await waitFor(() => expect(getByRole("tab", { name: "Details" })).toBeDefined());
+      await waitFor(() => expect(getByRole("tab", { name: "Status" })).toBeDefined());
 
       expect(barWords()).toEqual(["Ask", "Edit", "Copy as kubectl"]);
       // Nothing was left over to fold, so there is no overflow to open onto an

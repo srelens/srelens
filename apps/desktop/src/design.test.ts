@@ -5,25 +5,30 @@ import { DESIGN_KEY, PORTED_SCREENS, loadDesign, saveDesign } from "./design";
 beforeEach(() => localStorage.clear());
 
 describe("the design preference", () => {
-  it("defaults to classic, so an untouched install is unchanged", () => {
+  it("defaults to the new design, so a new install and anyone who never chose get it", () => {
+    expect(loadDesign()).toBe("next");
+  });
+
+  it("keeps classic only for someone who explicitly chose it", () => {
+    localStorage.setItem(DESIGN_KEY, "classic");
     expect(loadDesign()).toBe("classic");
   });
 
   it("round-trips a choice", () => {
-    saveDesign("next");
-    expect(loadDesign()).toBe("next");
     saveDesign("classic");
     expect(loadDesign()).toBe("classic");
+    saveDesign("next");
+    expect(loadDesign()).toBe("next");
   });
 
-  it("falls back to classic on a value it does not recognise", () => {
+  it("falls back to the new design on a value it does not recognise", () => {
     // Written by a future version, or by hand. Never leave someone on a design
     // that does not exist — they would get a blank window with no way back.
     localStorage.setItem(DESIGN_KEY, "hologram");
-    expect(loadDesign()).toBe("classic");
+    expect(loadDesign()).toBe("next");
   });
 
-  it("survives storage being unavailable", () => {
+  it("falls back to the new design when storage is unreadable", () => {
     // Storage throws in some privacy modes. A preference is not worth failing
     // to boot over.
     const original = Storage.prototype.getItem;
@@ -31,7 +36,7 @@ describe("the design preference", () => {
       throw new Error("denied");
     };
     try {
-      expect(loadDesign()).toBe("classic");
+      expect(loadDesign()).toBe("next");
     } finally {
       Storage.prototype.getItem = original;
     }

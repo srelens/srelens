@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 
@@ -37,6 +37,10 @@ vi.mock("@srelens/core", async (orig) => ({
 }));
 
 import { ForwardAction } from "./ForwardAction";
+import type { ClusterContext } from "@srelens/core";
+import { resetContexts, setContexts } from "../../lib/clusters";
+import { defaultState } from "../../lib/tabs";
+import { getState, setState, setWorkspaceProtected } from "../../lib/tabsStore";
 
 const CONTEXT = "prod-eu";
 const ELSEWHERE = "stage-eu";
@@ -198,5 +202,40 @@ describe("ForwardAction", () => {
     await screen.findByRole("dialog");
     expect(screen.queryByText(/This still runs against/)).toBeNull();
     await waitFor(() => expect(core.listNamespaces).toHaveBeenCalledWith(ELSEWHERE));
+  });
+});
+
+/** A port's own door into the forward dialog, on a protected cluster (#101). */
+describe("ForwardAction — on a protected cluster (#101)", () => {
+  const PROD: ClusterContext = { name: CONTEXT, stableId: "prod", key: "prod", cluster: "prod", server: "", isCurrent: true, sourceFile: "", authKind: "token" };
+
+  beforeEach(() => {
+    setContexts([PROD]);
+    setState(defaultState([PROD]));
+    setWorkspaceProtected(getState().currentId, true);
+  });
+  afterEach(() => {
+    resetContexts();
+    setState(defaultState([]));
+  });
+
+  it("starts no forward until the cluster's name is typed", async () => {
+    draw(CONTEXT);
+    await userEvent.click(screen.getByRole("button", { name: "Forward port 8080" }));
+    await screen.findByRole("dialog");
+    await waitFor(() => expect(core.listNamespaces).toHaveBeenCalledWith(CONTEXT));
+    await userEvent.selectOptions(screen.getByLabelText("Namespace"), NAMESPACE);
+    await waitFor(() =>
+      expect(within(screen.getByLabelText("Target")).queryByRole("option", { name: "svc/checkout-api" })).toBeTruthy(),
+    );
+    expect(screen.getByText(`${CONTEXT} is protected (workspace Default).`)).toBeTruthy();
+
+    await userEvent.click(screen.getByRole("button", { name: "Start forward" }));
+    expect(core.startPortForward).not.toHaveBeenCalled();
+    expect(screen.getByText(`Type ${CONTEXT} to confirm.`)).toBeTruthy();
+
+    await userEvent.type(screen.getByRole("textbox", { name: `Type ${CONTEXT} to confirm` }), CONTEXT);
+    await userEvent.click(screen.getByRole("button", { name: "Start forward" }));
+    await waitFor(() => expect(core.startPortForward).toHaveBeenCalledTimes(1));
   });
 });

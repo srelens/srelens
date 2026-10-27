@@ -66,7 +66,10 @@ pub async fn run(
                     });
                 }
             };
-            provider.stream_turn(&turns, &tools, &mut on_item).await?;
+            let request_turns = compact_request_turns_for_round(&turns);
+            provider
+                .stream_turn(&request_turns, &tools, &mut on_item)
+                .await?;
         }
 
         if let Some(u) = round_usage {
@@ -95,6 +98,23 @@ pub async fn run(
                         .into(),
             });
             on_event(AgentEvent::TurnDone);
+            // If prior tool rounds completed successfully in this turn, keep them
+            // so earlier work is not lost, and record whatever text the assistant
+            // generated (closing the turn cleanly with an Assistant turn).
+            // If the cutoff happened on the very first round of this turn, discard
+            // the whole turn so history stays clean.
+            if turns.len() > history.len() + 1 {
+                turns.push(Turn::Assistant {
+                    text: if text.is_empty() {
+                        "The assistant's reply was cut off at the output-token limit mid-tool-call."
+                            .into()
+                    } else {
+                        text
+                    },
+                    tool_calls: Vec::new(),
+                });
+                return Ok(turns);
+            }
             return Ok(history);
         }
 
@@ -161,11 +181,12 @@ async fn invoke_one(
                 ToolStatus::Ok
             };
             // A denied call is fed back as an error so the model can adapt.
-            let content = if res.denied && res.content.is_empty() {
+            let raw_content = if res.denied && res.content.is_empty() {
                 "the user declined this tool call".to_string()
             } else {
                 res.content
             };
+            let content = cap_tool_result_content(&call.name, &raw_content);
             let is_error = res.is_error || res.denied;
             // The row's summary reads the same text the model is given (#385),
             // so the two never tell different stories about one call.
@@ -183,7 +204,9 @@ async fn invoke_one(
             }
         }
         Err(e) => {
-            let summary = srelens_agent::event::summarize_result(&e.to_string(), true);
+            let err_str = e.to_string();
+            let content = cap_tool_result_content(&call.name, &err_str);
+            let summary = srelens_agent::event::summarize_result(&content, true);
             on_event(AgentEvent::ToolResult {
                 id: call.id.clone(),
                 status: ToolStatus::Error,
@@ -192,11 +215,138 @@ async fn invoke_one(
             ToolOutcome {
                 id: call.id.clone(),
                 name: call.name.clone(),
-                content: e.to_string(),
+                content,
                 is_error: true,
             }
         }
     }
+}
+
+/// Maximum tool result bytes passed to the native model in one tool execution.
+pub const MAX_AGENT_TOOL_RESULT_BYTES: usize = 16 * 1024; // 16 KB
+
+/// Returns true if the tool outputs sequential logs where newest entries are most critical.
+fn is_log_tool(tool_name: &str) -> bool {
+    let lower = tool_name.to_ascii_lowercase();
+    lower.contains("podlogs") || lower.contains("journallogs") || lower.ends_with("logs")
+}
+
+/// Cap individual tool result content to prevent single massive outputs (e.g. huge pod logs)
+/// from blowing out the model context window.
+///
+/// For log streams (`podLogs`, `nodeJournalLogs`), the newest lines at the tail are preserved
+/// up to 16KB so that panics, stack traces, and crash reasons are not dropped.
+/// For structured objects/lists (`listPods`, `getManifest`), the head is preserved.
+pub fn cap_tool_result_content(tool_name: &str, content: &str) -> String {
+    if content.len() <= MAX_AGENT_TOOL_RESULT_BYTES {
+        return content.to_string();
+    }
+    if let Some(refusal) = page_over_cap(content) {
+        return refusal;
+    }
+
+    if is_log_tool(tool_name) {
+        // Log streams: keep the newest lines at the tail where panics, errors, and crashes appear.
+        // Budget space for the notice header so total output never exceeds MAX_AGENT_TOOL_RESULT_BYTES.
+        let notice_prefix = format!(
+            "[Earlier log lines truncated (kept newest bytes for `{tool_name}`). Specify tail_lines or container if needed.]\n\n"
+        );
+        let max_tail = MAX_AGENT_TOOL_RESULT_BYTES.saturating_sub(notice_prefix.len() + 10);
+        let mut start = content.len().saturating_sub(max_tail);
+        while start < content.len() && !content.is_char_boundary(start) {
+            start += 1;
+        }
+        let slice = &content[start..];
+        let offset = match slice.find('\n') {
+            Some(newline_pos) if start + newline_pos + 1 < content.len() => start + newline_pos + 1,
+            _ => start,
+        };
+        let tail = &content[offset..];
+        format!(
+            "[Earlier log lines truncated (kept newest {} bytes for `{tool_name}`). Specify tail_lines or container if needed.]\n\n{}",
+            tail.len(),
+            tail
+        )
+    } else {
+        // Structured objects/lists: keep head and reserve budget for notice suffix.
+        let notice = format!(
+            "\n\n[Output truncated at 16KB for `{tool_name}`. Output exceeded limit; specify more focused selectors, namespace, or fields.]"
+        );
+        let max_head = MAX_AGENT_TOOL_RESULT_BYTES.saturating_sub(notice.len());
+        let boundary = content
+            .char_indices()
+            .take_while(|(idx, _)| *idx <= max_head)
+            .last()
+            .map(|(idx, _)| idx)
+            .unwrap_or(0);
+        let mut truncated = content[..boundary].to_string();
+        truncated.push_str(&notice);
+        truncated
+    }
+}
+
+/// A page of `k8s.podLogs` over the cap, refused whole: cut to its tail it
+/// would keep `next_cursor` and lose its first lines, which the agent would
+/// then never read. `None` for any other answer.
+fn page_over_cap(content: &str) -> Option<String> {
+    let page: serde_json::Value = serde_json::from_str(content).ok()?;
+    page.get("next_cursor")?;
+    let logs = page.get("logs")?.as_str()?.len();
+    let over = content.len() - MAX_AGENT_TOOL_RESULT_BYTES;
+    // The page's own fields stay; `logs` shrinks, with room to spare.
+    let fits = logs.saturating_sub(over + 512).max(1_000);
+    Some(format!(
+        "The log page was {} bytes, over the {MAX_AGENT_TOOL_RESULT_BYTES} bytes this agent keeps of one result, so none of it was read. Call again with the same arguments and max_bytes: {fits}.",
+        content.len()
+    ))
+}
+
+/// Compact earlier intermediate tool results when sending requests to the provider
+/// in multi-round execution.
+///
+/// Compact prior completed user turns for sending to the model:
+/// - The active user turn (`idx >= current_turn_start`) is ALWAYS preserved in full fidelity.
+///   This prevents in-turn amnesia loops (where earlier tool outputs disappear, causing
+///   the model to repeatedly re-query) and ensures Anthropic prompt caching prefixes remain
+///   100% stable across all rounds of the active turn.
+/// - Tool results from previous user turns (`idx < current_turn_start`) are condensed if
+///   their content exceeds 600 bytes.
+/// - Canonical conversation history (`turns`) remains immutable and untouched.
+pub fn compact_request_turns_for_round(turns: &[Turn]) -> Vec<Turn> {
+    let current_turn_start = turns
+        .iter()
+        .rposition(|t| matches!(t, Turn::User(_)))
+        .unwrap_or(0);
+
+    turns
+        .iter()
+        .enumerate()
+        .map(|(idx, turn)| match turn {
+            Turn::ToolResults(outcomes) if idx < current_turn_start => {
+                let compacted = outcomes
+                    .iter()
+                    .map(|o| {
+                        let mut copy = o.clone();
+                        if copy.content.len() > 600 {
+                            let snippet: String = copy
+                                .content
+                                .char_indices()
+                                .take_while(|(byte_idx, ch)| *byte_idx + ch.len_utf8() <= 250)
+                                .map(|(_, ch)| ch)
+                                .collect();
+                            copy.content = format!(
+                                "{}... [Output condensed for subsequent round]",
+                                snippet.trim_end()
+                            );
+                        }
+                        copy
+                    })
+                    .collect();
+                Turn::ToolResults(compacted)
+            }
+            _ => turn.clone(),
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -398,6 +548,66 @@ mod tests {
         assert!(matches!(events.last(), Some(AgentEvent::TurnDone)));
         // The failed turn is discarded — the next request starts from the prior history.
         assert_eq!(history, prior);
+    }
+
+    #[test]
+    fn a_truncated_round_with_tool_calls_after_successful_rounds_preserves_prior_work() {
+        let provider = ScriptedProvider::new(vec![
+            vec![
+                StreamItem::ToolCall(ToolCall {
+                    id: "c1".into(),
+                    name: "k8s_listPods".into(),
+                    arguments: json!({}),
+                    thought_signature: None,
+                }),
+                StreamItem::Done(StopReason::ToolUse),
+            ],
+            vec![
+                StreamItem::Text("Partial analysis before cutting off".into()),
+                StreamItem::ToolCall(ToolCall {
+                    id: "c2".into(),
+                    name: "k8s_scale".into(),
+                    arguments: json!({}),
+                    thought_signature: None,
+                }),
+                StreamItem::Done(StopReason::MaxTokens),
+            ],
+        ]);
+        let invoker = StubInvoker {
+            result: ToolCallResult {
+                content: "pod-1".into(),
+                is_error: false,
+                denied: false,
+            },
+            calls: Mutex::new(Vec::new()),
+        };
+        let prior = vec![Turn::User("earlier".into())];
+        let (events, history) = drive_from(&provider, &invoker, prior.clone(), "inspect and fix");
+        // Only the first round's tool executed
+        assert_eq!(invoker.calls.lock().unwrap().len(), 1);
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, AgentEvent::Error { message } if message.contains("cut off"))),
+            "expected a truncation error event, got {events:?}"
+        );
+        assert!(matches!(events.last(), Some(AgentEvent::TurnDone)));
+        // Prior work and current turn's successful tool round are preserved,
+        // ending with an Assistant turn containing the text fragment.
+        assert_eq!(history.len(), 5);
+        assert_eq!(history[0], Turn::User("earlier".into()));
+        assert_eq!(history[1], Turn::User("inspect and fix".into()));
+        assert!(
+            matches!(history[2], Turn::Assistant { ref tool_calls, .. } if tool_calls.len() == 1)
+        );
+        assert!(matches!(history[3], Turn::ToolResults(ref res) if res.len() == 1));
+        assert_eq!(
+            history[4],
+            Turn::Assistant {
+                text: "Partial analysis before cutting off".into(),
+                tool_calls: Vec::new(),
+            }
+        );
     }
 
     #[test]
@@ -624,6 +834,56 @@ mod tests {
         );
     }
 
+    struct LargeErrorInvoker;
+
+    #[async_trait]
+    impl ToolInvoker for LargeErrorInvoker {
+        async fn list_tools(&self) -> Result<Vec<ToolDef>, LlmError> {
+            Ok(vec![ToolDef {
+                name: "k8s_scale".into(),
+                description: "scale".into(),
+                input_schema: json!({ "type": "object" }),
+                read_only: false,
+            }])
+        }
+
+        async fn call_tool(&self, _name: &str, _args: &Value) -> Result<ToolCallResult, LlmError> {
+            Err(LlmError::Api(
+                "fatal error trace: ".to_string() + &"x".repeat(25 * 1024),
+            ))
+        }
+    }
+
+    #[test]
+    fn a_large_tool_error_is_capped_in_outcome_and_event() {
+        let provider = ScriptedProvider::new(vec![
+            vec![
+                StreamItem::ToolCall(ToolCall {
+                    id: "c1".into(),
+                    name: "k8s_scale".into(),
+                    arguments: json!({}),
+                    thought_signature: None,
+                }),
+                StreamItem::Done(StopReason::ToolUse),
+            ],
+            vec![
+                StreamItem::Text("done".into()),
+                StreamItem::Done(StopReason::EndTurn),
+            ],
+        ]);
+        let (_events, returned_history) =
+            drive_from(&provider, &LargeErrorInvoker, Vec::new(), "scale it");
+        if let Turn::ToolResults(outcomes) = &returned_history[2] {
+            assert!(outcomes[0].is_error);
+            assert!(outcomes[0].content.len() <= MAX_AGENT_TOOL_RESULT_BYTES);
+            assert!(outcomes[0]
+                .content
+                .contains("[Output truncated at 16KB for `k8s_scale`"));
+        } else {
+            panic!("Expected Turn::ToolResults at index 2");
+        }
+    }
+
     #[test]
     fn a_provider_error_surfaces_before_turn_done() {
         let provider = ScriptedProvider::new(vec![vec![StreamItem::Error("Overloaded".into())]]);
@@ -751,5 +1011,347 @@ mod tests {
             (1000, 50, 0, 1050),
             "multiple snapshots in a single round must record the latest snapshot, not sum them"
         );
+    }
+
+    #[test]
+    fn test_cap_tool_result_content_structured_tool_truncates_head_with_hint() {
+        let large = "a".repeat(20 * 1024);
+        let capped = cap_tool_result_content("k8s_listPods", &large);
+        assert!(capped.len() <= MAX_AGENT_TOOL_RESULT_BYTES);
+        assert!(capped.contains("[Output truncated at 16KB for `k8s_listPods`"));
+        assert!(capped.contains("specify more focused selectors"));
+    }
+
+    #[test]
+    fn test_cap_tool_result_content_log_tool_preserves_tail() {
+        let mut large = "OLD_STARTUP_LOG\n".to_string();
+        large.push_str(&"x".repeat(20 * 1024));
+        large.push_str("\nCRITICAL_PANIC_AT_TAIL\n");
+
+        let capped = cap_tool_result_content("k8s_podLogs", &large);
+        assert!(capped.len() <= MAX_AGENT_TOOL_RESULT_BYTES);
+        assert!(capped.contains("[Earlier log lines truncated (kept newest"));
+        assert!(capped.contains("CRITICAL_PANIC_AT_TAIL"));
+        assert!(!capped.contains("OLD_STARTUP_LOG"));
+    }
+
+    /// A page of `k8s.podLogs` cut to its tail would keep its cursor and lose
+    /// its first lines, which the agent would then never read. It is refused
+    /// whole, naming a `max_bytes` that fits.
+    #[test]
+    fn test_cap_tool_result_content_refuses_a_log_page_whole() {
+        let logs = "x".repeat(20 * 1024);
+        let page = serde_json::json!({
+            "logs": logs, "next_cursor": "abc", "end": false, "lines": 1, "scanned": 1
+        })
+        .to_string();
+        let capped = cap_tool_result_content("k8s_podLogs", &page);
+        assert!(
+            !capped.contains("next_cursor") && !capped.contains("abc"),
+            "a cut page keeps its cursor: {capped}"
+        );
+        let fits: usize = capped
+            .split("max_bytes: ")
+            .nth(1)
+            .and_then(|rest| rest.trim_end_matches('.').parse().ok())
+            .unwrap_or_else(|| panic!("names a max_bytes: {capped}"));
+        assert!(
+            fits + (page.len() - logs.len()) <= MAX_AGENT_TOOL_RESULT_BYTES,
+            "{fits}"
+        );
+    }
+
+    #[test]
+    fn test_cap_tool_result_content_preserves_short_output() {
+        let short = "{\"status\":\"ok\"}";
+        let capped = cap_tool_result_content("k8s_scale", short);
+        assert_eq!(capped, short);
+    }
+
+    #[test]
+    fn test_compact_request_turns_condenses_prior_user_turns_preserves_active_turn() {
+        let turns = vec![
+            // Prior user turn
+            Turn::User("earlier question".into()),
+            Turn::Assistant {
+                text: "".into(),
+                tool_calls: vec![ToolCall {
+                    id: "c1".into(),
+                    name: "k8s_listPods".into(),
+                    arguments: json!({}),
+                    thought_signature: None,
+                }],
+            },
+            Turn::ToolResults(vec![ToolOutcome {
+                id: "c1".into(),
+                name: "k8s_listPods".into(),
+                content: "a".repeat(1500),
+                is_error: false,
+            }]),
+            Turn::Assistant {
+                text: "earlier answer".into(),
+                tool_calls: vec![],
+            },
+            // Current active user turn
+            Turn::User("current question".into()),
+            Turn::Assistant {
+                text: "".into(),
+                tool_calls: vec![ToolCall {
+                    id: "c2".into(),
+                    name: "k8s_listPods".into(),
+                    arguments: json!({}),
+                    thought_signature: None,
+                }],
+            },
+            Turn::ToolResults(vec![ToolOutcome {
+                id: "c2".into(),
+                name: "k8s_listPods".into(),
+                content: "b".repeat(1500),
+                is_error: false,
+            }]),
+            Turn::Assistant {
+                text: "".into(),
+                tool_calls: vec![ToolCall {
+                    id: "c3".into(),
+                    name: "k8s_scale".into(),
+                    arguments: json!({}),
+                    thought_signature: None,
+                }],
+            },
+            Turn::ToolResults(vec![ToolOutcome {
+                id: "c3".into(),
+                name: "k8s_scale".into(),
+                content: "c".repeat(1500),
+                is_error: false,
+            }]),
+        ];
+
+        let compacted = compact_request_turns_for_round(&turns);
+        assert_eq!(compacted.len(), 9);
+
+        // Turn at index 2 (from earlier user question) must be condensed
+        if let Turn::ToolResults(outcomes) = &compacted[2] {
+            assert!(outcomes[0]
+                .content
+                .contains("... [Output condensed for subsequent round]"));
+            assert!(outcomes[0].content.len() < 400);
+        } else {
+            panic!("Expected Turn::ToolResults at index 2");
+        }
+
+        // Turns at index 6 and 8 (from current active user turn) must remain full
+        if let Turn::ToolResults(outcomes) = &compacted[6] {
+            assert_eq!(outcomes[0].content.len(), 1500);
+            assert!(!outcomes[0].content.contains("[Output condensed"));
+        } else {
+            panic!("Expected Turn::ToolResults at index 6");
+        }
+        if let Turn::ToolResults(outcomes) = &compacted[8] {
+            assert_eq!(outcomes[0].content.len(), 1500);
+            assert!(!outcomes[0].content.contains("[Output condensed"));
+        } else {
+            panic!("Expected Turn::ToolResults at index 8");
+        }
+    }
+
+    #[test]
+    fn test_compact_request_turns_preserves_all_rounds_in_active_turn() {
+        let heavy = "x".repeat(1500);
+        let turns = vec![
+            Turn::User("active question".into()),
+            Turn::Assistant {
+                text: "".into(),
+                tool_calls: vec![],
+            },
+            Turn::ToolResults(vec![ToolOutcome {
+                id: "c1".into(),
+                name: "tool1".into(),
+                content: heavy.clone(),
+                is_error: false,
+            }]),
+            Turn::Assistant {
+                text: "".into(),
+                tool_calls: vec![],
+            },
+            Turn::ToolResults(vec![ToolOutcome {
+                id: "c2".into(),
+                name: "tool2".into(),
+                content: heavy.clone(),
+                is_error: false,
+            }]),
+            Turn::Assistant {
+                text: "".into(),
+                tool_calls: vec![],
+            },
+            Turn::ToolResults(vec![ToolOutcome {
+                id: "c3".into(),
+                name: "tool3".into(),
+                content: heavy.clone(),
+                is_error: false,
+            }]),
+            Turn::Assistant {
+                text: "".into(),
+                tool_calls: vec![],
+            },
+            Turn::ToolResults(vec![ToolOutcome {
+                id: "c4".into(),
+                name: "tool4".into(),
+                content: heavy.clone(),
+                is_error: false,
+            }]),
+        ];
+
+        let compacted = compact_request_turns_for_round(&turns);
+        assert_eq!(compacted.len(), 9);
+
+        // All rounds in the active turn (indices 2, 4, 6, 8) must remain full
+        for idx in [2, 4, 6, 8] {
+            if let Turn::ToolResults(outcomes) = &compacted[idx] {
+                assert_eq!(outcomes[0].content.len(), 1500);
+                assert!(!outcomes[0].content.contains("[Output condensed"));
+            } else {
+                panic!("Expected ToolResults at index {idx}");
+            }
+        }
+    }
+
+    #[test]
+    fn test_compact_request_turns_multibyte_prefix_bounded_by_bytes() {
+        // '日' is 3 bytes in UTF-8. 250 characters = 750 bytes (> 600 bytes guard).
+        let multibyte_content = "日".repeat(250);
+        let turns = vec![
+            Turn::User("earlier question".into()),
+            Turn::Assistant {
+                text: "".into(),
+                tool_calls: vec![ToolCall {
+                    id: "c1".into(),
+                    name: "k8s_listPods".into(),
+                    arguments: json!({}),
+                    thought_signature: None,
+                }],
+            },
+            Turn::ToolResults(vec![ToolOutcome {
+                id: "c1".into(),
+                name: "k8s_listPods".into(),
+                content: multibyte_content,
+                is_error: false,
+            }]),
+            Turn::Assistant {
+                text: "answer".into(),
+                tool_calls: vec![],
+            },
+            Turn::User("current question".into()),
+        ];
+
+        let compacted = compact_request_turns_for_round(&turns);
+        if let Turn::ToolResults(outcomes) = &compacted[2] {
+            let prefix = outcomes[0]
+                .content
+                .strip_suffix("... [Output condensed for subsequent round]")
+                .expect("has condensation suffix");
+            assert!(
+                prefix.len() <= 250,
+                "prefix byte length {} must be <= 250 bytes",
+                prefix.len()
+            );
+            // 83 chars * 3 bytes = 249 bytes. If it had taken 250 chars, prefix.len() would be 750 bytes.
+            assert_eq!(prefix.len(), 249);
+            assert_eq!(prefix.chars().count(), 83);
+        } else {
+            panic!("Expected Turn::ToolResults at index 2");
+        }
+    }
+
+    #[test]
+    fn test_run_preserves_current_turn_tool_results_across_rounds_and_condenses_history() {
+        let heavy_output_1 = "X".repeat(1000);
+        let history = vec![
+            Turn::User("past query".into()),
+            Turn::Assistant {
+                text: "".into(),
+                tool_calls: vec![ToolCall {
+                    id: "c0".into(),
+                    name: "k8s_scale".into(),
+                    arguments: json!({}),
+                    thought_signature: None,
+                }],
+            },
+            Turn::ToolResults(vec![ToolOutcome {
+                id: "c0".into(),
+                name: "k8s_scale".into(),
+                content: "H".repeat(1000),
+                is_error: false,
+            }]),
+            Turn::Assistant {
+                text: "past answer".into(),
+                tool_calls: vec![],
+            },
+        ];
+
+        let provider = ScriptedProvider::new(vec![
+            // Round 1: calls tool 1
+            vec![
+                StreamItem::ToolCall(ToolCall {
+                    id: "c1".into(),
+                    name: "k8s_scale".into(),
+                    arguments: json!({}),
+                    thought_signature: None,
+                }),
+                StreamItem::Done(StopReason::ToolUse),
+            ],
+            // Round 2: calls tool 2
+            vec![
+                StreamItem::ToolCall(ToolCall {
+                    id: "c2".into(),
+                    name: "k8s_scale".into(),
+                    arguments: json!({}),
+                    thought_signature: None,
+                }),
+                StreamItem::Done(StopReason::ToolUse),
+            ],
+            // Round 3: final answer
+            vec![
+                StreamItem::Text("done".into()),
+                StreamItem::Done(StopReason::EndTurn),
+            ],
+        ]);
+
+        let invoker = StubInvoker {
+            result: ToolCallResult {
+                content: heavy_output_1.clone(),
+                is_error: false,
+                denied: false,
+            },
+            calls: Mutex::new(Vec::new()),
+        };
+
+        let (_events, returned_history) = drive_from(&provider, &invoker, history, "multi step");
+
+        let seen = provider.seen_turns.lock().unwrap().clone();
+        assert_eq!(seen.len(), 3);
+
+        // In round 3, check that:
+        // 1. The historical tool result (index 2) was condensed
+        if let Turn::ToolResults(outcomes) = &seen[2][2] {
+            assert!(outcomes[0]
+                .content
+                .contains("... [Output condensed for subsequent round]"));
+        } else {
+            panic!("Expected Turn::ToolResults at index 2 of round 3");
+        }
+
+        // 2. The active turn's round 1 tool result (index 6) was preserved in full
+        if let Turn::ToolResults(outcomes) = &seen[2][6] {
+            assert_eq!(outcomes[0].content, heavy_output_1);
+        } else {
+            panic!("Expected Turn::ToolResults at index 6 of round 3");
+        }
+
+        // Canonical returned_history preserves the full content for active turn tool results
+        if let Turn::ToolResults(outcomes) = &returned_history[6] {
+            assert_eq!(outcomes[0].content, heavy_output_1);
+        } else {
+            panic!("Expected Turn::ToolResults at index 6 of returned history");
+        }
     }
 }

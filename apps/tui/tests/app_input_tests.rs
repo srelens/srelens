@@ -13,7 +13,6 @@ use ratatui::style::Style;
 use serde_json::{json, Value};
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver};
 
-use srelens_kube::contexts::ContextDto;
 use srectl::app::{ActiveView, App, SuspendAction};
 use srectl::commands::{
     command_suggestions_with_crds, CommandTarget, CrdMeta, PrinterColumn, ResourceKind,
@@ -27,16 +26,13 @@ use srectl::views::{
     DescribeViewState, LogsViewState, NodeInspectorState, ResourceTableState, YamlViewState,
 };
 use srectl::CommandPopupDensity;
+use srelens_kube::contexts::ContextDto;
 
-use common::{ch, ctrl, key, shift, type_str};
+use common::{ch, ctrl, key, press, shift, type_str};
 
 // ---------------------------------------------------------------------------
 // Local helpers
 // ---------------------------------------------------------------------------
-
-async fn press(app: &mut App, k: KeyEvent) {
-    app.handle_key_event(k).await;
-}
 
 fn table(app: &App) -> &ResourceTableState {
     match &app.active_view {
@@ -1766,6 +1762,775 @@ async fn empty_command_enter_runs_highlighted_suggestion_and_arrow_selection() {
     type_str(&mut app, "zzzz").await;
     press(&mut app, key(KeyCode::Enter)).await;
     assert!(toast(&app).starts_with("Unknown command: 'zzzz'"));
+}
+
+#[tokio::test]
+async fn namespace_colon_command_switches_namespace_directly_without_leaving_modal_open() {
+    let _settings = common::env::isolate_settings();
+    let (mut app, _rx) = common::app().await;
+    app.namespaces = vec![
+        "default".to_string(),
+        "kube-system".to_string(),
+        "tools".to_string(),
+    ];
+
+    // :ns default + Enter switches namespace directly without leaving modal open
+    press(&mut app, ch(':')).await;
+    type_str(&mut app, "ns default").await;
+    press(&mut app, key(KeyCode::Enter)).await;
+    assert_eq!(app.active_namespace, "default");
+    assert!(app.modal.is_none(), "Modal must not be left open");
+    assert_eq!(app.input_mode, InputMode::Normal);
+
+    // :ns tools + Enter switches to tools
+    press(&mut app, ch(':')).await;
+    type_str(&mut app, "ns tools").await;
+    press(&mut app, key(KeyCode::Enter)).await;
+    assert_eq!(app.active_namespace, "tools");
+    assert!(app.modal.is_none(), "Modal must not be left open");
+
+    // :ns -A + Enter switches to all namespaces ("")
+    press(&mut app, ch(':')).await;
+    type_str(&mut app, "ns -A").await;
+    press(&mut app, key(KeyCode::Enter)).await;
+    assert_eq!(
+        app.active_namespace, "",
+        ":ns -A must select all namespaces"
+    );
+
+    // :ns * + Enter switches to all namespaces ("")
+    app.active_namespace = "tools".to_string();
+    press(&mut app, ch(':')).await;
+    type_str(&mut app, "ns *").await;
+    press(&mut app, key(KeyCode::Enter)).await;
+    assert_eq!(app.active_namespace, "", ":ns * must select all namespaces");
+
+    // :ns all + Enter switches to all namespaces ("")
+    app.active_namespace = "tools".to_string();
+    press(&mut app, ch(':')).await;
+    type_str(&mut app, "ns all").await;
+    press(&mut app, key(KeyCode::Enter)).await;
+    assert_eq!(
+        app.active_namespace, "",
+        ":ns all must select all namespaces"
+    );
+
+    // When discovery is pending (empty namespaces), :ns -A still switches to all namespaces ("")
+    app.namespaces.clear();
+    app.active_namespace = "tools".to_string();
+    press(&mut app, ch(':')).await;
+    type_str(&mut app, "ns -A").await;
+    press(&mut app, key(KeyCode::Enter)).await;
+    assert_eq!(
+        app.active_namespace, "",
+        ":ns -A with empty namespaces must select all namespaces"
+    );
+}
+
+#[tokio::test]
+async fn namespace_command_tab_autocompletes_and_cycles_namespaces() {
+    let _settings = common::env::isolate_settings();
+    let (mut app, _rx) = common::app().await;
+    app.namespaces = vec![
+        "cattle-fleet-system".to_string(),
+        "cattle-impersonation-system".to_string(),
+        "cattle-system".to_string(),
+        "default".to_string(),
+    ];
+
+    // :pods cattl + Tab repeatedly cycles through all cattle namespaces
+    press(&mut app, ch(':')).await;
+    type_str(&mut app, "pods cattl").await;
+
+    // 1st Tab: first matching candidate
+    press(&mut app, key(KeyCode::Tab)).await;
+    assert_eq!(app.command_buffer, "pods cattle-fleet-system");
+
+    // 2nd Tab: cycles to second matching candidate
+    press(&mut app, key(KeyCode::Tab)).await;
+    assert_eq!(app.command_buffer, "pods cattle-impersonation-system");
+
+    // 3rd Tab: cycles to third matching candidate
+    press(&mut app, key(KeyCode::Tab)).await;
+    assert_eq!(app.command_buffer, "pods cattle-system");
+
+    // 4th Tab: wraps around to first candidate
+    press(&mut app, key(KeyCode::Tab)).await;
+    assert_eq!(app.command_buffer, "pods cattle-fleet-system");
+
+    // BackTab (Shift+Tab): cycles backwards to third candidate
+    press(&mut app, key(KeyCode::BackTab)).await;
+    assert_eq!(app.command_buffer, "pods cattle-system");
+
+    // Enter executes the currently cycled selection
+    press(&mut app, key(KeyCode::Enter)).await;
+    assert_eq!(app.active_namespace, "cattle-system");
+    assert_eq!(table(&app).kind, ResourceKind::Pods);
+    assert!(app.modal.is_none());
+}
+
+#[tokio::test]
+async fn namespace_command_tab_preserves_target_when_cluster_namespaces_update_before_enter() {
+    let _settings = common::env::isolate_settings();
+    let (mut app, _rx) = common::app().await;
+    app.namespaces = vec!["dev-b".to_string(), "dev-c".to_string()];
+
+    // Tab to dev-b
+    press(&mut app, ch(':')).await;
+    type_str(&mut app, "pods dev").await;
+    press(&mut app, key(KeyCode::Tab)).await;
+    assert_eq!(app.command_buffer, "pods dev-b");
+
+    // Asynchronous cluster discovery adds dev-a in the background before Enter
+    app.namespaces = vec![
+        "dev-a".to_string(),
+        "dev-b".to_string(),
+        "dev-c".to_string(),
+    ];
+
+    // Enter must open dev-b as shown on screen, not shift to dev-a
+    press(&mut app, key(KeyCode::Enter)).await;
+    assert_eq!(app.active_namespace, "dev-b");
+    assert_eq!(table(&app).kind, ResourceKind::Pods);
+    assert!(app.modal.is_none());
+}
+
+#[tokio::test]
+async fn namespace_loading_placeholder_hint_not_completed_on_tab() {
+    let _settings = common::env::isolate_settings();
+    let (mut app, _rx) = common::app().await;
+    app.namespaces.clear();
+
+    // While namespaces are not loaded, typing ":ns " shows "<namespace>" hint.
+    // Pressing Tab must NOT copy "<namespace>" into the buffer.
+    press(&mut app, ch(':')).await;
+    type_str(&mut app, "ns ").await;
+    press(&mut app, key(KeyCode::Tab)).await;
+    assert_eq!(
+        app.command_buffer, "ns ",
+        "Tab on placeholder hint must leave buffer unchanged"
+    );
+
+    // Enter must not switch to literal namespace "<namespace>"
+    press(&mut app, key(KeyCode::Enter)).await;
+    assert_ne!(
+        app.active_namespace, "<namespace>",
+        "Must not switch to literal <namespace>"
+    );
+}
+
+#[tokio::test]
+async fn wildcard_all_selected_even_when_substring_namespace_matches() {
+    let _settings = common::env::isolate_settings();
+    let (mut app, _rx) = common::app().await;
+    app.namespaces = vec!["small".to_string(), "default".to_string()];
+
+    // Cluster contains namespace "small" (which contains "all").
+    // Typing ":pods all" + Enter must select all namespaces (""), NOT "small".
+    press(&mut app, ch(':')).await;
+    type_str(&mut app, "pods all").await;
+    press(&mut app, key(KeyCode::Enter)).await;
+    assert_eq!(
+        app.active_namespace, "",
+        ":pods all must switch to all namespaces, not small"
+    );
+    assert_eq!(table(&app).kind, ResourceKind::Pods);
+    assert!(app.modal.is_none());
+}
+
+#[tokio::test]
+async fn wildcard_not_triggered_by_lowercase_dash_a_and_matches_team_a() {
+    let _settings = common::env::isolate_settings();
+    let (mut app, _rx) = common::app().await;
+    app.namespaces = vec!["team-a".to_string(), "default".to_string()];
+
+    // Typing ":pods -a" must match team-a without being intercepted by a fake "All namespaces" row
+    press(&mut app, ch(':')).await;
+    type_str(&mut app, "pods -a").await;
+    press(&mut app, key(KeyCode::Enter)).await;
+    assert_eq!(
+        app.active_namespace, "team-a",
+        ":pods -a must select team-a"
+    );
+    assert_eq!(table(&app).kind, ResourceKind::Pods);
+}
+
+#[tokio::test]
+async fn literal_all_namespace_targeted_when_cluster_has_all_namespace() {
+    let _settings = common::env::isolate_settings();
+    let (mut app, _rx) = common::app().await;
+    app.namespaces = vec![
+        "all".to_string(),
+        "small".to_string(),
+        "default".to_string(),
+    ];
+
+    // When a namespace literally named "all" exists in the cluster, ":pods all" targets "all"
+    press(&mut app, ch(':')).await;
+    type_str(&mut app, "pods all").await;
+    press(&mut app, key(KeyCode::Enter)).await;
+    assert_eq!(
+        app.active_namespace, "all",
+        ":pods all must target literal namespace all when it exists"
+    );
+    assert_eq!(table(&app).kind, ResourceKind::Pods);
+}
+
+#[tokio::test]
+async fn pasted_command_clears_tab_base_and_runs_full_pasted_query() {
+    let _settings = common::env::isolate_settings();
+    let (mut app, _rx) = common::app().await;
+    app.namespaces = vec!["prod".to_string(), "prod-blue".to_string()];
+
+    // Complete ":pods prod" with Tab
+    press(&mut app, ch(':')).await;
+    type_str(&mut app, "pods prod").await;
+    press(&mut app, key(KeyCode::Tab)).await;
+    assert_eq!(app.command_buffer, "pods prod");
+
+    // Paste "-blue"
+    app.handle_paste("-blue".to_string());
+    assert_eq!(app.command_buffer, "pods prod-blue");
+
+    // Enter must search "pods prod-blue" and open prod-blue, not cached "pods prod"
+    press(&mut app, key(KeyCode::Enter)).await;
+    assert_eq!(app.active_namespace, "prod-blue");
+    assert_eq!(table(&app).kind, ResourceKind::Pods);
+    assert!(app.modal.is_none());
+}
+
+#[tokio::test]
+async fn highlighted_row_tracks_target_when_namespaces_update() {
+    let _settings = common::env::isolate_settings();
+    let (mut app, _rx) = common::app().await;
+    app.namespaces = vec!["dev-b".to_string(), "dev-c".to_string()];
+
+    // Type ":pods dev" and press Down to select dev-c
+    press(&mut app, ch(':')).await;
+    type_str(&mut app, "pods dev").await;
+    press(&mut app, key(KeyCode::Down)).await;
+    assert_eq!(app.command_suggestion_idx, 1);
+
+    // Asynchronous discovery adds dev-a
+    let ch_name = format!("discovery:namespaces:{}", app.active_context);
+    app.handle_stream_event(
+        ch_name,
+        json!([{"name": "dev-a"}, {"name": "dev-b"}, {"name": "dev-c"}]),
+    );
+
+    // Rendering frame re-evaluates suggestions and ensures command_suggestion_idx tracks dev-c (now index 2)
+    let _ = common::render_app(&mut app, 100, 40);
+    assert_eq!(
+        app.command_suggestion_idx, 2,
+        "Highlighted row must follow dev-c to index 2"
+    );
+
+    // Enter executes dev-c
+    press(&mut app, key(KeyCode::Enter)).await;
+    assert_eq!(app.active_namespace, "dev-c");
+    assert_eq!(table(&app).kind, ResourceKind::Pods);
+}
+
+#[tokio::test]
+async fn single_matching_namespace_autoselects_on_enter() {
+    let _settings = common::env::isolate_settings();
+    let (mut app, _rx) = common::app().await;
+    app.namespaces = vec![
+        "airflow-edge".to_string(),
+        "monitoring".to_string(),
+        "default".to_string(),
+    ];
+
+    // :svc airflo has exactly 1 cluster match (airflow-edge).
+    // Hitting Enter directly without Down arrow must autoselect and run it.
+    press(&mut app, ch(':')).await;
+    type_str(&mut app, "svc airflo").await;
+    press(&mut app, key(KeyCode::Enter)).await;
+
+    assert_eq!(app.active_namespace, "airflow-edge");
+    assert_eq!(table(&app).kind, ResourceKind::Services);
+    assert!(app.modal.is_none());
+}
+
+#[tokio::test]
+async fn resource_namespace_command_switches_namespace_and_view() {
+    let _settings = common::env::isolate_settings();
+    let (mut app, _rx) = common::app().await;
+    app.namespaces = vec!["default".to_string(), "tools".to_string()];
+
+    // :pods tools + Enter switches namespace to tools and view to Pods
+    press(&mut app, ch(':')).await;
+    type_str(&mut app, "pods tools").await;
+    press(&mut app, key(KeyCode::Enter)).await;
+    assert_eq!(app.active_namespace, "tools");
+    assert_eq!(table(&app).kind, ResourceKind::Pods);
+    assert!(app.modal.is_none());
+
+    // :pods -A + Enter switches namespace to all ("") and view to Pods
+    press(&mut app, ch(':')).await;
+    type_str(&mut app, "pods -A").await;
+    press(&mut app, key(KeyCode::Enter)).await;
+    assert_eq!(
+        app.active_namespace, "",
+        ":pods -A must switch to all namespaces"
+    );
+    assert_eq!(table(&app).kind, ResourceKind::Pods);
+    assert!(app.modal.is_none());
+}
+
+#[tokio::test]
+async fn changed_duration_command_does_not_corrupt_active_namespace() {
+    let _settings = common::env::isolate_settings();
+    let (mut app, _rx) = common::app().await;
+    app.active_namespace = "default".to_string();
+
+    // :changed 1h must NOT overwrite active_namespace to "1h"
+    press(&mut app, ch(':')).await;
+    type_str(&mut app, "changed 1h").await;
+    press(&mut app, key(KeyCode::Enter)).await;
+    assert_eq!(
+        app.active_namespace, "default",
+        "active_namespace must not be corrupted by duration"
+    );
+    assert!(matches!(app.active_view, ActiveView::Changed(_)));
+}
+
+#[tokio::test]
+async fn crd_selection_down_arrow_then_space_commits_selected_crd() {
+    let _settings = common::env::isolate_settings();
+    let (mut app, _rx) = common::app().await;
+
+    let crd_agent = CrdMeta {
+        crd_name: "prometheusagents.monitoring.coreos.com".to_string(),
+        group: "monitoring.coreos.com".to_string(),
+        version: "v1alpha1".to_string(),
+        kind: "PrometheusAgent".to_string(),
+        plural: "prometheusagents".to_string(),
+        singular: "prometheusagent".to_string(),
+        namespaced: true,
+        short_names: vec![],
+        printer_columns: vec![],
+        created_at: None,
+    };
+    let crd_prom = CrdMeta {
+        crd_name: "prometheuses.monitoring.coreos.com".to_string(),
+        group: "monitoring.coreos.com".to_string(),
+        version: "v1".to_string(),
+        kind: "Prometheus".to_string(),
+        plural: "prometheuses".to_string(),
+        singular: "prometheus".to_string(),
+        namespaced: true,
+        short_names: vec![],
+        printer_columns: vec![],
+        created_at: None,
+    };
+    let crd_rules = CrdMeta {
+        crd_name: "prometheusrules.monitoring.coreos.com".to_string(),
+        group: "monitoring.coreos.com".to_string(),
+        version: "v1".to_string(),
+        kind: "PrometheusRule".to_string(),
+        plural: "prometheusrules".to_string(),
+        singular: "prometheusrule".to_string(),
+        namespaced: true,
+        short_names: vec![],
+        printer_columns: vec![],
+        created_at: None,
+    };
+
+    app.crds = vec![crd_agent.clone(), crd_prom.clone(), crd_rules.clone()];
+    app.namespaces = vec!["default".to_string(), "monitoring".to_string()];
+
+    // 1. Type :prome
+    press(&mut app, ch(':')).await;
+    type_str(&mut app, "prome").await;
+
+    // 2. Press Down twice to select prometheusrules (index 2)
+    press(&mut app, key(KeyCode::Down)).await;
+    assert_eq!(app.command_suggestion_idx, 1);
+    press(&mut app, key(KeyCode::Down)).await;
+    assert_eq!(app.command_suggestion_idx, 2);
+
+    // 3. Press Space: must commit "prometheusrules " into command_buffer
+    press(&mut app, ch(' ')).await;
+    assert_eq!(app.command_buffer, "prometheusrules ");
+    assert_eq!(app.command_suggestion_idx, 0);
+
+    // 4. Press Enter: must execute prometheusrules, NOT prometheusagents!
+    press(&mut app, key(KeyCode::Enter)).await;
+    assert_eq!(table(&app).kind, ResourceKind::CustomResource(crd_rules));
+}
+
+#[tokio::test]
+async fn crd_selection_down_arrow_space_then_namespace_switches_namespace() {
+    let _settings = common::env::isolate_settings();
+    let (mut app, _rx) = common::app().await;
+
+    let crd_rules = CrdMeta {
+        crd_name: "prometheusrules.monitoring.coreos.com".to_string(),
+        group: "monitoring.coreos.com".to_string(),
+        version: "v1".to_string(),
+        kind: "PrometheusRule".to_string(),
+        plural: "prometheusrules".to_string(),
+        singular: "prometheusrule".to_string(),
+        namespaced: true,
+        short_names: vec![],
+        printer_columns: vec![],
+        created_at: None,
+    };
+
+    app.crds = vec![crd_rules.clone()];
+    app.namespaces = vec!["default".to_string(), "monitoring".to_string()];
+
+    press(&mut app, ch(':')).await;
+    type_str(&mut app, "prome").await;
+    press(&mut app, key(KeyCode::Down)).await;
+    press(&mut app, ch(' ')).await;
+    assert_eq!(app.command_buffer, "prometheusrules ");
+
+    type_str(&mut app, "moni").await;
+    press(&mut app, key(KeyCode::Enter)).await;
+    assert_eq!(app.active_namespace, "monitoring");
+    assert_eq!(table(&app).kind, ResourceKind::CustomResource(crd_rules));
+}
+
+#[tokio::test]
+async fn static_command_selection_down_arrow_then_space_commits_selected_command() {
+    let _settings = common::env::isolate_settings();
+    let (mut app, _rx) = common::app().await;
+
+    // Type :po and navigate down to pdb (PodDisruptionBudgets)
+    press(&mut app, ch(':')).await;
+    type_str(&mut app, "po").await;
+    let suggestions = command_suggestions_with_crds("po", &app.crds);
+    let pdb_idx = suggestions
+        .iter()
+        .position(|(def, _)| {
+            def.target == CommandTarget::Resource(ResourceKind::PodDisruptionBudgets)
+        })
+        .expect("poddisruptionbudgets must be suggested for :po");
+
+    for _ in 0..pdb_idx {
+        press(&mut app, key(KeyCode::Down)).await;
+    }
+    assert_eq!(app.command_suggestion_idx, pdb_idx);
+
+    // Press Space: commits "pdb "
+    press(&mut app, ch(' ')).await;
+    assert_eq!(app.command_buffer, "pdb ");
+
+    // Press Enter: opens PodDisruptionBudgets
+    press(&mut app, key(KeyCode::Enter)).await;
+    assert_eq!(table(&app).kind, ResourceKind::PodDisruptionBudgets);
+}
+
+#[tokio::test]
+async fn empty_argument_with_trailing_space_leaves_active_namespace_unchanged() {
+    let _settings = common::env::isolate_settings();
+    let (mut app, _rx) = common::app().await;
+    app.active_namespace = "prod".to_string();
+    app.namespaces = vec!["default".to_string(), "prod".to_string()];
+
+    // Type ":pods " with trailing space and hit Enter.
+    // Active namespace must remain "prod", NOT switch to "default"!
+    press(&mut app, ch(':')).await;
+    type_str(&mut app, "pods ").await;
+    press(&mut app, key(KeyCode::Enter)).await;
+
+    assert_eq!(
+        app.active_namespace, "prod",
+        "Empty argument with trailing space must leave active_namespace unchanged"
+    );
+    assert_eq!(table(&app).kind, ResourceKind::Pods);
+}
+
+#[tokio::test]
+async fn crd_plural_collision_space_preserves_full_crd_name_with_group() {
+    let _settings = common::env::isolate_settings();
+    let (mut app, _rx) = common::app().await;
+
+    let widget_a = CrdMeta {
+        crd_name: "widgets.a.io".to_string(),
+        group: "a.io".to_string(),
+        version: "v1".to_string(),
+        kind: "Widget".to_string(),
+        plural: "widgets".to_string(),
+        singular: "widget".to_string(),
+        namespaced: true,
+        short_names: vec![],
+        printer_columns: vec![],
+        created_at: None,
+    };
+    let widget_b = CrdMeta {
+        crd_name: "widgets.b.io".to_string(),
+        group: "b.io".to_string(),
+        version: "v1".to_string(),
+        kind: "Widget".to_string(),
+        plural: "widgets".to_string(),
+        singular: "widget".to_string(),
+        namespaced: true,
+        short_names: vec![],
+        printer_columns: vec![],
+        created_at: None,
+    };
+
+    app.crds = vec![widget_a.clone(), widget_b.clone()];
+    app.namespaces = vec!["default".to_string()];
+
+    // Type widgets.b.io and select it
+    press(&mut app, ch(':')).await;
+    type_str(&mut app, "widgets.b.io").await;
+    press(&mut app, key(KeyCode::Down)).await;
+
+    // Press Space: must preserve full CRD name "widgets.b.io " rather than stripping to ambiguous "widgets "
+    press(&mut app, ch(' ')).await;
+    assert_eq!(app.command_buffer, "widgets.b.io ");
+
+    // Press Enter: must open widgets.b.io, NOT widgets.a.io!
+    press(&mut app, key(KeyCode::Enter)).await;
+    assert_eq!(table(&app).kind, ResourceKind::CustomResource(widget_b));
+}
+
+#[tokio::test]
+async fn crd_plural_collision_tab_then_space_preserves_full_crd_name_with_group() {
+    let _settings = common::env::isolate_settings();
+    let (mut app, _rx) = common::app().await;
+
+    let widget_a = CrdMeta {
+        crd_name: "widgets.a.io".to_string(),
+        group: "a.io".to_string(),
+        version: "v1".to_string(),
+        kind: "Widget".to_string(),
+        plural: "widgets".to_string(),
+        singular: "widget".to_string(),
+        namespaced: true,
+        short_names: vec![],
+        printer_columns: vec![],
+        created_at: None,
+    };
+    let widget_b = CrdMeta {
+        crd_name: "widgets.b.io".to_string(),
+        group: "b.io".to_string(),
+        version: "v1".to_string(),
+        kind: "Widget".to_string(),
+        plural: "widgets".to_string(),
+        singular: "widget".to_string(),
+        namespaced: true,
+        short_names: vec![],
+        printer_columns: vec![],
+        created_at: None,
+    };
+
+    app.crds = vec![widget_a.clone(), widget_b.clone()];
+    app.namespaces = vec!["default".to_string()];
+
+    // Type ":widg" prefix
+    press(&mut app, ch(':')).await;
+    type_str(&mut app, "widg").await;
+
+    // Tab completes to common command name "widgets" while pointing to widgets.a.io
+    press(&mut app, key(KeyCode::Tab)).await;
+    assert_eq!(app.command_buffer, "widgets");
+
+    // Select the second colliding CRD (widgets.b.io) with Down arrow
+    press(&mut app, key(KeyCode::Down)).await;
+
+    // Press Space: because Tab completed "widgets" without group, Space must resolve and preserve full "widgets.b.io "
+    press(&mut app, ch(' ')).await;
+    assert_eq!(app.command_buffer, "widgets.b.io ");
+
+    // Press Enter: must open widgets.b.io
+    press(&mut app, key(KeyCode::Enter)).await;
+    assert_eq!(table(&app).kind, ResourceKind::CustomResource(widget_b));
+}
+
+#[tokio::test]
+async fn first_suggestion_space_without_arrows_completes_deployments_and_services() {
+    let _settings = common::env::isolate_settings();
+    let (mut app, _rx) = common::app().await;
+
+    // Type ":deplo" prefix without touching arrow keys, then press Space
+    press(&mut app, ch(':')).await;
+    type_str(&mut app, "deplo").await;
+    press(&mut app, ch(' ')).await;
+    assert_eq!(
+        app.command_buffer, "deployments ",
+        "Space on highlighted index 0 must complete :deplo to :deployments "
+    );
+
+    // Escape and test :serv (serviceaccounts ranks before services alphabetically)
+    press(&mut app, key(KeyCode::Esc)).await;
+    press(&mut app, ch(':')).await;
+    type_str(&mut app, "serv").await;
+    press(&mut app, ch(' ')).await;
+    assert_eq!(
+        app.command_buffer, "serviceaccounts ",
+        "Space on highlighted index 0 must complete whatever command is highlighted at index 0"
+    );
+}
+
+#[tokio::test]
+async fn first_suggestion_space_without_arrows_completes_crd_command() {
+    let _settings = common::env::isolate_settings();
+    let (mut app, _rx) = common::app().await;
+
+    let crd = CrdMeta {
+        crd_name: "prometheuses.monitoring.coreos.com".to_string(),
+        group: "monitoring.coreos.com".to_string(),
+        version: "v1".to_string(),
+        kind: "Prometheus".to_string(),
+        plural: "prometheuses".to_string(),
+        singular: "prometheus".to_string(),
+        namespaced: true,
+        short_names: vec![],
+        printer_columns: vec![],
+        created_at: None,
+    };
+    app.crds = vec![crd.clone()];
+
+    // Type ":prome" prefix and press Space directly
+    press(&mut app, ch(':')).await;
+    type_str(&mut app, "prome").await;
+    press(&mut app, ch(' ')).await;
+    assert_eq!(
+        app.command_buffer, "prometheuses ",
+        "Space on highlighted CRD at index 0 must complete to full CRD name"
+    );
+
+    // Press Enter to verify navigation
+    press(&mut app, key(KeyCode::Enter)).await;
+    assert_eq!(table(&app).kind, ResourceKind::CustomResource(crd));
+}
+
+#[tokio::test]
+async fn negative_space_on_empty_colon_does_not_commit_themes() {
+    let _settings = common::env::isolate_settings();
+    let (mut app, _rx) = common::app().await;
+
+    // Type ":" followed immediately by Space: must NOT complete "themes "
+    press(&mut app, ch(':')).await;
+    press(&mut app, ch(' ')).await;
+    assert_ne!(
+        app.command_buffer.trim(),
+        "themes",
+        "Space on empty command bar must not commit first registry entry"
+    );
+    assert_eq!(app.command_buffer, " ");
+}
+
+#[tokio::test]
+async fn negative_space_on_exact_name_or_alias_preserves_typed_command() {
+    let _settings = common::env::isolate_settings();
+    let (mut app, _rx) = common::app().await;
+
+    // Type ":ns " - must remain ":ns " and NOT rewrite to ":namespaces "
+    press(&mut app, ch(':')).await;
+    type_str(&mut app, "ns").await;
+    press(&mut app, ch(' ')).await;
+    assert_eq!(app.command_buffer, "ns ");
+
+    // Type ":theme " - must remain ":theme " and NOT rewrite to ":themes "
+    press(&mut app, key(KeyCode::Esc)).await;
+    press(&mut app, ch(':')).await;
+    type_str(&mut app, "theme").await;
+    press(&mut app, ch(' ')).await;
+    assert_eq!(app.command_buffer, "theme ");
+
+    // Type ":ctx " - must remain ":ctx "
+    press(&mut app, key(KeyCode::Esc)).await;
+    press(&mut app, ch(':')).await;
+    type_str(&mut app, "ctx").await;
+    press(&mut app, ch(' ')).await;
+    assert_eq!(app.command_buffer, "ctx ");
+}
+
+#[tokio::test]
+async fn negative_space_on_substring_only_match_does_not_commit() {
+    let _settings = common::env::isolate_settings();
+    let (mut app, _rx) = common::app().await;
+
+    // Type ":drac" which only matches "Dracula" in theme descriptions (score < 80)
+    press(&mut app, ch(':')).await;
+    type_str(&mut app, "drac").await;
+    press(&mut app, ch(' ')).await;
+
+    // Must NOT complete "themes ", should stay literal "drac "
+    assert_eq!(app.command_buffer, "drac ");
+}
+
+#[tokio::test]
+async fn space_then_enter_parity_with_bare_enter() {
+    let _settings = common::env::isolate_settings();
+
+    for prefix in ["deplo", "serv", "ing"] {
+        // Run 1: Bare Enter on prefix
+        let (mut app1, _rx1) = common::app().await;
+        press(&mut app1, ch(':')).await;
+        type_str(&mut app1, prefix).await;
+        press(&mut app1, key(KeyCode::Enter)).await;
+        let expected_kind = table(&app1).kind.clone();
+
+        // Run 2: Space then Enter on prefix
+        let (mut app2, _rx2) = common::app().await;
+        press(&mut app2, ch(':')).await;
+        type_str(&mut app2, prefix).await;
+        press(&mut app2, ch(' ')).await;
+        press(&mut app2, key(KeyCode::Enter)).await;
+        let actual_kind = table(&app2).kind.clone();
+
+        assert_eq!(
+            actual_kind, expected_kind,
+            "Space then Enter on '{}' must yield identical view as bare Enter",
+            prefix
+        );
+    }
+}
+
+#[tokio::test]
+async fn crd_plural_colliding_with_static_command_preserves_full_crd_name_on_space() {
+    let _settings = common::env::isolate_settings();
+
+    let custom_deployment = CrdMeta {
+        crd_name: "deployments.acme.io".to_string(),
+        group: "acme.io".to_string(),
+        version: "v1".to_string(),
+        kind: "Deployment".to_string(),
+        plural: "deployments".to_string(),
+        singular: "deployment".to_string(),
+        namespaced: true,
+        short_names: vec![],
+        printer_columns: vec![],
+        created_at: None,
+    };
+
+    // Run 1: Bare Enter on :deployments.acme with CRD present
+    let (mut app1, _rx1) = common::app().await;
+    app1.crds = vec![custom_deployment.clone()];
+    press(&mut app1, ch(':')).await;
+    type_str(&mut app1, "deployments.acme").await;
+    press(&mut app1, key(KeyCode::Enter)).await;
+    let expected_kind = table(&app1).kind.clone();
+    assert_eq!(
+        expected_kind,
+        ResourceKind::CustomResource(custom_deployment.clone())
+    );
+
+    // Run 2: Space then Enter on :deplo with CRD present (when selecting the CRD)
+    let (mut app2, _rx2) = common::app().await;
+    app2.crds = vec![custom_deployment.clone()];
+    press(&mut app2, ch(':')).await;
+    type_str(&mut app2, "deplo").await;
+
+    // The CRD deployments.acme.io has score 105 (crd prefix) vs 100 (static prefix), so it is at index 0.
+    // Space must expand to the full CRD name "deployments.acme.io " rather than ambiguous "deployments "
+    press(&mut app2, ch(' ')).await;
+    assert_eq!(app2.command_buffer, "deployments.acme.io ");
+    press(&mut app2, key(KeyCode::Enter)).await;
+    let actual_kind = table(&app2).kind.clone();
+
+    assert_eq!(
+        actual_kind, expected_kind,
+        "Space then Enter on CRD colliding with static command must yield identical view as bare Enter"
+    );
 }
 
 #[tokio::test]
@@ -3510,6 +4275,478 @@ async fn tab_on_workloads_cycles_segments_and_on_wide_events_focuses_the_reason_
 }
 
 #[tokio::test]
+async fn with_cursor_as_the_agent_the_assistant_turns_to_cursor_agent_not_the_provider() {
+    let mut settings = common::env::isolate_settings();
+    // Nowhere to find cursor-agent (`common::app` looks for no agent), and
+    // no provider key to fall back on.
+    settings.remove_env("ANTHROPIC_API_KEY");
+    let (mut app, _rx) = common::app().await;
+    app.ai_settings.agent = srelens_agent::adapter::AgentKind::Cursor;
+    app.ai_settings.default_provider = srectl::AiProvider::Anthropic;
+    app.ai_settings.api_keys.clear();
+
+    app.submit_assistant_query("why?".to_string(), "why?".to_string());
+
+    let last = &app.assistant_state.messages.last().unwrap().content;
+    assert!(last.contains("Cursor CLI was not found"), "{last}");
+    assert!(
+        last.contains("https://docs.cursor.com/en/cli/overview"),
+        "{last}"
+    );
+}
+
+#[tokio::test]
+async fn asking_a_local_agent_that_is_not_installed_says_where_to_get_it() {
+    use srelens_agent::adapter::AgentKind;
+    let mut settings = common::env::isolate_settings();
+    settings.remove_env("ANTHROPIC_API_KEY");
+    let (mut app, _rx) = common::app().await;
+    app.ai_settings.api_keys.clear();
+
+    for (kind, name, url) in [
+        (
+            AgentKind::Claude,
+            "Claude Code",
+            "https://docs.anthropic.com/en/docs/claude-code/setup",
+        ),
+        (
+            AgentKind::Codex,
+            "Codex",
+            "https://developers.openai.com/codex/cli/",
+        ),
+    ] {
+        app.ai_settings.agent = kind;
+        app.submit_assistant_query("hi".to_string(), "hi".to_string());
+
+        let last = &app.assistant_state.messages.last().unwrap().content;
+        assert!(last.contains(name), "{last}");
+        assert!(last.contains(url), "{last}");
+        assert!(
+            !last.contains("No API key"),
+            "a local agent never falls back to the provider path: {last}"
+        );
+    }
+}
+
+/// A do-nothing `program` in `dir`, named as this platform runs it.
+fn plant_fake_agent(dir: &std::path::Path, program: &str) {
+    let (name, body) = if cfg!(windows) {
+        (format!("{program}.cmd"), "@echo off\r\n")
+    } else {
+        (program.to_string(), "#!/bin/sh\n")
+    };
+    let path = dir.join(name);
+    std::fs::write(&path, body).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+}
+
+#[tokio::test]
+async fn agents_are_looked_for_where_the_app_is_told_not_on_the_process_path() {
+    use srectl::views::settings_view::PickerTarget;
+    use srelens_agent::adapter::AgentKind;
+    let mut settings = common::env::isolate_settings();
+    // Claude Code and Codex on PATH, as on a dev box or CI image with them...
+    let installed = tempfile::tempdir().unwrap();
+    plant_fake_agent(installed.path(), "claude");
+    plant_fake_agent(installed.path(), "codex");
+    settings.set_env("PATH", installed.path());
+    settings.set_env("HOME", installed.path());
+    let (mut app, mut rx) = common::app().await;
+    // ...but the app is told to look in an empty directory.
+    let empty = tempfile::tempdir().unwrap();
+    app.agent_search = common::agents_only_in(empty.path());
+
+    // The Assistant does not run the one on PATH.
+    app.ai_settings.agent = AgentKind::Claude;
+    app.submit_assistant_query("hi".to_string(), "hi".to_string());
+    let last = &app.assistant_state.messages.last().unwrap().content;
+    assert!(last.contains("Claude Code CLI was not found"), "{last}");
+
+    // The Agent card does not list it.
+    app.switch_view_to_kind(ResourceKind::Settings).await;
+    assert_eq!(settings_view(&app).agent_paths, Vec::new());
+
+    // The model picker does not run it to list models.
+    app.open_model_picker(PickerTarget::Agent(AgentKind::Codex));
+    let result = loop {
+        let ev = tokio::time::timeout(Duration::from_secs(20), rx.recv())
+            .await
+            .expect("the list comes back")
+            .expect("the channel stays open");
+        if let AppEvent::ModelsLoaded { result, .. } = ev {
+            break result;
+        }
+    };
+    assert_eq!(result, Err("Codex is not installed".to_string()));
+}
+
+/// Sets its flag when dropped, as a turn's agent guard ends the agent.
+struct Ended(std::sync::Arc<std::sync::atomic::AtomicBool>);
+
+impl Drop for Ended {
+    fn drop(&mut self) {
+        self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+/// A turn that runs until it is stopped, and the flag its end sets.
+fn endless_turn() -> (
+    tokio::task::AbortHandle,
+    std::sync::Arc<std::sync::atomic::AtomicBool>,
+) {
+    let ended = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let guard = Ended(ended.clone());
+    let task = tokio::spawn(async move {
+        let _guard = guard;
+        std::future::pending::<()>().await;
+    });
+    (task.abort_handle(), ended)
+}
+
+/// On exit srectl removes its Cursor chat root, which a live agent may be
+/// running in (on Windows a directory in use cannot be removed): every turn,
+/// in the open context and in the background, has ended first.
+#[tokio::test]
+async fn stopping_the_assistant_turns_ends_every_one_before_returning() {
+    use std::sync::atomic::Ordering;
+    let _settings = common::env::isolate_settings();
+    let (mut app, _rx) = common::app().await;
+    let (here, here_ended) = endless_turn();
+    let (there, there_ended) = endless_turn();
+    app.assistant_state.task = Some(here);
+    let mut background =
+        srectl::views::assistant_view::AssistantViewState::for_context("other-cluster");
+    background.task = Some(there);
+    app.assistant_states
+        .insert("other-cluster".to_string(), background);
+
+    app.stop_assistant_turns().await;
+
+    assert!(here_ended.load(Ordering::SeqCst), "the open context's turn");
+    assert!(there_ended.load(Ordering::SeqCst), "a background turn");
+}
+
+#[tokio::test]
+async fn clearing_the_conversation_starts_the_agent_afresh() {
+    use srelens_agent::adapter::AgentKind;
+    let _settings = common::env::isolate_settings();
+    let (mut app, _rx) = common::app().await;
+    app.active_view = ActiveView::Assistant;
+    let before = app.assistant_state.conversation_id.clone();
+    app.assistant_state.cli_resume_id = Some("s-1".to_string());
+    app.assistant_state.chat_agent = Some(AgentKind::Claude);
+
+    press(&mut app, ctrl('l')).await;
+
+    assert_eq!(app.assistant_state.cli_resume_id, None);
+    assert_ne!(app.assistant_state.conversation_id, before);
+    assert_eq!(app.assistant_state.chat_agent, None);
+}
+
+#[tokio::test]
+async fn switching_agent_starts_the_new_one_afresh() {
+    use srelens_agent::adapter::AgentKind;
+    let _settings = common::env::isolate_settings();
+    let (mut app, _rx) = common::app().await;
+    let before = app.assistant_state.conversation_id.clone();
+    app.assistant_state.cli_resume_id = Some("claude-session".to_string());
+    app.assistant_state.chat_agent = Some(AgentKind::Claude);
+    app.assistant_state
+        .messages
+        .push(srectl::views::assistant_view::ChatMessage {
+            role: "user".to_string(),
+            content: "earlier question".to_string(),
+            timestamp: "10:00:00".to_string(),
+            tool_calls: Vec::new(),
+            token_usage: None,
+        });
+    app.ai_settings.agent = AgentKind::Codex;
+
+    app.submit_assistant_query("hi".to_string(), "hi".to_string());
+
+    let ai = &app.assistant_state;
+    assert_eq!(
+        ai.cli_resume_id, None,
+        "Codex cannot resume Claude's session"
+    );
+    assert_ne!(ai.conversation_id, before);
+    assert_eq!(ai.chat_agent, Some(AgentKind::Codex));
+    assert!(
+        ai.messages.iter().any(|m| m.content == "earlier question"),
+        "the transcript stays on screen when the agent changes"
+    );
+}
+
+#[tokio::test]
+async fn asking_the_same_agent_again_keeps_its_conversation() {
+    use srelens_agent::adapter::AgentKind;
+    let _settings = common::env::isolate_settings();
+    let (mut app, _rx) = common::app().await;
+    app.ai_settings.agent = AgentKind::Codex;
+    let before = app.assistant_state.conversation_id.clone();
+
+    // The first turn marks the conversation as Codex's and keeps its id.
+    app.submit_assistant_query("one".to_string(), "one".to_string());
+    assert_eq!(app.assistant_state.chat_agent, Some(AgentKind::Codex));
+    assert_eq!(app.assistant_state.conversation_id, before);
+
+    // A later turn with the same agent resumes it.
+    app.assistant_state.cli_resume_id = Some("s-1".to_string());
+    app.submit_assistant_query("two".to_string(), "two".to_string());
+    assert_eq!(app.assistant_state.cli_resume_id.as_deref(), Some("s-1"));
+    assert_eq!(app.assistant_state.conversation_id, before);
+}
+
+#[tokio::test]
+async fn switching_agent_leaves_the_old_agents_history_behind() {
+    use srelens_agent::adapter::AgentKind;
+    let _settings = common::env::isolate_settings();
+    let (mut app, _rx) = common::app().await;
+    // srelens's own agent has talked here...
+    app.assistant_state.chat_agent = Some(AgentKind::Srelens);
+    let old = app.assistant_state.native_history.clone();
+    old.try_lock()
+        .unwrap()
+        .push(srelens_llm::types::Turn::User("earlier".to_string()));
+    app.ai_settings.agent = AgentKind::Claude;
+
+    // ...and the user moves to Claude.
+    app.submit_assistant_query("hi".to_string(), "hi".to_string());
+
+    let now = &app.assistant_state.native_history;
+    assert!(
+        !std::sync::Arc::ptr_eq(&old, now),
+        "a fresh history, so a late write from the old native turn lands in the old one"
+    );
+    assert!(now.try_lock().unwrap().is_empty());
+    assert_eq!(old.try_lock().unwrap().len(), 1, "the old one is untouched");
+}
+
+#[tokio::test]
+async fn clearing_the_conversation_gives_the_native_agent_a_fresh_history() {
+    let _settings = common::env::isolate_settings();
+    let (mut app, _rx) = common::app().await;
+    app.active_view = ActiveView::Assistant;
+    let old = app.assistant_state.native_history.clone();
+    old.try_lock()
+        .unwrap()
+        .push(srelens_llm::types::Turn::User("earlier".to_string()));
+
+    press(&mut app, ctrl('l')).await;
+
+    let now = &app.assistant_state.native_history;
+    assert!(!std::sync::Arc::ptr_eq(&old, now));
+    assert!(now.try_lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn an_installed_local_agent_gets_the_turn_and_its_session_comes_back() {
+    use srelens_agent::adapter::AgentKind;
+    let mut settings = common::env::isolate_settings();
+    // A fake `claude` first on PATH: a batch shim on Windows (as npm installs
+    // it), a shell script elsewhere. It answers with Claude's stream-json.
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("transcript.jsonl"),
+        concat!(
+            r#"{"type":"system","subtype":"init","session_id":"s-1"}"#,
+            "\n",
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"hello"}]},"session_id":"s-1"}"#,
+            "\n",
+            r#"{"type":"result","subtype":"success","session_id":"s-1"}"#,
+            "\n",
+        ),
+    )
+    .unwrap();
+    // It also records what it was started with: the Cursor key variable in
+    // `env.txt`, and one argv entry per line in `argv.txt`.
+    let (name, script) = if cfg!(windows) {
+        (
+            "claude.cmd",
+            concat!(
+                "@echo off\r\n",
+                "setlocal enabledelayedexpansion\r\n",
+                // `shift` moves %0 too, so the directory is taken first.
+                "set \"d=%~dp0\"\r\n",
+                "echo [!CURSOR_API_KEY!]> \"%d%env.txt\"\r\n",
+                ":next\r\n",
+                "if \"%~1\"==\"\" goto done\r\n",
+                "set \"arg=%~1\"\r\n",
+                "echo !arg!>> \"%d%argv.txt\"\r\n",
+                "shift\r\n",
+                "goto next\r\n",
+                ":done\r\n",
+                "more > \"%d%stdin.txt\"\r\n",
+                "type \"%d%transcript.jsonl\"\r\n",
+            )
+            .to_string(),
+        )
+    } else {
+        (
+            "claude",
+            concat!(
+                "#!/bin/sh\n",
+                "d=\"$(dirname \"$0\")\"\n",
+                "printf '[%s]\\n' \"$CURSOR_API_KEY\" > \"$d/env.txt\"\n",
+                "printf '%s\\n' \"$@\" > \"$d/argv.txt\"\n",
+                "cat > \"$d/stdin.txt\"\n",
+                "cat \"$d/transcript.jsonl\"\n",
+            )
+            .to_string(),
+        )
+    };
+    let bin = dir.path().join(name);
+    std::fs::write(&bin, script).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let path = std::env::join_paths(std::iter::once(dir.path().to_path_buf()).chain(
+        std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()),
+    ))
+    .unwrap();
+    settings.set_env("PATH", path);
+    settings.set_env("HOME", dir.path());
+    settings.remove_env("CURSOR_API_KEY");
+    let (mut app, mut rx) = common::app().await;
+    app.agent_search = common::agents_only_in(dir.path());
+    app.ai_settings.agent = AgentKind::Claude;
+    // A Cursor key is stored, and Claude has its own model and a session to
+    // resume. The key must stay out of Claude's environment; the model and
+    // the session must reach its command line.
+    app.ai_settings
+        .api_keys
+        .insert("cursor".to_string(), "cursor-secret-123".to_string());
+    app.ai_settings
+        .set_agent_model(AgentKind::Claude, Some("sonnet".to_string()));
+    app.assistant_state.chat_agent = Some(AgentKind::Claude);
+    app.assistant_state.cli_resume_id = Some("resume-1".to_string());
+    let conversation = app.assistant_state.conversation_id.clone();
+
+    app.submit_assistant_query("why?".to_string(), "why?".to_string());
+
+    assert!(app.assistant_state.is_busy, "the turn is under way");
+    let mut results = Vec::new();
+    loop {
+        let ev = tokio::time::timeout(Duration::from_secs(20), rx.recv())
+            .await
+            .expect("the turn ends")
+            .expect("the channel stays open");
+        if let AppEvent::ActionResult { title, result } = ev {
+            let done = title.starts_with("ai_done:");
+            results.push((title, result));
+            if done {
+                break;
+            }
+        }
+    }
+    let ctx = &app.active_context;
+    assert!(
+        results
+            .iter()
+            .any(|(t, r)| *t == format!("ai_chunk:{ctx}") && r.as_deref() == Ok("hello")),
+        "Claude's answer reaches the Assistant: {results:?}"
+    );
+    assert!(
+        results
+            .iter()
+            .any(|(t, r)| *t == format!("ai_session:{ctx}")
+                && r.as_deref() == Ok(format!("{conversation}|s-1").as_str())),
+        "the session is kept for the next turn: {results:?}"
+    );
+
+    let seen_env = std::fs::read_to_string(dir.path().join("env.txt")).unwrap();
+    assert!(
+        !seen_env.contains("cursor-secret-123"),
+        "the Cursor key reaches only a Cursor child: {seen_env:?}"
+    );
+    let argv: Vec<String> = std::fs::read_to_string(dir.path().join("argv.txt"))
+        .unwrap()
+        .lines()
+        .map(|l| l.trim().to_string())
+        .collect();
+    assert!(
+        argv.windows(2).any(|w| w == ["--model", "sonnet"]),
+        "Claude runs on its own model: {argv:?}"
+    );
+    assert!(
+        argv.windows(2).any(|w| w == ["--resume", "resume-1"]),
+        "Claude resumes its own session: {argv:?}"
+    );
+}
+
+/// A local agent's turn runs under the agent's own timeout, not the
+/// provider's.
+#[tokio::test]
+async fn a_local_agents_turn_runs_under_its_own_timeout() {
+    use srelens_agent::adapter::AgentKind;
+    let _settings = common::env::isolate_settings();
+    let dir = tempfile::tempdir().unwrap();
+    let (name, script) = if cfg!(windows) {
+        ("claude.cmd", "@ping -n 60 127.0.0.1 >nul\r\n")
+    } else {
+        ("claude", "#!/bin/sh\nexec sleep 60\n")
+    };
+    let bin = dir.path().join(name);
+    std::fs::write(&bin, script).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let (mut app, mut rx) = common::app().await;
+    app.agent_search = common::agents_only_in(dir.path());
+    app.ai_settings.agent = AgentKind::Claude;
+    app.ai_settings
+        .set_agent_timeout_seconds(AgentKind::Claude, 5);
+    let provider = app.ai_settings.default_provider;
+    app.ai_settings.set_timeout_seconds(provider, 3600);
+
+    app.submit_assistant_query("why?".to_string(), "why?".to_string());
+
+    let chunk = format!("ai_chunk:{}", app.active_context);
+    loop {
+        let ev = tokio::time::timeout(Duration::from_secs(20), rx.recv())
+            .await
+            .expect("the turn times out under Claude's own timeout")
+            .expect("the channel stays open");
+        if let AppEvent::ActionResult { title, result } = ev {
+            if title == chunk
+                && result
+                    .as_deref()
+                    .is_ok_and(|m| m.contains("timed out after 5 seconds"))
+            {
+                break;
+            }
+            assert!(!title.starts_with("ai_done:"), "{title}: {result:?}");
+        }
+    }
+}
+
+#[tokio::test]
+async fn the_title_names_the_agent_and_its_model() {
+    use srelens_agent::adapter::AgentKind;
+    let _settings = common::env::isolate_settings();
+    let (mut app, _rx) = common::app().await;
+    app.active_view = ActiveView::Assistant;
+    app.ai_settings.agent = AgentKind::Codex;
+    app.ai_settings
+        .set_agent_model(AgentKind::Codex, Some("gpt-5.6-sol".to_string()));
+
+    let text = common::render_app(&mut app, 200, 30);
+    assert!(text.contains("[Codex · gpt-5.6-sol]"), "{text}");
+
+    app.ai_settings.set_agent_model(AgentKind::Codex, None);
+    let text = common::render_app(&mut app, 200, 30);
+    assert!(text.contains("[Codex · Default]"), "{text}");
+}
+
+#[tokio::test]
 async fn settings_view_lets_colon_open_the_prompt_unless_a_field_is_being_edited() {
     let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app().await;
@@ -3527,6 +4764,284 @@ async fn settings_view_lets_colon_open_the_prompt_unless_a_field_is_being_edited
         InputMode::Normal,
         "while editing, ':' is text"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Settings: the model picker
+// ---------------------------------------------------------------------------
+
+/// Open the Settings view on Anthropic's Model field. Callers hold the
+/// settings guard with `ANTHROPIC_API_KEY` removed, so opening the picker
+/// never reaches the network.
+async fn open_settings_on_the_model_field(app: &mut App) {
+    app.switch_view_to_kind(ResourceKind::Settings).await;
+    let ActiveView::Settings(s) = &mut app.active_view else {
+        panic!("expected the settings view")
+    };
+    s.selected_provider_idx = 0;
+    s.selected_field = srectl::views::SettingField::Model;
+}
+
+fn settings_view(app: &App) -> &srectl::views::SettingsViewState {
+    match &app.active_view {
+        ActiveView::Settings(s) => s,
+        _ => panic!("expected the settings view"),
+    }
+}
+
+fn picker(app: &App) -> &srectl::views::settings_view::ModelPicker {
+    settings_view(app)
+        .picker
+        .as_ref()
+        .expect("the model picker is open")
+}
+
+fn model(id: &str, label: &str) -> srelens_agent::adapter::ModelChoice {
+    srelens_agent::adapter::ModelChoice {
+        id: id.into(),
+        label: label.into(),
+    }
+}
+
+#[tokio::test]
+async fn a_failed_list_still_lets_you_type_a_model() {
+    use srectl::views::settings_view::PickerLoad;
+    let mut settings = common::env::isolate_settings();
+    settings.remove_env("ANTHROPIC_API_KEY");
+    let (mut app, _rx) = common::app().await;
+    open_settings_on_the_model_field(&mut app).await;
+
+    press(&mut app, ch('e')).await;
+    assert_eq!(picker(&app).load, PickerLoad::Loading);
+    let screen = common::render_app(&mut app, 120, 40);
+    assert!(screen.contains("Loading models…"), "{screen}");
+
+    let list_key = picker(&app).key.clone();
+    app.handle_models_loaded(&list_key, Err("offline".into()));
+    let screen = common::render_app(&mut app, 120, 40);
+    assert!(screen.contains("offline"), "{screen}");
+
+    // The `:` is part of the id, not the command prompt.
+    type_str(&mut app, "my-proxy:claude").await;
+    assert_eq!(app.input_mode, InputMode::Normal);
+    press(&mut app, key(KeyCode::Enter)).await;
+    assert!(settings_view(&app).picker.is_none());
+    assert_eq!(
+        app.ai_settings.get_model(srectl::AiProvider::Anthropic),
+        "my-proxy:claude"
+    );
+}
+
+#[tokio::test]
+async fn a_paste_into_the_picker_filters_by_the_pasted_id() {
+    let mut settings = common::env::isolate_settings();
+    settings.remove_env("ANTHROPIC_API_KEY");
+    let (mut app, _rx) = common::app().await;
+    open_settings_on_the_model_field(&mut app).await;
+    press(&mut app, ch('e')).await;
+    let list_key = picker(&app).key.clone();
+    app.handle_models_loaded(
+        &list_key,
+        Ok(vec![model("claude-a", "Claude A"), model("my-model", "")]),
+    );
+    press(&mut app, key(KeyCode::Down)).await;
+    assert_eq!(picker(&app).selected, 1);
+
+    app.handle_paste("my-model\r\n".to_string());
+
+    assert_eq!(picker(&app).query, "my-model");
+    assert_eq!(
+        picker(&app).selected,
+        0,
+        "the highlight goes back to the top"
+    );
+    press(&mut app, key(KeyCode::Enter)).await;
+    assert_eq!(
+        app.ai_settings.get_model(srectl::AiProvider::Anthropic),
+        "my-model"
+    );
+}
+
+#[tokio::test]
+async fn a_listed_model_picked_in_settings_is_what_the_agent_uses() {
+    let mut settings = common::env::isolate_settings();
+    settings.remove_env("ANTHROPIC_API_KEY");
+    let (mut app, _rx) = common::app().await;
+    open_settings_on_the_model_field(&mut app).await;
+
+    press(&mut app, key(KeyCode::Enter)).await;
+    let list_key = picker(&app).key.clone();
+    app.handle_models_loaded(
+        &list_key,
+        Ok(vec![
+            model("claude-a", "Claude A"),
+            model("claude-b", "Claude B"),
+        ]),
+    );
+    let screen = common::render_app(&mut app, 120, 40);
+    assert!(screen.contains("Claude B"), "{screen}");
+
+    press(&mut app, key(KeyCode::Down)).await;
+    press(&mut app, key(KeyCode::Enter)).await;
+    assert_eq!(
+        app.ai_settings.get_model(srectl::AiProvider::Anthropic),
+        "claude-b"
+    );
+    let saved = std::fs::read_to_string(srectl::AiSettings::config_path()).expect("saved");
+    let saved = srectl::AiSettings::from_json(&saved).unwrap();
+    assert_eq!(saved.get_model(srectl::AiProvider::Anthropic), "claude-b");
+}
+
+#[tokio::test]
+async fn an_open_picker_reuses_the_list_it_already_has() {
+    use srectl::views::settings_view::PickerLoad;
+    let mut settings = common::env::isolate_settings();
+    settings.remove_env("ANTHROPIC_API_KEY");
+    let (mut app, _rx) = common::app().await;
+    open_settings_on_the_model_field(&mut app).await;
+
+    press(&mut app, ch('e')).await;
+    let list_key = picker(&app).key.clone();
+    app.handle_models_loaded(&list_key, Ok(vec![model("claude-a", "Claude A")]));
+    press(&mut app, key(KeyCode::Esc)).await;
+    assert!(settings_view(&app).picker.is_none());
+    assert_eq!(
+        app.ai_settings.get_model(srectl::AiProvider::Anthropic),
+        srectl::AiSettings::default().get_model(srectl::AiProvider::Anthropic),
+        "Esc picks nothing"
+    );
+
+    press(&mut app, ch('e')).await;
+    assert_eq!(picker(&app).load, PickerLoad::Ready);
+    assert_eq!(picker(&app).items, [model("claude-a", "Claude A")]);
+}
+
+#[tokio::test]
+async fn a_list_outlives_leaving_settings() {
+    use srectl::views::settings_view::PickerLoad;
+    let mut settings = common::env::isolate_settings();
+    settings.remove_env("ANTHROPIC_API_KEY");
+    let (mut app, _rx) = common::app().await;
+    open_settings_on_the_model_field(&mut app).await;
+    press(&mut app, ch('e')).await;
+    let list_key = picker(&app).key.clone();
+    app.handle_models_loaded(&list_key, Ok(vec![model("claude-a", "Claude A")]));
+    press(&mut app, key(KeyCode::Esc)).await;
+    press(&mut app, key(KeyCode::Esc)).await;
+    assert!(!matches!(app.active_view, ActiveView::Settings(_)));
+
+    open_settings_on_the_model_field(&mut app).await;
+    press(&mut app, ch('e')).await;
+    assert_eq!(picker(&app).load, PickerLoad::Ready);
+    assert_eq!(picker(&app).items, [model("claude-a", "Claude A")]);
+}
+
+#[tokio::test]
+async fn a_failed_list_is_fetched_again_next_time() {
+    use srectl::views::settings_view::PickerLoad;
+    let mut settings = common::env::isolate_settings();
+    settings.remove_env("ANTHROPIC_API_KEY");
+    let (mut app, _rx) = common::app().await;
+    open_settings_on_the_model_field(&mut app).await;
+    press(&mut app, ch('e')).await;
+    let list_key = picker(&app).key.clone();
+    app.handle_models_loaded(&list_key, Err("offline".into()));
+    press(&mut app, key(KeyCode::Esc)).await;
+
+    press(&mut app, ch('e')).await;
+    assert_eq!(
+        picker(&app).load,
+        PickerLoad::Loading,
+        "a failure is not kept"
+    );
+    app.handle_models_loaded(&list_key, Ok(vec![model("claude-a", "Claude A")]));
+    press(&mut app, key(KeyCode::Esc)).await;
+    press(&mut app, ch('e')).await;
+    assert_eq!(picker(&app).load, PickerLoad::Ready, "a list is kept");
+}
+
+#[tokio::test]
+async fn reopening_while_a_list_loads_does_not_fetch_it_twice() {
+    use srectl::views::settings_view::PickerLoad;
+    let mut settings = common::env::isolate_settings();
+    settings.remove_env("ANTHROPIC_API_KEY");
+    let (mut app, mut rx) = common::app().await;
+    open_settings_on_the_model_field(&mut app).await;
+
+    press(&mut app, ch('e')).await;
+    press(&mut app, key(KeyCode::Esc)).await;
+    press(&mut app, ch('e')).await;
+    assert_eq!(picker(&app).load, PickerLoad::Loading);
+
+    // With no key a fetch ends at once; count the fetches that reported.
+    let deadline = tokio::time::Instant::now() + Duration::from_millis(500);
+    let mut fetches = 0;
+    while let Ok(Some(event)) = tokio::time::timeout_at(deadline, rx.recv()).await {
+        if matches!(event, AppEvent::ModelsLoaded { .. }) {
+            fetches += 1;
+        }
+    }
+    assert_eq!(fetches, 1);
+}
+
+#[tokio::test]
+async fn a_provider_without_a_key_says_so_without_calling_out() {
+    let mut settings = common::env::isolate_settings();
+    settings.remove_env("ANTHROPIC_API_KEY");
+    let err = srectl::model_list::provider_models(
+        &srectl::AiSettings::default(),
+        srectl::AiProvider::Anthropic,
+    )
+    .await
+    .unwrap_err();
+    // Any HTTP attempt would end in a network or API error instead.
+    assert_eq!(err, "Add an API key for Anthropic (Claude) first");
+}
+
+#[tokio::test]
+async fn a_provider_list_is_kept_per_base_url_and_key() {
+    use srectl::model_list::provider_cache_key;
+    use srectl::AiProvider::OpenAi;
+    let mut settings = common::env::isolate_settings();
+    settings.remove_env("OPENAI_API_KEY");
+    let mut s = srectl::AiSettings::default();
+    let no_key = provider_cache_key(&s, OpenAi);
+
+    s.api_keys.insert("openai".into(), "sk-test-one".into());
+    let with_key = provider_cache_key(&s, OpenAi);
+    assert_ne!(no_key, with_key);
+    assert!(!with_key.contains("sk-test"), "never the key itself");
+    s.api_keys.insert("openai".into(), "sk-test-two".into());
+    assert_ne!(
+        provider_cache_key(&s, OpenAi),
+        with_key,
+        "another account may list other models"
+    );
+    s.api_keys.insert("openai".into(), "sk-test-one".into());
+    assert_eq!(provider_cache_key(&s, OpenAi), with_key);
+
+    s.base_urls
+        .insert("openai".into(), "https://proxy.example/v1".into());
+    assert_ne!(provider_cache_key(&s, OpenAi), with_key);
+}
+
+#[tokio::test]
+async fn cursors_list_is_kept_per_cursor_key() {
+    use srectl::model_list::agent_cache_key;
+    use srelens_agent::adapter::AgentKind::{Codex, Cursor};
+    let mut settings = common::env::isolate_settings();
+    settings.remove_env("CURSOR_API_KEY");
+    let mut s = srectl::AiSettings::default();
+    let no_key = agent_cache_key(&s, Cursor);
+    let codex = agent_cache_key(&s, Codex);
+
+    s.api_keys.insert("cursor".into(), "cur-test-one".into());
+    let one = agent_cache_key(&s, Cursor);
+    assert_ne!(no_key, one);
+    assert!(!one.contains("cur-test"), "never the key itself");
+    s.api_keys.insert("cursor".into(), "cur-test-two".into());
+    assert_ne!(agent_cache_key(&s, Cursor), one);
+    assert_eq!(agent_cache_key(&s, Codex), codex, "not Cursor's key");
 }
 
 // ---------------------------------------------------------------------------
@@ -3903,9 +5418,13 @@ async fn l_and_s_on_a_single_container_pod_go_straight_to_logs_and_shell() {
         _ => panic!("expected the logs view"),
     }
     let channel = app.active_log_channel.clone().expect("log channel");
-    app.handle_stream_event(channel, json!({ "line": "hello from the pod" }));
+    app.handle_stream_event(
+        channel,
+        json!({ "seq": 1, "lines": [{ "source": "", "line": "hello from the pod" }, { "source": "", "line": "and again" }] }),
+    );
     let screen = common::render_app(&mut app, 120, 30);
     assert!(screen.contains("hello from the pod"), "screen: {}", screen);
+    assert!(screen.contains("and again"), "screen: {}", screen);
     press(&mut app, key(KeyCode::Esc)).await;
 
     press(&mut app, ch('s')).await;
@@ -5063,10 +6582,7 @@ async fn helm_detail_manifest_search_and_navigation_input_flow() {
 
     // 1. Press '/' to enter search mode
     press(&mut app, ch('/')).await;
-    assert_eq!(
-        app.input_mode,
-        srectl::ui::statusbar::InputMode::Filter
-    );
+    assert_eq!(app.input_mode, srectl::ui::statusbar::InputMode::Filter);
 
     // 2. Type "token"
     for c in "token".chars() {
@@ -5084,10 +6600,7 @@ async fn helm_detail_manifest_search_and_navigation_input_flow() {
 
     // 3. Press Enter to return to Normal mode with search query active
     press(&mut app, key(KeyCode::Enter)).await;
-    assert_eq!(
-        app.input_mode,
-        srectl::ui::statusbar::InputMode::Normal
-    );
+    assert_eq!(app.input_mode, srectl::ui::statusbar::InputMode::Normal);
     assert_eq!(app.filter_buffer, "token");
 
     // 4. Press 'n' to go to next match
@@ -5383,6 +6896,25 @@ async fn feature_banner_modal_interactive_navigation_toggle_and_jump() {
 
     press(&mut app, ch('i')).await;
     assert!(matches!(app.modal, Some(Modal::AddCluster { .. })));
+
+    // Re-open via :features and test 'c' jumps to ContextPicker modal
+    app.modal = None;
+    common::type_str(&mut app, ":features").await;
+    press(&mut app, key(KeyCode::Enter)).await;
+    assert!(matches!(app.modal, Some(Modal::FeatureBanner { .. })));
+
+    press(&mut app, ch('c')).await;
+    assert!(matches!(app.modal, Some(Modal::ContextPicker { .. })));
+
+    // Re-open via :features and test 'h' jumps to Top Hotspots view
+    app.modal = None;
+    common::type_str(&mut app, ":features").await;
+    press(&mut app, key(KeyCode::Enter)).await;
+    assert!(matches!(app.modal, Some(Modal::FeatureBanner { .. })));
+
+    press(&mut app, ch('h')).await;
+    assert!(app.modal.is_none());
+    assert!(matches!(app.active_view, ActiveView::Top(_)));
 }
 
 #[tokio::test]
@@ -5696,6 +7228,7 @@ async fn changed_view_drops_a_result_for_a_window_it_no_longer_shows() {
         includes_failing: true,
         includes_scaled: true,
         argo: Default::default(),
+        omitted: vec![],
     };
 
     // The view shows 1h; a 15m answer from before a window change is stale.
@@ -5770,29 +7303,6 @@ fn only_rca(app: &srectl::App) -> srectl::views::changed_view::QuickRca {
             c.ai_summaries.values().next().unwrap().clone()
         }
         _ => panic!("expected ActiveView::Changed"),
-    }
-}
-
-#[tokio::test]
-async fn quick_rca_with_cursor_says_it_needs_an_http_provider() {
-    use srectl::views::changed_view::QuickRcaStatus;
-    let settings = common::env::isolate_settings();
-    let (mut app, _rx) = changed_app_with_report(&settings).await;
-    app.ai_settings.default_provider = srectl::AiProvider::Cursor;
-
-    press(&mut app, ch('s')).await;
-
-    let rca = only_rca(&app);
-    match rca.status {
-        QuickRcaStatus::Error(msg) => {
-            assert!(msg.contains("needs an HTTP provider"), "{msg}");
-            assert!(msg.contains("[a]"), "points at the Assistant: {msg}");
-            assert!(
-                !msg.contains("API key"),
-                "Cursor's problem is not a key: {msg}"
-            );
-        }
-        other => panic!("expected an error, got {other:?}"),
     }
 }
 
@@ -6345,8 +7855,9 @@ async fn argo_view_x_opens_action_palette_with_ai_diagnose_and_actions() {
             // Check actions
             let action_ids: Vec<_> = actions.iter().map(|a| a.id).collect();
             assert!(action_ids.contains(&srectl::ui::dialogs::QuickActionId::AskAi));
-            assert!(action_ids
-                .contains(&srectl::ui::dialogs::QuickActionId::PlaybookArgoProgressing));
+            assert!(
+                action_ids.contains(&srectl::ui::dialogs::QuickActionId::PlaybookArgoProgressing)
+            );
             assert!(action_ids.contains(&srectl::ui::dialogs::QuickActionId::ArgoSync));
             assert!(action_ids.contains(&srectl::ui::dialogs::QuickActionId::ArgoRefresh));
             assert!(action_ids.contains(&srectl::ui::dialogs::QuickActionId::ArgoOpenGit));
@@ -6580,50 +8091,86 @@ async fn argo_view_column_prioritization_and_no_clipping() {
     );
 }
 
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// Renders the argo view, asserts its header shows `[{prefix}as of <age> ago]`
+/// and returns the text. The view reads the wall clock itself, so an exact age
+/// races the clock (#895): accept every age between the clock reads either
+/// side of the render.
+fn assert_argo_age_tag(state: &srectl::views::argo_view::ArgoViewState, prefix: &str) -> String {
+    let fetched_at = state.fetched_at.expect("fetched_at is set");
+    let before = unix_now();
+    let text = common::render_text(160, 25, |f| {
+        srectl::views::argo_view::render_argo_view(f, f.area(), state);
+    });
+    let ages: Vec<String> = (before..=unix_now())
+        .map(|now| srelens_kube::format_age(now.saturating_sub(fetched_at) as i64))
+        .collect();
+    assert!(
+        ages.iter()
+            .any(|age| text.contains(&format!("[{prefix}as of {age} ago]"))),
+        "header must show [{prefix}as of {ages:?} ago], got:\n{text}"
+    );
+    text
+}
+
 #[tokio::test]
 async fn argo_view_renders_header_with_age_tag_and_hub_spoke_filtering() {
     let mut argo_state = srectl::views::argo_view::ArgoViewState::new();
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    argo_state.fetched_at = Some(now - 30); // 30s ago
+    argo_state.fetched_at = Some(unix_now() - 30); // 30s ago
 
     // 1. Remote hub with spoke filter
     argo_state.set_applications(vec![], vec![], true, Some("tools".to_string()));
-    let text = common::render_text(160, 25, |f| {
-        srectl::views::argo_view::render_argo_view(f, f.area(), &argo_state);
-    });
-    assert!(
-        text.contains("[Hub: tools · Spoke Filtered, as of 30s ago]"),
-        "must render spoke filtered age tag in header, got:\n{}",
-        text
-    );
+    let text = assert_argo_age_tag(&argo_state, "Hub: tools · Spoke Filtered, ");
     assert!(!text.contains("View All Hub Apps"));
     assert!(!text.contains("Hard refresh"));
 
     // 2. Remote hub with all hub apps
     argo_state.show_all_hub_apps = true;
-    let text_all = common::render_text(160, 25, |f| {
-        srectl::views::argo_view::render_argo_view(f, f.area(), &argo_state);
-    });
-    assert!(
-        text_all.contains("[Hub: tools · All Hub Apps, as of 30s ago]"),
-        "must render all hub apps age tag in header, got:\n{}",
-        text_all
-    );
+    assert_argo_age_tag(&argo_state, "Hub: tools · All Hub Apps, ");
 
-    // 3. Local argo cluster (not remote hub)
+    // 3. Local argo cluster (not remote hub): no Hub: prefix
     argo_state.is_remote_hub = false;
     argo_state.hub_context_name = None;
-    let text_local = common::render_text(160, 25, |f| {
-        srectl::views::argo_view::render_argo_view(f, f.area(), &argo_state);
-    });
+    assert_argo_age_tag(&argo_state, "");
+}
+
+#[test]
+fn open_browser_url_runs_the_browser_env_command_on_the_url() {
+    // $BROWSER names a program that cannot exist, so the spawn fails and no
+    // browser opens. The quoted form also exercises the shlex split.
+    let mut env = common::env::lock();
+    env.set("BROWSER", "\"srelens-no-such-browser-0x380\" --new-tab");
+    let result = srectl::app::open_browser_url("https://example.invalid/srelens-896");
+    drop(env);
+    let err = result.expect_err("a nonexistent browser cannot be spawned");
     assert!(
-        text_local.contains("[as of 30s ago]"),
-        "must render local age tag without Hub: prefix, got:\n{}",
-        text_local
+        err.starts_with(
+            "Failed to open https://example.invalid/srelens-896 with \
+             '\"srelens-no-such-browser-0x380\" --new-tab':"
+        ),
+        "{err}"
     );
+}
+
+#[test]
+fn browser_env_command_passes_the_options_then_the_url() {
+    // Built, never spawned: the program, its options and the URL arrive as
+    // separate arguments.
+    let cmd = srectl::app::browser_env_command(
+        "\"srelens-no-such-browser-0x380\" --new-tab",
+        "https://example.invalid/srelens-896",
+    )
+    .expect("a non-empty $BROWSER is a command");
+    assert_eq!(cmd.get_program(), "srelens-no-such-browser-0x380");
+    let args: Vec<_> = cmd.get_args().collect();
+    assert_eq!(args, ["--new-tab", "https://example.invalid/srelens-896"]);
+    assert!(srectl::app::browser_env_command("  ", "https://example.invalid").is_none());
 }
 
 #[tokio::test]
@@ -6727,9 +8274,14 @@ async fn argo_view_key_bindings_and_actions() {
     press(&mut app, ch('r')).await;
     assert!(toast(&app).contains("Refreshing ArgoCD applications"));
 
-    // 8. Open Git repo ('g') - app1 has repo_url configured
+    // 8. Open Git repo ('g') - app1 has repo_url configured. The settings
+    // guard's $BROWSER cannot exist, so the repo is tried but never opened.
     press(&mut app, ch('g')).await;
-    assert!(toast(&app).contains("Git repo") || toast(&app).contains("Could not open browser"));
+    let want = format!(
+        "Could not open browser: Failed to open https://github.com/example/repo with '{}':",
+        common::env::NO_BROWSER
+    );
+    assert!(toast(&app).starts_with(&want), "{}", toast(&app));
 
     // 9. Config view ('c')
     press(&mut app, ch('c')).await;
@@ -6897,7 +8449,11 @@ async fn argo_detail_view_key_navigation_and_actions() {
     assert!(toast(&app).contains("Copied deep link"));
 
     press(&mut app, ch('g')).await;
-    assert!(toast(&app).contains("Git repo") || toast(&app).contains("Could not open browser"));
+    let want = format!(
+        "Could not open browser: Failed to open https://github.com/example/payments with '{}':",
+        common::env::NO_BROWSER
+    );
+    assert!(toast(&app).starts_with(&want), "{}", toast(&app));
 
     // 4. Exit detail view via 'q'
     press(&mut app, ch('q')).await;
@@ -7488,6 +9044,7 @@ async fn switch_context_while_in_changed_view_clears_report_and_handles_stale_re
         includes_failing: true,
         includes_scaled: true,
         argo: Default::default(),
+        omitted: vec![],
     });
     app.active_view = ActiveView::Changed(changed_state);
     app.active_context = "cluster-1".to_string();
@@ -7527,6 +9084,7 @@ async fn switch_context_while_in_changed_view_clears_report_and_handles_stale_re
         includes_failing: true,
         includes_scaled: true,
         argo: Default::default(),
+        omitted: vec![],
     };
     app.handle_changed_triage_result("cluster-1", None, Ok(stale_report));
 
@@ -7559,6 +9117,7 @@ async fn switch_context_while_in_changed_view_clears_report_and_handles_stale_re
         includes_failing: true,
         includes_scaled: true,
         argo: Default::default(),
+        omitted: vec![],
     };
     app.handle_changed_triage_result("cluster-2", None, Ok(cluster2_report));
 
@@ -7599,6 +9158,7 @@ async fn switch_namespace_while_in_changed_view_clears_stale_report() {
         includes_failing: true,
         includes_scaled: true,
         argo: Default::default(),
+        omitted: vec![],
     });
     app.active_view = ActiveView::Changed(changed_state);
     app.active_context = "cluster-1".to_string();
@@ -7779,5 +9339,575 @@ async fn a_github_answer_lands_on_the_changed_view_under_describe() {
     assert!(
         !parked.causes.contains_key("unasked"),
         "an answer nobody asked for is dropped"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Agent approval prompts: a local agent's gated tool call, asked over every view
+// ---------------------------------------------------------------------------
+
+use srectl::consent::PendingConsent;
+use srelens_mcp::policy::{ConsentKind, ConsentRequest, Decision};
+use tokio::sync::oneshot::{self, error::TryRecvError};
+
+fn delete_pod_request(pod: &str) -> ConsentRequest {
+    ConsentRequest {
+        tool: "k8s.deletePod".into(),
+        args: json!({ "name": pod, "namespace": "prod" }),
+        kind: ConsentKind::Destructive,
+        impact: srelens_capability::Impact::High,
+        confirm_text: Some(format!("Delete pod prod/{pod}?")),
+        caller: None,
+    }
+}
+
+/// A prompt as srectl's consent policy raises it, and the end the policy
+/// waits on for the answer.
+fn consent_for(request: ConsentRequest) -> (PendingConsent, oneshot::Receiver<Decision>) {
+    let (reply, answer) = oneshot::channel();
+    let pending = PendingConsent {
+        request,
+        agent: "claude".into(),
+        context: "kind-dev".into(),
+        reply,
+    };
+    (pending, answer)
+}
+
+fn delete_pod_consent(pod: &str) -> (PendingConsent, oneshot::Receiver<Decision>) {
+    consent_for(delete_pod_request(pod))
+}
+
+fn screen(app: &mut App) -> String {
+    common::render_app(app, 120, 40)
+}
+
+#[tokio::test]
+async fn an_approval_prompt_shows_what_the_agent_wants() {
+    let _settings = common::env::isolate_settings();
+    let (mut app, _rx) = common::app().await;
+    let (prompt, _answer) = delete_pod_consent("api-0");
+
+    app.consents.push(prompt);
+
+    let screen = screen(&mut app);
+    for shown in [
+        "claude",
+        "kind-dev",
+        "Delete pod prod/api-0?",
+        "k8s.deletePod",
+        "high",
+        "change",
+        "s left",
+        "[y] Approve",
+        "[n/Esc] Decline",
+    ] {
+        assert!(screen.contains(shown), "missing {shown:?} in:\n{screen}");
+    }
+}
+
+#[tokio::test]
+async fn the_answer_keys_stay_on_screen_in_a_small_terminal() {
+    let _settings = common::env::isolate_settings();
+    let (mut app, _rx) = common::app().await;
+    let mut request = delete_pod_request("api-0");
+    request.confirm_text = Some(
+        "Delete pod prod/api-0? Its controller will start a new one, and any \
+         data the pod kept outside a volume is lost."
+            .into(),
+    );
+    let (prompt, _answer) = consent_for(request);
+
+    app.consents.push(prompt);
+
+    let screen = common::render_app(&mut app, 80, 24);
+    assert!(screen.contains("[y] Approve"), "screen:\n{screen}");
+    assert!(screen.contains("[n/Esc] Decline"), "screen:\n{screen}");
+}
+
+#[tokio::test]
+async fn a_secret_read_prompt_says_it_is_one() {
+    let _settings = common::env::isolate_settings();
+    let (mut app, _rx) = common::app().await;
+    let (prompt, _answer) = consent_for(ConsentRequest {
+        tool: "k8s.getSecret".into(),
+        args: json!({ "name": "db", "namespace": "prod" }),
+        kind: ConsentKind::SensitiveRead,
+        impact: srelens_capability::Impact::Medium,
+        confirm_text: None,
+        caller: None,
+    });
+
+    app.consents.push(prompt);
+
+    let screen = screen(&mut app);
+    assert!(screen.contains("Secret read"), "screen:\n{screen}");
+    assert!(screen.contains("k8s.getSecret"), "screen:\n{screen}");
+}
+
+#[tokio::test]
+async fn y_approves_once_the_prompt_is_armed() {
+    let _settings = common::env::isolate_settings();
+    let (mut app, _rx) = common::app().await;
+    app.consent_arm_delay = Duration::ZERO;
+
+    for y in ['y', 'Y'] {
+        let (prompt, mut answer) = delete_pod_consent("api-0");
+        app.consents.push(prompt);
+
+        press(&mut app, ch(y)).await;
+
+        assert_eq!(answer.try_recv(), Ok(Decision::Approved), "{y:?} approves");
+        assert!(app.consents.is_empty());
+        assert!(
+            !screen(&mut app).contains("[y] Approve"),
+            "the prompt is gone"
+        );
+    }
+}
+
+#[tokio::test]
+async fn n_and_esc_decline() {
+    let _settings = common::env::isolate_settings();
+    let (mut app, _rx) = common::app().await;
+    app.consent_arm_delay = Duration::ZERO;
+
+    for no in [ch('n'), ch('N'), key(KeyCode::Esc)] {
+        let (prompt, mut answer) = delete_pod_consent("api-0");
+        app.consents.push(prompt);
+
+        press(&mut app, no).await;
+
+        assert_eq!(
+            answer.try_recv(),
+            Ok(Decision::Denied("declined in srectl".into())),
+            "{no:?} declines"
+        );
+        assert!(app.consents.is_empty());
+    }
+}
+
+#[tokio::test]
+async fn enter_never_approves() {
+    let _settings = common::env::isolate_settings();
+    let (mut app, _rx) = common::app().await;
+    app.consent_arm_delay = Duration::ZERO;
+    let (prompt, mut answer) = delete_pod_consent("api-0");
+    app.consents.push(prompt);
+
+    press(&mut app, key(KeyCode::Enter)).await;
+    press(&mut app, ch('x')).await;
+
+    assert_eq!(answer.try_recv(), Err(TryRecvError::Empty));
+    assert!(screen(&mut app).contains("[y] Approve"), "still asking");
+}
+
+/// Windows reports a key's release as well as its press. The release of the
+/// Ctrl+C that answered one prompt must not decline the next.
+#[tokio::test]
+async fn a_released_key_does_not_answer_a_prompt() {
+    use crossterm::event::KeyEventKind;
+    let _settings = common::env::isolate_settings();
+    let (mut app, _rx) = common::app().await;
+    app.consent_arm_delay = Duration::ZERO;
+    let (prompt, mut answer) = delete_pod_consent("api-0");
+    app.consents.push(prompt);
+
+    for released in [ch('y'), ch('n'), key(KeyCode::Esc), ctrl('c')] {
+        let released = KeyEvent {
+            kind: KeyEventKind::Release,
+            ..released
+        };
+        press(&mut app, released).await;
+        assert_eq!(
+            answer.try_recv(),
+            Err(TryRecvError::Empty),
+            "{released:?} answers nothing"
+        );
+    }
+    assert!(screen(&mut app).contains("[y] Approve"), "still asking");
+}
+
+#[tokio::test]
+async fn a_y_typed_ahead_in_the_assistant_does_not_approve() {
+    let _settings = common::env::isolate_settings();
+    let (mut app, _rx) = common::app().await;
+    assert_eq!(app.consent_arm_delay, Duration::from_secs(1));
+    app.active_view = ActiveView::Assistant;
+    app.assistant_state.is_busy = true;
+    let (prompt, mut answer) = delete_pod_consent("api-0");
+    app.consents.push(prompt);
+
+    type_str(&mut app, "yes").await;
+
+    assert_eq!(answer.try_recv(), Err(TryRecvError::Empty));
+    assert_eq!(
+        app.assistant_state.input, "",
+        "keys during the prompt's first second go nowhere"
+    );
+    let screen = screen(&mut app);
+    assert!(screen.contains("[y] Approve"), "still asking:\n{screen}");
+    assert!(screen.contains("ready in 1s"), "screen:\n{screen}");
+}
+
+#[tokio::test]
+async fn the_next_prompt_arms_from_when_it_is_shown() {
+    let _settings = common::env::isolate_settings();
+    let (mut app, _rx) = common::app().await;
+    app.consent_arm_delay = Duration::from_millis(50);
+    let (first, mut first_answer) = delete_pod_consent("api-0");
+    let (second, mut second_answer) = delete_pod_consent("api-1");
+    app.consents.push(first);
+    app.consents.push(second);
+    screen(&mut app);
+    tokio::time::sleep(Duration::from_millis(80)).await;
+
+    press(&mut app, ch('y')).await;
+    screen(&mut app);
+    press(&mut app, ch('y')).await;
+
+    assert_eq!(first_answer.try_recv(), Ok(Decision::Approved));
+    assert_eq!(
+        second_answer.try_recv(),
+        Err(TryRecvError::Empty),
+        "the second prompt only just appeared"
+    );
+}
+
+/// The screen is redrawn only after a batch of events, and one event in the
+/// batch can take a while (a context switch awaits); a `y` typed before the
+/// prompt was ever drawn must not answer it, however long that took.
+#[tokio::test]
+async fn a_prompt_never_drawn_cannot_be_approved() {
+    let _settings = common::env::isolate_settings();
+    let (mut app, _rx) = common::app().await;
+    app.consent_arm_delay = Duration::from_millis(50);
+    let (prompt, mut answer) = delete_pod_consent("api-0");
+    app.consents.push(prompt);
+    tokio::time::sleep(Duration::from_millis(80)).await;
+
+    press(&mut app, ch('y')).await;
+    assert_eq!(answer.try_recv(), Err(TryRecvError::Empty), "never drawn");
+
+    screen(&mut app);
+    tokio::time::sleep(Duration::from_millis(80)).await;
+    press(&mut app, ch('y')).await;
+    assert_eq!(
+        answer.try_recv(),
+        Ok(Decision::Approved),
+        "drawn, then armed"
+    );
+}
+
+#[tokio::test]
+async fn a_click_under_the_prompt_does_nothing() {
+    let _settings = common::env::isolate_settings();
+    let (mut app, _rx) = common::app().await;
+    *app.context_chip_rects.borrow_mut() = vec![(
+        ratatui::layout::Rect::new(0, 0, 10, 1),
+        "other-cluster".to_string(),
+    )];
+    let (prompt, _answer) = delete_pod_consent("api-0");
+    app.consents.push(prompt);
+
+    app.handle_mouse(common::click(1, 0)).await;
+
+    assert_eq!(app.active_context, "test-cluster");
+}
+
+#[tokio::test]
+async fn a_paste_under_the_prompt_goes_nowhere() {
+    let _settings = common::env::isolate_settings();
+    let (mut app, _rx) = common::app().await;
+    app.consent_arm_delay = Duration::ZERO;
+    app.active_view = ActiveView::Assistant;
+    let (prompt, mut answer) = delete_pod_consent("api-0");
+    app.consents.push(prompt);
+
+    app.handle_paste("y".to_string());
+
+    assert_eq!(app.assistant_state.input, "");
+    assert_eq!(answer.try_recv(), Err(TryRecvError::Empty));
+}
+
+/// Ctrl+C on a prompt is "stop": it declines, and it cancels the turn of the
+/// chat that asked, wherever that chat is. srectl keeps running.
+#[tokio::test]
+async fn ctrl_c_declines_and_cancels_the_turn_that_asked() {
+    let _settings = common::env::isolate_settings();
+    let (mut app, _rx) = common::app().await;
+    app.assistant_state.is_busy = true;
+    let mut other = srectl::views::assistant_view::AssistantViewState::for_context("kind-dev");
+    other.is_busy = true;
+    app.assistant_states.insert("kind-dev".into(), other);
+    let (mut here, mut here_answer) = delete_pod_consent("api-0");
+    here.context = "test-cluster".into();
+    let (there, mut there_answer) = delete_pod_consent("api-1");
+    app.consents.push(here);
+    app.consents.push(there);
+
+    press(&mut app, ctrl('c')).await;
+    press(&mut app, ctrl('c')).await;
+
+    let declined = Ok(Decision::Denied("declined in srectl".into()));
+    assert_eq!(here_answer.try_recv(), declined);
+    assert_eq!(there_answer.try_recv(), declined);
+    assert!(
+        !app.assistant_state.is_busy,
+        "the active chat's turn stopped"
+    );
+    assert!(
+        !app.assistant_states["kind-dev"].is_busy,
+        "the other chat's turn stopped"
+    );
+    assert!(app.consents.is_empty());
+    assert!(app.is_running, "Ctrl+C on a prompt does not quit");
+}
+
+#[tokio::test]
+async fn ctrl_c_for_a_closed_request_stops_nothing_else() {
+    let _settings = common::env::isolate_settings();
+    let (mut app, _rx) = common::app().await;
+    app.assistant_state.is_busy = true;
+    let (gone, gone_answer) = delete_pod_consent("api-0");
+    let (mut next, mut next_answer) = delete_pod_consent("api-1");
+    next.context = "test-cluster".into();
+    app.consents.push(gone);
+    app.consents.push(next);
+
+    drop(gone_answer);
+    press(&mut app, ctrl('c')).await;
+
+    assert_eq!(
+        next_answer.try_recv(),
+        Err(TryRecvError::Empty),
+        "the Ctrl+C was meant for a prompt that had already closed"
+    );
+    assert!(app.assistant_state.is_busy, "nobody else's turn stopped");
+}
+
+/// The prompt names the chat the turn started in; the call itself may name
+/// another cluster, and that is the one it would change.
+#[tokio::test]
+async fn a_call_aimed_at_another_cluster_says_so() {
+    let _settings = common::env::isolate_settings();
+    let (mut app, _rx) = common::app().await;
+    let (prompt, _answer) = consent_for(ConsentRequest {
+        tool: "k8s.deletePod".into(),
+        args: json!({ "context": "prod-eu", "name": "api-0", "namespace": "shop" }),
+        kind: ConsentKind::Destructive,
+        impact: srelens_capability::Impact::High,
+        confirm_text: Some("Delete pod shop/api-0?".into()),
+        caller: None,
+    });
+    app.consents.push(prompt);
+
+    let buffer = common::render_app_buffer(&mut app, 120, 40);
+
+    let screen = common::buffer_lines(&buffer).join("\n");
+    assert!(screen.contains("targets prod-eu"), "screen:\n{screen}");
+    assert!(screen.contains("kind-dev"), "screen:\n{screen}");
+    let (x, y) = find_cells(&buffer, "targets prod-eu").expect("on screen");
+    let target = &buffer[(x + "targets ".len() as u16, y)];
+    assert_eq!(
+        target.fg,
+        srectl::theme::Theme::status_warn().fg.unwrap(),
+        "the cluster it would change stands out"
+    );
+}
+
+/// Where `text` starts on screen, read cell by cell.
+fn find_cells(buffer: &ratatui::buffer::Buffer, text: &str) -> Option<(u16, u16)> {
+    let area = buffer.area;
+    for y in 0..area.height {
+        for x in 0..area.width {
+            let fits = text.chars().enumerate().all(|(i, c)| {
+                let cx = x + i as u16;
+                cx < area.width && buffer[(cx, y)].symbol() == c.to_string()
+            });
+            if fits {
+                return Some((x, y));
+            }
+        }
+    }
+    None
+}
+
+#[tokio::test]
+async fn a_call_without_the_hosts_sentence_shows_what_it_acts_on() {
+    let _settings = common::env::isolate_settings();
+    let (mut app, _rx) = common::app().await;
+    let (prompt, _answer) = consent_for(ConsentRequest {
+        tool: "k8s.getSecret".into(),
+        args: json!({ "namespace": "payments", "name": "stripe-key" }),
+        kind: ConsentKind::SensitiveRead,
+        impact: srelens_capability::Impact::Medium,
+        confirm_text: None,
+        caller: None,
+    });
+    app.consents.push(prompt);
+
+    let screen = screen(&mut app);
+
+    assert!(screen.contains("payments"), "screen:\n{screen}");
+    assert!(screen.contains("stripe-key"), "screen:\n{screen}");
+}
+
+#[tokio::test]
+async fn the_arguments_shown_leave_out_the_hint_and_stay_short() {
+    let _settings = common::env::isolate_settings();
+    let (mut app, _rx) = common::app().await;
+    let mut request = delete_pod_request("api-0");
+    request.args = json!({
+        "name": "api-0",
+        "namespace": "prod",
+        "_confirm": "HINT-FOR-THE-POLICY",
+        "gracePeriodSeconds": 0,
+        "label": "a\u{202E}b",
+        // Each of these is eight characters once escaped: long, and longer
+        // still after escaping.
+        "manifest": "\u{202E}".repeat(5000),
+    });
+    let (prompt, _answer) = consent_for(request);
+    app.consents.push(prompt);
+
+    let screen = screen(&mut app);
+
+    assert!(screen.contains("gracePeriodSeconds"), "screen:\n{screen}");
+    assert!(!screen.contains("HINT-FOR-THE-POLICY"), "screen:\n{screen}");
+    assert!(!screen.contains('\u{202E}'), "screen:\n{screen}");
+    assert!(
+        screen.contains("\\u{202e}"),
+        "the hidden character is shown, not obeyed:\n{screen}"
+    );
+    let rows = screen
+        .lines()
+        .filter(|l| l.contains("\\u{202e}\\u{202e}"))
+        .count();
+    assert!(
+        (1..=4).contains(&rows),
+        "{rows} rows of arguments:\n{screen}"
+    );
+}
+
+#[tokio::test]
+async fn the_prompt_wins_over_an_open_dialog() {
+    let _settings = common::env::isolate_settings();
+    let (mut app, _rx) = common::app().await;
+    app.consent_arm_delay = Duration::ZERO;
+    app.modal = Some(Modal::Scale {
+        workload_name: "web".into(),
+        current_replicas: 1,
+        input: "1".into(),
+    });
+    let (approve, mut approved) = delete_pod_consent("api-0");
+    let (decline, mut declined) = delete_pod_consent("api-1");
+    app.consents.push(approve);
+    app.consents.push(decline);
+    assert!(
+        screen(&mut app).contains("[y] Approve"),
+        "drawn over the dialog"
+    );
+
+    press(&mut app, ch('y')).await;
+    press(&mut app, key(KeyCode::Esc)).await;
+
+    assert_eq!(approved.try_recv(), Ok(Decision::Approved));
+    assert_eq!(
+        declined.try_recv(),
+        Ok(Decision::Denied("declined in srectl".into()))
+    );
+    assert!(
+        matches!(app.modal, Some(Modal::Scale { ref input, .. }) if input == "1"),
+        "the dialog never saw the keys: {:?}",
+        app.modal
+    );
+}
+
+#[tokio::test]
+async fn a_closed_request_leaves_the_screen_on_the_next_tick() {
+    let _settings = common::env::isolate_settings();
+    let (mut app, _rx) = common::app().await;
+    let (prompt, answer) = delete_pod_consent("api-0");
+    app.consents.push(prompt);
+
+    drop(answer);
+    app.handle_tick();
+
+    assert!(app.consents.is_empty());
+    assert!(!screen(&mut app).contains("[y] Approve"));
+}
+
+#[tokio::test]
+async fn a_y_for_a_closed_request_approves_nothing() {
+    let _settings = common::env::isolate_settings();
+    let (mut app, _rx) = common::app().await;
+    app.consent_arm_delay = Duration::ZERO;
+    let (gone, gone_answer) = delete_pod_consent("api-0");
+    let (next, mut next_answer) = delete_pod_consent("api-1");
+    app.consents.push(gone);
+    app.consents.push(next);
+
+    drop(gone_answer);
+    press(&mut app, ch('y')).await;
+
+    assert_eq!(
+        next_answer.try_recv(),
+        Err(TryRecvError::Empty),
+        "the y was meant for a prompt that had already closed"
+    );
+    assert!(screen(&mut app).contains("Delete pod prod/api-1?"));
+}
+
+#[tokio::test]
+async fn prompts_queue_one_at_a_time() {
+    let _settings = common::env::isolate_settings();
+    let (mut app, _rx) = common::app().await;
+    app.consent_arm_delay = Duration::ZERO;
+    let (first, mut first_answer) = delete_pod_consent("api-0");
+    let (second, mut second_answer) = delete_pod_consent("api-1");
+    app.consents.push(first);
+    app.consents.push(second);
+
+    let before = screen(&mut app);
+    assert!(
+        before.contains("Delete pod prod/api-0?"),
+        "screen:\n{before}"
+    );
+    assert!(
+        !before.contains("Delete pod prod/api-1?"),
+        "screen:\n{before}"
+    );
+
+    press(&mut app, ch('y')).await;
+
+    assert_eq!(first_answer.try_recv(), Ok(Decision::Approved));
+    assert_eq!(second_answer.try_recv(), Err(TryRecvError::Empty));
+    let after = screen(&mut app);
+    assert!(after.contains("Delete pod prod/api-1?"), "screen:\n{after}");
+}
+
+#[tokio::test]
+async fn the_seconds_left_count_from_when_the_agent_asked() {
+    let _settings = common::env::isolate_settings();
+    let (mut app, _rx) = common::app().await;
+    app.consent_arm_delay = Duration::ZERO;
+    let (first, _first_answer) = delete_pod_consent("api-0");
+    let (second, _second_answer) = delete_pod_consent("api-1");
+    app.consents.push(first);
+    app.consents.push(second);
+    tokio::time::sleep(Duration::from_millis(1100)).await;
+
+    press(&mut app, ch('y')).await;
+
+    let screen = screen(&mut app);
+    assert!(
+        screen.contains("Delete pod prod/api-1?"),
+        "screen:\n{screen}"
+    );
+    assert!(screen.contains("s left"), "screen:\n{screen}");
+    assert!(
+        !screen.contains("60s left") && !screen.contains("59s left"),
+        "the second prompt has waited over a second already:\n{screen}"
     );
 }

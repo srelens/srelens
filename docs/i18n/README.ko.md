@@ -40,6 +40,7 @@
 <p align="center">
   <a href="https://github.com/srelens/srelens/stargazers"><img alt="GitHub stars" src="https://img.shields.io/github/stars/srelens/srelens?logo=github&color=eab308"></a>
   <a href="https://www.reddit.com/r/srelens/"><img alt="Reddit: r/srelens" src="https://img.shields.io/reddit/subreddit-subscribers/srelens?label=r%2Fsrelens&logo=reddit&logoColor=white&color=FF4500"></a>
+  <a href="https://join.slack.com/t/srelens/shared_invite/zt-4cu0tzuzo-Ktei1KsVlqPi2XY~irTDAg"><img alt="Slack: srelens" src="https://img.shields.io/badge/Slack-srelens-4A154B?logo=slack&logoColor=white"></a>
   <a href="https://deepwiki.com/srelens/srelens"><img alt="Ask DeepWiki" src="https://img.shields.io/badge/Ask-DeepWiki-2563eb"></a>
 </p>
 
@@ -58,6 +59,10 @@
   <img alt="Terminal UI" src="https://img.shields.io/badge/terminal-srectl-14b8a6">
   <img alt="MCP server" src="https://img.shields.io/badge/agents-MCP-fb923c">
   <img alt="Project status: stable" src="https://img.shields.io/badge/status-stable-22c55e">
+</p>
+
+<p align="center">
+  <img alt="Kubernetes 오브젝트를 실시간으로 나열하고 검색 및 네임스페이스 필터를 지원하는 srelens 데스크톱 앱" src="../assets/screenshots/srelens-demo-changes.gif" width="100%">
 </p>
 
 <p align="center">
@@ -106,10 +111,10 @@ Kubernetes 트러블슈팅을 하다 보면 보통 터미널, 대시보드, YAML
 ## 데스크톱 앱
 
 데스크톱 앱은 네이티브 창에서 동작하는 완전한 Kubernetes 워크스페이스입니다. 아래
-스크린샷은 화면 단위로 순차 적용 중인 **새 디자인**입니다.
-**Settings → Appearance → Design → New design**(설정 → 모양 → 디자인 → 새 디자인)에서
-켤 수 있으며, 언제든 같은 경로로 되돌릴 수 있습니다. 테마는 Light, Paper, Dark, Midnight,
-Glass, High contrast 여섯 가지입니다.
+스크린샷은 이제 기본값이 된 **새 디자인**입니다. 테마는 Light, Paper, Dark, Midnight,
+Glass, High contrast 여섯 가지입니다. 클래식 디자인은 더 이상 권장되지 않으며 향후 버전에서
+제거됩니다. 그때까지는 **Settings → Appearance → Design**(설정 → 모양 → 디자인)에서 클래식
+디자인으로 전환할 수 있습니다.
 
 <table>
   <tr>
@@ -384,6 +389,7 @@ srelens는 **안정 버전이며 활발히 개발 중**이고, macOS, Linux, Win
 ## 커뮤니티
 
 - [Reddit의 r/srelens](https://www.reddit.com/r/srelens/) — 공지, 질문, 피드백
+- [Slack의 srelens](https://join.slack.com/t/srelens/shared_invite/zt-4cu0tzuzo-Ktei1KsVlqPi2XY~irTDAg) — 메인테이너 및 다른 사용자와의 채팅
 - [이슈](https://github.com/srelens/srelens/issues) — 버그 제보 및 기능 요청
 - [웹사이트](https://srelens.com)
 

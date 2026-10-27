@@ -23,6 +23,10 @@ use crate::window_streams::{Stream, WindowStreams};
 /// this machine either way, and the web host denies the command outright.
 ///
 /// `namespace`, when given, is the terminal's default namespace (#846).
+///
+/// `readOnly`, when true, makes the shell's `kubectl` and `helm` refuse every
+/// subcommand that is not a read: the page asks for it on a protected cluster
+/// (#101). Absent means false.
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
 pub async fn start_terminal<R: Runtime>(
@@ -33,6 +37,7 @@ pub async fn start_terminal<R: Runtime>(
     rows: Option<u16>,
     command: Option<String>,
     namespace: Option<String>,
+    read_only: Option<bool>,
     app: AppHandle<R>,
     window: Window<R>,
     manager: State<'_, TerminalManager>,
@@ -51,6 +56,7 @@ pub async fn start_terminal<R: Runtime>(
             rows,
             command,
             namespace,
+            read_only.unwrap_or(false),
         )
         .await?;
     owned.keep(window.label(), epoch, Stream::Terminal(session), || {
@@ -108,4 +114,74 @@ pub async fn terminal_close<R: Runtime>(
         owned.disown(window.label(), &stream);
     }
     Ok(())
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+    use tauri::{Listener, Manager};
+
+    /// One context, `srelens-101-ro`, at an address nothing answers on.
+    const KUBECONFIG: &str = "apiVersion: v1\nkind: Config\n\
+        clusters:\n- name: c\n  cluster:\n    server: https://127.0.0.1:1\n\
+        users:\n- name: u\n  user: {}\n\
+        contexts:\n- name: srelens-101-ro\n  context:\n    cluster: c\n    user: u\n";
+
+    /// What the page sends, `readOnly` as core's `startLocalTerminal` spells
+    /// it, reaches the shell's guards: a write typed in the terminal is
+    /// refused there (#101).
+    #[test]
+    fn a_terminal_the_page_starts_read_only_refuses_a_write() {
+        let config = tempfile::tempdir().unwrap();
+        let path = config.path().join("config");
+        std::fs::write(&path, KUBECONFIG).unwrap();
+        let app = tauri::test::mock_builder()
+            .invoke_handler(tauri::generate_handler![start_terminal])
+            .manage(TerminalManager::new())
+            .manage(WindowStreams::default())
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .unwrap();
+        let webview = tauri::WebviewWindowBuilder::new(&app, "main", Default::default())
+            .build()
+            .unwrap();
+        let out = Arc::new(Mutex::new(String::new()));
+        let heard = Arc::clone(&out);
+        app.listen_any("term:out:t-ro", move |e| {
+            let chunk: String = serde_json::from_str(e.payload()).unwrap_or_default();
+            heard.lock().unwrap().push_str(&chunk);
+        });
+
+        let request = tauri::webview::InvokeRequest {
+            cmd: "start_terminal".into(),
+            callback: tauri::ipc::CallbackFn(0),
+            error: tauri::ipc::CallbackFn(1),
+            url: "tauri://localhost".parse().unwrap(),
+            body: tauri::ipc::InvokeBody::Json(serde_json::json!({
+                "context": "srelens-101-ro",
+                "extraKubeconfigs": [path.display().to_string()],
+                "channel": "t-ro",
+                "cols": 200,
+                "rows": 24,
+                "command": null,
+                "namespace": null,
+                "readOnly": true,
+            })),
+            headers: Default::default(),
+            invoke_key: tauri::test::INVOKE_KEY.to_string(),
+        };
+        let session: u64 = tauri::test::get_ipc_response(&webview, request)
+            .unwrap()
+            .deserialize()
+            .unwrap();
+        app.state::<TerminalManager>()
+            .input(session, "kubectl delete pods --all\n");
+        let refused = (0..100).any(|_| {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            out.lock().unwrap().contains("this terminal is read-only")
+        });
+        app.state::<TerminalManager>().close(session);
+
+        assert!(refused, "{}", out.lock().unwrap());
+    }
 }

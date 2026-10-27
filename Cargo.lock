@@ -7062,8 +7062,11 @@ dependencies = [
 name = "srelens-agent"
 version = "0.16.0"
 dependencies = [
+ "log",
  "serde",
  "serde_json",
+ "tokio",
+ "uuid",
 ]
 
 [[package]]
@@ -7096,6 +7099,7 @@ dependencies = [
  "log",
  "objc2",
  "reqwest 0.13.4",
+ "rustls",
  "serde",
  "serde_json",
  "srelens-agent",
@@ -7129,15 +7133,20 @@ version = "0.16.0"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
+ "bytes",
  "chrono",
  "dirs",
  "flate2",
+ "form_urlencoded",
  "futures",
  "hex",
  "http",
+ "http-body",
+ "http-body-util",
  "k8s-openapi",
  "kube",
  "libc",
+ "regex",
  "schemars 0.8.22",
  "serde",
  "serde_json",
@@ -7323,6 +7332,7 @@ dependencies = [
 name = "srelens-streams"
 version = "0.16.0"
 dependencies = [
+ "chrono",
  "portable-pty",
  "schemars 0.8.22",
  "serde",

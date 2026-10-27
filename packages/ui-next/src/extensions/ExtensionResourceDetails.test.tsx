@@ -1,11 +1,16 @@
 import fluxManifest from "../../../../examples/extensions/flux.json";
 import argoManifest from "../../../../examples/extensions/argocd.json";
 const declaredMeta = Object.fromEntries([...fluxManifest.actions.filter(action=>action.resource==="helmreleases").map(action=>({...action,name:action.name.replace("helmreleases-","")})),...argoManifest.actions].map(action=>[action.name,{title:action.title,availableWhen:("availableWhen" in action?action.availableWhen:[]) as import("@srelens/core").ActionPredicate[],impact:"medium" as const,confirm:null}]));
-import { render, screen, fireEvent, waitFor } from "@testing-library/react";
+import { act, render, screen, fireEvent, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, onTestFinished, vi } from "vitest";
 vi.mock("@srelens/core", async original => ({...await original<typeof import("@srelens/core")>(),inspectExtensionResource:vi.fn(),actOnExtensionResource:vi.fn(),listExtensions:vi.fn(),resolveExtensionPanels:vi.fn(),resolveExtensionLinks:vi.fn(),resolveExtensionReverseLinks:vi.fn()}));
 import { inspectExtensionResource, actOnExtensionResource, listExtensions, resolveExtensionPanels, resolveExtensionLinks, resolveExtensionReverseLinks, EXTENSION_RESOURCE_CHANGED } from "@srelens/core";
 import { ExtensionResourceDetails } from "./ExtensionResourceDetails";
+import { requestExtensionAction } from "./actionRequests";
+import type { ClusterContext } from "@srelens/core";
+import { resetContexts, setContexts } from "../lib/clusters";
+import { defaultState } from "../lib/tabs";
+import { getState, setState, setWorkspaceProtected } from "../lib/tabsStore";
 const selection = {id:"org.srelens.flux",revision:1,capability:"kustomizations",context:"cluster/a",namespace:"team",name:"apps"};
 const detail = {resource:{apiVersion:"kustomize.toolkit.fluxcd.io/v1",kind:"Kustomization",metadata:{name:"apps",namespace:"team",uid:"uid-a",resourceVersion:"12"},spec:{suspend:false,path:"./apps",sourceRef:{kind:"GitRepository",name:"platform-config"}},status:{conditions:[{type:"Ready",status:"False",reason:"BuildFailed",message:"Missing source"}],lastAppliedRevision:"main@sha1:abcdef"}},actions:["suspend","resume","reconcile"],actionMeta:declaredMeta};
 beforeEach(()=>{vi.resetAllMocks();vi.mocked(inspectExtensionResource).mockResolvedValue(detail);vi.mocked(actOnExtensionResource).mockResolvedValue({requested:true});});
@@ -399,4 +404,49 @@ it("reports malformed conditions instead of an empty or successful condition lis
   render(<ExtensionResourceDetails selection={selection}/>);
   expect((await screen.findByRole("alert")).textContent).toContain("Could not display Conditions");
   expect(screen.queryByText("No conditions reported.")).toBeNull();
+});
+
+// #101: on a protected cluster the review's Confirm waits for the cluster's
+// name, typed. An app page names its cluster by its pinned ID, which is what
+// this selection carries.
+it("holds Confirm on a protected cluster until its name is typed, and forgets it with the review",async()=>{
+  const ctx:ClusterContext={name:"cluster/a",stableId:"a",key:"a",pinnedId:"srelens-context:/home/u/.kube/config#cluster%2Fa",cluster:"a",server:"",isCurrent:true,sourceFile:"/home/u/.kube/config",authKind:"token"};
+  setContexts([ctx]);setState(defaultState([ctx]));setWorkspaceProtected(getState().currentId,true);
+  onTestFinished(()=>{resetContexts();setState(defaultState([]));});
+  const pinned={...selection,context:ctx.pinnedId!};
+  render(<ExtensionResourceDetails selection={pinned}/>);
+  fireEvent.click(await screen.findByRole("button",{name:"Suspend"}));
+  expect(screen.getByText("cluster/a is protected (workspace Default).")).toBeTruthy();
+  const confirm=()=>screen.getByRole("button",{name:"Confirm Suspend"}) as HTMLButtonElement;
+  const typed=()=>screen.getByRole("textbox",{name:"Type cluster/a to confirm"}) as HTMLInputElement;
+  expect(confirm().disabled).toBe(true);
+  fireEvent.change(typed(),{target:{value:"cluster/a"}});
+  expect(confirm().disabled).toBe(false);
+  // Cancelled and asked again: the name was for that review.
+  fireEvent.click(screen.getByRole("button",{name:"Cancel"}));
+  fireEvent.click(screen.getByRole("button",{name:"Suspend"}));
+  expect(typed().value).toBe("");
+  expect(confirm().disabled).toBe(true);
+  fireEvent.change(typed(),{target:{value:"cluster/a"}});
+  fireEvent.click(confirm());
+  await waitFor(()=>expect(actOnExtensionResource).toHaveBeenCalledWith(pinned,"suspend","uid-a","12"));
+});
+it("asks again when a palette request replaces the open review",async()=>{
+  // The palette can raise a review while another is open (#544), so the review
+  // is not always closed between two actions: the name typed for Suspend does
+  // not answer Reconcile.
+  const ctx:ClusterContext={name:"cluster/a",stableId:"a",key:"a",pinnedId:"srelens-context:/home/u/.kube/config#cluster%2Fa",cluster:"a",server:"",isCurrent:true,sourceFile:"/home/u/.kube/config",authKind:"token"};
+  setContexts([ctx]);setState(defaultState([ctx]));setWorkspaceProtected(getState().currentId,true);
+  onTestFinished(()=>{resetContexts();setState(defaultState([]));});
+  const pinned={...selection,context:ctx.pinnedId!};
+  render(<ExtensionResourceDetails selection={pinned} fullPage/>);
+  fireEvent.click(await screen.findByRole("button",{name:"Suspend"}));
+  const typed=()=>screen.getByRole("textbox",{name:"Type cluster/a to confirm"}) as HTMLInputElement;
+  fireEvent.change(typed(),{target:{value:"cluster/a"}});
+  expect((screen.getByRole("button",{name:"Confirm Suspend"}) as HTMLButtonElement).disabled).toBe(false);
+  act(()=>requestExtensionAction({id:pinned.id,capability:pinned.capability,context:pinned.context,namespace:pinned.namespace,name:pinned.name,action:"reconcile"}));
+  const confirm=await screen.findByRole("button",{name:"Confirm Reconcile"}) as HTMLButtonElement;
+  expect(typed().value).toBe("");
+  expect(confirm.disabled).toBe(true);
+  expect(actOnExtensionResource).not.toHaveBeenCalled();
 });

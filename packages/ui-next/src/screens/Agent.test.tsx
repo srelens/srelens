@@ -7,6 +7,7 @@ import { PortalScopeProvider } from "@srelens/ui-kit";
 import { ConsoleProvider, useConsole } from "../console";
 import { resetLock, __setKnownVaultMode } from "../shell/LockGate";
 import { resetContexts, setContexts } from "../lib/clusters";
+import { setAssistantEnabled, setClusterAssistant } from "../lib/assistant";
 import { defaultState } from "../lib/tabs";
 import * as tabs from "../lib/tabsStore";
 
@@ -92,6 +93,10 @@ vi.mock("../lib/agentRun", () => ({
   useActiveRunKey,
   useRun,
   useRunSubject,
+  // What `lib/assistant` asks when a switch flips (#968): no run is busy here.
+  getRunSummaries: () => [],
+  getRun: () => ({ busy: false }),
+  getRunSubject: () => undefined,
 }));
 
 const CLAUDE: AgentInfo = {
@@ -218,6 +223,19 @@ describe("the agent screen", () => {
     renderAgent();
     await userEvent.click(await screen.findByRole("button", { name: /new question/i }));
     expect(clearAgentRun).toHaveBeenCalledTimes(1);
+  });
+
+  // Review finding (#968): a restored /agent tab on a cluster switched off
+  // must not invite a question there.
+  it("offers no question and no intro on a cluster the AI Assistant is off for", async () => {
+    setContexts([CTX]);
+    tabs.setState(defaultState([CTX]));
+    setClusterAssistant(CTX.stableId, false);
+    renderAgent();
+    await screen.findByRole("complementary", { name: "Agent" });
+    expect(screen.queryByText("Ask about this cluster")).toBeNull();
+    expect(screen.queryByRole("button", { name: /new question/i })).toBeNull();
+    expect(screen.getAllByText(/AI Assistant is off for/).length).toBeGreaterThan(0);
   });
 
   it("gets its agent picker from the composer, not from the rail", async () => {
@@ -452,6 +470,19 @@ describe("the agent screen", () => {
     expect(screen.queryByRole("textbox")).toBeNull();
     // And not dressed as a failure: nothing has failed, nothing was asked.
     expect(screen.queryByRole("alert")).toBeNull();
+  });
+
+  // #968: off everywhere, the screen is the notice and the way to Settings.
+  it("shows only the off notice when the AI Assistant is off", async () => {
+    setAssistantEnabled(false);
+    renderAgent();
+    expect(screen.getByText("AI Assistant is off")).toBeTruthy();
+    expect(screen.queryByRole("textbox")).toBeNull();
+    expect(screen.queryByText(/Recent runs/i)).toBeNull();
+    expect(screen.queryByRole("alert")).toBeNull();
+
+    await userEvent.click(screen.getByRole("button", { name: "Open Settings" }));
+    expect(tabs.activeRoute()).toBe("/settings");
   });
 
   it("still says what DOES work in the browser, rather than only what does not", () => {

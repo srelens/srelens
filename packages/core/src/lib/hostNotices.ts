@@ -31,7 +31,7 @@ function toast(notice: HostNotice): void {
 /**
  * Hand each notice the host broadcasts to `show`, for as long as the page
  * lives: a `notify` toast unless the caller draws notices itself — the new
- * design does, since it mounts no `notify` sink. Returns the subscription's
+ * design does, so a notice stays up until it is dismissed. Returns the subscription's
  * release.
  */
 export function listenForHostNotices(show: (notice: HostNotice) => void = toast): () => void {

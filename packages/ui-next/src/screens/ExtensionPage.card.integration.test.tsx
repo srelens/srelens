@@ -22,7 +22,12 @@ vi.mock("../lib/clusters", () => ({
   getKubeconfigFiles: () => [],
   setContexts: vi.fn(),
 }));
-vi.mock("../lib/tabsStore", () => ({ openTab: vi.fn() }));
+// The real store, but for `openTab`: the bulk-action bar reads protection
+// from it (#101).
+vi.mock("../lib/tabsStore", async (orig) => ({
+  ...(await orig<typeof import("../lib/tabsStore")>()),
+  openTab: vi.fn(),
+}));
 
 if (!("ResizeObserver" in globalThis)) {
   (globalThis as unknown as { ResizeObserver: unknown }).ResizeObserver = class {
@@ -43,8 +48,12 @@ import {
   resolveExtensionColumns,
   type InstalledExtension,
 } from "@srelens/core";
-import { openTab } from "../lib/tabsStore";
+// ExtensionPage first, so it is the importer that loads the real store inside
+// the mock above. The store reaches ExtensionPage through its route table, so
+// a test that imports the store first has the page load inside the mock's
+// factory, where it binds the real `openTab` and the assertions see none (#101).
 import { ExtensionPage } from "./ExtensionPage";
+import { openTab } from "../lib/tabsStore";
 
 const manifest = {
   id: "org.example.certs", name: "cert-manager", version: "1.0.0", srelensApiVersion: "^0.4", kind: "declarative",

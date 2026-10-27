@@ -4,7 +4,11 @@ import {
   formatStorageSize,
   jobStatus,
   nodeStatus,
+  containersSortValue,
+  describeContainer,
   nodeUsage,
+  podUsage,
+  type PodResourceUsage,
   phaseKind,
   podStatus,
   scaledStatus,
@@ -41,10 +45,43 @@ import {
   taintTooltip,
 } from "@srelens/core";
 import { AgeCell } from "../ageCell";
-import { Badge, Meter, StatusPill, Tooltip, type Column, type Tone } from "@srelens/ui-kit";
+import { ContainerBlocks } from "./containerBlocks";
+import type { UsageSample } from "../usageHistory";
+import { Badge, loadTone, Meter, Sparkline, StatusPill, Tooltip, type Column, type Tone } from "@srelens/ui-kit";
 import { NodeLink } from "../nodeLink";
 
-export type PodRow = PodSummary & { cpu?: number; memory?: number };
+export type PodRow = PodSummary & {
+  cpu?: number;
+  memory?: number;
+  /** The last ten minutes of readings, oldest first, ending in the figures
+   *  above — what this window has itself been given, see `lib/usageHistory`.
+   *  Keyed by name, so it may reach back before this pod: read it through
+   *  `ownHistory`. */
+  usageHistory?: UsageSample[];
+};
+
+/**
+ * A pod's readings that are its own.
+ *
+ * History is kept by namespace and name, and a StatefulSet's `web-0` deleted
+ * and created again is a new pod under the old name. The readings carry no
+ * identity to tell them apart by; the row does — it knows when its pod was
+ * created — so whatever was read before then belonged to the pod before it,
+ * and is not drawn as this one's past.
+ */
+export function ownHistory(row: Pick<PodRow, "created" | "usageHistory">): UsageSample[] {
+  const samples = row.usageHistory ?? [];
+  const born = row.created ? Date.parse(row.created) : NaN;
+  return Number.isNaN(born) ? samples : samples.filter((s) => s.at >= born);
+}
+
+/** "3 minutes", "40 seconds" — how much past a graph is showing. */
+function spanWords(ms: number): string {
+  const minutes = Math.round(ms / 60_000);
+  if (minutes >= 1) return `${minutes} minute${minutes === 1 ? "" : "s"}`;
+  const seconds = Math.round(ms / 1000);
+  return `${seconds} second${seconds === 1 ? "" : "s"}`;
+}
 export type NodeRow = NodeSummary & { cpu?: number; memory?: number };
 
 /** A thin space (U+2009), not a locale comma — the design's CPU thousands separator. */
@@ -92,6 +129,147 @@ const metric = (value: number | undefined, format: (value: number) => string) =>
 const metricSort = (value: number | undefined) => value ?? -1;
 
 /**
+ * How much room a usage cell asks for, whether or not it holds a bar.
+ *
+ * `Table` measures the natural column widths on the first render that has
+ * rows and pins them, and the node list answers before the metrics do — so
+ * the first render is all dashes. A width that arrived with the bars arrived
+ * after the column had been fixed at the width of a dash, and the bars drew
+ * across the column beside them. Overview's node table hit exactly this; see
+ * `READING_WIDTH` there.
+ */
+const USAGE_CELL = "flex min-w-[13rem] items-center gap-2";
+
+/**
+ * The narrowest a usage column may be dragged: the cell's own 13rem (208px)
+ * and the padding either side of it.
+ *
+ * `Column.minWidth` is the floor a resize stops at, and without one it is
+ * 72px — well under what the cell above will shrink to. Dragged below 13rem
+ * the column kept the width it was given and the bar ran on into the column
+ * beside it, since a table cell does not clip what overflows it.
+ */
+const USAGE_COLUMN_MIN_WIDTH = 232;
+
+/**
+ * A pod's CPU and memory against what it was given — core's `podUsage`, so
+ * this list and a pod's own page cannot mean different things by a percentage.
+ *
+ * The row carries the metric's two figures flattened onto it (`cpu`,
+ * `memory`), as a node row does; they arrive together or not at all.
+ */
+function podLoad(p: PodRow) {
+  const metric = p.cpu == null || p.memory == null ? undefined : { cpuMillicores: p.cpu, memoryMiB: p.memory };
+  return podUsage(p, metric);
+}
+
+/**
+ * One pod's CPU or memory in the Pods list: the amount, and how it stands
+ * against what the pod was given (#864). CPU as a small graph of its last ten
+ * minutes; memory as a bar.
+ *
+ * The two are drawn differently because they behave differently. CPU moves:
+ * it spikes and idles from one reading to the next, and a single figure says
+ * little about a pod that was pinned a minute ago. Where it has been is the
+ * information. Memory mostly sits where it is or creeps, and the question a
+ * reader has of it is "how full" — which a bar answers at a glance and a
+ * nearly flat line does not.
+ *
+ * Both are measured against the pod's limit, or its request where it has no
+ * whole limit; both are coloured by load against a limit and keep one quiet
+ * tone against a request, since running past a request is ordinary; both say
+ * which in the tooltip and in their own name.
+ *
+ * The graph is part of the row, not a widget in it: no frame, no axis, no
+ * background of its own. Its top edge is the bound, so a pod idling under its
+ * limit is a low line and one pressed against it is a line along the top. Its
+ * past is only what this window has been given since the list was first
+ * opened: a graph that has just started is one reading, drawn flat.
+ *
+ * States, kept apart:
+ * - no metric: a dash, and nothing drawn — an empty bar or graph would read
+ *   as an idle pod;
+ * - a metric, but neither a limit nor a request: the amount; for CPU a muted
+ *   graph scaled to its own peak, for memory no bar, since there is nothing
+ *   to take a share of;
+ * - a metric and a bound: the amount, and the graph or bar against the bound.
+ */
+function PodUsageCell({
+  as,
+  used,
+  history,
+  usage,
+  format,
+  what,
+}: {
+  as: "graph" | "bar";
+  used: number | undefined;
+  /** The readings so far, oldest first, and when each was taken. Only the
+   *  graph draws them. */
+  history?: { at: number; value: number }[];
+  usage: PodResourceUsage | null;
+  format: (value: number) => string;
+  what: string;
+}) {
+  if (used == null) return <div className={USAGE_CELL}>—</div>;
+  const amount = format(used);
+  const share = usage === null ? null : `${Math.round(usage.percent)}%`;
+  const against = usage === null ? "no request or limit set" : `${share} of ${format(usage.bound)} ${usage.of}`;
+  // By load against a limit: near it is near being throttled or killed.
+  // Against a request it is not a verdict at all, so one quiet tone however
+  // far past it goes.
+  const tone = usage === null ? "muted" : usage.of === "request" ? "info" : loadTone(usage.percent);
+  if (as === "bar") {
+    return (
+      <div className={USAGE_CELL} title={`${amount}, ${against}`}>
+        <span className="num w-[4.75rem] shrink-0 text-right">{amount}</span>
+        {usage !== null && (
+          <span className="min-w-0 flex-1">
+            {/* Unrounded and unclamped: `Meter` clamps the bar and rounds what
+                it shows, and a pod past its bound must not be drawn the same
+                as one exactly at it. */}
+            <Meter value={usage.percent} tone={tone} ariaLabel={`${what}, of ${usage.of}`} />
+          </span>
+        )}
+      </div>
+    );
+  }
+  // The figure itself when nothing older is held, so the graph is never empty
+  // beside a reading.
+  const drawn = history && history.length > 0 ? history : [{ at: 0, value: used }];
+  const elapsed = drawn[drawn.length - 1].at - drawn[0].at;
+  // What the graph actually covers, which is less than ten minutes until the
+  // list has been open that long — and said as it is, not as the most it
+  // could be.
+  const over = elapsed > 0 ? ` over the last ${spanWords(elapsed)}` : "";
+  return (
+    <div className={USAGE_CELL} title={`${amount}, ${against}`}>
+      <span className="num w-[4.75rem] shrink-0 text-right">{amount}</span>
+      <span className="min-w-0 flex-1">
+        <Sparkline
+          points={drawn.map((s) => s.value)}
+          // Placed by when they were read: a stretch with no readings is as
+          // wide as it lasted, not one step like any other.
+          at={drawn.map((s) => s.at)}
+          height={USAGE_GRAPH_HEIGHT}
+          // The line alone. The wash under it fills the box whenever the line
+          // runs high, and a tinted block in a table cell reads as a frame.
+          fill={false}
+          ceiling={usage?.bound}
+          tone={tone}
+          ariaLabel={`${what}${over}, now ${amount}, ${against}`}
+        />
+      </span>
+      <span className="num w-9 shrink-0 text-right text-[0.6875rem] text-muted">{share}</span>
+    </div>
+  );
+}
+
+/** Short enough to sit inside a row at every density without growing it. */
+const USAGE_GRAPH_HEIGHT = 18;
+
+
+/**
  * The design's unhealthy dot for a pod, and the pill beside it: both read
  * core's `podStatus`, which is the same function the detail header asks about
  * the same pod. Nothing here restates a rule, so a row and a header cannot
@@ -116,7 +294,25 @@ export const podColumns: Column<PodRow>[] = [
     // none, and a dash that opened nothing would be a link to nowhere.
     render: (p) => (p.node ? <NodeLink name={p.node} /> : "—"),
   },
-  { key: "ready", header: "Ready", align: "end" },
+  {
+    key: "podIp",
+    header: "IP",
+    sortable: false,
+    render: (p) => p.podIp || "—",
+  },
+  // One square per container, in place of the `1/2` the Ready column printed
+  // (#878): which container, in what state. Sorted worst first, so the pods
+  // with a container in trouble gather at one end; searched by the names,
+  // states and reasons the squares stand for, since a square holds no text.
+  {
+    key: "containers",
+    header: "Containers",
+    sortable: true,
+    render: (p) => <ContainerBlocks containers={p.containers} fallback={p.ready} />,
+    getSortValue: (p) => containersSortValue(p.containers ?? []),
+    getValue: (p) =>
+      p.containers && p.containers.length > 0 ? p.containers.map(describeContainer).join("; ") : p.ready,
+  },
   {
     key: "phase", header: "Status", sortable: true,
     render: (p) => {
@@ -129,8 +325,38 @@ export const podColumns: Column<PodRow>[] = [
     getSortValue: (p) => podStatus(p).status,
   },
   { key: "restarts", header: "Restarts", sortable: true, align: "end" },
-  { key: "cpu", header: "CPU", sortable: true, align: "end", render: (p) => metric(p.cpu, formatCpu), getSortValue: (p) => metricSort(p.cpu) },
-  { key: "memory", header: "Memory", sortable: true, align: "end", render: (p) => metric(p.memory, formatMemory), getSortValue: (p) => metricSort(p.memory) },
+  // The amount, with CPU as a ten-minute graph and memory as a bar (#864).
+  // Sorted by the
+  // amount, as before: "which pod is using the most" is the question the
+  // column was already answering, and a pod with no bound has no percentage
+  // to sort by.
+  {
+    key: "cpu",
+    header: "CPU",
+    sortable: true,
+    minWidth: USAGE_COLUMN_MIN_WIDTH,
+    render: (p) => (
+      <PodUsageCell
+        as="graph"
+        used={p.cpu}
+        history={ownHistory(p).map((s) => ({ at: s.at, value: s.cpu }))}
+        usage={podLoad(p).cpu}
+        format={formatCpu}
+        what={`${p.name} CPU`}
+      />
+    ),
+    getSortValue: (p) => metricSort(p.cpu),
+  },
+  {
+    key: "memory",
+    header: "Memory",
+    sortable: true,
+    minWidth: USAGE_COLUMN_MIN_WIDTH,
+    render: (p) => (
+      <PodUsageCell as="bar" used={p.memory} usage={podLoad(p).memory} format={formatMemory} what={`${p.name} memory`} />
+    ),
+    getSortValue: (p) => metricSort(p.memory),
+  },
   // #405: derived here against a ticking clock, from the summary's
   // `created` timestamp — the backend's `age` string is rendered once per
   // watch event and freezes for an object nothing is changing.
@@ -332,29 +558,6 @@ function nodeLoad(n: NodeRow) {
 }
 
 /**
- * How much room a usage cell asks for, whether or not it holds a bar.
- *
- * `Table` measures the natural column widths on the first render that has
- * rows and pins them, and the node list answers before the metrics do — so
- * the first render is all dashes. A width that arrived with the bars arrived
- * after the column had been fixed at the width of a dash, and the bars drew
- * across the column beside them. Overview's node table hit exactly this; see
- * `READING_WIDTH` there.
- */
-const USAGE_CELL = "flex min-w-[13rem] items-center gap-2";
-
-/**
- * The narrowest a usage column may be dragged: the cell's own 13rem (208px)
- * and the padding either side of it.
- *
- * `Column.minWidth` is the floor a resize stops at, and without one it is
- * 72px — well under what the cell above will shrink to. Dragged below 13rem
- * the column kept the width it was given and the bar ran on into the column
- * beside it, since a table cell does not clip what overflows it.
- */
-const USAGE_COLUMN_MIN_WIDTH = 232;
-
-/**
  * One node's CPU or memory in the Nodes list: the amount, and the same bar
  * Overview draws for it (#830).
  *
@@ -427,6 +630,19 @@ export const nodeColumns: Column<NodeRow>[] = [
     ),
   },
   { key: "roles", header: "Roles" },
+  {
+    key: "internalIp",
+    header: "Internal IP",
+    sortable: false,
+    render: (n) => n.internalIp || "—",
+  },
+  {
+    key: "externalIp",
+    header: "External IP",
+    sortable: false,
+    defaultHidden: true,
+    render: (n) => n.externalIp || "—",
+  },
   {
     key: "cpu",
     header: "CPU",

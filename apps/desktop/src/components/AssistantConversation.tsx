@@ -3,7 +3,7 @@ import { Bot, Check, ChevronDown, ChevronRight, Copy, Paperclip, Sparkles, Wrenc
 import { listen } from "@tauri-apps/api/event";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Badge, Button, Spinner, TextInput } from "../ui";
-import { cancelChat, listAgents, startChat, sendChat, type AgentEvent, type AgentInfo } from "@srelens/core";
+import { cancelChat, handoffPreface, listAgents, startChat, sendChat, type AgentEvent, type AgentInfo } from "@srelens/core";
 // Named the same as toolbox's ToolStatus, so taken from its own module.
 import type { ToolStatus } from "@srelens/core/lib/chat";
 import { isTauri, respondToConfirm, type ConfirmRequest } from "@srelens/core";
@@ -1388,6 +1388,8 @@ export const AssistantConversation = forwardRef<
         : "";
     const attachedImages = pendingImages;
     const rawImages = attachedImages.map(stripDataUri);
+    // What was said before this question, for an agent with no record of it.
+    const earlier = messagesRef.current;
     setInput("");
     setPendingImages([]);
     setMessagesTracked((msgs) => [
@@ -1432,15 +1434,19 @@ export const AssistantConversation = forwardRef<
       // Resume the CLI's own session only when this turn runs on the same
       // agent the stored id came from (see `cliSessionRef`).
       const resume = cliSessionRef.current?.kind === usedKind ? cliSessionRef.current.id : null;
-      const cliId = await sendChat(session, outgoing, agentPath, applyEvent, rawImages, usedKind, turnNonceRef.current, resume);
+      // Nothing to resume: this agent has none of the earlier turns, so they go
+      // with the question instead — never another CLI's id.
+      const handoff = resume === null ? handoffPreface(earlier) : "";
+      // `session` is also the disk id here (see `persistSession`), restored on
+      // reopen, so it names the conversation too.
+      const cliId = await sendChat(session, `${handoff}${outgoing}`, agentPath, applyEvent, rawImages, usedKind, turnNonceRef.current, resume, session);
       // The return IS what to store now (see chat_send): a cancelled or
       // drifty-but-clean turn echoes the resumed id back, so `null` with an
-      // id on hand always means CLEAR — either the turn ran on an agent
-      // with no id (native, Codex: the stored session is now missing turns
-      // the transcript visibly contains) or the resume itself crashed (the
-      // CLI lost the session; keeping the id would retry the same failing
-      // --resume forever). A transport rejection skips this entirely (the
-      // catch below) and keeps the stored id.
+      // id on hand always means CLEAR: the resume itself crashed (the CLI
+      // lost the session; keeping the id would retry the same failing
+      // --resume forever). Every agent returns an id now, srelens's own
+      // included (it names its kept history, #215). A transport rejection
+      // skips this entirely (the catch below) and keeps the stored id.
       const prev = cliSessionRef.current;
       if (cliId ? prev?.id !== cliId || prev?.kind !== usedKind : prev !== null) {
         cliSessionRef.current = cliId ? { kind: usedKind, id: cliId } : null;
@@ -1589,6 +1595,15 @@ export const AssistantConversation = forwardRef<
                     )
                     : `${selectedAgent.label} isn't installed.`
               : "No coding agent available. Install one to use the assistant."}
+          </p>
+        )}
+        {/* Send is gated on a picked context (see `canSend`); without this the
+            gate was silent — a dead Send and an Enter that did nothing. */}
+        {agentReady && multiContextMode && selectedContexts.length === 0 && (
+          <p className="mb-2 px-1 text-xs text-muted-foreground">
+            {availableContexts.length > 0
+              ? "Pick at least one context under Contexts to ask about."
+              : "Add a kubeconfig under Settings → Contexts to ask about a cluster."}
           </p>
         )}
         {/* Composer card: a chip row (context / skills / pending images) and a

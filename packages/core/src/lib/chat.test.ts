@@ -27,6 +27,7 @@ describe("sendChat", () => {
       agentKind: "claude",
       turn: 0,
       resume: null,
+      conversation: null,
     });
   });
 
@@ -41,6 +42,22 @@ describe("sendChat", () => {
       agentKind: "codex",
       turn: 3,
       resume: null,
+      conversation: null,
+    });
+  });
+
+  it("passes the saved conversation's id through to chat_send", async () => {
+    const { sendChat } = await import("./chat");
+    await sendChat("s1", "hi", "/usr/bin/cursor-agent", () => {}, [], "cursor", 1, "chat-1", "conv-1");
+    expect(invokeCommandMock).toHaveBeenCalledWith("chat_send", {
+      session: "s1",
+      prompt: "hi",
+      images: [],
+      agentPath: "/usr/bin/cursor-agent",
+      agentKind: "cursor",
+      turn: 1,
+      resume: "chat-1",
+      conversation: "conv-1",
     });
   });
 

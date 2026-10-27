@@ -1,5 +1,11 @@
 import { describe, it, expect } from "vitest";
-import { createLogBuffer, appendLogLines, clearLogBuffer, type LogLine } from "./logBuffer";
+import {
+  createLogBuffer,
+  appendLogLines,
+  clearLogBuffer,
+  prependLogLines,
+  type LogLine,
+} from "./logBuffer";
 
 const line = (text: string, source = ""): LogLine => ({ source, text });
 
@@ -86,5 +92,29 @@ describe("clearLogBuffer", () => {
     buffer = appendLogLines(buffer, [line("a"), line("b"), line("c"), line("d"), line("e")]);
     expect(buffer.lines).toHaveLength(4);
     expect(buffer.dropped).toBe(1);
+  });
+});
+
+describe("prependLogLines", () => {
+  it("puts a page in front, lowers dropped by as many, and grows to the capacity given", () => {
+    let buffer = createLogBuffer(3);
+    buffer = appendLogLines(buffer, ["a", "b", "c", "d", "e"].map((t) => line(t)));
+    expect(buffer.lines.map((l) => l.text)).toEqual(["c", "d", "e"]);
+    expect(buffer.dropped).toBe(2);
+
+    buffer = prependLogLines(buffer, [line("a"), line("b")], 6);
+    expect(buffer.lines.map((l) => l.text)).toEqual(["a", "b", "c", "d", "e"]);
+    expect(buffer.dropped).toBe(0);
+    expect(buffer.capacity).toBe(6);
+
+    // The raised capacity holds what was loaded while new lines arrive.
+    buffer = appendLogLines(buffer, [line("f")]);
+    expect(buffer.lines.map((l) => l.text)).toEqual(["a", "b", "c", "d", "e", "f"]);
+  });
+
+  it("never lowers dropped below nought or capacity below what it was", () => {
+    const buffer = prependLogLines(createLogBuffer(10), [line("a")], 4);
+    expect(buffer.dropped).toBe(0);
+    expect(buffer.capacity).toBe(10);
   });
 });

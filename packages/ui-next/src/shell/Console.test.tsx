@@ -1,4 +1,5 @@
 import { useEffect } from "react";
+import * as layout from "../lib/consoleLayout";
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import fluxManifest from "../../../../examples/extensions/flux.json";
 import { takeExtensionAction } from "../extensions/actionRequests";
@@ -7,6 +8,7 @@ import userEvent from "@testing-library/user-event";
 import { Console } from "./Console";
 import { invalidateAgentInventory } from "../lib/agentInventory";
 import { ConsoleProvider, useConsole } from "../console";
+import { setAssistantEnabled, setClusterAssistant } from "../lib/assistant";
 import { pinContextKey, resetContexts, setContexts } from "../lib/clusters";
 import { defaultState } from "../lib/tabs";
 import { logsRoute } from "../screens/Logs";
@@ -55,6 +57,10 @@ vi.mock("../lib/agentRun", () => ({
   useActiveRunKey,
   chooseAgent,
   useRunSubject,
+  // What `lib/assistant` asks when a switch flips (#968): no run is busy here.
+  getRunSummaries: () => [],
+  getRun: () => ({ busy: false }),
+  getRunSubject: () => undefined,
 }));
 
 // The dock is desktop-only: nothing in a browser can answer a question, since
@@ -191,9 +197,61 @@ beforeEach(() => {
   stopAgentRun.mockReset();
   chooseAgent.mockReset();
   useActiveRunKey.mockReset().mockReturnValue(null);
+  layout.__resetConsoleLayoutForTests();
 });
 
 describe("Console", () => {
+  it("is resized from its top edge, the reader's height kept by the app (#944)", async () => {
+    const user = userEvent.setup();
+    useAgentRun.mockReturnValue(runState({ turns: [{ id: 1, role: "user", text: "how many pods fit?", calls: [], at: 1 }] }));
+    useRun.mockReturnValue(runState({ turns: [{ id: 1, role: "user", text: "how many pods fit?", calls: [], at: 1 }] }));
+    setup();
+    await user.click(screen.getByRole("button", { name: "Ask from elsewhere" }));
+    const grip = screen.getByRole("separator", { name: "Resize console" });
+    fireEvent.keyDown(grip, { key: "End" });
+    // The window's height less the room the page always keeps.
+    expect(layout.consoleHeight()).toBe(layout.consoleHeightBounds(window.innerHeight).max);
+    expect(screen.getByRole("log").style.height).toBe(`${layout.consoleHeight()}px`);
+  });
+
+  it("fills the content area when maximized, and steps back when it is folded away (#944)", async () => {
+    const user = userEvent.setup();
+    setup();
+    await user.click(screen.getByRole("button", { name: "Ask from elsewhere" }));
+    await user.click(screen.getByRole("button", { name: "Maximize console" }));
+    expect(layout.consoleMaximized()).toBe(true);
+    expect(screen.queryByRole("separator")).toBeNull();
+    await user.click(screen.getByRole("button", { name: "Minimize console" }));
+    expect(layout.consoleMaximized()).toBe(false);
+  });
+
+  it("hands the room the page above can spare to the dock (#948)", async () => {
+    const user = userEvent.setup();
+    useAgentRun.mockReturnValue(runState({ turns: [{ id: 1, role: "user", text: "q", calls: [], at: 1 }] }));
+    useRun.mockReturnValue(runState({ turns: [{ id: 1, role: "user", text: "q", calls: [], at: 1 }] }));
+    render(
+      <ConsoleProvider onToggleTheme={() => {}}>
+        <Elsewhere />
+        <Console spareAbove={40} />
+      </ConsoleProvider>,
+    );
+    await user.click(screen.getByRole("button", { name: "Ask from elsewhere" }));
+    expect(screen.getByRole("log").style.maxHeight).toContain("px)");
+  });
+
+  it("offers neither Maximize nor a grip in the full view, where the screen is the conversation", () => {
+    render(<ConsoleProvider onToggleTheme={() => {}}><Console fullView /></ConsoleProvider>);
+    expect(screen.queryByRole("button", { name: "Maximize console" })).toBeNull();
+    expect(screen.queryByRole("separator")).toBeNull();
+  });
+
+  it("keeps a dragged height off the full view's command list, which it could not shrink", async () => {
+    layout.setConsoleHeight(500);
+    render(<ConsoleProvider onToggleTheme={() => {}}><Console fullView /></ConsoleProvider>);
+    await userEvent.type(screen.getByRole("textbox", { name: "Console prompt" }), "/");
+    expect(screen.getByRole("log").style.height).toBe("");
+  });
+
   it("asks the agent with what was typed at the prompt, and clears it", async () => {
     const user = userEvent.setup();
     setup();
@@ -1153,6 +1211,22 @@ describe("Console — debt 2's real navigation", () => {
     expect(tab?.sub).toBe("prod-eu");
   });
 
+  it("Follow logs from a detail tab pinned to another cluster brings that cluster into focus (#834)", async () => {
+    // The dock speaks for the detail tab's own cluster, and the Logs screen
+    // reads the rail's: with the rail on stage, prod's pod would otherwise be
+    // followed on stage under a prod-labelled tab.
+    const user = userEvent.setup();
+    const contexts = [ctx("prod", "prod-eu"), ctx("stage", "stage-eu")];
+    setContexts(contexts);
+    tabsStore.setState(defaultState(contexts));
+    tabsStore.setActiveCluster("stage", "stage-eu");
+    tabsStore.openTab("/k/prod-eu/Pod/checkout/api-0", { clusterName: "prod-eu" });
+    setup();
+    await user.type(screen.getByRole("textbox", { name: "Console prompt" }), "/follow logs{Enter}");
+    expect(tabsStore.activeRoute()).toBe("/logs/Pod/checkout/api-0");
+    expect(tabsStore.currentWorkspace().activeCluster).toBe("prod");
+  });
+
   it("Open a shell reaches Terminals — generic navigation, per debt 2's resolution", async () => {
     const user = userEvent.setup();
     tabsStore.openTab("/k/Pod/checkout/api-0");
@@ -1180,8 +1254,8 @@ describe("Console — debt 2's real navigation", () => {
     tabsStore.openTab("/k/Deployment/checkout/api");
     setup();
     await user.type(screen.getByRole("textbox", { name: "Console prompt" }), "/restart{Enter}");
-    expect(tabsStore.activeRoute()).toBe("/k/Deployment/checkout/api");
-    const tab = tabsStore.currentWorkspace().tabs.find((t) => t.route === "/k/Deployment/checkout/api");
+    expect(tabsStore.activeRoute()).toBe("/k/prod-eu/Deployment/checkout/api");
+    const tab = tabsStore.currentWorkspace().tabs.find((t) => t.route === "/k/prod-eu/Deployment/checkout/api");
     expect(tab?.sub).toBe("prod-eu");
   });
 });
@@ -1766,5 +1840,88 @@ describe("app commands in the palette (#544)", () => {
       expect(takeExtensionAction({ ...helmReleaseSelection, context: "srelens-context:/kube/a%23b#c" })).toBeNull();
       expect(takeExtensionAction({ ...helmReleaseSelection, context: "srelens-context:/kube/a#b%23c" })).toBe("helmreleases-reconcile");
     });
+  });
+});
+
+/**
+ * #968: where the AI Assistant is off, the dock stays as the app's command
+ * palette and nothing else — no question leaves it, and nothing on it says AI.
+ */
+describe("Console — where the AI Assistant is off", () => {
+  const prompt = () => screen.getByRole("textbox", { name: "Console prompt" }) as HTMLTextAreaElement;
+
+  it("runs a / command while the AI Assistant is off for the cluster", async () => {
+    const user = userEvent.setup();
+    const onToggleTheme = vi.fn();
+    setClusterAssistant(HARNESS_CTX.stableId, false);
+    setup({ onToggleTheme });
+    await user.type(prompt(), "/theme{Enter}");
+    expect(onToggleTheme).toHaveBeenCalledTimes(1);
+    expect(askAgent).not.toHaveBeenCalled();
+  });
+
+  it("says only that nothing matched, with no offer to ask the agent", async () => {
+    const user = userEvent.setup();
+    setClusterAssistant(HARNESS_CTX.stableId, false);
+    setup();
+    await user.type(prompt(), "/zzzz");
+    expect(await screen.findByText("No command matches.")).toBeTruthy();
+    expect(screen.queryByText(/ask the agent/)).toBeNull();
+  });
+
+  it("sends nothing and keeps the draft and the image when the cluster is switched off mid-question", async () => {
+    const user = userEvent.setup();
+    const shot = () => new File([new Uint8Array([1, 2, 3])], "shot.png", { type: "image/png" });
+    setup();
+    // Open the dock (its attachments row is drawn only then); that question is not this test's.
+    await user.click(screen.getByRole("button", { name: "Ask from elsewhere" }));
+    askAgent.mockClear();
+    fireEvent.paste(prompt(), { clipboardData: { files: [shot()], types: ["Files"] } });
+    await screen.findByAltText("Attachment 1");
+    await user.type(prompt(), "why is it slow");
+
+    act(() => { setClusterAssistant(HARNESS_CTX.stableId, false); });
+    fireEvent.keyDown(prompt(), { key: "Enter" });
+    await act(async () => {
+      for (let i = 0; i < 10; i++) await Promise.resolve();
+    });
+    expect(askAgent).not.toHaveBeenCalled();
+    expect(prompt().value).toBe("why is it slow");
+
+    // Switched back on, the question is exactly as it was left, image and all.
+    act(() => { setClusterAssistant(HARNESS_CTX.stableId, true); });
+    expect(prompt().value).toBe("why is it slow");
+    expect(screen.getByAltText("Attachment 1")).toBeTruthy();
+  });
+
+  it("ignores a question from a screen, and says why with a way to Settings", async () => {
+    const user = userEvent.setup();
+    setClusterAssistant(HARNESS_CTX.stableId, false);
+    setup();
+    await user.click(screen.getByRole("button", { name: "Ask from elsewhere" }));
+    expect(askAgent).not.toHaveBeenCalled();
+    expect(screen.getByText("AI Assistant is off for prod-eu")).toBeTruthy();
+
+    await user.click(screen.getByRole("button", { name: "Open Settings" }));
+    expect(tabsStore.activeRoute()).toBe("/settings");
+  });
+
+  it("shows no Ask wording and no agent picker while the assistant is off", async () => {
+    setClusterAssistant(HARNESS_CTX.stableId, false);
+    setup();
+    await act(async () => {});
+    expect(prompt().getAttribute("placeholder")).toBe("Type / for commands");
+    expect(screen.queryByText(/Ask about/)).toBeNull();
+    expect(screen.queryByRole("button", { name: /Choose agent/ })).toBeNull();
+    expect(screen.queryByText(/^Agent$/)).toBeNull();
+  });
+
+  it("says the assistant is off, not off for a cluster, when it is off everywhere", async () => {
+    const user = userEvent.setup();
+    setAssistantEnabled(false);
+    setup();
+    await user.click(screen.getByRole("button", { name: "Ask from elsewhere" }));
+    expect(screen.getByText("AI Assistant is off")).toBeTruthy();
+    expect(askAgent).not.toHaveBeenCalled();
   });
 });

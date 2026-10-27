@@ -1180,8 +1180,14 @@ export function SettingsView({
                     {updateState.update.notes && <ReleaseNotes notes={updateState.update.notes} />}
                     {updateState.update.external ? (
                       <p className="fl-settings-update__status">
-                        This install is managed by your system package manager — update it there.
-                        On Arch (AUR): <code>paru -Syu</code> or <code>yay -Syu</code>.
+                        {updateState.update.nixManaged ? (
+                          <>This install is managed by Nix — update it with <code>nix profile upgrade</code>.</>
+                        ) : (
+                          <>
+                            This install is managed by your system package manager — update it there.
+                            On Arch (AUR): <code>paru -Syu</code> or <code>yay -Syu</code>.
+                          </>
+                        )}
                       </p>
                     ) : (
                       <>

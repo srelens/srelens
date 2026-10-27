@@ -6,7 +6,7 @@ import { useSyncExternalStore } from "react";
  *
  * The dock's agent picker reads the inventory at mount, and the dock is never
  * unmounted by a tab switch — so a provider key configured in Settings ›
- * Agent & MCP never reached a dock that was already open: the native agent
+ * Settings › AI Assistant never reached a dock that was already open: the native agent
  * stayed missing from the picker, and one whose key was cleared stayed
  * offered. The writers are known and few, so they say so here rather than the
  * readers polling a question that has an exact answer.

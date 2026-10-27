@@ -18,7 +18,7 @@ function Pane({
   min = 180,
   max = 420,
 }: {
-  edge?: "left" | "right";
+  edge?: "left" | "right" | "top";
   onCommit?: (width: number) => void;
   initial?: number;
   min?: number;
@@ -179,6 +179,26 @@ describe("ResizeHandle on either edge", () => {
     expect(onCommit).toHaveBeenLastCalledWith(224);
   });
 
+  it("grows upward on a top-edge handle, a pane docked at the bottom (#942)", () => {
+    render(<Pane edge="top" />);
+    fireEvent.mouseDown(handle(), { clientX: 10, clientY: 500 });
+    // Sideways travel is not a resize of a vertical grip.
+    fireEvent.mouseMove(window, { clientX: 400, clientY: 440 });
+    expect(paneWidth()).toBe("300px");
+    fireEvent.mouseMove(window, { clientX: 10, clientY: 540 });
+    expect(paneWidth()).toBe("200px");
+  });
+
+  it("maps ArrowUp to taller on a top-edge handle, and is a horizontal separator", async () => {
+    render(<Pane edge="top" />);
+    expect(handle().getAttribute("aria-orientation")).toBe("horizontal");
+    handle().focus();
+    await userEvent.keyboard("{ArrowUp}");
+    expect(paneWidth()).toBe("256px");
+    await userEvent.keyboard("{ArrowDown}{ArrowDown}");
+    expect(paneWidth()).toBe("224px");
+  });
+
   it("says which edge it is on, so the stylesheet can put the rule there", () => {
     const { rerender } = render(<Pane />);
     expect(handle().dataset.edge).toBe("right");
@@ -212,5 +232,14 @@ describe("the resize handle's stylesheet", () => {
     expect(body).toContain("border-left:");
     // Or the base rule's own border draws down the far side of the grip.
     expect(body).toMatch(/border-right:\s*none/);
+  });
+
+  it("puts a top-edge grip's rule along the top, as a row resize", () => {
+    const rule = components.slice(components.indexOf('.resize-handle[data-edge="top"] {'));
+    const body = rule.slice(0, rule.indexOf("}"));
+    expect(body).toContain("cursor: row-resize");
+    expect(body).toContain("border-top:");
+    expect(body).toMatch(/border-right:\s*none/);
+    expect(body).toContain("height: 5px");
   });
 });

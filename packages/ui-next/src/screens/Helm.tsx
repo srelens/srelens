@@ -1,3 +1,4 @@
+import { CollectionScopeNotice, NamespaceScopePicker } from "./collections/NamespaceScope";
 import {
   useCallback,
   useEffect,
@@ -19,6 +20,7 @@ import {
   type ClusterContext,
   type HelmReleaseSummary,
   type HelmRevision,
+  selectsNothing,
 } from "@srelens/core";
 import { useNamespaceOptions } from "@srelens/core/react";
 import {
@@ -34,7 +36,7 @@ import {
   tableFilterError,
   type Column,
 } from "@srelens/ui-kit";
-import { useConsole } from "../console";
+import { useAsk } from "../console";
 import { getKubeconfigFiles, useActiveContext } from "../lib/clusters";
 import { FailureState, NamespaceFailuresAlert, friendly } from "../lib/errorCopy";
 import {
@@ -46,12 +48,11 @@ import {
 } from "../lib/helmOps";
 import { Icons } from "../lib/icons";
 import { describe } from "../lib/routes";
-import { useNamespaces, useSetNamespaces } from "../lib/workspace";
+import { useNamespaces, useFallbackNamespace, useSetNamespaces } from "../lib/workspace";
 import { HelmOpDialog } from "./helm/HelmOpDialog";
 import { ReleasePane, type PaneRelease } from "./helm/ReleasePane";
 import {
   NamespaceErrorAlert,
-  NamespacePicker,
   NoClusterScreen,
   StaleSelectionAlert,
   emptyTableCopy,
@@ -293,7 +294,7 @@ function HelmReleases({
   // never interchangeable — see `lib/clusters`.
   const name = context.name;
   const files = getKubeconfigFiles();
-  const { ask } = useConsole();
+  const ask = useAsk(name);
 
   const ops = useSyncExternalStore(subscribeHelmOps, getHelmOps, getHelmOps);
 
@@ -319,7 +320,8 @@ function HelmReleases({
    */
   const selection = useNamespaces(context.stableId);
   const setNamespaces = useSetNamespaces();
-  const { namespaces, scope, error: namespaceError } = useNamespaceOptions(name, files);
+  const namespaceOptions = useNamespaceOptions(name, files);
+  const { namespaces, scope, error: namespaceError } = namespaceOptions;
 
   /**
    * What the BACKEND is asked for: every namespace for an empty selection,
@@ -335,9 +337,7 @@ function HelmReleases({
   // A namespace-restricted credential has one namespace and no way to ask for
   // another — the same rule every other screen follows, written to the shared
   // store so they all agree about it.
-  useEffect(() => {
-    if (scope) setNamespaces(context.stableId, [scope]);
-  }, [scope, context.stableId, setNamespaces]);
+  useFallbackNamespace(context.stableId, scope);
 
   /**
    * Which listing is the current one.
@@ -361,7 +361,14 @@ function HelmReleases({
    */
   const reload = useCallback(async () => {
     const seq = ++listSeq.current;
-    const out = await listHelmReleasesIn(name, parseNamespaceSelection(listKey));
+    const asked = parseNamespaceSelection(listKey);
+    // A namespace collection that matches nothing here (#881): no releases,
+    // and helm is not asked about a namespace that cannot exist.
+    if (selectsNothing(asked)) {
+      setList({ status: "ready", releases: [], at: Date.now(), failures: [] });
+      return;
+    }
+    const out = await listHelmReleasesIn(name, asked);
     if (seq !== listSeq.current) return;
     if (out.error !== undefined || !out.releases) {
       setList({ status: "error", error: out.error ?? "helm returned no releases" });
@@ -822,16 +829,18 @@ function HelmReleases({
               invisible one until #352. The visible word is §16's; the question
               that will actually be sent is the accessible name, which is the
               same split the chip itself makes. */}
-          <Button
-            type="button"
-            size="sm"
-            aria-label={`${EXPLAIN_LABEL}: ${question}`}
-            title={`${EXPLAIN_LABEL}: ${question}`}
-            onClick={() => ask(question)}
-          >
-            <Sparkle size={12} aria-hidden="true" />
-            {EXPLAIN_LABEL}
-          </Button>
+          {ask && (
+            <Button
+              type="button"
+              size="sm"
+              aria-label={`${EXPLAIN_LABEL}: ${question}`}
+              title={`${EXPLAIN_LABEL}: ${question}`}
+              onClick={() => ask(question)}
+            >
+              <Sparkle size={12} aria-hidden="true" />
+              {EXPLAIN_LABEL}
+            </Button>
+          )}
           <Button
             variant="primary"
             size="sm"
@@ -903,11 +912,7 @@ function HelmReleases({
         label="Filter releases"
         placeholder="Filter releases…"
       >
-        <NamespacePicker
-          namespaces={namespaces}
-          selection={selection}
-          onChange={(next) => setNamespaces(context.stableId, next)}
-        />
+        <NamespaceScopePicker context={context} options={namespaceOptions} />
       </FilterBar>
 
       {/* Non-fatal: the picker keeps whatever namespaces it had, and the
@@ -915,6 +920,7 @@ function HelmReleases({
           control may be short. */}
       <NamespaceErrorAlert error={namespaceError} />
 
+      <CollectionScopeNotice context={context} />
       <StaleSelectionAlert
         selection={selection}
         namespaces={namespaces}

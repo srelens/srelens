@@ -1,5 +1,5 @@
 import { rememberContextMarks } from "./marks";
-import { useSyncExternalStore } from "react";
+import { createContext, useContext, useSyncExternalStore } from "react";
 import type { ClusterContext } from "@srelens/core";
 import { reconcileClusters, useActiveCluster } from "./tabsStore";
 
@@ -229,4 +229,19 @@ export function useActiveContext(): ClusterContext | undefined {
   const active = useActiveCluster();
   const all = useContexts();
   return resolveContext(all, active);
+}
+
+/**
+ * The cluster a screen pinned to its own renders — a detail tab's, from its
+ * route (#834) — for what it draws that would otherwise read the rail. A pod's
+ * node link in prod's detail tab must open prod's node while the rail is on
+ * staging. Unset everywhere else, where the rail's cluster is the right one.
+ */
+export const ScreenCluster = createContext<ClusterContext | undefined>(undefined);
+
+/** {@link ScreenCluster} when a pinned screen set it, else the rail's {@link useActiveContext}. */
+export function useScreenContext(): ClusterContext | undefined {
+  const pinned = useContext(ScreenCluster);
+  const active = useActiveContext();
+  return pinned ?? active;
 }

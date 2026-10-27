@@ -7,6 +7,17 @@ release: its Features and Fixes lists. This file holds what a subject cannot say
 what to do when upgrading and which features are previews. Issue and pull request numbers
 are in srelens/srelens.
 
+### The new design is the default
+
+The desktop app and the web build now open in the new design for new installs and for
+everyone who never chose a design. If you switched to the classic design yourself, srelens
+keeps it.
+
+The classic design is deprecated and will be removed in a future version. While it runs, a
+banner says so and offers **Switch to the new design**; dismissing the banner hides it for
+the rest of the session. **Settings → Appearance → Design** still switches between the two
+and labels classic **Classic (deprecated)**.
+
 ### Extension platform
 
 What changed in extensions since v0.15.0 (2026-09-20).

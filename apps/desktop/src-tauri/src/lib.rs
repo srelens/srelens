@@ -37,6 +37,7 @@ mod vault_password;
 mod toolbox;
 mod updater;
 mod watch;
+pub mod web_frontend;
 mod window;
 mod window_blur;
 mod window_streams;
@@ -49,7 +50,7 @@ use external::open_external;
 use files::{pick_kubeconfig_files, save_pasted_kubeconfig, save_text_file};
 use forward::{list_forwards, start_port_forward, stop_port_forward};
 use helm::{helm_op_close, start_helm_op};
-use logs::{start_log_stream, stop_log_stream};
+use logs::{export_log_spool, quit as quit_logs, read_log_spool, start_log_stream, stop_log_stream};
 use mcp::{
     install_srelens_cli, mcp_audit_tail, mcp_confirm_pending, mcp_confirm_respond,
     mcp_http_start, mcp_http_status, mcp_http_stop, mcp_prompt_issues, mcp_token_get,
@@ -76,6 +77,16 @@ pub use capabilities::{
     build_registry, build_registry_for_user, build_registry_with_paths,
     build_registry_with_paths_and_settings, default_settings_path,
 };
+
+/// Install ring as the process's rustls crypto provider.
+///
+/// reqwest is built with `rustls-no-provider`, so the first client built
+/// without one panics: the native agent's `HttpProvider`, the Toolbox
+/// download. Call it first thing in `main`, so no run mode depends on a
+/// cluster call having installed one first. A second install is a no-op.
+pub fn install_tls_provider() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+}
 
 /// Size the main window to a comfortable default, clamped to the screen it
 /// opens on: on a large display it stays at the preferred ~16" size (centered),
@@ -369,6 +380,14 @@ pub fn run() {
             // Best-effort: remove stale helm temp files (kubeconfig/values) left
             // behind by a crashed/killed prior run so they don't accumulate.
             srelens_kube::helm_cli::sweep_stale_temp_files();
+            // And log histories (#914) a crashed or killed run left behind;
+            // a running srelens holds its own, so they stay.
+            srelens_streams::log_spool::sweep_stale(&std::env::temp_dir());
+            // And the Cursor chats no saved conversation holds (#952). A saved
+            // one keeps its chat across runs and loses it with the chat.
+            assistant::sweep_cursor_state(app.handle());
+            // Likewise the srelens agent's histories (#215).
+            llm_agent::sweep_native_state(app.handle());
 
             // Use Tauri's managed async runtime — `tokio::spawn` here panics
             // ("no reactor running") because `setup` runs before/outside a Tokio
@@ -482,8 +501,12 @@ pub fn run() {
         .manage(ForwardManager::new(cache.clone()))
         .manage(McpHttpManager::new(cache.clone()))
         .manage(assistant::ChatManager::default())
-        .manage(llm_agent::NativeHistory::default())
-        .manage(LogStreamManager::new(cache))
+        .manage(LogStreamManager::new(cache).with_spools(
+            srelens_streams::log_spool::SpoolDirs::per_process(
+                std::env::temp_dir(),
+                srelens_streams::log_spool::DESKTOP_SPOOL_CEILING,
+            ),
+        ))
         .manage(TerminalManager::new())
         .manage(HelmManager::new())
         // Which helm operations are still running, so one whose window goes
@@ -514,6 +537,8 @@ pub fn run() {
             assistant_skills::skill_load,
             assistant_skills::skill_save,
             assistant_skills::skill_delete,
+            assistant_skills::skills_dir_path,
+            assistant_skills::skill_reveal,
             invoke_capability,
             bridge::invoke_package_capability,
             start_resource_watch,
@@ -531,6 +556,8 @@ pub fn run() {
             list_forwards,
             start_log_stream,
             stop_log_stream,
+            read_log_spool,
+            export_log_spool,
             save_text_file,
             open_external,
             pick_kubeconfig_files,
@@ -582,7 +609,7 @@ pub fn run() {
             window::open_context_window,
             window_blur::set_window_blur,
         ])
-        .build(tauri::generate_context!())
+        .build(web_frontend::context())
         .expect("error while running tauri application")
         .run(|app, event| {
             // srelens is quitting: the last chance to delete the node debug
@@ -590,11 +617,14 @@ pub fn run() {
             // answer cannot hold the app open; what is left is in the log.
             if let tauri::RunEvent::Exit = event {
                 let (done, finished) = std::sync::mpsc::channel();
-                let app = app.clone();
+                let shells = app.clone();
                 tauri::async_runtime::spawn(async move {
-                    node_shells::delete_all(&app).await;
+                    node_shells::delete_all(&shells).await;
                     let _ = done.send(());
                 });
+                // The log histories go while the node pods are being deleted,
+                // so removing them can't delay or skip that (#734).
+                quit_logs(app);
                 let deadline =
                     node_shells::quit_deadline(srelens_kube::connect::request_timeout());
                 if finished.recv_timeout(deadline).is_err() {

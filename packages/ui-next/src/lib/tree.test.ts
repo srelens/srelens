@@ -145,3 +145,38 @@ describe("INVESTIGATE", () => {
     ]);
   });
 });
+
+/**
+ * #402: the sidebar's per-kind counts ride on the nodes. The map is keyed by
+ * node id so one lookup serves kinds, CRDs and the forwards route alike, and
+ * a row with no entry must come out exactly as it did before counts existed —
+ * no `count` key at all, which is what keeps the kit from drawing a slot.
+ */
+describe("counts on nodes", () => {
+  const leaf = (nodes: ResourceNode[], id: string): ResourceNode | undefined =>
+    nodes.flatMap((n) => [n, ...(n.children ?? [])]).find((n) => n.id === id);
+
+  it("puts a count on the kind it names", () => {
+    const nodes = kindNodes(new Map([["kind:pods", "38"], ["kind:nodes", "0"]]));
+    expect(leaf(nodes, "kind:pods")?.count).toBe("38");
+    // Zero is an answer — a list that came back empty — and is drawn.
+    expect(leaf(nodes, "kind:nodes")?.count).toBe("0");
+  });
+
+  it("leaves a row with no entry exactly as it was", () => {
+    const nodes = kindNodes(new Map([["kind:pods", "38"]]));
+    expect("count" in (leaf(nodes, "kind:deployments") ?? {})).toBe(false);
+    expect(kindNodes(new Map())).toEqual(kindNodes());
+  });
+
+  it("never counts a group", () => {
+    const nodes = kindNodes(new Map([["workloads", "9"]]));
+    expect("count" in (nodes.find((n) => n.id === "workloads") ?? {})).toBe(false);
+  });
+
+  it("counts a CRD and the forwards route", () => {
+    const crds = crdNodes([CERTS], new Map([["crd:certificates.cert-manager.io", "4"]]));
+    expect(leaf(crds, "crd:certificates.cert-manager.io")?.count).toBe("4");
+    expect(leaf(kindNodes(new Map([["route:/forwards", "2"]])), "route:/forwards")?.count).toBe("2");
+  });
+});

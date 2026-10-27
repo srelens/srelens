@@ -1,0 +1,478 @@
+import { useEffect, useId, useMemo, useState } from "react";
+import {
+  apiKindName,
+  listApiKinds,
+  parseMemberList,
+  resolveNamespaceCollections,
+  validateCollection,
+  type ApiKind,
+  type Collection,
+  type CollectionProblem,
+  type NamespaceResolution,
+} from "@srelens/core";
+import { Button, Checkbox, Dialog, Field, MultiSelect, Switch, TextInput } from "@srelens/ui-kit";
+import { useCollections, saveCollection } from "../../lib/collections";
+import { friendly } from "../../lib/errorCopy";
+import { useListing } from "../../lib/collectionScope";
+
+/** How long typing settles before the backend is asked to check or preview. */
+const SETTLE_MS = 200;
+/** How many matched namespaces the preview lists before it counts the rest. */
+const PREVIEW_SHOWN = 40;
+
+const TEXTAREA =
+  "scroll w-full rounded-md border border-[var(--control-line)] bg-transparent px-2 py-1.5 font-mono text-[0.75rem] outline-none focus:border-[var(--accent)]";
+
+/** What a draft says, as a collection; empty fields left out. */
+function draftCollection(fields: Draft): Collection {
+  const collection: Collection = { name: fields.name.trim(), type: "namespace" };
+  if (fields.description.trim()) collection.description = fields.description.trim();
+  const members = parseMemberList(fields.members);
+  if (members.length > 0) collection.members = members;
+  const patterns = parseMemberList(fields.patterns);
+  if (patterns.length > 0) collection.patterns = patterns;
+  if (fields.labelSelector.trim()) collection.labelSelector = fields.labelSelector.trim();
+  if (fields.filterResources) collection.resources = { kinds: fields.kinds, nameRegex: fields.nameRegex };
+  return collection;
+}
+
+interface Draft {
+  name: string;
+  description: string;
+  members: string;
+  patterns: string;
+  labelSelector: string;
+  /** Whether the collection also narrows resource lists (#885). */
+  filterResources: boolean;
+  kinds: string[];
+  nameRegex: string;
+}
+
+function draftOf(collection: Collection | undefined, members: readonly string[] = []): Draft {
+  return {
+    name: collection?.name ?? "",
+    description: collection?.description ?? "",
+    members: (collection?.members ?? members).join("\n"),
+    patterns: (collection?.patterns ?? []).join("\n"),
+    labelSelector: collection?.labelSelector ?? "",
+    filterResources: collection?.resources !== undefined,
+    kinds: collection?.resources?.kinds ?? [],
+    nameRegex: collection?.resources?.nameRegex ?? "",
+  };
+}
+
+/** A field's problems as one line each, a list entry's prefixed with what it was. */
+function problemText(problems: CollectionProblem[], field: string): string | undefined {
+  const mine = problems.filter((p) => p.field === field);
+  return mine.length > 0 ? mine.map((p) => p.message).join(" ") : undefined;
+}
+
+export interface CollectionDialogProps {
+  /** The collection being edited; absent for a new one. */
+  editing?: Collection;
+  /** For a new one, the namespaces it starts with — Save as collection… */
+  members?: readonly string[];
+  /** The cluster the preview resolves against, by `stableId`, and its name. */
+  clusterId?: string;
+  clusterName?: string;
+  onClose: () => void;
+  /** After a save, with what was saved. */
+  onSaved?: (collection: Collection) => void;
+}
+
+/**
+ * Create or edit a namespace collection (#881): a name, and any of explicit
+ * members, name patterns and a label selector.
+ *
+ * Checked by the backend as it is typed, so the rule that refuses a save is
+ * the rule the matching applies, and previewed against the cluster in focus,
+ * so a typo in a member or a pattern that matches nothing shows before the
+ * collection is used: each member is marked found or missing.
+ *
+ * Members and patterns take one per line, or commas — a list pasted from a
+ * release ticket is split, trimmed and kept once each.
+ */
+export function CollectionDialog({ editing, members, clusterId, clusterName, onClose, onSaved }: CollectionDialogProps) {
+  const all = useCollections();
+  const [draft, setDraft] = useState<Draft>(() => draftOf(editing, members));
+  const [problems, setProblems] = useState<CollectionProblem[] | null>(null);
+  // Set from each change until the backend has checked it. The problems shown
+  // meanwhile are the last ones, so nothing flickers while typing, but a save
+  // waits for the draft's own.
+  const [checking, setChecking] = useState(true);
+  const [checkError, setCheckError] = useState<string | null>(null);
+  const [touchedName, setTouchedName] = useState(editing !== undefined);
+  const collection = useMemo(() => draftCollection(draft), [draft]);
+  const taken = useMemo(
+    () => all.filter((c) => c.type === "namespace" && c.name !== editing?.name).map((c) => c.name),
+    [all, editing?.name],
+  );
+  const ids = { members: useId(), patterns: useId(), selector: useId(), kinds: useId() };
+
+  useEffect(() => {
+    let current = true;
+    setChecking(true);
+    const timer = setTimeout(() => {
+      validateCollection(collection, taken).then(
+        (found) => {
+          if (!current) return;
+          setCheckError(null);
+          setProblems(found);
+          setChecking(false);
+        },
+        (error: unknown) => {
+          if (!current) return;
+          setCheckError(error instanceof Error ? error.message : String(error));
+          setProblems([]);
+          setChecking(false);
+        },
+      );
+    }, SETTLE_MS);
+    return () => {
+      current = false;
+      clearTimeout(timer);
+    };
+  }, [collection, taken]);
+
+  const set = (field: "name" | "description" | "members" | "patterns" | "labelSelector" | "nameRegex") => (value: string) =>
+    setDraft((d) => ({ ...d, [field]: value }));
+  // An empty name is a problem the reader has not made yet: it is not shown
+  // until they have typed one or tried to save.
+  const shown = (problems ?? []).filter((p) => p.field !== "name" || touchedName);
+  const canSave = !checking && problems !== null && problems.length === 0 && checkError === null;
+  // The preview needs the rules to be sound, not the whole collection: a
+  // pattern typed before the name is worth seeing at once.
+  const previewable =
+    problems !== null &&
+    checkError === null &&
+    // The preview is of namespaces; the resource filter does not change it.
+    problems.every((p) => p.field === "name" || p.field === "description" || p.field.startsWith("resources."));
+
+  function save() {
+    setTouchedName(true);
+    if (!canSave) return;
+    const saved = { ...collection };
+    saveCollection(saved, editing?.name);
+    onSaved?.(saved);
+    onClose();
+  }
+
+  return (
+    <Dialog
+      title={editing ? `Edit ${editing.name}` : "New namespace collection"}
+      onClose={onClose}
+      maxWidth={560}
+      footer={
+        <>
+          <Button variant="secondary" size="sm" onClick={onClose}>
+            Cancel
+          </Button>
+          <Button variant="primary" size="sm" onClick={save} disabled={checking || (!canSave && touchedName)}>
+            {editing ? "Save" : "Save collection"}
+          </Button>
+        </>
+      }
+    >
+      <div className="flex flex-col gap-3 p-3 text-[0.8125rem]">
+        <Field label="Name" error={problemText(shown, "name")}>
+          <TextInput
+            value={draft.name}
+            onValueChange={(v) => {
+              setTouchedName(true);
+              set("name")(v);
+            }}
+            onEnter={save}
+            placeholder="prod"
+           
+          />
+        </Field>
+        <Field label="Description (optional)" error={problemText(shown, "description")}>
+          <TextInput value={draft.description} onValueChange={set("description")} />
+        </Field>
+        <Field
+          label="Members"
+          hint="Always included. One per line, or paste a comma-separated list."
+          error={problemText(shown, "members")}
+        >
+          <textarea
+            id={ids.members}
+            aria-label="Members"
+            value={draft.members}
+            onChange={(e) => set("members")(e.target.value)}
+            rows={3}
+            className={TEXTAREA}
+            placeholder={"payments\ncheckout"}
+          />
+        </Field>
+        <Field
+          label="Patterns"
+          hint="One per line; * matches any characters, e.g. prod-*, *-canary."
+          error={problemText(shown, "patterns")}
+        >
+          <textarea
+            id={ids.patterns}
+            aria-label="Patterns"
+            value={draft.patterns}
+            onChange={(e) => set("patterns")(e.target.value)}
+            rows={2}
+            className={TEXTAREA}
+            placeholder="prod-*"
+          />
+        </Field>
+        <Field
+          label="Label selector"
+          hint="As kubectl get -l takes it. With patterns, a namespace must match both."
+          error={problemText(shown, "labelSelector")}
+        >
+          <TextInput
+            value={draft.labelSelector}
+            onValueChange={set("labelSelector")}
+            placeholder="env=prod"
+          />
+        </Field>
+        {/* The resource half (#885): in the lists of these kinds, inside the
+            namespaces above, only the names this expression is found in. */}
+        <Switch
+          on={draft.filterResources}
+          onChange={(on) => setDraft((d) => ({ ...d, filterResources: on }))}
+          label="Filter resources"
+          hint="Also narrow the lists of chosen kinds, in these namespaces, to names matching a regular expression."
+          // Label and hint across the dialog, the switch at the end of the line.
+          className="!flex w-full justify-between gap-4"
+        />
+        {draft.filterResources && (
+          <>
+            {/* Not a Field: a Field wraps its control in a <label>, and a click
+                on a button inside one is delivered to it twice — the picker
+                opened and closed at once. Same markup otherwise. */}
+            <div className="py-1">
+              <span className="field-label mb-0.5" id={ids.kinds}>
+                Kinds
+              </span>
+              <KindsPicker
+                clusterName={clusterName}
+                kinds={draft.kinds}
+                onChange={(kinds) => setDraft((d) => ({ ...d, kinds }))}
+              />
+              {problemText(shown, "resources.kinds") && (
+                <div className="mt-1 text-[0.75rem]" style={{ color: "var(--sev)" }}>
+                  {problemText(shown, "resources.kinds")}
+                </div>
+              )}
+            </div>
+            <Field
+              label="Name expression"
+              hint="A regular expression searched for in each name: ^payment- for names that start so, canary for names that contain it."
+              error={problemText(shown, "resources.nameRegex")}
+            >
+              <TextInput value={draft.nameRegex} onValueChange={set("nameRegex")} placeholder="^payment-" />
+            </Field>
+          </>
+        )}
+        {checkError !== null && (
+          <p role="alert" style={{ color: "var(--sev)" }}>
+            The collection could not be checked: {checkError}
+          </p>
+        )}
+        <Preview
+          collection={collection}
+          valid={previewable}
+          clusterId={clusterId}
+          clusterName={clusterName}
+          onMembers={(next) => set("members")(next.join("\n"))}
+        />
+      </div>
+    </Dialog>
+  );
+}
+
+/**
+ * What the draft matches on the cluster in focus, one row per namespace, and
+ * a box on each row to keep it as a member.
+ *
+ * A pattern finds namespaces; ticking one pins it, so it stays in the
+ * collection whatever the pattern later says — and a namespace a member
+ * names but this cluster does not have is listed too, marked not found, so a
+ * typo shows before the collection is used.
+ */
+function Preview({
+  collection,
+  valid,
+  clusterId,
+  clusterName,
+  onMembers,
+}: {
+  collection: Collection;
+  /** Whether the rules are sound enough to resolve; the name is not needed. */
+  valid: boolean;
+  clusterId?: string;
+  clusterName?: string;
+  onMembers: (members: string[]) => void;
+}) {
+  const listing = useListing(clusterId);
+  const [result, setResult] = useState<NamespaceResolution | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const empty = !collection.members && !collection.patterns && !collection.labelSelector;
+  const members = collection.members ?? [];
+
+  useEffect(() => {
+    let current = true;
+    setError(null);
+    if (!listing || !valid || empty) {
+      setResult(null);
+      return;
+    }
+    const timer = setTimeout(() => {
+      // Resolved under a stand-in name when it has none yet: the backend
+      // refuses a nameless collection, and the name decides nothing here.
+      // Without the resource filter: it does not change which namespaces
+      // match, and an unfinished one would have the whole draft refused.
+      const { resources: _resources, ...namespaces } = collection;
+      resolveNamespaceCollections([{ ...namespaces, name: collection.name || "preview" }], listing.items, listing.complete).then(
+        (r) => current && setResult(r),
+        (e: unknown) => current && setError(e instanceof Error ? e.message : String(e)),
+      );
+    }, SETTLE_MS);
+    return () => {
+      current = false;
+      clearTimeout(timer);
+    };
+  }, [collection, valid, empty, listing]);
+
+  const toggle = (name: string, on: boolean) =>
+    onMembers(on ? [...members.filter((m) => m !== name), name] : members.filter((m) => m !== name));
+
+  const where = clusterName ?? "this cluster";
+  let body;
+  if (!clusterId || !listing) {
+    body = <p className="text-muted">Open a namespace list on a cluster to preview what this matches there.</p>;
+  } else if (empty) {
+    body = <p className="text-muted">Add members, a pattern or a label selector to see what it matches on {where}.</p>;
+  } else if (error !== null) {
+    body = <p style={{ color: "var(--sev)" }}>The preview could not be worked out: {error}</p>;
+  } else if (!valid) {
+    body = <p className="text-muted">Correct the members, patterns or label selector above to see what they match.</p>;
+  } else if (result === null) {
+    body = <p className="text-muted">Working out what this matches on {where}…</p>;
+  } else {
+    const match = result.collections[0];
+    const matched = match?.matched ?? [];
+    const status = new Map((match?.members ?? []).map((m) => [m.name, m.status]));
+    // Every namespace it matched, then each member this cluster lacks.
+    const rows = [...matched, ...members.filter((m) => !matched.includes(m))];
+    const shown = rows.slice(0, PREVIEW_SHOWN);
+    body = (
+      <>
+        <p>
+          {matched.length === 0
+            ? `Matches no namespace on ${where}.`
+            : `Matches ${matched.length} ${matched.length === 1 ? "namespace" : "namespaces"} on ${where}.`}
+          {result.partial && " These credentials cannot list every namespace, so this may be partial."}
+        </p>
+        {rows.length > 0 && (
+          <>
+            <p className="mt-1 text-[0.75rem] text-muted">Tick a namespace to keep it as a member.</p>
+            <ul className="scroll mt-1 flex max-h-48 flex-col" aria-label="Matched namespaces">
+              {shown.map((name) => {
+                const isMember = members.includes(name);
+                const state = isMember ? status.get(name) : undefined;
+                return (
+                  <li key={name} className="flex items-center gap-2 py-0.5 text-[0.75rem]" data-namespace={name}>
+                    <Checkbox
+                      checked={isMember}
+                      onChange={(on) => toggle(name, on)}
+                      label={<span className="sr-only">Keep {name} as a member</span>}
+                    />
+                    <span className="min-w-0 flex-1 truncate font-mono">{name}</span>
+                    {/* A word, and the colour on the word: never the colour
+                        alone. Only what needs looking at is toned. */}
+                    {state === "missing" ? (
+                      <span className="shrink-0" style={{ color: "var(--warn)" }}>not found</span>
+                    ) : state === "unknown" ? (
+                      <span className="shrink-0 text-muted">cannot check</span>
+                    ) : isMember ? (
+                      <span className="shrink-0 text-muted">member</span>
+                    ) : null}
+                  </li>
+                );
+              })}
+            </ul>
+            {rows.length > PREVIEW_SHOWN && (
+              <p className="mt-1 text-[0.75rem] text-muted">and {rows.length - PREVIEW_SHOWN} more</p>
+            )}
+          </>
+        )}
+      </>
+    );
+  }
+
+  return (
+    // Ruled off from the form, not boxed: a card inside the dialog's card is
+    // one frame too many.
+    <section aria-label="Preview" className="rule-t -mx-3 px-3 pt-3">
+      <p className="eyebrow mb-1">Preview</p>
+      {body}
+    </section>
+  );
+}
+
+/**
+ * The kinds a resource filter narrows, chosen from what the cluster in focus
+ * serves (its API discovery), as `group/Kind` — or the bare kind of the core
+ * group. Kinds already chosen stay offered even where this cluster lacks them:
+ * a collection works across clusters.
+ */
+function KindsPicker({
+  clusterName,
+  kinds,
+  onChange,
+}: {
+  clusterName?: string;
+  kinds: string[];
+  onChange: (kinds: string[]) => void;
+}) {
+  const [served, setServed] = useState<ApiKind[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [attempt, setAttempt] = useState(0);
+  useEffect(() => {
+    let live = true;
+    setServed(null);
+    setError(null);
+    if (!clusterName) return;
+    listApiKinds(clusterName).then(
+      (found) => live && setServed(found),
+      (e: unknown) => live && setError(e instanceof Error ? e.message : String(e)),
+    );
+    return () => {
+      live = false;
+    };
+  }, [clusterName, attempt]);
+  const names = [...new Set([...(served ?? []).map(apiKindName), ...kinds])];
+  const empty = !clusterName
+    ? "Pick a cluster to choose from the kinds it serves."
+    : error !== null
+      ? (
+          <>
+            {`Could not read the kinds ${clusterName} serves. ${friendly(error).detail} `}
+            <button type="button" className="btn !py-0" onClick={() => setAttempt((n) => n + 1)}>
+              Try again
+            </button>
+          </>
+        )
+      : served === null
+        ? `Reading the kinds ${clusterName} serves…`
+        : "This cluster serves no kinds that can be listed.";
+  return (
+    <MultiSelect
+      options={names.map((value) => ({ value }))}
+      selection={kinds}
+      onChange={onChange}
+      placeholder="Choose kinds…"
+      searchPlaceholder="Find a kind…"
+      ariaLabel="Kinds"
+      className="w-full"
+      selectAll={false}
+      empty={empty}
+    />
+  );
+}

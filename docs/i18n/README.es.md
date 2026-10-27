@@ -41,6 +41,7 @@
 <p align="center">
   <a href="https://github.com/srelens/srelens/stargazers"><img alt="GitHub stars" src="https://img.shields.io/github/stars/srelens/srelens?logo=github&color=eab308"></a>
   <a href="https://www.reddit.com/r/srelens/"><img alt="Reddit: r/srelens" src="https://img.shields.io/reddit/subreddit-subscribers/srelens?label=r%2Fsrelens&logo=reddit&logoColor=white&color=FF4500"></a>
+  <a href="https://join.slack.com/t/srelens/shared_invite/zt-4cu0tzuzo-Ktei1KsVlqPi2XY~irTDAg"><img alt="Slack: srelens" src="https://img.shields.io/badge/Slack-srelens-4A154B?logo=slack&logoColor=white"></a>
   <a href="https://deepwiki.com/srelens/srelens"><img alt="Ask DeepWiki" src="https://img.shields.io/badge/Ask-DeepWiki-2563eb"></a>
 </p>
 
@@ -59,6 +60,10 @@
   <img alt="Terminal UI" src="https://img.shields.io/badge/terminal-srectl-14b8a6">
   <img alt="MCP server" src="https://img.shields.io/badge/agents-MCP-fb923c">
   <img alt="Project status: stable" src="https://img.shields.io/badge/status-stable-22c55e">
+</p>
+
+<p align="center">
+  <img alt="La aplicación de escritorio de srelens muestra objetos de Kubernetes en directo, con búsqueda y filtros de namespace" src="../assets/screenshots/srelens-demo-changes.gif" width="100%">
 </p>
 
 <p align="center">
@@ -110,11 +115,11 @@ ciclo de investigación en un único espacio de trabajo local-first.
 ## Aplicación de escritorio
 
 La aplicación de escritorio es un espacio de trabajo de Kubernetes completo en una
-ventana nativa. Las capturas de abajo muestran el **nuevo diseño**, que se está
-desplegando pantalla a pantalla: actívalo en
-**Settings → Appearance → Design → New design** (Ajustes → Apariencia → Diseño →
-Nuevo diseño) y vuelve al anterior por el mismo camino cuando quieras. Incluye seis
-temas: Light, Paper, Dark, Midnight, Glass y High contrast.
+ventana nativa. Las capturas de abajo muestran el **nuevo diseño**, que ahora es el
+predeterminado. Incluye seis temas: Light, Paper, Dark, Midnight, Glass y High
+contrast. El diseño clásico está obsoleto y se eliminará en una versión futura;
+hasta entonces puedes cambiar a él en **Settings → Appearance → Design** (Ajustes →
+Apariencia → Diseño).
 
 <table>
   <tr>
@@ -407,6 +412,8 @@ notas de la versión cuando actualices.
 
 - [r/srelens en Reddit](https://www.reddit.com/r/srelens/) — anuncios, preguntas
   y feedback
+- [srelens en Slack](https://join.slack.com/t/srelens/shared_invite/zt-4cu0tzuzo-Ktei1KsVlqPi2XY~irTDAg) —
+  chat con los mantenedores y otros usuarios
 - [Issues](https://github.com/srelens/srelens/issues) — bugs y peticiones de
   funcionalidades
 - [Sitio web](https://srelens.com)

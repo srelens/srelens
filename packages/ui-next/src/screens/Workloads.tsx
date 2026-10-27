@@ -1,4 +1,5 @@
 import { ContextLabel } from "../lib/contextLabel";
+import { CollectionScopeNotice, NamespaceScopePicker } from "./collections/NamespaceScope";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   ageSortValue,
@@ -29,7 +30,7 @@ import {
   type StatusKind,
   type TabItem,
 } from "@srelens/ui-kit";
-import { useConsole } from "../console";
+import { useAsk } from "../console";
 import { getKubeconfigFiles, useActiveContext } from "../lib/clusters";
 import { useHiddenColumns } from "../lib/columnPrefs";
 import { detailRoute, newRoute } from "../lib/detailRoute";
@@ -50,11 +51,10 @@ import type { ListRow } from "../lib/kinds/types";
 import { useResourceList, type ResourceList } from "../lib/resourceList";
 import { describe } from "../lib/routes";
 import { openTab, useTabs } from "../lib/tabsStore";
-import { useNamespaces, useSetNamespaces } from "../lib/workspace";
+import { useNamespaces, useFallbackNamespace, useSetNamespaces } from "../lib/workspace";
 import { useRowMenu } from "./ResourceMenu";
 import {
   NamespaceErrorAlert,
-  NamespacePicker,
   NoClusterScreen,
   PausedClusterScreen,
   StaleSelectionAlert,
@@ -363,11 +363,12 @@ function WorkloadList({
 }) {
   const name = context.name;
   const files = getKubeconfigFiles();
-  const { ask } = useConsole();
+  const ask = useAsk();
 
   const selection = useNamespaces(context.stableId);
   const setNamespaces = useSetNamespaces();
-  const { namespaces, scope, error: namespaceError } = useNamespaceOptions(name, files);
+  const namespaceOptions = useNamespaceOptions(name, files);
+  const { namespaces, scope, error: namespaceError } = namespaceOptions;
   // Every workload kind here is namespaced, so the selection is handed to
   // the watches as it stands: each selected namespace is watched on its own
   // (#688), none is "all namespaces". No cluster-scoped branch to take
@@ -443,9 +444,7 @@ function WorkloadList({
 
   // A namespace-restricted credential has one namespace and no way to ask
   // for another — same rule `KindList` follows.
-  useEffect(() => {
-    if (scope) setNamespaces(context.stableId, [scope]);
-  }, [scope, context.stableId, setNamespaces]);
+  useFallbackNamespace(context.stableId, scope);
 
   // Plain data after the fixed hooks above, not another hook: summarizing
   // five results into a table is not itself something React needs to track
@@ -622,15 +621,12 @@ function WorkloadList({
         placeholder={`Filter ${lower}…`}
       >
         <Tabs tabs={SEGMENTS} active={segment} onChange={setSegment} label="Workload kind" />
-        <NamespacePicker
-          namespaces={namespaces}
-          selection={selection}
-          onChange={(next) => setNamespaces(context.stableId, next)}
-        />
+        <NamespaceScopePicker context={context} options={namespaceOptions} />
       </FilterBar>
 
       <NamespaceErrorAlert error={namespaceError} />
 
+      <CollectionScopeNotice context={context} />
       <StaleSelectionAlert
         selection={selection}
         namespaces={namespaces}
@@ -689,7 +685,7 @@ function WorkloadList({
               activeFilterKey={filterKey}
               onActiveFilterKeyChange={setFilterKey}
               onRowActivate={(row) =>
-                openTab(detailRoute(row.kind, row.namespace ?? null, row.name), { clusterName: name })
+                openTab(detailRoute(row.kind, row.namespace ?? null, row.name, { cluster: name }), { clusterName: name })
               }
               rowMenu={rowMenuItems}
               rowMenuLabel={`${title} actions`}

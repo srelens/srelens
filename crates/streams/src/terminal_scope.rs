@@ -15,17 +15,27 @@
 //! - `bin/kubectl`, `bin/helm` — small guards placed ahead of the real tools on
 //!   `PATH`. They refuse the flags and `config` verbs that would aim the tool at
 //!   another cluster, pin `KUBECONFIG` to the file above whatever the
-//!   environment says by then, and hand over to the real binary.
+//!   environment says by then, and hand over to the real binary. In a
+//!   read-only terminal, the one a protected cluster gets (#101), they also
+//!   refuse every subcommand that is not a read.
 //! - `init.sh` and the rc files that source it — for bash and zsh, run after
 //!   the reader's own rc files: put `bin` back at the front of `PATH` (rc files
 //!   commonly prepend to it), make `KUBECONFIG` read-only, and tag the prompt
-//!   with the cluster and namespace.
+//!   with the cluster and namespace, and `read-only` when the terminal is.
+//!   Read-only, each prompt also puts `bin` back in front if a prompt hook
+//!   moved it, and fish, which reads none of these files, is started to put
+//!   it back after its config ([`Scope::shell_start`]).
 //!
 //! What is left outside, by design: a tool that is neither `kubectl` nor `helm`
-//! and is told about another kubeconfig by its own flag; a shell that is
-//! neither bash nor zsh, which gets the kubeconfig and the guards but no
-//! read-only variable and no prompt tag; and a reader who removes the guards
-//! from `PATH` on purpose. `docs/USAGE.md` says the same to the reader.
+//! and is told about another kubeconfig by its own flag, or, in a read-only
+//! terminal, changes the cluster through the session's kubeconfig (k9s, the
+//! argocd and flux CLIs, a script); a shell that is neither bash nor zsh,
+//! which gets the kubeconfig and the guards but not the read-only
+//! `KUBECONFIG` or the prompt tag; in a read-only terminal, a shell other than
+//! bash, zsh and fish, where the guards hold only while the shell's own config
+//! leaves `bin` first on `PATH`; and a reader who removes the guards from
+//! `PATH` on purpose, or runs the real tool by its full path. `docs/USAGE.md`
+//! says the same to the reader.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -38,6 +48,9 @@ pub(crate) struct Scope {
     /// The guards' directory, to go first on `PATH`. `None` where there are no
     /// guards (a platform without `/bin/sh`).
     pub bin: Option<PathBuf>,
+    /// The guards refuse every subcommand that is not a read (#101). Never
+    /// where there are no guards: nothing would refuse anything there.
+    pub read_only: bool,
 }
 
 /// How to start `shell` so that it reads its own rc files and then ours.
@@ -53,11 +66,16 @@ impl Scope {
     /// `create_dir` rather than `create_dir_all`, and mode 0700 at creation: a
     /// path that already exists is refused rather than followed, and there is
     /// no window in which another user can read the credentials inside.
+    ///
+    /// `read_only` makes the guards refuse every `kubectl` and `helm`
+    /// subcommand that is not a read, and tags the prompt `read-only` (#101).
+    /// Where there are no guards it changes nothing.
     pub fn create(
         id: u64,
         context: &str,
         namespace: Option<&str>,
         kubeconfig_paths: &[PathBuf],
+        read_only: bool,
     ) -> Result<Scope, String> {
         let yaml = srelens_kube::connect::single_context_kubeconfig_yaml_in(
             kubeconfig_paths,
@@ -65,35 +83,37 @@ impl Scope {
             namespace,
         )?;
         let dir = std::env::temp_dir().join(format!("srelens-term-{}-{}", std::process::id(), id));
-        make_private_dir(&dir)?;
+        make_private_dir(&dir).map_err(|e| e.to_string())?;
+        let bin = cfg!(unix).then(|| dir.join("bin"));
         let scope = Scope {
             kubeconfig: dir.join("kubeconfig"),
-            bin: cfg!(unix).then(|| dir.join("bin")),
+            read_only: read_only && bin.is_some(),
+            bin,
             dir,
         };
-        let written = scope.write(context, &yaml);
+        let written = scope.write(context, &yaml, read_only);
         if written.is_err() {
             scope.remove();
         }
         written.map(|()| scope)
     }
 
-    fn write(&self, context: &str, yaml: &str) -> Result<(), String> {
+    fn write(&self, context: &str, yaml: &str, read_only: bool) -> Result<(), String> {
         write_private(&self.kubeconfig, yaml, false)?;
         let Some(bin) = &self.bin else { return Ok(()) };
-        make_private_dir(bin)?;
+        make_private_dir(bin).map_err(|e| e.to_string())?;
         for tool in [Tool::Kubectl, Tool::Helm] {
-            let script = guard_script(tool, context, bin, &self.kubeconfig);
+            let script = guard_script(tool, context, bin, &self.kubeconfig, read_only);
             write_private(&bin.join(tool.name()), &script, true)?;
         }
         write_private(
             &self.dir.join("init.sh"),
-            &init_script(context, bin, &self.kubeconfig),
+            &init_script(context, bin, &self.kubeconfig, read_only),
             false,
         )?;
         write_private(&self.dir.join("bashrc"), &bashrc(&self.dir), false)?;
         let zsh = self.dir.join("zsh");
-        make_private_dir(&zsh)?;
+        make_private_dir(&zsh).map_err(|e| e.to_string())?;
         write_private(&zsh.join(".zshenv"), &zshenv(&zsh), false)?;
         write_private(&zsh.join(".zshrc"), &zshrc(&self.dir), false)
     }
@@ -101,9 +121,9 @@ impl Scope {
     /// The arguments and environment that make `shell` read our init file after
     /// its own. Empty for a shell this module has no init for.
     pub fn shell_start(&self, shell: &str) -> ShellStart {
-        if self.bin.is_none() {
+        let Some(bin) = &self.bin else {
             return ShellStart::default();
-        }
+        };
         let name = Path::new(shell)
             .file_name()
             .and_then(|n| n.to_str())
@@ -128,6 +148,17 @@ impl Scope {
                 }
                 ShellStart { args: Vec::new(), env }
             }
+            // Read-only (#101), the guards must stay ahead of the real tools,
+            // and fish's config can move a directory in front of them, as
+            // `fish_add_path --move` in `brew shellenv` does. `-C` runs after
+            // the config, before the first prompt.
+            "fish" if self.read_only => ShellStart {
+                args: vec![
+                    "-C".into(),
+                    format!("set -gx PATH {} $PATH", fish_quote(&bin.to_string_lossy())),
+                ],
+                env: Vec::new(),
+            },
             _ => ShellStart::default(),
         }
     }
@@ -151,13 +182,17 @@ impl Scope {
 /// the terminal is bound to. Written by the host rather than printed by an rc
 /// file: it is then the same in every shell, and prompt themes that object to
 /// output during shell start-up have nothing to object to.
-pub(crate) fn banner(context: &str, namespace: Option<&str>) -> String {
+///
+/// A read-only terminal (#101) says so here as well: only bash and zsh show
+/// it in the prompt tag.
+pub(crate) fn banner(context: &str, namespace: Option<&str>, read_only: bool) -> String {
     let namespace = match namespace {
         Some(ns) if !ns.is_empty() => format!(", namespace {}", printable(ns)),
         _ => String::new(),
     };
+    let mode = if read_only { " It is read-only: kubectl and helm here only read." } else { "" };
     format!(
-        "\x1b[2msrelens: this terminal is bound to {}{namespace}. kubectl and helm here cannot be pointed at another cluster.\x1b[0m\r\n",
+        "\x1b[2msrelens: this terminal is bound to {}{namespace}. kubectl and helm here cannot be pointed at another cluster.{mode}\x1b[0m\r\n",
         printable(context)
     )
 }
@@ -229,6 +264,78 @@ impl Tool {
             Tool::Helm => "unset HELM_KUBECONTEXT HELM_KUBEAPISERVER\n",
         }
     }
+
+    /// The global flags that take no value (#101). To cobra, which both tools
+    /// are built on, every other flag word with no `=` — `--name`, or `-x` —
+    /// takes the next word as its value, a flag it has never heard of
+    /// included: in `kubectl -l get delete pods` the subcommand is `delete`.
+    /// The read-only check reads words the same way, so the subcommand it
+    /// checks is the one the tool runs.
+    ///
+    /// kubectl's list includes the klog booleans that 1.25 and earlier
+    /// registered (`--logtostderr` and the rest). Newer kubectl rejects them
+    /// as unknown before it runs anything, so listing them is safe.
+    ///
+    /// kubectl accepts `_` for `-` in flag names, so each listed name matches
+    /// both: `[-_]` stands for each separator inside a name, and a name with
+    /// none (`--logtostderr`) is listed as it is.
+    ///
+    /// ponytail: a boolean flag missing from this list hides the subcommand
+    /// from the check, because the guard reads the flag as taking the next
+    /// word as its value; with no subcommand found nothing is refused, and a
+    /// write can run (`kubectl --logtostderr apply -f x.yaml` did, before
+    /// those were listed). List each boolean global flag when kubectl or
+    /// helm adds one.
+    fn bool_flags(self) -> &'static str {
+        match self {
+            Tool::Kubectl => {
+                "--add[-_]dir[-_]header|--alsologtostderr|--disable[-_]compression|--insecure[-_]skip[-_]tls[-_]verify|--logtostderr|--match[-_]server[-_]version|--one[-_]output|--skip[-_]headers|--skip[-_]log[-_]headers|--warnings[-_]as[-_]errors"
+            }
+            Tool::Helm => "--debug|--kube-insecure-skip-tls-verify",
+        }
+    }
+
+    /// The read-only terminal's check on each word that is neither a flag nor
+    /// a flag's value (#101). The first such word is the subcommand, and it
+    /// must be a read: anything nobody listed, a plugin's name included, is
+    /// refused. kubectl's `rollout` and `auth` pass only for their reads,
+    /// because `rollout restart` and `auth reconcile` write. cobra's hidden
+    /// `__complete` and `__completeNoDesc` pass too: the scripts that
+    /// `completion` prints call them on every Tab, and they run the
+    /// completion functions, never the command being completed.
+    fn read_only_check(self) -> &'static str {
+        match self {
+            Tool::Kubectl => r#"  case "$verb" in
+    '')
+      case "$arg" in
+        get|describe|logs|top|explain|api-resources|api-versions|version|cluster-info|events|diff|wait|completion|__complete|__completeNoDesc|help|config) verb=read ;;
+        rollout|auth) verb=$arg ;;
+        *) refuse_write "$arg" ;;
+      esac
+      ;;
+    rollout)
+      case "$arg" in
+        status|history) verb=read ;;
+        *) refuse_write "rollout $arg" ;;
+      esac
+      ;;
+    auth)
+      case "$arg" in
+        can-i|whoami) verb=read ;;
+        *) refuse_write "auth $arg" ;;
+      esac
+      ;;
+  esac
+"#,
+            Tool::Helm => r#"  if [ -z "$verb" ]; then
+    case "$arg" in
+      list|ls|status|get|history|show|inspect|search|template|lint|version|env|help|completion|__complete|__completeNoDesc|repo|dependency|dep) verb=read ;;
+      *) refuse_write "$arg" ;;
+    esac
+  fi
+"#,
+        }
+    }
 }
 
 /// `text` as one single-quoted POSIX shell word.
@@ -240,23 +347,53 @@ fn sh_path(path: &Path) -> String {
     sh_quote(&path.to_string_lossy())
 }
 
+/// `text` as one single-quoted fish word. Inside fish's single quotes `\\`
+/// and `\'` are escapes, so [`sh_quote`]'s `'\''` does not carry over.
+fn fish_quote(text: &str) -> String {
+    format!("'{}'", text.replace('\\', "\\\\").replace('\'', "\\'"))
+}
+
 /// The guard for one tool. POSIX `sh`, with the session's paths written into
 /// it, so it depends on nothing in an environment the reader may have changed.
 ///
 /// Arguments after `--` are not read: they belong to whatever the tool runs
 /// (`kubectl exec pod -- curl --server …`), not to the tool.
-fn guard_script(tool: Tool, context: &str, bin: &Path, kubeconfig: &Path) -> String {
+///
+/// `read_only` adds the read-only terminal's check (#101; see
+/// [`Tool::read_only_check`]), with flags and their values told apart as
+/// [`Tool::bool_flags`] says. Read-only, a `--` that a flag is still waiting
+/// on is that flag's value, as it is to cobra: `kubectl -n -- delete pods -A`
+/// is a delete.
+fn guard_script(tool: Tool, context: &str, bin: &Path, kubeconfig: &Path, read_only: bool) -> String {
     let name = tool.name();
-    let config_check = match tool.refused_config_verbs() {
-        Some(verbs) => format!(
+    // How a flag's value is told from the word after it. Read-only, cobra's
+    // way; otherwise kubectl's named list, which only `config` needs.
+    let value_flags = if read_only {
+        format!(
+            "    {}|--*=*) continue ;;\n    --?*|-?) value=next; continue ;;\n    -*) continue ;;\n",
+            tool.bool_flags()
+        )
+    } else if tool.refused_config_verbs().is_some() {
+        format!("    {}) value=next; continue ;;\n", Tool::VALUE_FLAGS)
+    } else {
+        String::new()
+    };
+    let value_skip = if value_flags.is_empty() {
+        String::new()
+    } else {
+        format!(
             r#"  if [ -n "$value" ]; then
     value=
     continue
   fi
   case "$arg" in
-    {value_flags}) value=next; continue ;;
-  esac
-  if [ "$config" = verb ]; then
+{value_flags}  esac
+"#
+        )
+    };
+    let config_check = match tool.refused_config_verbs() {
+        Some(verbs) => format!(
+            r#"  if [ "$config" = verb ]; then
     case "$arg" in
       {verbs}) refuse "config $arg" ;;
       {allowed}) config=done ;;
@@ -265,9 +402,29 @@ fn guard_script(tool: Tool, context: &str, bin: &Path, kubeconfig: &Path) -> Str
   [ "$arg" = config ] && [ -z "$config" ] && config=verb
 "#,
             allowed = Tool::ALLOWED_CONFIG_VERBS,
-            value_flags = Tool::VALUE_FLAGS,
         ),
         None => String::new(),
+    };
+    let stop = if read_only {
+        r#"  [ "$arg" = -- ] && [ -z "$value" ] && break"#
+    } else {
+        r#"  [ "$arg" = -- ] && break"#
+    };
+    // `verb=` too: a `verb` exported by the reader's environment is not a
+    // subcommand already found.
+    let (read_only_preamble, read_only_check) = if read_only {
+        (
+            format!(
+                r#"refuse_write() {{
+  printf 'srelens: "%s" is not available here: %s is protected and this terminal is read-only.\n' "{name} $1" "$bound" >&2
+  exit 64
+}}
+verb="#
+            ),
+            tool.read_only_check(),
+        )
+    } else {
+        (String::new(), "")
     };
     format!(
         r#"#!/bin/sh
@@ -282,15 +439,15 @@ refuse() {{
   printf 'srelens: "%s" is not available here. This terminal is bound to %s; open a terminal from the other cluster to work there.\n' "$1" "$bound" >&2
   exit 64
 }}
-
+{read_only_preamble}
 config=
 value=
 for arg in "$@"; do
-  [ "$arg" = -- ] && break
+{stop}
   case "$arg" in
     {flags}) refuse "$arg" ;;
   esac
-{config_check}done
+{value_skip}{config_check}{read_only_check}done
 
 IFS=:
 for dir in $PATH; do
@@ -320,8 +477,23 @@ fn prompt_safe(text: &str) -> String {
 }
 
 /// Sourced by bash and zsh after the reader's own rc files. Written to parse in
-/// both; each shell runs only its own branch.
-fn init_script(context: &str, bin: &Path, kubeconfig: &Path) -> String {
+/// both; each shell runs only its own branch. `read_only` adds `read-only` to
+/// the prompt tag (#101), and has each prompt put the guards back in front:
+/// the prompt function runs after the hooks the reader's rc files installed
+/// (mise, direnv and the like), which can move their own directories, and a
+/// kubectl in one, ahead again.
+fn init_script(context: &str, bin: &Path, kubeconfig: &Path, read_only: bool) -> String {
+    // ponytail: the later copy of `bin` is left where it is, so a hook that
+    // moves its directories ahead before every prompt adds one entry to PATH
+    // each time; strip the old copy if that grows long enough to matter.
+    let path_first = if read_only {
+        format!(
+            "    case \"$PATH\" in\n      {bin}|{bin}:*) ;;\n      *) PATH={bin}:$PATH ;;\n    esac\n",
+            bin = sh_path(bin)
+        )
+    } else {
+        String::new()
+    };
     format!(
         r#"# Written by srelens for one terminal session. See the guards beside this file.
 # rc files commonly prepend to PATH; the guards go back in front of them.
@@ -335,11 +507,11 @@ __srelens_context={context}
 __srelens_last=
 __srelens_tag() {{
   __srelens_ns=$(sed -n 's/^[[:space:]]*namespace:[[:space:]]*//p' "$KUBECONFIG" 2>/dev/null | head -n 1 | tr -c 'A-Za-z0-9._\n-' '_')
-  printf '[%s%s] ' "$__srelens_context" "${{__srelens_ns:+/$__srelens_ns}}"
+  printf '[%s%s{mode}] ' "$__srelens_context" "${{__srelens_ns:+/$__srelens_ns}}"
 }}
 if [ -n "${{BASH_VERSION-}}" ]; then
   __srelens_prompt() {{
-    local tag
+{path_first}    local tag
     tag=$(__srelens_tag)
     case "$PS1" in
       "$tag"*) ;;
@@ -351,7 +523,7 @@ if [ -n "${{BASH_VERSION-}}" ]; then
 }}__srelens_prompt"
 elif [ -n "${{ZSH_VERSION-}}" ]; then
   __srelens_prompt() {{
-    local tag
+{path_first}    local tag
     tag=$(__srelens_tag)
     case "$PROMPT" in
       "$tag"*) ;;
@@ -365,6 +537,7 @@ fi
         bin = sh_path(bin),
         kubeconfig = sh_path(kubeconfig),
         context = sh_quote(&prompt_safe(context)),
+        mode = if read_only { " read-only" } else { "" },
     )
 }
 
@@ -402,14 +575,14 @@ unset SRELENS_USER_ZDOTDIR
     )
 }
 
-fn make_private_dir(path: &Path) -> Result<(), String> {
+pub(crate) fn make_private_dir(path: &Path) -> std::io::Result<()> {
     let mut builder = std::fs::DirBuilder::new();
     #[cfg(unix)]
     {
         use std::os::unix::fs::DirBuilderExt;
         builder.mode(0o700);
     }
-    builder.create(path).map_err(|e| e.to_string())
+    builder.create(path)
 }
 
 /// Created with `O_EXCL` and its final mode, so a path that already exists is
@@ -476,6 +649,11 @@ contexts:
     /// A scope for `context`, and a directory of stand-in tools that print what
     /// they were run with — so a test can tell a refusal from a hand-over.
     fn fixture(context: &str, namespace: Option<&str>) -> Fixture {
+        fixture_in_mode(context, namespace, false)
+    }
+
+    /// [`fixture`], for a terminal opened read-only or not (#101).
+    fn fixture_in_mode(context: &str, namespace: Option<&str>, read_only: bool) -> Fixture {
         let dir = tempfile::tempdir().unwrap();
         let config = dir.path().join("config");
         std::fs::write(&config, KUBECONFIG.replace("dev-cluster", context)).unwrap();
@@ -491,7 +669,7 @@ contexts:
             std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
         }
         let id = NEXT.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        let scope = Scope::create(id, context, namespace, &[config]).unwrap();
+        let scope = Scope::create(id, context, namespace, &[config], read_only).unwrap();
         Fixture { _dir: dir, real, scope }
     }
 
@@ -751,21 +929,22 @@ contexts:
         assert!(said.contains("b=[dev-cluster/billing] $ "), "{said}");
     }
 
-    /// zsh, where there is one: the macOS default, and absent from most Linux
-    /// CI images. `SRELENS_TEST_ZSH` names a binary that is not on `PATH`.
-    fn zsh() -> Option<String> {
-        if let Ok(path) = std::env::var("SRELENS_TEST_ZSH") {
+    /// The shell `name`, where there is one: zsh is the macOS default, and
+    /// zsh and fish are absent from most Linux CI images. `SRELENS_TEST_ZSH`
+    /// and `SRELENS_TEST_FISH` name a binary that is not on `PATH`.
+    fn shell_named(name: &str) -> Option<String> {
+        if let Ok(path) = std::env::var(format!("SRELENS_TEST_{}", name.to_uppercase())) {
             return Some(path);
         }
         std::env::split_paths(&std::env::var_os("PATH")?)
-            .map(|dir| dir.join("zsh"))
+            .map(|dir| dir.join(name))
             .find(|path| path.is_file())
             .map(|path| path.to_string_lossy().into_owned())
     }
 
     #[test]
     fn zsh_reads_the_readers_files_then_puts_the_guards_first_and_locks_the_variable() {
-        let Some(zsh) = zsh() else {
+        let Some(zsh) = shell_named("zsh") else {
             eprintln!("zsh not found; skipped");
             return;
         };
@@ -818,6 +997,61 @@ contexts:
     }
 
     #[test]
+    fn a_read_only_fish_is_started_to_put_the_guards_back_first_after_its_config() {
+        let f = fixture_in_mode("dev-cluster", None, true);
+        let bin = f.scope.bin.as_ref().unwrap().display().to_string();
+        assert_eq!(
+            f.scope.shell_start("/opt/homebrew/bin/fish"),
+            ShellStart {
+                args: vec!["-C".to_string(), format!("set -gx PATH '{bin}' $PATH")],
+                env: Vec::new(),
+            }
+        );
+        // bash and zsh do it from `init.sh`, so they start as they always did.
+        assert_eq!(
+            f.scope.shell_start("/bin/bash").args,
+            vec!["--rcfile".to_string(), f.scope.dir.join("bashrc").display().to_string()]
+        );
+        assert!(f.scope.shell_start("/bin/zsh").args.is_empty());
+        // Inside fish's single quotes a backslash escapes, unlike sh's.
+        assert_eq!(fish_quote(r"it's a\dir\"), r"'it\'s a\\dir\\'");
+    }
+
+    #[test]
+    fn a_read_only_fish_refuses_a_write_after_its_config_moves_another_kubectl_ahead() {
+        let Some(fish) = shell_named("fish") else {
+            eprintln!("fish not found; skipped");
+            return;
+        };
+        let f = fixture_in_mode("dev-cluster", None, true);
+        let home = tempfile::tempdir().unwrap();
+        let config = home.path().join(".config/fish");
+        std::fs::create_dir_all(&config).unwrap();
+        // What `eval (brew shellenv)` does in fish: moves a directory that
+        // holds its own kubectl to the front.
+        std::fs::write(
+            config.join("config.fish"),
+            format!("set -gx PATH {} $PATH\n", fish_quote(&f.real.to_string_lossy())),
+        )
+        .unwrap();
+        // Started as the terminal starts it: by name.
+        let start = f.scope.shell_start("/usr/bin/fish");
+        let out = Command::new(&fish)
+            .args(&start.args)
+            .args(["-c", "kubectl delete pods --all; echo refused=$status"])
+            .env("HOME", home.path())
+            .env("XDG_CONFIG_HOME", home.path().join(".config"))
+            .env("PATH", f.path())
+            .output()
+            .unwrap();
+        let said = stdout(&out);
+        let context = format!("{said}\n{}", stderr(&out));
+        assert!(said.contains("refused=64"), "{context}");
+        assert!(!said.contains("real-kubectl"), "{context}");
+        assert!(stderr(&out).contains(&read_only_refusal("kubectl delete")), "{context}");
+    }
+
+    #[test]
     fn removing_the_scope_leaves_nothing_behind() {
         let f = fixture("dev-cluster", None);
         let dir = f.scope.dir.clone();
@@ -828,9 +1062,363 @@ contexts:
 
     #[test]
     fn the_banner_names_the_cluster_and_drops_control_characters() {
-        let line = banner("dev\x1b[31m-cluster", Some("payments"));
+        let line = banner("dev\x1b[31m-cluster", Some("payments"), false);
         assert!(line.contains("bound to dev[31m-cluster, namespace payments."));
-        assert!(banner("dev-cluster", None).contains("bound to dev-cluster. kubectl"));
-        assert!(banner("dev-cluster", Some("")).contains("bound to dev-cluster. kubectl"));
+        assert!(banner("dev-cluster", None, false).contains("bound to dev-cluster. kubectl"));
+        assert!(banner("dev-cluster", Some(""), false).contains("bound to dev-cluster. kubectl"));
+    }
+
+    #[test]
+    fn a_read_only_terminal_says_so_in_its_opening_line() {
+        assert_eq!(
+            banner("dev-cluster", Some("payments"), true),
+            "\x1b[2msrelens: this terminal is bound to dev-cluster, namespace payments. kubectl and helm here cannot be pointed at another cluster. It is read-only: kubectl and helm here only read.\x1b[0m\r\n"
+        );
+        // A terminal that is not read-only opens with the line it always did.
+        assert_eq!(
+            banner("dev-cluster", Some("payments"), false),
+            "\x1b[2msrelens: this terminal is bound to dev-cluster, namespace payments. kubectl and helm here cannot be pointed at another cluster.\x1b[0m\r\n"
+        );
+    }
+
+    /// The read-only refusal, word for word (#101).
+    fn read_only_refusal(said: &str) -> String {
+        format!(
+            "srelens: \"{said}\" is not available here: dev-cluster is protected and this terminal is read-only.\n"
+        )
+    }
+
+    #[test]
+    fn a_read_only_terminal_passes_each_read_through() {
+        let f = fixture_in_mode("dev-cluster", None, true);
+        for (tool, args) in [
+            ("kubectl", vec!["get", "pods"]),
+            ("kubectl", vec!["describe", "deploy", "web"]),
+            ("kubectl", vec!["logs", "web-0", "-f"]),
+            ("kubectl", vec!["top", "pods"]),
+            ("kubectl", vec!["explain", "pods.spec"]),
+            ("kubectl", vec!["api-resources"]),
+            ("kubectl", vec!["api-versions"]),
+            ("kubectl", vec!["version"]),
+            ("kubectl", vec!["cluster-info"]),
+            ("kubectl", vec!["events"]),
+            ("kubectl", vec!["diff", "-f", "web.yaml"]),
+            ("kubectl", vec!["wait", "--for=condition=Ready", "pod/web-0"]),
+            ("kubectl", vec!["completion", "bash"]),
+            ("kubectl", vec!["help", "delete"]),
+            ("kubectl", vec!["config", "get-contexts"]),
+            ("kubectl", vec!["auth", "can-i", "delete", "pods"]),
+            ("kubectl", vec!["auth", "whoami"]),
+            // No subcommand at all: kubectl prints its help.
+            ("kubectl", vec![]),
+            // What the scripts `completion` prints call on every Tab: cobra's
+            // hidden command, which runs the completion functions and never
+            // the command being completed.
+            ("kubectl", vec!["__complete", "get", "po", ""]),
+            ("kubectl", vec!["__completeNoDesc", "delete", ""]),
+            ("helm", vec!["__complete", "uninstall", ""]),
+            ("helm", vec!["__completeNoDesc", "uninstall", ""]),
+            ("helm", vec!["list", "-A"]),
+            ("helm", vec!["ls"]),
+            ("helm", vec!["status", "web"]),
+            ("helm", vec!["get", "values", "web"]),
+            ("helm", vec!["history", "web"]),
+            ("helm", vec!["show", "values", "./chart"]),
+            ("helm", vec!["inspect", "chart", "./chart"]),
+            ("helm", vec!["search", "repo", "nginx"]),
+            ("helm", vec!["template", "web", "./chart"]),
+            ("helm", vec!["lint", "./chart"]),
+            ("helm", vec!["version"]),
+            ("helm", vec!["env"]),
+            ("helm", vec!["help", "uninstall"]),
+            ("helm", vec!["completion", "zsh"]),
+            ("helm", vec!["repo", "update"]),
+            ("helm", vec!["dependency", "build", "./chart"]),
+            ("helm", vec!["dep", "update", "./chart"]),
+        ] {
+            let out = f.run(tool, &args);
+            assert!(out.status.success(), "{tool} {args:?}: {}", stderr(&out));
+            assert!(stdout(&out).starts_with(&format!("real-{tool} ")), "{tool} {args:?}");
+        }
+    }
+
+    #[test]
+    fn a_read_only_terminal_refuses_every_other_subcommand() {
+        let f = fixture_in_mode("dev-cluster", None, true);
+        for (tool, args, said) in [
+            ("kubectl", vec!["delete", "pod", "web-0"], "kubectl delete"),
+            ("kubectl", vec!["apply", "-f", "web.yaml"], "kubectl apply"),
+            ("kubectl", vec!["edit", "deploy/web"], "kubectl edit"),
+            ("kubectl", vec!["scale", "deploy/web", "--replicas=0"], "kubectl scale"),
+            ("kubectl", vec!["exec", "web-0", "--", "sh"], "kubectl exec"),
+            ("kubectl", vec!["cordon", "node-1"], "kubectl cordon"),
+            // `auth` reads only through `can-i` and `whoami`; `reconcile` writes RBAC.
+            ("kubectl", vec!["auth", "reconcile", "-f", "rbac.yaml"], "kubectl auth reconcile"),
+            // A plugin, or anything else nobody listed, is not a read.
+            ("kubectl", vec!["neat", "get", "pods"], "kubectl neat"),
+            ("helm", vec!["install", "web", "./chart"], "helm install"),
+            ("helm", vec!["upgrade", "web", "./chart"], "helm upgrade"),
+            ("helm", vec!["rollback", "web", "1"], "helm rollback"),
+            ("helm", vec!["uninstall", "web"], "helm uninstall"),
+            ("helm", vec!["plugin", "install", "https://example.com/p"], "helm plugin"),
+        ] {
+            let out = f.run(tool, &args);
+            assert_eq!(out.status.code(), Some(64), "{tool} {args:?} was not refused");
+            assert_eq!(stdout(&out), "", "{tool} {args:?} reached the real {tool}");
+            assert_eq!(stderr(&out), read_only_refusal(said), "{tool} {args:?}");
+        }
+        // A `verb` the reader's environment happens to export is not a
+        // subcommand already found.
+        let out = Command::new("kubectl")
+            .args(["delete", "pod", "web-0"])
+            .env("PATH", f.path())
+            .env("verb", "read")
+            .output()
+            .unwrap();
+        assert_eq!(out.status.code(), Some(64), "{}", stdout(&out));
+    }
+
+    #[test]
+    fn a_read_only_rollout_may_be_watched_but_not_changed() {
+        let f = fixture_in_mode("dev-cluster", None, true);
+        for args in [vec!["rollout", "status", "deploy/web"], vec!["rollout", "history", "deploy/web"]] {
+            let out = f.run("kubectl", &args);
+            assert!(out.status.success(), "{args:?}: {}", stderr(&out));
+            assert!(stdout(&out).starts_with("real-kubectl "), "{args:?}");
+        }
+        for (args, said) in [
+            (vec!["rollout", "restart", "deploy/web"], "kubectl rollout restart"),
+            (vec!["rollout", "undo", "deploy/web"], "kubectl rollout undo"),
+            (vec!["rollout", "pause", "deploy/web"], "kubectl rollout pause"),
+        ] {
+            let out = f.run("kubectl", &args);
+            assert_eq!(out.status.code(), Some(64), "{args:?} was not refused");
+            assert_eq!(stderr(&out), read_only_refusal(said), "{args:?}");
+        }
+    }
+
+    #[test]
+    fn a_read_only_terminal_finds_the_subcommand_past_flags_and_their_values() {
+        let f = fixture_in_mode("dev-cluster", None, true);
+        for (tool, args) in [
+            ("kubectl", vec!["-n", "kube-system", "get", "pods"]),
+            // A namespace that happens to be called `delete` is a namespace.
+            ("kubectl", vec!["--namespace", "delete", "get", "pods"]),
+            ("kubectl", vec!["--namespace=prod", "-v=6", "get", "pods"]),
+            // A flag that takes no value leaves the next word the subcommand.
+            ("kubectl", vec!["--insecure-skip-tls-verify", "get", "pods"]),
+            ("kubectl", vec!["--alsologtostderr", "get", "pods"]),
+            ("kubectl", vec!["--insecure_skip_tls_verify", "get", "pods"]),
+            ("kubectl", vec!["rollout", "-n", "prod", "status", "deploy/web"]),
+            ("helm", vec!["-n", "prod", "list"]),
+            ("helm", vec!["--debug", "status", "web"]),
+        ] {
+            let out = f.run(tool, &args);
+            assert!(out.status.success(), "{tool} {args:?}: {}", stderr(&out));
+        }
+        for (tool, args, said) in [
+            // A read standing as a flag's value is the value: the subcommand
+            // is the word after it.
+            ("kubectl", vec!["-n", "get", "delete", "pods", "--all"], "kubectl delete"),
+            // A flag the guard has never heard of takes the next word, as
+            // kubectl itself reads it: `get` is delete's label selector here.
+            ("kubectl", vec!["-l", "get", "delete", "pods"], "kubectl delete"),
+            ("kubectl", vec!["--selector", "get", "delete", "pods"], "kubectl delete"),
+            ("kubectl", vec!["rollout", "-n", "status", "restart", "deploy/web"], "kubectl rollout restart"),
+            ("helm", vec!["-n", "list", "uninstall", "web"], "helm uninstall"),
+            ("helm", vec!["--kube-as-user", "list", "uninstall", "web"], "helm uninstall"),
+            ("kubectl", vec!["--logtostderr", "apply", "-f", "web.yaml"], "kubectl apply"),
+        ] {
+            let out = f.run(tool, &args);
+            assert_eq!(out.status.code(), Some(64), "{tool} {args:?} was not refused");
+            assert_eq!(stderr(&out), read_only_refusal(said), "{tool} {args:?}");
+        }
+        // Every klog boolean kubectl 1.25 and earlier registered takes no
+        // value. Read as taking one, it swallows the subcommand after it, the
+        // check finds none, and the write runs.
+        for flag in [
+            "--add-dir-header",
+            "--alsologtostderr",
+            "--logtostderr",
+            "--one-output",
+            "--skip-headers",
+            "--skip-log-headers",
+        ] {
+            let out = f.run("kubectl", &[flag, "apply", "-f", "web.yaml"]);
+            assert_eq!(out.status.code(), Some(64), "kubectl {flag} apply was not refused");
+            assert_eq!(stderr(&out), read_only_refusal("kubectl apply"), "kubectl {flag} apply");
+        }
+        // kubectl reads `_` in a flag name as `-`, so a boolean flag is one in
+        // either spelling, and in a mix of the two. Each global boolean with
+        // a separator inside its name, in the spellings it is typed in.
+        for flag in [
+            "--add_dir_header",
+            "--disable-compression",
+            "--disable_compression",
+            "--insecure-skip-tls-verify",
+            "--insecure_skip_tls_verify",
+            "--insecure-skip_tls-verify",
+            "--match-server-version",
+            "--match_server_version",
+            "--one_output",
+            "--skip_headers",
+            "--skip_log_headers",
+            "--skip_log-headers",
+            "--warnings-as-errors",
+            "--warnings_as_errors",
+        ] {
+            let out = f.run("kubectl", &[flag, "apply", "-f", "web.yaml"]);
+            assert_eq!(out.status.code(), Some(64), "kubectl {flag} apply was not refused");
+            assert_eq!(stderr(&out), read_only_refusal("kubectl apply"), "kubectl {flag} apply");
+        }
+    }
+
+    #[test]
+    fn a_read_only_terminal_stops_at_a_double_dash_unless_a_flag_is_waiting_for_it() {
+        let f = fixture_in_mode("dev-cluster", None, true);
+        // After `--` the words are not kubectl's subcommand, to kubectl as here.
+        let out = f.run("kubectl", &["--", "delete", "pods"]);
+        assert!(out.status.success(), "{}", stderr(&out));
+        assert!(stdout(&out).starts_with("real-kubectl "));
+        // A flag still waiting for its value takes `--` as that value, in
+        // kubectl as here, and the subcommand is the word after it.
+        let out = f.run("kubectl", &["-n", "--", "delete", "pods", "-A"]);
+        assert_eq!(out.status.code(), Some(64), "{}", stdout(&out));
+        assert_eq!(stderr(&out), read_only_refusal("kubectl delete"));
+    }
+
+    #[test]
+    fn a_read_only_terminal_still_refuses_another_cluster_past_a_flags_double_dash() {
+        let f = fixture_in_mode("dev-cluster", None, true);
+        // `--` is `-n`'s value, so the words after it are still kubectl's,
+        // and the flags and verbs that leave the cluster are refused (#846).
+        for (args, said) in [
+            (vec!["-n", "--", "--kubeconfig=/x", "get", "pods"], "--kubeconfig=/x"),
+            (vec!["-n", "--", "config", "set-cluster", "x"], "config set-cluster"),
+        ] {
+            let out = f.run("kubectl", &args);
+            assert_eq!(out.status.code(), Some(64), "{args:?} was not refused");
+            assert_eq!(
+                stderr(&out),
+                format!(
+                    "srelens: \"{said}\" is not available here. This terminal is bound to dev-cluster; open a terminal from the other cluster to work there.\n"
+                ),
+                "{args:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_terminal_that_is_not_read_only_still_hands_writes_over() {
+        let f = fixture("dev-cluster", Some("payments"));
+        for (tool, args) in [
+            ("kubectl", vec!["delete", "pod", "web-0"]),
+            ("kubectl", vec!["rollout", "restart", "deploy/web"]),
+            ("kubectl", vec!["-l", "app", "delete", "pods"]),
+            ("helm", vec!["uninstall", "web"]),
+        ] {
+            let out = f.run(tool, &args);
+            assert!(out.status.success(), "{tool} {args:?}: {}", stderr(&out));
+            assert!(stdout(&out).starts_with(&format!("real-{tool} ")), "{tool} {args:?}");
+        }
+        for tool in [Tool::Kubectl, Tool::Helm] {
+            let script = std::fs::read_to_string(f.scope.bin.as_ref().unwrap().join(tool.name())).unwrap();
+            assert!(!script.contains("read-only"), "{script}");
+        }
+        let init = std::fs::read_to_string(f.scope.dir.join("init.sh")).unwrap();
+        assert!(!init.contains("read-only"), "{init}");
+    }
+
+    #[test]
+    fn a_read_only_terminal_says_so_in_its_prompt() {
+        let f = fixture_in_mode("dev-cluster", Some("payments"), true);
+        let home = tempfile::tempdir().unwrap();
+        let out = interactive(&f, "bash", home.path(), "PS1='$ '; __srelens_prompt; echo \"ps1=$PS1\"");
+        let said = stdout(&out);
+        assert!(said.contains("ps1=[dev-cluster/payments read-only] $ "), "{said}\n{}", stderr(&out));
+    }
+
+    #[test]
+    fn a_read_only_bash_puts_the_guards_back_first_after_a_prompt_hook_moves_them() {
+        let f = fixture_in_mode("dev-cluster", None, true);
+        let home = tempfile::tempdir().unwrap();
+        // A hook of the kind mise or direnv installs: before each prompt it
+        // puts its own directory, which holds a kubectl, ahead on PATH.
+        std::fs::write(
+            home.path().join(".bashrc"),
+            format!("PROMPT_COMMAND='PATH={}:$PATH'\n", f.real.display()),
+        )
+        .unwrap();
+        let out = interactive(
+            &f,
+            "bash",
+            home.path(),
+            // What bash runs before a prompt; then once more with nothing
+            // moved, which must leave PATH as it was.
+            "eval \"$PROMPT_COMMAND\"; before=$PATH; __srelens_prompt; \
+             [ \"$PATH\" = \"$before\" ] && echo stable; \
+             kubectl delete pods --all; echo refused=$?",
+        );
+        let said = stdout(&out);
+        let context = format!("{said}\n{}", stderr(&out));
+        assert!(said.contains("refused=64"), "{context}");
+        assert!(!said.contains("real-kubectl"), "{context}");
+        assert!(said.contains("stable"), "{context}");
+    }
+
+    #[test]
+    fn a_read_only_zsh_puts_the_guards_back_first_after_a_prompt_hook_moves_them() {
+        let Some(zsh) = shell_named("zsh") else {
+            eprintln!("zsh not found; skipped");
+            return;
+        };
+        let f = fixture_in_mode("dev-cluster", None, true);
+        let home = tempfile::tempdir().unwrap();
+        std::fs::write(
+            home.path().join(".zshrc"),
+            format!(
+                "__hook() {{ PATH={}:$PATH }}\nprecmd_functions+=(__hook)\n",
+                f.real.display()
+            ),
+        )
+        .unwrap();
+        let start = f.scope.shell_start("/bin/zsh");
+        let out = Command::new(&zsh)
+            .args(["-i", "-c"])
+            // What zsh runs before a prompt.
+            .arg("for fn in $precmd_functions; do $fn; done; kubectl delete pods --all; echo refused=$?")
+            .envs(start.env.iter().cloned())
+            .env("HOME", home.path())
+            .env("PATH", f.path())
+            .env("KUBECONFIG", &f.scope.kubeconfig)
+            .output()
+            .unwrap();
+        let said = stdout(&out);
+        let context = format!("{said}\n{}", stderr(&out));
+        assert!(said.contains("refused=64"), "{context}");
+        assert!(!said.contains("real-kubectl"), "{context}");
+    }
+}
+
+#[cfg(all(test, not(unix)))]
+mod tests {
+    use super::*;
+
+    /// Where there are no guards (Windows) nothing refuses a write, so a
+    /// terminal asked to be read-only is not, and its opening line must not
+    /// say it is (#101).
+    #[test]
+    fn without_guards_a_terminal_asked_to_be_read_only_is_not() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("config");
+        std::fs::write(
+            &config,
+            "apiVersion: v1\nkind: Config\nclusters:\n- name: c\n  cluster:\n    server: https://127.0.0.1:1\n\
+             users:\n- name: u\n  user: {}\ncontexts:\n- name: ctx\n  context:\n    cluster: c\n    user: u\n",
+        )
+        .unwrap();
+        let scope = Scope::create(u64::MAX, "ctx", None, &[config], true).unwrap();
+        scope.remove();
+        assert!(!scope.read_only);
     }
 }

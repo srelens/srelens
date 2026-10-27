@@ -59,6 +59,10 @@ silently focuses the first:
 - `/edit/<cluster>/<kind>/<namespace>/<name>` — the cluster is in it because
   the editor pins the cluster it opened on. Without it, Edit on staging's
   `default/web` focused prod's draft and staging's could not be opened at all.
+- `/k/<cluster>/<kind>/<namespace>/<name>` — a detail tab pins its cluster the
+  same way (#834), and reads it from the route, not the rail. Without it, prod's
+  and staging's `worker-1` were one tab that followed the rail. Anything drawn
+  inside it that would read the rail reads `useScreenContext()` instead.
 - A custom kind carries its group (`acme.io%2FDeployment`), because a CRD may
   legally reuse a built-in kind's name and resolving by name alone lands on
   the built-in — including for delete.
@@ -211,3 +215,106 @@ cases), and in `srelens-kube`,
 `context_resolve::tests::a_pinned_id_finds_its_own_context_whatever_it_is_displayed_as`,
 whose context IDs carry a `\` path there. Do not "fix" them by changing what
 they assert; CI runs Linux.
+
+## The Human QA Matrix: Adversarial Verification Before Merging
+
+Automated unit tests assert developer assumptions; human fingers assert chaos.
+Features in this codebase routinely passed 100% in CI only to break in front
+of a human within seconds (e.g. arrowing down in suggestions and pressing
+`Space`, or typing `:changed 1h` corrupting active namespaces).
+
+The goal is **not** to promise "zero slips" or eliminate human judgment. The
+goal is to shrink the human tester's exploratory burden to the genuinely
+perceptual layer (D7: layout, readability) by systematically automating
+interaction edge cases beforehand.
+
+### Path-Filtered Applicability
+
+The QA matrix checklist is **mandatory** whenever a PR touches:
+- Terminal input handling (`apps/tui/src/app.rs`)
+- Command bar or suggestion logic (`apps/tui/src/commands.rs`)
+- Capability caller `*In` deserialization structs
+
+For other PRs (purely internal crates, dependency bumps, docs, backend fixes
+with no input surface), the author explicitly notes:
+`Matrix: N/A because <reason>` in the PR description.
+
+### Continuous Verification: Call `/qa` (or Run Two-Pass Checks) After Every Commit
+
+Adversarial verification must be performed after **each commit** we make
+touching any applicable interactive surface, input handling, command bar logic,
+or caller wire contract. Do not defer adversarial verification to the end of a
+task or wait for human testers to stumble on regressions:
+
+1. Commit the implementation slice or fix.
+2. If available in your assistant environment, invoke the `/qa` skill (located
+   at `~/.gemini/config/skills/qa/SKILL.md` or tool equivalent). Otherwise,
+   execute the documented Two-Pass Model directly against the diff:
+   - **Pass 1 (Finger Chaos)**: identify non-linear sequences (hesitations,
+     arrows, spaces, rapid double keys).
+   - **Pass 2 (Wire & Buffer Truth)**: verify caller payloads and render the screen
+     via `common::render_app` before asserting on rendered strings.
+3. Formulate and run journey tests in `apps/tui/tests/journeys/<feature>.rs`
+   covering the applicable matrix dimensions.
+4. Verify tests pass (`cargo test -p srectl --test journeys_tests`) before
+   moving on to the next task.
+
+
+### The Two-Pass Model
+
+Avoid pure black-box testing (which shipped the broken `api_version` assertion)
+and avoid pure white-box testing (which tests developer assumptions). Instead,
+use two distinct passes:
+
+1. **Pass 1: Black-Box Sequence Generation (Finger Chaos)**:
+   Model what a messy human does without looking at internal branches:
+   hesitations, out-of-order arrows, pressing `Space` mid-selection, rapid
+   double-Enter, deleting words backwards, pasting strings with spaces/tabs.
+2. **Pass 2: Grey-Box Contract & Visual Checks (Wire & Buffer Truth)**:
+   Assert against what the cluster/callers actually exchange and what the
+   terminal actually renders. Read caller payloads beside `*In` structs, and
+   use `common::render_app` to inspect rendered buffer text (e.g. verifying
+   ` <namespace>` lowercase, not guessed uppercase `<NAMESPACE>`).
+
+### The 7 Dimensions & Verification Seams
+
+Every applicable PR must provide at least one journey test per applicable
+dimension, and state which dimensions do not apply with rationale:
+
+| Dimension | Human Behavior Modeled | How Verified in this Repo |
+| :--- | :--- | :--- |
+| **D1: Input Disorder & Interleaving** | Arrows down $\rightarrow$ Space; Tab $\rightarrow$ Backspace; rapid double-submissions. | Headless journey tests in `apps/tui/tests/journeys/` using `common::press` and `common::type_str`. |
+| **D2: Ambiguity & Collisions** | CRD plural collides with built-in (`deployments.acme.io`); prefix tie scores; aliases. | Dedicated collision tests asserting full disambiguation and preservation of exact names. |
+| **D3: Temporal & Asynchrony** | Typing while discovery is running; late arrival arrives mid-interaction; network retry. | Inject late arrivals or errors via `_rx` (`AppEvent`) or state flags (`namespace_discovery_error`). |
+| **D4: Boundary & Scale Extremes** | 0 items (empty state); 1 item (singleton); 1,000 items; 63-char names; long annotations. | Budget-style tests with counts and time ceilings (`docs/extensions/testing.md#performance-budgets`). |
+| **D5: State Transitions & Re-Entry** | Context switches (`prod` $\rightarrow$ `staging` $\rightarrow$ `prod`); laptop sleep; token expiry. | Context-switching journey tests. Clock/token expiry tests require a time abstraction first. |
+| **D6: Feedback & Truthfulness** | Never collapse API failure into absence; no false reassurance on empty apply. | Error-arm tests asserting the exact failure message reaches the status bar or toast. |
+| **D7: Visual & Perceptual Reality** | Narrow 80×24 terminal squeeze; wide 200×50 screen; intact status line and headers. | Covered globally by `tests/viewport_render_tests.rs` plus per-feature `common::render_app` checks. |
+
+### Where Journey Tests Land
+
+Do not add new interaction sequences to `apps/tui/tests/app_input_tests.rs`
+(which is already >8,000 lines).
+
+Place modular journey tests in `apps/tui/tests/journeys/<feature>.rs`, register
+them in `apps/tui/tests/journeys/mod.rs`, and execute them via:
+```bash
+cargo test -p srectl --test journeys_tests
+```
+
+### Adversarial Failures: Bug vs. Spec Ambiguity
+
+When an adversarial journey test fails, do **not** immediately assume the code
+must change to satisfy the test. Ambiguous specs often cause tests to assert
+the wrong expectation (which is how bugs like `:changed 1h` were introduced).
+Evaluate first:
+- Is this an implementation bug? $\rightarrow$ Fix the implementation.
+- Was the requirement or contract ambiguous? $\rightarrow$ Clarify the spec with the architect before altering behavior.
+
+### The Slip-to-Matrix Feedback Loop
+
+When a human tester or user catches an edge case that slipped past tests:
+1. Do not merely patch the single symptom.
+2. Formulate the human behavior as a named invariant row in this matrix.
+3. Add a regression journey test in `apps/tui/tests/journeys/` that fails without the invariant.
+

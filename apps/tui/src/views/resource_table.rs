@@ -870,7 +870,7 @@ pub fn default_columns_for_kind(kind: &ResourceKind) -> Vec<ColumnDef> {
             ColumnDef {
                 name: "NAME",
                 key: "name",
-                width: Constraint::Length(24),
+                width: Constraint::Min(20),
             },
             ColumnDef {
                 name: "STATUS",
@@ -880,6 +880,11 @@ pub fn default_columns_for_kind(kind: &ResourceKind) -> Vec<ColumnDef> {
             ColumnDef {
                 name: "ROLES",
                 key: "roles",
+                width: Constraint::Length(16),
+            },
+            ColumnDef {
+                name: "INTERNAL-IP",
+                key: "internalIp",
                 width: Constraint::Length(16),
             },
             ColumnDef {
@@ -1735,10 +1740,24 @@ pub fn extract_field_str<'a>(val: &'a Value, key: &str) -> String {
         }
     }
 
-    // 4. Kubernetes Service specific lookups
+    // 4. Kubernetes Service & Node address lookups
     if key_lower == "clusterip" {
         if let Some(cip) = val.pointer("/spec/clusterIP").and_then(|v| v.as_str()) {
             return cip.to_string();
+        }
+    }
+
+    if key_lower == "internalip" {
+        if let Some(addrs) = val.pointer("/status/addresses").and_then(|v| v.as_array()) {
+            for a in addrs {
+                if a.get("type").and_then(|t| t.as_str()) == Some("InternalIP") {
+                    if let Some(ip) = a.get("address").and_then(|v| v.as_str()) {
+                        if !ip.is_empty() {
+                            return ip.to_string();
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -1776,6 +1795,19 @@ pub fn extract_field_str<'a>(val: &'a Value, key: &str) -> String {
         }
         if svc_type.is_some() {
             return "<none>".to_string();
+        }
+
+        // If not a Service, check status.addresses for raw Node objects
+        if let Some(addrs) = val.pointer("/status/addresses").and_then(|v| v.as_array()) {
+            for a in addrs {
+                if a.get("type").and_then(|t| t.as_str()) == Some("ExternalIP") {
+                    if let Some(ip) = a.get("address").and_then(|v| v.as_str()) {
+                        if !ip.is_empty() {
+                            return ip.to_string();
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -2769,5 +2801,79 @@ mod tests {
             extract_field_str(&raw_cordoned, "status"),
             "Ready,SchedulingDisabled"
         );
+    }
+
+    #[test]
+    fn test_nodes_table_columns_and_constraints() {
+        let cols = default_columns_for_kind(&ResourceKind::Nodes);
+        let name_col = cols.iter().find(|c| c.name == "NAME").unwrap();
+        assert_eq!(name_col.width, Constraint::Min(20));
+
+        let status_col = cols.iter().find(|c| c.name == "STATUS").unwrap();
+        assert_eq!(status_col.width, Constraint::Length(26));
+
+        let ip_col = cols.iter().find(|c| c.name == "INTERNAL-IP").unwrap();
+        assert_eq!(ip_col.key, "internalIp");
+        assert_eq!(ip_col.width, Constraint::Length(16));
+
+        // Ensure EXTERNAL-IP is not in TUI table
+        assert!(cols.iter().all(|c| c.name != "EXTERNAL-IP"));
+    }
+
+    #[test]
+    fn test_node_internal_ip_extraction_and_wire_contract() {
+        // Wire camelCase from backend
+        let node_wire = json!({
+            "name": "node-1",
+            "internalIp": "192.168.1.50",
+            "externalIp": "35.200.10.5"
+        });
+        assert_eq!(extract_field_str(&node_wire, "internalIp"), "192.168.1.50");
+        assert_eq!(extract_field_str(&node_wire, "externalIp"), "35.200.10.5");
+
+        // Raw node status.addresses fallback
+        let raw_node = json!({
+            "metadata": { "name": "node-2" },
+            "status": {
+                "addresses": [
+                    { "type": "InternalIP", "address": "10.0.0.12" },
+                    { "type": "ExternalIP", "address": "52.1.2.3" }
+                ]
+            }
+        });
+        assert_eq!(extract_field_str(&raw_node, "internalIp"), "10.0.0.12");
+        assert_eq!(extract_field_str(&raw_node, "externalIp"), "52.1.2.3");
+    }
+
+    #[test]
+    fn test_service_external_ip_regression_invariance() {
+        let svc_lb_pending = json!({
+            "metadata": { "name": "my-lb" },
+            "spec": { "type": "LoadBalancer" },
+            "status": { "loadBalancer": {} }
+        });
+        assert_eq!(
+            extract_field_str(&svc_lb_pending, "externalIP"),
+            "<pending>"
+        );
+
+        let svc_lb_ready = json!({
+            "metadata": { "name": "my-lb" },
+            "spec": { "type": "LoadBalancer" },
+            "status": {
+                "loadBalancer": {
+                    "ingress": [
+                        { "ip": "1.2.3.4" }
+                    ]
+                }
+            }
+        });
+        assert_eq!(extract_field_str(&svc_lb_ready, "externalIP"), "1.2.3.4");
+
+        let svc_cluster_ip = json!({
+            "metadata": { "name": "my-clusterip" },
+            "spec": { "type": "ClusterIP" }
+        });
+        assert_eq!(extract_field_str(&svc_cluster_ip, "externalIP"), "<none>");
     }
 }

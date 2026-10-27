@@ -22,8 +22,8 @@ vi.mock("@tauri-apps/api/window", () => ({
   }),
 }));
 
-import { invokeCapability, invokeCommand, on, relaunchApp, appVersion, onWindowCloseRequested, currentWindowLabel, setWindowBlur } from "./tauriTransport";
-import { currentWindowLabel as webWindowLabel, setWindowBlur as webSetWindowBlur } from "./webTransport";
+import { invokeCapability, invokeCommand, on, relaunchApp, appVersion, onWindowCloseRequested, currentWindowLabel, closeCurrentWindow, setWindowBlur } from "./tauriTransport";
+import { currentWindowLabel as webWindowLabel, closeCurrentWindow as webCloseCurrentWindow, setWindowBlur as webSetWindowBlur } from "./webTransport";
 
 beforeEach(() => {
   invokeMock.mockReset();
@@ -244,5 +244,13 @@ describe("transport", () => {
   it("currentWindowLabel returns the label of the current window or main on web", () => {
     expect(currentWindowLabel()).toBe("ctx-test");
     expect(webWindowLabel()).toBe("main");
+  });
+
+  it("closeCurrentWindow asks the window to close, so its close-requested cleanup runs", async () => {
+    windowCloseMock.mockResolvedValue(undefined);
+    await closeCurrentWindow();
+    expect(windowCloseMock).toHaveBeenCalledTimes(1);
+    expect(windowDestroyMock).not.toHaveBeenCalled();
+    await expect(webCloseCurrentWindow()).resolves.toBeUndefined();
   });
 });

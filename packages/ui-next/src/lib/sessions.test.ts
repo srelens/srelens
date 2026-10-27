@@ -6,6 +6,9 @@ const startLocalTerminal = vi.fn();
 const deletePod = vi.fn();
 const notifyError = vi.fn();
 const isTauri = vi.fn(() => false);
+const protectionFor = vi.fn(
+  (_context: string | null | undefined): { name: string; workspace: string } | null => null,
+);
 
 vi.mock("@srelens/core", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@srelens/core")>();
@@ -18,6 +21,12 @@ vi.mock("@srelens/core", async (importOriginal) => {
     notify: { ...actual.notify, error: notifyError },
   };
 });
+
+// Whether a cluster is protected is `./protection`'s to say, and tested there;
+// here it is the boundary.
+vi.mock("./protection", () => ({
+  protectionFor: (context: string | null | undefined) => protectionFor(context),
+}));
 
 // Imported after the mock so the store binds the doubles rather than the real
 // Tauri-backed session openers.
@@ -121,6 +130,7 @@ beforeEach(() => {
   notifyError.mockReset();
   // The web, unless a case says otherwise: there the store deletes the pod.
   isTauri.mockReset().mockReturnValue(false);
+  protectionFor.mockReset().mockReturnValue(null);
   __resetSessionsForTests();
 });
 
@@ -165,6 +175,19 @@ describe("the session store", () => {
     expect(startLocalTerminal.mock.calls[0][6]).toBe("payments");
     // Where it starts, not where it is: the reader can move it from inside.
     expect(getSessions()[0].namespace).toBe("");
+  });
+
+  it("opens a protected cluster's local shell read-only, and any other's not (#101)", async () => {
+    fakeBackend();
+    protectionFor.mockImplementation((context) =>
+      context === "prod-eu" ? { name: "Production EU", workspace: "Production" } : null,
+    );
+    await startLocalSession({ context: "prod-eu" });
+    await startLocalSession({ context: "kind-srelens-demo" });
+
+    // The eighth argument: after the command and the namespace.
+    expect(startLocalTerminal.mock.calls[0][7]).toBe(true);
+    expect(startLocalTerminal.mock.calls[1][7]).toBe(false);
   });
 
   it("renames a session, and only that one", async () => {

@@ -1,7 +1,9 @@
 import { describe } from "./routes";
+import { detailRoute, parseDetailRoute } from "./detailRoute";
 import { loadRestoreSession, scopedSettingsKey, settingsStorage } from "@srelens/core";
 import type { TableSort } from "@srelens/ui-kit";
-import type { Tab, TabsState, Workspace } from "./tabs";
+import type { ClusterStrip, Tab, TabsState, Workspace } from "./tabs";
+import { isPaletteColor } from "./markSymbols";
 
 /**
  * Where the shell's tabs live between launches.
@@ -28,6 +30,13 @@ export interface Storage {
 const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
 const isString = (v: unknown): v is string => typeof v === "string";
 
+/**
+ * The longest Logs query a tab restores. A longer one is still written with the tab, because the save does not look
+ * inside a view; it is dropped on load, so a pasted stack trace is not worth restoring but does sit in the settings
+ * file until the query changes.
+ */
+export const MAX_SAVED_QUERY = 2000;
+
 const isTableSort = (v: unknown): v is TableSort =>
   isRecord(v) && isString(v.key) && (v.direction === "asc" || v.direction === "desc");
 
@@ -48,6 +57,9 @@ function parseView(v: unknown): Tab["view"] | undefined {
   if (v.filterKey === null) view.filterKey = null;
   else if (isString(v.filterKey)) view.filterKey = v.filterKey;
   if (typeof v.regex === "boolean") view.regex = v.regex;
+  // Too long is dropped, not cut: half a query filters differently from the
+  // one that was typed, and a restored tab should show what it was left with.
+  if (isString(v.query) && v.query.length <= MAX_SAVED_QUERY) view.query = v.query;
   return view;
 }
 
@@ -63,6 +75,13 @@ function parseTab(v: unknown): Tab | null {
   if (!isRecord(v) || !isString(v.id) || !isString(v.route) || !isString(v.title) || !isString(v.kind)) return null;
   const tab: Tab = { id: v.id, route: v.route, title: v.title, kind: v.kind as Tab["kind"] };
   if (isString(v.sub)) tab.sub = v.sub;
+  // An earlier build's detail route had no cluster and showed the rail's — the
+  // cluster its `sub` was last relabelled for. Pin it there (#834), so it comes
+  // back showing what it showed; with no `sub` it follows the rail as before.
+  const detail = parseDetailRoute(tab.route);
+  if (detail && !detail.cluster && tab.sub) {
+    tab.route = detailRoute(detail.kind, detail.namespace, detail.name, { cluster: tab.sub, group: detail.group });
+  }
   // The former Control room route is now app-wide; retain the tab's identity
   // and pin preference while dropping its obsolete cluster label.
   if (tab.route === "/") {
@@ -77,7 +96,36 @@ function parseTab(v: unknown): Tab | null {
   if (view !== undefined) tab.view = view;
   const namespaces = parseNamespaces(v.namespaces);
   if (namespaces !== undefined) tab.namespaces = namespaces;
+  // The same shape: per cluster, a list of names (collection names here).
+  const namespaceCollections = parseNamespaces(v.namespaceCollections);
+  if (namespaceCollections !== undefined && Object.keys(namespaceCollections).length > 0) {
+    tab.namespaceCollections = namespaceCollections;
+  }
+  if (typeof v.closedAt === "number" && Number.isFinite(v.closedAt)) tab.closedAt = v.closedAt;
   return tab;
+}
+
+/**
+ * The tabs of the clusters not in focus (#908). One cluster's entry that
+ * cannot be read costs that cluster's tabs, not the workspace; an entry for a
+ * cluster the workspace does not have is dropped, as `reconcile` would.
+ */
+function parseShelved(v: unknown, clusters: readonly string[]): Workspace["shelved"] | undefined {
+  if (!isRecord(v)) return undefined;
+  const shelved: Record<string, ClusterStrip> = {};
+  for (const [id, raw] of Object.entries(v)) {
+    if (!clusters.includes(id) || !isRecord(raw) || !Array.isArray(raw.tabs)) continue;
+    const tabs = raw.tabs.map(parseTab).filter((t): t is Tab => t !== null);
+    const closed = Array.isArray(raw.closed) ? raw.closed.map(parseTab).filter((t): t is Tab => t !== null) : [];
+    if (tabs.length === 0 && closed.length === 0) continue;
+    shelved[id] = {
+      tabs,
+      order: Array.isArray(raw.order) ? raw.order.filter(isString) : tabs.map((t) => t.id),
+      activeId: isString(raw.activeId) ? raw.activeId : (tabs[0]?.id ?? ""),
+      closed,
+    };
+  }
+  return Object.keys(shelved).length > 0 ? shelved : undefined;
 }
 
 function parseWorkspace(v: unknown): Workspace | null {
@@ -98,6 +146,16 @@ function parseWorkspace(v: unknown): Workspace | null {
   // Only a cluster the workspace actually has: the field is an index into
   // `clusters`, and `reconcile` would drop a dangling one anyway.
   if (isString(v.activeCluster) && clusters.includes(v.activeCluster)) ws.activeCluster = v.activeCluster;
+  // Not the cluster in focus: its tabs are the strip itself.
+  const shelved = parseShelved(v.shelved, clusters.filter((id) => id !== ws.activeCluster));
+  if (shelved) ws.shelved = shelved;
+  // Only a palette colour: the chip paints whatever it is handed, and a value
+  // from a hand-edited file or another build's palette is not one this build
+  // can name.
+  if (isPaletteColor(v.color)) ws.color = v.color;
+  // Only `true`: a flag this build did not write is no flag, as a colour it
+  // cannot name is no colour.
+  if (v.protected === true) ws.protected = true;
   return ws;
 }
 

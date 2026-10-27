@@ -60,7 +60,7 @@ export function Placeholder({
         action={
           <span className="flex gap-2">
             <Button type="button" variant="secondary" size="sm" onClick={() => onOpenInClassic(route, clusterName)}>
-              Open in classic
+              Open in Classic (deprecated)
             </Button>
             {onOpenGallery && (
               <Button type="button" variant="secondary" size="sm" onClick={onOpenGallery}>

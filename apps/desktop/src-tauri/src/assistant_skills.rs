@@ -52,6 +52,15 @@ pub struct SkillMeta {
     /// `false`.
     #[serde(default)]
     pub builtin: bool,
+    /// Where this skill's file is, for a reader who wants to open it and edit
+    /// it by hand (srelens/srelens#851). `None` for a shipped default nobody
+    /// has overridden: that one is compiled into the app and has no file.
+    #[serde(default)]
+    pub path: Option<String>,
+    /// True for a user file that stands in for a shipped default of the same
+    /// name. Deleting it does not remove the skill; the default comes back.
+    #[serde(default)]
+    pub overrides_builtin: bool,
 }
 
 /// `<base>/assistant/skills` — where skill `.md` files live.
@@ -149,16 +158,56 @@ fn write_skill_atomic(dir: &Path, skill: &Skill) -> Result<(), String> {
 /// message.
 fn read_skill(dir: &Path, name: &str) -> Result<Skill, String> {
     validate_name(name)?;
-    let path = skill_path(dir, name);
+    let path = user_skill_file(dir, name).ok_or_else(|| format!("no skill found named {name:?}"))?;
     let raw = fs::read_to_string(&path).map_err(|_| format!("no skill found named {name:?}"))?;
     parse_skill(&raw)
+}
+
+/// Every `*.md` in `dir`, in file-name order, so that whatever is decided
+/// from them is decided the same way on every read. A folder that cannot be
+/// read has none.
+fn skill_files(dir: &Path) -> Vec<PathBuf> {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut files: Vec<PathBuf> = entries
+        .filter_map(|entry| entry.ok().map(|e| e.path()))
+        .filter(|path| path.extension().is_some_and(|e| e.eq_ignore_ascii_case("md")))
+        .collect();
+    files.sort();
+    files
+}
+
+/// The user's file for the skill called `name`, if they have one.
+///
+/// Usually `<name>.md`, which is what installing a skill writes. But the
+/// folder is the user's to edit, and a skill is called what its front matter
+/// says: `my notes.md` declaring `team-runbook` is listed as `team-runbook`.
+/// Loading, removing and revealing it must reach that same file — rebuilding
+/// `team-runbook.md` from the name finds nothing, and a delete that finds
+/// nothing reports success while the skill stays listed. `<name>.md` wins
+/// where both exist, then the first by file name; [`list_all_skills`] lists
+/// the same one.
+fn user_skill_file(dir: &Path, name: &str) -> Option<PathBuf> {
+    let named = skill_path(dir, name);
+    if named.exists() {
+        return Some(named);
+    }
+    skill_files(dir).into_iter().find(|path| {
+        fs::read_to_string(path)
+            .ok()
+            .and_then(|raw| parse_skill(&raw).ok())
+            .is_some_and(|skill| skill.name == name)
+    })
 }
 
 /// Remove a skill's file. Removing a name that has no file is not an error —
 /// deleting is idempotent, matching `assistant_history::delete_session`.
 fn delete_skill(dir: &Path, name: &str) -> Result<(), String> {
     validate_name(name)?;
-    let path = skill_path(dir, name);
+    let Some(path) = user_skill_file(dir, name) else {
+        return Ok(());
+    };
     match fs::remove_file(&path) {
         Ok(()) => Ok(()),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
@@ -178,18 +227,14 @@ fn delete_skill(dir: &Path, name: &str) -> Result<(), String> {
 /// clear `Err` — only the LIST is tolerant; loading a specific, presumably
 /// intentionally-selected file is not.
 fn list_skills(dir: &Path) -> Result<Vec<SkillMeta>, String> {
-    let entries = match fs::read_dir(dir) {
-        Ok(entries) => entries,
+    match fs::read_dir(dir) {
+        Ok(_) => {}
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(e) => return Err(format!("could not read {}: {e}", dir.display())),
-    };
+    }
 
     let mut metas = Vec::new();
-    for entry in entries {
-        let path = entry.map_err(|e| format!("could not read entry in {}: {e}", dir.display()))?.path();
-        if !path.extension().is_some_and(|e| e.eq_ignore_ascii_case("md")) {
-            continue;
-        }
+    for path in skill_files(dir) {
         let Ok(raw) = fs::read_to_string(&path) else {
             // Unreadable file (permissions, race with a concurrent delete,
             // etc.): skip it, same tolerance as a parse failure below.
@@ -200,8 +245,17 @@ fn list_skills(dir: &Path) -> Result<Vec<SkillMeta>, String> {
             // file, but keep listing every other skill that DOES parse.
             continue;
         };
-        metas.push(SkillMeta { name: skill.name, description: skill.description, builtin: false });
+        metas.push(SkillMeta {
+            name: skill.name,
+            description: skill.description,
+            builtin: false,
+            // The file as found, not `<name>.md` rebuilt: a hand-made file may
+            // be named differently from the skill it declares.
+            path: Some(path.display().to_string()),
+            overrides_builtin: false,
+        });
     }
+    // Stable, so files declaring the same name stay in file-name order.
     metas.sort_by(|a, b| a.name.cmp(&b.name));
     Ok(metas)
 }
@@ -292,11 +346,32 @@ fn list_all_skills(dir: &Path) -> Result<Vec<SkillMeta>, String> {
     for b in builtin_skills() {
         by_name.insert(
             b.name.clone(),
-            SkillMeta { name: b.name, description: b.description, builtin: true },
+            SkillMeta {
+                name: b.name,
+                description: b.description,
+                builtin: true,
+                path: None,
+                overrides_builtin: false,
+            },
         );
     }
+    let shipped: std::collections::BTreeSet<String> = by_name.keys().cloned().collect();
+    let mut from_user: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     for m in list_skills(dir)? {
-        by_name.insert(m.name.clone(), SkillMeta { name: m.name, description: m.description, builtin: false });
+        // Two files may declare one name. The one listed is the one
+        // `user_skill_file` resolves, so the path shown is the file that
+        // loading, removing and revealing act on.
+        if !from_user.insert(m.name.clone()) {
+            let named = skill_path(dir, &m.name).display().to_string();
+            if m.path.as_deref() != Some(named.as_str()) {
+                continue;
+            }
+        }
+        // Asked of the shipped names, not of `by_name`: that holds the
+        // user's own files too, and a second file of an ordinary skill would
+        // be told it replaces a preinstalled one.
+        let overrides_builtin = shipped.contains(&m.name);
+        by_name.insert(m.name.clone(), SkillMeta { overrides_builtin, ..m });
     }
     Ok(by_name.into_values().collect())
 }
@@ -307,7 +382,7 @@ fn list_all_skills(dir: &Path) -> Result<Vec<SkillMeta>, String> {
 /// purpose) rather than silently falling back to a default.
 fn load_skill_or_builtin(dir: &Path, name: &str) -> Result<Skill, String> {
     validate_name(name)?;
-    if skill_path(dir, name).exists() {
+    if user_skill_file(dir, name).is_some() {
         return read_skill(dir, name);
     }
     builtin_skills()
@@ -352,6 +427,38 @@ pub fn skill_delete(app: AppHandle, name: String) -> Result<(), String> {
     delete_skill(&resolve_skills_dir(&app)?, &name)
 }
 
+/// The folder the user's skill files are kept in, so the UI can say where to
+/// look. Created if it is not there yet: a path shown to the reader should be
+/// one they can open.
+#[tauri::command]
+pub fn skills_dir_path(app: AppHandle) -> Result<String, String> {
+    Ok(resolve_skills_dir(&app)?.display().to_string())
+}
+
+/// What to show in the file manager for `name`: that skill's own file, or —
+/// with no name, or for a skill that has no file — a path inside the skills
+/// folder that does not exist, which [`crate::app_log::reveal_in_file_manager`]
+/// answers by opening the folder itself.
+fn reveal_target(dir: &Path, name: Option<&str>) -> Result<PathBuf, String> {
+    let Some(name) = name else {
+        return Ok(dir.join(SKILLS_FOLDER_PLACEHOLDER));
+    };
+    validate_name(name)?;
+    Ok(user_skill_file(dir, name).unwrap_or_else(|| dir.join(SKILLS_FOLDER_PLACEHOLDER)))
+}
+
+/// A file name no skill can have (`validate_name` refuses the space), used
+/// to point the file manager at the folder rather than at a file in it.
+const SKILLS_FOLDER_PLACEHOLDER: &str = "no such skill";
+
+/// Open the skills folder in the OS file manager, with `name`'s file selected
+/// where it has one and the platform can select a file.
+#[tauri::command]
+pub fn skill_reveal(app: AppHandle, name: Option<String>) -> Result<(), String> {
+    let dir = resolve_skills_dir(&app)?;
+    crate::app_log::reveal_in_file_manager(&reveal_target(&dir, name.as_deref())?)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -385,6 +492,152 @@ mod tests {
             description: format!("Description for {name}"),
             body: "Step 1: look at the pod.\n\nStep 2: check events.\n".to_string(),
         }
+    }
+
+    #[test]
+    fn a_user_skill_says_where_its_file_is_and_a_shipped_default_has_none() {
+        let tmp = TempDir::new();
+        write_skill_atomic(tmp.path(), &sample_skill("team-runbook")).unwrap();
+        let all = list_all_skills(tmp.path()).unwrap();
+
+        let mine = all.iter().find(|m| m.name == "team-runbook").unwrap();
+        assert_eq!(mine.path.as_deref(), Some(skill_path(tmp.path(), "team-runbook").display().to_string().as_str()));
+        assert!(!mine.builtin && !mine.overrides_builtin);
+
+        let shipped = all.iter().find(|m| m.name == "crashloop-triage").unwrap();
+        assert!(shipped.builtin);
+        assert_eq!(shipped.path, None);
+    }
+
+    #[test]
+    fn a_file_named_for_a_shipped_default_stands_in_for_it_and_says_so() {
+        let tmp = TempDir::new();
+        write_skill_atomic(tmp.path(), &sample_skill("crashloop-triage")).unwrap();
+        let all = list_all_skills(tmp.path()).unwrap();
+        let entry = all.iter().find(|m| m.name == "crashloop-triage").unwrap();
+
+        assert!(!entry.builtin, "the file is what is in effect");
+        assert!(entry.overrides_builtin);
+        assert!(entry.path.is_some());
+        // And the default is still there underneath: remove the file and it
+        // is back.
+        delete_skill(tmp.path(), "crashloop-triage").unwrap();
+        let all = list_all_skills(tmp.path()).unwrap();
+        assert!(all.iter().find(|m| m.name == "crashloop-triage").unwrap().builtin);
+    }
+
+    #[test]
+    fn a_skills_path_is_the_file_as_found_even_when_named_differently_from_the_skill() {
+        let tmp = TempDir::new();
+        let odd = tmp.path().join("my notes.md");
+        std::fs::write(&odd, to_markdown(&sample_skill("team-runbook"))).unwrap();
+        let metas = list_skills(tmp.path()).unwrap();
+        assert_eq!(metas[0].path.as_deref(), Some(odd.display().to_string().as_str()));
+    }
+
+    #[test]
+    fn the_new_fields_are_sent_under_the_names_the_frontend_reads() {
+        let tmp = TempDir::new();
+        write_skill_atomic(tmp.path(), &sample_skill("crashloop-triage")).unwrap();
+        let json = serde_json::to_value(list_all_skills(tmp.path()).unwrap()).unwrap();
+        let entry = json.as_array().unwrap().iter().find(|m| m["name"] == "crashloop-triage").unwrap();
+        assert_eq!(entry["overridesBuiltin"], true);
+        assert!(entry["path"].is_string());
+    }
+
+    #[test]
+    fn revealing_a_skill_points_at_its_file_and_otherwise_at_the_folder() {
+        let tmp = TempDir::new();
+        write_skill_atomic(tmp.path(), &sample_skill("team-runbook")).unwrap();
+
+        assert_eq!(
+            reveal_target(tmp.path(), Some("team-runbook")).unwrap(),
+            skill_path(tmp.path(), "team-runbook")
+        );
+        // A shipped default has no file, and no name asks for the folder: both
+        // get a path in the folder that is not there, which opens the folder.
+        for target in [reveal_target(tmp.path(), Some("crashloop-triage")).unwrap(), reveal_target(tmp.path(), None).unwrap()] {
+            assert_eq!(target.parent(), Some(tmp.path()));
+            assert!(!target.exists());
+        }
+    }
+
+    /// A skill is called what its front matter says, so a hand-made file may
+    /// be named anything. Everything done to that skill by name has to reach
+    /// that file: rebuilding `<name>.md` found nothing, and a delete that
+    /// finds nothing reported success while the skill stayed listed.
+    #[test]
+    fn a_hand_named_file_is_loaded_revealed_and_removed_by_the_name_it_declares() {
+        let tmp = TempDir::new();
+        let file = tmp.path().join("my notes.md");
+        std::fs::write(&file, "---\nname: team-runbook\ndescription: Ours\n---\nRoll back first.\n").unwrap();
+
+        let listed = list_all_skills(tmp.path()).unwrap();
+        let meta = listed.iter().find(|m| m.name == "team-runbook").unwrap();
+        assert_eq!(meta.path.as_deref(), Some(file.display().to_string().as_str()));
+
+        assert_eq!(load_skill_or_builtin(tmp.path(), "team-runbook").unwrap().body.trim(), "Roll back first.");
+        assert_eq!(reveal_target(tmp.path(), Some("team-runbook")).unwrap(), file);
+
+        delete_skill(tmp.path(), "team-runbook").unwrap();
+        assert!(!file.exists());
+        assert!(list_all_skills(tmp.path()).unwrap().iter().all(|m| m.name != "team-runbook"));
+    }
+
+    #[test]
+    fn restoring_a_preinstalled_skill_removes_a_hand_named_file_that_replaced_it() {
+        let tmp = TempDir::new();
+        let file = tmp.path().join("mine.md");
+        std::fs::write(&file, "---\nname: crashloop-triage\ndescription: Ours\n---\nOur way.\n").unwrap();
+        assert_eq!(load_skill_or_builtin(tmp.path(), "crashloop-triage").unwrap().body.trim(), "Our way.");
+
+        delete_skill(tmp.path(), "crashloop-triage").unwrap();
+        assert!(!file.exists());
+        let meta = list_all_skills(tmp.path()).unwrap().into_iter().find(|m| m.name == "crashloop-triage").unwrap();
+        assert!(meta.builtin);
+        assert!(!meta.overrides_builtin);
+    }
+
+    /// Only a shipped name can be replaced. Two files of the user's own that
+    /// declare one name used to mark the skill as replacing a preinstalled
+    /// one, and the pane offered to "restore" a skill that never shipped.
+    #[test]
+    fn two_user_files_declaring_one_name_do_not_make_it_a_replacement_and_the_named_file_is_the_one_listed() {
+        let tmp = TempDir::new();
+        std::fs::write(tmp.path().join("a-copy.md"), "---\nname: team-runbook\ndescription: Copy\n---\nCopy.\n")
+            .unwrap();
+        let named = tmp.path().join("team-runbook.md");
+        std::fs::write(&named, "---\nname: team-runbook\ndescription: Named\n---\nNamed.\n").unwrap();
+
+        let listed = list_all_skills(tmp.path()).unwrap();
+        let ours: Vec<&SkillMeta> = listed.iter().filter(|m| m.name == "team-runbook").collect();
+        assert_eq!(ours.len(), 1);
+        assert!(!ours[0].overrides_builtin);
+        assert_eq!(ours[0].description, "Named");
+        assert_eq!(ours[0].path.as_deref(), Some(named.display().to_string().as_str()));
+        assert_eq!(load_skill_or_builtin(tmp.path(), "team-runbook").unwrap().body.trim(), "Named.");
+    }
+
+    #[test]
+    fn of_two_hand_named_files_declaring_one_name_the_first_by_file_name_is_the_skill() {
+        let tmp = TempDir::new();
+        std::fs::write(tmp.path().join("b.md"), "---\nname: team-runbook\ndescription: B\n---\nB.\n").unwrap();
+        let first = tmp.path().join("a.md");
+        std::fs::write(&first, "---\nname: team-runbook\ndescription: A\n---\nA.\n").unwrap();
+
+        let listed = list_all_skills(tmp.path()).unwrap();
+        let meta = listed.iter().find(|m| m.name == "team-runbook").unwrap();
+        assert_eq!(meta.description, "A");
+        assert_eq!(reveal_target(tmp.path(), Some("team-runbook")).unwrap(), first);
+    }
+
+    #[test]
+    fn revealing_refuses_a_name_that_could_leave_the_skills_folder() {
+        let tmp = TempDir::new();
+        assert!(reveal_target(tmp.path(), Some("../../etc/passwd")).is_err());
+        assert!(reveal_target(tmp.path(), Some("")).is_err());
+        // The placeholder itself is not a name a skill can have.
+        assert!(validate_name(SKILLS_FOLDER_PLACEHOLDER).is_err());
     }
 
     #[test]

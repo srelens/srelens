@@ -1,4 +1,5 @@
 import {
+  asArray,
   asRecord,
   formatStorageSize,
   formatTaint,
@@ -23,6 +24,20 @@ function InfoSection({ object }: { object: K8sObject }) {
   const info = asRecord(status.nodeInfo);
   const cordoned = spec.unschedulable === true;
 
+  const addresses = asArray(status.addresses).map(asRecord);
+  const internalIps = addresses
+    .filter((a) => str(a.type) === "InternalIP")
+    .map((a) => str(a.address))
+    .filter(Boolean);
+  const externalIps = addresses
+    .filter((a) => str(a.type) === "ExternalIP")
+    .map((a) => str(a.address))
+    .filter(Boolean);
+  const hostnames = addresses
+    .filter((a) => str(a.type) === "Hostname")
+    .map((a) => str(a.address))
+    .filter(Boolean);
+
   return (
     <Section title="Info">
       <KV
@@ -34,6 +49,9 @@ function InfoSection({ object }: { object: K8sObject }) {
           />
         }
       />
+      <KV k="Internal IP" v={internalIps.length > 0 ? internalIps.join(", ") : "—"} mono />
+      {externalIps.length > 0 && <KV k="External IP" v={externalIps.join(", ")} mono />}
+      {hostnames.length > 0 && <KV k="Hostname" v={hostnames.join(", ")} mono />}
       <KV k="Kubelet" v={str(info.kubeletVersion)} />
       <KV k="OS image" v={str(info.osImage)} />
       <KV k="Kernel" v={str(info.kernelVersion)} />

@@ -1,4 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 
@@ -28,6 +30,9 @@ const h = vi.hoisted(() => {
       error: undefined as { title: string; detail: string; raw: string } | undefined,
       paused: false,
       pending: 0,
+      /** Whether the screen holds the view, and the lines it holds it on: see `holdStream`. */
+      held: false,
+      heldLines: [] as { source: string; text: string }[],
       /** Per-target truth: how many are streaming, how many are down, of how
        *  many altogether. */
       live: 4,
@@ -35,15 +40,29 @@ const h = vi.hoisted(() => {
       reconnecting: 0,
       total: 4,
       restarts: 0,
+      /** The history the stream keeps on disk (#914): where it starts, and why it stopped, if it did. */
+      history: undefined as { first: number; failed?: string } | undefined,
+      loadingEarlier: false,
+      loadError: undefined as unknown,
     },
     /** Whether the app believes it is inside the Tauri shell. */
     tauri: true,
     /** Every `saveTextFile` the screen has asked for. */
     saved: vi.fn(),
+    /** The most lines the mocked module says the view holds (#914): small, so the cap is reached in milliseconds. */
+    cap: 300,
+    /** Every "Load earlier" the screen has asked the hook for (#914). */
+    loadEarlier: vi.fn(),
+    /** The pauses and loads the screen asked the hook for, in the order it asked (#914). */
+    calls: [] as ("togglePause" | "pause" | "loadEarlier")[],
+    /** Every export of the history on disk the screen has asked the hook for (#914). */
+    exportSpool: vi.fn(),
     /** Every one-shot `podLogs` fetch the previous-instance toggle has made. */
     fetched: vi.fn(),
     /** Every `listResource` the bare route's recents have been checked with. */
     listed: vi.fn(),
+    /** The field of every `facetCounts` pass the rail has run: one entry per recount. */
+    facetPasses: [] as string[],
     /** Every call the screen has made into the hook, in order. */
     seen: [] as {
       context: string;
@@ -53,6 +72,8 @@ const h = vi.hoisted(() => {
         sinceSeconds?: number;
         tailLines?: number;
         timestamps?: boolean;
+        spoolMaxBytes?: number;
+        visible?: boolean;
         source?: { key: string; open: (...a: never[]) => Promise<unknown> };
       };
     }[],
@@ -77,14 +98,19 @@ vi.mock("../lib/logSubject", async (orig) => ({
   resolveLogSubject: (...a: unknown[]) => h.resolve(...a),
 }));
 
-vi.mock("../lib/logStream", async () => {
+vi.mock("../lib/logStream", async (orig) => {
+  // Every export is the real module's but the hook, and the cap on loaded lines: the screen reads it, and the real
+  // fifty thousand would make the test that reaches it build fifty thousand rows.
+  const actual = await orig<typeof import("../lib/logStream")>();
   const { useSyncExternalStore } = await import("react");
   return {
+    ...actual,
+    MAX_LOADED_LINES: h.cap,
     useLogStream: (
       context: string,
       namespace: string,
       targets: { pod: string; container?: string; label?: string }[],
-      options: { sinceSeconds?: number; tailLines?: number; timestamps?: boolean; source?: never } = {},
+      options: { sinceSeconds?: number; tailLines?: number; timestamps?: boolean; spoolMaxBytes?: number; visible?: boolean; source?: never } = {},
     ) => {
       useSyncExternalStore(
         h.subscribe,
@@ -93,18 +119,29 @@ vi.mock("../lib/logStream", async () => {
       );
       h.seen.push({ context, namespace, targets, options });
       return {
-        lines: h.state.lines,
+        lines: h.state.held ? h.state.heldLines : h.state.lines,
         dropped: h.state.dropped,
         status: h.state.status,
         error: h.state.error,
         paused: h.state.paused,
+        held: h.state.held,
+        hold: holdStream,
         pendingWhilePaused: h.state.pending,
         liveTargets: h.state.live,
         completedTargets: h.state.completed,
         reconnectingTargets: h.state.reconnecting,
         totalTargets: h.state.total,
         togglePause: () => {
+          h.calls.push("togglePause");
           h.state.paused = !h.state.paused;
+          h.state.pending = 0;
+          notify();
+        },
+        // As the real hook has it: pauses a following view, and leaves one that is paused as it is.
+        pause: () => {
+          h.calls.push("pause");
+          if (h.state.paused) return;
+          h.state.paused = true;
           h.state.pending = 0;
           notify();
         },
@@ -113,6 +150,13 @@ vi.mock("../lib/logStream", async () => {
           notify();
         },
         restartCount: h.state.restarts,
+        history: h.state.history,
+        loadEarlier: h.loadEarlier,
+        loadingEarlier: h.state.loadingEarlier,
+        loadError: h.state.loadError,
+        // As the real hook has it: a stream that opened a history can export it, even once the history has stopped,
+        // so it is the screen that must not offer an export of a history that is no longer whole.
+        exportSpool: h.state.history ? h.exportSpool : undefined,
       };
     },
   };
@@ -124,31 +168,45 @@ vi.mock("../lib/logStream", async () => {
  * decision the screen makes from `isTauri()` and that decision is the thing
  * under test.
  */
-vi.mock("@srelens/core", async (orig) => ({
-  ...(await orig<typeof import("@srelens/core")>()),
-  isTauri: () => h.tauri,
-  saveTextFile: (...a: unknown[]) => h.saved(...a),
-  podLogs: (...a: unknown[]) => h.fetched(...a),
-  // The bare route's only backend call: one list per kind and namespace, to
-  // find out which remembered subjects the cluster still has.
-  listResource: (...a: unknown[]) => h.listed(...a),
-  // A log provider's source (#569): the app view it opens its stream on, and the
-  // kubeconfig listing that says which cluster an app is enabled for.
-  listContexts: async () => ({ contexts: [{ name: "prod-eu", key: "prod" }] }),
-  openExtensionView: (app: string, label: string) => {
-    const opened: { request: unknown; handlers: { onEnd?: (end: unknown) => void } }[] = [];
-    const view = { app, label, close: vi.fn(async () => {}), opened };
-    h.views.push(view);
-    return {
-      view: `${app}/${label}`,
-      close: view.close,
-      open: async (request: unknown, handlers: { onEnd?: (end: unknown) => void }) => {
-        opened.push({ request, handlers });
-        return { stream: "s-1", cancel: vi.fn(async () => {}) };
-      },
-    };
-  },
-}));
+vi.mock("@srelens/core", async (orig) => {
+  const real = await orig<typeof import("@srelens/core")>();
+  return {
+    ...real,
+    // Calls through; only records which facet each pass recounted.
+    facetCounts: (...a: Parameters<typeof real.facetCounts>) => {
+      h.facetPasses.push(a[2]);
+      return real.facetCounts(...a);
+    },
+    isTauri: () => h.tauri,
+    saveTextFile: (...a: unknown[]) => h.saved(...a),
+    podLogs: (...a: unknown[]) => h.fetched(...a),
+    // The bare route's only backend call: one list per kind and namespace, to
+    // find out which remembered subjects the cluster still has.
+    listResource: (...a: unknown[]) => h.listed(...a),
+    // A log provider's source (#569): the app view it opens its stream on, and the
+    // kubeconfig listing that says which cluster an app is enabled for.
+    listContexts: async () => ({ contexts: [{ name: "prod-eu", key: "prod" }] }),
+    openExtensionView: (app: string, label: string) => {
+      const opened: { request: unknown; handlers: { onEnd?: (end: unknown) => void } }[] = [];
+      const view = { app, label, close: vi.fn(async () => {}), opened };
+      h.views.push(view);
+      return {
+        view: `${app}/${label}`,
+        close: view.close,
+        open: async (request: unknown, handlers: { onEnd?: (end: unknown) => void }) => {
+          opened.push({ request, handlers });
+          return { stream: "s-1", cancel: vi.fn(async () => {}) };
+        },
+      };
+    },
+  };
+});
+
+/**
+ * A regex is answered by a worker, and jsdom has none. Each oracle the screen makes is a fake the test answers:
+ * see `regexWorker.fake`.
+ */
+vi.mock("../lib/regexWorker", () => import("../lib/regexWorker.fake"));
 
 vi.mock("../extensions/inventoryStore", async (orig) => ({
   ...(await orig<typeof import("../extensions/inventoryStore")>()),
@@ -169,18 +227,34 @@ if (!("ResizeObserver" in globalThis)) {
 import type { ClusterContext, LogTarget } from "@srelens/core";
 import type { LogSubjectPod, PreviousInstance } from "../lib/logSubject";
 import { absoluteTimestamp, describeError } from "@srelens/core";
-import { toneColor } from "@srelens/ui-kit";
+import { PortalScopeProvider, toneColor } from "@srelens/ui-kit";
 import { Logs, logsRoute, parseLogsRoute } from "./Logs";
 import { ConsoleProvider, useConsole } from "../console";
+import { setClusterAssistant } from "../lib/assistant";
 import { resetContexts, setContexts, setKubeconfigFiles } from "../lib/clusters";
 import { loadRecentLogSubjects, recentLogSubjects, rememberLogSubject } from "../lib/logRecents";
+import { liveLogStreams } from "../lib/liveLogStreams";
+import type { RegexAnswer } from "../lib/regexMatch";
+import { oracleFor, oracles, resetFakeOracles, workerIsRunning } from "../lib/regexWorker.fake";
 import { defaultState } from "../lib/tabs";
+import { TabScope } from "../lib/tabScope";
 import * as store from "../lib/tabsStore";
 
 /** Push the version forward and wake every mounted hook. */
 function notify() {
   h.version += 1;
   for (const listener of [...h.listeners]) listener();
+}
+
+/**
+ * The hook's `hold`, as its contract has it (`logStream.test.ts` pins the real one): while held, the screen is
+ * handed the lines it had when the hold began, whatever arrives; on release, the lines as they are now.
+ */
+function holdStream(on: boolean) {
+  if (h.state.held === on) return;
+  h.state.held = on;
+  h.state.heldLines = h.state.lines;
+  notify();
 }
 
 const CTX: ClusterContext = {
@@ -225,11 +299,29 @@ const line = (source: string, ts: string, text: string) => ({
   text: `2026-08-24T${ts}Z ${text}`,
 });
 
+/**
+ * The `HH:MM:SS.mmm` the time column draws for an instant: the reader's own
+ * clock, so the expectation holds in whatever zone the suite runs in. Built
+ * from local `Date` getters on purpose — it must not share the code under test.
+ */
+const localTs = (iso: string) => {
+  const at = new Date(iso);
+  const two = (n: number) => String(n).padStart(2, "0");
+  return `${two(at.getHours())}:${two(at.getMinutes())}:${two(at.getSeconds())}.${String(at.getMilliseconds()).padStart(3, "0")}`;
+};
+
 const LINES = [
   line("api-7/api", "14:07:41.208000000", "info starting checkout-api build=4f2a1c"),
   line("api-7/otel-sidecar", "14:07:42.100000000", "warn exporter queue is full"),
   line("api-8/api", "14:07:43.900000000", "error pool timeout waited=30.0s in_use=5"),
   line("api-9/api", "14:07:44.010000000", "GET /healthz 200 1ms"),
+];
+
+/** Three JSON lines like the issue's screenshot: a logger's level, msg and fields. */
+const JSON_LINES = [
+  line("api-7/api", "14:07:41.208000000", '{"level":"info","msg":"Wrote batch","system":"camlog","internal_use":true}'),
+  line("api-8/api", "14:07:42.100000000", '{"level":"warn","msg":"Skipping checkpoint","system":"schwarz"}'),
+  line("api-9/api", "14:07:43.900000000", '{"level":"error","msg":"Success: Write failed","system":"camlog"}'),
 ];
 
 /**
@@ -266,9 +358,11 @@ beforeEach(() => {
   h.listeners.clear();
   h.version = 0;
   h.seen = [];
+  h.calls = [];
   h.plugins = [];
   h.inventoryError = undefined;
   h.views = [];
+  resetFakeOracles();
   h.state = {
     lines: [],
     dropped: 0,
@@ -276,14 +370,23 @@ beforeEach(() => {
     error: undefined,
     paused: false,
     pending: 0,
+    held: false,
+    heldLines: [],
     live: 4,
     completed: 0,
     reconnecting: 0,
     total: 4,
     restarts: 0,
+    history: undefined,
+    loadingEarlier: false,
+    loadError: undefined,
   };
   h.tauri = true;
   h.saved.mockResolvedValue("/home/u/checkout-api.log");
+  h.loadEarlier.mockImplementation(async () => {
+    h.calls.push("loadEarlier");
+  });
+  h.exportSpool.mockResolvedValue("/home/u/checkout-api.log");
   h.fetched.mockResolvedValue({ logs: PREVIOUS_BLOB });
   // Everything the recents name is still there unless a test says otherwise.
   h.listed.mockResolvedValue({ items: [{ name: "checkout-api", namespace: "checkout", age: "1d" }] });
@@ -326,6 +429,15 @@ function draw(route = ROUTE) {
     <ConsoleProvider>
       <AskSpy />
       <Logs route={route} />
+    </ConsoleProvider>,
+  );
+}
+
+/** The screen as `Window` mounts it: inside the tab whose id it is given. */
+function drawInTab(tabId: string) {
+  return render(
+    <ConsoleProvider>
+      <TabScope.Provider value={tabId}><Logs route={ROUTE} /></TabScope.Provider>
     </ConsoleProvider>,
   );
 }
@@ -406,19 +518,23 @@ const lastOptions = () => h.seen[h.seen.length - 1].options;
  * call this runs against the "render everything" bail-out, where the drawn
  * window and the filtered buffer are the same array and nothing can tell them
  * apart. Only `.logline` is given a height, so the measurement path under test
- * is the real one: the screen finds the first row itself.
+ * is the real one: the screen finds the first row itself. `height` is read on
+ * each measurement, so a test can take it away, as `display: none` does.
  */
-function measurableRows() {
+function measurableRows(height: () => number = () => 20) {
   const proto = window.HTMLElement.prototype;
   const original = proto.getBoundingClientRect;
   proto.getBoundingClientRect = function (this: HTMLElement) {
-    if (this.classList.contains("logline")) return { height: 20 } as DOMRect;
+    if (this.classList.contains("logline")) return { height: height() } as DOMRect;
     return original.call(this);
   };
   return () => {
     proto.getBoundingClientRect = original;
   };
 }
+
+// jsdom has no scrollIntoView; keyboard selection reveals the row through it.
+HTMLElement.prototype.scrollIntoView ??= () => {};
 
 describe("the logs route", () => {
   it("round-trips a subject through the route it mints", () => {
@@ -485,10 +601,10 @@ describe("Logs", () => {
       // `warning` tone name, and `error`, not `danger`. A column printing the
       // severity vocabulary reports a word that appears nowhere in the log it
       // is describing (and `WARNING` does not fit its 44px gutter either).
-      "14:07:41.208|api-7 · api|info|info starting checkout-api build=4f2a1c",
-      "14:07:42.100|api-7 · otel-sidecar|warn|warn exporter queue is full",
-      "14:07:43.900|api-8 · api|error|error pool timeout waited=30.0s in_use=5",
-      "14:07:44.010|api-9 · api||GET /healthz 200 1ms",
+      `${localTs("2026-08-24T14:07:41.208Z")}|api-7 · api|info|info starting checkout-api build=4f2a1c`,
+      `${localTs("2026-08-24T14:07:42.100Z")}|api-7 · otel-sidecar|warn|warn exporter queue is full`,
+      `${localTs("2026-08-24T14:07:43.900Z")}|api-8 · api|error|error pool timeout waited=30.0s in_use=5`,
+      `${localTs("2026-08-24T14:07:44.010Z")}|api-9 · api||GET /healthz 200 1ms`,
     ]);
   });
 
@@ -499,8 +615,8 @@ describe("Logs", () => {
     // screen's, drawn beside the line's text rather than in it, so the filter
     // and an export never see it.
     expect(rendered(region)).toEqual([
-      "14:07:41.208|api-7 · api|info|info the start of it [line cut: too long]",
-      "14:07:42.100|api-7 · otel-sidecar|warn|warn exporter queue is full",
+      `${localTs("2026-08-24T14:07:41.208Z")}|api-7 · api|info|info the start of it [line cut: too long]`,
+      `${localTs("2026-08-24T14:07:42.100Z")}|api-7 · otel-sidecar|warn|warn exporter queue is full`,
     ]);
     const notes = Array.from(region.querySelectorAll(".logline")).map(
       (row) => row.querySelector("[data-slot=message] .text-faint")?.textContent ?? null,
@@ -648,8 +764,8 @@ describe("Logs", () => {
       // Still there — and the gutter still names the pod ALONE, because the
       // fix carries the container as data beside the label rather than
       // putting it back into the string the reader sees.
-      "14:07:41.208|web-0|info|info serving on :8080",
-      "14:07:42.100|web-1|warn|warn upstream slow",
+      `${localTs("2026-08-24T14:07:41.208Z")}|web-0|info|info serving on :8080`,
+      `${localTs("2026-08-24T14:07:42.100Z")}|web-1|warn|warn upstream slow`,
     ]);
   });
 
@@ -723,6 +839,30 @@ describe("Logs", () => {
     h.state.lines = [{ source: "", text: "2026-08-25T08:13:41.721258+02:00 pool timeout waited=30.0s" }];
     const region = await (draw(), body());
     expect(within(region).getByText(/^pool timeout waited=30.0s$/)).toBeTruthy();
+  });
+
+  it("draws a line's time on the reader's clock, not the stamp's own", async () => {
+    // The histogram axis, its caption and the window pill are all local, so a
+    // time column left on the stamp's UTC wall time disagrees with them by the
+    // reader's offset: a line at 22:00:29Z sat beside an axis reading 00:00:29.
+    // An offset stamp is the same instant read the same way, not its own wall
+    // time. -03:30 is no zone's August offset, so its written clock cannot
+    // coincide with the machine's.
+    const region = await (draw(), body());
+    push(
+      line("api-7/api", "14:07:41.208000000", "info stamped in Z"),
+      { source: "api-8/api", text: "2026-08-24T10:37:42.100000000-03:30 info stamped with an offset" },
+    );
+    expect(rendered(region).map((r) => r.split("|")[0])).toEqual([
+      localTs("2026-08-24T14:07:41.208Z"),
+      localTs("2026-08-24T14:07:42.100Z"),
+    ]);
+  });
+
+  it("leaves the time column empty for a line that arrived without a stamp", async () => {
+    const region = await (draw(), body());
+    push({ source: "api-7/api", text: "info no stamp on this one" });
+    expect(rendered(region)).toEqual(["|api-7 · api|info|info no stamp on this one"]);
   });
 
   it("opens on the whole log, not the last five minutes", async () => {
@@ -902,6 +1042,102 @@ describe("Logs", () => {
       }
     });
 
+    describe("when its viewport has no size", () => {
+      /**
+       * A tab behind another is `display: none`: its viewport and its rows measure 0px, and the viewport's
+       * ResizeObserver says so. 0 reads as "draw every row" to the window, so a 50,000-line tab hiding drew all of
+       * them once, a freeze of seconds.
+       */
+      async function measured(visible: boolean) {
+        let size = 100;
+        const restore = measurableRows(() => (size === 0 ? 0 : 20));
+        const resized: (() => void)[] = [];
+        const realObserver = globalThis.ResizeObserver;
+        globalThis.ResizeObserver = class {
+          constructor(callback: () => void) {
+            resized.push(callback);
+          }
+          observe() {}
+          unobserve() {}
+          disconnect() {}
+        } as unknown as typeof ResizeObserver;
+        const inTab = (visible: boolean) => (
+          <PortalScopeProvider scope={{ container: undefined, visible, hold: () => () => {} }}>
+            <ConsoleProvider>
+              <Logs route={ROUTE} />
+            </ConsoleProvider>
+          </PortalScopeProvider>
+        );
+        const view = render(inTab(visible));
+        const region = await body();
+        Object.defineProperty(region, "clientHeight", { configurable: true, get: () => size });
+        push(...many(300));
+        const drawn = () => region.querySelectorAll(".logline").length;
+        return {
+          region,
+          drawn,
+          /** The viewport goes to 0px (and its rows with it), and its observer says so. */
+          collapse: (stillVisible = false) => {
+            size = 0;
+            view.rerender(inTab(stillVisible));
+            act(() => resized.forEach((callback) => callback()));
+          },
+          /** And comes back. */
+          comeBack: () => {
+            size = 100;
+            view.rerender(inTab(true));
+            act(() => resized.forEach((callback) => callback()));
+          },
+          done: () => {
+            restore(); // the row heights
+            globalThis.ResizeObserver = realObserver;
+          },
+        };
+      }
+
+      it("keeps the window it had while the tab is hidden, rather than drawing every row", async () => {
+        const tab = await measured(true);
+        try {
+          const before = tab.drawn();
+          expect(before).toBeGreaterThan(0);
+          expect(before).toBeLessThan(300);
+          tab.collapse();
+          expect(tab.drawn()).toBe(before);
+          // Back on screen, it measures what is there again.
+          tab.comeBack();
+          expect(tab.drawn()).toBeGreaterThan(0);
+          expect(tab.drawn()).toBeLessThan(300);
+        } finally {
+          tab.done();
+        }
+      });
+
+      it("keeps it while the document is hidden too", async () => {
+        const tab = await measured(true);
+        try {
+          const before = tab.drawn();
+          Object.defineProperty(document, "hidden", { configurable: true, get: () => true });
+          tab.collapse(true);
+          expect(tab.drawn()).toBe(before);
+        } finally {
+          delete (document as { hidden?: boolean }).hidden;
+          tab.done();
+        }
+      });
+
+      it("still measures a viewport that is 0px tall while it is showing: that is a real size", async () => {
+        const tab = await measured(true);
+        try {
+          expect(tab.drawn()).toBeLessThan(300);
+          // Showing, in a showing document, with a viewport that has collapsed: no fixed rows to window by.
+          tab.collapse(true);
+          expect(tab.drawn()).toBe(300);
+        } finally {
+          tab.done();
+        }
+      });
+    });
+
     it("draws everything once lines wrap, because a wrapped row has no fixed height", async () => {
       const restore = measurableRows();
       try {
@@ -971,6 +1207,13 @@ describe("Logs", () => {
     await waitFor(() =>
       expect(asked).toEqual(["Summarise the last 500 log lines and group errors by cause"]),
     );
+  });
+
+  it("offers no summary while the AI Assistant is off for the cluster (#968)", async () => {
+    setClusterAssistant(CTX.stableId, false);
+    draw();
+    await body();
+    expect(screen.queryByRole("button", { name: /Summarise this stream/i })).toBeNull();
   });
 
   it("asks which logs rather than showing none, on a bare route", async () => {
@@ -1119,6 +1362,9 @@ const railTerms = (container: HTMLElement) =>
 const filterField = () =>
   within(screen.getByRole("search", { name: /filter lines/i })).getByRole("searchbox");
 
+const messages = (region?: HTMLElement) => rendered(region).map((r) => r.split("|")[3]);
+const logRegion = () => screen.getByRole("log", { name: /logs/i });
+
 describe("what the stream is doing, in a word AND a denominator", () => {
   /**
    * The aggregate flips to `reconnecting` the moment ONE target does, which is
@@ -1238,6 +1484,20 @@ describe("the Stream rail", () => {
     expect(terms.every(([term]) => !/^\d{4}-\d{2}-\d{2}T/.test(term))).toBe(true);
   });
 
+  it("tallies the Top terms of a logfmt stream, whose every line opens with a time of its own", async () => {
+    // `time=…` is a key=value no other line repeats, and the tally ends a term at one before it reads a word of
+    // the message. The screen has read the message (`msg`) already, and hands it over.
+    const { container } = draw();
+    await body();
+    push(
+      ...[1, 2, 3].map((n) =>
+        line("api-8/api", `14:07:4${n}.000000000`, `time=2026-08-24T14:07:4${n}Z level=error msg="Write failed: timeout" system=x`),
+      ),
+    );
+    expect(railTerms(container)).toEqual([["Write failed timeout", "3"]]);
+    expect(container.querySelector('[data-slot="term"] .status')?.getAttribute("data-kind")).toBe("danger");
+  });
+
   it("counts what the BODY is drawing, so the badge and the terms cannot describe a different set", async () => {
     const { container } = draw();
     await body();
@@ -1269,6 +1529,17 @@ describe("the Stream rail", () => {
   });
 });
 
+/** Export's menu (#915), opened: the panel its rows are read from. */
+async function exportMenu() {
+  await userEvent.click(screen.getByRole("button", { name: /export/i }));
+  return screen.findByRole("dialog", { name: "Export" });
+}
+
+/** Export → Current view: what the Export button did on its own before it had a menu (#915). */
+async function exportCurrentView() {
+  await userEvent.click(within(await exportMenu()).getByRole("button", { name: "Current view" }));
+}
+
 describe("exporting what is on screen", () => {
   const flatten = () => String(h.saved.mock.calls[0][1]).split("\n");
 
@@ -1284,7 +1555,7 @@ describe("exporting what is on screen", () => {
     draw();
     await body();
     push(...LINES);
-    await userEvent.click(screen.getByRole("button", { name: /export/i }));
+    await exportCurrentView();
     await waitFor(() => expect(h.saved).toHaveBeenCalledTimes(1));
     expect(h.saved.mock.calls[0][0]).toBe("checkout-api.log");
     expect(flatten()).toEqual([
@@ -1300,7 +1571,7 @@ describe("exporting what is on screen", () => {
     await body();
     push(...LINES);
     await userEvent.type(filterField(), "pool");
-    await userEvent.click(screen.getByRole("button", { name: /export/i }));
+    await exportCurrentView();
     await waitFor(() => expect(h.saved).toHaveBeenCalledTimes(1));
     expect(flatten()).toEqual([
       "api-8/api | 2026-08-24T14:07:43.900000000Z error pool timeout waited=30.0s in_use=5",
@@ -1333,7 +1604,7 @@ describe("exporting what is on screen", () => {
       expect(drawn).toBeGreaterThan(0);
       expect(drawn).toBeLessThan(150);
 
-      await userEvent.click(screen.getByRole("button", { name: /export/i }));
+      await exportCurrentView();
       await waitFor(() => expect(h.saved).toHaveBeenCalledTimes(1));
       const written = flatten();
       // Every matching line, not the `drawn` rows. How far someone happened to
@@ -1356,7 +1627,7 @@ describe("exporting what is on screen", () => {
       h.state.pending = 900;
       notify();
     });
-    await userEvent.click(screen.getByRole("button", { name: /export/i }));
+    await exportCurrentView();
     await waitFor(() => expect(h.saved).toHaveBeenCalledTimes(1));
     expect(flatten()).toHaveLength(4);
   });
@@ -1383,7 +1654,7 @@ describe("exporting what is on screen", () => {
       draw();
       await body();
       push(...LINES);
-      await userEvent.click(screen.getByRole("button", { name: /export/i }));
+      await exportCurrentView();
       await waitFor(() => expect(clicked).toEqual(["checkout-api.log"]));
       expect(h.saved).not.toHaveBeenCalled();
       expect(await readBlob(urls[0])).toContain("api-8/api | ");
@@ -1392,12 +1663,17 @@ describe("exporting what is on screen", () => {
     }
   });
 
-  it("offers nothing to export when there is nothing on screen", async () => {
+  it("offers the view only once there is something on screen, and the cluster's history either way", async () => {
     draw();
     await body();
-    expect(screen.getByRole("button", { name: /export/i })).toHaveProperty("disabled", true);
+    let panel = await exportMenu();
+    expect(within(panel).getByRole("button", { name: "Current view" })).toHaveProperty("disabled", true);
+    // A range reads the cluster, not this buffer: a quiet tail is no reason to refuse the last hour.
+    expect(within(panel).getByRole("button", { name: "Last 1 h" })).toHaveProperty("disabled", false);
+    await userEvent.keyboard("{Escape}");
     push(...LINES);
-    expect(screen.getByRole("button", { name: /export/i })).toHaveProperty("disabled", false);
+    panel = await exportMenu();
+    expect(within(panel).getByRole("button", { name: "Current view" })).toHaveProperty("disabled", false);
   });
 
   it("heads a failed save with the screen's own sentence, not the backend's", async () => {
@@ -1405,7 +1681,7 @@ describe("exporting what is on screen", () => {
     draw();
     await body();
     push(...LINES);
-    await userEvent.click(screen.getByRole("button", { name: /export/i }));
+    await exportCurrentView();
     const notice = await screen.findByText(/could not save this stream/i);
     // The headline says what failed. `describeError` has nothing to classify
     // in a local filesystem refusal, so the original is what sits underneath
@@ -1418,7 +1694,7 @@ describe("exporting what is on screen", () => {
     draw();
     await body();
     push(...LINES);
-    await userEvent.click(screen.getByRole("button", { name: /export/i }));
+    await exportCurrentView();
     const notice = await screen.findByText(/could not save this stream/i);
     const alert = notice.closest("[role=status]") as HTMLElement;
     expect(within(alert).getByText(/didn't respond in time/i)).toBeTruthy();
@@ -1434,12 +1710,248 @@ describe("exporting what is on screen", () => {
     draw();
     await body();
     push(...LINES);
-    await userEvent.click(screen.getByRole("button", { name: /export/i }));
+    await exportCurrentView();
     await screen.findByText(/could not save this stream/i);
 
     h.saved.mockResolvedValue("/home/u/checkout-api.log");
-    await userEvent.click(screen.getByRole("button", { name: /export/i }));
+    await exportCurrentView();
     await waitFor(() => expect(screen.queryByText(/could not save this stream/i)).toBeNull());
+  });
+});
+
+describe("exporting a time range (#915)", () => {
+  /**
+   * What the cluster still holds for each container, one stamped blob each as
+   * `podLogs` hands it back. Older than anything in the buffer, and out of
+   * order across pods on purpose: the export has to merge them.
+   */
+  const HISTORY: Record<string, string> = {
+    "api-7/api":
+      "2026-08-24T13:20:00.000000000Z info warmed the cache\n" +
+      "2026-08-24T14:07:41.208000000Z error pool timeout on api-7\n",
+    "api-7/otel-sidecar": "2026-08-24T13:30:00.000000000Z warn exporter queue is full\n",
+    "api-8/api": "2026-08-24T13:25:00.000000000Z error pool timeout on api-8\n",
+    "api-9/api": "2026-08-24T13:10:00.000000000Z GET /healthz 200 1ms\n",
+  };
+  const history = async (_context: string, _namespace: string, pod: string, _invoke: unknown, options: { container?: string }) => ({
+    logs: HISTORY[`${pod}/${options.container}`],
+  });
+  const written = () => String(h.saved.mock.calls[0][1]).split("\n");
+  const pick = async (range: string) =>
+    userEvent.click(within(await exportMenu()).getByRole("button", { name: range }));
+
+  beforeEach(() => {
+    h.fetched.mockImplementation(history);
+  });
+
+  it("offers the view on screen first, then spans of the cluster's history back from now", async () => {
+    draw();
+    await body();
+    push(...LINES);
+    const panel = await exportMenu();
+    expect(within(panel).getAllByRole("button").map((b) => b.textContent)).toEqual([
+      "Current view",
+      "Last 10 min",
+      "Last 1 h",
+      "Last 6 h",
+      "Last 24 h",
+      "All",
+    ]);
+  });
+
+  it("reads the range from the cluster, once for each container still in view", async () => {
+    draw();
+    await body();
+    push(...LINES);
+    await userEvent.click(screen.getByRole("checkbox", { name: "api-9" }));
+    await pick("Last 1 h");
+    await waitFor(() => expect(h.saved).toHaveBeenCalledTimes(1));
+    const asked = { timestamps: true, sinceSeconds: 3600, allLines: true };
+    expect(h.fetched.mock.calls.map(([context, namespace, pod, , options]) => [context, namespace, pod, options])).toEqual([
+      ["prod-eu", "checkout", "api-7", { container: "api", ...asked }],
+      ["prod-eu", "checkout", "api-7", { container: "otel-sidecar", ...asked }],
+      ["prod-eu", "checkout", "api-8", { container: "api", ...asked }],
+    ]);
+  });
+
+  it("writes the range merged by stamp and through the query, under the range's name", async () => {
+    draw();
+    await body();
+    push(...LINES);
+    await userEvent.type(filterField(), "pool");
+    await pick("Last 6 h");
+    await waitFor(() => expect(h.saved).toHaveBeenCalledTimes(1));
+    expect(h.saved.mock.calls[0][0]).toBe("checkout-api-last-6h.log");
+    expect(written()).toEqual([
+      "api-8/api | 2026-08-24T13:25:00.000000000Z error pool timeout on api-8",
+      "api-7/api | 2026-08-24T14:07:41.208000000Z error pool timeout on api-7",
+    ]);
+  });
+
+  it("writes the range through a regex answered by a worker of its own, never run on this thread", async () => {
+    const watch = mainThreadRuns("timeout.on");
+    try {
+      draw();
+      await body();
+      push(...LINES);
+      await userEvent.type(filterField(), "/timeout.on/");
+      await waitFor(() => expect(oracleFor("timeout.on").asks).toHaveLength(1));
+      await act(async () => oracleFor("timeout.on").reply());
+      await pick("Last 6 h");
+      // The range's lines are not the buffer's: a worker is made for them, apart from the screen's.
+      await waitFor(() => expect(oracles).toHaveLength(2));
+      await act(async () => oracles[1].reply());
+      await waitFor(() => expect(h.saved).toHaveBeenCalledTimes(1));
+      expect(written()).toEqual([
+        "api-8/api | 2026-08-24T13:25:00.000000000Z error pool timeout on api-8",
+        "api-7/api | 2026-08-24T14:07:41.208000000Z error pool timeout on api-7",
+      ]);
+      expect(oracles[1].disposed).toBe(true);
+    } finally {
+      watch.restore();
+    }
+    expect(watch.runs).toEqual([]);
+  });
+
+  it("writes the range through the regex in the box while its worker still has the buffer", async () => {
+    draw();
+    await body();
+    push(...LINES);
+    await userEvent.type(filterField(), "/timeout.on/");
+    await waitFor(() => expect(oracleFor("timeout.on").asks).toHaveLength(1));
+    // Not answered yet: the screen keeps what it had, but the file is what the box says.
+    await pick("Last 6 h");
+    await waitFor(() => expect(oracles).toHaveLength(2));
+    await act(async () => oracles[1].reply());
+    await waitFor(() => expect(h.saved).toHaveBeenCalledTimes(1));
+    expect(written()).toEqual([
+      "api-8/api | 2026-08-24T13:25:00.000000000Z error pool timeout on api-8",
+      "api-7/api | 2026-08-24T14:07:41.208000000Z error pool timeout on api-7",
+    ]);
+  });
+
+  it("refuses to write a range through a regex too slow to run, in the alert's words", async () => {
+    draw();
+    await body();
+    push(...LINES);
+    await userEvent.type(filterField(), "/timeout.on/");
+    await waitFor(() => expect(oracleFor("timeout.on").asks).toHaveLength(1));
+    await act(async () => oracleFor("timeout.on").fail("slow"));
+    await pick("Last 6 h");
+    const failure = await screen.findByText("Could not save this stream");
+    expect(failure.closest('[role="status"]')?.textContent).toContain("Too slow to run on these lines: /timeout.on/");
+    expect(h.saved).not.toHaveBeenCalled();
+  });
+
+  it("orders two containers' lines inside one millisecond by the whole stamp", async () => {
+    // A trimmed fraction on purpose: the kubelet's RFC3339Nano drops trailing zeros.
+    const blobs: Record<string, string> = {
+      "api-7/api": "2026-08-24T14:07:41.2089Z info later\n",
+      "api-8/api": "2026-08-24T14:07:41.208100000Z info earlier\n",
+    };
+    h.fetched.mockImplementation(async (_c: string, _n: string, pod: string, _i: unknown, options: { container?: string }) => ({
+      logs: blobs[`${pod}/${options.container}`] ?? "",
+    }));
+    draw();
+    await body();
+    push(...LINES);
+    await pick("Last 1 h");
+    await waitFor(() => expect(h.saved).toHaveBeenCalledTimes(1));
+    expect(written()).toEqual([
+      "api-8/api | 2026-08-24T14:07:41.208100000Z info earlier",
+      "api-7/api | 2026-08-24T14:07:41.2089Z info later",
+    ]);
+  });
+
+  it("stays busy when the source changes while a range is read", async () => {
+    h.plugins = [observability()];
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    h.fetched.mockImplementation(async (...a: Parameters<typeof history>) => {
+      await gate;
+      return history(...a);
+    });
+    draw();
+    await body();
+    push(...LINES);
+    await pick("Last 1 h");
+    await screen.findByRole("button", { name: "Exporting…" });
+    fireEvent.change(screen.getByRole("combobox", { name: "Logs from" }), {
+      target: { value: "org.example.observability/loki" },
+    });
+    await waitFor(() => expect(h.seen.at(-1)?.options.source).toBeDefined());
+    // The provider's one-click Export, but not a second save while the first is still coming.
+    expect(screen.getByRole("button", { name: "Exporting…" })).toHaveProperty("disabled", true);
+    await act(async () => release());
+    await waitFor(() => expect(h.saved).toHaveBeenCalledTimes(1));
+    expect(screen.getByRole("button", { name: "Export" })).toHaveProperty("disabled", false);
+  });
+
+  it("exports the whole range, not the window picked off the histogram", async () => {
+    const { container } = draw();
+    await body();
+    push(...LINES);
+    const bar = container.querySelectorAll('[data-slot="bucket"]')[0];
+    fireEvent.pointerDown(bar);
+    fireEvent.pointerUp(bar);
+    await pick("Last 24 h");
+    await waitFor(() => expect(h.saved).toHaveBeenCalledTimes(1));
+    expect(written()).toHaveLength(5);
+  });
+
+  it("asks for everything the container runtime still keeps when the range is All", async () => {
+    draw();
+    await body();
+    push(...LINES);
+    await pick("All");
+    await waitFor(() => expect(h.saved).toHaveBeenCalledTimes(1));
+    expect(h.fetched.mock.calls[0][4]).toEqual({ container: "api", timestamps: true, allLines: true });
+    expect(h.saved.mock.calls[0][0]).toBe("checkout-api-all.log");
+  });
+
+  it("writes nothing when a container's history cannot be read, and says which", async () => {
+    h.fetched.mockImplementation(async (...a: Parameters<typeof history>) =>
+      a[2] === "api-8" ? { error: "k8s.podLogs failed: request timeout" } : history(...a),
+    );
+    draw();
+    await body();
+    push(...LINES);
+    await pick("Last 1 h");
+    const notice = await screen.findByText("Could not read the logs of api-8 · api");
+    expect(h.saved).not.toHaveBeenCalled();
+    expect(notice.closest("[role=status]")?.querySelector("details")?.textContent).toContain("request timeout");
+  });
+
+  it("says it is working, and takes no second export, while the history is read", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    h.fetched.mockImplementation(async (...a: Parameters<typeof history>) => {
+      await gate;
+      return history(...a);
+    });
+    draw();
+    await body();
+    push(...LINES);
+    await pick("Last 1 h");
+    expect(await screen.findByRole("button", { name: "Exporting…" })).toHaveProperty("disabled", true);
+    await act(async () => release());
+    await waitFor(() => expect(h.saved).toHaveBeenCalledTimes(1));
+    expect(screen.getByRole("button", { name: "Export" })).toHaveProperty("disabled", false);
+  });
+
+  it("exports a log provider's view straight away: the cluster's history is not the provider's", async () => {
+    h.plugins = [observability()];
+    draw();
+    fireEvent.change(await screen.findByRole("combobox", { name: "Logs from" }), {
+      target: { value: "org.example.observability/loki" },
+    });
+    await waitFor(() => expect(h.seen.at(-1)?.options.source).toBeDefined());
+    await body();
+    push(...LINES);
+    await userEvent.click(screen.getByRole("button", { name: "Export" }));
+    await waitFor(() => expect(h.saved).toHaveBeenCalledTimes(1));
+    expect(h.saved.mock.calls[0][0]).toBe("checkout-api.log");
+    expect(h.fetched).not.toHaveBeenCalled();
   });
 });
 
@@ -1522,16 +2034,32 @@ describe("the previous instance", () => {
     // live one would be a second severity rule in the same pane.
     await waitFor(() =>
       expect(rendered(region)).toEqual([
-        "14:07:11.004|api-7 · api|info|info starting checkout-api build=4f2a1c pool_size=5",
-        "14:07:12.880|api-7 · api|warn|warn pool saturated within 1.8s of accepting traffic",
-        "14:07:41.902|api-7 · api|error|error pool timeout waited=30.0s pool_size=5 in_use=5",
-        "14:07:42.410|api-7 · api|fatal|fatal liveness deadline exceeded, terminating",
+        `${localTs("2026-08-24T14:07:11.004Z")}|api-7 · api|info|info starting checkout-api build=4f2a1c pool_size=5`,
+        `${localTs("2026-08-24T14:07:12.880Z")}|api-7 · api|warn|warn pool saturated within 1.8s of accepting traffic`,
+        `${localTs("2026-08-24T14:07:41.902Z")}|api-7 · api|error|error pool timeout waited=30.0s pool_size=5 in_use=5`,
+        `${localTs("2026-08-24T14:07:42.410Z")}|api-7 · api|fatal|fatal liveness deadline exceeded, terminating`,
       ]),
     );
     // And the live lines are gone from the pane, not merged into it: the two
     // buffers are different instances of the same container, and interleaving
     // them would invent a history that never happened.
     expect(rendered(region).join("\n")).not.toContain("exporter queue is full");
+  });
+
+  it("takes the time window off with the buffer it was picked from, and draws the other buffer whole", async () => {
+    // A window is a stretch of one buffer's clock. Kept across the swap it
+    // would crop a different instance's lines to a minute they never ran in.
+    withCorpse();
+    const { container } = draw();
+    const region = await body();
+    push(...LINES);
+    const bar = container.querySelectorAll('[data-slot="bucket"]')[0];
+    fireEvent.pointerDown(bar);
+    fireEvent.pointerUp(bar);
+    expect(screen.getByRole("button", { name: "Remove the time window" })).toBeTruthy();
+    await press();
+    await waitFor(() => expect(rendered(region)).toHaveLength(4));
+    expect(screen.queryByRole("button", { name: "Remove the time window" })).toBeNull();
   });
 
   it("tones the previous buffer through the kit, exactly as a live line is", async () => {
@@ -1894,6 +2422,21 @@ describe("log sources (#569)", () => {
     expect(h.views[0].close).toHaveBeenCalled();
   });
 
+  it("keeps the time window across a change of source, which is the same stretch of time", async () => {
+    h.plugins = [observability()];
+    const { container } = draw();
+    await body();
+    push(...LINES);
+    const bar = container.querySelectorAll('[data-slot="bucket"]')[0];
+    fireEvent.pointerDown(bar);
+    fireEvent.pointerUp(bar);
+    fireEvent.change(await screen.findByRole("combobox", { name: "Logs from" }), {
+      target: { value: "org.example.observability/loki" },
+    });
+    await waitFor(() => expect(h.seen.at(-1)?.options.source).toBeDefined());
+    expect(screen.getByRole("button", { name: "Remove the time window" })).toBeTruthy();
+  });
+
   it("does not call a change of source a cleared scrollback: the new source sends its own history", async () => {
     h.plugins = [observability()];
     draw();
@@ -2008,5 +2551,1776 @@ describe("log sources (#569)", () => {
     expect(document.body.textContent).toContain("Loki · Observability sent no line in the last 7 days before its stream ended.");
     const follow = screen.getByRole("button", { name: /^Follow$/ }) as HTMLButtonElement;
     expect(follow.disabled).toBe(true);
+  });
+});
+
+/**
+ * What Home's "Live now" reads to know a logs tab is streaming: the route
+ * alone says a tab is open, not that a stream started or is still running.
+ */
+describe("the running-stream registry", () => {
+  it("marks the tab while its stream runs, and unmarks it when the tab goes", async () => {
+    const view = drawInTab("tab-1");
+    await body();
+    expect(liveLogStreams().has("tab-1")).toBe(true);
+    view.unmount();
+    expect(liveLogStreams().has("tab-1")).toBe(false);
+  });
+
+  it.each(["error", "completed"])("unmarks a stream that ended as %s", async (ended) => {
+    drawInTab(`tab-${ended}`);
+    await body();
+    expect(liveLogStreams().has(`tab-${ended}`)).toBe(true);
+    act(() => { h.state.status = ended as typeof h.state.status; notify(); });
+    expect(liveLogStreams().has(`tab-${ended}`)).toBe(false);
+  });
+
+  it("never marks a tab whose subject left nothing to follow", async () => {
+    h.resolve.mockResolvedValue({ status: "empty", detail: "checkout-api has no containers." });
+    drawInTab("tab-3");
+    await screen.findByText("Nothing to follow");
+    expect(liveLogStreams().has("tab-3")).toBe(false);
+  });
+});
+
+/**
+ * The search box is the tab's to keep (#898): a restart reopens each Logs tab
+ * with the query it was left with. The tab store stands in for the settings
+ * file, the way `resourceShell`'s tests seed it for sort and filter.
+ */
+describe("a Logs tab's saved query (#898)", () => {
+  /** A tab on the logs route, as a previous launch left it: with `query` saved, or with no view at all. */
+  function tabLeftWith(query?: string) {
+    store.openTab(ROUTE);
+    const id = store.currentWorkspace().tabs.find((t) => t.route === ROUTE)!.id;
+    if (query !== undefined) store.setTabView(id, { query });
+    return id;
+  }
+  const tabView = (id: string) => store.currentWorkspace().tabs.find((t) => t.id === id)?.view;
+
+  it("opens with the box, the pills and the body showing the saved query", async () => {
+    const id = tabLeftWith("level:error");
+    drawInTab(id);
+    const region = await body();
+    push(...LINES);
+    expect(filterField()).toHaveProperty("value", "level:error");
+    expect(screen.getByRole("button", { name: "Remove filter level:error" })).toBeTruthy();
+    expect(messages(region)).toEqual(["error pool timeout waited=30.0s in_use=5"]);
+  });
+
+  it("writes the query back to its tab once it is typed", async () => {
+    const id = tabLeftWith();
+    drawInTab(id);
+    await body();
+    await userEvent.type(filterField(), "level:error pool");
+    await waitFor(() => expect(tabView(id)?.query).toBe("level:error pool"));
+  });
+
+  it("writes an emptied box as an empty query, so the old one does not come back", async () => {
+    const id = tabLeftWith("level:error");
+    drawInTab(id);
+    await body();
+    await userEvent.clear(filterField());
+    await waitFor(() => expect(tabView(id)?.query).toBe(""));
+  });
+
+  it("leaves a tab with no saved query untouched until something is typed", async () => {
+    const id = tabLeftWith();
+    drawInTab(id);
+    await body();
+    expect(tabView(id)).toBeUndefined();
+  });
+
+  it("starts empty, and writes nothing, when it is not in a tab", async () => {
+    // The tab it would borrow if it fell back to the active one: it holds a query this screen must not read or touch.
+    const id = tabLeftWith("level:error");
+    const region = await (draw(), body());
+    const before = store.getState();
+    expect(filterField()).toHaveProperty("value", "");
+    push(...LINES);
+    await userEvent.type(filterField(), "pool");
+    await waitFor(() => expect(messages(region)).toEqual(["error pool timeout waited=30.0s in_use=5"]));
+    expect(store.getState()).toBe(before);
+    expect(tabView(id)?.query).toBe("level:error");
+  });
+
+  it("puts a saved regex through its worker like a typed one: a slow one opens with the alert, never run here", async () => {
+    const watch = mainThreadRuns("(a+)+$");
+    try {
+      const id = tabLeftWith("/(a+)+$/");
+      drawInTab(id);
+      const region = await body();
+      push(...LINES);
+      expect(filterField()).toHaveProperty("value", "/(a+)+$/");
+      await waitFor(() => expect(oracleFor("(a+)+$").asks).toHaveLength(1));
+      // The regex met an empty buffer, so it applied at once: these lines came after, and wait on the worker.
+      expect(rendered(region)).toHaveLength(0);
+      await act(async () => oracleFor("(a+)+$").fail("slow"));
+      expect(screen.getByText("Too slow to run on these lines: /(a+)+$/").closest('[role="alert"]')).not.toBeNull();
+      expect(rendered(region)).toHaveLength(4);
+    } finally {
+      watch.restore();
+    }
+    expect(watch.runs).toEqual([]);
+  });
+});
+
+/**
+ * Every run of a regex whose source is `source` that is not a fake worker's,
+ * from now until `restore`: the main thread must make none. Parsing compiles
+ * the pattern, and compiling is not running it.
+ */
+function mainThreadRuns(source: string) {
+  const runs: string[] = [];
+  const realTest = RegExp.prototype.test;
+  const realExec = RegExp.prototype.exec;
+  const test = vi.spyOn(RegExp.prototype, "test").mockImplementation(function (this: RegExp, s: string) {
+    if (this.source === source && !workerIsRunning()) runs.push(`test ${s}`);
+    return realTest.call(this, s);
+  });
+  const exec = vi.spyOn(RegExp.prototype, "exec").mockImplementation(function (this: RegExp, s: string) {
+    if (this.source === source && !workerIsRunning()) runs.push(`exec ${s}`);
+    return realExec.call(this, s);
+  });
+  return {
+    runs,
+    restore: () => {
+      test.mockRestore();
+      exec.mockRestore();
+    },
+  };
+}
+
+describe("a regex in the query (#898)", () => {
+  /** Type `query` and wait for the screen to ask the worker for `source` about the buffer. */
+  async function typeRegex(query: string, source: string) {
+    await userEvent.type(filterField(), query);
+    await waitFor(() => expect(oracleFor(source).asks).toHaveLength(1));
+  }
+
+  /** The worker for `source` answers what it has been asked: with its own code, or with `given` for every line. */
+  const reply = (source: string, given?: RegexAnswer) => act(async () => oracleFor(source).reply(given));
+
+  it("filters by what the worker answers, holding each later line back until it has", async () => {
+    const region = await (draw(), body());
+    push(...LINES);
+    await typeRegex("/po+l/", "po+l");
+    // Not an empty body while the worker has the buffer: the lines it had stay.
+    expect(rendered(region)).toHaveLength(4);
+    await reply("po+l");
+    expect(messages(region)).toEqual(["error pool timeout waited=30.0s in_use=5"]);
+    expect(screen.queryByText(/Too slow to run/)).toBeNull();
+    // A line that lands later is asked about, and shown once it is answered.
+    push(line("api-8/api", "14:07:45.000000000", "warn pool drained"));
+    await waitFor(() => expect(oracleFor("po+l").asks).toHaveLength(2));
+    expect(oracleFor("po+l").asks[1].map((item) => item.test)).toEqual(["warn pool drained"]);
+    expect(messages(region)).toEqual(["error pool timeout waited=30.0s in_use=5"]);
+    await reply("po+l");
+    expect(messages(region)).toEqual(["error pool timeout waited=30.0s in_use=5", "warn pool drained"]);
+  });
+
+  it("goes back to the filter it had when a later line is too slow, never having run the pattern itself", async () => {
+    // What froze the app: a pattern that passed over the first lines, then met a line of the bad kind.
+    const watch = mainThreadRuns("(a+)+$");
+    // Short enough that the pattern, run here by mistake, takes a moment and the spy says so, rather than hanging.
+    const bad = `error ${"a".repeat(20)}!`;
+    try {
+      const region = await (draw(), body());
+      push(...LINES);
+      await userEvent.type(filterField(), "level:error");
+      await waitFor(() => expect(messages(region)).toEqual(["error pool timeout waited=30.0s in_use=5"]));
+      await userEvent.type(filterField(), " /(a+)+$/");
+      await waitFor(() => expect(oracleFor("(a+)+$").asks).toHaveLength(1));
+      // The buffer comes back in time: the query is applied, and no line matches it.
+      await reply("(a+)+$");
+      expect(messages(region)).toEqual([]);
+      push(line("api-8/api", "14:07:45.000000000", bad));
+      await waitFor(() => expect(oracleFor("(a+)+$").asks).toHaveLength(2));
+      await act(async () => oracleFor("(a+)+$").fail("slow"));
+      expect(screen.getByText("Too slow to run on these lines: /(a+)+$/").closest('[role="alert"]')).not.toBeNull();
+      expect(messages(region)).toEqual(["error pool timeout waited=30.0s in_use=5", bad]);
+    } finally {
+      watch.restore();
+    }
+    expect(watch.runs).toEqual([]);
+  });
+
+  it("marks a line where the worker says the pattern falls", async () => {
+    const region = await (draw(), body());
+    push(...LINES);
+    await typeRegex("/pool/", "pool");
+    // Ranges the pattern itself would not give: the marks can only have come from the answer.
+    await reply("pool", { hit: true, ranges: [[0, 5]] });
+    expect(rendered(region)).toHaveLength(4);
+    const log = screen.getByRole("log", { name: /logs/i });
+    expect([...log.querySelectorAll("mark")].map((m) => m.textContent)).toEqual(["info ", "warn ", "error", "GET /"]);
+  });
+
+  it("says a regex is too slow, applies nothing, and drops the alert once the box is cleared", async () => {
+    const region = await (draw(), body());
+    push(...LINES);
+    await typeRegex("/(a+)+$/", "(a+)+$");
+    await act(async () => oracleFor("(a+)+$").fail("slow"));
+    const alert = screen.getByText("Too slow to run on these lines: /(a+)+$/");
+    expect(alert.closest('[role="alert"]')).not.toBeNull();
+    expect(rendered(region)).toHaveLength(4);
+    await userEvent.clear(filterField());
+    await waitFor(() => expect(screen.queryByText(/Too slow to run/)).toBeNull());
+  });
+
+  it("says when no worker can run a regex, and applies nothing", async () => {
+    const region = await (draw(), body());
+    push(...LINES);
+    await typeRegex("/po+l/", "po+l");
+    await act(async () => oracleFor("po+l").fail("unavailable"));
+    expect(screen.getByText("Regex search is unavailable here").closest('[role="alert"]')).not.toBeNull();
+    expect(rendered(region)).toHaveLength(4);
+  });
+
+  it("makes no worker for a query that holds no regex, and filters by it at once", async () => {
+    const region = await (draw(), body());
+    push(...LINES);
+    await userEvent.type(filterField(), "level:error pool");
+    await waitFor(() => expect(messages(region)).toEqual(["error pool timeout waited=30.0s in_use=5"]));
+    expect(oracles).toHaveLength(0);
+  });
+});
+
+describe("structured lines and the query (#898)", () => {
+  it("shows a JSON line as its msg with the other fields after it, not as the raw object", async () => {
+    const region = await (draw(), body());
+    push(...JSON_LINES);
+    expect(rendered(region)[0]).toBe(
+      `${localTs("2026-08-24T14:07:41.208Z")}|api-7 · api|info|Wrote batch  system=camlog internal_use=true`,
+    );
+  });
+
+  it("keeps the two-space gap before the fields from collapsing, without changing the text or its marks", async () => {
+    // The row is `white-space: nowrap`, which collapses two spaces to one. The gap is its own pre-spaced span rather
+    // than a pre-wrap faint span, which would let the row break and lose the fixed height the window depends on.
+    const region = await (draw(), body());
+    push(...JSON_LINES);
+    const cell = () => region.querySelector("[data-slot=message]") as HTMLElement;
+    const gap = cell().querySelector(".whitespace-pre");
+    expect(gap?.textContent).toBe("  ");
+    expect(gap?.parentElement?.classList.contains("text-faint")).toBe(true);
+    expect(cell().querySelector(".text-faint")?.classList.contains("whitespace-pre")).toBe(false);
+    expect(cell().textContent).toBe("Wrote batch  system=camlog internal_use=true");
+    await userEvent.type(filterField(), "system:camlog");
+    expect(Array.from(cell().querySelectorAll("mark")).map((m) => m.textContent)).toEqual(["system=camlog"]);
+    expect(cell().textContent).toBe("Wrote batch  system=camlog internal_use=true");
+  });
+
+  it("draws no gap for a row with nothing after its message, or no message before its fields", async () => {
+    const region = await (draw(), body());
+    push(
+      line("api-7/api", "14:07:41.208000000", "info a plain line"),
+      line("api-7/api", "14:07:42.208000000", '{"level":"warn","system":"camlog"}'),
+    );
+    expect(region.querySelectorAll(".whitespace-pre")).toHaveLength(0);
+  });
+
+  it("filters on a field, and ORs two values of one field", async () => {
+    const region = await (draw(), body());
+    push(...JSON_LINES);
+    await userEvent.type(filterField(), "system:camlog");
+    expect(messages(region)).toEqual([
+      "Wrote batch  system=camlog internal_use=true",
+      "Success: Write failed  system=camlog",
+    ]);
+    await userEvent.clear(filterField());
+    await userEvent.type(filterField(), "level:warn level:error");
+    expect(messages(region)).toEqual(["Skipping checkpoint  system=schwarz", "Success: Write failed  system=camlog"]);
+  });
+
+  it("excludes with a leading '-'", async () => {
+    const region = await (draw(), body());
+    push(...LINES);
+    await userEvent.type(filterField(), "-pool");
+    expect(messages(region)).toHaveLength(3);
+    expect(messages(region)).not.toContain("error pool timeout waited=30.0s in_use=5");
+  });
+
+  it("finds a phrase across the punctuation the term tally strips", async () => {
+    const region = await (draw(), body());
+    push(...JSON_LINES);
+    await userEvent.type(filterField(), '"success write failed"');
+    expect(messages(region)).toEqual(["Success: Write failed  system=camlog"]);
+  });
+
+  it("says why a query can't be applied, and leaves the body unfiltered", async () => {
+    const region = await (draw(), body());
+    push(...LINES);
+    await userEvent.type(filterField(), "/(/");
+    const error = screen.getByText(/invalid regex/i);
+    expect(error.closest('[role="alert"]')).not.toBeNull();
+    expect(rendered(region)).toHaveLength(4);
+  });
+
+  it("marks what the query matched inside the message", async () => {
+    await (draw(), body());
+    push(...LINES);
+    await userEvent.type(filterField(), "pool");
+    const marks = Array.from(logRegion().querySelectorAll("[data-slot=message] mark")).map((m) => m.textContent);
+    expect(marks).toEqual(["pool"]);
+  });
+
+  it("shows each clause as a pill whose × takes it out of the box", async () => {
+    await (draw(), body());
+    push(...LINES);
+    await userEvent.type(filterField(), "level:error pool");
+    await userEvent.click(screen.getByRole("button", { name: "Remove filter level:error" }));
+    expect(filterField()).toHaveProperty("value", "pool");
+  });
+
+  it("keeps the keyboard in the box when a pill goes from the keyboard", async () => {
+    await (draw(), body());
+    push(...LINES);
+    await userEvent.type(filterField(), "level:error pool");
+    screen.getByRole("button", { name: "Remove filter level:error" }).focus();
+    await userEvent.keyboard("{Enter}");
+    expect(document.activeElement).toBe(filterField());
+    expect(filterField()).toHaveProperty("value", "pool");
+  });
+
+  it("keeps the keyboard in the box after Clear all", async () => {
+    await (draw(), body());
+    push(...LINES);
+    await userEvent.type(filterField(), "level:error pool");
+    screen.getByRole("button", { name: "Clear all" }).focus();
+    await userEvent.keyboard("{Enter}");
+    expect(document.activeElement).toBe(filterField());
+    expect(filterField()).toHaveProperty("value", "");
+  });
+
+  it("filters on a level clicked in the rail, writing it into the search box", async () => {
+    const region = await (draw(), body());
+    push(...JSON_LINES);
+    await userEvent.click(screen.getByRole("button", { name: "level = warn, 1 line" }));
+    expect(filterField()).toHaveProperty("value", "level:warn");
+    expect(messages(region)).toEqual(["Skipping checkpoint  system=schwarz"]);
+  });
+
+  it("excludes a field value from the rail, and the same button takes it back", async () => {
+    const region = await (draw(), body());
+    push(...JSON_LINES);
+    await userEvent.click(screen.getByRole("button", { name: "Exclude system = camlog" }));
+    expect(filterField()).toHaveProperty("value", "-system:camlog");
+    expect(messages(region)).toEqual(["Skipping checkpoint  system=schwarz"]);
+    await userEvent.click(screen.getByRole("button", { name: "Exclude system = camlog" }));
+    expect(filterField()).toHaveProperty("value", "");
+  });
+
+  it("recounts each facet once for a streamed line, not again for the field list", async () => {
+    await (draw(), body());
+    push(...JSON_LINES);
+    h.facetPasses.length = 0;
+    // No new field and no new value: the same three facets, one line heavier.
+    push(line("api-9/api", "14:07:44.010000000", '{"level":"info","msg":"Wrote again","system":"camlog"}'));
+    // Within a quarter second of the last batch, so the recount lands when that is up.
+    expect(await screen.findByRole("button", { name: "level = info, 2 lines" })).toBeTruthy();
+    // The Level facet and the one discovered field, once each: the deferred
+    // pass. The urgent render must not rerun the field's count because the
+    // list of fields came back as a new array of the same names.
+    expect([...h.facetPasses].sort()).toEqual(["level", "system"]);
+  });
+});
+
+describe("the volume histogram (#898)", () => {
+  it("narrows the body and the export to a clicked bar, and the window's pill takes it back", async () => {
+    const { container } = draw();
+    const region = await body();
+    push(...LINES);
+    const bars = container.querySelectorAll('[data-slot="bucket"]');
+    expect(bars).toHaveLength(4);
+    fireEvent.pointerDown(bars[0]);
+    fireEvent.pointerUp(bars[0]);
+    expect(messages(region)).toEqual(["info starting checkout-api build=4f2a1c"]);
+    await exportCurrentView();
+    await waitFor(() => expect(h.saved).toHaveBeenCalled());
+    expect(String(h.saved.mock.calls[0][1]).split("\n")).toHaveLength(1);
+    await userEvent.click(screen.getByRole("button", { name: "Remove the time window" }));
+    expect(rendered(region)).toHaveLength(4);
+  });
+
+  it("shades the window instead of cropping to it, and the rail counts what is inside it", async () => {
+    const { container } = draw();
+    await body();
+    push(...JSON_LINES);
+    const bars = () => container.querySelectorAll('[data-slot="bucket"]');
+    expect(screen.getByRole("button", { name: "level = info, 1 line" })).toBeTruthy();
+    fireEvent.pointerDown(bars()[1]);
+    fireEvent.pointerUp(bars()[1]);
+    // The histogram keeps all three bars, so the reader can still see the spike's surroundings.
+    expect(bars()).toHaveLength(3);
+    expect(screen.getByRole("button", { name: "level = warn, 1 line" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "level = info, 1 line" })).toBeNull();
+  });
+
+  it("takes the window away with the rest of the filters when nothing is left to show", async () => {
+    const { container } = draw();
+    const region = await body();
+    push(
+      line("api-7/api", "14:07:41.208000000", "info before the gap"),
+      line("api-7/api", "14:07:44.010000000", "info after the gap"),
+    );
+    const bars = container.querySelectorAll('[data-slot="bucket"]');
+    // Four one-second bars, and the second is empty.
+    fireEvent.pointerDown(bars[1]);
+    fireEvent.pointerUp(bars[1]);
+    expect(rendered(region)).toHaveLength(0);
+    await userEvent.click(screen.getByRole("button", { name: "Clear the filter" }));
+    expect(rendered(region)).toHaveLength(2);
+    expect(screen.queryByRole("button", { name: "Remove the time window" })).toBeNull();
+  });
+  describe("the legend", () => {
+    it("filters on a level clicked in it, writing it into the search box, and takes it back", async () => {
+      await (draw(), body());
+      push(...LINES);
+      await userEvent.click(screen.getByRole("button", { name: "error 1" }));
+      expect(filterField()).toHaveProperty("value", "level:error");
+      expect(screen.getByRole("button", { name: "error 1" }).getAttribute("aria-pressed")).toBe("true");
+      await userEvent.click(screen.getByRole("button", { name: "error 1" }));
+      expect(filterField()).toHaveProperty("value", "");
+    });
+
+    it("writes every level word of the group, and takes them all out again", async () => {
+      await (draw(), body());
+      push(
+        line("api-7/api", "14:07:41.208000000", "error a"),
+        line("api-7/api", "14:07:42.208000000", "fatal b"),
+        line("api-7/api", "14:07:43.208000000", "info c"),
+      );
+      await userEvent.click(screen.getByRole("button", { name: "error 2" }));
+      expect(filterField()).toHaveProperty("value", "level:error level:fatal");
+      await userEvent.click(screen.getByRole("button", { name: "error 2" }));
+      expect(filterField()).toHaveProperty("value", "");
+    });
+
+    const errorAndFatal = () =>
+      push(
+        line("api-7/api", "14:07:41.208000000", "error a"),
+        line("api-7/api", "14:07:42.208000000", "fatal b"),
+        line("api-7/api", "14:07:43.208000000", "info c"),
+      );
+
+    it("adds the words a group is missing when one is typed, and then takes them all out", async () => {
+      await (draw(), body());
+      errorAndFatal();
+      await userEvent.type(filterField(), "level:error");
+      // Not pressed: the group is error AND fatal, and only one is in the query.
+      expect(screen.getByRole("button", { name: "error 2" }).getAttribute("aria-pressed")).toBe("false");
+      await userEvent.click(screen.getByRole("button", { name: "error 2" }));
+      expect(filterField()).toHaveProperty("value", "level:error level:fatal");
+      expect(screen.getByRole("button", { name: "error 2" }).getAttribute("aria-pressed")).toBe("true");
+      await userEvent.click(screen.getByRole("button", { name: "error 2" }));
+      expect(filterField()).toHaveProperty("value", "");
+    });
+
+    it("turns an excluded word of the group into an included one", async () => {
+      await (draw(), body());
+      errorAndFatal();
+      await userEvent.type(filterField(), "-level:fatal");
+      await userEvent.click(screen.getByRole("button", { name: "error 2" }));
+      expect(filterField()).toHaveProperty("value", "level:fatal level:error");
+    });
+
+    it("keeps the other levels on offer once one is picked, while the bars follow the query", async () => {
+      await (draw(), body());
+      push(...LINES);
+      await userEvent.type(filterField(), "level:error");
+      expect(screen.getByRole("button", { name: "warn 1" })).toBeTruthy();
+      expect(screen.getByRole("button", { name: "info 1" })).toBeTruthy();
+      expect(screen.getByRole("button", { name: "error 1" }).getAttribute("aria-pressed")).toBe("true");
+      // The bars and the caption count only the line the query keeps.
+      expect(document.querySelector('[data-slot="volume-caption"]')?.textContent).toMatch(/^1 line · /);
+    });
+  });
+});
+
+describe("the line detail (#898)", () => {
+  const rows = () => Array.from(logRegion().querySelectorAll(".logline"));
+
+  it("opens on a click, follows the arrow keys, and closes on Escape", async () => {
+    await (draw(), body());
+    push(...JSON_LINES);
+    await userEvent.click(rows()[0]);
+    const panel = () => screen.getByRole("region", { name: "Line detail" });
+    expect(within(panel()).getByText("camlog")).toBeTruthy();
+    expect(rows()[0].closest("[aria-current]")?.getAttribute("aria-current")).toBe("true");
+    await userEvent.keyboard("{ArrowDown}");
+    expect(within(panel()).getByText("schwarz")).toBeTruthy();
+    await userEvent.keyboard("{Escape}");
+    expect(screen.queryByRole("region", { name: "Line detail" })).toBeNull();
+  });
+
+  it("filters from the panel through the search box", async () => {
+    await (draw(), body());
+    push(...JSON_LINES);
+    await userEvent.click(rows()[0]);
+    await userEvent.click(screen.getByRole("button", { name: "Filter out system = camlog" }));
+    expect(filterField()).toHaveProperty("value", "-system:camlog");
+  });
+
+  const panel = () => screen.getByRole("region", { name: "Line detail" });
+
+  it("makes the log a tab stop, and lets Escape through while no line is open", async () => {
+    await (draw(), body());
+    push(...JSON_LINES);
+    expect(logRegion().getAttribute("tabindex")).toBe("0");
+    const outer = vi.fn();
+    document.addEventListener("keydown", outer);
+    try {
+      logRegion().focus();
+      await userEvent.keyboard("{Escape}");
+      expect(outer).toHaveBeenCalledTimes(1);
+      // With a line open the same key closes the panel and goes no further.
+      await userEvent.click(rows()[0]);
+      await userEvent.keyboard("{Escape}");
+      expect(screen.queryByRole("region", { name: "Line detail" })).toBeNull();
+      expect(outer).toHaveBeenCalledTimes(1);
+    } finally {
+      document.removeEventListener("keydown", outer);
+    }
+  });
+
+  it("shows where focus is on the log, rather than leaving the tab stop without an outline", async () => {
+    await (draw(), body());
+    expect(logRegion().classList.contains("log-body")).toBe(true);
+    // jsdom draws no CSS; what can be held is that the rule the class names exists, in the accent. It is inset: the
+    // log is a scroll container flush with the rail, the filter bar and the panel, so an outer ring would be cut.
+    const css = readFileSync(join(__dirname, "../styles/next.css"), "utf8").replace(/\/\*[\s\S]*?\*\//g, "");
+    const rule = css.match(/\.log-body:focus-visible\s*\{([^}]*)\}/)?.[1];
+    expect(rule).toContain("outline: 2px solid var(--accent)");
+    expect(rule).toContain("outline-offset: -2px");
+  });
+
+  it("starts from the end the key points to, and stops at the ends", async () => {
+    await (draw(), body());
+    push(...JSON_LINES);
+    logRegion().focus();
+    await userEvent.keyboard("{ArrowDown}");
+    expect(within(panel()).getByText("Wrote batch")).toBeTruthy();
+    await userEvent.keyboard("{ArrowUp}");
+    expect(within(panel()).getByText("Wrote batch")).toBeTruthy();
+    await userEvent.keyboard("{Escape}{ArrowUp}");
+    expect(within(panel()).getByText("Success: Write failed")).toBeTruthy();
+    await userEvent.keyboard("{ArrowDown}");
+    expect(within(panel()).getByText("Success: Write failed")).toBeTruthy();
+  });
+
+  it("holds the line a filter has hidden, and says so", async () => {
+    await (draw(), body());
+    push(...JSON_LINES);
+    await userEvent.click(rows()[0]);
+    await userEvent.click(screen.getByRole("button", { name: "Filter out system = camlog" }));
+    await waitFor(() => expect(rows()).toHaveLength(1));
+    expect(within(panel()).getByText("Wrote batch")).toBeTruthy();
+    expect(within(panel()).getByText("No longer in view")).toBeTruthy();
+  });
+
+  it("closes when the pane swaps to the previous instance's buffer", async () => {
+    h.resolve.mockResolvedValue({ status: "resolved", targets: TARGETS, pods: PODS, previous: TERMINATED });
+    await (draw(), body());
+    push(...JSON_LINES);
+    await userEvent.click(rows()[0]);
+    await userEvent.click(screen.getByRole("button", { name: /previous instance/i }));
+    await waitFor(() => expect(rows()).toHaveLength(4));
+    expect(screen.queryByRole("region", { name: "Line detail" })).toBeNull();
+  });
+
+  it("returns focus to the log when Escape closes the panel from inside it", async () => {
+    await (draw(), body());
+    push(...JSON_LINES);
+    await userEvent.click(rows()[0]);
+    screen.getByRole("button", { name: /^copy$/i }).focus();
+    await userEvent.keyboard("{Escape}");
+    expect(screen.queryByRole("region", { name: "Line detail" })).toBeNull();
+    expect(document.activeElement).toBe(logRegion());
+  });
+
+  it("returns focus to the log when the close button closes the panel", async () => {
+    await (draw(), body());
+    push(...JSON_LINES);
+    await userEvent.click(rows()[0]);
+    await userEvent.click(screen.getByRole("button", { name: "Close the line detail" }));
+    expect(screen.queryByRole("region", { name: "Line detail" })).toBeNull();
+    expect(document.activeElement).toBe(logRegion());
+  });
+
+  it("leaves a modified arrow to the browser", async () => {
+    await (draw(), body());
+    push(...JSON_LINES);
+    logRegion().focus();
+    await userEvent.keyboard("{Control>}{ArrowDown}{/Control}{Alt>}{ArrowDown}{/Alt}{Meta>}{ArrowUp}{/Meta}{Shift>}{ArrowUp}{/Shift}");
+    expect(screen.queryByRole("region", { name: "Line detail" })).toBeNull();
+  });
+
+  it("does not open for a click that ended a text selection", async () => {
+    await (draw(), body());
+    push(...JSON_LINES);
+    const selection = vi.spyOn(window, "getSelection").mockReturnValue({ toString: () => "camlog" } as unknown as Selection);
+    try {
+      await userEvent.click(rows()[0]);
+      expect(screen.queryByRole("region", { name: "Line detail" })).toBeNull();
+    } finally {
+      selection.mockRestore();
+    }
+  });
+
+  it("closes when the source is switched, which is a different buffer", async () => {
+    h.plugins = [observability()];
+    await (draw(), body());
+    push(...JSON_LINES);
+    await userEvent.click(rows()[0]);
+    expect(panel()).toBeTruthy();
+    fireEvent.change(await screen.findByRole("combobox", { name: "Logs from" }), {
+      target: { value: "org.example.observability/loki" },
+    });
+    expect(screen.queryByRole("region", { name: "Line detail" })).toBeNull();
+  });
+
+  it("closes when the followed provider stops being offered", async () => {
+    h.plugins = [observability()];
+    await (draw(), body());
+    push(...JSON_LINES);
+    fireEvent.change(await screen.findByRole("combobox", { name: "Logs from" }), {
+      target: { value: "org.example.observability/loki" },
+    });
+    await waitFor(() => expect(h.seen.at(-1)?.options.source).toBeDefined());
+    await userEvent.click(rows()[0]);
+    expect(panel()).toBeTruthy();
+    act(() => {
+      h.plugins = [];
+      h.inventoryError = undefined;
+      notify();
+    });
+    await waitFor(() => expect(h.seen.at(-1)?.options.source).toBeUndefined());
+    expect(screen.queryByRole("region", { name: "Line detail" })).toBeNull();
+  });
+
+  describe("keeping the selected line in view", () => {
+    /** jsdom does no layout: declare the viewport's geometry, and clamp a write to scrollTop the way a browser does. */
+    function scrollable(el: HTMLElement) {
+      let top = 0;
+      const max = () => h.state.lines.length * 20 - 100;
+      Object.defineProperty(el, "clientHeight", { configurable: true, get: () => 100 });
+      Object.defineProperty(el, "scrollHeight", { configurable: true, get: () => h.state.lines.length * 20 });
+      Object.defineProperty(el, "scrollTop", {
+        configurable: true,
+        get: () => top,
+        set: (v: number) => {
+          top = Math.max(0, Math.min(v, max()));
+        },
+      });
+      return {
+        get top() {
+          return top;
+        },
+        to(v: number) {
+          top = v;
+          fireEvent.scroll(el);
+        },
+        /** What a browser does when it lays the page out after the content got shorter. */
+        clamp() {
+          top = Math.min(top, max());
+        },
+      };
+    }
+    const many = (n: number, from = 0) =>
+      Array.from({ length: n }, (_, i) => line("api-7/api", "14:07:41.208000000", `line ${from + i}`));
+
+    /** What the pane reveals through: the browser does the pixels, so the test sees only which row it was asked about. */
+    function revealed() {
+      const spy = vi.spyOn(HTMLElement.prototype, "scrollIntoView");
+      return {
+        spy,
+        /** The element of the latest reveal. */
+        get last() {
+          return spy.mock.contexts.at(-1) as HTMLElement | undefined;
+        },
+      };
+    }
+
+    it("reveals the newly selected row, with the earlier-lines banner above the rows", async () => {
+      const restore = measurableRows();
+      const reveal = revealed();
+      try {
+        const region = await (draw(), body());
+        h.state.dropped = 5;
+        push(...JSON_LINES);
+        expect(screen.getByText(/earlier lines dropped/)).toBeTruthy();
+        region.focus();
+        await userEvent.keyboard("{ArrowDown}{ArrowDown}");
+        expect(reveal.last).toBe(rows()[1].closest("[aria-current]"));
+        expect(reveal.spy).toHaveBeenLastCalledWith({ block: "nearest" });
+        // An arrow at the end of the buffer selects the same row again, and still brings it back into view.
+        await userEvent.keyboard("{ArrowDown}");
+        reveal.spy.mockClear();
+        await userEvent.keyboard("{ArrowDown}");
+        expect(reveal.spy).toHaveBeenCalledTimes(1);
+        expect(reveal.last).toBe(rows()[2].closest("[aria-current]"));
+      } finally {
+        reveal.spy.mockRestore();
+        restore();
+      }
+    });
+
+    it("reveals the newly selected row when lines wrap, because their heights differ", async () => {
+      const restore = measurableRows();
+      const reveal = revealed();
+      try {
+        const region = await (draw(), body());
+        push(...JSON_LINES);
+        await userEvent.click(screen.getByRole("button", { name: "Wrap" }));
+        region.focus();
+        await userEvent.keyboard("{ArrowDown}{ArrowDown}");
+        expect(reveal.last).toBe(rows()[1].closest("[aria-current]"));
+        expect(reveal.spy).toHaveBeenLastCalledWith({ block: "nearest" });
+      } finally {
+        reveal.spy.mockRestore();
+        restore();
+      }
+    });
+
+    it("brings a windowed-out row into the drawn slice, then reveals it", async () => {
+      const restore = measurableRows();
+      const reveal = revealed();
+      try {
+        const region = await (draw(), body());
+        const view = scrollable(region);
+        push(...many(300));
+        view.to(0);
+        expect(rows().some((r) => r.textContent?.includes("line 299"))).toBe(false);
+        region.focus();
+        // ArrowUp from nothing selected goes to the last line, 6,000px down and not drawn.
+        await userEvent.keyboard("{ArrowUp}");
+        expect(view.top).toBeGreaterThan(0);
+        // The browser reports the scroll; the slice follows it and the row now has an element.
+        view.to(view.top);
+        expect(reveal.last?.textContent).toContain("line 299");
+        expect(reveal.last?.getAttribute("aria-current")).toBe("true");
+        // Once revealed, the reader's own scrolling is theirs: a few rows up moves the slice, the selected row
+        // is still drawn, and the view is not pulled back to it.
+        reveal.spy.mockClear();
+        view.to(view.top - 100);
+        expect(reveal.spy).not.toHaveBeenCalled();
+      } finally {
+        reveal.spy.mockRestore();
+        restore();
+      }
+    });
+
+    it("stays on the selected line when the reveal landed at the end and a new line arrives", async () => {
+      // A browser's scrollIntoView moves the viewport and then reports the scroll. That report is not the reader
+      // returning to the end: with a line selected the view is pinned to it.
+      const region = await (draw(), body());
+      const view = scrollable(region);
+      const reveal = vi.spyOn(HTMLElement.prototype, "scrollIntoView").mockImplementation(() => {
+        region.scrollTop = region.scrollHeight;
+      });
+      try {
+        push(...many(20));
+        view.to(0);
+        region.focus();
+        await userEvent.keyboard("{ArrowUp}");
+        expect(view.top).toBe(300);
+        fireEvent.scroll(region);
+        push(...many(5, 20));
+        expect(view.top).toBe(300);
+      } finally {
+        reveal.mockRestore();
+      }
+    });
+
+    it("follows the end again once the line is closed and the reader is back at it", async () => {
+      const region = await (draw(), body());
+      const view = scrollable(region);
+      push(...many(20));
+      region.focus();
+      await userEvent.keyboard("{ArrowUp}{Escape}");
+      view.to(300);
+      push(...many(5, 20));
+      expect(view.top).toBe(400);
+    });
+
+    it("reveals a clicked row, which the panel opening under it would otherwise cover", async () => {
+      const reveal = revealed();
+      try {
+        await (draw(), body());
+        push(...many(20));
+        await userEvent.click(rows()[19]);
+        expect(reveal.last).toBe(rows()[19].closest("[aria-current]"));
+        expect(reveal.spy).toHaveBeenLastCalledWith({ block: "nearest" });
+        // The same row again still asks, though no render is coming to do it.
+        reveal.spy.mockClear();
+        await userEvent.click(rows()[19]);
+        expect(reveal.spy).toHaveBeenCalledTimes(1);
+      } finally {
+        reveal.spy.mockRestore();
+      }
+    });
+
+    it("stops following the end once a row is clicked, so a new line cannot carry it away", async () => {
+      const region = await (draw(), body());
+      const view = scrollable(region);
+      push(...many(20));
+      expect(view.top).toBe(300);
+      await userEvent.click(rows()[19]);
+      push(...many(5, 20));
+      expect(view.top).toBe(300);
+    });
+
+    /**
+     * What the ring does once it is full: a batch drops `dropped` lines from the front and adds the same
+     * number at the end, so the buffer keeps its size and everything after the dropped lines moves up.
+     */
+    function ring(dropped: number, nextLine: number) {
+      act(() => {
+        h.state.lines = [...h.state.lines.slice(dropped), ...many(dropped, nextLine)];
+        h.state.dropped += dropped;
+        notify();
+      });
+    }
+    const indexOf = (n: number) => h.state.lines.findIndex((l) => l.text.endsWith(`line ${n}`));
+    const selectedRow = () => logRegion().querySelector('[aria-current="true"]') as HTMLElement | null;
+    const lineRow = (n: number) => rows().find((r) => r.textContent?.includes(`line ${n}`)) as Element;
+
+    const ROW = 20;
+    const BANNER = 30;
+    /**
+     * jsdom lays nothing out. Stack the children of the rows box the way a browser does, one under the next: a
+     * spacer as tall as its style says, the earlier-lines banner BANNER tall, a line `heightOf(wrapper)` tall.
+     * `onLayout` runs on every measurement, as the browser's own work on the page does before it answers one.
+     */
+    function layOut(heightOf: (wrapper: HTMLElement) => number = () => ROW, onLayout: () => void = () => undefined) {
+      const proto = window.HTMLElement.prototype;
+      const original = proto.getBoundingClientRect;
+      const tall = (el: Element) => {
+        const box = el as HTMLElement;
+        if (box.getAttribute("data-slot") === "dropped-banner") return BANNER;
+        return box.style.height !== "" ? parseFloat(box.style.height) : heightOf(box);
+      };
+      proto.getBoundingClientRect = function (this: HTMLElement) {
+        onLayout();
+        const box = this.parentElement;
+        if (box?.parentElement?.getAttribute("role") === "log") {
+          const above = Array.from(box.children).slice(0, Array.from(box.children).indexOf(this));
+          return { top: above.reduce((t, el) => t + tall(el), 0), height: tall(this) } as DOMRect;
+        }
+        // The first row's height is what the screen windows by.
+        if (this.classList.contains("logline")) return { height: ROW } as DOMRect;
+        return original.call(this);
+      };
+      return () => {
+        proto.getBoundingClientRect = original;
+      };
+    }
+    /** Where the selected row is drawn on screen: where the layout stacks it, less how far the view has scrolled. */
+    const onScreen = (view: { top: number }) => (selectedRow() as HTMLElement).getBoundingClientRect().top - view.top;
+
+    it("holds the selected line where it is on screen while a full ring drops lines from the front", async () => {
+      const restore = layOut();
+      try {
+        const region = await (draw(), body());
+        const view = scrollable(region);
+        // The ring is already full, so the earlier-lines banner is above the rows before and after each batch.
+        h.state.dropped = 100;
+        push(...many(300));
+        view.to(2000);
+        await userEvent.click(lineRow(100));
+        // Where the row sits on screen: the banner, then its place in the buffer at 20px a row, less the scroll.
+        const offset = () => BANNER + indexOf(100) * ROW - view.top;
+        const before = offset();
+        expect(onScreen(view)).toBe(before);
+        ring(30, 300);
+        expect(indexOf(100)).toBe(70);
+        expect(offset()).toBe(before);
+        // The view moved with the content, so the row is still drawn, in the same place.
+        expect(selectedRow()?.textContent).toContain("line 100");
+        expect(onScreen(view)).toBe(before);
+        // The reader's own scrolling is theirs: it is not undone, and the next batch holds the row wherever they left it.
+        view.to(1000);
+        // A nudge of less than a row moves no slice, so nothing is redrawn for it: the next batch still starts from where the reader is.
+        view.to(1010);
+        expect(view.top).toBe(1010);
+        const left = offset();
+        ring(10, 330);
+        expect(indexOf(100)).toBe(60);
+        expect(offset()).toBe(left);
+      } finally {
+        restore();
+      }
+    });
+
+    it("holds the selected line through the first drop, which also brings in the earlier-lines banner", async () => {
+      const restore = layOut();
+      try {
+        const region = await (draw(), body());
+        const view = scrollable(region);
+        push(...many(300));
+        view.to(2000);
+        await userEvent.click(lineRow(100));
+        expect(screen.queryByText(/earlier lines dropped/)).toBeNull();
+        // 300 lines are windowed: after the batch the row is outside the slice drawn from the old scroll position.
+        const offset = () => (h.state.dropped > 0 ? BANNER : 0) + indexOf(100) * ROW - view.top;
+        const before = offset();
+        ring(30, 300);
+        expect(screen.getByText(/earlier lines dropped/)).toBeTruthy();
+        expect(offset()).toBe(before);
+        expect(onScreen(view)).toBe(before);
+      } finally {
+        restore();
+      }
+    });
+
+    // A line is as tall as its text needs when lines wrap: here 20, 30 or 40px by its number.
+    const byNumber = (wrapper: HTMLElement) => 20 + (Number(wrapper.textContent?.match(/line (\d+)/)?.[1]) % 3) * 10;
+
+    it("holds a drawn selected line through the first drop by where its row is drawn, not by the row height", async () => {
+      // Few enough lines that all are drawn. The first row, which the screen measures its row height from, is 20px,
+      // and the rows above the selected one are not: only the drawn row knows where it went.
+      const restore = layOut(byNumber);
+      try {
+        const region = await (draw(), body());
+        const view = scrollable(region);
+        push(...many(30));
+        view.to(200);
+        await userEvent.click(lineRow(20));
+        const before = onScreen(view);
+        ring(5, 30);
+        expect(screen.getByText(/earlier lines dropped/)).toBeTruthy();
+        // Lines 0 to 4 are 20, 30, 40, 20 and 30px, and a banner of 30 arrived: 110px up.
+        expect(view.top).toBe(200 - 140 + 30);
+        expect(onScreen(view)).toBe(before);
+      } finally {
+        restore();
+      }
+    });
+
+    it("does not correct twice when the browser has already pulled the scroll position back", async () => {
+      // A batch that shrinks the content leaves the scroll position past the new end, and the browser clamps it
+      // when it lays the page out: before the screen reads it, and before it has moved the view.
+      let view: ReturnType<typeof scrollable> | undefined;
+      const restore = layOut(undefined, () => view?.clamp());
+      try {
+        const region = await (draw(), body());
+        view = scrollable(region);
+        h.state.dropped = 100;
+        push(...many(30));
+        view.to(480);
+        await userEvent.click(lineRow(25));
+        const before = onScreen(view);
+        act(() => {
+          h.state.lines = h.state.lines.slice(10);
+          h.state.dropped += 10;
+          notify();
+        });
+        expect(view.top).toBe(280);
+        expect(onScreen(view)).toBe(before);
+      } finally {
+        restore();
+      }
+    });
+
+    it("holds the selected line from where the reveal put the view, though the reveal's scroll event has not arrived", async () => {
+      // A click reveals its row, and scrollIntoView moves the view at once; the scroll event only arrives at the next
+      // rendering step. A batch that lands in between must not start from the position before the reveal.
+      const restore = layOut();
+      const reveal = vi.spyOn(HTMLElement.prototype, "scrollIntoView");
+      try {
+        const region = await (draw(), body());
+        const view = scrollable(region);
+        h.state.dropped = 100;
+        push(...many(30));
+        view.to(100);
+        // Down to the bottom of the pane, as a browser does for a row below it, and with no event.
+        reveal.mockImplementation(() => {
+          region.scrollTop = 250;
+        });
+        await userEvent.click(lineRow(20));
+        expect(view.top).toBe(250);
+        const before = onScreen(view);
+        ring(5, 30);
+        // Five rows of 20px left above it: 100px up from where the reveal left the view, not from where it was.
+        expect(view.top).toBe(150);
+        expect(onScreen(view)).toBe(before);
+      } finally {
+        reveal.mockRestore();
+        restore();
+      }
+    });
+
+    it("holds the selected line by where its row is drawn when lines wrap and rows differ in height", async () => {
+      // No sum of one row height says where a wrapped row is.
+      const restore = layOut(byNumber);
+      try {
+        const region = await (draw(), body());
+        const view = scrollable(region);
+        h.state.dropped = 100;
+        push(...many(30));
+        await userEvent.click(screen.getByRole("button", { name: "Wrap" }));
+        view.to(300);
+        await userEvent.click(lineRow(20));
+        const before = onScreen(view);
+        ring(5, 30);
+        expect(indexOf(20)).toBe(15);
+        // Lines 0 to 4 are 20, 30, 40, 20 and 30px.
+        expect(view.top).toBe(300 - 140);
+        expect(onScreen(view)).toBe(before);
+      } finally {
+        restore();
+      }
+    });
+
+    it("leaves the view alone when the ring drops the selected line itself, and when lines only arrive", async () => {
+      const restore = measurableRows();
+      try {
+        const region = await (draw(), body());
+        const view = scrollable(region);
+        push(...many(300));
+        view.to(2000);
+        await userEvent.click(rows().find((r) => r.textContent?.includes("line 100")) as Element);
+        push(...many(10, 300));
+        expect(view.top).toBe(2000);
+        // Line 100 is among the first 150 lines, which this batch drops: it is no longer in the buffer.
+        ring(150, 310);
+        expect(indexOf(100)).toBe(-1);
+        expect(view.top).toBe(2000);
+      } finally {
+        restore();
+      }
+    });
+
+    it("does not take the selection moving to another line for the content moving", async () => {
+      const restore = measurableRows();
+      try {
+        const region = await (draw(), body());
+        const view = scrollable(region);
+        push(...many(300));
+        view.to(2000);
+        await userEvent.click(rows().find((r) => r.textContent?.includes("line 100")) as Element);
+        region.focus();
+        await userEvent.keyboard("{ArrowDown}{ArrowDown}");
+        expect(selectedRow()?.textContent).toContain("line 102");
+        expect(view.top).toBe(2000);
+      } finally {
+        restore();
+      }
+    });
+
+    it("stops following the end once a line is selected", async () => {
+      const restore = measurableRows();
+      try {
+        const region = await (draw(), body());
+        const view = scrollable(region);
+        push(...many(20));
+        expect(view.top).toBe(300);
+        region.focus();
+        await userEvent.keyboard("{ArrowUp}");
+        push(...many(5, 20));
+        expect(view.top).toBe(300);
+      } finally {
+        restore();
+      }
+    });
+  });
+});
+
+describe("under a busy stream (#898)", () => {
+  const caption = () => document.querySelector('[data-slot="volume-caption"]')?.textContent ?? "";
+  const anotherError = line("api-8/api", "14:07:45.100000000", "error pool timeout waited=30.1s in_use=6");
+  const many = (n: number, from = 0) =>
+    Array.from({ length: n }, (_, i) => line("api-7/api", "14:07:41.208000000", `line ${from + i}`));
+  /** A full ring's next batch: `n` lines off the front and `n` new ones on the end. */
+  function ring(n: number, next: number) {
+    act(() => {
+      h.state.lines = [...h.state.lines.slice(n), ...many(n, next)];
+      h.state.dropped += n;
+      notify();
+    });
+  }
+  const lineRow = (n: number) =>
+    Array.from(logRegion().querySelectorAll(".logline")).find((r) => r.textContent?.includes(`line ${n}`)) as Element;
+
+  it("keeps a drawn line on its own element while a full ring drops lines from the front", async () => {
+    // An element that is handed another line under the pointer turns a click, or a selection, into one of that line.
+    await (draw(), body());
+    push(...many(30));
+    const drawn = lineRow(10);
+    ring(5, 30);
+    expect(drawn.isConnected).toBe(true);
+    expect(drawn.textContent).toContain("line 10");
+  });
+
+  it("keeps a drawn line on its own element when the targets are resolved again, after the ring has dropped lines", async () => {
+    // A row's id belongs to the module, not to one indexing of the targets: numbered afresh from 0 by place in the
+    // buffer, a rebuilt row takes the id of a line the ring has since dropped, and that line's element with it.
+    const region = await (draw(), body());
+    push(...many(30));
+    ring(5, 30);
+    const drawn = lineRow(10);
+    // The same stream under a renamed context: the subject is resolved again, to targets the screen indexes afresh.
+    // The answer lands in the request's own tick, so React takes the loading state and the new targets as one render
+    // and the screen is rebuilt in place; an answer a network later unmounts it, and with it every drawn element.
+    const again = TARGETS.map((t) => ({ ...t }));
+    const answer = { status: "resolved", targets: again, pods: PODS, previous: [] };
+    h.resolve.mockReturnValue({ then: (done: (a: typeof answer) => void) => done(answer) });
+    act(() => setContexts([{ ...CTX, name: "prod-eu-2" }]));
+    expect(h.seen[h.seen.length - 1].targets).toBe(again);
+    expect(region.isConnected).toBe(true);
+    expect(rendered(region)).toHaveLength(30);
+    // Replaced by an element of its own, or still its own line: never another's.
+    expect(drawn.isConnected ? drawn.textContent : "line 10").toContain("line 10");
+  });
+
+  it("recounts the rail, the facets and the histogram at most four times a second, and the last batch always lands", async () => {
+    // The quarter second is read off the clock; stopped, a slow machine cannot run it out between two batches.
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      const region = await (draw(), body());
+      push(...LINES);
+      expect(screen.getByText("1 error")).toBeTruthy();
+      push(anotherError);
+      // The body draws every batch.
+      expect(rendered(region)).toHaveLength(5);
+      // The counts wait out the quarter second since their last recount.
+      expect(screen.getByText("1 error")).toBeTruthy();
+      expect(screen.getByRole("button", { name: "level = error, 1 line" })).toBeTruthy();
+      expect(screen.getByRole("button", { name: "error 1" })).toBeTruthy();
+      expect(caption()).toMatch(/^4 lines · /);
+      await waitFor(() => {
+        expect(screen.getByText("2 errors")).toBeTruthy();
+        expect(screen.getByRole("button", { name: "level = error, 2 lines" })).toBeTruthy();
+        expect(screen.getByRole("button", { name: "error 2" })).toBeTruthy();
+        expect(caption()).toMatch(/^5 lines · /);
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("empties the counts at once when the buffer is emptied, though a recount is waiting", async () => {
+    // A restart leaves nothing to count: the old buffer's tallies must not go on being read for the quarter second a
+    // recount waits. The clock is stopped, so that quarter second cannot run out inside the test.
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      const region = await (draw(), body());
+      push(...LINES);
+      expect(screen.getByText("1 error")).toBeTruthy();
+      push(anotherError);
+      // The recount is waiting: the counts still hold the last one.
+      expect(screen.getByText("1 error")).toBeTruthy();
+      act(() => {
+        // What the hook does on a restart: a fresh buffer and a bumped restart count.
+        h.state.lines = [];
+        h.state.restarts = 1;
+        notify();
+      });
+      expect(rendered(region)).toHaveLength(0);
+      expect(screen.queryByText("1 error")).toBeNull();
+      expect(screen.queryByRole("button", { name: "error 1" })).toBeNull();
+      expect(caption()).toBe("");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  describe("holding the view while the reader works in it", () => {
+    const heldNote = () => screen.queryByText(/^Held while you select/);
+    /** The task after a release, which is when the screen lets go of a press. */
+    const released = () => act(() => new Promise((r) => setTimeout(r, 0)));
+    /** A press on `el`, and its release, as a browser sends them: the pointer's event, then the mouse's. */
+    const press = (el: Element) => {
+      fireEvent.pointerDown(el);
+      fireEvent.mouseDown(el);
+    };
+    const lift = (el: Element) => {
+      fireEvent.pointerUp(el);
+      fireEvent.mouseUp(el);
+    };
+    /** Select `node`'s text, a caret at its start, or nothing, and say so the way the browser does. */
+    const select = (node: Node | null, caret = false) =>
+      act(() => {
+        const selection = document.getSelection() as Selection;
+        if (node === null) selection.removeAllRanges();
+        else if (caret) selection.collapse(node, 0);
+        else selection.selectAllChildren(node);
+        document.dispatchEvent(new Event("selectionchange"));
+      });
+
+    it("holds the view while the mouse is down in the log, and lets go when it comes up, leaving Pause alone", async () => {
+      const region = await (draw(), body());
+      push(...many(5));
+      press(lineRow(2));
+      push(...many(3, 5));
+      expect(rendered(region)).toHaveLength(5);
+      // The reader's own control still says what they chose.
+      expect(screen.getByRole("button", { name: "Pause" })).toBeTruthy();
+      lift(lineRow(2));
+      await released();
+      expect(rendered(region)).toHaveLength(8);
+    });
+
+    it.each([
+      ["a pointerup anywhere in the window", () => fireEvent.pointerUp(window)],
+      ["a pointercancel", () => fireEvent.pointerCancel(window)],
+      ["the window losing focus", () => fireEvent.blur(window)],
+      [
+        "the window being hidden",
+        () => {
+          Object.defineProperty(document, "hidden", { configurable: true, get: () => true });
+          fireEvent(document, new Event("visibilitychange"));
+        },
+      ],
+    ])("lets go of a press on %s, though not of a selection", async (_, end) => {
+      // A release that never reaches the log, or never comes at all, must not leave the view held.
+      try {
+        const region = await (draw(), body());
+        push(...many(5));
+        press(lineRow(2));
+        push(...many(3, 5));
+        expect(rendered(region)).toHaveLength(5);
+        end();
+        await released();
+        expect(rendered(region)).toHaveLength(8);
+        // A selection is let go of only by collapsing or leaving the log. (jsdom also queues a selectionchange of
+        // its own a task after the selection; it is let through first, so it cannot put back what `end` took.)
+        select(lineRow(2));
+        await released();
+        push(...many(1, 8));
+        end();
+        await released();
+        expect(rendered(region)).toHaveLength(8);
+      } finally {
+        delete (document as { hidden?: boolean }).hidden;
+      }
+    });
+
+    it("lets go of a press though something on the page stops its release on the way up", async () => {
+      const region = await (draw(), body());
+      push(...many(5));
+      press(lineRow(2));
+      push(...many(3, 5));
+      const swallow = (e: Event) => e.stopPropagation();
+      document.body.addEventListener("pointerup", swallow);
+      try {
+        fireEvent.pointerUp(document.body);
+        await released();
+        expect(rendered(region)).toHaveLength(8);
+      } finally {
+        document.body.removeEventListener("pointerup", swallow);
+      }
+    });
+
+    it("keeps holding when the press takes focus from the search box: only the window losing it lets go", async () => {
+      const region = await (draw(), body());
+      push(...many(5));
+      press(lineRow(2));
+      fireEvent.blur(filterField());
+      push(...many(3, 5));
+      await released();
+      expect(rendered(region)).toHaveLength(5);
+    });
+
+    it("lets go of nothing once the screen has gone, though the release came before it went", async () => {
+      // The hold is let go of a task after the release; by then there may be no screen, and no stream, to let go.
+      const view = draw();
+      await body();
+      push(...many(5));
+      press(lineRow(2));
+      fireEvent.pointerUp(window);
+      view.unmount();
+      await released();
+      expect(h.state.held).toBe(true);
+    });
+
+    it("holds the view while text is selected in the log, and lets go when it is cleared", async () => {
+      const region = await (draw(), body());
+      push(...many(5));
+      // A selection elsewhere on the screen is not the log's.
+      select(screen.getByRole("button", { name: "Wrap" }));
+      push(...many(1, 5));
+      expect(rendered(region)).toHaveLength(6);
+      select(lineRow(2));
+      push(...many(3, 6));
+      expect(rendered(region)).toHaveLength(6);
+      // A caret is no selection: it is where a click in the log leaves one.
+      select(lineRow(2), true);
+      expect(rendered(region)).toHaveLength(9);
+      select(lineRow(2));
+      push(...many(1, 9));
+      expect(rendered(region)).toHaveLength(9);
+      select(null);
+      expect(rendered(region)).toHaveLength(10);
+    });
+
+    it.each([
+      ["Ctrl+A", () => select(document.body)],
+      [
+        "a drag from the filter bar to past the log",
+        () =>
+          act(() => {
+            const wrap = screen.getByRole("button", { name: "Wrap" });
+            (document.getSelection() as Selection).setBaseAndExtent(wrap, 0, document.body, document.body.childNodes.length);
+            document.dispatchEvent(new Event("selectionchange"));
+          }),
+      ],
+    ])("holds the view while %s selects the log, though neither end of the selection is in it", async (_, enclose) => {
+      // The text under the selection is rewritten as surely as under one that starts in the log.
+      const region = await (draw(), body());
+      push(...many(5));
+      enclose();
+      const selection = document.getSelection() as Selection;
+      expect(region.contains(selection.anchorNode) || region.contains(selection.focusNode)).toBe(false);
+      push(...many(3, 5));
+      expect(rendered(region)).toHaveLength(5);
+      select(null);
+      expect(rendered(region)).toHaveLength(8);
+    });
+
+    it("says the view is held only once a hold has lasted, never for an ordinary click", async () => {
+      // Every click holds the view for as long as the button is down; a note that flashed on each one would be noise.
+      await (draw(), body());
+      push(...many(5));
+      vi.useFakeTimers();
+      try {
+        press(lineRow(2));
+        act(() => vi.advanceTimersByTime(100));
+        expect(heldNote()).toBeNull();
+        lift(lineRow(2));
+        act(() => vi.advanceTimersByTime(1000));
+        expect(heldNote()).toBeNull();
+        // A selection kept is a hold worth naming, and what waits behind it.
+        select(lineRow(3));
+        h.state.pending = 3;
+        push(...many(3, 5));
+        act(() => vi.advanceTimersByTime(299));
+        expect(heldNote()).toBeNull();
+        act(() => vi.advanceTimersByTime(1));
+        expect(heldNote()?.textContent).toBe("Held while you select · 3 new lines");
+        select(null);
+        expect(heldNote()).toBeNull();
+        // The next hold is timed afresh: a click after a long selection is still only a click.
+        press(lineRow(2));
+        act(() => vi.advanceTimersByTime(100));
+        expect(heldNote()).toBeNull();
+        lift(lineRow(2));
+        act(() => vi.advanceTimersByTime(0));
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("tells a screen reader the view is held while the note shows, without the count that changes under it", async () => {
+      await (draw(), body());
+      push(...many(5));
+      const live = () => document.querySelector('[data-slot="held-live"]') as HTMLElement;
+      // Mounted before anything is held, so the first announcement is a change to a region the reader already has.
+      expect(live().textContent).toBe("");
+      expect(live().getAttribute("role")).toBe("status");
+      expect(live().getAttribute("aria-live")).toBe("polite");
+      expect(live().getAttribute("aria-atomic")).toBe("true");
+      expect(live().className).toContain("sr-only");
+      vi.useFakeTimers();
+      try {
+        select(lineRow(3));
+        h.state.pending = 3;
+        push(...many(3, 5));
+        act(() => vi.advanceTimersByTime(299));
+        expect(live().textContent).toBe("");
+        act(() => vi.advanceTimersByTime(1));
+        expect(heldNote()?.textContent).toBe("Held while you select · 3 new lines");
+        // The count is the visible note's alone: said here, it would be read out again on every batch.
+        expect(live().textContent).toBe("View held while you select");
+        h.state.pending = 40;
+        push(...many(1, 8));
+        expect(live().textContent).toBe("View held while you select");
+        select(null);
+        expect(live().textContent).toBe("");
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("opens the line detail on the line pressed, though lines arrive and the view follows them before the release", async () => {
+      // A following view moves on every batch: the release lands on another row, or on none, and is no click at all.
+      const restore = measurableRows();
+      try {
+        const region = await (draw(), body());
+        // jsdom lays nothing out: a viewport 100px tall over the lines the screen is handed, 20px each.
+        let top = 0;
+        const height = () => (h.state.held ? h.state.heldLines : h.state.lines).length * 20;
+        Object.defineProperty(region, "clientHeight", { configurable: true, get: () => 100 });
+        Object.defineProperty(region, "scrollHeight", { configurable: true, get: height });
+        Object.defineProperty(region, "scrollTop", {
+          configurable: true,
+          get: () => top,
+          set: (v: number) => {
+            top = Math.max(0, Math.min(v, height() - 100));
+          },
+        });
+        push(...many(300));
+        fireEvent.scroll(region);
+        const pressed = lineRow(297);
+        press(pressed);
+        push(...many(100, 300));
+        // The browser reports the scroll that following the end made.
+        fireEvent.scroll(region);
+        lift(pressed);
+        fireEvent.click(pressed);
+        expect(screen.getByRole("region", { name: "Line detail" }).textContent).toContain("line 297");
+        // Then the screen lets the lines that waited in, under the panel still on that line.
+        expect(h.state.held).toBe(true);
+        await released();
+        expect(h.state.held).toBe(false);
+        expect(screen.getByRole("region", { name: "Line detail" }).textContent).toContain("line 297");
+      } finally {
+        restore();
+      }
+    });
+  });
+
+  it("recounts at once while paused, when nothing is arriving to hold back", async () => {
+    await (draw(), body());
+    await userEvent.click(screen.getByRole("button", { name: "Pause" }));
+    push(...LINES);
+    push(anotherError);
+    expect(screen.getByText("2 errors")).toBeTruthy();
+    expect(caption()).toMatch(/^5 lines · /);
+  });
+});
+
+describe("history on disk (#914)", () => {
+  /** The stream reports a history: `first` is the oldest line kept, `dropped` every line before the first in memory. */
+  function keepHistory(history: { first: number; failed?: string }, dropped: number) {
+    act(() => {
+      h.state.history = history;
+      h.state.dropped = dropped;
+      notify();
+    });
+  }
+
+  it("asks the cluster's stream to keep the chosen history", async () => {
+    draw();
+    await body();
+    expect(lastOptions().spoolMaxBytes).toBe(256 * 1024 * 1024);
+  });
+
+  it("leaves history to an app's own source", async () => {
+    h.plugins = [observability()];
+    draw();
+    const picker = await screen.findByRole("combobox", { name: "Logs from" });
+    expect(lastOptions().spoolMaxBytes).toBe(256 * 1024 * 1024);
+    fireEvent.change(picker, { target: { value: "org.example.observability/loki" } });
+    await waitFor(() => expect(lastOptions().source).toBeDefined());
+    expect(lastOptions().spoolMaxBytes).toBeUndefined();
+    fireEvent.change(picker, { target: { value: "kubernetes" } });
+    await waitFor(() => expect(lastOptions().source).toBeUndefined());
+    expect(lastOptions().spoolMaxBytes).toBe(256 * 1024 * 1024);
+  });
+
+  it("offers the lines on disk and loads the page before the oldest shown", async () => {
+    draw();
+    await body();
+    act(() => {
+      h.state.history = { first: 1 };
+      h.state.dropped = 182_340;
+      notify();
+    });
+    push(...LINES);
+    expect(screen.getByText(/182\s?340 earlier lines on disk/)).toBeTruthy();
+    // The screen's measuring code reads this slot's height to hold the view still.
+    expect(document.querySelector('[data-slot="dropped-banner"]')?.textContent).toMatch(/earlier lines on disk/);
+    await userEvent.click(screen.getByRole("button", { name: /Load 5\s?000 earlier/ }));
+    expect(h.loadEarlier).toHaveBeenCalledTimes(1);
+  });
+
+  it("pauses a followed view before loading earlier lines, so the page is not pushed out of it as it lands", async () => {
+    draw();
+    await body();
+    keepHistory({ first: 1 }, 182_340);
+    push(...LINES);
+    expect(h.state.paused).toBe(false);
+    await userEvent.click(screen.getByRole("button", { name: /Load 5\s?000 earlier/ }));
+    // In this order: the load reads the view it finds, and a view that is still moving is one the page leaves.
+    expect(h.calls).toEqual(["pause", "loadEarlier"]);
+    expect(h.state.paused).toBe(true);
+  });
+
+  it("loads into a view the reader has already paused, and leaves it paused", async () => {
+    draw();
+    await body();
+    keepHistory({ first: 1 }, 182_340);
+    push(...LINES);
+    await userEvent.click(screen.getByRole("button", { name: "Pause" }));
+    h.calls = [];
+    await userEvent.click(screen.getByRole("button", { name: /Load 5\s?000 earlier/ }));
+    // A toggle here would resume it, and let the stream run on over the page.
+    expect(h.calls).toEqual(["pause", "loadEarlier"]);
+    expect(h.state.paused).toBe(true);
+  });
+
+  it("tells the stream whether its tab is the one showing, so a tab behind another draws nothing", async () => {
+    // Inactive tabs stay mounted under `display: none` while the document is visible: only the surface knows.
+    const inTab = (visible: boolean) => (
+      <PortalScopeProvider scope={{ container: undefined, visible, hold: () => () => {} }}>
+        <ConsoleProvider>
+          <AskSpy />
+          <Logs route={ROUTE} />
+        </ConsoleProvider>
+      </PortalScopeProvider>
+    );
+    const view = render(inTab(false));
+    await body();
+    expect(lastOptions().visible).toBe(false);
+    view.rerender(inTab(true));
+    await waitFor(() => expect(lastOptions().visible).toBe(true));
+    view.unmount();
+    // And outside any tab surface the screen is showing.
+    draw();
+    await body();
+    expect(lastOptions().visible).toBe(true);
+  });
+
+  it("does not offer a second load while one is under way", async () => {
+    draw();
+    await body();
+    keepHistory({ first: 1 }, 182_340);
+    h.state.loadingEarlier = true;
+    push(...LINES);
+    const loading = screen.getByRole("button", { name: "Loading…" });
+    // Not `disabled`: a disabled button drops keyboard focus, and the reader presses it again from where they are.
+    expect(loading.getAttribute("aria-disabled")).toBe("true");
+    expect(loading).toHaveProperty("disabled", false);
+    expect(screen.queryByRole("button", { name: /Load 5\s?000 earlier/ })).toBeNull();
+    loading.focus();
+    await userEvent.click(loading);
+    expect(h.loadEarlier).not.toHaveBeenCalled();
+    // And no pause for a load that is not made.
+    expect(h.calls).toEqual([]);
+    expect(document.activeElement).toBe(loading);
+  });
+
+  it("sends the reader to Export once the screen holds as many lines as it will", async () => {
+    draw();
+    await body();
+    const lines = (count: number) =>
+      Array.from({ length: count }, (_, i) => line("api-7/api", "14:07:41.208000000", `info line ${i}`));
+    keepHistory({ first: 1 }, 60_000);
+    // One short of the cap, there is still room for a page.
+    push(...lines(h.cap - 1));
+    expect(screen.getByRole("button", { name: /Load 5\s?000 earlier/ })).toBeTruthy();
+    expect(screen.queryByText(/lines loaded/)).toBeNull();
+    // At the cap there is not, and the cap is the module's, not a number of the screen's own.
+    push(...lines(1));
+    expect(screen.getByText(`${h.cap} lines loaded · Export for the rest`)).toBeTruthy();
+    expect(screen.getByText(/60\s?000 earlier lines on disk/)).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /Load 5\s?000 earlier/ })).toBeNull();
+  });
+
+  it("says how many of the oldest lines passed the history limit", async () => {
+    draw();
+    await body();
+    act(() => {
+      h.state.history = { first: 1001 };
+      h.state.dropped = 5000;
+      notify();
+    });
+    push(...LINES);
+    expect(screen.getByText(/1\s?000 oldest lines passed the history limit/)).toBeTruthy();
+    expect(screen.getByText(/4\s?000 earlier lines on disk/)).toBeTruthy();
+  });
+
+  it("says only what passed the limit when nothing older is on disk", async () => {
+    draw();
+    await body();
+    keepHistory({ first: 1001 }, 1000);
+    push(...LINES);
+    expect(screen.getByText(/1\s?000 oldest lines passed the history limit/)).toBeTruthy();
+    expect(screen.queryByText(/earlier lines on disk/)).toBeNull();
+    expect(screen.queryByRole("button", { name: /Load 5\s?000 earlier/ })).toBeNull();
+  });
+
+  it("draws no banner while every line is still in memory", async () => {
+    draw();
+    await body();
+    keepHistory({ first: 1 }, 0);
+    push(...LINES);
+    expect(document.querySelector('[data-slot="dropped-banner"]')).toBeNull();
+  });
+
+  it("says why earlier lines could not be loaded", async () => {
+    draw();
+    await body();
+    act(() => {
+      h.state.history = { first: 1 };
+      h.state.dropped = 10;
+      h.state.loadError = new Error("this log stream has ended");
+      notify();
+    });
+    push(...LINES);
+    expect(screen.getByText("Could not load earlier lines")).toBeTruthy();
+    // The button stays: trying again is how the reader recovers.
+    expect(screen.getByRole("button", { name: /Load 5\s?000 earlier/ })).toBeTruthy();
+  });
+
+  it("shows no load error over the previous instance, whose lines never came from the disk", async () => {
+    h.resolve.mockResolvedValue({ status: "resolved", targets: TARGETS, pods: PODS, previous: TERMINATED });
+    const region = await (draw(), body());
+    act(() => {
+      h.state.history = { first: 1 };
+      h.state.dropped = 10;
+      h.state.loadError = new Error("this log stream has ended");
+      notify();
+    });
+    push(...LINES);
+    expect(screen.getByText("Could not load earlier lines")).toBeTruthy();
+    await userEvent.click(screen.getByRole("button", { name: /previous instance/i }));
+    await waitFor(() => expect(rendered(region)).toHaveLength(4));
+    expect(screen.queryByText("Could not load earlier lines")).toBeNull();
+  });
+
+  it("shows no load error once history stops, as there is nothing left to load from", async () => {
+    draw();
+    await body();
+    act(() => {
+      h.state.history = { first: 1 };
+      h.state.dropped = 10;
+      h.state.loadError = new Error("this log stream has ended");
+      notify();
+    });
+    push(...LINES);
+    expect(screen.getByText("Could not load earlier lines")).toBeTruthy();
+    keepHistory({ first: 1, failed: "No space left on device" }, 10);
+    expect(screen.queryByText("Could not load earlier lines")).toBeNull();
+  });
+
+  it("never draws a negative count when more lines passed the limit than are in memory", async () => {
+    draw();
+    await body();
+    // `dropped` is 500 but the oldest line kept is the 1001st: none of the lines before the first shown is on disk.
+    keepHistory({ first: 1001 }, 500);
+    push(...LINES);
+    expect(document.querySelector('[data-slot="dropped-banner"]')?.textContent).toMatch(
+      /^1\s?000 oldest lines passed the history limit$/,
+    );
+  });
+
+  /** A row of Export's menu by its accessible name; the history's rows say "kept on disk" beside the cluster's. */
+  const nameOf = (b: HTMLElement) => b.getAttribute("aria-label") ?? b.textContent;
+  const pickKept = async (range: string) =>
+    userEvent.click(within(await exportMenu()).getByRole("button", { name: `${range} kept on disk` }));
+
+  it("offers the history kept on disk between the view and the cluster's spans", async () => {
+    draw();
+    await body();
+    keepHistory({ first: 1 }, 0);
+    push(...LINES);
+    const panel = await exportMenu();
+    expect(within(panel).getByText("kept on disk")).toBeTruthy();
+    expect(within(panel).getAllByRole("button").map(nameOf)).toEqual([
+      "Current view",
+      "Last 10 min kept on disk",
+      "Last 1 h kept on disk",
+      "All kept on disk",
+      "Last 10 min",
+      "Last 1 h",
+      "Last 6 h",
+      "Last 24 h",
+      "All",
+    ]);
+  });
+
+  it("exports the history kept on disk, a span back from now or all of it, under its own name", async () => {
+    draw();
+    await body();
+    keepHistory({ first: 1 }, 0);
+    push(...LINES);
+    await pickKept("Last 10 min");
+    await waitFor(() => expect(h.exportSpool).toHaveBeenCalledWith("checkout-api-disk-last-10m.log", 600));
+    await pickKept("All");
+    await waitFor(() => expect(h.exportSpool).toHaveBeenLastCalledWith("checkout-api-disk-all.log", undefined));
+    // The disk, not this buffer and not the cluster.
+    expect(h.saved).not.toHaveBeenCalled();
+    expect(h.fetched).not.toHaveBeenCalled();
+  });
+
+  it("writes the view, not the history, from Current view", async () => {
+    draw();
+    await body();
+    keepHistory({ first: 1 }, 0);
+    push(...LINES);
+    await exportCurrentView();
+    await waitFor(() => expect(h.saved).toHaveBeenCalledTimes(1));
+    expect(h.exportSpool).not.toHaveBeenCalled();
+  });
+
+  it("offers the history to export even when the view is empty", async () => {
+    draw();
+    await body();
+    keepHistory({ first: 1 }, 0);
+    // No lines on screen: the view has nothing to write, the history on disk may have.
+    const panel = await exportMenu();
+    expect(within(panel).getByRole("button", { name: "Current view" })).toHaveProperty("disabled", true);
+    expect(within(panel).getByRole("button", { name: "All kept on disk" })).toHaveProperty("disabled", false);
+  });
+
+  it("reads Exporting… while the history is written, and Export once it is", async () => {
+    let finish: (path: string | null) => void = () => {};
+    h.exportSpool.mockReturnValue(new Promise<string | null>((resolve) => (finish = resolve)));
+    draw();
+    await body();
+    keepHistory({ first: 1 }, 0);
+    push(...LINES);
+    await pickKept("All");
+    expect(await screen.findByText("Exporting…")).toBeTruthy();
+    await act(async () => finish("/home/u/checkout-api-disk-all.log"));
+    expect(screen.queryByText("Exporting…")).toBeNull();
+  });
+
+  it("says why the history could not be saved", async () => {
+    h.exportSpool.mockRejectedValue("save_text_file failed: Permission denied (os error 13)");
+    draw();
+    await body();
+    keepHistory({ first: 1 }, 0);
+    push(...LINES);
+    await pickKept("All");
+    expect((await screen.findByText(/could not save this stream/i)).textContent).toBe("Could not save this stream");
+  });
+
+  it("stops offering the history once it stops, and keeps the dropped-lines banner", async () => {
+    draw();
+    await body();
+    keepHistory({ first: 1 }, 0);
+    push(...LINES);
+    // The hook goes on offering an export of a history that is no longer whole; the screen must not take it up.
+    act(() => {
+      h.state.history = { first: 1, failed: "No space left on device" };
+      h.state.dropped = 1200;
+      notify();
+    });
+    const panel = await exportMenu();
+    expect(within(panel).queryByText("kept on disk")).toBeNull();
+    expect(within(panel).queryByRole("button", { name: /kept on disk/ })).toBeNull();
+    expect(screen.getByText(/1\s?200 earlier lines dropped/)).toBeTruthy();
+  });
+
+  it("writes the previous instance, not the live history, and offers neither the history nor its banner there", async () => {
+    h.resolve.mockResolvedValue({ status: "resolved", targets: TARGETS, pods: PODS, previous: TERMINATED });
+    const region = await (draw(), body());
+    keepHistory({ first: 1 }, 182_340);
+    push(...LINES);
+    expect(within(await exportMenu()).getByRole("button", { name: "All kept on disk" })).toBeTruthy();
+    await userEvent.keyboard("{Escape}");
+    await userEvent.click(screen.getByRole("button", { name: /previous instance/i }));
+    await waitFor(() => expect(rendered(region)).toHaveLength(4));
+    expect(within(region).queryByText(/earlier lines on disk/)).toBeNull();
+    expect(screen.queryByRole("button", { name: /Load 5\s?000 earlier/ })).toBeNull();
+    // A previous instance keeps the one-click Export (#915): it writes that buffer.
+    await userEvent.click(screen.getByRole("button", { name: "Export" }));
+    await waitFor(() => expect(h.saved).toHaveBeenCalledTimes(1));
+    expect(h.saved.mock.calls[0][0]).toBe("checkout-api-previous.log");
+    expect(h.exportSpool).not.toHaveBeenCalled();
   });
 });

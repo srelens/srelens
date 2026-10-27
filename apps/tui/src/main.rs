@@ -75,6 +75,7 @@ impl Drop for TerminalCleanupGuard {
                 crossterm::cursor::Show
             );
         }
+        crate::agent::cleanup_process_cursor_chats();
     }
 }
 
@@ -84,9 +85,11 @@ mod ai_skills;
 mod app;
 mod cli;
 mod commands;
+mod consent;
 mod deep_link;
 mod event;
 mod mcp_server;
+mod model_list;
 mod sink;
 mod theme;
 mod tui_config;
@@ -155,6 +158,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let cli = Cli::parse();
+    srelens_kube::connect::init_timeout_from_env();
 
     // Resolved BEFORE the subcommand match, because those arms return early.
     // `info` used to call `all_kubeconfig_paths()` itself and so ignored
@@ -224,6 +228,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     println!("  {:<8} : {}{}", tool.name, status, path_info);
                 }
                 return Ok(());
+            }
+            CliCommand::Skill { subcommand } => {
+                return run_skill_command(subcommand);
             }
         }
     }
@@ -430,6 +437,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         views::assistant_view::ToolCallStatus::Error(status_str.to_string())
                                     };
                                     target_state.finish_tool_call(id, status);
+                                } else if action == "ai_session" {
+                                    let (target_conv, session_id) = if let Some((c, s)) = msg.split_once('|') {
+                                        (c, s)
+                                    } else {
+                                        ("", msg.as_str())
+                                    };
+                                    if target_conv.is_empty() || target_conv == target_state.conversation_id {
+                                        target_state.cli_resume_id = if session_id.is_empty() {
+                                            None
+                                        } else {
+                                            Some(session_id.to_string())
+                                        };
+                                    }
                                 } else if action == "ai_usage" {
                                     let parts: Vec<&str> = msg.split('|').collect();
                                     if parts.len() >= 4 {
@@ -544,6 +564,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 AppEvent::ChangedCauseResult { key, result } => {
                     app.handle_changed_cause_result(&key, result);
                 }
+                AppEvent::AgentConsent(pending) => app.consents.push(pending),
+                AppEvent::ModelsLoaded { key, result } => app.handle_models_loaded(&key, result),
             }
 
             if !app.is_running {
@@ -764,6 +786,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     disable_raw_mode()?;
     execute!(terminal.backend_mut(), LeaveAlternateScreen, DisableMouseCapture, DisableBracketedPaste)?;
     terminal.show_cursor()?;
+    // No agent may still be running in the chat root it removes.
+    app.stop_assistant_turns().await;
+    crate::agent::cleanup_process_cursor_chats();
 
     Ok(())
 }
@@ -921,4 +946,187 @@ fn update_off_the_runtime(check_only: bool, channel: Option<String>) -> Result<(
 fn fail(error: srectl::self_update::UpdateError) -> ! {
     eprintln!("srectl: {error}");
     std::process::exit(1);
+}
+
+fn run_skill_command(
+    subcommand: Option<cli::SkillSubcommand>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use crate::ai_skills::{
+        builtin_skills, delete_skill, fallback_name_from_url, fetch_skill_url,
+        list_all_skills, load_skill_or_builtin, load_user_skills_dir, parse_skill_content,
+        to_markdown, user_skill_file, validate_custom_skill_name, validate_name,
+        write_skill_atomic,
+    };
+    use crate::cli::SkillSubcommand;
+    use std::io::{IsTerminal, Read};
+
+    let subcmd = subcommand.unwrap_or(SkillSubcommand::List { json: false });
+
+    match subcmd {
+        SkillSubcommand::Path => {
+            println!("{}", load_user_skills_dir().display());
+            Ok(())
+        }
+        SkillSubcommand::List { json } => {
+            let dir = load_user_skills_dir();
+            let skills = list_all_skills(&dir).map_err(|e| format!("{e}"))?;
+
+            if json {
+                println!("{}", serde_json::to_string_pretty(&skills)?);
+                return Ok(());
+            }
+
+            if skills.is_empty() {
+                println!("No diagnostic skills found.");
+                return Ok(());
+            }
+
+            println!("{:<24} {:<10} {}", "NAME", "TYPE", "DESCRIPTION");
+            println!("{}", "-".repeat(70));
+            for s in &skills {
+                let kind = if s.overrides_builtin {
+                    "override"
+                } else if s.builtin {
+                    "builtin"
+                } else {
+                    "user"
+                };
+                println!("{:<24} {:<10} {}", s.name, kind, s.description);
+            }
+            println!("\nUse 'srectl skill show <NAME>' to view instructions, or 'srectl skill path' for storage.");
+            Ok(())
+        }
+        SkillSubcommand::Show { name, raw } => {
+            validate_name(&name).map_err(|e| format!("{e}"))?;
+            let dir = load_user_skills_dir();
+            let skill = load_skill_or_builtin(&dir, &name).map_err(|e| format!("{e}"))?;
+
+            if raw {
+                println!("{}", to_markdown(&skill));
+                return Ok(());
+            }
+
+            let meta = list_all_skills(&dir)
+                .map_err(|e| format!("{e}"))?
+                .into_iter()
+                .find(|m| m.name == name);
+
+            let kind = if meta.as_ref().map_or(false, |m| m.overrides_builtin) {
+                "override"
+            } else if meta.as_ref().map_or(false, |m| m.builtin) {
+                "builtin"
+            } else {
+                "user"
+            };
+
+            let path_str = meta
+                .and_then(|m| m.path)
+                .unwrap_or_else(|| "(built-in playbook)".to_string());
+
+            println!("{:<14} {}", "Name:", skill.name);
+            println!("{:<14} {}", "Type:", kind);
+            println!("{:<14} {}", "Path:", path_str);
+            println!("{:<14} {}", "Description:", skill.description);
+            println!("\nInstructions:");
+            println!("{}", "-".repeat(70));
+            println!("{}", skill.body.trim());
+            Ok(())
+        }
+        SkillSubcommand::Add {
+            name,
+            file,
+            url,
+            desc,
+        } => {
+            if file.is_some() && url.is_some() {
+                return Err("cannot specify both --file and --url".into());
+            }
+
+            let (content, fallback_name) = if let Some(path) = file {
+                let text = std::fs::read_to_string(&path)
+                    .map_err(|e| format!("could not read file {}: {e}", path.display()))?;
+                let fb = path.file_stem().and_then(|s| s.to_str()).map(|s| s.to_string());
+                (text, fb)
+            } else if let Some(ref url_str) = url {
+                let text = fetch_skill_url(url_str).map_err(|e| format!("{e}"))?;
+                let fb = fallback_name_from_url(url_str);
+                (text, fb)
+            } else {
+                if std::io::stdin().is_terminal() {
+                    return Err(
+                        "no skill content provided: specify --file <PATH>, --url <URL>, or pipe content via stdin"
+                            .into(),
+                    );
+                }
+                let mut buf = String::new();
+                std::io::stdin().read_to_string(&mut buf)?;
+                if buf.trim().is_empty() {
+                    return Err("stdin was empty".into());
+                }
+                (buf, None)
+            };
+
+            let effective_name = name.as_deref().or(fallback_name.as_deref());
+            let mut skill = parse_skill_content(
+                &content,
+                effective_name,
+                desc.as_deref(),
+            )
+            .map_err(|e| format!("{e}"))?;
+
+            if let Some(n) = name {
+                skill.name = n;
+            }
+            if let Some(d) = desc {
+                skill.description = d;
+            }
+
+            validate_custom_skill_name(&skill.name).map_err(|e| format!("{e}"))?;
+
+            let dir = load_user_skills_dir();
+            let is_builtin = builtin_skills().iter().any(|b| b.name == skill.name);
+            let saved_path = write_skill_atomic(&dir, &skill).map_err(|e| format!("{e}"))?;
+
+            if is_builtin {
+                println!(
+                    "Added skill '{}' (overriding built-in playbook) at {}",
+                    skill.name,
+                    saved_path.display()
+                );
+            } else {
+                println!("Added skill '{}' at {}", skill.name, saved_path.display());
+            }
+
+            Ok(())
+        }
+        SkillSubcommand::Delete { name } => {
+            validate_name(&name).map_err(|e| format!("{e}"))?;
+            let dir = load_user_skills_dir();
+            let is_builtin = builtin_skills().iter().any(|b| b.name == name);
+            let had_user_file = user_skill_file(&dir, &name).is_some();
+
+            if !is_builtin && !had_user_file {
+                return Err(format!("skill '{name}' not found").into());
+            }
+
+            if is_builtin && !had_user_file {
+                return Err(format!(
+                    "cannot delete built-in skill '{name}' (built-in playbooks cannot be deleted)"
+                )
+                .into());
+            }
+
+            delete_skill(&dir, &name).map_err(|e| format!("{e}"))?;
+
+            if is_builtin && had_user_file {
+                println!(
+                    "Deleted user override for built-in skill '{name}' (restored built-in playbook)."
+                );
+            } else {
+                println!("Deleted skill '{name}'.");
+            }
+
+            Ok(())
+        }
+    }
 }

@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, onTestFinished } from "vitest";
 import { act, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 
@@ -13,6 +13,8 @@ import userEvent from "@testing-library/user-event";
  */
 const core = vi.hoisted(() => ({
   isTauri: vi.fn(() => true),
+  // Whether a settings write reached the backend (#968 saves wait on it).
+  flushSettingsWrites: vi.fn(async (_options?: { throwOnError?: boolean }) => {}),
   appVersion: vi.fn(async () => "1.0.0"),
   checkForUpdate: vi.fn(),
   installUpdate: vi.fn(),
@@ -42,8 +44,13 @@ vi.mock("@srelens/core", async (orig) => ({
   ...core,
 }));
 
-import type { VaultBiometricStatus } from "@srelens/core";
+import { readAssistantSetting, type VaultBiometricStatus } from "@srelens/core";
+import { openSettings } from "../lib/settingsRequest";
+import { defaultState } from "../lib/tabs";
+import { TabScope } from "../lib/tabScope";
+import { activateTab, currentWorkspace, duplicateTab, moveTab, openTab, setState } from "../lib/tabsStore";
 import { Settings } from "./Settings";
+import { __resetAssistantForTests, assistantSaved } from "../lib/assistant";
 
 const ROUTE = "/settings";
 
@@ -66,17 +73,22 @@ const PORTED = ["Aardvark ledger", "Basalt tally", "Cinnabar dial"];
 
 /** §23's nav, in §23's order, minus the entry decision 2 removed. */
 const DESKTOP_SECTIONS = [
-  "Agent & MCP",
+  "AI Assistant",
+  // #851. Desktop only: the skill store is files on this machine.
+  "Skills",
   "Security",
   "Backup",
   "Appearance",
   "Accessibility",
   "Shortcuts",
   "Deep links",
-  "Workspace",
+  "Session & layout",
   "Kubernetes",
   "Application logs",
   "Updates",
+  "Workspaces",
+  // #881. On the web too: collections are kept in each user's settings.
+  "Collections",
   "Clusters",
   "Apps",
 ];
@@ -87,7 +99,7 @@ const DESKTOP_SECTIONS = [
  * `srelens://` scheme, so in a browser no such link reaches srelens at all.
  */
 const WEB_SECTIONS = DESKTOP_SECTIONS.filter(
-  (s) => s !== "Security" && s !== "Backup" && s !== "Updates" && s !== "Deep links",
+  (s) => s !== "Skills" && s !== "Security" && s !== "Backup" && s !== "Updates" && s !== "Deep links",
 );
 
 function paint(props: { onLocked?: () => void } = {}) {
@@ -132,6 +144,7 @@ describe("Settings", () => {
     core.llmKeyStatus.mockResolvedValue([]);
     core.llmListModels.mockResolvedValue([]);
     core.listAgents.mockResolvedValue([]);
+    core.flushSettingsWrites.mockResolvedValue(undefined);
   });
 
   it("titles itself the way the design does, and takes no header action", () => {
@@ -144,6 +157,78 @@ describe("Settings", () => {
   it("lists every section, in order, and no section it cannot fill", () => {
     paint();
     expect(sections()).toEqual(DESKTOP_SECTIONS);
+  });
+
+  it("opens on the section another screen asked for, and moves to one asked for while open", async () => {
+    openSettings("extensions", "catalog");
+    paint();
+    const rail = screen.getByRole("complementary", { name: "Settings" });
+    expect(within(rail).getByRole("tab", { name: "Apps" }).getAttribute("aria-selected")).toBe("true");
+    expect((await screen.findByRole("tab", { name: "Catalog" })).getAttribute("aria-selected")).toBe("true");
+    expect(screen.getByRole("region", { name: "App catalog" })).toBeTruthy();
+    act(() => openSettings("appearance"));
+    expect(within(rail).getByRole("tab", { name: "Appearance" }).getAttribute("aria-selected")).toBe("true");
+  });
+
+  it("opens on Workspaces when asked, and still finds Session & layout by its old id", () => {
+    openSettings("workspaces");
+    paint();
+    const rail = screen.getByRole("complementary", { name: "Settings" });
+    expect(within(rail).getByRole("tab", { name: "Workspaces" }).getAttribute("aria-selected")).toBe("true");
+    expect(screen.getByRole("list", { name: "Workspaces" })).toBeTruthy();
+    act(() => openSettings("workspace"));
+    expect(within(rail).getByRole("tab", { name: "Session & layout" }).getAttribute("aria-selected")).toBe("true");
+  });
+
+  it("hands a request to the Settings tab it brings to the front, not to another Settings tab", () => {
+    setState(defaultState([]));
+    openTab("/settings");
+    const original = currentWorkspace().activeId;
+    duplicateTab(original);
+    const copy = currentWorkspace().activeId;
+    // The copy moved ahead of the original: `openTab` now focuses the copy.
+    moveTab(copy, 1);
+    // And the request comes from Home, as Home's links do.
+    activateTab(currentWorkspace().tabs[0].id);
+    const props = { route: ROUTE, ported: PORTED, onSwitchToClassic: vi.fn(), onLocked: vi.fn() };
+    render(
+      <>
+        <TabScope.Provider value={original}><Settings {...props} /></TabScope.Provider>
+        <TabScope.Provider value={copy}><Settings {...props} /></TabScope.Provider>
+      </>,
+    );
+    act(() => openSettings("appearance"));
+    expect(currentWorkspace().activeId).toBe(copy);
+    const [originalRail, copyRail] = screen.getAllByRole("complementary", { name: "Settings" });
+    expect(within(copyRail).getByRole("tab", { name: "Appearance" }).getAttribute("aria-selected")).toBe("true");
+    expect(within(originalRail).getByRole("tab", { name: "Appearance" }).getAttribute("aria-selected")).toBe("false");
+  });
+
+  it("shows the installed apps for a later request that names no tab", async () => {
+    openSettings("extensions", "catalog");
+    paint();
+    expect((await screen.findByRole("tab", { name: "Catalog" })).getAttribute("aria-selected")).toBe("true");
+    act(() => openSettings("extensions"));
+    expect(screen.getByRole("tab", { name: "Catalog" }).getAttribute("aria-selected")).toBe("false");
+  });
+
+  it("does not carry a catalog request into a later visit through the rail", async () => {
+    openSettings("extensions", "catalog");
+    const { user } = paint();
+    const rail = screen.getByRole("complementary", { name: "Settings" });
+    expect((await screen.findByRole("tab", { name: "Catalog" })).getAttribute("aria-selected")).toBe("true");
+    await user.click(within(rail).getByRole("tab", { name: "Appearance" }));
+    await user.click(within(rail).getByRole("tab", { name: "Apps" }));
+    expect((await screen.findByRole("tab", { name: "Catalog" })).getAttribute("aria-selected")).toBe("false");
+  });
+
+  it("moves an open Apps section to its catalog when asked", async () => {
+    openSettings("extensions");
+    paint();
+    expect((await screen.findByRole("tab", { name: "Catalog" })).getAttribute("aria-selected")).toBe("false");
+    act(() => openSettings("extensions", "catalog"));
+    expect(screen.getByRole("tab", { name: "Catalog" }).getAttribute("aria-selected")).toBe("true");
+    expect(screen.getByRole("region", { name: "App catalog" })).toBeTruthy();
   });
 
   /**
@@ -194,10 +279,39 @@ describe("Settings", () => {
     expect(screen.getByText(/px body text/i)).toBeTruthy();
   });
 
+  // #968
+  it("opens on the AI Assistant switch, on until turned off, and keeps every pane below it", async () => {
+    const { user } = paint();
+    const toggle = await screen.findByRole("switch", { name: "AI Assistant" });
+    expect(toggle.getAttribute("aria-checked")).toBe("true");
+    expect(screen.queryByText("Turned off. These settings are kept for when it is switched back on.")).toBeNull();
+
+    await user.click(toggle);
+    expect(readAssistantSetting()).toEqual({ enabled: false, disabledClusters: [] });
+    expect(screen.getByRole("switch", { name: "AI Assistant" }).getAttribute("aria-checked")).toBe("false");
+    expect(screen.getByText("Turned off. These settings are kept for when it is switched back on.")).toBeTruthy();
+    expect(screen.getByText(/never without confirmation/i)).toBeTruthy();
+    expect(await screen.findByText(/drops in-flight requests/i)).toBeTruthy();
+    expect(screen.getByText(/every change made here/i)).toBeTruthy();
+  });
+
+  it("says the switch could not be saved, and shows what the file holds", async () => {
+    core.flushSettingsWrites.mockRejectedValue(new Error("settings.json is locked"));
+    const { user } = paint();
+    await user.click(await screen.findByRole("switch", { name: "AI Assistant" }));
+    await act(async () => {
+      await assistantSaved();
+    });
+    onTestFinished(__resetAssistantForTests);
+    const alert = screen.getByText(/Could not save the AI Assistant setting/);
+    expect(alert.getAttribute("role")).toBe("alert");
+    expect(alert.textContent).toContain("settings.json is locked");
+  });
+
   it("stacks the three agent panes together", async () => {
     paint();
     expect(await screen.findByText(/never without confirmation/i)).toBeTruthy();
-    expect(screen.getByText(/drops in-flight requests/i)).toBeTruthy();
+    expect(await screen.findByText(/drops in-flight requests/i)).toBeTruthy();
     expect(screen.getByText(/every change made here/i)).toBeTruthy();
     const nested = screen.getByText("Providers").closest(".card")?.parentElement;
     expect(nested?.className).toContain("settings-agent-groups");
@@ -229,7 +343,7 @@ describe("Settings", () => {
         .getAllByRole("tab")
         .filter((t) => t.getAttribute("aria-selected") === "true")
         .map((t) => t.textContent);
-    expect(selected()).toEqual(["Agent & MCP"]);
+    expect(selected()).toEqual(["AI Assistant"]);
     await user.click(screen.getByRole("tab", { name: "Shortcuts" }));
     expect(selected()).toEqual(["Shortcuts"]);
   });
@@ -243,23 +357,23 @@ describe("Settings", () => {
     expect(tabs.map((t) => t.tabIndex)).toEqual(DESKTOP_SECTIONS.map((_, i) => i === 0 ? 0 : -1));
     tabs[0].focus();
     await user.keyboard("{ArrowDown}");
-    expect(sections()[1]).toBe("Security");
-    expect(document.activeElement?.textContent).toBe("Security");
+    expect(sections()[1]).toBe("Skills");
+    expect(document.activeElement?.textContent).toBe("Skills");
     await user.keyboard("{End}");
     expect(document.activeElement?.textContent).toBe("Apps");
     await user.keyboard("{ArrowDown}");
-    expect(document.activeElement?.textContent).toBe("Agent & MCP");
+    expect(document.activeElement?.textContent).toBe("AI Assistant");
     await user.keyboard("{ArrowUp}");
     expect(document.activeElement?.textContent).toBe("Apps");
     await user.keyboard("{Home}");
-    expect(document.activeElement?.textContent).toBe("Agent & MCP");
+    expect(document.activeElement?.textContent).toBe("AI Assistant");
   });
 
   it("hands Appearance the screens the host injected, not a list of its own", async () => {
     const { user, onSwitchToClassic } = paint();
     await user.click(screen.getByRole("tab", { name: "Appearance" }));
     expect(screen.getAllByTestId("ported-screen").map((n) => n.textContent)).toEqual(PORTED);
-    await user.click(screen.getByRole("button", { name: /switch to the classic design/i }));
+    await user.click(screen.getByRole("button", { name: "Switch to Classic (deprecated)" }));
     expect(onSwitchToClassic).toHaveBeenCalledTimes(1);
   });
 
@@ -338,7 +452,7 @@ describe("Settings", () => {
     it("still opens on the first section, which is not the missing one", async () => {
       paint();
       expect(await screen.findByText(/never without confirmation/i)).toBeTruthy();
-      expect(screen.getByRole("tab", { name: "Agent & MCP" }).getAttribute("aria-selected")).toBe(
+      expect(screen.getByRole("tab", { name: "AI Assistant" }).getAttribute("aria-selected")).toBe(
         "true",
       );
     });
@@ -370,7 +484,7 @@ describe("Settings", () => {
 
     it("keeps the section, because what an agent may do is true on both", async () => {
       paint();
-      expect(sections()).toContain("Agent & MCP");
+      expect(sections()).toContain("AI Assistant");
       // `AgentAccess` is static information read from srelens's own capability
       // registry, and it is the pane a web reader most wants: what a connected
       // agent may do without asking.
@@ -431,7 +545,7 @@ describe("Settings", () => {
     it("draws all three agent panels, because every command behind them answers", async () => {
       paint();
       expect(await screen.findByText(/never without confirmation/i)).toBeTruthy();
-      expect(screen.getByText(/drops in-flight requests/i)).toBeTruthy();
+      expect(await screen.findByText(/drops in-flight requests/i)).toBeTruthy();
       expect(screen.getByText(/every change made here/i)).toBeTruthy();
       expect(screen.queryByTestId("no-agent-server")).toBeNull();
     });
@@ -446,7 +560,7 @@ it("keeps an in-progress update when switching settings sections", async () => {
   await user.click(screen.getByRole("tab", { name: "Updates" }));
   await user.click(screen.getByRole("button", { name: "Check for updates" }));
   await user.click(await screen.findByRole("button", { name: "Download & install" }));
-  await user.click(screen.getByRole("tab", { name: "Workspace" }));
+  await user.click(screen.getByRole("tab", { name: "Session & layout" }));
   await act(async () => finish());
   await user.click(screen.getByRole("tab", { name: "Updates" }));
   expect(await screen.findByRole("button", { name: "Restart srelens" })).toBeTruthy();

@@ -44,7 +44,7 @@ import {
   type Column,
   type Tone,
 } from "@srelens/ui-kit";
-import { useConsole } from "../console";
+import { useAsk } from "../console";
 import { useClusterGate } from "../lib/clusterMoved";
 import { useActiveContext } from "../lib/clusters";
 import { detailRoute } from "../lib/detailRoute";
@@ -164,7 +164,7 @@ function ClusterOverview({ title, context }: { title: string; context: ClusterCo
   const name = context.name;
   const contextLabel = useContextLabel(name, context.stableId);
   const overview = useOverview(name);
-  const { ask } = useConsole();
+  const ask = useAsk(name);
   const Sparkle = Icons.ask;
 
   // `<cluster name> / <provider>`, and just the name until the facts answer.
@@ -186,16 +186,18 @@ function ClusterOverview({ title, context }: { title: string; context: ClusterCo
         // until its row is hovered, which is right for one of forty rows and
         // invisible on a toolbar. The visible word is the design's; the
         // question it will actually send is the accessible name.
-        <Button
-          type="button"
-          size="sm"
-          aria-label={`${SUMMARISE_LABEL}: ${SUMMARISE}`}
-          title={`${SUMMARISE_LABEL}: ${SUMMARISE}`}
-          onClick={() => ask(SUMMARISE)}
-        >
-          <Sparkle size={12} aria-hidden="true" />
-          {SUMMARISE_LABEL}
-        </Button>
+        ask && (
+          <Button
+            type="button"
+            size="sm"
+            aria-label={`${SUMMARISE_LABEL}: ${SUMMARISE}`}
+            title={`${SUMMARISE_LABEL}: ${SUMMARISE}`}
+            onClick={() => ask(SUMMARISE)}
+          >
+            <Sparkle size={12} aria-hidden="true" />
+            {SUMMARISE_LABEL}
+          </Button>
+        )
       }
     >
       <SideRail
@@ -1065,7 +1067,7 @@ function nodeActions(context: string, row: NodeRow, open: (pending: Pending) => 
     {
       id: "open",
       label: ROW_ACTION_LABEL.openTab,
-      onSelect: () => openTab(detailRoute("Node", null, row.name), { clusterName: context }),
+      onSelect: () => openTab(detailRoute("Node", null, row.name, { cluster: context }), { clusterName: context }),
     },
     {
       id: "copy",
@@ -1286,7 +1288,7 @@ function NotReady({ context, overview }: { context: string; overview: OverviewDa
                   name={row.name}
                   facts={facts(row)}
                   onActivate={() =>
-                    openTab(detailRoute(row.kind, row.namespace, row.name), { clusterName: context })
+                    openTab(detailRoute(row.kind, row.namespace, row.name, { cluster: context }), { clusterName: context })
                   }
                 />
               ))}

@@ -1,4 +1,5 @@
 import { ContextLabel } from "../lib/contextLabel";
+import { CollectionScopeNotice, NamespaceScopePicker } from "./collections/NamespaceScope";
 import { useEffect, useMemo, useState } from "react";
 import {
   eventVerdict,
@@ -23,7 +24,7 @@ import {
   tableFilterError,
   type TabItem,
 } from "@srelens/ui-kit";
-import { useConsole } from "../console";
+import { useAsk } from "../console";
 import { getKubeconfigFiles, useActiveContext } from "../lib/clusters";
 import { useHiddenColumns } from "../lib/columnPrefs";
 import { detailRoute } from "../lib/detailRoute";
@@ -40,11 +41,10 @@ import {
 import { useResourceList } from "../lib/resourceList";
 import { describe } from "../lib/routes";
 import { openTab, useTabs } from "../lib/tabsStore";
-import { useNamespaces, useSetNamespaces } from "../lib/workspace";
+import { useNamespaces, useFallbackNamespace, useSetNamespaces } from "../lib/workspace";
 import { ReasonRail } from "./events/ReasonRail";
 import {
   NamespaceErrorAlert,
-  NamespacePicker,
   NoClusterScreen,
   PausedClusterScreen,
   StaleSelectionAlert,
@@ -149,18 +149,17 @@ function EventList({
   // never interchangeable — see `lib/clusters`.
   const name = context.name;
   const files = getKubeconfigFiles();
-  const { ask } = useConsole();
+  const ask = useAsk();
 
   const selection = useNamespaces(context.stableId);
   const setNamespaces = useSetNamespaces();
-  const { namespaces, scope, error: namespaceError } = useNamespaceOptions(name, files);
+  const namespaceOptions = useNamespaceOptions(name, files);
+  const { namespaces, scope, error: namespaceError } = namespaceOptions;
 
   // A namespace-restricted credential has one namespace and no way to ask for
   // another — written to the workspace store rather than held here, so every
   // screen looking at this cluster follows the same scope.
-  useEffect(() => {
-    if (scope) setNamespaces(context.stableId, [scope]);
-  }, [scope, context.stableId, setNamespaces]);
+  useFallbackNamespace(context.stableId, scope);
 
   // Each selected namespace is watched on its own (#688); none is "all
   // namespaces". Events are namespaced, so there is no cluster-scoped branch.
@@ -251,7 +250,7 @@ function EventList({
   function openInvolved(row: EventRow) {
     const { kind, name: objectName } = involvedObject(row);
     if (!kind || !objectName) return;
-    openTab(detailRoute(kind, eventNamespace(row) || null, objectName), { clusterName: name });
+    openTab(detailRoute(kind, eventNamespace(row) || null, objectName, { cluster: name }), { clusterName: name });
   }
 
   // Loading and error each replace the table with their own state; the
@@ -280,16 +279,18 @@ function EventList({
               toolbar. The visible word is the design's; the question goes in
               the accessible name behind it, where it says what will actually
               be sent — the same split the chip itself makes. */}
-          <Button
-            type="button"
-            size="sm"
-            aria-label={`${GROUP_BY_CAUSE_LABEL}: ${GROUP_BY_CAUSE}`}
-            title={`${GROUP_BY_CAUSE_LABEL}: ${GROUP_BY_CAUSE}`}
-            onClick={() => ask(GROUP_BY_CAUSE)}
-          >
-            <Sparkle size={12} aria-hidden="true" />
-            {GROUP_BY_CAUSE_LABEL}
-          </Button>
+          {ask && (
+            <Button
+              type="button"
+              size="sm"
+              aria-label={`${GROUP_BY_CAUSE_LABEL}: ${GROUP_BY_CAUSE}`}
+              title={`${GROUP_BY_CAUSE_LABEL}: ${GROUP_BY_CAUSE}`}
+              onClick={() => ask(GROUP_BY_CAUSE)}
+            >
+              <Sparkle size={12} aria-hidden="true" />
+              {GROUP_BY_CAUSE_LABEL}
+            </Button>
+          )}
           {/* Not in the design, which draws a screen whose fixtures never
               fail. The rows arrive on a watch that can drop to a poll, and the
               label carries that meaning; the tone only colours it. */}
@@ -343,15 +344,12 @@ function EventList({
           <Tabs tabs={SEGMENTS} active={segment} onChange={setSegment} label="Type" variant="segmented" />
           {/* Inherited, not grown here: the selection is the workspace's, shared
               by every list looking at this cluster. */}
-          <NamespacePicker
-            namespaces={namespaces}
-            selection={selection}
-            onChange={(next) => setNamespaces(context.stableId, next)}
-          />
+          <NamespaceScopePicker context={context} options={namespaceOptions} />
         </FilterBar>
 
         <NamespaceErrorAlert error={namespaceError} />
 
+        <CollectionScopeNotice context={context} />
         <StaleSelectionAlert
           selection={selection}
           namespaces={namespaces}

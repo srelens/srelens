@@ -39,6 +39,7 @@
 <p align="center">
   <a href="https://github.com/srelens/srelens/stargazers"><img alt="GitHub stars" src="https://img.shields.io/github/stars/srelens/srelens?logo=github&color=eab308"></a>
   <a href="https://www.reddit.com/r/srelens/"><img alt="Reddit: r/srelens" src="https://img.shields.io/reddit/subreddit-subscribers/srelens?label=r%2Fsrelens&logo=reddit&logoColor=white&color=FF4500"></a>
+  <a href="https://join.slack.com/t/srelens/shared_invite/zt-4cu0tzuzo-Ktei1KsVlqPi2XY~irTDAg"><img alt="Slack: srelens" src="https://img.shields.io/badge/Slack-srelens-4A154B?logo=slack&logoColor=white"></a>
   <a href="https://deepwiki.com/srelens/srelens"><img alt="Ask DeepWiki" src="https://img.shields.io/badge/Ask-DeepWiki-2563eb"></a>
 </p>
 
@@ -57,6 +58,10 @@
   <img alt="Terminal UI" src="https://img.shields.io/badge/terminal-srectl-14b8a6">
   <img alt="MCP server" src="https://img.shields.io/badge/agents-MCP-fb923c">
   <img alt="Project status: stable" src="https://img.shields.io/badge/status-stable-22c55e">
+</p>
+
+<p align="center">
+  <img alt="srelens 桌面应用实时列出 Kubernetes 对象，并支持搜索和命名空间筛选" src="../assets/screenshots/srelens-demo-changes.gif" width="100%">
 </p>
 
 <p align="center">
@@ -96,9 +101,9 @@
 
 ## 桌面应用
 
-桌面应用是一个运行在原生窗口中的完整 Kubernetes 工作台。下方截图展示的是**新设计**，它正在逐个界面地推出：在
-**Settings → Appearance → Design → New design**（设置 → 外观 → 设计 → 新设计）中即可开启，也随时可以用同样的方式切换回来。它提供六种主题：Light、Paper、Dark、Midnight、Glass
-和 High contrast。
+桌面应用是一个运行在原生窗口中的完整 Kubernetes 工作台。下方截图展示的是**新设计**，它现在是默认设计。它提供六种主题：Light、Paper、Dark、Midnight、Glass
+和 High contrast。经典设计已弃用，将在未来的版本中移除；在此之前，你可以在
+**Settings → Appearance → Design**（设置 → 外观 → 设计）中切换到经典设计。
 
 <table>
   <tr>
@@ -345,6 +350,7 @@ Developer ID 签名并经过公证，受支持的安装包可以原地更新。�
 ## 社区
 
 - [Reddit 上的 r/srelens](https://www.reddit.com/r/srelens/)——公告、提问和反馈
+- [Slack 上的 srelens](https://join.slack.com/t/srelens/shared_invite/zt-4cu0tzuzo-Ktei1KsVlqPi2XY~irTDAg)——与维护者和其他用户交流
 - [Issue 列表](https://github.com/srelens/srelens/issues)——Bug 报告和功能请求
 - [官网](https://srelens.com)
 

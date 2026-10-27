@@ -244,12 +244,14 @@ vi.mock("./components/EditResourceTab", () => ({
     name,
     draft,
     onDraftChange,
+    onLoaded,
     onEdited,
   }: {
     kind: string;
     name: string;
     draft: string | null;
     onDraftChange: (yaml: string) => void;
+    onLoaded?: (yaml: string) => void;
     onEdited?: () => void;
   }) => (
     <div data-testid="edit-tab">
@@ -259,9 +261,21 @@ vi.mock("./components/EditResourceTab", () => ({
         value={draft ?? "kind: Deployment\nmetadata:\n  name: web\n"}
         onChange={(event) => onDraftChange(event.target.value)}
       />
+      {/* As the real tab reports a load: through `onLoaded`, else as an edit. */}
+      <button onClick={() => (onLoaded ?? onDraftChange)("kind: Deployment\nmetadata:\n  name: web\n")}>
+        mock manifest loads
+      </button>
       <button onClick={onEdited}>mock apply succeeds</button>
     </div>
   ),
+}));
+// Refused rather than real: a real switch would reload the test's window.
+const { switchDesignMock } = vi.hoisted(() => ({
+  switchDesignMock: vi.fn(() => Promise.resolve({ ok: false as const, reason: "not in tests" })),
+}));
+vi.mock("./design", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./design")>()),
+  switchDesign: switchDesignMock,
 }));
 vi.mock("./components/NewResourceEditor", () => ({
   NewResourceEditor: ({
@@ -298,7 +312,7 @@ vi.mock("./components/NewResourceEditor", () => ({
 
 import { App } from "./App";
 import { HANDOFF_KEY } from "./design";
-import { flushSaveOpenTabs } from "@srelens/core";
+import { flushSaveOpenTabs, writeAssistantSetting } from "@srelens/core";
 import { notify } from "@srelens/core/lib/notify";
 
 const context = (name: string) => ({
@@ -330,6 +344,43 @@ describe("App", () => {
     onView();
     expect(await screen.findByTestId("settings")).toBeDefined();
     delete (window as unknown as { __TAURI_INTERNALS__?: object }).__TAURI_INTERNALS__;
+  });
+
+  it("says the classic design is deprecated, with the way to the new one", () => {
+    render(<App />);
+    expect(screen.getByText(/classic design is deprecated/i)).toBeDefined();
+    expect(screen.getByRole("button", { name: "Switch to the new design" })).toBeDefined();
+  });
+
+  it("tells the deprecation banner about unsaved editor drafts before it switches", async () => {
+    render(<App />);
+    fireEvent.click(screen.getByText("open-kind-dev"));
+    fireEvent.click(screen.getByText("nav-services"));
+    fireEvent.click(screen.getByText("new-secret"));
+    fireEvent.change(screen.getByLabelText("mock new draft"), {
+      target: { value: "kind: Secret\nmetadata:\n  name: unsaved\n" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Switch to the new design" }));
+    expect(await screen.findByText(/discards 1 unsaved editor draft/i)).toBeDefined();
+  });
+
+  it("counts an edit tab as unsaved only once its manifest has been changed", async () => {
+    switchDesignMock.mockClear();
+    render(<App />);
+    fireEvent.click(screen.getByText("open-kind-dev"));
+    fireEvent.click(screen.getByText("nav-services"));
+    fireEvent.click(screen.getByText("edit-web"));
+    // Loaded and untouched: nothing to lose, so the switch is not held up.
+    fireEvent.click(screen.getByRole("button", { name: "mock manifest loads" }));
+    fireEvent.click(screen.getByRole("button", { name: "Switch to the new design" }));
+    await waitFor(() => expect(switchDesignMock).toHaveBeenCalledWith("next"));
+    expect(screen.queryByText(/unsaved editor draft/i)).toBeNull();
+
+    fireEvent.change(screen.getByLabelText("mock edit draft"), {
+      target: { value: "kind: Deployment\nmetadata:\n  name: changed\n" },
+    });
+    fireEvent.click(await screen.findByRole("button", { name: "Switch to the new design" }));
+    expect(await screen.findByText(/discards 1 unsaved editor draft/i)).toBeDefined();
   });
 
   it("shows the welcome state until a cluster is opened", () => {
@@ -585,6 +636,31 @@ describe("App", () => {
     fireEvent.click(screen.getByText("open-assistant"));
     expect(screen.getAllByRole("tab", { name: /^Assistant$/ })).toHaveLength(1);
     delete (window as unknown as { __TAURI_INTERNALS__?: object }).__TAURI_INTERNALS__;
+  });
+
+  // #968: the classic design honours the AI Assistant switch too.
+  it("opens no assistant while the AI Assistant is off", () => {
+    (window as unknown as { __TAURI_INTERNALS__?: object }).__TAURI_INTERNALS__ = {};
+    onTestFinished(() => { delete (window as unknown as { __TAURI_INTERNALS__?: object }).__TAURI_INTERNALS__; });
+    writeAssistantSetting({ enabled: false, disabledClusters: [] });
+    render(<App />);
+    fireEvent.click(screen.getByText("open-assistant"));
+    expect(screen.queryByTestId("assistant-tab")).toBeNull();
+    expect(screen.queryByRole("tab", { name: /^Assistant$/ })).toBeNull();
+  });
+
+  it("says the assistant is off on an Assistant tab left open when it was switched off", () => {
+    (window as unknown as { __TAURI_INTERNALS__?: object }).__TAURI_INTERNALS__ = {};
+    onTestFinished(() => { delete (window as unknown as { __TAURI_INTERNALS__?: object }).__TAURI_INTERNALS__; });
+    render(<App />);
+    fireEvent.click(screen.getByText("open-assistant"));
+    expect(screen.getByTestId("assistant-tab")).toBeDefined();
+
+    writeAssistantSetting({ enabled: false, disabledClusters: [] });
+    fireEvent.click(screen.getByText("open-settings"));
+    fireEvent.click(screen.getByRole("tab", { name: /^Assistant$/ }));
+    expect(screen.queryByTestId("assistant-tab")).toBeNull();
+    expect(screen.getByText("AI Assistant is off")).toBeDefined();
   });
 
   it("hides the assistant entry point in a web build", () => {

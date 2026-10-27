@@ -47,6 +47,41 @@ pub fn assert_every_app_operation_has_a_tool(
     if missing.is_empty() { Ok(()) } else { Err(missing) }
 }
 
+/// Returns Err(problems) for every tool in a `tools/list` result whose
+/// `inputSchema` an MCP client refuses. The TypeScript SDK's `ToolSchema`
+/// requires `type: "object"` at the root, every `properties` entry to be an
+/// object (not the `true` that schemars writes for a `serde_json::Value`), and
+/// `required` to be strings. Cursor applies it to the whole list, so one bad
+/// schema hides every srelens tool (#920).
+pub fn assert_every_input_schema_is_an_object(
+    tools: &[serde_json::Value],
+) -> Result<(), Vec<String>> {
+    let mut problems = Vec::new();
+    for tool in tools {
+        let name = tool["name"].as_str().unwrap_or("?");
+        let schema = &tool["inputSchema"];
+        if schema["type"] != "object" {
+            problems.push(format!("{name}: root type is {}, not \"object\"", schema["type"]));
+        }
+        match schema.get("properties") {
+            None => {}
+            Some(serde_json::Value::Object(props)) => problems.extend(
+                props
+                    .iter()
+                    .filter(|(_, p)| !p.is_object())
+                    .map(|(key, p)| format!("{name}: property {key} is {p}, not a schema object")),
+            ),
+            Some(other) => problems.push(format!("{name}: properties is {other}")),
+        }
+        if let Some(required) = schema.get("required") {
+            if !required.as_array().is_some_and(|r| r.iter().all(|k| k.is_string())) {
+                problems.push(format!("{name}: required is {required}"));
+            }
+        }
+    }
+    if problems.is_empty() { Ok(()) } else { Err(problems) }
+}
+
 /// A capability that mutates something (i.e. is not `read_only`) but is not
 /// confirm-gated would be executable by any client with no consent step —
 /// whether or not it also happens to be flagged `destructive`. A capability

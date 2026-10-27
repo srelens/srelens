@@ -1,4 +1,6 @@
 import { ContextLabel } from "../lib/contextLabel";
+import { useCollectionNameFilter } from "../lib/collectionNameFilter";
+import { CollectionNameNotice, CollectionScopeNotice, NamespaceScopePicker } from "./collections/NamespaceScope";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   describeError,
@@ -26,10 +28,11 @@ import {
   tableFilterError,
   type Column,
 } from "@srelens/ui-kit";
-import { useConsole } from "../console";
-import { getKubeconfigFiles, useActiveContext } from "../lib/clusters";
+import { useAsk } from "../console";
+import { getKubeconfigFiles, ScreenCluster, useActiveContext, useContexts, useContextsStatus } from "../lib/clusters";
 import { useHiddenColumns } from "../lib/columnPrefs";
 import { detailRoute, newRoute, parseDetailRoute } from "../lib/detailRoute";
+import { useEscapeToClose } from "../lib/escapeToClose";
 import { customDescriptor } from "../lib/kinds/custom";
 import { descriptorFor } from "../lib/kinds/descriptors";
 import { addNamespace, useRowRefocus, withNamespaceSelect } from "../lib/kinds/namespaceCell";
@@ -40,7 +43,7 @@ import { useResourceList } from "../lib/resourceList";
 import { describe, isBuiltInKind } from "../lib/routes";
 import { openTab, useTabs } from "../lib/tabsStore";
 import { useResource } from "../lib/useResource";
-import { useNamespaces, useSetNamespaces } from "../lib/workspace";
+import { useNamespaces, useFallbackNamespace, useSetNamespaces } from "../lib/workspace";
 import { FailureState, NamespaceFailuresAlert, StaleListAlert } from "../lib/errorCopy";
 import { useExtensions } from "../extensions/inventoryStore";
 import { qualifiedTableKind, useResolvedColumns } from "../extensions/useResolvedColumns";
@@ -52,7 +55,6 @@ import { useRowMenu } from "./ResourceMenu";
 import { ListCount } from "./ListCount";
 import {
   NamespaceErrorAlert,
-  NamespacePicker,
   NoClusterScreen,
   PausedClusterScreen,
   StaleSelectionAlert,
@@ -120,7 +122,7 @@ function KindList({
   const name = context.name;
   const files = getKubeconfigFiles();
   const builtIn = isBuiltInKind(slug);
-  const { ask } = useConsole();
+  const ask = useAsk();
 
   // Discovery runs only for a slug that is not one of core's kinds: listing
   // pods must not cost a CRD round trip, and must not fail on a cluster whose
@@ -169,13 +171,12 @@ function KindList({
 
   const selection = useNamespaces(context.stableId);
   const setNamespaces = useSetNamespaces();
-  const { namespaces, scope, error: namespaceError } = useNamespaceOptions(name, files);
+  const namespaceOptions = useNamespaceOptions(name, files);
+  const { namespaces, scope, error: namespaceError } = namespaceOptions;
 
   // A namespace-restricted credential has one namespace and no way to ask for
   // another. Written to this tab's selection, so the picker shows the scope.
-  useEffect(() => {
-    if (scope) setNamespaces(context.stableId, [scope]);
-  }, [scope, context.stableId, setNamespaces]);
+  useFallbackNamespace(context.stableId, scope);
 
   const clusterScoped = descriptor?.scope === "cluster";
   // Each selected namespace is listed on its own (#688); none is "all
@@ -185,10 +186,24 @@ function KindList({
   // for several — its contract is a single namespace, not the list's scopes.
   const namespace = clusterScoped ? "" : watchNamespaceForSelection(selection);
 
-  const rows = useMemo(
+  const scoped = useMemo(
     () => clusterScoped ? list.rows : list.rows.filter((row) => rowInSelection(row.namespace ?? "", selection)),
     [list.rows, clusterScoped, selection],
   );
+  // A collection the tab is scoped to may also narrow this kind's list to the
+  // names matching its expression (#885). Narrowed here, ahead of everything
+  // that reads `rows`, so the count, the columns, the bulk actions and the
+  // table all agree about what is listed.
+  const listKind = useMemo(
+    () => (descriptor ? { kind: descriptor.k8sKind, ...(descriptor.group ? { group: descriptor.group } : {}) } : undefined),
+    [descriptor],
+  );
+  const nameFilter = useCollectionNameFilter(context.stableId, listKind, scoped);
+  const narrow = nameFilter.apply;
+  // Keyed on `apply`, which changes only with the answer: the hook's result is
+  // a new object every render, and a new `rows` every render would re-run
+  // everything downstream of it.
+  const rows = useMemo(() => narrow(scoped), [narrow, scoped]);
   const inventory = useExtensions();
   const appColumns = useResolvedColumns({
     plugins: inventory.data?.plugins ?? [], context: name, contextId: context.key, namespace,
@@ -347,6 +362,24 @@ function KindList({
   const listRow = usePeekBounds();
   const peekWidth = clampPeekWidth(usePeekWidth(), listRow.bounds);
 
+  /**
+   * Dismiss the peek, and leave the keyboard on the row it was opened from.
+   *
+   * One way out for both of the panel's closers — its own button and Escape
+   * inside it, and Escape pressed anywhere else on this screen (#883). When
+   * the press came from inside the panel, focus goes with the panel as it
+   * leaves the page; `refocus` puts it back on the row, so the arrow keys
+   * carry on from where the reader was and Enter opens the next one. When
+   * focus never left the row, there is nothing to put back.
+   */
+  function closePeek() {
+    if (peek) refocus.remember(rowKey({ name: peek.name, namespace: peek.namespace ?? undefined }));
+    setPeek(null);
+  }
+  // `refocus.scope` is the list itself: an element of this screen, which is
+  // all the hook needs to know whether this tab is the one being looked at.
+  useEscapeToClose(peek !== null, closePeek, refocus.scope);
+
   function peekAt(rowNamespace: string | null, rowName: string) {
     setPeek((prev) =>
       prev && prev.name === rowName && prev.namespace === rowNamespace
@@ -396,6 +429,9 @@ function KindList({
   // declaration closes over the widest type `descriptor` ever has, so the
   // narrowing the guard above performed is not in scope within one.
   const k8sKind = descriptor.k8sKind;
+  // Set only by `customDescriptor`: a custom kind's name alone does not
+  // identify it, so the peek and the tab route carry its group (#919).
+  const group = descriptor.group;
 
   /**
    * Promote a row to a tab of its own — the row's double click and the peek
@@ -405,7 +441,7 @@ function KindList({
    * to stop.
    */
   function openRowTab(rowNamespace: string | null, rowName: string) {
-    openTab(detailRoute(k8sKind, rowNamespace, rowName), { clusterName: name });
+    openTab(detailRoute(k8sKind, rowNamespace, rowName, { cluster: name, group }), { clusterName: name });
   }
 
   // Loading and error each replace the table with their own state below; the
@@ -499,6 +535,7 @@ function KindList({
           <ResourceDetailView
             context={name}
             kind={descriptor.k8sKind}
+            group={group}
             namespace={peek.namespace}
             name={peek.name}
             // The one prop the tab host does not pass, carrying both of the
@@ -506,7 +543,7 @@ function KindList({
             // not dismiss: the reader asked for a tab, not for the list to
             // stop showing them what they were looking at.
             peek={{
-              onClose: () => setPeek(null),
+              onClose: closePeek,
               onOpenTab: () => openRowTab(peek.namespace, peek.name),
             }}
           />
@@ -573,11 +610,7 @@ function KindList({
         )}
       >
         {!clusterScoped && (
-          <NamespacePicker
-            namespaces={namespaces}
-            selection={selection}
-            onChange={(next) => setNamespaces(context.stableId, next)}
-          />
+          <NamespaceScopePicker context={context} options={namespaceOptions} />
         )}
       </FilterBar>
 
@@ -602,12 +635,18 @@ function KindList({
         </Alert>
       )}
 
+      {/* Outside the namespaced guard: a cluster-scoped list (Nodes, a
+          cluster-scoped custom kind) is narrowed by name too, and says so. */}
+      <CollectionNameNotice filter={nameFilter} noun={lower} />
       {!clusterScoped && (
-        <StaleSelectionAlert
-          selection={selection}
-          namespaces={namespaces}
-          onReset={() => setNamespaces(context.stableId, [])}
-        />
+        <>
+          <CollectionScopeNotice context={context} />
+          <StaleSelectionAlert
+            selection={selection}
+            namespaces={namespaces}
+            onReset={() => setNamespaces(context.stableId, [])}
+          />
+        </>
       )}
 
       {showRows && !list.stale && (
@@ -674,7 +713,7 @@ function KindList({
  * per-kind blocks, the same actions.
  *
  * Everything it shows comes out of the route string:
- * `/k/<kind>/<namespace>/<name>` already carries the Kubernetes kind — not
+ * `/k/<cluster>/<kind>/<namespace>/<name>` already carries the Kubernetes kind — not
  * the list screen's slug, and not for built-in kinds only, since
  * `customDescriptor` mints a CRD's route from `crd.kind` too — so there is
  * nothing to look up and nothing to keep in step with the list.
@@ -685,11 +724,29 @@ function KindList({
  * everything twice and cost the page a strip's worth of height.
  */
 export function ResourceDetailScreen({ route }: { route: string }) {
-  const context = useActiveContext();
+  const active = useActiveContext();
+  const contexts = useContexts();
+  const contextsStatus = useContextsStatus();
   const parts = parseDetailRoute(route);
+  // The cluster in the route, which this tab is pinned to whatever the rail
+  // does (#834); only a route an earlier build persisted follows the rail.
+  const context = parts?.cluster ? contexts.find((c) => c.name === parts.cluster) : active;
   // The strip's own title for this route — the resource's name — so the
   // guard below names the same thing the tab does.
   const title = parts?.name ?? describe(route).title;
+
+  if (!context && parts?.cluster && contextsStatus === "loaded") {
+    // Not `NoClusterScreen`: picking a cluster in the rail is no remedy for a
+    // tab pinned to one the kubeconfig has since lost.
+    return (
+      <Screen title={title} fill>
+        <ErrorState
+          title={`${parts.cluster} is no longer in your kubeconfig files`}
+          detail="This tab was opened on that cluster. Close it, or add the cluster back in Settings → Contexts."
+        />
+      </Screen>
+    );
+  }
 
   if (!context) {
     return <NoClusterScreen title={title} noun="resources" />;
@@ -704,20 +761,23 @@ export function ResourceDetailScreen({ route }: { route: string }) {
       <Screen title={title} eyebrow={<ContextLabel context={context} />} fill>
         <ErrorState
           title={`${route} does not name a resource`}
-          detail="A resource tab's route is /k/<kind>/<namespace>/<name>. Close this tab and open the resource from its list."
+          detail="A resource tab's route is /k/<cluster>/<kind>/<namespace>/<name>. Close this tab and open the resource from its list."
         />
       </Screen>
     );
   }
 
   return (
-    <div className="flex min-h-0 flex-1 flex-col">
-      <ResourceTabView
-        context={context.name}
-        kind={parts.kind}
-        namespace={parts.namespace}
-        name={parts.name}
-      />
-    </div>
+    <ScreenCluster.Provider value={context}>
+      <div className="flex min-h-0 flex-1 flex-col">
+        <ResourceTabView
+          context={context.name}
+          kind={parts.kind}
+          group={parts.group}
+          namespace={parts.namespace}
+          name={parts.name}
+        />
+      </div>
+    </ScreenCluster.Provider>
   );
 }

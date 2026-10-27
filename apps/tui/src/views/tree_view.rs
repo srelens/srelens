@@ -5,7 +5,7 @@ use ratatui::{
     widgets::{Block, Borders, Paragraph, Wrap},
     Frame,
 };
-use srelens_kube::lineage::{LineageNode, LineageRelation};
+use srelens_kube::lineage::{LineageNode, LineageRelation, NodeOutcome};
 
 use crate::theme::Theme;
 
@@ -14,9 +14,12 @@ pub struct FlattenedTreeNode {
     pub kind: String,
     pub name: String,
     pub namespace: Option<String>,
+    pub api_version: Option<String>,
+    pub uid: Option<String>,
     pub status: Option<String>,
     pub details: Option<String>,
     pub relationship: LineageRelation,
+    pub fetch_outcome: Option<NodeOutcome>,
     pub depth: usize,
     pub is_last_child: bool,
     pub prefix: String,
@@ -26,6 +29,7 @@ pub struct TreeViewState {
     pub root_kind: String,
     pub root_name: String,
     pub namespace: Option<String>,
+    pub api_version: Option<String>,
     pub nodes: Vec<FlattenedTreeNode>,
     pub raw_tree: Option<LineageNode>,
     pub selected_idx: usize,
@@ -36,10 +40,20 @@ pub struct TreeViewState {
 
 impl TreeViewState {
     pub fn new(kind: String, name: String, namespace: Option<String>) -> Self {
+        Self::with_api_version(kind, name, namespace, None)
+    }
+
+    pub fn with_api_version(
+        kind: String,
+        name: String,
+        namespace: Option<String>,
+        api_version: Option<String>,
+    ) -> Self {
         Self {
             root_kind: kind,
             root_name: name,
             namespace,
+            api_version,
             nodes: Vec::new(),
             raw_tree: None,
             selected_idx: 0,
@@ -108,12 +122,19 @@ impl TreeViewState {
         for node in &self.nodes {
             let st = node.status.as_deref().unwrap_or("-");
             let dt = node.details.as_deref().unwrap_or("");
+            let outcome_badge = node
+                .fetch_outcome
+                .as_ref()
+                .filter(|o| **o != NodeOutcome::Healthy)
+                .map(|o| format!(" {}", o.badge()))
+                .unwrap_or_default();
             out.push_str(&format!(
-                "{}{}/{} {} [status: {}] {}\n",
+                "{}{}/{} {}{} [status: {}] {}\n",
                 node.prefix,
                 node.kind,
                 node.name,
                 node.relationship.badge(),
+                outcome_badge,
                 st,
                 dt
             ));
@@ -142,9 +163,12 @@ fn flatten_lineage(
         kind: node.kind.clone(),
         name: node.name.clone(),
         namespace: node.namespace.clone(),
+        api_version: node.api_version.clone(),
+        uid: node.uid.clone(),
         status: node.status.clone(),
         details: node.details.clone(),
         relationship: node.relationship,
+        fetch_outcome: node.fetch_outcome.clone(),
         depth,
         is_last_child: is_last,
         prefix: full_prefix,
@@ -330,7 +354,25 @@ pub fn render_tree_view(f: &mut Frame, area: Rect, state: &TreeViewState) {
             spans.push(Span::styled(format!("[● {}]", status), st_style));
         }
 
-        // 6. Details
+        // 6. Outcome badge (for errors/not found/forbidden/timed out)
+        if let Some(outcome) = &node.fetch_outcome {
+            if outcome != &NodeOutcome::Healthy {
+                let badge = outcome.badge();
+                if !badge.is_empty() {
+                    let out_style = match outcome {
+                        NodeOutcome::NotFound | NodeOutcome::Error(_) => Theme::status_error(),
+                        NodeOutcome::Forbidden | NodeOutcome::TimedOut | NodeOutcome::Truncated => {
+                            Theme::status_warn()
+                        }
+                        NodeOutcome::Healthy => Style::default(),
+                    };
+                    spans.push(Span::raw(" "));
+                    spans.push(Span::styled(badge, out_style));
+                }
+            }
+        }
+
+        // 7. Details
         if let Some(details) = &node.details {
             spans.push(Span::raw(" "));
             spans.push(Span::styled(

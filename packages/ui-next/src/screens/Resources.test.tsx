@@ -147,9 +147,11 @@ proto.releasePointerCapture ??= () => {};
 import { describeError, type ClusterContext, type CrdRef, type K8sObject } from "@srelens/core";
 import { ResourceDetailScreen, Resources } from "./Resources";
 import { ConsoleProvider, useConsole } from "../console";
+import { setClusterAssistant } from "../lib/assistant";
 import * as store from "../lib/tabsStore";
 import { TabScope } from "../lib/tabScope";
 import { defaultState } from "../lib/tabs";
+import { detailRoute } from "../lib/detailRoute";
 import { resetContexts, setContexts, setKubeconfigFiles } from "../lib/clusters";
 import { hiddenColumns, loadColumnPrefs, toggleColumn } from "../lib/columnPrefs";
 import {
@@ -602,6 +604,23 @@ describe("Resources", () => {
   // Correction 3: every row gets a trailing ask chip that hands the row to
   // the console dock, naming the actual resource and its state — "Why is X
   // unhealthy?" for a bad row, a resource-use question otherwise.
+  it("draws no ask chip on rows while the AI Assistant is off for the cluster (#968)", async () => {
+    setClusterAssistant(CTX.stableId, false);
+    watchResource.mockImplementation(
+      async (_c: string, _n: string, _k: string, onRows: (rows: unknown[]) => void) => {
+        onRows([
+          { name: "bad-1", namespace: "default", ready: "0/1", phase: "CrashLoopBackOff", restarts: 9, node: "n1", age: "2d", image: "acme/checkout-worker:118a7e" },
+        ]);
+        return { stop };
+      },
+    );
+    open("/k/pods");
+    await waitFor(() => expect(rowNames()).toHaveLength(1));
+
+    const badRow = within(screen.getByText("bad-1").closest("tr")!);
+    expect(badRow.queryByRole("button", { name: /Why is bad-1 unhealthy\?/ })).toBeNull();
+  });
+
   it("offers an ask chip on each row that names the resource and its state", async () => {
     watchResource.mockImplementation(
       async (_c: string, _n: string, _k: string, onRows: (rows: unknown[]) => void) => {
@@ -988,7 +1007,7 @@ describe("Resources", () => {
    */
   describe("a node clicked in the Pods list", () => {
     const nodeTabs = () =>
-      store.currentWorkspace().tabs.filter((t) => t.route.startsWith("/k/Node/"));
+      store.currentWorkspace().tabs.filter((t) => t.route.startsWith("/k/prod-eu/Node/"));
 
     it("opens that node's detail in a tab on this cluster, and does not peek the pod", async () => {
       open("/k/pods");
@@ -1519,7 +1538,7 @@ describe("Resources", () => {
     expect(screen.queryByText("Stream lost")).toBeNull();
   });
 
-  it("opens the resource's /k/<kind>/<namespace>/<name> route when a row is activated", async () => {
+  it("opens the resource's /k/<cluster>/<kind>/<namespace>/<name> route when a row is activated", async () => {
     open("/k/pods");
     await waitFor(() => expect(rowNames()).toEqual(["web-1", "api-7"]));
 
@@ -1527,8 +1546,8 @@ describe("Resources", () => {
 
     // web-1's own namespace is "default" (PODS above) — the descriptor's
     // k8sKind ("Pod"), not the /k/pods slug, is what mints the route.
-    await waitFor(() => expect(tabFor("/k/Pod/default/web-1")).toBeTruthy());
-    expect(store.currentWorkspace().activeId).toBe(tabFor("/k/Pod/default/web-1").id);
+    await waitFor(() => expect(tabFor("/k/prod-eu/Pod/default/web-1")).toBeTruthy());
+    expect(store.currentWorkspace().activeId).toBe(tabFor("/k/prod-eu/Pod/default/web-1").id);
   });
 
   it("gives two same-named resources of different kinds their own tabs", async () => {
@@ -1544,7 +1563,7 @@ describe("Resources", () => {
     const podView = open("/k/pods");
     await waitFor(() => expect(rowNames()).toEqual(["web"]));
     fireEvent.doubleClick(screen.getByText("web").closest("tr")!);
-    await waitFor(() => expect(tabFor("/k/Pod/default/web")).toBeTruthy());
+    await waitFor(() => expect(tabFor("/k/prod-eu/Pod/default/web")).toBeTruthy());
     podView.unmount();
 
     watchResource.mockImplementation(
@@ -1556,13 +1575,13 @@ describe("Resources", () => {
     open("/k/configmaps");
     await waitFor(() => expect(rowNames()).toEqual(["web"]));
     fireEvent.doubleClick(screen.getByText("web").closest("tr")!);
-    await waitFor(() => expect(tabFor("/k/ConfigMap/default/web")).toBeTruthy());
+    await waitFor(() => expect(tabFor("/k/prod-eu/ConfigMap/default/web")).toBeTruthy());
 
     const tabs = store.currentWorkspace().tabs;
-    expect(tabs.some((t) => t.route === "/k/Pod/default/web")).toBe(true);
-    expect(tabs.some((t) => t.route === "/k/ConfigMap/default/web")).toBe(true);
+    expect(tabs.some((t) => t.route === "/k/prod-eu/Pod/default/web")).toBe(true);
+    expect(tabs.some((t) => t.route === "/k/prod-eu/ConfigMap/default/web")).toBe(true);
     // Two distinct tabs, not one that the second activation merely reused.
-    expect(tabFor("/k/Pod/default/web").id).not.toBe(tabFor("/k/ConfigMap/default/web").id);
+    expect(tabFor("/k/prod-eu/Pod/default/web").id).not.toBe(tabFor("/k/prod-eu/ConfigMap/default/web").id);
   });
 
   it("deletes only the checked row when two selected candidates share a name across namespaces", async () => {
@@ -1625,6 +1644,98 @@ describe("the detail pane's two hosts", () => {
     await waitFor(() => expect(peekPane()).toBeNull());
     // The table is still there — dismissing the peek is not leaving the list.
     expect(rowNames()).toEqual(["web-1", "api-7"]);
+  });
+
+  /**
+   * #883: the peek is opened by clicking a row, which leaves focus on the
+   * row. Escape pressed then was a key pressed outside the panel, and the
+   * panel only listened inside itself.
+   */
+  describe("Escape", () => {
+    const tableRow = (name: string) => row(name).closest("tr") as HTMLElement;
+    const peeked = async (name = "web-1") => {
+      open("/k/pods");
+      await waitFor(() => expect(rowNames()).toEqual(["web-1", "api-7"]));
+      fireEvent.click(row(name));
+      await waitFor(() => expect(paneName()).toBe(name));
+    };
+
+    it("closes the peek with focus still on the row that opened it, and leaves focus there", async () => {
+      await peeked();
+      tableRow("web-1").focus();
+
+      fireEvent.keyDown(tableRow("web-1"), { key: "Escape" });
+
+      await waitFor(() => expect(peekPane()).toBeNull());
+      expect(rowNames()).toEqual(["web-1", "api-7"]);
+      expect(document.activeElement).toBe(tableRow("web-1"));
+    });
+
+    it("closes the peek with focus nowhere in particular", async () => {
+      await peeked();
+      fireEvent.keyDown(document.body, { key: "Escape" });
+      await waitFor(() => expect(peekPane()).toBeNull());
+    });
+
+    it("closes it once from inside the panel, and hands the keyboard back to the row", async () => {
+      await peeked();
+      const close = screen.getByRole("button", { name: "Close inspector" });
+      close.focus();
+
+      fireEvent.keyDown(close, { key: "Escape" });
+
+      await waitFor(() => expect(peekPane()).toBeNull());
+      // Focus went with the panel as it left; it is put back on the row, so
+      // the arrow keys carry on from where the reader was.
+      await waitFor(() => expect(document.activeElement).toBe(tableRow("web-1")));
+    });
+
+    it("hands the keyboard back to the row when the panel is closed by its button, too", async () => {
+      await peeked("api-7");
+      await userEvent.click(screen.getByRole("button", { name: "Close inspector" }));
+      await waitFor(() => expect(peekPane()).toBeNull());
+      await waitFor(() => expect(document.activeElement).toBe(tableRow("api-7")));
+    });
+
+    it("leaves the peek open when Escape is the filter box's: it has a filter to clear", async () => {
+      await peeked();
+      const filter = screen.getByRole("searchbox", { name: "Filter pods" }) as HTMLInputElement;
+      await userEvent.type(filter, "web");
+      await userEvent.keyboard("{Escape}");
+      // The filter took the key and cleared itself; the panel is untouched —
+      // still there a moment later, so a close that was only deferred would
+      // not slip past this.
+      expect(filter.value).toBe("");
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      });
+      expect(peekPane()).not.toBeNull();
+    });
+
+    it("closes the peek from an empty filter box, which has no use for the key", async () => {
+      // The kit's own rule: a filter claims Escape only while it has
+      // something to drop, so the reader is not trapped one level down.
+      await peeked();
+      screen.getByRole("searchbox", { name: "Filter pods" }).focus();
+      await userEvent.keyboard("{Escape}");
+      await waitFor(() => expect(peekPane()).toBeNull());
+    });
+
+    it("opens the next row's detail after closing one, with nothing left over", async () => {
+      await peeked();
+      fireEvent.keyDown(document.body, { key: "Escape" });
+      await waitFor(() => expect(peekPane()).toBeNull());
+      fireEvent.click(row("api-7"));
+      await waitFor(() => expect(paneName()).toBe("api-7"));
+    });
+
+    it("does nothing with no peek open", async () => {
+      open("/k/pods");
+      await waitFor(() => expect(rowNames()).toEqual(["web-1", "api-7"]));
+      fireEvent.keyDown(document.body, { key: "Escape" });
+      expect(rowNames()).toEqual(["web-1", "api-7"]);
+      expect(peekPane()).toBeNull();
+    });
   });
 
   it("does not refetch when the peek is already showing that row", async () => {
@@ -1747,6 +1858,47 @@ describe("the detail pane's two hosts", () => {
     expect(getObject).toHaveBeenCalledWith("prod-eu", "Node", null, "worker-1");
   });
 
+  /**
+   * #834: a detail tab belongs to the cluster it was opened on. It read
+   * `useActiveContext()`, so moving the rail turned prod's worker-1 into
+   * staging's worker-1 under the same tab.
+   */
+  it("reads the cluster in its route, and keeps reading it when the rail moves", async () => {
+    setContexts([CTX, STAGE]);
+    store.setState(defaultState([CTX, STAGE]));
+
+    openDetailTab(detailRoute("Node", null, "worker-1", { cluster: "stage-eu" }));
+
+    await waitFor(() => expect(paneName()).toBe("worker-1"));
+    expect(getObject).toHaveBeenCalledWith("stage-eu", "Node", null, "worker-1");
+
+    act(() => store.setActiveCluster("stage", "stage-eu"));
+    act(() => store.setActiveCluster("prod", "prod-eu"));
+
+    expect(getObject).not.toHaveBeenCalledWith("prod-eu", "Node", null, "worker-1");
+    expect(tabProps[tabProps.length - 1].context).toBe("stage-eu");
+  });
+
+  it("opens a pod's node link on the tab's own cluster, not the rail's (#834)", async () => {
+    setContexts([CTX, STAGE]);
+    store.setState(defaultState([CTX, STAGE]));
+    getObject.mockImplementation(async (_c: string, kind: string, namespace: string | null, name: string) => ({
+      object: { kind, apiVersion: "v1", metadata: { name, ...(namespace ? { namespace } : {}) }, spec: { nodeName: "n1" } },
+    }));
+
+    openDetailTab(detailRoute("Pod", "default", "web-1", { cluster: "stage-eu" }));
+    await userEvent.click((await screen.findAllByRole("button", { name: "Open node n1" }))[0]);
+
+    expect(store.activeRoute()).toBe(detailRoute("Node", null, "n1", { cluster: "stage-eu" }));
+  });
+
+  it("says its cluster is gone, rather than reading another, when the kubeconfig no longer has it", async () => {
+    openDetailTab(detailRoute("Node", null, "worker-1", { cluster: "gone-eu" }));
+
+    expect(screen.getByText("gone-eu is no longer in your kubeconfig files")).toBeTruthy();
+    expect(getObject).not.toHaveBeenCalled();
+  });
+
   it("prompts for a cluster rather than reading anything when the workspace has none", async () => {
     setContexts([]);
     store.setState(defaultState([]));
@@ -1799,6 +1951,41 @@ describe("the detail pane's two hosts", () => {
     expect(fromTab).toEqual(subject);
   });
 
+  it("reads a grouped detail tab in its own group, and hands the group to the tab (#919)", async () => {
+    listCrds.mockResolvedValue({
+      crds: [
+        { name: "deployments.acme.io", group: "acme.io", version: "v1", kind: "Deployment", plural: "deployments", namespaced: true },
+      ],
+    });
+    getObject.mockResolvedValue({ object: { kind: "Deployment", metadata: { name: "api", namespace: "default" } } });
+    openDetailTab("/k/prod-eu/acme.io%2FDeployment/default/api");
+    await waitFor(() =>
+      expect(getObject).toHaveBeenCalledWith("prod-eu", "Deployment", "default", "api", undefined, {
+        group: "acme.io",
+        version: "v1",
+        plural: "deployments",
+      }),
+    );
+    expect(tabProps.at(-1)).toMatchObject({ kind: "Deployment", group: "acme.io" });
+  });
+
+  it("hands a custom resource's group to its peek and to the tab it opens (#919)", async () => {
+    listCrds.mockResolvedValue({ crds: [WIDGETS] });
+    listCustomResource.mockResolvedValue({
+      items: [{ name: "left", namespace: "default", age: "1d", columns: ["Ready"] }],
+    });
+    open("/k/widgets.example.com");
+    await waitFor(() => expect(rowNames()).toEqual(["left"]));
+
+    fireEvent.click(row("left"));
+    await waitFor(() =>
+      expect(lastDetailProps()).toMatchObject({ kind: "Widget", group: "example.com", name: "left" }),
+    );
+
+    fireEvent.doubleClick(row("left"));
+    await waitFor(() => expect(tabFor("/k/prod-eu/example.com%2FWidget/default/left")).toBeTruthy());
+  });
+
   it("promotes the peeked row to its own tab, at the very route a double click opens", async () => {
     open("/k/pods");
     await waitFor(() => expect(rowNames()).toEqual(["web-1", "api-7"]));
@@ -1807,8 +1994,8 @@ describe("the detail pane's two hosts", () => {
 
     await userEvent.click(screen.getByRole("button", { name: "Open tab" }));
 
-    await waitFor(() => expect(tabFor("/k/Pod/default/web-1")).toBeTruthy());
-    expect(store.currentWorkspace().activeId).toBe(tabFor("/k/Pod/default/web-1").id);
+    await waitFor(() => expect(tabFor("/k/prod-eu/Pod/default/web-1")).toBeTruthy());
+    expect(store.currentWorkspace().activeId).toBe(tabFor("/k/prod-eu/Pod/default/web-1").id);
     const routes = store.currentWorkspace().tabs.map((t) => t.route);
 
     // The same route the row's own activate gesture mints. `openTab` dedupes

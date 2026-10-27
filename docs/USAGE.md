@@ -129,6 +129,42 @@ The selection belongs to the tab. In the new design a tab opened from another, s
 as Deployments from the sidebar while you are on Pods, starts with that tab's
 selection and is independent from then on.
 
+**Namespace collections.** In the new design the namespace selector also offers
+*collections*: saved groups of namespaces, on a **Collections** tab beside the
+**Namespaces** tab, most recently used first. Each tab counts what is chosen on
+it. A collection is any mix of:
+
+- **members**: namespaces that are always included;
+- **patterns**: names with `*` for any run of characters (`prod-*`, `*-canary`,
+  `team-*-staging`), case-sensitive;
+- **a label selector**, as `kubectl get -l` takes it (`env=prod`,
+  `team in (shop,data)`).
+
+A namespace is in the collection if it is a member, or if it matches the patterns
+and the selector (both, when both are set). Choosing one or more collections
+scopes the list to whatever they match on the cluster you are looking at — their
+union — so one collection works on every cluster; picking namespaces by hand
+replaces it again. If a collection matches nothing there, the list is empty and
+says so, rather than falling back to all namespaces.
+
+Pick namespaces and choose **Save as collection…** in the selector to save them
+as one, or manage them all in **Settings → Collections**, where the editor checks
+each pattern and selector as you type and previews what the collection matches on
+the cluster in focus, marking each member found or not found. Tick a namespace in
+the preview to keep it as a member. Members can be
+pasted as a list separated by commas or new lines. Collections are kept with your
+settings, so they are the same in every window and survive a restart.
+
+A collection can also **filter resources**. Switch on *Filter resources* in its
+editor, choose the kinds it applies to from the ones the cluster serves, and give
+a regular expression for resource names (`^payment-` for names that start so,
+`canary` for names that contain it). With the collection chosen in the namespace
+selector, the lists of those kinds show only the resources, inside its
+namespaces, whose name matches; a line above the list says so. Other kinds' lists
+are only scoped to the namespaces. With several collections chosen, a list is
+narrowed only when each of them filters its kind, and shows a name any of their
+expressions matches.
+
 **Bulk actions.** Select rows with their checkboxes to reveal a bar with **Delete**,
 **Evict** (Pods), and **Rollout restart** (Deployments, StatefulSets, DaemonSets).
 Each is confirmation-gated and reports partial failures.
@@ -262,7 +298,8 @@ srelens opens interactive sessions in the dock:
 - **Local terminal** — your own shell on your machine, bound to one cluster. Open
   it with **Terminal** in the status bar (or **Cmd/Ctrl-J**) for the cluster you
   are looking at, or from **Terminals → New session → Local shell**. See
-  [A terminal bound to one cluster](#a-terminal-bound-to-one-cluster).
+  [A terminal bound to one cluster](#a-terminal-bound-to-one-cluster) and
+  [The terminal panel](#the-terminal-panel).
 - **Node shell** — a privileged debug pod pinned to a node that enters the host
   namespaces (via `nsenter`), for node-level troubleshooting. Open it from a
   Node's **Node shell** action; the pod is deleted automatically when you close the
@@ -271,6 +308,34 @@ srelens opens interactive sessions in the dock:
 Dock sessions stay alive when you switch tabs, so scrollback and live streams are
 preserved. Resize the dock by dragging its top edge; close individual sessions or
 the whole dock.
+
+### The terminal panel
+
+In the new design, **Terminal** in the status bar (or **Cmd/Ctrl-J**) opens the
+shell in a panel at the bottom of the page you are on — under the Pods list, if
+that is where you are — so the list stays in view while you type.
+
+- The panel takes half the page. Drag its top edge (or focus the edge and use the
+  arrow keys) to resize it; the size is kept.
+- **Maximize** fills the page with the terminal; **Restore** brings the page back.
+- **Minimize** folds the panel down to its header, giving the page (and an agent
+  answer in the console below) the room back; the shell keeps running.
+  **Terminal** or **Cmd/Ctrl-J** brings it back up.
+- **Open in tab** moves the shell to the Terminals tab, scrollback and all.
+- **Close** hides the panel and leaves the shell running. **Terminal** or
+  **Cmd/Ctrl-J** on the same tab shows it again; the shell is also listed in
+  Terminals. **Detach** ends it.
+- Each tab has its own panel, kept while you are on other tabs.
+
+The agent console along the bottom of the window (framed in the accent colour,
+so it is easy to tell apart) has the same controls in its header: **Minimize**
+folds it down to its prompt (typing in the prompt opens it again), **Maximize**
+fills the content area with the conversation, **Open in full view** opens the
+Agent tab, and **Clear** clears the conversation. Drag its top edge to make the
+conversation taller or shorter; the size is kept.
+
+Terminals are drawn in the app's own monospace font and size, in the panel and
+in the Terminals tab alike.
 
 ### A terminal bound to one cluster
 
@@ -290,6 +355,13 @@ there does not land on another cluster by accident:
   `unset KUBECONFIG` fail instead of quietly leaving the cluster.
 - The terminal opens with a line saying which cluster it is bound to, and in bash
   and zsh the prompt starts with `[cluster/namespace]`.
+- On a cluster that a protected workspace holds, the terminal is also read-only
+  (on macOS and Linux; on Windows, see below). `kubectl` and `helm` run only the
+  subcommands that read, such as `get`, `describe`, `logs`, `rollout status` and
+  `helm list`. Anything else is refused with a line saying the cluster is
+  protected. The opening line says the terminal is read-only, and in bash and
+  zsh the prompt tag reads `[cluster/namespace read-only]`. A terminal keeps the
+  mode it opened in.
 - Opened from a tab that is looking at exactly one namespace, the terminal starts
   in that namespace.
 
@@ -301,12 +373,22 @@ a guard against accidents, not a sandbox. It does not cover:
 - tools other than `kubectl` and `helm` that are given another kubeconfig through
   their own flags;
 - shells other than bash and zsh (fish, for example), which get the private
-  kubeconfig and the `kubectl`/`helm` guards but not the read-only variable or the
-  prompt tag;
+  kubeconfig and the `kubectl`/`helm` guards but not the read-only `KUBECONFIG`
+  or the prompt tag;
+- in a read-only terminal, a shell other than bash, zsh and fish whose own
+  config puts another `kubectl` or `helm` ahead of srelens's guards on `PATH`.
+  bash and zsh put the guards back first at every prompt, and fish after
+  reading its config; in any other shell the read-only guard holds only while
+  the shell's own config leaves srelens's directory first on `PATH`;
+- in a read-only terminal, programs other than `kubectl` and `helm` (k9s, the
+  `argocd` and `flux` CLIs, scripts that use `$KUBECONFIG`), and `kubectl` or
+  `helm` run by their full path: these can still change a protected cluster;
 - prompt themes that redraw the whole prompt and drop the tag;
 - deliberately calling the real binary by its full path, or starting a new shell
   with a clean environment;
-- the Windows desktop, where the terminal gets the private kubeconfig only.
+- the Windows desktop, where the terminal gets the private kubeconfig only. A
+  protected cluster's terminal can't be made read-only there, so it opens only
+  after you type the cluster's name.
 
 ## Port forwarding
 
@@ -378,7 +460,7 @@ each key applies. The ones worth knowing before you look:
 | **Cmd-W** (macOS only) | Close the tab — or the window, on the last one. It comes from the macOS app menu, so there is no Windows/Linux equivalent yet. |
 | **Cmd/Ctrl +** / **-** / **0** | Interface larger / smaller / reset |
 | **Cmd/Ctrl-F** | Search the terminal's scrollback, or find in the YAML editor |
-| **Esc** | Close the open dialog, drawer, or search bar |
+| **Esc** | Close the open dialog or menu, clear a search field, or close the detail panel beside a list (one thing per press, innermost first) |
 
 ## Deep links
 
@@ -425,6 +507,22 @@ no longer resets them and a search typed in one list never carries into another.
 These are restored along with the tabs themselves. Column show/hide choices
 remain shared by every tab of the same kind.
 
+In the new design **each cluster keeps its own tabs**. Switching cluster in the
+sidebar puts the tabs of the cluster you leave away and brings back the ones
+the cluster you switch to last had, with the tab that was active there active
+again; a cluster you look at for the first time opens on its overview. Each
+cluster's tabs are remembered across disconnects and restarts.
+
+- App-wide tabs (Home, Settings, Connections) stay on screen whichever cluster
+  is in focus.
+- An **Edit** or **New resource** tab also stays: it names its own cluster and
+  goes on showing it, so unsaved changes are not lost to a switch.
+- **Reopen closed tab** brings back tabs closed on the cluster in focus, or
+  app-wide ones. Home's *Pick up where you left off* lists closed tabs from
+  every cluster and reopens each on its own.
+- Removing a cluster from a workspace, or from the kubeconfig, forgets its
+  tabs.
+
 ## Application logs
 
 srelens keeps its own rotating log file so you can diagnose problems after they
@@ -460,8 +558,15 @@ AI clients, using your locally authenticated cluster contexts. Open
   is never sent anywhere.
 
 Both transports support **resource subscriptions** (`resources/subscribe` on
-`k8s://` object URIs): the server pushes a `notifications/resources/updated`
-when the watched object changes, and the client re-reads. Over stdio,
+`k8s://` object URIs, including `/events`): the server pushes a
+`notifications/resources/updated` when the watched object or its matching Event
+collection changes, and the client re-reads. An `/events` subscription watches
+Events filtered by the involved object's name and kind, in its namespace (or
+across namespaces for a cluster-scoped object). A change to the parent object
+alone does not trigger an event-list notification. Initial lists and relists
+also notify, so changes between reading and subscribing are not missed. The
+32-subscription limit and existing resource restrictions still apply; pod log
+resources remain readable but cannot be subscribed to. Over stdio,
 notifications arrive on the server's stdout. Over HTTP, the client first opens
 the push channel — `GET /mcp` with `Accept: text/event-stream`, same bearer
 token — and notifications arrive as SSE events on that stream; subscribing
@@ -618,8 +723,12 @@ The top bar has a **Star** button that opens the srelens repository on GitHub; a
 star helps other people find the project. After you have used the app for a few
 days it asks once, in a small callout, whether you would like to star it, and
 never asks again whichever way you answer. It does not ask at all if you have
-already used one of the app's Star buttons. To show the star count, srelens makes
-one unauthenticated request a day to the public GitHub API; if that fails the
+already used one of the app's Star buttons. To show the star count, srelens asks
+the public GitHub API, unauthenticated: when it starts, about every half hour
+while it is open, when you come back to its window after a quarter of an hour
+away, and just after you have used a Star button — never more than once a
+minute, and not at all for up to an hour once GitHub says the hourly allowance
+for your address is spent. If a request fails the
 button keeps the last count it had, or shows no number if it never had one. The
-button is not shown while the workspace is locked. **Settings → Workspace → srelens on GitHub** hides
-the button, which also stops that request.
+button is not shown while the workspace is locked. **Settings → Session & layout → srelens on GitHub** hides
+the button, which also stops those requests.

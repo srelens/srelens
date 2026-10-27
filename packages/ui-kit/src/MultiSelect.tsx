@@ -1,4 +1,6 @@
+import { useState, type ReactNode } from "react";
 import { Picker, PickerRow, optionLabel, type ComboboxOption } from "./picker";
+import { Tabs } from "./Tabs";
 import { filled } from "./slot";
 
 export interface MultiSelectProps {
@@ -14,6 +16,47 @@ export interface MultiSelectProps {
   searchPlaceholder?: string;
   ariaLabel?: string;
   className?: string;
+  /**
+   * A second kind of choice made in the same place, on a tab of its own
+   * beside the options — the namespace picker's collections (#881). With it,
+   * the popover opens on a tab strip: the options under `optionsLabel`, this
+   * under its own `label`, each counting what is chosen on it.
+   */
+  otherTab?: {
+    label: string;
+    /** How many are chosen on it, shown on the tab when there are any. */
+    count: number;
+    /** Its rows, given a way to close the popover. */
+    rows: (close: () => void) => ReactNode;
+    /** What it says when it has no rows. */
+    empty?: ReactNode;
+  };
+  /** The options' tab, when there is an `otherTab`. */
+  optionsLabel?: string;
+  /**
+   * Whether to offer Select all and to count the options on the "all" row.
+   * Off for a picker whose options are filters of the list rather than parts
+   * of it, where every one of them at once is not a thing anyone wants and
+   * the count reads as a count of the list.
+   */
+  selectAll?: boolean;
+  /** What the options say when there are none; "No results" otherwise. */
+  empty?: ReactNode;
+  /** Which tab the popover opens on; the options unless told otherwise. */
+  openOn?: "options" | "other";
+  /**
+   * What the trigger says, when the selection alone does not say it — the
+   * caller's other choice is in force.
+   */
+  summary?: string;
+  /** Whether the "all" row is the current state; by default, an empty selection is. */
+  allChecked?: boolean;
+  /**
+   * Footer controls of the caller's own, on a row of their own under the
+   * count, Select all and Reset: the popover is narrow, and one row of five
+   * controls wraps their labels and cuts the last one off.
+   */
+  footerExtra?: ReactNode;
 }
 
 /**
@@ -47,7 +90,16 @@ export function MultiSelect({
   searchPlaceholder,
   ariaLabel,
   className,
+  otherTab,
+  optionsLabel = "Options",
+  openOn = "options",
+  selectAll = true,
+  empty,
+  summary,
+  allChecked,
+  footerExtra,
 }: MultiSelectProps) {
+  const [view, setView] = useState<"options" | "other">(openOn);
   // A Set, so a repeated value cannot produce two rows with the same key, and
   // iterating it still yields the caller's order.
   const chosen = new Set(selection);
@@ -92,7 +144,24 @@ export function MultiSelect({
 
   return (
     <Picker
-      summary={summarize()}
+      summary={summary ?? summarize()}
+      // Each time it opens, on the tab the caller says is the one in force.
+      onOpenChange={(open) => open && setView(openOn)}
+      header={
+        otherTab && (
+          <Tabs
+            variant="segmented"
+            label={ariaLabel ? `${ariaLabel}: show` : "Show"}
+            active={view}
+            onChange={(id) => setView(id === "other" ? "other" : "options")}
+            tabs={[
+              { id: "options", label: counted(optionsLabel, selection.length) },
+              { id: "other", label: counted(otherTab.label, otherTab.count) },
+            ]}
+          />
+        )
+      }
+      empty={view === "other" ? otherTab?.empty : empty}
       ariaLabel={ariaLabel}
       searchPlaceholder={searchPlaceholder}
       className={className}
@@ -101,29 +170,43 @@ export function MultiSelect({
           {/* What the list currently amounts to, in the design's label voice.
               "all" rather than "0 selected", because an empty selection is not
               an empty result — it is the filter switched off. */}
-          <span className="eyebrow flex-1">
-            {selection.length === 0 ? "all" : selection.length} selected
-          </span>
-          <button type="button" className="btn !py-0" onClick={() => onChange(options.map((o) => o.value))}>
-            Select all
-          </button>
+          {otherTab && view === "other" ? (
+            // The caller's tab counts its own, and "Select all" — every
+            // option on the other tab — is not a thing to offer from here.
+            <span className="eyebrow flex-1">{otherTab.count} chosen</span>
+          ) : (
+            <>
+              <span className="eyebrow flex-1">
+                {selection.length === 0 ? "all" : selection.length} selected
+              </span>
+              {selectAll && (
+                <button type="button" className="btn !py-0" onClick={() => onChange(options.map((o) => o.value))}>
+                  Select all
+                </button>
+              )}
+            </>
+          )}
           <button type="button" className="btn !py-0" onClick={() => onChange([])}>
             Reset
           </button>
+          {footerExtra !== undefined && (
+            <div className="flex w-full basis-full items-center gap-1.5">{footerExtra}</div>
+          )}
         </>
       }
     >
-      {(close) => (
+      {(close) => {
+        const rows = (
         <>
           {all !== undefined && (
             <PickerRow
               value={all}
               label={all}
-              checked={selection.length === 0}
+              checked={allChecked ?? selection.length === 0}
               onSelect={() => onChange([])}
               // A check, not a box: this is not one more thing to switch on
               // beside the others, it is the absence of any of them.
-              trailing={<span className="path text-faint">{options.length}</span>}
+              trailing={selectAll ? <span className="path text-faint">{options.length}</span> : undefined}
             />
           )}
           {ordered.map((option) => (
@@ -154,7 +237,26 @@ export function MultiSelect({
             />
           ))}
         </>
-      )}
+        );
+        if (otherTab && view === "other") return otherTab.rows(close);
+        // With no options the list is never empty — the "all" row is there —
+        // so the caller's message would never show as the list's own.
+        // Without one, the list's own empty state says it, once.
+        if (options.length === 0 && empty !== undefined && all !== undefined) {
+          return (
+            <>
+              {rows}
+              <p className="px-3 py-3 text-center text-[0.75rem] text-faint">{empty}</p>
+            </>
+          );
+        }
+        return rows;
+      }}
     </Picker>
   );
+}
+
+/** "Namespaces (3)", or the bare label when nothing is chosen there. */
+function counted(label: string, count: number): string {
+  return count > 0 ? `${label} (${count})` : label;
 }

@@ -11,9 +11,9 @@
     "test:packages": "pnpm -r test"
   },
   "devDependencies": {
-    "@vitest/coverage-v8": "^4.1.11",
+    "@vitest/coverage-v8": "^4.1.12",
     "turbo": "^2.0.0",
-    "vitest": "^4.1.11"
+    "vitest": "^4.1.12"
   },
   "engines": {
     "node": "24.x || 26.x"

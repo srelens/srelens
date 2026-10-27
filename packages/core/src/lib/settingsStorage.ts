@@ -162,6 +162,25 @@ export const settingsStorage = {
   },
 };
 
+/**
+ * Read one key again from the backend, after this window's own writes have
+ * landed.
+ *
+ * A window loads its settings once and writes whole values. For a value that
+ * is a list two windows both add to, that loses whichever wrote first: the
+ * second window writes the list it loaded, without the first one's entry. A
+ * writer that must not do that looks again before it writes. Rejects when the
+ * backend cannot be read; before the backend is in use there is nothing to
+ * look at again, and it does nothing.
+ */
+export async function refreshSetting(key: string): Promise<void> {
+  if (!initializationAttempted || !backendReady) return;
+  await writes;
+  const loaded = await readBackendSettings();
+  if (Object.prototype.hasOwnProperty.call(loaded.values, key)) values.set(key, loaded.values[key]);
+  else values.delete(key);
+}
+
 /** Test seam for callers that need to observe queued write completion. */
 export async function flushSettingsWrites(options: { throwOnError?: boolean } = {}): Promise<void> {
   await writes;

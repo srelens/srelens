@@ -543,6 +543,39 @@ describe("SettingsView", () => {
     expect(screen.queryByRole("button", { name: /Download & install/ })).toBeNull();
   });
 
+  it("offers Nix profile guidance instead of install for Nix installs", async () => {
+    updaterMocks.checkForUpdate.mockResolvedValue({
+      version: "0.2.0",
+      currentVersion: "0.1.0",
+      notes: "New things",
+      external: true,
+      nixManaged: true,
+    });
+    render(
+      <SettingsView
+        theme={{ name: "slate", mode: "dark" }}
+        onThemeNameChange={() => {}}
+        onThemeModeChange={() => {}}
+        defaultNamespace=""
+        onDefaultNamespaceChange={() => {}}
+        layout={DEFAULT_WORKSPACE_LAYOUT}
+        onLayoutChange={() => {}}
+        contextProfiles={{}}
+        onContextProfilesChange={() => {}}
+        kubeconfigFiles={[]}
+        onKubeconfigFilesChange={() => {}}
+        contextOrder={[]}
+        onContextOrderChange={() => {}}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: /Updates/ }));
+    fireEvent.click(await screen.findByRole("button", { name: "Check for updates" }));
+    expect(await screen.findByText(/0\.2\.0/)).toBeDefined();
+    expect(screen.getByText(/managed by Nix/)).toBeDefined();
+    expect(screen.getByText(/nix profile upgrade/)).toBeDefined();
+    expect(screen.queryByRole("button", { name: /Download & install/ })).toBeNull();
+  });
+
   it("warns before a .deb/.rpm update asks for a password (#35)", async () => {
     updaterMocks.checkForUpdate.mockResolvedValue({
       version: "0.2.0",

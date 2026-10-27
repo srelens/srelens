@@ -1,6 +1,8 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
+  checkForUpdateAndNotify,
   cleanErrorMessage,
+  closeCurrentWindow,
   describeError,
   isApplePlatform,
   isTauri,
@@ -8,7 +10,11 @@ import {
   loadKubeconfigFiles,
   listenForHostNotices,
   loadMcpSettings,
+  loadUpdateChannel,
+  notify,
+  on,
   rehydrateForwards,
+  setNotifier,
   startMcpHttp,
   vaultLock,
   type ClusterContext,
@@ -30,6 +36,8 @@ import {
 } from "@srelens/ui-kit";
 import { contextLabelFor } from "../lib/agentSuggestions";
 import {
+  getContexts,
+  getKubeconfigFiles,
   pinContextKey,
   resolveContext,
   setContexts,
@@ -44,11 +52,14 @@ import { getMark, getContextLabel, loadMarks, useMark } from "../lib/marks";
 import { useContextLabel } from "../lib/contextLabel";
 import { mcpAutoStartSettled, mcpAutoStartStarting } from "../lib/mcpAutoStart";
 import { openCluster } from "../lib/openCluster";
+import { openSettings } from "../lib/settingsRequest";
 import { loadPeekWidth } from "../lib/peekWidth";
 import { loadSectionFolds } from "../lib/sectionFolds";
 import { loadExpanded } from "../lib/workspace";
 import { TabScope } from "../lib/tabScope";
 import { getInfo, probeCluster } from "../lib/probe";
+import { followMainProtection } from "../lib/protection";
+import { followAssistantSetting } from "../lib/assistant";
 import { defaultState, makeTab, reconcile, type TabsState } from "../lib/tabs";
 import { parseEditRoute, parseNewRoute } from "../lib/detailRoute";
 import { isClusterScopedRoute, keepsManagementWhenPaused, tabDetail } from "../lib/routes";
@@ -89,22 +100,45 @@ function resetWorkspacesToHome(state: TabsState): void {
     w.tabs = [home];
     w.activeId = home.id;
     w.closed = [];
+    // The main window's other clusters' tabs are not this window's either.
+    delete w.shelved;
   }
 }
 import { useConsole } from "../console";
 import { canOpenClusterTerminal, openClusterTerminal } from "../lib/clusterTerminal";
-import { countLaunch, refreshStarCount } from "../lib/starOnGitHub";
+import { applySkillDefaults } from "../lib/skillDefaults";
+import { countLaunch, useStarCountRefresh } from "../lib/starOnGitHub";
 import { hint, matchWindowKey, type WindowAction } from "../lib/shortcuts";
 import { AgentConsent } from "./AgentConsent";
 import { Body } from "./Body";
 import { Chrome, zoom } from "./Chrome";
+import { ClusterTerminalConfirm } from "./ClusterTerminalConfirm";
 import { Console } from "./Console";
-import { isWorkspaceSealed, LockGate, lockWorkspace } from "./LockGate";
+import { isWorkspaceSealed, LockGate, lockWorkspace, useWorkspaceSealed } from "./LockGate";
 import { Nav } from "./Nav";
+import { ProtectedStrip, protectedStripCluster } from "./ProtectedStrip";
 import { Rail } from "./Rail";
 import { Status } from "./Status";
 import { TabSurface } from "./TabSurface";
+import { PageWithTerminal } from "./TerminalPanel";
+import { consoleSpareAbove, setConsoleMaximized, useConsoleMaximized } from "../lib/consoleLayout";
 import { useDeepLinks } from "./useDeepLinks";
+
+/** One toast in the window's queue: a host notice, or a `notify` call. */
+type Notice = Omit<HostNotice, "level"> & {
+  /** `ok` is `notify.success`; a host notice is only ever `info` or `error`. */
+  level: HostNotice["level"] | "ok";
+  /** A sign-in prompt's or an update's one button. */
+  action?: { label: string; run: () => void };
+  /** Goes on its own after {@link TRANSIENT_NOTICE_MS}. */
+  transient?: boolean;
+};
+
+/** How long a confirmation stays up: sonner's default, which classic used. */
+const TRANSIENT_NOTICE_MS = 4_000;
+
+/** How often the automatic update check runs after the one at launch: classic's. */
+const UPDATE_CHECK_EVERY_MS = 6 * 60 * 60 * 1000;
 
 export interface WindowProps {
   /** Display names of the screens that exist in the new design. */
@@ -200,6 +234,26 @@ export function Window({
   // cluster's name; `Console` itself only reads `scope` back off the provider.
   const activeTabRoute = tabs.find((t) => t.id === activeId)?.route ?? "/";
   const activeTab = tabs.find((t) => t.id === activeId);
+  const consoleMaximized = useConsoleMaximized();
+  // The content area's height, so the console under it is held to what it
+  // can actually spare (#948). Measured, because what it holds — tab strip,
+  // page header, a terminal panel — is not something the window knows.
+  const bandRef = useRef<HTMLDivElement>(null);
+  const [bandHeight, setBandHeight] = useState(0);
+  useLayoutEffect(() => {
+    const band = bandRef.current;
+    if (!band || typeof ResizeObserver === "undefined") return undefined;
+    const measure = () => setBandHeight(band.clientHeight);
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(band);
+    return () => observer.disconnect();
+  }, [booted, active]);
+  // A tab picked while the console fills the content area is a page the
+  // reader wants to see: the console steps back to its size (#944).
+  useEffect(() => {
+    setConsoleMaximized(false);
+  }, [activeId]);
   const routeCluster = parseEditRoute(activeTabRoute)?.cluster ?? parseNewRoute(activeTabRoute)?.cluster ?? activeTab?.sub;
   const probeContext = isClusterScopedRoute(activeTabRoute)
     ? (routeCluster ? contexts.find(c => c.name === routeCluster) : activeCtx)
@@ -218,19 +272,22 @@ export function Window({
   // The star button's two start-up acts (#850), done here rather than by the
   // button: once per window, after boot — settings are readable by then — and
   // never from a test or a gallery that merely draws the bar. The count is
-  // asked for at most once a day and its failure is silent by design.
+  // then kept current for as long as the window is open (#866); its failure
+  // is silent by design.
   useEffect(() => {
     if (!booted) return;
     countLaunch();
-    void refreshStarCount();
+    // The skills the reader keeps on (#851), once settings are readable.
+    applySkillDefaults();
   }, [booted]);
+  useStarCountRefresh(booted);
 
   // What the desktop host reports after the page that would have heard it is
   // gone: a helm operation outlives the window that started it, and how it
   // ended reaches every window (#735). The web host sends none. A refused
   // `srelens://` link joins the same queue (#370), and so do links held behind
   // a failed context listing (#855): one surface, oldest first.
-  const [notices, setNotices] = useState<HostNotice[]>([]);
+  const [notices, setNotices] = useState<Notice[]>([]);
   useEffect(
     () =>
       isTauri()
@@ -238,6 +295,76 @@ export function Window({
         : undefined,
     [],
   );
+  // Every `notify` call joins it too (#374): its only other renderer is
+  // classic's sonner Toaster, which this design never mounts. Installed in
+  // place of that sink, not beside it, so a toast is drawn once; and handed
+  // back on unmount. Declared before boot so boot's own reports are caught.
+  useEffect(() => {
+    const push = (notice: Notice) => setNotices((shown) => [...shown, notice]);
+    return setNotifier({
+      success: (title, detail) => push({ level: "ok", title, detail, transient: true }),
+      info: (title, detail) => push({ level: "info", title, detail, transient: true }),
+      // An error stays until dismissed, and a notice with no words draws
+      // nothing, so no dismiss button either: one empty error would hold every
+      // later notice back. Core's own title for an unclassified failure.
+      error: (title, detail) =>
+        push({ level: "error", title: !title && !detail ? "Something went wrong" : title, detail }),
+      updateAvailable: (version, onView) =>
+        push({
+          level: "info",
+          title: "Update available",
+          detail: `srelens ${version} is ready to install.`,
+          action: { label: "View update", run: onView },
+        }),
+      clusterSignIn: (title, detail, onSignIn) =>
+        push({ level: "info", title, detail, action: { label: "Sign in", run: onSignIn } }),
+    });
+  }, []);
+  // #374 item 6: classic checks for an update at launch and every six hours
+  // (`App.tsx`), on the channel the reader chose, and offers it in a toast that
+  // opens Settings on Updates. Core's helper swallows a failed check, because a
+  // background poll must not nag, and a version already offered is not offered
+  // again.
+  const offeredVersion = useRef<string | null>(null);
+  useEffect(() => {
+    if (!isTauri()) return;
+    // A check still out when the window goes would answer into whatever sink
+    // `setNotifier` handed back, so its answer is dropped.
+    let live = true;
+    const check = () =>
+      void checkForUpdateAndNotify(
+        loadUpdateChannel(),
+        (update) => {
+          if (!live) return;
+          offeredVersion.current = update.version;
+          notify.updateAvailable(update.version, () => openSettings("updates"));
+        },
+        { alreadyNotified: (version) => offeredVersion.current === version },
+      );
+    check();
+    const timer = setInterval(check, UPDATE_CHECK_EVERY_MS);
+    return () => {
+      live = false;
+      clearInterval(timer);
+    };
+  }, []);
+  const notice = notices[0];
+  const dismissNotice = () => setNotices((shown) => shown.slice(1));
+  // The queue is drawn outside `LockGate`, so a notice stays in view over the
+  // cover, but its action ("View update", "Sign in") opens a tab: held while
+  // the cover is up, like every other act on the workspace (see `run`).
+  // Subscribed, not read at render, so it comes back on unlock.
+  const sealed = useWorkspaceSealed();
+  // A confirmation goes on its own, the way classic's did; a failure or a
+  // prompt waits for the reader.
+  useEffect(() => {
+    if (!notice?.transient) return;
+    const timer = setTimeout(
+      () => setNotices((shown) => (shown[0] === notice ? shown.slice(1) : shown)),
+      TRANSIENT_NOTICE_MS,
+    );
+    return () => clearTimeout(timer);
+  }, [notice]);
   useDeepLinks({
     windowLabel,
     ready: booted,
@@ -449,6 +576,12 @@ export function Window({
     };
   }, [booted]);
 
+  // #101: a context window copied main's workspaces when it opened. It reads
+  // main's save again whenever it is focused, so protection turned on in main
+  // since then applies here before the reader acts.
+  useEffect(() => followMainProtection(windowLabel), [windowLabel]);
+  useEffect(() => followAssistantSetting(), []);
+
   useEffect(() => {
     return onWindowCloseRequested(async () => {
       flushSave();
@@ -478,6 +611,32 @@ export function Window({
       pendingCtxQuery.current = null;
     }
   }, [booted, contexts, contextsStatus]);
+
+  // #374 item 3: an edit made outside srelens (`kubectl config use-context`, a
+  // file dropped into the kubeconfig folder) reaches this window only as the
+  // host watcher's `kubeconfig-changed` (`watch_kubeconfig_files`, lib.rs).
+  // Classic re-lists on it. Written the way every Refresh here writes, so a
+  // failed listing keeps the clusters on screen and says why, and whatever
+  // waits on the store — a held deep link, a `?context=` — is judged again.
+  //
+  // Counted, not listed on the spot, so an older listing can never land last.
+  // An edit while boot is still listing waits for boot to install its list,
+  // and each edit drops the reply of the listing before it.
+  const [kubeconfigEdits, setKubeconfigEdits] = useState(0);
+  useEffect(() => {
+    if (!isTauri()) return;
+    return on("kubeconfig-changed", () => setKubeconfigEdits((n) => n + 1));
+  }, []);
+  useEffect(() => {
+    if (!booted || kubeconfigEdits === 0) return;
+    let current = true;
+    void listContexts(getKubeconfigFiles()).then((outcome) => {
+      if (current) setContexts(outcome.contexts ?? getContexts(), outcome.error ?? "");
+    });
+    return () => {
+      current = false;
+    };
+  }, [booted, kubeconfigEdits]);
 
 
   /**
@@ -617,7 +776,26 @@ export function Window({
       runRef.current(action);
     }
     window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
+    // #374 item 4: on macOS the menu's own Close item takes ⌘W before the
+    // webview sees a keydown (`install_macos_menu`, lib.rs) and says
+    // `close-active-tab` instead, which classic listens for. Here it is the
+    // chord's own action, so the sealed rule in `run` covers it too. Classic's
+    // fallback comes with it: Close on the last tab closes the window, as
+    // macOS does when nothing is left in one. Not under the cover, where the
+    // chord does nothing either. A refused close goes to the console, as
+    // `lockNow`'s refusal does, and for the reason it gives.
+    const offMenuClose = desktop
+      ? on("close-active-tab", () => {
+          if (isWorkspaceSealed() || currentWorkspace().tabs.length !== 1) return runRef.current({ type: "close-tab" });
+          closeCurrentWindow().catch((error) => {
+            console.error("the window could not be closed:", describeError(error).title, error);
+          });
+        })
+      : undefined;
+    return () => {
+      window.removeEventListener("keydown", onKey);
+      offMenuClose?.();
+    };
   }, [active, apple, desktop]);
 
   /**
@@ -775,7 +953,13 @@ export function Window({
             label="Open tabs"
           />
         )}
-        <div className="relative min-h-0 flex-1">
+        {/* #101: between the strip and the tab, about the active tab's own cluster. */}
+        {active && <ProtectedStrip contextName={protectedStripCluster(activeTabRoute, activeCtx?.name ?? null, contexts)} />}
+        {/* Hidden, not unmounted, while the agent console fills the content
+            area (#944): every tab keeps its page, scroll and watches for when
+            the console is restored. */}
+        <div ref={bandRef} className="relative min-h-0 flex-1" hidden={consoleMaximized && activeTabRoute !== "/agent"}>
+
           {tabs.map((tab) => {
             // An editor's target is pinned in its route. Its tab label follows
             // the rail, so it cannot decide whether the editor's readers are
@@ -795,6 +979,7 @@ export function Window({
             return (
             <TabSurface key={tab.id} visible={tab.id === activeId}>
               <TabScope.Provider value={tab.id}>
+              <PageWithTerminal tabId={tab.id}>
               {/* A placeholder tab without a cluster of its own still leaves
                   via the cluster this window is looking at — that is the
                   context classic reopens onto. */}
@@ -813,6 +998,7 @@ export function Window({
                 // non-throwing and idempotent: the whole of the contract.
                 onLocked={lockWorkspace}
               />
+              </PageWithTerminal>
               </TabScope.Provider>
             </TabSurface>
             );
@@ -827,7 +1013,9 @@ export function Window({
             while its tab is the one showing, because `TabSurface` keeps hidden
             tabs mounted and a hidden `/agent` otherwise kept a second console
             alive behind this one. */}
-        {active && activeTabRoute !== "/agent" && <Console />}
+        {active && activeTabRoute !== "/agent" && (
+          <Console spareAbove={bandHeight > 0 ? consoleSpareAbove(bandHeight) : undefined} />
+        )}
       </div>
       <Drawer open={creating} title="New workspace" onClose={() => setCreating(false)}>
         <div className="flex flex-col gap-3 px-3 py-3">
@@ -854,6 +1042,10 @@ export function Window({
           </div>
         </div>
       </Drawer>
+      {/* A protected cluster's local shell, asked for from the status bar or
+          ⌘J on Windows, waits here for its typed name (#101). In the band, so
+          a raised cover takes the question down with everything else. */}
+      <ClusterTerminalConfirm />
     </>
   ) : (
     // `flex-1`, because this is now a flex item of the band's own row rather
@@ -950,15 +1142,36 @@ export function Window({
       */}
       {windowLabel === "main" && <AgentConsent />}
       {/* What the host reports after the page that would have heard it is
-        gone (#735), and why a deep link was refused (#370). This design
-        mounts no `notify` sink, so the window draws them: the oldest first,
-        each until it is dismissed. */}
+        gone (#735), why a deep link was refused (#370), and every `notify`
+        call (#374): the oldest first, each until it is dismissed or, for a
+        confirmation, until it times out. */}
       <SurfaceToast
         anchor="window"
-        title={notices[0]?.title}
-        hint={notices[0]?.detail}
-        tone={notices[0]?.level === "error" ? "sev" : "info"}
-        onClose={() => setNotices((shown) => shown.slice(1))}
+        title={notice?.title}
+        hint={
+          notice?.action ? (
+            <>
+              {notice.detail}
+              <Button
+                type="button"
+                size="sm"
+                className="mt-1.5 block"
+                disabled={sealed}
+                title={sealed ? "Unlock the workspace first" : undefined}
+                onClick={() => {
+                  dismissNotice();
+                  notice.action?.run();
+                }}
+              >
+                {notice.action.label}
+              </Button>
+            </>
+          ) : (
+            notice?.detail
+          )
+        }
+        tone={notice?.level === "error" ? "sev" : notice?.level === "ok" ? "ok" : "info"}
+        onClose={dismissNotice}
         dismissLabel="Dismiss notice"
       />
     </>

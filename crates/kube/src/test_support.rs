@@ -18,11 +18,10 @@ pub struct Seen {
     pub accept: String,
 }
 
-/// A client whose API server answers every request with `respond(request)` as a 200,
-/// and records each request it answered.
-pub fn fake_api<F>(respond: F) -> (Client, Arc<Mutex<Vec<Seen>>>)
+/// A client whose API server answers requests with custom status codes and bodies.
+pub fn fake_api_raw<F>(respond: F) -> (Client, Arc<Mutex<Vec<Seen>>>)
 where
-    F: Fn(&Seen) -> Value + Send + Sync + 'static,
+    F: Fn(&Seen) -> (u16, Value) + Send + Sync + 'static,
 {
     let respond = Arc::new(respond);
     let requests = Arc::new(Mutex::new(Vec::new()));
@@ -38,12 +37,12 @@ where
                 .unwrap_or("")
                 .to_owned(),
         };
-        let body = respond(&seen);
+        let (status, body) = respond(&seen);
         recorded.lock().unwrap().push(seen);
         async move {
             Ok::<_, std::convert::Infallible>(
                 http::Response::builder()
-                    .status(200)
+                    .status(status)
                     .header("content-type", "application/json")
                     .body(kube::client::Body::from(body.to_string().into_bytes()))
                     .unwrap(),
@@ -51,4 +50,13 @@ where
         }
     });
     (Client::new(service, "default"), requests)
+}
+
+/// A client whose API server answers every request with `respond(request)` as a 200,
+/// and records each request it answered.
+pub fn fake_api<F>(respond: F) -> (Client, Arc<Mutex<Vec<Seen>>>)
+where
+    F: Fn(&Seen) -> Value + Send + Sync + 'static,
+{
+    fake_api_raw(move |seen| (200, respond(seen)))
 }

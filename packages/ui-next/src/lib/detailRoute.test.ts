@@ -2,26 +2,67 @@
 import { describe, it, expect } from "vitest";
 import { detailRoute, editRoute, newRoute, parseDetailRoute, parseEditRoute, parseNewRoute } from "./detailRoute";
 
+// The cluster a detail or edit tab is pinned to.
+const ON = { cluster: "prod" };
+
 describe("detailRoute", () => {
-  it("carries the kind, the namespace and the name", () => {
-    expect(detailRoute("Pod", "kube-system", "web-0")).toBe("/k/Pod/kube-system/web-0");
+  it("carries the cluster, the kind, the namespace and the name", () => {
+    expect(detailRoute("Pod", "kube-system", "web-0", ON)).toBe("/k/prod/Pod/kube-system/web-0");
   });
 
   it("stands a placeholder in for a cluster-scoped kind, so the arity never varies", () => {
-    expect(detailRoute("Node", null, "worker-1")).toBe("/k/Node/-/worker-1");
+    expect(detailRoute("Node", null, "worker-1", ON)).toBe("/k/prod/Node/-/worker-1");
   });
 
-  it("encodes every segment, so a name cannot change the route's shape", () => {
-    // A CRD's kind and a resource's name can both contain a slash in the wild.
-    const route = detailRoute("Widget", "default", "a/b");
-    expect(route.split("/")).toHaveLength(5);
-    expect(parseDetailRoute(route)!.name).toBe("a/b");
+  it("gives two clusters' same-named resources two different routes (#834)", () => {
+    // `openTab` dedupes by route: with no cluster in it, opening staging's
+    // worker-1 focused prod's worker-1 tab and turned it into staging's.
+    expect(detailRoute("Node", null, "worker-1", { cluster: "prod" })).not.toBe(
+      detailRoute("Node", null, "worker-1", { cluster: "staging" }),
+    );
+  });
+
+  it("encodes every segment, so a name or a cluster cannot change the route's shape", () => {
+    // A CRD's kind and a resource's name can both contain a slash in the wild,
+    // and so can a context's name.
+    const route = detailRoute("Widget", "default", "a/b", { cluster: "kind/local" });
+    expect(route.split("/")).toHaveLength(6);
+    expect(parseDetailRoute(route)).toMatchObject({ cluster: "kind/local", name: "a/b" });
+  });
+
+  it("qualifies a custom kind with its group, editRoute's spelling, without changing the arity", () => {
+    // A kind name alone does not identify a custom resource: a CRD may reuse
+    // a built-in's name in its own group (#919).
+    const route = detailRoute("Deployment", "default", "api", { cluster: "prod", group: "acme.io" });
+    expect(route).toBe("/k/prod/acme.io%2FDeployment/default/api");
+    expect(parseDetailRoute(route)).toEqual({
+      cluster: "prod",
+      group: "acme.io",
+      kind: "Deployment",
+      namespace: "default",
+      name: "api",
+    });
+  });
+
+  it("reads an empty namespace as cluster-scoped, as a custom resource's list row carries one (#940)", () => {
+    // `CustomRow.namespace` is "" for a cluster-scoped kind; an empty segment
+    // is one the parser refuses, so the tab would never open.
+    const route = detailRoute("ClusterIssuer", "", "letsencrypt", { cluster: "prod", group: "cert-manager.io" });
+    expect(route).toBe("/k/prod/cert-manager.io%2FClusterIssuer/-/letsencrypt");
+    expect(parseDetailRoute(route)).toMatchObject({ kind: "ClusterIssuer", namespace: null, name: "letsencrypt" });
+    expect(parseEditRoute(editRoute("ClusterIssuer", "", "letsencrypt", { cluster: "prod", group: "cert-manager.io" })))
+      .toMatchObject({ kind: "ClusterIssuer", namespace: null, name: "letsencrypt" });
   });
 
   it("round-trips", () => {
     for (const [k, ns, n] of [["Pod", "default", "web"], ["Node", null, "n1"]] as const) {
-      expect(parseDetailRoute(detailRoute(k, ns, n))).toEqual({ kind: k, namespace: ns, name: n });
+      expect(parseDetailRoute(detailRoute(k, ns, n, ON))).toEqual({ cluster: "prod", kind: k, namespace: ns, name: n });
     }
+  });
+
+  it("still parses the five-segment shape an earlier build persisted, with no cluster", () => {
+    // Such a tab follows the rail, as every detail tab did before #834.
+    expect(parseDetailRoute("/k/Pod/default/web")).toEqual({ kind: "Pod", namespace: "default", name: "web" });
   });
 
   it("refuses a segment that cannot be decoded, rather than throwing", () => {
@@ -40,11 +81,15 @@ describe("detailRoute", () => {
     // A cluster-scoped route never decodes its namespace segment, so the name
     // is the only one left that can break this one.
     expect(parseDetailRoute("/k/Node/-/%zz")).toBeNull();
+    // And the cluster segment, in the shape that carries one.
+    expect(parseDetailRoute("/k/%zz/Pod/default/web-1")).toBeNull();
+    expect(parseDetailRoute("/k/prod/Pod/default/%zz")).toBeNull();
   });
 
   it("refuses a route that is not a detail route", () => {
     expect(parseDetailRoute("/k/pods")).toBeNull(); // a LIST route
     expect(parseDetailRoute("/k/Pod/default")).toBeNull(); // too few segments
+    expect(parseDetailRoute("/k/prod/Pod/default/web-0/extra")).toBeNull(); // too many
     expect(parseDetailRoute("/resources")).toBeNull();
   });
 });
@@ -54,7 +99,6 @@ describe("detailRoute", () => {
 // route string, so `Edit` on `default/api` and on `staging/api` collapsed into
 // ONE tab, and the second click focused the first resource's editor. So did a
 // Pod `api` and a Deployment `api`.
-const ON = { cluster: "prod" };
 
 describe("editRoute", () => {
   it("carries the cluster, the kind, the namespace and the name", () => {

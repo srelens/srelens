@@ -183,26 +183,70 @@ pub fn api_resource_for_api_version(api_version: &str, kind: &str) -> Option<Api
 
 /// Resolve the (ApiResource, namespaced) for a request: a dynamic CRD GVK if
 /// group/version/plural are supplied, else the static `gvk_for` table.
+#[allow(dead_code)]
 fn resolve_api_resource(input: &ManifestIn) -> Result<(ApiResource, bool), CapabilityError> {
-    if let (Some(g), Some(v), Some(p)) = (
+    resolve_kind(
+        &input.kind,
+        input.namespace.as_deref(),
         input.group.as_deref(),
         input.version.as_deref(),
         input.plural.as_deref(),
-    ) {
-        let namespaced = input
-            .namespace
-            .as_deref()
-            .map(|s| !s.is_empty())
-            .unwrap_or(false);
-        Ok((
-            crate::crds::custom_api_resource(g, v, &input.kind, p),
-            namespaced,
-        ))
-    } else {
-        let (gvk, namespaced) = gvk_for(&input.kind)
-            .ok_or_else(|| CapabilityError::Handler(format!("unsupported kind: {}", input.kind)))?;
-        Ok((ApiResource::from_gvk(&gvk), namespaced))
+    )
+}
+
+/// The one resolver `getObject`, `getManifest` and `listResource` share, so a
+/// kind one of them can reach the others can too (#932).
+///
+/// With group, version and plural all given it is a custom resource, built
+/// from them; its scope is not known here, so a namespace given means
+/// namespaced and none means cluster-wide — which for a list is also "every
+/// namespace". Otherwise the kind must be in the built-in table, and the
+/// refusal says what to pass for one that is not: an agent that is told only
+/// "unsupported kind" does not learn that the tool can read it.
+fn resolve_kind(
+    kind: &str,
+    namespace: Option<&str>,
+    group: Option<&str>,
+    version: Option<&str>,
+    plural: Option<&str>,
+) -> Result<(ApiResource, bool), CapabilityError> {
+    if let (Some(g), Some(v), Some(p)) = (group, version, plural) {
+        let namespaced = namespace.is_some_and(|s| !s.is_empty());
+        // The plural decides what the request reaches; the caller's kind is
+        // only a label. Where the group and plural are a built-in kind's, that
+        // kind is the identity, so every check made on it — a Secret's values
+        // being blanked above all — sees what is actually being read.
+        let kind = match gvk_for(p) {
+            Some((gvk, _)) if gvk.group == g => gvk.kind,
+            _ => kind.to_string(),
+        };
+        return Ok((crate::crds::custom_api_resource(g, v, &kind, p), namespaced));
     }
+    let (gvk, namespaced) = gvk_for(kind).ok_or_else(|| {
+        CapabilityError::Handler(format!(
+            "unsupported kind: {kind}; for a custom resource, pass its group, version and plural \
+             (e.g. group \"traefik.io\", version \"v1alpha1\", plural \"ingressroutes\")"
+        ))
+    })?;
+    Ok((ApiResource::from_gvk(&gvk), namespaced))
+}
+
+/// Resolve the (ApiResource, namespaced) dynamically using ClientCache, with fallback to discovery.
+async fn resolve_manifest_in(
+    cache: &ClientCache,
+    input: &ManifestIn,
+) -> Result<(ApiResource, bool), CapabilityError> {
+    cache
+        .resolve_resource(
+            &input.context,
+            &input.kind,
+            input.group.as_deref(),
+            input.version.as_deref(),
+            input.plural.as_deref(),
+            input.namespace.as_deref().is_some_and(|ns| !ns.is_empty()),
+        )
+        .await
+        .map_err(CapabilityError::Handler)
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -265,6 +309,14 @@ fn check_selectors(input: &ListResourceIn) -> Result<(), CapabilityError> {
             )));
         }
     }
+    if let Some(ref filter) = input.field_filter {
+        if filter.len() > MAX_FIELDS {
+            return Err(CapabilityError::InvalidInput(format!(
+                "fieldFilter: {} filters requested, at most {MAX_FIELDS}",
+                filter.len()
+            )));
+        }
+    }
     Ok(())
 }
 
@@ -278,10 +330,23 @@ fn readable_object(
     obj.metadata.managed_fields = None;
     let mut object =
         serde_json::to_value(obj).map_err(|e| CapabilityError::Handler(e.to_string()))?;
-    if ar.kind == "Secret" && ar.group.is_empty() {
+    if is_core_secret(ar) {
         crate::secrets::redact_secret_data(&mut object);
     }
     Ok(object)
+}
+
+/// Whether a resolved resource is the core `Secret`, whose values the
+/// ungated readers blank.
+///
+/// By the plural as well as the kind, because the plural is what the request
+/// is sent to. A caller naming a custom resource supplies both, and the kind
+/// is only a label the API server never checks: `kind: "Anything"` with an
+/// empty group, `v1` and plural `secrets` reads core Secrets. `resolve_kind`
+/// already puts the real kind back for a built-in plural; this is the second
+/// lock on the same door, at the place the values leave.
+fn is_core_secret(ar: &ApiResource) -> bool {
+    ar.group.is_empty() && (ar.kind == "Secret" || ar.plural == "secrets")
 }
 
 /// Each requested path mapped to what it lands on — a scalar, a map or a
@@ -338,11 +403,14 @@ pub fn get_object_capability(cache: Arc<ClientCache>) -> Capability {
          path, with null where the object has none. To read a field across many objects, use \
          k8s.listResource with `fields` instead of calling this once per object.",
         Annotations::READ_ONLY,
-        move |GetObjectIn { target: input, fields }: GetObjectIn| {
+        move |GetObjectIn {
+                  target: input,
+                  fields,
+              }: GetObjectIn| {
             let cache = cache.clone();
             async move {
                 check_fields(&fields)?;
-                let (ar, namespaced) = resolve_api_resource(&input)?;
+                let (ar, namespaced) = resolve_manifest_in(&cache, &input).await?;
                 let client = cache
                     .get(&input.context)
                     .await
@@ -535,7 +603,7 @@ pub fn gvk_for(kind: &str) -> Option<(GroupVersionKind, bool)> {
 /// editor and the detail pane show, for no gain on a resource that carries
 /// nothing to redact.
 fn manifest_yaml(obj: &DynamicObject, ar: &ApiResource) -> Result<String, CapabilityError> {
-    if ar.kind == "Secret" && ar.group.is_empty() {
+    if is_core_secret(ar) {
         let mut object =
             serde_json::to_value(obj).map_err(|e| CapabilityError::Handler(e.to_string()))?;
         crate::secrets::redact_secret_data(&mut object);
@@ -553,7 +621,7 @@ pub fn get_manifest_capability(cache: Arc<ClientCache>) -> Capability {
         move |input: ManifestIn| {
             let cache = cache.clone();
             async move {
-                let (ar, namespaced) = resolve_api_resource(&input)?;
+                let (ar, namespaced) = resolve_manifest_in(&cache, &input).await?;
                 let client = cache
                     .get(&input.context)
                     .await
@@ -582,6 +650,53 @@ pub fn get_manifest_capability(cache: Arc<ClientCache>) -> Capability {
     )
 }
 
+fn field_value_as_str(val: Option<&serde_json::Value>) -> Option<String> {
+    match val {
+        Some(serde_json::Value::String(s)) => Some(s.clone()),
+        Some(serde_json::Value::Bool(b)) => Some(b.to_string()),
+        Some(serde_json::Value::Number(n)) => Some(n.to_string()),
+        Some(serde_json::Value::Null) | None => None,
+        Some(other) => Some(other.to_string()),
+    }
+}
+
+/// Match a Kubernetes JSON object against a comma-separated fieldSelector expression
+/// (e.g. `status.nodeName=worker-1,status.phase!=Failed`).
+pub fn matches_field_selector(obj_val: &serde_json::Value, selector: &str) -> bool {
+    for clause in selector.split(',') {
+        let clause = clause.trim();
+        if clause.is_empty() {
+            continue;
+        }
+        let (key, val, equals) = if let Some((k, v)) = clause.split_once("!=") {
+            (k.trim(), v.trim(), false)
+        } else if let Some((k, v)) = clause.split_once("==") {
+            (k.trim(), v.trim(), true)
+        } else if let Some((k, v)) = clause.split_once('=') {
+            (k.trim(), v.trim(), true)
+        } else {
+            return false;
+        };
+
+        let actual = field_value_as_str(crate::crds::json_path_value(obj_val, key));
+        let actual_str = match actual.as_deref() {
+            Some(s) => s,
+            None if key == "spec.unschedulable" => "false",
+            None => "",
+        };
+        if equals {
+            if actual_str != val {
+                return false;
+            }
+        } else {
+            if actual_str == val {
+                return false;
+            }
+        }
+    }
+    true
+}
+
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct ListResourceIn {
     pub context: String,
@@ -589,6 +704,15 @@ pub struct ListResourceIn {
     pub kind: String,
     #[serde(default)]
     pub namespace: Option<String>,
+    /// Optional API group override / hint for disambiguation
+    #[serde(default)]
+    pub group: Option<String>,
+    /// Optional API version override / hint
+    #[serde(default)]
+    pub version: Option<String>,
+    /// Optional plural name override / hint
+    #[serde(default)]
+    pub plural: Option<String>,
     /// Label selector the API server filters by, as `kubectl get -l` takes
     /// it, e.g. `app=web,tier!=cache`.
     #[serde(default, rename = "labelSelector")]
@@ -597,6 +721,10 @@ pub struct ListResourceIn {
     /// --field-selector` takes it, e.g. `spec.nodeName=worker-1`.
     #[serde(default, rename = "fieldSelector")]
     pub field_selector: Option<String>,
+    /// Optional client-side field filters, e.g. `{"status.nodeName": "worker-1"}`.
+    /// Evaluated in-memory when the API server rejects server-side field selectors on CRDs.
+    #[serde(default, rename = "fieldFilter")]
+    pub field_filter: Option<BTreeMap<String, String>>,
     /// Paths to return for every item, in its row's `fields`: kubectl-style
     /// JSONPath, each starting with '.', e.g. `.status.allocatable`,
     /// `.metadata.labels['app.kubernetes.io/name']`, `.spec.containers[0].image`
@@ -665,13 +793,16 @@ pub struct ListResourceOut {
     pub items: Vec<ResourceRow>,
 }
 
-/// `k8s.listResource` — list any supported kind generically: name and
-/// namespace, filtered by selectors, plus the `fields` a caller names.
+/// `k8s.listResource` — list any kind generically, a custom resource's too:
+/// name and namespace, filtered by selectors, plus the `fields` a caller names.
 pub fn list_resource_capability(cache: Arc<ClientCache>) -> Capability {
     Capability::typed::<ListResourceIn, ListResourceOut, _, _>(
         "k8s.listResource",
-        "list any supported resource kind (name + namespace), optionally filtered by \
-         `labelSelector`/`fieldSelector`. Pass `fields` (kubectl-style JSONPath such as \
+        "list resources of a kind (name + namespace), optionally filtered by \
+         `labelSelector`/`fieldSelector` or client-side `fieldFilter` (e.g. {\"status.nodeName\": \"node-1\"}). \
+         For a custom resource, pass its `group`, `version` and \
+         `plural` as well as `kind` (e.g. traefik.io / v1alpha1 / ingressroutes for IngressRoute), \
+         as getObject takes them. Pass `fields` (kubectl-style JSONPath such as \
          .status.allocatable or .spec.taints) to get those paths for every item in one call, \
          keyed by path in each row's `fields`, with null where an item has none. Prefer this \
          over one getObject call per item when a summary tool lacks a field you need.",
@@ -681,34 +812,91 @@ pub fn list_resource_capability(cache: Arc<ClientCache>) -> Capability {
             async move {
                 check_fields(&input.fields)?;
                 check_selectors(&input)?;
-                let (gvk, namespaced) = gvk_for(&input.kind).ok_or_else(|| {
-                    CapabilityError::Handler(format!("unsupported kind: {}", input.kind))
-                })?;
+                let (ar, namespaced) = cache
+                    .resolve_resource(
+                        &input.context,
+                        &input.kind,
+                        input.group.as_deref(),
+                        input.version.as_deref(),
+                        input.plural.as_deref(),
+                        input.namespace.as_deref().is_some_and(|ns| !ns.is_empty()),
+                    )
+                    .await
+                    .map_err(CapabilityError::Handler)?;
                 let client = cache
                     .get(&input.context)
                     .await
                     .map_err(CapabilityError::Handler)?;
-                let ar = ApiResource::from_gvk(&gvk);
-                let ns = input.namespace.as_deref().unwrap_or("");
-                // Empty namespace on a namespaced kind => all namespaces.
-                let api: Api<DynamicObject> = if namespaced && !ns.is_empty() {
-                    Api::namespaced_with(client, ns, &ar)
-                } else {
-                    Api::all_with(client, &ar)
-                };
-                let list = tokio::time::timeout(request_timeout(), api.list(&list_params(&input)))
-                    .await
-                    .map_err(|_| CapabilityError::Handler("list resource timed out".into()))?
-                    .map_err(|e| CapabilityError::Handler(e.to_string()))?;
-                let items = list
-                    .items
-                    .into_iter()
-                    .map(|o| resource_row(o, &ar, &input.fields))
-                    .collect::<Result<_, _>>()?;
-                Ok(ListResourceOut { items })
+                list_resource(client, &ar, namespaced, &input).await
             }
         },
     )
+}
+
+/// The list itself, against a client already in hand.
+async fn list_resource(
+    client: kube::Client,
+    ar: &ApiResource,
+    namespaced: bool,
+    input: &ListResourceIn,
+) -> Result<ListResourceOut, CapabilityError> {
+    let ns = input.namespace.as_deref().unwrap_or("");
+    // Empty namespace on a namespaced kind => all namespaces.
+    let api: Api<DynamicObject> = if namespaced && !ns.is_empty() {
+        Api::namespaced_with(client, ns, ar)
+    } else {
+        Api::all_with(client, ar)
+    };
+    let mut params = list_params(input);
+    let mut fallback_field_selector = false;
+    let list_res = tokio::time::timeout(request_timeout(), api.list(&params)).await;
+    let list = match list_res {
+        Ok(Ok(l)) => l,
+        Ok(Err(e)) => {
+            let err_str = e.to_string();
+            if input.field_selector.is_some()
+                && (err_str.contains("field label not supported")
+                    || err_str.contains("fieldSelector")
+                    || err_str.contains("field selector"))
+            {
+                params.field_selector = None;
+                fallback_field_selector = true;
+                tokio::time::timeout(request_timeout(), api.list(&params))
+                    .await
+                    .map_err(|_| CapabilityError::Handler("list resource timed out".into()))?
+                    .map_err(|e| CapabilityError::Handler(e.to_string()))?
+            } else {
+                return Err(CapabilityError::Handler(err_str));
+            }
+        }
+        Err(_) => return Err(CapabilityError::Handler("list resource timed out".into())),
+    };
+    let mut items = Vec::new();
+    for o in list.items {
+        if (fallback_field_selector && input.field_selector.is_some())
+            || input.field_filter.is_some()
+        {
+            let obj_val = readable_object(o.clone(), ar)?;
+            if fallback_field_selector {
+                if let Some(ref sel) = input.field_selector {
+                    if !matches_field_selector(&obj_val, sel) {
+                        continue;
+                    }
+                }
+            }
+            if let Some(ref filter) = input.field_filter {
+                let matches = filter.iter().all(|(path, val)| {
+                    let actual = field_value_as_str(crate::crds::json_path_value(&obj_val, path));
+                    actual.as_deref().unwrap_or("") == val.as_str()
+                });
+                if !matches {
+                    continue;
+                }
+            }
+        }
+        items.push(resource_row(o, ar, &input.fields)?);
+    }
+    Ok(ListResourceOut { items })
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -1630,6 +1818,48 @@ mod tests {
         assert!(
             yaml.contains("last-applied-configuration"),
             "the annotation key survives, only its value is blanked: {yaml}"
+        );
+    }
+
+    /// #980 review: a custom kind read by its hints, whose scope the cluster
+    /// cannot give (discovery refused, or not listing it), is read where the
+    /// namespace asked for says, as before discovery was consulted. Assuming
+    /// namespaced sent a read with no namespace to `namespaces/default/`, a
+    /// 404 for a cluster-scoped kind.
+    #[tokio::test]
+    async fn a_hinted_kind_the_cluster_cannot_scope_is_read_where_its_namespace_says() {
+        let served = serde_json::json!({
+            "apiVersion": "acme.io/v1", "kind": "ClusterWidget", "metadata": { "name": "w" },
+        });
+        let (client, uris) =
+            crate::list_cap::test_support::mock_slow_pages(vec![served], std::time::Duration::ZERO);
+        let cache = ClientCache::new(PathBuf::from("/x"));
+        cache.preload("fake", client).await;
+        let capability = get_object_capability(cache);
+        let read = |namespace: serde_json::Value| {
+            serde_json::json!({
+                "context": "fake", "kind": "ClusterWidget", "group": "acme.io",
+                "version": "v1", "plural": "clusterwidgets", "name": "w", "namespace": namespace,
+            })
+        };
+        let last = || uris.lock().unwrap().last().cloned().unwrap_or_default();
+
+        (capability.handler)(read(serde_json::Value::Null))
+            .await
+            .expect("the fake API server answers");
+        assert!(
+            last().starts_with("/apis/acme.io/v1/clusterwidgets/w"),
+            "{}",
+            last()
+        );
+
+        (capability.handler)(read("team".into()))
+            .await
+            .expect("the fake API server answers");
+        assert!(
+            last().starts_with("/apis/acme.io/v1/namespaces/team/clusterwidgets/w"),
+            "{}",
+            last()
         );
     }
 
@@ -2732,6 +2962,318 @@ metadata:
         assert!(!namespaced);
     }
 
+    #[test]
+    fn an_unknown_kind_is_refused_with_what_to_pass_for_a_custom_resource() {
+        let input = ManifestIn {
+            context: "c".into(),
+            kind: "IngressRoute".into(),
+            namespace: None,
+            name: "x".into(),
+            group: None,
+            version: None,
+            plural: None,
+        };
+        let Err(CapabilityError::Handler(message)) = resolve_api_resource(&input) else {
+            panic!("an unknown kind with no group/version/plural must be refused");
+        };
+        assert!(
+            message.starts_with("unsupported kind: IngressRoute"),
+            "{message}"
+        );
+        for word in ["group", "version", "plural"] {
+            assert!(message.contains(word), "{message} must name {word}");
+        }
+    }
+
+    // -- listResource: custom resources (#932) ----------------------------------
+
+    /// A custom resource's kind is the caller's word, and the API server
+    /// never checks it: the plural is what the request reaches. A caller
+    /// naming core Secrets by group, version and plural, under any kind, must
+    /// get a resource that is a Secret, or every check made on the kind —
+    /// blanking a Secret's values above all — is skipped.
+    #[test]
+    fn a_built_in_plural_resolves_to_its_own_kind_whatever_kind_the_caller_names() {
+        let (ar, _) = resolve_kind(
+            "Anything",
+            Some("team"),
+            Some(""),
+            Some("v1"),
+            Some("secrets"),
+        )
+        .unwrap();
+        assert_eq!(ar.kind, "Secret");
+        assert!(is_core_secret(&ar));
+        // getObject and getManifest resolve through the same function.
+        let input = ManifestIn {
+            context: "c".into(),
+            kind: "Anything".into(),
+            namespace: Some("team".into()),
+            name: "db".into(),
+            group: Some(String::new()),
+            version: Some("v1".into()),
+            plural: Some("secrets".into()),
+        };
+        assert_eq!(resolve_api_resource(&input).unwrap().0.kind, "Secret");
+        // A custom resource keeps the kind the caller named.
+        let (ar, _) = resolve_kind(
+            "Widget",
+            None,
+            Some("example.com"),
+            Some("v1"),
+            Some("widgets"),
+        )
+        .unwrap();
+        assert_eq!(ar.kind, "Widget");
+        // And a plural that only shares a built-in name in another group is not that kind.
+        let (ar, _) = resolve_kind(
+            "Secret",
+            None,
+            Some("example.com"),
+            Some("v1"),
+            Some("secrets"),
+        )
+        .unwrap();
+        assert!(!is_core_secret(&ar));
+    }
+
+    /// The payload from review of #934: core Secrets listed under another
+    /// kind, asking for `.data`. The values must come back blanked, as they
+    /// do for `kind: Secret`; this tool is not consent-gated.
+    #[tokio::test]
+    async fn listing_secrets_under_another_kind_still_blanks_their_values() {
+        let input = list_input(serde_json::json!({
+            "context": "c", "kind": "Anything", "namespace": "team",
+            "group": "", "version": "v1", "plural": "secrets",
+            "fields": [".data", ".metadata.annotations"],
+        }));
+        let (ar, namespaced) = resolve_kind(
+            &input.kind,
+            input.namespace.as_deref(),
+            input.group.as_deref(),
+            input.version.as_deref(),
+            input.plural.as_deref(),
+        )
+        .unwrap();
+        let (client, _) = listing_client(serde_json::json!({
+            "apiVersion": "v1", "kind": "SecretList", "metadata": {},
+            "items": [{
+                "apiVersion": "v1", "kind": "Secret",
+                "metadata": {"name": "db", "namespace": "team", "annotations": {"note": "hunter2"}},
+                "data": {"password": "aHVudGVyMg=="},
+            }],
+        }));
+
+        let out = list_resource(client, &ar, namespaced, &input)
+            .await
+            .unwrap();
+
+        let shown = serde_json::to_string(&out.items).unwrap();
+        assert!(!shown.contains("aHVudGVyMg=="), "{shown}");
+        assert!(!shown.contains("hunter2"), "{shown}");
+        assert_eq!(out.items[0].name, "db");
+    }
+
+    /// The second lock: whatever kind a resolved resource carries, the core
+    /// `secrets` plural is a Secret to the redactor.
+    #[test]
+    fn the_redactor_knows_a_core_secret_by_its_plural_too() {
+        let ar = crate::crds::custom_api_resource("", "v1", "Anything", "secrets");
+        assert!(is_core_secret(&ar));
+        let object = serde_json::from_value::<DynamicObject>(serde_json::json!({
+            "apiVersion": "v1", "kind": "Secret",
+            "metadata": {"name": "db", "annotations": {"note": "hunter2"}},
+            "data": {"password": "aHVudGVyMg=="},
+        }))
+        .unwrap();
+        let readable =
+            serde_json::to_string(&readable_object(object.clone(), &ar).unwrap()).unwrap();
+        assert!(
+            !readable.contains("aHVudGVyMg==") && !readable.contains("hunter2"),
+            "{readable}"
+        );
+        let yaml = manifest_yaml(&object, &ar).unwrap();
+        assert!(
+            !yaml.contains("aHVudGVyMg==") && !yaml.contains("hunter2"),
+            "{yaml}"
+        );
+    }
+
+    /// A client that records each request line and answers every one with
+    /// `body`.
+    fn listing_client(body: serde_json::Value) -> (kube::Client, Arc<Mutex<Vec<String>>>) {
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let seen = requests.clone();
+        let body = Arc::new(body.to_string());
+        let service = tower::service_fn(move |request: http::Request<kube::client::Body>| {
+            let seen = seen.clone();
+            let body = body.clone();
+            async move {
+                seen.lock()
+                    .unwrap()
+                    .push(format!("{} {}", request.method(), request.uri()));
+                Ok::<_, std::convert::Infallible>(
+                    http::Response::builder()
+                        .status(200)
+                        .header("content-type", "application/json")
+                        .body(kube::client::Body::from(body.as_bytes().to_vec()))
+                        .unwrap(),
+                )
+            }
+        });
+        (kube::Client::new(service, "default"), requests)
+    }
+
+    fn ingress_routes() -> serde_json::Value {
+        serde_json::json!({
+            "apiVersion": "traefik.io/v1alpha1",
+            "kind": "IngressRouteList",
+            "metadata": {},
+            "items": [{
+                "apiVersion": "traefik.io/v1alpha1",
+                "kind": "IngressRoute",
+                "metadata": {"name": "dashboard", "namespace": "edge", "labels": {"app": "web"}},
+                "spec": {"entryPoints": ["websecure"]},
+            }],
+        })
+    }
+
+    fn list_input(value: serde_json::Value) -> ListResourceIn {
+        serde_json::from_value(value).unwrap()
+    }
+
+    #[test]
+    fn list_resource_in_reads_a_custom_resources_group_version_and_plural() {
+        let input = list_input(serde_json::json!({
+            "context": "c", "kind": "IngressRoute",
+            "group": "traefik.io", "version": "v1alpha1", "plural": "ingressroutes",
+        }));
+        assert_eq!(input.group.as_deref(), Some("traefik.io"));
+        assert_eq!(input.version.as_deref(), Some("v1alpha1"));
+        assert_eq!(input.plural.as_deref(), Some("ingressroutes"));
+        // And a built-in kind needs none of them.
+        let plain = list_input(serde_json::json!({"context": "c", "kind": "Pod"}));
+        assert_eq!(
+            (plain.group, plain.version, plain.plural),
+            (None, None, None)
+        );
+    }
+
+    /// The bug in #932: every custom resource was refused as an unsupported
+    /// kind, though getObject and getManifest could already read one. Listed
+    /// here through the same resolver, at the custom resource's own path,
+    /// with the selector and the projected fields the built-in kinds get.
+    #[tokio::test]
+    async fn lists_a_custom_resource_in_a_namespace_with_selectors_and_fields() {
+        let input = list_input(serde_json::json!({
+            "context": "c", "kind": "IngressRoute", "namespace": "edge",
+            "group": "traefik.io", "version": "v1alpha1", "plural": "ingressroutes",
+            "labelSelector": "app=web", "fields": [".spec.entryPoints"],
+        }));
+        let (ar, namespaced) = resolve_kind(
+            &input.kind,
+            input.namespace.as_deref(),
+            input.group.as_deref(),
+            input.version.as_deref(),
+            input.plural.as_deref(),
+        )
+        .expect("a custom resource with group/version/plural resolves");
+        let (client, requests) = listing_client(ingress_routes());
+
+        let out = list_resource(client, &ar, namespaced, &input)
+            .await
+            .unwrap();
+
+        let requests = requests.lock().unwrap();
+        assert_eq!(requests.len(), 1);
+        assert!(
+            requests[0].starts_with("GET /apis/traefik.io/v1alpha1/namespaces/edge/ingressroutes?"),
+            "{}",
+            requests[0]
+        );
+        assert!(
+            requests[0].contains("labelSelector=app%3Dweb"),
+            "{}",
+            requests[0]
+        );
+        assert_eq!(out.items.len(), 1);
+        assert_eq!(out.items[0].name, "dashboard");
+        assert_eq!(out.items[0].namespace, "edge");
+        assert_eq!(
+            out.items[0].fields.as_ref().unwrap()[".spec.entryPoints"],
+            serde_json::json!(["websecure"])
+        );
+    }
+
+    #[tokio::test]
+    async fn lists_a_custom_resource_across_every_namespace_when_none_is_given() {
+        let input = list_input(serde_json::json!({
+            "context": "c", "kind": "IngressRoute",
+            "group": "traefik.io", "version": "v1alpha1", "plural": "ingressroutes",
+        }));
+        let (ar, namespaced) = resolve_kind(
+            &input.kind,
+            None,
+            input.group.as_deref(),
+            input.version.as_deref(),
+            input.plural.as_deref(),
+        )
+        .unwrap();
+        let (client, requests) = listing_client(ingress_routes());
+
+        list_resource(client, &ar, namespaced, &input)
+            .await
+            .unwrap();
+
+        let line = requests.lock().unwrap()[0].clone();
+        assert!(
+            line.starts_with("GET /apis/traefik.io/v1alpha1/ingressroutes"),
+            "{line}"
+        );
+    }
+
+    /// A built-in kind is resolved from the table as before, and the extra
+    /// fields are only needed for a kind that is not in it.
+    #[tokio::test]
+    async fn lists_a_built_in_kind_from_the_table_as_before() {
+        let input = list_input(
+            serde_json::json!({"context": "c", "kind": "Deployment", "namespace": "prod"}),
+        );
+        let (ar, namespaced) =
+            resolve_kind(&input.kind, input.namespace.as_deref(), None, None, None).unwrap();
+        let (client, requests) = listing_client(serde_json::json!({
+            "apiVersion": "apps/v1", "kind": "DeploymentList", "metadata": {}, "items": [],
+        }));
+
+        list_resource(client, &ar, namespaced, &input)
+            .await
+            .unwrap();
+
+        let line = requests.lock().unwrap()[0].clone();
+        assert!(
+            line.starts_with("GET /apis/apps/v1/namespaces/prod/deployments"),
+            "{line}"
+        );
+    }
+
+    /// `tools/list` is where an agent learns how to call the tool, so the
+    /// three fields have to be in the schema and the description, or the
+    /// agent goes on believing custom resources need another tool.
+    #[test]
+    fn the_tool_tells_an_agent_how_to_list_a_custom_resource() {
+        let cap = list_resource_capability(ClientCache::new(PathBuf::from("/x")));
+        for field in ["group", "version", "plural"] {
+            assert!(
+                cap.input_schema["properties"][field]["description"]
+                    .as_str()
+                    .is_some_and(|d| !d.is_empty()),
+                "{field} must be described in the input schema"
+            );
+        }
+        assert!(cap.summary.contains("custom resource"), "{}", cap.summary);
+        assert!(cap.summary.contains("`plural`"), "{}", cap.summary);
+    }
+
     // -- listResource / getObject: selectors and projected fields ---------------
 
     /// The payload an MCP client sends, spelled the way the tool schema
@@ -2747,7 +3289,10 @@ metadata:
         }))
         .unwrap();
         assert_eq!(input.label_selector.as_deref(), Some("app=web"));
-        assert_eq!(input.field_selector.as_deref(), Some("spec.nodeName=worker-1"));
+        assert_eq!(
+            input.field_selector.as_deref(),
+            Some("spec.nodeName=worker-1")
+        );
         assert_eq!(input.fields, [".spec.nodeName", ".status.phase"]);
 
         let snake: ListResourceIn = serde_json::from_value(serde_json::json!({
@@ -2756,6 +3301,66 @@ metadata:
         .unwrap();
         assert_eq!(snake.label_selector, None);
         assert!(snake.fields.is_empty());
+    }
+
+    #[test]
+    fn list_resource_in_reads_dynamic_gvk_hints() {
+        let input: ListResourceIn = serde_json::from_value(serde_json::json!({
+            "context": "c",
+            "kind": "VirtualMachine",
+            "group": "kubevirt.io",
+            "version": "v1",
+            "plural": "virtualmachines",
+            "namespace": "vms",
+        }))
+        .unwrap();
+        assert_eq!(input.group.as_deref(), Some("kubevirt.io"));
+        assert_eq!(input.version.as_deref(), Some("v1"));
+        assert_eq!(input.plural.as_deref(), Some("virtualmachines"));
+    }
+
+    #[tokio::test]
+    async fn resolve_manifest_in_resolves_via_preloaded_discovery() {
+        let cache = ClientCache::new(std::path::PathBuf::from("/nonexistent"));
+        let mut index = crate::client_cache::DiscoveryIndex::new();
+        let crd_res = crate::client_cache::DiscoveredResource {
+            ar: crate::crds::custom_api_resource(
+                "cert-manager.io",
+                "v1",
+                "Certificate",
+                "certificates",
+            ),
+            namespaced: true,
+        };
+        index.insert(crd_res.clone());
+        index.insert_alias("cert", &crd_res);
+        cache.preload_discovery("ctx", index).await;
+
+        let input = ManifestIn {
+            context: "ctx".into(),
+            kind: "Certificate".into(),
+            namespace: Some("default".into()),
+            name: "my-cert".into(),
+            group: None,
+            version: None,
+            plural: None,
+        };
+        let (ar, ns) = resolve_manifest_in(&cache, &input).await.unwrap();
+        assert_eq!(ar.kind, "Certificate");
+        assert_eq!(ar.group, "cert-manager.io");
+        assert!(ns);
+
+        let input_alias = ManifestIn {
+            context: "ctx".into(),
+            kind: "cert".into(),
+            namespace: Some("default".into()),
+            name: "my-cert".into(),
+            group: None,
+            version: None,
+            plural: None,
+        };
+        let (ar_alias, _) = resolve_manifest_in(&cache, &input_alias).await.unwrap();
+        assert_eq!(ar_alias.kind, "Certificate");
     }
 
     #[test]
@@ -2787,7 +3392,10 @@ metadata:
             ".status.conditions[?(@.type==\"Ready\"&&@.status==\"True\")].status",
         ] {
             assert!(
-                matches!(check_fields(&[bad.to_string()]), Err(CapabilityError::InvalidInput(_))),
+                matches!(
+                    check_fields(&[bad.to_string()]),
+                    Err(CapabilityError::InvalidInput(_))
+                ),
                 "{bad:?} must be refused"
             );
         }
@@ -2808,9 +3416,15 @@ metadata:
         let at_limit: Vec<String> = (0..MAX_FIELDS).map(|i| format!(".a{i}")).collect();
         assert!(check_fields(&at_limit).is_ok());
         let over: Vec<String> = (0..=MAX_FIELDS).map(|i| format!(".a{i}")).collect();
-        assert!(matches!(check_fields(&over), Err(CapabilityError::InvalidInput(_))));
+        assert!(matches!(
+            check_fields(&over),
+            Err(CapabilityError::InvalidInput(_))
+        ));
         let long = format!(".{}", "a".repeat(MAX_FIELD_CHARS));
-        assert!(matches!(check_fields(&[long]), Err(CapabilityError::InvalidInput(_))));
+        assert!(matches!(
+            check_fields(&[long]),
+            Err(CapabilityError::InvalidInput(_))
+        ));
     }
 
     #[test]
@@ -2838,21 +3452,25 @@ metadata:
             serde_json::to_value(schemars::schema_for!(ListResourceIn)).unwrap(),
             serde_json::to_value(schemars::schema_for!(GetObjectIn)).unwrap(),
         ] {
-            let text = schema["properties"]["fields"]["description"].as_str().unwrap();
+            let text = schema["properties"]["fields"]["description"]
+                .as_str()
+                .unwrap();
             assert!(text.contains(".status.allocatable"), "{text}");
             assert!(text.contains("[?(@.type"), "{text}");
-            assert!(text.contains("[*]"), "says wildcards are unsupported: {text}");
+            assert!(
+                text.contains("[*]"),
+                "says wildcards are unsupported: {text}"
+            );
             assert!(!text.contains("FIELDS_HELP"), "{text}");
         }
     }
 
     fn node_object() -> DynamicObject {
         let (gvk, _) = gvk_for("Node").unwrap();
-        let mut node = DynamicObject::new("worker-1", &ApiResource::from_gvk(&gvk)).data(
-            serde_json::json!({
+        let mut node =
+            DynamicObject::new("worker-1", &ApiResource::from_gvk(&gvk)).data(serde_json::json!({
                 "status": { "allocatable": { "cpu": "4", "example.com/fpga": "2" } },
-            }),
-        );
+            }));
         node.metadata.managed_fields = Some(vec![Default::default()]);
         node
     }
@@ -2896,7 +3514,9 @@ metadata:
             .within("prod")
             .data(serde_json::json!({ "data": { "password": "aHVudGVyMg==" } }));
         secret.metadata.annotations = Some(
-            [("note".to_string(), "hunter2".to_string())].into_iter().collect(),
+            [("note".to_string(), "hunter2".to_string())]
+                .into_iter()
+                .collect(),
         );
         (secret, ar)
     }
@@ -2911,7 +3531,10 @@ metadata:
         let row = serde_json::to_string(&resource_row(secret, &ar, &fields).unwrap()).unwrap();
         assert!(!row.contains("aHVudGVyMg=="), "{row}");
         assert!(!row.contains("hunter2"), "{row}");
-        assert!(row.contains("password"), "the key stays, only the value goes: {row}");
+        assert!(
+            row.contains("password"),
+            "the key stays, only the value goes: {row}"
+        );
     }
 
     #[test]
@@ -2923,7 +3546,10 @@ metadata:
 
         let (secret, ar) = secret_object();
         let whole = serde_json::to_string(&object_out(secret, &ar, &[]).unwrap()).unwrap();
-        assert!(!whole.contains("aHVudGVyMg==") && !whole.contains("hunter2"), "{whole}");
+        assert!(
+            !whole.contains("aHVudGVyMg==") && !whole.contains("hunter2"),
+            "{whole}"
+        );
     }
 
     #[test]
@@ -2963,7 +3589,10 @@ metadata:
             .iter()
             .filter_map(|v| v.as_str())
             .collect();
-        assert!(required.contains(&"context") && required.contains(&"name"), "{schema}");
+        assert!(
+            required.contains(&"context") && required.contains(&"name"),
+            "{schema}"
+        );
         assert!(!required.contains(&"fields"), "{schema}");
     }
 
@@ -3166,5 +3795,127 @@ metadata:
         assert_eq!(gvk.version, "v2");
         assert_eq!(gvk.kind, "CiliumNetworkPolicy");
         assert!(namespaced, "CiliumNetworkPolicy must be namespaced");
+    }
+
+    #[test]
+    fn test_matches_field_selector_equality_and_inequality() {
+        let obj = serde_json::json!({
+            "metadata": {
+                "name": "vm-production-1",
+                "namespace": "default"
+            },
+            "status": {
+                "nodeName": "harvester-amd008-eu-dus1",
+                "phase": "Running"
+            }
+        });
+
+        // Exact match
+        assert!(matches_field_selector(
+            &obj,
+            "status.nodeName=harvester-amd008-eu-dus1"
+        ));
+        assert!(matches_field_selector(
+            &obj,
+            "status.nodeName==harvester-amd008-eu-dus1"
+        ));
+        assert!(!matches_field_selector(
+            &obj,
+            "status.nodeName=harvester-amd009-eu-dus1"
+        ));
+
+        // Inequality
+        assert!(matches_field_selector(
+            &obj,
+            "status.nodeName!=harvester-amd009-eu-dus1"
+        ));
+        assert!(!matches_field_selector(
+            &obj,
+            "status.nodeName!=harvester-amd008-eu-dus1"
+        ));
+
+        // Multi-clause
+        assert!(matches_field_selector(
+            &obj,
+            "status.nodeName=harvester-amd008-eu-dus1,status.phase=Running"
+        ));
+        assert!(!matches_field_selector(
+            &obj,
+            "status.nodeName=harvester-amd008-eu-dus1,status.phase=Failed"
+        ));
+
+        // Missing field
+        assert!(!matches_field_selector(
+            &obj,
+            "spec.nodeName=harvester-amd008-eu-dus1"
+        ));
+        assert!(matches_field_selector(
+            &obj,
+            "spec.nodeName!=harvester-amd008-eu-dus1"
+        ));
+    }
+
+    #[test]
+    fn test_matches_field_selector_spec_unschedulable_default_false() {
+        let node_without_unschedulable = serde_json::json!({
+            "metadata": { "name": "node-schedulable" },
+            "spec": {}
+        });
+        let node_with_unschedulable_true = serde_json::json!({
+            "metadata": { "name": "node-cordoned" },
+            "spec": { "unschedulable": true }
+        });
+        let node_with_unschedulable_false = serde_json::json!({
+            "metadata": { "name": "node-explicit-schedulable" },
+            "spec": { "unschedulable": false }
+        });
+
+        assert!(matches_field_selector(
+            &node_without_unschedulable,
+            "spec.unschedulable=false"
+        ));
+        assert!(!matches_field_selector(
+            &node_without_unschedulable,
+            "spec.unschedulable=true"
+        ));
+
+        assert!(!matches_field_selector(
+            &node_with_unschedulable_true,
+            "spec.unschedulable=false"
+        ));
+        assert!(matches_field_selector(
+            &node_with_unschedulable_true,
+            "spec.unschedulable=true"
+        ));
+
+        assert!(matches_field_selector(
+            &node_with_unschedulable_false,
+            "spec.unschedulable=false"
+        ));
+        assert!(!matches_field_selector(
+            &node_with_unschedulable_false,
+            "spec.unschedulable=true"
+        ));
+    }
+
+    #[test]
+    fn test_list_resource_in_deserializes_camel_case_field_filter() {
+        let json = serde_json::json!({
+            "context": "c1",
+            "kind": "VirtualMachineInstance",
+            "fieldFilter": {
+                "status.nodeName": "harvester-amd008-eu-dus1"
+            }
+        });
+        let parsed: ListResourceIn = serde_json::from_value(json).unwrap();
+        assert_eq!(
+            parsed
+                .field_filter
+                .as_ref()
+                .unwrap()
+                .get("status.nodeName")
+                .unwrap(),
+            "harvester-amd008-eu-dus1"
+        );
     }
 }

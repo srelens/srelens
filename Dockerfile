@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1
 
 # ---- Stage 1: build the frontend bundle -------------------------------------
-FROM node:26-slim@sha256:ec7758ee051e457b468b32bde57b0879010b325bb9862718e9615225ce4aaae1 AS frontend
+FROM node:26-slim@sha256:36793bcbb160a6a16cede1e62b93f84e26b78a972a8a4c0b879c1c12f22761ec AS frontend
 WORKDIR /src
 # package.json alone, ahead of the lockfile: it names the pnpm version, and
 # copying it by itself keeps the pnpm install layer cached when only the
@@ -34,7 +34,7 @@ COPY apps/desktop apps/desktop
 RUN pnpm --filter @srelens/desktop build
 
 # ---- Stage 2: build the headless server binary ------------------------------
-FROM rust:1-slim-bookworm@sha256:ff521445a372125ed4f76e1453a1f8098f2d05332d1601d30db1c1f62757e730 AS backend
+FROM rust:1-slim-bookworm@sha256:86234e857a413004348b471d11a4ebe1aa92d2eae2b6b143cac68fd1ac3c48be AS backend
 WORKDIR /src
 # Only C toolchain + perl are needed (no GTK/webkit — this binary isn't Tauri).
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -56,11 +56,11 @@ COPY sdk/rust sdk/rust
 COPY sdk/examples/hello-world/rust sdk/examples/hello-world/rust
 # rust-embed reads apps/desktop/dist at compile time; copy the built bundle in.
 COPY --from=frontend /src/apps/desktop/dist apps/desktop/dist
+# Stripped by [profile.release] in the root Cargo.toml.
 RUN cargo build --release -p srelens-server --bin srelens-server
-RUN strip target/release/srelens-server
 
 # ---- Stage 3: slim runtime --------------------------------------------------
-FROM debian:bookworm-slim@sha256:3783cc01769c7b2b1b83a5c5ad96c815348e28ed7da68e2e3687004faa906251 AS runtime
+FROM debian:bookworm-slim@sha256:7ff6ba31527b9e336162fa061746c366c4b2032f4d2cff2078bea43f78efe3f8 AS runtime
 ARG KUBECTL_VERSION=v1.36.3
 # Helm is pinned to the 3.x line on purpose: Helm 4 has breaking CLI/behavior
 # changes the helm capabilities aren't validated against yet.

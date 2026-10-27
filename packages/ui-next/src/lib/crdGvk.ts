@@ -1,4 +1,4 @@
-import { K8S_KIND, listCrds, type DynamicGvk } from "@srelens/core";
+import { K8S_KIND, listCrds, type CrdRef, type DynamicGvk } from "@srelens/core";
 
 /** The list slug for each built-in Kubernetes kind — `Deployment` to
  *  `deployments` — which is also the set of kinds the backend resolves on its
@@ -12,6 +12,16 @@ export const SLUG_BY_K8S_KIND: Record<string, string> = Object.fromEntries(
 /** Whether `k8s.getManifest` can find this kind without being told its group. */
 export function isBuiltInKind(kind: string): boolean {
   return SLUG_BY_K8S_KIND[kind] !== undefined;
+}
+
+/**
+ * Whether a subject is a custom resource: told so by a group — the only thing
+ * that tells `Deployment` in `acme.io` from the built-in — or, with none, by
+ * its kind being outside the built-in table. The editor and the detail both
+ * decide by this.
+ */
+export function isCustomKind(kind: string, group?: string): boolean {
+  return group !== undefined || !isBuiltInKind(kind);
 }
 
 /**
@@ -36,7 +46,12 @@ export async function resolveCrdGvk(
   /** The API group, when the caller knows it — the only thing that tells a
    *  CRD reusing a built-in kind's name apart from the built-in. */
   group?: string,
-): Promise<{ crd?: DynamicGvk; error?: string }> {
+): Promise<{
+  crd?: DynamicGvk;
+  /** The whole matched CRD — its printer columns are what the detail summarises. */
+  ref?: CrdRef;
+  error?: string;
+}> {
   const result = await listCrds(context);
   if (result.error) {
     return { error: `Could not look up ${kind}'s CustomResourceDefinition: ${result.error}` };
@@ -58,5 +73,5 @@ export async function resolveCrdGvk(
     };
   }
   const match = matches[0];
-  return { crd: { group: match.group, version: match.version, plural: match.plural } };
+  return { crd: { group: match.group, version: match.version, plural: match.plural }, ref: match };
 }

@@ -3,9 +3,7 @@ mod common;
 #[cfg(test)]
 mod tests {
     use serde_json::json;
-    use srectl::commands::{
-        command_suggestions, resolve_command, CommandTarget, ResourceKind,
-    };
+    use srectl::commands::{command_suggestions, resolve_command, CommandTarget, ResourceKind};
     use srectl::views::ResourceTableState;
 
     #[test]
@@ -70,9 +68,7 @@ mod tests {
 
     #[test]
     fn test_crd_resolution_and_matching() {
-        use srectl::commands::{
-            command_suggestions_with_crds, resolve_command_with_crds, CrdMeta,
-        };
+        use srectl::commands::{command_suggestions_with_crds, resolve_command_with_crds, CrdMeta};
 
         let cilium_crd = CrdMeta {
             crd_name: "ciliumloadbalancerippools.cilium.io".to_string(),
@@ -109,6 +105,317 @@ mod tests {
         let suggs2 = command_suggestions_with_crds("ciliumlbippool", &crds);
         assert!(!suggs2.is_empty());
         assert_eq!(suggs2[0].0.name, "ciliumloadbalancerippools");
+    }
+
+    #[test]
+    fn test_namespace_command_resolution() {
+        use srectl::commands::{resolve_command_with_crds, CommandTarget, ResourceKind};
+
+        // :ns <target> switches namespace directly
+        assert_eq!(
+            resolve_command_with_crds(":ns default", &[]),
+            Some(CommandTarget::SwitchNamespace("default".to_string()))
+        );
+        assert_eq!(
+            resolve_command_with_crds("namespace staging", &[]),
+            Some(CommandTarget::SwitchNamespace("staging".to_string()))
+        );
+        assert_eq!(
+            resolve_command_with_crds(":ns *", &[]),
+            Some(CommandTarget::SwitchNamespace(String::new()))
+        );
+        assert_eq!(
+            resolve_command_with_crds(":ns -A", &[]),
+            Some(CommandTarget::SwitchNamespace(String::new()))
+        );
+        assert_eq!(
+            resolve_command_with_crds(":ns all", &[]),
+            Some(CommandTarget::SwitchNamespace(String::new()))
+        );
+
+        // :pods <target> and aliases
+        assert_eq!(
+            resolve_command_with_crds(":pods tools", &[]),
+            Some(CommandTarget::ResourceInNamespace(
+                ResourceKind::Pods,
+                "tools".to_string()
+            ))
+        );
+        assert_eq!(
+            resolve_command_with_crds(":po kube-system", &[]),
+            Some(CommandTarget::ResourceInNamespace(
+                ResourceKind::Pods,
+                "kube-system".to_string()
+            ))
+        );
+        assert_eq!(
+            resolve_command_with_crds(":deploy prod", &[]),
+            Some(CommandTarget::ResourceInNamespace(
+                ResourceKind::Deployments,
+                "prod".to_string()
+            ))
+        );
+        assert_eq!(
+            resolve_command_with_crds(":svc default", &[]),
+            Some(CommandTarget::ResourceInNamespace(
+                ResourceKind::Services,
+                "default".to_string()
+            ))
+        );
+
+        // Protection for M1 / M2 / M5:
+        // :changed 1h must NOT resolve to ResourceInNamespace
+        assert_eq!(resolve_command_with_crds(":changed 1h", &[]), None);
+        // :argo my-app must NOT resolve to ResourceInNamespace
+        assert_eq!(resolve_command_with_crds(":argo my-app", &[]), None);
+        // Multi-word alias "top pods" and "top nodes" must resolve to TopPods / TopNodes
+        assert_eq!(
+            resolve_command_with_crds(":top pods", &[]),
+            Some(CommandTarget::Resource(ResourceKind::TopPods))
+        );
+        assert_eq!(
+            resolve_command_with_crds(":top nodes", &[]),
+            Some(CommandTarget::Resource(ResourceKind::TopNodes))
+        );
+        // Special prefixes like theme and open must resolve to SetTheme / OpenUrl
+        assert_eq!(
+            resolve_command_with_crds(":theme nord", &[]),
+            Some(CommandTarget::SetTheme("nord".to_string()))
+        );
+        assert_eq!(
+            resolve_command_with_crds(":colors tokyo-night", &[]),
+            Some(CommandTarget::SetTheme("tokyo-night".to_string()))
+        );
+        assert_eq!(
+            resolve_command_with_crds(":open srelens://view/c/n/pods", &[]),
+            Some(CommandTarget::OpenUrl(
+                "srelens://view/c/n/pods".to_string()
+            ))
+        );
+        // Quotas and Limits take namespace arguments
+        assert_eq!(
+            resolve_command_with_crds(":quota tools", &[]),
+            Some(CommandTarget::ResourceInNamespace(
+                ResourceKind::ResourceQuotas,
+                "tools".to_string()
+            ))
+        );
+        assert_eq!(
+            resolve_command_with_crds(":limits tools", &[]),
+            Some(CommandTarget::ResourceInNamespace(
+                ResourceKind::LimitRanges,
+                "tools".to_string()
+            ))
+        );
+        // Cluster-scoped kinds do not take a namespace argument
+        assert_eq!(resolve_command_with_crds(":nodes foo", &[]), None);
+    }
+
+    #[test]
+    fn test_namespace_command_suggestions_and_active_filtering() {
+        use srectl::commands::{command_suggestions_full, CommandTarget, ResourceKind};
+
+        let namespaces = vec![
+            "default".to_string(),
+            "kube-system".to_string(),
+            "kube-public".to_string(),
+            "kube-node-lease".to_string(),
+            "tools".to_string(),
+        ];
+
+        // 1. :ns without subquery suggests all namespaces (no *, all, -A wildcards)
+        let ns_all = command_suggestions_full("ns ", &[], &namespaces, None);
+        assert!(!ns_all.is_empty());
+        assert!(ns_all.iter().any(|(s, _)| s.name == "ns default"));
+        assert!(!ns_all.iter().any(|(s, _)| s.name == "ns *"));
+        assert!(!ns_all.iter().any(|(s, _)| s.name == "ns all"));
+        assert!(!ns_all.iter().any(|(s, _)| s.name == "ns -A"));
+        // Namespace completions have clean empty description, category, and syntax hint
+        for (s, _) in &ns_all {
+            assert!(s.description.is_empty());
+            assert!(s.category().is_empty());
+            assert!(s.syntax_hint().is_empty());
+        }
+
+        // 2. Active filtering: :ns defa matches default
+        let ns_defa = command_suggestions_full("ns defa", &[], &namespaces, None);
+        assert!(!ns_defa.is_empty());
+        assert!(ns_defa.iter().any(|(s, _)| s.name == "ns default"));
+
+        // 3. Single match autoselection & prefix ranking:
+        // Cluster matches rank at the top; no typed fallback shadows real matches.
+        let airflow_cluster_ns = vec!["airflow-edge".to_string(), "monitoring".to_string()];
+        let airflo_suggs = command_suggestions_full("svc airflo", &[], &airflow_cluster_ns, None);
+        assert_eq!(airflo_suggs.len(), 1);
+        assert_eq!(airflo_suggs[0].0.name, "svc airflow-edge");
+        assert_eq!(
+            airflo_suggs[0].0.target,
+            CommandTarget::ResourceInNamespace(ResourceKind::Services, "airflow-edge".to_string())
+        );
+
+        // When typed query does not match any cluster namespace, inject typed fallback
+        let unknown_suggs = command_suggestions_full("ns unknown", &[], &airflow_cluster_ns, None);
+        assert_eq!(unknown_suggs.len(), 1);
+        assert_eq!(unknown_suggs[0].0.name, "ns unknown");
+        assert_eq!(
+            unknown_suggs[0].0.target,
+            CommandTarget::SwitchNamespace("unknown".to_string())
+        );
+
+        // 4. M4: When namespaces list is empty, say so truthfully and don't fake default/kube-system
+        let empty_suggs = command_suggestions_full("ns ", &[], &[], None);
+        assert!(!empty_suggs.is_empty());
+        assert!(empty_suggs[0]
+            .0
+            .description
+            .contains("namespace list not loaded yet"));
+        assert!(!empty_suggs
+            .iter()
+            .any(|(s, _)| s.name == "ns default" && !s.description.contains("not loaded")));
+
+        // 4b. When discovery fails, surface the error
+        let err_suggs = command_suggestions_full("ns ", &[], &[], Some("403 Forbidden"));
+        assert!(!err_suggs.is_empty());
+        assert!(err_suggs[0]
+            .0
+            .description
+            .contains("namespaces unavailable: 403 Forbidden"));
+
+        // 5. :pods tools filters tools namespace
+        let pod_suggs = command_suggestions_full("pods tool", &[], &namespaces, None);
+        assert!(!pod_suggs.is_empty());
+        assert!(pod_suggs.iter().any(|(s, _)| s.name == "pods tools"
+            && matches!(
+                s.target,
+                CommandTarget::ResourceInNamespace(ResourceKind::Pods, _)
+            )
+            && s.description.is_empty()
+            && s.category().is_empty()
+            && s.syntax_hint().is_empty()));
+
+        // 6. Alias :po tools works too
+        let po_suggs = command_suggestions_full("po tool", &[], &namespaces, None);
+        assert!(!po_suggs.is_empty());
+        assert!(po_suggs.iter().any(|(s, _)| s.name == "po tools"
+            && matches!(
+                s.target,
+                CommandTarget::ResourceInNamespace(ResourceKind::Pods, _)
+            )));
+
+        // 7. Wildcards: -A normalizes target to all-namespaces ("")
+        let wildcard_suggs = command_suggestions_full("ns -A", &[], &namespaces, None);
+        assert!(!wildcard_suggs.is_empty());
+        assert_eq!(
+            wildcard_suggs[0].0.target,
+            CommandTarget::SwitchNamespace(String::new())
+        );
+
+        let pod_wildcard = command_suggestions_full("pods -A", &[], &namespaces, None);
+        assert!(!pod_wildcard.is_empty());
+        assert_eq!(
+            pod_wildcard[0].0.target,
+            CommandTarget::ResourceInNamespace(ResourceKind::Pods, String::new())
+        );
+
+        // 8. Cluster-scoped resources like :nodes foo yield no namespace suggestions
+        let nodes_suggs = command_suggestions_full("nodes foo", &[], &namespaces, None);
+        assert!(nodes_suggs.is_empty());
+    }
+
+    #[test]
+    fn test_crd_namespace_command_resolution_and_suggestions() {
+        use srectl::commands::{
+            command_suggestions_full, resolve_command_with_crds, CommandTarget, CrdMeta,
+        };
+
+        let namespaced_crd = CrdMeta {
+            crd_name: "virtualservices.networking.istio.io".to_string(),
+            group: "networking.istio.io".to_string(),
+            version: "v1beta1".to_string(),
+            kind: "VirtualService".to_string(),
+            plural: "virtualservices".to_string(),
+            singular: "virtualservice".to_string(),
+            namespaced: true,
+            short_names: vec!["vs".to_string()],
+            printer_columns: vec![],
+            created_at: None,
+        };
+
+        let cluster_crd = CrdMeta {
+            crd_name: "clusterissuers.cert-manager.io".to_string(),
+            group: "cert-manager.io".to_string(),
+            version: "v1".to_string(),
+            kind: "ClusterIssuer".to_string(),
+            plural: "clusterissuers".to_string(),
+            singular: "clusterissuer".to_string(),
+            namespaced: false,
+            short_names: vec![],
+            printer_columns: vec![],
+            created_at: None,
+        };
+
+        let crds = vec![namespaced_crd, cluster_crd];
+        let namespaces = vec!["istio-system".to_string(), "default".to_string()];
+
+        // Namespaced CRD resolves with namespace
+        let res_vs = resolve_command_with_crds(":vs istio-system", &crds);
+        assert!(
+            matches!(res_vs, Some(CommandTarget::CustomResourceInNamespace(_, ref ns)) if ns == "istio-system")
+        );
+
+        // Namespaced CRD suggestions
+        let suggs_vs = command_suggestions_full("vs istio", &crds, &namespaces, None);
+        assert!(!suggs_vs.is_empty());
+        assert!(suggs_vs.iter().any(|(s, _)| s.name == "vs istio-system"
+            && matches!(s.target, CommandTarget::CustomResourceInNamespace(_, _))));
+
+        // Cluster-scoped CRD does not resolve or suggest namespace
+        let res_ci = resolve_command_with_crds(":clusterissuer default", &crds);
+        assert!(res_ci.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_namespace_discovery_stale_context_and_error_handling() {
+        let _settings = crate::common::env::isolate_settings();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = crate::common::theme::new_app(
+            Some("ctx-b".to_string()),
+            Some("default".to_string()),
+            false,
+            None,
+            vec![],
+            tx,
+        )
+        .await
+        .unwrap();
+
+        app.active_context = "ctx-b".to_string();
+        app.namespaces = vec!["b-ns1".to_string(), "b-ns2".to_string()];
+
+        // Stale discovery from old context "ctx-a" arrives - must NOT overwrite ctx-b's namespaces
+        app.handle_stream_event(
+            "discovery:namespaces:ctx-a".to_string(),
+            serde_json::json!([{"name": "stale-ns1"}, {"name": "stale-ns2"}]),
+        );
+        assert_eq!(app.namespaces, vec!["b-ns1", "b-ns2"]);
+
+        // Valid discovery for ctx-b arrives - must update
+        app.handle_stream_event(
+            "discovery:namespaces:ctx-b".to_string(),
+            serde_json::json!([{"name": "b-fresh1"}, {"name": "b-fresh2"}]),
+        );
+        assert_eq!(app.namespaces, vec!["b-fresh1", "b-fresh2"]);
+        assert!(app.namespace_discovery_error.is_none());
+
+        // Error for ctx-b arrives - must record error without crashing
+        app.handle_stream_event(
+            "discovery:namespaces:ctx-b".to_string(),
+            serde_json::json!({"error": "403 Forbidden"}),
+        );
+        assert_eq!(
+            app.namespace_discovery_error.as_deref(),
+            Some("403 Forbidden")
+        );
     }
 
     #[test]
@@ -149,11 +456,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_informer_cache_instant_screen_switching() {
+        use srectl::app::{ActiveView, App};
+        use srectl::ui::InputMode;
         use srelens_kube::client_cache::ClientCache;
         use srelens_streams::logs::LogStreamManager;
         use srelens_streams::watch::WatchManager;
-        use srectl::app::{ActiveView, App};
-        use srectl::ui::InputMode;
         use std::collections::{HashMap, HashSet};
         use std::path::PathBuf;
         use std::sync::Arc;
@@ -171,12 +478,15 @@ mod tests {
             active_namespace: "default".to_string(),
             kubeconfig_paths: Vec::new(),
             contexts: Vec::new(),
+            namespace_discovery_error: None,
             namespaces: vec!["default".to_string()],
             active_view: ActiveView::Table(ResourceTableState::new(ResourceKind::Namespaces)),
             nav_stack: Vec::new(),
             input_mode: InputMode::Normal,
             command_buffer: String::new(),
             command_suggestion_idx: 0,
+            command_tab_base: None,
+            command_tab_target: None,
             filter_buffer: String::new(),
             modal: None,
             show_help: false,
@@ -224,6 +534,13 @@ mod tests {
             screen_selection: None,
             screen_selecting: false,
             screen_selection_text: std::cell::RefCell::new(String::new()),
+            consents: Default::default(),
+            consent_arm_delay: std::time::Duration::from_secs(1),
+            model_lists: Default::default(),
+            agent_search: srelens_kube::toolbox::SearchPaths {
+                app_path: String::new(),
+                system_path: String::new(),
+            },
         };
 
         // 1. Simulate streaming snapshot arrival for pods
@@ -257,11 +574,11 @@ mod tests {
     #[tokio::test]
     async fn test_command_mode_ctrl_w_and_word_deletion() {
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        use srectl::app::{ActiveView, App};
+        use srectl::ui::InputMode;
         use srelens_kube::client_cache::ClientCache;
         use srelens_streams::logs::LogStreamManager;
         use srelens_streams::watch::WatchManager;
-        use srectl::app::{ActiveView, App};
-        use srectl::ui::InputMode;
         use std::collections::{HashMap, HashSet};
         use std::path::PathBuf;
         use std::sync::Arc;
@@ -280,12 +597,15 @@ mod tests {
             active_context: "prod-cluster".to_string(),
             active_namespace: "default".to_string(),
             contexts: vec![],
+            namespace_discovery_error: None,
             namespaces: vec!["default".to_string()],
             active_view: ActiveView::Table(ResourceTableState::new(ResourceKind::Pods)),
             nav_stack: Vec::new(),
             input_mode: InputMode::Normal,
             command_buffer: String::new(),
             command_suggestion_idx: 0,
+            command_tab_base: None,
+            command_tab_target: None,
             filter_buffer: String::new(),
             modal: None,
             show_help: false,
@@ -333,6 +653,13 @@ mod tests {
             screen_selection: None,
             screen_selecting: false,
             screen_selection_text: std::cell::RefCell::new(String::new()),
+            consents: Default::default(),
+            consent_arm_delay: std::time::Duration::from_secs(1),
+            model_lists: Default::default(),
+            agent_search: srelens_kube::toolbox::SearchPaths {
+                app_path: String::new(),
+                system_path: String::new(),
+            },
         };
 
         // 1. Enter command mode by typing ':'
@@ -374,13 +701,13 @@ mod tests {
     #[tokio::test]
     async fn test_ai_settings_navigation_and_editing() {
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-        use srelens_kube::client_cache::ClientCache;
-        use srelens_streams::logs::LogStreamManager;
-        use srelens_streams::watch::WatchManager;
         use srectl::ai_config::AiProvider;
         use srectl::app::{ActiveView, App};
         use srectl::ui::InputMode;
         use srectl::views::SettingField;
+        use srelens_kube::client_cache::ClientCache;
+        use srelens_streams::logs::LogStreamManager;
+        use srelens_streams::watch::WatchManager;
         use std::collections::{HashMap, HashSet};
         use std::path::PathBuf;
         use std::sync::Arc;
@@ -401,12 +728,15 @@ mod tests {
             active_context: "prod-cluster".to_string(),
             active_namespace: "default".to_string(),
             contexts: vec![],
+            namespace_discovery_error: None,
             namespaces: vec!["default".to_string()],
             active_view: ActiveView::Table(ResourceTableState::new(ResourceKind::Pods)),
             nav_stack: Vec::new(),
             input_mode: InputMode::Normal,
             command_buffer: String::new(),
             command_suggestion_idx: 0,
+            command_tab_base: None,
+            command_tab_target: None,
             filter_buffer: String::new(),
             modal: None,
             show_help: false,
@@ -454,6 +784,13 @@ mod tests {
             screen_selection: None,
             screen_selecting: false,
             screen_selection_text: std::cell::RefCell::new(String::new()),
+            consents: Default::default(),
+            consent_arm_delay: std::time::Duration::from_secs(1),
+            model_lists: Default::default(),
+            agent_search: srelens_kube::toolbox::SearchPaths {
+                app_path: String::new(),
+                system_path: String::new(),
+            },
         };
 
         // 1. Switch to settings view via :settings command
@@ -520,27 +857,37 @@ mod tests {
             Some("sk-test-openai-key")
         );
 
-        // 7. Test navigating all the way to Cursor Agent
-        // Currently at OpenAi (index 1), press 'j' 3 times to get to Cursor (index 4)
+        // 7. Test navigating past the last provider, which reaches the Agent
+        // card above the list, and then the first provider again.
+        // Currently at OpenAi (index 1), press 'j' 4 times to get back to Anthropic (index 0)
         app.handle_key_event(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE))
             .await; // Gemini (2)
         app.handle_key_event(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE))
             .await; // OpenAICompatible (3)
         app.handle_key_event(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE))
-            .await; // Cursor (4)
+            .await; // the Agent card
+        if let ActiveView::Settings(s) = &app.active_view {
+            assert!(s.agent_card_focused);
+        }
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE))
+            .await; // Anthropic (0)
 
         if let ActiveView::Settings(s) = &app.active_view {
-            assert_eq!(s.current_provider(), AiProvider::Cursor);
+            assert!(!s.agent_card_focused);
+            assert_eq!(s.current_provider(), AiProvider::Anthropic);
+            assert_eq!(s.selected_field, SettingField::ProviderToggle);
         }
 
-        // Select Cursor as active provider
+        // Select Anthropic as active provider
         app.handle_key_event(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE))
             .await;
         app.handle_key_event(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE))
             .await;
-        assert_eq!(app.ai_settings.default_provider, AiProvider::Cursor);
+        assert_eq!(app.ai_settings.default_provider, AiProvider::Anthropic);
 
-        // 8. Currently at ApiKey, Tab twice to get to Timeout field
+        // 8. Currently at the provider row, Tab three times to get to Timeout field
+        app.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
+            .await; // ApiKey
         app.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
             .await; // Model
         app.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
@@ -572,7 +919,10 @@ mod tests {
         app.handle_key_event(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE))
             .await;
 
-        assert_eq!(app.ai_settings.get_timeout_seconds(AiProvider::Cursor), 240);
+        assert_eq!(
+            app.ai_settings.get_timeout_seconds(AiProvider::Anthropic),
+            240
+        );
 
         // 9. Test pasting into an edit buffer
         app.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
@@ -584,29 +934,482 @@ mod tests {
         if let ActiveView::Settings(s) = &app.active_view {
             assert_eq!(s.is_editing, true);
         }
-        app.handle_paste("pasted-cursor-api-key-12345".to_string());
+        app.handle_paste("pasted-anthropic-api-key-12345".to_string());
         if let ActiveView::Settings(s) = &app.active_view {
-            assert_eq!(s.edit_buffer, "pasted-cursor-api-key-12345");
+            assert_eq!(s.edit_buffer, "pasted-anthropic-api-key-12345");
         }
         app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
             .await;
         if let ActiveView::Settings(s) = &app.active_view {
             assert_eq!(s.is_editing, false);
             assert_eq!(
-                s.settings.get_api_key(AiProvider::Cursor).as_deref(),
-                Some("pasted-cursor-api-key-12345")
+                s.settings.get_api_key(AiProvider::Anthropic).as_deref(),
+                Some("pasted-anthropic-api-key-12345")
             );
+        }
+    }
+
+    fn settings_view(app: &srectl::app::App) -> &srectl::views::SettingsViewState {
+        match &app.active_view {
+            srectl::app::ActiveView::Settings(s) => s,
+            _ => panic!("expected the settings view"),
+        }
+    }
+
+    /// The Settings view with the cursor on Anthropic, the first provider.
+    async fn open_settings(app: &mut srectl::app::App) {
+        app.switch_view_to_kind(ResourceKind::Settings).await;
+        match &mut app.active_view {
+            srectl::app::ActiveView::Settings(s) => s.selected_provider_idx = 0,
+            _ => panic!("expected the settings view"),
+        }
+    }
+
+    #[tokio::test]
+    async fn k_from_the_first_provider_reaches_the_agent_card() {
+        use crossterm::event::KeyCode;
+        use srectl::ai_config::AiProvider;
+        use srectl::views::SettingField;
+        let _settings = crate::common::env::isolate_settings();
+        let (mut app, _rx) = crate::common::app().await;
+        open_settings(&mut app).await;
+
+        app.handle_key_event(crate::common::ch('k')).await;
+        let s = settings_view(&app);
+        assert!(s.agent_card_focused);
+        assert_eq!(s.selected_field, SettingField::Agent);
+
+        // Up again wraps to the last provider; down comes back to the card
+        // and down once more to the first provider.
+        app.handle_key_event(crate::common::key(KeyCode::Up)).await;
+        assert_eq!(
+            settings_view(&app).current_provider(),
+            AiProvider::OpenAiCompatible
+        );
+        app.handle_key_event(crate::common::key(KeyCode::Down))
+            .await;
+        assert!(settings_view(&app).agent_card_focused);
+        app.handle_key_event(crate::common::ch('j')).await;
+        let s = settings_view(&app);
+        assert!(!s.agent_card_focused);
+        assert_eq!(s.current_provider(), AiProvider::Anthropic);
+    }
+
+    #[tokio::test]
+    async fn space_on_the_agent_field_moves_to_the_next_agent_and_saves() {
+        use crossterm::event::KeyCode;
+        use srectl::views::SettingField;
+        use srelens_agent::adapter::AgentKind;
+        let _settings = crate::common::env::isolate_settings();
+        let (mut app, _rx) = crate::common::app().await;
+        open_settings(&mut app).await;
+        app.handle_key_event(crate::common::ch('k')).await;
+        assert_eq!(settings_view(&app).selected_field, SettingField::Agent);
+        assert_eq!(app.ai_settings.agent, AgentKind::Srelens);
+
+        // Space, Enter and `e` each take one step: srelens, Claude Code,
+        // Codex, Cursor, and round to srelens.
+        let keys = [
+            crate::common::ch(' '),
+            crate::common::key(KeyCode::Enter),
+            crate::common::ch('e'),
+            crate::common::ch(' '),
+        ];
+        let agents = [
+            AgentKind::Claude,
+            AgentKind::Codex,
+            AgentKind::Cursor,
+            AgentKind::Srelens,
+        ];
+        for (k, agent) in keys.into_iter().zip(agents) {
+            app.handle_key_event(k).await;
+            assert_eq!(app.ai_settings.agent, agent, "the Assistant follows");
+            assert_eq!(settings_view(&app).settings.agent, agent);
+            let saved = std::fs::read_to_string(srectl::AiSettings::config_path())
+                .expect("the choice is saved at once");
+            assert_eq!(
+                srectl::AiSettings::from_json(&saved).unwrap().agent,
+                agent,
+                "{saved}"
+            );
+            assert!(!settings_view(&app).is_editing, "no edit box for an agent");
+            // The default provider is not what Space changed.
+            assert_eq!(
+                app.ai_settings.default_provider,
+                srectl::AiSettings::default().default_provider
+            );
+        }
+
+        app.handle_key_event(crate::common::ch(' ')).await;
+        let screen = crate::common::render_app(&mut app, 160, 40);
+        assert!(
+            screen.contains("Assistant agent set to Claude Code"),
+            "{screen}"
+        );
+        let saved = std::fs::read_to_string(srectl::AiSettings::config_path()).unwrap();
+        let saved: serde_json::Value = serde_json::from_str(&saved).unwrap();
+        assert_eq!(saved["agent"], "claude");
+    }
+
+    #[tokio::test]
+    async fn e_on_the_agent_cards_model_field_opens_the_active_agents_picker() {
+        use crossterm::event::KeyCode;
+        use srectl::ai_config::AiProvider;
+        use srectl::views::settings_view::PickerTarget;
+        use srelens_agent::adapter::AgentKind;
+        let mut settings = crate::common::env::isolate_settings();
+        // No provider key to ask a provider with.
+        settings.remove_env("ANTHROPIC_API_KEY");
+        let (mut app, _rx) = crate::common::app().await;
+        open_settings(&mut app).await;
+        app.handle_key_event(crate::common::ch('k')).await;
+        app.handle_key_event(crate::common::key(KeyCode::Tab)).await;
+        assert_eq!(
+            settings_view(&app).selected_field,
+            srectl::views::SettingField::Model
+        );
+
+        // srelens answers through the default provider: its models.
+        app.handle_key_event(crate::common::ch('e')).await;
+        let picker = settings_view(&app).picker.as_ref().expect("a picker");
+        assert_eq!(picker.target, PickerTarget::Provider(AiProvider::Anthropic));
+        assert!(!settings_view(&app).is_editing);
+        app.handle_key_event(crate::common::key(KeyCode::Esc)).await;
+        assert!(settings_view(&app).picker.is_none());
+
+        // Space on the card steps the agent whichever of its fields is
+        // focused; the Model field then lists that agent's models.
+        app.handle_key_event(crate::common::ch(' ')).await;
+        assert_eq!(app.ai_settings.agent, AgentKind::Claude);
+        app.handle_key_event(crate::common::key(KeyCode::Enter))
+            .await;
+        let picker = settings_view(&app).picker.as_ref().expect("a picker");
+        assert_eq!(picker.target, PickerTarget::Agent(AgentKind::Claude));
+    }
+
+    #[tokio::test]
+    async fn cursors_api_key_is_set_and_cleared_on_the_agent_card_and_shown_masked() {
+        use crossterm::event::KeyCode;
+        use srectl::views::SettingField;
+        use srelens_agent::adapter::AgentKind;
+        const KEY: &str = "cur-test-key-0123456789";
+        let mut settings = crate::common::env::isolate_settings();
+        settings.remove_env("CURSOR_API_KEY");
+        let (mut app, _rx) = crate::common::app().await;
+        open_settings(&mut app).await;
+        match &mut app.active_view {
+            srectl::app::ActiveView::Settings(s) => s.settings.agent = AgentKind::Claude,
+            _ => panic!("expected the settings view"),
+        }
+        app.handle_key_event(crate::common::ch('k')).await;
+
+        // Claude Code has no key of its own here: Agent, Model and Timeout.
+        for _ in 0..3 {
+            app.handle_key_event(crate::common::key(KeyCode::Tab)).await;
+        }
+        assert_eq!(settings_view(&app).selected_field, SettingField::Agent);
+        let screen = crate::common::render_app(&mut app, 160, 40);
+        assert!(!screen.contains("cursor auth"), "{screen}");
+
+        // Cursor's card has its API Key, after its Model.
+        match &mut app.active_view {
+            srectl::app::ActiveView::Settings(s) => s.settings.agent = AgentKind::Cursor,
+            _ => panic!("expected the settings view"),
+        }
+        let screen = crate::common::render_app(&mut app, 160, 40);
+        assert!(
+            screen.contains("API Key: auto (uses logged-in cursor auth or CURSOR_API_KEY)"),
+            "{screen}"
+        );
+        app.handle_key_event(crate::common::key(KeyCode::Tab)).await;
+        app.handle_key_event(crate::common::key(KeyCode::Tab)).await;
+        assert_eq!(settings_view(&app).selected_field, SettingField::ApiKey);
+
+        app.handle_key_event(crate::common::ch('e')).await;
+        assert!(settings_view(&app).is_editing);
+        crate::common::type_str(&mut app, KEY).await;
+        app.handle_key_event(crate::common::key(KeyCode::Enter))
+            .await;
+        assert_eq!(app.ai_settings.get_cursor_key().as_deref(), Some(KEY));
+        let saved = std::fs::read_to_string(srectl::AiSettings::config_path()).unwrap();
+        let saved = srectl::AiSettings::from_json(&saved).unwrap();
+        assert_eq!(saved.api_keys.get("cursor").map(String::as_str), Some(KEY));
+        let screen = crate::common::render_app(&mut app, 160, 40);
+        assert!(
+            screen.contains("API Key: cur-••••••••6789 [stored in config]"),
+            "{screen}"
+        );
+        assert!(!screen.contains(KEY), "the key is never shown whole");
+
+        // An empty value clears it.
+        app.handle_key_event(crate::common::ch('e')).await;
+        for _ in 0..KEY.len() {
+            app.handle_key_event(crate::common::key(KeyCode::Backspace))
+                .await;
+        }
+        app.handle_key_event(crate::common::key(KeyCode::Enter))
+            .await;
+        assert_eq!(app.ai_settings.api_keys.get("cursor"), None);
+
+        // Set in the environment instead, it is named, not shown.
+        settings.set_env("CURSOR_API_KEY", KEY);
+        let screen = crate::common::render_app(&mut app, 160, 40);
+        assert!(
+            screen.contains("API Key: [env: CURSOR_API_KEY set]"),
+            "{screen}"
+        );
+        assert!(!screen.contains(KEY), "{screen}");
+
+        // Space from the key steps to an agent without one: back on Agent.
+        app.handle_key_event(crate::common::ch(' ')).await;
+        assert_eq!(app.ai_settings.agent, AgentKind::Srelens);
+        assert_eq!(settings_view(&app).selected_field, SettingField::Agent);
+    }
+
+    /// A local agent's turn timeout is its own, set on the Agent card after
+    /// its model (and Cursor's key), and leaves the provider's alone.
+    #[tokio::test]
+    async fn a_local_agents_timeout_is_set_on_the_agent_card() {
+        use crossterm::event::KeyCode;
+        use srectl::views::SettingField;
+        use srelens_agent::adapter::AgentKind;
+        let _settings = crate::common::env::isolate_settings();
+        let (mut app, _rx) = crate::common::app().await;
+        open_settings(&mut app).await;
+        let provider = app.ai_settings.default_provider;
+        let provider_timeout = app.ai_settings.get_timeout_seconds(provider);
+        match &mut app.active_view {
+            srectl::app::ActiveView::Settings(s) => s.settings.agent = AgentKind::Codex,
+            _ => panic!("expected the settings view"),
+        }
+        app.handle_key_event(crate::common::ch('k')).await;
+        app.handle_key_event(crate::common::key(KeyCode::Tab)).await;
+        app.handle_key_event(crate::common::key(KeyCode::Tab)).await;
+        assert_eq!(settings_view(&app).selected_field, SettingField::Timeout);
+
+        app.handle_key_event(crate::common::ch('e')).await;
+        for _ in 0..5 {
+            app.handle_key_event(crate::common::key(KeyCode::Backspace))
+                .await;
+        }
+        crate::common::type_str(&mut app, "300").await;
+        app.handle_key_event(crate::common::key(KeyCode::Enter))
+            .await;
+
+        assert_eq!(
+            app.ai_settings.get_agent_timeout_seconds(AgentKind::Codex),
+            300
+        );
+        assert_eq!(
+            app.ai_settings.get_timeout_seconds(provider),
+            provider_timeout
+        );
+        let saved = std::fs::read_to_string(srectl::AiSettings::config_path()).unwrap();
+        let saved = srectl::AiSettings::from_json(&saved).unwrap();
+        assert_eq!(saved.get_agent_timeout_seconds(AgentKind::Codex), 300);
+        let screen = crate::common::render_app(&mut app, 160, 40);
+        assert!(screen.contains("Timeout: 300s"), "{screen}");
+    }
+
+    const CLAUDE_URL: &str = "https://docs.anthropic.com/en/docs/claude-code/setup";
+
+    /// The Settings view with Claude Code as the agent and no agent CLI
+    /// found (`common::app` looks for none), and the settings guard the app
+    /// was made under.
+    async fn open_settings_with_claude_missing(
+    ) -> (crate::common::env::SettingsGuard, srectl::app::App) {
+        let settings = crate::common::env::isolate_settings();
+        let (mut app, _rx) = crate::common::app().await;
+        open_settings(&mut app).await;
+        match &mut app.active_view {
+            srectl::app::ActiveView::Settings(s) => {
+                s.settings.agent = srelens_agent::adapter::AgentKind::Claude
+            }
+            _ => panic!("expected the settings view"),
+        }
+        (settings, app)
+    }
+
+    // Through the real chrome (3 header rows, 2 footer rows, the view's border)
+    // Claude's full card (with its timeout row) needs a 41-row terminal.
+    #[tokio::test]
+    async fn a_folded_agent_card_still_says_whether_the_active_agent_is_installed() {
+        let (_settings, mut app) = open_settings_with_claude_missing().await;
+
+        let full = crate::common::render_app(&mut app, 120, 41);
+        assert!(full.contains("○ Codex"), "{full}");
+
+        let folded = crate::common::render_app(&mut app, 120, 40);
+        assert!(!folded.contains("○ Codex"), "{folded}");
+        assert!(
+            folded.contains(&format!(
+                "Agent: ● Claude Code · Default · not installed — {CLAUDE_URL}"
+            )),
+            "{folded}"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_agent_card_is_drawn_in_full_while_it_has_the_cursor() {
+        let (_settings, mut app) = open_settings_with_claude_missing().await;
+        app.handle_key_event(crate::common::ch('k')).await;
+
+        let screen = crate::common::render_app(&mut app, 120, 39);
+        for row in ["○ srelens", "● Claude Code", "○ Codex", "○ Cursor"] {
+            assert!(screen.contains(row), "{row}: {screen}");
+        }
+        assert!(screen.contains("Model:   Default"), "{screen}");
+
+        // Back on a provider, the card folds again.
+        app.handle_key_event(crate::common::ch('j')).await;
+        let screen = crate::common::render_app(&mut app, 120, 39);
+        assert!(!screen.contains("○ Codex"), "{screen}");
+    }
+
+    #[tokio::test]
+    async fn an_install_link_wider_than_the_card_moves_to_its_own_line() {
+        let (_settings, mut app) = open_settings_with_claude_missing().await;
+
+        // The full card, with room: the row is 83 columns, the card 76.
+        let screen = crate::common::render_app(&mut app, 80, 60);
+        assert!(
+            screen.contains(&format!("not installed — {CLAUDE_URL}")),
+            "{screen}"
+        );
+
+        // The folded card on a classic 80x24 terminal.
+        let screen = crate::common::render_app(&mut app, 80, 24);
+        assert!(!screen.contains("○ Codex"), "{screen}");
+        assert!(
+            screen.contains(&format!("not installed — {CLAUDE_URL}")),
+            "{screen}"
+        );
+        assert!(
+            screen.contains("Agent: ● Claude Code · Default"),
+            "{screen}"
+        );
+    }
+
+    // The classic 80x24 terminal: 17 rows inside the chrome and the view's
+    // border, of which the description takes 3 and the hints 2.
+
+    /// A fake `codex` as the only agent CLI the app finds, then the Settings
+    /// view with `agent` active.
+    async fn open_settings_on_a_small_terminal(
+        bin: &std::path::Path,
+        agent: srelens_agent::adapter::AgentKind,
+    ) -> srectl::app::App {
+        let (name, body) = if cfg!(windows) {
+            ("codex.cmd", "@echo off\r\n")
+        } else {
+            ("codex", "#!/bin/sh\n")
+        };
+        let codex = bin.join(name);
+        std::fs::write(&codex, body).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&codex, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let (mut app, _rx) = crate::common::app().await;
+        app.agent_search = crate::common::agents_only_in(bin);
+        open_settings(&mut app).await;
+        match &mut app.active_view {
+            srectl::app::ActiveView::Settings(s) => s.settings.agent = agent,
+            _ => panic!("expected the settings view"),
+        }
+        app
+    }
+
+    #[tokio::test]
+    async fn on_80x24_an_installed_agent_shows_on_the_folded_card() {
+        let _settings = crate::common::env::isolate_settings();
+        let bin = tempfile::tempdir().unwrap();
+        let mut app =
+            open_settings_on_a_small_terminal(bin.path(), srelens_agent::adapter::AgentKind::Codex)
+                .await;
+
+        let screen = crate::common::render_app(&mut app, 80, 24);
+        assert!(
+            screen.contains("Agent: ● Codex · Default · installed"),
+            "{screen}"
+        );
+        assert!(screen.contains("1. Anthropic (Claude)"), "{screen}");
+    }
+
+    #[tokio::test]
+    async fn on_80x24_srelens_shows_on_the_folded_card_and_the_first_provider_keeps_its_fields() {
+        let _settings = crate::common::env::isolate_settings();
+        let bin = tempfile::tempdir().unwrap();
+        let mut app = open_settings_on_a_small_terminal(
+            bin.path(),
+            srelens_agent::adapter::AgentKind::Srelens,
+        )
+        .await;
+
+        let screen = crate::common::render_app(&mut app, 80, 24);
+        assert!(
+            screen.contains("Agent: ● srelens · Anthropic (Claude) · claude-3-7-sonnet-20250219"),
+            "{screen}"
+        );
+        // The providers fill the rows in order at their natural height; the
+        // first one has every row, and the rest are cut off at the bottom.
+        assert!(screen.contains("1. Anthropic (Claude)"), "{screen}");
+        assert!(screen.contains("API Key:"), "{screen}");
+        assert!(
+            screen.contains("Model:   claude-3-7-sonnet-20250219"),
+            "{screen}"
+        );
+    }
+
+    #[tokio::test]
+    async fn on_80x24_a_missing_agent_and_the_first_provider_are_both_readable() {
+        let _settings = crate::common::env::isolate_settings();
+        let bin = tempfile::tempdir().unwrap();
+        let mut app = open_settings_on_a_small_terminal(
+            bin.path(),
+            srelens_agent::adapter::AgentKind::Claude,
+        )
+        .await;
+
+        let screen = crate::common::render_app(&mut app, 80, 24);
+        assert!(
+            screen.contains(&format!("not installed — {CLAUDE_URL}")),
+            "{screen}"
+        );
+        assert!(screen.contains("1. Anthropic (Claude)"), "{screen}");
+    }
+
+    #[tokio::test]
+    async fn on_80x24_the_selected_provider_never_leaves_the_screen() {
+        let _settings = crate::common::env::isolate_settings();
+        let bin = tempfile::tempdir().unwrap();
+        let mut app = open_settings_on_a_small_terminal(
+            bin.path(),
+            srelens_agent::adapter::AgentKind::Srelens,
+        )
+        .await;
+
+        for name in [
+            "2. OpenAI (GPT-4o)",
+            "3. Google Gemini",
+            "4. OpenAI-Compatible / Ollama (Local)",
+        ] {
+            app.handle_key_event(crate::common::ch('j')).await;
+            let screen = crate::common::render_app(&mut app, 80, 24);
+            assert!(screen.contains(name), "{name}: {screen}");
+            assert!(screen.contains("Agent: ● srelens"), "{name}: {screen}");
         }
     }
 
     #[tokio::test]
     async fn test_assistant_typing_s_and_ctrl_s_shortcut() {
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        use srectl::app::{ActiveView, App};
+        use srectl::ui::InputMode;
         use srelens_kube::client_cache::ClientCache;
         use srelens_streams::logs::LogStreamManager;
         use srelens_streams::watch::WatchManager;
-        use srectl::app::{ActiveView, App};
-        use srectl::ui::InputMode;
         use std::collections::{HashMap, HashSet};
         use std::path::PathBuf;
         use std::sync::Arc;
@@ -625,12 +1428,15 @@ mod tests {
             active_context: "prod-cluster".to_string(),
             active_namespace: "default".to_string(),
             contexts: vec![],
+            namespace_discovery_error: None,
             namespaces: vec!["default".to_string()],
             active_view: ActiveView::Assistant,
             nav_stack: Vec::new(),
             input_mode: InputMode::Normal,
             command_buffer: String::new(),
             command_suggestion_idx: 0,
+            command_tab_base: None,
+            command_tab_target: None,
             filter_buffer: String::new(),
             modal: None,
             show_help: false,
@@ -678,6 +1484,13 @@ mod tests {
             screen_selection: None,
             screen_selecting: false,
             screen_selection_text: std::cell::RefCell::new(String::new()),
+            consents: Default::default(),
+            consent_arm_delay: std::time::Duration::from_secs(1),
+            model_lists: Default::default(),
+            agent_search: srelens_kube::toolbox::SearchPaths {
+                app_path: String::new(),
+                system_path: String::new(),
+            },
         };
 
         // 1. In Assistant view, typing 's' when input is empty should type 's' into prompt, NOT jump to settings!
@@ -830,12 +1643,12 @@ mod tests {
 
     #[tokio::test]
     async fn test_assistant_conversation_persistence_across_view_switches() {
-        use srelens_kube::client_cache::ClientCache;
-        use srelens_streams::logs::LogStreamManager;
-        use srelens_streams::watch::WatchManager;
         use srectl::app::{ActiveView, App};
         use srectl::ui::InputMode;
         use srectl::views::assistant_view::ToolCallStatus;
+        use srelens_kube::client_cache::ClientCache;
+        use srelens_streams::logs::LogStreamManager;
+        use srelens_streams::watch::WatchManager;
         use std::collections::{HashMap, HashSet};
         use std::path::PathBuf;
         use std::sync::Arc;
@@ -854,12 +1667,15 @@ mod tests {
             active_context: "prod-cluster".to_string(),
             active_namespace: "default".to_string(),
             contexts: vec![],
+            namespace_discovery_error: None,
             namespaces: vec!["default".to_string()],
             active_view: ActiveView::Assistant,
             nav_stack: Vec::new(),
             input_mode: InputMode::Normal,
             command_buffer: String::new(),
             command_suggestion_idx: 0,
+            command_tab_base: None,
+            command_tab_target: None,
             filter_buffer: String::new(),
             modal: None,
             show_help: false,
@@ -907,6 +1723,13 @@ mod tests {
             screen_selection: None,
             screen_selecting: false,
             screen_selection_text: std::cell::RefCell::new(String::new()),
+            consents: Default::default(),
+            consent_arm_delay: std::time::Duration::from_secs(1),
+            model_lists: Default::default(),
+            agent_search: srelens_kube::toolbox::SearchPaths {
+                app_path: String::new(),
+                system_path: String::new(),
+            },
         };
 
         // 1. User starts turn in Assistant view
@@ -1001,61 +1824,15 @@ mod tests {
         assert!(ai.messages[0].tool_calls.is_empty());
     }
 
-    #[test]
-    fn test_filter_out_hook_additional_contexts() {
-        use srectl::app::extract_tool_call_start_info;
-
-        // JSON emitted by cursor-agent with both real tool (bashToolCall) and hookAdditionalContexts
-        let json_str = r#"{
-            "type": "tool_call",
-            "subtype": "started",
-            "call_id": "call_123",
-            "tool_call": {
-                "hookAdditionalContexts": [],
-                "bashToolCall": {
-                    "args": {
-                        "command": "kubectl get pods -A"
-                    }
-                },
-                "toolCallId": "call_123",
-                "startedAtMs": "1786359191055"
-            }
-        }"#;
-        let v: serde_json::Value = serde_json::from_str(json_str).unwrap();
-        let extracted = extract_tool_call_start_info(&v);
-        assert!(extracted.is_some());
-        let (id, tool, args) = extracted.unwrap();
-        assert_eq!(id, "call_123");
-        assert_eq!(tool, "bash");
-        assert_eq!(args, "kubectl get pods -A");
-
-        // JSON with ONLY hookAdditionalContexts metadata and no real ToolCall
-        let json_hook_only = r#"{
-            "type": "tool_call",
-            "subtype": "started",
-            "call_id": "call_999",
-            "tool_call": {
-                "hookAdditionalContexts": [],
-                "toolCallId": "call_999"
-            }
-        }"#;
-        let v_hook: serde_json::Value = serde_json::from_str(json_hook_only).unwrap();
-        let extracted_hook = extract_tool_call_start_info(&v_hook);
-        assert!(
-            extracted_hook.is_none(),
-            "hookAdditionalContexts without a ToolCall key should be ignored"
-        );
-    }
-
     #[tokio::test]
     async fn test_regex_search_single_item_combines_enter_to_go_to_resource() {
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-        use srelens_kube::client_cache::ClientCache;
-        use srelens_streams::logs::LogStreamManager;
-        use srelens_streams::watch::WatchManager;
         use srectl::app::{ActiveView, App};
         use srectl::ui::InputMode;
         use srectl::views::resource_table::ResourceTableState;
+        use srelens_kube::client_cache::ClientCache;
+        use srelens_streams::logs::LogStreamManager;
+        use srelens_streams::watch::WatchManager;
         use std::collections::{HashMap, HashSet};
         use std::path::PathBuf;
         use std::sync::Arc;
@@ -1084,6 +1861,7 @@ mod tests {
             active_context: "prod-cluster".to_string(),
             active_namespace: "default".to_string(),
             contexts: vec![],
+            namespace_discovery_error: None,
             namespaces: vec![
                 "default".to_string(),
                 "kube-system".to_string(),
@@ -1094,6 +1872,8 @@ mod tests {
             input_mode: InputMode::Normal,
             command_buffer: String::new(),
             command_suggestion_idx: 0,
+            command_tab_base: None,
+            command_tab_target: None,
             filter_buffer: String::new(),
             modal: None,
             show_help: false,
@@ -1141,6 +1921,13 @@ mod tests {
             screen_selection: None,
             screen_selecting: false,
             screen_selection_text: std::cell::RefCell::new(String::new()),
+            consents: Default::default(),
+            consent_arm_delay: std::time::Duration::from_secs(1),
+            model_lists: Default::default(),
+            agent_search: srelens_kube::toolbox::SearchPaths {
+                app_path: String::new(),
+                system_path: String::new(),
+            },
         };
 
         // 1. Enter filter mode with '/'
@@ -1211,12 +1998,12 @@ mod tests {
     #[tokio::test]
     async fn test_port_forward_keybinding_on_pods() {
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-        use srelens_kube::client_cache::ClientCache;
-        use srelens_streams::logs::LogStreamManager;
-        use srelens_streams::watch::WatchManager;
         use srectl::app::{ActiveView, App};
         use srectl::ui::{InputMode, Modal};
         use srectl::views::resource_table::ResourceTableState;
+        use srelens_kube::client_cache::ClientCache;
+        use srelens_streams::logs::LogStreamManager;
+        use srelens_streams::watch::WatchManager;
         use std::collections::{HashMap, HashSet};
         use std::path::PathBuf;
         use std::sync::Arc;
@@ -1250,12 +2037,15 @@ mod tests {
             active_context: "prod-cluster".to_string(),
             active_namespace: "default".to_string(),
             contexts: vec![],
+            namespace_discovery_error: None,
             namespaces: vec!["default".to_string()],
             active_view: ActiveView::Table(table),
             nav_stack: Vec::new(),
             input_mode: InputMode::Normal,
             command_buffer: String::new(),
             command_suggestion_idx: 0,
+            command_tab_base: None,
+            command_tab_target: None,
             filter_buffer: String::new(),
             modal: None,
             show_help: false,
@@ -1303,6 +2093,13 @@ mod tests {
             screen_selection: None,
             screen_selecting: false,
             screen_selection_text: std::cell::RefCell::new(String::new()),
+            consents: Default::default(),
+            consent_arm_delay: std::time::Duration::from_secs(1),
+            model_lists: Default::default(),
+            agent_search: srelens_kube::toolbox::SearchPaths {
+                app_path: String::new(),
+                system_path: String::new(),
+            },
         };
 
         // Press 'f' (or 'F') on the selected pod -> opens PortForward modal with detected port 3000
@@ -1590,12 +2387,12 @@ mod tests {
 
     #[tokio::test]
     async fn test_pod_metrics_usage_update_and_column_extraction() {
-        use srelens_kube::client_cache::ClientCache;
-        use srelens_streams::logs::LogStreamManager;
-        use srelens_streams::watch::WatchManager;
         use srectl::app::{ActiveView, App};
         use srectl::ui::InputMode;
         use srectl::views::resource_table::{extract_field_str, ResourceTableState};
+        use srelens_kube::client_cache::ClientCache;
+        use srelens_streams::logs::LogStreamManager;
+        use srelens_streams::watch::WatchManager;
         use std::collections::{HashMap, HashSet};
         use std::path::PathBuf;
         use std::sync::Arc;
@@ -1628,12 +2425,15 @@ mod tests {
             active_context: "prod-cluster".to_string(),
             active_namespace: "copy-controller".to_string(),
             contexts: vec![],
+            namespace_discovery_error: None,
             namespaces: vec!["copy-controller".to_string()],
             active_view: ActiveView::Table(table),
             nav_stack: Vec::new(),
             input_mode: InputMode::Normal,
             command_buffer: String::new(),
             command_suggestion_idx: 0,
+            command_tab_base: None,
+            command_tab_target: None,
             filter_buffer: String::new(),
             modal: None,
             show_help: false,
@@ -1681,6 +2481,13 @@ mod tests {
             screen_selection: None,
             screen_selecting: false,
             screen_selection_text: std::cell::RefCell::new(String::new()),
+            consents: Default::default(),
+            consent_arm_delay: std::time::Duration::from_secs(1),
+            model_lists: Default::default(),
+            agent_search: srelens_kube::toolbox::SearchPaths {
+                app_path: String::new(),
+                system_path: String::new(),
+            },
         };
 
         // Initially without metrics, extract_field_str returns "-"
@@ -1715,13 +2522,14 @@ mod tests {
 
     #[tokio::test]
     async fn test_native_mcp_agent_invoker_and_tool_execution() {
+        use srectl::agent::{build_mcp_server, McpToolInvoker};
         use srelens_kube::client_cache::ClientCache;
         use srelens_llm::ToolInvoker;
-        use srectl::agent::{build_mcp_server, McpToolInvoker};
         use std::path::PathBuf;
 
         let client_cache = ClientCache::new(PathBuf::from("/nonexistent"));
-        let server = build_mcp_server(client_cache, vec![]);
+        let policy = std::sync::Arc::new(srelens_mcp::policy::FlagGated::new(false, true));
+        let server = build_mcp_server(client_cache, vec![], policy);
         let invoker = McpToolInvoker::new(server);
 
         // 1. Tool listing returns all k8s capabilities with provider-safe names
@@ -1763,11 +2571,11 @@ mod tests {
     #[tokio::test]
     async fn test_assistant_mouse_selection_copy_and_bracketed_paste() {
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        use srectl::app::{ActiveView, App};
+        use srectl::ui::InputMode;
         use srelens_kube::client_cache::ClientCache;
         use srelens_streams::logs::LogStreamManager;
         use srelens_streams::watch::WatchManager;
-        use srectl::app::{ActiveView, App};
-        use srectl::ui::InputMode;
         use std::collections::{HashMap, HashSet};
         use std::path::PathBuf;
         use std::sync::Arc;
@@ -1786,12 +2594,15 @@ mod tests {
             active_context: "kind-dev".to_string(),
             active_namespace: "default".to_string(),
             contexts: vec![],
+            namespace_discovery_error: None,
             namespaces: vec!["default".to_string()],
             active_view: ActiveView::Assistant,
             nav_stack: Vec::new(),
             input_mode: InputMode::Normal,
             command_buffer: String::new(),
             command_suggestion_idx: 0,
+            command_tab_base: None,
+            command_tab_target: None,
             filter_buffer: String::new(),
             modal: None,
             show_help: false,
@@ -1839,6 +2650,13 @@ mod tests {
             screen_selection: None,
             screen_selecting: false,
             screen_selection_text: std::cell::RefCell::new(String::new()),
+            consents: Default::default(),
+            consent_arm_delay: std::time::Duration::from_secs(1),
+            model_lists: Default::default(),
+            agent_search: srelens_kube::toolbox::SearchPaths {
+                app_path: String::new(),
+                system_path: String::new(),
+            },
         };
 
         // 1. Test paste handling into Assistant input
@@ -1872,11 +2690,11 @@ mod tests {
     #[tokio::test]
     async fn test_assistant_bottom_bar_hints_only_cmd_and_help() {
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        use srectl::app::{ActiveView, App};
+        use srectl::ui::InputMode;
         use srelens_kube::client_cache::ClientCache;
         use srelens_streams::logs::LogStreamManager;
         use srelens_streams::watch::WatchManager;
-        use srectl::app::{ActiveView, App};
-        use srectl::ui::InputMode;
         use std::collections::{HashMap, HashSet};
         use std::path::PathBuf;
         use std::sync::Arc;
@@ -1895,12 +2713,15 @@ mod tests {
             active_context: "kind-dev".to_string(),
             active_namespace: "default".to_string(),
             contexts: vec![],
+            namespace_discovery_error: None,
             namespaces: vec!["default".to_string()],
             active_view: ActiveView::Assistant,
             nav_stack: Vec::new(),
             input_mode: InputMode::Normal,
             command_buffer: String::new(),
             command_suggestion_idx: 0,
+            command_tab_base: None,
+            command_tab_target: None,
             filter_buffer: String::new(),
             modal: None,
             show_help: false,
@@ -1948,6 +2769,13 @@ mod tests {
             screen_selection: None,
             screen_selecting: false,
             screen_selection_text: std::cell::RefCell::new(String::new()),
+            consents: Default::default(),
+            consent_arm_delay: std::time::Duration::from_secs(1),
+            model_lists: Default::default(),
+            agent_search: srelens_kube::toolbox::SearchPaths {
+                app_path: String::new(),
+                system_path: String::new(),
+            },
         };
 
         // When input is empty, typing '?' opens help modal
@@ -1970,11 +2798,11 @@ mod tests {
             KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
         };
         use ratatui::layout::Rect;
+        use srectl::app::{ActiveView, App};
+        use srectl::ui::InputMode;
         use srelens_kube::client_cache::ClientCache;
         use srelens_streams::logs::LogStreamManager;
         use srelens_streams::watch::WatchManager;
-        use srectl::app::{ActiveView, App};
-        use srectl::ui::InputMode;
         use std::collections::{HashMap, HashSet};
         use std::path::PathBuf;
         use std::sync::Arc;
@@ -1996,6 +2824,7 @@ mod tests {
             active_context: "kind-dev".to_string(),
             active_namespace: "default".to_string(),
             contexts: vec![],
+            namespace_discovery_error: None,
             namespaces: vec!["default".to_string()],
             active_view: ActiveView::Assistant,
             nav_stack: vec![ActiveView::Table(ResourceTableState::new(
@@ -2004,6 +2833,8 @@ mod tests {
             input_mode: InputMode::Normal,
             command_buffer: String::new(),
             command_suggestion_idx: 0,
+            command_tab_base: None,
+            command_tab_target: None,
             filter_buffer: String::new(),
             modal: None,
             show_help: false,
@@ -2051,6 +2882,13 @@ mod tests {
             screen_selection: None,
             screen_selecting: false,
             screen_selection_text: std::cell::RefCell::new(String::new()),
+            consents: Default::default(),
+            consent_arm_delay: std::time::Duration::from_secs(1),
+            model_lists: Default::default(),
+            agent_search: srelens_kube::toolbox::SearchPaths {
+                app_path: String::new(),
+                system_path: String::new(),
+            },
         };
 
         // Set viewport and simulate tool chip line at index 2
@@ -2092,14 +2930,14 @@ mod tests {
     async fn test_header_context_chips_mouse_click_and_hotbar() {
         use crossterm::event::{KeyCode, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
         use ratatui::layout::Rect;
-        use srelens_kube::client_cache::ClientCache;
-        use srelens_streams::logs::LogStreamManager;
-        use srelens_streams::watch::WatchManager;
         use srectl::app::{ActiveView, App};
         use srectl::commands::ResourceKind;
         use srectl::ui::dialogs::Modal;
         use srectl::ui::InputMode;
         use srectl::views::resource_table::ResourceTableState;
+        use srelens_kube::client_cache::ClientCache;
+        use srelens_streams::logs::LogStreamManager;
+        use srelens_streams::watch::WatchManager;
         use std::collections::{HashMap, HashSet};
         use std::path::PathBuf;
         use std::sync::Arc;
@@ -2149,12 +2987,15 @@ mod tests {
                     auth_kind: "client certificate".to_string(),
                 },
             ],
+            namespace_discovery_error: None,
             namespaces: vec!["default".to_string()],
             active_view: ActiveView::Table(ResourceTableState::new(ResourceKind::Pods)),
             nav_stack: vec![],
             input_mode: InputMode::Normal,
             command_buffer: String::new(),
             command_suggestion_idx: 0,
+            command_tab_base: None,
+            command_tab_target: None,
             filter_buffer: String::new(),
             modal: None,
             show_help: false,
@@ -2202,6 +3043,13 @@ mod tests {
             screen_selection: None,
             screen_selecting: false,
             screen_selection_text: std::cell::RefCell::new(String::new()),
+            consents: Default::default(),
+            consent_arm_delay: std::time::Duration::from_secs(1),
+            model_lists: Default::default(),
+            agent_search: srelens_kube::toolbox::SearchPaths {
+                app_path: String::new(),
+                system_path: String::new(),
+            },
         };
 
         // Simulate header chips at columns 12..25 (prod-eu) and 26..40 (kind-dev) on row 0
@@ -2279,11 +3127,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_per_cluster_assistant_state_isolation() {
+        use srectl::app::{ActiveView, App};
+        use srectl::ui::InputMode;
         use srelens_kube::client_cache::ClientCache;
         use srelens_streams::logs::LogStreamManager;
         use srelens_streams::watch::WatchManager;
-        use srectl::app::{ActiveView, App};
-        use srectl::ui::InputMode;
         use std::collections::{HashMap, HashSet};
         use std::path::PathBuf;
         use std::sync::Arc;
@@ -2333,12 +3181,15 @@ mod tests {
                     auth_kind: "client certificate".to_string(),
                 },
             ],
+            namespace_discovery_error: None,
             namespaces: vec!["default".to_string(), "kube-system".to_string()],
             active_view: ActiveView::Assistant,
             nav_stack: vec![],
             input_mode: InputMode::Normal,
             command_buffer: String::new(),
             command_suggestion_idx: 0,
+            command_tab_base: None,
+            command_tab_target: None,
             filter_buffer: String::new(),
             modal: None,
             show_help: false,
@@ -2388,6 +3239,13 @@ mod tests {
             screen_selection: None,
             screen_selecting: false,
             screen_selection_text: std::cell::RefCell::new(String::new()),
+            consents: Default::default(),
+            consent_arm_delay: std::time::Duration::from_secs(1),
+            model_lists: Default::default(),
+            agent_search: srelens_kube::toolbox::SearchPaths {
+                app_path: String::new(),
+                system_path: String::new(),
+            },
         };
 
         // 1. In data-processing-prod-eu-dus1, user has a conversation
@@ -2444,14 +3302,14 @@ mod tests {
     #[tokio::test]
     async fn test_deep_link_navigation_and_copy_shortcuts() {
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-        use srelens_kube::client_cache::ClientCache;
-        use srelens_streams::logs::LogStreamManager;
-        use srelens_streams::watch::WatchManager;
         use srectl::app::{ActiveView, App};
         use srectl::commands::ResourceKind;
         use srectl::deep_link::DeepLink;
         use srectl::ui::InputMode;
         use srectl::views::resource_table::ResourceTableState;
+        use srelens_kube::client_cache::ClientCache;
+        use srelens_streams::logs::LogStreamManager;
+        use srelens_streams::watch::WatchManager;
         use std::collections::{HashMap, HashSet};
         use std::path::PathBuf;
         use std::sync::Arc;
@@ -2524,6 +3382,7 @@ mod tests {
                     auth_kind: "token".to_string(),
                 },
             ],
+            namespace_discovery_error: None,
             namespaces: vec![
                 "default".to_string(),
                 "production".to_string(),
@@ -2534,6 +3393,8 @@ mod tests {
             input_mode: InputMode::Normal,
             command_buffer: String::new(),
             command_suggestion_idx: 0,
+            command_tab_base: None,
+            command_tab_target: None,
             filter_buffer: String::new(),
             modal: None,
             show_help: false,
@@ -2583,6 +3444,13 @@ mod tests {
             screen_selection: None,
             screen_selecting: false,
             screen_selection_text: std::cell::RefCell::new(String::new()),
+            consents: Default::default(),
+            consent_arm_delay: std::time::Duration::from_secs(1),
+            model_lists: Default::default(),
+            agent_search: srelens_kube::toolbox::SearchPaths {
+                app_path: String::new(),
+                system_path: String::new(),
+            },
         };
 
         // 1. Pressing 'c' on the selected row copies the resource name!
@@ -2630,14 +3498,14 @@ mod tests {
 
     #[tokio::test]
     async fn test_live_cluster_overview_and_capacity_gauges() {
-        use srelens_kube::client_cache::ClientCache;
-        use srelens_streams::logs::LogStreamManager;
-        use srelens_streams::watch::WatchManager;
         use srectl::app::{ActiveView, App};
         use srectl::commands::ResourceKind;
         use srectl::ui::InputMode;
         use srectl::views::overview_view::ClusterOverviewData;
         use srectl::views::resource_table::ResourceTableState;
+        use srelens_kube::client_cache::ClientCache;
+        use srelens_streams::logs::LogStreamManager;
+        use srelens_streams::watch::WatchManager;
         use std::collections::{HashMap, HashSet};
         use std::path::PathBuf;
         use std::sync::Arc;
@@ -2656,12 +3524,15 @@ mod tests {
             active_context: "data-processing-prod-eu-dus1".to_string(),
             active_namespace: "default".to_string(),
             contexts: vec![],
+            namespace_discovery_error: None,
             namespaces: vec!["default".to_string()],
             active_view: ActiveView::Table(ResourceTableState::new(ResourceKind::Pods)),
             nav_stack: vec![],
             input_mode: InputMode::Normal,
             command_buffer: String::new(),
             command_suggestion_idx: 0,
+            command_tab_base: None,
+            command_tab_target: None,
             filter_buffer: String::new(),
             modal: None,
             show_help: false,
@@ -2709,6 +3580,13 @@ mod tests {
             screen_selection: None,
             screen_selecting: false,
             screen_selection_text: std::cell::RefCell::new(String::new()),
+            consents: Default::default(),
+            consent_arm_delay: std::time::Duration::from_secs(1),
+            model_lists: Default::default(),
+            agent_search: srelens_kube::toolbox::SearchPaths {
+                app_path: String::new(),
+                system_path: String::new(),
+            },
         };
 
         // 1. Switch view to Overview
@@ -3146,11 +4024,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_table_copy_and_bulk_mark_copy() {
+        use srectl::app::{ActiveView, App};
+        use srectl::ui::InputMode;
         use srelens_kube::client_cache::ClientCache;
         use srelens_streams::logs::LogStreamManager;
         use srelens_streams::watch::WatchManager;
-        use srectl::app::{ActiveView, App};
-        use srectl::ui::InputMode;
         use std::collections::{HashMap, HashSet};
         use std::path::PathBuf;
         use std::sync::Arc;
@@ -3180,11 +4058,14 @@ mod tests {
             active_namespace: "default".to_string(),
             kubeconfig_paths: vec![],
             contexts: vec![],
+            namespace_discovery_error: None,
             namespaces: vec!["default".to_string()],
             active_view: ActiveView::Table(table),
             nav_stack: vec![],
             command_buffer: String::new(),
             command_suggestion_idx: 0,
+            command_tab_base: None,
+            command_tab_target: None,
             filter_buffer: String::new(),
             input_mode: InputMode::Normal,
             toast: None,
@@ -3216,9 +4097,7 @@ mod tests {
             cluster_unreachable: false,
             ai_settings: srectl::AiSettings::default(),
             tui_config: srectl::TuiConfig::default(),
-            assistant_state: srectl::views::assistant_view::AssistantViewState::for_context(
-                "prod",
-            ),
+            assistant_state: srectl::views::assistant_view::AssistantViewState::for_context("prod"),
             assistant_states: HashMap::new(),
             pod_metrics_tick_counter: 0,
             node_metrics_tick_counter: 0,
@@ -3235,6 +4114,13 @@ mod tests {
             screen_selection: None,
             screen_selecting: false,
             screen_selection_text: std::cell::RefCell::new(String::new()),
+            consents: Default::default(),
+            consent_arm_delay: std::time::Duration::from_secs(1),
+            model_lists: Default::default(),
+            agent_search: srelens_kube::toolbox::SearchPaths {
+                app_path: String::new(),
+                system_path: String::new(),
+            },
         };
 
         // 1. Press 'c' -> Copies selected pod name
@@ -3317,12 +4203,12 @@ mod tests {
 
     #[tokio::test]
     async fn test_delete_resource_and_rollout_restart_modal_action_format() {
-        use srelens_kube::client_cache::ClientCache;
-        use srelens_streams::logs::LogStreamManager;
-        use srelens_streams::watch::WatchManager;
         use srectl::app::{ActiveView, App};
         use srectl::ui::dialogs::Modal;
         use srectl::ui::InputMode;
+        use srelens_kube::client_cache::ClientCache;
+        use srelens_streams::logs::LogStreamManager;
+        use srelens_streams::watch::WatchManager;
         use std::collections::{HashMap, HashSet};
         use std::path::PathBuf;
         use std::sync::Arc;
@@ -3347,11 +4233,14 @@ mod tests {
             active_namespace: "prod".to_string(),
             kubeconfig_paths: vec![],
             contexts: vec![],
+            namespace_discovery_error: None,
             namespaces: vec!["prod".to_string()],
             active_view: ActiveView::Table(table),
             nav_stack: vec![],
             command_buffer: String::new(),
             command_suggestion_idx: 0,
+            command_tab_base: None,
+            command_tab_target: None,
             filter_buffer: String::new(),
             input_mode: InputMode::Normal,
             toast: None,
@@ -3383,9 +4272,7 @@ mod tests {
             cluster_unreachable: false,
             ai_settings: srectl::AiSettings::default(),
             tui_config: srectl::TuiConfig::default(),
-            assistant_state: srectl::views::assistant_view::AssistantViewState::for_context(
-                "prod",
-            ),
+            assistant_state: srectl::views::assistant_view::AssistantViewState::for_context("prod"),
             assistant_states: HashMap::new(),
             pod_metrics_tick_counter: 0,
             node_metrics_tick_counter: 0,
@@ -3402,6 +4289,13 @@ mod tests {
             screen_selection: None,
             screen_selecting: false,
             screen_selection_text: std::cell::RefCell::new(String::new()),
+            consents: Default::default(),
+            consent_arm_delay: std::time::Duration::from_secs(1),
+            model_lists: Default::default(),
+            agent_search: srelens_kube::toolbox::SearchPaths {
+                app_path: String::new(),
+                system_path: String::new(),
+            },
         };
 
         // 1. Press 'Ctrl+d' on Deployment -> Delete confirmation modal
@@ -3595,14 +4489,14 @@ mod tests {
 
     #[tokio::test]
     async fn test_action_palette_generation_and_execution() {
-        use srelens_kube::client_cache::ClientCache;
-        use srelens_streams::logs::LogStreamManager;
-        use srelens_streams::watch::WatchManager;
         use srectl::app::{ActiveView, App};
         use srectl::commands::ResourceKind;
         use srectl::ui::dialogs::{Modal, QuickActionId};
         use srectl::ui::InputMode;
         use srectl::views::resource_table::ResourceTableState;
+        use srelens_kube::client_cache::ClientCache;
+        use srelens_streams::logs::LogStreamManager;
+        use srelens_streams::watch::WatchManager;
         use std::collections::{HashMap, HashSet};
         use std::path::PathBuf;
         use std::sync::Arc;
@@ -3631,12 +4525,15 @@ mod tests {
             active_namespace: "prod".to_string(),
             kubeconfig_paths: vec![],
             contexts: vec![],
+            namespace_discovery_error: None,
             namespaces: vec!["prod".to_string()],
             active_view: ActiveView::Table(table),
             nav_stack: vec![],
             input_mode: InputMode::Normal,
             command_buffer: String::new(),
             command_suggestion_idx: 0,
+            command_tab_base: None,
+            command_tab_target: None,
             filter_buffer: String::new(),
             modal: None,
             show_help: false,
@@ -3667,9 +4564,7 @@ mod tests {
             close_pf_button_rect: std::cell::RefCell::new(None),
             ai_settings: srectl::AiSettings::default(),
             tui_config: srectl::TuiConfig::default(),
-            assistant_state: srectl::views::assistant_view::AssistantViewState::for_context(
-                "prod",
-            ),
+            assistant_state: srectl::views::assistant_view::AssistantViewState::for_context("prod"),
             assistant_states: HashMap::new(),
             pod_metrics_tick_counter: 0,
             node_metrics_tick_counter: 0,
@@ -3686,6 +4581,13 @@ mod tests {
             screen_selection: None,
             screen_selecting: false,
             screen_selection_text: std::cell::RefCell::new(String::new()),
+            consents: Default::default(),
+            consent_arm_delay: std::time::Duration::from_secs(1),
+            model_lists: Default::default(),
+            agent_search: srelens_kube::toolbox::SearchPaths {
+                app_path: String::new(),
+                system_path: String::new(),
+            },
         };
 
         // 1. Press 'x' on Deployment -> Opens Action Palette
@@ -3750,14 +4652,14 @@ mod tests {
 
     #[tokio::test]
     async fn test_resource_relationship_tree_navigation() {
-        use srelens_kube::client_cache::ClientCache;
-        use srelens_kube::lineage::{LineageNode, LineageRelation};
-        use srelens_streams::logs::LogStreamManager;
-        use srelens_streams::watch::WatchManager;
         use srectl::app::{ActiveView, App};
         use srectl::commands::ResourceKind;
         use srectl::ui::InputMode;
         use srectl::views::resource_table::ResourceTableState;
+        use srelens_kube::client_cache::ClientCache;
+        use srelens_kube::lineage::{LineageNode, LineageRelation};
+        use srelens_streams::logs::LogStreamManager;
+        use srelens_streams::watch::WatchManager;
         use std::collections::{HashMap, HashSet};
         use std::path::PathBuf;
         use std::sync::Arc;
@@ -3785,12 +4687,15 @@ mod tests {
             active_namespace: "shop".to_string(),
             kubeconfig_paths: vec![],
             contexts: vec![],
+            namespace_discovery_error: None,
             namespaces: vec!["shop".to_string()],
             active_view: ActiveView::Table(table),
             nav_stack: vec![],
             input_mode: InputMode::Normal,
             command_buffer: String::new(),
             command_suggestion_idx: 0,
+            command_tab_base: None,
+            command_tab_target: None,
             filter_buffer: String::new(),
             modal: None,
             show_help: false,
@@ -3821,9 +4726,7 @@ mod tests {
             close_pf_button_rect: std::cell::RefCell::new(None),
             ai_settings: srectl::AiSettings::default(),
             tui_config: srectl::TuiConfig::default(),
-            assistant_state: srectl::views::assistant_view::AssistantViewState::for_context(
-                "shop",
-            ),
+            assistant_state: srectl::views::assistant_view::AssistantViewState::for_context("shop"),
             assistant_states: HashMap::new(),
             pod_metrics_tick_counter: 0,
             node_metrics_tick_counter: 0,
@@ -3840,6 +4743,13 @@ mod tests {
             screen_selection: None,
             screen_selecting: false,
             screen_selection_text: std::cell::RefCell::new(String::new()),
+            consents: Default::default(),
+            consent_arm_delay: std::time::Duration::from_secs(1),
+            model_lists: Default::default(),
+            agent_search: srelens_kube::toolbox::SearchPaths {
+                app_path: String::new(),
+                system_path: String::new(),
+            },
         };
 
         // 1. Press 't' on Pod -> Opens Tree View
@@ -3897,16 +4807,16 @@ mod tests {
     #[tokio::test]
     async fn test_node_inspector_enter_navigation_and_pod_jump() {
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        use srectl::app::{ActiveView, App};
+        use srectl::commands::ResourceKind;
+        use srectl::ui::{InputMode, Modal};
+        use srectl::views::resource_table::ResourceTableState;
         use srelens_kube::client_cache::ClientCache;
         use srelens_kube::node_inspector::{
             NodeConditionInfo, NodeInspectorDetails, NodePodItem, NodeTaintInfo,
         };
         use srelens_streams::logs::LogStreamManager;
         use srelens_streams::watch::WatchManager;
-        use srectl::app::{ActiveView, App};
-        use srectl::commands::ResourceKind;
-        use srectl::ui::{InputMode, Modal};
-        use srectl::views::resource_table::ResourceTableState;
         use std::collections::{HashMap, HashSet};
         use std::path::PathBuf;
         use std::sync::Arc;
@@ -3934,12 +4844,15 @@ mod tests {
             active_namespace: "default".to_string(),
             kubeconfig_paths: vec![],
             contexts: vec![],
+            namespace_discovery_error: None,
             namespaces: vec!["default".to_string(), "ai-prod".to_string()],
             active_view: ActiveView::Table(node_table),
             nav_stack: vec![],
             input_mode: InputMode::Normal,
             command_buffer: String::new(),
             command_suggestion_idx: 0,
+            command_tab_base: None,
+            command_tab_target: None,
             filter_buffer: String::new(),
             modal: None,
             show_help: false,
@@ -3989,6 +4902,13 @@ mod tests {
             screen_selection: None,
             screen_selecting: false,
             screen_selection_text: std::cell::RefCell::new(String::new()),
+            consents: Default::default(),
+            consent_arm_delay: std::time::Duration::from_secs(1),
+            model_lists: Default::default(),
+            agent_search: srelens_kube::toolbox::SearchPaths {
+                app_path: String::new(),
+                system_path: String::new(),
+            },
         };
 
         // 1. Pressing 'x' on Node table opens Action Palette with 'InspectNode'
@@ -4119,14 +5039,14 @@ mod tests {
     async fn test_mouse_row_selection_and_scrolling_in_table_and_node_inspector() {
         use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
         use ratatui::layout::Rect;
-        use srelens_kube::client_cache::ClientCache;
-        use srelens_kube::node_inspector::{NodeInspectorDetails, NodePodItem};
-        use srelens_streams::logs::LogStreamManager;
-        use srelens_streams::watch::WatchManager;
         use srectl::app::{ActiveView, App};
         use srectl::commands::ResourceKind;
         use srectl::ui::InputMode;
         use srectl::views::resource_table::ResourceTableState;
+        use srelens_kube::client_cache::ClientCache;
+        use srelens_kube::node_inspector::{NodeInspectorDetails, NodePodItem};
+        use srelens_streams::logs::LogStreamManager;
+        use srelens_streams::watch::WatchManager;
         use std::collections::HashMap;
         use std::path::PathBuf;
         use std::sync::Arc;
@@ -4159,12 +5079,15 @@ mod tests {
             active_namespace: "default".to_string(),
             kubeconfig_paths: vec![],
             contexts: vec![],
+            namespace_discovery_error: None,
             namespaces: vec!["default".to_string()],
             active_view: ActiveView::Table(node_table),
             nav_stack: vec![],
             input_mode: InputMode::Normal,
             command_buffer: String::new(),
             command_suggestion_idx: 0,
+            command_tab_base: None,
+            command_tab_target: None,
             filter_buffer: String::new(),
             modal: None,
             show_help: false,
@@ -4214,6 +5137,13 @@ mod tests {
             screen_selection: None,
             screen_selecting: false,
             screen_selection_text: std::cell::RefCell::new(String::new()),
+            consents: Default::default(),
+            consent_arm_delay: std::time::Duration::from_secs(1),
+            model_lists: Default::default(),
+            agent_search: srelens_kube::toolbox::SearchPaths {
+                app_path: String::new(),
+                system_path: String::new(),
+            },
         };
 
         // 1. Click on row at y = 3 + 2 + 5 = 10 -> row 5
@@ -4348,14 +5278,14 @@ mod tests {
     #[tokio::test]
     async fn test_text_search_in_describe_yaml_and_logs() {
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-        use srelens_kube::client_cache::ClientCache;
-        use srelens_streams::logs::LogStreamManager;
-        use srelens_streams::watch::WatchManager;
         use srectl::app::{ActiveView, App};
         use srectl::ui::InputMode;
         use srectl::views::describe_view::DescribeViewState;
         use srectl::views::logs_view::LogsViewState;
         use srectl::views::yaml_view::YamlViewState;
+        use srelens_kube::client_cache::ClientCache;
+        use srelens_streams::logs::LogStreamManager;
+        use srelens_streams::watch::WatchManager;
         use std::collections::HashMap;
         use std::path::PathBuf;
         use std::sync::Arc;
@@ -4382,12 +5312,15 @@ mod tests {
             active_namespace: "default".to_string(),
             kubeconfig_paths: vec![],
             contexts: vec![],
+            namespace_discovery_error: None,
             namespaces: vec!["default".to_string()],
             active_view: ActiveView::Describe(desc_view),
             nav_stack: vec![],
             input_mode: InputMode::Normal,
             command_buffer: String::new(),
             command_suggestion_idx: 0,
+            command_tab_base: None,
+            command_tab_target: None,
             filter_buffer: String::new(),
             modal: None,
             show_help: false,
@@ -4437,6 +5370,13 @@ mod tests {
             screen_selection: None,
             screen_selecting: false,
             screen_selection_text: std::cell::RefCell::new(String::new()),
+            consents: Default::default(),
+            consent_arm_delay: std::time::Duration::from_secs(1),
+            model_lists: Default::default(),
+            agent_search: srelens_kube::toolbox::SearchPaths {
+                app_path: String::new(),
+                system_path: String::new(),
+            },
         };
 
         // 1. In Describe mode: press '/' to enter search mode
@@ -4938,12 +5878,12 @@ mod tests {
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
         use ratatui::backend::TestBackend;
         use ratatui::Terminal;
-        use srelens_kube::metrics::MetricSample;
         use srectl::app::ActiveView;
         use srectl::commands::ResourceKind;
         use srectl::ui::dialogs::Modal;
         use srectl::views::metrics_panel_view::MetricsTimeRange;
         use srectl::views::resource_table::ResourceTableState;
+        use srelens_kube::metrics::MetricSample;
 
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         let mut app = crate::common::theme::new_app(
@@ -5307,13 +6247,13 @@ mod tests {
     #[tokio::test]
     async fn test_node_inspector_multi_container_pod_logs_picker() {
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        use srectl::app::{ActiveView, App};
+        use srectl::ui::{ContainerAction, InputMode, Modal};
+        use srectl::views::node_inspector_view::NodeInspectorState;
         use srelens_kube::client_cache::ClientCache;
         use srelens_kube::node_inspector::{NodeInspectorDetails, NodePodItem};
         use srelens_streams::logs::LogStreamManager;
         use srelens_streams::watch::WatchManager;
-        use srectl::app::{ActiveView, App};
-        use srectl::ui::{ContainerAction, InputMode, Modal};
-        use srectl::views::node_inspector_view::NodeInspectorState;
         use std::collections::{HashMap, HashSet};
         use std::path::PathBuf;
         use std::sync::Arc;
@@ -5417,12 +6357,15 @@ mod tests {
             active_namespace: "default".to_string(),
             kubeconfig_paths: vec![],
             contexts: vec![],
+            namespace_discovery_error: None,
             namespaces: vec!["default".to_string(), "monitoring".to_string()],
             active_view: ActiveView::NodeInspector(ni_state),
             nav_stack: vec![],
             input_mode: InputMode::Normal,
             command_buffer: String::new(),
             command_suggestion_idx: 0,
+            command_tab_base: None,
+            command_tab_target: None,
             filter_buffer: String::new(),
             modal: None,
             show_help: false,
@@ -5472,6 +6415,13 @@ mod tests {
             screen_selection: None,
             screen_selecting: false,
             screen_selection_text: std::cell::RefCell::new(String::new()),
+            consents: Default::default(),
+            consent_arm_delay: std::time::Duration::from_secs(1),
+            model_lists: Default::default(),
+            agent_search: srelens_kube::toolbox::SearchPaths {
+                app_path: String::new(),
+                system_path: String::new(),
+            },
         };
 
         // 1. Press 'l' on the highlighted pod in NodeInspector
@@ -5536,13 +6486,13 @@ mod tests {
     #[tokio::test]
     async fn test_node_inspector_single_container_pod_logs_direct() {
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        use srectl::app::{ActiveView, App};
+        use srectl::ui::InputMode;
+        use srectl::views::node_inspector_view::NodeInspectorState;
         use srelens_kube::client_cache::ClientCache;
         use srelens_kube::node_inspector::{NodeInspectorDetails, NodePodItem};
         use srelens_streams::logs::LogStreamManager;
         use srelens_streams::watch::WatchManager;
-        use srectl::app::{ActiveView, App};
-        use srectl::ui::InputMode;
-        use srectl::views::node_inspector_view::NodeInspectorState;
         use std::collections::{HashMap, HashSet};
         use std::path::PathBuf;
         use std::sync::Arc;
@@ -5641,12 +6591,15 @@ mod tests {
             active_namespace: "default".to_string(),
             kubeconfig_paths: vec![],
             contexts: vec![],
+            namespace_discovery_error: None,
             namespaces: vec!["default".to_string()],
             active_view: ActiveView::NodeInspector(ni_state),
             nav_stack: vec![],
             input_mode: InputMode::Normal,
             command_buffer: String::new(),
             command_suggestion_idx: 0,
+            command_tab_base: None,
+            command_tab_target: None,
             filter_buffer: String::new(),
             modal: None,
             show_help: false,
@@ -5696,6 +6649,13 @@ mod tests {
             screen_selection: None,
             screen_selecting: false,
             screen_selection_text: std::cell::RefCell::new(String::new()),
+            consents: Default::default(),
+            consent_arm_delay: std::time::Duration::from_secs(1),
+            model_lists: Default::default(),
+            agent_search: srelens_kube::toolbox::SearchPaths {
+                app_path: String::new(),
+                system_path: String::new(),
+            },
         };
 
         // Press 'l' on single-container pod
@@ -5838,14 +6798,14 @@ mod tests {
     async fn test_workloads_rebuild_aggregation_and_status_verdicts() {
         let _theme = crate::common::theme::lock();
         use serde_json::json;
-        use srelens_kube::client_cache::ClientCache;
-        use srelens_streams::logs::LogStreamManager;
-        use srelens_streams::watch::WatchManager;
         use srectl::app::{ActiveView, App};
         use srectl::commands::ResourceKind;
         use srectl::theme::{status_style, Theme};
         use srectl::ui::InputMode;
         use srectl::views::resource_table::ResourceTableState;
+        use srelens_kube::client_cache::ClientCache;
+        use srelens_streams::logs::LogStreamManager;
+        use srelens_streams::watch::WatchManager;
         use std::collections::{HashMap, HashSet};
         use std::path::PathBuf;
         use std::sync::Arc;
@@ -5920,12 +6880,15 @@ mod tests {
             active_namespace: "default".to_string(),
             kubeconfig_paths: vec![],
             contexts: vec![],
+            namespace_discovery_error: None,
             namespaces: vec!["default".to_string()],
             active_view: ActiveView::Table(ResourceTableState::new(ResourceKind::Workloads)),
             nav_stack: Vec::new(),
             input_mode: InputMode::Normal,
             command_buffer: String::new(),
             command_suggestion_idx: 0,
+            command_tab_base: None,
+            command_tab_target: None,
             filter_buffer: String::new(),
             modal: None,
             show_help: false,
@@ -5975,6 +6938,13 @@ mod tests {
             screen_selection: None,
             screen_selecting: false,
             screen_selection_text: std::cell::RefCell::new(String::new()),
+            consents: Default::default(),
+            consent_arm_delay: std::time::Duration::from_secs(1),
+            model_lists: Default::default(),
+            agent_search: srelens_kube::toolbox::SearchPaths {
+                app_path: String::new(),
+                system_path: String::new(),
+            },
         };
 
         // Rebuild table
@@ -6047,13 +7017,13 @@ mod tests {
     async fn test_workloads_tab_segment_cycle_and_enter_drilldown() {
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
         use serde_json::json;
-        use srelens_kube::client_cache::ClientCache;
-        use srelens_streams::logs::LogStreamManager;
-        use srelens_streams::watch::WatchManager;
         use srectl::app::{ActiveView, App};
         use srectl::commands::ResourceKind;
         use srectl::ui::InputMode;
         use srectl::views::resource_table::{ResourceTableState, WorkloadSegment};
+        use srelens_kube::client_cache::ClientCache;
+        use srelens_streams::logs::LogStreamManager;
+        use srelens_streams::watch::WatchManager;
         use std::collections::{HashMap, HashSet};
         use std::path::PathBuf;
         use std::sync::Arc;
@@ -6085,12 +7055,15 @@ mod tests {
             active_namespace: "default".to_string(),
             kubeconfig_paths: vec![],
             contexts: vec![],
+            namespace_discovery_error: None,
             namespaces: vec!["default".to_string()],
             active_view: ActiveView::Table(ResourceTableState::new(ResourceKind::Workloads)),
             nav_stack: Vec::new(),
             input_mode: InputMode::Normal,
             command_buffer: String::new(),
             command_suggestion_idx: 0,
+            command_tab_base: None,
+            command_tab_target: None,
             filter_buffer: String::new(),
             modal: None,
             show_help: false,
@@ -6140,6 +7113,13 @@ mod tests {
             screen_selection: None,
             screen_selecting: false,
             screen_selection_text: std::cell::RefCell::new(String::new()),
+            consents: Default::default(),
+            consent_arm_delay: std::time::Duration::from_secs(1),
+            model_lists: Default::default(),
+            agent_search: srelens_kube::toolbox::SearchPaths {
+                app_path: String::new(),
+                system_path: String::new(),
+            },
         };
 
         app.rebuild_workloads_table();
@@ -6395,11 +7375,9 @@ mod tests {
         let mut theme = crate::common::theme::lock();
         use ratatui::backend::TestBackend;
         use ratatui::Terminal;
-        use srelens_kube::node_inspector::{NodeInspectorDetails, NodePodItem};
         use srectl::theme::Theme;
-        use srectl::views::node_inspector_view::{
-            render_node_inspector_view, NodeInspectorState,
-        };
+        use srectl::views::node_inspector_view::{render_node_inspector_view, NodeInspectorState};
+        use srelens_kube::node_inspector::{NodeInspectorDetails, NodePodItem};
 
         assert!(theme.set_by_name("solarized-dark").is_some());
         assert_ne!(
@@ -7054,16 +8032,16 @@ mod tests {
     #[tokio::test]
     async fn test_topology_command_resolution_and_flow_navigation() {
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        use srectl::app::{ActiveView, App};
+        use srectl::commands::{resolve_command, CommandTarget, ResourceKind};
+        use srectl::ui::InputMode;
+        use srectl::views::topology_view::TopologyViewState;
         use srelens_kube::client_cache::ClientCache;
         use srelens_kube::topology::{
             EdgeKind, Health, Lane, Provenance, TopologyEdge, TopologyGraphOut, TopologyNode,
         };
         use srelens_streams::logs::LogStreamManager;
         use srelens_streams::watch::WatchManager;
-        use srectl::app::{ActiveView, App};
-        use srectl::commands::{resolve_command, CommandTarget, ResourceKind};
-        use srectl::ui::InputMode;
-        use srectl::views::topology_view::TopologyViewState;
         use std::collections::{HashMap, HashSet};
         use std::path::PathBuf;
         use std::sync::Arc;
@@ -7187,12 +8165,15 @@ mod tests {
             active_namespace: "default".to_string(),
             kubeconfig_paths: vec![],
             contexts: vec![],
+            namespace_discovery_error: None,
             namespaces: vec!["default".to_string(), "ai-prod".to_string()],
             active_view: ActiveView::Topology(topo_state),
             nav_stack: vec![],
             input_mode: InputMode::Normal,
             command_buffer: String::new(),
             command_suggestion_idx: 0,
+            command_tab_base: None,
+            command_tab_target: None,
             filter_buffer: String::new(),
             modal: None,
             show_help: false,
@@ -7242,6 +8223,13 @@ mod tests {
             screen_selection: None,
             screen_selecting: false,
             screen_selection_text: std::cell::RefCell::new(String::new()),
+            consents: Default::default(),
+            consent_arm_delay: std::time::Duration::from_secs(1),
+            model_lists: Default::default(),
+            agent_search: srelens_kube::toolbox::SearchPaths {
+                app_path: String::new(),
+                system_path: String::new(),
+            },
         };
 
         // Initially selected on Workloads (cart-deploy)
@@ -7285,14 +8273,14 @@ mod tests {
     #[tokio::test]
     async fn test_gpuinfo_command_resolution_and_node_pod_vram_selection() {
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-        use srelens_kube::client_cache::ClientCache;
-        use srelens_kube::gpu_info::{format_vram_mib, GpuClusterInfo, GpuNodeInfo, GpuPodItem};
-        use srelens_streams::logs::LogStreamManager;
-        use srelens_streams::watch::WatchManager;
         use srectl::app::{ActiveView, App};
         use srectl::commands::{resolve_command, CommandTarget, ResourceKind};
         use srectl::ui::InputMode;
         use srectl::views::gpu_view::{GpuPane, GpuViewState};
+        use srelens_kube::client_cache::ClientCache;
+        use srelens_kube::gpu_info::{format_vram_mib, GpuClusterInfo, GpuNodeInfo, GpuPodItem};
+        use srelens_streams::logs::LogStreamManager;
+        use srelens_streams::watch::WatchManager;
         use std::collections::{HashMap, HashSet};
         use std::path::PathBuf;
         use std::sync::Arc;
@@ -7405,12 +8393,15 @@ mod tests {
             active_namespace: "default".to_string(),
             kubeconfig_paths: vec![],
             contexts: vec![],
+            namespace_discovery_error: None,
             namespaces: vec!["default".to_string(), "ai-gen".to_string()],
             active_view: ActiveView::GpuInfo(gpu_state),
             nav_stack: vec![],
             input_mode: InputMode::Normal,
             command_buffer: String::new(),
             command_suggestion_idx: 0,
+            command_tab_base: None,
+            command_tab_target: None,
             filter_buffer: String::new(),
             modal: None,
             show_help: false,
@@ -7460,6 +8451,13 @@ mod tests {
             screen_selection: None,
             screen_selecting: false,
             screen_selection_text: std::cell::RefCell::new(String::new()),
+            consents: Default::default(),
+            consent_arm_delay: std::time::Duration::from_secs(1),
+            model_lists: Default::default(),
+            agent_search: srelens_kube::toolbox::SearchPaths {
+                app_path: String::new(),
+                system_path: String::new(),
+            },
         };
 
         // 3. Initially selected on gpu-node-alpha on the left
@@ -7522,13 +8520,13 @@ mod tests {
     #[tokio::test]
     async fn test_multi_pod_logs_from_marked_items_and_workload() {
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-        use srelens_kube::client_cache::ClientCache;
-        use srelens_streams::logs::LogStreamManager;
-        use srelens_streams::watch::WatchManager;
         use srectl::app::{ActiveView, App};
         use srectl::commands::ResourceKind;
         use srectl::ui::InputMode;
         use srectl::views::resource_table::ResourceTableState;
+        use srelens_kube::client_cache::ClientCache;
+        use srelens_streams::logs::LogStreamManager;
+        use srelens_streams::watch::WatchManager;
         use std::collections::{HashMap, HashSet};
         use std::path::PathBuf;
         use std::sync::Arc;
@@ -7569,12 +8567,15 @@ mod tests {
             active_namespace: "prod".to_string(),
             kubeconfig_paths: vec![],
             contexts: vec![],
+            namespace_discovery_error: None,
             namespaces: vec!["prod".to_string()],
             active_view: ActiveView::Table(table),
             nav_stack: vec![],
             input_mode: InputMode::Normal,
             command_buffer: String::new(),
             command_suggestion_idx: 0,
+            command_tab_base: None,
+            command_tab_target: None,
             filter_buffer: String::new(),
             modal: None,
             show_help: false,
@@ -7605,9 +8606,7 @@ mod tests {
             toast: None,
             ai_settings: srectl::AiSettings::default(),
             tui_config: srectl::TuiConfig::default(),
-            assistant_state: srectl::views::assistant_view::AssistantViewState::for_context(
-                "prod",
-            ),
+            assistant_state: srectl::views::assistant_view::AssistantViewState::for_context("prod"),
             assistant_states: HashMap::new(),
             pod_metrics_tick_counter: 0,
             node_metrics_tick_counter: 0,
@@ -7624,6 +8623,13 @@ mod tests {
             screen_selection: None,
             screen_selecting: false,
             screen_selection_text: std::cell::RefCell::new(String::new()),
+            consents: Default::default(),
+            consent_arm_delay: std::time::Duration::from_secs(1),
+            model_lists: Default::default(),
+            agent_search: srelens_kube::toolbox::SearchPaths {
+                app_path: String::new(),
+                system_path: String::new(),
+            },
         };
 
         // Populate resource cache with pods
@@ -7649,24 +8655,27 @@ mod tests {
         app.handle_stream_event(
             ch.clone(),
             serde_json::json!({
-                "source": "api-server-abc",
-                "line": "GET /health 200"
+                "seq": 1,
+                "lines": [{ "source": "api-server-abc", "line": "GET /health 200" }]
             }),
         );
         app.handle_stream_event(
             ch.clone(),
             serde_json::json!({
-                "source": "api-server-def",
-                "line": "POST /order 201"
+                "seq": 2,
+                "lines": [{ "source": "api-server-def", "line": "POST /order 201" }]
             }),
         );
         // A line the host cut arrives marked, and the mark reaches the view (#747).
         app.handle_stream_event(
             ch.clone(),
             serde_json::json!({
-                "source": "api-server-abc",
-                "line": "the start of a long one",
-                "truncated": true
+                "seq": 3,
+                "lines": [{
+                    "source": "api-server-abc",
+                    "line": "the start of a long one",
+                    "truncated": true
+                }]
             }),
         );
 
@@ -7695,13 +8704,13 @@ mod tests {
     #[tokio::test]
     async fn test_top_hotspots_commands_and_sorting() {
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-        use srelens_kube::client_cache::ClientCache;
-        use srelens_streams::logs::LogStreamManager;
-        use srelens_streams::watch::WatchManager;
         use srectl::app::{ActiveView, App};
         use srectl::commands::{resolve_command, CommandTarget, ResourceKind};
         use srectl::ui::InputMode;
         use srectl::views::top_view::{TopNodeRow, TopPodRow, TopSortBy, TopTab};
+        use srelens_kube::client_cache::ClientCache;
+        use srelens_streams::logs::LogStreamManager;
+        use srelens_streams::watch::WatchManager;
         use std::collections::{HashMap, HashSet};
         use std::path::PathBuf;
         use std::sync::Arc;
@@ -7780,12 +8789,15 @@ mod tests {
             active_namespace: "default".to_string(),
             kubeconfig_paths: vec![],
             contexts: vec![],
+            namespace_discovery_error: None,
             namespaces: vec!["default".to_string()],
             active_view: ActiveView::Top(top_state),
             nav_stack: vec![],
             input_mode: InputMode::Normal,
             command_buffer: String::new(),
             command_suggestion_idx: 0,
+            command_tab_base: None,
+            command_tab_target: None,
             filter_buffer: String::new(),
             modal: None,
             show_help: false,
@@ -7835,6 +8847,13 @@ mod tests {
             screen_selection: None,
             screen_selecting: false,
             screen_selection_text: std::cell::RefCell::new(String::new()),
+            consents: Default::default(),
+            consent_arm_delay: std::time::Duration::from_secs(1),
+            model_lists: Default::default(),
+            agent_search: srelens_kube::toolbox::SearchPaths {
+                app_path: String::new(),
+                system_path: String::new(),
+            },
         };
 
         // Verify initial CPU sort puts high-cpu-pod first
@@ -7885,10 +8904,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_helm_detail_view_state_and_values_diff() {
-        use srelens_kube::helm::{HelmReleaseDetail, HelmRevision};
         use srectl::views::helm_detail_view::{
             DiffKind, HelmDetailTab, HelmDetailViewState, ValuesDiffMode,
         };
+        use srelens_kube::helm::{HelmReleaseDetail, HelmRevision};
 
         let mut detail_state =
             HelmDetailViewState::new("ingress-nginx".to_string(), "default".to_string());
@@ -8237,8 +9256,8 @@ mod tests {
 
     #[tokio::test]
     async fn helm_detail_search_matches_and_navigates_across_tabs() {
-        use srelens_kube::helm::{HelmReleaseDetail, HelmRevision};
         use srectl::views::helm_detail_view::{HelmDetailTab, HelmDetailViewState};
+        use srelens_kube::helm::{HelmReleaseDetail, HelmRevision};
 
         let mut detail_state = HelmDetailViewState::new("app".to_string(), "default".to_string());
         let mock_detail = HelmReleaseDetail {
@@ -8319,11 +9338,11 @@ mod tests {
     async fn test_argo_views_navigation_and_interactions() {
         let _settings = crate::common::env::isolate_settings();
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-        use srelens_kube::argo::ArgoApplication;
         use srectl::app::ActiveView;
         use srectl::ui::Modal;
         use srectl::views::argo_detail_view::ArgoDetailTab;
         use srectl::views::argo_view::ArgoViewState;
+        use srelens_kube::argo::ArgoApplication;
 
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         let mut app = crate::common::theme::new_app(
@@ -8592,9 +9611,9 @@ mod tests {
         .unwrap();
         app.active_namespace = "default".to_string();
 
-        // :argo argocd should switch to Argo and set filter_query to argocd
+        // :argo argocd should switch to Argo and set filter_query to argocd without corrupting active_namespace
         app.execute_colon_command("argo argocd").await;
-        assert_eq!(app.active_namespace, "argocd");
+        assert_eq!(app.active_namespace, "default");
         match &app.active_view {
             ActiveView::Argo(state) => {
                 assert_eq!(state.filter_query, "argocd");
@@ -8677,9 +9696,9 @@ mod tests {
     #[tokio::test]
     async fn test_argo_view_renders_loading_error_empty_hub_and_table_states() {
         let _settings = crate::common::env::isolate_settings();
-        use srelens_kube::argo::ArgoApplication;
         use srectl::app::ActiveView;
         use srectl::views::argo_view::ArgoViewState;
+        use srelens_kube::argo::ArgoApplication;
 
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         let mut app = crate::common::theme::new_app(
@@ -8750,9 +9769,9 @@ mod tests {
     #[tokio::test]
     async fn test_argo_detail_view_renders_all_tabs() {
         let _settings = crate::common::env::isolate_settings();
-        use srelens_kube::argo::ArgoApplication;
         use srectl::app::ActiveView;
         use srectl::views::argo_detail_view::{ArgoDetailTab, ArgoDetailViewState};
+        use srelens_kube::argo::ArgoApplication;
 
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         let mut app = crate::common::theme::new_app(
@@ -8846,10 +9865,10 @@ mod tests {
     async fn test_argo_sync_and_toggle_auto_confirm_modals_render() {
         let _settings = crate::common::env::isolate_settings();
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-        use srelens_kube::argo::ArgoApplication;
         use srectl::app::ActiveView;
         use srectl::ui::dialogs::Modal;
         use srectl::views::argo_view::ArgoViewState;
+        use srelens_kube::argo::ArgoApplication;
 
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         let mut app = crate::common::theme::new_app(
@@ -8916,10 +9935,10 @@ mod tests {
     async fn test_argo_list_and_detail_key_handlers_exercise_side_panels_safely() {
         let _settings = crate::common::env::isolate_settings();
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-        use srelens_kube::argo::ArgoApplication;
         use srectl::app::ActiveView;
         use srectl::views::argo_detail_view::ArgoDetailTab;
         use srectl::views::argo_view::ArgoViewState;
+        use srelens_kube::argo::ArgoApplication;
 
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         let mut app = crate::common::theme::new_app(

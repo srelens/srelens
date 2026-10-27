@@ -105,3 +105,6 @@ export function currentWindowLabel(): string {
   return "main";
 }
 
+/** A page cannot close the browser window it is in, so this does nothing. */
+export async function closeCurrentWindow(): Promise<void> {}
+
