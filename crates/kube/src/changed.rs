@@ -3498,54 +3498,78 @@ pub fn evaluate_changed_triage_inputs(inputs: TriageInputs<'_>) -> ChangedTriage
             && image_error_count == 0
             && detected_failure_category == FailureCategory::None
         {
-            let unready_failure_age_secs = unready_pods
-                .iter()
-                .filter_map(|p| {
-                    let ready_cond_transition = p
-                        .status
-                        .as_ref()
-                        .and_then(|s| s.conditions.as_ref())
-                        .and_then(|conds| {
-                            conds
-                                .iter()
-                                .find(|c| c.type_ == "Ready" && c.status != "True")
-                        })
-                        .and_then(|c| c.last_transition_time.as_ref().map(|t| t.0));
-                    if let Some(transition_ts) = ready_cond_transition {
-                        return Some(now.duration_since(transition_ts).as_secs());
-                    }
-                    let container_start = p
-                        .status
-                        .as_ref()
-                        .and_then(|s| s.container_statuses.as_ref())
-                        .and_then(|cs| {
-                            cs.iter()
-                                .filter_map(|c| {
-                                    c.state.as_ref()?.running.as_ref()?.started_at.as_ref()
-                                })
-                                .map(|t| t.0)
-                                .min()
-                        });
-                    container_start
-                        .or_else(|| p.metadata.creation_timestamp.as_ref().map(|t| t.0))
-                        .map(|ts| now.duration_since(ts).as_secs())
-                })
-                .max();
+            let rollout_start_ts =
+                newest_cr_ts.or_else(|| ds.metadata.creation_timestamp.as_ref().map(|t| t.0));
 
-            let update_age_secs = newest_cr_ts
+            let update_age_secs = rollout_start_ts
                 .or(latest_pod_created)
-                .or_else(|| ds.metadata.creation_timestamp.as_ref().map(|t| t.0))
                 .map(|ts| now.duration_since(ts).as_secs());
 
-            let stall_age_secs = if !unready_pods.is_empty() {
-                unready_failure_age_secs.or(update_age_secs)
-            } else {
-                update_age_secs
-            };
+            // A rollout cannot be stalled unless the rollout itself has lasted at least 10 minutes.
+            let rollout_has_lasted_10m = update_age_secs.is_some_and(|age| age >= 600);
 
-            if let Some(age_secs) = stall_age_secs {
-                if age_secs >= 600 {
-                    is_stalled = true;
+            if rollout_has_lasted_10m {
+                // Limit the unready failure clock to pods belonging to the current rollout.
+                let rollout_unready_pods: Vec<&Pod> = unready_pods
+                    .iter()
+                    .copied()
+                    .filter(|p| {
+                        if let Some(r_ts) = rollout_start_ts {
+                            p.metadata.creation_timestamp.as_ref().map_or(true, |t| {
+                                t.0 >= r_ts
+                                    .checked_sub(std::time::Duration::from_secs(10))
+                                    .unwrap_or(r_ts)
+                            })
+                        } else {
+                            true
+                        }
+                    })
+                    .collect();
+
+                let unready_failure_age_secs = rollout_unready_pods
+                    .iter()
+                    .filter_map(|p| {
+                        let ready_cond_transition = p
+                            .status
+                            .as_ref()
+                            .and_then(|s| s.conditions.as_ref())
+                            .and_then(|conds| {
+                                conds
+                                    .iter()
+                                    .find(|c| c.type_ == "Ready" && c.status != "True")
+                            })
+                            .and_then(|c| c.last_transition_time.as_ref().map(|t| t.0));
+                        if let Some(transition_ts) = ready_cond_transition {
+                            return Some(now.duration_since(transition_ts).as_secs());
+                        }
+                        let container_start = p
+                            .status
+                            .as_ref()
+                            .and_then(|s| s.container_statuses.as_ref())
+                            .and_then(|cs| {
+                                cs.iter()
+                                    .filter_map(|c| {
+                                        c.state.as_ref()?.running.as_ref()?.started_at.as_ref()
+                                    })
+                                    .map(|t| t.0)
+                                    .min()
+                            });
+                        container_start
+                            .or_else(|| p.metadata.creation_timestamp.as_ref().map(|t| t.0))
+                            .map(|ts| now.duration_since(ts).as_secs())
+                    })
+                    .max();
+
+                let stall_age_secs = if !rollout_unready_pods.is_empty() {
+                    unready_failure_age_secs
+                } else {
+                    update_age_secs
+                };
+
+                if let Some(age_secs) = stall_age_secs {
+                    if age_secs >= 600 {
+                        is_stalled = true;
+                    }
                 }
             }
         }
@@ -9385,6 +9409,75 @@ mod tests {
         assert_eq!(d.rollout_status, RolloutStatus::Complete);
         assert_eq!(d.incident_status, IncidentStatus::Pending);
         assert_eq!(d.failure_detail, "27/28 Ready");
+        assert!(!d.failure_detail.contains("stalled"));
+    }
+
+    #[test]
+    fn triage_daemonset_fresh_rollout_with_older_unready_pod_is_not_stalled() {
+        let now = Timestamp::from_second(NOW).unwrap();
+        // DaemonSet with 28 desired, 14 updated, 14 ready.
+        // A fresh rollout started 60s ago.
+        let ds = daemonset("datadog-agent", 28, 14, 14, 60);
+        let cr = controller_revision(
+            "datadog-agent-rev2",
+            "DaemonSet",
+            "datadog-agent",
+            2,
+            "datadog/agent:7.51",
+            60, // rollout started 1m ago
+            None,
+        );
+
+        // Older unready pod from revision 1 that has been unready for 30m
+        let mut old_unready_pod = pod("datadog-agent-old", "datadog-agent", vec![]);
+        old_unready_pod.metadata.owner_references =
+            Some(vec![make_owner_ref("DaemonSet", "datadog-agent")]);
+        old_unready_pod.metadata.creation_timestamp = Some(
+            k8s_openapi::apimachinery::pkg::apis::meta::v1::Time(ago(1800)),
+        );
+        old_unready_pod.status = Some(k8s_openapi::api::core::v1::PodStatus {
+            conditions: Some(vec![k8s_openapi::api::core::v1::PodCondition {
+                type_: "Ready".to_string(),
+                status: "False".to_string(),
+                last_transition_time: Some(k8s_openapi::apimachinery::pkg::apis::meta::v1::Time(
+                    ago(1800),
+                )),
+                ..Default::default()
+            }]),
+            ..Default::default()
+        });
+
+        let inputs = TriageInputs {
+            deployments: &[],
+            daemonsets: &[ds],
+            statefulsets: &[],
+            cronjobs: &[],
+            jobs: &[],
+            replicasets: &[],
+            controller_revisions: &[cr],
+            configmaps: &[],
+            secrets: &[],
+            pods: &[old_unready_pod],
+            events: &[],
+            argo_apps: &[],
+            window: Duration::from_secs(300), // 5 min window
+            now,
+            namespace: Some("default".to_string()),
+            opts: TriageOptions {
+                include_failing: true,
+                ..Default::default()
+            },
+            omitted: Vec::new(),
+        };
+
+        let report = evaluate_changed_triage_inputs(inputs);
+        assert_eq!(report.deployments.len(), 1);
+        let d = &report.deployments[0];
+        // The new rollout just started 60s ago; it must NOT be marked stalled!
+        assert_ne!(d.rollout_status, RolloutStatus::Stalled);
+        assert_ne!(d.incident_status, IncidentStatus::Stalled);
+        assert_eq!(d.rollout_status, RolloutStatus::Progressing);
+        assert_eq!(d.incident_status, IncidentStatus::Rolling);
         assert!(!d.failure_detail.contains("stalled"));
     }
 }
