@@ -243,6 +243,7 @@ async fn resolve_manifest_in(
             input.group.as_deref(),
             input.version.as_deref(),
             input.plural.as_deref(),
+            input.namespace.as_deref().is_some_and(|ns| !ns.is_empty()),
         )
         .await
         .map_err(CapabilityError::Handler)
@@ -818,6 +819,7 @@ pub fn list_resource_capability(cache: Arc<ClientCache>) -> Capability {
                         input.group.as_deref(),
                         input.version.as_deref(),
                         input.plural.as_deref(),
+                        input.namespace.as_deref().is_some_and(|ns| !ns.is_empty()),
                     )
                     .await
                     .map_err(CapabilityError::Handler)?;
@@ -1816,6 +1818,48 @@ mod tests {
         assert!(
             yaml.contains("last-applied-configuration"),
             "the annotation key survives, only its value is blanked: {yaml}"
+        );
+    }
+
+    /// #980 review: a custom kind read by its hints, whose scope the cluster
+    /// cannot give (discovery refused, or not listing it), is read where the
+    /// namespace asked for says, as before discovery was consulted. Assuming
+    /// namespaced sent a read with no namespace to `namespaces/default/`, a
+    /// 404 for a cluster-scoped kind.
+    #[tokio::test]
+    async fn a_hinted_kind_the_cluster_cannot_scope_is_read_where_its_namespace_says() {
+        let served = serde_json::json!({
+            "apiVersion": "acme.io/v1", "kind": "ClusterWidget", "metadata": { "name": "w" },
+        });
+        let (client, uris) =
+            crate::list_cap::test_support::mock_slow_pages(vec![served], std::time::Duration::ZERO);
+        let cache = ClientCache::new(PathBuf::from("/x"));
+        cache.preload("fake", client).await;
+        let capability = get_object_capability(cache);
+        let read = |namespace: serde_json::Value| {
+            serde_json::json!({
+                "context": "fake", "kind": "ClusterWidget", "group": "acme.io",
+                "version": "v1", "plural": "clusterwidgets", "name": "w", "namespace": namespace,
+            })
+        };
+        let last = || uris.lock().unwrap().last().cloned().unwrap_or_default();
+
+        (capability.handler)(read(serde_json::Value::Null))
+            .await
+            .expect("the fake API server answers");
+        assert!(
+            last().starts_with("/apis/acme.io/v1/clusterwidgets/w"),
+            "{}",
+            last()
+        );
+
+        (capability.handler)(read("team".into()))
+            .await
+            .expect("the fake API server answers");
+        assert!(
+            last().starts_with("/apis/acme.io/v1/namespaces/team/clusterwidgets/w"),
+            "{}",
+            last()
         );
     }
 
