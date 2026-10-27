@@ -611,6 +611,9 @@ fn build_with(
     reg.register(srelens_kube::topology::topology_graph_capability(
         cache.clone(),
     ));
+    reg.register(srelens_kube::lineage::resource_tree_capability(
+        cache.clone(),
+    ));
     reg.register(srelens_kube::topology::topology_probe_capability(
         cache.clone(),
     ));

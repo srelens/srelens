@@ -1069,6 +1069,15 @@
     "confirm": "Request a rolling restart[ of {resource}][ in cluster {cluster}]? Running pods will be replaced."
   },
   {
+    "id": "k8s.resourceTree",
+    "readOnly": true,
+    "destructive": false,
+    "requiresConfirm": false,
+    "sensitive": false,
+    "impact": "low",
+    "confirm": null
+  },
+  {
     "id": "k8s.rolloutRestart",
     "readOnly": false,
     "destructive": false,

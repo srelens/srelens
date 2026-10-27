@@ -74,6 +74,26 @@ impl DiscoveryIndex {
         }
         self.by_name.get(&normalized).cloned()
     }
+
+    /// Return all distinct discovered resources in this index.
+    pub fn all_resources(&self) -> Vec<DiscoveredResource> {
+        let mut seen = std::collections::HashSet::new();
+        let mut result = Vec::new();
+        for res in self.by_group_and_name.values() {
+            let key = (
+                res.ar.group.clone(),
+                res.ar.version.clone(),
+                res.ar.kind.clone(),
+            );
+            if seen.insert(key) {
+                result.push(res.clone());
+            }
+        }
+        result.sort_by(|a, b| {
+            (&a.ar.group, &a.ar.kind, &a.ar.version).cmp(&(&b.ar.group, &b.ar.kind, &b.ar.version))
+        });
+        result
+    }
 }
 
 pub struct ClientCache {
@@ -334,6 +354,18 @@ impl ClientCache {
         }
         lock.insert(context.to_string(), arc_index.clone());
         Ok(arc_index)
+    }
+
+    /// Retrieve the discovery index for `context`, returning cached discovery if available
+    /// or discovering cluster resources on demand.
+    pub async fn get_discovery(&self, context: &str) -> Result<Arc<DiscoveryIndex>, String> {
+        {
+            let lock = self.discovery.lock().await;
+            if let Some(idx) = lock.get(context) {
+                return Ok(idx.clone());
+            }
+        }
+        self.discover_cluster(context).await
     }
 
     /// Resolve an arbitrary Kubernetes kind/plural/alias to its `(ApiResource, namespaced)`.
