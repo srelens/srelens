@@ -987,6 +987,37 @@ fn correlate_workload_config_changes(
     changes
 }
 
+fn extract_workload_restart_or_start_time(pods: &[&Pod]) -> Option<Timestamp> {
+    pods.iter()
+        .filter_map(|p| {
+            let container_ts = p
+                .status
+                .as_ref()?
+                .container_statuses
+                .as_ref()?
+                .iter()
+                .filter_map(|cs| {
+                    let term_ts = cs
+                        .last_state
+                        .as_ref()
+                        .and_then(|s| s.terminated.as_ref())
+                        .and_then(|t| t.finished_at.as_ref())
+                        .map(|t| t.0);
+                    let start_ts = cs
+                        .state
+                        .as_ref()
+                        .and_then(|s| s.running.as_ref())
+                        .and_then(|r| r.started_at.as_ref())
+                        .map(|t| t.0);
+                    term_ts.max(start_ts)
+                })
+                .max();
+            let pod_creation_ts = p.metadata.creation_timestamp.as_ref().map(|t| t.0);
+            container_ts.max(pod_creation_ts)
+        })
+        .max()
+}
+
 fn parse_revision(rs: &ReplicaSet) -> i64 {
     rs.metadata
         .annotations
@@ -2299,8 +2330,9 @@ pub fn evaluate_changed_triage_inputs(inputs: TriageInputs<'_>) -> ChangedTriage
         }
     }
 
-    // Index ControllerRevisions by owner DaemonSet and StatefulSet
-    let mut cr_by_owner: HashMap<(String, String), Vec<&ControllerRevision>> = HashMap::new();
+    // Index ControllerRevisions by owner kind and name (owner_kind, namespace, owner_name)
+    let mut cr_by_owner: HashMap<(String, String, String), Vec<&ControllerRevision>> =
+        HashMap::new();
     for cr in controller_revisions {
         let ns = cr.metadata.namespace.clone().unwrap_or_default();
         if let Some(ref target_ns) = namespace {
@@ -2311,7 +2343,7 @@ pub fn evaluate_changed_triage_inputs(inputs: TriageInputs<'_>) -> ChangedTriage
         for owner in cr.metadata.owner_references.iter().flatten() {
             if owner.kind == "DaemonSet" || owner.kind == "StatefulSet" {
                 cr_by_owner
-                    .entry((ns.clone(), owner.name.clone()))
+                    .entry((owner.kind.clone(), ns.clone(), owner.name.clone()))
                     .or_default()
                     .push(cr);
             }
@@ -2340,21 +2372,33 @@ pub fn evaluate_changed_triage_inputs(inputs: TriageInputs<'_>) -> ChangedTriage
         }
     }
 
-    // 3. Index Events by involved object (kind, namespace, name)
+    // 3. Index Events by involved object (kind, namespace, name) and nodes by name
     let mut events_by_object: HashMap<(String, String, String), Vec<&Event>> = HashMap::new();
+    let mut events_by_node: HashMap<String, Vec<&Event>> = HashMap::new();
     for ev in events {
+        let kind = ev.involved_object.kind.clone().unwrap_or_default();
+        let name = ev.involved_object.name.clone().unwrap_or_default();
+        if kind == "Node" {
+            events_by_node.entry(name.clone()).or_default().push(ev);
+        }
         let ns = ev.metadata.namespace.clone().unwrap_or_default();
         if let Some(ref target_ns) = namespace {
             if !target_ns.is_empty() && !ns.is_empty() && &ns != target_ns {
-                continue;
+                if kind != "Node" {
+                    continue;
+                }
             }
         }
-        let kind = ev.involved_object.kind.clone().unwrap_or_default();
-        let name = ev.involved_object.name.clone().unwrap_or_default();
         events_by_object
-            .entry((kind, ns, name))
+            .entry((kind.clone(), ns.clone(), name.clone()))
             .or_default()
             .push(ev);
+        if kind == "Node" && !ns.is_empty() {
+            events_by_object
+                .entry((kind, "".to_string(), name))
+                .or_default()
+                .push(ev);
+        }
     }
 
     let mut deployment_changes = Vec::new();
@@ -2733,25 +2777,7 @@ pub fn evaluate_changed_triage_inputs(inputs: TriageInputs<'_>) -> ChangedTriage
             .and_then(|s| s.template.spec.as_ref())
             .map(extract_pod_spec_config_refs)
             .unwrap_or_default();
-        let recent_restart_time = current_pods
-            .iter()
-            .filter_map(|p| {
-                p.status
-                    .as_ref()?
-                    .container_statuses
-                    .as_ref()?
-                    .iter()
-                    .find_map(|cs| {
-                        cs.last_state
-                            .as_ref()?
-                            .terminated
-                            .as_ref()?
-                            .finished_at
-                            .as_ref()
-                            .map(|t| t.0)
-                    })
-            })
-            .max();
+        let recent_restart_time = extract_workload_restart_or_start_time(&current_pods);
         let config_changes = correlate_workload_config_changes(
             &config_refs,
             &dep_ns,
@@ -2879,6 +2905,16 @@ pub fn evaluate_changed_triage_inputs(inputs: TriageInputs<'_>) -> ChangedTriage
             .cloned()
             .unwrap_or_default();
 
+        let sts_crs = cr_by_owner
+            .get(&("StatefulSet".to_string(), sts_ns.clone(), sts_name.clone()))
+            .map(|v| v.as_slice())
+            .unwrap_or(&[]);
+        let newest_cr = sts_crs.first().copied();
+        let previous_cr = sts_crs.get(1).copied();
+        let latest_cr_ts = newest_cr
+            .and_then(|cr| cr.metadata.creation_timestamp.as_ref())
+            .map(|t| t.0);
+
         let latest_pod_created = current_pods
             .iter()
             .filter_map(|p| p.metadata.creation_timestamp.as_ref().map(|t| t.0))
@@ -2888,8 +2924,9 @@ pub fn evaluate_changed_triage_inputs(inputs: TriageInputs<'_>) -> ChangedTriage
             .filter_map(|ev| event_last_timestamp(ev))
             .max();
 
-        let deployed_at_ts =
-            latest_pod_created.or_else(|| sts.metadata.creation_timestamp.as_ref().map(|t| t.0));
+        let deployed_at_ts = latest_pod_created
+            .or(latest_cr_ts)
+            .or_else(|| sts.metadata.creation_timestamp.as_ref().map(|t| t.0));
         let deployed_at = deployed_at_ts.map(|t| t.to_string());
         let deployed_age = deployed_at_ts
             .map(|t| crate::format_age(now.duration_since(t).as_secs().max(0)))
@@ -2899,11 +2936,20 @@ pub fn evaluate_changed_triage_inputs(inputs: TriageInputs<'_>) -> ChangedTriage
         let mut change_kind = ChangeKind::Rollout;
         let mut changed_age = deployed_age.clone();
 
-        if let Some(pod_ts) = latest_pod_created {
-            if cutoff_ts.as_ref().is_some_and(|c| &pod_ts >= c) {
+        if let Some(cr_ts) = latest_cr_ts {
+            if cutoff_ts.as_ref().is_some_and(|c| &cr_ts >= c) {
                 in_window = true;
                 change_kind = ChangeKind::Rollout;
-                changed_age = crate::format_age(now.duration_since(pod_ts).as_secs().max(0));
+                changed_age = crate::format_age(now.duration_since(cr_ts).as_secs().max(0));
+            }
+        }
+        if !in_window {
+            if let Some(pod_ts) = latest_pod_created {
+                if cutoff_ts.as_ref().is_some_and(|c| &pod_ts >= c) {
+                    in_window = true;
+                    change_kind = ChangeKind::Rollout;
+                    changed_age = crate::format_age(now.duration_since(pod_ts).as_secs().max(0));
+                }
             }
         }
         if !in_window {
@@ -2944,13 +2990,6 @@ pub fn evaluate_changed_triage_inputs(inputs: TriageInputs<'_>) -> ChangedTriage
             let pod_name = p.metadata.name.clone().unwrap_or_default();
             tracked_objects.insert(("Pod".to_string(), sts_ns.clone(), pod_name));
         }
-
-        let sts_crs = cr_by_owner
-            .get(&(sts_ns.clone(), sts_name.clone()))
-            .map(|v| v.as_slice())
-            .unwrap_or(&[]);
-        let newest_cr = sts_crs.first().copied();
-        let previous_cr = sts_crs.get(1).copied();
 
         let current_images = extract_sts_container_images(sts);
         let previous_images = previous_cr
@@ -3024,25 +3063,7 @@ pub fn evaluate_changed_triage_inputs(inputs: TriageInputs<'_>) -> ChangedTriage
             .and_then(|s| s.template.spec.as_ref())
             .map(extract_pod_spec_config_refs)
             .unwrap_or_default();
-        let recent_restart_time = current_pods
-            .iter()
-            .filter_map(|p| {
-                p.status
-                    .as_ref()?
-                    .container_statuses
-                    .as_ref()?
-                    .iter()
-                    .find_map(|cs| {
-                        cs.last_state
-                            .as_ref()?
-                            .terminated
-                            .as_ref()?
-                            .finished_at
-                            .as_ref()
-                            .map(|t| t.0)
-                    })
-            })
-            .max();
+        let recent_restart_time = extract_workload_restart_or_start_time(&current_pods);
         let config_changes = correlate_workload_config_changes(
             &config_refs,
             &sts_ns,
@@ -3232,7 +3253,7 @@ pub fn evaluate_changed_triage_inputs(inputs: TriageInputs<'_>) -> ChangedTriage
             .unwrap_or_default();
 
         let ds_crs = cr_by_owner
-            .get(&(ds_ns.clone(), ds_name.clone()))
+            .get(&("DaemonSet".to_string(), ds_ns.clone(), ds_name.clone()))
             .map(|v| v.as_slice())
             .unwrap_or(&[]);
         let newest_cr = ds_crs.first().copied();
@@ -3315,11 +3336,7 @@ pub fn evaluate_changed_triage_inputs(inputs: TriageInputs<'_>) -> ChangedTriage
                         .count();
                     change_kind = ChangeKind::Scaled;
                     changed_age = crate::format_age(now.duration_since(pod_ts).as_secs().max(0));
-                    let old_desired = (desired_replicas - young_pod_count as i32).max(0);
-                    change_detail = Some(format!(
-                        "Scheduled to {} new node(s) ({}→{})",
-                        young_pod_count, old_desired, desired_replicas
-                    ));
+                    change_detail = Some(format!("{} pod(s) created in window", young_pod_count));
                     if opts.include_scaled {
                         in_window = true;
                     }
@@ -3337,42 +3354,71 @@ pub fn evaluate_changed_triage_inputs(inputs: TriageInputs<'_>) -> ChangedTriage
             }
         }
 
-        let newest_hash: Option<&str> = newest_cr.and_then(|cr| {
-            cr.metadata
-                .labels
+        let grace_cutoff = now.checked_sub(SignedDuration::from_secs(90)).ok();
+        let is_grace_startup = |p: &Pod| -> bool {
+            let is_ready = p
+                .status
                 .as_ref()
-                .and_then(|l| l.get("controller-revision-hash").map(|s| s.as_str()))
-                .or_else(|| {
-                    cr.metadata
-                        .name
-                        .as_deref()
-                        .and_then(|n| n.split('-').last())
-                })
-        });
-
-        let scored_pods: Vec<&Pod> = if let Some(hash) = newest_hash {
-            let matched: Vec<&Pod> = current_pods
-                .iter()
-                .copied()
-                .filter(|p| {
-                    p.metadata
-                        .labels
-                        .as_ref()
-                        .and_then(|l| l.get("controller-revision-hash"))
-                        .is_some_and(|h| h.contains(hash))
-                })
-                .collect();
-            if matched.is_empty() {
-                current_pods.clone()
-            } else {
-                matched
+                .and_then(|s| s.conditions.as_ref())
+                .is_some_and(|conds| {
+                    conds
+                        .iter()
+                        .any(|c| c.type_ == "Ready" && c.status == "True")
+                });
+            if is_ready {
+                return false;
             }
-        } else {
-            current_pods.clone()
+            if let Some(ref created) = p.metadata.creation_timestamp {
+                if grace_cutoff.as_ref().is_some_and(|gc| &created.0 > gc) {
+                    let is_container_creating = p
+                        .status
+                        .as_ref()
+                        .and_then(|s| s.container_statuses.as_ref())
+                        .is_some_and(|cs| {
+                            cs.iter().any(|c| {
+                                c.state
+                                    .as_ref()
+                                    .and_then(|st| st.waiting.as_ref())
+                                    .is_some_and(|w| {
+                                        w.reason.as_deref() == Some("ContainerCreating")
+                                    })
+                            })
+                        });
+                    let is_pending =
+                        p.status.as_ref().and_then(|s| s.phase.as_deref()) == Some("Pending");
+                    let has_crash_or_error = p
+                        .status
+                        .as_ref()
+                        .and_then(|s| s.container_statuses.as_ref())
+                        .is_some_and(|cs| {
+                            cs.iter().any(|c| {
+                                let waiting_err = c
+                                    .state
+                                    .as_ref()
+                                    .and_then(|s| s.waiting.as_ref())
+                                    .is_some_and(|w| {
+                                        let r = w.reason.as_deref().unwrap_or("");
+                                        r.contains("Crash")
+                                            || r.contains("BackOff")
+                                            || r.contains("Err")
+                                    });
+                                let term_err = c
+                                    .state
+                                    .as_ref()
+                                    .and_then(|s| s.terminated.as_ref())
+                                    .is_some_and(|t| t.exit_code != 0);
+                                waiting_err || term_err
+                            })
+                        });
+                    if (is_container_creating || is_pending) && !has_crash_or_error {
+                        return true;
+                    }
+                }
+            }
+            false
         };
 
-        let grace_cutoff = now.checked_sub(SignedDuration::from_secs(90)).ok();
-        let unready_pods: Vec<&Pod> = scored_pods
+        let unready_pods: Vec<&Pod> = current_pods
             .iter()
             .copied()
             .filter(|p| {
@@ -3385,33 +3431,11 @@ pub fn evaluate_changed_triage_inputs(inputs: TriageInputs<'_>) -> ChangedTriage
                             .iter()
                             .any(|c| c.type_ == "Ready" && c.status == "True")
                     });
-                if is_ready {
-                    return false;
-                }
-                if let Some(ref created) = p.metadata.creation_timestamp {
-                    if grace_cutoff.as_ref().is_some_and(|gc| &created.0 > gc) {
-                        let is_container_creating = p
-                            .status
-                            .as_ref()
-                            .and_then(|s| s.container_statuses.as_ref())
-                            .is_some_and(|cs| {
-                                cs.iter().any(|c| {
-                                    c.state
-                                        .as_ref()
-                                        .and_then(|st| st.waiting.as_ref())
-                                        .is_some_and(|w| {
-                                            w.reason.as_deref() == Some("ContainerCreating")
-                                        })
-                                })
-                            });
-                        if is_container_creating {
-                            return false;
-                        }
-                    }
-                }
-                true
+                !is_ready && !is_grace_startup(p)
             })
             .collect();
+
+        let grace_pod_count = current_pods.iter().filter(|p| is_grace_startup(p)).count();
 
         let (
             failing_pod_names,
@@ -3425,10 +3449,12 @@ pub fn evaluate_changed_triage_inputs(inputs: TriageInputs<'_>) -> ChangedTriage
             pod_symptoms,
             mut detected_failure_category,
             detected_failure_detail,
-        ) = evaluate_pod_failures(&scored_pods, &events_by_object, &ds_ns);
+        ) = evaluate_pod_failures(&current_pods, &events_by_object, &ds_ns);
+
+        let pending_deficit = pending_pod_count.saturating_sub(grace_pod_count);
 
         let probe_eval = evaluate_workload_probes_and_restarts(
-            &scored_pods,
+            &current_pods,
             &events_by_object,
             &ds_ns,
             cutoff_ts.as_ref(),
@@ -3437,11 +3463,59 @@ pub fn evaluate_changed_triage_inputs(inputs: TriageInputs<'_>) -> ChangedTriage
             desired_replicas,
         );
 
-        let is_actively_failing = crash_loop_count > 0
+        let is_on_delete = ds
+            .spec
+            .as_ref()
+            .and_then(|s| s.update_strategy.as_ref())
+            .and_then(|u| u.type_.as_deref())
+            == Some("OnDelete");
+
+        let is_zero_desired = desired_replicas == 0;
+
+        if is_on_delete && change_detail.is_none() {
+            change_detail = Some(format!(
+                "OnDelete: {} of {} nodes on new revision",
+                updated_replicas, desired_replicas
+            ));
+        }
+
+        if is_zero_desired && change_detail.is_none() {
+            change_detail = Some("no nodes match selector".to_string());
+        }
+
+        let mut is_stalled = false;
+        let is_incomplete =
+            updated_replicas < desired_replicas || ready_replicas < desired_replicas;
+        if is_incomplete
+            && !is_on_delete
+            && !is_zero_desired
+            && crash_loop_count == 0
+            && oom_killed_count == 0
+            && config_error_count == 0
+            && image_error_count == 0
+            && detected_failure_category == FailureCategory::None
+        {
+            let in_grace = desired_replicas > ready_replicas
+                && grace_pod_count >= (desired_replicas - ready_replicas) as usize;
+            if !in_grace {
+                let update_age_secs = newest_cr_ts
+                    .or(latest_pod_created)
+                    .or_else(|| ds.metadata.creation_timestamp.as_ref().map(|t| t.0))
+                    .map(|ts| now.duration_since(ts).as_secs());
+                if let Some(age_secs) = update_age_secs {
+                    if age_secs >= 600 {
+                        is_stalled = true;
+                    }
+                }
+            }
+        }
+
+        let is_actively_failing = is_stalled
+            || crash_loop_count > 0
             || oom_killed_count > 0
             || config_error_count > 0
             || image_error_count > 0
-            || (pending_pod_count > 0
+            || (pending_deficit > 0
                 && (ready_replicas < desired_replicas
                     || detected_failure_category != FailureCategory::None))
             || !unready_pods.is_empty()
@@ -3472,9 +3546,10 @@ pub fn evaluate_changed_triage_inputs(inputs: TriageInputs<'_>) -> ChangedTriage
                 .collect();
             let mut not_ready_nodes = Vec::new();
             for node_name in &unready_node_names {
-                if let Some(node_evs) =
+                let node_evs = events_by_node.get(node_name).or_else(|| {
                     events_by_object.get(&("Node".to_string(), "".to_string(), node_name.clone()))
-                {
+                });
+                if let Some(node_evs) = node_evs {
                     if node_evs
                         .iter()
                         .any(|ev| ev.reason.as_deref() == Some("NodeNotReady"))
@@ -3490,38 +3565,6 @@ pub fn evaluate_changed_triage_inputs(inputs: TriageInputs<'_>) -> ChangedTriage
                     not_ready_nodes.len(),
                     not_ready_nodes.join(", ")
                 ));
-            }
-        }
-
-        let is_on_delete = ds
-            .spec
-            .as_ref()
-            .and_then(|s| s.update_strategy.as_ref())
-            .and_then(|u| u.type_.as_deref())
-            == Some("OnDelete");
-        if is_on_delete && change_detail.is_none() {
-            change_detail = Some(format!(
-                "OnDelete: {} of {} nodes on new revision",
-                updated_replicas, desired_replicas
-            ));
-        }
-
-        let is_zero_desired = desired_replicas == 0;
-        if is_zero_desired && change_detail.is_none() {
-            change_detail = Some("no nodes match selector".to_string());
-        }
-
-        let mut is_stalled = false;
-        if updated_replicas < desired_replicas && !is_on_delete && !is_zero_desired {
-            if let Some(cr_ts) = newest_cr_ts {
-                let age_secs = now.duration_since(cr_ts).as_secs();
-                if age_secs >= 600
-                    && crash_loop_count == 0
-                    && oom_killed_count == 0
-                    && detected_failure_category == FailureCategory::None
-                {
-                    is_stalled = true;
-                }
             }
         }
 
@@ -3560,20 +3603,31 @@ pub fn evaluate_changed_triage_inputs(inputs: TriageInputs<'_>) -> ChangedTriage
             IncidentStatus::ConfigError
         } else if image_error_count > 0 {
             IncidentStatus::ImageError
-        } else if (pending_pod_count > 0 && ready_replicas < desired_replicas)
+        } else if (pending_deficit > 0 && ready_replicas < desired_replicas)
             || detected_failure_category != FailureCategory::None
+            || (!unready_pods.is_empty() && is_on_delete)
         {
             IncidentStatus::Pending
-        } else if is_zero_desired || is_on_delete {
+        } else if is_zero_desired {
             IncidentStatus::Healthy
+        } else if is_on_delete {
+            if unready_pods.is_empty() && ready_replicas == desired_replicas {
+                IncidentStatus::Healthy
+            } else {
+                IncidentStatus::Pending
+            }
         } else if ready_replicas < desired_replicas || updated_replicas < desired_replicas {
             IncidentStatus::Rolling
         } else {
             IncidentStatus::Healthy
         };
 
-        let failure_category = if is_stalled {
+        let failure_category = if incident_status == IncidentStatus::Healthy {
+            FailureCategory::None
+        } else if is_stalled {
             FailureCategory::App
+        } else if probe_eval.is_probe_failure {
+            FailureCategory::Probe
         } else if detected_failure_category != FailureCategory::None {
             detected_failure_category
         } else if oom_killed_count > 0
@@ -3593,7 +3647,11 @@ pub fn evaluate_changed_triage_inputs(inputs: TriageInputs<'_>) -> ChangedTriage
         let failure_detail = if let Some(nad) = node_attribution_detail {
             nad
         } else if is_stalled {
-            "DaemonSet rollout stalled: updated pods not ready after 10m".to_string()
+            if updated_replicas < desired_replicas {
+                "DaemonSet rollout stalled: updated pods not ready after 10m".to_string()
+            } else {
+                "DaemonSet rollout stalled: pods not ready after 10m".to_string()
+            }
         } else if probe_eval.is_probe_failure {
             if let Some(ref d) = probe_eval.probe_failure_detail {
                 d.clone()
@@ -3625,6 +3683,10 @@ pub fn evaluate_changed_triage_inputs(inputs: TriageInputs<'_>) -> ChangedTriage
             }
         } else if ready_replicas < desired_replicas {
             format!("{ready_replicas}/{desired_replicas} Ready")
+        } else if is_zero_desired {
+            "no nodes match selector".to_string()
+        } else if let Some(ref detail) = change_detail {
+            detail.clone()
         } else {
             "Healthy".to_string()
         };
@@ -3639,25 +3701,7 @@ pub fn evaluate_changed_triage_inputs(inputs: TriageInputs<'_>) -> ChangedTriage
             .and_then(|s| s.template.spec.as_ref())
             .map(extract_pod_spec_config_refs)
             .unwrap_or_default();
-        let recent_restart_time = current_pods
-            .iter()
-            .filter_map(|p| {
-                p.status
-                    .as_ref()?
-                    .container_statuses
-                    .as_ref()?
-                    .iter()
-                    .find_map(|cs| {
-                        cs.last_state
-                            .as_ref()?
-                            .terminated
-                            .as_ref()?
-                            .finished_at
-                            .as_ref()
-                            .map(|t| t.0)
-                    })
-            })
-            .max();
+        let recent_restart_time = extract_workload_restart_or_start_time(&current_pods);
         let config_changes = correlate_workload_config_changes(
             &config_refs,
             &ds_ns,
@@ -3693,6 +3737,19 @@ pub fn evaluate_changed_triage_inputs(inputs: TriageInputs<'_>) -> ChangedTriage
         correlated_events.truncate(5);
 
         let (error_log_pod, error_log_container) = log_target(&pod_symptoms, &current_pods);
+        let gitops_match = gitops_release_for(
+            argo_apps,
+            &Workload {
+                api_version: "apps/v1",
+                kind: "DaemonSet",
+                name: &ds_name,
+                ns: &ds_ns,
+                meta: &ds.metadata,
+                rollout_created: newest_cr_ts,
+            },
+            now,
+            cutoff_ts.as_ref(),
+        );
         deployment_changes.push(AppDeploymentChange {
             app_name: ds_name,
             kind: "DaemonSet".to_string(),
@@ -3700,9 +3757,9 @@ pub fn evaluate_changed_triage_inputs(inputs: TriageInputs<'_>) -> ChangedTriage
             incident_status,
             failure_category,
             failure_detail,
-            gitops: None,
-            argo_rollout_in_window: None,
-            gitops_unresolved: None,
+            gitops: gitops_match.info,
+            argo_rollout_in_window: gitops_match.rollout_in_window,
+            gitops_unresolved: gitops_match.unresolved,
             local_cause,
             error_log_snippet: None,
             error_log_pod,
@@ -4421,9 +4478,9 @@ pub async fn fetch_changed_triage(
         tokio::time::timeout(timeout, ds_api.list(&lp)),
         tokio::time::timeout(timeout, cj_api.list(&lp)),
         tokio::time::timeout(timeout, job_api.list(&lp)),
-        tokio::time::timeout(timeout, cr_api.list(&lp)),
-        tokio::time::timeout(timeout, list_metadata_capped(&cm_api, lp.clone())),
-        tokio::time::timeout(timeout, list_metadata_capped(&sec_api, lp.clone())),
+        crate::list_cap::list_capped(&cr_api, lp.clone()),
+        list_metadata_capped(&cm_api, lp.clone()),
+        list_metadata_capped(&sec_api, lp.clone()),
         argo_fut,
     );
 
@@ -4468,30 +4525,59 @@ pub async fn fetch_changed_triage(
         }
     }
 
-    fn record_metadata_optional<K>(
+    fn record_capped_optional<T>(
         kind: &str,
-        res: Result<
-            Result<(Vec<PartialObjectMeta<K>>, bool), crate::list_cap::ListCappedError>,
-            tokio::time::error::Elapsed,
-        >,
+        res: Result<(Vec<T>, bool), crate::list_cap::ListCappedError>,
         omitted: &mut Vec<OmittedWorkloadKind>,
-    ) -> Vec<PartialObjectMeta<K>>
-    where
-        K: kube::Resource + Clone + serde::de::DeserializeOwned + std::fmt::Debug,
-    {
+    ) -> Vec<T> {
         match res {
-            Ok(Ok((items, _truncated))) => items,
-            Ok(Err(e)) => {
+            Ok((items, truncated)) => {
+                if truncated {
+                    omitted.push(OmittedWorkloadKind {
+                        kind: format!("{kind} (partial)"),
+                        reason: format!(
+                            "list reached cap ({} items); older revisions omitted",
+                            items.len()
+                        ),
+                    });
+                }
+                items
+            }
+            Err(e) => {
                 omitted.push(OmittedWorkloadKind {
                     kind: kind.to_string(),
                     reason: e.to_string(),
                 });
                 Vec::new()
             }
-            Err(_) => {
+        }
+    }
+
+    fn record_metadata_optional<K>(
+        kind: &str,
+        res: Result<(Vec<PartialObjectMeta<K>>, bool), crate::list_cap::ListCappedError>,
+        omitted: &mut Vec<OmittedWorkloadKind>,
+    ) -> Vec<PartialObjectMeta<K>>
+    where
+        K: kube::Resource + Clone + serde::de::DeserializeOwned + std::fmt::Debug,
+    {
+        match res {
+            Ok((items, truncated)) => {
+                if truncated {
+                    omitted.push(OmittedWorkloadKind {
+                        kind: format!("{kind} (partial)"),
+                        reason: format!(
+                            "list reached cap ({} items); later changes may not correlate",
+                            items.len()
+                        ),
+                    });
+                }
+                items
+            }
+            Err(e) => {
                 omitted.push(OmittedWorkloadKind {
                     kind: kind.to_string(),
-                    reason: "request timed out".to_string(),
+                    reason: e.to_string(),
                 });
                 Vec::new()
             }
@@ -4506,7 +4592,7 @@ pub async fn fetch_changed_triage(
     let ds = record_optional("DaemonSet", ds, &mut omitted);
     let cjs = record_optional("CronJob", cjs, &mut omitted);
     let jobs = record_optional("Job", jobs, &mut omitted);
-    let crs = record_optional("ControllerRevision", crs, &mut omitted);
+    let crs = record_capped_optional("ControllerRevision", crs, &mut omitted);
     let cms = record_metadata_optional("ConfigMap", cms, &mut omitted);
     let secs = record_metadata_optional("Secret", secs, &mut omitted);
 
@@ -8016,6 +8102,39 @@ mod tests {
         }
     }
 
+    fn statefulset(name: &str, replicas: i32, ready: i32, age_secs: i64) -> StatefulSet {
+        StatefulSet {
+            metadata: ObjectMeta {
+                name: Some(name.to_string()),
+                namespace: Some("default".to_string()),
+                creation_timestamp: Some(k8s_openapi::apimachinery::pkg::apis::meta::v1::Time(
+                    ago(age_secs),
+                )),
+                ..Default::default()
+            },
+            spec: Some(k8s_openapi::api::apps::v1::StatefulSetSpec {
+                replicas: Some(replicas),
+                template: k8s_openapi::api::core::v1::PodTemplateSpec {
+                    spec: Some(k8s_openapi::api::core::v1::PodSpec {
+                        containers: vec![k8s_openapi::api::core::v1::Container {
+                            name: name.to_string(),
+                            image: Some(format!("{name}:v2")),
+                            ..Default::default()
+                        }],
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                },
+                ..Default::default()
+            }),
+            status: Some(k8s_openapi::api::apps::v1::StatefulSetStatus {
+                replicas,
+                ready_replicas: Some(ready),
+                ..Default::default()
+            }),
+        }
+    }
+
     fn controller_revision(
         name: &str,
         owner_kind: &str,
@@ -8225,7 +8344,7 @@ mod tests {
         assert_eq!(d.change_kind, ChangeKind::Scaled);
         assert_eq!(
             d.change_detail,
-            Some("Scheduled to 1 new node(s) (28→29)".to_string())
+            Some("1 pod(s) created in window".to_string())
         );
     }
 
@@ -8259,6 +8378,7 @@ mod tests {
             k8s_openapi::apimachinery::pkg::apis::meta::v1::Time(ago(40)),
         );
         young_pod.status = Some(k8s_openapi::api::core::v1::PodStatus {
+            phase: Some("Pending".to_string()),
             container_statuses: Some(vec![k8s_openapi::api::core::v1::ContainerStatus {
                 name: "fluentd".to_string(),
                 ready: false,
@@ -8359,8 +8479,9 @@ mod tests {
     fn triage_daemonset_unready_on_notready_node_attributes_to_compute() {
         let now = Timestamp::from_second(NOW).unwrap();
         let mut ds = daemonset("calico-node", 28, 28, 27, 300);
+        ds.metadata.namespace = Some("kube-system".to_string());
         ds.status.as_mut().unwrap().number_ready = 27;
-        let cr = controller_revision(
+        let mut cr = controller_revision(
             "calico-node-rev1",
             "DaemonSet",
             "calico-node",
@@ -8369,8 +8490,10 @@ mod tests {
             300,
             None,
         );
+        cr.metadata.namespace = Some("kube-system".to_string());
 
         let mut unready_pod = pod("calico-node-deadnode", "calico-node", vec![]);
+        unready_pod.metadata.namespace = Some("kube-system".to_string());
         unready_pod.metadata.owner_references = Some(vec![
             k8s_openapi::apimachinery::pkg::apis::meta::v1::OwnerReference {
                 api_version: "apps/v1".to_string(),
@@ -8393,11 +8516,11 @@ mod tests {
             ..Default::default()
         });
 
-        // Event for node worker-dead-1
+        // Event for node worker-dead-1 (normal k8s node events live in "default")
         let node_event = Event {
             metadata: ObjectMeta {
                 name: Some("ev-node-1".to_string()),
-                namespace: Some("".to_string()),
+                namespace: Some("default".to_string()),
                 ..Default::default()
             },
             involved_object: k8s_openapi::api::core::v1::ObjectReference {
@@ -8428,7 +8551,7 @@ mod tests {
             argo_apps: &[],
             window: Duration::from_secs(1800),
             now,
-            namespace: Some("default".to_string()),
+            namespace: Some("kube-system".to_string()),
             opts: TriageOptions::default(),
             omitted: Vec::new(),
         };
@@ -8767,5 +8890,375 @@ mod tests {
         assert_eq!(report.omitted[0].reason, "403 Forbidden (RBAC)");
         assert_eq!(report.omitted[1].kind, "Secret");
         assert_eq!(report.omitted[1].reason, "request timed out");
+    }
+
+    #[test]
+    fn triage_daemonset_older_pod_failure_during_partial_rollout_is_detected() {
+        let now = Timestamp::from_second(NOW).unwrap();
+        // DaemonSet rolling out: 2 desired, 1 updated on rev2 (healthy), 1 older pod on rev1 crashing
+        let ds = daemonset("fluentd", 2, 1, 1, 300);
+        let cr2 = controller_revision(
+            "fluentd-rev2",
+            "DaemonSet",
+            "fluentd",
+            2,
+            "fluent:v2",
+            300,
+            None,
+        );
+        let cr1 = controller_revision(
+            "fluentd-rev1",
+            "DaemonSet",
+            "fluentd",
+            1,
+            "fluent:v1",
+            3600,
+            None,
+        );
+
+        let mut pod_new = pod("fluentd-new", "fluentd", vec![running("fluentd")]);
+        pod_new.metadata.owner_references = Some(vec![make_owner_ref("DaemonSet", "fluentd")]);
+        pod_new
+            .metadata
+            .labels
+            .get_or_insert_with(Default::default)
+            .insert(
+                "controller-revision-hash".to_string(),
+                "fluentd-rev2".to_string(),
+            );
+
+        let mut pod_old = pod("fluentd-old", "fluentd", vec![]);
+        pod_old.metadata.owner_references = Some(vec![make_owner_ref("DaemonSet", "fluentd")]);
+        pod_old
+            .metadata
+            .labels
+            .get_or_insert_with(Default::default)
+            .insert(
+                "controller-revision-hash".to_string(),
+                "fluentd-rev1".to_string(),
+            );
+        pod_old.status = Some(k8s_openapi::api::core::v1::PodStatus {
+            container_statuses: Some(vec![k8s_openapi::api::core::v1::ContainerStatus {
+                name: "fluentd".to_string(),
+                ready: false,
+                restart_count: 5,
+                image: "fluent:v1".to_string(),
+                image_id: "".to_string(),
+                state: Some(k8s_openapi::api::core::v1::ContainerState {
+                    waiting: Some(k8s_openapi::api::core::v1::ContainerStateWaiting {
+                        reason: Some("CrashLoopBackOff".to_string()),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }]),
+            ..Default::default()
+        });
+
+        let inputs = TriageInputs {
+            deployments: &[],
+            daemonsets: &[ds],
+            statefulsets: &[],
+            cronjobs: &[],
+            jobs: &[],
+            replicasets: &[],
+            controller_revisions: &[cr2, cr1],
+            configmaps: &[],
+            secrets: &[],
+            pods: &[pod_new, pod_old],
+            events: &[],
+            argo_apps: &[],
+            window: Duration::from_secs(1800),
+            now,
+            namespace: Some("default".to_string()),
+            opts: TriageOptions::default(),
+            omitted: Vec::new(),
+        };
+
+        let report = evaluate_changed_triage_inputs(inputs);
+        assert_eq!(report.deployments.len(), 1);
+        let d = &report.deployments[0];
+        assert_eq!(d.incident_status, IncidentStatus::CrashLoop);
+        assert_eq!(d.failure_category, FailureCategory::App);
+    }
+
+    #[test]
+    fn triage_daemonset_and_statefulset_with_same_name_do_not_collide_revisions() {
+        let now = Timestamp::from_second(NOW).unwrap();
+        let mut ds = daemonset("redis", 3, 3, 3, 300);
+        ds.spec
+            .as_mut()
+            .unwrap()
+            .template
+            .spec
+            .as_mut()
+            .unwrap()
+            .containers[0]
+            .image = Some("redis:ds-v5".to_string());
+        let cr_ds = controller_revision(
+            "redis-ds-5",
+            "DaemonSet",
+            "redis",
+            5,
+            "redis:ds-v5",
+            300,
+            None,
+        );
+
+        let mut sts = statefulset("redis", 3, 3, 300);
+        sts.spec
+            .as_mut()
+            .unwrap()
+            .template
+            .spec
+            .as_mut()
+            .unwrap()
+            .containers[0]
+            .image = Some("redis:sts-v2".to_string());
+        let cr_sts = controller_revision(
+            "redis-sts-2",
+            "StatefulSet",
+            "redis",
+            2,
+            "redis:sts-v2",
+            300,
+            None,
+        );
+
+        let inputs = TriageInputs {
+            deployments: &[],
+            daemonsets: &[ds],
+            statefulsets: &[sts],
+            cronjobs: &[],
+            jobs: &[],
+            replicasets: &[],
+            controller_revisions: &[cr_ds, cr_sts],
+            configmaps: &[],
+            secrets: &[],
+            pods: &[],
+            events: &[],
+            argo_apps: &[],
+            window: Duration::from_secs(1800),
+            now,
+            namespace: Some("default".to_string()),
+            opts: TriageOptions::default(),
+            omitted: Vec::new(),
+        };
+
+        let report = evaluate_changed_triage_inputs(inputs);
+        assert_eq!(report.deployments.len(), 2);
+        let d_ds = report
+            .deployments
+            .iter()
+            .find(|d| d.kind == "DaemonSet")
+            .unwrap();
+        let d_sts = report
+            .deployments
+            .iter()
+            .find(|d| d.kind == "StatefulSet")
+            .unwrap();
+
+        assert_eq!(d_ds.current_revision, "5");
+        assert_eq!(d_ds.current_images, vec!["redis:ds-v5".to_string()]);
+
+        assert_eq!(d_sts.current_revision, "2");
+        assert_eq!(d_sts.current_images, vec!["redis:sts-v2".to_string()]);
+    }
+
+    #[test]
+    fn triage_daemonset_on_delete_with_unready_pod_reports_failure() {
+        let now = Timestamp::from_second(NOW).unwrap();
+        let mut ds = daemonset("custom-ds", 2, 2, 1, 300);
+        ds.spec.as_mut().unwrap().update_strategy =
+            Some(k8s_openapi::api::apps::v1::DaemonSetUpdateStrategy {
+                type_: Some("OnDelete".to_string()),
+                ..Default::default()
+            });
+        let cr = controller_revision(
+            "custom-ds-rev1",
+            "DaemonSet",
+            "custom-ds",
+            1,
+            "custom:v1",
+            300,
+            None,
+        );
+
+        let mut unready_pod = pod("custom-ds-unready", "custom-ds", vec![]);
+        unready_pod.metadata.owner_references =
+            Some(vec![make_owner_ref("DaemonSet", "custom-ds")]);
+        unready_pod.metadata.creation_timestamp = Some(
+            k8s_openapi::apimachinery::pkg::apis::meta::v1::Time(ago(600)),
+        );
+        unready_pod.status = Some(k8s_openapi::api::core::v1::PodStatus {
+            conditions: Some(vec![k8s_openapi::api::core::v1::PodCondition {
+                type_: "Ready".to_string(),
+                status: "False".to_string(),
+                ..Default::default()
+            }]),
+            ..Default::default()
+        });
+
+        let inputs = TriageInputs {
+            deployments: &[],
+            daemonsets: &[ds],
+            statefulsets: &[],
+            cronjobs: &[],
+            jobs: &[],
+            replicasets: &[],
+            controller_revisions: &[cr],
+            configmaps: &[],
+            secrets: &[],
+            pods: &[unready_pod],
+            events: &[],
+            argo_apps: &[],
+            window: Duration::from_secs(1800),
+            now,
+            namespace: Some("default".to_string()),
+            opts: TriageOptions::default(),
+            omitted: Vec::new(),
+        };
+
+        let report = evaluate_changed_triage_inputs(inputs);
+        assert_eq!(report.deployments.len(), 1);
+        let d = &report.deployments[0];
+        // Must NOT be marked Healthy when a pod is failing readiness!
+        assert_ne!(d.incident_status, IncidentStatus::Healthy);
+        assert_eq!(d.incident_status, IncidentStatus::Pending);
+    }
+
+    #[test]
+    fn triage_daemonset_probe_failure_preserves_probe_category() {
+        let now = Timestamp::from_second(NOW).unwrap();
+        let ds = daemonset("ingress-router", 1, 1, 1, 300);
+        let cr = controller_revision(
+            "ingress-router-1",
+            "DaemonSet",
+            "ingress-router",
+            1,
+            "router:v1",
+            300,
+            None,
+        );
+
+        let mut p = pod(
+            "ingress-router-pod",
+            "ingress-router",
+            vec![running("router")],
+        );
+        p.metadata.owner_references = Some(vec![make_owner_ref("DaemonSet", "ingress-router")]);
+        p.metadata.namespace = Some("default".to_string());
+
+        let probe_ev = Event {
+            metadata: ObjectMeta {
+                name: Some("ev-probe-1".to_string()),
+                namespace: Some("default".to_string()),
+                ..Default::default()
+            },
+            involved_object: k8s_openapi::api::core::v1::ObjectReference {
+                kind: Some("Pod".to_string()),
+                name: Some("ingress-router-pod".to_string()),
+                namespace: Some("default".to_string()),
+                ..Default::default()
+            },
+            reason: Some("Unhealthy".to_string()),
+            type_: Some("Warning".to_string()),
+            message: Some(
+                "Readiness probe failed: HTTP probe failed with statuscode: 500".to_string(),
+            ),
+            count: Some(5),
+            last_timestamp: Some(k8s_openapi::apimachinery::pkg::apis::meta::v1::Time(ago(
+                60,
+            ))),
+            ..Default::default()
+        };
+
+        let inputs = TriageInputs {
+            deployments: &[],
+            daemonsets: &[ds],
+            statefulsets: &[],
+            cronjobs: &[],
+            jobs: &[],
+            replicasets: &[],
+            controller_revisions: &[cr],
+            configmaps: &[],
+            secrets: &[],
+            pods: &[p],
+            events: &[probe_ev],
+            argo_apps: &[],
+            window: Duration::from_secs(1800),
+            now,
+            namespace: Some("default".to_string()),
+            opts: TriageOptions::default(),
+            omitted: Vec::new(),
+        };
+
+        let report = evaluate_changed_triage_inputs(inputs);
+        assert_eq!(report.deployments.len(), 1);
+        let d = &report.deployments[0];
+        assert_eq!(d.incident_status, IncidentStatus::ProbeFailure);
+        assert_eq!(d.failure_category, FailureCategory::Probe);
+    }
+
+    #[test]
+    fn triage_daemonset_stalled_out_of_window_is_preserved_as_failing() {
+        let now = Timestamp::from_second(NOW).unwrap();
+        // Rollout started 15m ago, outside the 5m window, and is stalled
+        let ds = daemonset("datadog-agent", 28, 14, 14, 900);
+        let cr = controller_revision(
+            "datadog-agent-rev2",
+            "DaemonSet",
+            "datadog-agent",
+            2,
+            "datadog/agent:7.50",
+            900,
+            None,
+        );
+
+        let mut unready_pod = pod("datadog-agent-unready", "datadog-agent", vec![]);
+        unready_pod.metadata.owner_references =
+            Some(vec![make_owner_ref("DaemonSet", "datadog-agent")]);
+        unready_pod.metadata.creation_timestamp = Some(
+            k8s_openapi::apimachinery::pkg::apis::meta::v1::Time(ago(900)),
+        );
+        unready_pod.status = Some(k8s_openapi::api::core::v1::PodStatus {
+            conditions: Some(vec![k8s_openapi::api::core::v1::PodCondition {
+                type_: "Ready".to_string(),
+                status: "False".to_string(),
+                ..Default::default()
+            }]),
+            ..Default::default()
+        });
+
+        let inputs = TriageInputs {
+            deployments: &[],
+            daemonsets: &[ds],
+            statefulsets: &[],
+            cronjobs: &[],
+            jobs: &[],
+            replicasets: &[],
+            controller_revisions: &[cr],
+            configmaps: &[],
+            secrets: &[],
+            pods: &[unready_pod],
+            events: &[],
+            argo_apps: &[],
+            window: Duration::from_secs(300), // 5 min window
+            now,
+            namespace: Some("default".to_string()),
+            opts: TriageOptions {
+                include_failing: true,
+                ..Default::default()
+            },
+            omitted: Vec::new(),
+        };
+
+        let report = evaluate_changed_triage_inputs(inputs);
+        assert_eq!(report.deployments.len(), 1);
+        let d = &report.deployments[0];
+        assert_eq!(d.rollout_status, RolloutStatus::Stalled);
+        assert_eq!(d.incident_status, IncidentStatus::Stalled);
+        assert_eq!(d.change_kind, ChangeKind::FailingOnly);
     }
 }

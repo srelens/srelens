@@ -90,6 +90,27 @@ fn sample_report_with_mixed_workloads() -> ChangedTriageReport {
             referenced_by: "volume 'certs'".to_string(),
             relation: "updated 25m ago".to_string(),
         },
+        ConfigChange {
+            kind: "ConfigMap".to_string(),
+            name: "cilium-extra-1".to_string(),
+            age: "30m".to_string(),
+            referenced_by: "volume 'extra1'".to_string(),
+            relation: "updated 30m ago".to_string(),
+        },
+        ConfigChange {
+            kind: "ConfigMap".to_string(),
+            name: "cilium-extra-2".to_string(),
+            age: "35m".to_string(),
+            referenced_by: "volume 'extra2'".to_string(),
+            relation: "updated 35m ago".to_string(),
+        },
+        ConfigChange {
+            kind: "ConfigMap".to_string(),
+            name: "cilium-extra-3".to_string(),
+            age: "40m".to_string(),
+            referenced_by: "volume 'extra3'".to_string(),
+            relation: "updated 40m ago".to_string(),
+        },
     ];
 
     let sts = AppDeploymentChange {
@@ -176,22 +197,25 @@ fn sample_report_with_mixed_workloads() -> ChangedTriageReport {
         config_changes: vec![],
     };
 
+    let mut colliding_deploy = deploy.clone();
+    colliding_deploy.app_name = "ds-operator".to_string();
+
     ChangedTriageReport {
         window_seconds: 3600,
         window_label: "1h".to_string(),
         namespace: Some("default".to_string()),
         summary: TriageSummary {
-            total_deployments: 3,
+            total_deployments: 4,
             crashing_count: 0,
             oom_count: 0,
             error_count: 1,
             pending_count: 0,
             probe_failure_count: 0,
             rolling_count: 1,
-            healthy_count: 2,
+            healthy_count: 3,
             headline_message: "WARNING: cilium-cni: 1 pod(s) unready".to_string(),
         },
-        deployments: vec![ds, sts, deploy],
+        deployments: vec![ds, sts, deploy, colliding_deploy],
         infra_changes: vec![],
         includes_failing: true,
         includes_scaled: true,
@@ -222,8 +246,9 @@ async fn journey_d1_filter_daemonset_alias_and_kind_prefix() {
     assert!(screen_all.contains("cilium-cni (ds)"));
     assert!(screen_all.contains("redis-cluster (sts)"));
     assert!(screen_all.contains("auth-service"));
+    assert!(screen_all.contains("ds-operator"));
 
-    // 1. Filter by alias 'ds'
+    // 1. Filter by alias 'ds' (must exclusively match DaemonSets, not colliding Deployment 'ds-operator')
     press(&mut app, ch('/')).await;
     type_str(&mut app, "ds").await;
     press(&mut app, key(KeyCode::Enter)).await;
@@ -232,6 +257,7 @@ async fn journey_d1_filter_daemonset_alias_and_kind_prefix() {
     assert!(screen_ds.contains("cilium-cni (ds)"));
     assert!(!screen_ds.contains("redis-cluster (sts)"));
     assert!(!screen_ds.contains("auth-service"));
+    assert!(!screen_ds.contains("ds-operator"));
 
     // Clear filter
     press(&mut app, key(KeyCode::Esc)).await;
@@ -245,6 +271,7 @@ async fn journey_d1_filter_daemonset_alias_and_kind_prefix() {
     assert!(!screen_sts.contains("cilium-cni (ds)"));
     assert!(screen_sts.contains("redis-cluster (sts)"));
     assert!(!screen_sts.contains("auth-service"));
+    assert!(!screen_sts.contains("ds-operator"));
 
     // 3. Clear filter (Esc or empty Enter)
     press(&mut app, key(KeyCode::Esc)).await;
@@ -252,6 +279,7 @@ async fn journey_d1_filter_daemonset_alias_and_kind_prefix() {
     assert!(screen_cleared.contains("cilium-cni (ds)"));
     assert!(screen_cleared.contains("redis-cluster (sts)"));
     assert!(screen_cleared.contains("auth-service"));
+    assert!(screen_cleared.contains("ds-operator"));
 }
 
 /// D3: Temporal & Asynchrony (Truthful Coverage Degradation)
@@ -269,23 +297,35 @@ async fn journey_d3_temporal_rbac_omitted_notice_truthfulness() {
     press(&mut app, key(KeyCode::Enter)).await;
 
     let mut report = sample_report_with_mixed_workloads();
-    // Simulate DaemonSet RBAC forbidden
-    report.omitted = vec![OmittedWorkloadKind {
-        kind: "DaemonSet".to_string(),
-        reason: "403 Forbidden: user cannot list daemonsets.apps in cluster".to_string(),
-    }];
+    // Simulate multiple omissions (DaemonSet RBAC and Secret timeout) with raw server characters
+    report.omitted = vec![
+        OmittedWorkloadKind {
+            kind: "DaemonSet".to_string(),
+            reason: "403 Forbidden: user cannot list daemonsets.apps in cluster\r\n".to_string(),
+        },
+        OmittedWorkloadKind {
+            kind: "Secret".to_string(),
+            reason: "request timed out\t".to_string(),
+        },
+    ];
 
     app.handle_changed_triage_result("test-cluster", Some("default"), Ok(report));
 
-    let screen = render_app(&mut app, 120, 30);
+    let screen = render_app(&mut app, 160, 30);
     assert!(
         screen.contains("Coverage Notice:"),
         "Screen must render coverage notice"
     );
     assert!(
-        screen.contains("DaemonSet list unavailable (403 Forbidden"),
-        "Must specify DaemonSet and reason verbatim"
+        screen.contains("DaemonSet list unavailable (403 Forbidden: user cannot list daemonsets.apps in cluster)"),
+        "Must specify DaemonSet and reason sanitized"
     );
+    assert!(
+        screen.contains("Secret list unavailable (request timed out)"),
+        "Must display multiple omitted kinds across lines without clipping"
+    );
+    assert!(!screen.contains('\t'), "Must sanitize tab characters");
+    assert!(!screen.contains('\r'), "Must sanitize carriage returns");
 }
 
 fn run_app(app: &mut App) -> &mut App {
@@ -403,6 +443,10 @@ async fn journey_d7_perceptual_layout_and_node_metrics() {
     assert!(
         screen.contains("Nodes: Desired: 5, Updated: 5, Ready: 4, Available: 4, Misscheduled: 1"),
         "Card must display Nodes header and misscheduled count"
+    );
+    assert!(
+        screen.contains("+2 more recent config changes..."),
+        "Card must bound config changes to 3 and show summary line"
     );
 
     // Test Quick RCA unit

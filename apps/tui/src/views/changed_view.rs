@@ -577,9 +577,7 @@ impl ChangedViewState {
             _ => None,
         };
         if let Some(target_kind) = q_kind {
-            if d.kind.eq_ignore_ascii_case(target_kind) {
-                return true;
-            }
+            return d.kind.eq_ignore_ascii_case(target_kind);
         }
         if let Some(stripped) = q.strip_prefix("kind:") {
             let stripped = stripped.trim();
@@ -1111,7 +1109,7 @@ pub fn render_guide_banner_preview(f: &mut Frame, area: Rect, enabled: bool) {
 
 pub fn render_changed_view(f: &mut Frame, area: Rect, state: &ChangedViewState) {
     let (banner_block, health, controls, coverage) = summary_banner(state);
-    let b_height = banner_height(&health, &controls, coverage.is_some(), area.width);
+    let b_height = banner_height(&health, &controls, coverage.len(), area.width);
     let guide_h = if state.show_guide_banner && area.height >= 28 {
         if area.height >= 34 {
             4
@@ -1216,7 +1214,7 @@ fn summary_banner(
     Block<'static>,
     Line<'static>,
     Line<'static>,
-    Option<Line<'static>>,
+    Vec<Line<'static>>,
 ) {
     let (crashing, oom, error, pending, probe_failures, rolling) = if let Some(r) = &state.report {
         (
@@ -1379,43 +1377,56 @@ fn summary_banner(
 
     let coverage = if let Some(r) = &state.report {
         if !r.omitted.is_empty() {
-            let parts: Vec<String> = r
-                .omitted
-                .iter()
-                .map(|o| format!("{} list unavailable ({})", o.kind, o.reason))
-                .collect();
-            Some(Line::from(vec![
-                Span::styled(
-                    " ⚠️ Coverage Notice: ",
-                    Style::default()
-                        .fg(Theme::yellow())
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(parts.join("; "), Style::default().fg(Theme::dim())),
-            ]))
+            let mut cov_lines = Vec::new();
+            for (i, o) in r.omitted.iter().take(3).enumerate() {
+                let prefix = if i == 0 {
+                    " ⚠️ Coverage Notice: "
+                } else {
+                    "                    "
+                };
+                let clean_reason = sanitize_span_text(o.reason.trim());
+                cov_lines.push(Line::from(vec![
+                    Span::styled(
+                        prefix,
+                        Style::default()
+                            .fg(Theme::yellow())
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(
+                        format!("{} list unavailable ({})", o.kind, clean_reason),
+                        Style::default().fg(Theme::dim()),
+                    ),
+                ]));
+            }
+            if r.omitted.len() > 3 {
+                cov_lines.push(Line::from(vec![
+                    Span::styled("                    ", Style::default().fg(Theme::yellow())),
+                    Span::styled(
+                        format!("+{} more resource lists unavailable", r.omitted.len() - 3),
+                        Style::default().fg(Theme::dim()),
+                    ),
+                ]));
+            }
+            cov_lines
         } else {
-            None
+            Vec::new()
         }
     } else {
-        None
+        Vec::new()
     };
 
     (block, line1, controls, coverage)
 }
 
-/// Rows the banner needs at `width`: one content line, or two, plus coverage row if present.
-fn banner_height(health: &Line, controls: &Line, has_coverage: bool, width: u16) -> u16 {
+/// Rows the banner needs at `width`: one content line, or two, plus coverage rows if present.
+fn banner_height(health: &Line, controls: &Line, coverage_lines: usize, width: u16) -> u16 {
     let inner = usize::from(width.saturating_sub(2));
     let base = if health.width() + 2 + controls.width() <= inner {
         3
     } else {
         4
     };
-    if has_coverage {
-        base + 1
-    } else {
-        base
-    }
+    base + coverage_lines.min(4) as u16
 }
 
 fn render_summary_banner(
@@ -1424,7 +1435,7 @@ fn render_summary_banner(
     block: Block<'static>,
     health: Line<'static>,
     controls: Line<'static>,
-    coverage: Option<Line<'static>>,
+    coverage: Vec<Line<'static>>,
 ) {
     let inner = usize::from(area.width.saturating_sub(2));
     let single_line = health.width() + 2 + controls.width() <= inner;
@@ -1436,7 +1447,7 @@ fn render_summary_banner(
     } else {
         vec![health, controls]
     };
-    if let Some(cov) = coverage {
+    for cov in coverage {
         lines.push(cov);
     }
     let p = Paragraph::new(lines).block(block);
@@ -1628,7 +1639,9 @@ fn build_workload_row(
 
     let short_detail =
         srelens_kube::changed::condense_diagnostic(d.failure_category, &d.failure_detail);
-    let detail_text = if d.failure_category != FailureCategory::None || !short_detail.is_empty() {
+    let detail_text = if d.failure_category != FailureCategory::None
+        || (!short_detail.is_empty() && short_detail != "Healthy")
+    {
         format!("{} {}", d.failure_category.badge(), short_detail)
             .trim()
             .to_string()
@@ -2064,7 +2077,8 @@ fn render_deployment_diagnostic_card(f: &mut Frame, area: Rect, state: &ChangedV
     }
     lines.extend(why_lines(d, state));
 
-    for c in &d.config_changes {
+    let max_config_shown = 3;
+    for c in d.config_changes.iter().take(max_config_shown) {
         lines.push(Line::from(vec![
             Span::styled("⚙️ Config: ", Theme::header_label()),
             Span::styled(
@@ -2073,6 +2087,18 @@ fn render_deployment_diagnostic_card(f: &mut Frame, area: Rect, state: &ChangedV
             ),
             Span::styled(
                 format!(" — {}", c.relation),
+                Style::default().fg(Theme::dim()),
+            ),
+        ]));
+    }
+    if d.config_changes.len() > max_config_shown {
+        lines.push(Line::from(vec![
+            Span::styled("⚙️ Config: ", Theme::header_label()),
+            Span::styled(
+                format!(
+                    "+{} more recent config changes...",
+                    d.config_changes.len() - max_config_shown
+                ),
                 Style::default().fg(Theme::dim()),
             ),
         ]));
