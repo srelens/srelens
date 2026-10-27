@@ -3498,12 +3498,11 @@ pub fn evaluate_changed_triage_inputs(inputs: TriageInputs<'_>) -> ChangedTriage
             && image_error_count == 0
             && detected_failure_category == FailureCategory::None
         {
-            let rollout_start_ts =
-                newest_cr_ts.or_else(|| ds.metadata.creation_timestamp.as_ref().map(|t| t.0));
-
-            let update_age_secs = rollout_start_ts
+            let rollout_start_ts = newest_cr_ts
                 .or(latest_pod_created)
-                .map(|ts| now.duration_since(ts).as_secs());
+                .or_else(|| ds.metadata.creation_timestamp.as_ref().map(|t| t.0));
+
+            let update_age_secs = rollout_start_ts.map(|ts| now.duration_since(ts).as_secs());
 
             // A rollout cannot be stalled unless the rollout itself has lasted at least 10 minutes.
             let rollout_has_lasted_10m = update_age_secs.is_some_and(|age| age >= 600);
@@ -9474,6 +9473,61 @@ mod tests {
         assert_eq!(report.deployments.len(), 1);
         let d = &report.deployments[0];
         // The new rollout just started 60s ago; it must NOT be marked stalled!
+        assert_ne!(d.rollout_status, RolloutStatus::Stalled);
+        assert_ne!(d.incident_status, IncidentStatus::Stalled);
+        assert_eq!(d.rollout_status, RolloutStatus::Progressing);
+        assert_eq!(d.incident_status, IncidentStatus::Rolling);
+        assert!(!d.failure_detail.contains("stalled"));
+    }
+
+    #[test]
+    fn triage_daemonset_without_controller_revision_recent_pod_is_not_stalled() {
+        let now = Timestamp::from_second(NOW).unwrap();
+        // DaemonSet created 1 day ago
+        let ds = daemonset("datadog-agent", 28, 14, 14, 86400);
+        // Recent pod created 120s ago (new rollout underway without ControllerRevisions)
+        let mut recent_pod = pod("datadog-agent-recent", "datadog-agent", vec![]);
+        recent_pod.metadata.owner_references =
+            Some(vec![make_owner_ref("DaemonSet", "datadog-agent")]);
+        recent_pod.metadata.creation_timestamp = Some(
+            k8s_openapi::apimachinery::pkg::apis::meta::v1::Time(ago(120)),
+        );
+        recent_pod.status = Some(k8s_openapi::api::core::v1::PodStatus {
+            conditions: Some(vec![k8s_openapi::api::core::v1::PodCondition {
+                type_: "Ready".to_string(),
+                status: "True".to_string(),
+                ..Default::default()
+            }]),
+            ..Default::default()
+        });
+
+        let inputs = TriageInputs {
+            deployments: &[],
+            daemonsets: &[ds],
+            statefulsets: &[],
+            cronjobs: &[],
+            jobs: &[],
+            replicasets: &[],
+            controller_revisions: &[], // ControllerRevisions absent
+            configmaps: &[],
+            secrets: &[],
+            pods: &[recent_pod],
+            events: &[],
+            argo_apps: &[],
+            window: Duration::from_secs(300), // 5 min window
+            now,
+            namespace: Some("default".to_string()),
+            opts: TriageOptions {
+                include_failing: true,
+                ..Default::default()
+            },
+            omitted: Vec::new(),
+        };
+
+        let report = evaluate_changed_triage_inputs(inputs);
+        assert_eq!(report.deployments.len(), 1);
+        let d = &report.deployments[0];
+        // The recent pod was created 120s ago, so rollout has NOT lasted 10m!
         assert_ne!(d.rollout_status, RolloutStatus::Stalled);
         assert_ne!(d.incident_status, IncidentStatus::Stalled);
         assert_eq!(d.rollout_status, RolloutStatus::Progressing);
