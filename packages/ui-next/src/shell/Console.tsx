@@ -23,6 +23,8 @@ import { AgentPicker } from "../screens/agent/AgentPicker";
 import { LOADING, type Read } from "../lib/read";
 import { contextLabelFor } from "../lib/agentSuggestions";
 import { useContextLabel } from "../lib/contextLabel";
+import { useAssistant, useAssistantAllowed } from "../lib/assistant";
+import { openSettings } from "../lib/settingsRequest";
 import { askContextFor, runKeyFor } from "../lib/askContext";
 import { useNamespaces } from "../lib/workspace";
 import { readImageFile } from "../lib/pastedImages";
@@ -54,6 +56,8 @@ const GROUPS: readonly CommandGroup[] = ["Action", "Go", "Apps", "Cluster", "Wor
 
 /** §F's empty-palette line, verbatim. */
 const NO_COMMAND_MATCH = "No command matches. Press ⏎ to ask the agent instead.";
+/** Where the AI Assistant is off (#968) there is no agent to fall back to. */
+const NO_COMMAND_ONLY = "No command matches.";
 
 /** Command palette mode: the matched commands, grouped under §F's four
  *  headings — a group with nothing in it draws no heading at all, which is
@@ -324,6 +328,14 @@ export function Console({ fullView, spareAbove }: { fullView?: boolean; spareAbo
   const shownClusterLabel = useContextLabel(shown?.about.cluster ?? "", contexts.find(c => c.name === shown?.about.cluster)?.stableId);
   const askScope = shown ? contextLabelFor(shown.route, shownClusterLabel) : scope;
 
+  // #968: where the AI Assistant may not act on the cluster the next question
+  // would reach, the dock is the command palette and nothing else — no
+  // transcript, no question sent, no AI wording. The draft is left alone, so a
+  // question typed before the switch is still there if it comes back on.
+  const assistantOn = useAssistantAllowed(askCluster);
+  const assistantEverywhere = useAssistant().enabled;
+  const offLabel = useContextLabel(askCluster, contexts.find((c) => c.name === askCluster)?.stableId);
+
   // Installed apps' commands (#544). Scoped as the sidebar's Apps entries are:
   // enabled and allowed on the cluster, found by the context key no two
   // contexts share (#695). Named by `extensionLabel`, the host's name.
@@ -460,7 +472,7 @@ export function Console({ fullView, spareAbove }: { fullView?: boolean; spareAbo
    * `reading` gate applied to a question that had nothing to do with it.
    */
   function askFromScreen(question: string) {
-    if (!sendable(question)) return;
+    if (!assistantOn || !sendable(question)) return;
     void send(question, "screen");
   }
 
@@ -475,6 +487,8 @@ export function Console({ fullView, spareAbove }: { fullView?: boolean; spareAbo
       // §F's own words for this: no command matched, so what was typed is
       // asked as a question instead of being discarded.
     }
+    // No agent to ask: nothing is sent, and the draft stays where it is.
+    if (!assistantOn) return;
     if (!sendable(raw)) return;
     // An image still being read belongs to THIS question. Sending now would
     // send the question without it and attach it to the next one. Only the
@@ -596,7 +610,7 @@ export function Console({ fullView, spareAbove }: { fullView?: boolean; spareAbo
     const matched = matchCommands(commands, value.slice(1));
     children =
       matched.length === 0 ? (
-        <p className="min-w-0 break-words text-sm text-muted">{NO_COMMAND_MATCH}</p>
+        <p className="min-w-0 break-words text-sm text-muted">{assistantOn ? NO_COMMAND_MATCH : NO_COMMAND_ONLY}</p>
       ) : (
         <CommandRows
           commands={matched}
@@ -606,6 +620,17 @@ export function Console({ fullView, spareAbove }: { fullView?: boolean; spareAbo
           }}
         />
       );
+  } else if (!assistantOn) {
+    // Said once, quietly, with the way to change it — so a dock that stopped
+    // answering does not look broken.
+    children = (
+      <p className="min-w-0 break-words text-sm text-muted">
+        {assistantEverywhere ? `AI Assistant is off for ${offLabel}` : "AI Assistant is off"}{" "}
+        <button type="button" className="text-btn" onClick={() => openSettings("agent")}>
+          Open Settings
+        </button>
+      </p>
+    );
   } else if (isFullView || turns.length === 0) {
     /*
       Nothing. A dock with nothing in it is a composer, not a panel with a
@@ -634,7 +659,7 @@ export function Console({ fullView, spareAbove }: { fullView?: boolean; spareAbo
   // Run-level, above whichever of the three modes is showing. The store held
   // this in `error` and nothing drew it, so an `ask()` chip pressed mid-turn
   // was refused in silence — which is what the refusal was supposed to stop.
-  if (error !== undefined) {
+  if (assistantOn && error !== undefined) {
     children = (
       <div className="flex min-w-0 flex-col gap-2">
         <Alert tone="sev" title="That question was not sent" onDismiss={() => dismissAgentError(runKey)}>
@@ -653,7 +678,7 @@ export function Console({ fullView, spareAbove }: { fullView?: boolean; spareAbo
   // that changes the query, and a polite region would read the whole matched
   // list out again on every character (I7's scenario, `/re` re-announcing
   // three times).
-  const dockLive = !commandMode && turns.length > 0;
+  const dockLive = assistantOn && !commandMode && turns.length > 0;
 
   return (
     <ConsoleDock
@@ -677,16 +702,16 @@ export function Console({ fullView, spareAbove }: { fullView?: boolean; spareAbo
       value={value}
       onValueChange={setValue}
       onSubmit={onSubmit}
-      busy={busy}
-      mode={commandMode ? "Command" : "Agent"}
+      busy={assistantOn && busy}
+      mode={commandMode || !assistantOn ? "Command" : "Agent"}
       // Empty rather than absent is a bordered chip with nothing in it, and
       // the console is unscoped until `Window`'s own effect (`contextLabelFor`)
       // has scoped it to the active route and cluster.
       context={askScope || undefined}
-      status={exchanges > 0 ? `${exchanges} exchange${exchanges === 1 ? "" : "s"}` : undefined}
-      placeholder={askScope ? `Ask about ${askScope}` : "Ask about this cluster"}
+      status={assistantOn && exchanges > 0 ? `${exchanges} exchange${exchanges === 1 ? "" : "s"}` : undefined}
+      placeholder={!assistantOn ? "Type / for commands" : askScope ? `Ask about ${askScope}` : "Ask about this cluster"}
       shortcutHint={hint("console", apple)}
-      onClear={() => clearAgentRun(runKey)}
+      onClear={assistantOn ? () => clearAgentRun(runKey) : undefined}
       // The dock and `/agent` are two views of ONE conversation, and until now
       // there was no way between them: a reader had to know the left nav has an
       // Agent entry under Investigate. Reported as "how to go to full mode".
@@ -698,7 +723,7 @@ export function Console({ fullView, spareAbove }: { fullView?: boolean; spareAbo
       // Absent in the full view itself: a control that opens the screen the
       // reader is already looking at does nothing they can see.
       onExpand={
-        isFullView
+        isFullView || !assistantOn
           ? undefined
           : () => {
               selectRun(runKey);
@@ -707,7 +732,7 @@ export function Console({ fullView, spareAbove }: { fullView?: boolean; spareAbo
       }
       // The only Stop in the app: the agent screen's own composer is gone.
       promptLead={
-        offered.length > 0 ? (
+        assistantOn && offered.length > 0 ? (
           <AgentPicker
             agents={offered}
             selectedKind={pickerKind}
@@ -720,10 +745,11 @@ export function Console({ fullView, spareAbove }: { fullView?: boolean; spareAbo
           />
         ) : undefined
       }
-      onStop={busy ? () => stopAgentRun() : undefined}
-      onPasteImages={(files) => void attach(files)}
-      onPickImages={(files) => void attach(files)}
+      onStop={assistantOn && busy ? () => stopAgentRun() : undefined}
+      onPasteImages={assistantOn ? (files) => void attach(files) : undefined}
+      onPickImages={assistantOn ? (files) => void attach(files) : undefined}
       promptContext={
+        assistantOn &&
         // What the question is about, said where the question is typed. The
         // header already carries a context pill, but the header belongs to the
         // dock's transcript; this belongs to the composer.
@@ -754,7 +780,7 @@ export function Console({ fullView, spareAbove }: { fullView?: boolean; spareAbo
         ) : undefined
       }
       attachments={
-        <>
+        assistantOn && <>
           {images.map((uri, i) => (
             <span key={i} className="chip">
               {/* The image itself, not a filename: a pasted screenshot has no

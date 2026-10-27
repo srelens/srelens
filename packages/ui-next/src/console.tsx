@@ -8,6 +8,8 @@ import {
   type ReactNode,
 } from "react";
 import { isApplePlatform } from "@srelens/core";
+import { useAssistantAllowed } from "./lib/assistant";
+import { useScreenContext } from "./lib/clusters";
 
 /** What a question is delivered to: the dock's own submit handler. */
 type Submit = (question: string) => void;
@@ -200,4 +202,15 @@ export function useConsole(): ConsoleValue {
   const value = useContext(ConsoleContext);
   if (!value) throw new Error("useConsole must be used inside a ConsoleProvider");
   return value;
+}
+
+/**
+ * A screen's way to ask, or `undefined` where the AI Assistant may not act
+ * (#968) — so a screen draws its Ask only when it has one. About `cluster`
+ * when the screen names one, else the screen's own cluster.
+ */
+export function useAsk(cluster?: string | null): ((question: string) => void) | undefined {
+  const { ask } = useConsole();
+  const screen = useScreenContext();
+  return useAssistantAllowed(cluster === undefined ? screen?.name : cluster) ? ask : undefined;
 }

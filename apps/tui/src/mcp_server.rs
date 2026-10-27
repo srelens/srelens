@@ -17,13 +17,18 @@ pub fn build_stdio_mcp_server(
     allow_sensitive_reads: bool,
 ) -> McpServer {
     let cache = ClientCache::new_many(kubeconfig_paths.clone());
-    let registry = srelens_registry::build_registry_with_paths(cache, kubeconfig_paths);
+    let registry = srelens_registry::build_registry_with_paths(cache.clone(), kubeconfig_paths);
     let policy = Arc::new(srelens_mcp::policy::FlagGated::new(
         allow_destructive,
         allow_sensitive_reads,
     ));
     McpServer::new(Arc::new(registry))
         .with_policy(policy)
+        // #968: the desktop app's AI Assistant switches hold here too.
+        .with_assistant(Arc::new(srelens_registry::assistant::SettingsAssistant::new(
+            srelens_registry::default_settings_path(),
+            cache,
+        )))
         .with_kind_resolver(srelens_registry::kind_resolver())
 }
 

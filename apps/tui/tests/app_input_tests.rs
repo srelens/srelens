@@ -7228,6 +7228,7 @@ async fn changed_view_drops_a_result_for_a_window_it_no_longer_shows() {
         includes_failing: true,
         includes_scaled: true,
         argo: Default::default(),
+        omitted: vec![],
     };
 
     // The view shows 1h; a 15m answer from before a window change is stale.
@@ -9043,6 +9044,7 @@ async fn switch_context_while_in_changed_view_clears_report_and_handles_stale_re
         includes_failing: true,
         includes_scaled: true,
         argo: Default::default(),
+        omitted: vec![],
     });
     app.active_view = ActiveView::Changed(changed_state);
     app.active_context = "cluster-1".to_string();
@@ -9082,6 +9084,7 @@ async fn switch_context_while_in_changed_view_clears_report_and_handles_stale_re
         includes_failing: true,
         includes_scaled: true,
         argo: Default::default(),
+        omitted: vec![],
     };
     app.handle_changed_triage_result("cluster-1", None, Ok(stale_report));
 
@@ -9114,6 +9117,7 @@ async fn switch_context_while_in_changed_view_clears_report_and_handles_stale_re
         includes_failing: true,
         includes_scaled: true,
         argo: Default::default(),
+        omitted: vec![],
     };
     app.handle_changed_triage_result("cluster-2", None, Ok(cluster2_report));
 
@@ -9154,6 +9158,7 @@ async fn switch_namespace_while_in_changed_view_clears_stale_report() {
         includes_failing: true,
         includes_scaled: true,
         argo: Default::default(),
+        omitted: vec![],
     });
     app.active_view = ActiveView::Changed(changed_state);
     app.active_context = "cluster-1".to_string();

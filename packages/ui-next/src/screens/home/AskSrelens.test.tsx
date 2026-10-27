@@ -3,6 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { ClusterContext } from "@srelens/core";
 import { ConsoleProvider, useConsole } from "../../console";
+import { setAssistantEnabled, setClusterAssistant } from "../../lib/assistant";
 import type { AttentionItem, ClusterAttention } from "../../lib/attention";
 import { resetContexts, setContexts } from "../../lib/clusters";
 import { defaultState } from "../../lib/tabs";
@@ -70,9 +71,46 @@ describe("AskSrelens", () => {
     expect(draft()).toBe("Why is checkout/web-7d4b crash-looping on staging?");
   });
 
+  it("suggests a custom kind and the built-in of the same name apart, each under its own key", () => {
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      show([PROD], {
+        [PROD.stableId]: scan([
+          item(PROD, { kind: "Deployment", group: "acme.io", name: "api", problem: "ReconcileFailed", cause: "warning" }),
+          item(PROD, { kind: "Deployment", name: "api", problem: "ProgressDeadlineExceeded", cause: "warning" }),
+        ]),
+      });
+      expect(screen.getAllByRole("button", { name: /^Ask: / }).map((b) => b.textContent)).toEqual([
+        "What is behind the ReconcileFailed warning on acme.io/Deployment checkout/api on prod?",
+        "What is behind the ProgressDeadlineExceeded warning on Deployment checkout/api on prod?",
+      ]);
+      expect(errors.mock.calls.flat().join(" ")).not.toMatch(/same key/);
+    } finally {
+      errors.mockRestore();
+    }
+  });
+
   it("suggests nothing when nothing needs attention", () => {
     show([PROD], { [PROD.stableId]: scan([]) });
     expect(screen.queryByRole("button", { name: /^Ask: / })).toBeNull();
+  });
+
+  // #968
+  it("is not drawn while the AI Assistant is off", () => {
+    setAssistantEnabled(false);
+    show();
+    expect(screen.queryByRole("heading", { name: "Ask srelens" })).toBeNull();
+  });
+
+  it("suggests nothing about a cluster the AI Assistant is off for", () => {
+    setClusterAssistant(STAGE.stableId, false);
+    show([PROD, STAGE], {
+      [PROD.stableId]: scan([item(PROD, { kind: "Deployment", name: "api", problem: "1/3 ready", cause: "replicas" })]),
+      [STAGE.stableId]: scan([item(STAGE, {})]),
+    });
+    expect(screen.getAllByRole("button", { name: /^Ask: / }).map((b) => b.textContent)).toEqual([
+      "Why does Deployment checkout/api have unavailable replicas on prod?",
+    ]);
   });
 
   it("is not drawn on the web host, where the assistant cannot run", () => {

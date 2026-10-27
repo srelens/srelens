@@ -34,8 +34,16 @@ vi.mock("@srelens/core/react", async (orig) => ({
 // editor the way a reader would.
 const { active } = vi.hoisted(() => ({ active: { name: "prod-eu", stableId: "prod-eu", key: "prod-eu" } }));
 // The console the Review button hands the draft to.
-const { ask } = vi.hoisted(() => ({ ask: vi.fn() }));
-vi.mock("../console", () => ({ useConsole: () => ({ ask }) }));
+// `useAsk` answers nothing where the AI Assistant may not act (#968), and says
+// which cluster it was asked about.
+const { ask, assistant } = vi.hoisted(() => ({ ask: vi.fn(), assistant: { off: false, askedFor: [] as unknown[] } }));
+vi.mock("../console", () => ({
+  useConsole: () => ({ ask }),
+  useAsk: (cluster?: string | null) => {
+    assistant.askedFor.push(cluster);
+    return assistant.off ? undefined : ask;
+  },
+}));
 vi.mock("../lib/clusters", async (orig) => ({
   ...(await orig<typeof import("../lib/clusters")>()),
   useActiveContext: () => ({ ...active }),
@@ -134,6 +142,8 @@ async function pick(label: string, option: string) {
 
 beforeEach(() => {
   editors.length = 0;
+  assistant.off = false;
+  assistant.askedFor.length = 0;
   active.name = "prod-eu";
   active.stableId = "prod-eu";
   core.getManifest.mockReset().mockResolvedValue({ yaml: LIVE });
@@ -515,6 +525,15 @@ describe("EditResource", () => {
     core.validateManifest.mockResolvedValue({ valid: true, errors: [] });
     await userEvent.click(screen.getByRole("button", { name: "Dry run" }));
     expect((await screen.findByTestId("dry-run-verdict")).textContent).toContain("Dry run passed");
+  });
+
+  it("offers no Review where the AI Assistant may not act on the pinned cluster (#968)", async () => {
+    assistant.off = true;
+    render(<EditResource route={ROUTE} />);
+    await waitFor(() => expect(latestEditor()?.value).toBe(LIVE));
+    expect(screen.queryByRole("button", { name: "Review" })).toBeNull();
+    // Asked about the cluster the editor is pinned to, not the rail's.
+    expect(assistant.askedFor).toContain("prod-eu");
   });
 
   it("hands the draft to the assistant for review, naming the cluster it is bound for", async () => {

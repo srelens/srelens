@@ -9,7 +9,7 @@ import {
   SideRail,
   statusTone,
 } from "@srelens/ui-kit";
-import { useConsole } from "../console";
+import { useAsk } from "../console";
 import { useActiveContext } from "../lib/clusters";
 import { ClusterMovedAlert } from "../lib/clusterMoved";
 import { useTabs } from "../lib/tabsStore";
@@ -81,7 +81,6 @@ export function Terminals(_props: { route: string }) {
   const cluster = useActiveContext();
   const { workspace } = useTabs();
   const paused = cluster !== undefined && workspace.pausedClusters?.includes(cluster.stableId) === true;
-  const { ask } = useConsole();
   const [picked, setPicked] = useState<number | null>(null);
   /**
    * The `New session` menu, and the cluster it was opened against.
@@ -133,6 +132,8 @@ export function Terminals(_props: { route: string }) {
     (sessions.length > 0 ? sessions[sessions.length - 1] : undefined);
 
   const context = active?.context ?? cluster?.name ?? "";
+  // About the session on screen, which can be on another cluster than the rail.
+  const ask = useAsk(context);
   const namespace = active?.namespace ?? cluster?.namespace ?? "";
   const verdict = active ? SESSION_VERDICT[active.state] : undefined;
 
@@ -152,14 +153,16 @@ export function Terminals(_props: { route: string }) {
               and invisible in a header, where there is no row to hover. The
               visible word is the design's; the question it will actually send
               goes in the accessible name — the same split the chip makes. */}
-          <Button
-            type="button"
-            size="sm"
-            aria-label={`Draft a command: ${askQuestion(active, context)}`}
-            onClick={() => ask(askQuestion(active, context))}
-          >
-            Draft a command
-          </Button>
+          {ask && (
+            <Button
+              type="button"
+              size="sm"
+              aria-label={`Draft a command: ${askQuestion(active, context)}`}
+              onClick={() => ask(askQuestion(active, context))}
+            >
+              Draft a command
+            </Button>
+          )}
           <Button
             variant="primary"
             size="sm"

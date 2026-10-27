@@ -36,7 +36,7 @@ import {
   tableFilterError,
   type Column,
 } from "@srelens/ui-kit";
-import { useConsole } from "../console";
+import { useAsk } from "../console";
 import { getKubeconfigFiles, useActiveContext } from "../lib/clusters";
 import { FailureState, NamespaceFailuresAlert, friendly } from "../lib/errorCopy";
 import {
@@ -294,7 +294,7 @@ function HelmReleases({
   // never interchangeable — see `lib/clusters`.
   const name = context.name;
   const files = getKubeconfigFiles();
-  const { ask } = useConsole();
+  const ask = useAsk(name);
 
   const ops = useSyncExternalStore(subscribeHelmOps, getHelmOps, getHelmOps);
 
@@ -829,16 +829,18 @@ function HelmReleases({
               invisible one until #352. The visible word is §16's; the question
               that will actually be sent is the accessible name, which is the
               same split the chip itself makes. */}
-          <Button
-            type="button"
-            size="sm"
-            aria-label={`${EXPLAIN_LABEL}: ${question}`}
-            title={`${EXPLAIN_LABEL}: ${question}`}
-            onClick={() => ask(question)}
-          >
-            <Sparkle size={12} aria-hidden="true" />
-            {EXPLAIN_LABEL}
-          </Button>
+          {ask && (
+            <Button
+              type="button"
+              size="sm"
+              aria-label={`${EXPLAIN_LABEL}: ${question}`}
+              title={`${EXPLAIN_LABEL}: ${question}`}
+              onClick={() => ask(question)}
+            >
+              <Sparkle size={12} aria-hidden="true" />
+              {EXPLAIN_LABEL}
+            </Button>
+          )}
           <Button
             variant="primary"
             size="sm"

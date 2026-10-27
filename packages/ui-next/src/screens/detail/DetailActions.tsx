@@ -1,5 +1,5 @@
 import { ActionBar, Button, type ActionBarAction, type ContextMenuItem } from "@srelens/ui-kit";
-import { useConsole } from "../../console";
+import { useAsk } from "../../console";
 import { Icons } from "../../lib/icons";
 import { askQuestion } from "../../lib/kinds/rowAffordances";
 import { ROW_ACTION_LABEL } from "../../lib/kinds/rowActions";
@@ -157,7 +157,7 @@ export function DetailActions({
   host = "peek",
   group,
 }: DetailActionsProps) {
-  const { ask } = useConsole();
+  const ask = useAsk(context);
   const { items, dialog } = useRowMenu({ context, kind, actions, group, onChanged });
 
   // What a table would have handed the hook. `suspended` is not on `ListRow`
@@ -182,17 +182,19 @@ export function DetailActions({
           The visible word is short and the same on every subject, so the
           question goes in the accessible name, where it says what will
           actually be sent — the same split `AskChip` makes. */}
-      <Button
-        type="button"
-        size="sm"
-        className={inPeek ? "flex-1 justify-center" : undefined}
-        aria-label={`Ask: ${question}`}
-        title={`Ask: ${question}`}
-        onClick={() => ask(question)}
-      >
-        <Sparkle size={12} aria-hidden="true" />
-        Ask
-      </Button>
+      {ask && (
+        <Button
+          type="button"
+          size="sm"
+          className={inPeek ? "flex-1 justify-center" : undefined}
+          aria-label={`Ask: ${question}`}
+          title={`Ask: ${question}`}
+          onClick={() => ask(question)}
+        >
+          <Sparkle size={12} aria-hidden="true" />
+          Ask
+        </Button>
+      )}
       <ActionBar
         actions={toBarActions(items(row))}
         label={`${kind} actions`}

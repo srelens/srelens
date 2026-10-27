@@ -2719,4 +2719,13 @@ describe("Window — main's protection reaches a context window (#101)", () => {
     });
     expect(refreshSetting).not.toHaveBeenCalledWith("srelens.next.workspaces");
   });
+
+  // #968: a switch flipped in another window reaches this one on focus.
+  it("re-reads the AI Assistant setting when the window is focused", async () => {
+    await bootedAs("ctx-stage");
+    await act(async () => {
+      window.dispatchEvent(new Event("focus"));
+    });
+    expect(refreshSetting).toHaveBeenCalledWith("srelens.assistant");
+  });
 });

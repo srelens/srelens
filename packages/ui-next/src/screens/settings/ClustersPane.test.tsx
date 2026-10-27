@@ -1,18 +1,19 @@
-import { beforeEach, expect, it, vi } from "vitest";
-import { render, screen, within, fireEvent } from "@testing-library/react";
+import { beforeEach, expect, it, onTestFinished, vi } from "vitest";
+import { act, render, screen, within, fireEvent } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { loadClusterNamespaces, loadContextProfiles, loadContextOrder, saveClusterNamespaces, saveContextProfiles, saveContextOrder, type ClusterContext } from "@srelens/core";
+import { loadClusterNamespaces, loadContextProfiles, loadContextOrder, readAssistantSetting, saveClusterNamespaces, saveContextProfiles, saveContextOrder, type ClusterContext } from "@srelens/core";
+import { __resetAssistantForTests, assistantSaved, setAssistantEnabled, setClusterAssistant } from "../../lib/assistant";
 import { setContexts } from "../../lib/clusters";
 import { loadMarks } from "../../lib/marks";
 import { ClustersPane } from "./ClustersPane";
 import { activeCluster, currentWorkspace, setState } from "../../lib/tabsStore";
 import { defaultState } from "../../lib/tabs";
 import { setNamespaces } from "../../lib/workspace";
-const backend = vi.hoisted(() => ({ deleteContext: vi.fn(), listContexts: vi.fn(), isTauri: vi.fn(() => true) }));
+const backend = vi.hoisted(() => ({ deleteContext: vi.fn(), listContexts: vi.fn(), isTauri: vi.fn(() => true), flushSettingsWrites: vi.fn(async (_options?: { throwOnError?: boolean }) => {}) }));
 vi.mock("@srelens/core", async (original) => ({ ...await original<object>(), ...backend }));
 const contexts: ClusterContext[] = ["prod", "staging"].map(name => ({ name, stableId: name + "-id", key: name + "-id", cluster: name, server: "https://" + name, sourceFile: "/config", authKind: "token", isCurrent: false }));
 beforeEach(() => {
-  localStorage.clear(); vi.clearAllMocks(); backend.isTauri.mockReturnValue(true);
+  localStorage.clear(); vi.clearAllMocks(); backend.isTauri.mockReturnValue(true); backend.flushSettingsWrites.mockResolvedValue(undefined);
   setState(defaultState(contexts));
   saveContextProfiles({ "prod-id": { displayName: "Production Europe", shortName: "PE", logo: "cloud", color: "#123456" } });
   saveContextOrder(["staging-id", "prod-id"]); loadMarks(); setContexts(contexts);
@@ -188,4 +189,41 @@ it("falls back to the context name in the list while retaining an editable blank
   await user.type(input, "  Production Europe  ");
   expect(input.value).toBe("  Production Europe  ");
   expect(screen.getByRole("button", { name: "Edit Production Europe" }).textContent).toContain("Production Europe");
+});
+
+/** #968: the per-cluster switch, which can only turn the assistant off. */
+it("switches the AI Assistant off for the selected cluster, and back on", async () => {
+  const user = userEvent.setup(); render(<ClustersPane />);
+  await user.click(screen.getByRole("button", { name: "Edit Production Europe" }));
+  expect(screen.getByText("AI Assistant")).toBeTruthy();
+  const allow = screen.getByRole("switch", { name: "Allow AI Assistant" });
+  expect(allow.getAttribute("aria-checked")).toBe("true");
+  await user.click(allow);
+  expect(readAssistantSetting().disabledClusters).toEqual(["prod-id"]);
+  expect(screen.getByRole("switch", { name: "Allow AI Assistant" }).getAttribute("aria-checked")).toBe("false");
+  await user.click(screen.getByRole("switch", { name: "Allow AI Assistant" }));
+  expect(readAssistantSetting().disabledClusters).toEqual([]);
+});
+
+it("holds the cluster switch still, and says why, while the assistant is off everywhere", async () => {
+  setClusterAssistant("prod-id", false);
+  setAssistantEnabled(false);
+  const user = userEvent.setup(); render(<ClustersPane />);
+  await user.click(screen.getByRole("button", { name: "Edit Production Europe" }));
+  const allow = screen.getByRole("switch", { name: "Allow AI Assistant" }) as HTMLButtonElement;
+  expect(allow.disabled).toBe(true);
+  expect(screen.getByText("Turned off for every cluster in Settings › AI Assistant.")).toBeTruthy();
+  expect(readAssistantSetting()).toEqual({ enabled: false, disabledClusters: ["prod-id"] });
+});
+
+it("says the cluster switch could not be saved, and shows what the file holds", async () => {
+  backend.flushSettingsWrites.mockRejectedValue(new Error("settings.json is locked"));
+  const user = userEvent.setup(); render(<ClustersPane />);
+  await user.click(screen.getByRole("button", { name: "Edit Production Europe" }));
+  await user.click(screen.getByRole("switch", { name: "Allow AI Assistant" }));
+  await act(async () => { await assistantSaved(); });
+  onTestFinished(__resetAssistantForTests);
+  const alert = screen.getByText(/Could not save the AI Assistant setting/);
+  expect(alert.getAttribute("role")).toBe("alert");
+  expect(alert.textContent).toContain("settings.json is locked");
 });

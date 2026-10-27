@@ -1,11 +1,12 @@
 import { useState } from "react";
 import { isTauri, plural, type ClusterContext } from "@srelens/core";
 import { Alert, Button, EmptyState, LoadingState, RawError, StatusPill } from "@srelens/ui-kit";
-import { attentionPath, attentionQuestion, rankedAttention, type ClusterAttention } from "../../lib/attention";
+import { attentionKind, attentionPath, attentionQuestion, rankedAttention, type ClusterAttention } from "../../lib/attention";
 import { detailRoute } from "../../lib/detailRoute";
 import { summarise } from "../../lib/errorCopy";
 import { getMark } from "../../lib/marks";
 import { openOnCluster } from "../../lib/openCluster";
+import { isAssistantAllowed } from "../../lib/assistant";
 import { useAskAssistant } from "./ask";
 
 /** How many rows show before the reader asks for the rest — a strip, not a second resource list. */
@@ -85,19 +86,30 @@ export function NeedsAttention({ targets, scans }: NeedsAttentionProps) {
               {shown.map(({ item, context }) => {
                 const where = label(context);
                 const path = attentionPath(item);
+                // A custom kind by its group, so `acme.io/Deployment` reads, keys
+                // and opens apart from the built-in Deployment.
+                const kind = attentionKind(item);
                 return (
-                  <li key={`${item.clusterId}/${item.kind}/${item.namespace}/${item.name}`} className="home-attention-row">
+                  <li key={`${item.clusterId}/${kind}/${item.namespace}/${item.name}`} className="home-attention-row">
                     <button
                       type="button"
                       className="home-attention-open"
-                      aria-label={`Open ${item.kind} ${path} on ${where}`}
-                      onClick={() => openOnCluster(context, detailRoute(item.kind, item.namespace || null, item.name, { cluster: context.name }))}
+                      aria-label={`Open ${kind} ${path} on ${where}`}
+                      onClick={() =>
+                        openOnCluster(
+                          context,
+                          detailRoute(item.kind, item.namespace || null, item.name, {
+                            cluster: context.name,
+                            ...(item.group ? { group: item.group } : {}),
+                          }),
+                        )
+                      }
                     >
                       <StatusPill status={item.problem} kind={item.cause === "crash" || item.cause === "image" ? "danger" : "warning"} tinted />
                       <span className="min-w-0 flex-1 truncate font-medium" title={path}>{path}</span>
-                      <span className="shrink-0 truncate text-xs text-muted">{item.kind} · {where}</span>
+                      <span className="shrink-0 truncate text-xs text-muted">{kind} · {where}</span>
                     </button>
-                    {desktop && (
+                    {desktop && ask && isAssistantAllowed(context.name) && (
                       <Button variant="secondary" size="sm" aria-label={`Ask about ${path} on ${where}`} onClick={() => ask(attentionQuestion(item), context)}>
                         Ask
                       </Button>

@@ -9,6 +9,7 @@ import {
 } from "@srelens/core";
 import { StatusBar, type StatusSegment } from "@srelens/ui-kit";
 import { useConsole } from "../console";
+import { useAssistantAllowed } from "../lib/assistant";
 import { getHelmOps, subscribeHelmOps } from "../lib/helmOps";
 import { useInfo } from "../lib/probe";
 import { getSessions, subscribeSessions } from "../lib/sessions";
@@ -97,6 +98,8 @@ export function Status({ contexts }: { contexts: ClusterContext[] }) {
   // Found rather than assumed: the active id is persisted and the context list
   // is whatever the machine has now, so an id can outlive the context it named.
   const ctx = resolveContext(contexts, activeId);
+  // No Ask where the AI Assistant may not act (#968).
+  const assistantOn = useAssistantAllowed(ctx?.stableId);
   // Absence of a probe is not evidence of a failed connection.
   const state = activeId ? links[activeId]?.state : undefined;
   const paused = activeId !== null && (workspace.pausedClusters ?? []).includes(activeId);
@@ -239,7 +242,7 @@ export function Status({ contexts }: { contexts: ClusterContext[] }) {
   if (canOpenClusterTerminal(ctx)) {
     end.push({ id: "terminal", label: "Terminal", onSelect: () => void openClusterTerminal(ctx) });
   }
-  end.push({ id: "ask", label: "Ask", tone: "accent", onSelect: () => setOpen(true) });
+  if (assistantOn) end.push({ id: "ask", label: "Ask", tone: "accent", onSelect: () => setOpen(true) });
 
   // Stripped in ONE place, at the end, rather than eight `sealed ? … :
   // undefined` ternaries above. A segment added later gets the guard for free;

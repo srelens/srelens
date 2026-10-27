@@ -26,7 +26,7 @@ Everything this server exposes over MCP, generated from the live registry so it 
 | `k8s.getObject` | low | fetch one resource as a structured JSON object (any supported kind). Pass `fields` (kubectl-style JSONPath such as .status.allocatable) to get only those paths, keyed by path, with null where the object has none. To read a field across many objects, use k8s.listResource with `fields` instead of calling this once per object. |
 | `k8s.gpuInventory` | low | cluster-wide physical and virtual GPU inventory, VRAM allocations, and GPU pods |
 | `k8s.listCRDs` | low | list installed CustomResourceDefinitions (group, kind, plural, scope) |
-| `k8s.listChanges` | low | holistic deployment and change incident triage: evaluates recent rollouts, GitOps release info, pod crash loops, compute/storage blockers, and error log snippets |
+| `k8s.listChanges` | low | holistic deployment and change incident triage: evaluates recent rollouts (Deployments, DaemonSets, StatefulSets, CronJobs, Jobs), GitOps release info, pod crash loops, compute/storage blockers, ConfigMap/Secret changes, and error log snippets |
 | `k8s.listClusterRoleBindings` | low | list ClusterRoleBindings of a connected kube context (cluster-scoped) |
 | `k8s.listClusterRoles` | low | list ClusterRoles of a connected kube context (cluster-scoped) |
 | `k8s.listConfigMaps` | low | list ConfigMaps in a namespace of a connected kube context |

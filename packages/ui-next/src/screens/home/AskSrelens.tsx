@@ -1,7 +1,8 @@
 import { useState } from "react";
 import { isTauri, type ClusterContext } from "@srelens/core";
 import { Button, Eyebrow, TextInput } from "@srelens/ui-kit";
-import { attentionQuestion, rankedAttention, type ClusterAttention } from "../../lib/attention";
+import { attentionKind, attentionQuestion, rankedAttention, type ClusterAttention } from "../../lib/attention";
+import { isAssistantAllowed } from "../../lib/assistant";
 import { useAskAssistant } from "./ask";
 
 /** Suggestions are a nudge, not a second list of what needs attention. */
@@ -21,8 +22,10 @@ export function AskSrelens({ targets, scans }: {
 }) {
   const ask = useAskAssistant();
   const [question, setQuestion] = useState("");
-  if (!isTauri()) return null;
-  const suggestions = rankedAttention(targets, scans).slice(0, SUGGESTED);
+  if (!isTauri() || !ask) return null;
+  const suggestions = rankedAttention(targets, scans)
+    .filter(({ context }) => isAssistantAllowed(context.name))
+    .slice(0, SUGGESTED);
   const submit = () => {
     const text = question.trim();
     if (!text) return;
@@ -45,7 +48,7 @@ export function AskSrelens({ targets, scans }: {
               {suggestions.map(({ item, context }) => {
                 const text = attentionQuestion(item);
                 return (
-                  <li key={`${item.clusterId}/${item.kind}/${item.namespace}/${item.name}`}>
+                  <li key={`${item.clusterId}/${attentionKind(item)}/${item.namespace}/${item.name}`}>
                     <button type="button" className="home-pick-row" aria-label={`Ask: ${text}`} onClick={() => ask(text, context)}>
                       <span className="min-w-0">{text}</span>
                     </button>

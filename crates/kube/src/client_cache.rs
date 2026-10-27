@@ -373,6 +373,12 @@ impl ClientCache {
     /// 2. If group/version/plural are omitted and kind matches built-in static table, resolve via `gvk_for`.
     /// 3. Otherwise, look up in cached discovery index for `context`.
     /// 4. On cache miss, run dynamic discovery against the cluster and populate the cache.
+    ///
+    /// `namespace_given` is whether the caller named a namespace. In tier 1 it
+    /// is the scope when the cluster cannot say (discovery refused, or not
+    /// listing the kind): a read with no namespace then takes the cluster-wide
+    /// path, which a cluster-scoped kind needs and a namespaced one's list
+    /// shares (#980 review).
     pub async fn resolve_resource(
         &self,
         context: &str,
@@ -380,6 +386,7 @@ impl ClientCache {
         group: Option<&str>,
         version: Option<&str>,
         plural: Option<&str>,
+        namespace_given: bool,
     ) -> Result<(ApiResource, bool), String> {
         // Tier 1: Caller provided explicit GVK + plural hints
         if let (Some(g), Some(v), Some(p)) = (group, version, plural) {
@@ -395,9 +402,9 @@ impl ClientCache {
                 } else if let Ok(idx) = self.discover_cluster(context).await {
                     idx.find(kind, Some(g))
                         .map(|r| r.namespaced)
-                        .unwrap_or(true)
+                        .unwrap_or(namespace_given)
                 } else {
-                    true
+                    namespace_given
                 }
             };
             return Ok((crate::crds::custom_api_resource(g, v, kind, p), namespaced));
@@ -418,9 +425,7 @@ impl ClientCache {
             if let Some(idx) = lock.get(context) {
                 if let Some(res) = idx.find(kind, group) {
                     if let Some(v) = version {
-                        let mut ar = res.ar.clone();
-                        ar.version = v.to_string();
-                        return Ok((ar, res.namespaced));
+                        return Ok((at_version(res.ar, v), res.namespaced));
                     }
                     return Ok((res.ar, res.namespaced));
                 }
@@ -431,9 +436,7 @@ impl ClientCache {
         let idx = self.discover_cluster(context).await?;
         if let Some(res) = idx.find(kind, group) {
             if let Some(v) = version {
-                let mut ar = res.ar.clone();
-                ar.version = v.to_string();
-                return Ok((ar, res.namespaced));
+                return Ok((at_version(res.ar, v), res.namespaced));
             }
             Ok((res.ar, res.namespaced))
         } else {
@@ -442,6 +445,18 @@ impl ClientCache {
             ))
         }
     }
+}
+
+/// `ar` at version `v`. kube builds a request's path from `api_version`, so it
+/// changes with `version`; changing `version` alone still asks for the old one.
+fn at_version(mut ar: ApiResource, v: &str) -> ApiResource {
+    ar.api_version = if ar.group.is_empty() {
+        v.to_string()
+    } else {
+        format!("{}/{v}", ar.group)
+    };
+    ar.version = v.to_string();
+    ar
 }
 
 #[cfg(test)]
@@ -670,7 +685,7 @@ mod tests {
     async fn resolve_resource_fast_path_built_in() {
         let cache = ClientCache::new(PathBuf::from("/nonexistent"));
         let (ar, namespaced) = cache
-            .resolve_resource("ctx", "Pod", None, None, None)
+            .resolve_resource("ctx", "Pod", None, None, None, false)
             .await
             .expect("resolves built-in Pod");
         assert_eq!(ar.kind, "Pod");
@@ -679,7 +694,7 @@ mod tests {
         assert!(namespaced);
 
         let (node_ar, node_ns) = cache
-            .resolve_resource("ctx", "Node", None, None, None)
+            .resolve_resource("ctx", "Node", None, None, None, false)
             .await
             .expect("resolves built-in Node");
         assert_eq!(node_ar.kind, "Node");
@@ -696,6 +711,7 @@ mod tests {
                 Some("widgets.io"),
                 Some("v1"),
                 Some("customwidgets"),
+                true,
             )
             .await
             .expect("resolves with explicit hints");
@@ -703,7 +719,20 @@ mod tests {
         assert_eq!(ar.group, "widgets.io");
         assert_eq!(ar.version, "v1");
         assert_eq!(ar.plural, "customwidgets");
+        // No cluster to ask: the scope is whether a namespace was given.
         assert!(namespaced);
+        let (_, namespaced) = cache
+            .resolve_resource(
+                "ctx",
+                "CustomWidget",
+                Some("widgets.io"),
+                Some("v1"),
+                Some("customwidgets"),
+                false,
+            )
+            .await
+            .expect("resolves with explicit hints");
+        assert!(!namespaced);
     }
 
     #[tokio::test]
@@ -728,7 +757,7 @@ mod tests {
 
         // 1. By exact Kind
         let (ar1, ns1) = cache
-            .resolve_resource("cluster-a", "VirtualMachine", None, None, None)
+            .resolve_resource("cluster-a", "VirtualMachine", None, None, None, false)
             .await
             .expect("resolves exact Kind");
         assert_eq!(ar1.kind, "VirtualMachine");
@@ -737,24 +766,51 @@ mod tests {
 
         // 2. By lowercase plural
         let (ar2, _) = cache
-            .resolve_resource("cluster-a", "virtualmachines", None, None, None)
+            .resolve_resource("cluster-a", "virtualmachines", None, None, None, false)
             .await
             .expect("resolves plural");
         assert_eq!(ar2.kind, "VirtualMachine");
 
         // 3. By short name alias
         let (ar3, _) = cache
-            .resolve_resource("cluster-a", "vm", None, None, None)
+            .resolve_resource("cluster-a", "vm", None, None, None, false)
             .await
             .expect("resolves short name");
         assert_eq!(ar3.kind, "VirtualMachine");
 
         // 4. Case-insensitivity check
         let (ar4, _) = cache
-            .resolve_resource("cluster-a", "VM", None, None, None)
+            .resolve_resource("cluster-a", "VM", None, None, None, false)
             .await
             .expect("resolves case-insensitively");
         assert_eq!(ar4.kind, "VirtualMachine");
+    }
+
+    /// A version asked for by name, against a resource discovery found at
+    /// another, is the version the request goes to. kube builds the path from
+    /// `api_version`, not `version`, so both must name it.
+    #[tokio::test]
+    async fn resolve_resource_requests_the_asked_version_of_a_discovered_resource() {
+        use kube::core::Resource;
+        let cache = ClientCache::new(PathBuf::from("/nonexistent"));
+        let mut index = DiscoveryIndex::new();
+        index.insert(DiscoveredResource {
+            ar: crate::crds::custom_api_resource("kubevirt.io", "v1", "VirtualMachine", "virtualmachines"),
+            namespaced: true,
+        });
+        cache.preload_discovery("cluster-a", index).await;
+
+        let (ar, _) = cache
+            .resolve_resource("cluster-a", "VirtualMachine", None, Some("v1alpha1"), None, false)
+            .await
+            .expect("resolves the discovered kind at the asked version");
+
+        assert_eq!(ar.version, "v1alpha1");
+        assert_eq!(ar.api_version, "kubevirt.io/v1alpha1");
+        assert_eq!(
+            kube::core::DynamicObject::url_path(&ar, Some("default")),
+            "/apis/kubevirt.io/v1alpha1/namespaces/default/virtualmachines"
+        );
     }
 
     #[tokio::test]
@@ -787,6 +843,7 @@ mod tests {
                 Some("crd.projectcalico.org"),
                 None,
                 None,
+                false,
             )
             .await
             .expect("resolves Calico BGPPeer");
@@ -794,7 +851,7 @@ mod tests {
         assert!(!ns_calico);
 
         let (ar_metallb, ns_metallb) = cache
-            .resolve_resource("cluster-a", "BGPPeer", Some("metallb.io"), None, None)
+            .resolve_resource("cluster-a", "BGPPeer", Some("metallb.io"), None, None, false)
             .await
             .expect("resolves MetalLB BGPPeer");
         assert_eq!(ar_metallb.group, "metallb.io");

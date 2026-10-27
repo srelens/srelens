@@ -217,8 +217,10 @@ export function eventAskQuestion(row: EventRow): string {
  */
 export function withEventAsk(
   columns: Column<EventRow>[],
-  ask: (question: string) => void,
+  // Absent where the AI Assistant may not act (#968).
+  ask?: (question: string) => void,
 ): Column<EventRow>[] {
+  if (!ask) return columns;
   return [
     ...columns,
     {

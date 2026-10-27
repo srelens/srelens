@@ -30,7 +30,7 @@ import {
   type StatusKind,
   type TabItem,
 } from "@srelens/ui-kit";
-import { useConsole } from "../console";
+import { useAsk } from "../console";
 import { getKubeconfigFiles, useActiveContext } from "../lib/clusters";
 import { useHiddenColumns } from "../lib/columnPrefs";
 import { detailRoute, newRoute } from "../lib/detailRoute";
@@ -363,7 +363,7 @@ function WorkloadList({
 }) {
   const name = context.name;
   const files = getKubeconfigFiles();
-  const { ask } = useConsole();
+  const ask = useAsk();
 
   const selection = useNamespaces(context.stableId);
   const setNamespaces = useSetNamespaces();

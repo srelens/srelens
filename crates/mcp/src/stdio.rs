@@ -162,6 +162,61 @@ fn mcp_input_schema(schema: Value) -> Value {
     Value::Object(schema)
 }
 
+/// Whether `name`'s input schema has a `context`, so a call without one could
+/// still reach a cluster (the current one).
+fn takes_context(registry: &srelens_capability::Registry, name: &str) -> bool {
+    registry
+        .get(name)
+        .is_some_and(|cap| cap.input_schema["properties"].get("context").is_some())
+}
+
+/// The AI Assistant setting as it is now, applied to one call (#968). A
+/// setting that cannot be read refuses, with the reason.
+async fn assistant_allows(
+    server: &McpServer,
+    tool: &str,
+    args: &Value,
+    schema_has_context: bool,
+) -> Result<(), String> {
+    let snapshot = server.assistant().snapshot().await?;
+    crate::assistant::decide(&snapshot, tool, args, schema_has_context)
+}
+
+/// A subscription to a cluster the AI Assistant is off for, refused before the
+/// transport registers its watch (#968). `None` lets it through. Here rather
+/// than in `handle_subscription`, which must stay synchronous for the HTTP
+/// transport's session lock; both serve loops call this first.
+pub(crate) async fn assistant_refuses_subscription(
+    server: &McpServer,
+    req: &Value,
+    transport: crate::Transport,
+) -> Option<Value> {
+    if req.get("method").and_then(Value::as_str) != Some("resources/subscribe") {
+        return None;
+    }
+    let id = req.get("id").cloned()?;
+    let uri = req.pointer("/params/uri").and_then(Value::as_str).unwrap_or("");
+    let Ok(crate::resources::ResourceUri::Object { context, .. }) = crate::resources::ResourceUri::parse(uri) else {
+        return None;
+    };
+    let refusal = assistant_allows(server, "resources/subscribe", &json!({ "context": context }), true)
+        .await
+        .err()?;
+    server.audit().record(crate::audit::AuditRecord {
+        result_bytes: None,
+        source: transport.into(),
+        app: None,
+        cluster: Some(context),
+        resource: None,
+        tool: "resources/subscribe".to_string(),
+        args: crate::audit::redact(&json!({ "uri": uri }), false),
+        decision: "auto",
+        outcome: crate::audit::OUTCOME_REJECTED,
+        error: Some(refusal.clone()),
+    });
+    Some(err(id, -32602, &refusal))
+}
+
 /// [`handle_request_as`] for a request nobody can be named for: the stdio
 /// transport, an in-process call with no chat behind it, and tests.
 pub async fn handle_request(
@@ -282,6 +337,17 @@ pub async fn handle_request_as(
             let sensitive = McpServer::is_sensitive_in(&registry, name);
             let mut decision = "auto";
 
+            // #968: the AI Assistant switches, before any consent prompt is
+            // raised. The setting guard first — it holds while the assistant
+            // is on — then the setting as it is now.
+            if let Some(refusal) = crate::assistant::guarded_setting(name, &args) {
+                return Some(rejected_tool_call(server, id?, transport, name, &args, sensitive, refusal));
+            }
+            let schema_has_context = takes_context(&registry, name);
+            if let Err(refusal) = assistant_allows(server, name, &args, schema_has_context).await {
+                return Some(rejected_tool_call(server, id?, transport, name, &args, sensitive, refusal));
+            }
+
             if let Some(mut request) = McpServer::consent_request_in(&registry, name, &raw_args) {
                 // From the transport, never the arguments (#393).
                 request.caller = caller.clone();
@@ -355,6 +421,11 @@ pub async fn handle_request_as(
                             "_meta": { "srelens/denied": true }
                         }),
                     ));
+                }
+                // The prompt can stay open for a while: a switch flipped
+                // meanwhile still wins over the approval.
+                if let Err(refusal) = assistant_allows(server, name, &args, schema_has_context).await {
+                    return Some(rejected_tool_call(server, id?, transport, name, &args, sensitive, refusal));
                 }
                 decision = "approved";
             }
@@ -493,6 +564,25 @@ pub async fn handle_request_as(
             } else {
                 let capability_id =
                     read.capability.capability_id().expect("the None arm returned above");
+                // #968: a resource read reaches a cluster as surely as a tool call.
+                let schema_has_context = takes_context(&*server.resolve(capability_id).await, capability_id);
+                if let Err(refusal) = assistant_allows(server, capability_id, &read.args, schema_has_context).await {
+                    let redacted_args = crate::audit::redact(&read.args, server.is_sensitive(capability_id));
+                    let (app, cluster, resource) = crate::audit::describe_target(&redacted_args);
+                    server.audit().record(crate::audit::AuditRecord {
+                        result_bytes: None,
+                        source: transport.into(),
+                        tool: capability_id.to_string(),
+                        app,
+                        cluster,
+                        resource,
+                        args: redacted_args,
+                        decision: "auto",
+                        outcome: crate::audit::OUTCOME_REJECTED,
+                        error: Some(refusal.clone()),
+                    });
+                    return Some(err(id?, -32602, &refusal));
+                }
                 // The gate is reproduced here so a resource read leaves the
                 // same audit trail as the identical read via `tools/call`;
                 // the recording of the call itself is the registry's, through
@@ -936,7 +1026,10 @@ where
                 // HTTP transport, which has no channel to push notifications and
                 // must keep answering -32601.
                 let resp = if method == "resources/subscribe" || method == "resources/unsubscribe" {
-                    handle_subscription(server, subs, dirty, wake_tx, &req, method, crate::Transport::Stdio)
+                    match assistant_refuses_subscription(server, &req, crate::Transport::Stdio).await {
+                        Some(refused) => Some(refused),
+                        None => handle_subscription(server, subs, dirty, wake_tx, &req, method, crate::Transport::Stdio),
+                    }
                 } else {
                     handle_request(server, &req, crate::Transport::Stdio).await
                 };
@@ -3596,5 +3689,210 @@ mod tests {
             None,
             "a call nobody vouched for has no caller, whatever its arguments say"
         );
+    }
+
+    /// #968: the AI Assistant switches, enforced where every agent's call lands.
+    mod assistant_gate {
+        use super::*;
+        use crate::assistant::{AssistantSnapshot, Scripted};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Mutex;
+
+        const PROD_OFF: &str = "The srelens AI Assistant is turned off for cluster kube_a/prod.";
+        const PROD_NAMES: &[&str] = &["srelens-context:/k/a#prod", "/k/a#prod", "kube_a/prod", "prod"];
+
+        #[derive(Default)]
+        struct Spy(Mutex<Vec<crate::audit::AuditRecord>>);
+        impl crate::audit::AuditSink for Spy {
+            fn record(&self, rec: crate::audit::AuditRecord) {
+                self.0.lock().unwrap().push(rec);
+            }
+        }
+
+        /// Approves, and counts how often it was asked.
+        #[derive(Default)]
+        struct Counting(AtomicUsize);
+        #[async_trait::async_trait]
+        impl crate::policy::ConfirmPolicy for Counting {
+            async fn confirm(&self, _request: &crate::policy::ConsentRequest) -> crate::policy::Decision {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                crate::policy::Decision::Approved
+            }
+        }
+
+        /// `k8s.listPods` (read-only) and `k8s.scale` (gated), each taking a
+        /// `context`, and how many times either actually ran.
+        fn registry(ran: Arc<AtomicUsize>) -> Registry {
+            let mut reg = Registry::new();
+            for (id, mutating) in [("k8s.listPods", false), ("k8s.scale", true)] {
+                let ran = ran.clone();
+                let mut cap = Capability::read_only(id, id, move |_| {
+                    let ran = ran.clone();
+                    async move {
+                        ran.fetch_add(1, Ordering::SeqCst);
+                        Ok(json!({"ok": true}))
+                    }
+                });
+                cap.input_schema = json!({"type": "object", "properties": {"context": {"type": "string"}}});
+                if mutating {
+                    cap.annotations = srelens_capability::Annotations::MUTATING;
+                }
+                reg.register(cap);
+            }
+            reg
+        }
+
+        fn call(name: &str, arguments: Value) -> Value {
+            json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": name, "arguments": arguments}})
+        }
+
+        #[tokio::test]
+        async fn a_call_to_a_disabled_cluster_is_refused_before_consent() {
+            let ran = Arc::new(AtomicUsize::new(0));
+            let policy = Arc::new(Counting::default());
+            let spy = Arc::new(Spy::default());
+            let server = McpServer::new(Arc::new(registry(ran.clone())))
+                .with_policy(policy.clone())
+                .with_audit(spy.clone())
+                .with_assistant(Scripted::off_for("kube_a/prod", PROD_NAMES));
+
+            let resp = handle_request(&server, &call("k8s.scale", json!({"context": "prod", "replicas": 0})), Transport::Http)
+                .await
+                .unwrap();
+
+            assert!(resp.get("error").is_none(), "a tool result, not an RPC error: {resp}");
+            assert_eq!(resp["id"], json!(1));
+            assert_eq!(resp["result"]["isError"], json!(true));
+            assert_eq!(resp["result"]["content"][0]["text"], json!(PROD_OFF));
+            assert_eq!(policy.0.load(Ordering::SeqCst), 0, "no consent prompt for a refused call");
+            assert_eq!(ran.load(Ordering::SeqCst), 0);
+            let seen = spy.0.lock().unwrap();
+            assert_eq!(seen.len(), 1, "{seen:?}");
+            assert_eq!(seen[0].outcome, crate::audit::OUTCOME_REJECTED);
+        }
+
+        #[tokio::test]
+        async fn an_unreadable_setting_refuses_every_call() {
+            let ran = Arc::new(AtomicUsize::new(0));
+            let server = McpServer::new(Arc::new(registry(ran.clone())))
+                .with_assistant(Scripted::new(vec![Err("parse settings.json: expected value".into())]));
+
+            let resp = handle_request(&server, &call("k8s.listPods", json!({"context": "dev"})), Transport::Http)
+                .await
+                .unwrap();
+
+            assert_eq!(resp["result"]["isError"], json!(true));
+            assert_eq!(resp["result"]["content"][0]["text"], json!("parse settings.json: expected value"));
+            assert_eq!(ran.load(Ordering::SeqCst), 0);
+        }
+
+        #[tokio::test]
+        async fn a_switch_flipped_during_consent_still_refuses() {
+            let ran = Arc::new(AtomicUsize::new(0));
+            let policy = Arc::new(Counting::default());
+            let on = AssistantSnapshot { enabled: true, disabled: vec![], known: None };
+            let server = McpServer::new(Arc::new(registry(ran.clone())))
+                .with_policy(policy.clone())
+                .with_assistant(Scripted::new(vec![
+                    Ok(on),
+                    Ok(crate::assistant::off_for("kube_a/prod", PROD_NAMES)),
+                ]));
+
+            let resp = handle_request(&server, &call("k8s.scale", json!({"context": "prod", "replicas": 0})), Transport::Http)
+                .await
+                .unwrap();
+
+            assert_eq!(policy.0.load(Ordering::SeqCst), 1, "asked while it was on");
+            assert_eq!(resp["result"]["content"][0]["text"], json!(PROD_OFF));
+            assert_eq!(ran.load(Ordering::SeqCst), 0, "not run once the switch went off");
+        }
+
+        #[tokio::test]
+        async fn a_call_naming_the_display_name_with_a_file_prefix_is_refused() {
+            let ran = Arc::new(AtomicUsize::new(0));
+            let server = McpServer::new(Arc::new(registry(ran.clone())))
+                .with_assistant(Scripted::off_for("kube_a/prod", PROD_NAMES));
+            let resp = handle_request(&server, &call("k8s.listPods", json!({"context": "kube_a/prod"})), Transport::Http)
+                .await
+                .unwrap();
+            assert_eq!(resp["result"]["content"][0]["text"], json!(PROD_OFF));
+            assert_eq!(ran.load(Ordering::SeqCst), 0);
+        }
+
+        #[tokio::test]
+        async fn a_tool_with_a_context_called_without_one_is_refused_while_a_cluster_is_off() {
+            let ran = Arc::new(AtomicUsize::new(0));
+            let server = McpServer::new(Arc::new(registry(ran.clone())))
+                .with_assistant(Scripted::off_for("kube_a/prod", PROD_NAMES));
+            let resp = handle_request(&server, &call("k8s.listPods", json!({})), Transport::Http).await.unwrap();
+            assert_eq!(
+                resp["result"]["content"][0]["text"],
+                json!("Name the cluster: the AI Assistant is turned off for some clusters.")
+            );
+            assert_eq!(ran.load(Ordering::SeqCst), 0);
+        }
+
+        #[tokio::test]
+        async fn settings_set_of_the_assistant_key_is_refused_over_mcp() {
+            let ran = Arc::new(AtomicUsize::new(0));
+            let mut reg = registry(ran.clone());
+            let counted = ran.clone();
+            reg.register(Capability::read_only("settings.set", "write settings", move |_| {
+                let counted = counted.clone();
+                async move {
+                    counted.fetch_add(1, Ordering::SeqCst);
+                    Ok(json!({"saved": true}))
+                }
+            }));
+            // On everywhere, nothing disabled: the guard holds anyway.
+            let server = McpServer::new(Arc::new(reg));
+            let resp = handle_request(
+                &server,
+                &call("settings.set", json!({"values": {"srelens.assistant": {"enabled": true}}})),
+                Transport::Http,
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                resp["result"]["content"][0]["text"],
+                json!("The AI Assistant setting can only be changed in srelens Settings.")
+            );
+            assert_eq!(ran.load(Ordering::SeqCst), 0);
+        }
+
+        #[tokio::test]
+        async fn the_default_source_changes_nothing() {
+            let ran = Arc::new(AtomicUsize::new(0));
+            let server = McpServer::new(Arc::new(registry(ran.clone())));
+            let resp = handle_request(&server, &call("k8s.listPods", json!({})), Transport::Http).await.unwrap();
+            assert_eq!(resp["result"]["isError"], json!(false), "{resp}");
+            assert_eq!(ran.load(Ordering::SeqCst), 1);
+        }
+
+        #[tokio::test]
+        async fn resources_read_of_a_disabled_cluster_is_refused() {
+            let server = server_with_kinds().with_assistant(Scripted::off_for("c", &["c"]));
+            let resp = handle_request(
+                &server,
+                &json!({"jsonrpc": "2.0", "id": 1, "method": "resources/read", "params": {"uri": "k8s://c/ns/Pod/web-0"}}),
+                Transport::Stdio,
+            )
+            .await
+            .unwrap();
+            assert_eq!(resp["error"]["message"], json!("The srelens AI Assistant is turned off for cluster c."), "{resp}");
+        }
+
+        #[tokio::test]
+        async fn subscribing_to_a_disabled_cluster_is_refused() {
+            let input = concat!(
+                r#"{"jsonrpc":"2.0","id":1,"method":"resources/subscribe","params":{"uri":"k8s://c/ns/Pod/web-0"}}"#,
+                "\n",
+            );
+            let mut out: Vec<u8> = Vec::new();
+            let server = server_with_kinds().with_assistant(Scripted::off_for("c", &["c"]));
+            serve(server, BufReader::new(input.as_bytes()), &mut out).await.unwrap();
+            let line: Value = serde_json::from_str(String::from_utf8(out).unwrap().lines().next().unwrap()).unwrap();
+            assert_eq!(line["error"]["message"], json!("The srelens AI Assistant is turned off for cluster c."), "{line}");
+        }
     }
 }

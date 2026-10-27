@@ -9,6 +9,7 @@ import { defaultState } from "../lib/tabs";
 import { probeCluster, resetProbes } from "../lib/probe";
 import { resetView } from "../lib/workspace";
 import { lockWorkspace, resetLock } from "./LockGate";
+import { setClusterAssistant } from "../lib/assistant";
 
 // The forwards store is core's, module-level and driven by the backend, so the
 // count is faked at the boundary rather than by starting a real forward. The
@@ -393,5 +394,12 @@ describe("Status", () => {
     expect(screen.getByRole("group", { name: "Status" }).querySelectorAll("button")).toHaveLength(0);
     act(() => resetLock());
     expect(screen.getByRole("button", { name: "Ask" })).toBeDefined();
+  });
+
+  it("draws no Ask while the AI Assistant is off for the active cluster (#968)", () => {
+    setState(defaultState([ctx]));
+    setClusterAssistant(ctx.stableId, false);
+    mount(<Status contexts={[ctx]} />);
+    expect(screen.queryByRole("button", { name: "Ask" })).toBeNull();
   });
 });

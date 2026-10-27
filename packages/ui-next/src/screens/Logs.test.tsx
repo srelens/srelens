@@ -230,6 +230,7 @@ import { absoluteTimestamp, describeError } from "@srelens/core";
 import { PortalScopeProvider, toneColor } from "@srelens/ui-kit";
 import { Logs, logsRoute, parseLogsRoute } from "./Logs";
 import { ConsoleProvider, useConsole } from "../console";
+import { setClusterAssistant } from "../lib/assistant";
 import { resetContexts, setContexts, setKubeconfigFiles } from "../lib/clusters";
 import { loadRecentLogSubjects, recentLogSubjects, rememberLogSubject } from "../lib/logRecents";
 import { liveLogStreams } from "../lib/liveLogStreams";
@@ -1206,6 +1207,13 @@ describe("Logs", () => {
     await waitFor(() =>
       expect(asked).toEqual(["Summarise the last 500 log lines and group errors by cause"]),
     );
+  });
+
+  it("offers no summary while the AI Assistant is off for the cluster (#968)", async () => {
+    setClusterAssistant(CTX.stableId, false);
+    draw();
+    await body();
+    expect(screen.queryByRole("button", { name: /Summarise this stream/i })).toBeNull();
   });
 
   it("asks which logs rather than showing none, on a bare route", async () => {

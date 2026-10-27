@@ -14,6 +14,7 @@ import { Badge, Button, ConfirmDialog, Field, Panel, SubHead, TextInput } from "
 import { FailureAlert } from "../../lib/errorCopy";
 import { McpClientSetup } from "./McpClientSetup";
 import { useMcpAutoStart } from "../../lib/mcpAutoStart";
+import { useAssistant } from "../../lib/assistant";
 
 /**
  * §23's `MCP server` pane: the loopback HTTP transport itself — start it, stop
@@ -229,6 +230,7 @@ type Read<T> = { kind: "loading" } | { kind: "error"; error: unknown } | { kind:
 const LOADING: Read<never> = { kind: "loading" };
 
 export function McpServer() {
+  const assistantOn = useAssistant().enabled;
   const [tokenRead, setTokenRead] = useState<Read<string | null>>(LOADING);
   /** The running server's own URL, or `null` for "not running" — the value
    *  `mcpHttpStatus()` actually returns, kept rather than reduced to a flag. */
@@ -521,6 +523,13 @@ export function McpServer() {
             </span>
           </div>
         </>
+      )}
+      {/* #968: Start/Stop is not the switch. The port can stay up; what it
+          serves is refused while the assistant is off. */}
+      {!assistantOn && (
+        <p className="mt-2 text-[0.75rem] leading-relaxed text-muted">
+          The AI Assistant is off, so the server refuses every tool call.
+        </p>
       )}
 
       <div className="mt-3 flex flex-wrap items-end gap-2">

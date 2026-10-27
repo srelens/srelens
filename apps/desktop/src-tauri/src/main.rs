@@ -296,6 +296,11 @@ fn run_mcp_http(
         };
         let server = server
             .with_policy(policy)
+            // #968: the AI Assistant switches, read from the settings file per call.
+            .with_assistant(Arc::new(srelens_registry::assistant::SettingsAssistant::new(
+                srelens_desktop_lib::default_settings_path(),
+                cache.clone(),
+            )))
             .with_audit(audit)
             .with_prompts(srelens_mcp::prompts::PromptLibrary::new(Some(
                 mcp_prompts_dir(),
@@ -417,6 +422,11 @@ fn run_mcp_stdio(allow_destructive: bool, allow_sensitive_reads: bool) {
         };
         let server = server
             .with_policy(policy)
+            // #968: the AI Assistant switches, read from the settings file per call.
+            .with_assistant(Arc::new(srelens_registry::assistant::SettingsAssistant::new(
+                srelens_desktop_lib::default_settings_path(),
+                cache.clone(),
+            )))
             .with_audit(audit)
             .with_prompts(srelens_mcp::prompts::PromptLibrary::new(Some(
                 mcp_prompts_dir(),

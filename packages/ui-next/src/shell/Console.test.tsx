@@ -8,6 +8,7 @@ import userEvent from "@testing-library/user-event";
 import { Console } from "./Console";
 import { invalidateAgentInventory } from "../lib/agentInventory";
 import { ConsoleProvider, useConsole } from "../console";
+import { setAssistantEnabled, setClusterAssistant } from "../lib/assistant";
 import { pinContextKey, resetContexts, setContexts } from "../lib/clusters";
 import { defaultState } from "../lib/tabs";
 import { logsRoute } from "../screens/Logs";
@@ -56,6 +57,10 @@ vi.mock("../lib/agentRun", () => ({
   useActiveRunKey,
   chooseAgent,
   useRunSubject,
+  // What `lib/assistant` asks when a switch flips (#968): no run is busy here.
+  getRunSummaries: () => [],
+  getRun: () => ({ busy: false }),
+  getRunSubject: () => undefined,
 }));
 
 // The dock is desktop-only: nothing in a browser can answer a question, since
@@ -1835,5 +1840,88 @@ describe("app commands in the palette (#544)", () => {
       expect(takeExtensionAction({ ...helmReleaseSelection, context: "srelens-context:/kube/a%23b#c" })).toBeNull();
       expect(takeExtensionAction({ ...helmReleaseSelection, context: "srelens-context:/kube/a#b%23c" })).toBe("helmreleases-reconcile");
     });
+  });
+});
+
+/**
+ * #968: where the AI Assistant is off, the dock stays as the app's command
+ * palette and nothing else — no question leaves it, and nothing on it says AI.
+ */
+describe("Console — where the AI Assistant is off", () => {
+  const prompt = () => screen.getByRole("textbox", { name: "Console prompt" }) as HTMLTextAreaElement;
+
+  it("runs a / command while the AI Assistant is off for the cluster", async () => {
+    const user = userEvent.setup();
+    const onToggleTheme = vi.fn();
+    setClusterAssistant(HARNESS_CTX.stableId, false);
+    setup({ onToggleTheme });
+    await user.type(prompt(), "/theme{Enter}");
+    expect(onToggleTheme).toHaveBeenCalledTimes(1);
+    expect(askAgent).not.toHaveBeenCalled();
+  });
+
+  it("says only that nothing matched, with no offer to ask the agent", async () => {
+    const user = userEvent.setup();
+    setClusterAssistant(HARNESS_CTX.stableId, false);
+    setup();
+    await user.type(prompt(), "/zzzz");
+    expect(await screen.findByText("No command matches.")).toBeTruthy();
+    expect(screen.queryByText(/ask the agent/)).toBeNull();
+  });
+
+  it("sends nothing and keeps the draft and the image when the cluster is switched off mid-question", async () => {
+    const user = userEvent.setup();
+    const shot = () => new File([new Uint8Array([1, 2, 3])], "shot.png", { type: "image/png" });
+    setup();
+    // Open the dock (its attachments row is drawn only then); that question is not this test's.
+    await user.click(screen.getByRole("button", { name: "Ask from elsewhere" }));
+    askAgent.mockClear();
+    fireEvent.paste(prompt(), { clipboardData: { files: [shot()], types: ["Files"] } });
+    await screen.findByAltText("Attachment 1");
+    await user.type(prompt(), "why is it slow");
+
+    act(() => { setClusterAssistant(HARNESS_CTX.stableId, false); });
+    fireEvent.keyDown(prompt(), { key: "Enter" });
+    await act(async () => {
+      for (let i = 0; i < 10; i++) await Promise.resolve();
+    });
+    expect(askAgent).not.toHaveBeenCalled();
+    expect(prompt().value).toBe("why is it slow");
+
+    // Switched back on, the question is exactly as it was left, image and all.
+    act(() => { setClusterAssistant(HARNESS_CTX.stableId, true); });
+    expect(prompt().value).toBe("why is it slow");
+    expect(screen.getByAltText("Attachment 1")).toBeTruthy();
+  });
+
+  it("ignores a question from a screen, and says why with a way to Settings", async () => {
+    const user = userEvent.setup();
+    setClusterAssistant(HARNESS_CTX.stableId, false);
+    setup();
+    await user.click(screen.getByRole("button", { name: "Ask from elsewhere" }));
+    expect(askAgent).not.toHaveBeenCalled();
+    expect(screen.getByText("AI Assistant is off for prod-eu")).toBeTruthy();
+
+    await user.click(screen.getByRole("button", { name: "Open Settings" }));
+    expect(tabsStore.activeRoute()).toBe("/settings");
+  });
+
+  it("shows no Ask wording and no agent picker while the assistant is off", async () => {
+    setClusterAssistant(HARNESS_CTX.stableId, false);
+    setup();
+    await act(async () => {});
+    expect(prompt().getAttribute("placeholder")).toBe("Type / for commands");
+    expect(screen.queryByText(/Ask about/)).toBeNull();
+    expect(screen.queryByRole("button", { name: /Choose agent/ })).toBeNull();
+    expect(screen.queryByText(/^Agent$/)).toBeNull();
+  });
+
+  it("says the assistant is off, not off for a cluster, when it is off everywhere", async () => {
+    const user = userEvent.setup();
+    setAssistantEnabled(false);
+    setup();
+    await user.click(screen.getByRole("button", { name: "Ask from elsewhere" }));
+    expect(screen.getByText("AI Assistant is off")).toBeTruthy();
+    expect(askAgent).not.toHaveBeenCalled();
   });
 });

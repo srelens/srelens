@@ -3,6 +3,7 @@
 mod agent_text;
 #[cfg(test)]
 mod app_tools_tests;
+pub mod assistant;
 pub mod audit;
 pub mod auth;
 pub mod completeness;
@@ -123,6 +124,8 @@ pub struct McpServer {
     /// Installed apps' tools, when the host has any (#574).
     app_tools: Option<Arc<dyn ToolSource>>,
     confirm_policy: Arc<dyn crate::policy::ConfirmPolicy>,
+    /// The AI Assistant switches (#968), read per call.
+    assistant: Arc<dyn crate::assistant::AssistantSource>,
     audit: Arc<dyn crate::audit::AuditSink>,
     prompts: crate::prompts::PromptLibrary,
     kind_resolver: std::sync::Arc<dyn crate::resources::KindResolver>,
@@ -139,6 +142,9 @@ impl McpServer {
             app_tools: None,
             // Fail closed: a host that wires nothing permits nothing.
             confirm_policy: Arc::new(crate::policy::AlwaysDeny),
+            // On, until a host wires the setting: a host that reads none keeps
+            // today's behaviour.
+            assistant: Arc::new(crate::assistant::AlwaysOn),
             audit: Arc::new(crate::audit::NoopAudit),
             // Built-ins only until a host supplies a user prompt directory.
             prompts: crate::prompts::PromptLibrary::new(None),
@@ -218,6 +224,16 @@ impl McpServer {
 
     pub fn confirm_policy(&self) -> &Arc<dyn crate::policy::ConfirmPolicy> {
         &self.confirm_policy
+    }
+
+    /// Read the AI Assistant switches from `source` on every call (#968).
+    pub fn with_assistant(mut self, source: Arc<dyn crate::assistant::AssistantSource>) -> Self {
+        self.assistant = source;
+        self
+    }
+
+    pub fn assistant(&self) -> &Arc<dyn crate::assistant::AssistantSource> {
+        &self.assistant
     }
 
     pub fn with_audit(mut self, audit: Arc<dyn crate::audit::AuditSink>) -> Self {

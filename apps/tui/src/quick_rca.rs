@@ -52,10 +52,15 @@ pub fn evaluate_direct_rca(d: &AppDeploymentChange) -> Option<QuickRcaReply> {
         && d.failing_pods_count == 0
         && d.pod_symptoms.is_empty()
     {
+        let unit = if d.kind == "DaemonSet" {
+            "nodes"
+        } else {
+            "replicas"
+        };
         Some(QuickRcaReply {
             root_cause: format!(
-                "Workload is healthy with {}/{} replicas ready.",
-                d.ready_replicas, d.desired_replicas
+                "Workload is healthy with {}/{} {} ready.",
+                d.ready_replicas, d.desired_replicas, unit
             ),
             action_item: "No remediation needed.".to_string(),
         })
@@ -111,9 +116,14 @@ pub fn build_prompt_with_cause(
         d.failure_category.badge(),
         clip(&d.failure_detail)
     ));
+    let unit_label = if d.kind == "DaemonSet" {
+        "Nodes"
+    } else {
+        "Replicas"
+    };
     p.push_str(&format!(
-        "Replicas: {}/{} ready\n",
-        d.ready_replicas, d.desired_replicas
+        "{}: {}/{} ready\n",
+        unit_label, d.ready_replicas, d.desired_replicas
     ));
     p.push_str(&format!(
         "Revision: {} (previous: {})\n",
@@ -435,6 +445,8 @@ mod tests {
                 event("Warning", "BackOff", "Back-off restarting failed container"),
                 event("Normal", "Pulled", "Container image already present"),
             ],
+            misscheduled: None,
+            config_changes: vec![],
         }
     }
 
