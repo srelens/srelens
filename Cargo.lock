@@ -7018,7 +7018,7 @@ dependencies = [
 
 [[package]]
 name = "srectl"
-version = "0.16.0"
+version = "0.17.0"
 dependencies = [
  "async-trait",
  "chrono",
@@ -7060,7 +7060,7 @@ dependencies = [
 
 [[package]]
 name = "srelens-agent"
-version = "0.16.0"
+version = "0.17.0"
 dependencies = [
  "log",
  "serde",
@@ -7071,7 +7071,7 @@ dependencies = [
 
 [[package]]
 name = "srelens-capability"
-version = "0.16.0"
+version = "0.17.0"
 dependencies = [
  "aho-corasick",
  "chrono",
@@ -7085,7 +7085,7 @@ dependencies = [
 
 [[package]]
 name = "srelens-desktop"
-version = "0.16.0"
+version = "0.17.0"
 dependencies = [
  "argon2",
  "async-trait",
@@ -7129,7 +7129,7 @@ dependencies = [
 
 [[package]]
 name = "srelens-kube"
-version = "0.16.0"
+version = "0.17.0"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -7164,7 +7164,7 @@ dependencies = [
 
 [[package]]
 name = "srelens-llm"
-version = "0.16.0"
+version = "0.17.0"
 dependencies = [
  "async-trait",
  "futures",
@@ -7178,7 +7178,7 @@ dependencies = [
 
 [[package]]
 name = "srelens-mcp"
-version = "0.16.0"
+version = "0.17.0"
 dependencies = [
  "async-trait",
  "axum",
@@ -7198,7 +7198,7 @@ dependencies = [
 
 [[package]]
 name = "srelens-plugin-host"
-version = "0.16.0"
+version = "0.17.0"
 dependencies = [
  "jsonschema",
  "landlock",
@@ -7225,7 +7225,7 @@ dependencies = [
 
 [[package]]
 name = "srelens-registry"
-version = "0.16.0"
+version = "0.17.0"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -7260,7 +7260,7 @@ dependencies = [
 
 [[package]]
 name = "srelens-server"
-version = "0.16.0"
+version = "0.17.0"
 dependencies = [
  "aes-gcm",
  "async-trait",
@@ -7292,7 +7292,7 @@ dependencies = [
 
 [[package]]
 name = "srelens-sidecar"
-version = "0.16.0"
+version = "0.17.0"
 dependencies = [
  "jsonschema",
  "log",
@@ -7305,7 +7305,7 @@ dependencies = [
 
 [[package]]
 name = "srelens-sidecar-hello-world"
-version = "0.16.0"
+version = "0.17.0"
 dependencies = [
  "log",
  "serde",
@@ -7318,7 +7318,7 @@ dependencies = [
 
 [[package]]
 name = "srelens-sidecar-protocol"
-version = "0.16.0"
+version = "0.17.0"
 dependencies = [
  "jsonschema",
  "regex",
@@ -7330,7 +7330,7 @@ dependencies = [
 
 [[package]]
 name = "srelens-streams"
-version = "0.16.0"
+version = "0.17.0"
 dependencies = [
  "chrono",
  "portable-pty",

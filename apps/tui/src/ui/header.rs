@@ -81,6 +81,62 @@ pub fn render_header(f: &mut Frame, area: Rect, props: HeaderProps) {
                     .fg(Theme::accent())
                     .add_modifier(Modifier::BOLD),
             )],
+            crate::theme::HeaderStyle::TurboVision => {
+                let mut s = vec![
+                    Span::styled(
+                        "╔═[ ",
+                        Style::default()
+                            .fg(Theme::accent())
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(
+                        "SRELENS: CONTROL",
+                        Style::default()
+                            .fg(Theme::fg())
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(
+                        " ]═",
+                        Style::default()
+                            .fg(Theme::accent())
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                ];
+                if Theme::show_live_clock() {
+                    let time_str = chrono::Local::now().format("%H:%M:%S").to_string();
+                    s.push(Span::styled("═[ ", Style::default().fg(Theme::accent())));
+                    s.push(Span::styled(
+                        time_str,
+                        Style::default()
+                            .fg(Theme::cyan())
+                            .add_modifier(Modifier::BOLD),
+                    ));
+                    s.push(Span::styled(" ]═", Style::default().fg(Theme::accent())));
+                }
+                s
+            }
+            crate::theme::HeaderStyle::NocDeck => {
+                let mut s = vec![
+                    Span::styled(
+                        "◈ ",
+                        Style::default()
+                            .fg(Theme::cyan())
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(
+                        "SRELENS // NOC",
+                        Style::default()
+                            .fg(Theme::fg())
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                ];
+                if Theme::show_live_clock() {
+                    let time_str = chrono::Utc::now().format("%H:%M:%S UTC").to_string();
+                    s.push(Span::styled("  │  ", Style::default().fg(Theme::border())));
+                    s.push(Span::styled(time_str, Style::default().fg(Theme::cyan())));
+                }
+                s
+            }
             crate::theme::HeaderStyle::Standard => vec![
                 Span::styled(Theme::brand_icon(), Style::default().fg(Theme::yellow())),
                 Span::styled(
@@ -98,13 +154,19 @@ pub fn render_header(f: &mut Frame, area: Rect, props: HeaderProps) {
         let stats_line = build_stats_line(&props);
         let stats_line_w =
             unicode_width::UnicodeWidthStr::width(stats_line.to_string().as_str()) as u16;
-        let base_stats_w = if header_style == crate::theme::HeaderStyle::FinoTime {
+        let base_stats_w = if header_style == crate::theme::HeaderStyle::FinoTime
+            || header_style == crate::theme::HeaderStyle::TurboVision
+            || header_style == crate::theme::HeaderStyle::NocDeck
+        {
             44
         } else {
             34
         };
         let update_extra = if props.update_available.is_some() {
-            if header_style == crate::theme::HeaderStyle::FinoTime {
+            if header_style == crate::theme::HeaderStyle::FinoTime
+                || header_style == crate::theme::HeaderStyle::TurboVision
+                || header_style == crate::theme::HeaderStyle::NocDeck
+            {
                 24
             } else {
                 20
@@ -133,11 +195,12 @@ pub fn render_header(f: &mut Frame, area: Rect, props: HeaderProps) {
         render_stats(f, r0_chunks[2], stats_line);
 
         // Row 1: Active context details & navigation hints
+        let hints_w = if inner.width >= 95 { 38 } else { 0 };
         let r1_chunks = Layout::default()
             .direction(Direction::Horizontal)
             .constraints([
-                Constraint::Min(35),    // Active Ctx / NS / View
-                Constraint::Length(38), // Hints
+                Constraint::Min(35),         // Active Ctx / NS / View
+                Constraint::Length(hints_w), // Hints
             ])
             .split(v_rows[1]);
 
@@ -210,6 +273,56 @@ pub fn render_header(f: &mut Frame, area: Rect, props: HeaderProps) {
                         .add_modifier(Modifier::BOLD),
                 ),
             ]),
+            crate::theme::HeaderStyle::TurboVision => Line::from(vec![
+                Span::styled("╔═[ ", Style::default().fg(Theme::accent())),
+                Span::styled("CTX: ", Theme::header_label()),
+                Span::styled(
+                    props.context,
+                    Style::default()
+                        .fg(active_ctx_color)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(" ]═[ ", Style::default().fg(Theme::accent())),
+                Span::styled("NS: ", Theme::header_label()),
+                Span::styled(
+                    ns_display,
+                    Style::default()
+                        .fg(Theme::cyan())
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(" ]═[ ", Style::default().fg(Theme::accent())),
+                Span::styled("VIEW: ", Theme::header_label()),
+                Span::styled(
+                    props.active_view_name,
+                    Style::default()
+                        .fg(Theme::yellow())
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(" ]═", Style::default().fg(Theme::accent())),
+            ]),
+            crate::theme::HeaderStyle::NocDeck => Line::from(vec![
+                Span::styled("TARGET: ", Theme::header_label()),
+                Span::styled(
+                    props.context,
+                    Style::default()
+                        .fg(active_ctx_color)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled("  //  NS: ", Theme::header_label()),
+                Span::styled(
+                    ns_display.to_uppercase(),
+                    Style::default()
+                        .fg(Theme::cyan())
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled("  //  SURFACE: ", Theme::header_label()),
+                Span::styled(
+                    props.active_view_name.to_uppercase(),
+                    Style::default()
+                        .fg(Theme::yellow())
+                        .add_modifier(Modifier::BOLD),
+                ),
+            ]),
             crate::theme::HeaderStyle::Standard => Line::from(vec![
                 Span::styled("Ctx: ", Theme::header_label()),
                 Span::styled(
@@ -238,33 +351,35 @@ pub fn render_header(f: &mut Frame, area: Rect, props: HeaderProps) {
         };
         f.render_widget(Paragraph::new(active_line), r1_chunks[0]);
 
-        let hints_line = Line::from(vec![
-            Span::styled(
-                "<:ctx>",
-                Style::default()
-                    .fg(Theme::cyan())
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(" All Ctx  ", Theme::header_label()),
-            Span::styled(
-                "<F1-F10>",
-                Style::default()
-                    .fg(Theme::cyan())
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(" Hotkeys  ", Theme::header_label()),
-            Span::styled(
-                "<?>",
-                Style::default()
-                    .fg(Theme::cyan())
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(" Help", Theme::header_label()),
-        ]);
-        f.render_widget(
-            Paragraph::new(hints_line).alignment(ratatui::layout::Alignment::Right),
-            r1_chunks[1],
-        );
+        if hints_w > 0 {
+            let hints_line = Line::from(vec![
+                Span::styled(
+                    "<:ctx>",
+                    Style::default()
+                        .fg(Theme::cyan())
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(" All Ctx  ", Theme::header_label()),
+                Span::styled(
+                    "<F1-F10>",
+                    Style::default()
+                        .fg(Theme::cyan())
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(" Hotkeys  ", Theme::header_label()),
+                Span::styled(
+                    "<?>",
+                    Style::default()
+                        .fg(Theme::cyan())
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(" Help", Theme::header_label()),
+            ]);
+            f.render_widget(
+                Paragraph::new(hints_line).alignment(ratatui::layout::Alignment::Right),
+                r1_chunks[1],
+            );
+        }
     } else {
         // Fallback for compact single-row header
         let stats_line = build_stats_line(&props);
@@ -407,6 +522,75 @@ pub fn build_stats_line(props: &HeaderProps) -> Line<'static> {
                 ));
                 spans.push(Span::styled(
                     format!("Update: {}", tag),
+                    Style::default()
+                        .fg(Theme::yellow())
+                        .add_modifier(Modifier::BOLD),
+                ));
+            }
+            Line::from(spans)
+        }
+        crate::theme::HeaderStyle::TurboVision => {
+            let mut spans = vec![
+                Span::styled("[ ", Style::default().fg(Theme::accent())),
+                Span::styled(format!("{} ", bullet), Style::default().fg(status_color)),
+                Span::styled(version_clean, Theme::header_label()),
+                Span::styled(" ]═[ ", Style::default().fg(Theme::accent())),
+                Span::styled("NODES: ", Theme::header_label()),
+                Span::styled(format!("{}", props.node_count), Theme::header_val()),
+                Span::styled(" ]═[ ", Style::default().fg(Theme::accent())),
+                Span::styled("PODS: ", Theme::header_label()),
+                Span::styled(format!("{}", props.pod_count), Theme::header_val()),
+                Span::styled(" ]", Style::default().fg(Theme::accent())),
+            ];
+            if let Some(upd) = props.update_available {
+                let tag = if upd.starts_with('v') {
+                    upd.to_string()
+                } else {
+                    format!("v{}", upd)
+                };
+                spans.push(Span::styled("═[ ", Style::default().fg(Theme::accent())));
+                spans.push(Span::styled(
+                    "▲ ",
+                    Style::default()
+                        .fg(Theme::yellow())
+                        .add_modifier(Modifier::BOLD),
+                ));
+                spans.push(Span::styled(
+                    format!("Update: {}", tag),
+                    Style::default()
+                        .fg(Theme::yellow())
+                        .add_modifier(Modifier::BOLD),
+                ));
+                spans.push(Span::styled(" ]", Style::default().fg(Theme::accent())));
+            }
+            Line::from(spans)
+        }
+        crate::theme::HeaderStyle::NocDeck => {
+            let conn_status = if props.is_connected {
+                "ONLINE"
+            } else {
+                "OFFLINE"
+            };
+            let mut spans = vec![
+                Span::styled(format!("{} ", bullet), Style::default().fg(status_color)),
+                Span::styled(
+                    format!("{} // {}  │  ", conn_status, version_clean),
+                    Theme::header_label(),
+                ),
+                Span::styled("NODES: ", Theme::header_label()),
+                Span::styled(format!("{}  │  ", props.node_count), Theme::header_val()),
+                Span::styled("PODS: ", Theme::header_label()),
+                Span::styled(format!("{}", props.pod_count), Theme::header_val()),
+            ];
+            if let Some(upd) = props.update_available {
+                let tag = if upd.starts_with('v') {
+                    upd.to_string()
+                } else {
+                    format!("v{}", upd)
+                };
+                spans.push(Span::raw("  │  "));
+                spans.push(Span::styled(
+                    format!("UPDATE AVAILABLE: {}", tag),
                     Style::default()
                         .fg(Theme::yellow())
                         .add_modifier(Modifier::BOLD),

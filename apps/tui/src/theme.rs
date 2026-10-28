@@ -1,12 +1,21 @@
-use std::sync::atomic::{AtomicUsize, Ordering};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::widgets::BorderType;
 use serde::{Deserialize, Serialize};
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum HeaderStyle {
     Standard,
     FinoTime,
+    Minimal,
+    TurboVision,
+    NocDeck,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum StatusStyle {
+    Standard,
+    FunctionKeys,
     Minimal,
 }
 
@@ -27,6 +36,8 @@ pub enum ThemeId {
     SreHighContrast,
     TokyoStorm,
     GitHubDarkHc,
+    TurboVision,
+    NocDeck,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -64,6 +75,7 @@ pub struct ThemePalette {
     pub marked_bg: Color,
     pub marked_fg: Color,
     pub header_style: HeaderStyle,
+    pub status_style: StatusStyle,
     pub border_type: BorderType,
     pub prompt_glyph: &'static str,
     pub bullet_glyph: &'static str,
@@ -95,6 +107,7 @@ pub static ALL_THEMES: &[ThemePalette] = &[
         marked_bg: Color::Rgb(60, 40, 90),
         marked_fg: Color::Yellow,
         header_style: HeaderStyle::Standard,
+        status_style: StatusStyle::Standard,
         border_type: BorderType::Rounded,
         prompt_glyph: ":",
         bullet_glyph: "●",
@@ -124,6 +137,7 @@ pub static ALL_THEMES: &[ThemePalette] = &[
         marked_bg: Color::Rgb(65, 45, 80),
         marked_fg: Color::Rgb(224, 175, 104),
         header_style: HeaderStyle::Standard,
+        status_style: StatusStyle::Standard,
         border_type: BorderType::Rounded,
         prompt_glyph: ":",
         bullet_glyph: "●",
@@ -153,6 +167,7 @@ pub static ALL_THEMES: &[ThemePalette] = &[
         marked_bg: Color::Rgb(70, 45, 85),
         marked_fg: Color::Rgb(241, 250, 140),
         header_style: HeaderStyle::Standard,
+        status_style: StatusStyle::Standard,
         border_type: BorderType::Rounded,
         prompt_glyph: ":",
         bullet_glyph: "●",
@@ -182,6 +197,7 @@ pub static ALL_THEMES: &[ThemePalette] = &[
         marked_bg: Color::Rgb(60, 50, 75),
         marked_fg: Color::Rgb(235, 203, 139),
         header_style: HeaderStyle::Minimal,
+        status_style: StatusStyle::Minimal,
         border_type: BorderType::Plain,
         prompt_glyph: "❯ ",
         bullet_glyph: "◆",
@@ -211,6 +227,7 @@ pub static ALL_THEMES: &[ThemePalette] = &[
         marked_bg: Color::Rgb(80, 50, 40),
         marked_fg: Color::Rgb(250, 189, 47),
         header_style: HeaderStyle::Standard,
+        status_style: StatusStyle::Standard,
         border_type: BorderType::Plain,
         prompt_glyph: ":",
         bullet_glyph: "●",
@@ -240,6 +257,7 @@ pub static ALL_THEMES: &[ThemePalette] = &[
         marked_bg: Color::Rgb(20, 45, 60),
         marked_fg: Color::Rgb(181, 137, 0),
         header_style: HeaderStyle::Minimal,
+        status_style: StatusStyle::Minimal,
         border_type: BorderType::Plain,
         prompt_glyph: ":",
         bullet_glyph: "●",
@@ -269,6 +287,7 @@ pub static ALL_THEMES: &[ThemePalette] = &[
         marked_bg: Color::Rgb(70, 50, 55),
         marked_fg: Color::Rgb(255, 216, 102),
         header_style: HeaderStyle::Standard,
+        status_style: StatusStyle::Standard,
         border_type: BorderType::Rounded,
         prompt_glyph: "▶ ",
         bullet_glyph: "▪",
@@ -298,6 +317,7 @@ pub static ALL_THEMES: &[ThemePalette] = &[
         marked_bg: Color::Rgb(220, 210, 230),
         marked_fg: Color::Rgb(136, 57, 239),
         header_style: HeaderStyle::Standard,
+        status_style: StatusStyle::Standard,
         border_type: BorderType::Rounded,
         prompt_glyph: ":",
         bullet_glyph: "●",
@@ -327,6 +347,7 @@ pub static ALL_THEMES: &[ThemePalette] = &[
         marked_bg: Color::Rgb(55, 55, 75),
         marked_fg: Color::Rgb(250, 204, 21),
         header_style: HeaderStyle::FinoTime,
+        status_style: StatusStyle::Standard,
         border_type: BorderType::Rounded,
         prompt_glyph: "╰─○ ",
         bullet_glyph: "○",
@@ -356,6 +377,7 @@ pub static ALL_THEMES: &[ThemePalette] = &[
         marked_bg: Color::Rgb(65, 45, 75),
         marked_fg: Color::Rgb(246, 193, 119),
         header_style: HeaderStyle::Standard,
+        status_style: StatusStyle::Minimal,
         border_type: BorderType::Rounded,
         prompt_glyph: "❯ ",
         bullet_glyph: "◆",
@@ -385,6 +407,7 @@ pub static ALL_THEMES: &[ThemePalette] = &[
         marked_bg: Color::Rgb(70, 15, 60),
         marked_fg: Color::Rgb(255, 222, 0),
         header_style: HeaderStyle::Standard,
+        status_style: StatusStyle::Standard,
         border_type: BorderType::Thick,
         prompt_glyph: "▶ ",
         bullet_glyph: "▪",
@@ -414,6 +437,7 @@ pub static ALL_THEMES: &[ThemePalette] = &[
         marked_bg: Color::Rgb(55, 55, 75),
         marked_fg: Color::Rgb(229, 192, 123),
         header_style: HeaderStyle::Standard,
+        status_style: StatusStyle::Standard,
         border_type: BorderType::Plain,
         prompt_glyph: ":",
         bullet_glyph: "●",
@@ -443,6 +467,7 @@ pub static ALL_THEMES: &[ThemePalette] = &[
         marked_bg: Color::Rgb(67, 56, 202),
         marked_fg: Color::Rgb(250, 204, 21),
         header_style: HeaderStyle::Standard,
+        status_style: StatusStyle::Standard,
         border_type: BorderType::Rounded,
         prompt_glyph: "❯ ",
         bullet_glyph: "●",
@@ -472,6 +497,7 @@ pub static ALL_THEMES: &[ThemePalette] = &[
         marked_bg: Color::Rgb(65, 50, 95),
         marked_fg: Color::Rgb(224, 175, 104),
         header_style: HeaderStyle::Standard,
+        status_style: StatusStyle::Standard,
         border_type: BorderType::Rounded,
         prompt_glyph: "▶ ",
         bullet_glyph: "●",
@@ -501,11 +527,72 @@ pub static ALL_THEMES: &[ThemePalette] = &[
         marked_bg: Color::Rgb(56, 40, 80),
         marked_fg: Color::Rgb(210, 153, 34),
         header_style: HeaderStyle::Standard,
+        status_style: StatusStyle::Standard,
         border_type: BorderType::Rounded,
         prompt_glyph: ":",
         bullet_glyph: "●",
         brand_icon: "⚡ ",
         show_live_clock: false,
+    },
+    ThemePalette {
+        id: ThemeId::TurboVision,
+        name: "turbo-vision",
+        display_name: "Turbo Vision (Norton)",
+        description: "Borland C++ & Norton classic — double frames, cobalt blue, action buttons",
+        is_light: false,
+        bg: Color::Reset,
+        fg: Color::Rgb(255, 255, 255),
+        label: Color::Rgb(170, 210, 240),
+        dim: Color::Rgb(165, 185, 215),
+        accent: Color::Rgb(255, 255, 85),
+        cyan: Color::Rgb(85, 255, 255),
+        green: Color::Rgb(85, 255, 85),
+        yellow: Color::Rgb(255, 255, 85),
+        red: Color::Rgb(255, 85, 85),
+        orange: Color::Rgb(255, 170, 0),
+        border: Color::Rgb(0, 170, 170),
+        border_focus: Color::Rgb(255, 255, 85),
+        sel_bg: Color::Rgb(0, 120, 180),
+        sel_fg: Color::Rgb(255, 255, 255),
+        marked_bg: Color::Rgb(120, 80, 0),
+        marked_fg: Color::Rgb(255, 255, 85),
+        header_style: HeaderStyle::TurboVision,
+        status_style: StatusStyle::FunctionKeys,
+        border_type: BorderType::Double,
+        prompt_glyph: "▶ ",
+        bullet_glyph: "■",
+        brand_icon: "═ ",
+        show_live_clock: true,
+    },
+    ThemePalette {
+        id: ThemeId::NocDeck,
+        name: "noc-deck",
+        display_name: "NOC Telemetry Deck",
+        description: "Flight director & telemetry HUD — thin hairlines, live clock, status pips",
+        is_light: false,
+        bg: Color::Reset,
+        fg: Color::Rgb(230, 238, 245),
+        label: Color::Rgb(165, 185, 205),
+        dim: Color::Rgb(145, 165, 185),
+        accent: Color::Rgb(0, 225, 255),
+        cyan: Color::Rgb(0, 225, 255),
+        green: Color::Rgb(0, 255, 136),
+        yellow: Color::Rgb(255, 191, 0),
+        red: Color::Rgb(255, 51, 85),
+        orange: Color::Rgb(255, 128, 0),
+        border: Color::Rgb(40, 60, 80),
+        border_focus: Color::Rgb(0, 225, 255),
+        sel_bg: Color::Rgb(20, 45, 70),
+        sel_fg: Color::Rgb(255, 255, 255),
+        marked_bg: Color::Rgb(45, 30, 70),
+        marked_fg: Color::Rgb(0, 225, 255),
+        header_style: HeaderStyle::NocDeck,
+        status_style: StatusStyle::Standard,
+        border_type: BorderType::Plain,
+        prompt_glyph: "◈ ",
+        bullet_glyph: "◆",
+        brand_icon: "◈ ",
+        show_live_clock: true,
     },
 ];
 
@@ -518,20 +605,20 @@ impl Theme {
     // Compile-time default constant fallbacks for tests and constant evaluation
     pub const BG: Color = Color::Reset;
     pub const FG: Color = Color::Rgb(220, 224, 232);
-    pub const LABEL: Color = Color::Rgb(186, 194, 222);   // Clear silver-lavender field labels
-    // Mirrors the default palette's `dim`, and like it sits below `FG` —
-    // secondary text must not outshine primary text. See `ThemePalette::dim`.
+    pub const LABEL: Color = Color::Rgb(186, 194, 222); // Clear silver-lavender field labels
+                                                        // Mirrors the default palette's `dim`, and like it sits below `FG` —
+                                                        // secondary text must not outshine primary text. See `ThemePalette::dim`.
     pub const DIM: Color = Color::Rgb(171, 175, 188);
-    pub const ACCENT: Color = Color::Rgb(139, 92, 246);      // Purple / Violet (SRElens brand)
-    pub const CYAN: Color = Color::Rgb(56, 189, 248);        // Sky blue
-    pub const GREEN: Color = Color::Rgb(34, 197, 94);        // Success / Running
-    pub const YELLOW: Color = Color::Rgb(234, 179, 8);       // Warning / Pending
-    pub const RED: Color = Color::Rgb(239, 68, 68);          // Error / CrashLoop / Failed
-    pub const ORANGE: Color = Color::Rgb(249, 115, 22);      // Terminating / Evicted
-    pub const BORDER: Color = Color::Rgb(75, 85, 99);        // Border gray
-    pub const BORDER_FOCUS: Color = Color::Rgb(139, 92, 246);// Border active
-    pub const SEL_BG: Color = Color::Rgb(45, 55, 72);        // Selected row background
-    pub const SEL_FG: Color = Color::Rgb(255, 255, 255);     // Selected row foreground
+    pub const ACCENT: Color = Color::Rgb(139, 92, 246); // Purple / Violet (SRElens brand)
+    pub const CYAN: Color = Color::Rgb(56, 189, 248); // Sky blue
+    pub const GREEN: Color = Color::Rgb(34, 197, 94); // Success / Running
+    pub const YELLOW: Color = Color::Rgb(234, 179, 8); // Warning / Pending
+    pub const RED: Color = Color::Rgb(239, 68, 68); // Error / CrashLoop / Failed
+    pub const ORANGE: Color = Color::Rgb(249, 115, 22); // Terminating / Evicted
+    pub const BORDER: Color = Color::Rgb(75, 85, 99); // Border gray
+    pub const BORDER_FOCUS: Color = Color::Rgb(139, 92, 246); // Border active
+    pub const SEL_BG: Color = Color::Rgb(45, 55, 72); // Selected row background
+    pub const SEL_FG: Color = Color::Rgb(255, 255, 255); // Selected row foreground
 
     /// Active theme palette reference
     pub fn active_palette() -> &'static ThemePalette {
@@ -541,7 +628,9 @@ impl Theme {
 
     /// Current active theme index
     pub fn active_index() -> usize {
-        ACTIVE_THEME_IDX.load(Ordering::Relaxed).min(ALL_THEMES.len() - 1)
+        ACTIVE_THEME_IDX
+            .load(Ordering::Relaxed)
+            .min(ALL_THEMES.len() - 1)
     }
 
     /// Set theme by index (0-based)
@@ -557,9 +646,16 @@ impl Theme {
     /// Set theme by case-insensitive name or alias
     pub fn set_theme_by_name(name: &str) -> Option<&'static ThemePalette> {
         let lower = name.trim().to_lowercase();
-        let clean_lower: String = lower.chars().filter(|c| *c != '-' && *c != '_' && *c != ' ').collect();
+        let clean_lower: String = lower
+            .chars()
+            .filter(|c| *c != '-' && *c != '_' && *c != ' ')
+            .collect();
         for (i, p) in ALL_THEMES.iter().enumerate() {
-            let clean_p: String = p.name.chars().filter(|c| *c != '-' && *c != '_' && *c != ' ').collect();
+            let clean_p: String = p
+                .name
+                .chars()
+                .filter(|c| *c != '-' && *c != '_' && *c != ' ')
+                .collect();
             if p.name == lower
                 || clean_p == clean_lower
                 || (lower == "default" && p.id == ThemeId::CatppuccinMocha)
@@ -594,6 +690,17 @@ impl Theme {
                 || (lower == "github-dark" && p.id == ThemeId::GitHubDarkHc)
                 || (lower == "githubhc" && p.id == ThemeId::GitHubDarkHc)
                 || (lower == "github-dark-hc" && p.id == ThemeId::GitHubDarkHc)
+                || (lower == "turbovision" && p.id == ThemeId::TurboVision)
+                || (lower == "turbo-vision" && p.id == ThemeId::TurboVision)
+                || (lower == "turbo" && p.id == ThemeId::TurboVision)
+                || (lower == "borland" && p.id == ThemeId::TurboVision)
+                || (lower == "norton" && p.id == ThemeId::TurboVision)
+                || (lower == "mc" && p.id == ThemeId::TurboVision)
+                || (lower == "noc" && p.id == ThemeId::NocDeck)
+                || (lower == "nocdeck" && p.id == ThemeId::NocDeck)
+                || (lower == "noc-deck" && p.id == ThemeId::NocDeck)
+                || (lower == "telemetry" && p.id == ThemeId::NocDeck)
+                || (lower == "deck" && p.id == ThemeId::NocDeck)
             {
                 ACTIVE_THEME_IDX.store(i, Ordering::Relaxed);
                 return Some(p);
@@ -607,33 +714,82 @@ impl Theme {
     }
 
     // Visual chrome and layout accessors
-    pub fn header_style() -> HeaderStyle { Self::active_palette().header_style }
-    pub fn border_type() -> BorderType { Self::active_palette().border_type }
-    pub fn prompt_glyph() -> &'static str { Self::active_palette().prompt_glyph }
-    pub fn bullet_glyph() -> &'static str { Self::active_palette().bullet_glyph }
-    pub fn brand_icon() -> &'static str { Self::active_palette().brand_icon }
-    pub fn show_live_clock() -> bool { Self::active_palette().show_live_clock }
+    pub fn header_style() -> HeaderStyle {
+        Self::active_palette().header_style
+    }
+    pub fn status_style() -> StatusStyle {
+        Self::active_palette().status_style
+    }
+    pub fn border_type() -> BorderType {
+        Self::active_palette().border_type
+    }
+    pub fn prompt_glyph() -> &'static str {
+        Self::active_palette().prompt_glyph
+    }
+    pub fn bullet_glyph() -> &'static str {
+        Self::active_palette().bullet_glyph
+    }
+    pub fn brand_icon() -> &'static str {
+        Self::active_palette().brand_icon
+    }
+    pub fn show_live_clock() -> bool {
+        Self::active_palette().show_live_clock
+    }
 
     // Dynamic color accessors reading live from the active theme
-    pub fn bg() -> Color { Self::active_palette().bg }
-    pub fn fg() -> Color { Self::active_palette().fg }
-    pub fn label() -> Color { Self::active_palette().label }
-    pub fn dim() -> Color { Self::active_palette().dim }
-    pub fn accent() -> Color { Self::active_palette().accent }
-    pub fn cyan() -> Color { Self::active_palette().cyan }
-    pub fn green() -> Color { Self::active_palette().green }
-    pub fn yellow() -> Color { Self::active_palette().yellow }
-    pub fn red() -> Color { Self::active_palette().red }
-    pub fn orange() -> Color { Self::active_palette().orange }
-    pub fn border() -> Color { Self::active_palette().border }
-    pub fn border_focus() -> Color { Self::active_palette().border_focus }
-    pub fn sel_bg() -> Color { Self::active_palette().sel_bg }
-    pub fn sel_fg() -> Color { Self::active_palette().sel_fg }
-    pub fn marked_bg() -> Color { Self::active_palette().marked_bg }
-    pub fn marked_fg() -> Color { Self::active_palette().marked_fg }
+    pub fn bg() -> Color {
+        Self::active_palette().bg
+    }
+    pub fn fg() -> Color {
+        Self::active_palette().fg
+    }
+    pub fn label() -> Color {
+        Self::active_palette().label
+    }
+    pub fn dim() -> Color {
+        Self::active_palette().dim
+    }
+    pub fn accent() -> Color {
+        Self::active_palette().accent
+    }
+    pub fn cyan() -> Color {
+        Self::active_palette().cyan
+    }
+    pub fn green() -> Color {
+        Self::active_palette().green
+    }
+    pub fn yellow() -> Color {
+        Self::active_palette().yellow
+    }
+    pub fn red() -> Color {
+        Self::active_palette().red
+    }
+    pub fn orange() -> Color {
+        Self::active_palette().orange
+    }
+    pub fn border() -> Color {
+        Self::active_palette().border
+    }
+    pub fn border_focus() -> Color {
+        Self::active_palette().border_focus
+    }
+    pub fn sel_bg() -> Color {
+        Self::active_palette().sel_bg
+    }
+    pub fn sel_fg() -> Color {
+        Self::active_palette().sel_fg
+    }
+    pub fn marked_bg() -> Color {
+        Self::active_palette().marked_bg
+    }
+    pub fn marked_fg() -> Color {
+        Self::active_palette().marked_fg
+    }
 
     pub fn header() -> Style {
-        Style::default().fg(Self::cyan()).add_modifier(Modifier::BOLD)
+        Style::default()
+            .fg(Self::cyan())
+            .add_modifier(Modifier::BOLD)
     }
 
     pub fn header_label() -> Style {
@@ -645,40 +801,66 @@ impl Theme {
     }
 
     pub fn title() -> Style {
-        Style::default().fg(Self::accent()).add_modifier(Modifier::BOLD)
+        Style::default()
+            .fg(Self::accent())
+            .add_modifier(Modifier::BOLD)
     }
 
     pub fn table_header() -> Style {
-        Style::default().fg(Self::cyan()).add_modifier(Modifier::BOLD)
+        Style::default()
+            .fg(Self::cyan())
+            .add_modifier(Modifier::BOLD)
     }
 
     pub fn selected_row() -> Style {
-        Style::default().bg(Self::sel_bg()).fg(Self::sel_fg()).add_modifier(Modifier::BOLD)
+        Style::default()
+            .bg(Self::sel_bg())
+            .fg(Self::sel_fg())
+            .add_modifier(Modifier::BOLD)
     }
 
     pub fn marked_row() -> Style {
-        Style::default().bg(Self::marked_bg()).fg(Self::marked_fg()).add_modifier(Modifier::BOLD)
+        Style::default()
+            .bg(Self::marked_bg())
+            .fg(Self::marked_fg())
+            .add_modifier(Modifier::BOLD)
     }
 
     pub fn status_ok() -> Style {
-        Style::default().fg(Self::green()).add_modifier(Modifier::BOLD)
+        Style::default()
+            .fg(Self::green())
+            .add_modifier(Modifier::BOLD)
     }
 
     pub fn status_warn() -> Style {
-        Style::default().fg(Self::yellow()).add_modifier(Modifier::BOLD)
+        Style::default()
+            .fg(Self::yellow())
+            .add_modifier(Modifier::BOLD)
     }
 
     pub fn status_error() -> Style {
-        Style::default().fg(Self::red()).add_modifier(Modifier::BOLD)
+        Style::default()
+            .fg(Self::red())
+            .add_modifier(Modifier::BOLD)
     }
 
     pub fn context_color(ctx_name: &str, is_local: bool) -> Color {
         let lower = ctx_name.to_lowercase();
         if lower.contains("prod") || lower.contains("prd") || lower.contains("live") {
             Color::Rgb(255, 110, 110) // Coral red for production
-        } else if lower.contains("stage") || lower.contains("stg") || lower.contains("uat") || lower.contains("qa") {
+        } else if lower.contains("stage")
+            || lower.contains("stg")
+            || lower.contains("uat")
+            || lower.contains("qa")
+        {
             Color::Rgb(255, 200, 80) // Amber gold for staging
-        } else if is_local || lower.contains("dev") || lower.contains("kind") || lower.contains("minikube") || lower.contains("k3d") || lower.contains("local") {
+        } else if is_local
+            || lower.contains("dev")
+            || lower.contains("kind")
+            || lower.contains("minikube")
+            || lower.contains("k3d")
+            || lower.contains("local")
+        {
             Color::Rgb(80, 220, 140) // Mint green for local dev
         } else {
             Color::Rgb(100, 200, 255) // Sky blue for general clusters
@@ -690,7 +872,9 @@ impl Theme {
     }
 
     pub fn key_hint_key() -> Style {
-        Style::default().fg(Self::cyan()).add_modifier(Modifier::BOLD)
+        Style::default()
+            .fg(Self::cyan())
+            .add_modifier(Modifier::BOLD)
     }
 
     pub fn key_hint_desc() -> Style {
@@ -698,7 +882,9 @@ impl Theme {
     }
 
     pub fn prompt() -> Style {
-        Style::default().fg(Self::accent()).add_modifier(Modifier::BOLD)
+        Style::default()
+            .fg(Self::accent())
+            .add_modifier(Modifier::BOLD)
     }
 
     pub fn badge(bg: Color, fg: Color) -> Style {

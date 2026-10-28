@@ -2,7 +2,7 @@ use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap},
+    widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap},
     Frame,
 };
 
@@ -1052,6 +1052,8 @@ pub fn render_modal(f: &mut Frame, area: Rect, modal: &Modal) {
                     let visual_badge = match p.header_style {
                         crate::theme::HeaderStyle::FinoTime => "[Fino • Live Clock • Tree] ",
                         crate::theme::HeaderStyle::Minimal => "[Minimalist Chrome] ",
+                        crate::theme::HeaderStyle::TurboVision => "[Double Frames] ",
+                        crate::theme::HeaderStyle::NocDeck => "[Hairlines • UTC] ",
                         crate::theme::HeaderStyle::Standard => {
                             if p.border_type == ratatui::widgets::BorderType::Thick {
                                 "[Thick Neon Borders] "
@@ -1123,7 +1125,9 @@ pub fn render_modal(f: &mut Frame, area: Rect, modal: &Modal) {
                 .collect();
 
             let list = List::new(items);
-            f.render_widget(list, chunks[0]);
+            let mut list_state = ListState::default();
+            list_state.select(Some(*selected_idx));
+            f.render_stateful_widget(list, chunks[0], &mut list_state);
 
             let active_name = Theme::active_palette().display_name;
             let footer = Paragraph::new(Line::from(vec![
