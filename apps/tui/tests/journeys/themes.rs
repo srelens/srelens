@@ -49,7 +49,7 @@ async fn journey_d7_perceptual_narrow_80x24_header_renders_active_view() {
     theme.set_by_name("turbo-vision");
     let screen_tv_80x24 = render_app(&mut app, 80, 24);
     assert!(
-        screen_tv_80x24.contains("VIEW: Pods") || screen_tv_80x24.contains("Pods"),
+        screen_tv_80x24.contains("VIEW: Pods"),
         "Turbo Vision on 80-column terminal must render active view name without truncation"
     );
     assert!(
@@ -61,7 +61,7 @@ async fn journey_d7_perceptual_narrow_80x24_header_renders_active_view() {
     theme.set_by_name("noc-deck");
     let screen_noc_80x24 = render_app(&mut app, 80, 24);
     assert!(
-        screen_noc_80x24.contains("SURFACE: PODS") || screen_noc_80x24.contains("PODS"),
+        screen_noc_80x24.contains("SURFACE: PODS"),
         "NOC Telemetry Deck on 80-column terminal must render active surface name without truncation"
     );
     assert!(
