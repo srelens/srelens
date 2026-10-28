@@ -1,10 +1,11 @@
-import { useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
+import { Fragment, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
 import { cx } from "./cx";
 import { EmptyState } from "./EmptyState";
 import { ErrorState } from "./ErrorState";
 import type { IconComponent } from "./IconButton";
 import { NavIcon } from "./NavIcon";
 import { filled } from "./slot";
+import { Tooltip, TooltipGroup } from "./Tooltip";
 
 export interface ResourceNode {
   id: string;
@@ -21,6 +22,11 @@ export interface ResourceNode {
   children?: ResourceNode[];
   /** Groups only, and only the starting state. Defaults to open. */
   defaultExpanded?: boolean;
+  /**
+   * Top-level nodes only. Neighbours sharing one sit together; a change draws
+   * a rule between them. Unlabelled on purpose: the rows carry the words.
+   */
+  band?: string;
 }
 
 export interface ResourceTreeProps {
@@ -111,6 +117,11 @@ interface Row {
   open: boolean;
 }
 
+/** Whether `id` is somewhere under `node`. */
+function holds(node: ResourceNode, id: string): boolean {
+  return (node.children ?? []).some((child) => child.id === id || holds(child, id));
+}
+
 /** The rows actually on screen, top to bottom — a closed group contributes only itself. */
 function flatten(
   nodes: ResourceNode[],
@@ -165,6 +176,14 @@ export function ResourceTree({
   const folds = useFolds(expanded, onExpandedChange);
   const refs = useRef(new Map<string, HTMLButtonElement>());
   const [focusId, setFocusId] = useState<string | null>(null);
+  // The one row whose label is cut short under the pointer or the focus, so
+  // only that row offers a tooltip: a hint repeating words already on screen
+  // is noise on every row of a tree you walk with the arrow keys.
+  const [clipped, setClipped] = useState<string | null>(null);
+  const measure = (id: string, row: HTMLElement) => {
+    const text = row.querySelector<HTMLElement>(".truncate");
+    setClipped(text && text.scrollWidth > text.clientWidth ? id : null);
+  };
 
   const needle = query.trim();
   const visible = useMemo(() => filterResourceNodes(nodes, needle), [nodes, needle]);
@@ -235,64 +254,94 @@ export function ResourceTree({
     if (next) move(next);
   }
 
+  // The top-level row before each row, for the band rule and the gap above it.
+  let above: Row | undefined;
+  const tops = rows.map((row) => {
+    if (row.level !== 1) return undefined;
+    const before = above;
+    above = row;
+    return before;
+  });
+
   return (
-    <ul role="tree" aria-label={label} className={cx("pb-2", className)} onKeyDown={onKeyDown}>
-      {rows.map((row) => (
-        // `none`, so the wrapper does not put a list between the tree and its
-        // items: the nesting is carried by aria-level.
-        <li role="none" key={row.node.id}>
-          <button
-            // Explicit, because a bare button inside a form is a submit button
-            // and this tree lives beside filter boxes and inline forms.
-            type="button"
-            role="treeitem"
-            ref={(node) => {
-              if (node) refs.current.set(row.node.id, node);
-              else refs.current.delete(row.node.id);
-            }}
-            className={row.group ? "tree-group" : "tree-row"}
-            style={{ paddingLeft: (row.group ? 6 : 10) + (row.level - 1) * 11 }}
-            aria-level={row.level}
-            // Only where it means something: a leaf that says aria-expanded=false
-            // promises a subtree it does not have.
-            aria-expanded={row.group ? row.open : undefined}
-            aria-selected={row.group ? undefined : row.node.id === active}
-            data-active={row.node.id === active}
-            tabIndex={row.node.id === stop ? 0 : -1}
-            title={row.node.label}
-            onFocus={() => setFocusId(row.node.id)}
-            onClick={() =>
-              row.group ? folds.toggle(row.node.id, row.open) : onActivate(row.node.id)
-            }
-          >
-            {row.group && (
-              // Inline rather than an icon-set import: the kit takes no
-              // dependency on lucide.
-              <svg
-                width="11"
-                height="11"
-                viewBox="0 0 24 24"
-                fill="none"
-                aria-hidden="true"
-                className="tree-caret shrink-0"
-                data-open={row.open}
-              >
-                <path
-                  d="m9 18 6-6-6-6"
-                  stroke="currentColor"
-                  strokeWidth="2.5"
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                />
-              </svg>
-            )}
-            {row.node.icon && <NavIcon icon={row.node.icon} />}
-            <span className="truncate">{row.node.label}</span>
-            <span className="flex-1" />
-            {filled(row.node.count) && <span className="tree-count">{row.node.count}</span>}
-          </button>
-        </li>
-      ))}
-    </ul>
+    <TooltipGroup>
+      <ul role="tree" aria-label={label} className={cx("pb-2", className)} onKeyDown={onKeyDown}>
+        {rows.map((row, index) => {
+          const before = tops[index];
+          const newBand = before !== undefined && before.node.band !== row.node.band;
+          // A closed group stands in for the active row it hides. It does not
+          // open itself: groups are shut because the reader shut them.
+          const here = row.group && !row.open && active !== undefined && holds(row.node, active);
+          return (
+            <Fragment key={row.node.id}>
+              {newBand && <li role="none" aria-hidden="true" data-slot="band-rule" />}
+              {/* `none`, so the wrapper does not put a list between the tree and
+                  its items: the nesting is carried by aria-level. */}
+              <li role="none" data-gap={before !== undefined && !newBand ? "" : undefined}>
+                <Tooltip label={clipped === row.node.id ? row.node.label : ""} side="right">
+                  <button
+                    // Explicit, because a bare button inside a form is a submit button
+                    // and this tree lives beside filter boxes and inline forms.
+                    type="button"
+                    role="treeitem"
+                    ref={(node) => {
+                      if (node) refs.current.set(row.node.id, node);
+                      else refs.current.delete(row.node.id);
+                    }}
+                    className={row.group ? "tree-group" : "tree-row"}
+                    // A leaf starts past where a group's caret sits, so icons in
+                    // one level line up; each level is one 12px step further in.
+                    style={{ paddingLeft: (row.group ? 6 : 22) + (row.level - 1) * 12 }}
+                    aria-level={row.level}
+                    // Only where it means something: a leaf that says aria-expanded=false
+                    // promises a subtree it does not have.
+                    aria-expanded={row.group ? row.open : undefined}
+                    aria-selected={row.group ? undefined : row.node.id === active}
+                    aria-current={here ? "location" : undefined}
+                    data-active={row.node.id === active}
+                    tabIndex={row.node.id === stop ? 0 : -1}
+                    onPointerEnter={(event) => measure(row.node.id, event.currentTarget)}
+                    onFocus={(event) => {
+                      setFocusId(row.node.id);
+                      measure(row.node.id, event.currentTarget);
+                    }}
+                    onClick={() =>
+                      row.group ? folds.toggle(row.node.id, row.open) : onActivate(row.node.id)
+                    }
+                  >
+                    {row.group && (
+                      // Inline rather than an icon-set import: the kit takes no
+                      // dependency on lucide.
+                      <svg
+                        width="11"
+                        height="11"
+                        viewBox="0 0 24 24"
+                        fill="none"
+                        aria-hidden="true"
+                        className="tree-caret shrink-0"
+                        data-open={row.open}
+                      >
+                        <path
+                          d="m9 18 6-6-6-6"
+                          stroke="currentColor"
+                          strokeWidth="2.5"
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                        />
+                      </svg>
+                    )}
+                    {row.node.icon && <NavIcon icon={row.node.icon} />}
+                    <span className="truncate">{row.node.label}</span>
+                    {here && <span data-slot="here" aria-hidden="true" className="tree-here" />}
+                    <span className="flex-1" />
+                    {filled(row.node.count) && <span className="tree-count">{row.node.count}</span>}
+                  </button>
+                </Tooltip>
+              </li>
+            </Fragment>
+          );
+        })}
+      </ul>
+    </TooltipGroup>
   );
 }

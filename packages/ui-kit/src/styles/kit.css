@@ -1038,15 +1038,29 @@
     padding-top: 0.28rem;
     padding-bottom: 0.28rem;
     padding-right: 0.5rem;
-    font-size: 0.6875rem;
+    font-size: 0.75rem;
     font-weight: 600;
-    letter-spacing: 0.02em;
-    color: var(--ink-soft);
+    color: var(--ink);
     text-align: left;
   }
   .tree-group:hover { background: var(--field); }
   .tree-caret { transition: transform 120ms ease; color: var(--ink-faint); }
   .tree-caret[data-open="true"] { transform: rotate(90deg); }
+  /* A closed group holding the active row says so: accent caret, accent dot. */
+  .tree-group[aria-current="location"] .tree-caret { color: var(--accent); }
+  .tree-here {
+    width: 5px;
+    height: 5px;
+    flex-shrink: 0;
+    border-radius: 50%;
+    background: var(--accent);
+  }
+  /* Between bands the strongest mark in the sidebar; inside one, only space. */
+  [role="tree"] > [data-slot="band-rule"] {
+    margin: 6px 0;
+    border-top: 1px solid var(--rule-strong);
+  }
+  [role="tree"] > li[data-gap] { margin-top: 2px; }
 
   .tree-row {
     display: flex;
@@ -1057,7 +1071,7 @@
     padding-bottom: var(--pad-y);
     padding-right: 0.5rem;
     font-size: 0.75rem;
-    color: var(--ink-muted);
+    color: var(--ink-soft);
     text-align: left;
   }
   .tree-row:hover { background: var(--field); color: var(--ink); }
