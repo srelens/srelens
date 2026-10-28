@@ -912,13 +912,41 @@ fn settings_state() -> SettingsViewState {
         edit_buffer: String::new(),
         toast: None,
         picker: None,
-        agent_card_focused: false,
+        agents_focused: false,
+        selected_agent_idx: 0,
         agent_paths: Vec::new(),
     }
 }
 
 fn render_settings(width: u16, height: u16, state: &SettingsViewState) -> String {
     common::render_text(width, height, |f| render_settings_view(f, f.area(), state))
+}
+
+/// What a list row says at its right edge: the line with the borders and
+/// the padding before them trimmed off.
+fn row_end(line: &str) -> &str {
+    line.trim_end_matches(['│', ' '])
+}
+
+/// The cursor on agent row `idx`: srelens, Claude Code, Codex, Cursor.
+fn focus_agent(state: &mut SettingsViewState, idx: usize) {
+    state.agents_focused = true;
+    state.selected_agent_idx = idx;
+    state.selected_field = SettingField::Agent;
+}
+
+/// The fields Tab visits from the focused one until it comes round again.
+fn tab_round(state: &mut SettingsViewState) -> Vec<SettingField> {
+    let start = state.selected_field;
+    let mut seen = vec![start];
+    for _ in 0..8 {
+        state.select_next_field();
+        if state.selected_field == start {
+            break;
+        }
+        seen.push(state.selected_field);
+    }
+    seen
 }
 
 #[test]
@@ -931,41 +959,62 @@ fn settings_view_new_selects_the_configured_default_provider() {
     assert!(!state.is_editing);
     assert!(state.edit_buffer.is_empty());
     assert!(state.toast.is_none());
-    assert!(!state.agent_card_focused, "the cursor starts on a provider");
+    assert!(!state.agents_focused, "the cursor starts on a provider");
 }
 
 #[test]
-fn settings_view_provider_selection_runs_through_the_agent_card_and_freezes_while_editing() {
+fn settings_view_rows_run_through_the_providers_then_the_agents_and_freeze_while_editing() {
+    use srelens_agent::adapter::AgentKind;
     let mut state = settings_state();
     assert_eq!(state.current_provider(), AiProvider::Anthropic);
-    state.select_next_provider();
+    state.select_next_row();
     assert_eq!(state.current_provider(), AiProvider::OpenAi);
-    state.select_prev_provider();
+    state.select_prev_row();
     assert_eq!(state.current_provider(), AiProvider::Anthropic);
-    assert!(!state.agent_card_focused);
+    assert!(!state.agents_focused);
 
-    // Up from the first provider reaches the Agent card above it.
-    state.select_prev_provider();
-    assert!(state.agent_card_focused);
+    // Up from the first provider wraps to the last agent, at the bottom.
+    state.select_prev_row();
+    assert!(state.agents_focused);
+    assert_eq!(state.focused_agent(), AgentKind::Cursor);
     assert_eq!(state.selected_field, SettingField::Agent);
-    // Up from the card wraps to the last provider; down from there is the card.
-    state.select_prev_provider();
-    assert!(!state.agent_card_focused);
-    assert_eq!(state.current_provider(), AiProvider::OpenAiCompatible);
-    assert_eq!(state.selected_field, SettingField::ProviderToggle);
-    state.select_next_provider();
-    assert!(state.agent_card_focused);
-    // Down from the card is the first provider.
-    state.select_next_provider();
-    assert!(!state.agent_card_focused);
+    // Down from the last agent wraps to the first provider.
+    state.select_next_row();
+    assert!(!state.agents_focused);
     assert_eq!(state.current_provider(), AiProvider::Anthropic);
     assert_eq!(state.selected_field, SettingField::ProviderToggle);
+
+    // Down past the last provider walks the agents in order.
+    state.selected_provider_idx = 3;
+    let mut agents = Vec::new();
+    for _ in 0..4 {
+        state.select_next_row();
+        assert!(state.agents_focused);
+        agents.push(state.focused_agent());
+    }
+    assert_eq!(
+        agents,
+        [
+            AgentKind::Srelens,
+            AgentKind::Claude,
+            AgentKind::Codex,
+            AgentKind::Cursor
+        ]
+    );
+    // Up from the first agent is the last provider.
+    for _ in 0..3 {
+        state.select_prev_row();
+    }
+    assert_eq!(state.focused_agent(), AgentKind::Srelens);
+    state.select_prev_row();
+    assert!(!state.agents_focused);
+    assert_eq!(state.current_provider(), AiProvider::OpenAiCompatible);
 
     state.is_editing = true;
-    state.select_next_provider();
-    state.select_prev_provider();
-    assert_eq!(state.current_provider(), AiProvider::Anthropic);
-    assert!(!state.agent_card_focused);
+    state.select_next_row();
+    state.select_prev_row();
+    assert_eq!(state.current_provider(), AiProvider::OpenAiCompatible);
+    assert!(!state.agents_focused);
 
     // An out-of-range index is folded back into the provider list.
     state.selected_provider_idx = 6;
@@ -973,25 +1022,118 @@ fn settings_view_provider_selection_runs_through_the_agent_card_and_freezes_whil
 }
 
 #[test]
-fn settings_view_fields_on_the_agent_card_are_agent_and_model() {
+fn each_agent_row_steps_through_its_own_fields() {
+    use srelens_agent::adapter::AgentKind;
+    use SettingField::{Agent, ApiKey, BaseUrl, Model, ProviderToggle, Timeout};
     let mut state = settings_state();
-    state.select_prev_provider();
-    assert_eq!(state.selected_field, SettingField::Agent);
-    state.select_next_field();
-    assert_eq!(state.selected_field, SettingField::Model);
-    state.select_next_field();
-    assert_eq!(state.selected_field, SettingField::Agent);
+    focus_agent(&mut state, 0);
+    assert_eq!(state.focused_agent(), AgentKind::Srelens);
+    assert_eq!(tab_round(&mut state), [Agent, Model]);
+    focus_agent(&mut state, 1);
+    assert_eq!(tab_round(&mut state), [Agent, Model, Timeout]);
+    focus_agent(&mut state, 2);
+    assert_eq!(tab_round(&mut state), [Agent, Model, Timeout]);
+    focus_agent(&mut state, 3);
+    assert_eq!(tab_round(&mut state), [Agent, Model, ApiKey, Timeout]);
     state.select_prev_field();
-    assert_eq!(state.selected_field, SettingField::Model);
+    assert_eq!(state.selected_field, Timeout, "back from Agent wraps round");
 
-    // Model is the field both kinds of card share: it stays put when the
-    // cursor leaves the card, as it does from one provider to the next.
-    state.select_next_provider();
-    assert!(!state.agent_card_focused);
-    assert_eq!(state.selected_field, SettingField::Model);
-    state.select_prev_provider();
-    assert!(state.agent_card_focused);
-    assert_eq!(state.selected_field, SettingField::Model);
+    // A field the next row also has stays put, from an agent to a provider
+    // and back.
+    state.select_next_row();
+    assert!(!state.agents_focused);
+    assert_eq!(state.selected_field, Timeout);
+    state.select_prev_row();
+    assert_eq!(state.focused_agent(), AgentKind::Cursor);
+    assert_eq!(state.selected_field, Timeout);
+
+    // One it lacks becomes the row itself: Codex has no key of its own.
+    state.select_prev_field();
+    assert_eq!(state.selected_field, ApiKey);
+    state.select_prev_row();
+    assert_eq!(state.focused_agent(), AgentKind::Codex);
+    assert_eq!(state.selected_field, Agent);
+
+    state.select_next_field();
+    state.select_prev_row();
+    state.select_prev_row();
+    assert_eq!(state.focused_agent(), AgentKind::Srelens);
+    assert_eq!(state.selected_field, Model);
+
+    state.select_prev_field();
+    state.select_prev_row();
+    assert_eq!(state.current_provider(), AiProvider::OpenAiCompatible);
+    assert_eq!(state.selected_field, ProviderToggle);
+    state.selected_field = BaseUrl;
+    state.select_next_row();
+    assert_eq!(state.focused_agent(), AgentKind::Srelens);
+    assert_eq!(state.selected_field, Agent);
+}
+
+#[test]
+fn an_agent_row_edits_its_own_agent_not_the_active_one() {
+    use srectl::views::settings_view::PickerTarget;
+    use srelens_agent::adapter::AgentKind;
+    let mut state = settings_state();
+    assert_eq!(state.settings.agent, AgentKind::Srelens);
+
+    focus_agent(&mut state, 2);
+    assert_eq!(
+        state.agent_picker_target(),
+        PickerTarget::Agent(AgentKind::Codex)
+    );
+    state.selected_field = SettingField::Timeout;
+    state.start_editing();
+    assert_eq!(
+        state.edit_buffer,
+        state
+            .settings
+            .get_agent_timeout_seconds(AgentKind::Codex)
+            .to_string()
+    );
+    state.edit_buffer = "300".to_string();
+    state.finish_editing();
+    assert_eq!(
+        state.settings.get_agent_timeout_seconds(AgentKind::Codex),
+        300
+    );
+    assert_eq!(state.settings.agent, AgentKind::Srelens, "still srelens");
+
+    focus_agent(&mut state, 3);
+    state.selected_field = SettingField::ApiKey;
+    state.start_editing();
+    state.edit_buffer = "cur-key".to_string();
+    state.finish_editing();
+    assert_eq!(
+        state.settings.api_keys.get("cursor").map(String::as_str),
+        Some("cur-key")
+    );
+
+    // srelens's own row picks from the default provider's models.
+    focus_agent(&mut state, 0);
+    assert_eq!(
+        state.agent_picker_target(),
+        PickerTarget::Provider(state.settings.default_provider)
+    );
+}
+
+#[test]
+fn using_an_agent_row_makes_that_agent_the_assistants() {
+    use srelens_agent::adapter::AgentKind;
+    let mut state = settings_state();
+    focus_agent(&mut state, 1);
+    state.selected_field = SettingField::Model;
+    assert_eq!(state.use_focused_agent(), AgentKind::Claude);
+    assert_eq!(state.settings.agent, AgentKind::Claude);
+    assert_eq!(
+        state.selected_field,
+        SettingField::Model,
+        "the cursor stays"
+    );
+    assert_eq!(
+        state.settings.default_provider,
+        AiSettings::default().default_provider
+    );
 }
 
 #[test]
@@ -1220,48 +1362,84 @@ fn settings_view_timeout_edits_are_parsed_and_clamped() {
 }
 
 #[test]
-fn settings_view_renders_the_active_provider_summary_and_every_provider_card() {
-    let _env = common::env::lock();
+fn settings_view_lists_each_provider_on_one_row_and_expands_only_the_one_under_the_cursor() {
+    let mut env = common::env::lock();
+    for var in [
+        "ANTHROPIC_API_KEY",
+        "OPENAI_API_KEY",
+        "GEMINI_API_KEY",
+        "OPENAI_COMPATIBLE_API_KEY",
+    ] {
+        env.remove(var);
+    }
     let mut state = settings_state();
     state.settings.default_provider = AiProvider::Gemini;
-    state.selected_provider_idx = 2;
-    let text = render_settings(120, 40, &state);
+    state.selected_provider_idx = 1;
+    let lines = common::render_lines(120, 40, |f| render_settings_view(f, f.area(), &state));
+    let text = lines.join("\n");
+    let row = |name: &str| lines[row_of(&lines, name)].as_str();
 
     assert!(text.contains("SRElens AI & Assistant Settings"), "{text}");
     assert!(
-        text.contains("Active AI Provider: ● Google Gemini (model: gemini-2.5-flash)"),
+        !text.contains("Active AI Provider"),
+        "the badge says it: {text}"
+    );
+    assert!(
+        text.contains("srelens's own agent talks directly to a provider with your API key."),
         "{text}"
     );
     assert!(
-        text.contains("Configure default provider, API keys, models"),
-        "{text}"
-    );
-    assert!(text.contains("○ 1. Anthropic (Claude)"), "{text}");
-    assert!(text.contains("○ 2. OpenAI (GPT-4o)"), "{text}");
-    assert!(
-        text.contains("● 3. Google Gemini  [ACTIVE DEFAULT]"),
+        row("Anthropic (Claude)").contains("○ Anthropic (Claude)"),
         "{text}"
     );
     assert!(
-        text.contains("○ 4. OpenAI-Compatible / Ollama (Local)"),
+        row("Google Gemini").contains("● Google Gemini  [DEFAULT]"),
+        "{text}"
+    );
+    assert_eq!(text.matches("[DEFAULT]").count(), 1, "{text}");
+    assert!(!text.contains("1. Anthropic"), "no numbers: {text}");
+
+    // Each row ends in whether it has a key, at the right edge.
+    assert!(
+        row_end(row("Anthropic (Claude)")).ends_with("  no key"),
         "{text}"
     );
     assert!(
-        !text.contains("5. Cursor"),
-        "Cursor is an agent, not a provider card: {text}"
-    );
-    assert_eq!(text.matches("[ACTIVE DEFAULT]").count(), 1, "{text}");
-    assert!(
-        text.contains("Model:   claude-3-7-sonnet-20250219   │   Timeout: 120s"),
-        "{text}"
-    );
-    assert!(text.contains("Model:   llama3.2"), "{text}");
-    assert!(
-        text.contains("[↑/↓/j/k] Provider  [Tab/←/→] Field  [Space] Set Active"),
+        row_end(row("Google Gemini")).ends_with("  no key"),
         "{text}"
     );
     assert!(
-        text.contains("[e/Enter] Edit  [s] Save to Disk  [Esc/q] Back"),
+        row_end(row("OpenAI-Compatible / Ollama (Local)")).ends_with("  key optional · llama3.2"),
+        "{text}"
+    );
+    let ends: Vec<usize> = ["Anthropic (Claude)", "OpenAI (GPT-4o)", "Google Gemini"]
+        .iter()
+        .map(|n| row_end(row(n)).chars().count())
+        .collect();
+    assert!(
+        ends.windows(2).all(|w| w[0] == w[1]),
+        "right-aligned: {text}"
+    );
+
+    // Only the row under the cursor shows its fields, right below it.
+    assert_eq!(text.matches("API Key:").count(), 1, "{text}");
+    let openai = row_of(&lines, "OpenAI (GPT-4o)");
+    assert!(lines[openai + 1].contains("API Key: no key set"), "{text}");
+    assert!(
+        lines[openai + 2].contains("Model:   gpt-4o   │   Timeout: 120s"),
+        "{text}"
+    );
+    assert!(lines[openai + 3].contains("● Google Gemini"), "{text}");
+
+    // The providers come first, then the agent CLIs.
+    assert!(row_of(&lines, "Providers") < row_of(&lines, "Anthropic (Claude)"));
+    assert!(row_of(&lines, "OpenAI-Compatible") < row_of(&lines, "Agent CLIs"));
+    assert!(row_of(&lines, "Agent CLIs") < row_of(&lines, "srelens (built-in)"));
+
+    assert!(
+        text.contains(
+            "[↑/↓/j/k] Row  [Tab/←/→] Field  [Space] Use  [e/Enter] Edit  [s] Save  [Esc/q] Back"
+        ),
         "{text}"
     );
     assert!(
@@ -1291,59 +1469,80 @@ fn install_only_a_fake_codex() -> (tempfile::TempDir, std::path::PathBuf) {
 }
 
 #[test]
-fn the_agent_card_lists_each_agent_and_whether_it_is_installed() {
+fn the_agent_cli_list_has_a_row_per_agent_saying_whether_it_is_installed() {
     let _settings = common::env::isolate_settings();
     let (bin, codex) = install_only_a_fake_codex();
-    let state = SettingsViewState::new(&common::agents_only_in(bin.path()));
-    // Wide enough for the scratch path, so nothing is cut off.
+    let mut state = SettingsViewState::new(&common::agents_only_in(bin.path()));
+    // Wide enough for every install link, so nothing is cut off.
     let lines = common::render_lines(240, 40, |f| render_settings_view(f, f.area(), &state));
     let text = lines.join("\n");
+    let row = |agent: &str| row_end(&lines[row_of(&lines, agent)]).to_lowercase();
 
-    let row = |agent: &str| lines[row_of(&lines, agent)].to_lowercase();
     assert!(
-        row("srelens").contains('●'),
+        row("srelens (built-in)").contains("● srelens (built-in)"),
         "srelens is the active agent: {text}"
     );
     assert!(
-        row("Claude Code")
-            .contains("not installed — https://docs.anthropic.com/en/docs/claude-code/setup"),
+        row("srelens (built-in)").ends_with("  anthropic (claude) · claude-3-7-sonnet-20250219"),
+        "srelens answers through the default provider: {text}"
+    );
+    assert!(
+        row("○ Claude Code")
+            .ends_with("  not installed — https://docs.anthropic.com/en/docs/claude-code/setup"),
         "{text}"
     );
-    let codex_row = row("Codex");
+    assert!(row("○ Codex").ends_with("  installed · default"), "{text}");
+    assert!(
+        row("○ Cursor").ends_with("  not installed — https://docs.cursor.com/en/cli/overview"),
+        "{text}"
+    );
+    assert!(
+        row_of(&lines, "Claude Code") > row_of(&lines, "OpenAI-Compatible"),
+        "the agents sit below the providers: {text}"
+    );
+
+    // The row under the cursor shows where its CLI was found.
+    focus_agent(&mut state, 2);
+    let text = render_settings(240, 40, &state).to_lowercase();
     // Windows may spell the extension in PATHEXT's case.
     assert!(
-        codex_row.contains(&format!("installed: {}", codex.display()).to_lowercase()),
+        text.contains(&format!("path:    {}", codex.display()).to_lowercase()),
         "{text}"
-    );
-    assert!(!codex_row.contains("not installed"), "{text}");
-    assert!(
-        row("Cursor").contains("not installed — https://docs.cursor.com/en/cli/overview"),
-        "{text}"
-    );
-    assert!(
-        row_of(&lines, "Claude Code") < row_of(&lines, "1. Anthropic (Claude)"),
-        "the Agent card sits above the provider cards: {text}"
     );
 }
 
 #[test]
-fn the_agent_card_shows_the_active_agents_model() {
+fn the_agent_row_under_the_cursor_shows_its_own_model_and_timeout() {
     use srelens_agent::adapter::AgentKind;
     let _env = common::env::lock();
     let mut state = settings_state();
     state.settings.default_provider = AiProvider::Gemini;
+    focus_agent(&mut state, 0);
     let text = render_settings(160, 40, &state);
     assert!(
         text.contains("Model:   Google Gemini · gemini-2.5-flash"),
-        "srelens answers through the active provider: {text}"
+        "srelens answers through the default provider: {text}"
+    );
+    assert!(
+        !text.contains("Timeout:"),
+        "srelens runs under its provider's timeout: {text}"
     );
 
-    state.settings.agent = AgentKind::Codex;
+    // Codex's row, while srelens is still the active agent.
+    focus_agent(&mut state, 2);
     let text = render_settings(160, 40, &state);
-    assert!(text.contains("● Codex"), "{text}");
-    assert!(text.contains("○ srelens"), "{text}");
+    assert!(text.contains("● srelens (built-in)"), "{text}");
+    assert!(text.contains("○ Codex"), "{text}");
     assert!(text.contains("Model:   Default"), "{text}");
-    assert!(!text.contains("Google Gemini ·"), "{text}");
+    let timeout = state.settings.get_agent_timeout_seconds(AgentKind::Codex);
+    assert!(text.contains(&format!("Timeout: {timeout}s")), "{text}");
+    assert!(
+        text.contains(&format!(
+            "Install: {}",
+            srectl::ai_config::agent_install_url(AgentKind::Codex)
+        )),
+        "a missing CLI's row says in full where to get it: {text}"
+    );
 
     state
         .settings
@@ -1353,41 +1552,43 @@ fn the_agent_card_shows_the_active_agents_model() {
 }
 
 #[test]
-fn a_short_terminal_folds_the_agent_card_into_one_line() {
-    use srelens_agent::adapter::AgentKind;
-    let _settings = common::env::isolate_settings();
-    let (bin, _codex) = install_only_a_fake_codex();
-    let mut state = SettingsViewState::new(&common::agents_only_in(bin.path()));
-    state.settings.agent = AgentKind::Codex;
-    state
-        .settings
-        .set_agent_model(AgentKind::Codex, Some("gpt-5.6-sol".to_string()));
+fn a_short_terminal_scrolls_to_keep_the_cursor_row_and_its_fields_in_view() {
+    let _env = common::env::lock();
+    let mut state = settings_state();
+    let tall = render_settings(100, 40, &state);
+    assert!(tall.contains("● Anthropic (Claude)"), "{tall}");
+    assert!(tall.contains("○ Cursor"), "{tall}");
 
-    // Tall enough for every card: the agent list, one row per agent.
-    let tall = render_settings(160, 40, &state);
-    assert!(tall.contains("not installed"), "{tall}");
+    // 10 rows between the frame and the hints.
+    let short = render_settings(100, 14, &state);
+    assert!(short.contains("● Anthropic (Claude)"), "{short}");
+    assert!(short.contains("API Key:"), "{short}");
+    assert!(!short.contains("○ Cursor"), "{short}");
 
-    // Not tall enough: the agent is one line, with whether its CLI is there.
-    let short = render_settings(160, 26, &state);
+    focus_agent(&mut state, 3);
+    let short = render_settings(100, 14, &state);
+    assert!(short.contains("○ Cursor"), "{short}");
+    assert!(short.contains("Timeout:"), "its fields show too: {short}");
     assert!(
-        short.contains("Agent: ● Codex · gpt-5.6-sol · installed"),
-        "{short}"
+        !short.contains("● Anthropic (Claude)"),
+        "scrolled past: {short}"
     );
-    assert!(!short.contains("not installed"), "{short}");
-    assert!(short.contains("1. Anthropic (Claude)"), "{short}");
-    assert!(
-        short.contains("API Key:"),
-        "the first provider still has its rows: {short}"
-    );
+    assert!(!short.contains("Providers"), "{short}");
+}
 
-    // srelens has no CLI to report on.
-    state.settings.agent = AgentKind::Srelens;
-    let short = render_settings(160, 26, &state);
+#[test]
+fn a_narrow_terminal_keeps_each_row_on_one_line_and_cuts_its_status_short() {
+    let _env = common::env::lock();
+    let state = settings_state();
+    let lines = common::render_lines(60, 40, |f| render_settings_view(f, f.area(), &state));
+    let text = lines.join("\n");
+    let claude = row_of(&lines, "○ Claude Code");
     assert!(
-        short.contains("Agent: ● srelens · Anthropic (Claude) · claude-3-7-sonnet-20250219"),
-        "{short}"
+        lines[claude].contains("not installed — https://docs"),
+        "{text}"
     );
-    assert!(!short.contains("installed"), "{short}");
+    assert!(row_end(&lines[claude]).ends_with('…'), "{text}");
+    assert_eq!(row_of(&lines, "○ Codex"), claude + 1, "one line: {text}");
 }
 
 #[test]
@@ -1408,8 +1609,22 @@ fn settings_view_masks_stored_api_keys_and_flags_missing_ones() {
         .settings
         .api_keys
         .insert("openai".to_string(), "   ".to_string());
-    let text = render_settings(120, 40, &state);
+    let lines = common::render_lines(120, 40, |f| render_settings_view(f, f.area(), &state));
+    let text = lines.join("\n");
+    let row = |name: &str| row_end(&lines[row_of(&lines, name)]).to_string();
 
+    assert!(
+        row("Anthropic (Claude)").ends_with("  key set · claude-3-7-sonnet-20250219"),
+        "{text}"
+    );
+    assert!(
+        row("Google Gemini").ends_with("  key set · gemini-2.5-flash"),
+        "{text}"
+    );
+    // A blank stored key counts as unset, regardless of the developer's shell.
+    assert!(row("OpenAI (GPT-4o)").ends_with("  no key"), "{text}");
+
+    // The row under the cursor shows the key itself, masked.
     assert!(
         text.contains("API Key: sk-a••••••••wxyz [stored in config]"),
         "{text}"
@@ -1418,16 +1633,21 @@ fn settings_view_masks_stored_api_keys_and_flags_missing_ones() {
         !text.contains("verylongkey"),
         "the middle of the key never reaches the screen"
     );
+    state.selected_provider_idx = 2;
+    let text = render_settings(120, 40, &state);
     assert!(
         text.contains("API Key: •••••••• [stored in config]"),
         "{text}"
     );
     assert!(!text.contains("short"), "{text}");
-    // A blank stored key counts as unset, regardless of the developer's shell.
+    state.selected_provider_idx = 1;
+    let text = render_settings(120, 40, &state);
     assert!(
         text.contains("API Key: no key set (press 'e' to set or export OPENAI_API_KEY)"),
         "{text}"
     );
+    state.selected_provider_idx = 3;
+    let text = render_settings(120, 40, &state);
     assert!(text.contains("API Key: optional (local Ollama)"), "{text}");
 }
 
@@ -1436,9 +1656,16 @@ fn settings_view_reports_an_api_key_that_comes_from_the_environment() {
     // Dropping the guard puts back any key the developer's shell exports.
     let mut env = common::env::lock();
     env.set("GEMINI_API_KEY", "from-env");
-    let state = settings_state();
-    let text = render_settings(120, 40, &state);
+    let mut state = settings_state();
+    state.selected_provider_idx = 2;
+    let lines = common::render_lines(120, 40, |f| render_settings_view(f, f.area(), &state));
     drop(env);
+    let text = lines.join("\n");
+    assert!(
+        row_end(&lines[row_of(&lines, "Google Gemini")])
+            .ends_with("  env GEMINI_API_KEY · gemini-2.5-flash"),
+        "{text}"
+    );
     assert!(
         text.contains("API Key: [env: GEMINI_API_KEY set]"),
         "{text}"
@@ -1450,7 +1677,7 @@ fn settings_view_reports_an_api_key_that_comes_from_the_environment() {
 }
 
 #[test]
-fn settings_view_highlights_the_focused_field_on_the_selected_card() {
+fn settings_view_highlights_the_focused_field_on_the_selected_row() {
     let _env = common::env::lock();
     let _theme = common::theme::lock();
     let mut state = settings_state();
@@ -1459,7 +1686,7 @@ fn settings_view_highlights_the_focused_field_on_the_selected_card() {
     let lines = common::render_lines(120, 40, |f| render_settings_view(f, f.area(), &state));
     let buf = render_buffer(120, 40, |f| render_settings_view(f, f.area(), &state));
 
-    let openai_row = row_of(&lines, "2. OpenAI (GPT-4o)");
+    let openai_row = row_of(&lines, "OpenAI (GPT-4o)");
     let model_row = openai_row + 2;
     assert!(
         lines[model_row].contains("Model:   gpt-4o"),
@@ -1485,24 +1712,30 @@ fn settings_view_highlights_the_focused_field_on_the_selected_card() {
         "unfocused label stays dim"
     );
 
-    // The selected card's border is cyan, the others' are the plain border colour.
-    let card_top = openai_row as u16 - 1;
-    assert_eq!(buf[(1, card_top)].fg, Theme::CYAN);
-    let anthropic_top = row_of(&lines, "1. Anthropic (Claude)") as u16 - 1;
-    assert_eq!(buf[(1, anthropic_top)].fg, Theme::BORDER);
+    // The list with the cursor has a cyan frame, the other the plain one.
+    let providers_top = row_of(&lines, "Providers") as u16;
+    let agents_top = row_of(&lines, "Agent CLIs") as u16;
+    assert_eq!(buf[(1, providers_top)].fg, Theme::CYAN);
+    assert_eq!(buf[(1, agents_top)].fg, Theme::BORDER);
+    let mut on_agents = settings_state();
+    focus_agent(&mut on_agents, 1);
+    let l = common::render_lines(120, 40, |f| render_settings_view(f, f.area(), &on_agents));
+    let b = render_buffer(120, 40, |f| render_settings_view(f, f.area(), &on_agents));
+    assert_eq!(b[(1, row_of(&l, "Providers") as u16)].fg, Theme::BORDER);
+    assert_eq!(b[(1, row_of(&l, "Agent CLIs") as u16)].fg, Theme::CYAN);
 
     // Timeout, API key and Base URL focus each light up their own label.
     let mut s = settings_state();
     s.selected_field = SettingField::Timeout;
     let b = render_buffer(120, 40, |f| render_settings_view(f, f.area(), &s));
     let l = common::render_lines(120, 40, |f| render_settings_view(f, f.area(), &s));
-    let r = row_of(&l, "1. Anthropic (Claude)") + 2;
+    let r = row_of(&l, "Anthropic (Claude)") + 2;
     let tx = col(&l[r], "Timeout:");
     assert_eq!(b[(tx, r as u16)].fg, Theme::YELLOW);
 
     s.selected_field = SettingField::ApiKey;
     let b = render_buffer(120, 40, |f| render_settings_view(f, f.area(), &s));
-    let r = row_of(&l, "1. Anthropic (Claude)") + 1;
+    let r = row_of(&l, "Anthropic (Claude)") + 1;
     let kx = col(&l[r], "API Key:");
     assert_eq!(b[(kx, r as u16)].fg, Theme::YELLOW);
 
@@ -1510,7 +1743,7 @@ fn settings_view_highlights_the_focused_field_on_the_selected_card() {
     s.selected_field = SettingField::BaseUrl;
     let b = render_buffer(120, 40, |f| render_settings_view(f, f.area(), &s));
     let l = common::render_lines(120, 40, |f| render_settings_view(f, f.area(), &s));
-    let r = row_of(&l, "4. OpenAI-Compatible / Ollama (Local)") + 3;
+    let r = row_of(&l, "OpenAI-Compatible / Ollama (Local)") + 3;
     assert!(
         l[r].contains("Base URL: http://localhost:11434/v1"),
         "{}",
@@ -1525,9 +1758,10 @@ fn settings_view_highlights_the_focused_field_on_the_selected_card() {
 #[test]
 fn settings_view_renders_base_url_for_openai_compatible_provider() {
     let _env = common::env::lock();
-    let state = settings_state();
+    let mut state = settings_state();
+    state.selected_provider_idx = 3;
     let lines = common::render_lines(120, 40, |f| render_settings_view(f, f.area(), &state));
-    let oai_compat_row = row_of(&lines, "4. OpenAI-Compatible / Ollama (Local)");
+    let oai_compat_row = row_of(&lines, "OpenAI-Compatible / Ollama (Local)");
     let base_url_row = oai_compat_row + 3;
     assert!(
         lines[base_url_row].contains("Base URL: http://localhost:11434/v1"),
@@ -1552,8 +1786,8 @@ fn settings_view_edit_modal_names_the_field_and_shows_the_buffer() {
         text.contains("<Enter> Confirm  |  <Ctrl+v> Paste  |  <Ctrl+w> Rubout  |  <Esc> Cancel"),
         "{text}"
     );
-    // The modal is drawn over the cards, which stay visible around it.
-    assert!(text.contains("1. Anthropic (Claude)"), "{text}");
+    // The modal is drawn over the lists, which stay visible around it.
+    assert!(text.contains("Anthropic (Claude)"), "{text}");
 
     state.cancel_editing();
     state.selected_field = SettingField::Timeout;
@@ -1591,47 +1825,6 @@ fn settings_view_edit_modal_names_the_field_and_shows_the_buffer() {
     assert!(
         text.contains("Edit Provider for OpenAI-Compatible"),
         "{text}"
-    );
-}
-
-#[test]
-fn settings_view_narrow_terminal_still_shows_the_header_and_first_cards() {
-    let _env = common::env::lock();
-    let state = settings_state();
-    // 19 rows leave 9 for the provider cards (the description, a one-line
-    // Agent card and the hints take the rest). They are drawn in order at
-    // their natural height and cut off at the bottom: the first in full, the
-    // second down to its API key line, the third and fourth not at all.
-    let text = render_settings(60, 19, &state);
-    assert!(text.contains("SRElens AI & Assistant Settings"), "{text}");
-    assert!(
-        text.contains("Active AI Provider: ● Anthropic (Claude)"),
-        "{text}"
-    );
-    assert!(text.contains("Agent: ● srelens"), "{text}");
-    assert!(
-        text.contains("● 1. Anthropic (Claude)  [ACTIVE DEFAULT]"),
-        "{text}"
-    );
-    assert!(text.contains("API Key: no key set"), "{text}");
-    assert!(text.contains("○ 2. OpenAI (GPT-4o)"), "{text}");
-    assert!(!text.contains("3. Google Gemini"), "{text}");
-}
-
-#[test]
-fn a_provider_card_too_short_to_show_its_name_is_not_drawn_as_a_bare_frame() {
-    let _env = common::env::lock();
-    let state = settings_state();
-    // 17 rows leave 7 for the providers: the first takes 5 and the 2 left
-    // are not enough for a box with a name in it.
-    let lines = common::render_lines(100, 17, |f| render_settings_view(f, f.area(), &state));
-    let text = lines.join("\n");
-    assert!(text.contains("1. Anthropic (Claude)"), "{text}");
-    assert!(!text.contains("2. OpenAI"), "{text}");
-    let frames = lines.iter().filter(|l| l.contains('┌')).count();
-    assert_eq!(
-        frames, 3,
-        "the view, the Agent card and one provider: {text}"
     );
 }
 
