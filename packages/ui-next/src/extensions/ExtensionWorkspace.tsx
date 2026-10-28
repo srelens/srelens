@@ -2,7 +2,7 @@ import { ExtensionLogo } from "./ExtensionLogo";
 import { ExtensionRequirements } from "./ExtensionRequirements";
 import { AgeCell } from "../lib/ageCell";
 import { useNamespaceOptions } from "@srelens/core/react";
-import { Fragment, useContext, useEffect, useState } from "react";
+import { Fragment, useEffect, useState } from "react";
 import {
   loadKubeconfigFiles,
   onExtensionResourceChanged,
@@ -17,7 +17,7 @@ import {
 import { AppCards } from "./DashboardCards";
 import { plainText } from "./displayText";
 import { STATUS_WORD } from "./StatusBadge";
-import { ExtensionControls } from "./ExtensionControls";
+import { Button, Combobox } from "@srelens/ui-kit";
 import { ErrorNotice, ExtensionResults } from "./ExtensionResults";
 import { useResource } from "../lib/useResource";
 import { LiveNotice, LiveReaders, LiveStatus, useLiveReaders } from "./liveReaders";
@@ -108,7 +108,6 @@ function Summary({
   refresh: number;
   onPage(id: string): void;
 }) {
-  const { Button } = useContext(ExtensionControls);
   const data = useResource(
     () =>
       readExtension(
@@ -359,7 +358,6 @@ export function ExtensionWorkspace({
   /** On a card's target: the picker chose another namespace, whose plain page this is not. */
   onLeaveCard?(namespace: string): void;
 }) {
-  const { Button, Combobox } = useContext(ExtensionControls);
   const [localPage, setLocalPage] = useState(page.id);
   const [localCard,setLocalCard] = useState<{id:string;namespace:string}>();
   const card = routeCard ?? localCard?.id;

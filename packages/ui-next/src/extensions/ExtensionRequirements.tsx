@@ -1,7 +1,7 @@
-import { useContext, type ReactNode } from "react";
+import { type ReactNode } from "react";
 import { listCrds, type ExtensionPage, type InstalledExtension } from "@srelens/core";
 import { useResource } from "../lib/useResource";
-import { ExtensionControls } from "./ExtensionControls";
+import { Button } from "@srelens/ui-kit";
 import { ErrorNotice } from "./ExtensionResults";
 
 /** Installation is global; only the APIs needed by this view are cluster-specific. */
@@ -12,7 +12,6 @@ export function ExtensionRequirements({ plugin, page, context, refresh, children
   refresh: number;
   children: ReactNode;
 }) {
-  const { Button } = useContext(ExtensionControls);
   const capabilities = new Set([page.capability, ...(page.dashboard?.pages ?? []).flatMap(id =>
     plugin.manifest.contributions.pages.filter(p => p.id === id).map(p => p.capability))]);
   // A reader accepts its `versions` in preference order, or the one `arguments.version` it

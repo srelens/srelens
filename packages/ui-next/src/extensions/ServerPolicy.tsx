@@ -1,6 +1,5 @@
-import { useContext } from "react";
 import type { ExtensionPolicy, InstalledExtension } from "@srelens/core";
-import { ExtensionControls } from "./ExtensionControls";
+import { Button } from "@srelens/ui-kit";
 import { plainText } from "./displayText";
 
 const list = (items: string[]) => items.map(plainText).join(", ");
@@ -35,7 +34,6 @@ export function ServerPolicy({ policy, plugins, openCatalog }: {
   plugins: InstalledExtension[];
   openCatalog: () => void;
 }) {
-  const { Button } = useContext(ExtensionControls);
   const missing = policy.requiredApps.filter((id) => !plugins.some((plugin) => plugin.manifest.id === id));
   return (
     <section className="extension-install extension-server-policy" aria-label="Server policy">

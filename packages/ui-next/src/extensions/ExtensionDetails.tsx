@@ -1,4 +1,4 @@
-import { useContext, useState } from "react";
+import { useState } from "react";
 import {
   NETWORK_HTTP,
   clearExtensionSecret,
@@ -9,14 +9,13 @@ import {
   type ExtensionPreviousVersion,
   type InstalledExtension,
 } from "@srelens/core";
-import { CodeEditor } from "@srelens/ui-kit";
+import { Button, CodeEditor, Tabs } from "@srelens/ui-kit";
 import { saveOrDownload } from "../lib/saveOrDownload";
 import { ExtensionClusters } from "./ExtensionClusters";
 import { ExtensionNetwork } from "./ExtensionNetwork";
 import { ExtensionBindings } from "./ExtensionBindings";
 import { describeGrant, installedOn, origin } from "./detailsText";
 import { networkReach, networkRequests, reachText } from "./networkText";
-import { ExtensionControls } from "./ExtensionControls";
 import { ExtensionInspector } from "./ExtensionInspector";
 import { ExtensionLogs } from "./ExtensionLogs";
 import { escapeFormatCharacters } from "./displayText";
@@ -53,7 +52,6 @@ export function ExtensionDetails({
   change(action: ExtensionChange): Promise<boolean>;
   onError(message: string): void;
 }) {
-  const { Button, Tabs } = useContext(ExtensionControls);
   // The Overview first, as Details opened before the Inspector and Logs (#575) existed.
   const [tab, setTab] = useState<DetailsTab>("overview");
   const [resetting, setResetting] = useState(false);

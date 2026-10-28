@@ -1,4 +1,4 @@
-import { useContext, useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   KUBECONFIG_FILES_CHANGED,
   listContexts,
@@ -6,7 +6,7 @@ import {
   type ExtensionChange,
   type InstalledExtension,
 } from "@srelens/core";
-import { ExtensionControls } from "./ExtensionControls";
+import { Button, Combobox } from "@srelens/ui-kit";
 import { ErrorNotice } from "./ExtensionResults";
 import { useResource } from "../lib/useResource";
 
@@ -27,7 +27,6 @@ export function ExtensionClusters({
   busy: boolean;
   change(action: ExtensionChange): Promise<boolean>;
 }) {
-  const { Button, Combobox } = useContext(ExtensionControls);
   const saved = plugin.contexts;
   const [limited, setLimited] = useState(Boolean(saved));
   const [chosen, setChosen] = useState<string[]>(saved ?? []);
