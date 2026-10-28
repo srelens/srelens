@@ -131,7 +131,7 @@ pub fn render_header(f: &mut Frame, area: Rect, props: HeaderProps) {
                     ),
                 ];
                 if Theme::show_live_clock() {
-                    let time_str = chrono::Local::now().format("%H:%M:%S").to_string();
+                    let time_str = chrono::Utc::now().format("%H:%M:%S UTC").to_string();
                     s.push(Span::styled("  │  ", Style::default().fg(Theme::border())));
                     s.push(Span::styled(time_str, Style::default().fg(Theme::cyan())));
                 }
@@ -195,11 +195,12 @@ pub fn render_header(f: &mut Frame, area: Rect, props: HeaderProps) {
         render_stats(f, r0_chunks[2], stats_line);
 
         // Row 1: Active context details & navigation hints
+        let hints_w = if inner.width >= 95 { 38 } else { 0 };
         let r1_chunks = Layout::default()
             .direction(Direction::Horizontal)
             .constraints([
-                Constraint::Min(35),    // Active Ctx / NS / View
-                Constraint::Length(38), // Hints
+                Constraint::Min(35),         // Active Ctx / NS / View
+                Constraint::Length(hints_w), // Hints
             ])
             .split(v_rows[1]);
 
@@ -350,33 +351,35 @@ pub fn render_header(f: &mut Frame, area: Rect, props: HeaderProps) {
         };
         f.render_widget(Paragraph::new(active_line), r1_chunks[0]);
 
-        let hints_line = Line::from(vec![
-            Span::styled(
-                "<:ctx>",
-                Style::default()
-                    .fg(Theme::cyan())
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(" All Ctx  ", Theme::header_label()),
-            Span::styled(
-                "<F1-F10>",
-                Style::default()
-                    .fg(Theme::cyan())
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(" Hotkeys  ", Theme::header_label()),
-            Span::styled(
-                "<?>",
-                Style::default()
-                    .fg(Theme::cyan())
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(" Help", Theme::header_label()),
-        ]);
-        f.render_widget(
-            Paragraph::new(hints_line).alignment(ratatui::layout::Alignment::Right),
-            r1_chunks[1],
-        );
+        if hints_w > 0 {
+            let hints_line = Line::from(vec![
+                Span::styled(
+                    "<:ctx>",
+                    Style::default()
+                        .fg(Theme::cyan())
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(" All Ctx  ", Theme::header_label()),
+                Span::styled(
+                    "<F1-F10>",
+                    Style::default()
+                        .fg(Theme::cyan())
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(" Hotkeys  ", Theme::header_label()),
+                Span::styled(
+                    "<?>",
+                    Style::default()
+                        .fg(Theme::cyan())
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(" Help", Theme::header_label()),
+            ]);
+            f.render_widget(
+                Paragraph::new(hints_line).alignment(ratatui::layout::Alignment::Right),
+                r1_chunks[1],
+            );
+        }
     } else {
         // Fallback for compact single-row header
         let stats_line = build_stats_line(&props);
@@ -563,10 +566,15 @@ pub fn build_stats_line(props: &HeaderProps) -> Line<'static> {
             Line::from(spans)
         }
         crate::theme::HeaderStyle::NocDeck => {
+            let conn_status = if props.is_connected {
+                "ONLINE"
+            } else {
+                "OFFLINE"
+            };
             let mut spans = vec![
                 Span::styled(format!("{} ", bullet), Style::default().fg(status_color)),
                 Span::styled(
-                    format!("ONLINE // {}  │  ", version_clean),
+                    format!("{} // {}  │  ", conn_status, version_clean),
                     Theme::header_label(),
                 ),
                 Span::styled("NODES: ", Theme::header_label()),

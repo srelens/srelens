@@ -559,22 +559,7 @@ pub fn render_statusbar(f: &mut Frame, area: Rect, props: StatusBarProps) {
 
             match Theme::status_style() {
                 crate::theme::StatusStyle::FunctionKeys => {
-                    let fkey_hints: &[(&str, &str)] = if props.custom_hints.is_none() {
-                        &[
-                            ("1", "Help"),
-                            ("2", "Scope"),
-                            ("3", "Logs"),
-                            ("4", "Diff"),
-                            ("5", "Refr"),
-                            ("7", "Find"),
-                            ("8", "Del"),
-                            ("10", "Quit"),
-                        ]
-                    } else {
-                        hints
-                    };
-
-                    for (i, (key, desc)) in fkey_hints.iter().enumerate() {
+                    for (i, (key, desc)) in hints.iter().enumerate() {
                         if i > 0 {
                             spans.push(Span::raw(" "));
                         }
@@ -587,7 +572,7 @@ pub fn render_statusbar(f: &mut Frame, area: Rect, props: StatusBarProps) {
                                 .add_modifier(Modifier::BOLD),
                         ));
                         spans.push(Span::styled(
-                            format!("{:<6}", desc),
+                            format!(" {} ", desc),
                             Style::default()
                                 .fg(Theme::fg())
                                 .add_modifier(Modifier::BOLD),

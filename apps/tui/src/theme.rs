@@ -538,7 +538,7 @@ pub static ALL_THEMES: &[ThemePalette] = &[
         id: ThemeId::TurboVision,
         name: "turbo-vision",
         display_name: "Turbo Vision (Norton)",
-        description: "Borland C++ & Norton classic — double frames, cobalt blue, F-key action bar",
+        description: "Borland C++ & Norton classic — double frames, cobalt blue, action buttons",
         is_light: false,
         bg: Color::Reset,
         fg: Color::Rgb(255, 255, 255),
