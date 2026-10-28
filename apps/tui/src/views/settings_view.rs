@@ -846,6 +846,22 @@ fn list_lines(state: &SettingsViewState, width: usize) -> (Vec<Line<'static>>, R
     (lines, focus)
 }
 
+/// Key hints, each its keys in their colour and what they do.
+fn hint_line(hints: &[(&'static str, Color, &'static str)]) -> Line<'static> {
+    let mut spans = Vec::new();
+    for (i, &(keys, color, does)) in hints.iter().enumerate() {
+        if i > 0 {
+            spans.push(Span::raw("  "));
+        }
+        spans.push(Span::styled(
+            keys,
+            Style::default().fg(color).add_modifier(Modifier::BOLD),
+        ));
+        spans.push(Span::styled(format!(" {does}"), Theme::header_label()));
+    }
+    Line::from(spans)
+}
+
 pub fn render_settings_view(f: &mut Frame, area: Rect, state: &SettingsViewState) {
     let block = Block::default()
         .borders(Borders::ALL)
@@ -878,54 +894,24 @@ pub fn render_settings_view(f: &mut Frame, area: Rect, state: &SettingsViewState
         chunks[0],
     );
 
-    let hints_line = Line::from(vec![
-        Span::styled(
-            "[↑/↓/j/k]",
-            Style::default()
-                .fg(Theme::YELLOW)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(" Row  ", Theme::header_label()),
-        Span::styled(
-            "[Tab/←/→]",
-            Style::default()
-                .fg(Theme::YELLOW)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(" Field  ", Theme::header_label()),
-        Span::styled(
-            "[Space]",
-            Style::default()
-                .fg(Theme::GREEN)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(" Use  ", Theme::header_label()),
-        Span::styled(
-            "[e/Enter]",
-            Style::default()
-                .fg(Theme::CYAN)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(" Edit  ", Theme::header_label()),
-        Span::styled(
-            "[s]",
-            Style::default()
-                .fg(Theme::ACCENT)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(" Save  ", Theme::header_label()),
-        Span::styled(
-            "[Esc/q]",
-            Style::default()
-                .fg(Theme::YELLOW)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(" Back", Theme::header_label()),
-    ]);
+    // The key hints on one line, or split in two between hints, never inside
+    // one, when the view is too narrow for them.
+    let hints = [
+        ("[↑/↓/j/k]", Theme::YELLOW, "Row"),
+        ("[Tab/←/→]", Theme::YELLOW, "Field"),
+        ("[Space]", Theme::GREEN, "Use"),
+        ("[e/Enter]", Theme::CYAN, "Edit"),
+        ("[s]", Theme::ACCENT, "Save"),
+        ("[Esc/q]", Theme::YELLOW, "Back"),
+    ];
+    let one_line = hint_line(&hints);
+    let hint_lines = if one_line.width() <= usize::from(chunks[1].width) {
+        vec![one_line]
+    } else {
+        vec![hint_line(&hints[..3]), hint_line(&hints[3..])]
+    };
     f.render_widget(
-        Paragraph::new(hints_line)
-            .wrap(Wrap { trim: true })
-            .alignment(Alignment::Center),
+        Paragraph::new(hint_lines).alignment(Alignment::Center),
         chunks[1],
     );
 
