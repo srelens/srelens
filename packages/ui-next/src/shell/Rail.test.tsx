@@ -208,7 +208,7 @@ describe("Rail", () => {
     await pick("prod-eu", "Disconnect");
     expect(currentWorkspace().clusters).toContain("prod-eu");
     expect(currentWorkspace().pausedClusters).toEqual(["prod-eu"]);
-    expect(screen.getByRole("button", { name: "prod-eu, Paused" })).toBeDefined();
+    expect(screen.getByRole("button", { name: "prod-eu, Paused" }).querySelector('[data-slot="paused"]')).not.toBeNull();
     const menu = await openMenu("prod-eu", "prod-eu, Paused");
     expect(within(menu).getByRole("menuitem", { name: "Reconnect" })).toBeDefined();
   });

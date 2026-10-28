@@ -142,6 +142,30 @@ describe("ClusterRail state", () => {
     expect(container.querySelector("[data-unavailable='true']")).not.toBeNull();
   });
 
+  it("says a paused cluster is paused with a glyph, not by fading it further", () => {
+    const { container } = setup({
+      items: [
+        { id: "prod-eu", name: "prod-eu", mark: <span>PE</span>, unavailable: "Paused", paused: true },
+        { id: "staging", name: "staging", mark: <span>ST</span>, unavailable: "Disconnected" },
+      ],
+    });
+    const glyphs = container.querySelectorAll('[data-slot="paused"]');
+    expect(glyphs).toHaveLength(1);
+    expect(chip("prod-eu, Paused").contains(glyphs[0])).toBe(true);
+    // The word is already in the name; the glyph is a picture of it.
+    expect(glyphs[0].getAttribute("aria-hidden")).toBe("true");
+  });
+
+  it("draws its edge in the strong rule, so the rail and the sidebar do not run together", () => {
+    setup();
+    expect(screen.getByRole("navigation").className).toContain("border-rule-strong");
+  });
+
+  it("outlines the add tile at a control's contrast", () => {
+    setup({ onAdd: () => {}, addLabel: "Add a cluster" });
+    expect(screen.getByRole("button", { name: "Add a cluster" }).className).toContain("border-control-line");
+  });
+
   it("rules off between groups, but not before the first", () => {
     const { container } = setup();
     // prod-eu/prod-us share a group; staging starts a new one.
