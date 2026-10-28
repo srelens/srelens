@@ -71,19 +71,22 @@ async fn journey_d1_drag_above_top_boundary_scrolls_up_and_moved_implicit_releas
     let scrolled = app.assistant_state.effective_scroll();
     assert!(scrolled < initial_scroll);
 
-    // Terminal drops Up event outside window and sends Moved instead
-    app.handle_mouse(mouse(MouseEventKind::Moved, vp.x + 5, 0))
+    // Terminal drops Up event outside window and sends Moved as pointer re-enters at row vp.y + 4
+    app.handle_mouse(mouse(MouseEventKind::Moved, vp.x + 5, vp.y + 4))
         .await;
 
     // Selection finished, drag_scroll cleared, toast set
     assert!(!app.assistant_state.is_selecting);
     assert_eq!(app.assistant_state.drag_scroll, None);
     assert_eq!(toast(&app), "✓ Copied selection to clipboard");
+    // Verify selection end was preserved at the drag endpoint, not overwritten by Moved row
+    let sel = app.assistant_state.selection.as_ref().unwrap();
+    assert_eq!(sel.end.line, scrolled);
 }
 
 /// D2: Selection Normalization.
 /// Dragging backward (bottom-to-top, right-to-left) normalizes start/end
-/// bounds so copied text maintains forward reading order.
+/// bounds so copied text exactly equals forward selection over the same coordinates.
 #[tokio::test]
 async fn journey_d2_reverse_selection_preserves_normalized_extraction_order() {
     let _settings = common::env::isolate_settings();
@@ -92,9 +95,21 @@ async fn journey_d2_reverse_selection_preserves_normalized_extraction_order() {
     render_app(&mut app, 80, 24);
     let vp = app.assistant_state.last_viewport_rect.get();
 
-    // Drag from bottom-right towards top-left (reverse)
     let start_row = vp.y + 6;
     let end_row = vp.y + 2;
+
+    // Forward selection
+    app.handle_mouse(click(vp.x + 5, end_row)).await;
+    app.handle_mouse(mouse(
+        MouseEventKind::Drag(MouseButton::Left),
+        vp.x + 20,
+        start_row,
+    ))
+    .await;
+    let forward_text = app.assistant_state.get_selected_text().unwrap();
+    app.assistant_state.clear_selection();
+
+    // Reverse selection across same coordinates
     app.handle_mouse(click(vp.x + 20, start_row)).await;
     app.handle_mouse(mouse(
         MouseEventKind::Drag(MouseButton::Left),
@@ -110,11 +125,9 @@ async fn journey_d2_reverse_selection_preserves_normalized_extraction_order() {
     .await;
 
     assert_eq!(toast(&app), "✓ Copied selection to clipboard");
-    let sel_text = app.assistant_state.get_selected_text();
-    assert!(sel_text.is_some());
-    let text = sel_text.unwrap();
-    let lines: Vec<&str> = text.lines().collect();
-    assert!(lines.len() >= 2);
+    let reverse_text = app.assistant_state.get_selected_text().unwrap();
+    assert_eq!(reverse_text, forward_text);
+    assert!(reverse_text.contains("Message line"));
 }
 
 /// D3: Temporal & Stationary Hold Ramp / Streaming stability.
@@ -164,7 +177,7 @@ async fn journey_d3_stationary_hold_acceleration_ramp_and_streaming_stability() 
 }
 
 /// D4: Scale Extremes & Time Budget.
-/// 1,000-line history rendered and processed through 20 drag + tick cycles in <50ms.
+/// 1,000-line history rendered and processed through 10 rendered drag + tick cycles in <200ms.
 #[tokio::test]
 async fn journey_d4_scale_extreme_and_time_budget_1000_lines() {
     let _settings = common::env::isolate_settings();
@@ -176,21 +189,57 @@ async fn journey_d4_scale_extreme_and_time_budget_1000_lines() {
     let start = std::time::Instant::now();
     let click_row = vp.y + vp.height.saturating_sub(2);
     app.handle_mouse(click(vp.x + 5, click_row)).await;
-    for _ in 0..20 {
+    for _ in 0..10 {
         app.handle_mouse(mouse(MouseEventKind::Drag(MouseButton::Left), vp.x + 5, 0))
             .await;
         app.handle_tick();
+        render_app(&mut app, 80, 24);
     }
     app.handle_mouse(mouse(MouseEventKind::Up(MouseButton::Left), vp.x + 5, 0))
         .await;
     let elapsed = start.elapsed();
 
     assert!(
-        elapsed < std::time::Duration::from_millis(50),
+        elapsed < std::time::Duration::from_millis(200),
         "elapsed was {:?}",
         elapsed
     );
     assert_eq!(toast(&app), "✓ Copied selection to clipboard");
+}
+
+/// D5: State Transitions & View Ownership.
+/// Tabbing or navigating away from Assistant cancels active drag-scrolling
+/// and mouse events in other views clear pending selections.
+#[tokio::test]
+async fn journey_d5_leaving_assistant_cancels_hidden_drag_scroll() {
+    let _settings = common::env::isolate_settings();
+    let (mut app, _rx) = common::app().await;
+    let original_view = std::mem::replace(&mut app.active_view, ActiveView::Assistant);
+    seed_chat_messages(&mut app, 40);
+    render_app(&mut app, 80, 24);
+    let vp = app.assistant_state.last_viewport_rect.get();
+
+    // Start drag in Assistant to activate Up zone
+    let click_row = vp.y + vp.height.saturating_sub(2);
+    app.handle_mouse(click(vp.x + 5, click_row)).await;
+    app.handle_mouse(mouse(MouseEventKind::Drag(MouseButton::Left), vp.x + 5, 0))
+        .await;
+    assert_eq!(
+        app.assistant_state.drag_scroll,
+        Some(DragScrollZone::Up { ticks: 0 })
+    );
+
+    // Switch view (e.g. user pressed Tab / Esc to return to previous view)
+    app.active_view = original_view;
+
+    // Ticks in another view cancel the hidden drag_scroll
+    app.handle_tick();
+    assert_eq!(app.assistant_state.drag_scroll, None);
+
+    // Mouse events in another view clear the dangling selection
+    app.handle_mouse(click(10, 10)).await;
+    assert!(!app.assistant_state.is_selecting);
+    assert_eq!(app.assistant_state.selection, None);
 }
 
 /// D5: State Transitions & Tool Chips.

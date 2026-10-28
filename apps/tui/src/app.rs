@@ -695,7 +695,17 @@ impl App {
     }
 
     pub fn handle_tick(&mut self) {
-        self.assistant_state.tick();
+        if matches!(self.active_view, ActiveView::Assistant) {
+            self.assistant_state.tick();
+        } else {
+            // Cancel active drag-scroll if Assistant lost input focus
+            if self.assistant_state.drag_scroll.is_some() {
+                self.assistant_state.drag_scroll = None;
+            }
+            if self.assistant_state.is_busy {
+                self.assistant_state.spinner_frame = (self.assistant_state.spinner_frame + 1) % 10;
+            }
+        }
         self.consents.prune_closed();
 
         // Clear expired toasts (auto-dismiss after 3s)
@@ -8870,9 +8880,10 @@ impl App {
                 }
             }
 
-            // Implicit release if mouse moved without buttons pressed while selecting
+            // Implicit release if mouse moved without buttons pressed while selecting:
+            // finalize at the last recorded selection endpoint rather than overwriting with hover coordinates.
             if mouse.kind == MouseEventKind::Moved && self.assistant_state.is_selecting {
-                if let Some(text) = self.assistant_state.mouse_up(mouse.row, mouse.column) {
+                if let Some(text) = self.assistant_state.finish_implicit_release() {
                     self.copy_selection_and_toast(text);
                 }
                 return;
@@ -8903,6 +8914,10 @@ impl App {
             } else if matches!(mouse.kind, MouseEventKind::Down(_)) {
                 self.assistant_state.clear_selection();
             }
+        } else if self.assistant_state.is_selecting {
+            // Mouse event arrived in another view while Assistant selection was pending:
+            // cancel active drag-scroll and selection to prevent background drift.
+            self.assistant_state.clear_selection();
         }
 
         if let ActiveView::Yaml(yaml) = &mut self.active_view {

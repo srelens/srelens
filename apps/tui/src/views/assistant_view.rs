@@ -511,6 +511,24 @@ impl AssistantViewState {
             .map(|s| s.trim_end_matches('\n').to_string())
     }
 
+    pub fn finish_implicit_release(&mut self) -> Option<String> {
+        self.drag_scroll = None;
+        if !self.is_selecting {
+            return None;
+        }
+        self.is_selecting = false;
+
+        if let Some(sel) = &self.selection {
+            if sel.start == sel.end {
+                self.selection = None;
+                return None;
+            }
+        }
+
+        self.get_selected_text()
+            .map(|s| s.trim_end_matches('\n').to_string())
+    }
+
     pub fn tick_drag_scroll(&mut self) {
         if !self.is_selecting || self.selection.is_none() {
             self.drag_scroll = None;
