@@ -129,6 +129,14 @@ async fn wait_for(driver: &WebDriver, by: By, secs: u64) -> WebDriverResult<WebE
 /// for a moment — by a dialog on its way out, or a popover's panel — and one
 /// attempt would fail instantly with ElementClickIntercepted; retrying makes
 /// every click "when actually clickable, within the deadline".
+///
+/// One cover never goes on its own: the "Update available" notice, which the
+/// app raises at launch whenever the stable feed is ahead of the build under
+/// test — every branch of `dev` from a stable release until `dev` takes its
+/// version bump. It waits to be dismissed, over the pod peek's action bar
+/// (#998). It says nothing about the change under test, so a click it
+/// intercepts dismisses it. Any other notice still holds the click until the
+/// deadline fails it.
 async fn click(driver: &WebDriver, by: By, secs: u64) -> WebDriverResult<()> {
     let deadline = Instant::now() + Duration::from_secs(secs);
     loop {
@@ -141,10 +149,26 @@ async fn click(driver: &WebDriver, by: By, secs: u64) -> WebDriverResult<()> {
         match attempt {
             Ok(()) => return Ok(()),
             Err(e) if Instant::now() >= deadline => return Err(e),
+            Err(WebDriverError::ElementClickIntercepted(_)) => {
+                if let Ok(close) = driver
+                    .query(By::XPath(UPDATE_NOTICE_DISMISS.to_string()))
+                    .nowait()
+                    .first()
+                    .await
+                {
+                    close.click().await.ok();
+                }
+                tokio::time::sleep(Duration::from_millis(500)).await
+            }
             Err(_) => tokio::time::sleep(Duration::from_millis(500)).await,
         }
     }
 }
+
+/// The window's notice (`Window.tsx`'s `SurfaceToast`) while it shows the
+/// update offer, and only then: its dismiss button.
+const UPDATE_NOTICE_DISMISS: &str =
+    "//*[@role='status'][.//*[normalize-space()='Update available']]//button[@aria-label='Dismiss notice']";
 
 /// Click the element at `target` (an XPath) until `proof` appears, within
 /// `secs`. A WebDriver click can be accepted and still change nothing — on a
