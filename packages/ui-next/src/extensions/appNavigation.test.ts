@@ -14,18 +14,29 @@ const app = {
 
 it("opens executable operations on the cluster and installed revision they belong to", () => {
   const navigation = appNavigation([app], "config#a/b");
-  expect(navigation?.children?.[0].label).toBe("Trivy");
-  expect(navigation?.children?.[0].children?.map(({ id, label }) => ({ id, label }))).toEqual([
+  expect(navigation.map(({ id, label }) => ({ id, label }))).toEqual([{ id: "extension:org.srelens.trivy", label: "Trivy" }]);
+  expect(navigation[0].children?.map(({ id, label }) => ({ id, label }))).toEqual([
     { id: "route:/extension-operation-contexts/config%23a%2Fb/org.srelens.trivy/3/source-status", label: "Overview" },
     { id: "route:/extension-operation-contexts/config%23a%2Fb/org.srelens.trivy/3/list-images", label: "Images" },
   ]);
-  expect(appNavigation([{ ...app, enabled: false }], "config#a/b")).toBeNull();
-  expect(appNavigation([{ ...app, contexts: ["other"] }], "config#a/b")).toBeNull();
+  expect(appNavigation([{ ...app, enabled: false }], "config#a/b")).toEqual([]);
+  expect(appNavigation([{ ...app, contexts: ["other"] }], "config#a/b")).toEqual([]);
 });
 
 it("omits an app whose only operations are hidden", () => {
   const hidden = structuredClone(app);
   hidden.manifest.contributions.pages = [];
   hidden.manifest.sidecar!.operations = [{name:"findings",title:"Findings",view:{hidden:true}}];
-  expect(appNavigation([hidden], "config#demo")).toBeNull();
+  expect(appNavigation([hidden], "config#demo")).toEqual([]);
+});
+
+/** #1001: an app with one place to go is a row, not a heading with one row under it. */
+it("draws an app with one destination as a leaf, named after the app", () => {
+  const single = structuredClone(app);
+  single.manifest.sidecar!.operations = [{ name: "list-images", title: "Images" }];
+  const [entry] = appNavigation([single], "config#a/b");
+  expect(entry.children).toBeUndefined();
+  expect(entry.id).toBe("route:/extension-operation-contexts/config%23a%2Fb/org.srelens.trivy/3/list-images");
+  expect(entry.label).toBe("Trivy");
+  expect(entry.icon).toBeTruthy();
 });

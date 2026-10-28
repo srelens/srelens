@@ -1,7 +1,8 @@
 import { describe, it, expect } from "vitest";
-import { RESOURCE_LABELS, type CrdRef } from "@srelens/core";
+import type { CrdRef } from "@srelens/core";
+import { Icons } from "./icons";
 import type { ResourceNode } from "@srelens/ui-kit";
-import { crdNodes, INVESTIGATE, kindNodes, NAV_GROUPS, routeForNode } from "./tree";
+import { crdNodes, kindNodes, NAV_GROUPS, navLabel, navNodes, routeForNode } from "./tree";
 
 const labels = (nodes: ResourceNode[] | undefined) => (nodes ?? []).map((n) => n.label);
 const ids = (nodes: ResourceNode[] | undefined) => (nodes ?? []).map((n) => n.id);
@@ -19,23 +20,29 @@ const CERTS = crd("certificates.cert-manager.io", "cert-manager.io", "Certificat
 const ISSUERS = crd("issuers.cert-manager.io", "cert-manager.io", "Issuer");
 const ARGO = crd("applications.argoproj.io", "argoproj.io", "Application");
 
+describe("navLabel", () => {
+  it("puts core's Title Case labels in sentence case", () => {
+    expect(navLabel("Port Forwards")).toBe("Port forwards");
+    expect(navLabel("Cluster Role Bindings")).toBe("Cluster role bindings");
+    expect(navLabel("Mutating Webhook Configs")).toBe("Mutating webhook configs");
+  });
+
+  it("keeps a Kubernetes kind's own capitals", () => {
+    expect(navLabel("ConfigMaps")).toBe("ConfigMaps");
+    expect(navLabel("StatefulSets")).toBe("StatefulSets");
+    expect(navLabel("Custom resources")).toBe("Custom resources");
+  });
+});
+
 describe("kindNodes", () => {
-  it("is the six groups, in order", () => {
-    expect(labels(kindNodes())).toEqual(["Cluster", "Workloads", "Config", "Network", "Storage", "Access control"]);
+  it("is the five resource groups, in order", () => {
+    expect(labels(kindNodes())).toEqual(["Workloads", "Config", "Network", "Storage", "Access control"]);
     expect(ids(kindNodes())).toEqual(NAV_GROUPS.map((g) => g.id));
   });
 
-  it("labels every kind the way core does", () => {
+  it("labels every kind in sentence case, keeping the kinds' own names", () => {
     const workloads = kindNodes().find((n) => n.id === "workloads");
-    expect(labels(workloads?.children)).toEqual([
-      RESOURCE_LABELS.pods,
-      RESOURCE_LABELS.deployments,
-      RESOURCE_LABELS.statefulsets,
-      RESOURCE_LABELS.daemonsets,
-      RESOURCE_LABELS.replicasets,
-      RESOURCE_LABELS.jobs,
-      RESOURCE_LABELS.cronjobs,
-    ]);
+    expect(labels(workloads?.children)).toEqual(["Pods", "Deployments", "StatefulSets", "DaemonSets", "ReplicaSets", "Jobs", "CronJobs"]);
     expect(ids(workloads?.children)).toEqual([
       "kind:pods",
       "kind:deployments",
@@ -45,6 +52,9 @@ describe("kindNodes", () => {
       "kind:jobs",
       "kind:cronjobs",
     ]);
+    const config = kindNodes().find((n) => n.id === "config");
+    expect(labels(config?.children)).toContain("Horizontal pod autoscalers");
+    expect(labels(config?.children)).toContain("ConfigMaps");
   });
 
   it("carries a glyph on every group and every leaf", () => {
@@ -54,28 +64,42 @@ describe("kindNodes", () => {
     }
   });
 
-  it("puts overview, port forwards and helm in the Cluster group as routes, not kinds", () => {
-    const cluster = kindNodes()[0];
-    expect(ids(cluster.children)).toEqual([
-      "route:/overview",
-      "kind:nodes",
-      "kind:namespaces",
-      "kind:events",
-      "route:/forwards",
-      "route:/helm",
-    ]);
-    expect(labels(cluster.children)).toEqual([
-      RESOURCE_LABELS.overview,
-      RESOURCE_LABELS.nodes,
-      RESOURCE_LABELS.namespaces,
-      RESOURCE_LABELS.events,
-      RESOURCE_LABELS.portforwards,
-      RESOURCE_LABELS.helmreleases,
-    ]);
-  });
-
   it("has no group that folds shut to begin with", () => {
     for (const group of kindNodes()) expect(group.defaultExpanded).not.toBe(false);
+  });
+});
+
+describe("navNodes", () => {
+  const app: ResourceNode = { id: "extension:flux", label: "Flux" };
+  const tree = navNodes({ apps: [app], crds: [], agent: true });
+
+  it("arranges the tree in three bands: the cluster, its resources, then apps and tools", () => {
+    expect(ids(tree)).toEqual([
+      "route:/overview", "kind:nodes", "kind:namespaces", "kind:events",
+      "workloads", "config", "network", "storage", "access", "crds",
+      "extension:flux", "route:/helm", "route:/forwards", "route:/topology", "route:/incidents", "route:/agent",
+    ]);
+    expect(tree.map((n) => n.band)).toEqual([
+      ...Array(4).fill("cluster"),
+      ...Array(6).fill("resources"),
+      ...Array(6).fill("tools"),
+    ]);
+    expect(labels(tree.slice(10))).toEqual(["Flux", "Helm releases", "Port forwards", "Topology", "Incidents", "Agent"]);
+  });
+
+  it("has no Home: that is a new tab's start screen, not a place in a cluster", () => {
+    const all = (nodes: ResourceNode[]): ResourceNode[] => nodes.flatMap((n) => [n, ...all(n.children ?? [])]);
+    expect(all(tree).map((n) => routeForNode(n.id, []))).not.toContain("/");
+  });
+
+  it("offers no Agent where the assistant may not act", () => {
+    expect(ids(navNodes({ crds: [], agent: false }))).not.toContain("route:/agent");
+  });
+
+  it("keeps Custom resources shut to begin with, holding what it is given", () => {
+    const crds = navNodes({ crds: crdNodes([CERTS]), agent: false }).find((n) => n.id === "crds");
+    expect(crds?.defaultExpanded).toBe(false);
+    expect(ids(crds?.children)).toEqual(["crdgroup:cert-manager.io"]);
   });
 });
 
@@ -95,6 +119,10 @@ describe("crdNodes", () => {
 
   it("starts every group folded shut — there can be hundreds", () => {
     for (const group of crdNodes([CERTS, ARGO])) expect(group.defaultExpanded).toBe(false);
+  });
+
+  it("gives each custom resource its group's icon, not the fallback", () => {
+    expect(crdNodes([CERTS])[0].children?.[0].icon).toBe(Icons.crds);
   });
 
   it("is empty for no CRDs", () => {
@@ -135,17 +163,6 @@ describe("routeForNode", () => {
   });
 });
 
-describe("INVESTIGATE", () => {
-  it("is the control room, incidents, topology and the agent", () => {
-    expect(INVESTIGATE.map((i) => [i.label, i.route])).toEqual([
-      ["Home", "/"],
-      ["Incidents", "/incidents"],
-      ["Topology", "/topology"],
-      ["Agent", "/agent"],
-    ]);
-  });
-});
-
 /**
  * #402: the sidebar's per-kind counts ride on the nodes. The map is keyed by
  * node id so one lookup serves kinds, CRDs and the forwards route alike, and
@@ -157,7 +174,7 @@ describe("counts on nodes", () => {
     nodes.flatMap((n) => [n, ...(n.children ?? [])]).find((n) => n.id === id);
 
   it("puts a count on the kind it names", () => {
-    const nodes = kindNodes(new Map([["kind:pods", "38"], ["kind:nodes", "0"]]));
+    const nodes = navNodes({ counts: new Map([["kind:pods", "38"], ["kind:nodes", "0"]]), crds: [], agent: false });
     expect(leaf(nodes, "kind:pods")?.count).toBe("38");
     // Zero is an answer — a list that came back empty — and is drawn.
     expect(leaf(nodes, "kind:nodes")?.count).toBe("0");
@@ -177,6 +194,6 @@ describe("counts on nodes", () => {
   it("counts a CRD and the forwards route", () => {
     const crds = crdNodes([CERTS], new Map([["crd:certificates.cert-manager.io", "4"]]));
     expect(leaf(crds, "crd:certificates.cert-manager.io")?.count).toBe("4");
-    expect(leaf(kindNodes(new Map([["route:/forwards", "2"]])), "route:/forwards")?.count).toBe("2");
+    expect(leaf(navNodes({ counts: new Map([["route:/forwards", "2"]]), crds: [], agent: false }), "route:/forwards")?.count).toBe("2");
   });
 });
