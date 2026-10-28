@@ -834,17 +834,19 @@
     padding: 0 0.6rem;
     background: var(--ground-sunk);
     border-bottom: 1px solid var(--rule);
-    font-size: 0.625rem;
+    font-size: var(--text-meta);
     font-weight: 600;
     letter-spacing: 0.07em;
     text-transform: uppercase;
-    color: var(--ink-faint);
+    color: var(--ink-soft);
   }
   .pane-body { flex: 1; min-height: 0; overflow: auto; }
 
   /* --- the fixed rail ---------------------------------------------
      The region beside a main one on almost every screen in the design: a
-     hairline, a small-caps head and a column that scrolls on its own.
+     rule, a small-caps head and a column that scrolls on its own. The edge
+     is --rule-strong, the left side panel's band rule (#1001): at --rule it
+     was about 1.2:1 and the rail ran into the region beside it.
 
      It names NO WIDTH. Four screens want four different ones — events 250,
      custom resources 264, cluster overview 286, logs 272 — which is four
@@ -862,7 +864,7 @@
     flex-shrink: 0;
     min-height: 0;
     background: var(--ground-surface);
-    border-left: 1px solid var(--rule);
+    border-left: 1px solid var(--rule-strong);
   }
   .side-rail-body { flex: 1; min-height: 0; overflow: auto; }
 
@@ -874,9 +876,11 @@
 
      The rule is drawn between siblings, never around them, so the first block
      in a run has no line above it and the last none below — the divider is the
-     thing, not a frame. */
+     thing, not a frame. It is --rule-strong (#1001): a run of closed blocks
+     is nothing but headings and the rules between them, and at --rule they
+     ran together. */
   .section { padding: 0.6rem 0.75rem; }
-  .section + .section { border-top: 1px solid var(--rule); }
+  .section + .section { border-top: 1px solid var(--rule-strong); }
   .section-title { margin-bottom: 0.3rem; }
 
   /* `padded: false` — the content runs to both edges of the surface while the
@@ -898,8 +902,8 @@
   .section[data-band] { padding-top: 0; padding-bottom: 0; }
   .section[data-band] > .section-title { margin-bottom: 0; }
 
-  /* The design's section-head voice (§C.3), recipe verbatim: the same 10px /
-     600 / 0.07em / uppercase / --ink-faint `.pane-head` wears, ON
+  /* The design's section-head voice (§C.3): the same 11px (--text-meta) /
+     600 / 0.07em / uppercase / --ink-soft `.pane-head` wears, ON
      --surface-sunk, WITH A BOTTOM RULE — and, unlike a pane head, 25px and
      sticky within its pane rather than fixed. A band with no tint behind it
      reads flatter than the design; this is what makes it read as a band.
@@ -923,11 +927,11 @@
     height: 25px;
     background: var(--surface-sunk);
     border-bottom: 1px solid var(--rule);
-    font-size: 0.625rem;
+    font-size: var(--text-meta);
     font-weight: 600;
     letter-spacing: 0.07em;
     text-transform: uppercase;
-    color: var(--ink-faint);
+    color: var(--ink-soft);
   }
 
   /* `.tbl thead th` is also sticky at `top: 0` (see `.tbl thead th` above) —
@@ -1573,12 +1577,14 @@
      the base rule above is one-sided, and left alone it would draw the grip's
      border down the far side of the pane. In the same @layer deliberately:
      this codebase declares its cascade layers, and a components rule that
-     landed in `utilities` would win and lose against the wrong things. */
+     landed in `utilities` would win and lose against the wrong things.
+     --rule-strong, like `.side-rail`'s edge: this line is the peek's edge,
+     and a right-hand pane is ruled off the same way whichever it is (#1001). */
   .resize-handle[data-edge="left"] {
     right: auto;
     left: 0;
     border-right: none;
-    border-left: 1px solid var(--rule);
+    border-left: 1px solid var(--rule-strong);
   }
   /* The vertical grip: a pane docked at the bottom of a page (the terminal
      panel, #942) resizes from its top edge, so the rule is drawn there. */

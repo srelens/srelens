@@ -90,3 +90,42 @@ it.each(themes)("gives %s form boundaries enough contrast against their surfaces
   expect(values["control-line"]).toMatch(/^#[\da-fA-F]{6}$/);
   for (const ground of grounds) expect(contrast(values["control-line"], values[ground]), ground).toBeGreaterThanOrEqual(3);
 });
+
+// #1001: the right rail's edge and the rules between the blocks in it, and in
+// the quick-details peek, were --rule: about 1.2:1, a line you had to look for.
+// They take the left side panel's band rule (#1006), which must stay a line
+// you can see on the grounds it divides.
+it("rules off the right rail and the blocks in it in --rule-strong", () => {
+  const kit = readFileSync(join(__dirname, "styles/kit.css"), "utf8");
+  const body = (selector: string) => {
+    const start = kit.indexOf(`${selector} {`);
+    expect(start, selector).toBeGreaterThan(-1);
+    return kit.slice(start, kit.indexOf("}", start));
+  };
+  expect(body(".side-rail")).toContain("border-left: 1px solid var(--rule-strong)");
+  // The peek's own edge: a right-docked pane is ruled off by its grip.
+  expect(body('.resize-handle[data-edge="left"]')).toContain("border-left: 1px solid var(--rule-strong)");
+  expect(body(".section + .section")).toContain("border-top: 1px solid var(--rule-strong)");
+  for (const theme of themes) {
+    for (const accent of accents) {
+      const values = tokens(theme, accent);
+      for (const ground of ["surface", "surface-sunk"]) {
+        expect(contrast(values["rule-strong"], values[ground]), `${theme} ${accent} on ${ground}`).toBeGreaterThanOrEqual(1.3);
+      }
+    }
+  }
+});
+
+// #1001: the small-caps heads (a pane's, the right rail's, a banded list's)
+// were 10px in --ink-faint, the faintest text on screen naming what sits under
+// it. --ink-soft on every ground is pinned for every theme and accent by the
+// suite at the top of this file; the band draws on --surface-sunk.
+it("draws small-caps heads at the metadata size in --ink-soft", () => {
+  const kit = readFileSync(join(__dirname, "styles/kit.css"), "utf8");
+  for (const selector of [".pane-head", ".subhead-caps"]) {
+    const start = kit.indexOf(`${selector} {`);
+    const body = kit.slice(start, kit.indexOf("}", start));
+    expect(body, selector).toContain("font-size: var(--text-meta)");
+    expect(body, selector).toContain("color: var(--ink-soft)");
+  }
+});

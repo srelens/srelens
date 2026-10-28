@@ -173,7 +173,9 @@ export function Inspector({
       className={cx("pane", className)}
       onKeyDown={onKeyDown}
     >
-      <header className="rule-b px-3 py-2">
+      {/* The frame's lines are --rule-strong, the hairlines inside the body
+          --rule (#1001): at one weight the header ran into the first block. */}
+      <header className="border-b border-rule-strong px-3 py-2">
         <div className="flex items-start justify-between gap-2">
           <div className="min-w-0">
             <div className="name-row flex items-center gap-1.5">
@@ -286,7 +288,7 @@ export function Inspector({
       </header>
 
       {tabs.length > 0 && (
-        <div className="rule-b px-2 py-1.5">
+        <div className="border-b border-rule-strong px-2 py-1.5">
           <Tabs
             tabs={tabs}
             active={active!}
@@ -312,7 +314,7 @@ export function Inspector({
       </div>
 
       {filled(footer) && (
-        <footer className="rule-t flex items-center gap-1 px-2 py-1.5">{footer}</footer>
+        <footer className="flex items-center gap-1 border-t border-rule-strong px-2 py-1.5">{footer}</footer>
       )}
     </section>
   );
