@@ -110,7 +110,6 @@ export { Toast, type ToastProps } from "./Toast";
 export { Toolbar, type ToolbarProps } from "./Toolbar";
 export { Tooltip, type TooltipProps } from "./Tooltip";
 export { WorkspaceSwitcher, type WorkspaceSummary, type WorkspaceSwitcherProps } from "./WorkspaceSwitcher";
-export { type ClusterLink, type WorkspaceCluster, WorkspaceTree, type WorkspaceTreeProps } from "./WorkspaceTree";
 export { cx } from "./cx";
 export { loadTone, toneColor, toneWash, type Tone } from "./tone";
 // `COPIED_MS` stays unexported: the gallery test reads every capitalised name

@@ -130,9 +130,8 @@ function tabName(tab: StripTab): string {
  * own recommendation for closable tabs and the only reason the close affordance
  * has a keyboard equivalent at all. The visible close button stays where it is
  * and stays pointer-operable, but out of the tab order at `tabIndex={-1}`. That
- * is the same reckoning `WorkspaceTree` made when it declined `role="tree"` —
- * a tab, like a treeitem, is one focusable node, and three controls do not fit
- * in one — except that here the pattern is worth keeping and the extra control
+ * is because a tab, like a treeitem, is one focusable node, and three controls
+ * do not fit in one: here the pattern is worth keeping, so the extra control
  * is what gives way. Tab reaches the strip and then leaves it; the close is
  * reached by pointer or by Delete, and closing moves the focus to a neighbour
  * rather than dropping it on the body.

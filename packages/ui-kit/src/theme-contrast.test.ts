@@ -106,6 +106,8 @@ it("gives tree rows and Settings' nav one active style", () => {
   const rule = [...kit.matchAll(/([^{}]+)\{([^{}]*)\}/g)].find(([, selectors]) =>
     selectors.includes('.tree-row[data-active="true"]') && selectors.includes('.nav-item[data-active="true"]'));
   expect(rule, "one rule for both").toBeDefined();
+  // The third, WorkspaceTree's ink-and-bar `.tree-cluster`, went with it.
+  expect(kit).not.toContain(".tree-cluster");
   for (const decl of ["background: var(--accent-wash-strong)", "color: var(--ink)", "font-weight: 600", "box-shadow: inset 3px 0 0 var(--accent)"]) {
     expect(rule![2]).toContain(decl);
   }

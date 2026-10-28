@@ -85,13 +85,12 @@ export function filterResourceNodes(nodes: ResourceNode[], query: string): Resou
 }
 
 /**
- * The fold protocol both trees in this pair speak.
+ * The fold protocol a tree speaks.
  *
- * Controlled when `expanded` is given — the workspace tree's folds live in app
- * state, because which clusters are open outlives the component — and self-kept
- * otherwise, which is what a resource tree wants. Either way the caller hears
- * about every toggle, so a self-kept tree can still be persisted. Written once
- * because two half-implementations of the same protocol is how they drift.
+ * Controlled when `expanded` is given — the sidebar's folds live in app state,
+ * because which groups are open outlives the component — and self-kept
+ * otherwise. Either way the caller hears about every toggle, so a self-kept
+ * tree can still be persisted.
  */
 export function useFolds(
   expanded: string[] | undefined,
@@ -152,7 +151,7 @@ function flatten(
  * parent, and Home and End reach the ends. The rows stay `<button>`s underneath
  * the role so Enter and Space keep working without any code of ours. The tree
  * pattern earns itself here because the thing genuinely nests and genuinely
- * folds; its sibling `WorkspaceTree` is a list for the opposite reason.
+ * folds.
  *
  * The larger change is that it no longer knows where anything comes from. The
  * mock read `navTree` from a module, resolved each icon through a name-keyed

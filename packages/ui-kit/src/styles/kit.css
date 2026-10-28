@@ -1107,54 +1107,6 @@
   }
   .focus-back:hover { filter: brightness(0.97); }
 
-  .drill-in {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    width: 15px;
-    height: 15px;
-    flex-shrink: 0;
-    border-radius: 4px;
-    color: var(--ink-faint);
-    opacity: 0;
-  }
-  .tree-cluster:hover .drill-in { opacity: 1; }
-  .drill-in:hover { background: var(--accent-wash); color: var(--accent); }
-
-  .tree-cluster {
-    display: flex;
-    align-items: center;
-    gap: 0.4rem;
-    width: 100%;
-    padding-top: 0.2rem;
-    padding-bottom: 0.2rem;
-    padding-right: 0.5rem;
-    font-size: 0.8125rem;
-    font-weight: 500;
-    color: var(--ink-soft);
-    text-align: left;
-  }
-  .tree-cluster:hover { background: var(--field); }
-  .caret-btn {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    width: 15px;
-    height: 15px;
-    flex-shrink: 0;
-    border-radius: 3px;
-    color: var(--ink-faint);
-  }
-  .caret-btn:hover { background: var(--rule); color: var(--ink); }
-  .tree-cluster[data-active="true"] {
-    background: var(--accent-wash);
-    color: var(--ink);
-    font-weight: 600;
-    box-shadow: inset 2px 0 0 var(--accent);
-  }
-  .tree-cluster[data-off="true"] { opacity: 0.5; }
-  .tree-cluster[data-off="true"]:hover { opacity: 0.85; }
-
   .tree-count {
     font-size: 0.6875rem;
     font-variant-numeric: tabular-nums;
