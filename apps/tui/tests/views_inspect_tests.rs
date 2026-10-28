@@ -1425,11 +1425,9 @@ fn settings_view_lists_each_provider_on_one_row_and_expands_only_the_one_under_t
     assert_eq!(text.matches("API Key:").count(), 1, "{text}");
     let openai = row_of(&lines, "OpenAI (GPT-4o)");
     assert!(lines[openai + 1].contains("API Key: no key set"), "{text}");
-    assert!(
-        lines[openai + 2].contains("Model:   gpt-4o   │   Timeout: 120s"),
-        "{text}"
-    );
-    assert!(lines[openai + 3].contains("● Google Gemini"), "{text}");
+    assert!(lines[openai + 2].contains("Model:   gpt-4o"), "{text}");
+    assert!(lines[openai + 3].contains("Timeout: 120s"), "{text}");
+    assert!(lines[openai + 4].contains("● Google Gemini"), "{text}");
 
     // The providers come first, then the agent CLIs.
     assert!(row_of(&lines, "Providers") < row_of(&lines, "Anthropic (Claude)"));
@@ -1705,9 +1703,10 @@ fn settings_view_highlights_the_focused_field_on_the_selected_row() {
         Theme::YELLOW,
         "focused value is yellow"
     );
-    let timeout_x = col(&lines[model_row], "Timeout:");
+    let timeout_row = openai_row + 3;
+    let timeout_x = col(&lines[timeout_row], "Timeout:");
     assert_eq!(
-        buf[(timeout_x, model_row as u16)].fg,
+        buf[(timeout_x, timeout_row as u16)].fg,
         Theme::DIM,
         "unfocused label stays dim"
     );
@@ -1729,7 +1728,7 @@ fn settings_view_highlights_the_focused_field_on_the_selected_row() {
     s.selected_field = SettingField::Timeout;
     let b = render_buffer(120, 40, |f| render_settings_view(f, f.area(), &s));
     let l = common::render_lines(120, 40, |f| render_settings_view(f, f.area(), &s));
-    let r = row_of(&l, "Anthropic (Claude)") + 2;
+    let r = row_of(&l, "Anthropic (Claude)") + 3;
     let tx = col(&l[r], "Timeout:");
     assert_eq!(b[(tx, r as u16)].fg, Theme::YELLOW);
 
@@ -1753,6 +1752,31 @@ fn settings_view_highlights_the_focused_field_on_the_selected_row() {
     assert_eq!(b[(bx, r as u16)].fg, Theme::YELLOW);
     let vx = col(&l[r], "http://localhost:11434/v1");
     assert_eq!(b[(vx, r as u16)].fg, Theme::YELLOW);
+}
+
+/// A model id that fills its line at 80 columns is cut short; the Timeout
+/// field after it stays in sight, lit when it is the focused one.
+#[test]
+fn a_long_model_id_never_hides_the_timeout_field() {
+    let _env = common::env::lock();
+    let _theme = common::theme::lock();
+    let mut state = settings_state();
+    state
+        .settings
+        .models
+        .insert("anthropic".to_string(), format!("acme/{}", "m".repeat(55)));
+    state.selected_field = SettingField::Timeout;
+    let lines = common::render_lines(80, 40, |f| render_settings_view(f, f.area(), &state));
+    let buf = render_buffer(80, 40, |f| render_settings_view(f, f.area(), &state));
+
+    let r = row_of(&lines, "Timeout: 120s");
+    let tx = col(&lines[r], "Timeout:");
+    assert_eq!(
+        buf[(tx, r as u16)].fg,
+        Theme::YELLOW,
+        "{}",
+        lines.join("\n")
+    );
 }
 
 #[test]

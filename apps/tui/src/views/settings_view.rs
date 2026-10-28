@@ -688,7 +688,8 @@ fn framed(
     out
 }
 
-/// The fields under the provider row the cursor is on.
+/// The fields under the provider row the cursor is on, a line each in Tab's
+/// order, so a value cut short never hides the field after it.
 fn provider_field_lines(state: &SettingsViewState, provider: AiProvider) -> Vec<Line<'static>> {
     let focus = |field| state.selected_field == field;
     let unset = if provider == AiProvider::OpenAiCompatible {
@@ -717,14 +718,6 @@ fn provider_field_lines(state: &SettingsViewState, provider: AiProvider) -> Vec<
                 state.settings.get_model(provider),
                 value_style(focus(SettingField::Model)),
             ),
-            Span::styled(
-                "   │   Timeout: ",
-                label_style(focus(SettingField::Timeout)),
-            ),
-            Span::styled(
-                format!("{}s", state.settings.get_timeout_seconds(provider)),
-                value_style(focus(SettingField::Timeout)),
-            ),
         ]),
     ];
     if provider == AiProvider::OpenAiCompatible {
@@ -736,6 +729,13 @@ fn provider_field_lines(state: &SettingsViewState, provider: AiProvider) -> Vec<
             ),
         ]));
     }
+    lines.push(Line::from(vec![
+        Span::styled("   Timeout: ", label_style(focus(SettingField::Timeout))),
+        Span::styled(
+            format!("{}s", state.settings.get_timeout_seconds(provider)),
+            value_style(focus(SettingField::Timeout)),
+        ),
+    ]));
     lines
 }
 
