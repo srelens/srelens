@@ -6,10 +6,12 @@ use ratatui::{
     Frame,
 };
 
+use std::ops::Range;
 use std::path::PathBuf;
 use std::sync::LazyLock;
 
 use srelens_agent::adapter::{valid_model_id, AgentKind, ModelChoice};
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::ai_config::{
     agent_install_url, agent_slug, default_base_url_for_provider, default_model_for_provider,
@@ -117,8 +119,11 @@ pub struct SettingsViewState {
     pub edit_buffer: String,
     pub toast: Option<String>,
     pub picker: Option<ModelPicker>,
-    /// The cursor is on the Agent card above the provider cards.
-    pub agent_card_focused: bool,
+    /// The cursor is on the Agent CLIs list below the providers, on
+    /// [`SettingsViewState::focused_agent`]'s row.
+    pub agents_focused: bool,
+    /// Index into the agent rows: srelens, Claude Code, Codex, Cursor.
+    pub selected_agent_idx: usize,
     /// Where each local agent CLI was found, looked up once when the view
     /// opens; an agent missing here is not installed.
     pub agent_paths: Vec<(AgentKind, PathBuf)>,
@@ -142,7 +147,8 @@ impl SettingsViewState {
             edit_buffer: String::new(),
             toast: None,
             picker: None,
-            agent_card_focused: false,
+            agents_focused: false,
+            selected_agent_idx: 0,
             agent_paths: AGENTS
                 .iter()
                 .filter_map(|&kind| Some((kind, find_agent_in(kind, agent_search)?)))
@@ -218,93 +224,81 @@ impl SettingsViewState {
         ALL_PROVIDERS[self.selected_provider_idx % ALL_PROVIDERS.len()]
     }
 
-    /// Down: the next provider; past the last one, the Agent card; from the
-    /// card, the first provider.
-    pub fn select_next_provider(&mut self) {
+    /// The agent whose row is (or was last) under the cursor.
+    pub fn focused_agent(&self) -> AgentKind {
+        AGENTS[self.selected_agent_idx % AGENTS.len()]
+    }
+
+    /// Down: the next row, the providers then the agents, round.
+    pub fn select_next_row(&mut self) {
+        self.step_row(true);
+    }
+
+    /// Up: the previous row, round.
+    pub fn select_prev_row(&mut self) {
+        self.step_row(false);
+    }
+
+    /// One row down (`forward`) or up. A field the new row also has stays
+    /// focused; one it lacks gives way to the row itself.
+    fn step_row(&mut self, forward: bool) {
         if self.is_editing {
             return;
         }
-        if self.agent_card_focused {
-            self.selected_provider_idx = 0;
-            self.leave_agent_card();
-        } else if self.selected_provider_idx % ALL_PROVIDERS.len() == ALL_PROVIDERS.len() - 1 {
-            self.focus_agent_card();
+        let providers = ALL_PROVIDERS.len();
+        let rows = providers + AGENTS.len();
+        let at = if self.agents_focused {
+            providers + self.selected_agent_idx % AGENTS.len()
         } else {
-            self.selected_provider_idx += 1;
-        }
-    }
-
-    /// Up: the previous provider; above the first one, the Agent card; from
-    /// the card, the last provider.
-    pub fn select_prev_provider(&mut self) {
-        if self.is_editing {
-            return;
-        }
-        if self.agent_card_focused {
-            self.selected_provider_idx = ALL_PROVIDERS.len() - 1;
-            self.leave_agent_card();
-        } else if self
-            .selected_provider_idx
-            .is_multiple_of(ALL_PROVIDERS.len())
-        {
-            self.focus_agent_card();
+            self.selected_provider_idx % providers
+        };
+        let next = (if forward { at + 1 } else { at + rows - 1 }) % rows;
+        self.agents_focused = next >= providers;
+        if self.agents_focused {
+            self.selected_agent_idx = next - providers;
         } else {
-            self.selected_provider_idx -= 1;
+            self.selected_provider_idx = next;
+        }
+        let fields = self.row_fields();
+        if !fields.contains(&self.selected_field) {
+            self.selected_field = fields[0];
         }
     }
 
-    /// Model is the one field both kinds of card have, so it stays put as the
-    /// cursor crosses; any other field lands on the card's Agent row.
-    fn focus_agent_card(&mut self) {
-        self.agent_card_focused = true;
-        if self.selected_field != SettingField::Model {
-            self.selected_field = SettingField::Agent;
+    /// The focused row's fields, the row itself first.
+    fn row_fields(&self) -> &'static [SettingField] {
+        if self.agents_focused {
+            return agent_fields(self.focused_agent());
         }
-    }
-
-    fn leave_agent_card(&mut self) {
-        self.agent_card_focused = false;
-        if self.selected_field == SettingField::Agent {
-            self.selected_field = SettingField::ProviderToggle;
-        }
-    }
-
-    /// Step the Assistant's agent: srelens, Claude Code, Codex, Cursor, round.
-    pub fn cycle_agent(&mut self) -> AgentKind {
-        let at = AGENTS.iter().position(|&a| a == self.settings.agent);
-        let next = AGENTS[(at.unwrap_or(0) + 1) % AGENTS.len()];
-        self.settings.agent = next;
-        if !self.agent_card_fields().contains(&self.selected_field) {
-            self.selected_field = SettingField::Agent;
-        }
-        next
-    }
-
-    /// The Agent card's fields: the agent and its model, and for a local
-    /// agent its turn timeout (after Cursor's own API key). srelens's own
-    /// agent runs under its provider's timeout.
-    fn agent_card_fields(&self) -> &'static [SettingField] {
-        match self.settings.agent {
-            AgentKind::Srelens => &[SettingField::Agent, SettingField::Model],
-            AgentKind::Cursor => &[
-                SettingField::Agent,
-                SettingField::Model,
+        if self.current_provider() == AiProvider::OpenAiCompatible {
+            &[
+                SettingField::ProviderToggle,
                 SettingField::ApiKey,
+                SettingField::Model,
+                SettingField::BaseUrl,
                 SettingField::Timeout,
-            ],
-            AgentKind::Claude | AgentKind::Codex => &[
-                SettingField::Agent,
+            ]
+        } else {
+            &[
+                SettingField::ProviderToggle,
+                SettingField::ApiKey,
                 SettingField::Model,
                 SettingField::Timeout,
-            ],
+            ]
         }
+    }
+
+    /// Make the agent under the cursor the one the Assistant runs.
+    pub fn use_focused_agent(&mut self) -> AgentKind {
+        self.settings.agent = self.focused_agent();
+        self.settings.agent
     }
 
     /// Where an API key being edited is kept: the focused provider's, or on
-    /// the Agent card the active agent's (only Cursor has one).
+    /// an agent's row that agent's (only Cursor has one).
     fn key_slug(&self) -> &'static str {
-        if self.agent_card_focused {
-            agent_slug(self.settings.agent)
+        if self.agents_focused {
+            agent_slug(self.focused_agent())
         } else {
             provider_slug(self.current_provider())
         }
@@ -312,25 +306,28 @@ impl SettingsViewState {
 
     /// What the field being edited belongs to, for the edit box's title.
     fn editing_for(&self) -> &'static str {
-        if self.agent_card_focused {
-            self.settings.agent.label()
+        if self.agents_focused {
+            self.focused_agent().label()
         } else {
             provider_display_name(self.current_provider())
         }
     }
 
-    /// What the Agent card's Model field picks from: the active local agent's
-    /// own list, or the default provider's when srelens answers.
+    /// What an agent row's Model field picks from: that local agent's own
+    /// list, or on srelens's row the default provider's.
     pub fn agent_picker_target(&self) -> PickerTarget {
-        match self.settings.agent {
+        match self.focused_agent() {
             AgentKind::Srelens => PickerTarget::Provider(self.settings.default_provider),
             kind => PickerTarget::Agent(kind),
         }
     }
 
-    /// The next of the card's fields (`forward`) or the previous, round.
-    fn step_agent_card_field(&mut self, forward: bool) {
-        let fields = self.agent_card_fields();
+    /// The next of the row's fields (`forward`) or the previous, round.
+    fn step_field(&mut self, forward: bool) {
+        if self.is_editing {
+            return;
+        }
+        let fields = self.row_fields();
         let n = fields.len();
         let at = fields
             .iter()
@@ -341,49 +338,11 @@ impl SettingsViewState {
     }
 
     pub fn select_next_field(&mut self) {
-        if self.is_editing {
-            return;
-        }
-        if self.agent_card_focused {
-            return self.step_agent_card_field(true);
-        }
-        let is_custom = self.current_provider() == AiProvider::OpenAiCompatible;
-        self.selected_field = match self.selected_field {
-            SettingField::ProviderToggle => SettingField::ApiKey,
-            SettingField::ApiKey => SettingField::Model,
-            SettingField::Model => {
-                if is_custom {
-                    SettingField::BaseUrl
-                } else {
-                    SettingField::Timeout
-                }
-            }
-            SettingField::BaseUrl => SettingField::Timeout,
-            SettingField::Timeout | SettingField::Agent => SettingField::ProviderToggle,
-        };
+        self.step_field(true);
     }
 
     pub fn select_prev_field(&mut self) {
-        if self.is_editing {
-            return;
-        }
-        if self.agent_card_focused {
-            return self.step_agent_card_field(false);
-        }
-        let is_custom = self.current_provider() == AiProvider::OpenAiCompatible;
-        self.selected_field = match self.selected_field {
-            SettingField::ProviderToggle | SettingField::Agent => SettingField::Timeout,
-            SettingField::Timeout => {
-                if is_custom {
-                    SettingField::BaseUrl
-                } else {
-                    SettingField::Model
-                }
-            }
-            SettingField::BaseUrl => SettingField::Model,
-            SettingField::Model => SettingField::ApiKey,
-            SettingField::ApiKey => SettingField::ProviderToggle,
-        };
+        self.step_field(false);
     }
 
     pub fn set_active_provider(&mut self) {
@@ -397,7 +356,7 @@ impl SettingsViewState {
                 self.set_active_provider();
                 return;
             }
-            // The agent is stepped through, not typed.
+            // The agent is picked, not typed.
             SettingField::Agent => return,
             SettingField::ApiKey => self
                 .settings
@@ -407,9 +366,9 @@ impl SettingsViewState {
                 .unwrap_or_default(),
             SettingField::Model => self.settings.get_model(provider),
             SettingField::BaseUrl => self.settings.get_base_url(provider),
-            SettingField::Timeout if self.agent_card_focused => self
+            SettingField::Timeout if self.agents_focused => self
                 .settings
-                .get_agent_timeout_seconds(self.settings.agent)
+                .get_agent_timeout_seconds(self.focused_agent())
                 .to_string(),
             SettingField::Timeout => self.settings.get_timeout_seconds(provider).to_string(),
         };
@@ -448,9 +407,9 @@ impl SettingsViewState {
             SettingField::Timeout => {
                 if let Ok(secs) = val.parse::<u32>() {
                     let secs = secs.clamp(5, 3600);
-                    if self.agent_card_focused {
+                    if self.agents_focused {
                         self.settings
-                            .set_agent_timeout_seconds(self.settings.agent, secs);
+                            .set_agent_timeout_seconds(self.focused_agent(), secs);
                     } else {
                         self.settings.set_timeout_seconds(provider, secs);
                     }
@@ -471,7 +430,7 @@ impl SettingsViewState {
     }
 }
 
-/// The Assistant's agents, in the order Space steps through them.
+/// The Assistant's agents, in the order their rows are listed.
 const AGENTS: [AgentKind; 4] = [
     AgentKind::Srelens,
     AgentKind::Claude,
@@ -479,48 +438,29 @@ const AGENTS: [AgentKind; 4] = [
     AgentKind::Cursor,
 ];
 
-/// How far a status that did not fit beside its agent is indented below it.
-const STATUS_INDENT: &str = "  ";
-
-fn provider_card_rows(provider: AiProvider) -> u16 {
-    // The custom endpoint's card has a Base URL line.
-    if provider == AiProvider::OpenAiCompatible {
-        6
-    } else {
-        5
+/// An agent row's fields: the agent and its model, and for a local agent its
+/// turn timeout (after Cursor's own API key). srelens's own agent runs under
+/// its provider's timeout.
+fn agent_fields(kind: AgentKind) -> &'static [SettingField] {
+    match kind {
+        AgentKind::Srelens => &[SettingField::Agent, SettingField::Model],
+        AgentKind::Cursor => &[
+            SettingField::Agent,
+            SettingField::Model,
+            SettingField::ApiKey,
+            SettingField::Timeout,
+        ],
+        AgentKind::Claude | AgentKind::Codex => &[
+            SettingField::Agent,
+            SettingField::Model,
+            SettingField::Timeout,
+        ],
     }
 }
 
-/// The fewest rows a provider card can have and still say which provider it
-/// is: its borders and its name line.
-const MIN_PROVIDER_CARD_ROWS: u16 = 3;
-
-/// Where the provider cards go in `area`: in order, each at its natural
-/// height, the last one cut short; a card left with fewer than
-/// [`MIN_PROVIDER_CARD_ROWS`] is not drawn rather than drawn as a bare frame.
-/// When they do not all fit, the list starts at the first card that lets the
-/// `selected` one show its name, so the cursor is never off screen.
-fn provider_card_areas(area: Rect, selected: Option<usize>) -> Vec<(usize, Rect)> {
-    let rows = |i: usize| provider_card_rows(ALL_PROVIDERS[i]);
-    let mut first = selected.map_or(0, |s| s % ALL_PROVIDERS.len());
-    let mut room = area.height.saturating_sub(MIN_PROVIDER_CARD_ROWS);
-    while first > 0 && rows(first - 1) <= room {
-        first -= 1;
-        room -= rows(first);
-    }
-    let end = area.y + area.height;
-    let mut y = area.y;
-    let mut areas = Vec::new();
-    for idx in first..ALL_PROVIDERS.len() {
-        let height = rows(idx).min(end - y);
-        if height < MIN_PROVIDER_CARD_ROWS {
-            break;
-        }
-        areas.push((idx, Rect::new(area.x, y, area.width, height)));
-        y += height;
-    }
-    areas
-}
+const PROVIDERS_NOTE: &str = "srelens's own agent talks directly to a provider with your API key.";
+const AGENTS_NOTE: &str =
+    "External coding-agent CLIs the Assistant can run instead of srelens's own agent.";
 
 fn label_style(focused: bool) -> Style {
     if focused {
@@ -536,9 +476,9 @@ fn value_style(focused: bool) -> Style {
     Style::default().fg(if focused { Theme::YELLOW } else { Theme::FG })
 }
 
-/// The active agent's model; while srelens answers, the default provider's.
-fn agent_model(state: &SettingsViewState) -> String {
-    match state.settings.agent {
+/// `kind`'s model; for srelens, the default provider's.
+fn agent_model(state: &SettingsViewState, kind: AgentKind) -> String {
+    match kind {
         AgentKind::Srelens => {
             let provider = state.settings.default_provider;
             format!(
@@ -554,169 +494,372 @@ fn agent_model(state: &SettingsViewState) -> String {
     }
 }
 
-/// Whether `kind`'s CLI is installed (`folded`: just the word, else the path)
-/// or where to get it; an active agent that is missing is an error. srelens's
-/// own agent is built in and has no CLI.
-fn agent_status(state: &SettingsViewState, kind: AgentKind, folded: bool) -> Option<Span<'static>> {
-    kind.binary()?;
-    let found = state.agent_paths.iter().find(|(k, _)| *k == kind);
-    Some(match found {
-        Some(_) if folded => Span::styled("installed", Style::default().fg(Theme::DIM)),
-        Some((_, path)) => Span::styled(
-            format!("installed: {}", path.display()),
-            Style::default().fg(Theme::GREEN),
-        ),
-        None => Span::styled(
-            format!("not installed — {}", agent_install_url(kind)),
-            if kind == state.settings.agent {
-                Theme::status_error()
-            } else {
-                Style::default().fg(Theme::DIM)
-            },
-        ),
-    })
+/// Where a key comes from; a blank stored key counts as none.
+enum KeySource<'a> {
+    Stored(&'a str),
+    Env,
+    Unset,
 }
 
-/// `head` and `status` on one line (after `sep`) when `width` allows;
-/// otherwise the status alone on the line below, never clipped beside it.
-fn with_status(
-    head: Vec<Span<'static>>,
-    sep: &'static str,
-    status: Option<Span<'static>>,
-    width: usize,
-) -> Vec<Line<'static>> {
-    let mut line = Line::from(head);
-    let Some(status) = status else {
-        return vec![line];
-    };
-    let sep = Span::styled(sep, Style::default().fg(Theme::DIM));
-    if line.width() + sep.width() + status.width() <= width {
-        line.spans.push(sep);
-        line.spans.push(status);
-        vec![line]
-    } else {
-        vec![line, Line::from(vec![Span::raw(STATUS_INDENT), status])]
+fn key_source<'a>(stored: Option<&'a String>, env_var: &str) -> KeySource<'a> {
+    match stored.filter(|s| !s.trim().is_empty()) {
+        Some(k) => KeySource::Stored(k),
+        None if std::env::var(env_var).is_ok() => KeySource::Env,
+        None => KeySource::Unset,
     }
 }
 
-/// An API key as a settings card shows it: masked when stored, the variable
-/// it comes from when set in the environment, else `unset`.
+/// An API key as a field shows it: masked when stored, the variable it comes
+/// from when set in the environment, else `unset`.
 fn key_display(stored: Option<&String>, env_var: &str, unset: Span<'static>) -> Span<'static> {
-    if let Some(k) = stored.filter(|s| !s.trim().is_empty()) {
-        let masked = if k.len() > 8 {
-            format!("{}••••••••{}", &k[..4], &k[k.len() - 4..])
-        } else {
-            "••••••••".to_string()
-        };
-        Span::styled(
-            format!("{} [stored in config]", masked),
-            Style::default().fg(Theme::GREEN),
-        )
-    } else if std::env::var(env_var).is_ok() {
-        Span::styled(
+    match key_source(stored, env_var) {
+        KeySource::Stored(k) => {
+            let masked = if k.len() > 8 {
+                format!("{}••••••••{}", &k[..4], &k[k.len() - 4..])
+            } else {
+                "••••••••".to_string()
+            };
+            Span::styled(
+                format!("{} [stored in config]", masked),
+                Style::default().fg(Theme::GREEN),
+            )
+        }
+        KeySource::Env => Span::styled(
             format!("[env: {} set]", env_var),
             Style::default().fg(Theme::CYAN),
-        )
-    } else {
-        unset
+        ),
+        KeySource::Unset => unset,
     }
 }
 
-/// The full card: a row per agent with whether its CLI is installed, then
-/// the active agent's model, Cursor's own API key, and a local agent's
-/// timeout.
-fn full_agent_lines(state: &SettingsViewState, width: usize) -> Vec<Line<'static>> {
-    let on_card = state.agent_card_focused;
-    let agent_focus = on_card && state.selected_field == SettingField::Agent;
-    let model_focus = on_card && state.selected_field == SettingField::Model;
-    let key_focus = on_card && state.selected_field == SettingField::ApiKey;
-    let mut lines: Vec<Line<'static>> = AGENTS
-        .iter()
-        .flat_map(|&kind| {
-            let active = kind == state.settings.agent;
-            let radio = if active {
-                Span::styled(
-                    "● ",
-                    Style::default()
-                        .fg(Theme::GREEN)
-                        .add_modifier(Modifier::BOLD),
-                )
-            } else {
-                Span::styled("○ ", Style::default().fg(Theme::DIM))
-            };
-            let name_style = if active {
-                value_style(agent_focus).add_modifier(Modifier::BOLD)
-            } else {
-                Style::default().fg(Theme::FG)
-            };
-            let head = vec![
-                radio,
-                Span::styled(format!("{:<13}", kind.label()), name_style),
-            ];
-            with_status(head, "", agent_status(state, kind, false), width)
-        })
-        .collect();
-    lines.push(Line::from(vec![
-        Span::styled("   Model:   ", label_style(model_focus)),
-        Span::styled(agent_model(state), value_style(model_focus)),
-    ]));
-    if state.settings.agent == AgentKind::Cursor {
-        let unset = Span::styled(
-            "auto (uses logged-in cursor auth or CURSOR_API_KEY)",
-            Style::default().fg(Theme::DIM),
+/// What a provider's row says at its right edge: where its key comes from
+/// and the model it uses, or that it has none.
+fn provider_status(state: &SettingsViewState, provider: AiProvider) -> Span<'static> {
+    let model = state.settings.get_model(provider);
+    let env_var = env_var_for_provider(provider);
+    let stored = state.settings.api_keys.get(provider_slug(provider));
+    let (text, color) = match key_source(stored, env_var) {
+        KeySource::Stored(_) => (format!("key set · {model}"), Theme::GREEN),
+        KeySource::Env => (format!("env {env_var} · {model}"), Theme::CYAN),
+        KeySource::Unset if provider == AiProvider::OpenAiCompatible => {
+            (format!("key optional · {model}"), Theme::DIM)
+        }
+        KeySource::Unset => ("no key".to_string(), Theme::DIM),
+    };
+    Span::styled(text, Style::default().fg(color))
+}
+
+/// What an agent's row says at its right edge: for srelens the provider it
+/// answers through; for a CLI whether it is installed, with its model, or
+/// where to get it (an error for the active agent).
+fn agent_status(state: &SettingsViewState, kind: AgentKind) -> Span<'static> {
+    let dim = Style::default().fg(Theme::DIM);
+    if kind == AgentKind::Srelens {
+        return Span::styled(agent_model(state, kind), dim);
+    }
+    if state.agent_paths.iter().any(|(k, _)| *k == kind) {
+        return Span::styled(
+            format!("installed · {}", agent_model(state, kind)),
+            Style::default().fg(Theme::GREEN),
         );
-        lines.push(Line::from(vec![
-            Span::styled("   API Key: ", label_style(key_focus)),
+    }
+    let style = if kind == state.settings.agent {
+        Theme::status_error()
+    } else {
+        dim
+    };
+    Span::styled(
+        format!("not installed — {}", agent_install_url(kind)),
+        style,
+    )
+}
+
+/// A row's radio and name: filled when `chosen`; the name is yellow while
+/// the cursor is on the row itself rather than one of its fields.
+fn row_head(name: &str, chosen: bool, on_row: bool) -> Vec<Span<'static>> {
+    let radio = if chosen {
+        Span::styled(
+            "● ",
+            Style::default()
+                .fg(Theme::GREEN)
+                .add_modifier(Modifier::BOLD),
+        )
+    } else {
+        Span::styled("○ ", Style::default().fg(Theme::DIM))
+    };
+    let name_style = if on_row {
+        Style::default()
+            .fg(Theme::YELLOW)
+            .add_modifier(Modifier::BOLD)
+    } else if chosen {
+        Style::default().fg(Theme::FG).add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Theme::FG)
+    };
+    vec![radio, Span::styled(name.to_string(), name_style)]
+}
+
+/// The longest start of `s` that fits in `max` columns.
+fn take(s: &str, max: usize) -> String {
+    let mut used = 0;
+    s.chars()
+        .take_while(|c| {
+            used += c.width().unwrap_or(0);
+            used <= max
+        })
+        .collect()
+}
+
+/// `s` in `max` columns, ending in "…" when it had to be cut.
+fn cut(s: &str, max: usize) -> String {
+    if s.width() <= max {
+        s.to_string()
+    } else if max == 0 {
+        String::new()
+    } else {
+        format!("{}…", take(s, max - 1))
+    }
+}
+
+/// `head` at the left of a `width`-wide row and `status` at its right edge,
+/// two columns apart at least; the status is what gets cut short.
+fn list_row(mut head: Vec<Span<'static>>, status: Span<'static>, width: usize) -> Line<'static> {
+    let head_width = Line::from(head.clone()).width();
+    let text = cut(&status.content, width.saturating_sub(head_width + 2));
+    head.push(Span::raw(
+        " ".repeat(width.saturating_sub(head_width + text.width())),
+    ));
+    head.push(Span::styled(text, status.style));
+    Line::from(head)
+}
+
+/// `line` padded to `width` columns, or cut to them with "…".
+fn fit(mut line: Line<'static>, width: usize) -> Line<'static> {
+    if line.width() > width {
+        let mut left = width.saturating_sub(1);
+        let mut spans = Vec::new();
+        for span in line.spans {
+            if span.width() <= left {
+                left -= span.width();
+                spans.push(span);
+            } else {
+                spans.push(Span::styled(
+                    format!("{}…", take(&span.content, left)),
+                    span.style,
+                ));
+                break;
+            }
+        }
+        line = Line::from(spans);
+    }
+    let pad = width.saturating_sub(line.width());
+    line.spans.push(Span::raw(" ".repeat(pad)));
+    line
+}
+
+/// A `width`-wide frame with `title` in its top border round `lines`, each
+/// with a column of space either side; cyan while the cursor is in it.
+fn framed(
+    title: &str,
+    lines: Vec<Line<'static>>,
+    width: usize,
+    focused: bool,
+) -> Vec<Line<'static>> {
+    let border = Style::default().fg(if focused { Theme::CYAN } else { Theme::BORDER });
+    let rule = |n: usize| "─".repeat(n);
+    let mut out = vec![Line::from(vec![
+        Span::styled("┌ ", border),
+        Span::styled(title.to_string(), Theme::header_label()),
+        Span::styled(
+            format!(" {}┐", rule(width.saturating_sub(title.width() + 4))),
+            border,
+        ),
+    ])];
+    out.extend(lines.into_iter().map(|line| {
+        let mut spans = vec![Span::styled("│ ", border)];
+        spans.extend(fit(line, width.saturating_sub(4)).spans);
+        spans.push(Span::styled(" │", border));
+        Line::from(spans)
+    }));
+    out.push(Line::from(Span::styled(
+        format!("└{}┘", rule(width.saturating_sub(2))),
+        border,
+    )));
+    out
+}
+
+/// The fields under the provider row the cursor is on, a line each in Tab's
+/// order, so a value cut short never hides the field after it.
+fn provider_field_lines(state: &SettingsViewState, provider: AiProvider) -> Vec<Line<'static>> {
+    let focus = |field| state.selected_field == field;
+    let unset = if provider == AiProvider::OpenAiCompatible {
+        Span::styled("optional (local Ollama)", Style::default().fg(Theme::DIM))
+    } else {
+        Span::styled(
+            format!(
+                "no key set (press 'e' to set or export {})",
+                env_var_for_provider(provider)
+            ),
+            Style::default().fg(Theme::RED),
+        )
+    };
+    let mut lines = vec![
+        Line::from(vec![
+            Span::styled("   API Key: ", label_style(focus(SettingField::ApiKey))),
             key_display(
-                state.settings.api_keys.get(agent_slug(AgentKind::Cursor)),
+                state.settings.api_keys.get(provider_slug(provider)),
+                env_var_for_provider(provider),
+                unset,
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled("   Model:   ", label_style(focus(SettingField::Model))),
+            Span::styled(
+                state.settings.get_model(provider),
+                value_style(focus(SettingField::Model)),
+            ),
+        ]),
+    ];
+    if provider == AiProvider::OpenAiCompatible {
+        lines.push(Line::from(vec![
+            Span::styled("   Base URL: ", label_style(focus(SettingField::BaseUrl))),
+            Span::styled(
+                state.settings.get_base_url(provider),
+                value_style(focus(SettingField::BaseUrl)),
+            ),
+        ]));
+    }
+    lines.push(Line::from(vec![
+        Span::styled("   Timeout: ", label_style(focus(SettingField::Timeout))),
+        Span::styled(
+            format!("{}s", state.settings.get_timeout_seconds(provider)),
+            value_style(focus(SettingField::Timeout)),
+        ),
+    ]));
+    lines
+}
+
+/// The fields under the agent row the cursor is on, then where its CLI was
+/// found or where to get it.
+fn agent_field_lines(state: &SettingsViewState, kind: AgentKind) -> Vec<Line<'static>> {
+    let focus = |field| state.selected_field == field;
+    let dim = Style::default().fg(Theme::DIM);
+    let mut lines = vec![Line::from(vec![
+        Span::styled("   Model:   ", label_style(focus(SettingField::Model))),
+        Span::styled(
+            agent_model(state, kind),
+            value_style(focus(SettingField::Model)),
+        ),
+    ])];
+    if kind == AgentKind::Cursor {
+        let unset = Span::styled("auto (uses logged-in cursor auth or CURSOR_API_KEY)", dim);
+        lines.push(Line::from(vec![
+            Span::styled("   API Key: ", label_style(focus(SettingField::ApiKey))),
+            key_display(
+                state.settings.api_keys.get(agent_slug(kind)),
                 "CURSOR_API_KEY",
                 unset,
             ),
         ]));
     }
-    if state.settings.agent != AgentKind::Srelens {
-        let timeout_focus = on_card && state.selected_field == SettingField::Timeout;
-        lines.push(Line::from(vec![
-            Span::styled("   Timeout: ", label_style(timeout_focus)),
-            Span::styled(
-                format!(
-                    "{}s",
-                    state
-                        .settings
-                        .get_agent_timeout_seconds(state.settings.agent)
-                ),
-                value_style(timeout_focus),
-            ),
-        ]));
+    if kind == AgentKind::Srelens {
+        return lines;
     }
+    lines.push(Line::from(vec![
+        Span::styled("   Timeout: ", label_style(focus(SettingField::Timeout))),
+        Span::styled(
+            format!("{}s", state.settings.get_agent_timeout_seconds(kind)),
+            value_style(focus(SettingField::Timeout)),
+        ),
+    ]));
+    lines.push(match state.agent_paths.iter().find(|(k, _)| *k == kind) {
+        Some((_, path)) => Line::from(vec![
+            Span::styled("   Path:    ", label_style(false)),
+            Span::styled(path.display().to_string(), dim),
+        ]),
+        None => Line::from(vec![
+            Span::styled("   Install: ", label_style(false)),
+            Span::styled(agent_install_url(kind), dim),
+        ]),
+    });
     lines
 }
 
-/// The card folded: the active agent and its model on one line, with whether
-/// its CLI is installed.
-fn folded_agent_lines(state: &SettingsViewState, width: usize) -> Vec<Line<'static>> {
-    let agent = state.settings.agent;
-    let head = vec![
-        Span::styled("Agent: ", label_style(false)),
-        Span::styled(
-            format!("● {}", agent.label()),
-            value_style(false).add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(" · ", Style::default().fg(Theme::DIM)),
-        Span::styled(agent_model(state), value_style(false)),
-    ];
-    with_status(head, " · ", agent_status(state, agent, true), width)
+/// Both lists, `width` wide: a row per provider, then a row per agent, and
+/// under the row the cursor is on its fields. Also says which lines those
+/// are, for the view to keep in sight.
+fn list_lines(state: &SettingsViewState, width: usize) -> (Vec<Line<'static>>, Range<usize>) {
+    let row_width = width.saturating_sub(4);
+    let dim = Style::default().fg(Theme::DIM);
+    let mut focus = 0..0;
+
+    let mut providers = vec![Line::from(Span::styled(PROVIDERS_NOTE, dim))];
+    for (idx, &provider) in ALL_PROVIDERS.iter().enumerate() {
+        let on_row =
+            !state.agents_focused && state.selected_provider_idx % ALL_PROVIDERS.len() == idx;
+        let is_default = provider == state.settings.default_provider;
+        let mut head = row_head(
+            provider_display_name(provider),
+            is_default,
+            on_row && state.selected_field == SettingField::ProviderToggle,
+        );
+        if is_default {
+            head.push(Span::raw("  "));
+            head.push(Span::styled(
+                "[DEFAULT]",
+                Style::default()
+                    .fg(Theme::GREEN)
+                    .add_modifier(Modifier::BOLD),
+            ));
+        }
+        providers.push(list_row(head, provider_status(state, provider), row_width));
+        if on_row {
+            // + 1 for the frame's top border.
+            let row = providers.len();
+            providers.extend(provider_field_lines(state, provider));
+            focus = row..providers.len() + 1;
+        }
+    }
+    let mut lines = framed("Providers", providers, width, !state.agents_focused);
+
+    let mut agents = vec![Line::from(Span::styled(AGENTS_NOTE, dim))];
+    for (idx, &kind) in AGENTS.iter().enumerate() {
+        let on_row = state.agents_focused && state.selected_agent_idx % AGENTS.len() == idx;
+        let name = if kind == AgentKind::Srelens {
+            "srelens (built-in)"
+        } else {
+            kind.label()
+        };
+        let head = row_head(
+            name,
+            kind == state.settings.agent,
+            on_row && state.selected_field == SettingField::Agent,
+        );
+        agents.push(list_row(head, agent_status(state, kind), row_width));
+        if on_row {
+            let row = lines.len() + agents.len();
+            agents.extend(agent_field_lines(state, kind));
+            focus = row..lines.len() + agents.len() + 1;
+        }
+    }
+    lines.extend(framed("Agent CLIs", agents, width, state.agents_focused));
+    (lines, focus)
 }
 
-/// The Agent card: which agent answers the Assistant, around `lines`.
-fn render_agent_card(f: &mut Frame, area: Rect, lines: Vec<Line<'static>>, focused: bool) {
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(if focused { Theme::CYAN } else { Theme::BORDER }))
-        .title(Span::styled(" Assistant agent ", Theme::header_label()));
-    let inner = block.inner(area);
-    f.render_widget(block, area);
-    f.render_widget(Paragraph::new(lines), inner);
+/// Key hints, each its keys in their colour and what they do.
+fn hint_line(hints: &[(&'static str, Color, &'static str)]) -> Line<'static> {
+    let mut spans = Vec::new();
+    for (i, &(keys, color, does)) in hints.iter().enumerate() {
+        if i > 0 {
+            spans.push(Span::raw("  "));
+        }
+        spans.push(Span::styled(
+            keys,
+            Style::default().fg(color).add_modifier(Modifier::BOLD),
+        ));
+        spans.push(Span::styled(format!(" {does}"), Theme::header_label()));
+    }
+    Line::from(spans)
 }
 
 pub fn render_settings_view(f: &mut Frame, area: Rect, state: &SettingsViewState) {
@@ -731,278 +874,45 @@ pub fn render_settings_view(f: &mut Frame, area: Rect, state: &SettingsViewState
     let inner = block.inner(area);
     f.render_widget(block, area);
 
-    // The Agent card is drawn in full while it has the cursor, or when every
-    // provider card still fits below it. Otherwise it folds into one line (two
-    // when its CLI's status does not fit beside it) and the providers get the
-    // rows that are left.
-    let card_width = usize::from(inner.width.saturating_sub(2));
-    let full_lines = full_agent_lines(state, card_width);
-    let providers_rows: u16 = ALL_PROVIDERS.iter().map(|&p| provider_card_rows(p)).sum();
-    let full_rows = full_lines.len() as u16 + 2;
-    let agent_lines =
-        if state.agent_card_focused || inner.height >= 3 + full_rows + providers_rows + 2 {
-            full_lines
-        } else {
-            folded_agent_lines(state, card_width)
-        };
-    let agent_rows = agent_lines.len() as u16 + 2;
-
-    // The description, the Agent card and the hints keep their rows; the
-    // provider list takes whatever is left, however little.
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(3),          // Top description & instructions
-            Constraint::Length(agent_rows), // Agent card
-            Constraint::Min(0),             // Provider list
-            Constraint::Length(2),          // Bottom key hints
+            Constraint::Min(0),    // The two lists
+            Constraint::Length(2), // Bottom key hints
         ])
         .split(inner);
 
-    // 1. Top Header Description
-    let active_prov_name = provider_display_name(state.settings.default_provider);
-    let desc_lines = vec![
-        Line::from(vec![
-            Span::styled("Active AI Provider: ", Theme::header_label()),
-            Span::styled(
-                format!("● {} ", active_prov_name),
-                Style::default()
-                    .fg(Theme::GREEN)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                format!(
-                    "(model: {})",
-                    state.settings.get_model(state.settings.default_provider)
-                ),
-                Style::default().fg(Theme::CYAN),
-            ),
-        ]),
-        Line::from(vec![Span::styled(
-            "Configure default provider, API keys, models, and timeouts.",
-            Style::default().fg(Theme::DIM),
-        )]),
-    ];
+    // The lists scroll, when they do not fit, just far enough to show the
+    // row under the cursor and its fields.
+    let (lines, focus) = list_lines(state, usize::from(chunks[0].width));
+    let scroll = focus
+        .end
+        .saturating_sub(usize::from(chunks[0].height))
+        .min(focus.start);
     f.render_widget(
-        Paragraph::new(desc_lines).wrap(Wrap { trim: true }),
+        Paragraph::new(lines).scroll((u16::try_from(scroll).unwrap_or(u16::MAX), 0)),
         chunks[0],
     );
 
-    // 2. Agent card
-    render_agent_card(f, chunks[1], agent_lines, state.agent_card_focused);
-
-    // 3. Providers List
-    let selected = (!state.agent_card_focused).then_some(state.selected_provider_idx);
-    for (idx, provider_area) in provider_card_areas(chunks[2], selected) {
-        let provider = ALL_PROVIDERS[idx];
-        let is_selected_provider = selected == Some(idx);
-        let is_active_provider = provider == state.settings.default_provider;
-
-        let border_color = if is_selected_provider {
-            Theme::CYAN
-        } else {
-            Theme::BORDER
-        };
-
-        let card_block = Block::default()
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(border_color));
-
-        let card_inner = card_block.inner(provider_area);
-        f.render_widget(card_block, provider_area);
-
-        // Header line: Radio icon, Name, Active Badge
-        let radio = if is_active_provider { "● " } else { "○ " };
-        let radio_style = if is_active_provider {
-            Style::default()
-                .fg(Theme::GREEN)
-                .add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().fg(Theme::DIM)
-        };
-
-        let title_style =
-            if is_selected_provider && state.selected_field == SettingField::ProviderToggle {
-                Style::default()
-                    .fg(Theme::YELLOW)
-                    .add_modifier(Modifier::BOLD)
-            } else if is_active_provider {
-                Style::default().fg(Theme::FG).add_modifier(Modifier::BOLD)
-            } else {
-                Style::default().fg(Theme::FG)
-            };
-
-        let mut header_spans = vec![
-            Span::styled(radio, radio_style),
-            Span::styled(
-                format!("{}. {}", idx + 1, provider_display_name(provider)),
-                title_style,
-            ),
-        ];
-
-        if is_active_provider {
-            header_spans.push(Span::raw("  "));
-            header_spans.push(Span::styled(
-                "[ACTIVE DEFAULT]",
-                Style::default()
-                    .fg(Theme::GREEN)
-                    .add_modifier(Modifier::BOLD),
-            ));
-        }
-
-        // Field 1: API Key / Auth Display
-        let key_focus = is_selected_provider && state.selected_field == SettingField::ApiKey;
-        let key_label_style = if key_focus {
-            Style::default()
-                .fg(Theme::YELLOW)
-                .add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().fg(Theme::DIM)
-        };
-
-        let unset = if provider == AiProvider::OpenAiCompatible {
-            Span::styled("optional (local Ollama)", Style::default().fg(Theme::DIM))
-        } else {
-            Span::styled(
-                format!(
-                    "no key set (press 'e' to set or export {})",
-                    env_var_for_provider(provider)
-                ),
-                Style::default().fg(Theme::RED),
-            )
-        };
-        let key_value_display = key_display(
-            state.settings.api_keys.get(provider_slug(provider)),
-            env_var_for_provider(provider),
-            unset,
-        );
-
-        // Field 2: Model Display
-        let model_focus = is_selected_provider && state.selected_field == SettingField::Model;
-        let model_label_style = if model_focus {
-            Style::default()
-                .fg(Theme::YELLOW)
-                .add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().fg(Theme::DIM)
-        };
-        let current_model = state.settings.get_model(provider);
-
-        // Field: Timeout Display
-        let timeout_focus = is_selected_provider && state.selected_field == SettingField::Timeout;
-        let timeout_label_style = if timeout_focus {
-            Style::default()
-                .fg(Theme::YELLOW)
-                .add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().fg(Theme::DIM)
-        };
-        let timeout_display = format!("{}s", state.settings.get_timeout_seconds(provider));
-
-        let mut lines = vec![
-            Line::from(header_spans),
-            Line::from(vec![
-                Span::styled("   API Key: ", key_label_style),
-                key_value_display,
-            ]),
-            Line::from(vec![
-                Span::styled("   Model:   ", model_label_style),
-                Span::styled(
-                    current_model,
-                    if model_focus {
-                        Style::default().fg(Theme::YELLOW)
-                    } else {
-                        Style::default().fg(Theme::FG)
-                    },
-                ),
-                Span::styled("   │   Timeout: ", timeout_label_style),
-                Span::styled(
-                    timeout_display,
-                    if timeout_focus {
-                        Style::default().fg(Theme::YELLOW)
-                    } else {
-                        Style::default().fg(Theme::FG)
-                    },
-                ),
-            ]),
-        ];
-
-        // Field 3: Base URL (for OpenAICompatible)
-        if provider == AiProvider::OpenAiCompatible {
-            let url_focus = is_selected_provider && state.selected_field == SettingField::BaseUrl;
-            let url_label_style = if url_focus {
-                Style::default()
-                    .fg(Theme::YELLOW)
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                Style::default().fg(Theme::DIM)
-            };
-            lines.push(Line::from(vec![
-                Span::styled("   Base URL: ", url_label_style),
-                Span::styled(
-                    state.settings.get_base_url(provider),
-                    if url_focus {
-                        Style::default().fg(Theme::YELLOW)
-                    } else {
-                        Style::default().fg(Theme::FG)
-                    },
-                ),
-            ]));
-        }
-
-        f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: true }), card_inner);
-    }
-
-    // 4. Bottom Key Hints
-    let hints_line = Line::from(vec![
-        Span::styled(
-            "[↑/↓/j/k]",
-            Style::default()
-                .fg(Theme::YELLOW)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(" Provider  ", Theme::header_label()),
-        Span::styled(
-            "[Tab/←/→]",
-            Style::default()
-                .fg(Theme::YELLOW)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(" Field  ", Theme::header_label()),
-        Span::styled(
-            "[Space]",
-            Style::default()
-                .fg(Theme::GREEN)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(" Set Active  ", Theme::header_label()),
-        Span::styled(
-            "[e/Enter]",
-            Style::default()
-                .fg(Theme::CYAN)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(" Edit  ", Theme::header_label()),
-        Span::styled(
-            "[s]",
-            Style::default()
-                .fg(Theme::ACCENT)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(" Save to Disk  ", Theme::header_label()),
-        Span::styled(
-            "[Esc/q]",
-            Style::default()
-                .fg(Theme::YELLOW)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(" Back", Theme::header_label()),
-    ]);
+    // The key hints on one line, or split in two between hints, never inside
+    // one, when the view is too narrow for them.
+    let hints = [
+        ("[↑/↓/j/k]", Theme::YELLOW, "Row"),
+        ("[Tab/←/→]", Theme::YELLOW, "Field"),
+        ("[Space]", Theme::GREEN, "Use"),
+        ("[e/Enter]", Theme::CYAN, "Edit"),
+        ("[s]", Theme::ACCENT, "Save"),
+        ("[Esc/q]", Theme::YELLOW, "Back"),
+    ];
+    let one_line = hint_line(&hints);
+    let hint_lines = if one_line.width() <= usize::from(chunks[1].width) {
+        vec![one_line]
+    } else {
+        vec![hint_line(&hints[..3]), hint_line(&hints[3..])]
+    };
     f.render_widget(
-        Paragraph::new(hints_line)
-            .wrap(Wrap { trim: true })
-            .alignment(Alignment::Center),
-        chunks[3],
+        Paragraph::new(hint_lines).alignment(Alignment::Center),
+        chunks[1],
     );
 
     // 5. Modal Edit Input Dialog (when editing)
@@ -1210,7 +1120,8 @@ mod tests {
             edit_buffer: String::new(),
             toast: None,
             picker: None,
-            agent_card_focused: false,
+            agents_focused: false,
+            selected_agent_idx: 0,
             agent_paths: Vec::new(),
         }
     }

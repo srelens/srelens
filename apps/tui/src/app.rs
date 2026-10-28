@@ -6992,24 +6992,24 @@ impl App {
                                 self.switch_view_to_kind(ResourceKind::Pods).await;
                             }
                         }
-                        KeyCode::Char('j') | KeyCode::Down => settings.select_next_provider(),
-                        KeyCode::Char('k') | KeyCode::Up => settings.select_prev_provider(),
+                        KeyCode::Char('j') | KeyCode::Down => settings.select_next_row(),
+                        KeyCode::Char('k') | KeyCode::Up => settings.select_prev_row(),
                         KeyCode::Tab | KeyCode::Right | KeyCode::Char('l') => {
                             settings.select_next_field()
                         }
                         KeyCode::BackTab | KeyCode::Left | KeyCode::Char('h') => {
                             settings.select_prev_field()
                         }
-                        // On the Agent card, Space steps the agent from any of
-                        // its fields; `e`/Enter steps it from the Agent field,
-                        // lists models from the Model field, and edits
-                        // Cursor's API Key like a provider's.
+                        // On an agent's row, Space makes it the Assistant's
+                        // agent from any of its fields; `e`/Enter does from the
+                        // Agent field, lists models from the Model field, and
+                        // edits Cursor's API Key like a provider's.
                         KeyCode::Char(' ' | 'e') | KeyCode::Enter
-                            if settings.agent_card_focused
+                            if settings.agents_focused
                                 && (key.code == KeyCode::Char(' ')
                                     || settings.selected_field == SettingField::Agent) =>
                         {
-                            let agent = settings.cycle_agent();
+                            let agent = settings.use_focused_agent();
                             self.ai_settings = settings.settings.clone();
                             match settings.save() {
                                 Ok(_) => self.set_toast(
@@ -7023,7 +7023,7 @@ impl App {
                             }
                         }
                         KeyCode::Char('e') | KeyCode::Enter
-                            if settings.agent_card_focused
+                            if settings.agents_focused
                                 && settings.selected_field == SettingField::Model =>
                         {
                             let target = settings.agent_picker_target();
