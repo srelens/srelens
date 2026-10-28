@@ -7176,9 +7176,9 @@ mod tests {
     fn test_theme_palette_switching_and_lookups() {
         let mut theme = crate::common::theme::lock();
         use ratatui::widgets::BorderType;
-        use srectl::theme::{HeaderStyle, Theme, ThemeId, ALL_THEMES};
+        use srectl::theme::{HeaderStyle, StatusStyle, Theme, ThemeId, ALL_THEMES};
 
-        assert_eq!(ALL_THEMES.len(), 15);
+        assert_eq!(ALL_THEMES.len(), 17);
 
         // Test theme lookup and setting by id/name
         let nord = theme.set_by_name("nord");
@@ -7265,6 +7265,33 @@ mod tests {
         let github = theme.set_by_name("github-dark-hc");
         assert!(github.is_some());
         assert_eq!(Theme::active_palette().id, ThemeId::GitHubDarkHc);
+
+        // Test TurboVision Norton classic
+        let turbo = theme.set_by_name("turbo-vision");
+        assert!(turbo.is_some());
+        assert_eq!(Theme::active_palette().id, ThemeId::TurboVision);
+        assert_eq!(Theme::header_style(), HeaderStyle::TurboVision);
+        assert_eq!(Theme::status_style(), StatusStyle::FunctionKeys);
+        assert_eq!(Theme::border_type(), BorderType::Double);
+        assert!(Theme::show_live_clock());
+
+        let norton_alias = theme.set_by_name("norton");
+        assert!(norton_alias.is_some());
+        assert_eq!(Theme::active_palette().id, ThemeId::TurboVision);
+
+        // Test NocDeck Bloomberg / flight director telemetry HUD
+        let noc = theme.set_by_name("noc-deck");
+        assert!(noc.is_some());
+        assert_eq!(Theme::active_palette().id, ThemeId::NocDeck);
+        assert_eq!(Theme::header_style(), HeaderStyle::NocDeck);
+        assert_eq!(Theme::status_style(), StatusStyle::Standard);
+        assert_eq!(Theme::border_type(), BorderType::Plain);
+        assert_eq!(Theme::prompt_glyph(), "◈ ");
+        assert!(Theme::show_live_clock());
+
+        let telemetry_alias = theme.set_by_name("telemetry");
+        assert!(telemetry_alias.is_some());
+        assert_eq!(Theme::active_palette().id, ThemeId::NocDeck);
 
         // Reset to default Mocha
         let mocha = theme.set_by_name("catppuccin-mocha");

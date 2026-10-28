@@ -1052,6 +1052,12 @@ pub fn render_modal(f: &mut Frame, area: Rect, modal: &Modal) {
                     let visual_badge = match p.header_style {
                         crate::theme::HeaderStyle::FinoTime => "[Fino • Live Clock • Tree] ",
                         crate::theme::HeaderStyle::Minimal => "[Minimalist Chrome] ",
+                        crate::theme::HeaderStyle::TurboVision => {
+                            "[Turbo Vision • Double Frames • F-Keys] "
+                        }
+                        crate::theme::HeaderStyle::NocDeck => {
+                            "[NOC Telemetry • Hairlines • Live Clock] "
+                        }
                         crate::theme::HeaderStyle::Standard => {
                             if p.border_type == ratatui::widgets::BorderType::Thick {
                                 "[Thick Neon Borders] "
