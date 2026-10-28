@@ -98,6 +98,16 @@ describe("ClassicAppsNotice", () => {
     expect(switchDesignMock).toHaveBeenCalledWith("next");
   });
 
+  it("moves focus to Cancel, described by what the switch would discard", async () => {
+    // The pressed button gives way to the confirm step; without this, focus
+    // falls to the body and a screen reader hears nothing of the warning.
+    render(<ClassicAppsNotice unsavedDrafts={1} />);
+    await userEvent.click(screen.getByRole("button", { name: "Switch to the new design" }));
+    expect(document.activeElement).toBe(
+      screen.getByRole("button", { name: "Cancel", description: /discards 1 unsaved editor draft\./ }),
+    );
+  });
+
   it("says why when the switch is refused", async () => {
     switchDesignMock.mockResolvedValue({ ok: false, reason: "storage refused it" });
     render(<ClassicAppsNotice />);

@@ -196,7 +196,9 @@ vi.mock("./components/ResourceBrowser", () => ({
   ),
 }));
 vi.mock("./components/SettingsView", () => ({
-  SettingsView: () => <div data-testid="settings">workspace settings</div>,
+  SettingsView: ({ unsavedDrafts }: { unsavedDrafts?: number }) => (
+    <div data-testid="settings" data-unsaved-drafts={unsavedDrafts}>workspace settings</div>
+  ),
 }));
 // The dock hosts xterm, which is dynamically imported and has no place in
 // jsdom; these tests only care about whether it is mounted and with what.
@@ -359,6 +361,20 @@ describe("App", () => {
     });
     fireEvent.click(screen.getByRole("button", { name: "Switch to the new design" }));
     expect(await screen.findByText(/discards 1 unsaved editor draft/i)).toBeDefined();
+  });
+
+  it("tells Settings about unsaved editor drafts, for the Apps notice's switch", () => {
+    // Settings → Apps in classic is the new-design notice, whose switch reloads
+    // the window; without the count it would drop these drafts without asking.
+    render(<App />);
+    fireEvent.click(screen.getByText("open-kind-dev"));
+    fireEvent.click(screen.getByText("nav-services"));
+    fireEvent.click(screen.getByText("new-secret"));
+    fireEvent.change(screen.getByLabelText("mock new draft"), {
+      target: { value: "kind: Secret\nmetadata:\n  name: unsaved\n" },
+    });
+    fireEvent.click(screen.getByText("open-settings"));
+    expect(screen.getByTestId("settings").dataset.unsavedDrafts).toBe("1");
   });
 
   it("counts an edit tab as unsaved only once its manifest has been changed", async () => {

@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useId, useState } from "react";
 import { X } from "lucide-react";
 import { Button, IconButton } from "../ui";
 import { switchDesign } from "../design";
@@ -66,6 +66,7 @@ function SwitchToNewDesign({ unsavedDrafts }: { unsavedDrafts: number }) {
   const [busy, setBusy] = useState(false);
   const [confirming, setConfirming] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const warningId = useId();
 
   async function switchToNext() {
     setConfirming(false);
@@ -88,14 +89,22 @@ function SwitchToNewDesign({ unsavedDrafts }: { unsavedDrafts: number }) {
 
   return (
     <>
-      {confirming && <p>Switching reloads the window and discards {drafts}.</p>}
+      {confirming && <p id={warningId}>Switching reloads the window and discards {drafts}.</p>}
       {error && <p role="alert">Could not switch design. {error}</p>}
       {confirming ? (
         <>
           <Button type="button" size="sm" onClick={() => void switchToNext()}>
             Switch anyway
           </Button>
-          <Button type="button" size="sm" variant="ghost" onClick={() => setConfirming(false)}>
+          {/* The pressed button is gone; land on the safe choice, which reads the warning. */}
+          <Button
+            type="button"
+            size="sm"
+            variant="ghost"
+            autoFocus
+            aria-describedby={warningId}
+            onClick={() => setConfirming(false)}
+          >
             Cancel
           </Button>
         </>
