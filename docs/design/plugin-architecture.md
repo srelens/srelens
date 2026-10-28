@@ -12,7 +12,7 @@ serves each manifest under the highest one its `srelensApiVersion` range matches
 versioning and compatibility rules are in the
 [extension API specification](../extensions/specification.md). The desktop application renders declarative pages,
 dashboards, resource details, navigation groups and actions with host components
-in both classic and new designs. No third-party JavaScript executes in the host.
+in the new design; the deprecated classic design shows a notice in their place. No third-party JavaScript executes in the host.
 Native Flux and Argo CD manifests are the reference integrations.
 
 The application installs declarative manifests from the catalog, which is signed and
