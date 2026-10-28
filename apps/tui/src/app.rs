@@ -679,6 +679,21 @@ impl App {
         self.toast = Some((msg, Instant::now(), style));
     }
 
+    pub fn copy_selection_and_toast(&mut self, text: String) {
+        let trimmed = text.trim_end_matches('\n');
+        if trimmed.trim().is_empty() {
+            return;
+        }
+        let copy_text = trimmed.to_string();
+        tokio::spawn(async move {
+            let _ = copy_to_clipboard(&copy_text);
+        });
+        self.set_toast(
+            "✓ Copied selection to clipboard".to_string(),
+            Theme::status_ok(),
+        );
+    }
+
     pub fn handle_tick(&mut self) {
         self.assistant_state.tick();
         self.consents.prune_closed();
@@ -8837,40 +8852,53 @@ impl App {
             }
         }
 
-        if let ActiveView::Assistant = &self.active_view {
+        if matches!(self.active_view, ActiveView::Assistant) {
             let vp = self.assistant_state.last_viewport_rect.get();
-            if mouse.column >= vp.x
+            let is_inside_vp = mouse.column >= vp.x
                 && mouse.column < vp.x + vp.width
                 && mouse.row >= vp.y
-                && mouse.row < vp.y + vp.height
-            {
-                let screen_row = mouse.row.saturating_sub(vp.y) as usize;
-                let screen_col = mouse.column.saturating_sub(vp.x + 1) as usize;
-                let line_idx = self.assistant_state.effective_scroll() + screen_row;
+                && mouse.row < vp.y + vp.height;
 
-                if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
-                    if self
-                        .assistant_state
-                        .tool_chip_lines
-                        .borrow()
-                        .contains(&line_idx)
-                    {
-                        self.assistant_state.toggle_tools_expansion();
-                        return;
-                    }
+            // Handle scroll wheel within assistant viewport
+            if is_inside_vp {
+                if mouse.kind == MouseEventKind::ScrollUp {
+                    self.assistant_state.scroll_up(3);
+                    return;
+                } else if mouse.kind == MouseEventKind::ScrollDown {
+                    self.assistant_state.scroll_down(3);
+                    return;
                 }
+            }
 
+            // Implicit release if mouse moved without buttons pressed while selecting
+            if mouse.kind == MouseEventKind::Moved && self.assistant_state.is_selecting {
+                if let Some(text) = self.assistant_state.mouse_up(mouse.row, mouse.column) {
+                    self.copy_selection_and_toast(text);
+                }
+                return;
+            }
+
+            if self.assistant_state.is_selecting {
                 match mouse.kind {
-                    MouseEventKind::Down(MouseButton::Left) => {
-                        self.assistant_state.start_selection(line_idx, screen_col);
-                    }
                     MouseEventKind::Drag(MouseButton::Left) => {
-                        self.assistant_state.update_selection(line_idx, screen_col);
+                        self.assistant_state.mouse_drag(mouse.row, mouse.column);
                     }
                     MouseEventKind::Up(MouseButton::Left) => {
-                        self.assistant_state.finish_selection(line_idx, screen_col);
+                        if let Some(text) = self.assistant_state.mouse_up(mouse.row, mouse.column) {
+                            self.copy_selection_and_toast(text);
+                        }
+                    }
+                    MouseEventKind::Down(MouseButton::Left) => {
+                        self.assistant_state.clear_selection();
+                        if is_inside_vp {
+                            self.assistant_state.mouse_down(mouse.row, mouse.column);
+                        }
                     }
                     _ => {}
+                }
+            } else if is_inside_vp {
+                if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
+                    self.assistant_state.mouse_down(mouse.row, mouse.column);
                 }
             } else if matches!(mouse.kind, MouseEventKind::Down(_)) {
                 self.assistant_state.clear_selection();
@@ -8896,13 +8924,7 @@ impl App {
                     }
                     MouseEventKind::Up(MouseButton::Left) => {
                         if let Some(selected) = yaml.finish_selection(line_idx) {
-                            tokio::spawn(async move {
-                                let _ = copy_to_clipboard(&selected);
-                            });
-                            self.set_toast(
-                                "✓ Copied selection to clipboard".to_string(),
-                                Theme::status_ok(),
-                            );
+                            self.copy_selection_and_toast(selected);
                         }
                     }
                     MouseEventKind::ScrollDown => {

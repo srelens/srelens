@@ -97,6 +97,12 @@ impl SelectionRange {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DragScrollZone {
+    Up { ticks: usize },
+    Down { ticks: usize },
+}
+
 pub struct AssistantViewState {
     pub context_name: String,
     pub messages: Vec<ChatMessage>,
@@ -117,6 +123,7 @@ pub struct AssistantViewState {
     pub expand_tools: bool,
     pub selection: Option<SelectionRange>,
     pub is_selecting: bool,
+    pub drag_scroll: Option<DragScrollZone>,
     pub last_viewport_rect: Cell<Rect>,
     pub plain_lines: RefCell<Vec<String>>,
     pub tool_chip_lines: RefCell<Vec<usize>>,
@@ -182,6 +189,7 @@ impl AssistantViewState {
             expand_tools: false,
             selection: None,
             is_selecting: false,
+            drag_scroll: None,
             last_viewport_rect: Cell::new(Rect::default()),
             plain_lines: RefCell::new(Vec::new()),
             tool_chip_lines: RefCell::new(Vec::new()),
@@ -376,6 +384,7 @@ impl AssistantViewState {
 
     pub fn start_selection(&mut self, line: usize, col: usize) {
         self.is_selecting = true;
+        self.drag_scroll = None;
         self.selection = Some(SelectionRange {
             start: TextPosition { line, col },
             end: TextPosition { line, col },
@@ -393,6 +402,7 @@ impl AssistantViewState {
     pub fn finish_selection(&mut self, line: usize, col: usize) {
         if self.is_selecting {
             self.is_selecting = false;
+            self.drag_scroll = None;
             if let Some(sel) = &mut self.selection {
                 sel.end = TextPosition { line, col };
                 if sel.start == sel.end {
@@ -405,6 +415,141 @@ impl AssistantViewState {
     pub fn clear_selection(&mut self) {
         self.is_selecting = false;
         self.selection = None;
+        self.drag_scroll = None;
+    }
+
+    pub fn mouse_down(&mut self, row: u16, col: u16) -> bool {
+        let vp = self.last_viewport_rect.get();
+        if row < vp.y || row >= vp.y + vp.height {
+            return false;
+        }
+        let screen_row = row.saturating_sub(vp.y) as usize;
+        let screen_col = col.saturating_sub(vp.x + 1) as usize;
+        let line_idx = self.effective_scroll() + screen_row;
+
+        if self.tool_chip_lines.borrow().contains(&line_idx) {
+            self.toggle_tools_expansion();
+            return true;
+        }
+
+        self.start_selection(line_idx, screen_col);
+        true
+    }
+
+    pub fn mouse_drag(&mut self, row: u16, col: u16) {
+        if !self.is_selecting {
+            return;
+        }
+        let vp = self.last_viewport_rect.get();
+        if row < vp.y {
+            let distance = vp.y.saturating_sub(row) as usize;
+            let step = distance.clamp(1, 4);
+            self.scroll_up(step);
+            self.drag_scroll = Some(DragScrollZone::Up { ticks: 0 });
+            let cur_line = self.effective_scroll();
+            if let Some(sel) = &mut self.selection {
+                sel.end = TextPosition {
+                    line: cur_line,
+                    col: 0,
+                };
+            }
+        } else if row >= vp.y + vp.height {
+            let distance = row.saturating_sub(vp.y + vp.height).saturating_add(1) as usize;
+            let step = distance.clamp(1, 4);
+            self.scroll_down(step);
+            self.drag_scroll = Some(DragScrollZone::Down { ticks: 0 });
+            let plain = self.plain_lines.borrow();
+            let max_line = plain
+                .iter()
+                .rposition(|l| !l.trim().is_empty())
+                .unwrap_or_else(|| plain.len().saturating_sub(1));
+            let cur_line =
+                (self.effective_scroll() + vp.height.saturating_sub(1) as usize).min(max_line);
+            if let Some(sel) = &mut self.selection {
+                sel.end = TextPosition {
+                    line: cur_line,
+                    col: usize::MAX,
+                };
+            }
+        } else {
+            self.drag_scroll = None;
+            let screen_row = row.saturating_sub(vp.y) as usize;
+            let screen_col = col.saturating_sub(vp.x + 1) as usize;
+            let line_idx = self.effective_scroll() + screen_row;
+            self.update_selection(line_idx, screen_col);
+        }
+    }
+
+    pub fn mouse_up(&mut self, row: u16, col: u16) -> Option<String> {
+        self.drag_scroll = None;
+        if !self.is_selecting {
+            return None;
+        }
+        self.is_selecting = false;
+
+        let vp = self.last_viewport_rect.get();
+        if row >= vp.y && row < vp.y + vp.height {
+            let screen_row = row.saturating_sub(vp.y) as usize;
+            let screen_col = col.saturating_sub(vp.x + 1) as usize;
+            let line_idx = self.effective_scroll() + screen_row;
+            if let Some(sel) = &mut self.selection {
+                sel.end = TextPosition {
+                    line: line_idx,
+                    col: screen_col,
+                };
+            }
+        }
+
+        if let Some(sel) = &self.selection {
+            if sel.start == sel.end {
+                self.selection = None;
+                return None;
+            }
+        }
+
+        self.get_selected_text()
+            .map(|s| s.trim_end_matches('\n').to_string())
+    }
+
+    pub fn tick_drag_scroll(&mut self) {
+        if !self.is_selecting || self.selection.is_none() {
+            self.drag_scroll = None;
+            return;
+        }
+        let vp = self.last_viewport_rect.get();
+        match self.drag_scroll {
+            Some(DragScrollZone::Up { ref mut ticks }) => {
+                *ticks = ticks.saturating_add(1);
+                let step = (1 + *ticks / 2).min(8);
+                self.scroll_up(step);
+                let cur_line = self.effective_scroll();
+                if let Some(sel) = &mut self.selection {
+                    sel.end = TextPosition {
+                        line: cur_line,
+                        col: 0,
+                    };
+                }
+            }
+            Some(DragScrollZone::Down { ref mut ticks }) => {
+                *ticks = ticks.saturating_add(1);
+                let step = (1 + *ticks / 2).min(8);
+                self.scroll_down(step);
+                let plain = self.plain_lines.borrow();
+                let max_line = plain
+                    .iter()
+                    .rposition(|l| !l.trim().is_empty())
+                    .unwrap_or_else(|| plain.len().saturating_sub(1));
+                let cur_line =
+                    (self.effective_scroll() + vp.height.saturating_sub(1) as usize).min(max_line);
+                if let Some(sel) = &mut self.selection {
+                    sel.end = TextPosition {
+                        line: cur_line,
+                        col: usize::MAX,
+                    };
+                }
+            }
+            None => {}
+        }
     }
 
     pub fn get_selected_text(&self) -> Option<String> {
@@ -853,6 +998,9 @@ impl AssistantViewState {
     pub fn tick(&mut self) {
         if self.is_busy {
             self.spinner_frame = (self.spinner_frame + 1) % 10;
+        }
+        if self.is_selecting && self.selection.is_some() {
+            self.tick_drag_scroll();
         }
     }
 
@@ -3081,5 +3229,62 @@ Events: FailedScheduling from optimize-scheduler:
             last_msg.content,
             "Step 1 done.\n\nStep 2 done.\n\nFinal answer."
         );
+    }
+
+    #[test]
+    fn test_mouse_down_and_drag_selection_lifecycle() {
+        let mut state = AssistantViewState::new();
+        state.last_viewport_rect.set(Rect::new(0, 5, 80, 20));
+        *state.plain_lines.borrow_mut() = (0..50).map(|i| format!("Line {:02}", i)).collect();
+        state.last_max_scroll.set(30);
+        state.auto_scroll = false;
+        state.scroll_offset = 0;
+
+        // Click outside viewport returns false and does not start selection
+        assert!(!state.mouse_down(2, 10));
+        assert!(!state.is_selecting);
+
+        // Click inside viewport starts selection
+        assert!(state.mouse_down(10, 5)); // row 10 (vp.y=5, so screen_row 5)
+        assert!(state.is_selecting);
+        assert_eq!(state.drag_scroll, None);
+
+        // Drag inside viewport updates selection
+        state.mouse_drag(12, 10);
+        assert_eq!(state.drag_scroll, None);
+        let sel = state.selection.as_ref().unwrap();
+        assert_eq!(sel.end.line, 7); // scroll 0 + screen_row (12 - 5) = 7
+
+        // Drag above top boundary triggers scroll up and Up zone
+        state.scroll_offset = 10;
+        state.auto_scroll = false;
+        state.mouse_drag(2, 5); // 3 rows above vp.y=5
+        assert_eq!(state.drag_scroll, Some(DragScrollZone::Up { ticks: 0 }));
+        assert_eq!(state.scroll_offset, 7); // 10 - clamp(3, 1, 4) = 7
+        assert_eq!(state.selection.as_ref().unwrap().end.line, 7);
+        assert_eq!(state.selection.as_ref().unwrap().end.col, 0);
+
+        // Stationary hold: tick accelerates ramp
+        state.tick();
+        assert_eq!(state.drag_scroll, Some(DragScrollZone::Up { ticks: 1 }));
+        assert_eq!(state.scroll_offset, 6); // step = 1 + 1/2 = 1
+
+        state.tick();
+        assert_eq!(state.drag_scroll, Some(DragScrollZone::Up { ticks: 2 }));
+        assert_eq!(state.scroll_offset, 4); // step = 1 + 2/2 = 2
+
+        // Mouse up outside keeps boundary end col
+        let text = state.mouse_up(2, 5);
+        assert!(!state.is_selecting);
+        assert_eq!(state.drag_scroll, None);
+        assert!(text.is_some());
+
+        // Esc / clear_selection clears all state including drag_scroll
+        state.start_selection(0, 0);
+        state.drag_scroll = Some(DragScrollZone::Up { ticks: 5 });
+        state.clear_selection();
+        assert!(!state.is_selecting);
+        assert_eq!(state.selection, None);
+        assert_eq!(state.drag_scroll, None);
     }
 }
