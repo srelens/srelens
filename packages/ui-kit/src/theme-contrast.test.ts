@@ -85,6 +85,49 @@ it.each(themes)("keeps the %s GitHub pill legible, and visible on the bar it sit
   for (const ground of grounds) expect(contrast(values["gh-line"], values[ground]), ground).toBeGreaterThanOrEqual(3);
 });
 
+// #1001: the active row's wash was ~1.1:1 on the sidebar, the same as hover.
+// Its text is ink rather than accent: no wash at 1.3:1 can also carry accent
+// text at 4.5:1 for paper's amber, or at 7:1 for the contrast theme's blue.
+it.each(themes)("gives the %s active row a fill distinct from the ground", theme => {
+  const floor = theme === "contrast" ? 7 : 4.5;
+  for (const accent of accents) {
+    const values = tokens(theme, accent);
+    const wash = values["accent-wash-strong"];
+    expect(wash, accent).toMatch(/^#[\da-fA-F]{6}$/);
+    expect(contrast(wash, values["surface-sunk"]), `${accent} wash on surface-sunk`).toBeGreaterThanOrEqual(1.3);
+    for (const ink of ["ink", "ink-soft"]) expect(contrast(values[ink], wash), `${accent} ${ink}`).toBeGreaterThanOrEqual(floor);
+    // The bar and the icon: graphics, so 3:1.
+    expect(contrast(values.accent, wash), `${accent} bar`).toBeGreaterThanOrEqual(3);
+  }
+});
+
+it("gives tree rows and Settings' nav one active style", () => {
+  const kit = readFileSync(join(__dirname, "styles/kit.css"), "utf8");
+  const rule = [...kit.matchAll(/([^{}]+)\{([^{}]*)\}/g)].find(([, selectors]) =>
+    selectors.includes('.tree-row[data-active="true"]') && selectors.includes('.nav-item[data-active="true"]'));
+  expect(rule, "one rule for both").toBeDefined();
+  for (const decl of ["background: var(--accent-wash-strong)", "color: var(--ink)", "font-weight: 600", "box-shadow: inset 3px 0 0 var(--accent)"]) {
+    expect(rule![2]).toContain(decl);
+  }
+});
+
+// A paused or unreachable cluster's mark is dimmed; it must still be seen.
+it.each(themes)("keeps an unavailable %s rail mark at 3:1 against the rail", theme => {
+  const kit = readFileSync(join(__dirname, "styles/kit.css"), "utf8");
+  const opacity = Number(kit.match(/\[data-unavailable="true"\]\s*\{\s*opacity:\s*([\d.]+)/)?.[1]);
+  expect(opacity).toBeGreaterThan(0);
+  const rgb = (hex: string) => [1, 3, 5].map(i => parseInt(hex.slice(i, i + 2), 16));
+  const over = (top: string, ground: string) =>
+    "#" + rgb(top).map((v, i) => Math.round(v * opacity + rgb(ground)[i] * (1 - opacity)).toString(16).padStart(2, "0")).join("");
+  for (const accent of accents) {
+    const values = tokens(theme, accent);
+    const rail = values["canvas-deep"];
+    const marks = [...Object.keys(values).filter(name => name.startsWith("mark-")), "accent"];
+    expect(marks.length).toBe(12);
+    for (const mark of marks) expect(contrast(over(values[mark], rail), rail), `${accent} ${mark}`).toBeGreaterThanOrEqual(3);
+  }
+});
+
 it.each(themes)("gives %s form boundaries enough contrast against their surfaces", theme => {
   const values = tokens(theme, "violet");
   expect(values["control-line"]).toMatch(/^#[\da-fA-F]{6}$/);

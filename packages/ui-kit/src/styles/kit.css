@@ -594,11 +594,6 @@
     transition: background 110ms ease, color 110ms ease;
   }
   .nav-item:hover { background: var(--field); color: var(--ink); }
-  .nav-item[data-active="true"] {
-    background: var(--accent-wash);
-    color: var(--accent);
-    font-weight: 600;
-  }
 
 
 
@@ -1066,12 +1061,24 @@
     text-align: left;
   }
   .tree-row:hover { background: var(--field); color: var(--ink); }
-  .tree-row[data-active="true"] {
-    background: var(--accent-wash);
-    color: var(--accent);
-    font-weight: 500;
-    box-shadow: inset 2px 0 0 var(--accent);
+  /* The one active style for left-hand navigation (#1001). Ink rather than
+     accent text: a wash strong enough to tell from hover cannot also carry
+     accent text in every theme. The bar and the icon keep the accent. */
+  .tree-row[data-active="true"],
+  .nav-item[data-active="true"] {
+    background: var(--accent-wash-strong);
+    color: var(--ink);
+    font-weight: 600;
+    box-shadow: inset 3px 0 0 var(--accent);
   }
+  .tree-row[data-active="true"] > svg,
+  .nav-item[data-active="true"] > svg { color: var(--accent); }
+  .tree-row[data-active="true"] .tree-count { color: var(--ink-soft); }
+
+  /* A rail mark out of reach (`ClusterRailItem.unavailable`). Dimmed, never
+     below 3:1 against the rail for any mark colour: paper's amber needs 0.86
+     (theme-contrast.test.ts). A paused one says so with a glyph instead. */
+  [data-unavailable="true"] { opacity: 0.88; }
   .focus-back {
     display: flex;
     align-items: center;

@@ -462,7 +462,7 @@ export function ClusterRail({
                     }}
                     onDoubleClick={onOpen ? () => onOpen(item.id) : undefined}
                     className="relative flex w-full flex-col items-center gap-0.5"
-                    style={dragging === item.id ? { opacity: 0.55 } : away ? { opacity: 0.42 } : undefined}
+                    style={dragging === item.id ? { opacity: 0.55 } : undefined}
                   >
                     <span
                       className="relative inline-flex shrink-0 items-center justify-center"
