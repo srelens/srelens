@@ -14,12 +14,12 @@ vi.mock("@srelens/core", async (orig) => ({
   podMetrics,
 }));
 
-import { NAV_GROUPS } from "../tree";
+import { CLUSTER_KINDS, NAV_GROUPS } from "../tree";
 import { descriptorFor, CLUSTER_SCOPED } from "./descriptors";
 import { rowKey } from "./types";
 
 /** Every kind the sidebar offers, minus Events, which routes to its own screen. */
-const SIDEBAR_KINDS = NAV_GROUPS.flatMap((g) => g.kinds).filter((k) => k !== "events");
+const SIDEBAR_KINDS = [...CLUSTER_KINDS, ...NAV_GROUPS.flatMap((g) => g.kinds)].filter((k) => k !== "events");
 
 describe("descriptors", () => {
   // This asserts coverage only: no sidebar route resolves to `undefined`. It

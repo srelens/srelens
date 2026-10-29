@@ -9,7 +9,7 @@ import { Icons } from "../lib/icons";
 import { useMark } from "../lib/marks";
 import { resolveContext } from "../lib/clusters";
 import { openTab, useActiveCluster, useTabs } from "../lib/tabsStore";
-import { crdNodes, glyph, INVESTIGATE, kindNodes, routeForNode } from "../lib/tree";
+import { crdNodes, navNodes, routeForNode } from "../lib/tree";
 import { useAssistantAllowed } from "../lib/assistant";
 import { useResource } from "../lib/useResource";
 import { useSidebarCounts } from "../lib/sidebarCounts";
@@ -120,23 +120,8 @@ export function Nav({ contexts }: NavProps) {
   const nodes = useMemo<ResourceNode[]>(() => {
     // App routes and app scope both name the cluster by its key, which no two contexts share
     // (#623, #695); a window opened for one of two sharing a stable ID pins its key.
-    const apps = ctx && extensions.data ? appNavigation(extensions.data.plugins, ctx.key) : null;
-    const kinds = kindNodes(counts);
-    return [
-      ...kinds.slice(0, 1),
-      ...(apps ? [apps] : []),
-      ...kinds.slice(1),
-      { id: "crds", label: "Custom resources", icon: Icons.crds, defaultExpanded: false, children: crdChildren },
-      {
-        id: "investigate",
-        label: "Investigate",
-        icon: Icons.investigate,
-        children: INVESTIGATE
-          // No Agent entry where the AI Assistant may not act (#968).
-          .filter((i) => assistantOn || i.id !== "agent")
-          .map((i) => ({ id: `route:${i.route}`, label: i.label, icon: glyph(i.id) })),
-      },
-    ];
+    const apps = ctx && extensions.data ? appNavigation(extensions.data.plugins, ctx.key) : [];
+    return navNodes({ counts, apps, crds: crdChildren, agent: assistantOn });
   }, [crdChildren, ctx, extensions.data, counts, assistantOn]);
 
   const link = ctx

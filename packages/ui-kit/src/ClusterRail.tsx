@@ -37,6 +37,8 @@ export interface ClusterRailItem {
    * told in opacity alone.
    */
   unavailable?: string;
+  /** Out of reach because the reader paused it: drawn with a pause glyph. */
+  paused?: boolean;
   /** Items sharing one sit together; a change draws a rule between them. */
   group?: string;
 }
@@ -314,7 +316,7 @@ export function ClusterRail({
     <nav
       aria-label={label}
       onKeyDown={onKeyDown}
-      className={cx("rule-r flex shrink-0 flex-col items-center gap-1.5 bg-[var(--ground-deep)] py-2", className)}
+      className={cx("flex shrink-0 flex-col items-center gap-1.5 border-r border-rule-strong bg-[var(--ground-deep)] py-2", className)}
       style={{ width }}
     >
       {/* What a move did, for anyone who cannot see the marks change places.
@@ -462,7 +464,7 @@ export function ClusterRail({
                     }}
                     onDoubleClick={onOpen ? () => onOpen(item.id) : undefined}
                     className="relative flex w-full flex-col items-center gap-0.5"
-                    style={dragging === item.id ? { opacity: 0.55 } : away ? { opacity: 0.42 } : undefined}
+                    style={dragging === item.id ? { opacity: 0.55 } : undefined}
                   >
                     <span
                       className="relative inline-flex shrink-0 items-center justify-center"
@@ -476,6 +478,18 @@ export function ClusterRail({
                         />
                       )}
                       {item.mark}
+                      {item.paused && (
+                        // A picture of the word already in the button's name.
+                        <span
+                          data-slot="paused"
+                          aria-hidden="true"
+                          className="absolute -bottom-1 -right-1 flex h-[11px] w-[11px] items-center justify-center rounded-full bg-canvas-deep text-soft ring-1 ring-rule-strong"
+                        >
+                          <svg width="7" height="7" viewBox="0 0 8 8" fill="none">
+                            <path d="M2.5 1.5v5M5.5 1.5v5" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
+                          </svg>
+                        </span>
+                      )}
                       {markers.length > 0 && (
                         <span aria-hidden="true" className="absolute -bottom-0.5 -right-0.5 flex gap-px">
                           {markers.map((marker) => (
@@ -529,7 +543,7 @@ export function ClusterRail({
             type="button"
             aria-label={addLabel}
             onClick={onAdd}
-            className="mt-1 flex shrink-0 items-center justify-center rounded-[7px] border border-dashed border-rule-strong text-faint transition-colors hover:text-ink"
+            className="mt-1 flex shrink-0 items-center justify-center rounded-[7px] border border-dashed border-control-line text-faint transition-colors hover:text-ink"
             style={{ width: mark, height: mark }}
           >
             <AddIcon size={13} aria-hidden="true" />

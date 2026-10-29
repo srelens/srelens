@@ -481,21 +481,19 @@ async fn run_flow(driver: &WebDriver, context: &str, full: bool) -> Result<(), F
     // collapsed, so Workloads must be DISCLOSED before its Pods entry exists
     // in the DOM at all. Clicked only while it says it is collapsed, so a
     // future default-open change can't turn the click into a collapse.
-    // Rows are found by their `title` (the label alone), not their text:
-    // since #961 a row's text is its label plus a count that arrives when the
-    // fold's counts load ("Pods 10"), so a text match raced the count.
+    // Rows are found by their label's own span, not the row's text: since
+    // #961 a row's text is its label plus a count that arrives when the
+    // fold's counts load ("Pods 10"), so a text match raced the count. The
+    // native `title` that used to carry the label gave way to the kit's
+    // tooltip (#1001).
     let tree = "//*[@role='tree' and @aria-label='Cluster resources']";
-    let workloads = format!("{tree}//*[@role='treeitem' and @title='Workloads']");
+    let row = |label: &str| format!("{tree}//*[@role='treeitem' and .//span[normalize-space()='{label}']]");
+    let workloads = row("Workloads");
     let group = wait_for(driver, By::XPath(workloads.clone()), 30).await?;
     if group.attr("aria-expanded").await?.as_deref() == Some("false") {
         click(driver, By::XPath(format!("{workloads}[@aria-expanded='false']")), 15).await?;
     }
-    click(
-        driver,
-        By::XPath(format!("{tree}//*[@role='treeitem' and @title='Pods']")),
-        15,
-    )
-    .await?;
+    click(driver, By::XPath(row("Pods")), 15).await?;
 
     // ---- 5. The fixture pod is in the default namespace, which a fresh
     // profile's "all namespaces" includes. A single click on its row opens

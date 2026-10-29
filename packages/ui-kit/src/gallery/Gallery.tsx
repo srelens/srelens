@@ -77,7 +77,6 @@ import { Toast } from "../Toast";
 import { Toolbar } from "../Toolbar";
 import { Tooltip } from "../Tooltip";
 import { WorkspaceSwitcher } from "../WorkspaceSwitcher";
-import { WorkspaceTree } from "../WorkspaceTree";
 import type { Tone } from "../tone";
 
 const TONES: Tone[] = ["muted", "ok", "info", "accent", "warn", "sev"];
@@ -1495,70 +1494,6 @@ export function Gallery() {
             onActivate={() => {}}
             emptyTitle="No resources"
             emptyHint="Nothing in this cluster answers to an API group this build knows."
-          />
-        </div>
-      </section>
-
-      <section>
-        <h2>WorkspaceTree</h2>
-        {/* Deliberately a list rather than a tree: each row is three controls,
-            and Tab reaches every one of them. */}
-        <div className="card overflow-hidden" style={{ width: 320 }}>
-          <WorkspaceTree
-            name="Acme platform"
-            active={cluster}
-            onActivate={setCluster}
-            onConnect={() => {}}
-            onDrillIn={() => {}}
-            renderExpanded={(c) => (
-              <ResourceTree
-                label={`${c.name} resources`}
-                nodes={RESOURCE_NODES}
-                active={resource}
-                onActivate={setResource}
-              />
-            )}
-            clusters={[
-              {
-                id: "prod-eu",
-                name: "prod-eu",
-                chip: <Mark decorative name="prod-eu" short="PE" size="sm" />,
-                detail: "eks · eu-west-1",
-                count: 412,
-              },
-              {
-                id: "prod-us",
-                name: "prod-us",
-                chip: <Mark decorative name="prod-us" short="PU" size="sm" color="var(--ok)" />,
-                link: "connecting",
-              },
-              {
-                id: "staging",
-                name: "staging",
-                chip: <Mark decorative name="staging" short="ST" size="sm" color="var(--info)" />,
-                link: "disconnected",
-              },
-              {
-                // The reason sits under the row and is tied to it, rather than
-                // shouted through a live region while something else is read.
-                id: "sandbox",
-                name: "sandbox",
-                chip: <Mark decorative name="sandbox" short="SB" size="sm" color="var(--warn)" />,
-                link: "error",
-                error: "dial tcp 10.0.4.7:6443: i/o timeout",
-              },
-            ]}
-          />
-        </div>
-        {/* An empty workspace keeps the way out of being empty. */}
-        <div className="card overflow-hidden" style={{ width: 320 }}>
-          <WorkspaceTree
-            name="New workspace"
-            clusters={[]}
-            onActivate={() => {}}
-            emptyTitle="No clusters"
-            emptyHint="Connect one to see what is in it."
-            emptyAction={<Button size="xs">Connect a cluster</Button>}
           />
         </div>
       </section>

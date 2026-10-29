@@ -16,7 +16,7 @@ import { CACHE_TTL_MS, useCachedResource } from "./cachedResource";
 import { useCollectionScope } from "./collectionScope";
 import { descriptorFor } from "./kinds/descriptors";
 import { groupNumber } from "./numbers";
-import { NAV_GROUPS, type NodeCounts } from "./tree";
+import { CLUSTER_KINDS, NAV_GROUPS, type NodeCounts } from "./tree";
 import { useNamespaceCollections, useNamespaces } from "./workspace";
 
 export interface SidebarCountArgs {
@@ -45,10 +45,10 @@ const clock = (at: number) => new Date(at).toLocaleTimeString([], { hour: "2-dig
  * outside any tab is the active tab's selection), or in the cluster for a
  * cluster-scoped kind. Switching to a tab with another selection moves them.
  *
- * **What is counted** is only what is in sight: the kinds under an open fold,
- * and a CRD only when both "Custom resources" and its API group are open.
- * Groups start shut, so an untouched sidebar asks nothing. A paused cluster
- * asks nothing at all.
+ * **What is counted** is only what is in sight: the cluster band's kinds and
+ * Port forwards, which are rows of their own and always showing, the kinds
+ * under an open fold, and a CRD only when both "Custom resources" and its API
+ * group are open. A paused cluster asks nothing at all.
  *
  * **What is never drawn is `0` for something not known.** A kind the backend
  * could not count gets no entry. A selection of nothing is `0` without asking
@@ -64,8 +64,8 @@ const clock = (at: number) => new Date(at).toLocaleTimeString([], { hour: "2-dig
  *
  * **Freshness.** Counted on demand, then again every {@link CACHE_TTL_MS}
  * while the page is visible, and on coming back to it if the last count is
- * older than that. A refresh that fails keeps the last numbers, dimmed, with
- * when they were counted — `useCachedResource`'s `stale`.
+ * older than that. A refresh that fails keeps the last numbers, marked with a
+ * dotted underline, with when they were counted — `useCachedResource`'s `stale`.
  *
  * ponytail: an open kind's live rows.length could replace its 30 s-old count; one source until that matters
  */
@@ -101,10 +101,8 @@ export function useSidebarCounts({ ctx, paused, expanded, crds }: SidebarCountAr
       ask.push({ id, ref });
     };
     if (live) {
-      for (const group of NAV_GROUPS) {
-        if (!open.has(group.id)) continue;
-        for (const slug of group.kinds) add(`kind:${slug}`, { kind: K8S_KIND[slug], namespaced: descriptorFor(slug)?.scope !== "cluster" });
-      }
+      const kinds = [...CLUSTER_KINDS, ...NAV_GROUPS.flatMap((group) => (open.has(group.id) ? group.kinds : []))];
+      for (const slug of kinds) add(`kind:${slug}`, { kind: K8S_KIND[slug], namespaced: descriptorFor(slug)?.scope !== "cluster" });
       if (open.has("crds")) {
         for (const crd of crds) {
           if (!open.has(`crdgroup:${crd.group || "core"}`)) continue;
@@ -161,8 +159,9 @@ export function useSidebarCounts({ ctx, paused, expanded, crds }: SidebarCountAr
       map.set(
         id,
         why ? (
-          // The dimming and the title reach no screen reader; the words do.
-          <span className="opacity-60" title={why}>
+          // Marked rather than faded, which took the number below 3:1 (#1001).
+          // The mark and the title reach no screen reader; the words do.
+          <span className="underline decoration-dotted underline-offset-2" title={why}>
             {groupNumber(c.count)}
             <span className="sr-only">, not refreshed</span>
           </span>
@@ -171,9 +170,9 @@ export function useSidebarCounts({ ctx, paused, expanded, crds }: SidebarCountAr
         ),
       );
     });
-    if (live && ctx && folds.split("\u0000").includes("cluster")) {
+    if (live && ctx) {
       map.set("route:/forwards", groupNumber(forwards.filter((f) => f.context === ctx.name && !isForwardEnded(f)).length));
     }
     return map;
-  }, [zero, ask, narrows, data, stale, at, live, ctx, folds, forwards]);
+  }, [zero, ask, narrows, data, stale, at, live, ctx, forwards]);
 }

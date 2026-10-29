@@ -151,6 +151,7 @@ export function Rail({ contexts, onConnect, error }: RailProps) {
           : link?.state === "disconnected"
             ? "Disconnected"
             : undefined,
+      paused,
       markers: !paused && link?.state === "connecting" ? [{ label: "Connecting", tone: "info" }] : [],
       color: mark.color,
     });

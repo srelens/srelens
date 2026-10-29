@@ -1,6 +1,7 @@
 import { render, screen } from "@testing-library/react";
 import { expect, it } from "vitest";
-import { ExtensionLogo, extensionPageIcon } from "./ExtensionLogo";
+import { Icons } from "../lib/icons";
+import { ExtensionLogo, extensionLogoIcon, extensionPageIcon } from "./ExtensionLogo";
 const svg = `data:image/svg+xml;base64,${btoa("<svg xmlns=\"http://www.w3.org/2000/svg\"/>")}`;
 it("draws the logo the host read from the app's package, and initials otherwise (#562)",()=>{
   const view=render(<ExtensionLogo icon={svg} name="Packaged example" />);
@@ -36,4 +37,13 @@ it("distinguishes common app page roles",()=>{
   expect(extensionPageIcon("Helm releases")).not.toBe(extensionPageIcon("Sources"));
   expect(extensionPageIcon("A custom view")).toBeTruthy();
   expect(extensionPageIcon("constructor")).toBe(extensionPageIcon("A custom view"));
+});
+it("falls back to a neutral app glyph, not the Config group's own icon (#1001)",()=>{
+  expect(extensionPageIcon("A custom view")).toBe(Icons.apps);
+  expect(extensionPageIcon("A custom view")).not.toBe(Icons.config);
+});
+it("draws a sidebar logo in the same 13px box as every other row icon (#1001)",()=>{
+  const Logo=extensionLogoIcon("Flux");
+  const view=render(<Logo size={13} />);
+  expect(view.container.querySelector("svg")?.getAttribute("width")).toBe("13");
 });

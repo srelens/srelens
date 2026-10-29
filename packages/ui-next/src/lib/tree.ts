@@ -21,12 +21,10 @@ import { Icons } from "./icons";
  */
 
 /**
- * The groups, mirroring the classic sidebar's `NAV_SECTIONS` so that someone
- * running both builds during the migration finds the same kinds in the same
- * places. Only the routes moved (see {@link CLUSTER_ROUTES}).
+ * The resource groups: the Kubernetes kinds, in the order the classic sidebar's
+ * `NAV_SECTIONS` kept them. The middle band of {@link navNodes}.
  */
 export const NAV_GROUPS: ReadonlyArray<{ id: string; label: string; kinds: ResourceKind[] }> = [
-  { id: "cluster", label: "Cluster", kinds: ["nodes", "namespaces", "events"] },
   {
     id: "workloads",
     label: "Workloads",
@@ -62,26 +60,34 @@ export const NAV_GROUPS: ReadonlyArray<{ id: string; label: string; kinds: Resou
   },
 ];
 
-/**
- * The three rows in the Cluster group that are not kinds at all.
- *
- * Core lists `overview`, `portforwards` and `helmreleases` in `ResourceKind`
- * for the classic sidebar's sake, but none of them has a Kubernetes kind behind
- * it (`K8S_KIND` is `""` for all three) and none is a `/k/<kind>` list here:
- * they are screens, at `/overview`, `/forwards` and `/helm`. They keep core's
- * labels, because they are the same three things by another door.
- */
-const CLUSTER_ROUTES: ReadonlyArray<{ kind: ResourceKind; route: string; before?: true }> = [
-  { kind: "overview", route: "/overview", before: true },
-  { kind: "portforwards", route: "/forwards" },
-  { kind: "helmreleases", route: "/helm" },
-];
+/** The kinds that stand in the cluster band as rows of their own, after Overview. */
+export const CLUSTER_KINDS: ResourceKind[] = ["nodes", "namespaces", "events"];
 
-/** Where the app can be sent that is not a list of resources. */
-export const INVESTIGATE: ReadonlyArray<{ id: string; label: string; route: string }> = [
-  { id: "control", label: "Home", route: "/" },
-  { id: "incidents", label: "Incidents", route: "/incidents" },
+/**
+ * A core label in the sentence case the new design's navigation uses.
+ *
+ * Core keeps Title Case ("Port Forwards") because the classic design draws it,
+ * and core is shared, so the mapping lives here. A word with a capital inside
+ * it is a Kubernetes name (ConfigMaps, StatefulSets) and is left as it is.
+ */
+export function navLabel(label: string): string {
+  return label.replace(/ ([A-Z][a-z]+)(?= |$)/g, (_, word: string) => ` ${word.toLowerCase()}`);
+}
+
+/**
+ * The last band's built-in rows, after the apps: screens, not lists of a kind.
+ *
+ * Core lists `portforwards` and `helmreleases` in `ResourceKind` for the
+ * classic sidebar's sake, but neither has a Kubernetes kind behind it: they are
+ * screens, at `/forwards` and `/helm`. They keep core's labels, because they
+ * are the same things by another door. Home is not here: it is where every new
+ * tab starts, not a place in a cluster.
+ */
+export const TOOLS: ReadonlyArray<{ id: string; label: string; route: string }> = [
+  { id: "helmreleases", label: navLabel(RESOURCE_LABELS.helmreleases), route: "/helm" },
+  { id: "portforwards", label: navLabel(RESOURCE_LABELS.portforwards), route: "/forwards" },
   { id: "topology", label: "Topology", route: "/topology" },
+  { id: "incidents", label: "Incidents", route: "/incidents" },
   { id: "agent", label: "Agent", route: "/agent" },
 ];
 
@@ -110,32 +116,61 @@ const counted = (id: string, counts?: NodeCounts): { count?: ReactNode } =>
 
 const kindNode = (kind: ResourceKind, counts?: NodeCounts): ResourceNode => ({
   id: `kind:${kind}`,
-  label: RESOURCE_LABELS[kind],
+  label: navLabel(RESOURCE_LABELS[kind]),
   icon: glyph(kind),
   ...counted(`kind:${kind}`, counts),
 });
 
 const routeNode = (kind: ResourceKind, route: string, counts?: NodeCounts): ResourceNode => ({
   id: `route:${route}`,
-  label: RESOURCE_LABELS[kind],
+  label: navLabel(RESOURCE_LABELS[kind]),
   icon: glyph(kind),
   ...counted(`route:${route}`, counts),
 });
 
-/** The built-in half of the tree: the six groups, open to begin with. */
+/** The resource groups as nodes, open to begin with unless the caller keeps the folds. */
 export function kindNodes(counts?: NodeCounts): ResourceNode[] {
-  return NAV_GROUPS.map((group) => {
-    const kinds = group.kinds.map((kind) => kindNode(kind, counts));
-    const children =
-      group.id === "cluster"
-        ? [
-            ...CLUSTER_ROUTES.filter((r) => r.before).map((r) => routeNode(r.kind, r.route, counts)),
-            ...kinds,
-            ...CLUSTER_ROUTES.filter((r) => !r.before).map((r) => routeNode(r.kind, r.route, counts)),
-          ]
-        : kinds;
-    return { id: group.id, label: group.label, icon: glyph(group.id), children };
-  });
+  return NAV_GROUPS.map((group) => ({
+    id: group.id,
+    label: group.label,
+    icon: glyph(group.id),
+    children: group.kinds.map((kind) => kindNode(kind, counts)),
+  }));
+}
+
+export interface NavInput {
+  counts?: NodeCounts;
+  /** Each enabled app's entry, from `appNavigation`. */
+  apps?: ResourceNode[];
+  /** What "Custom resources" holds: {@link crdNodes}, or its failure leaf. */
+  crds: ResourceNode[];
+  /** Whether the AI Assistant may act on this cluster: no Agent row where it may not (#968). */
+  agent: boolean;
+}
+
+/**
+ * The whole sidebar, in three unlabelled bands (#1001): the cluster itself
+ * (Overview, Nodes, Namespaces, Events), its resources (the kind groups, then
+ * Custom resources), then apps and tools (each app, Helm releases, Port
+ * forwards, Topology, Incidents, Agent). Apps follow the built-ins, as they do
+ * in Lens. The kit draws a rule where the band changes.
+ */
+export function navNodes({ counts, apps = [], crds, agent }: NavInput): ResourceNode[] {
+  const inBand = (band: string) => (node: ResourceNode): ResourceNode => ({ ...node, band });
+  const tools = TOOLS.filter((tool) => agent || tool.id !== "agent").map((tool) => ({
+    id: `route:${tool.route}`,
+    label: tool.label,
+    icon: glyph(tool.id),
+    ...counted(`route:${tool.route}`, counts),
+  }));
+  return [
+    ...[routeNode("overview", "/overview", counts), ...CLUSTER_KINDS.map((kind) => kindNode(kind, counts))].map(inBand("cluster")),
+    ...[
+      ...kindNodes(counts),
+      { id: "crds", label: "Custom resources", icon: Icons.crds, defaultExpanded: false, children: crds },
+    ].map(inBand("resources")),
+    ...[...apps, ...tools].map(inBand("tools")),
+  ];
 }
 
 /**
@@ -167,7 +202,7 @@ export function crdNodes(crds: CrdRef[], counts?: NodeCounts): ResourceNode[] {
       defaultExpanded: false,
       children: [...list]
         .sort((a, b) => a.kind.localeCompare(b.kind))
-        .map((crd) => ({ id: `crd:${crd.name}`, label: crd.kind, icon: Icons.fallback, ...counted(`crd:${crd.name}`, counts) })),
+        .map((crd) => ({ id: `crd:${crd.name}`, label: crd.kind, icon: Icons.crds, ...counted(`crd:${crd.name}`, counts) })),
     }));
 }
 

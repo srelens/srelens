@@ -594,11 +594,6 @@
     transition: background 110ms ease, color 110ms ease;
   }
   .nav-item:hover { background: var(--field); color: var(--ink); }
-  .nav-item[data-active="true"] {
-    background: var(--accent-wash);
-    color: var(--accent);
-    font-weight: 600;
-  }
 
 
 
@@ -1043,15 +1038,29 @@
     padding-top: 0.28rem;
     padding-bottom: 0.28rem;
     padding-right: 0.5rem;
-    font-size: 0.6875rem;
+    font-size: 0.75rem;
     font-weight: 600;
-    letter-spacing: 0.02em;
-    color: var(--ink-soft);
+    color: var(--ink);
     text-align: left;
   }
   .tree-group:hover { background: var(--field); }
   .tree-caret { transition: transform 120ms ease; color: var(--ink-faint); }
   .tree-caret[data-open="true"] { transform: rotate(90deg); }
+  /* A closed group holding the active row says so: accent caret, accent dot. */
+  .tree-group[aria-current="location"] .tree-caret { color: var(--accent); }
+  .tree-here {
+    width: 5px;
+    height: 5px;
+    flex-shrink: 0;
+    border-radius: 50%;
+    background: var(--accent);
+  }
+  /* Between bands the strongest mark in the sidebar; inside one, only space. */
+  [role="tree"] > [data-slot="band-rule"] {
+    margin: 6px 0;
+    border-top: 1px solid var(--rule-strong);
+  }
+  [role="tree"] > li[data-gap] { margin-top: 2px; }
 
   .tree-row {
     display: flex;
@@ -1062,16 +1071,28 @@
     padding-bottom: var(--pad-y);
     padding-right: 0.5rem;
     font-size: 0.75rem;
-    color: var(--ink-muted);
+    color: var(--ink-soft);
     text-align: left;
   }
   .tree-row:hover { background: var(--field); color: var(--ink); }
-  .tree-row[data-active="true"] {
-    background: var(--accent-wash);
-    color: var(--accent);
-    font-weight: 500;
-    box-shadow: inset 2px 0 0 var(--accent);
+  /* The one active style for left-hand navigation (#1001). Ink rather than
+     accent text: a wash strong enough to tell from hover cannot also carry
+     accent text in every theme. The bar and the icon keep the accent. */
+  .tree-row[data-active="true"],
+  .nav-item[data-active="true"] {
+    background: var(--accent-wash-strong);
+    color: var(--ink);
+    font-weight: 600;
+    box-shadow: inset 3px 0 0 var(--accent);
   }
+  .tree-row[data-active="true"] > svg,
+  .nav-item[data-active="true"] > svg { color: var(--accent); }
+  .tree-row[data-active="true"] .tree-count { color: var(--ink-soft); }
+
+  /* A rail mark out of reach (`ClusterRailItem.unavailable`). Dimmed, never
+     below 3:1 against the rail for any mark colour: paper's amber needs 0.86
+     (theme-contrast.test.ts). A paused one says so with a glyph instead. */
+  [data-unavailable="true"] { opacity: 0.88; }
   .focus-back {
     display: flex;
     align-items: center;
@@ -1085,54 +1106,6 @@
     text-align: left;
   }
   .focus-back:hover { filter: brightness(0.97); }
-
-  .drill-in {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    width: 15px;
-    height: 15px;
-    flex-shrink: 0;
-    border-radius: 4px;
-    color: var(--ink-faint);
-    opacity: 0;
-  }
-  .tree-cluster:hover .drill-in { opacity: 1; }
-  .drill-in:hover { background: var(--accent-wash); color: var(--accent); }
-
-  .tree-cluster {
-    display: flex;
-    align-items: center;
-    gap: 0.4rem;
-    width: 100%;
-    padding-top: 0.2rem;
-    padding-bottom: 0.2rem;
-    padding-right: 0.5rem;
-    font-size: 0.8125rem;
-    font-weight: 500;
-    color: var(--ink-soft);
-    text-align: left;
-  }
-  .tree-cluster:hover { background: var(--field); }
-  .caret-btn {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    width: 15px;
-    height: 15px;
-    flex-shrink: 0;
-    border-radius: 3px;
-    color: var(--ink-faint);
-  }
-  .caret-btn:hover { background: var(--rule); color: var(--ink); }
-  .tree-cluster[data-active="true"] {
-    background: var(--accent-wash);
-    color: var(--ink);
-    font-weight: 600;
-    box-shadow: inset 2px 0 0 var(--accent);
-  }
-  .tree-cluster[data-off="true"] { opacity: 0.5; }
-  .tree-cluster[data-off="true"]:hover { opacity: 0.85; }
 
   .tree-count {
     font-size: 0.6875rem;
