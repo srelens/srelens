@@ -212,6 +212,14 @@ describe("bulk actions over an app's resource table", () => {
     expect(result.getAttribute("data-status")).toBe("partial");
   });
 
+  it("asks the host about a table row by its identity alone", async () => {
+    // A table row also carries its age and columns, and the host refuses a field it does not know.
+    const row = { namespace: "team", name: "app-0", age: "1d", columns: ["True"] } as BulkResource;
+    vi.mocked(inspectExtensionResource).mockResolvedValue(detailFor("app-0") as never);
+    render(<ExtensionBulkActions target={target} selection={[row]} onClear={() => {}} />);
+    await waitFor(() => expect(inspectExtensionResource).toHaveBeenCalledWith({ ...target, namespace: "team", name: "app-0" }));
+  });
+
   it("does not offer an action the host does not list for this kind", async () => {
     vi.mocked(inspectExtensionResource).mockImplementation(async (selection) => ({
       ...detailFor(selection.name),

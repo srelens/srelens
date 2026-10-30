@@ -11,7 +11,7 @@ vi.mock("@srelens/core", async (original) => ({
 }));
 
 import { useResolvedColumns } from "./useResolvedColumns";
-import type { InstalledExtension } from "@srelens/core";
+import { NO_NAMESPACE, type InstalledExtension } from "@srelens/core";
 
 const plugin = {
   enabled: true, revision: 2, manifest: { id: "org.example.security", name: "Security", contributions: {
@@ -29,7 +29,7 @@ it("resolves 1,000 deployment rows with one call, then removes the column on dis
     { uid: null, name: "api-0", namespace: "team", values: { critical: "3" } },
   ] });
   const rows = Array.from({ length: 1_000 }, (_, index) => ({ name: `api-${index}`, namespace: "team" }));
-  const props = { plugins: [plugin], context: "prod", contextId: "context-key", namespace: "team", kind: "apps/Deployment", rows };
+  const props = { plugins: [plugin], context: "prod", contextId: "context-key", namespaces: ["team"], kind: "apps/Deployment", rows };
   const view = renderHook((next) => useResolvedColumns(next), { initialProps: props });
   await waitFor(() => expect(view.result.current.columns[0].getValue?.(rows[0])).toBe("3"));
   expect(resolve).toHaveBeenCalledTimes(1);
@@ -40,10 +40,32 @@ it("resolves 1,000 deployment rows with one call, then removes the column on dis
   expect(view.result.current.columns).toHaveLength(0);
 });
 
+it("asks for each selected namespace's rows on their own, never the whole cluster", async () => {
+  resolve.mockImplementation(async (_id, _revision, _context, namespace) => ({ columns: [], cells: [
+    { uid: null, name: `api-${namespace}`, namespace, values: { critical: namespace === "prod" ? "1" : "2" } },
+  ] }));
+  const rows = [{ name: "api-prod", namespace: "prod" }, { name: "api-team", namespace: "team" }];
+  const view = renderHook(() => useResolvedColumns({ plugins: [plugin], context: "prod", namespaces: ["prod", "team"], kind: "apps/Deployment", rows }));
+  await waitFor(() => expect(view.result.current.columns[0].getValue?.(rows[1])).toBe("2"));
+  expect(view.result.current.columns[0].getValue?.(rows[0])).toBe("1");
+  expect(resolve.mock.calls.map((call) => [call[3], call[5].map((row: { name: string }) => row.name)]))
+    .toEqual([["prod", ["api-prod"]], ["team", ["api-team"]]]);
+});
+
+it("says the columns could not be read when one namespace's could not, never a blank cell", async () => {
+  resolve.mockImplementation(async (_id, _revision, _context, namespace) => {
+    if (namespace === "prod") throw new Error("RBAC denied");
+    return { columns: [], cells: [{ uid: null, name: "api", namespace, values: { critical: "2" } }] };
+  });
+  const rows = [{ name: "api", namespace: "prod" }, { name: "api", namespace: "team" }];
+  const view = renderHook(() => useResolvedColumns({ plugins: [plugin], context: "prod", namespaces: ["prod", "team"], kind: "apps/Deployment", rows }));
+  await waitFor(() => expect(view.result.current.errors[0]?.message).toBe("RBAC denied"));
+});
+
 it("keeps a failed read explicit and retries one batch", async () => {
   resolve.mockRejectedValueOnce(new Error("RBAC denied")).mockResolvedValueOnce({ columns: [], cells: [] });
   const rows = [{ name: "api", namespace: "team" }];
-  const view = renderHook(() => useResolvedColumns({ plugins: [plugin], context: "prod", namespace: "team", kind: "apps/Deployment", rows }));
+  const view = renderHook(() => useResolvedColumns({ plugins: [plugin], context: "prod", namespaces: ["team"], kind: "apps/Deployment", rows }));
   await waitFor(() => expect(view.result.current.errors[0]?.message).toBe("RBAC denied"));
   act(() => view.result.current.reload());
   await waitFor(() => expect(resolve).toHaveBeenCalledTimes(2));
@@ -56,7 +78,7 @@ it("keeps resolved cells while a watched snapshot is pending and loads only new 
   ] }).mockImplementationOnce(() => new Promise((done) => { complete = done; }));
   const first = { name: "api", namespace: "team" };
   const added = { name: "worker", namespace: "team" };
-  const props = { plugins: [plugin], context: "prod", namespace: "team", kind: "apps/Deployment", rows: [first] };
+  const props = { plugins: [plugin], context: "prod", namespaces: ["team"], kind: "apps/Deployment", rows: [first] };
   const view = renderHook((next) => useResolvedColumns(next), { initialProps: props });
   await waitFor(() => expect(view.result.current.columns[0].getValue?.(first)).toBe("3"));
   view.rerender({ ...props, rows: [first, added] });
@@ -73,7 +95,7 @@ it("keeps resolved cells while a watched snapshot is pending and loads only new 
 it("sends no summary fields for join-only columns even when rows have large unused messages", async () => {
   resolve.mockResolvedValue({ columns: [], cells: [] });
   const rows = [{ name: "api", namespace: "team", message: "x".repeat(8_192) }];
-  renderHook(() => useResolvedColumns({ plugins: [plugin], context: "prod", namespace: "team", kind: "apps/Deployment", rows }));
+  renderHook(() => useResolvedColumns({ plugins: [plugin], context: "prod", namespaces: ["team"], kind: "apps/Deployment", rows }));
   await waitFor(() => expect(resolve).toHaveBeenCalledTimes(1));
   expect(resolve.mock.calls[0][5][0].row).toEqual({});
 });
@@ -85,7 +107,7 @@ it("projects only the root key read by a row column", async () => {
       source: { jsonPath: ".status.ready" }, format: "text" },
   ] } } } as InstalledExtension;
   const rows = [{ name: "api", namespace: "team", status: { ready: "True" }, message: "x".repeat(8_192) }];
-  renderHook(() => useResolvedColumns({ plugins: [source], context: "prod", namespace: "team", kind: "apps/Deployment", rows }));
+  renderHook(() => useResolvedColumns({ plugins: [source], context: "prod", namespaces: ["team"], kind: "apps/Deployment", rows }));
   await waitFor(() => expect(resolve).toHaveBeenCalledTimes(1));
   expect(resolve.mock.calls[0][5][0].row).toEqual({ status: { ready: "True" } });
 });
@@ -107,7 +129,7 @@ it("puts an app's badges on built-in rows from the same one batch, always as wor
       badgeErrors: { "flux-managed": "row is not in the host's metadata read; refresh" } },
   ] });
   const rows = [{ name: "api", namespace: "team" }, { name: "plain", namespace: "team" }, { name: "gone", namespace: "team" }];
-  const view = renderHook(() => useResolvedColumns({ plugins: [flux], context: "prod", namespace: "team", kind: "apps/Deployment", rows }));
+  const view = renderHook(() => useResolvedColumns({ plugins: [flux], context: "prod", namespaces: ["team"], kind: "apps/Deployment", rows }));
   await waitFor(() => expect(view.result.current.columns[0]?.getValue?.(rows[0])).toBe("Flux"));
   expect(resolve).toHaveBeenCalledTimes(1);
   const column = view.result.current.columns[0];
@@ -132,7 +154,7 @@ it("keeps an app's badge column apart from a table column whose id is `badges`",
   } } } as InstalledExtension;
   resolve.mockResolvedValue({ columns: both.manifest.contributions.tableColumns, badges: flux.manifest.contributions.badges, cells: [] });
   const rows = [{ name: "api", namespace: "team" }];
-  const view = renderHook(() => useResolvedColumns({ plugins: [both], context: "prod", namespace: "team", kind: "apps/Deployment", rows }));
+  const view = renderHook(() => useResolvedColumns({ plugins: [both], context: "prod", namespaces: ["team"], kind: "apps/Deployment", rows }));
   await waitFor(() => expect(resolve).toHaveBeenCalledTimes(1));
   const keys = view.result.current.columns.map((column) => column.key);
   expect(keys).toHaveLength(2);
@@ -141,7 +163,7 @@ it("keeps an app's badge column apart from a table column whose id is `badges`",
 
 it("asks for nothing on a kind no badge names", async () => {
   const rows = [{ name: "db", namespace: "team" }];
-  const view = renderHook(() => useResolvedColumns({ plugins: [flux], context: "prod", namespace: "team", kind: "apps/StatefulSet", rows }));
+  const view = renderHook(() => useResolvedColumns({ plugins: [flux], context: "prod", namespaces: ["team"], kind: "apps/StatefulSet", rows }));
   await act(async () => {});
   expect(resolve).not.toHaveBeenCalled();
   expect(view.result.current.columns).toHaveLength(0);
@@ -154,7 +176,7 @@ it("shows one cell's resolver error without hiding another row's value", async (
     { uid: null, name: "worker", namespace: "team", values: { critical: "7" } },
   ] });
   const rows = [{ name: "api", namespace: "team" }, { name: "worker", namespace: "team" }];
-  const view = renderHook(() => useResolvedColumns({ plugins: [plugin], context: "prod", namespace: "team", kind: "apps/Deployment", rows }));
+  const view = renderHook(() => useResolvedColumns({ plugins: [plugin], context: "prod", namespaces: ["team"], kind: "apps/Deployment", rows }));
   await waitFor(() => expect(view.result.current.columns[0].getValue?.(rows[1])).toBe("7"));
   expect(renderToStaticMarkup(<>{view.result.current.columns[0].render?.(rows[0])}</>))
     .toContain("matched multiple joined resources");
@@ -178,9 +200,14 @@ it("re-resolves a joined column in place when the joined reader's kind changes (
   resolve.mockResolvedValueOnce({ columns: [], cells: [{ uid: null, name: "api", namespace: "team", values: { critical: "3" } }] })
     .mockImplementationOnce(() => new Promise((done) => { finish = done; }));
   const rows = [{ name: "api", namespace: "team" }];
-  const view = renderHook(() => useResolvedColumns({ plugins: [joined], context: "prod", namespace: "team", kind: "apps/Deployment", rows }));
+  const view = renderHook(() => useResolvedColumns({ plugins: [joined], context: "prod", namespaces: ["team"], kind: "apps/Deployment", rows }));
   await waitFor(() => expect(view.result.current.columns[0].getValue?.(rows[0])).toBe("3"));
   await waitFor(() => expect(watched.map((w) => [w.capability, w.namespace])).toEqual([["reports", "team"]]));
+  // A collection that matches no namespace has nothing to follow.
+  const none = renderHook(() => useResolvedColumns({ plugins: [joined], context: "prod", namespaces: [NO_NAMESPACE], kind: "apps/Deployment", rows: [] }));
+  await act(async () => {});
+  expect(watched).toHaveLength(1);
+  none.unmount();
   act(() => watched[0].onData({ event: "changed" }, 1));
   await waitFor(() => expect(resolve).toHaveBeenCalledTimes(2));
   // The old value stays while the new one is read.

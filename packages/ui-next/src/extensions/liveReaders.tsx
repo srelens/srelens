@@ -8,6 +8,8 @@ import {
   isExtensionWatchEvent,
   isTauri,
   openExtensionView,
+  selectsNothing,
+  watchNamespaceForSelection,
   type ExtensionStream,
   type ExtensionView,
   type InstalledExtension,
@@ -123,20 +125,28 @@ export function LiveReaders({ plugin, label, children }: { plugin: InstalledExte
 const RANK: Record<LiveState["state"], number> = { live: 0, connecting: 1, reconnecting: 2, stopped: 3, off: 4 };
 
 /**
- * Follow `capabilities` — declared readers of `plugin` — in `context` and
- * `namespace`, calling `onChange` whenever what they would answer may have
- * changed. Answers the least current of their states. Inside `LiveReaders` the
- * watches belong to that view; outside, to this component.
+ * Follow `capabilities` — declared readers of `plugin` — in `context` over the
+ * selected `namespaces`, calling `onChange` whenever what they would answer may
+ * have changed. Answers the least current of their states. Inside `LiveReaders`
+ * the watches belong to that view; outside, to this component. A selection of
+ * nothing has nothing to follow.
+ *
+ * ponytail: several namespaces are followed by one cluster-wide watch. An app
+ * has 8 open streams, across its views, and one per namespace per reader would
+ * spend them on a small selection; a credential that cannot watch the cluster
+ * is told the view is not live, and Refresh still reads each namespace.
  */
 export function useLiveReaders(args: {
   plugin: InstalledExtension;
   capabilities: string[];
   context: string;
-  namespace: string;
+  namespaces: string[];
   label: string;
   onChange(): void;
 }): LiveState {
-  const { plugin, capabilities, context, namespace, label } = args;
+  const { plugin, context, namespaces, label } = args;
+  const capabilities = selectsNothing(namespaces) ? [] : args.capabilities;
+  const namespace = watchNamespaceForSelection(namespaces);
   const id = plugin.manifest.id;
   // The enclosing view's hub follows its own app only; another app's reader gets a hub of its own.
   const enclosing = useContext(HubContext);

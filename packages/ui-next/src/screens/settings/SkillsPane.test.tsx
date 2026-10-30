@@ -172,18 +172,29 @@ describe("SkillsPane", () => {
 
   it("narrows the list to the skills that match the search, by name or description", async () => {
     await shown();
-    await userEvent.type(screen.getByRole("textbox", { name: "Search installed skills" }), "rolls back");
+    await userEvent.type(screen.getByRole("searchbox", { name: "Filter skills" }), "rolls back");
     expect(card("team-runbook")).not.toBeNull();
     expect(card("crashloop-triage")).toBeNull();
-    await userEvent.clear(screen.getByRole("textbox", { name: "Search installed skills" }));
-    await userEvent.type(screen.getByRole("textbox", { name: "Search installed skills" }), "PENDING");
+    await userEvent.clear(screen.getByRole("searchbox", { name: "Filter skills" }));
+    await userEvent.type(screen.getByRole("searchbox", { name: "Filter skills" }), "PENDING");
     expect(card("pending-pod")).not.toBeNull();
     expect(card("team-runbook")).toBeNull();
   });
 
+  it("filters through the standard filter row, a regular expression included", async () => {
+    await shown();
+    expect(screen.getByRole("search", { name: "Filter skills" })).toBeDefined();
+    await userEvent.click(screen.getByRole("button", { name: "Use regular expression" }));
+    await userEvent.type(screen.getByRole("searchbox", { name: "Filter skills" }), "^team-");
+    expect(card("team-runbook")).not.toBeNull();
+    expect(card("crashloop-triage")).toBeNull();
+    await userEvent.keyboard("{Escape}");
+    expect(card("crashloop-triage")).not.toBeNull();
+  });
+
   it("says so when nothing matches the search", async () => {
     await shown();
-    await userEvent.type(screen.getByRole("textbox", { name: "Search installed skills" }), "zzz");
+    await userEvent.type(screen.getByRole("searchbox", { name: "Filter skills" }), "zzz");
     expect(screen.getByText("No skill matches")).toBeDefined();
   });
 

@@ -1,6 +1,6 @@
 import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { ExtensionStreamHandlers, ExtensionStreamRequest } from "@srelens/core";
+import { NO_NAMESPACE, type ExtensionStreamHandlers, type ExtensionStreamRequest } from "@srelens/core";
 
 const core = vi.hoisted(() => ({
   tauri: true,
@@ -55,9 +55,23 @@ const plugin = {
 const emit = (data: unknown, seq = 1) => act(() => handlers[0].onData(data, seq));
 
 describe("a live app page (#566)", () => {
+  it("follows nothing for a collection that matches no namespace", async () => {
+    render(<ExtensionResults plugin={plugin} capability="list" context="kind-demo" namespaces={[NO_NAMESPACE]} />);
+    expect(await screen.findByText("No resources returned by this app.")).toBeTruthy();
+    expect(core.openExtensionView).not.toHaveBeenCalled();
+    expect(core.readExtension).not.toHaveBeenCalled();
+  });
+
+  it("follows one namespace there, and every namespace for several: an app has 8 streams to spend", async () => {
+    core.readExtension.mockResolvedValue(rows("web"));
+    render(<ExtensionResults plugin={plugin} capability="list" context="kind-demo" namespaces={["a", "b", "c"]} />);
+    await waitFor(() => expect(handlers).toHaveLength(1));
+    expect(requests[0]).toMatchObject({ namespace: "", source: { kind: "watch", capability: "list" } });
+  });
+
   it("reads again in place when the watch reports a change", async () => {
     core.readExtension.mockResolvedValueOnce(rows("web"));
-    render(<ExtensionResults plugin={plugin} capability="list" context="kind-demo" namespace="team" />);
+    render(<ExtensionResults plugin={plugin} capability="list" context="kind-demo" namespaces={["team"]} />);
     expect(await screen.findByText("web")).toBeTruthy();
     await waitFor(() => expect(handlers).toHaveLength(1));
     expect(requests[0]).toMatchObject({ context: "kind-demo", namespace: "team", source: { kind: "watch", capability: "list" } });
@@ -75,7 +89,7 @@ describe("a live app page (#566)", () => {
 
   it("marks the list out of date while reconnecting, and reads afresh after", async () => {
     core.readExtension.mockResolvedValue(rows("web"));
-    const { container } = render(<ExtensionResults plugin={plugin} capability="list" context="kind-demo" namespace="team" />);
+    const { container } = render(<ExtensionResults plugin={plugin} capability="list" context="kind-demo" namespaces={["team"]} />);
     await screen.findByText("web");
     await waitFor(() => expect(handlers).toHaveLength(1));
     emit({ event: "synced" });
@@ -94,7 +108,7 @@ describe("a live app page (#566)", () => {
 
   it("says why it is not live when the host ends the watch", async () => {
     core.readExtension.mockResolvedValue(rows("web"));
-    render(<ExtensionResults plugin={plugin} capability="list" context="kind-demo" namespace="team" />);
+    render(<ExtensionResults plugin={plugin} capability="list" context="kind-demo" namespaces={["team"]} />);
     await screen.findByText("web");
     await waitFor(() => expect(handlers).toHaveLength(1));
     act(() => handlers[0].onEnd?.({ type: "error", code: "rateLimited", message: "App org.test.gitops sent more than 50 stream messages per second" }));
@@ -106,7 +120,7 @@ describe("a live app page (#566)", () => {
   it("stays a read-on-Refresh list on the web, and says so", async () => {
     core.tauri = false;
     core.readExtension.mockResolvedValue(rows("web"));
-    render(<ExtensionResults plugin={plugin} capability="list" context="kind-demo" namespace="team" />);
+    render(<ExtensionResults plugin={plugin} capability="list" context="kind-demo" namespaces={["team"]} />);
     await screen.findByText("web");
     expect(screen.getByText("Not live")).toBeTruthy();
     expect(core.openExtensionView).not.toHaveBeenCalled();
@@ -125,6 +139,26 @@ describe("an app limited to chosen clusters (Settings → Apps)", () => {
     contexts: ["/kube/a%23b#c"],
   } as never;
 
+  it("resolves a cluster-scoped card's columns over its rows, whatever namespaces the card counted in", async () => {
+    // The rows have no namespace, so a selection of named ones would match none of them.
+    const clusterKind = {
+      ...(limited as object),
+      contexts: undefined,
+      manifest: {
+        ...(limited as { manifest: object }).manifest,
+        capabilities: [{ name: "list", target: "k8s.listCustomResource", arguments: { kind: "Application", group: "argoproj.io", namespaced: false }, inputs: ["context", "namespace"] }],
+      },
+    } as never;
+    core.readExtension.mockResolvedValue({ items: [{ name: "web", namespace: "", age: "1d", columns: [] }] });
+    render(<ExtensionResults plugin={clusterKind} capability="list" context="ctx" namespaces={["prod", "team"]} card="expiring" />);
+    await screen.findByText("web");
+    await waitFor(() => expect(core.resolveExtensionColumns).toHaveBeenCalled());
+    expect(core.resolveExtensionColumns.mock.calls[0][3]).toBe("");
+    expect(core.resolveExtensionColumns.mock.calls[0][5].map((row: { name: string }) => row.name)).toEqual(["web"]);
+    // The card's own read keeps the namespaces it counted in.
+    expect(core.readExtension).toHaveBeenCalledWith("org.test.gitops", 1, "list", "ctx", "", true, "expiring", ["prod", "team"]);
+  });
+
   it("joins its columns on its own page, which asks the host by pinned ID (#695)", async () => {
     // `/kube/a` declaring `b#c` and `/kube/a#b` declaring `c` share the stable ID `/kube/a#b#c` (#623).
     core.listContexts.mockResolvedValue({ contexts: [
@@ -132,7 +166,7 @@ describe("an app limited to chosen clusters (Settings → Apps)", () => {
       { name: "c", stableId: "/kube/a#b#c", key: "/kube/a%23b#c", pinnedId: "srelens-context:/kube/a%23b#c" },
     ] });
     core.readExtension.mockResolvedValue(rows("web"));
-    render(<ExtensionResults plugin={limited} capability="list" context="srelens-context:/kube/a%23b#c" namespace="team" />);
+    render(<ExtensionResults plugin={limited} capability="list" context="srelens-context:/kube/a%23b#c" namespaces={["team"]} />);
     await screen.findByText("web");
     await waitFor(() => expect(core.resolveExtensionColumns).toHaveBeenCalledWith(
       "org.test.gitops", 1, "srelens-context:/kube/a%23b#c", "team", "argoproj.io/Application", expect.any(Array)));

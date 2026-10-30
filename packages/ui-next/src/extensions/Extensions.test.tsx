@@ -118,7 +118,7 @@ it("shows a declared native table column on the app's own resource page", async 
     contributions:{ ...plugin.manifest.contributions, tableColumns:[column] } } };
   vi.mocked(readExtension).mockResolvedValue({ items:[{name:"apps",namespace:"team",age:"1d",columns:[]}], printerColumns:[] });
   vi.mocked(resolveExtensionColumns).mockResolvedValue({ columns:[column], cells:[{uid:null,name:"apps",namespace:"team",values:{critical:"4"}}] });
-  render(<ExtensionResults plugin={app} capability="list" context="prod" namespace="team" />);
+  render(<ExtensionResults plugin={app} capability="list" context="prod" namespaces={["team"]} />);
   expect(await screen.findByRole("columnheader", {name:"Critical CVEs"})).toBeTruthy();
   expect(await screen.findByText("4")).toBeTruthy();
   expect(resolveExtensionColumns).toHaveBeenCalledTimes(1);
@@ -133,7 +133,7 @@ it("shows the host-resolved status as a word in its own column, searchable, when
     { name:"billing", namespace:"team", age:"1d", columns:[], status:{ status:"warning", label:"Out of sync", reason:"abc123" } },
     { name:"legacy", namespace:"team", age:"1d", columns:[] },
   ], printerColumns:[] });
-  const view = render(<ExtensionResults plugin={app} capability="list" context="prod" namespace="team" />);
+  const view = render(<ExtensionResults plugin={app} capability="list" context="prod" namespaces={["team"]} />);
   expect(await screen.findByRole("columnheader", { name:"Status" })).toBeTruthy();
   const rows = within(screen.getByRole("table")).getAllByRole("row").slice(1);
   expect(within(rows[0]).getByText("Healthy")).toBeTruthy();
@@ -141,7 +141,7 @@ it("shows the host-resolved status as a word in its own column, searchable, when
   expect(within(rows[1]).getByText("abc123")).toBeTruthy();
   // A row the host returned no status for says so, rather than borrowing a word.
   expect(within(rows[2]).getByText("—")).toBeTruthy();
-  view.rerender(<ExtensionResults plugin={app} capability="list" context="prod" namespace="team" search="out of sync" />);
+  view.rerender(<ExtensionResults plugin={app} capability="list" context="prod" namespaces={["team"]} search="out of sync" />);
   expect(screen.getByText("billing")).toBeTruthy();
   expect(screen.queryByText("guestbook")).toBeNull();
 });
@@ -153,7 +153,7 @@ it("draws no status column for a kind without a resolver", async () => {
     contributions:{ ...plugin.manifest.contributions, statusResolvers:[{ forKinds:["argoproj.io/AppProject"],
       rules:[{ when:[], status:"unknown", label:"Unknown" }] }] } } };
   vi.mocked(readExtension).mockResolvedValue({ items:[{ name:"apps", namespace:"team", age:"1d", columns:["True"] }], printerColumns:[{ name:"Ready", jsonPath:".r" }] });
-  render(<ExtensionResults plugin={app} capability="list" context="prod" namespace="team" />);
+  render(<ExtensionResults plugin={app} capability="list" context="prod" namespaces={["team"]} />);
   expect(await screen.findByText("apps")).toBeTruthy();
   expect(screen.queryByRole("columnheader", { name:"Status" })).toBeNull();
 });
@@ -171,13 +171,13 @@ it("sorts and searches opted-in app column values", async () => {
     {uid:null,name:"alpha",namespace:"team",values:{score:"12"}},
     {uid:null,name:"beta",namespace:"team",values:{score:"4"}},
   ] });
-  const view = render(<ExtensionResults plugin={app} capability="list" context="prod" namespace="team" />);
+  const view = render(<ExtensionResults plugin={app} capability="list" context="prod" namespaces={["team"]} />);
   expect(await screen.findByText("12")).toBeTruthy();
   fireEvent.click(screen.getByRole("button", {name:"Sort by Score"}));
   expect(within(screen.getByRole("table")).getAllByRole("row").slice(1).map((row) => row.textContent)).toEqual([
     expect.stringContaining("beta"), expect.stringContaining("alpha"),
   ]);
-  view.rerender(<ExtensionResults plugin={app} capability="list" context="prod" namespace="team" search="12" />);
+  view.rerender(<ExtensionResults plugin={app} capability="list" context="prod" namespaces={["team"]} search="12" />);
   expect(screen.getByText("alpha")).toBeTruthy();
   expect(screen.queryByText("beta")).toBeNull();
 });
@@ -275,7 +275,7 @@ it("refreshes an open list only when an action on one of its own resources is ac
   const { EXTENSION_RESOURCE_CHANGED } = await import("@srelens/core");
   vi.mocked(readExtension).mockResolvedValue({ items: [] } as any);
   render(
-    <ExtensionResults plugin={plugin} capability="list" context="staging" namespace="argo" />,
+    <ExtensionResults plugin={plugin} capability="list" context="staging" namespaces={["argo"]} />,
   );
   await waitFor(() => expect(readExtension).toHaveBeenCalledTimes(1));
   const changed = (detail: object) =>
@@ -425,7 +425,7 @@ it("reads the pinned context and distinguishes failed reads from empty results",
       plugin={plugin}
       capability="list"
       context="staging"
-      namespace="argo"
+      namespaces={["argo"]}
     />,
   );
   expect((await screen.findByRole("alert")).textContent).toContain("Forbidden");
@@ -1083,6 +1083,7 @@ it("offers a limited app on exactly the chosen one of two clusters sharing a sta
   // `a` + `b#c` and `a#b` + `c` share a stable ID; the key encodes both parts (#623).
   installed.contexts = ["/kube/a#b%23c"];
   vi.mocked(listExtensions).mockResolvedValue({ schemaVersion: 1, nextRevision: 2, plugins: [installed] });
+  vi.mocked(readExtension).mockResolvedValue({ items: [] });
   vi.mocked(listContexts).mockResolvedValue({
     contexts: [
       { name: "b#c", stableId: "/kube/a#b#c", key: "/kube/a#b%23c" },

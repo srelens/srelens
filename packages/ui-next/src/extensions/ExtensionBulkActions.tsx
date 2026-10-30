@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import {
   actOnExtensionResource,
   inspectExtensionResource,
@@ -68,6 +69,8 @@ export interface ExtensionBulkActionsProps {
   /** Empties the table's selection once the reader is done with the result. */
   onClear(): void;
   available?: BulkActionAvailability;
+  /** Where the bar goes when the page keeps it elsewhere; beside the rest otherwise. */
+  barSlot?: HTMLElement | null;
 }
 
 const count = (n: number, one: string, many: string) => `${n.toLocaleString("en-US")} ${n === 1 ? one : many}`;
@@ -122,7 +125,7 @@ function NameList({ testId, title, items }: { testId: string; title: string; ite
   );
 }
 
-export function ExtensionBulkActions({ target, selection, onClear, available }: ExtensionBulkActionsProps) {
+export function ExtensionBulkActions({ target, selection, onClear, available, barSlot }: ExtensionBulkActionsProps) {
   // Who the host says asked: read from its own installed inventory, never from
   // the app. See `confirmationApp.ts`.
   const app = useConfirmationApp({ id: target.id, revision: target.revision });
@@ -138,7 +141,7 @@ export function ExtensionBulkActions({ target, selection, onClear, available }: 
       inspectionAbort.current = controller;
       const details = new Map<string, ExtensionResourceDetail>();
       const outcomes = await runBulk(selection, async (resource) => {
-        const detail = await inspectExtensionResource({ ...target, ...resource });
+        const detail = await inspectExtensionResource({ ...target, namespace: resource.namespace, name: resource.name });
         details.set(bulkResourceKey(resource), detail);
         return { ok: true };
       }, BULK_CONCURRENCY, { signal: controller.signal });
@@ -262,8 +265,7 @@ export function ExtensionBulkActions({ target, selection, onClear, available }: 
 
   if (selection.length === 0) return null;
 
-  return (
-    <div className="extension-bulk">
+  const bar = (
       <div className="extension-bulk-bar">
         <strong data-testid="bulk-count">{count(selection.length, "selected", "selected")}</strong>
         {menu.status === "loading" && <span className="extension-message">Loading actions…</span>}
@@ -288,6 +290,11 @@ export function ExtensionBulkActions({ target, selection, onClear, available }: 
           Clear selection
         </Button>
       </div>
+  );
+
+  return (
+    <div className="extension-bulk">
+      {barSlot ? createPortal(bar, barSlot) : bar}
       {menu.status === "error" && (
         // The host could not say which actions it offers. That is a failed
         // read, not an absence of actions, so it says so and offers a retry

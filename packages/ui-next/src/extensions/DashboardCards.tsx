@@ -195,7 +195,7 @@ export function AppCards({
         if (previewLists && card.type === "list" && answer?.state === "list" && answer.total > 0) {
           return <section key={card.id} className="extension-overview-list" aria-label={plainText(card.title)}>
             <header className="extension-toolbar"><h3>{plainText(card.title)}</h3>{target && <Button variant="ghost" onClick={()=>onOpen(card)}>View all matching</Button>}</header>
-            <ExtensionResults plugin={plugin} capability={card.source} context={host} namespace={selection.length === 1 ? selection[0] : ""} refresh={refresh} hideToolbar card={card.id} cardNamespaces={selection.length > 1 ? selection : undefined} previewRows={answer.rows}/>
+            <ExtensionResults plugin={plugin} capability={card.source} context={host} namespaces={selection} refresh={refresh} hideToolbar card={card.id} previewRows={answer.rows}/>
           </section>;
         }
         const windowSetting = /^\$\{settings\.([^}]+)\}$/.exec(card.predicate?.within ?? "")?.[1];
