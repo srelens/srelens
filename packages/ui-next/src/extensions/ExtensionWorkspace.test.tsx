@@ -820,6 +820,46 @@ describe("the app page's namespaces (#1001)", () => {
     expect(readExtension).toHaveBeenLastCalledWith("org.test.flux", 3, "apps", "staging", "", true);
   });
 
+  it("reads a built-in cluster-scoped reader once, however many namespaces the tab has selected", async () => {
+    // A built-in reader's arguments are empty: its scope is the host's to say.
+    const nodes = structuredClone(plugin);
+    nodes.manifest.capabilities[0] = { ...nodes.manifest.capabilities[0], target: "k8s.listNodes", arguments: {} };
+    vi.mocked(readExtension).mockResolvedValue({ items: [row("node-1", "")] } as never);
+    pick("prod", "team");
+    render(<Workspace plugin={nodes} page={nodes.manifest.contributions.pages[1]} context="staging" />);
+    expect(await screen.findByText("1 item")).toBeTruthy();
+    expect(screen.getAllByRole("cell", { name: "node-1" })).toHaveLength(1);
+    expect(screen.queryByRole("combobox", { name: "Namespaces" })).toBeNull();
+    expect(readExtension).toHaveBeenCalledTimes(1);
+    expect(readExtension).toHaveBeenCalledWith("org.test.flux", 3, "apps", "staging", "", true);
+  });
+
+  it("counts a dashboard's cluster-scoped page once beside its namespaced ones", async () => {
+    const mixed = structuredClone(plugin);
+    mixed.manifest.capabilities.push({ name: "nodes", target: "k8s.listNodes", arguments: {} } as never);
+    const pages = mixed.manifest.contributions.pages;
+    pages.push({ id: "nodes", title: "Nodes", capability: "nodes" });
+    pages[0].dashboard!.pages = ["apps", "nodes"];
+    vi.mocked(readExtension).mockImplementation((async (...args: unknown[]) =>
+      ({ items: [args[2] === "nodes" ? row("node-1", "") : row(`app-${args[4]}`, args[4] as string)] })) as never);
+    pick("prod", "team");
+    render(<Workspace plugin={mixed} page={pages[0]} context="staging" />);
+    const nodes = (await screen.findByLabelText("1 Nodes")).closest("section")!;
+    expect(nodes).toBeTruthy();
+    expect(await screen.findByLabelText("2 Kustomizations")).toBeTruthy();
+    expect(vi.mocked(readExtension).mock.calls.filter((call) => call[2] === "nodes").map((call) => call[4])).toEqual([""]);
+    // The namespaced page keeps the picker, whatever the dashboard page's own reader is.
+    expect(screen.getByRole("combobox", { name: "Namespaces" })).toBeTruthy();
+  });
+
+  it("offers the picker on a dashboard whose own reader is cluster-scoped but whose pages are not", async () => {
+    const mixed = structuredClone(plugin);
+    mixed.manifest.capabilities.push({ name: "nodes", target: "k8s.listNodes", arguments: {} } as never);
+    mixed.manifest.contributions.pages[0].capability = "nodes";
+    render(<Workspace plugin={mixed} page={mixed.manifest.contributions.pages[0]} context="staging" />);
+    expect(await screen.findByRole("combobox", { name: "Namespaces" })).toBeTruthy();
+  });
+
   it("reads each selected namespace on its own and shows their rows together", async () => {
     byNamespace({ prod: { items: [row("shop", "prod")] }, team: { items: [row("web", "team")] } });
     pick("prod", "team");

@@ -10,7 +10,6 @@ import {
   readExtension,
   itemStatuses,
   rowInSelection,
-  watchNamespaceForSelection,
   type ClusterContext,
   type ExtensionDashboardCard,
   type ExtensionPage,
@@ -25,7 +24,7 @@ import { Button, FilterBar, Tabs, filterMatcher, tableFilterError } from "@srele
 import { ErrorNotice, ExtensionResults } from "./ExtensionResults";
 import { useResource } from "../lib/useResource";
 import { LiveNotice, LiveReaders, LiveStatus, useLiveReaders } from "./liveReaders";
-import { readAcross } from "./readAcross";
+import { readAcross, readerNamespaces, readsClusterScope } from "./readAcross";
 import { NamespaceFailuresAlert } from "../lib/errorCopy";
 import { useFallbackNamespace, useInCollectionScope, useNamespaces, useSetNamespaces } from "../lib/workspace";
 import { CollectionScopeNotice, NamespaceScopePicker } from "../screens/collections/NamespaceScope";
@@ -107,7 +106,7 @@ function Summary({
   plugin,
   page,
   context,
-  namespaces,
+  namespaces: selected,
   refresh,
   onPage,
 }: {
@@ -118,6 +117,7 @@ function Summary({
   refresh: number;
   onPage(id: string): void;
 }) {
+  const namespaces = readerNamespaces(plugin, page.capability, selected);
   const data = useResource(
     async () => {
       const { answers, failures } = await readAcross(namespaces, (namespace) =>
@@ -136,7 +136,7 @@ function Summary({
   const { reload } = data;
   // Counts follow the reader's kind (#566), re-read in place on every change.
   const live = useLiveReaders({
-    plugin, capabilities: [page.capability], context, namespace: watchNamespaceForSelection(namespaces), label: `summary:${page.id}`, onChange: data.refresh,
+    plugin, capabilities: [page.capability], context, namespaces, label: `summary:${page.id}`, onChange: data.refresh,
   });
   // Status counts change when an action on one of these resources is accepted.
   useEffect(
@@ -232,7 +232,7 @@ function Events({
     ],
   );
   const live = useLiveReaders({
-    plugin, capabilities: [config.capability], context, namespace: watchNamespaceForSelection(namespaces), label: "events", onChange: result.refresh,
+    plugin, capabilities: [config.capability], context, namespaces, label: "events", onChange: result.refresh,
   });
   // Bound how many matching rows enter the DOM; Load more reveals the next page
   // of the already-capped backend result (#609).
@@ -324,7 +324,7 @@ function OverviewCards({plugin,context,namespaces,refresh,onOpen}: {
 }) {
   const [pulse,setPulse] = useState(0);
   const cards = plugin.manifest.contributions.dashboardCards ?? [];
-  const live = useLiveReaders({plugin,context,namespace:watchNamespaceForSelection(namespaces),capabilities:cards.map(card=>card.source),label:"overview:cards",onChange:()=>setPulse(n=>n+1)});
+  const live = useLiveReaders({plugin,context,namespaces,capabilities:cards.map(card=>card.source),label:"overview:cards",onChange:()=>setPulse(n=>n+1)});
   useEffect(()=>onExtensionResourceChanged(changed=>{
     if (changed.id===plugin.manifest.id && changed.context===context && cards.some(card=>card.source===changed.capability) && rowInSelection(changed.namespace,namespaces)) setPulse(n=>n+1);
   }),[plugin.manifest.id,context,namespaces.join("\u0000"),cards.map(card=>card.source).join("\u0000")]);
@@ -377,7 +377,6 @@ export function ExtensionWorkspace({
   const scopedByCollection = useInCollectionScope(cluster.stableId);
   const [count, setCount] = useState<HTMLElement | null>(null);
   const [bulkBar, setBulkBar] = useState<HTMLElement | null>(null);
-  const clusterScoped = plugin.manifest.capabilities.find((binding) => binding.name === page.capability)?.arguments.namespaced === false;
   // A card's target reads exactly the namespaces the card counted in — one (in
   // the route's path), several (its list) or every one — and nothing else: its
   // route, not a restricted credential's one namespace or the picker, says what
@@ -385,9 +384,18 @@ export function ExtensionWorkspace({
   // for the card's scope, never quietly another namespace's rows.
   const namespaces = card
     ? cardNamespace ? [cardNamespace] : cardNamespaces ?? []
-    : clusterScoped ? [] : scope && !scopedByCollection ? [scope] : selection;
+    : scope && !scopedByCollection ? [scope] : selection;
   const pages = plugin.manifest.contributions.pages;
   const cards = plugin.manifest.contributions.dashboardCards ?? [];
+  // Every reader this page shows. A dashboard's own capability reads nothing of it.
+  const readers = page.dashboard
+    ? [
+        ...pages.filter((p) => page.dashboard!.pages.includes(p.id)).map((p) => p.capability),
+        ...(page.dashboard.events ? [page.dashboard.events.capability] : []),
+        ...cards.map((card) => card.source),
+      ]
+    : [page.capability];
+  const clusterScoped = readers.every((reader) => readsClusterScope(plugin, reader));
   const groups = [...new Set(pages.map((p) => p.group ?? p.title))];
   const openCard = (opened: ExtensionDashboardCard) => {
     if (opened.target) onCard(opened.target.page, namespaces, opened.id);

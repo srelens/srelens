@@ -1,6 +1,6 @@
 import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { ExtensionStreamHandlers, ExtensionStreamRequest } from "@srelens/core";
+import { NO_NAMESPACE, type ExtensionStreamHandlers, type ExtensionStreamRequest } from "@srelens/core";
 
 const core = vi.hoisted(() => ({
   tauri: true,
@@ -55,6 +55,13 @@ const plugin = {
 const emit = (data: unknown, seq = 1) => act(() => handlers[0].onData(data, seq));
 
 describe("a live app page (#566)", () => {
+  it("follows nothing for a collection that matches no namespace", async () => {
+    render(<ExtensionResults plugin={plugin} capability="list" context="kind-demo" namespaces={[NO_NAMESPACE]} />);
+    expect(await screen.findByText("No resources returned by this app.")).toBeTruthy();
+    expect(core.openExtensionView).not.toHaveBeenCalled();
+    expect(core.readExtension).not.toHaveBeenCalled();
+  });
+
   it("follows one namespace there, and every namespace for several: an app has 8 streams to spend", async () => {
     core.readExtension.mockResolvedValue(rows("web"));
     render(<ExtensionResults plugin={plugin} capability="list" context="kind-demo" namespaces={["a", "b", "c"]} />);

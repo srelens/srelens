@@ -12,7 +12,6 @@ import {
   onExtensionResourceChanged,
   readExtension,
   rowInSelection,
-  watchNamespaceForSelection,
   type ExtensionResourceResult,
   type InstalledExtension,
 } from "@srelens/core";
@@ -22,7 +21,7 @@ import { contributionKind } from "@srelens/core";
 import { useContextId } from "./contextIds";
 import { StatusBadge } from "./StatusBadge";
 import { LiveNotice, LiveStatus, useLiveReaders } from "./liveReaders";
-import { readAcross } from "./readAcross";
+import { readAcross, readerNamespaces } from "./readAcross";
 import { NamespaceFailuresAlert } from "../lib/errorCopy";
 import { ListCount } from "../screens/ListCount";
 
@@ -99,7 +98,7 @@ export function ExtensionResults({
   plugin,
   capability,
   context,
-  namespaces = [],
+  namespaces: chosen = [],
   search = "",
   regex = false,
   refresh = 0,
@@ -137,6 +136,8 @@ export function ExtensionResults({
   /** Where the page wants the bulk bar, in its filter row. */
   bulkBar?: HTMLElement | null;
 }) {
+  // A card's rows are where it counted them, whatever kind they are.
+  const namespaces = card ? chosen : readerNamespaces(plugin, capability, chosen);
   const openResource = useContext(ExtensionResourceNavigation);
   const rowButtons = useRef(new Map<string,HTMLButtonElement>());
   const listRow = usePeekBounds();
@@ -188,15 +189,10 @@ export function ExtensionResults({
     ],
   );
   const { reload, refresh: reread } = data;
-  // ponytail: several namespaces are followed by one cluster-wide watch. An app
-  // has 8 open streams, across its views, and one per namespace per reader would
-  // spend them on a small selection; a credential that cannot watch the cluster
-  // is told the list is not live, and Refresh still reads each namespace.
-  const followed = watchNamespaceForSelection(namespaces);
   // Follow the reader's kind (#566): every change the watch reports reads the
   // list again in place, through the same read Refresh makes.
   const live = useLiveReaders({
-    plugin, capabilities: [capability], context, namespace: followed, label: `page:${capability}`, onChange: reread,
+    plugin, capabilities: [capability], context, namespaces, label: `page:${capability}`, onChange: reread,
   });
   // Refresh when an action on one of this list's resources is accepted, from any view.
   useEffect(
@@ -229,7 +225,7 @@ export function ExtensionResults({
     !!plugin.manifest.contributions.statusResolvers?.some((resolver) => resolver.forKinds.includes(columnKind));
   const contextId = useContextId(context);
   const appColumns = useResolvedColumns({
-    plugins: [plugin], context, contextId, namespace: followed, kind: columnKind, rows: sourceRows, refresh,
+    plugins: [plugin], context, contextId, namespaces, kind: columnKind, rows: sourceRows, refresh,
   });
   const columns = preview ? [] : data.data?.printerColumns ?? (Array.isArray(binding?.arguments.printerColumns)
     ? (binding.arguments.printerColumns as Array<{ name: string }>)
