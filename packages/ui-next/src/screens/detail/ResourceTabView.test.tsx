@@ -519,9 +519,11 @@ describe("ResourceTabView — the full tab the design draws", () => {
       // by hand: one above the row, where the sibling rule would have drawn
       // against the block before it, and one down the middle, between the two
       // columns. The peek needs neither and has neither — it stacks them.
+      // Both at the sibling rule's own weight, --rule-strong (#1001), or the
+      // two hand-drawn rules are the only faint dividers in the tab.
       const pair = breaks[0];
-      expect(pair.className).toContain("rule-t");
-      expect([...pair.children].map((column) => column.className)).toEqual(["", "rule-l"]);
+      expect(pair.className).toContain("border-t border-rule-strong");
+      expect([...pair.children].map((column) => column.className)).toEqual(["", "border-l border-rule-strong"]);
     });
 
     it("reads Labels and Annotations side by side", async () => {

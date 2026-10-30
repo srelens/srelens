@@ -118,6 +118,21 @@ describe("a section that discloses", () => {
     expect([...container.children].every((el) => el.matches("section.section"))).toBe(true);
   });
 
+  it("heads a closed block as strongly as an open one, and leaves it closed", () => {
+    // #1001: a run of closed sections read faint. The reader asked for them
+    // closed, so the fix is a legible heading, never opening them.
+    const { container } = render(
+      <Section title="Labels" open={false} onToggle={() => {}}>
+        <span>rows</span>
+      </Section>,
+    );
+    const head = screen.getByRole("heading", { level: 3, name: "Labels" });
+    expect(head.className).toContain("text-[0.8125rem]");
+    expect(head.className).toContain("text-ink");
+    expect(container.querySelector("section")?.getAttribute("data-open")).toBe("false");
+    expect(screen.queryByText("rows")).toBeNull();
+  });
+
   it("reports the state it is moving to, and keeps none of its own", async () => {
     // Controlled outright: the kit holds no app state and touches no storage,
     // so a section that flipped itself would disagree with the memory the
@@ -181,7 +196,7 @@ describe("a run of sections", () => {
     // jsdom does no layout. The components layer matters: a utility applied in
     // the JSX has to be able to override this, and Tailwind's utilities layer
     // is declared after it.
-    expect(components).toContain(".section + .section { border-top: 1px solid var(--rule); }");
+    expect(components).toContain(".section + .section { border-top: 1px solid var(--rule-strong); }");
     const rule = components.slice(components.indexOf("\n  .section {"));
     const body = rule.slice(0, rule.indexOf("}"));
     expect(body).not.toContain("border:");

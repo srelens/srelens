@@ -240,6 +240,17 @@ describe("Inspector", () => {
     expect(screen.queryByText("Needs attention")).toBeNull();
   });
 
+  it("rules its header, tab strip and footer off in --rule-strong", () => {
+    // #1001: the peek's frame lines were --rule, about 1.2:1, the same faint
+    // hairline as everything inside the body they frame.
+    const { container } = setup({ footer: <button type="button">Ask</button> });
+    const strip = screen.getByRole("tablist").closest("section > div");
+    for (const [name, el] of [["header", container.querySelector("header")], ["tab strip", strip], ["footer", container.querySelector("footer")]] as const) {
+      expect(el?.className, name).toContain("border-rule-strong");
+      expect(el?.className, name).not.toMatch(/\brule-[bt]\b/);
+    }
+  });
+
 /**
  * The flag dot and the status word are two channels on one fact, and they used
  * to be able to disagree: the dot was hard-coded to the severity tone whatever

@@ -256,9 +256,9 @@ export function ResourceTabView({ context, kind, group, namespace, name }: Resou
         {/* Two columns, and each wrapped, so neither section is the other's
             adjacent sibling — `.section + .section` would otherwise rule down
             the middle of the row instead of across it. */}
-        <div data-slot="metadata-pair" className="rule-t grid grid-cols-2">
+        <div data-slot="metadata-pair" className="border-t border-rule-strong grid grid-cols-2">
           <div>{subject.labels}</div>
-          <div className="rule-l">{subject.annotations}</div>
+          <div className="border-l border-rule-strong">{subject.annotations}</div>
         </div>
         {subject.afterMetadata}
       </>
