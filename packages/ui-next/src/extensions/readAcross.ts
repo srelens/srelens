@@ -1,4 +1,4 @@
-import { selectsNothing, type InstalledExtension } from "@srelens/core";
+import { selectsNothing, type InstalledExtension, type ListKind } from "@srelens/core";
 import { scopesFor, type NamespaceFailure } from "../lib/resourceList";
 
 /**
@@ -9,6 +9,24 @@ import { scopesFor, type NamespaceFailure } from "../lib/resourceList";
 export function readsClusterScope(plugin: InstalledExtension, capability: string): boolean {
   const binding = plugin.manifest.capabilities.find((candidate) => candidate.name === capability);
   return binding?.target === "k8s.listNodes" || binding?.arguments.namespaced === false;
+}
+
+/** The kind each built-in reader lists, as the host's `builtin_reader_identity` says. */
+const BUILTIN_READER_KINDS: Record<string, string> = {
+  "k8s.listDeployments": "Deployment",
+  "k8s.listStatefulSets": "StatefulSet",
+  "k8s.listDaemonSets": "DaemonSet",
+  "k8s.listNodes": "Node",
+};
+
+/** The kind a reader lists, as a collection's resource filter names it. */
+export function readerKind(plugin: InstalledExtension, capability: string): ListKind | undefined {
+  const binding = plugin.manifest.capabilities.find((candidate) => candidate.name === capability);
+  if (!binding) return undefined;
+  const builtin = BUILTIN_READER_KINDS[binding.target];
+  if (builtin) return { kind: builtin };
+  const { kind, group } = binding.arguments;
+  return typeof kind === "string" && kind ? { kind, ...(typeof group === "string" && group ? { group } : {}) } : undefined;
 }
 
 /** The namespaces a reader is asked about: none for a cluster-scoped kind, which has one answer. */

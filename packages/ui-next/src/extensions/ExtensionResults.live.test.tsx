@@ -139,6 +139,26 @@ describe("an app limited to chosen clusters (Settings → Apps)", () => {
     contexts: ["/kube/a%23b#c"],
   } as never;
 
+  it("resolves a cluster-scoped card's columns over its rows, whatever namespaces the card counted in", async () => {
+    // The rows have no namespace, so a selection of named ones would match none of them.
+    const clusterKind = {
+      ...(limited as object),
+      contexts: undefined,
+      manifest: {
+        ...(limited as { manifest: object }).manifest,
+        capabilities: [{ name: "list", target: "k8s.listCustomResource", arguments: { kind: "Application", group: "argoproj.io", namespaced: false }, inputs: ["context", "namespace"] }],
+      },
+    } as never;
+    core.readExtension.mockResolvedValue({ items: [{ name: "web", namespace: "", age: "1d", columns: [] }] });
+    render(<ExtensionResults plugin={clusterKind} capability="list" context="ctx" namespaces={["prod", "team"]} card="expiring" />);
+    await screen.findByText("web");
+    await waitFor(() => expect(core.resolveExtensionColumns).toHaveBeenCalled());
+    expect(core.resolveExtensionColumns.mock.calls[0][3]).toBe("");
+    expect(core.resolveExtensionColumns.mock.calls[0][5].map((row: { name: string }) => row.name)).toEqual(["web"]);
+    // The card's own read keeps the namespaces it counted in.
+    expect(core.readExtension).toHaveBeenCalledWith("org.test.gitops", 1, "list", "ctx", "", true, "expiring", ["prod", "team"]);
+  });
+
   it("joins its columns on its own page, which asks the host by pinned ID (#695)", async () => {
     // `/kube/a` declaring `b#c` and `/kube/a#b` declaring `c` share the stable ID `/kube/a#b#c` (#623).
     core.listContexts.mockResolvedValue({ contexts: [

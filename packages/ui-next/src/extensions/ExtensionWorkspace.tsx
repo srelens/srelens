@@ -24,7 +24,8 @@ import { Button, FilterBar, Tabs, filterMatcher, tableFilterError } from "@srele
 import { ErrorNotice, ExtensionResults } from "./ExtensionResults";
 import { useResource } from "../lib/useResource";
 import { LiveNotice, LiveReaders, LiveStatus, useLiveReaders } from "./liveReaders";
-import { readAcross, readerNamespaces, readsClusterScope } from "./readAcross";
+import { readAcross, readerKind, readerNamespaces, readsClusterScope } from "./readAcross";
+import { useCollectionNameFilter } from "../lib/collectionNameFilter";
 import { NamespaceFailuresAlert } from "../lib/errorCopy";
 import { useFallbackNamespace, useInCollectionScope, useNamespaces, useSetNamespaces } from "../lib/workspace";
 import { CollectionScopeNotice, NamespaceScopePicker } from "../screens/collections/NamespaceScope";
@@ -106,6 +107,7 @@ function Summary({
   plugin,
   page,
   context,
+  clusterId,
   namespaces: selected,
   refresh,
   onPage,
@@ -113,6 +115,7 @@ function Summary({
   plugin: InstalledExtension;
   page: ExtensionPage;
   context: string;
+  clusterId: string;
   namespaces: string[];
   refresh: number;
   onPage(id: string): void;
@@ -152,9 +155,11 @@ function Summary({
       }),
     [plugin.manifest.id, context, page.capability, namespaces.join("\u0000"), reload],
   );
+  // The same rows the page's list shows once a collection's name filter narrows it.
+  const nameFilter = useCollectionNameFilter(clusterId, readerKind(plugin, page.capability), data.data?.items ?? []);
   // The host's resolved status per row; a page still on the deprecated
   // `statusColumns` is read through the same mapping (`itemStatus`).
-  const resolved = itemStatuses(data.data?.items ?? [], page.statusColumns);
+  const resolved = itemStatuses(nameFilter.apply(data.data?.items ?? []), page.statusColumns);
   const counts = statuses.map((status) => resolved.filter((found) => found === status).length);
   const total = counts.reduce((a, b) => a + b, 0);
   const ring = donutBackground(
@@ -487,7 +492,7 @@ export function ExtensionWorkspace({
             {page.dashboard.pages.map((id,index) => {
               const p = pages.find(p => p.id === id);
               return p && <Fragment key={id}>
-                <Summary plugin={plugin} page={p} context={context} namespaces={namespaces} refresh={refresh} onPage={onPage}/>
+                <Summary plugin={plugin} page={p} context={context} clusterId={cluster.stableId} namespaces={namespaces} refresh={refresh} onPage={onPage}/>
                 {index === 0 && cards.length > 0 && <OverviewCards plugin={plugin} context={context} namespaces={namespaces} refresh={refresh} onOpen={openCard}/>}
               </Fragment>;
             })}
@@ -510,6 +515,7 @@ export function ExtensionWorkspace({
           plugin={plugin}
           capability={page.capability}
           context={context}
+          clusterId={cluster.stableId}
           namespaces={namespaces}
           search={view.filter}
           regex={view.regex}

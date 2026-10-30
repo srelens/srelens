@@ -21,8 +21,10 @@ import { contributionKind } from "@srelens/core";
 import { useContextId } from "./contextIds";
 import { StatusBadge } from "./StatusBadge";
 import { LiveNotice, LiveStatus, useLiveReaders } from "./liveReaders";
-import { readAcross, readerNamespaces } from "./readAcross";
+import { readAcross, readerKind, readerNamespaces } from "./readAcross";
+import { useCollectionNameFilter } from "../lib/collectionNameFilter";
 import { NamespaceFailuresAlert } from "../lib/errorCopy";
+import { CollectionNameNotice } from "../screens/collections/NamespaceScope";
 import { ListCount } from "../screens/ListCount";
 
 export function ErrorNotice({
@@ -98,6 +100,7 @@ export function ExtensionResults({
   plugin,
   capability,
   context,
+  clusterId,
   namespaces: chosen = [],
   search = "",
   regex = false,
@@ -113,6 +116,8 @@ export function ExtensionResults({
   plugin: InstalledExtension;
   capability: string;
   context: string;
+  /** The cluster whose tab narrows this list, by its collections' name filters. */
+  clusterId?: string;
   /** None is all namespaces. With a card, what it counted in; otherwise one read each. */
   namespaces?: string[];
   search?: string;
@@ -136,14 +141,15 @@ export function ExtensionResults({
   /** Where the page wants the bulk bar, in its filter row. */
   bulkBar?: HTMLElement | null;
 }) {
-  // A card's rows are where it counted them, whatever kind they are.
-  const namespaces = card ? chosen : readerNamespaces(plugin, capability, chosen);
+  // What this reader's rows are in, which its columns and watch follow. Only a
+  // card's own read keeps the namespaces it counted in, whatever kind they are.
+  const namespaces = readerNamespaces(plugin, capability, chosen);
   const openResource = useContext(ExtensionResourceNavigation);
   const rowButtons = useRef(new Map<string,HTMLButtonElement>());
   const listRow = usePeekBounds();
   const peekWidth = clampPeekWidth(usePeekWidth(), listRow.bounds);
   // The card is part of what is on screen: the filtered and whole lists keep no rows of each other.
-  const scope = JSON.stringify([plugin.manifest.id,plugin.revision,capability,context,namespaces,card ?? ""]);
+  const scope = JSON.stringify([plugin.manifest.id,plugin.revision,capability,context,chosen,card ?? ""]);
   const [selected,setSelected] = useState<{scope:string;name:string;namespace:string}|null>(null);
   const preview = previewRows !== undefined;
   const [columnSort, setColumnSort] = useState<{key:string;direction:"asc"|"desc"}|null>(null);
@@ -171,8 +177,8 @@ export function ExtensionResults({
       const { id } = plugin.manifest;
       // A card's rows are one host call, however many namespaces it counted in.
       if (card) {
-        const several = namespaces.length > 1 ? ([namespaces] as [string[]]) : ([] as []);
-        const answer = await readExtension(id, plugin.revision, capability, context, namespaces.length === 1 ? namespaces[0] : "", true, card, ...several);
+        const several = chosen.length > 1 ? ([chosen] as [string[]]) : ([] as []);
+        const answer = await readExtension(id, plugin.revision, capability, context, chosen.length === 1 ? chosen[0] : "", true, card, ...several);
         return { ...answer, failures: [] };
       }
       const { answers, failures } = await readAcross(namespaces, (namespace) => readExtension(id, plugin.revision, capability, context, namespace, true));
@@ -183,7 +189,7 @@ export function ExtensionResults({
       plugin.revision,
       capability,
       context,
-      namespaces.join("\u0000"),
+      chosen.join("\u0000"),
       refresh,
       card,
     ],
@@ -213,7 +219,12 @@ export function ExtensionResults({
   );
   if (data.data?.items) lastRows.current = data.data.items;
   const allRows = data.data?.items ?? lastRows.current;
-  const sourceRows = useMemo(() => previewRows ? allRows.filter(row=>previewRows.some(wanted=>row.name===wanted.name && row.namespace===wanted.namespace)) : allRows, [allRows,previewRows]);
+  const listed = useMemo(() => previewRows ? allRows.filter(row=>previewRows.some(wanted=>row.name===wanted.name && row.namespace===wanted.namespace)) : allRows, [allRows,previewRows]);
+  // Narrowed ahead of everything that reads the rows, so the count, the columns,
+  // the bulk bar and the table agree. A card's rows are what it counted.
+  const nameFilter = useCollectionNameFilter(card ? undefined : clusterId, readerKind(plugin, capability), listed);
+  const narrow = nameFilter.apply;
+  const sourceRows = useMemo(() => narrow(listed), [narrow, listed]);
   const columnKind = contributionKind(
     typeof binding?.arguments.kind === "string" ? binding.arguments.kind : "",
     typeof binding?.arguments.group === "string" ? binding.arguments.group : "",
@@ -340,6 +351,7 @@ export function ExtensionResults({
         <ErrorNotice key={error.id} cluster title={`Couldn’t read ${error.title} columns`} message={error.message} retry={appColumns.reload} />
       ))}
       <NamespaceFailuresAlert what={noun} failures={data.data?.failures ?? []} />
+      <CollectionNameNotice filter={nameFilter} noun={noun} />
       {data.data?.columnsError && <p className="extension-message" role="status">Could not load CRD columns: {data.data.columnsError}. Showing app-defined columns.</p>}
       {data.data?.truncated && (
         <p className="extension-message" role="status">
