@@ -18,6 +18,10 @@ banner says so and offers **Switch to the new design**; dismissing the banner hi
 the rest of the session. **Settings → Appearance → Design** still switches between the two
 and labels classic **Classic (deprecated)**.
 
+Apps are in the new design only ([#1001](https://github.com/srelens/srelens/issues/1001)).
+In classic, an app tab and **Settings → Apps** say **Apps open in the new design** and offer
+the same switch; the sidebar's Apps group and the app views in resource details are gone.
+
 ### Extension platform
 
 What changed in extensions since v0.15.0 (2026-09-20).

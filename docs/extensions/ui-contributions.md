@@ -1,7 +1,7 @@
 # UI contributions
 
-Everything an app shows is rendered by srelens with its own components, in both the new
-and classic designs. User-facing extension management is named **Apps**; internal
+Everything an app shows is rendered by srelens with its own components, in the new
+design; the deprecated classic design shows a notice in their place. User-facing extension management is named **Apps**; internal
 `extensions.*` capability IDs, manifest IDs and routes keep their names. Field
 reference: [manifest.md](manifest.md#contributions).
 
@@ -230,7 +230,7 @@ places, in the new design:
   goes on following the provider. "all" in **since** reaches back 7 days for a
   provider, and says so.
 
-The classic design does not draw providers. On the web, metric and trace panels answer
+On the web, metric and trace panels answer
 only under the operator's network ceiling, as every `network.http` request there does,
 and the log view offers no provider, since the web host runs no app streams yet.
 
@@ -256,8 +256,7 @@ host confirmation as the footer button, pinned to the UID and resourceVersion sh
 and nothing is written until it is confirmed there. An action the resource's
 availability rules exclude, or a resource read without a UID and resourceVersion to
 pin, says why instead; a failed read drops the request, so a later Retry does not open
-a review. The classic palette does not list app
-commands.
+a review.
 
 Arbitrary custom renderer code is not supported.
 

@@ -1,4 +1,4 @@
-import { useContext, useId, useState, type ReactNode } from "react";
+import { useId, useState, type ReactNode } from "react";
 import {
   getLiveKubeconfigFiles,
   listContexts,
@@ -7,7 +7,7 @@ import {
   type ExtensionSetting,
   type InstalledExtension,
 } from "@srelens/core";
-import { ExtensionControls } from "./ExtensionControls";
+import { Button, Combobox } from "@srelens/ui-kit";
 import { ErrorNotice } from "./ExtensionResults";
 import { plainText } from "./displayText";
 import { extensionLabel } from "./inventoryStore";
@@ -115,7 +115,6 @@ export function ExtensionSettingsForm({
   onClearSecret?(setting: string): Promise<void>;
   onClose(): void;
 }) {
-  const { Button } = useContext(ExtensionControls);
   const declared = plugin.manifest.settings ?? [];
   const name = extensionLabel(plugin);
   const [draft, setDraft] = useState<Draft>(() => initial(declared, plugin.settings));
@@ -409,7 +408,6 @@ function SecretField({
   onSet?(secret: string): Promise<void>;
   onClear?(): Promise<void>;
 }) {
-  const { Button } = useContext(ExtensionControls);
   const id = useId();
   const [typed, setTyped] = useState("");
   const [busy, setBusy] = useState(false);
@@ -545,7 +543,6 @@ function Choice({
   onChange(value: string): void;
   state?: PickerState;
 }) {
-  const { Combobox } = useContext(ExtensionControls);
   // A saved value the list no longer has is still what is saved: shown, so it can be changed.
   const listed = value && !options.some((option) => option.value === value) ? [{ value, label: value }, ...options] : options;
   return (
@@ -648,7 +645,6 @@ function NamespaceChoice({
   onChange(value: string): void;
   state?: PickerState;
 }) {
-  const { Combobox } = useContext(ExtensionControls);
   const contexts = useContexts();
   const [from, setFrom] = useState("");
   const namespaces = useResource(async () => {

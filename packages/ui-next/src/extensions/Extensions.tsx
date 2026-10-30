@@ -6,7 +6,7 @@ import { plainText } from "./displayText";
 import { ExtensionRequirements } from "./ExtensionRequirements";
 import { refreshContextIds, useContextLookup } from "./contextIds";
 import { ExtensionLogo } from "./ExtensionLogo";
-import { useContext, useLayoutEffect, useRef, useState } from "react";
+import { useLayoutEffect, useRef, useState } from "react";
 import {
   MAX_EXTENSION_PACKAGE_BYTES,
   clearExtensionSecret,
@@ -28,8 +28,7 @@ import {
 
 import { ExtensionCatalog } from "./ExtensionCatalog";
 import { ServerPolicy } from "./ServerPolicy";
-import { ExtensionControls } from "./ExtensionControls";
-export { ExtensionControlsProvider } from "./ExtensionControls";
+import { Button, Tabs } from "@srelens/ui-kit";
 import { ErrorNotice, ExtensionResults } from "./ExtensionResults";
 export { ErrorNotice, ExtensionResults } from "./ExtensionResults";
 
@@ -76,7 +75,6 @@ function signatureState(review: { signature?: number[]; signedBy?: ExtensionSign
  * catalog" — on mount and again whenever a new request object arrives.
  */
 export function ExtensionManager({ show }: { show?: { tab: string } } = {}) {
-  const { Button, Tabs } = useContext(ExtensionControls);
   const [tab, setTab] = useState("installed");
   const [catalogOpened, setCatalogOpened] = useState(false);
   // Before paint, so a manager opened on the catalog never shows its installed list first.
@@ -632,7 +630,6 @@ export function ExtensionResourceSlot({
   namespace: string | null;
   name: string;
 }) {
-  const { Button, Tabs } = useContext(ExtensionControls);
   const { inventory, tabs, links, lookupProblem } = useExtensionContributions(context, kind, group);
   const [selected, setSelected] = useState("");
   const active = [...tabs, ...links].some((c) => c.id === selected)

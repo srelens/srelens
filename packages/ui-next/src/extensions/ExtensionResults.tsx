@@ -2,7 +2,7 @@ import { AgeCell } from "../lib/ageCell";
 import { ExtensionResourceDetails } from "./ExtensionResourceDetails";
 import { ExtensionBulkActions, type BulkActionAvailability } from "./ExtensionBulkActions";
 import { bulkResourceKey } from "./bulkActions";
-import { Checkbox, ResizeHandle } from "@srelens/ui-kit";
+import { Button, Checkbox, ResizeHandle } from "@srelens/ui-kit";
 import { clampPeekWidth, savePeekWidth, setPeekWidth, usePeekBounds, usePeekWidth } from "../lib/peekWidth";
 import { ExtensionResourceNavigation } from "./resourceNavigation";
 import { useContext, useMemo, useEffect, useRef, useState } from "react";
@@ -13,7 +13,6 @@ import {
   type ExtensionResourceResult,
   type InstalledExtension,
 } from "@srelens/core";
-import { ExtensionControls } from "./ExtensionControls";
 import { useResource } from "../lib/useResource";
 import { useResolvedColumns } from "./useResolvedColumns";
 import { contributionKind } from "@srelens/core";
@@ -35,7 +34,6 @@ export function ErrorNotice({
   title?: string;
   guidance?: { title: string; detail: string };
 }) {
-  const { Button } = useContext(ExtensionControls);
   const error = describeError(message, {
     domain: cluster ? "cluster" : "local",
   });
@@ -123,7 +121,6 @@ export function ExtensionResults({
   /** A dashboard list preview: declared ordering and limit, without bulk selection. */
   previewRows?: {name:string;namespace:string}[];
 }) {
-  const { Button } = useContext(ExtensionControls);
   const openResource = useContext(ExtensionResourceNavigation);
   const rowButtons = useRef(new Map<string,HTMLButtonElement>());
   const listRow = usePeekBounds();

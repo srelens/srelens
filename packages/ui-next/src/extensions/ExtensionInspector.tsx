@@ -1,4 +1,4 @@
-import { useContext, useEffect, useId, useState, type ReactNode } from "react";
+import { useEffect, useId, useState, type ReactNode } from "react";
 import {
   inspectExtension,
   type ExtensionChange,
@@ -7,7 +7,7 @@ import {
   type ExtensionProcess,
   type InstalledExtension,
 } from "@srelens/core";
-import { ExtensionControls } from "./ExtensionControls";
+import { Button } from "@srelens/ui-kit";
 import { ErrorNotice } from "./ExtensionResults";
 import { LogLineRow, clock } from "./ExtensionLogs";
 import { bytes, describeGrant, inactiveReason, installedOn, origin } from "./detailsText";
@@ -128,7 +128,6 @@ function Process({
   change(action: ExtensionChange): Promise<boolean>;
   onViewLogs(): void;
 }) {
-  const { Button } = useContext(ExtensionControls);
   const process = inspection.process;
   if (inspection.runtime === "declarative")
     return (

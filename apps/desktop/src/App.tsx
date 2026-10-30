@@ -1,4 +1,3 @@
-import { ClassicAppPage } from "./components/Extensions";
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
@@ -27,7 +26,7 @@ import { Toaster } from "./components/ui/sonner";
 import { Dock, type DockSession, type DockKind } from "./components/Dock";
 import { StatusBar } from "./components/StatusBar";
 import { LandingPage } from "./components/LandingPage";
-import { ClassicDeprecationBanner } from "./components/ClassicDeprecationBanner";
+import { ClassicAppsNotice, ClassicDeprecationBanner } from "./components/ClassicDeprecationBanner";
 import { getInitialTheme, applyTheme, type Theme, type ThemeMode, type ThemeName } from "./ui";
 import { listCrds, type CrdRef } from "@srelens/core";
 import { targetNamespace, type ResourceTarget } from "@srelens/core";
@@ -747,6 +746,13 @@ export function App() {
 
   const activeTab = tabs.find((t) => t.id === activeTabId) ?? null;
   const activeCluster = activeTab?.cluster ?? null;
+  // Switching design reloads the window, and session restore leaves out create
+  // and edit tabs, so every switch asks first while these are open.
+  const unsavedDrafts = tabs.filter(
+    (tab) =>
+      tab.create?.draft !== undefined ||
+      (tab.edit?.draft !== undefined && tab.edit.draft !== tab.edit.loaded),
+  ).length;
   // #968: read each render — the switches live in the new design, and switching design reloads.
   const assistant = readAssistantSetting();
   const assistantHere = assistantAllowedFor(assistant, contexts ?? [], activeCluster);
@@ -797,14 +803,6 @@ export function App() {
     }
     const id = tabIdRef.current++;
     setTabs((ts) => [...ts, { id, cluster, clusterId: stableIdOf(cluster), kind, namespace: namespaceFor(cluster) }]);
-    setActiveTabId(id);
-  }
-
-  function openAppPage(cluster:string, appId:string, page:string, namespace="", resourceName?:string) {
-    const existing=tabs.find(t=>t.cluster===cluster && t.app?.id===appId && t.app.page===page && (t.namespace??"")===namespace && t.app.resourceName===resourceName);
-    if(existing){setActiveTabId(existing.id);return;}
-    const id=tabIdRef.current++;
-    setTabs(ts=>[...ts,{id,cluster,clusterId:stableIdOf(cluster),kind:"overview",namespace,app:{id:appId,page,resourceName}}]);
     setActiveTabId(id);
   }
 
@@ -1161,7 +1159,6 @@ export function App() {
           activeCrd={activeCrd}
           onSelect={(c, k) => openView(c, k)}
           onSelectCrd={(c, crd) => openCrdView(c, crd)}
-          onOpenApp={openAppPage}
           contextProfiles={contextProfiles}
           contextKey={contextKeyOf}
           width={sidebarWidth}
@@ -1169,15 +1166,7 @@ export function App() {
         />
       )}
       <div className="fl-main">
-        <ClassicDeprecationBanner
-          unsavedDrafts={
-            tabs.filter(
-              (tab) =>
-                tab.create?.draft !== undefined ||
-                (tab.edit?.draft !== undefined && tab.edit.draft !== tab.edit.loaded),
-            ).length
-          }
-        />
+        <ClassicDeprecationBanner unsavedDrafts={unsavedDrafts} />
         {tabs.length > 0 ? (
           <>
             <ResourceTabs
@@ -1192,7 +1181,7 @@ export function App() {
             {activeTab && (
               <>
                 <div className="flex min-h-0 flex-1 flex-col overflow-hidden bg-background">
-                  {activeTab.app && activeCluster ? <ClassicAppPage key={activeTab.id} context={activeCluster} id={activeTab.app.id} page={activeTab.app.page} namespace={activeTab.namespace} onNamespace={namespace=>setTabs(ts=>ts.map(t=>t.id===activeTab.id?{...t,namespace}:t))} resourceName={activeTab.app.resourceName} onOpenResource={(name,namespace)=>openAppPage(activeCluster,activeTab.app!.id,activeTab.app!.page,namespace,name)} onPage={(page,namespace)=>openAppPage(activeCluster,activeTab.app!.id,page,namespace)}/> : activeKind === "settings" ? (
+                  {activeTab.app ? <ClassicAppsNotice unsavedDrafts={unsavedDrafts} /> : activeKind === "settings" ? (
                     <SettingsView
                       key={`${activeTab.id}:${settingsSectionNonce}`}
                       initialSection={settingsInitialSection}
@@ -1212,6 +1201,7 @@ export function App() {
                       contexts={contexts}
                       contextsError={contextsError}
                       onDeleteContext={handleDeleteContext}
+                      unsavedDrafts={unsavedDrafts}
                     />
                   ) : activeKind === "toolbox" ? (
                     <ToolboxView key={activeTab.id} initialContext={toolboxContext} />

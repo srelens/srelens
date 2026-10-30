@@ -1,4 +1,4 @@
-import { useContext, useEffect, useId, useLayoutEffect, useRef, useState } from "react";
+import { useEffect, useId, useLayoutEffect, useRef, useState } from "react";
 import {
   EXTENSION_LOG_LEVELS,
   extensionLogs,
@@ -7,7 +7,7 @@ import {
   type ExtensionRuntime,
   type InstalledExtension,
 } from "@srelens/core";
-import { ExtensionControls } from "./ExtensionControls";
+import { Button } from "@srelens/ui-kit";
 import { ErrorNotice } from "./ExtensionResults";
 import { plainText } from "./displayText";
 import { extensionLabel } from "./inventoryStore";
@@ -59,7 +59,6 @@ export function LogLineRow({ line, level = true }: { line: ExtensionLogLine; lev
  * about it. Read on open and then every two seconds for the lines after the last one held.
  */
 export function ExtensionLogs({ plugin }: { plugin: InstalledExtension }) {
-  const { Button } = useContext(ExtensionControls);
   const id = plugin.manifest.id;
   const levelsLabel = useId();
   const [level, setLevel] = useState<ExtensionLogLevel>("trace");

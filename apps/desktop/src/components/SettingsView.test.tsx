@@ -794,3 +794,30 @@ describe("SettingsView", () => {
     expect(await screen.findByRole("button", { name: /Export setup/i })).toBeDefined();
   });
 });
+
+it("shows the new-design notice in place of Apps, asking first when drafts are open", async () => {
+  // Apps are built for the new design only (#1001). The drafts count comes
+  // from App, since the switch reloads the window and drops editor drafts.
+  render(
+    <SettingsView
+      theme={{ name: "slate", mode: "dark" }}
+      onThemeNameChange={() => {}}
+      onThemeModeChange={() => {}}
+      defaultNamespace=""
+      onDefaultNamespaceChange={() => {}}
+      layout={DEFAULT_WORKSPACE_LAYOUT}
+      onLayoutChange={() => {}}
+      contextProfiles={{}}
+      onContextProfilesChange={() => {}}
+      kubeconfigFiles={[]}
+      onKubeconfigFilesChange={() => {}}
+      contextOrder={[]}
+      onContextOrderChange={() => {}}
+      initialSection="extensions"
+      unsavedDrafts={1}
+    />,
+  );
+  expect(await screen.findByRole("heading", { name: "Apps open in the new design" })).toBeDefined();
+  await userEvent.click(screen.getByRole("button", { name: "Switch to the new design" }));
+  expect(screen.getByRole("button", { name: "Switch anyway" })).toBeDefined();
+});

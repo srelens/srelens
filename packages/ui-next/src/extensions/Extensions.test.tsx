@@ -2181,3 +2181,9 @@ it("describes a granted pod capability by the host's own facts", async () => {
   expect(grant).not.toContain("Not provided by this host");
   expect(grant).toContain("Sensitive · high impact · confirmed on every run");
 });
+
+it("has no seam for another design's controls", async () => {
+  // The seam let classic swap in its own Button, Combobox and Tabs. Apps are
+  // built for the new design only now (#1001), so the views use the kit's.
+  expect("ExtensionControlsProvider" in (await import("./Extensions"))).toBe(false);
+});

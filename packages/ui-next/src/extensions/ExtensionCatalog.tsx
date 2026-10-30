@@ -1,7 +1,7 @@
 import { ExtensionLogo } from "./ExtensionLogo";
-import { useContext, useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { isTauri, listExtensionCatalog, reviewCatalogExtension, openExternal, type ExtensionCatalogSnapshot, type ExtensionReview, type InstalledExtension } from "@srelens/core";
-import { ExtensionControls } from "./ExtensionControls";
+import { Button } from "@srelens/ui-kit";
 
 export function ExtensionCatalog({ installed, onReview, onReviewStart, autoLoad = false }: {
   autoLoad?: boolean;
@@ -15,7 +15,6 @@ export function ExtensionCatalog({ installed, onReview, onReviewStart, autoLoad 
   /** The host-verified review, and the release it is of, which a package install names again. */
   onReview: (review: ExtensionReview, release: { id: string; sha256: string }) => void;
 }) {
-  const { Button } = useContext(ExtensionControls);
   const [data, setData] = useState<ExtensionCatalogSnapshot>();
   const [query, setQuery] = useState("");
   const [busy, setBusy] = useState(false);

@@ -189,8 +189,7 @@ Residual risk:
 - **Grants are per host capability, not per binding.** Granting `k8s.listCustomResource`
   grants whatever the manifest binds, so the install review shows what that is
   ([#608]). The review (`ExtensionManager` in
-  `packages/ui-next/src/extensions/Extensions.tsx`, which the classic design reuses
-  through `apps/desktop/src/components/Extensions.tsx`) shows the app's name, a signature
+  `packages/ui-next/src/extensions/Extensions.tsx`) shows the app's name, a signature
   label, the requested capability IDs and any validation problems.
   - **Bindings:** once the host has accepted the manifest, the review lists each
     custom-resource reader's group, version, kind, plural, scope and printer columns
