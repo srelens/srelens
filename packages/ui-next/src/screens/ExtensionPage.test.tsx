@@ -7,7 +7,7 @@ vi.mock("../lib/tabsStore",()=>({openTab:vi.fn()}));
 vi.mock("../extensions/ExtensionResourceDetails",()=>({ExtensionResourceDetails:({selection,fullPage}:any)=><div data-testid="detail-page">{JSON.stringify({selection,fullPage})}</div>}));
 vi.mock("../extensions/ExtensionWorkspace",async()=>{
  const {useContext}=await import("react");const {ExtensionResourceNavigation}=await import("../extensions/resourceNavigation");
- return {ExtensionWorkspace:(props:{card?:string;cardNamespaces?:string[];onCard?(page:string,namespace:string,card:string):void})=>{const open=useContext(ExtensionResourceNavigation);return <><button onClick={()=>props.onCard?.("kustomizations","team","suspended-kustomizations")}>Open overview card</button><button data-card={props.card??""} data-namespaces={(props.cardNamespaces??[]).join(",")} onClick={()=>open?.({id:"org.srelens.flux",revision:1,capability:"kustomizations",context:"wrong-rail-cluster",namespace:"team",name:"apps"})}>Open resource</button></>;}};
+ return {ExtensionWorkspace:(props:{card?:string;cardNamespaces?:string[];onCard?(page:string,namespaces:string[],card:string):void})=>{const open=useContext(ExtensionResourceNavigation);return <><button onClick={()=>props.onCard?.("kustomizations",["team"],"suspended-kustomizations")}>Open overview card</button><button data-card={props.card??""} data-namespaces={(props.cardNamespaces??[]).join(",")} onClick={()=>open?.({id:"org.srelens.flux",revision:1,capability:"kustomizations",context:"wrong-rail-cluster",namespace:"team",name:"apps"})}>Open resource</button></>;}};
 });
 import {listExtensions,listContexts,extensionRoute,extensionResourceRoute,extensionClusterRoute,extensionClusterResourceRoute,extensionCardRoute,type InstalledExtension} from "@srelens/core";
 import {setContexts} from "../lib/clusters";
@@ -162,7 +162,7 @@ it("opens a dashboard card's target filtered to what the card counted, and offer
  const notice=screen.getByRole("status");
  expect(notice.textContent).toContain("Suspended Kustomizations");
  fireEvent.click(within(notice).getByRole("button",{name:"Show all Kustomizations"}));
- expect(openTab).toHaveBeenCalledWith(extensionClusterRoute("cluster/a",manifest.id,"kustomizations","team"),{clusterName:"cluster/a"});
+ expect(openTab).toHaveBeenCalledWith(extensionClusterRoute("cluster/a",manifest.id,"kustomizations"),{clusterName:"cluster/a"});
 });
 it("opens a card counted over several namespaces on those namespaces, and says which", async () => {
 

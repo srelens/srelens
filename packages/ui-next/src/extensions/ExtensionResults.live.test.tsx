@@ -55,9 +55,16 @@ const plugin = {
 const emit = (data: unknown, seq = 1) => act(() => handlers[0].onData(data, seq));
 
 describe("a live app page (#566)", () => {
+  it("follows one namespace there, and every namespace for several: an app has 8 streams to spend", async () => {
+    core.readExtension.mockResolvedValue(rows("web"));
+    render(<ExtensionResults plugin={plugin} capability="list" context="kind-demo" namespaces={["a", "b", "c"]} />);
+    await waitFor(() => expect(handlers).toHaveLength(1));
+    expect(requests[0]).toMatchObject({ namespace: "", source: { kind: "watch", capability: "list" } });
+  });
+
   it("reads again in place when the watch reports a change", async () => {
     core.readExtension.mockResolvedValueOnce(rows("web"));
-    render(<ExtensionResults plugin={plugin} capability="list" context="kind-demo" namespace="team" />);
+    render(<ExtensionResults plugin={plugin} capability="list" context="kind-demo" namespaces={["team"]} />);
     expect(await screen.findByText("web")).toBeTruthy();
     await waitFor(() => expect(handlers).toHaveLength(1));
     expect(requests[0]).toMatchObject({ context: "kind-demo", namespace: "team", source: { kind: "watch", capability: "list" } });
@@ -75,7 +82,7 @@ describe("a live app page (#566)", () => {
 
   it("marks the list out of date while reconnecting, and reads afresh after", async () => {
     core.readExtension.mockResolvedValue(rows("web"));
-    const { container } = render(<ExtensionResults plugin={plugin} capability="list" context="kind-demo" namespace="team" />);
+    const { container } = render(<ExtensionResults plugin={plugin} capability="list" context="kind-demo" namespaces={["team"]} />);
     await screen.findByText("web");
     await waitFor(() => expect(handlers).toHaveLength(1));
     emit({ event: "synced" });
@@ -94,7 +101,7 @@ describe("a live app page (#566)", () => {
 
   it("says why it is not live when the host ends the watch", async () => {
     core.readExtension.mockResolvedValue(rows("web"));
-    render(<ExtensionResults plugin={plugin} capability="list" context="kind-demo" namespace="team" />);
+    render(<ExtensionResults plugin={plugin} capability="list" context="kind-demo" namespaces={["team"]} />);
     await screen.findByText("web");
     await waitFor(() => expect(handlers).toHaveLength(1));
     act(() => handlers[0].onEnd?.({ type: "error", code: "rateLimited", message: "App org.test.gitops sent more than 50 stream messages per second" }));
@@ -106,7 +113,7 @@ describe("a live app page (#566)", () => {
   it("stays a read-on-Refresh list on the web, and says so", async () => {
     core.tauri = false;
     core.readExtension.mockResolvedValue(rows("web"));
-    render(<ExtensionResults plugin={plugin} capability="list" context="kind-demo" namespace="team" />);
+    render(<ExtensionResults plugin={plugin} capability="list" context="kind-demo" namespaces={["team"]} />);
     await screen.findByText("web");
     expect(screen.getByText("Not live")).toBeTruthy();
     expect(core.openExtensionView).not.toHaveBeenCalled();
@@ -132,7 +139,7 @@ describe("an app limited to chosen clusters (Settings → Apps)", () => {
       { name: "c", stableId: "/kube/a#b#c", key: "/kube/a%23b#c", pinnedId: "srelens-context:/kube/a%23b#c" },
     ] });
     core.readExtension.mockResolvedValue(rows("web"));
-    render(<ExtensionResults plugin={limited} capability="list" context="srelens-context:/kube/a%23b#c" namespace="team" />);
+    render(<ExtensionResults plugin={limited} capability="list" context="srelens-context:/kube/a%23b#c" namespaces={["team"]} />);
     await screen.findByText("web");
     await waitFor(() => expect(core.resolveExtensionColumns).toHaveBeenCalledWith(
       "org.test.gitops", 1, "srelens-context:/kube/a%23b#c", "team", "argoproj.io/Application", expect.any(Array)));

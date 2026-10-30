@@ -78,7 +78,7 @@ export function resetListCache() {
  * none, otherwise each selected namespace on its own — never the cluster scope
  * narrowed afterwards, which a namespace-scoped credential is refused (#688).
  */
-function scopesFor(namespaces: string[]): string[] {
+export function scopesFor(namespaces: string[]): string[] {
   return namespaces.length === 0 ? [""] : [...new Set(namespaces)];
 }
 

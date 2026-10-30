@@ -1,5 +1,6 @@
-import { render, screen, fireEvent, waitFor } from "@testing-library/react";
-import { it, expect, vi, beforeEach } from "vitest";
+import { act, render, screen, fireEvent, waitFor, within } from "@testing-library/react";
+import type { ComponentProps } from "react";
+import { describe, it, expect, vi, beforeEach } from "vitest";
 vi.mock("@srelens/core", async (original) => ({
   ...(await original<typeof import("@srelens/core")>()),
   listCrds: vi.fn(),
@@ -18,9 +19,23 @@ import {
   listNamespaces,
   openExtensionView,
   isTauri,
+  NO_NAMESPACE,
+  type ClusterContext,
   type InstalledExtension,
 } from "@srelens/core";
 import { ExtensionWorkspace, DONUT_COLORS, donutBackground, EMPTY_DONUT } from "./ExtensionWorkspace";
+import { currentWorkspace, openTab, setTabNamespaces, setTabView } from "../lib/tabsStore";
+
+const ROUTE = "/events";
+const staging = { name: "staging", stableId: "staging", key: "staging", pinnedId: "staging" } as ClusterContext;
+
+/** The page as `ExtensionPage` mounts it, its header drawn straight into the document. */
+function Workspace(props: Omit<ComponentProps<typeof ExtensionWorkspace>, "cluster" | "route" | "actions" | "onPage" | "onCard"> & Partial<ComponentProps<typeof ExtensionWorkspace>>) {
+  return <ExtensionWorkspace cluster={staging} route={ROUTE} actions={document.body} onPage={vi.fn()} onCard={vi.fn()} {...props} />;
+}
+const tabId = () => currentWorkspace().tabs.find((tab) => tab.route === ROUTE)!.id;
+/** The namespaces the tab's picker has selected. */
+const pick = (...namespaces: string[]) => act(() => setTabNamespaces(tabId(), "staging", namespaces));
 
 it("draws Unknown in a readable ink, never the hairline an empty ring uses", () => {
   // `--rule` is the subtle hairline role: an all-Unknown ring drawn in it
@@ -91,7 +106,7 @@ it("keeps the legend's counts exact when the ring exaggerates a sliver", async (
         statusResolvers: [{ forKinds: ["kustomize.toolkit.fluxcd.io/Kustomization"], rules: [] }] } },
   } as unknown as InstalledExtension;
   vi.mocked(readExtension).mockResolvedValue({ items } as never);
-  render(<ExtensionWorkspace plugin={migrated} page={migrated.manifest.contributions.pages[0]} context="staging" />);
+  render(<Workspace plugin={migrated} page={migrated.manifest.contributions.pages[0]} context="staging" />);
   expect(await screen.findByText("Healthy: 999")).toBeTruthy();
   expect(screen.getByText("Error: 1")).toBeTruthy();
 });
@@ -99,7 +114,7 @@ it("keeps the legend's counts exact when the ring exaggerates a sliver", async (
 const packageIcon = `data:image/svg+xml;base64,${btoa("<svg xmlns=\"http://www.w3.org/2000/svg\"/>")}`;
 it("draws the installed package's logo in the app's page navigation (#562)", async () => {
   const packaged = { ...plugin, icon: packageIcon } as unknown as InstalledExtension;
-  render(<ExtensionWorkspace plugin={packaged} page={packaged.manifest.contributions.pages[1]} context="staging" />);
+  render(<Workspace plugin={packaged} page={packaged.manifest.contributions.pages[1]} context="staging" />);
   const navigation = await screen.findByRole("navigation", { name: "Flux pages" });
   expect(navigation.querySelector("[data-extension-logo]")?.getAttribute("data-extension-logo")).toBe("package");
   expect(navigation.querySelector("image")?.getAttribute("href")).toBe(packageIcon);
@@ -170,6 +185,9 @@ const plugin = {
 } as unknown as InstalledExtension;
 beforeEach(async () => {
   vi.resetAllMocks();
+  openTab(ROUTE);
+  setTabView(tabId(), { filter: "", regex: false });
+  setTabNamespaces(tabId(), "staging", []);
   vi.spyOn(await import("@srelens/core/lib/workloads"),"listNamespaces").mockImplementation((...args)=>listNamespaces(...args));
   vi.mocked(listNamespaces).mockResolvedValue({ namespaces: [] } as never);
   vi.mocked(readExtension).mockResolvedValue({
@@ -196,7 +214,7 @@ it("watches each reader of a dashboard page once, for the page, and re-reads its
       return { stream: `s-${opened.length}`, cancel: vi.fn(async () => {}) };
     },
   }));
-  const { unmount } = render(<ExtensionWorkspace plugin={plugin} page={plugin.manifest.contributions.pages[0]} context="staging" />);
+  const { unmount } = render(<Workspace plugin={plugin} page={plugin.manifest.contributions.pages[0]} context="staging" />);
   expect(await screen.findByText("Healthy: 1")).toBeTruthy();
   await waitFor(() => expect(opened.map((o) => o.capability)).toEqual(["apps"]));
   expect(openExtensionView).toHaveBeenCalledTimes(1);
@@ -241,7 +259,7 @@ it("counts a resolver-backed page by the host's resolved statuses, in words", as
     { name: "c", namespace: "flux-system", age: "1d", columns: [], status: { status: "error", label: "Not ready" } },
     { name: "d", namespace: "flux-system", age: "1d", columns: [], status: { status: "error", label: "Not ready" } },
   ] });
-  render(<ExtensionWorkspace plugin={migrated} page={migrated.manifest.contributions.pages[0]} context="staging" />);
+  render(<Workspace plugin={migrated} page={migrated.manifest.contributions.pages[0]} context="staging" />);
   expect(await screen.findByText("Healthy: 1")).toBeTruthy();
   expect(screen.getByText("Error: 2")).toBeTruthy();
   expect(screen.getByText("Suspended: 1")).toBeTruthy();
@@ -251,7 +269,7 @@ it("counts a resolver-backed page by the host's resolved statuses, in words", as
 it("shows dashboard counts and navigates to grouped resource pages on the pinned cluster", async () => {
   const onPage = vi.fn();
   render(
-    <ExtensionWorkspace
+    <Workspace
       plugin={plugin}
       page={plugin.manifest.contributions.pages[0]}
       context="staging"
@@ -266,13 +284,13 @@ it("shows dashboard counts and navigates to grouped resource pages on the pinned
     "staging",
     "",
   );
-  fireEvent.click(screen.getByRole("button", { name: "Sources" }));
-  expect(onPage).toHaveBeenCalledWith("repos", "");
+  fireEvent.click(screen.getByRole("tab", { name: "Sources" }));
+  expect(onPage).toHaveBeenCalledWith("repos");
 });
 it("refreshes dashboard counts when an action on one of their resources is accepted", async () => {
   const { EXTENSION_RESOURCE_CHANGED } = await import("@srelens/core");
   render(
-    <ExtensionWorkspace
+    <Workspace
       plugin={plugin}
       page={plugin.manifest.contributions.pages[0]}
       context="staging"
@@ -295,7 +313,7 @@ it("refreshes dashboard counts when an action on one of their resources is accep
 it("reports failed summaries instead of displaying zero healthy resources", async () => {
   vi.mocked(readExtension).mockRejectedValue(new Error("Forbidden"));
   render(
-    <ExtensionWorkspace
+    <Workspace
       plugin={plugin}
       page={plugin.manifest.contributions.pages[0]}
       context="staging"
@@ -330,7 +348,7 @@ it("says when event reads were capped and pages matching rows", async () => {
         : { items: [] }) as never,
   );
   render(
-    <ExtensionWorkspace
+    <Workspace
       plugin={eventPlugin}
       page={eventPlugin.manifest.contributions.pages[0]}
       context="staging"
@@ -342,7 +360,7 @@ it("says when event reads were capped and pages matching rows", async () => {
     ),
   ).toBeTruthy();
   expect(screen.getByText("Events")).toBeTruthy();
-  expect(screen.getByText(/\(120\+\)/)).toBeTruthy();
+  expect(screen.getByText("120+ items")).toBeTruthy();
   expect(screen.getByText("Event 0")).toBeTruthy();
   expect(screen.queryByText("Event 100")).toBeNull();
   fireEvent.click(screen.getByRole("button", { name: /Show 20 more/ }));
@@ -370,7 +388,7 @@ it("resets event paging when the extension revision changes", async () => {
       (capability === "events" ? { events } : { items: [] }) as never,
   );
   const { rerender } = render(
-    <ExtensionWorkspace
+    <Workspace
       plugin={eventPlugin}
       page={eventPlugin.manifest.contributions.pages[0]}
       context="staging"
@@ -380,7 +398,7 @@ it("resets event paging when the extension revision changes", async () => {
   fireEvent.click(screen.getByRole("button", { name: /Show 20 more/ }));
   expect(screen.getByText("Event 100")).toBeTruthy();
   rerender(
-    <ExtensionWorkspace
+    <Workspace
       plugin={{ ...eventPlugin, revision: eventPlugin.revision + 1 }}
       page={eventPlugin.manifest.contributions.pages[0]}
       context="staging"
@@ -427,7 +445,7 @@ it("filters events by API group and search, not just a matching kind name", asyn
         : { items: [] }) as never,
   );
   render(
-    <ExtensionWorkspace
+    <Workspace
       plugin={eventPlugin}
       page={eventPlugin.manifest.contributions.pages[0]}
       context="staging"
@@ -436,7 +454,7 @@ it("filters events by API group and search, not just a matching kind name", asyn
   expect(await screen.findByText("Reconciliation succeeded")).toBeTruthy();
   expect(screen.queryByText("Unrelated event")).toBeNull();
   fireEvent.change(
-    screen.getByRole("textbox", { name: "Search app resources" }),
+    screen.getByRole("searchbox", { name: "Filter events" }),
     { target: { value: "does not match" } },
   );
   expect(await screen.findByText("No matching events.")).toBeTruthy();
@@ -448,7 +466,7 @@ it("retains a namespace discovery error and offers retry", async () => {
     error: "namespace request timed out",
   });
   render(
-    <ExtensionWorkspace
+    <Workspace
       plugin={plugin}
       page={plugin.manifest.contributions.pages[0]}
       context="staging"
@@ -463,7 +481,7 @@ it("retains a namespace discovery error and offers retry", async () => {
 
 it("asks the host for only a dashboard card's rows on its target page", async () => {
   render(
-    <ExtensionWorkspace
+    <Workspace
       plugin={plugin}
       page={plugin.manifest.contributions.pages[1]}
       context="staging"
@@ -487,7 +505,7 @@ it("reads a card's rows over the several namespaces it counted in", async () => 
     return { items: rows.filter((row) => !scope.length || scope.includes(row.namespace)) };
   }) as never);
   render(
-    <ExtensionWorkspace
+    <Workspace
       plugin={plugin}
       page={plugin.manifest.contributions.pages[1]}
       context="staging"
@@ -503,7 +521,7 @@ it("reads a card's rows over the several namespaces it counted in", async () => 
 
 it("filters resource rows without a second cluster read", async () => {
   render(
-    <ExtensionWorkspace
+    <Workspace
       plugin={plugin}
       page={plugin.manifest.contributions.pages[1]}
       context="staging"
@@ -511,7 +529,7 @@ it("filters resource rows without a second cluster read", async () => {
   );
   expect(await screen.findByRole("cell", { name: "apps" })).toBeTruthy();
   fireEvent.change(
-    screen.getByRole("textbox", { name: "Search app resources" }),
+    screen.getByRole("searchbox", { name: "Filter kustomizations" }),
     { target: { value: "missing" } },
   );
   expect(screen.queryByRole("cell", { name: "apps" })).toBeNull();
@@ -524,17 +542,14 @@ it("reloads the selected namespace without changing the pinned cluster", async (
     summaries: [],
   });
   render(
-    <ExtensionWorkspace
+    <Workspace
       plugin={plugin}
       page={plugin.manifest.contributions.pages[1]}
       context="staging"
     />,
   );
   await screen.findByRole("cell", { name: "apps" });
-  fireEvent.click(
-    screen.getByRole("combobox", { name: "App namespace" }),
-  );
-  fireEvent.click(await screen.findByRole("option", { name: "flux-system" }));
+  pick("flux-system");
   await waitFor(() =>
     expect(readExtension).toHaveBeenLastCalledWith(
       "org.test.flux",
@@ -550,15 +565,15 @@ it("reloads the selected namespace without changing the pinned cluster", async (
 it("uses the restricted namespace instead of an all-namespace resource read", async () => {
   vi.mocked(listNamespaces).mockResolvedValue({error:'Forbidden: User "system:serviceaccount:team:reader" cannot list namespaces'} as any);
   vi.spyOn(await import("@srelens/core/lib/clusters"),"listContexts").mockResolvedValue({contexts:[{name:"staging",namespace:"team"}]} as any);
-  render(<ExtensionWorkspace plugin={plugin} page={plugin.manifest.contributions.pages[1]} context="staging" />);
+  render(<Workspace plugin={plugin} page={plugin.manifest.contributions.pages[1]} context="staging" />);
   await waitFor(()=>expect(readExtension).toHaveBeenLastCalledWith(plugin.manifest.id,plugin.revision,"apps","staging","team",true));
   expect(vi.mocked(readExtension).mock.calls.every(call=>call[4]==="team")).toBe(true);
 });
 
 // A card route owns its scope, whatever the credential (#540 review): it reads
-// exactly the namespaces the card counted in, and the picker names them. A
-// credential restricted to another namespace gets the host's refusal for the
-// card's scope, never quietly its own namespace's rows under the card's banner.
+// exactly the namespaces the card counted in, and says which. A credential
+// restricted to another namespace gets the host's refusal for the card's scope,
+// never quietly its own namespace's rows under the card's banner.
 it.each([
   ["one namespace", "an unrestricted credential", "prod", undefined, false, ["prod", true, "suspended"], "prod"],
   ["one namespace", "a credential restricted to team", "prod", undefined, true, ["prod", true, "suspended"], "prod"],
@@ -573,44 +588,17 @@ it.each([
   } else {
     vi.mocked(listNamespaces).mockResolvedValue({namespaces:["prod","team","other"]} as any);
   }
-  const onLeaveCard = vi.fn();
-  render(<ExtensionWorkspace plugin={plugin} page={plugin.manifest.contributions.pages[1]} context="staging"
-    namespace={namespace} card="suspended" cardNamespaces={cardNamespaces ? [...cardNamespaces] : undefined}
-    onLeaveCard={onLeaveCard} />);
-  // Settled once the credential's scope, if any, is known: the picker is drawn then.
-  const picker = await screen.findByRole("combobox",{name:"App namespace"});
-  await waitFor(()=>expect(picker.textContent).toContain(label));
+  render(<Workspace plugin={plugin} page={plugin.manifest.contributions.pages[1]} context="staging"
+    namespace={namespace} card="suspended" cardNamespaces={cardNamespaces ? [...cardNamespaces] : undefined} />);
+  const bar = await screen.findByRole("search", { name: "Filter kustomizations" });
+  expect(await within(bar).findByText(label)).toBeTruthy();
+  // Read-only: the scope is the card's, and Show all is the way out of it.
+  expect(screen.queryByRole("combobox", { name: "Namespaces" })).toBeNull();
+  await waitFor(()=>expect(vi.mocked(readExtension).mock.calls.filter(call=>call[6]==="suspended").length).toBeGreaterThan(0));
   const cardReads = vi.mocked(readExtension).mock.calls.filter(call=>call[6]==="suspended");
-  expect(cardReads.length).toBeGreaterThan(0);
   for (const call of cardReads) expect(call.slice(4)).toEqual(read);
   // Never the credential's own namespace in place of the card's.
   if (restricted) expect(cardReads.some(call=>call[4]==="team")).toBe(false);
-  // One option per label: the card's scope is named once, so a reader never
-  // has two identical choices that do different things.
-  fireEvent.click(picker);
-  const labels = (await screen.findAllByRole("option")).map((option)=>option.textContent?.trim());
-  expect(labels.filter((text)=>text===label)).toHaveLength(1);
-  expect(new Set(labels).size).toBe(labels.length);
-  // Choosing the card's own scope stays on the card; any other namespace leaves it.
-  fireEvent.click(screen.getByRole("option",{name:label}));
-  expect(onLeaveCard).not.toHaveBeenCalled();
-  fireEvent.click(picker);
-  const other = restricted ? "team" : "other";
-  fireEvent.click(await screen.findByRole("option",{name:other}));
-  expect(onLeaveCard).toHaveBeenCalledWith(other);
-});
-
-it("carries the selected namespace into group navigation", async () => {
-  vi.mocked(listNamespaces).mockResolvedValue({namespaces:["team"]} as any);
-  const onPage=vi.fn();
-  const onNamespace=vi.fn();
-  render(<ExtensionWorkspace plugin={plugin} page={plugin.manifest.contributions.pages[1]} context="staging" onPage={onPage} onNamespace={onNamespace}/>);
-  await screen.findByRole("cell",{name:"apps"});
-  fireEvent.click(screen.getByRole("combobox",{name:"App namespace"}));
-  fireEvent.click(await screen.findByRole("option",{name:"team"}));
-  fireEvent.click(screen.getByRole("button",{name:"Sources"}));
-  expect(onPage).toHaveBeenCalledWith("repos","team");
-  expect(onNamespace).toHaveBeenCalledWith("team");
 });
 
 it("ticks event first and last occurrence ages without reloading events", async () => {
@@ -621,7 +609,7 @@ it("ticks event first and last occurrence ages without reloading events", async 
   vi.useFakeTimers();vi.setSystemTime(new Date("2026-09-13T12:00:10Z"));
   let view:ReturnType<typeof render>;
   try {
-    await act(async()=>{view=render(<ExtensionWorkspace plugin={eventPlugin} page={eventPlugin.manifest.contributions.pages[0]} context="staging"/>);});
+    await act(async()=>{view=render(<Workspace plugin={eventPlugin} page={eventPlugin.manifest.contributions.pages[0]} context="staging"/>);});
     expect(screen.getByText("10s")).toBeTruthy();
     act(()=>{vi.advanceTimersByTime(30000);});
     expect(screen.getByText("40s")).toBeTruthy();
@@ -635,7 +623,7 @@ it("shows unsupported-cluster requirements without reading app resources", async
   requiring.manifest.capabilities[0].target = "k8s.listCustomResource";
   Object.assign(requiring.manifest.capabilities[0].arguments, { group: "kustomize.toolkit.fluxcd.io", version: "v1", plural: "kustomizations", kind: "Kustomization" });
   vi.mocked(listCrds).mockResolvedValue({ crds: [] });
-  render(<ExtensionWorkspace plugin={requiring} page={requiring.manifest.contributions.pages[0]} context="staging" />);
+  render(<Workspace plugin={requiring} page={requiring.manifest.contributions.pages[0]} context="staging" />);
   expect(await screen.findByText("Missing requirements")).toBeTruthy();
   expect(readExtension).not.toHaveBeenCalled();
   expect(screen.getByRole("navigation", { name: "Flux pages" })).toBeTruthy();
@@ -654,18 +642,19 @@ it("shows app cards inside an overview and opens their filtered page in its name
   const app = withCards();
   vi.mocked(resolveDashboardCards).mockResolvedValue({ cards: [{ id: "expiring", state: "count", count: 2 }] });
   const onCard = vi.fn();
-  render(<ExtensionWorkspace plugin={app} page={app.manifest.contributions.pages[0]} context="staging" namespace="team" onCard={onCard} />);
+  pick("team");
+  render(<Workspace plugin={app} page={app.manifest.contributions.pages[0]} context="staging" onCard={onCard} />);
   const card = await screen.findByRole("region", { name: "Certificates expiring soon" });
   // The region is drawn before its count resolves ("Loading…"); wait for the
   // count rather than reading it the moment the card appears.
   await waitFor(() => expect(card.textContent).toContain("2"));
   fireEvent.click(screen.getByRole("button", { name: "Open Certificates expiring soon" }));
-  expect(onCard).toHaveBeenCalledWith("apps", "team", "expiring");
+  expect(onCard).toHaveBeenCalledWith("apps", ["team"], "expiring");
 });
 it("keeps overview card failures distinct from zero and retries them", async () => {
   const app = withCards();
   vi.mocked(resolveDashboardCards).mockRejectedValue(new Error("expiry read timed out"));
-  render(<ExtensionWorkspace plugin={app} page={app.manifest.contributions.pages[0]} context="staging" />);
+  render(<Workspace plugin={app} page={app.manifest.contributions.pages[0]} context="staging" />);
   const card = await screen.findByRole("region", { name: "Certificates expiring soon" });
   await waitFor(() => expect(card.getAttribute("data-state")).toBe("error"));
   expect(card.textContent).toContain("expiry read timed out");
@@ -688,7 +677,7 @@ it("previews soonest expirations with issuer and status, bounded to the declared
   vi.mocked(readExtension).mockResolvedValue({items});
   vi.mocked(resolveDashboardCards).mockResolvedValue({cards:[{id:"expiring",state:"count",count:3},{id:"upcoming",state:"list",total:3,rows:[{name:"first",namespace:"team"},{name:"next",namespace:"team"}]}]});
   vi.mocked(resolveExtensionColumns).mockResolvedValue({ columns: app.manifest.contributions.tableColumns, cells: items.map((row,i)=>({uid:null,name:row.name,namespace:row.namespace,values:{"not-after":["2026-11-01T00:00:00Z","2026-10-06T00:00:00Z","2026-10-08T00:00:00Z"][i],issuer:"production-ca"}})) });
-  render(<ExtensionWorkspace plugin={app} page={app.manifest.contributions.pages[0]} context="staging" />);
+  render(<Workspace plugin={app} page={app.manifest.contributions.pages[0]} context="staging" />);
   await screen.findByRole("columnheader", {name:"Issuer"});
   await waitFor(()=>expect(screen.getAllByRole("cell",{name:"production-ca"})).toHaveLength(2));
   expect(screen.queryByRole("columnheader",{name:"Secret"})).toBeNull();
@@ -697,32 +686,23 @@ it("previews soonest expirations with issuer and status, bounded to the declared
   const names = screen.getAllByRole("row").slice(1).map(row=>row.querySelector("td")?.textContent);
   expect(names).toEqual(["first","next"]);
   expect(screen.queryByRole("button",{name:"Select all"})).toBeNull();
-  expect(screen.queryByRole("textbox",{name:"Search app resources"})).toBeNull();
+  expect(screen.queryByRole("searchbox")).toBeNull();
 });
-it("keeps a card filter when an embedded overview navigates without a route callback", async () => {
-  const app = withCards();
-  vi.mocked(resolveDashboardCards).mockResolvedValue({cards:[{id:"expiring",state:"count",count:2}]});
-  render(<ExtensionWorkspace plugin={app} page={app.manifest.contributions.pages[0]} context="staging" namespace="team" />);
-  fireEvent.click(await screen.findByRole("button",{name:"Open Certificates expiring soon"}));
-  await waitFor(()=>expect(readExtension).toHaveBeenLastCalledWith(app.manifest.id,3,"apps","staging","team",true,"expiring"));
-});
-
-it("keeps the namespace chosen on an embedded overview when opening a card", async () => {
+it("opens a card over every namespace the page has selected", async () => {
   const app=withCards();
-  vi.mocked(listNamespaces).mockResolvedValue({namespaces:["team"]} as never);
+  const onCard=vi.fn();
   vi.mocked(resolveDashboardCards).mockResolvedValue({cards:[{id:"expiring",state:"count",count:2}]});
-  render(<ExtensionWorkspace plugin={app} page={app.manifest.contributions.pages[0]} context="staging" />);
-  fireEvent.click(await screen.findByRole("combobox",{name:"App namespace"}));
-  fireEvent.click(await screen.findByRole("option",{name:"team"}));
+  pick("team","prod");
+  render(<Workspace plugin={app} page={app.manifest.contributions.pages[0]} context="staging" onCard={onCard} />);
   fireEvent.click(await screen.findByRole("button",{name:"Open Certificates expiring soon"}));
-  await waitFor(()=>expect(readExtension).toHaveBeenLastCalledWith(app.manifest.id,3,"apps","staging","team",true,"expiring"));
+  expect(onCard).toHaveBeenCalledWith("apps",["team","prod"],"expiring");
 });
 
 it("uses the host list's ordering and limit even without a sortable app column", async () => {
   const app=withCards();
   vi.mocked(readExtension).mockResolvedValue({items:["late","first","next"].map(name=>({name,namespace:"team",age:"1d",columns:[]}))});
   vi.mocked(resolveDashboardCards).mockResolvedValue({cards:[{id:"expiring",state:"count",count:3},{id:"upcoming",state:"list",total:3,rows:[{name:"first",namespace:"team"},{name:"next",namespace:"team"}]}]});
-  render(<ExtensionWorkspace plugin={app} page={app.manifest.contributions.pages[0]} context="staging" />);
+  render(<Workspace plugin={app} page={app.manifest.contributions.pages[0]} context="staging" />);
   await waitFor(()=>expect(screen.getAllByRole("cell").filter(cell=>["first","next","late"].includes(cell.textContent??"")).map(cell=>cell.textContent)).toEqual(["first","next"]));
 });
 it("names the configured expiry window, including its manifest default", async () => {
@@ -730,9 +710,9 @@ it("names the configured expiry window, including its manifest default", async (
   app.manifest.settings=[{id:"expiryWindow",title:"Warn before expiry",type:"select",default:"14d",options:[{value:"14d",label:"14 days"},{value:"30d",label:"30 days"}]}];
   app.manifest.contributions.dashboardCards![0].predicate={jsonPath:".status.notAfter",within:"${settings.expiryWindow}"};
   vi.mocked(resolveDashboardCards).mockResolvedValue({cards:[{id:"expiring",state:"count",count:2}]});
-  const view=render(<ExtensionWorkspace plugin={app} page={app.manifest.contributions.pages[0]} context="staging" />);
+  const view=render(<Workspace plugin={app} page={app.manifest.contributions.pages[0]} context="staging" />);
   expect(await screen.findByText("Window: 14 days")).toBeTruthy();
-  view.rerender(<ExtensionWorkspace plugin={{...app,revision:4,settings:{expiryWindow:"30d"}}} page={app.manifest.contributions.pages[0]} context="staging" />);
+  view.rerender(<Workspace plugin={{...app,revision:4,settings:{expiryWindow:"30d"}}} page={app.manifest.contributions.pages[0]} context="staging" />);
   expect(await screen.findByText("Window: 30 days")).toBeTruthy();
 });
 
@@ -743,7 +723,158 @@ it("reads a preview in one namespace without also sending a namespace list", asy
     return {items:[{name:"apps",namespace:"team",age:"1d",columns:[]}]};
   });
   vi.mocked(resolveDashboardCards).mockResolvedValue({cards:[{id:"expiring",state:"count",count:1},{id:"upcoming",state:"list",total:1,rows:[{name:"apps",namespace:"team"}]}]});
-  render(<ExtensionWorkspace plugin={app} page={app.manifest.contributions.pages[0]} context="staging" namespace="team" />);
+  pick("team");
+  render(<Workspace plugin={app} page={app.manifest.contributions.pages[0]} context="staging" />);
   expect(await screen.findByRole("cell",{name:"apps"})).toBeTruthy();
   expect(screen.queryByText("Name one namespace or a list of them, not both")).toBeNull();
+});
+
+describe("the app page's filter row (#1001)", () => {
+  const list = plugin.manifest.contributions.pages[1];
+  const rows = (...names: string[]) => ({ items: names.map((name) => ({ name, namespace: "team", age: "1d", columns: ["True", "false", "False"] })) });
+
+  it("filters with the standard row: named, a regular expression, and Escape to clear it", async () => {
+    vi.mocked(readExtension).mockResolvedValue(rows("web", "api") as never);
+    render(<Workspace plugin={plugin} page={list} context="staging" />);
+    await screen.findByRole("cell", { name: "web" });
+    expect(screen.getByRole("search", { name: "Filter kustomizations" })).toBeTruthy();
+    const filter = screen.getByRole("searchbox", { name: "Filter kustomizations" });
+    fireEvent.click(screen.getByRole("button", { name: "Use regular expression" }));
+    fireEvent.change(filter, { target: { value: "^web$" } });
+    expect(screen.getByRole("cell", { name: "web" })).toBeTruthy();
+    expect(screen.queryByRole("cell", { name: "api" })).toBeNull();
+    fireEvent.keyDown(filter, { key: "Escape" });
+    expect(screen.getByRole("cell", { name: "api" })).toBeTruthy();
+  });
+
+  it("marks a half-typed regular expression and keeps the list", async () => {
+    vi.mocked(readExtension).mockResolvedValue(rows("web") as never);
+    render(<Workspace plugin={plugin} page={list} context="staging" />);
+    await screen.findByRole("cell", { name: "web" });
+    fireEvent.click(screen.getByRole("button", { name: "Use regular expression" }));
+    const filter = screen.getByRole("searchbox", { name: "Filter kustomizations" });
+    fireEvent.change(filter, { target: { value: "web(" } });
+    expect(filter.getAttribute("aria-invalid")).toBe("true");
+    expect(screen.getByRole("cell", { name: "web" })).toBeTruthy();
+  });
+
+  it("keeps the filter with the tab, as a built-in list does", async () => {
+    vi.mocked(readExtension).mockResolvedValue(rows("web") as never);
+    const view = render(<Workspace plugin={plugin} page={list} context="staging" />);
+    fireEvent.change(await screen.findByRole("searchbox", { name: "Filter kustomizations" }), { target: { value: "we" } });
+    view.unmount();
+    render(<Workspace plugin={plugin} page={list} context="staging" />);
+    expect((await screen.findByRole("searchbox", { name: "Filter kustomizations" }) as HTMLInputElement).value).toBe("we");
+  });
+
+  it("puts the count and Refresh in the page's header, not in the list", async () => {
+    vi.mocked(readExtension).mockResolvedValue(rows("web", "api") as never);
+    const header = document.createElement("div");
+    document.body.append(header);
+    render(<Workspace plugin={plugin} page={list} context="staging" actions={header} />);
+    await screen.findByRole("cell", { name: "web" });
+    expect(within(header).getByText("2 items")).toBeTruthy();
+    expect(within(header).getByRole("button", { name: "Refresh" })).toBeTruthy();
+    fireEvent.change(screen.getByRole("searchbox", { name: "Filter kustomizations" }), { target: { value: "web" } });
+    expect(within(header).getByText("1 / 2")).toBeTruthy();
+    header.remove();
+  });
+
+  it("moves between pages by tabs, and only a press leaves the page", async () => {
+    const onPage = vi.fn();
+    render(<Workspace plugin={plugin} page={plugin.manifest.contributions.pages[2]} context="staging" onPage={onPage} />);
+    const group = await screen.findByRole("tab", { name: "Sources" });
+    expect(group.getAttribute("aria-selected")).toBe("true");
+    expect(screen.getByRole("tab", { name: "Git repositories" }).getAttribute("aria-selected")).toBe("true");
+    group.focus();
+    fireEvent.keyDown(group, { key: "ArrowLeft" });
+    expect(onPage).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("tab", { name: "Kustomizations" }));
+    expect(onPage).toHaveBeenCalledWith("apps");
+  });
+});
+
+describe("the app page's namespaces (#1001)", () => {
+  const list = plugin.manifest.contributions.pages[1];
+  const byNamespace = (answers: Record<string, unknown>) => vi.mocked(readExtension).mockImplementation((async (...args: unknown[]) => {
+    const answer = answers[args[4] as string];
+    if (answer instanceof Error) throw answer;
+    return answer;
+  }) as never);
+  const row = (name: string, namespace: string) => ({ name, namespace, age: "1d", columns: ["True", "false", "False"] });
+
+  it("offers the standard picker in the filter row", async () => {
+    render(<Workspace plugin={plugin} page={list} context="staging" />);
+    const bar = await screen.findByRole("search", { name: "Filter kustomizations" });
+    expect(await within(bar).findByRole("combobox", { name: "Namespaces" })).toBeTruthy();
+    expect(screen.queryByRole("combobox", { name: "App namespace" })).toBeNull();
+  });
+
+  it("offers no picker over a cluster-scoped reader", async () => {
+    const scoped = structuredClone(plugin);
+    (scoped.manifest.capabilities[0].arguments as Record<string, unknown>).namespaced = false;
+    pick("team");
+    render(<Workspace plugin={scoped} page={scoped.manifest.contributions.pages[1]} context="staging" />);
+    await screen.findByRole("cell", { name: "apps" });
+    expect(screen.queryByRole("combobox", { name: "Namespaces" })).toBeNull();
+    expect(readExtension).toHaveBeenLastCalledWith("org.test.flux", 3, "apps", "staging", "", true);
+  });
+
+  it("reads each selected namespace on its own and shows their rows together", async () => {
+    byNamespace({ prod: { items: [row("shop", "prod")] }, team: { items: [row("web", "team")] } });
+    pick("prod", "team");
+    render(<Workspace plugin={plugin} page={list} context="staging" />);
+    expect(await screen.findByRole("cell", { name: "shop" })).toBeTruthy();
+    expect(screen.getByRole("cell", { name: "web" })).toBeTruthy();
+    expect(screen.getByText("2 items")).toBeTruthy();
+    expect(readExtension).toHaveBeenCalledWith("org.test.flux", 3, "apps", "staging", "prod", true);
+    expect(readExtension).toHaveBeenCalledWith("org.test.flux", 3, "apps", "staging", "team", true);
+    expect(readExtension).not.toHaveBeenCalledWith("org.test.flux", 3, "apps", "staging", "", true);
+  });
+
+  it("names the namespace that could not be read and keeps the others' rows", async () => {
+    byNamespace({ prod: new Error("Forbidden"), team: { items: [row("web", "team")] } });
+    pick("prod", "team");
+    render(<Workspace plugin={plugin} page={list} context="staging" />);
+    expect(await screen.findByRole("cell", { name: "web" })).toBeTruthy();
+    expect(screen.getByText("Could not list kustomizations in prod")).toBeTruthy();
+  });
+
+  it("reports a failure when no namespace could be read", async () => {
+    byNamespace({ prod: new Error("Forbidden"), team: new Error("Forbidden") });
+    pick("prod", "team");
+    render(<Workspace plugin={plugin} page={list} context="staging" />);
+    expect((await screen.findByRole("alert")).textContent).toContain("Forbidden");
+  });
+
+  it("says the list is cut short when any one namespace's read was", async () => {
+    byNamespace({ prod: { items: [row("shop", "prod")], truncated: true }, team: { items: [row("web", "team")] } });
+    pick("prod", "team");
+    render(<Workspace plugin={plugin} page={list} context="staging" />);
+    await screen.findByRole("cell", { name: "web" });
+    expect(screen.getByText(/more remain on the cluster/)).toBeTruthy();
+    expect(screen.getByText("2+ items")).toBeTruthy();
+  });
+
+  it("asks the cluster nothing for a collection that matches no namespace", async () => {
+    pick(NO_NAMESPACE);
+    render(<Workspace plugin={plugin} page={list} context="staging" />);
+    expect(await screen.findByText("No resources returned by this app.")).toBeTruthy();
+    expect(readExtension).not.toHaveBeenCalled();
+  });
+
+  it("merges a dashboard's counts and events over the selection", async () => {
+    const eventPlugin = structuredClone(plugin);
+    eventPlugin.manifest.contributions.pages[0].dashboard!.events = { capability: "events", apiGroups: ["kustomize.toolkit.fluxcd.io"] };
+    const event = (name: string, namespace: string, message: string) => ({ name, namespace, message, objectApiVersion: "kustomize.toolkit.fluxcd.io/v1", object: "Kustomization/apps", type: "Normal", count: 1, age: "1m" });
+    vi.mocked(readExtension).mockImplementation((async (...args: unknown[]) => {
+      const [capability, namespace] = [args[2], args[4] as string];
+      return capability === "events" ? { events: [event("same-name", namespace, `In ${namespace}`)] } : { items: [row("a", namespace)] };
+    }) as never);
+    pick("prod", "team");
+    render(<Workspace plugin={eventPlugin} page={eventPlugin.manifest.contributions.pages[0]} context="staging" />);
+    expect(await screen.findByText("In prod")).toBeTruthy();
+    expect(screen.getByText("In team")).toBeTruthy();
+    expect(await screen.findByText("Healthy: 2")).toBeTruthy();
+  });
 });

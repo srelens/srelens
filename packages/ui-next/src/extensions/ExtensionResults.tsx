@@ -2,14 +2,17 @@ import { AgeCell } from "../lib/ageCell";
 import { ExtensionResourceDetails } from "./ExtensionResourceDetails";
 import { ExtensionBulkActions, type BulkActionAvailability } from "./ExtensionBulkActions";
 import { bulkResourceKey } from "./bulkActions";
-import { Button, Checkbox, ResizeHandle } from "@srelens/ui-kit";
+import { Button, Checkbox, ResizeHandle, filterMatcher } from "@srelens/ui-kit";
 import { clampPeekWidth, savePeekWidth, setPeekWidth, usePeekBounds, usePeekWidth } from "../lib/peekWidth";
 import { ExtensionResourceNavigation } from "./resourceNavigation";
 import { useContext, useMemo, useEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import {
   describeError,
   onExtensionResourceChanged,
   readExtension,
+  rowInSelection,
+  watchNamespaceForSelection,
   type ExtensionResourceResult,
   type InstalledExtension,
 } from "@srelens/core";
@@ -19,6 +22,9 @@ import { contributionKind } from "@srelens/core";
 import { useContextId } from "./contextIds";
 import { StatusBadge } from "./StatusBadge";
 import { LiveNotice, LiveStatus, useLiveReaders } from "./liveReaders";
+import { readAcross } from "./readAcross";
+import { NamespaceFailuresAlert } from "../lib/errorCopy";
+import { ListCount } from "../screens/ListCount";
 
 export function ErrorNotice({
   message,
@@ -93,20 +99,26 @@ export function ExtensionResults({
   plugin,
   capability,
   context,
-  namespace = "",
+  namespaces = [],
   search = "",
+  regex = false,
   refresh = 0,
   hideToolbar = false,
   actionAvailability,
   card,
-  cardNamespaces,
   previewRows,
+  noun = "resources",
+  header,
+  bulkBar,
 }: {
   plugin: InstalledExtension;
   capability: string;
   context: string;
-  namespace?: string;
+  /** None is all namespaces. With a card, what it counted in; otherwise one read each. */
+  namespaces?: string[];
   search?: string;
+  /** Whether `search` is a regular expression. */
+  regex?: boolean;
   refresh?: number;
   hideToolbar?: boolean;
   /**
@@ -116,17 +128,21 @@ export function ExtensionResults({
   actionAvailability?: BulkActionAvailability;
   /** A dashboard card whose rows alone are read (#540). */
   card?: string;
-  /** With a card and no namespace: the several namespaces it counted in. */
-  cardNamespaces?: string[];
   /** A dashboard list preview: declared ordering and limit, without bulk selection. */
   previewRows?: {name:string;namespace:string}[];
+  /** Lowercase and plural: what the list's count and failures call its rows. */
+  noun?: string;
+  /** Where the page wants the count and live state, in its header. */
+  header?: HTMLElement | null;
+  /** Where the page wants the bulk bar, in its filter row. */
+  bulkBar?: HTMLElement | null;
 }) {
   const openResource = useContext(ExtensionResourceNavigation);
   const rowButtons = useRef(new Map<string,HTMLButtonElement>());
   const listRow = usePeekBounds();
   const peekWidth = clampPeekWidth(usePeekWidth(), listRow.bounds);
   // The card is part of what is on screen: the filtered and whole lists keep no rows of each other.
-  const scope = JSON.stringify([plugin.manifest.id,plugin.revision,capability,context,namespace,card ?? "", cardNamespaces ?? []]);
+  const scope = JSON.stringify([plugin.manifest.id,plugin.revision,capability,context,namespaces,card ?? ""]);
   const [selected,setSelected] = useState<{scope:string;name:string;namespace:string}|null>(null);
   const preview = previewRows !== undefined;
   const [columnSort, setColumnSort] = useState<{key:string;direction:"asc"|"desc"}|null>(null);
@@ -149,35 +165,38 @@ export function ExtensionResults({
   const lastRows = useRef<ExtensionResourceResult["items"]>([]);
   useEffect(()=>{loaded.current=false;lastRows.current=[];},[scope]);
   const data = useResource(
-    async () =>
-      context
-        ? readExtension(
-            plugin.manifest.id,
-            plugin.revision,
-            capability,
-            context,
-            namespace,
-            true,
-            // Only a card's target narrows the read; the whole list is called as before.
-            ...((card ? (cardNamespaces?.length ? [card, cardNamespaces] : [card]) : []) as [card?: string, namespaces?: string[]]),
-          )
-        : null,
+    async () => {
+      if (!context) return null;
+      const { id } = plugin.manifest;
+      // A card's rows are one host call, however many namespaces it counted in.
+      if (card) {
+        const several = namespaces.length > 1 ? ([namespaces] as [string[]]) : ([] as []);
+        const answer = await readExtension(id, plugin.revision, capability, context, namespaces.length === 1 ? namespaces[0] : "", true, card, ...several);
+        return { ...answer, failures: [] };
+      }
+      const { answers, failures } = await readAcross(namespaces, (namespace) => readExtension(id, plugin.revision, capability, context, namespace, true));
+      return { ...answers[0], items: answers.flatMap((answer) => answer.items), truncated: answers.some((answer) => answer.truncated), failures };
+    },
     [
       plugin.manifest.id,
       plugin.revision,
       capability,
       context,
-      namespace,
+      namespaces.join("\u0000"),
       refresh,
       card,
-      cardNamespaces?.join(","),
     ],
   );
   const { reload, refresh: reread } = data;
+  // ponytail: several namespaces are followed by one cluster-wide watch. An app
+  // has 8 open streams, across its views, and one per namespace per reader would
+  // spend them on a small selection; a credential that cannot watch the cluster
+  // is told the list is not live, and Refresh still reads each namespace.
+  const followed = watchNamespaceForSelection(namespaces);
   // Follow the reader's kind (#566): every change the watch reports reads the
   // list again in place, through the same read Refresh makes.
   const live = useLiveReaders({
-    plugin, capabilities: [capability], context, namespace, label: `page:${capability}`, onChange: reread,
+    plugin, capabilities: [capability], context, namespace: followed, label: `page:${capability}`, onChange: reread,
   });
   // Refresh when an action on one of this list's resources is accepted, from any view.
   useEffect(
@@ -187,11 +206,11 @@ export function ExtensionResults({
           changed.id === plugin.manifest.id &&
           changed.context === context &&
           changed.capability === capability &&
-          (!namespace || changed.namespace === namespace)
+          rowInSelection(changed.namespace, namespaces)
         )
           reload();
       }),
-    [plugin.manifest.id, context, capability, namespace, reload],
+    [plugin.manifest.id, context, capability, namespaces.join("\u0000"), reload],
   );
   const binding = plugin.manifest.capabilities.find(
     (b) => b.name === capability,
@@ -210,7 +229,7 @@ export function ExtensionResults({
     !!plugin.manifest.contributions.statusResolvers?.some((resolver) => resolver.forKinds.includes(columnKind));
   const contextId = useContextId(context);
   const appColumns = useResolvedColumns({
-    plugins: [plugin], context, contextId, namespace, kind: columnKind, rows: sourceRows, refresh,
+    plugins: [plugin], context, contextId, namespace: followed, kind: columnKind, rows: sourceRows, refresh,
   });
   const columns = preview ? [] : data.data?.printerColumns ?? (Array.isArray(binding?.arguments.printerColumns)
     ? (binding.arguments.printerColumns as Array<{ name: string }>)
@@ -221,7 +240,7 @@ export function ExtensionResults({
   const [visible, setVisible] = useState(PAGE);
   useEffect(() => {
     setVisible(PAGE);
-  }, [scope, search, refresh, data.status, columnSort]);
+  }, [scope, search, regex, refresh, data.status, columnSort]);
   useEffect(() => {
     if (data.status !== "loading") loaded.current = true;
   }, [data.status]);
@@ -277,12 +296,11 @@ export function ExtensionResults({
         Loading app resources…
       </p>
     );
+  const matches = filterMatcher(search, regex);
   const rows = sourceRows.filter((row) =>
     [row.name, row.namespace, ...row.columns, ...(resolvesStatus && row.status ? [row.status.label] : []),
       ...appColumns.columns.filter((column) => column.filterable === true).map((column) => column.getValue?.(row) ?? "")]
-      .join(" ")
-      .toLowerCase()
-      .includes(search.toLowerCase()),
+      .some((value) => matches(String(value))),
   );
   const sortColumn = appColumns.columns.find((column) => column.key === columnSort?.key && column.sortable);
   const collator = new Intl.Collator(undefined, {numeric:true,sensitivity:"base"});
@@ -325,6 +343,7 @@ export function ExtensionResults({
       {appColumns.errors.map((error) => (
         <ErrorNotice key={error.id} cluster title={`Couldn’t read ${error.title} columns`} message={error.message} retry={appColumns.reload} />
       ))}
+      <NamespaceFailuresAlert what={noun} failures={data.data?.failures ?? []} />
       {data.data?.columnsError && <p className="extension-message" role="status">Could not load CRD columns: {data.data.columnsError}. Showing app-defined columns.</p>}
       {data.data?.truncated && (
         <p className="extension-message" role="status">
@@ -336,8 +355,8 @@ export function ExtensionResults({
           <span>
             {binding?.arguments.namespaced === false
               ? "Cluster-scoped resources"
-              : namespace
-                ? `Namespace: ${namespace}`
+              : namespaces.length
+                ? `Namespace: ${namespaces.join(", ")}`
                 : "All namespaces"}
           </span>
           <LiveStatus live={live} />
@@ -346,7 +365,9 @@ export function ExtensionResults({
           </Button>
         </div>
       )}
-      {hideToolbar && <div className="extension-live-row"><LiveStatus live={live} /></div>}
+      {hideToolbar && (header
+        ? createPortal(<><ListCount total={sourceRows.length} shown={rows.length} truncated={data.data?.truncated} noun={noun} /><LiveStatus live={live} /></>, header)
+        : <div className="extension-live-row"><LiveStatus live={live} /></div>)}
       <LiveNotice live={live} what="list" />
       {/* One notice when both are down for one reason; the columns' own only when they differ. */}
       {appColumns.live.state !== live.state && <LiveNotice live={appColumns.live} what="app column values" />}
@@ -357,6 +378,7 @@ export function ExtensionResults({
           selection={pickedRows}
           onClear={()=>setPicked(new Set())}
           available={actionAvailability}
+          barSlot={bulkBar}
         />
       )}
       {data.status === "loading" ? <p className="extension-message" role="status">Refreshing resources…</p> : data.status === "error" ? <ErrorNotice cluster message={data.error} retry={data.reload}/> : shown.length ? (
