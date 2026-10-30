@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, expect, it, vi } from "vitest";
 
 // The real workspace, tab store, picker and collection scope. Only the host is
@@ -82,6 +82,23 @@ it("narrows an app's list by the name filter of the collection in force, count i
 it("counts a dashboard's page by the same filter, so its ring agrees with the list", async () => {
   page({ page: dashboard });
   expect(await screen.findByLabelText("1 Kustomizations")).toBeTruthy();
+});
+
+it("says a name filter failed rather than count a dashboard's page as empty, and offers to retry", async () => {
+  host.matchCollectionNames.mockRejectedValueOnce(new Error("expression refused"));
+  page({ page: dashboard });
+  expect(await screen.findByText("Could not narrow kustomizations by collection")).toBeTruthy();
+  expect(screen.queryByLabelText("0 Kustomizations")).toBeNull();
+  expect(screen.queryByText("Healthy: 0")).toBeNull();
+  fireEvent.click(screen.getByRole("button", { name: "Try again" }));
+  expect(await screen.findByLabelText("1 Kustomizations")).toBeTruthy();
+});
+
+it("gives a list no count while its name filter has not answered", async () => {
+  host.matchCollectionNames.mockRejectedValue(new Error("expression refused"));
+  page();
+  expect(await screen.findByText("Could not narrow kustomizations by collection")).toBeTruthy();
+  expect(screen.queryByText("0 items")).toBeNull();
 });
 
 it("leaves a card's rows as the card counted them", async () => {

@@ -25,6 +25,12 @@ export interface CollectionNameFilter {
 }
 
 /**
+ * Whether the rows `apply` gives are an answer. While the filter is matching or
+ * after it failed they are none, and a count of them would call the list empty.
+ */
+export const nameFilterAnswered = ({ state }: CollectionNameFilter) => state.status === "off" || state.status === "ready";
+
+/**
  * A list of one kind narrowed by the namespace collections its tab is scoped
  * to (#885): a collection whose resource filter names this kind shows only
  * the resources whose name matches its expression. Several are a union, and

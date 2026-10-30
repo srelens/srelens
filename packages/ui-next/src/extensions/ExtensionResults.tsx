@@ -22,7 +22,7 @@ import { useContextId } from "./contextIds";
 import { StatusBadge } from "./StatusBadge";
 import { LiveNotice, LiveStatus, useLiveReaders } from "./liveReaders";
 import { readAcross, readerKind, readerNamespaces } from "./readAcross";
-import { useCollectionNameFilter } from "../lib/collectionNameFilter";
+import { nameFilterAnswered, useCollectionNameFilter } from "../lib/collectionNameFilter";
 import { NamespaceFailuresAlert } from "../lib/errorCopy";
 import { CollectionNameNotice } from "../screens/collections/NamespaceScope";
 import { ListCount } from "../screens/ListCount";
@@ -374,7 +374,7 @@ export function ExtensionResults({
         </div>
       )}
       {hideToolbar && (header
-        ? createPortal(<><ListCount total={sourceRows.length} shown={rows.length} truncated={data.data?.truncated} noun={noun} /><LiveStatus live={live} /></>, header)
+        ? createPortal(<>{nameFilterAnswered(nameFilter) && <ListCount total={sourceRows.length} shown={rows.length} truncated={data.data?.truncated} noun={noun} />}<LiveStatus live={live} /></>, header)
         : <div className="extension-live-row"><LiveStatus live={live} /></div>)}
       <LiveNotice live={live} what="list" />
       {/* One notice when both are down for one reason; the columns' own only when they differ. */}
@@ -389,7 +389,7 @@ export function ExtensionResults({
           barSlot={bulkBar}
         />
       )}
-      {data.status === "loading" ? <p className="extension-message" role="status">Refreshing resources…</p> : data.status === "error" ? <ErrorNotice cluster message={data.error} retry={data.reload}/> : shown.length ? (
+      {data.status === "loading" ? <p className="extension-message" role="status">Refreshing resources…</p> : data.status === "error" ? <ErrorNotice cluster message={data.error} retry={data.reload}/> : !nameFilterAnswered(nameFilter) ? null : shown.length ? (
         <div className="extension-table-scroll" data-stale={live.state === "reconnecting" || undefined}>
           <table>
             <thead>

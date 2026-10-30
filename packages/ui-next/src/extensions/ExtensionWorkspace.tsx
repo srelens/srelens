@@ -25,10 +25,10 @@ import { ErrorNotice, ExtensionResults } from "./ExtensionResults";
 import { useResource } from "../lib/useResource";
 import { LiveNotice, LiveReaders, LiveStatus, useLiveReaders } from "./liveReaders";
 import { readAcross, readerKind, readerNamespaces, readsClusterScope } from "./readAcross";
-import { useCollectionNameFilter } from "../lib/collectionNameFilter";
+import { nameFilterAnswered, useCollectionNameFilter } from "../lib/collectionNameFilter";
 import { NamespaceFailuresAlert } from "../lib/errorCopy";
 import { useFallbackNamespace, useInCollectionScope, useNamespaces, useSetNamespaces } from "../lib/workspace";
-import { CollectionScopeNotice, NamespaceScopePicker } from "../screens/collections/NamespaceScope";
+import { CollectionNameNotice, CollectionScopeNotice, NamespaceScopePicker } from "../screens/collections/NamespaceScope";
 import { ListCount } from "../screens/ListCount";
 import { StaleSelectionAlert, useResourceTabView } from "../screens/resourceShell";
 
@@ -174,11 +174,12 @@ function Summary({
       <LiveStatus live={live} />
       <LiveNotice live={live} what="counts" />
       <NamespaceFailuresAlert what={plainText(page.title).toLowerCase()} failures={data.data?.failures ?? []} />
+      <CollectionNameNotice filter={nameFilter} noun={plainText(page.title).toLowerCase()} />
       {data.status === "error" ? (
         <ErrorNotice cluster message={data.error} retry={data.reload} />
       ) : data.status === "loading" ? (
         <p role="status">Loading…</p>
-      ) : (
+      ) : !nameFilterAnswered(nameFilter) ? null : (
         <div className="extension-summary-body">
           <div
             className="extension-donut"
