@@ -274,17 +274,6 @@
   margin-right: 6px;
 }
 
-.extension-catalog-search {
-  min-width: 0;
-  max-width: 100%;
-  padding: 6px 8px;
-  border: 1px solid var(--rule, var(--fl-color-border));
-  border-radius: 4px;
-  background: var(--surface, var(--fl-color-surface));
-  color: inherit;
-  font: inherit;
-}
-
 /* Settings uses the same body/meta scale as the owning design. */
 .extension-manager, .extension-catalog {
   font-family: inherit;

@@ -1,7 +1,7 @@
 import { ExtensionLogo } from "./ExtensionLogo";
 import { useEffect, useRef, useState } from "react";
 import { isTauri, listExtensionCatalog, reviewCatalogExtension, openExternal, type ExtensionCatalogSnapshot, type ExtensionReview, type InstalledExtension } from "@srelens/core";
-import { Button } from "@srelens/ui-kit";
+import { Button, FilterBar, useListFilter } from "@srelens/ui-kit";
 
 export function ExtensionCatalog({ installed, onReview, onReviewStart, autoLoad = false }: {
   autoLoad?: boolean;
@@ -16,7 +16,7 @@ export function ExtensionCatalog({ installed, onReview, onReviewStart, autoLoad 
   onReview: (review: ExtensionReview, release: { id: string; sha256: string }) => void;
 }) {
   const [data, setData] = useState<ExtensionCatalogSnapshot>();
-  const [query, setQuery] = useState("");
+  const filter = useListFilter();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const generation = useRef(0);
@@ -35,13 +35,13 @@ export function ExtensionCatalog({ installed, onReview, onReviewStart, autoLoad 
     });
   }
   useEffect(() => { if (autoLoad) load(false); }, [autoLoad]);
-  const entries = data?.catalog.extensions.filter(e => `${e.name} ${e.id} ${e.description}`.toLowerCase().includes(query.toLowerCase()));
+  const entries = data?.catalog.extensions.filter(e => [e.name, e.id, e.description].some(filter.matches));
   return <section className="extension-catalog" aria-label="App catalog">
     <div className="extension-toolbar">
       <strong>Available apps</strong>
-      {data && <input className="extension-catalog-search" aria-label="Find an app" placeholder="Find an app…" value={query} onChange={e => setQuery(e.target.value)} />}
       <Button variant="secondary" disabled={busy} onClick={() => load(Boolean(data))}>{data ? "Refresh catalog" : "Browse catalog"}</Button>
     </div>
+    {data && <FilterBar {...filter} label="Filter apps" placeholder="Filter apps…" />}
     {!data && <p className="extension-message">Discover native apps from the srelens catalog. Each app is maintained in its own repository.</p>}
     {busy && <p className="extension-message" role="status">Loading…</p>}
     {error && <p className="extension-error" role="alert">{error}</p>}

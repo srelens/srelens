@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { listContexts, callExtensionOperation, describeError, describeStreamEnd, extensionEnabledFor, extensionOperationRoute, openExtensionView, parseExtensionOperationRoute, relativeTime, type ExtensionOperation as Operation, type ExtensionView, type ExtensionStream } from "@srelens/core";
 import { useNamespaceOptions } from "@srelens/core/react";
-import { ActionBar, Badge, Button, Combobox, Popover, Screen, Table, TextInput, type BadgeTone } from "@srelens/ui-kit";
+import { ActionBar, Badge, Button, Combobox, FilterBar, Popover, Screen, Table, Tabs, TextInput, useListFilter, type BadgeTone } from "@srelens/ui-kit";
 import { ExtensionLogo } from "../extensions/ExtensionLogo";
 import { useExtensions } from "../extensions/inventoryStore";
 import { ErrorNotice } from "../extensions/ExtensionResults";
@@ -24,6 +24,8 @@ const severityTone: Record<string, BadgeTone> = { CRITICAL: "sev", HIGH: "sev", 
 const severityName = (name: string) => name.replace(/Count$/i, "").toUpperCase();
 const severityOrder = (name: string) => { const index = Object.keys(severityTone).indexOf(severityName(name)); return index < 0 ? 100 : index; };
 type ResultRow = { index: number; data: Record<string, unknown> };
+/** The fields `ReportTable` draws. */
+const reportFields = ["subject", "findings", "namespace", "source", "reportedAt"];
 const reportRow = (value: unknown): value is Record<string, unknown> => object(value) && typeof value.reportId === "string" && typeof value.category === "string" && typeof value.subject === "string";
 const rowActions = (operations: Operation[], current: string, data: Record<string, unknown>) => operations.filter((op) => op.name !== current && (op.inputs ?? []).some((input) => input.required && input.name !== "clusterId") && (op.inputs ?? []).every((input) => !input.required || input.name === "clusterId" || (scalar(data[input.name]) && data[input.name] !== ""))).sort((a,b)=>{const priority=(operation:Operation)=>(operation.inputs??[]).some(input=>input.required&&input.name==="reportId") ? 3 : (operation.inputs??[]).some(input=>input.required&&input.name==="image") ? 2 : 1;return priority(b)-priority(a);});
 const rowParams = (operation: Operation, data: Record<string, unknown>) => Object.fromEntries((operation.inputs ?? []).filter((input) => input.name !== "clusterId" && scalar(data[input.name])).map((input) => [input.name, data[input.name] as Scalar]));
@@ -82,7 +84,7 @@ function NamespaceInput({ context, value, onChange, required }: { context: strin
 
 /** Bounded data from a sidecar is rendered by the host, never as app HTML. */
 function OperationResult({ value, operations, current, onOpen }: { value: unknown; operations: Operation[]; current: string; onOpen: (operation: string, params: Record<string, Scalar>) => void }) {
-  const [filter, setFilter] = useState("");
+  const filter = useListFilter();
   const [source, setSource] = useState("");
   const fields = object(value) ? Object.entries(value) : [["Result", value] as const];
   const reports = object(value) && !value.state && Array.isArray(value.items) && value.items.every(reportRow) && (typeof value.totalReports === "number" || value.items.length > 0);
@@ -97,24 +99,27 @@ function OperationResult({ value, operations, current, onOpen }: { value: unknow
       {metadata.filter(([key]) => !technical(key) || key === "scope").map(([key, value]) => <div key={key} className="min-w-0 max-w-full"><dt className="text-xs text-muted">{label(key)}</dt><dd className={`text-[0.8125rem] ${prose(key) ? "whitespace-normal" : "overflow-auto whitespace-nowrap"}`}><ResultValue field={key} value={value} compact={compactList(key, value)} /></dd></div>)}
       {identity.length > 0 && <div className="min-w-0 basis-full"><ResultDetails entries={identity} title="Technical details" /></div>}
     </dl>}
-    {lists.length > 0 && <div className="app-result-filters"><TextInput aria-label="Filter results" placeholder={reports ? "Search reports, images or namespaces…" : "Filter results…"} value={filter} onValueChange={setFilter}/>{reports && <div className="app-source-filters" role="group" aria-label="Report source">{[["","All sources"],["app","App scans"],["operator","Operator reports"]].map(([value,title])=><Button key={value} variant="ghost" type="button" aria-pressed={source===value} onClick={()=>setSource(value)}>{title}</Button>)}</div>}</div>}
+    {lists.length > 0 && <FilterBar {...filter} label={reports ? "Filter reports" : "Filter results"} placeholder={reports ? "Filter reports…" : "Filter results…"}>{reports && <Tabs variant="segmented" label="Report source" active={source} onChange={setSource} tabs={[{id:"",label:"All sources"},{id:"app",label:"App scans"},{id:"operator",label:"Operator reports"}]}/>}</FilterBar>}
     {lists.map(([key, values]) => {
-      const rows = (values as unknown[]).map((value, index) => ({ index, data: object(value) ? value : { value } })).filter(({ data }) => (!reports || !source || data.source===source) && JSON.stringify(data).toLowerCase().includes(filter.toLowerCase()));
-      const columns = [...new Set(rows.flatMap(({ data }) => Object.keys(data)))].filter((key) =>
+      const all = (values as unknown[]).map((value, index) => ({ index, data: object(value) ? value : { value } }));
+      const columns = [...new Set(all.flatMap(({ data }) => Object.keys(data)))].filter((key) =>
         !metadata.some(([field, shared]) => field === key && scalar(shared) &&
           (values as unknown[]).every((value) => object(value) && value[key] === shared)));
       const visible = columns.filter((key) => !technical(key) || key === "clusterId").sort((a, b) => (firstColumns.indexOf(a) < 0 ? 100 : firstColumns.indexOf(a)) - (firstColumns.indexOf(b) < 0 ? 100 : firstColumns.indexOf(b)));
       const details = columns.filter((key) => technical(key) && key !== "clusterId");
+      // Matched against what the rows show: a query never finds a key or a hidden field.
+      const shown = reports && key === "items" ? reportFields : visible;
+      const rows = all.filter(({ data }) => (!reports || !source || data.source===source) && (!filter.value.trim() || shown.some((field) => filter.matches(cell(data[field])))));
       const secondary = (key: string): string | undefined => key === "name" && visible.includes("kind") ? "kind" : key === "container" && visible.includes("containerType") ? "containerType" : undefined;
       const combined = new Set(visible.map(secondary).filter(Boolean));
       const actions = (data: Record<string, unknown>) => rowActions(operations,current,data);
       return <section key={key} className="min-w-0">
-        <h2 className={reports ? "sr-only" : "border-b px-3 py-2 text-[0.8125rem] font-medium"} style={{ borderColor: "var(--rule)" }}>{key === "items" ? `${rows.length} ${rows.length === 1 ? "result" : "results"}` : `${label(key)} (${rows.length})`}{filter && <span className="text-muted"> of {(values as unknown[]).length}</span>}</h2>
+        <h2 className={reports ? "sr-only" : "border-b px-3 py-2 text-[0.8125rem] font-medium"} style={{ borderColor: "var(--rule)" }}>{key === "items" ? `${rows.length} ${rows.length === 1 ? "result" : "results"}` : `${label(key)} (${rows.length})`}{filter.value && <span className="text-muted"> of {(values as unknown[]).length}</span>}</h2>
         {reports && key==="items" ? <ReportTable rows={rows} operations={operations} current={current} onOpen={onOpen}/> : <Table<(typeof rows)[number]> data={rows} getRowKey={(row) => String(row.index)} columns={[
           ...visible.filter((key) => !combined.has(key)).map((key) => ({ key, header: key === "name" && secondary(key) ? "Resource" : label(key), getValue: ({ data }: (typeof rows)[number]) => data[key], render: ({ data }: (typeof rows)[number]) => <div><ResultValue field={key} value={data[key]} />{secondary(key) && <div className="text-xs text-muted"><ResultValue field={secondary(key)!} value={data[secondary(key)!]} /></div>}</div> })),
           ...(details.length > 0 ? [{ key: "identity", header: "Details", sortable: false, render: ({ data }: (typeof rows)[number]) => <ResultDetails title="Inspect" entries={details.map((key) => [key, data[key]])} /> }] : []),
           ...(rows.some(({ data }) => actions(data).length) ? [{ key: "open", header: "Actions", sortable: false, sticky: "end" as const, render: ({ data }: (typeof rows)[number]) => <ActionBar className="app-row-actions" label="Result actions" max={1} actions={actions(data).map(op=>({id:op.name,label:op.title,onSelect:()=>onOpen(op.name,rowParams(op,data))}))}/> }] : []),
-        ]} emptyText={filter ? "No results match this filter" : `No ${label(key).toLowerCase()} returned`} />}
+        ]} emptyText={filter.value ? "No results match this filter" : `No ${label(key).toLowerCase()} returned`} />}
       </section>;
     })}
   </div>;

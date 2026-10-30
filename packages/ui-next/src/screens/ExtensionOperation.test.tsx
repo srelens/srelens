@@ -141,8 +141,31 @@ it("keeps a row identity visible when it differs from the result metadata", asyn
  fireEvent.click(screen.getByRole("button", { name: "Scan image" }));
  expect(await screen.findByText("api")).toBeTruthy();
  expect(screen.getByRole("columnheader", { name: /Cluster Id/ })).toBeTruthy();
- fireEvent.change(screen.getByRole("textbox", { name: "Filter results" }), { target: { value: "web" } });
+ fireEvent.change(screen.getByRole("searchbox", { name: "Filter results" }), { target: { value: "web" } });
  expect(screen.getByRole("columnheader", { name: /Cluster Id/ })).toBeTruthy();
+});
+
+it("filters a result by what its rows show, never by a key or a hidden field", async () => {
+ host.answer = { items: [
+  { name: "web", uid: "hidden-marker" },
+  { name: "api", uid: "other" },
+ ] };
+ open();
+ fireEvent.change(await screen.findByLabelText("Image"), { target: { value: "alpine:3.9" } });
+ fireEvent.click(screen.getByRole("button", { name: "Scan image" }));
+ await screen.findByText("api");
+ expect(screen.getByRole("search", { name: "Filter results" })).toBeTruthy();
+ const filter = screen.getByRole("searchbox", { name: "Filter results" });
+ fireEvent.change(filter, { target: { value: "hidden-marker" } });
+ expect(screen.getByText("No results match this filter")).toBeTruthy();
+ fireEvent.change(filter, { target: { value: "name" } });
+ expect(screen.getByText("No results match this filter")).toBeTruthy();
+ fireEvent.click(screen.getByRole("button", { name: "Use regular expression" }));
+ fireEvent.change(filter, { target: { value: "^web$" } });
+ expect(screen.getByText("web")).toBeTruthy();
+ expect(screen.queryByText("api")).toBeNull();
+ fireEvent.keyDown(filter, { key: "Escape" });
+ expect(screen.getByText("api")).toBeTruthy();
 });
 
 it("keeps technical inventory identity behind details and leads with the image", async () => {
@@ -253,7 +276,7 @@ it("leads report rows with their subject, visible severity totals and readable s
 it("filters reports by source without combining retained scan severity counts", async () => {
  host.answer={items:[{reportId:"saved-a",subject:"payments",category:"namespace",source:"app",findings:2,summary:{HIGH:2}},{reportId:"operator-b",subject:"web",category:"vulnerability",source:"operator",findings:7,summary:{HIGH:7}}]};
  open();fireEvent.change(await screen.findByLabelText("Image"),{target:{value:"alpine:3.10"}});fireEvent.click(screen.getByRole("button",{name:"Scan image"}));
- fireEvent.click(await screen.findByRole("button",{name:/Operator reports/}));
+ fireEvent.click(await screen.findByRole("tab",{name:/Operator reports/}));
  expect(screen.getAllByRole("row")).toHaveLength(2);
  expect(screen.getByRole("table").textContent).toContain("web");
  expect(screen.getByRole("table").textContent).not.toContain("payments");

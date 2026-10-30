@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   deleteSkill,
   listSkills,
@@ -11,7 +11,7 @@ import {
   skillsDirPath,
   type SkillMeta,
 } from "@srelens/core";
-import { Badge, Button, ConfirmDialog, Dialog, EmptyState, Field, Switch, TextInput } from "@srelens/ui-kit";
+import { Badge, Button, ConfirmDialog, Dialog, EmptyState, Field, FilterBar, Switch, TextInput, useListFilter } from "@srelens/ui-kit";
 import { FailureAlert } from "../../lib/errorCopy";
 import {
   estimateTokens,
@@ -64,7 +64,7 @@ type Read = { state: "loading" } | { state: "failed"; error: unknown } | { state
 export function SkillsPane() {
   const [read, setRead] = useState<Read>({ state: "loading" });
   const [attempt, setAttempt] = useState(0);
-  const [query, setQuery] = useState("");
+  const filter = useListFilter();
   const [removing, setRemoving] = useState<Listed | null>(null);
   const [removeError, setRemoveError] = useState<unknown>(null);
   const [folder, setFolder] = useState<string | null>(null);
@@ -120,11 +120,7 @@ export function SkillsPane() {
   }
 
   const skills = read.state === "ready" ? read.skills : [];
-  const shown = useMemo(() => {
-    const needle = query.trim().toLowerCase();
-    if (!needle) return skills;
-    return skills.filter((s) => s.name.toLowerCase().includes(needle) || s.description.toLowerCase().includes(needle));
-  }, [skills, query]);
+  const shown = skills.filter((s) => [s.name, s.description].some(filter.matches));
 
   const enabled = skills.filter((s) => on.includes(s.name));
   const cost = enabled.reduce((sum, s) => sum + (s.tokens ?? 0), 0);
@@ -179,11 +175,8 @@ export function SkillsPane() {
         </p>
       </section>
 
-      <section className="flex flex-wrap items-center gap-2 border-b border-rule px-4 py-2" aria-label="Find a skill">
-        <span className="font-semibold">Installed ({skills.length})</span>
-        <span className="min-w-[12rem] flex-1">
-          <TextInput value={query} onValueChange={setQuery} placeholder="Search installed skills…" aria-label="Search installed skills" />
-        </span>
+      <section className="flex flex-wrap items-center gap-2 border-b border-rule px-4 py-2" aria-label="Installed skills">
+        <span className="mr-auto font-semibold">Installed ({skills.length})</span>
         <Button variant="secondary" disabled={read.state === "loading"} onClick={() => setAttempt((n) => n + 1)}>
           {read.state === "loading" ? "Refreshing…" : "Refresh"}
         </Button>
@@ -226,6 +219,8 @@ export function SkillsPane() {
         </div>
       )}
 
+      <FilterBar {...filter} label="Filter skills" placeholder="Filter skills…" />
+
       {read.state === "failed" ? (
         <div className="flex flex-col items-start gap-2 px-4 py-3">
           <FailureAlert tone="sev" title="Could not load skills" error={read.error} />
@@ -241,7 +236,7 @@ export function SkillsPane() {
         <EmptyState
           compact
           title={skills.length === 0 ? "No skills" : "No skill matches"}
-          hint={skills.length === 0 ? "Install one with Install skill…" : `Nothing installed matches “${query.trim()}”.`}
+          hint={skills.length === 0 ? "Install one with Install skill…" : `Nothing installed matches “${filter.value.trim()}”.`}
         />
       ) : (
         <ul aria-label="Installed skills">
