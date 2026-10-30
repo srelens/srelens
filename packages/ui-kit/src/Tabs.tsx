@@ -19,6 +19,12 @@ export interface TabsProps {
   /** Names the strip for assistive technology (e.g. "Resource views"). */
   label?: string;
   variant?: TabsVariant;
+  /**
+   * `manual` leaves the arrow keys moving focus only, and a tab takes effect
+   * when it is pressed: for tabs that navigate, where passing over one would
+   * leave the page the reader is still choosing from.
+   */
+  activation?: "automatic" | "manual";
 }
 
 /**
@@ -60,12 +66,12 @@ const SKIN: Record<TabsVariant, { list: string; tab: string }> = {
  * Selection follows focus, which is the expected pattern for tabs whose panels
  * are already rendered and cheap to switch. (#318)
  */
-export function Tabs({ tabs, active, onChange, label, variant = "strip" }: TabsProps) {
+export function Tabs({ tabs, active, onChange, label, variant = "strip", activation = "automatic" }: TabsProps) {
   const refs = useRef(new Map<string, HTMLButtonElement>());
   const skin = SKIN[variant];
 
   function focus(id: string) {
-    onChange(id);
+    if (activation === "automatic") onChange(id);
     // The element for the newly active tab may not have its tabIndex updated
     // until React re-renders, but focus() does not care about tabIndex.
     refs.current.get(id)?.focus();
