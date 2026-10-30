@@ -141,7 +141,7 @@ export function ExtensionBulkActions({ target, selection, onClear, available, ba
       inspectionAbort.current = controller;
       const details = new Map<string, ExtensionResourceDetail>();
       const outcomes = await runBulk(selection, async (resource) => {
-        const detail = await inspectExtensionResource({ ...target, ...resource });
+        const detail = await inspectExtensionResource({ ...target, namespace: resource.namespace, name: resource.name });
         details.set(bulkResourceKey(resource), detail);
         return { ok: true };
       }, BULK_CONCURRENCY, { signal: controller.signal });
