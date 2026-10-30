@@ -168,6 +168,22 @@ it("filters a result by what its rows show, never by a key or a hidden field", a
  expect(screen.getByText("api")).toBeTruthy();
 });
 
+it("filters a report by what its row shows, and never by its hidden metadata", async () => {
+ host.answer={items:[
+  {reportId:"hidden-marker",subject:"web",image:"alpine:3.10",category:"vulnerability",source:"app",freshness:"stale",findings:2,summary:{CRITICAL:2}},
+  {reportId:"other",subject:"api",category:"configaudit",namespace:"payments",source:"operator",freshness:"current",findings:0},
+ ]};
+ open();fireEvent.change(await screen.findByLabelText("Image"),{target:{value:"alpine:3.10"}});fireEvent.click(screen.getByRole("button",{name:"Scan image"}));
+ await screen.findByRole("table");
+ const filter=screen.getByRole("searchbox",{name:"Filter reports"});
+ const shown=(query:string)=>{fireEvent.change(filter,{target:{value:query}});return screen.queryByRole("table")?.textContent ?? "";};
+ for (const query of ["alpine","vulnerability report","critical","stale","app scan","cluster"]) expect(shown(query)).toContain("web");
+ for (const query of ["alpine","critical"]) expect(shown(query)).not.toContain("api");
+ expect(shown("No findings")).toContain("api");
+ expect(shown("payments")).toContain("api");
+ expect(shown("hidden-marker")).not.toContain("web");
+});
+
 it("keeps technical inventory identity behind details and leads with the image", async () => {
  host.answer = { clusterId: "srelens-context:config#demo", source: "workload templates", scope: "OS and supported language packages", items: [
   { container: "ollama", containerType: "regular", image: "ollama/ollama:latest", kind: "Deployment", name: "ollama-gpu", namespace: "ai-services", resourceVersion: "2885780069", uid: "workload-uid", scope: "OS and supported language packages" },

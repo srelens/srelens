@@ -24,8 +24,23 @@ const severityTone: Record<string, BadgeTone> = { CRITICAL: "sev", HIGH: "sev", 
 const severityName = (name: string) => name.replace(/Count$/i, "").toUpperCase();
 const severityOrder = (name: string) => { const index = Object.keys(severityTone).indexOf(severityName(name)); return index < 0 ? 100 : index; };
 type ResultRow = { index: number; data: Record<string, unknown> };
-/** The fields `ReportTable` draws. */
-const reportFields = ["subject", "findings", "namespace", "source", "reportedAt"];
+const severityLabel = (name: string) => label((severityTone[severityName(name)] ? severityName(name) : name).toLowerCase());
+const reportSource = (source: unknown) => source === "app" ? "App scan" : source === "operator" ? "Operator" : cell(source);
+const reportDate = (value: unknown) => { const date = typeof value === "string" ? new Date(value) : null; return date && Number.isFinite(date.getTime()) ? date : null; };
+const reportedAt = (date: Date) => date.toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+const reportSeverities = (data: Record<string, unknown>) => object(data.summary) ? Object.entries(data.summary).filter(([, count]) => typeof count === "number" && count > 0) : [];
+const reportFindings = (data: Record<string, unknown>) => data.findings === 0 ? "No findings" : "Severity unavailable";
+/** The words `ReportTable` draws for a report: a filter finds these, and no hidden metadata. */
+const reportText = (data: Record<string, unknown>) => {
+  const severities = reportSeverities(data).map(([name, count]) => `${severityLabel(name)} ${cell(count)}`);
+  const date = reportDate(data.reportedAt);
+  return [
+    cell(data.subject || "Unnamed report"), `${label(String(data.category))} report`, ...(data.image ? [cell(data.image)] : []),
+    cell(data.findings), ...(severities.length ? severities : [reportFindings(data)]),
+    cell(data.namespace || "Cluster"), reportSource(data.source), label(String(data.freshness ?? "unknown")),
+    date ? reportedAt(date) : "Not reported",
+  ];
+};
 const reportRow = (value: unknown): value is Record<string, unknown> => object(value) && typeof value.reportId === "string" && typeof value.category === "string" && typeof value.subject === "string";
 const rowActions = (operations: Operation[], current: string, data: Record<string, unknown>) => operations.filter((op) => op.name !== current && (op.inputs ?? []).some((input) => input.required && input.name !== "clusterId") && (op.inputs ?? []).every((input) => !input.required || input.name === "clusterId" || (scalar(data[input.name]) && data[input.name] !== ""))).sort((a,b)=>{const priority=(operation:Operation)=>(operation.inputs??[]).some(input=>input.required&&input.name==="reportId") ? 3 : (operation.inputs??[]).some(input=>input.required&&input.name==="image") ? 2 : 1;return priority(b)-priority(a);});
 const rowParams = (operation: Operation, data: Record<string, unknown>) => Object.fromEntries((operation.inputs ?? []).filter((input) => input.name !== "clusterId" && scalar(data[input.name])).map((input) => [input.name, data[input.name] as Scalar]));
@@ -46,10 +61,10 @@ function ReportActions({ data, operations, current, onOpen }: { data: Record<str
 function ReportTable({ rows, operations, current, onOpen }: { rows: ResultRow[]; operations: Operation[]; current: string; onOpen: (operation: string, params: Record<string, Scalar>) => void }) {
  return <Table<ResultRow> data={rows} getRowKey={({data,index})=>typeof data.reportId === "string" ? data.reportId : `row-${index}`} columns={[
   {key:"subject",header:"Report",getValue:({data})=>data.subject,render:({data})=><div className="app-report-subject"><strong tabIndex={0} title={cell(data.subject)}>{cell(data.subject || "Unnamed report")}</strong><span tabIndex={0} title={cell(data.image || data.category)}>{label(String(data.category))} report{data.image && data.image !== data.subject ? <> · <span>{cell(data.image)}</span></> : null}</span></div>},
-  {key:"findings",header:"Findings",getValue:({data})=>data.findings,render:({data})=><div className="app-report-findings"><strong>{cell(data.findings)}</strong>{object(data.summary) && Object.values(data.summary).some(count=>typeof count==="number"&&count>0) ? <ResultValue field="summary" value={Object.fromEntries(Object.entries(data.summary).filter(([,count])=>typeof count==="number"&&count>0))}/> : <span className="text-muted">{data.findings===0 ? "No findings" : "Severity unavailable"}</span>}</div>},
+  {key:"findings",header:"Findings",getValue:({data})=>data.findings,render:({data})=><div className="app-report-findings"><strong>{cell(data.findings)}</strong>{reportSeverities(data).length ? <ResultValue field="summary" value={Object.fromEntries(reportSeverities(data))}/> : <span className="text-muted">{reportFindings(data)}</span>}</div>},
   {key:"namespace",header:"Namespace",getValue:({data})=>data.namespace,render:({data})=><ResultValue field="namespace" value={data.namespace || "Cluster"}/>},
-  {key:"source",header:"Source",getValue:({data})=>data.source,render:({data})=><div className="app-report-source"><span>{data.source==="app" ? "App scan" : data.source==="operator" ? "Operator" : cell(data.source)}</span><ResultValue field="freshness" value={data.freshness ?? "unknown"}/></div>},
-  {key:"reportedAt",header:"Reported",getValue:({data})=>data.reportedAt,render:({data})=>{const date=typeof data.reportedAt==="string" ? new Date(data.reportedAt) : null;return date && Number.isFinite(date.getTime()) ? <time className="app-report-time" dateTime={String(data.reportedAt)} title={String(data.reportedAt)}><span>{date.toLocaleString(undefined,{month:"short",day:"numeric",hour:"2-digit",minute:"2-digit"})}</span><span>{relativeTime(date.getTime(),Date.now())}</span></time> : <span className="text-muted">Not reported</span>; }},
+  {key:"source",header:"Source",getValue:({data})=>data.source,render:({data})=><div className="app-report-source"><span>{reportSource(data.source)}</span><ResultValue field="freshness" value={data.freshness ?? "unknown"}/></div>},
+  {key:"reportedAt",header:"Reported",getValue:({data})=>data.reportedAt,render:({data})=>{const date=reportDate(data.reportedAt);return date ? <time className="app-report-time" dateTime={String(data.reportedAt)} title={String(data.reportedAt)}><span>{reportedAt(date)}</span><span>{relativeTime(date.getTime(),Date.now())}</span></time> : <span className="text-muted">Not reported</span>; }},
   {key:"actions",header:"Actions",sortable:false,sticky:"end",render:({data})=><ReportActions data={data} operations={operations} current={current} onOpen={onOpen}/>},
  ]} emptyText="No reports match these filters" emptyHint="Try another source or clear the search."/>;
 }
@@ -58,7 +73,7 @@ function ResultValue({ field, value, compact = false }: { field: string; value: 
   if (field === "image" && typeof value === "string") return <span tabIndex={0} className="app-image-reference" title={cell(value)}>{cell(value)}</span>;
   if (["name", "namespace", "container"].includes(field) && typeof value === "string") return <span tabIndex={0} className="app-resource-reference" title={cell(value)}>{cell(value)}</span>;
   if (compact && Array.isArray(value)) return <div className="flex flex-wrap gap-1">{value.map((item, index) => <Badge key={index}>{cell(item)}</Badge>)}</div>;
-  if (field === "summary" && object(value)) return <div className="flex flex-wrap gap-1">{Object.entries(value).sort(([a],[b])=>severityOrder(a)-severityOrder(b)).map(([name, count]) => <Badge key={name} tone={severityTone[severityName(name)] ?? "muted"}>{label((severityTone[severityName(name)] ? severityName(name) : name).toLowerCase())} {cell(count)}</Badge>)}</div>;
+  if (field === "summary" && object(value)) return <div className="flex flex-wrap gap-1">{Object.entries(value).sort(([a],[b])=>severityOrder(a)-severityOrder(b)).map(([name, count]) => <Badge key={name} tone={severityTone[severityName(name)] ?? "muted"}>{severityLabel(name)} {cell(count)}</Badge>)}</div>;
   if (["severity", "state", "freshness", "source"].includes(field) && typeof value === "string") {
     const tone = field === "severity" ? severityTone[value.toUpperCase()] ?? "muted" : ["unknown", "stale", "failed"].includes(value) ? "warn" : value === "served" || value === "completed" ? "ok" : "muted";
     return <Badge tone={tone}>{label(value)}</Badge>;
@@ -108,8 +123,8 @@ function OperationResult({ value, operations, current, onOpen }: { value: unknow
       const visible = columns.filter((key) => !technical(key) || key === "clusterId").sort((a, b) => (firstColumns.indexOf(a) < 0 ? 100 : firstColumns.indexOf(a)) - (firstColumns.indexOf(b) < 0 ? 100 : firstColumns.indexOf(b)));
       const details = columns.filter((key) => technical(key) && key !== "clusterId");
       // Matched against what the rows show: a query never finds a key or a hidden field.
-      const shown = reports && key === "items" ? reportFields : visible;
-      const rows = all.filter(({ data }) => (!reports || !source || data.source===source) && (!filter.value.trim() || shown.some((field) => filter.matches(cell(data[field])))));
+      const shown = (data: Record<string, unknown>) => reports && key === "items" ? reportText(data) : visible.map((field) => cell(data[field]));
+      const rows = all.filter(({ data }) => (!reports || !source || data.source===source) && (!filter.value.trim() || shown(data).some(filter.matches)));
       const secondary = (key: string): string | undefined => key === "name" && visible.includes("kind") ? "kind" : key === "container" && visible.includes("containerType") ? "containerType" : undefined;
       const combined = new Set(visible.map(secondary).filter(Boolean));
       const actions = (data: Record<string, unknown>) => rowActions(operations,current,data);
