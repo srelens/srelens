@@ -124,6 +124,11 @@ listed in [security.md](docs/extensions/security.md#not-yet-protected).
   ([specification.md](docs/extensions/specification.md#versioning)).
 - Flux and Argo CD actions moved from core into app manifests (srelens/srelens#674). Fields
   first added to 0.3 moved to a new 0.4 line (srelens/srelens#715).
+- App pages use the same filter row, count and namespace picker as built-in lists, and
+  several namespaces can be selected (srelens/srelens#1001). A page follows its tab's
+  namespaces, so a saved tab whose app route names a namespace opens on the tab's selection
+  instead. Over several namespaces a page keeps one cluster-wide watch: a credential that
+  cannot watch the whole cluster sees it as not live, and Refresh still reads each namespace.
 - App logos come from packages, not the bundle (srelens/srelens#741). Flux and Argo CD show
   their initials until their releases ship as packages.
 - The sidecar protocol crate's JSON Schema generation, `schema()` and the `JsonSchema`
