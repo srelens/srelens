@@ -2,16 +2,55 @@
 //! D1: Input Disorder & Boundary Escape (drag outside pane, implicit release on Moved)
 //! D2: Selection Normalization (reverse bottom-to-top vs top-to-bottom extraction)
 //! D3: Temporal & Stationary Hold Ramp / Streaming stability
-//! D4: Scale Extremes & Time Budget (1,000 lines, <50ms)
+//! D4: Scale Extremes & Work Budget (a whole 1,000-message history, counted in heap bytes)
 //! D5: State Transitions (tool chip toggle on Down vs dragging across chip lines)
 //! D6: Buffer Truthfulness & Trailing Newlines Trimmed
 //! D7: Perceptual Reality on 80x24 Terminal (padding columns intact)
+
+use std::alloc::{GlobalAlloc, Layout, System};
+use std::cell::Cell;
 
 use crossterm::event::{MouseButton, MouseEventKind};
 use srectl::app::{ActiveView, App};
 use srectl::views::assistant_view::{ChatMessage, DragScrollZone};
 
 use crate::common::{self, click, mouse, render_app};
+
+/// D4's ceiling on the heap bytes its gesture asks for, per selected line.
+/// Measured at 14,200 on 2026-10-30. Half as much again leaves room for a
+/// ratatui upgrade and still fails a frame that does its work twice. When it
+/// fails, find the change; do not raise the number.
+const MAX_HEAP_BYTES_PER_LINE: u64 = 21_000;
+
+thread_local! {
+    // Const-initialised with no destructor, so reading it never allocates.
+    static HEAP_BYTES: Cell<u64> = const { Cell::new(0) };
+}
+
+/// Counts the bytes each thread asks the heap for, which is how D4 measures
+/// work: the assistant view rebuilds every message on every frame, and every
+/// line it builds is on the heap. A stopwatch reads whatever else the machine
+/// is doing; this count does not. It is per thread, so tests running alongside
+/// do not add to it. `realloc` and `alloc_zeroed` default to `alloc`, so they
+/// are counted too.
+// ponytail: a nested loop that never allocates goes unseen; add a lines-visited
+// counter to the view if one ever lands on this path.
+struct CountingAllocator;
+
+// SAFETY: all memory comes from and returns to `System` unchanged.
+unsafe impl GlobalAlloc for CountingAllocator {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        HEAP_BYTES.with(|bytes| bytes.set(bytes.get() + layout.size() as u64));
+        unsafe { System.alloc(layout) }
+    }
+
+    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+        unsafe { System.dealloc(ptr, layout) }
+    }
+}
+
+#[global_allocator]
+static ALLOCATOR: CountingAllocator = CountingAllocator;
 
 fn toast(app: &App) -> String {
     app.toast
@@ -176,35 +215,65 @@ async fn journey_d3_stationary_hold_acceleration_ramp_and_streaming_stability() 
     assert_eq!(toast(&app), "✓ Copied selection to clipboard");
 }
 
-/// D4: Scale Extremes & Time Budget.
-/// 1,000-line history rendered and processed through 10 rendered drag + tick cycles in <200ms.
-#[tokio::test]
-async fn journey_d4_scale_extreme_and_time_budget_1000_lines() {
+/// One run of D4's gesture over `messages` messages: press at the bottom of the
+/// history, jump to its top, hold a drag above the viewport through 10 rendered
+/// drag + tick cycles, and release. Every frame highlights the whole history and
+/// the release extracts all of it, the worst case for a selection. Returns the
+/// heap bytes the gesture asked for and the number of lines it selected.
+fn heap_bytes_to_select_whole_history(messages: usize) -> (u64, u64) {
     let _settings = common::env::isolate_settings();
-    let (mut app, _rx) = common::app().await;
-    seed_chat_messages(&mut app, 1000);
-    render_app(&mut app, 80, 24);
-    let vp = app.assistant_state.last_viewport_rect.get();
-
-    let start = std::time::Instant::now();
-    let click_row = vp.y + vp.height.saturating_sub(2);
-    app.handle_mouse(click(vp.x + 5, click_row)).await;
-    for _ in 0..10 {
-        app.handle_mouse(mouse(MouseEventKind::Drag(MouseButton::Left), vp.x + 5, 0))
-            .await;
-        app.handle_tick();
+    // A runtime per run: dropping it drops the clipboard write the release
+    // spawned, which a second run on the same runtime could otherwise poll.
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("test runtime");
+    runtime.block_on(async {
+        let (mut app, _rx) = common::app().await;
+        seed_chat_messages(&mut app, messages);
         render_app(&mut app, 80, 24);
-    }
-    app.handle_mouse(mouse(MouseEventKind::Up(MouseButton::Left), vp.x + 5, 0))
-        .await;
-    let elapsed = start.elapsed();
+        let vp = app.assistant_state.last_viewport_rect.get();
+
+        let before = HEAP_BYTES.with(Cell::get);
+        let click_row = vp.y + vp.height.saturating_sub(2);
+        app.handle_mouse(click(vp.x + 5, click_row)).await;
+        app.assistant_state.scroll_to_top();
+        for _ in 0..10 {
+            app.handle_mouse(mouse(MouseEventKind::Drag(MouseButton::Left), vp.x + 5, 0))
+                .await;
+            app.handle_tick();
+            render_app(&mut app, 80, 24);
+        }
+        app.handle_mouse(mouse(MouseEventKind::Up(MouseButton::Left), vp.x + 5, 0))
+            .await;
+        let heap_bytes = HEAP_BYTES.with(Cell::get) - before;
+
+        assert_eq!(toast(&app), "✓ Copied selection to clipboard");
+        let selected = app.assistant_state.get_selected_text().unwrap();
+        assert!(selected.contains("Message line 000"));
+        assert!(selected.contains(&format!("pod-{}", messages - 1)));
+        (heap_bytes, selected.lines().count() as u64)
+    })
+}
+
+/// D4: Scale Extremes & Work Budget.
+/// Selecting a whole history costs work in proportion to its length, and no
+/// more per line than the ceiling allows. Both are held on counts: wall-clock
+/// time here failed on a contended CI runner with no code at fault (#1010).
+#[test]
+fn journey_d4_scale_extreme_and_work_budget_1000_messages() {
+    let (half, _) = heap_bytes_to_select_whole_history(500);
+    let (full, lines) = heap_bytes_to_select_whole_history(1000);
 
     assert!(
-        elapsed < std::time::Duration::from_millis(200),
-        "elapsed was {:?}",
-        elapsed
+        full <= 2 * half,
+        "doubling the history took the gesture from {half} to {full} heap bytes"
     );
-    assert_eq!(toast(&app), "✓ Copied selection to clipboard");
+    assert!(
+        full / lines <= MAX_HEAP_BYTES_PER_LINE,
+        "{} heap bytes per line over {lines} lines",
+        full / lines
+    );
 }
 
 /// D5: State Transitions & View Ownership.
