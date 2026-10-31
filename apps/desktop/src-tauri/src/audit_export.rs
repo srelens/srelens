@@ -57,17 +57,38 @@ mod tests {
     use tauri::Manager;
     use srelens_capability::audit::{JsonlAuditLog, NoopAudit};
 
-    #[test]
-    fn command_reads_the_managed_sink_and_propagates_refusals() {
+    #[tokio::test]
+    async fn command_reads_the_managed_sink_and_propagates_refusals() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("audit.jsonl");
         std::fs::write(&path, "{\"ts\":1,\"tool\":\"read\"}\n").unwrap();
         let app = tauri::test::mock_app();
         app.manage(AppAudit(Arc::new(JsonlAuditLog::new(path, 1024))));
-        assert_eq!(mcp_audit_retained(app.state()).unwrap().entries.len(), 1);
+        assert_eq!(mcp_audit_retained(app.state()).await.unwrap().entries.len(), 1);
         let app = tauri::test::mock_app();
         app.manage(AppAudit(Arc::new(NoopAudit)));
-        assert!(mcp_audit_retained(app.state()).is_err());
+        assert!(mcp_audit_retained(app.state()).await.is_err());
+    }
+
+    /// Even an async command can freeze its caller if it performs the read
+    /// directly. Observe where the sink runs, without sleeps or disk timing.
+    #[tokio::test]
+    async fn retained_read_runs_on_a_worker_not_the_callers_thread() {
+        struct ThreadAudit(Arc<std::sync::Mutex<Option<std::thread::ThreadId>>>);
+        impl srelens_capability::audit::AuditSink for ThreadAudit {
+            fn record(&self, _: srelens_capability::audit::AuditRecord) {}
+            fn retained(&self) -> std::io::Result<RetainedAudit> {
+                *self.0.lock().unwrap() = Some(std::thread::current().id());
+                Ok(RetainedAudit::default())
+            }
+        }
+        let caller = std::thread::current().id();
+        let seen = Arc::new(std::sync::Mutex::new(None));
+        let app = tauri::test::mock_app();
+        app.manage(AppAudit(Arc::new(ThreadAudit(seen.clone()))));
+        mcp_audit_retained(app.state()).await.unwrap();
+        let worker = seen.lock().unwrap().expect("the sink must have been read");
+        assert_ne!(worker, caller, "file reads and parsing must not run on the command caller");
     }
 
     #[test]
