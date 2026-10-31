@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { AuditExport } from "./AuditExport";
 import { auditTail, describeError, readPromptIssues, type PromptIssue, type AuditEntry } from "@srelens/core";
 import { Button, LoadingState, Panel, Section, Table, toneColor, type Column, type Tone } from "@srelens/ui-kit";
 import { FailureAlert, FailureState } from "../../lib/errorCopy";
@@ -40,10 +41,8 @@ import { formatBytes } from "../../lib/numbers";
  * there might have been before them would let a reader conclude the trail
  * they are looking at is the whole story. It says the number instead.
  *
- * **No `Export`** (#371). There is nothing here that serialises the trail to
- * a file, and on web there is no filesystem to write one to even if there
- * were — so rather than draw a button that cannot work, this says so in one
- * sentence.
+ * Export (#371) saves either this loaded window or every retained record.
+ * Arguments and error details require a separate opt-in.
  *
  * **An empty trail is not a failure.** A fresh install has made no capability
  * calls yet; `Table`'s own empty state (no `role="alert"`) says that plainly.
@@ -403,16 +402,7 @@ export function AuditPane() {
           />
         </Section>
       )}
-      {/* #371: still no serialisation and still no filesystem on web, so
-          still no button. What #555 changed is the seam under it — a record
-          now carries `source`, `app`, `cluster` and `resource` as fields of
-          its own rather than leaving a reader to infer them from `args`, so
-          an export has rows to write without this pane having to reconstruct
-          them. */}
-      <p className="mt-3 text-[0.75rem] leading-relaxed text-muted">
-        There is no way to export this trail — no serialisation exists for it, and srelens running on web has no
-        filesystem to save one to.
-      </p>
+      <AuditExport entries={entries} disabled={loading || error !== null} />
     </Panel>
   );
 }

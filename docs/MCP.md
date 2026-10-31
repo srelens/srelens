@@ -264,6 +264,37 @@ flag plus `_confirm: true` on that call.
 Review tool calls and use appropriate Kubernetes RBAC, especially with
 critical clusters.
 
+## Exporting the local audit trail
+
+In the desktop app's new design, open **Settings → AI Assistant → Audit**.
+Choose **All retained entries** (the default) or **Current view**, select
+JSONL or CSV, then **Export audit trail** to choose a destination in the
+native save dialog. Web mode has no audit pane or audit export endpoint.
+
+All retained entries reads the active log and its one retained rotation,
+oldest file first. Current view exports the loaded rows without refreshing
+them. Deleted rotations cannot be recovered. Malformed lines are skipped and
+their count is included in an all-retained export. A read or save failure is
+reported as a failure; cancelling the save dialog produces no success notice.
+
+JSONL starts with an `audit-export` metadata record (version, scope, count,
+first/last Unix timestamps, skipped-line count, and whether details are included),
+followed by one JSON object per entry. CSV repeats the scope metadata in each
+row; an empty export has one metadata-only row. CSV cells that could be
+interpreted as spreadsheet formulas are prefixed with an apostrophe; use JSONL
+when exact text matters.
+
+Both formats preserve the authorization decision and execution outcome as
+separate fields. Arguments and error details are omitted unless you select
+**Include arguments and error details**. Existing log redaction is preserved,
+but retained details may still contain sensitive information: review any file
+before sharing it. Export files are replaced atomically and created with
+owner-only permissions on Unix.
+
+This is a local diagnostic snapshot, not a tamper-evident or compliance-verifiable
+record. Reads coordinate with the desktop's audit writer, but a separately
+running headless process has its own lock and can rotate concurrently.
+
 ## The catalog and its safety classes
 
 [mcp-catalog.md](mcp-catalog.md) enumerates every tool, the built-in prompts,
