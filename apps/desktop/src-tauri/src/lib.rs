@@ -1,4 +1,5 @@
 mod app_log;
+mod audit_export;
 mod deep_link;
 mod appimage;
 mod assistant;
@@ -43,6 +44,7 @@ mod window_blur;
 mod window_streams;
 
 use app_log::{app_log_path, read_app_log, reveal_app_log};
+use audit_export::{mcp_audit_retained, save_audit_export};
 use bridge::{invoke_capability, AppAudit, AppRegistry};
 use bundle_cmd::{bundle_export, bundle_import, bundle_pick_file, bundle_preview};
 use exec::{exec_close, exec_input, exec_resize, start_pod_exec};
@@ -591,6 +593,8 @@ pub fn run() {
             vault_password::vault_recover_password,
             vault_password::vault_change_password,
             mcp_audit_tail,
+            mcp_audit_retained,
+            save_audit_export,
             mcp_prompt_issues,
             install_srelens_cli,
             srelens_cli_status,
