@@ -1,5 +1,7 @@
-import { describe, expect, it } from "vitest";
-import { serializeAuditExport } from "./auditExport";
+import { describe, expect, it, vi } from "vitest";
+const invoke = vi.hoisted(() => vi.fn());
+vi.mock("../transport/transport", () => ({ invokeCommand: invoke }));
+import { retainedAudit, saveAuditExport, serializeAuditExport } from "./auditExport";
 import type { AuditEntry } from "./mcpSecurity";
 
 const entry: AuditEntry = {
@@ -36,6 +38,23 @@ describe("audit export", () => {
   it("describes an empty trail without inventing timestamps", () => {
     const text = serializeAuditExport([], "all", "jsonl", 0, false);
     expect(JSON.parse(text)).toMatchObject({ count: 0, firstTs: null, lastTs: null });
+  });
+
+  it("uses the desktop command contract and preserves cancellation and failures", async () => {
+    invoke.mockResolvedValueOnce({ entries: [entry], skippedLines: 0 });
+    await expect(retainedAudit()).resolves.toMatchObject({ entries: [entry] });
+    expect(invoke).toHaveBeenLastCalledWith("mcp_audit_retained");
+    invoke.mockResolvedValueOnce(null);
+    await expect(saveAuditExport("contents", "csv")).resolves.toBeNull();
+    expect(invoke).toHaveBeenLastCalledWith("save_audit_export", { content: "contents", format: "csv" });
+    invoke.mockRejectedValueOnce(new Error("unreadable"));
+    await expect(retainedAudit()).rejects.toThrow("unreadable");
+  });
+
+  it("keeps an empty CSV export's metadata and computes bounds independently of row order", () => {
+    expect(serializeAuditExport([], "current", "csv", 0, false)).toContain('"current","0","","","0","false"');
+    const meta = JSON.parse(serializeAuditExport([{ ...entry, ts: 30 }, { ...entry, ts: 10 }], "current", "jsonl", 0, false).split("\n")[0]);
+    expect(meta).toMatchObject({ firstTs: 10, lastTs: 30 });
   });
 });
 

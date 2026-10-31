@@ -23,7 +23,7 @@ export function AuditExport({ entries, disabled }: { entries: AuditEntry[]; disa
       const snapshot = scope === "all" ? await retainedAudit() : { entries, skippedLines: 0 };
       const content = serializeAuditExport(snapshot.entries, scope, format, snapshot.skippedLines, details);
       const path = await saveAuditExport(content, format);
-      if (path !== null) setSaved(`Saved ${snapshot.entries.length} entries to ${path}.${snapshot.skippedLines ? ` Skipped ${snapshot.skippedLines} unreadable line(s).` : ""}`);
+      if (path !== null) setSaved(`Saved ${snapshot.entries.length} entries to ${path}.${snapshot.skippedLines ? ` Skipped ${snapshot.skippedLines} unreadable ${snapshot.skippedLines === 1 ? "line" : "lines"}.` : ""}`);
     } catch (e) {
       setError(e);
     } finally {
@@ -55,7 +55,7 @@ export function AuditExport({ entries, disabled }: { entries: AuditEntry[]; disa
         Exports are not tamper-evident. Review the file before sharing it.
       </p>
       {error !== null && <FailureAlert tone="sev" title="The audit trail could not be exported" error={error} />}
-      {saved !== null && <p role="status" className="mt-2 break-all">{saved}</p>}
+      {saved !== null && <p role="status" className="mt-2 overflow-x-auto whitespace-nowrap">{saved}</p>}
     </div>
   );
 }

@@ -65,4 +65,24 @@ describe("AuditExport", () => {
     render(<AuditExport entries={[]} disabled />);
     expect((screen.getByRole("button", { name: "Export audit trail" }) as HTMLButtonElement).disabled).toBe(true);
   });
+
+  it("shows save failures and allows another attempt", async () => {
+    core.saveAuditExport.mockRejectedValueOnce(new Error("disk full"));
+    render(<AuditExport entries={[row]} disabled={false} />);
+    await userEvent.click(screen.getByRole("button", { name: "Export audit trail" }));
+    expect((await screen.findByRole("alert")).textContent).toContain("disk full");
+    expect(screen.queryByRole("status")).toBeNull();
+  });
+
+  it("prevents a second export and changes to options while one is pending", async () => {
+    let finish!: (value: null) => void;
+    core.saveAuditExport.mockReturnValue(new Promise(resolve => { finish = resolve; }));
+    render(<AuditExport entries={[row]} disabled={false} />);
+    await userEvent.click(screen.getByRole("button", { name: "Export audit trail" }));
+    await userEvent.click(screen.getByRole("button", { name: "Exporting…" }));
+    expect(core.saveAuditExport).toHaveBeenCalledOnce();
+    expect((screen.getByRole("combobox", { name: "Export scope" }) as HTMLSelectElement).disabled).toBe(true);
+    finish(null);
+    await waitFor(() => expect((screen.getByRole("button", { name: "Export audit trail" }) as HTMLButtonElement).disabled).toBe(false));
+  });
 });
