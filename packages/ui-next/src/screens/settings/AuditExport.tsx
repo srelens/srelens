@@ -23,7 +23,7 @@ export function AuditExport({ entries, disabled }: { entries: AuditEntry[]; disa
       const snapshot = scope === "all" ? await retainedAudit() : { entries, skippedLines: 0 };
       const content = serializeAuditExport(snapshot.entries, scope, format, snapshot.skippedLines, details);
       const path = await saveAuditExport(content, format);
-      if (path !== null) setSaved(`Saved ${snapshot.entries.length} entries to ${path}.${snapshot.skippedLines ? ` Skipped ${snapshot.skippedLines} unreadable ${snapshot.skippedLines === 1 ? "line" : "lines"}.` : ""}`);
+      if (path !== null) setSaved(`Saved ${snapshot.entries.length} ${snapshot.entries.length === 1 ? "entry" : "entries"} to ${path}.${snapshot.skippedLines ? ` Skipped ${snapshot.skippedLines} unreadable ${snapshot.skippedLines === 1 ? "line" : "lines"}.` : ""}`);
     } catch (e) {
       setError(e);
     } finally {

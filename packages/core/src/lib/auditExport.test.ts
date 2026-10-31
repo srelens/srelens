@@ -57,4 +57,3 @@ describe("audit export", () => {
     expect(meta).toMatchObject({ firstTs: 10, lastTs: 30 });
   });
 });
-
