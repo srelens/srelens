@@ -8,8 +8,14 @@ use srelens_capability::audit::RetainedAudit;
 use crate::bridge::AppAudit;
 
 #[tauri::command]
-pub fn mcp_audit_retained(audit: State<'_, AppAudit>) -> Result<RetainedAudit, String> {
-    audit.0.retained().map_err(|e| format!("The retained audit trail could not be read: {e}"))
+pub async fn mcp_audit_retained(audit: State<'_, AppAudit>) -> Result<RetainedAudit, String> {
+    // Own the sink before crossing the await. Reading and parsing both logs
+    // can be slow, and must occupy neither the UI thread nor an async worker.
+    let audit = audit.0.clone();
+    tauri::async_runtime::spawn_blocking(move || audit.retained())
+        .await
+        .map_err(|e| format!("The retained audit worker could not finish: {e}"))?
+        .map_err(|e| format!("The retained audit trail could not be read: {e}"))
 }
 
 #[derive(Clone, Copy, serde::Deserialize)]
