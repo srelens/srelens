@@ -77,6 +77,10 @@ pub enum Modal {
     },
     /// The Assistant persona picker. Row 0 is the plain assistant; the
     /// personas follow in order.
+    /// Asks before installing Kubecost into `context` for the `:cost` view.
+    KubecostInstall {
+        context: String,
+    },
     PersonaPicker {
         selected_idx: usize,
         /// The row of the persona in use, to mark it.
@@ -1020,6 +1024,9 @@ pub fn render_modal(f: &mut Frame, area: Rect, modal: &Modal) {
                 *selected_idx,
                 active_filter.as_deref(),
             );
+        }
+        Modal::KubecostInstall { context } => {
+            render_kubecost_install(f, area, context);
         }
         Modal::PersonaPicker {
             selected_idx,
@@ -2116,4 +2123,71 @@ fn render_persona_picker(f: &mut Frame, area: Rect, selected_idx: usize, active:
         )));
     }
     f.render_widget(Paragraph::new(lines), inner);
+}
+
+/// The note shown before Kubecost is installed. Everything in it was measured
+/// on an install of this exact chart version, not recalled.
+fn render_kubecost_install(f: &mut Frame, area: Rect, context: &str) {
+    use srelens_kube::kubecost_install as kc;
+
+    let modal_area = centered_rect(86, 90, area);
+    f.render_widget(Clear, modal_area);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(Theme::border_type())
+        .border_style(Style::default().fg(Theme::accent()))
+        .title(Span::styled(
+            format!(" Install Kubecost into {context}? "),
+            Style::default().fg(Theme::accent()).add_modifier(Modifier::BOLD),
+        ));
+    let inner = block.inner(modal_area);
+    f.render_widget(block, modal_area);
+
+    let bold = Style::default().add_modifier(Modifier::BOLD);
+    let mut lines: Vec<Line> = Vec::new();
+    if kc::looks_like_production(context) {
+        lines.push(Line::from(Span::styled(
+            format!("PRODUCTION? '{context}' looks like a production cluster. Installing software there is a change to make deliberately."),
+            Theme::status_error(),
+        )));
+        lines.push(Line::raw(""));
+    }
+    lines.push(Line::from(
+        "No Kubecost or OpenCost was found, so :cost can only estimate. Kubecost reports real spend per namespace.",
+    ));
+    lines.push(Line::raw(""));
+    lines.push(Line::from(Span::styled("What this does", bold)));
+    for text in [
+        format!("Adds the Helm repository {} (downloads from the internet).", kc::REPO_URL),
+        format!(
+            "Installs chart {} {} as release '{}' in a new namespace '{}'.",
+            kc::CHART, kc::CHART_VERSION, kc::RELEASE, kc::NAMESPACE
+        ),
+        "Runs about 4 pods (the cost analyzer, its own Prometheus, Grafana and a forecaster), requesting about 0.4 CPU and 410 MiB.".to_string(),
+        "Creates 3 cluster-wide ClusterRoles (and bindings) so it can read cluster resources.".to_string(),
+        "Needs the helm command on your PATH, and takes a few minutes to start.".to_string(),
+    ] {
+        lines.push(Line::from(format!("  - {text}")));
+    }
+    lines.push(Line::raw(""));
+    lines.push(Line::from(Span::styled("After it installs", bold)));
+    lines.push(Line::from(
+        "  Figures start within minutes, but monthly numbers extrapolate from a short sample at first and settle over hours and days.",
+    ));
+    lines.push(Line::from(
+        "  Kubecost is a third-party product with its own license terms; check them before using it beyond a test cluster.",
+    ));
+    lines.push(Line::raw(""));
+    lines.push(Line::from(Span::styled("To remove it later", bold)));
+    for step in kc::removal_steps(context) {
+        lines.push(Line::from(Span::styled(format!("  {step}"), Theme::status_dim())));
+    }
+    lines.push(Line::raw(""));
+    lines.push(Line::from(vec![
+        Span::styled("[Enter/y]", Theme::key_hint_key()),
+        Span::raw(" Install    "),
+        Span::styled("[Esc/n]", Theme::key_hint_key()),
+        Span::raw(" Not now (press i in :cost to be asked again)"),
+    ]));
+    f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
 }

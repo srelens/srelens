@@ -228,6 +228,12 @@ pub struct App {
     /// The context for which the "pick a cluster" dialog was already offered
     /// after it timed out, so it opens once rather than on every retry.
     pub unreachable_offered_for: Option<String>,
+    /// Clusters `:cost` has already offered to install Kubecost into this
+    /// session, so a refresh or a declined offer is not repeated.
+    pub kubecost_offered: std::collections::HashSet<String>,
+    /// The install started from `:cost`. Never aborted on a cluster switch:
+    /// killing Helm half way leaves a half-installed release behind.
+    pub kubecost_install_task: Option<tokio::task::AbortHandle>,
     pub ai_settings: crate::ai_config::AiSettings,
     pub tui_config: crate::tui_config::TuiConfig,
     pub assistant_state: AssistantViewState,
@@ -632,6 +638,8 @@ impl App {
             connection_attempt_start: Instant::now(),
             cluster_unreachable: false,
             unreachable_offered_for: None,
+            kubecost_offered: Default::default(),
+            kubecost_install_task: None,
             ai_settings: crate::ai_config::AiSettings::load(),
             tui_config,
             assistant_state: AssistantViewState::for_context(&active_context),
@@ -776,6 +784,34 @@ impl App {
         if matches!(self.active_view, ActiveView::Cost(_)) {
             self.node_metrics_tick_counter = self.node_metrics_tick_counter.saturating_add(1);
             if self.node_metrics_tick_counter.is_multiple_of(300) {
+                self.reload_cost_view();
+            }
+        }
+
+        // While Kubecost has installed but not yet reported, ask again every
+        // ~10 seconds; give up quietly after 15 minutes.
+        let waiting_since = match &self.active_view {
+            ActiveView::Cost(c)
+                if c.install
+                    == cost_view::InstallState::Running(srelens_kube::kubecost_install::Step::WaitingForData) =>
+            {
+                Some(c.install_since)
+            }
+            _ => None,
+        };
+        if let Some(since) = waiting_since {
+            if since.is_some_and(|t| t.elapsed() > Duration::from_secs(15 * 60)) {
+                if let ActiveView::Cost(c) = &mut self.active_view {
+                    c.install = cost_view::InstallState::Idle;
+                    c.install_since = None;
+                }
+                self.set_toast(
+                    "Kubecost is installed but has no data yet; run :cost again in a while".to_string(),
+                    Theme::status_warn(),
+                );
+            } else if self.node_metrics_tick_counter.is_multiple_of(100)
+                && !self.node_metrics_tick_counter.is_multiple_of(300)
+            {
                 self.reload_cost_view();
             }
         }
@@ -4282,6 +4318,16 @@ impl App {
                             active_filter,
                         });
                     }
+                },
+                Modal::KubecostInstall { .. } => match key.code {
+                    KeyCode::Enter | KeyCode::Char('y') | KeyCode::Char('Y') => {
+                        self.modal = None;
+                        self.start_kubecost_install();
+                    }
+                    KeyCode::Esc | KeyCode::Char('n') | KeyCode::Char('N') => {
+                        self.modal = None;
+                    }
+                    _ => {}
                 },
                 Modal::PersonaPicker {
                     mut selected_idx,
@@ -7820,6 +7866,9 @@ impl App {
                 KeyCode::Char('r') => {
                     self.reload_cost_view();
                     self.set_toast("Refreshing cost & compute...".to_string(), Theme::status_dim());
+                }
+                KeyCode::Char('i') => {
+                    self.offer_kubecost_install_on_request();
                 }
                 _ => {}
             },
@@ -12001,13 +12050,177 @@ impl App {
         if self.active_context != context {
             return;
         }
+        let mut offer = false;
+        let mut ready = false;
         if let ActiveView::Cost(cost) = &mut self.active_view {
             if cost.context != context {
                 return;
             }
             match result {
-                Ok(data) => cost.set_data(data),
+                Ok(data) => {
+                    let nothing_found = data.provider.is_none() && data.provider_note.is_none();
+                    let has_provider = data.provider.is_some();
+                    cost.set_data(data);
+                    if has_provider
+                        && cost.install == cost_view::InstallState::Running(srelens_kube::kubecost_install::Step::WaitingForData)
+                    {
+                        cost.install = cost_view::InstallState::Idle;
+                        cost.install_since = None;
+                        ready = true;
+                    }
+                    // Offer only when nothing was found (not when something is
+                    // installed but quiet) and no install is in hand.
+                    offer = nothing_found && cost.install == cost_view::InstallState::Idle;
+                }
                 Err(err) => cost.set_error(err),
+            }
+        }
+        if ready {
+            self.set_toast("Kubecost is ready: showing real spend".to_string(), Theme::status_ok());
+        }
+        if offer && self.modal.is_none() && self.kubecost_offered.insert(context.to_string()) {
+            self.modal = Some(Modal::KubecostInstall { context: context.to_string() });
+        }
+    }
+
+    /// `i` on the cost dashboard: offer the install again, or say why not.
+    fn offer_kubecost_install_on_request(&mut self) {
+        let ctx = self.active_context.clone();
+        let (install, loaded, nothing_found, has_provider) = match &self.active_view {
+            ActiveView::Cost(c) => (
+                c.install.clone(),
+                c.data.is_some(),
+                c.data.as_ref().is_some_and(|d| d.provider.is_none() && d.provider_note.is_none()),
+                c.data.as_ref().is_some_and(|d| d.provider.is_some()),
+            ),
+            _ => return,
+        };
+        let message = if matches!(install, cost_view::InstallState::Running(_)) {
+            Some("Kubecost is already being installed")
+        } else if has_provider {
+            Some("Kubecost or OpenCost is already installed here and is being used")
+        } else if !loaded {
+            Some("Wait for the dashboard to load first")
+        } else if !nothing_found {
+            Some("A cost tool is already installed here; give it time to collect data")
+        } else {
+            None
+        };
+        match message {
+            Some(msg) => self.set_toast(msg.to_string(), Theme::status_warn()),
+            None => {
+                if self.modal.is_none() {
+                    self.kubecost_offered.insert(ctx.clone());
+                    self.modal = Some(Modal::KubecostInstall { context: ctx });
+                }
+            }
+        }
+    }
+
+    /// Start the Kubecost install the user just confirmed, for the cluster the
+    /// dashboard is showing. Runs in the background; the screen shows each step.
+    pub fn start_kubecost_install(&mut self) {
+        let ctx = self.active_context.clone();
+        match &self.active_view {
+            ActiveView::Cost(c) if c.context == ctx => {}
+            _ => return,
+        }
+        if self.kubecost_install_task.as_ref().is_some_and(|t| !t.is_finished()) {
+            self.set_toast("A Kubecost install is already running".to_string(), Theme::status_warn());
+            return;
+        }
+        if let ActiveView::Cost(c) = &mut self.active_view {
+            c.install = cost_view::InstallState::Running(srelens_kube::kubecost_install::Step::AddingRepo);
+            c.install_since = Some(Instant::now());
+        }
+        let cache = self.client_cache.clone();
+        let tx = self.event_tx.clone();
+        let handle = tokio::spawn(async move {
+            use srelens_kube::kubecost_install as kc;
+            let done = |result: Result<(), String>| {
+                let _ = tx.send(crate::event::AppEvent::CostInstallDone { context: ctx.clone(), result });
+            };
+            // Somebody's existing Kubecost is left alone. If we cannot tell, we do not install.
+            let existing = match srelens_kube::helm::fetch_helm_releases(&cache, &ctx, None).await {
+                Ok(releases) => releases.into_iter().find(|r| r.name == kc::RELEASE).map(|r| r.namespace),
+                Err(e) => {
+                    return done(Err(format!("Could not check whether Kubecost is already installed: {e}")));
+                }
+            };
+            if existing.is_none() {
+                if let Err(e) = srelens_kube::helm_cli::helm_binary() {
+                    return done(Err(format!(
+                        "{e}. Install Helm (srectl's :toolbox can install it into ~/.srelens/bin; add that folder to PATH), then press i to try again."
+                    )));
+                }
+            }
+            let run = |args: Vec<String>, scope: kc::Scope| {
+                let cache = cache.clone();
+                let ctx = ctx.clone();
+                async move {
+                    match scope {
+                        kc::Scope::Local => srelens_kube::helm_cli::run_helm_local(&args).await,
+                        kc::Scope::Cluster => srelens_kube::helm_cli::run_helm(&cache, &ctx, &args).await,
+                    }
+                }
+            };
+            let progress_tx = tx.clone();
+            let progress_ctx = ctx.clone();
+            let result = kc::install(&ctx, existing.as_deref(), run, move |step| {
+                let _ = progress_tx.send(crate::event::AppEvent::CostInstallStep {
+                    context: progress_ctx.clone(),
+                    step,
+                });
+            })
+            .await;
+            done(result.map_err(|e| e.to_string()));
+        });
+        self.kubecost_install_task = Some(handle.abort_handle());
+    }
+
+    pub fn handle_cost_install_step(&mut self, context: &str, step: srelens_kube::kubecost_install::Step) {
+        if self.active_context != context {
+            return;
+        }
+        if let ActiveView::Cost(cost) = &mut self.active_view {
+            if cost.context == context {
+                cost.install = cost_view::InstallState::Running(step);
+            }
+        }
+    }
+
+    pub fn handle_cost_install_done(&mut self, context: &str, result: Result<(), String>) {
+        let showing = self.active_context == context
+            && matches!(&self.active_view, ActiveView::Cost(c) if c.context == context);
+        if !showing {
+            // Finished on a cluster we are no longer looking at: say so, show nothing.
+            let (msg, style) = match result {
+                Ok(()) => (
+                    format!("Kubecost installed on {context}. Open :cost there to see it."),
+                    Theme::status_ok(),
+                ),
+                Err(e) => (format!("Kubecost install on {context} failed: {e}"), Theme::status_error()),
+            };
+            self.set_toast(msg, style);
+            return;
+        }
+        match result {
+            Ok(()) => {
+                if let ActiveView::Cost(cost) = &mut self.active_view {
+                    cost.install = cost_view::InstallState::Running(
+                        srelens_kube::kubecost_install::Step::WaitingForData,
+                    );
+                    cost.install_since = Some(Instant::now());
+                }
+                self.set_toast("Kubecost installed. Waiting for its first figures...".to_string(), Theme::status_ok());
+                self.reload_cost_view();
+            }
+            Err(e) => {
+                if let ActiveView::Cost(cost) = &mut self.active_view {
+                    cost.install = cost_view::InstallState::Failed(e.clone());
+                    cost.install_since = None;
+                }
+                self.set_toast(format!("Kubecost install failed: {e}"), Theme::status_error());
             }
         }
     }

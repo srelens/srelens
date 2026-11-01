@@ -310,6 +310,9 @@ async fn r_reloads_and_esc_goes_back() {
     let (mut app, _rx) = common::app().await;
     app.switch_view_to_kind(ResourceKind::Cost).await;
     app.handle_cost_result("test-cluster", Ok(data()));
+    // No cost tool in `data()`, so the install offer is open; decline it.
+    common::press(&mut app, common::key(KeyCode::Esc)).await;
+    assert!(app.modal.is_none());
 
     common::press(&mut app, common::ch('r')).await;
     match &app.active_view {

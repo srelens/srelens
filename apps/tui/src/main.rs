@@ -537,6 +537,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 AppEvent::CostResult { context, result } => {
                     app.handle_cost_result(&context, result);
                 }
+                AppEvent::CostInstallStep { context, step } => {
+                    app.handle_cost_install_step(&context, step);
+                }
+                AppEvent::CostInstallDone { context, result } => {
+                    app.handle_cost_install_done(&context, result);
+                }
                 AppEvent::GpuInfoResult { context, result } => {
                     app.handle_gpu_info_result(&context, result);
                 }
