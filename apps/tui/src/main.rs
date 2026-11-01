@@ -81,6 +81,7 @@ impl Drop for TerminalCleanupGuard {
 
 mod agent;
 mod ai_config;
+mod ai_personas;
 mod ai_skills;
 mod app;
 mod cli;
@@ -89,6 +90,7 @@ mod consent;
 mod deep_link;
 mod event;
 mod mcp_server;
+mod notifications;
 mod model_list;
 mod mux;
 mod sink;
@@ -530,6 +532,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 AppEvent::TopologyResult { context, namespaces, result } => {
                     app.handle_topology_result(&context, namespaces, result);
+                }
+                AppEvent::CostResult { context, result } => {
+                    app.handle_cost_result(&context, result);
                 }
                 AppEvent::GpuInfoResult { context, result } => {
                     app.handle_gpu_info_result(&context, result);
