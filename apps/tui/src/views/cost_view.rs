@@ -10,8 +10,18 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
 use ratatui::Frame;
 use srelens_kube::cost::{ClusterCompute, HOURS_PER_MONTH};
+use srelens_kube::kubecost_install::Step;
 
 use crate::theme::Theme;
+
+/// Where an install of Kubecost started from this screen stands.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum InstallState {
+    Idle,
+    /// Includes `Step::WaitingForData`: installed, not yet reporting figures.
+    Running(Step),
+    Failed(String),
+}
 
 #[derive(Debug, Clone)]
 pub struct CostViewState {
@@ -21,11 +31,22 @@ pub struct CostViewState {
     pub error: Option<String>,
     pub is_loading: bool,
     pub scroll: u16,
+    pub install: InstallState,
+    /// When the current install, or its wait for data, began.
+    pub install_since: Option<std::time::Instant>,
 }
 
 impl CostViewState {
     pub fn new(context: &str) -> Self {
-        Self { context: context.to_string(), data: None, error: None, is_loading: true, scroll: 0 }
+        Self {
+            context: context.to_string(),
+            data: None,
+            error: None,
+            is_loading: true,
+            scroll: 0,
+            install: InstallState::Idle,
+            install_since: None,
+        }
     }
 
     pub fn set_data(&mut self, data: ClusterCompute) {
@@ -155,7 +176,7 @@ fn resource_line(
     Line::from(spans)
 }
 
-fn lines_for(data: &ClusterCompute, width: usize) -> Vec<Line<'static>> {
+fn lines_for(data: &ClusterCompute, width: usize, can_offer_install: bool) -> Vec<Line<'static>> {
     let mut out: Vec<Line<'static>> = Vec::new();
 
     if data.nodes.is_empty() {
@@ -313,8 +334,14 @@ fn lines_for(data: &ClusterCompute, width: usize) -> Vec<Line<'static>> {
         )),
         (None, None) => notes.push((
             "COST SOURCE ",
-            "No Kubecost or OpenCost was found in this cluster, so the cost shown is the estimate. Install one for real spend."
-                .to_string(),
+            if can_offer_install {
+                "No Kubecost or OpenCost was found in this cluster, so the cost shown is the estimate. \
+                 Press i to install Kubecost for real spend (it asks first)."
+                    .to_string()
+            } else {
+                "No Kubecost or OpenCost was found in this cluster, so the cost shown is the estimate."
+                    .to_string()
+            },
         )),
     }
     if let Some(p) = data.provider.as_ref().filter(|p| p.is_short_sample()) {
@@ -349,6 +376,39 @@ fn lines_for(data: &ClusterCompute, width: usize) -> Vec<Line<'static>> {
             } else {
                 out.push(Line::from(dim(format!("{}{piece}", " ".repeat(label.len())))));
             }
+        }
+    }
+    out
+}
+
+/// The install's status, above everything else while there is one.
+fn install_banner(install: &InstallState, width: usize) -> Vec<Line<'static>> {
+    let mut out = Vec::new();
+    match install {
+        InstallState::Idle => {}
+        InstallState::Running(step) => {
+            out.push(Line::from(vec![
+                Span::styled("INSTALLING KUBECOST ", Theme::status_warn()),
+                Span::styled(step.label().to_string(), Style::default().add_modifier(Modifier::BOLD)),
+            ]));
+            out.push(Line::from(dim(
+                "You can keep using srectl. The estimate below stays until Kubecost has figures.",
+            )));
+            out.push(Line::raw(""));
+        }
+        InstallState::Failed(why) => {
+            for (i, piece) in wrap_text(&format!("Kubecost was not installed: {why}"), width.saturating_sub(21).max(20))
+                .into_iter()
+                .enumerate()
+            {
+                if i == 0 {
+                    out.push(Line::from(vec![Span::styled("INSTALL FAILED ", Theme::status_error()), dim(piece)]));
+                } else {
+                    out.push(Line::from(dim(format!("{}{piece}", " ".repeat(15)))));
+                }
+            }
+            out.push(Line::from(dim("Press i to try again. The estimate is shown below.")));
+            out.push(Line::raw(""));
         }
     }
     out
@@ -397,15 +457,17 @@ pub fn render(f: &mut Frame, area: Rect, state: &CostViewState) {
     let inner = block.inner(area);
     f.render_widget(block, area);
 
-    let lines: Vec<Line<'static>> = match (&state.data, &state.error) {
+    let can_offer_install = matches!(state.install, InstallState::Idle | InstallState::Failed(_));
+    let mut lines: Vec<Line<'static>> = install_banner(&state.install, inner.width as usize);
+    lines.extend(match (&state.data, &state.error) {
         (_, Some(err)) => vec![
             Line::from(Span::styled(format!("Could not load cost and compute: {err}"), Theme::status_error())),
             Line::raw(""),
             Line::from(dim("Press r to retry.")),
         ],
-        (Some(data), None) => lines_for(data, inner.width as usize),
+        (Some(data), None) => lines_for(data, inner.width as usize, can_offer_install),
         (None, None) => vec![Line::from(dim(format!("Loading compute for {}...", state.context)))],
-    };
+    });
 
     // Keep the scroll inside the content so a held `G` or `j` cannot leave a
     // blank screen.
