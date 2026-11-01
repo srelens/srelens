@@ -74,6 +74,10 @@ pub const WEB_DENIED_CAPABILITIES: &[&str] = &[
     // Uses the process-wide GitHub token (GITHUB_TOKEN / GH_TOKEN) on the host;
     // unsafe on a multi-user shared web container.
     "github.rolloutCause",
+    // Creates a Job that shares the node's PID namespace and mounts host
+    // directories, in the cluster the caller names. A person at the desktop
+    // confirms that; a web user on a shared container should not be offered it.
+    "k8s.runKubeBench",
 ];
 
 /// Installed apps' operations, `plugin/<id>/<operation>` (#574), are MCP tools, and

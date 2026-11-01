@@ -262,6 +262,12 @@ impl Harness {
 /// A capability registered later with no case here fails the coverage
 /// assertion at the end of `full_capability_suite`.
 const EXCLUDED: &[(&str, &str)] = &[
+    (
+        "k8s.runKubeBench",
+        "pulls the aquasec/kube-bench image from a registry and runs a hostPID Job to completion, \
+         which is too slow and network-bound for this suite; the Job spec, report parsing and Job \
+         state are unit tested in srelens-kube, and the run was checked by hand on a kind cluster",
+    ),
     ("k8s.runJob", "broker-only declaration stub; scoped Job authorization, results and cleanup are exercised in registry lifecycle tests"),
     (
         "k8s.nodeJournalLogs",

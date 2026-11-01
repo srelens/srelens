@@ -153,6 +153,7 @@ pub mod helm;
 pub mod helm_cli;
 pub mod ingresses;
 pub mod jobs;
+pub mod kubebench;
 pub mod kubeconfig;
 pub mod limitranges;
 pub mod lineage;
