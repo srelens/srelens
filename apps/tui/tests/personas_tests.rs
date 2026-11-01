@@ -276,8 +276,10 @@ async fn the_first_row_of_the_picker_clears_the_persona_and_esc_cancels() {
 fn the_assistant_title_names_the_active_persona() {
     use srectl::views::assistant_view::{render_assistant_view, AssistantViewState};
     let state = AssistantViewState::for_context("test-cluster");
-    let mut settings = AiSettings::default();
-    settings.persona = Some("security".into());
+    let mut settings = AiSettings {
+        persona: Some("security".into()),
+        ..AiSettings::default()
+    };
     let screen = common::render_text(180, 12, |f| {
         render_assistant_view(f, f.area(), &state, &settings)
     });
