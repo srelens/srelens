@@ -94,6 +94,31 @@ pub async fn type_str(app: &mut App, s: &str) {
     }
 }
 
+/// A kubeconfig context named `name`, for tests that need more than one.
+pub fn context_named(name: &str) -> srelens_kube::contexts::ContextDto {
+    srelens_kube::contexts::ContextDto {
+        name: name.to_string(),
+        stable_id: format!("file/{name}"),
+        key: format!("file/{name}"),
+        pinned_id: None,
+        cluster: format!("c-{name}"),
+        server: format!("https://{name}.example.invalid"),
+        namespace: String::new(),
+        is_current: false,
+        is_local: false,
+        provider: None,
+        source_file: "cluster-config.yaml".to_string(),
+        auth_kind: "token".to_string(),
+    }
+}
+
+/// Type `:command` into the command bar and press Enter, as a person does.
+pub async fn run_command(app: &mut App, command: &str) {
+    app.handle_key_event(ch(':')).await;
+    type_str(app, command).await;
+    app.handle_key_event(key(KeyCode::Enter)).await;
+}
+
 /// A left-button mouse event of the given kind at a cell.
 pub fn mouse(kind: MouseEventKind, column: u16, row: u16) -> MouseEvent {
     MouseEvent {
