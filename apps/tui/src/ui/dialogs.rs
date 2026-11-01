@@ -75,6 +75,13 @@ pub enum Modal {
         selected_idx: usize,
         active_filter: Option<String>,
     },
+    /// The Assistant persona picker. Row 0 is the plain assistant; the
+    /// personas follow in order.
+    PersonaPicker {
+        selected_idx: usize,
+        /// The row of the persona in use, to mark it.
+        active_idx: usize,
+    },
     ThemePicker {
         selected_idx: usize,
         initial_theme_idx: usize,
@@ -1013,6 +1020,12 @@ pub fn render_modal(f: &mut Frame, area: Rect, modal: &Modal) {
                 *selected_idx,
                 active_filter.as_deref(),
             );
+        }
+        Modal::PersonaPicker {
+            selected_idx,
+            active_idx,
+        } => {
+            render_persona_picker(f, area, *selected_idx, *active_idx);
         }
         Modal::ThemePicker {
             selected_idx,
@@ -2051,4 +2064,56 @@ fn argument_lines(
         }
     }
     lines
+}
+
+fn render_persona_picker(f: &mut Frame, area: Rect, selected_idx: usize, active: usize) {
+    let modal_area = centered_rect(70, 60, area);
+    f.render_widget(Clear, modal_area);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(Theme::border_type())
+        .border_style(Style::default().fg(Theme::accent()))
+        .title(Span::styled(
+            " Assistant Persona (↑/↓ or j/k Move • Enter Select • Esc Cancel) ",
+            Style::default().fg(Theme::accent()).add_modifier(Modifier::BOLD),
+        ));
+    let inner = block.inner(modal_area);
+    f.render_widget(block, modal_area);
+
+    let mut lines: Vec<Line> = Vec::new();
+    let rows = crate::ai_personas::picker_rows();
+    for (i, (name, tagline, read_only)) in rows.iter().enumerate() {
+        let sel = i == selected_idx;
+        let cursor = if sel { "▶ " } else { "  " };
+        let mut spans = vec![
+            Span::styled(
+                cursor,
+                if sel {
+                    Style::default().fg(Theme::cyan()).add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(Theme::dim())
+                },
+            ),
+            Span::styled(
+                name.to_string(),
+                if sel {
+                    Style::default().add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default()
+                },
+            ),
+        ];
+        if i == active {
+            spans.push(Span::styled(" (active)", Theme::status_ok()));
+        }
+        if *read_only {
+            spans.push(Span::styled(" [read-only]", Theme::status_warn()));
+        }
+        lines.push(Line::from(spans));
+        lines.push(Line::from(Span::styled(
+            format!("    {tagline}"),
+            Theme::status_dim(),
+        )));
+    }
+    f.render_widget(Paragraph::new(lines), inner);
 }

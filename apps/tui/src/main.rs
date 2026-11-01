@@ -81,6 +81,7 @@ impl Drop for TerminalCleanupGuard {
 
 mod agent;
 mod ai_config;
+mod ai_personas;
 mod ai_skills;
 mod app;
 mod cli;
@@ -89,6 +90,7 @@ mod consent;
 mod deep_link;
 mod event;
 mod mcp_server;
+mod notifications;
 mod model_list;
 mod sink;
 mod theme;
@@ -493,7 +495,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                         Err(err) => {
                             if title == "cluster_info_updated" || title == "cluster_info_failed" {
-                                app.handle_cluster_info_failure(&err);
+                                // The failing task tags its context before a unit separator.
+                                match err.split_once('\u{1f}') {
+                                    Some((ctx, msg)) => app.handle_cluster_info_failure_for(ctx, msg),
+                                    None => app.handle_cluster_info_failure(&err),
+                                }
                             } else if title == "crds_updated" || title == "crds_failed" {
                                 app.handle_crds_failed(&err);
                             } else if title.starts_with("crd_instances:") || title.starts_with("crd_instances_failed:") {
@@ -527,6 +533,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 AppEvent::TopologyResult { context, namespaces, result } => {
                     app.handle_topology_result(&context, namespaces, result);
+                }
+                AppEvent::CostResult { context, result } => {
+                    app.handle_cost_result(&context, result);
                 }
                 AppEvent::GpuInfoResult { context, result } => {
                     app.handle_gpu_info_result(&context, result);

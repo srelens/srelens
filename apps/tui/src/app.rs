@@ -53,9 +53,17 @@ pub enum ActiveView {
     NodeInspector(node_inspector_view::NodeInspectorState),
     Topology(topology_view::TopologyViewState),
     GpuInfo(gpu_view::GpuViewState),
+    Cost(cost_view::CostViewState),
     Bgp(bgp_view::BgpViewState),
     Top(top_view::TopViewState),
     Changed(changed_view::ChangedViewState),
+}
+
+/// CRDs as discovered for one named context.
+#[derive(serde::Deserialize, serde::Serialize)]
+struct CrdsForContext {
+    context: String,
+    crds: Vec<CrdMeta>,
 }
 
 /// The Argo Applications last seen for one context, shared by `:argo` and
@@ -187,6 +195,10 @@ pub struct App {
     pub filter_buffer: String,
     pub modal: Option<Modal>,
     pub show_help: bool,
+    /// The notification history overlay (`:notifications`).
+    pub show_notifications: bool,
+    /// What the one-slot toast loses, plus alerts raised by the pod watcher.
+    pub notifications: crate::notifications::NotificationCenter,
     pub toast: Option<(String, Instant, Style)>,
     pub client_cache: Arc<ClientCache>,
     pub watch_manager: Arc<WatchManager>,
@@ -213,6 +225,9 @@ pub struct App {
     pub is_connected: bool,
     pub connection_attempt_start: std::time::Instant,
     pub cluster_unreachable: bool,
+    /// The context for which the "pick a cluster" dialog was already offered
+    /// after it timed out, so it opens once rather than on every retry.
+    pub unreachable_offered_for: Option<String>,
     pub ai_settings: crate::ai_config::AiSettings,
     pub tui_config: crate::tui_config::TuiConfig,
     pub assistant_state: AssistantViewState,
@@ -589,6 +604,8 @@ impl App {
             filter_buffer: String::new(),
             modal: None,
             show_help: false,
+            show_notifications: false,
+            notifications: Default::default(),
             toast: None,
             client_cache,
             watch_manager,
@@ -614,6 +631,7 @@ impl App {
             is_connected: false,
             connection_attempt_start: Instant::now(),
             cluster_unreachable: false,
+            unreachable_offered_for: None,
             ai_settings: crate::ai_config::AiSettings::load(),
             tui_config,
             assistant_state: AssistantViewState::for_context(&active_context),
@@ -676,6 +694,11 @@ impl App {
     }
 
     pub fn set_toast(&mut self, msg: String, style: Style) {
+        self.notifications.push(
+            crate::notifications::Level::from_style(style),
+            &self.active_context,
+            msg.clone(),
+        );
         self.toast = Some((msg, Instant::now(), style));
     }
 
@@ -729,6 +752,7 @@ impl App {
                     table.is_loading = false;
                 }
             }
+            self.offer_context_picker_when_unreachable();
         }
 
         // Periodically refresh pod metrics (CPU/MEM) every ~4 seconds (40 ticks at 100ms)
@@ -745,6 +769,14 @@ impl App {
             self.pod_metrics_tick_counter = self.pod_metrics_tick_counter.saturating_add(1);
             if self.pod_metrics_tick_counter % 40 == 1 {
                 self.refresh_pod_metrics();
+            }
+        }
+
+        // The cost dashboard refreshes itself about every 30 seconds.
+        if matches!(self.active_view, ActiveView::Cost(_)) {
+            self.node_metrics_tick_counter = self.node_metrics_tick_counter.saturating_add(1);
+            if self.node_metrics_tick_counter % 300 == 0 {
+                self.reload_cost_view();
             }
         }
 
@@ -1317,20 +1349,20 @@ impl App {
 
                         let _ = event_tx.send(AppEvent::ActionResult {
                             title: "cluster_info_updated".to_string(),
-                            result: Ok(format!("{}|{}|{}", version, node_count, pod_count)),
+                            result: Ok(format!("{}|{}|{}|{}", version, node_count, pod_count, context)),
                         });
                     }
                     Err(err) => {
                         let _ = event_tx.send(AppEvent::ActionResult {
                             title: "cluster_info_failed".to_string(),
-                            result: Err(err.to_string()),
+                            result: Err(format!("{context}\u{1f}{err}")),
                         });
                     }
                 },
                 Err(err) => {
                     let _ = event_tx.send(AppEvent::ActionResult {
                         title: "cluster_info_failed".to_string(),
-                        result: Err(err.to_string()),
+                        result: Err(format!("{context}\u{1f}{err}")),
                     });
                 }
             }
@@ -1445,7 +1477,10 @@ impl App {
             match tokio::time::timeout(std::time::Duration::from_secs(15), fetch).await {
                 Ok(Ok(crds)) => {
                     crate::commands::save_cached_crds(&ctx, &crds);
-                    if let Ok(json_str) = serde_json::to_string(&crds) {
+                    if let Ok(json_str) = serde_json::to_string(&CrdsForContext {
+                        context: ctx.clone(),
+                        crds,
+                    }) {
                         let _ = event_tx.send(AppEvent::ActionResult {
                             title: "crds_updated".to_string(),
                             result: Ok(json_str),
@@ -1501,7 +1536,14 @@ impl App {
     }
 
     pub fn handle_crds_update(&mut self, json_str: &str) {
-        if let Ok(crds) = serde_json::from_str::<Vec<CrdMeta>>(json_str) {
+        // Either a bare list (no context known) or `{context, crds}`. A list
+        // discovered for another context is dropped, not saved under this one.
+        let crds = match serde_json::from_str::<CrdsForContext>(json_str) {
+            Ok(tagged) if tagged.context != self.active_context => return,
+            Ok(tagged) => Some(tagged.crds),
+            Err(_) => serde_json::from_str::<Vec<CrdMeta>>(json_str).ok(),
+        };
+        if let Some(crds) = crds {
             crate::commands::save_cached_crds(&self.active_context, &crds);
             self.crds = crds;
 
@@ -1796,8 +1838,14 @@ impl App {
     }
 
     pub fn handle_cluster_info_update(&mut self, payload: &str) {
-        let parts: Vec<&str> = payload.split('|').collect();
-        if parts.len() == 3 {
+        // `version|nodes|pods[|context]`. The context is last so a context
+        // name containing `|` survives `splitn`. A payload that names another
+        // context belongs to a cluster we already switched away from.
+        let parts: Vec<&str> = payload.splitn(4, '|').collect();
+        if parts.len() == 4 && parts[3] != self.active_context {
+            return;
+        }
+        if parts.len() >= 3 {
             self.cluster_version = parts[0].to_string();
             self.node_count = parts[1].parse().unwrap_or(0);
             self.pod_count = parts[2].parse().unwrap_or(0);
@@ -1822,6 +1870,15 @@ impl App {
         }
     }
 
+    /// A failure that names its context only counts when that context is still
+    /// the active one; a late error from the cluster we left must not mark the
+    /// new one unreachable.
+    pub fn handle_cluster_info_failure_for(&mut self, context: &str, err: &str) {
+        if context == self.active_context {
+            self.handle_cluster_info_failure(err);
+        }
+    }
+
     pub fn handle_cluster_info_failure(&mut self, _err: &str) {
         self.is_connected = false;
         if self.connection_attempt_start.elapsed() >= Duration::from_secs(8) {
@@ -1831,6 +1888,7 @@ impl App {
                     table.is_loading = false;
                 }
             }
+            self.offer_context_picker_when_unreachable();
         }
     }
 
@@ -2129,6 +2187,7 @@ impl App {
         if !force && self.active_context == new_context {
             return;
         }
+        let context_changed = self.active_context != new_context;
 
         self.stop_active_log_stream();
         self.logs_manager.shutdown_all();
@@ -2170,6 +2229,10 @@ impl App {
             } else {
                 self.active_namespace = String::new();
             }
+        }
+
+        if context_changed {
+            self.leave_old_cluster_screens();
         }
 
         self.cluster_version = "Connecting...".to_string();
@@ -2214,6 +2277,11 @@ impl App {
             changed.is_loading = true;
             self.refresh_changed_triage();
         }
+        if matches!(self.active_view, ActiveView::Cost(_)) {
+            // The dashboard follows the cluster: drop the old numbers, load these.
+            self.active_view = ActiveView::Cost(cost_view::CostViewState::new(&self.active_context));
+            self.reload_cost_view();
+        }
         self.set_toast(
             format!("Switched to context '{}'", self.active_context),
             Theme::status_ok(),
@@ -2226,6 +2294,54 @@ impl App {
         self.namespace_discovery_error = None;
         self.refresh_namespaces();
         self.restart_active_watch().await;
+    }
+
+    /// The active context timed out and there is somewhere else to go: open
+    /// the context picker once, instead of leaving the user on "Connecting..."
+    /// to discover `:ctx` themselves.
+    fn offer_context_picker_when_unreachable(&mut self) {
+        if self.contexts.len() < 2
+            || self.modal.is_some()
+            || self.unreachable_offered_for.as_deref() == Some(self.active_context.as_str())
+        {
+            return;
+        }
+        self.unreachable_offered_for = Some(self.active_context.clone());
+        self.open_context_picker();
+        self.set_toast(
+            format!("'{}' is unreachable - pick a cluster", self.active_context),
+            Theme::status_warn(),
+        );
+    }
+
+    /// After a real context change, nothing on screen may still describe the
+    /// cluster we left: detail views (manifest, logs, topology, ...) go back to
+    /// a fresh pods table, and the history, modals and filter that pointed at
+    /// the old cluster's objects are dropped. Views that reload themselves
+    /// (tables, Helm, Argo, overview, changed) and the cluster-independent
+    /// screens (assistant, settings, port forwards) are kept.
+    fn leave_old_cluster_screens(&mut self) {
+        let keeps_screen = matches!(
+            self.active_view,
+            ActiveView::Table(_)
+                | ActiveView::Helm(_)
+                | ActiveView::Argo(_)
+                | ActiveView::Overview(_)
+                | ActiveView::Changed(_)
+                | ActiveView::Cost(_)
+                | ActiveView::Assistant
+                | ActiveView::Settings(_)
+                | ActiveView::TuiConfig(_)
+                | ActiveView::PortForwards(_)
+        );
+        if !keeps_screen {
+            self.active_view = ActiveView::Table(crate::views::ResourceTableState::new(
+                ResourceKind::Pods,
+            ));
+        }
+        self.nav_stack.clear();
+        self.filter_buffer.clear();
+        self.modal = None;
     }
 
     pub fn set_namespace_raw(&mut self, new_namespace: String) {
@@ -2652,6 +2768,7 @@ impl App {
             if !matches!(self.active_view, ActiveView::Assistant)
                 || self.modal.is_some()
                 || self.show_help
+                || self.show_notifications
             {
                 self.is_running = false;
                 return;
@@ -2663,6 +2780,16 @@ impl App {
             if created.elapsed() > Duration::from_secs(4) {
                 self.toast = None;
             }
+        }
+
+        // 0. Notification history open
+        if self.show_notifications {
+            match key.code {
+                KeyCode::Esc | KeyCode::Char('q') => self.show_notifications = false,
+                KeyCode::Char('c') => self.notifications.clear(),
+                _ => {}
+            }
+            return;
         }
 
         // 1. Help Modal Open
@@ -4156,6 +4283,36 @@ impl App {
                         });
                     }
                 },
+                Modal::PersonaPicker {
+                    mut selected_idx,
+                    active_idx,
+                } => {
+                    let total = crate::ai_personas::all().len() + 1;
+                    match key.code {
+                        KeyCode::Esc | KeyCode::Char('q') => {
+                            self.modal = None;
+                        }
+                        KeyCode::Char('k') | KeyCode::Up => {
+                            selected_idx = if selected_idx > 0 { selected_idx - 1 } else { total - 1 };
+                            self.modal = Some(Modal::PersonaPicker { selected_idx, active_idx });
+                        }
+                        KeyCode::Char('j') | KeyCode::Down => {
+                            selected_idx = if selected_idx + 1 < total { selected_idx + 1 } else { 0 };
+                            self.modal = Some(Modal::PersonaPicker { selected_idx, active_idx });
+                        }
+                        KeyCode::Enter => {
+                            self.modal = None;
+                            if selected_idx == 0 {
+                                self.set_persona("off");
+                            } else if let Some(p) = crate::ai_personas::all().get(selected_idx - 1) {
+                                self.set_persona(p.id);
+                            }
+                        }
+                        _ => {
+                            self.modal = Some(Modal::PersonaPicker { selected_idx, active_idx });
+                        }
+                    }
+                }
                 Modal::ThemePicker {
                     mut selected_idx,
                     initial_theme_idx,
@@ -7646,6 +7803,26 @@ impl App {
                 }
                 _ => {}
             },
+            ActiveView::Cost(cost) => match key.code {
+                KeyCode::Esc | KeyCode::Char('q') => {
+                    if let Some(prev) = self.nav_stack.pop() {
+                        self.active_view = prev;
+                    } else {
+                        self.switch_view_to_kind(ResourceKind::Overview).await;
+                    }
+                }
+                KeyCode::Down | KeyCode::Char('j') => cost.scroll_down(),
+                KeyCode::Up | KeyCode::Char('k') => cost.scroll_up(),
+                KeyCode::PageDown => cost.page_down(10),
+                KeyCode::PageUp => cost.page_up(10),
+                KeyCode::Home | KeyCode::Char('g') => cost.scroll_to_top(),
+                KeyCode::End | KeyCode::Char('G') => cost.scroll_to_bottom(),
+                KeyCode::Char('r') => {
+                    self.reload_cost_view();
+                    self.set_toast("Refreshing cost & compute...".to_string(), Theme::status_dim());
+                }
+                _ => {}
+            },
             ActiveView::GpuInfo(gpu) => match key.code {
                 KeyCode::Esc | KeyCode::Char('q') => {
                     if let Some(prev) = self.nav_stack.pop() {
@@ -8646,15 +8823,15 @@ impl App {
     }
 
     pub fn submit_assistant_query(&mut self, clean_query: String, agent_query: String) {
+        let persona = self.ai_settings.persona.clone();
+        let read_only = crate::ai_personas::is_read_only(persona.as_deref())
+            .then(|| crate::ai_personas::scan_tools_for(persona.as_deref()));
         let ai = &mut self.assistant_state;
         ai.cancel_turn();
         ai.slash_suggestions.clear();
         ai.start_turn(clean_query);
-        let query = if let Some(lvl) = ai.caveman_level {
-            format!("{}\n\n{}", agent_query, lvl.prompt_instructions())
-        } else {
-            agent_query
-        };
+        let query =
+            crate::ai_personas::compose_turn_query(persona.as_deref(), ai.caveman_level, &agent_query);
         let provider = self.ai_settings.default_provider;
         let active_ctx = self.active_context.clone();
         let active_ns = self.active_namespace.clone();
@@ -8698,6 +8875,7 @@ impl App {
                     conversation_id: ai.conversation_id.clone(),
                     resume: ai.cli_resume_id.clone(),
                     chat_root: crate::agent::process_cursor_chats_root(),
+                    read_only,
                 };
                 let hub_kc_opt = argo_hub_kc.clone();
                 let handle = tokio::spawn(async move {
@@ -8724,6 +8902,12 @@ impl App {
             // the turn's watchdog it is waiting on them, not stalled.
             let consent = crate::consent::TuiConsent::new(event_tx.clone(), "srelens", &active_ctx);
             let waiting = consent.waiting();
+            let policy: std::sync::Arc<dyn srelens_mcp::policy::ConfirmPolicy> = match read_only {
+                Some(scan_tools) => {
+                    std::sync::Arc::new(crate::consent::ReadOnly::new(consent).allowing(scan_tools))
+                }
+                None => std::sync::Arc::new(consent),
+            };
 
             let handle = tokio::spawn(async move {
                 if let Some(ref hub_kc) = hub_kc_opt {
@@ -8732,7 +8916,7 @@ impl App {
                 let server = crate::agent::build_mcp_server(
                     cache,
                     kubeconfig_paths,
-                    std::sync::Arc::new(consent),
+                    policy,
                 );
                 let invoker = std::sync::Arc::new(crate::agent::McpToolInvoker::new(server));
                 crate::agent::run_native_agent_turn(
@@ -9030,6 +9214,15 @@ impl App {
                 MouseEventKind::ScrollUp => {
                     tree.select_prev();
                 }
+                _ => {}
+            }
+        }
+
+        // Cost dashboard scrolling
+        if let ActiveView::Cost(cost) = &mut self.active_view {
+            match mouse.kind {
+                MouseEventKind::ScrollDown => cost.scroll_down(),
+                MouseEventKind::ScrollUp => cost.scroll_up(),
                 _ => {}
             }
         }
@@ -9548,6 +9741,35 @@ impl App {
         }
     }
 
+    /// Set the Assistant's persona from what the user typed: an id, a name, or
+    /// `off`. Saved with the AI settings; announced either way.
+    pub fn set_persona(&mut self, key: &str) {
+        if crate::ai_personas::is_off_word(key) {
+            self.ai_settings.persona = None;
+            let _ = self.ai_settings.save();
+            self.set_toast("Assistant persona off".to_string(), Theme::status_ok());
+            return;
+        }
+        match crate::ai_personas::find(key) {
+            Some(p) => {
+                self.ai_settings.persona = Some(p.id.to_string());
+                let _ = self.ai_settings.save();
+                let note = if p.read_only { " (read-only)" } else { "" };
+                self.set_toast(
+                    format!("Assistant persona: {}{}", p.name, note),
+                    Theme::status_ok(),
+                );
+            }
+            None => {
+                let ids: Vec<&str> = crate::ai_personas::all().iter().map(|p| p.id).collect();
+                self.set_toast(
+                    format!("Unknown persona '{}'. Choose: {}, or off.", key, ids.join(", ")),
+                    Theme::status_warn(),
+                );
+            }
+        }
+    }
+
     pub fn open_context_picker(&mut self) {
         let items: Vec<crate::ui::dialogs::ContextPickerItem> = self
             .contexts
@@ -9898,6 +10120,20 @@ impl App {
             }
             CommandTarget::Quit => {
                 self.is_running = false;
+            }
+            CommandTarget::Notifications => {
+                self.show_notifications = true;
+                self.notifications.mark_read();
+            }
+            CommandTarget::Persona => {
+                let active = crate::ai_personas::row_of(self.ai_settings.persona.as_deref());
+                self.modal = Some(Modal::PersonaPicker {
+                    selected_idx: active,
+                    active_idx: active,
+                });
+            }
+            CommandTarget::SetPersona(key) => {
+                self.set_persona(&key);
             }
             CommandTarget::ThemePicker => {
                 let current_idx = Theme::active_index();
@@ -10288,6 +10524,11 @@ impl App {
                 });
 
                 ActiveView::Topology(topo_state)
+            }
+            ResourceKind::Cost => {
+                let state = cost_view::CostViewState::new(&self.active_context);
+                self.spawn_cost_fetch();
+                ActiveView::Cost(state)
             }
             ResourceKind::GpuInfo => {
                 let gpu_state = gpu_view::GpuViewState::new();
@@ -11712,6 +11953,61 @@ impl App {
                     Ok(graph) => topo.set_graph(graph),
                     Err(err) => topo.set_error(err),
                 }
+            }
+        }
+    }
+
+    /// The per-hour prices the `:cost` estimate uses: the configured ones, or
+    /// the placeholder defaults for any that is missing or not a positive
+    /// number.
+    pub fn cost_rates(&self) -> srelens_kube::cost::Rates {
+        let defaults = srelens_kube::cost::Rates::default();
+        let ok = |v: Option<f64>| v.filter(|x| x.is_finite() && *x > 0.0);
+        match (ok(self.tui_config.cost_cpu_core_hour), ok(self.tui_config.cost_mem_gib_hour)) {
+            (Some(cpu_core_hour), Some(mem_gib_hour)) => {
+                srelens_kube::cost::Rates { cpu_core_hour, mem_gib_hour }
+            }
+            // Half a price list is no price list: use the defaults for both.
+            _ => defaults,
+        }
+    }
+
+    fn spawn_cost_fetch(&self) {
+        let ctx = self.active_context.clone();
+        let cache = self.client_cache.clone();
+        let event_tx = self.event_tx.clone();
+        let rates = self.cost_rates();
+        tokio::spawn(async move {
+            let result = srelens_kube::cost::fetch_compute(cache, &ctx, rates).await;
+            let _ = event_tx.send(crate::event::AppEvent::CostResult { context: ctx, result });
+        });
+    }
+
+    pub fn reload_cost_view(&mut self) {
+        if let ActiveView::Cost(cost) = &mut self.active_view {
+            cost.start_reload();
+            self.spawn_cost_fetch();
+        }
+    }
+
+    /// An answer for the cost dashboard. One for a cluster we have since left
+    /// is dropped, so it can never put the old cluster's spend under the new
+    /// cluster's name.
+    pub fn handle_cost_result(
+        &mut self,
+        context: &str,
+        result: Result<srelens_kube::cost::ClusterCompute, String>,
+    ) {
+        if self.active_context != context {
+            return;
+        }
+        if let ActiveView::Cost(cost) = &mut self.active_view {
+            if cost.context != context {
+                return;
+            }
+            match result {
+                Ok(data) => cost.set_data(data),
+                Err(err) => cost.set_error(err),
             }
         }
     }
@@ -14987,6 +15283,17 @@ impl App {
                     let ctx = parts[1].to_string();
                     let ns = parts[2].to_string();
                     let kind = parts[3].to_string();
+                    if kind == "pods" && ctx == self.active_context {
+                        let raised = self.notifications.observe_pods(&ctx, &ns, items);
+                        // Already in the history; the toast is only the pop-up.
+                        if let Some((level, msg)) = raised.last() {
+                            let text = match raised.len() {
+                                1 => msg.clone(),
+                                n => format!("{n} pod alerts - latest: {msg}"),
+                            };
+                            self.toast = Some((text, Instant::now(), level.style()));
+                        }
+                    }
                     self.resource_cache
                         .insert((ctx, ns, kind.clone()), items.clone());
 
@@ -15158,6 +15465,7 @@ impl App {
             ActiveView::NodeInspector(_) => "Node & GPU Hardware Inspector",
             ActiveView::Topology(_) => "Workload & Traffic Topology Flow",
             ActiveView::GpuInfo(_) => "GPU Info & VRAM Allocation",
+            ActiveView::Cost(_) => "Cost & Compute",
             ActiveView::Bgp(_) => "BGP Peering & Route Advertisements",
             ActiveView::Top(top) => match top.active_tab {
                 top_view::TopTab::Pods => "Top Pods Hotspots",
@@ -15206,6 +15514,10 @@ impl App {
                 contexts: &context_chips,
                 context_chip_rects: Some(&self.context_chip_rects),
                 update_available: self.tui_config.update_available.as_deref(),
+                alert_badge: crate::ui::header::AlertBadge {
+                    count: self.notifications.unread(),
+                    has_error: self.notifications.unread_has_error(),
+                },
             },
         );
 
@@ -15252,6 +15564,7 @@ impl App {
             ActiveView::NodeInspector(ni) => render_node_inspector_view(f, chunks[1], ni),
             ActiveView::Topology(topo) => topology_view::render_topology_view(f, chunks[1], topo),
             ActiveView::GpuInfo(gpu) => gpu_view::render(f, chunks[1], gpu),
+            ActiveView::Cost(cost) => cost_view::render(f, chunks[1], cost),
             ActiveView::Bgp(bgp) => render_bgp_view(f, chunks[1], bgp),
             ActiveView::Top(top) => top_view::render_top_view(f, chunks[1], top),
             ActiveView::Changed(changed) => render_changed_view(f, chunks[1], changed),
@@ -15328,10 +15641,21 @@ impl App {
             _ => (0, 0, false),
         };
 
+        // Unread alerts outlive the 3-4s toast: a standing hint until opened.
+        let unread_hint = match self.notifications.unread() {
+            0 => None,
+            1 => Some("1 alert - :notifications".to_string()),
+            n => Some(format!("{n} alerts - :notifications")),
+        };
         let toast_prop = self
             .toast
             .as_ref()
-            .map(|(msg, _, style)| (msg.as_str(), *style));
+            .map(|(msg, _, style)| (msg.as_str(), *style))
+            .or_else(|| {
+                unread_hint
+                    .as_deref()
+                    .map(|h| (h, crate::notifications::Level::Error.style()))
+            });
 
         let suggestions = if self.input_mode == InputMode::Command {
             let query = self
@@ -15467,6 +15791,15 @@ impl App {
                     )
                 }
             }
+            ActiveView::Cost(_) => Some(
+                &[
+                    ("<:>", "Cmd"),
+                    ("<↑/↓>", "Scroll"),
+                    ("<r>", "Refresh"),
+                    ("<Esc>", "Back"),
+                    ("<?>", "Help"),
+                ][..],
+            ),
             ActiveView::GpuInfo(_) => Some(
                 &[
                     ("<:>", "Cmd"),
@@ -15897,6 +16230,8 @@ impl App {
             render_modal(f, size, modal);
         } else if self.show_help {
             render_help_modal(f, size);
+        } else if self.show_notifications {
+            crate::ui::render_notifications_modal(f, size, &self.notifications);
         }
 
         // An agent's approval prompt, over every view and dialog. Before the

@@ -61,6 +61,7 @@ impl DeepLink {
                             crate::commands::ResourceKind::TuiConfig => "config".to_string(),
                             crate::commands::ResourceKind::ArgoApplications => "argo".to_string(),
                             crate::commands::ResourceKind::BgpPeers => "bgp".to_string(),
+                            crate::commands::ResourceKind::Cost => "cost".to_string(),
                             other => other.to_string().to_lowercase(),
                         };
                         (Some(ns.as_str()), name)
@@ -77,6 +78,7 @@ impl DeepLink {
                             crate::commands::ResourceKind::TuiConfig => "config".to_string(),
                             crate::commands::ResourceKind::ArgoApplications => "argo".to_string(),
                             crate::commands::ResourceKind::BgpPeers => "bgp".to_string(),
+                            crate::commands::ResourceKind::Cost => "cost".to_string(),
                             other => other.to_string().to_lowercase(),
                         };
                         (namespace.as_deref(), name)
@@ -85,12 +87,15 @@ impl DeepLink {
                         (namespace.as_deref(), crd.plural.to_lowercase())
                     }
                     CommandTarget::Help => (namespace.as_deref(), "help".to_string()),
+                    CommandTarget::Notifications => (namespace.as_deref(), "notifications".to_string()),
                     CommandTarget::Contexts => (namespace.as_deref(), "contexts".to_string()),
                     CommandTarget::AddCluster => (namespace.as_deref(), "import".to_string()),
                     CommandTarget::Namespaces => (namespace.as_deref(), "namespaces".to_string()),
                     CommandTarget::Quit => (namespace.as_deref(), "quit".to_string()),
                     CommandTarget::ThemePicker => (namespace.as_deref(), "themes".to_string()),
                     CommandTarget::SetTheme(t) => (namespace.as_deref(), format!("theme/{}", t)),
+                    CommandTarget::Persona => (namespace.as_deref(), "persona".to_string()),
+                    CommandTarget::SetPersona(p) => (namespace.as_deref(), format!("persona/{}", p)),
                     CommandTarget::FeatureBanner => (namespace.as_deref(), "features".to_string()),
                     CommandTarget::OpenUrl(u) => (namespace.as_deref(), format!("open/{}", u)),
                     CommandTarget::Update => (namespace.as_deref(), "update".to_string()),

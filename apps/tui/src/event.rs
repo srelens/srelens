@@ -36,6 +36,10 @@ pub enum AppEvent {
         namespaces: Vec<String>,
         result: Result<srelens_kube::topology::TopologyGraphOut, String>,
     },
+    CostResult {
+        context: String,
+        result: Result<srelens_kube::cost::ClusterCompute, String>,
+    },
     GpuInfoResult {
         context: String,
         result: Result<srelens_kube::gpu_info::GpuClusterInfo, String>,

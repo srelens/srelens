@@ -2,6 +2,7 @@
 
 pub mod agent;
 pub mod ai_config;
+pub mod ai_personas;
 pub mod ai_skills;
 pub mod app;
 pub mod cli;
@@ -11,6 +12,7 @@ pub mod deep_link;
 pub mod event;
 pub mod mcp_server;
 pub mod model_list;
+pub mod notifications;
 pub mod self_update;
 pub mod sink;
 pub mod theme;
