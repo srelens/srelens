@@ -332,10 +332,10 @@ export function ExtensionResults({
   const toggleAllVisible = () =>
     setPicked((prev) => {
       const next = new Set(prev);
-      for (const key of visibleKeys) {
-        if (allVisiblePicked) next.delete(key);
-        else next.add(key);
-      }
+      // Unticking reaches every row the bar counts: a refresh, sort or filter
+      // puts picked rows past the ones drawn, and the bar still counts them.
+      if (allVisiblePicked) for (const row of pickedRows) next.delete(bulkResourceKey(row));
+      else for (const key of visibleKeys) next.add(key);
       return next;
     });
   const toggleRow = (key: string) =>

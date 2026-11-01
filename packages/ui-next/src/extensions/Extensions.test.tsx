@@ -1853,6 +1853,24 @@ it("selects rows one by one and all at once, and says how many are selected", as
   expect(screen.queryByTestId("bulk-count")).toBeNull();
 });
 
+it("unticks every selected row from the header, past the rows a refresh left drawn", async () => {
+  const { inspectExtensionResource } = await import("@srelens/core");
+  const items = Array.from({ length: 150 }, (_, i) => ({ name: `app-${i}`, namespace: "team", age: "1d", columns: [] as string[] }));
+  vi.mocked(readExtension).mockResolvedValue({ items });
+  vi.mocked(inspectExtensionResource).mockResolvedValue(menuDetail as any);
+  render(<ExtensionResults plugin={actionable} capability="list" context="cluster/a" />);
+  await screen.findByText("app-0");
+  fireEvent.click(screen.getByRole("button", { name: /Show 50 more/ }));
+  fireEvent.click(screen.getByLabelText("Select all"));
+  expect((await screen.findByTestId("bulk-count")).textContent).toBe("150 selected");
+  fireEvent.click(screen.getByRole("button", { name: "Refresh" }));
+  await screen.findByLabelText("Select all");
+  expect(screen.queryByText("app-100")).toBeNull();
+  expect(screen.getByTestId("bulk-count").textContent).toBe("150 selected");
+  fireEvent.click(screen.getByLabelText("Select all"));
+  expect(screen.queryByTestId("bulk-count")).toBeNull();
+});
+
 it("offers no selection column on a table whose rows the host has no actions for", async () => {
   vi.mocked(readExtension).mockResolvedValue(threeRows as any);
   render(<ExtensionResults plugin={plugin} capability="list" context="cluster/a" />);
