@@ -94,7 +94,7 @@ Everything this server exposes over MCP, generated from the live registry so it 
 | `k8s.podConnections` | medium | read the established TCP connections of pods, from their own /proc/net/tcp |
 | `k8s.topologyProbe` | medium | the topology graph, plus each pod's open connections read over pods/exec (one exec per pod) |
 
-### Kubernetes — needs confirmation (14)
+### Kubernetes — needs confirmation (15)
 
 | Tool | Impact | Summary |
 | --- | --- | --- |
@@ -108,6 +108,7 @@ Everything this server exposes over MCP, generated from the live registry so it 
 | `k8s.requestRolloutRestart` | high | Request a rolling restart of the reviewed built-in workload; requires confirmation |
 | `k8s.rolloutRestart` | medium | trigger a rolling restart of a workload |
 | `k8s.rolloutUndo` | medium | roll a Deployment back to an earlier revision (kubectl rollout undo --to-revision) |
+| `k8s.runKubeBench` | high | run the CIS Kubernetes Benchmark (kube-bench) on a node as a one-off Job, wait for it, and return the failed and manual-review checks with their remediation |
 | `k8s.scale` | medium | set the replica count of a workload (Deployment/StatefulSet/ReplicaSet) |
 | `k8s.setFields` | medium | Set fixed spec fields on the reviewed resource, as an app's action declares them; requires confirmation |
 | `k8s.setStatusCondition` | medium | Write one status condition on the reviewed resource through the status subresource, as an app's action declares it; requires confirmation |

@@ -521,6 +521,9 @@ fn build_with(
     reg.register(srelens_kube::cronjobs::cronjob_trigger_now_capability(
         cache.clone(),
     ));
+    reg.register(srelens_kube::kubebench::run_kube_bench_capability(
+        cache.clone(),
+    ));
     reg.register(srelens_kube::configmaps::list_configmaps_capability(
         cache.clone(),
     ));
