@@ -137,6 +137,8 @@ pub mod context_resolve;
 pub mod contexts;
 pub mod count;
 pub mod crds;
+pub mod cost;
+pub mod opencost;
 pub mod cronjobs;
 pub mod daemonsets;
 pub mod debug;
