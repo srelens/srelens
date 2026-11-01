@@ -240,7 +240,7 @@ fn lines_for(data: &ClusterCompute, width: usize) -> Vec<Line<'static>> {
             truncate(n.zone.as_deref().unwrap_or("-"), 12),
             format!("{}/{}", cores(n.requested_cpu_m), cores(n.allocatable_cpu_m)),
             format!("{}/{}", mem(n.requested_mem_mib), mem(n.allocatable_mem_mib)),
-            n.usage_cpu_m.map(|u| cores(u)).unwrap_or_else(|| "n/a".into()),
+            n.usage_cpu_m.map(cores).unwrap_or_else(|| "n/a".into()),
             n.usage_mem_mib.map(mem).unwrap_or_else(|| "n/a".into()),
             n.pods,
             money(n.hourly * HOURS_PER_MONTH, false),

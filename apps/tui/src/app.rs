@@ -775,7 +775,7 @@ impl App {
         // The cost dashboard refreshes itself about every 30 seconds.
         if matches!(self.active_view, ActiveView::Cost(_)) {
             self.node_metrics_tick_counter = self.node_metrics_tick_counter.saturating_add(1);
-            if self.node_metrics_tick_counter % 300 == 0 {
+            if self.node_metrics_tick_counter.is_multiple_of(300) {
                 self.reload_cost_view();
             }
         }
