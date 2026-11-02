@@ -1,6 +1,6 @@
 import type { ReactNode } from "react";
 import { describeError, describeForbidden, forbiddenSentence, namespacePhrase, parseForbidden, type ErrorDomain } from "@srelens/core";
-import { Alert, ErrorState, RawError, type Tone } from "@srelens/ui-kit";
+import { Alert, Button, ErrorState, RawError, type Tone } from "@srelens/ui-kit";
 
 /**
  * The new design's error vocabulary: one way to turn a backend refusal into
@@ -157,6 +157,8 @@ export interface FailureAlertProps {
   domain?: ErrorDomain;
   /** `warn` by default: a banner over surviving rows is a warning, not a stop. */
   tone?: Tone;
+  /** Read it again. Left out, the banner offers no button. */
+  onRetry?: () => void;
   className?: string;
 }
 
@@ -174,6 +176,7 @@ export function FailureAlert({
   error,
   domain,
   tone = "warn",
+  onRetry,
   className,
 }: FailureAlertProps) {
   const copy = friendly(error, domain);
@@ -181,6 +184,13 @@ export function FailureAlert({
     <Alert tone={tone} title={title} className={className}>
       {copy.detail}
       <RawError text={copy.raw ?? ""} className="mt-1" />
+      {onRetry && (
+        <div className="mt-2">
+          <Button type="button" variant="secondary" size="xs" onClick={onRetry}>
+            Retry
+          </Button>
+        </div>
+      )}
     </Alert>
   );
 }

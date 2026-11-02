@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
+import { vi } from "vitest";
 import { describeError } from "@srelens/core";
 import { FailureAlert, FailureState, FailureWord, NamespaceFailuresAlert, StaleListAlert, friendly, summarise } from "./errorCopy";
 
@@ -159,6 +160,27 @@ describe("FailureState", () => {
 });
 
 describe("FailureAlert", () => {
+  it("offers Retry when there is something to retry (#1001)", () => {
+    const onRetry = vi.fn();
+    render(<FailureAlert title="Pods could not be read" error={API_401} onRetry={onRetry} />);
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    expect(onRetry).toHaveBeenCalledTimes(1);
+  });
+
+  it("sets Retry on its own line, not on the end of the sentence", () => {
+    // A button is inline, so a margin on it alone moves nothing: seen live,
+    // "refused for the tour [Retry]".
+    render(<FailureAlert title="Pods could not be read" error={API_401} onRetry={() => {}} />);
+    const line = screen.getByRole("button", { name: "Retry" }).parentElement;
+    expect(line?.getAttribute("data-slot")).not.toBe("alert-body");
+    expect(line?.className).toContain("mt-2");
+  });
+
+  it("offers no button when there is not", () => {
+    render(<FailureAlert title="These pods are stale" error={API_401} />);
+    expect(screen.queryByRole("button", { name: "Retry" })).toBeNull();
+  });
+
   it("keeps the caller's sentence about the rows and rewrites only the reason", () => {
     render(<FailureAlert title="These pods are stale" error={API_401} />);
     expect(screen.getByText("These pods are stale")).toBeDefined();

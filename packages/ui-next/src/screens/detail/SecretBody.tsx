@@ -14,7 +14,7 @@ import {
   type DockerRegistryRow,
   type K8sObject,
 } from "@srelens/core";
-import { Button, EmptyState, KV, Spinner, StatusPill, Table, type Column } from "@srelens/ui-kit";
+import { Button, EmptyState, KV, LoadingState, StatusPill, Table, type Column } from "@srelens/ui-kit";
 import { FailureAlert } from "../../lib/errorCopy";
 import { Section } from "./Section";
 import { StringList } from "./sections";
@@ -53,6 +53,8 @@ export interface SecretDataState {
   /** The refusal, raw, exactly as the backend gave it — worded by `describeError`
    *  at the surface, per this package's error rule. */
   error?: string;
+  /** Ask for the values again, from `loading`. */
+  retry?: () => void;
 }
 
 /** Are this Secret's values on hand? The one question every surface below asks. */
@@ -124,7 +126,7 @@ function SecretEntry({ name, value, state }: { name: string; value: string; stat
   return (
     <div className="flex flex-col gap-1">
       <div className="flex items-center justify-between gap-2">
-        <span className="font-mono text-[0.8125rem] font-medium">{name}</span>
+        <span className="font-mono text-[0.75rem] font-medium">{name}</span>
         <div className="flex items-center gap-2">
           {!available && <span className="text-[0.75rem] text-muted">{withheldReason(state)}</span>}
           <Button
@@ -138,7 +140,7 @@ function SecretEntry({ name, value, state }: { name: string; value: string; stat
           </Button>
         </div>
       </div>
-      <pre className="whitespace-pre-wrap break-all font-mono text-[0.8125rem] text-muted">
+      <pre className="whitespace-pre-wrap break-all font-mono text-[0.75rem] text-ink">
         {available && revealed ? decodeBase64(value) : "••••••••"}
       </pre>
     </div>
@@ -242,16 +244,16 @@ function TlsSection({ state }: { state: SecretDataState }) {
           {leaf && leaf.sans.length > 0 && <KV k="DNS / IP names" v={<StringList items={leaf.sans} />} />}
           {data["tls.crt"] && <KV k="Certificate data" v={formatBytes(decodedByteLength(data["tls.crt"]))} />}
           {data["tls.key"] && <KV k="Private key data" v={formatBytes(decodedByteLength(data["tls.key"]))} />}
-          {certificates === null && count > 0 && <Spinner label="Reading certificates" />}
+          {certificates === null && count > 0 && <LoadingState compact label="Reading certificates" />}
           {certificates && certificates.length > 0 && (
             <Table columns={CERTIFICATE_COLUMNS} data={certificates} getRowKey={(row) => row.key} />
           )}
         </>
+      ) : state.status === "loading" ? (
+        <LoadingState compact label="Reading this Secret's certificate and private key" />
       ) : (
         <p className="text-[0.8125rem] text-muted">
-          {state.status === "loading"
-            ? "Reading this Secret's certificate and private key…"
-            : "The certificate and private key could not be read, so nothing about them is shown here."}
+          The certificate and private key could not be read, so nothing about them is shown here.
         </p>
       )}
     </Section>
@@ -291,11 +293,11 @@ function DockerSection({ state, type }: { state: SecretDataState; type: string }
             <EmptyState title="No valid registry credentials found" />
           )}
         </>
+      ) : state.status === "loading" ? (
+        <LoadingState compact label="Reading this Secret's registry credentials" />
       ) : (
         <p className="text-[0.8125rem] text-muted">
-          {state.status === "loading"
-            ? "Reading this Secret's registry credentials…"
-            : "The registry credentials could not be read, so no registries are listed here."}
+          The registry credentials could not be read, so no registries are listed here.
         </p>
       )}
     </Section>
@@ -346,6 +348,7 @@ function useSecretData(
   redacted: Record<string, string>,
 ): SecretDataState {
   const [fetched, setFetched] = useState<{ data?: Record<string, string>; error?: string } | null>(null);
+  const [attempt, setAttempt] = useState(0);
   useEffect(() => {
     setFetched(null);
     if (!context) return;
@@ -361,20 +364,22 @@ function useSecretData(
     return () => {
       active = false;
     };
-  }, [context, namespace, name]);
+  }, [context, namespace, name, attempt]);
 
   if (!context) return { status: "ready", data: redacted };
   if (fetched === null) return { status: "loading", data: redacted };
-  if (fetched.error !== undefined) return { status: "error", data: redacted, error: fetched.error };
+  if (fetched.error !== undefined) {
+    return { status: "error", data: redacted, error: fetched.error, retry: () => setAttempt((n) => n + 1) };
+  }
   if (fetched.data === undefined) return { status: "ready", data: redacted };
   return { status: "ready", data: fetched.data };
 }
 
 /**
- * A Secret's Details pane — classic's `SecretBody`: dispatches on `type` to
+ * A Secret's Overview pane — classic's `SecretBody`: dispatches on `type` to
  * TLS material, Docker registries, or a general summary, then always shows
  * the Data section beneath. Editing (`ConfigDataEditor`'s Save/Copy) is not
- * wired here — ui-next's Details panes are read-only, the same call every
+ * wired here — ui-next's Overview panes are read-only, the same call every
  * other body in this table has made for its own write affordance.
  */
 export function SecretDetailsBody({ object, context }: { object: K8sObject; context: string }) {
@@ -388,7 +393,7 @@ export function SecretDetailsBody({ object, context }: { object: K8sObject; cont
   // the reader does have — the same call `FailureAlert`'s own doc comment makes.
   const refusal =
     state.status === "error" ? (
-      <FailureAlert title="This Secret's values could not be read" error={state.error} />
+      <FailureAlert title="This Secret's values could not be read" error={state.error} onRetry={state.retry} />
     ) : null;
 
   if (type === "kubernetes.io/tls") {

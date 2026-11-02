@@ -65,6 +65,22 @@ describe("KV", () => {
     const { container } = render(<KV k="Status" v="Running" className="extra" />);
     expect(container.querySelector(".kv.extra")).not.toBeNull();
   });
+
+  it.each([
+    ["undefined", undefined],
+    ["null", null],
+    ["an empty string", ""],
+  ])("draws one dash for a value that is %s", (_, value) => {
+    // Missing was written four ways across the details: a dash, nothing at
+    // all, a muted dash and a zero. The row says it, so no caller has to.
+    const { container } = render(<KV k="External IP" v={value} />);
+    expect(container.querySelector(".kv-v")?.textContent).toBe("—");
+  });
+
+  it("keeps a zero, which is a value", () => {
+    const { container } = render(<KV k="Restarts" v={0} />);
+    expect(container.querySelector(".kv-v")?.textContent).toBe("0");
+  });
 });
 
 /**
@@ -142,27 +158,34 @@ describe("the key column's rules", () => {
   const css = readFileSync(join(__dirname, "styles", "kit.css"), "utf8");
   const components = css.slice(css.indexOf("@layer components {"), css.indexOf("@layer utilities {"));
 
-  it("truncates a key too long for its column instead of letting it paint over the value", () => {
-    // Found on the live cluster: the overview rail's Fleet section keys its
-    // rows on the kube CONTEXT name, and a real kubeconfig carries names like
-    // `kdev-1787048764-kubernetes-admin@cluster-...`. The key column is a
-    // `minmax(88px, 34%)` track — its max is fixed, so the track cannot grow —
-    // and a `white-space: nowrap` key with no `min-width: 0` and no overflow
-    // rule simply painted straight through the value column and out past the
-    // right edge of the 286px rail: "kind-srelens-dem30/30 running".
-    //
-    // An ellipsis rather than a wrap: every other name in this design that
-    // outgrows its space is clipped the same way — the tab strip's titles, the
-    // sidebar's cluster name — and a key that wraps to three lines pushes its
-    // own value off the row's baseline.
+  it("wraps a long key onto a second line, then clips it, and never paints it over the value", () => {
+    // In a 352px peek the column is about 120px, so "Volume claim templates"
+    // and "Image pull secrets" could not be read on one line (#1001). Two lines
+    // read them. The clamp is for the other kind of key: the overview rail's
+    // Fleet rows are keyed on the kube CONTEXT name, a real kubeconfig carries
+    // `kdev-1787048764-kubernetes-admin@cluster-...`, and a row four lines tall
+    // would push the rows under it down for the sake of one name.
     const rule = components.slice(components.indexOf("  .kv-k {"));
     const body = rule.slice(0, rule.indexOf("}"));
+    expect(body).not.toContain("white-space: nowrap");
+    expect(body).toContain("-webkit-line-clamp: 2");
+    expect(body).toContain("overflow-wrap: anywhere");
     // Without this the grid item's automatic minimum is its min-content size,
-    // which for a nowrap key is the whole string — the overflow rules below
-    // never get a chance to apply.
+    // which is what painted a long key through the value column and out past
+    // the right edge of the 286px rail: "kind-srelens-dem30/30 running".
     expect(body).toContain("min-width: 0");
     expect(body).toContain("overflow: hidden");
-    expect(body).toContain("text-overflow: ellipsis");
+  });
+
+  it("sets a code value at the size of any other value", () => {
+    // Identifiers were the smallest text in the pane: 11px beside 12px.
+    expect(components).not.toMatch(/\.kv-v\.code\s*\{/);
+  });
+
+  it("sets a list of pairs at the size of any other value", () => {
+    // A `PairList` IS the value on a Selector or Node selector row.
+    const rule = components.slice(components.indexOf("  .pairs {"));
+    expect(rule.slice(0, rule.indexOf("}"))).toContain("font-size: 0.75rem");
   });
 });
 

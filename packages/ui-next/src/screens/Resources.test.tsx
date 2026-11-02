@@ -2019,18 +2019,16 @@ describe("the detail pane's two hosts", () => {
     expect(screen.queryByRole("button", { name: "Open tab" })).toBeNull();
   });
 
-  it("offers the same data panes in both hosts, under the names each screen gives them", async () => {
-    // Not the same STRIP any more: the design's full tab heads its first pane
-    // Overview and folds the containers table into it, where the peek calls it
-    // Details and gives Containers a tab of its own. What must still hold is
-    // that neither host offers a pane the other cannot reach — the panes are
-    // the kind's, and only their labels and their grouping are the screen's.
+  it("offers the same data panes in both hosts, under one set of names", async () => {
+    // Not the same STRIP: the design's full tab folds the containers table into
+    // Overview, where the peek gives Containers a tab of its own. What must
+    // still hold is that neither host offers a pane the other cannot reach.
     const list = open("/k/pods");
     await waitFor(() => expect(rowNames()).toEqual(["web-1", "api-7"]));
     fireEvent.click(row("web-1"));
     await paneReadyFor("web-1");
     const peekTabs = paneTabs();
-    expect(peekTabs).toContain("Details");
+    expect(peekTabs).toContain("Overview");
     expect(peekTabs).toContain("YAML");
     expect(peekTabs).toContain("Events");
     list.unmount();
@@ -2039,13 +2037,8 @@ describe("the detail pane's two hosts", () => {
     await paneReadyFor("web-1");
 
     const tabTabs = paneTabs();
-    expect(tabTabs).toContain("Overview");
-    expect(tabTabs).not.toContain("Details");
-    // Every pane the peek offers beyond its first is offered here too, by the
-    // same name.
-    for (const label of peekTabs.filter((t) => t !== "Details" && t !== "Containers")) {
-      expect(tabTabs).toContain(label);
-    }
+    // Every pane the peek offers is offered here too, by the same name.
+    expect(tabTabs).toEqual(peekTabs.filter((t) => t !== "Containers"));
   });
 });
 

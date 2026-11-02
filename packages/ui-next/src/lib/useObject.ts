@@ -53,7 +53,7 @@ function keyFor(context: string, kind: string, namespace: string | null, name: s
  * caller mounted fresh per subject — and it painted a Pod's name over the
  * previously peeked Pod's Properties panel on every row-to-row click. The
  * YAML and Events panes were already safe because `useLoad` has this gate;
- * the Details pane, the default one, read straight off here and was not.
+ * the Overview pane, the default one, read straight off here and was not.
  *
  * A plain comparison computed fresh every render, not a second effect: it
  * holds on the very first commit after the target changes, and it cannot be

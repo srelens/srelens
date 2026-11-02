@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, waitFor, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import type {
   K8sObject,
   LabelSelectorRequirement,
@@ -234,28 +235,18 @@ describe("WorkloadDetailsBody", () => {
       const { container } = render(<WorkloadDetailsBody object={CHECKOUT_API} context="ctx" />);
       await waitFor(() => expect(screen.getByText("119 (6m ago)")).toBeDefined());
       expect(factLabels(container)).toEqual([
-        "Replicas",
+        "Created",
         "Up to date",
         "Strategy",
         "Revision",
         "Selector",
         "Min ready seconds",
-        "Namespace",
-        "Created",
         "Image",
       ]);
       expect(screen.queryByRole("heading", { name: "Properties" })).toBeNull();
     });
 
-    it("counts replicas the way the design does — ready against desired", async () => {
-      render(<WorkloadDetailsBody object={CHECKOUT_API} context="ctx" />);
-      expect(screen.getByText("9 ready · 12 desired")).toBeDefined();
-      // Not classic's five-number sentence.
-      expect(screen.queryByText(/desired,/)).toBeNull();
-      await waitFor(() => expect(listReplicaSets).toHaveBeenCalled());
-    });
-
-    it("gives Up to date a row of its own instead of folding it into Replicas", () => {
+    it("gives Up to date a row of its own", () => {
       render(<WorkloadDetailsBody object={CHECKOUT_API} context="ctx" />);
       expect(screen.getByText("Up to date")).toBeDefined();
       expect(screen.getByText("9 of 12")).toBeDefined();
@@ -371,7 +362,7 @@ describe("WorkloadDetailsBody", () => {
       );
       expect(screen.getByText("app=")).toBeDefined();
       expect(screen.getByText("tier=")).toBeDefined();
-      expect(screen.getByText("Managed by")).toBeDefined();
+      expect(screen.getByText("Controlled by")).toBeDefined();
       expect(screen.getByText("Deployment/web")).toBeDefined();
       expect(screen.queryByRole("button", { name: /^Open / })).toBeNull();
     });
@@ -389,14 +380,14 @@ describe("WorkloadDetailsBody", () => {
       expect(podsForSelector).not.toHaveBeenCalled();
     });
 
-    it("omits Managed by when the workload has no owner", () => {
+    it("omits Controlled by when the workload has no owner", () => {
       const { container } = render(
         <WorkloadDetailsBody
           object={workload("Deployment", { replicas: 1, selector: { matchLabels: {} } })}
           context="ctx"
         />,
       );
-      expect(factLabels(container)).not.toContain("Managed by");
+      expect(factLabels(container)).not.toContain("Controlled by");
     });
 
     it("shows a StatefulSet's Service and volume claim templates", () => {
@@ -449,23 +440,10 @@ describe("WorkloadDetailsBody", () => {
       expect(screen.queryByText("Degraded")).toBeNull();
     });
 
-    it("counts ready replicas, not available ones, so the header cannot contradict it", () => {
-      // Available is the subset of ready replicas that have outlived
-      // `minReadySeconds`, so a Deployment with one set sits at ready >
-      // available for a while. The header and the list row both read
-      // `readyReplicas`; the numbers here read the same field.
-      render(
-        <WorkloadDetailsBody
-          object={workload(
-            "Deployment",
-            { replicas: 12, minReadySeconds: 10, selector: { matchLabels: {} } },
-            { replicas: 12, readyReplicas: 12, availableReplicas: 9, updatedReplicas: 12 },
-          )}
-          context="ctx"
-        />,
-      );
-      expect(screen.getByText("12 ready · 12 desired")).toBeDefined();
-      expect(screen.queryByText(/9 ready/)).toBeNull();
+    it("leaves the ready count to the header, whose figure it is (#1001)", () => {
+      const { container } = render(<WorkloadDetailsBody object={CHECKOUT_API} context="ctx" />);
+      expect(factLabels(container)).not.toContain("Replicas");
+      expect(screen.queryByText(/ready ·/)).toBeNull();
     });
 
     it("reads zero for a workload whose status reports no counts at all", () => {
@@ -475,14 +453,15 @@ describe("WorkloadDetailsBody", () => {
           context="ctx"
         />,
       );
-      expect(screen.getByText("0 ready · 0 desired")).toBeDefined();
+      expect(screen.getByText("0 of 0")).toBeDefined();
     });
   });
 
   describe("Conditions, and what the body no longer draws", () => {
     it("shows each condition's status and reason, not a bare pill", () => {
       const { container } = render(<WorkloadDetailsBody object={CHECKOUT_API} context="ctx" />);
-      expect(factLabels(container, "Conditions")).toEqual(["Available", "Progressing"]);
+      const block = screen.getByRole("heading", { name: "Conditions" }).closest("section")!;
+      expect([...block.querySelectorAll("li .status")].map((el) => el.textContent)).toEqual(["Available", "Progressing"]);
       expect(screen.getByText("False · MinimumReplicasUnavailable")).toBeDefined();
       expect(screen.getByText("True · ReplicaSetUpdated")).toBeDefined();
     });
@@ -756,7 +735,7 @@ describe("WorkloadDetailsBody", () => {
       // 195 files in parallel, and passed on its own every time — the same
       // loading-frame signal that made the two-hosts test flaky. (#331)
       await waitFor(() => expect(screen.getByText("checkout-api-7d9f")).toBeDefined());
-      expect(screen.getByRole("heading", { name: "Deploy Revisions" })).toBeDefined();
+      expect(screen.getByRole("heading", { name: "Deploy revisions" })).toBeDefined();
       expect(screen.getByText("9/12")).toBeDefined();
       expect(screen.getByText("6m")).toBeDefined();
       expect(screen.getByText("web-abc123")).toBeDefined();
@@ -797,7 +776,7 @@ describe("WorkloadDetailsBody", () => {
       );
       await Promise.resolve();
       expect(listReplicaSets).not.toHaveBeenCalled();
-      expect(screen.queryByText("Deploy Revisions")).toBeNull();
+      expect(screen.queryByText("Deploy revisions")).toBeNull();
     });
 
     it("renders the revision's name inert, with no navigation control", async () => {
@@ -946,8 +925,8 @@ describe("WorkloadDetailsBody", () => {
       expect(screen.getByRole("heading", { name: "Scheduling" })).toBeDefined();
       expect(screen.getByText("Desired")).toBeDefined();
       // The replica facts block is the pane's unheaded first section; its
-      // "Replicas" row is what says it was drawn.
-      expect(screen.queryByText("Replicas")).toBeNull();
+      // "Up to date" row is what says it was drawn.
+      expect(screen.queryByText("Up to date")).toBeNull();
     });
 
     it("draws the replica Properties block when told Deployment, whatever the payload says", () => {
@@ -958,7 +937,7 @@ describe("WorkloadDetailsBody", () => {
           context="ctx"
         />,
       );
-      expect(screen.getByText("Replicas")).toBeDefined();
+      expect(screen.getByText("Up to date")).toBeDefined();
       expect(screen.queryByRole("heading", { name: "Scheduling" })).toBeNull();
     });
 
@@ -975,7 +954,7 @@ describe("WorkloadDetailsBody", () => {
           context="ctx"
         />,
       );
-      await waitFor(() => expect(screen.getByText("Replicas")).toBeDefined());
+      await waitFor(() => expect(screen.getByText("Up to date")).toBeDefined());
       expect(screen.queryByText("No workload data")).toBeNull();
       expect([...container.children].every((el) => el.matches("section.section"))).toBe(true);
     });
@@ -995,8 +974,22 @@ describe("WorkloadDetailsBody", () => {
           context="ctx"
         />,
       );
-      await waitFor(() => expect(screen.getByRole("heading", { name: "Deploy Revisions" })).toBeDefined());
-      expect(document.body.textContent).toContain("cannot list resource replicasets");
+      await waitFor(() => expect(screen.getByRole("heading", { name: "Deploy revisions" })).toBeDefined());
+      await waitFor(() => expect(document.body.textContent).toContain("cannot list resource replicasets"));
+    });
+
+    it("reads them again on Retry", async () => {
+      listReplicaSets.mockResolvedValue({ error: "listing replicasets timed out" });
+      render(
+        <WorkloadDetailsBody
+          object={workload("Deployment", { replicas: 3, selector: { matchLabels: { app: "web" } } })}
+          context="ctx"
+        />,
+      );
+      const retry = await screen.findByRole("button", { name: "Retry" });
+      listReplicaSets.mockResolvedValue({ replicasets: [REVISION_119] });
+      await userEvent.click(retry);
+      await waitFor(() => expect(screen.getByText("checkout-api-7d9f")).toBeDefined());
     });
 
     // The `queryByText` half alone could not fail for the reason this name
@@ -1021,7 +1014,7 @@ describe("WorkloadDetailsBody", () => {
       // during `loading`, so a `waitFor` on it resolves on the first frame and
       // the case would pass against a section that then vanished.
       await waitFor(() => expect(document.body.textContent).toContain("listing replicasets timed out"));
-      expect(screen.getByRole("heading", { name: "Deploy Revisions" })).toBeDefined();
+      expect(screen.getByRole("heading", { name: "Deploy revisions" })).toBeDefined();
       expect(screen.queryByText("No revisions")).toBeNull();
       // The revision NUMBER is the object's own annotation, so it stays; only
       // the "(6m ago)" age comes off the list, and that must be absent.
@@ -1039,7 +1032,7 @@ describe("WorkloadDetailsBody", () => {
         />,
       );
       await waitFor(() => expect(podsForSelector).toHaveBeenCalled());
-      expect(screen.queryByRole("heading", { name: "Deploy Revisions" })).toBeNull();
+      expect(screen.queryByRole("heading", { name: "Deploy revisions" })).toBeNull();
       expect(listReplicaSets).not.toHaveBeenCalled();
     });
   });

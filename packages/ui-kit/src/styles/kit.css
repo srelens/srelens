@@ -974,23 +974,25 @@
   }
   /* The key column is a `minmax(88px, 34%)` track, so its max is fixed and the
      track never grows to fit an outsized key. Without `min-width: 0` the grid
-     item's automatic minimum is its min-content size — for a `nowrap` key,
-     the entire string — and a long one painted straight through the value
-     column and out past the right edge of its surface. Seen on the overview
-     rail, whose Fleet rows are keyed on kube CONTEXT names: a real kubeconfig
-     carries `kdev-…-kubernetes-admin@cluster-…`, and the 286px rail rendered
-     "kind-srelens-dem30/30 running" with the tail hanging off the window.
+     item's automatic minimum is its min-content size, and a long key painted
+     straight through the value column and out past the right edge of its
+     surface. Seen on the overview rail, whose Fleet rows are keyed on kube
+     CONTEXT names: a real kubeconfig carries `kdev-…-kubernetes-admin@cluster-…`,
+     and the 286px rail rendered "kind-srelens-dem30/30 running" with the tail
+     hanging off the window.
 
-     Clipped rather than wrapped: a key that wraps to three lines drags its own
-     value off the row's baseline, and every other outsized name in this design
-     — the tab strip's titles, the sidebar's cluster name — is clipped too. */
+     Two lines, then clipped. One line could not hold "Volume claim templates"
+     in a 352px peek, and a key that wraps without limit drags its own value
+     off the row's baseline and pushes the rows under it down for one name. */
   .kv-k {
     font-size: 0.75rem;
     color: var(--ink-muted);
-    white-space: nowrap;
     min-width: 0;
     overflow: hidden;
-    text-overflow: ellipsis;
+    overflow-wrap: anywhere;
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
   }
   .kv-v {
     font-size: 0.75rem;
@@ -999,7 +1001,6 @@
     overflow-wrap: anywhere;
     font-variant-numeric: tabular-nums;
   }
-  .kv-v.code { font-size: 0.6875rem; }
 
   /* The same pair, read on a page instead of down a column: the label above
      the value, a hairline under the pair.
@@ -1027,7 +1028,7 @@
   /* labels and annotations read as key=value, the way kubectl prints them */
   .pairs {
     font-family: var(--font-mono);
-    font-size: 0.6875rem;
+    font-size: 0.75rem;
     line-height: 1.75;
   }
   .pairs .k { color: var(--ink-muted); }

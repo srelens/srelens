@@ -28,4 +28,20 @@ describe("LoadingState", () => {
     const { container } = render(<LoadingState className="extra" />);
     expect(container.querySelector(".extra")).not.toBeNull();
   });
+
+  it("draws one line inside a block, rather than a page's worth of waiting", () => {
+    // The page-sized form is 64px of padding around a 32px spinner, under a
+    // heading that may hold one table row (#1001).
+    const { container } = render(<LoadingState compact label="Loading pods" />);
+    expect(container.innerHTML).not.toContain("py-16");
+    expect(container.innerHTML).not.toContain("size-8");
+    expect(screen.getByText("Loading pods")).toBeDefined();
+    expect(screen.getAllByRole("status")).toHaveLength(1);
+    expect(screen.getByRole("status").getAttribute("aria-label")).toBe("Loading pods");
+  });
+
+  it("forwards className in the compact form too", () => {
+    const { container } = render(<LoadingState compact className="extra" />);
+    expect(container.querySelector(".extra")).not.toBeNull();
+  });
 });

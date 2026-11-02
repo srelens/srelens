@@ -59,10 +59,17 @@ export const SELF_DESCRIBING_KINDS: ReadonlySet<string> = new Set([
  * value column of a fact list, a `key=value` pair had about a third of the
  * pane to be read in. They are blocks of their own below.
  *
- * Namespace and Controlled by are a `ResourceLink`/`LinkedResources` in
- * classic that navigate — Namespace to the Namespace object, Controlled by to
- * each owner's own kind/name; neither can navigate here (`PaneBody` has no
- * navigation contract — see the task report), so both render as plain text.
+ * No `Namespace` either, and for the same reason again: both headers show it,
+ * the peek in its subtitle and the full tab in its trail. A cluster-scoped
+ * subject never had one. (#1001)
+ *
+ * The first facts of every kind, in this order, so `podFacts`,
+ * `workloadFacts` and `customResourceFacts` all start from this list rather
+ * than writing their own: a reader finds who owns a thing in one place.
+ *
+ * Controlled by is a `LinkedResources` in classic that navigates to each
+ * owner's own kind/name; it cannot here (`PaneBody` has no navigation contract
+ * — see the task report), so it renders as plain text.
  *
  * An object with none of these facts yields an empty list, and a screen draws
  * no block at all for one: an empty section still has its padding and still
@@ -73,7 +80,6 @@ export const identityFacts: FactsFor = ({ object }) => {
   const owners = meta.ownerReferences ?? [];
   const created = str(meta.creationTimestamp);
   const facts: DetailFact[] = [];
-  if (meta.namespace) facts.push({ label: "Namespace", value: str(meta.namespace), mono: true });
   if (created) facts.push({ label: "Created", value: `${ageFromTimestamp(created, Date.now())} ago` });
   if (owners.length > 0) {
     facts.push({
@@ -85,7 +91,7 @@ export const identityFacts: FactsFor = ({ object }) => {
 };
 
 /**
- * The Details pane's fallback wrapper — classic's `GenericDetail`, on the
+ * The Overview pane's fallback wrapper — classic's `GenericDetail`, on the
  * design's own shape: a flat run of blocks divided by hairline rules, not a
  * stack of cards. The kind's own `DETAILS_BODY` entry comes first (`children`,
  * classic's `KindBody`) where one exists, then related pods (where
@@ -114,7 +120,7 @@ export const identityFacts: FactsFor = ({ object }) => {
  * appearing twice; placing them once, above, retires that guard along with
  * the class of bug it was watching for. (#331)
  *
- * `ResourceDetailView` wraps every kind's Details pane in this component; for the
+ * `ResourceDetailView` wraps every kind's Overview pane in this component; for the
  * four `SELF_DESCRIBING_KINDS` it passes through `children` untouched, since
  * those kinds' own bodies already show the facts this wrapper would otherwise
  * duplicate. Adding a kind to `DETAILS_BODY` nests it here automatically, and

@@ -1,6 +1,5 @@
 import { useEffect, useState } from "react";
 import {
-  ageFromTimestamp,
   ageSortValue,
   asArray,
   asRecord,
@@ -20,7 +19,7 @@ import {
   RelatedPodsSection,
   StringList,
 } from "./sections";
-import { SELF_DESCRIBING_KINDS } from "./GenericBody";
+import { identityFacts, SELF_DESCRIBING_KINDS } from "./GenericBody";
 import { hasSelector, requirementText, selectorOf, type WorkloadSelector } from "../../lib/workloadSelector";
 import { AgeCell } from "../../lib/ageCell";
 
@@ -147,11 +146,11 @@ function DeployRevisionsSection({ state }: { state: RevisionsState }) {
   // {@link useSectionList}.
   if (state.status === "idle") return null;
   return (
-    <Section title="Deploy Revisions">
+    <Section title="Deploy revisions">
       {state.status === "loading" ? (
-        <LoadingState label="Loading revisions" />
+        <LoadingState compact label="Loading revisions" />
       ) : state.status === "error" ? (
-        <SectionFailure error={state.error} />
+        <SectionFailure what="revisions" error={state.error} onRetry={state.retry} />
       ) : (
         <Table
           columns={DEPLOY_REVISION_COLUMNS}
@@ -165,16 +164,15 @@ function DeployRevisionsSection({ state }: { state: RevisionsState }) {
 }
 
 /**
- * A Deployment/StatefulSet/ReplicaSet's facts, in the order the design's own
- * Deployment frame reads them: Replicas, Up to date, Strategy, Revision,
- * Selector, Min ready seconds, Namespace, Created, Image — with the
- * kind-specific extras (Managed by, a StatefulSet's Service and volume claim
- * templates) beside their own kin.
+ * A Deployment/StatefulSet/ReplicaSet's facts: the identity every kind leads
+ * with, then Up to date, Strategy, Revision, Selector, Min ready seconds and
+ * Image — with a StatefulSet's Service and volume claim templates beside their
+ * own kin.
  *
  * DATA, so the two detail screens can lay one list out two ways — the peek
  * down a column, the full tab across three — without either drawing the
  * other's markup. `revisions` arrives from the shared layer, which fetches it
- * once for this list AND for the Deploy Revisions table below, so a rollout
+ * once for this list AND for the Deploy revisions table below, so a rollout
  * cannot be in one and missing from the other.
  *
  * No heading and no `Name` fact: the pane's header has already given the name,
@@ -188,16 +186,10 @@ function DeployRevisionsSection({ state }: { state: RevisionsState }) {
  * panel reading "Pending". Two readings of one fact can disagree. The header
  * already says the word (through core's `resourceStatusLine`), the design's
  * own Deployment frame has no such row, and the numbers under it say the rest
- * — so the second reading is deleted, not re-pointed. The design DOES keep a
- * `Status` row on a Pod, where the phase is the pod's own vocabulary rather
- * than a count; `PodBody` renders it, from `resourceStatusLine`.
+ * — so the second reading is deleted, not re-pointed.
  *
- * `Replicas` reads "9 ready · 12 desired" — the design's form, and the same
- * two numbers the header and the list row show, off `status.readyReplicas`
- * like both of them. It replaces a five-number sentence ("12 desired, 9
- * updated, 12 total, 9 available, 0 unavailable") that made the reader find
- * the two that mattered; `Up to date` gets the row of its own the design
- * gives it, and the rest are on the YAML tab.
+ * No `Replicas` row for the same reason: the header's ready figure is those
+ * two numbers. `Up to date` is the one the header does not have.
  *
  * `Strategy` is `updateStrategyText` below — core's `updateStrategy` facts in
  * this design's own words — for every kind. It always read the whole strategy
@@ -205,20 +197,18 @@ function DeployRevisionsSection({ state }: { state: RevisionsState }) {
  * and so printed "RollingUpdate" with the surge and unavailable clauses — the
  * two numbers that decide how a rollout behaves — dropped.
  *
- * Namespace and Managed by are a `ResourceLink`/`LinkedResources` in classic
- * that navigate; they render here as plain text (see the task report).
+ * Controlled by is a `LinkedResources` in classic that navigates; it renders
+ * here as plain text (see the task report).
  */
-export const workloadFacts: FactsFor = ({ kind, object, revisions }) => {
+export const workloadFacts: FactsFor = (input) => {
+  const { kind, object, revisions } = input;
   const meta = object.metadata ?? {};
   const spec = asRecord(object.spec);
   const status = asRecord(object.status);
   const selector = selectorOf(object);
-  const owners = meta.ownerReferences ?? [];
-  const created = str(meta.creationTimestamp);
 
   const num = (v: unknown) => (v != null ? Number(v) : 0);
   const desired = num(spec.replicas);
-  const ready = num(status.readyReplicas);
   const updated = num(status.updatedReplicas);
   const strategy =
     kind === "Deployment"
@@ -241,10 +231,7 @@ export const workloadFacts: FactsFor = ({ kind, object, revisions }) => {
       : [];
   const images = templateImages(spec);
 
-  const facts: DetailFact[] = [
-    { label: "Replicas", value: `${ready} ready · ${desired} desired` },
-    { label: "Up to date", value: `${updated} of ${desired}` },
-  ];
+  const facts: DetailFact[] = [...identityFacts(input), { label: "Up to date", value: `${updated} of ${desired}` }];
   if (strategy) facts.push({ label: "Strategy", value: strategy });
   if (revision) facts.push({ label: "Revision", value: revisionText });
   if (hasSelector(selector)) {
@@ -253,18 +240,10 @@ export const workloadFacts: FactsFor = ({ kind, object, revisions }) => {
   if (spec.minReadySeconds != null) {
     facts.push({ label: "Min ready seconds", value: str(spec.minReadySeconds) });
   }
-  if (owners.length > 0) {
-    facts.push({
-      label: "Managed by",
-      value: <StringList items={owners.map((o) => `${o.kind}/${o.name}`)} />,
-    });
-  }
   if (serviceName) facts.push({ label: "Service", value: serviceName, mono: true });
   if (volumeClaimTemplateNames.length > 0) {
     facts.push({ label: "Volume claim templates", value: volumeClaimTemplateNames.join(", ") });
   }
-  if (meta.namespace) facts.push({ label: "Namespace", value: str(meta.namespace), mono: true });
-  if (created) facts.push({ label: "Created", value: `${ageFromTimestamp(created, Date.now())} ago` });
   if (images.length > 0) {
     facts.push({
       label: "Image",
@@ -303,7 +282,7 @@ function DaemonSetSchedulingSection({ object }: { object: K8sObject }) {
 
 
 /**
- * The Details pane for Deployment, StatefulSet, DaemonSet and ReplicaSet —
+ * The Overview pane for Deployment, StatefulSet, DaemonSet and ReplicaSet —
  * classic's `WorkloadDetailView` (Deployment/StatefulSet/ReplicaSet) and
  * `DaemonSetBody` (DaemonSet), which classic renders as genuinely different
  * shapes (replica counts vs. per-node counts), not variations on one KV list —

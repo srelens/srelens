@@ -32,7 +32,7 @@ import { IngressDetailsBody } from "./IngressBody";
 import { JobDetailsBody } from "./JobBody";
 import { NodeDetailsBody } from "./NodeBody";
 import { PodContainersBody, PodContainersTable, PodDetailsBody, podFacts } from "./PodBody";
-import { AnnotationsSection, LabelsSection, NodePodsSection } from "./sections";
+import { AnnotationsSection, LabelsSection } from "./sections";
 import { SecretDetailsBody } from "./SecretBody";
 import { ServiceDetailsBody } from "./ServiceBody";
 import { useDeployRevisions, WorkloadDetailsBody, workloadFacts, type RevisionsState } from "./WorkloadBody";
@@ -96,7 +96,7 @@ type PaneBody = (props: {
 }) => ReactNode;
 
 /**
- * The Details/Overview pane's per-kind TITLED blocks, keyed on `k8sKind`.
+ * The Overview pane's per-kind TITLED blocks, keyed on `k8sKind`.
  *
  * A kind absent from the table renders no nested body of its own —
  * `GenericBody` still gives it a complete, correct pane (classic's
@@ -127,7 +127,7 @@ export const DETAILS_BODY: Record<string, PaneBody> = {
  * A kind's lead fact list — the unheaded block at the top of its detail.
  *
  * Keyed on `k8sKind` like {@link DETAILS_BODY}, and falling back to
- * `identityFacts` (Namespace, Created, Controlled by) for every kind without
+ * `identityFacts` (Created, Controlled by) for every kind without
  * one of its own, which is what `GenericBody` used to render as a section.
  * DaemonSet is deliberately absent: its numbers are per-node rather than
  * replicas, so it leads with the identity facts and states its own counts in
@@ -184,6 +184,8 @@ export interface LoadState<T> {
   status: LoadStatus;
   data?: T;
   error?: string;
+  /** Load it again, from `loading`. */
+  reload?: () => void;
 }
 
 /**
@@ -227,6 +229,7 @@ export function useLoad<T>(
     targetKey,
   });
   const gen = useRef(0);
+  const [attempt, setAttempt] = useState(0);
 
   useEffect(() => {
     // Reset on every identity change, not only an enabling one: `target`
@@ -255,24 +258,38 @@ export function useLoad<T>(
       if (gen.current === mine) gen.current++;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [enabled, ...target]);
+  }, [enabled, attempt, ...target]);
 
   // The gate itself: if the data currently held was fetched for a different
   // target than the one being rendered right now, it is not this render's
   // to show — substitute "loading" rather than let it leak through for even
   // one committed frame.
-  return state.targetKey === targetKey ? state : { status: "loading" };
+  return state.targetKey === targetKey
+    ? { ...state, reload: () => setAttempt((n) => n + 1) }
+    : { status: "loading" };
 }
 
-/** The pane ids both screens use. The LABELS are each screen's own — the peek
- *  heads the first pane "Details" and the tab heads it "Overview" — but a pane
- *  is the same pane in both, which is what lets one memory, one gate and one
- *  lazy-load rule serve them. */
+/** The pane ids both screens use. A pane is the same pane in both, which is
+ *  what lets one memory, one gate and one lazy-load rule serve them. */
 export const PANE_DETAILS = "details";
 export const PANE_CONTAINERS = "containers";
 export const PANE_METRICS = "metrics";
 export const PANE_YAML = "yaml";
 export const PANE_EVENTS = "events";
+
+/**
+ * One order for every detail, on both surfaces and for every kind (#1001):
+ * Overview, the kind's own panes, Events, YAML last. What a screen chooses is
+ * only which of the kind's panes it has room for.
+ */
+export function detailTabs(kindTabs: TabItem[]): TabItem[] {
+  return [
+    { id: PANE_DETAILS, label: "Overview" },
+    ...kindTabs,
+    { id: PANE_EVENTS, label: "Events" },
+    { id: PANE_YAML, label: "YAML" },
+  ];
+}
 
 /** One subject, as data and blocks — no chrome, no layout. */
 export interface DetailSubject {
@@ -281,8 +298,10 @@ export interface DetailSubject {
   error?: string;
   /** Read the subject again without blanking the pane — see `useObject`. */
   refresh: () => void;
+  /** Read the subject again from `loading`: what Retry does. */
+  reload: () => void;
   /** A custom resource (#919): no built-in table applies to it, whatever its
-   *  kind is called, and its first pane is its status. */
+   *  kind is called. */
   custom: boolean;
   /** The kind's own row actions and extra panes, or `undefined` for a CRD. */
   descriptor: ReturnType<typeof descriptorFor>;
@@ -313,8 +332,6 @@ export interface DetailSubject {
    *  comment gives: a Secret's annotation can be the secret. */
   labels: ReactNode;
   annotations: ReactNode;
-  /** A kind-specific block that both hosts place after their metadata layout. */
-  afterMetadata: ReactNode;
   /** This kind's manifest goes through `redactSecretManifest`. */
   isSecret: boolean;
 }
@@ -340,7 +357,7 @@ export function useDetailSubject({
   /** The API group, for a custom kind only — see `isCustomKind`. */
   group?: string;
 }): DetailSubject {
-  const { object, crd, status, error, refresh } = useObject(context, kind, namespace, name, group);
+  const { object, crd, status, error, refresh, reload } = useObject(context, kind, namespace, name, group);
 
   // A custom resource reads none of the built-in tables below — not even one
   // keyed on its name, since `Deployment` in `acme.io` is not a Deployment.
@@ -375,6 +392,7 @@ export function useDetailSubject({
     status,
     error,
     refresh,
+    reload,
     custom,
     descriptor,
     statusLine: object && !custom ? resourceStatusLine(kind, object) : null,
@@ -404,8 +422,6 @@ export function useDetailSubject({
     metricsPane: bodyProps && MetricsBody ? createElement(MetricsBody, bodyProps) : null,
     labels: <LabelsSection labels={meta.labels ?? {}} />,
     annotations: <AnnotationsSection kind={kind} annotations={meta.annotations ?? {}} />,
-    afterMetadata:
-      object && !custom && kind === "Node" ? <NodePodsSection context={context} node={name} /> : null,
     isSecret: !custom && kind === "Secret",
   };
 }
@@ -422,9 +438,9 @@ export interface DetailPaneState {
 /**
  * The pane a reader is on, and the two panes that fetch for themselves.
  *
- * `tabs` is the SCREEN's — the peek offers Details/Containers/YAML/Events, the
- * tab offers Overview/YAML/Events — and all this layer does with it is refuse
- * to stay on a pane the screen does not offer. The lazy-load rule, the target
+ * `tabs` is the SCREEN's — the peek gives Containers a tab and the full tab
+ * does not — and all this layer does with it is refuse to stay on a pane the
+ * screen does not offer. The lazy-load rule, the target
  * gate and the Secret redaction are the same in both.
  */
 export function useDetailPaneState({
@@ -461,7 +477,7 @@ export function useDetailPaneState({
   // navigation intent, not data that goes stale — the peek fills on nearly
   // every row click on an already-mounted screen, and someone comparing YAML
   // (or scanning Events) across several rows should not be thrown back to
-  // Details, and charged a click to return, on every single one. It falls
+  // Overview, and charged a click to return, on every single one. It falls
   // back to the first pane only through the guard below (`tabs.some(...)`),
   // for the one case that genuinely needs it: the new subject's kind doesn't
   // have the pane that was selected (e.g. a Pod's Containers tab, followed by
@@ -492,13 +508,13 @@ export function useDetailPaneState({
   // object's own readiness doesn't gate this fetch — `getManifest` and
   // `listEvents` don't depend on `useObject` having succeeded, and while the
   // object is loading or has errored the pane isn't visible anyway (each
-  // screen's own early return short-circuits before any tab renders).
+  // screen's own early return draws that state in the pane's place).
   const target = [context, qualifiedKind, namespace, name] as const;
   // `getManifest` needs a CRD's group/version/plural to resolve a
   // custom-resource manifest — see `resolveCrdGvk`'s own doc comment for why
   // this is looked up here rather than threaded in from a descriptor.
   const custom = isCustomKind(kind, group);
-  // The Details pane keeps a Secret's values out of the DOM until the reader
+  // The Overview pane keeps a Secret's values out of the DOM until the reader
   // reveals them, and `k8s.getManifest` is an ungated read. The host blanks a
   // Secret's values on it (#661, `crates/kube/src/manifest.rs`); this redacts
   // again on arrival rather than trust that alone, because without it the
@@ -579,6 +595,7 @@ function YamlPane({
       <FailureState
         title={`Could not load ${describeTarget(kind, namespace, name)}'s manifest`}
         error={state.error}
+        onRetry={state.reload}
       />
     );
   }
@@ -611,7 +628,7 @@ function YamlPane({
           reader's attention. */}
       {redacted && (
         <Alert tone="info" title="Values redacted">
-          This Secret's values are not shown here. Reveal them one key at a time in the Details pane.
+          This Secret's values are not shown here. Reveal them one key at a time in the Overview pane.
         </Alert>
       )}
       <div className="min-h-0 flex-1">
@@ -690,6 +707,7 @@ function EventsPane({
       <FailureState
         title={`Could not load events for ${describeTarget(kind, namespace, name)}`}
         error={state.error}
+        onRetry={state.reload}
       />
     );
   }

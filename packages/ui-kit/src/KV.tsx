@@ -1,5 +1,6 @@
 import type { ReactNode } from "react";
 import { cx } from "./cx";
+import { filled } from "./slot";
 
 export interface KVProps {
   k: ReactNode;
@@ -42,6 +43,10 @@ export interface KVProps {
  * DOM — the same disclosure hole `PairList` removed after a `kubectl
  * apply`-managed Secret leaked through it via an annotation. There is no prop
  * to put it back, for the same reason. (#331)
+ *
+ * A value with nothing in it reads as one dash, drawn here. Missing was written
+ * four ways across the detail panes, and a row is the one place every caller
+ * passes through. A zero is a value and stays. (#1001)
  */
 export function KV({ k, v, mono, stacked, className }: KVProps) {
   return (
@@ -49,7 +54,7 @@ export function KV({ k, v, mono, stacked, className }: KVProps) {
     // this row, and the stylesheet reads it off the row it is laying out.
     <dl className={cx("kv", className)} data-stacked={stacked ? "true" : undefined}>
       <dt className="kv-k">{k}</dt>
-      <dd className={cx("kv-v", mono && "code")}>{v}</dd>
+      <dd className={cx("kv-v", mono && "code")}>{filled(v) ? v : "—"}</dd>
     </dl>
   );
 }

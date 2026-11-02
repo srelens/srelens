@@ -14,7 +14,7 @@ import {
   type K8sObject,
   type ResourceStatusLine,
 } from "@srelens/core";
-import { LoadingState, statusTone, type TabItem } from "@srelens/ui-kit";
+import { LoadingState, StatusPill, statusTone } from "@srelens/ui-kit";
 import { FailureState } from "../../lib/errorCopy";
 import { CUSTOM_RESOURCE_ACTIONS } from "../../lib/kinds/custom";
 import { formatCpu, formatMemory } from "../../lib/kinds/columns";
@@ -23,6 +23,7 @@ import { ResourceTabFrame, TabFacts, TabMetadata, type Tile } from "./ResourceFr
 import { SectionMemory } from "./Section";
 import {
   describeTarget,
+  detailTabs,
   useDetailPaneState,
   useDetailSubject,
   useLoad,
@@ -103,6 +104,14 @@ function metricTiles(statusLine: ResourceStatusLine | null, object: K8sObject, u
       delta: statusLine.status,
       tone: statusTone(statusLine.health),
     });
+  } else if (statusLine) {
+    // A verdict with no ready figure to hang it on: a Node, a CronJob, a Pod the
+    // kubelet has not reported yet. The header has no line of its own for it.
+    tiles.push({
+      key: "status",
+      label: "Status",
+      value: <StatusPill status={statusLine.status} kind={statusLine.health} tinted />,
+    });
   }
   const statuses = podContainerStatuses(object.status);
   if (statuses.length > 0) {
@@ -133,9 +142,8 @@ function metricTiles(statusLine: ResourceStatusLine | null, object: K8sObject, u
  * the peek and the full tab were the same pane and the user's own mock of this
  * tab retired it: the peek heads a column with a name, a kind and a status
  * line and puts its actions in a footer; this heads a page with a breadcrumb
- * and puts them in the header, calls the first pane Overview rather than
- * Details, folds the containers table into it, and reads its facts across
- * three columns instead of down one.
+ * and puts them in the header, folds the containers table into Overview, and
+ * reads its facts across three columns instead of down one.
  *
  * WHAT IT DOES NOT DUPLICATE, which is the point: the object is read once, the
  * panes load lazily under one rule, the per-kind blocks are the shared ones,
@@ -152,16 +160,9 @@ export function ResourceTabView({ context, kind, group, namespace, name }: Resou
   const subject = useDetailSubject({ context, kind, namespace, name, group });
   const { object, status, error, descriptor, statusLine, hasMetrics } = subject;
 
-  // THIS SCREEN'S STRIP: `Overview YAML Events Metrics`. Overview rather than
-  // the peek's Details, and no Containers tab at all — the design puts that
-  // table inline, which a page has the room for and a 352px column does not.
-  const tabs: TabItem[] = [
-    // #919: a custom resource's first pane is its status.
-    { id: PANE_DETAILS, label: subject.custom ? "Status" : "Overview" },
-    { id: PANE_YAML, label: "YAML" },
-    { id: PANE_EVENTS, label: "Events" },
-    ...(hasMetrics ? [{ id: PANE_METRICS, label: "Metrics" }] : []),
-  ];
+  // No Containers tab — the design puts that table inline, which a page has the
+  // room for and a 352px column does not.
+  const tabs = detailTabs(hasMetrics ? [{ id: PANE_METRICS, label: "Metrics" }] : []);
   const { active, selectTab, yamlPane, eventsPane } = useDetailPaneState({
     context,
     kind,
@@ -182,35 +183,9 @@ export function ResourceTabView({ context, kind, group, namespace, name }: Resou
     return { data: mine ? { cpu: mine.cpuMillicores, memory: mine.memoryMiB } : null };
   });
 
-  if (status === "loading") {
-    return <LoadingState label={`Loading ${describeTarget(kind, namespace, name)}`} />;
-  }
-  if (status === "error" || !object) {
-    return <FailureState title={`Could not load ${describeTarget(kind, namespace, name)}`} error={error} />;
-  }
-
-  const tiles = metricTiles(statusLine, object, usageTiles(usage.data?.cpu, usage.data?.memory));
-
-  // The tab's Overview: the fact grid, then the kind's own blocks, then the
-  // containers table the design folds in here, then Labels and Annotations
-  // side by side. Every block is a sibling of every other — `.section +
-  // .section` draws the hairlines — except the metadata pair, which is a row
-  // on purpose (see below).
-  let pane: ReactNode =
-    active === PANE_DETAILS ? (
-      <>
-        <TabFacts facts={subject.facts} />
-        {subject.body}
-        {subject.containersTable}
-        <TabMetadata labels={subject.labels} annotations={subject.annotations} />
-        {subject.afterMetadata}
-      </>
-    ) : null;
-  if (active === PANE_METRICS) pane = subject.metricsPane;
-  else if (active === PANE_YAML) pane = yamlPane;
-  else if (active === PANE_EVENTS) pane = eventsPane;
-
-  return (
+  // Every state draws the frame: the name and the trail are the route's, not the
+  // object's, so a read that is slow or failed still says what it was reading.
+  const frame = (pane: ReactNode, tiles: Tile[] = [], actions?: ReactNode) => (
     <ResourceTabFrame
       name={name}
       cluster={context}
@@ -220,28 +195,50 @@ export function ResourceTabView({ context, kind, group, namespace, name }: Resou
       active={active}
       onTabChange={selectTab}
       tiles={tiles}
-      actions={
-        <DetailActions
-          host="tab"
-          context={context}
-          kind={kind}
-          group={group}
-          namespace={namespace}
-          name={name}
-          // A kind outside `K8S_KIND` has no descriptor at all — the
-          // custom-resource case — so it inherits `customDescriptor`'s own
-          // action set, Delete withheld and all.
-          actions={descriptor?.actions ?? CUSTOM_RESOURCE_ACTIONS}
-          flagged={statusLine?.flagged ?? false}
-          suspended={object.spec?.suspend === true}
-          unschedulable={object.spec?.unschedulable === true}
-          // Those two are read off this pane's object, so a write made from the
-          // bar has to bring a new one: without it a node cordoned from here
-          // went on being offered Cordon.
-          onChanged={subject.refresh}
-        />
-      }
+      actions={actions}
     >
+      {pane}
+    </ResourceTabFrame>
+  );
+
+  if (status === "loading") {
+    return frame(<LoadingState label={`Loading ${describeTarget(kind, namespace, name)}`} />);
+  }
+  if (status === "error" || !object) {
+    return frame(
+      <FailureState
+        title={`Could not load ${describeTarget(kind, namespace, name)}`}
+        error={error}
+        onRetry={subject.reload}
+      />,
+    );
+  }
+
+  const tiles = metricTiles(statusLine, object, usageTiles(usage.data?.cpu, usage.data?.memory));
+  // The figures above the grid have said these. The Age tile is the Created fact.
+  const said = new Set(tiles.map((tile) => (tile.key === "age" ? "Created" : tile.label)));
+  const facts = subject.facts.filter((fact) => !said.has(fact.label));
+
+  // The tab's Overview: the fact grid, then the kind's own blocks, then the
+  // containers table the design folds in here, then Labels and Annotations
+  // side by side. Every block is a sibling of every other — `.section +
+  // .section` draws the hairlines — except the metadata pair, which is a row
+  // on purpose (see below).
+  let pane: ReactNode =
+    active === PANE_DETAILS ? (
+      <>
+        <TabFacts facts={facts} />
+        {subject.body}
+        {subject.containersTable}
+        <TabMetadata labels={subject.labels} annotations={subject.annotations} />
+      </>
+    ) : null;
+  if (active === PANE_METRICS) pane = subject.metricsPane;
+  else if (active === PANE_YAML) pane = yamlPane;
+  else if (active === PANE_EVENTS) pane = eventsPane;
+
+  return frame(
+    <>
       {/* The same fold memory the peek reads, wrapped by this screen around
           its own pane: the store is keyed by kind, so a block a reader opens
           in one screen is open in the other without either screen knowing
@@ -253,6 +250,26 @@ export function ResourceTabView({ context, kind, group, namespace, name }: Resou
       {active === PANE_DETAILS && <ExtensionRelatedSlot context={context} resource={object}/>}
       {active === PANE_DETAILS && <ExtensionPodSlot context={context} resource={object}/>}
       {active === PANE_DETAILS && <ExtensionResourceSlot context={context} kind={object.kind ?? kind} group={object.apiVersion?.includes("/") ? object.apiVersion.split("/")[0] : ""} namespace={namespace} name={name} />}
-    </ResourceTabFrame>
+    </>,
+    tiles,
+    <DetailActions
+      host="tab"
+      context={context}
+      kind={kind}
+      group={group}
+      namespace={namespace}
+      name={name}
+      // A kind outside `K8S_KIND` has no descriptor at all — the
+      // custom-resource case — so it inherits `customDescriptor`'s own
+      // action set, Delete withheld and all.
+      actions={descriptor?.actions ?? CUSTOM_RESOURCE_ACTIONS}
+      flagged={statusLine?.flagged ?? false}
+      suspended={object.spec?.suspend === true}
+      unschedulable={object.spec?.unschedulable === true}
+      // Those two are read off this pane's object, so a write made from the
+      // bar has to bring a new one: without it a node cordoned from here
+      // went on being offered Cordon.
+      onChanged={subject.refresh}
+    />,
   );
 }
