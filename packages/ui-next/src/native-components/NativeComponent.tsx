@@ -1,5 +1,6 @@
 import { type ReactNode } from "react";
-import { Badge, CodeEditor, EmptyState, ErrorState, KV, LoadingState, MetricTile, Table } from "@srelens/ui-kit";
+import { conditionKindWithReason } from "@srelens/core";
+import { Badge, CodeEditor, EmptyState, ErrorState, KV, LoadingState, MetricTile, StatusPill, Table } from "@srelens/ui-kit";
 import { describeError } from "@srelens/core/lib/errors";
 import { validateNativeComponent, type NativeComponentPayload, type NativeValue } from "@srelens/core/lib/nativeComponents";
 import { NativeMarkdown } from "./NativeMarkdown";
@@ -27,7 +28,7 @@ function Content({ component, label, fill }: { component: NativeComponentPayload
     case "Badge": return <div className="native-component-inset"><Badge tone={component.data.tone}>{component.data.label}</Badge></div>;
     case "Metric": return <MetricTile label={component.data.label} value={<span className="native-machine">{show(component.data.value)}{component.data.unit && ` ${component.data.unit}`}</span>} description={component.data.description}/>;
     case "Conditions": return <NativeRows items={component.data.items}>{items => items.map((item, index) => <article className="native-component-entry" key={index}>
-      <div className="native-machine"><strong>{item.type}</strong> <Badge tone={item.status === "Unknown" ? "warn" : "muted"}>{item.status}</Badge></div>
+      <div className="native-machine"><strong>{item.type}</strong> <StatusPill status={item.status} kind={conditionKindWithReason(item)} tinted /></div>
       {item.reason && <div className="native-machine">{item.reason}</div>}
       {item.message && <p>{item.message}</p>}
       {item.observedGeneration !== undefined && <div className="native-machine">Observed generation: {item.observedGeneration}</div>}

@@ -2,9 +2,11 @@ import { ExtensionLogo } from "./ExtensionLogo";
 import { ExtensionRequirements } from "./ExtensionRequirements";
 import { AgeCell } from "../lib/ageCell";
 import { useNamespaceOptions } from "@srelens/core/react";
-import { Fragment, useEffect, useState } from "react";
+import { Fragment, useEffect, useMemo, useState } from "react";
 import { createPortal } from "react-dom";
 import {
+  ageSortValue,
+  eventVerdict,
   loadKubeconfigFiles,
   onExtensionResourceChanged,
   readExtension,
@@ -19,8 +21,8 @@ import {
 } from "@srelens/core";
 import { AppCards } from "./DashboardCards";
 import { plainText } from "./displayText";
-import { STATUS_WORD } from "./StatusBadge";
-import { Button, FilterBar, Tabs, filterMatcher, tableFilterError } from "@srelens/ui-kit";
+import { STATUS_WORD } from "./AppStatus";
+import { Button, ColumnPicker, FilterBar, StatusPill, Table, Tabs, filterMatcher, tableFilterError, type Column } from "@srelens/ui-kit";
 import { ErrorNotice, ExtensionResults } from "./ExtensionResults";
 import { useResource } from "../lib/useResource";
 import { LiveNotice, LiveReaders, LiveStatus, useLiveReaders } from "./liveReaders";
@@ -30,7 +32,8 @@ import { NamespaceFailuresAlert } from "../lib/errorCopy";
 import { useFallbackNamespace, useInCollectionScope, useNamespaces, useSetNamespaces } from "../lib/workspace";
 import { CollectionNameNotice, CollectionScopeNotice, NamespaceScopePicker } from "../screens/collections/NamespaceScope";
 import { ListCount } from "../screens/ListCount";
-import { StaleSelectionAlert, useResourceTabView } from "../screens/resourceShell";
+import { StaleSelectionAlert, columnOptionsFor, emptyTableCopy, useResourceTabView } from "../screens/resourceShell";
+import { toggleColumn, useHiddenColumns } from "../lib/columnPrefs";
 
 // The six normalized statuses (#541), each counted and listed by its word:
 // the legend names every one, zero included, so no colour is the only signal.
@@ -201,6 +204,32 @@ function Summary({
     </section>
   );
 }
+const eventKey = (event: EventSummary) => `${event.namespace}/${event.name}`;
+const EVENT_PINNED = "message";
+const EVENT_COLUMNS: Column<EventSummary>[] = [
+  {
+    key: "type",
+    header: "Type",
+    render: (event) => {
+      const { health, bad } = eventVerdict(event.type);
+      return <StatusPill status={event.type || "—"} kind={health} tinted={bad} />;
+    },
+  },
+  { key: EVENT_PINNED, header: "Message", sortable: false, render: (event) => <span className="block max-w-[32rem] truncate" title={event.message}>{event.message}</span> },
+  { key: "namespace", header: "Namespace", render: (event) => event.namespace || "—" },
+  { key: "object", header: "Involved object", render: (event) => event.object || "—" },
+  { key: "source", header: "Source", render: (event) => event.source || "—" },
+  { key: "count", header: "Count", align: "end" },
+  {
+    key: "firstAge",
+    header: "Age",
+    align: "end",
+    getSortValue: (event) => ageSortValue({ created: event.firstCreated, age: event.firstAge }),
+    render: (event) => <AgeCell created={event.firstCreated} age={event.firstAge} />,
+  },
+  { key: "age", header: "Last seen", align: "end", getSortValue: ageSortValue, render: (event) => <AgeCell created={event.created} age={event.age} /> },
+];
+
 function Events({
   plugin,
   config,
@@ -240,13 +269,9 @@ function Events({
   const live = useLiveReaders({
     plugin, capabilities: [config.capability], context, namespaces, label: "events", onChange: result.refresh,
   });
-  // Bound how many matching rows enter the DOM; Load more reveals the next page
-  // of the already-capped backend result (#609).
-  const PAGE = 100;
-  const [visible, setVisible] = useState(PAGE);
-  useEffect(() => {
-    setVisible(PAGE);
-  }, [plugin.manifest.id, plugin.revision, config.capability, context, namespaces.join("\u0000"), search, regex, refresh]);
+  const columnsKey = `extension:${plugin.manifest.id}:${config.capability}`;
+  const hidden = useHiddenColumns(columnsKey);
+  const columns = useMemo(() => EVENT_COLUMNS.filter((column) => column.key === EVENT_PINNED || !hidden.has(column.key)), [hidden]);
   if (result.status === "error")
     return <ErrorNotice cluster message={result.error} retry={result.reload} />;
   if (result.status === "loading")
@@ -260,12 +285,17 @@ function Events({
   const events = ours.filter((event) =>
     [event.message, event.object, event.namespace, event.reason, event.source].some((value) => matches(value ?? "")),
   );
-  const shown = events.slice(0, visible);
-  const hidden = Math.max(0, events.length - shown.length);
   return (
     <section className="extension-results">
+      <div className="extension-resource-list">
       <h3 className="extension-message">Events</h3>
-      {header && createPortal(<ListCount total={ours.length} shown={events.length} truncated={result.data?.truncated} noun="events" />, header)}
+      {header && createPortal(
+        <>
+          <ListCount total={ours.length} shown={events.length} truncated={result.data?.truncated} noun="events" />
+          <ColumnPicker columns={columnOptionsFor(EVENT_COLUMNS)} hidden={hidden} onToggle={(key) => toggleColumn(columnsKey, key)} pinnedKey={EVENT_PINNED} />
+        </>,
+        header,
+      )}
       <NamespaceFailuresAlert what="events" failures={result.data?.failures ?? []} />
       <LiveNotice live={live} what="events" />
       {result.data?.truncated && (
@@ -273,52 +303,15 @@ function Events({
           Showing the first {(result.data.events ?? []).length.toLocaleString()} events; more remain on the cluster.
         </p>
       )}
-      {shown.length ? (
-        <div className="extension-table-scroll">
-          <table>
-            <thead>
-              <tr>
-                {[
-                  "Type",
-                  "Message",
-                  "Namespace",
-                  "Involved object",
-                  "Source",
-                  "Count",
-                  "Age",
-                  "Last seen",
-                ].map((h) => (
-                  <th key={h}>{h}</th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {shown.map((e) => (
-                <tr key={`${e.namespace}/${e.name}`}>
-                  <td>{e.type}</td>
-                  <td title={e.message}>{e.message}</td>
-                  <td>{e.namespace}</td>
-                  <td>{e.object}</td>
-                  <td>{e.source || "—"}</td>
-                  <td>{e.count}</td>
-                  <td><AgeCell created={e.firstCreated} age={e.firstAge} /></td>
-                  <td><AgeCell created={e.created} age={e.age} /></td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-          {hidden > 0 && (
-            <p className="extension-message">
-              <button type="button" className="extension-resource-link" onClick={() => setVisible((n) => n + PAGE)}>
-                Show {Math.min(PAGE, hidden).toLocaleString()} more
-              </button>
-              <span> · {hidden.toLocaleString()} matching rows not shown</span>
-            </p>
-          )}
-        </div>
-      ) : (
-        <p className="extension-message">No matching events.</p>
-      )}
+      <div className="extension-table-scroll">
+        <Table
+          columns={columns}
+          data={events}
+          getRowKey={eventKey}
+          {...(ours.length ? emptyTableCopy(ours.length, "events", "", "") : { emptyText: "No events", emptyHint: "This app's resources have no recent events." })}
+        />
+      </div>
+      </div>
     </section>
   );
 }

@@ -114,7 +114,7 @@ async function settle() {
 }
 
 const shownRows = () =>
-  screen.queryAllByRole("button").map((b) => b.textContent).filter((t) => t?.endsWith("-tls")).sort();
+  screen.queryAllByRole("cell").map((cell) => cell.textContent).filter((t) => t?.endsWith("-tls")).sort();
 
 it("shows exactly the rows the card counted in its namespaces, under a banner naming them", async () => {
   render(<ExtensionPage ported={[]} onSwitchToClassic={vi.fn()} onLocked={vi.fn()} route={cardRoute} />);

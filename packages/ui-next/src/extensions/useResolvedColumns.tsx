@@ -1,10 +1,10 @@
 import { useEffect, useMemo, useState } from "react";
 import { contributionKind, extensionEnabledFor, resolveExtensionColumns, selectsNothing, watchNamespaceForSelection, type ExtensionColumnResult, type ExtensionTableColumn, type InstalledExtension } from "@srelens/core";
-import { Badge, type Column } from "@srelens/ui-kit";
+import { StatusPill, type Column } from "@srelens/ui-kit";
 import type { ListRow } from "../lib/kinds/types";
 import { scopesFor } from "../lib/resourceList";
 import { plainText } from "./displayText";
-import { StatusBadge } from "./StatusBadge";
+import { AppStatus } from "./AppStatus";
 import { useLiveApps } from "./liveReaders";
 
 type Result = { plugin: InstalledExtension; state: "loading" | "ready" | "error"; pending?: boolean; data?: ExtensionColumnResult; error?: string };
@@ -26,10 +26,10 @@ function displayCell(value: string, format: ExtensionTableColumn["format"]) {
   }
   if (format === "status" || format === "badge") {
     const lower = value.toLowerCase();
-    const tone = /^(ready|healthy|success|true|ok)$/.test(lower) ? "ok"
-      : /^(error|critical|failed|false)$/.test(lower) ? "sev"
-      : /^(warning|pending|unknown)$/.test(lower) ? "warn" : "muted";
-    return <Badge tone={tone}>{shown}</Badge>;
+    const kind = /^(ready|healthy|success|true|ok)$/.test(lower) ? "success"
+      : /^(error|critical|failed|false)$/.test(lower) ? "danger"
+      : /^(warning|pending|unknown)$/.test(lower) ? "warning" : "neutral";
+    return <StatusPill status={shown} kind={kind} />;
   }
   return <span title={value} className="whitespace-nowrap">{shown}</span>;
 }
@@ -188,7 +188,7 @@ export function useResolvedColumns<Row extends ListRow>(args: {
         const shown = cell.badges ?? [];
         if (!shown.length && !failed.length) return <span>—</span>;
         return <span className="extension-badges">
-          {shown.map((badge) => <StatusBadge key={badge.id} resolved={badge} />)}
+          {shown.map((badge) => <AppStatus key={badge.id} resolved={badge} />)}
           {failed.map(([id, why]) => <span key={id} className="extension-badge-error" title={plainText(why)}>Couldn’t read</span>)}
         </span>;
       },

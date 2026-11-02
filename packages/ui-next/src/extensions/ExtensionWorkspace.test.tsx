@@ -361,51 +361,12 @@ it("says when event reads were capped and pages matching rows", async () => {
   ).toBeTruthy();
   expect(screen.getByText("Events")).toBeTruthy();
   expect(screen.getByText("120+ items")).toBeTruthy();
-  expect(screen.getByText("Event 0")).toBeTruthy();
-  expect(screen.queryByText("Event 100")).toBeNull();
-  fireEvent.click(screen.getByRole("button", { name: /Show 20 more/ }));
-  expect(screen.getByText("Event 100")).toBeTruthy();
-});
-
-it("resets event paging when the extension revision changes", async () => {
-  const eventPlugin = structuredClone(plugin);
-  eventPlugin.manifest.contributions.pages[0].dashboard!.events = {
-    capability: "events",
-    apiGroups: ["kustomize.toolkit.fluxcd.io"],
-  };
-  const events = Array.from({ length: 120 }, (_, i) => ({
-    name: `ev-${i}`,
-    namespace: "flux-system",
-    object: "Kustomization/apps",
-    objectApiVersion: "kustomize.toolkit.fluxcd.io/v1",
-    message: `Event ${i}`,
-    type: "Normal",
-    count: 1,
-    age: "1m",
-  }));
-  vi.mocked(readExtension).mockImplementation(
-    async (_id, _revision, capability) =>
-      (capability === "events" ? { events } : { items: [] }) as never,
-  );
-  const { rerender } = render(
-    <Workspace
-      plugin={eventPlugin}
-      page={eventPlugin.manifest.contributions.pages[0]}
-      context="staging"
-    />,
-  );
-  await screen.findByText("Event 0");
-  fireEvent.click(screen.getByRole("button", { name: /Show 20 more/ }));
-  expect(screen.getByText("Event 100")).toBeTruthy();
-  rerender(
-    <Workspace
-      plugin={{ ...eventPlugin, revision: eventPlugin.revision + 1 }}
-      page={eventPlugin.manifest.contributions.pages[0]}
-      context="staging"
-    />,
-  );
-  await waitFor(() => expect(screen.queryByText("Event 100")).toBeNull());
-  expect(screen.getByText("Event 0")).toBeTruthy();
+  // jsdom has no layout, so the kit draws them all; a window draws those in view.
+  expect(screen.getByRole("table").classList.contains("tbl")).toBe(true);
+  expect(screen.getByText("Event 119")).toBeTruthy();
+  expect(screen.queryByRole("button", { name: /Show .* more/ })).toBeNull();
+  expect(screen.getAllByText("Normal")[0].dataset.kind).toBeTruthy();
+  expect(screen.getByRole("button", { name: "Columns" })).toBeTruthy();
 });
 
 it("filters events by API group and search, not just a matching kind name", async () => {
@@ -457,7 +418,7 @@ it("filters events by API group and search, not just a matching kind name", asyn
     screen.getByRole("searchbox", { name: "Filter events" }),
     { target: { value: "does not match" } },
   );
-  expect(await screen.findByText("No matching events.")).toBeTruthy();
+  expect(await screen.findByText("No events match this filter")).toBeTruthy();
   expect(readExtension).toHaveBeenCalledTimes(2);
 });
 
@@ -678,10 +639,10 @@ it("previews soonest expirations with issuer and status, bounded to the declared
   vi.mocked(resolveDashboardCards).mockResolvedValue({cards:[{id:"expiring",state:"count",count:3},{id:"upcoming",state:"list",total:3,rows:[{name:"first",namespace:"team"},{name:"next",namespace:"team"}]}]});
   vi.mocked(resolveExtensionColumns).mockResolvedValue({ columns: app.manifest.contributions.tableColumns, cells: items.map((row,i)=>({uid:null,name:row.name,namespace:row.namespace,values:{"not-after":["2026-11-01T00:00:00Z","2026-10-06T00:00:00Z","2026-10-08T00:00:00Z"][i],issuer:"production-ca"}})) });
   render(<Workspace plugin={app} page={app.manifest.contributions.pages[0]} context="staging" />);
-  await screen.findByRole("columnheader", {name:"Issuer"});
+  await screen.findByRole("columnheader", {name:/Issuer/});
   await waitFor(()=>expect(screen.getAllByRole("cell",{name:"production-ca"})).toHaveLength(2));
-  expect(screen.queryByRole("columnheader",{name:"Secret"})).toBeNull();
-  expect(screen.queryByRole("columnheader",{name:"Age"})).toBeNull();
+  expect(screen.queryByRole("columnheader",{name:/Secret/})).toBeNull();
+  expect(screen.queryByRole("columnheader",{name:/Age/})).toBeNull();
   expect(vi.mocked(resolveExtensionColumns).mock.calls.at(-1)?.[5].map(row=>row.name).sort()).toEqual(["first","next"]);
   const names = screen.getAllByRole("row").slice(1).map(row=>row.querySelector("td")?.textContent);
   expect(names).toEqual(["first","next"]);
@@ -775,6 +736,7 @@ describe("the app page's filter row (#1001)", () => {
     await screen.findByRole("cell", { name: "web" });
     expect(within(header).getByText("2 items")).toBeTruthy();
     expect(within(header).getByRole("button", { name: "Refresh" })).toBeTruthy();
+    expect(within(header).getByRole("button", { name: "Columns" })).toBeTruthy();
     fireEvent.change(screen.getByRole("searchbox", { name: "Filter kustomizations" }), { target: { value: "web" } });
     expect(within(header).getByText("1 / 2")).toBeTruthy();
     header.remove();
