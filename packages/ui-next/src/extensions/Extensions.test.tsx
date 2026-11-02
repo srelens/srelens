@@ -119,9 +119,19 @@ it("shows a declared native table column on the app's own resource page", async 
   vi.mocked(readExtension).mockResolvedValue({ items:[{name:"apps",namespace:"team",age:"1d",columns:[]}], printerColumns:[] });
   vi.mocked(resolveExtensionColumns).mockResolvedValue({ columns:[column], cells:[{uid:null,name:"apps",namespace:"team",values:{critical:"4"}}] });
   render(<ExtensionResults plugin={app} capability="list" context="prod" namespaces={["team"]} />);
-  expect(await screen.findByRole("columnheader", {name:"Critical CVEs"})).toBeTruthy();
+  expect(await screen.findByRole("columnheader", {name:/Critical CVEs/})).toBeTruthy();
   expect(await screen.findByText("4")).toBeTruthy();
   expect(resolveExtensionColumns).toHaveBeenCalledTimes(1);
+});
+it("draws an app column in the status format as the standard status", async () => {
+  const column = { id:"health", title:"Health", forKinds:["argoproj.io/Application"], source:{ jsonPath:".health" }, format:"status" as const };
+  const app = { ...plugin, manifest: { ...plugin.manifest,
+    capabilities:[{ name:"list", target:"k8s.listCustomResource", arguments:{ group:"argoproj.io", kind:"Application", namespaced:true } }],
+    contributions:{ ...plugin.manifest.contributions, tableColumns:[column] } } };
+  vi.mocked(readExtension).mockResolvedValue({ items:[{name:"apps",namespace:"team",age:"1d",columns:[]}], printerColumns:[] });
+  vi.mocked(resolveExtensionColumns).mockResolvedValue({ columns:[column], cells:[{uid:null,name:"apps",namespace:"team",values:{health:"Failed"}}] });
+  render(<ExtensionResults plugin={app} capability="list" context="prod" namespaces={["team"]} />);
+  expect((await screen.findByText("Failed")).dataset.kind).toBe("danger");
 });
 it("shows the host-resolved status as a word in its own column, searchable, when the kind has a resolver", async () => {
   const app = { ...plugin, manifest: { ...plugin.manifest,
@@ -134,7 +144,7 @@ it("shows the host-resolved status as a word in its own column, searchable, when
     { name:"legacy", namespace:"team", age:"1d", columns:[] },
   ], printerColumns:[] });
   const view = render(<ExtensionResults plugin={app} capability="list" context="prod" namespaces={["team"]} />);
-  expect(await screen.findByRole("columnheader", { name:"Status" })).toBeTruthy();
+  expect(await screen.findByRole("columnheader", { name:/Status/ })).toBeTruthy();
   const rows = within(screen.getByRole("table")).getAllByRole("row").slice(1);
   expect(within(rows[0]).getByText("Healthy")).toBeTruthy();
   expect(within(rows[1]).getByText("Out of sync")).toBeTruthy();
@@ -155,7 +165,7 @@ it("draws no status column for a kind without a resolver", async () => {
   vi.mocked(readExtension).mockResolvedValue({ items:[{ name:"apps", namespace:"team", age:"1d", columns:["True"] }], printerColumns:[{ name:"Ready", jsonPath:".r" }] });
   render(<ExtensionResults plugin={app} capability="list" context="prod" namespaces={["team"]} />);
   expect(await screen.findByText("apps")).toBeTruthy();
-  expect(screen.queryByRole("columnheader", { name:"Status" })).toBeNull();
+  expect(screen.queryByRole("columnheader", { name:/Status/ })).toBeNull();
 });
 it("sorts and searches opted-in app column values", async () => {
   const column = { id:"score", title:"Score", forKinds:["argoproj.io/Application"],
@@ -1253,7 +1263,7 @@ it("renders printer-column values as text", async () => {
   render(<ExtensionResults plugin={plugin} capability="list" context="prod" />);
   expect(await screen.findByText("<script>bad()</script>")).toBeTruthy();
   expect(document.querySelector("script")).toBeNull();
-  expect(screen.getByRole("columnheader", { name: "Ready" })).toBeTruthy();
+  expect(screen.getByRole("columnheader", { name: /Ready/ })).toBeTruthy();
 });
 
 it("adds namespace detail views and links, and removes them when disabled", async () => {
@@ -1538,11 +1548,11 @@ it("refreshes external lifecycle changes without unmounting enabled content", as
 it("distinguishes filtered rows from an empty resource response", async () => {
   vi.mocked(readExtension).mockResolvedValue({items:[{name:"apps",namespace:"team",age:"1d",columns:[]}]});
   render(<ExtensionResults plugin={plugin} capability="list" context="test" search="missing" />);
-  expect(await screen.findByText("No matching resources.")).toBeTruthy();
+  expect(await screen.findByText("No resources match this filter")).toBeTruthy();
   expect(screen.queryByText("No resources returned by this app.")).toBeNull();
 });
 
-it("says when the backend capped the list and pages matching rows", async () => {
+it("says when the backend capped the list, and holds every row it returned", async () => {
   const items = Array.from({ length: 150 }, (_, i) => ({
     name: `app-${i}`,
     namespace: "team",
@@ -1556,31 +1566,10 @@ it("says when the backend capped the list and pages matching rows", async () => 
       "Showing the first 150 resources; more remain on the cluster.",
     ),
   ).toBeTruthy();
-  expect(screen.getByText("app-0")).toBeTruthy();
-  expect(screen.queryByText("app-100")).toBeNull();
-  expect(screen.getByText(/50 matching rows not shown/)).toBeTruthy();
-  fireEvent.click(screen.getByRole("button", { name: /Show 50 more/ }));
-  expect(screen.getByText("app-100")).toBeTruthy();
+  // jsdom has no layout, so the kit draws them all; a window draws those in view.
+  expect(screen.getByText("app-149")).toBeTruthy();
+  expect(screen.queryByRole("button", { name: /Show .* more/ })).toBeNull();
   expect(screen.queryByText(/matching rows not shown/)).toBeNull();
-});
-
-it("resets the visible page after a refresh", async () => {
-  const items = Array.from({ length: 150 }, (_, i) => ({
-    name: `app-${i}`,
-    namespace: "team",
-    age: "1d",
-    columns: [] as string[],
-  }));
-  vi.mocked(readExtension).mockResolvedValue({ items });
-  render(<ExtensionResults plugin={plugin} capability="list" context="test" />);
-  await screen.findByText("app-0");
-  fireEvent.click(screen.getByRole("button", { name: /Show 50 more/ }));
-  expect(screen.getByText("app-100")).toBeTruthy();
-  fireEvent.click(screen.getByRole("button", { name: "Refresh" }));
-  await waitFor(() => {
-    expect(screen.queryByText("app-100")).toBeNull();
-    expect(screen.getByText("app-0")).toBeTruthy();
-  });
 });
 
 it("advances app resource ages without refreshing backend data", async () => {
@@ -1749,9 +1738,9 @@ it("opens a clicked resource in its selected namespace and drops detail state on
   vi.mocked(inspectExtensionResource).mockResolvedValue({resource:{kind:"Kustomization",metadata:{name:"apps",namespace:"team",uid:"u",resourceVersion:"1"},status:{conditions:[{type:"Ready",status:"False",message:"Build failed"}]}},actions:[]});
   const app={...plugin,manifest:{...plugin.manifest,capabilities:[{...plugin.manifest.capabilities[0],target:"k8s.listCustomResource"}]}} as any;
   const view=render(<ExtensionResults plugin={app} capability="list" context="cluster/a"/>);
-  fireEvent.click(await screen.findByRole("button",{name:"apps"}));
+  fireEvent.click(await screen.findByText("apps"));
   expect(await screen.findByText("Build failed")).toBeTruthy();
-  expect(screen.getByRole("button",{name:"apps"})).toBeTruthy();
+  expect(within(screen.getByRole("table")).getByText("apps")).toBeTruthy();
   expect(screen.getByRole("region",{name:"apps"})).toBeTruthy();
   expect(inspectExtensionResource).toHaveBeenCalledWith({id:plugin.manifest.id,revision:plugin.revision,capability:"list",context:"cluster/a",namespace:"team",name:"apps"});
   view.rerender(<ExtensionResults plugin={app} capability="list" context="cluster/b"/>);
@@ -1761,15 +1750,15 @@ it("opens a clicked resource in its selected namespace and drops detail state on
 it("uses CRD printer columns instead of app-defined generic columns",async()=>{
  vi.mocked(readExtension).mockResolvedValue({printerColumns:[{name:"Source",jsonPath:".spec.sourceRef.name",type:"string"}],items:[{name:"apps",namespace:"team",age:"1d",columns:["platform-config"]}]});
  render(<ExtensionResults plugin={plugin} capability="list" context="prod"/>);
- expect(await screen.findByRole("columnheader",{name:"Source"})).toBeTruthy();
- expect(screen.queryByRole("columnheader",{name:"Ready"})).toBeNull();
+ expect(await screen.findByRole("columnheader",{name:/Source/})).toBeTruthy();
+ expect(screen.queryByRole("columnheader",{name:/Ready/})).toBeNull();
  expect(screen.getByText("platform-config")).toBeTruthy();
 });
 it("reports CRD discovery failure while retaining the fallback resource columns",async()=>{
  vi.mocked(readExtension).mockResolvedValue({printerColumns:[{name:"Ready",jsonPath:".status.ready"}],columnsError:"Forbidden",items:[{name:"apps",namespace:"team",age:"1d",columns:["True"]}]});
  render(<ExtensionResults plugin={plugin} capability="list" context="prod"/>);
  expect(await screen.findByText(/Could not load CRD columns: Forbidden/)).toBeTruthy();
- expect(await screen.findByRole("columnheader",{name:"Ready"})).toBeTruthy();
+ expect(await screen.findByRole("columnheader",{name:/Ready/})).toBeTruthy();
 });
 
 it("offers both contexts sharing a stable ID by their distinct keys", async () => {
@@ -1853,22 +1842,97 @@ it("selects rows one by one and all at once, and says how many are selected", as
   expect(screen.queryByTestId("bulk-count")).toBeNull();
 });
 
-it("unticks every selected row from the header, past the rows a refresh left drawn", async () => {
+const rowOf = (name: string) => within(screen.getByRole("table")).getByText(name).closest("tr") as HTMLElement;
+
+it("selects every row it holds from the header, in view or not", async () => {
   const { inspectExtensionResource } = await import("@srelens/core");
   const items = Array.from({ length: 150 }, (_, i) => ({ name: `app-${i}`, namespace: "team", age: "1d", columns: [] as string[] }));
   vi.mocked(readExtension).mockResolvedValue({ items });
   vi.mocked(inspectExtensionResource).mockResolvedValue(menuDetail as any);
   render(<ExtensionResults plugin={actionable} capability="list" context="cluster/a" />);
   await screen.findByText("app-0");
-  fireEvent.click(screen.getByRole("button", { name: /Show 50 more/ }));
   fireEvent.click(screen.getByLabelText("Select all"));
   expect((await screen.findByTestId("bulk-count")).textContent).toBe("150 selected");
-  fireEvent.click(screen.getByRole("button", { name: "Refresh" }));
-  await screen.findByLabelText("Select all");
-  expect(screen.queryByText("app-100")).toBeNull();
-  expect(screen.getByTestId("bulk-count").textContent).toBe("150 selected");
   fireEvent.click(screen.getByLabelText("Select all"));
   expect(screen.queryByTestId("bulk-count")).toBeNull();
+});
+
+it("is the kit's table, sortable by any column", async () => {
+  vi.mocked(readExtension).mockResolvedValue(threeRows as any);
+  render(<ExtensionResults plugin={plugin} capability="list" context="cluster/a" />);
+  await screen.findByText("apps");
+  expect(screen.getByRole("table").classList.contains("tbl")).toBe(true);
+  fireEvent.click(screen.getByRole("button", { name: "Sort by Name" }));
+  fireEvent.click(screen.getByRole("button", { name: "Sort by Name" }));
+  const names = within(screen.getByRole("table")).getAllByRole("row").slice(1).map((row) => within(row).getAllByRole("cell")[0].textContent);
+  expect(names).toEqual(["web", "infra", "apps"]);
+});
+
+it("peeks at a row on a click and opens it with Enter", async () => {
+  const { inspectExtensionResource } = await import("@srelens/core");
+  const { ExtensionResourceNavigation } = await import("./Extensions");
+  vi.mocked(readExtension).mockResolvedValue(threeRows as any);
+  vi.mocked(inspectExtensionResource).mockResolvedValue(menuDetail as any);
+  const open = vi.fn();
+  render(<ExtensionResourceNavigation.Provider value={open}><ExtensionResults plugin={actionable} capability="list" context="cluster/a" /></ExtensionResourceNavigation.Provider>);
+  await screen.findByText("apps");
+  fireEvent.click(rowOf("apps"));
+  expect(rowOf("apps").getAttribute("aria-selected")).toBe("true");
+  fireEvent.keyDown(rowOf("apps"), { key: "Enter" });
+  expect(open).toHaveBeenCalledWith(expect.objectContaining({ name: "apps", namespace: "team" }));
+});
+
+it("peeks with Enter where the page cannot open a tab", async () => {
+  const { inspectExtensionResource } = await import("@srelens/core");
+  vi.mocked(readExtension).mockResolvedValue(threeRows as any);
+  vi.mocked(inspectExtensionResource).mockResolvedValue(menuDetail as any);
+  render(<ExtensionResults plugin={actionable} capability="list" context="cluster/a" />);
+  await screen.findByText("apps");
+  fireEvent.keyDown(rowOf("apps"), { key: "Enter" });
+  expect(rowOf("apps").getAttribute("aria-selected")).toBe("true");
+});
+
+it("puts focus back on the row when its peek closes", async () => {
+  const { inspectExtensionResource } = await import("@srelens/core");
+  vi.mocked(readExtension).mockResolvedValue(threeRows as any);
+  vi.mocked(inspectExtensionResource).mockResolvedValue(menuDetail as any);
+  render(<ExtensionResults plugin={actionable} capability="list" context="cluster/a" />);
+  await screen.findByText("apps");
+  fireEvent.click(rowOf("apps"));
+  fireEvent.click(await screen.findByRole("button", { name: /^Close/ }));
+  await waitFor(() => expect(document.activeElement).toBe(rowOf("apps")));
+});
+
+it("says a list is empty with the kit's empty state", async () => {
+  vi.mocked(readExtension).mockResolvedValue({ items: [] } as any);
+  render(<ExtensionResults plugin={plugin} capability="list" context="cluster/a" noun="applications" />);
+  expect(await screen.findByText("No applications")).toBeTruthy();
+  expect(screen.getByText("No resources returned by this app.")).toBeTruthy();
+});
+
+it("draws a printer column that is a state as the standard status", async () => {
+  vi.mocked(readExtension).mockResolvedValue({ items: [
+    { name: "up", namespace: "team", age: "1d", columns: ["True", "False"] },
+    { name: "down", namespace: "team", age: "1d", columns: ["False", "True"] },
+  ], printerColumns: [{ name: "Ready" }, { name: "Suspended" }] } as any);
+  render(<ExtensionResults plugin={plugin} capability="list" context="cluster/a" />);
+  await screen.findByText("up");
+  expect(within(rowOf("up")).getByText("Ready").dataset.kind).toBe("success");
+  expect(within(rowOf("up")).getByText("No").dataset.kind).toBe("neutral");
+  expect(within(rowOf("down")).getByText("Not ready").dataset.kind).toBe("warning");
+  expect(within(rowOf("down")).getByText("Yes").dataset.kind).toBe("warning");
+});
+
+it("lets the reader hide a column, but never the name", async () => {
+  const { resetColumns } = await import("../lib/columnPrefs");
+  vi.mocked(readExtension).mockResolvedValue(threeRows as any);
+  render(<ExtensionResults plugin={plugin} capability="list" context="cluster/a" />);
+  await screen.findByText("apps");
+  fireEvent.click(screen.getByRole("button", { name: "Columns" }));
+  fireEvent.click(await screen.findByRole("checkbox", { name: "Namespace" }));
+  expect(screen.queryByRole("columnheader", { name: /Namespace/ })).toBeNull();
+  expect((screen.getByRole("checkbox", { name: "Name" }) as HTMLInputElement).disabled).toBe(true);
+  resetColumns("extension:org.test.gitops:list");
 });
 
 it("offers no selection column on a table whose rows the host has no actions for", async () => {

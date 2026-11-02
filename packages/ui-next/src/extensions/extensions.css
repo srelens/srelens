@@ -61,28 +61,20 @@
 .extension-table-scroll {
   overflow: auto;
 }
-.extension-results table {
+.extension-results table:not(.tbl) {
   width: 100%;
   border-collapse: collapse;
   white-space: nowrap;
 }
-.extension-results th,
-.extension-results td {
+.extension-results table:not(.tbl) th,
+.extension-results table:not(.tbl) td {
   padding: 7px 12px;
   text-align: left;
   border-bottom: 1px solid var(--rule, var(--fl-color-border));
 }
-.extension-results th {
+.extension-results table:not(.tbl) th {
   font-weight: 600;
   background: var(--surface, var(--fl-color-surface));
-}
-.extension-column-sort {
-  all: unset;
-  cursor: pointer;
-}
-.extension-column-sort:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 2px;
 }
 /* An app's resolved status or badge (#541): a word in a badge, and the
    reason beside it as one line that does not wrap into the row. */
@@ -193,29 +185,28 @@
   color: var(--ink-muted, var(--fl-color-text-muted));
   white-space: nowrap;
 }
-.extension-results th {
+.extension-results table:not(.tbl) th {
   font-size: var(--text-meta, 0.6875rem);
   letter-spacing: 0.07em;
   text-transform: uppercase;
   color: var(--ink-faint, var(--fl-color-text-muted));
   padding: 5px 10px;
 }
-.extension-results td {
+.extension-results table:not(.tbl) td {
   font-size: var(--text-body, 0.8125rem);
   padding: var(--pad-y, 0.2rem) 10px;
   height: var(--row-h, 27px);
   box-sizing: border-box;
   font-variant-numeric: tabular-nums;
 }
-.extension-results td:last-child,
-.extension-results th:last-child {
+.extension-results table:not(.tbl) td:last-child,
+.extension-results table:not(.tbl) th:last-child {
   text-align: right;
 }
-.extension-results tbody tr:hover {
+.extension-results table:not(.tbl) tbody tr:hover {
   background: var(--surface-sunk, var(--fl-color-surface-alt));
 }
-.extension-value,
-.extension-resource-name {
+.extension-value {
   display: inline-block;
   max-width: 32ch;
   vertical-align: middle;
@@ -223,26 +214,8 @@
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.extension-value[data-tone="ready"] {
-  color: var(--ok, var(--fl-color-success));
-}
-.extension-value[data-tone="warning"] {
-  color: var(--warn, var(--fl-color-warning));
-}
-.extension-value[data-tone="muted"],
-.extension-namespace {
+.extension-value[data-tone="muted"] {
   color: var(--ink-muted, var(--fl-color-text-muted));
-}
-.extension-value[data-tone="ready"]::before,
-.extension-value[data-tone="warning"]::before {
-  content: "";
-  display: inline-block;
-  width: 5px;
-  height: 5px;
-  border-radius: 50%;
-  background: currentColor;
-  vertical-align: middle;
-  margin-right: 6px;
 }
 
 /* Settings uses the same body/meta scale as the owning design. */
@@ -425,9 +398,6 @@
 
 .extension-logo { display: inline-block; flex-shrink: 0; vertical-align: middle; }
 
-.extension-resource-link { padding: 0; background: none; border: 0; color: var(--accent, var(--fl-color-primary)); font: inherit; cursor: pointer; text-align: left; }
-.extension-resource-link:hover { text-decoration: underline; }
-.extension-resource-link:focus-visible { outline: 2px solid currentColor; outline-offset: 3px; }
 .extension-resource-detail { display: flex; flex-direction: column; min-width: 0; overflow: hidden; }
 .extension-resource-detail > .pane { flex: 1; min-height: 0; }
 .extension-detail-heading { margin: 0; padding: 8px 12px; font-size: inherit; font-weight: 600; background: var(--surface, var(--fl-color-surface)); border-block: 1px solid var(--rule, var(--fl-color-border)); }
@@ -456,11 +426,12 @@
 .extension-resource-list { display: flex; flex-direction: column; flex: 1; min-width: 0; min-height: 0; }
 .extension-resource-list > .extension-toolbar { flex-shrink: 0; }
 .extension-resource-list > .extension-table-scroll { flex: 1; min-height: 0; }
+/* The kit's table draws only the rows in view of a scroller with a height of its own. */
+.extension-resource-slot .extension-results { max-height: 60vh; }
 .extension-detail-peek { position: relative; display: flex; flex-direction: column; flex-shrink: 0; min-height: 0; }
 .extension-detail-peek > .extension-resource-detail { flex: 1; min-height: 0; }
 .extension-resource-detail { flex: 1; min-height: 0; }
 .extension-detail-peek .extension-toolbar { gap: 6px; padding: 8px 12px; }
-.extension-results tbody tr[aria-selected="true"] { background: var(--accent-wash, var(--fl-color-surface)); }
 .extension-condition-list article { padding: 8px 12px; border-bottom: 1px solid var(--rule, var(--fl-color-border)); }
 .extension-condition-list p { margin: 4px 0; white-space: normal; overflow-wrap: break-word; }
 .extension-condition-list strong { font-weight: 600; }
@@ -480,7 +451,6 @@
 .extension-entries tbody tr:last-child td { border-bottom: 0; }
 
 /* Bulk actions over a selection of an app's resources (#553). */
-.extension-results th.extension-check, .extension-results td.extension-check { width: 2.25rem; padding-right: 0; }
 .extension-bulk { flex-shrink: 0; border-bottom: 1px solid var(--rule, var(--fl-color-border)); background: var(--surface, var(--fl-color-surface)); }
 .extension-bulk:empty { display: none; }
 .extension-bulk-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 8px 12px; }

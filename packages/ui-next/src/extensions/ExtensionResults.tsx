@@ -2,12 +2,13 @@ import { AgeCell } from "../lib/ageCell";
 import { ExtensionResourceDetails } from "./ExtensionResourceDetails";
 import { ExtensionBulkActions, type BulkActionAvailability } from "./ExtensionBulkActions";
 import { bulkResourceKey } from "./bulkActions";
-import { Button, Checkbox, ResizeHandle, filterMatcher } from "@srelens/ui-kit";
+import { Button, ColumnPicker, ResizeHandle, StatusPill, Table, filterTableData, type Column, type TableSort } from "@srelens/ui-kit";
 import { clampPeekWidth, savePeekWidth, setPeekWidth, usePeekBounds, usePeekWidth } from "../lib/peekWidth";
 import { ExtensionResourceNavigation } from "./resourceNavigation";
 import { useContext, useMemo, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import {
+  ageSortValue,
   describeError,
   onExtensionResourceChanged,
   readExtension,
@@ -19,13 +20,22 @@ import { useResource } from "../lib/useResource";
 import { useResolvedColumns } from "./useResolvedColumns";
 import { contributionKind } from "@srelens/core";
 import { useContextId } from "./contextIds";
-import { StatusBadge } from "./StatusBadge";
+import { AppStatus, statusWord } from "./AppStatus";
 import { LiveNotice, LiveStatus, useLiveReaders } from "./liveReaders";
 import { readAcross, readerKind, readerNamespaces } from "./readAcross";
 import { nameFilterAnswered, useCollectionNameFilter } from "../lib/collectionNameFilter";
 import { NamespaceFailuresAlert } from "../lib/errorCopy";
 import { CollectionNameNotice } from "../screens/collections/NamespaceScope";
 import { ListCount } from "../screens/ListCount";
+import { columnOptionsFor, emptyTableCopy } from "../screens/resourceShell";
+import { toggleColumn, useHiddenColumns } from "../lib/columnPrefs";
+import { useRowRefocus } from "../lib/kinds/namespaceCell";
+
+type Row = ExtensionResourceResult["items"][number];
+
+/** The identifier: never hidden, as on a built-in list. */
+const NAME_KEY = "name";
+const NO_COLUMNS: { name: string }[] = [];
 
 export function ErrorNotice({
   message,
@@ -62,36 +72,22 @@ export function ErrorNotice({
     </div>
   );
 }
+/** A printer column's value: the standard status where it names a state, and text otherwise. */
 function ResultValue({ value, column }: { value?: string; column: string }) {
   const raw = value || "—";
   const boolean = raw.toLowerCase();
-  let label = raw;
-  let tone = "neutral";
-  if (column === "Ready" && (boolean === "true" || boolean === "false")) {
-    label = boolean === "true" ? "Ready" : "Not ready";
-    tone = boolean === "true" ? "ready" : "warning";
-  } else if (
-    ["Suspended", "Reconciling"].includes(column) &&
-    ["true", "false"].includes(boolean)
-  ) {
-    label =
-      boolean === "false"
-        ? "No"
-        : column === "Reconciling"
-          ? "In progress"
-          : "Yes";
-    tone = boolean === "true" ? "warning" : "muted";
+  if (boolean === "true" || boolean === "false") {
+    const yes = boolean === "true";
+    if (column === "Ready") return <StatusPill status={yes ? "Ready" : "Not ready"} kind={yes ? "success" : "warning"} />;
+    if (column === "Suspended" || column === "Reconciling") {
+      const on = column === "Reconciling" ? "In progress" : "Yes";
+      return <StatusPill status={yes ? on : "No"} kind={yes ? "warning" : "neutral"} />;
+    }
   }
   const revision = raw.match(/^(.*?)@sha(?:1|256):([a-f0-9]{16,})$/i);
-  if (revision) label = `${revision[1]}@${revision[2].slice(0, 8)}`;
   return (
-    <span
-      className="extension-value"
-      data-tone={tone}
-      title={raw}
-      aria-label={revision ? raw : undefined}
-    >
-      {label}
+    <span className="extension-value" title={raw} aria-label={revision ? raw : undefined}>
+      {revision ? `${revision[1]}@${revision[2].slice(0, 8)}` : raw}
     </span>
   );
 }
@@ -145,14 +141,14 @@ export function ExtensionResults({
   // card's own read keeps the namespaces it counted in, whatever kind they are.
   const namespaces = readerNamespaces(plugin, capability, chosen);
   const openResource = useContext(ExtensionResourceNavigation);
-  const rowButtons = useRef(new Map<string,HTMLButtonElement>());
+  const refocus = useRowRefocus();
   const listRow = usePeekBounds();
   const peekWidth = clampPeekWidth(usePeekWidth(), listRow.bounds);
   // The card is part of what is on screen: the filtered and whole lists keep no rows of each other.
   const scope = JSON.stringify([plugin.manifest.id,plugin.revision,capability,context,chosen,card ?? ""]);
   const [selected,setSelected] = useState<{scope:string;name:string;namespace:string}|null>(null);
   const preview = previewRows !== undefined;
-  const [columnSort, setColumnSort] = useState<{key:string;direction:"asc"|"desc"}|null>(null);
+  const [columnSort, setColumnSort] = useState<TableSort|null>(null);
   useEffect(() => setColumnSort(null), [scope]);
   // The rows a bulk action would run against, by key. Cleared whenever the
   // scope moves: a rail switch behind the bar must not leave prod's rows
@@ -238,16 +234,48 @@ export function ExtensionResults({
   const appColumns = useResolvedColumns({
     plugins: [plugin], context, contextId, namespaces, kind: columnKind, rows: sourceRows, refresh,
   });
-  const columns = preview ? [] : data.data?.printerColumns ?? (Array.isArray(binding?.arguments.printerColumns)
+  const printer = preview ? NO_COLUMNS : data.data?.printerColumns ?? (Array.isArray(binding?.arguments.printerColumns)
     ? (binding.arguments.printerColumns as Array<{ name: string }>)
-    : []);
-  // Bound how many matching rows enter the DOM; Load more reveals the next page
-  // of the already-capped backend result (#609).
-  const PAGE = 100;
-  const [visible, setVisible] = useState(PAGE);
-  useEffect(() => {
-    setVisible(PAGE);
-  }, [scope, search, regex, refresh, data.status, columnSort]);
+    : NO_COLUMNS);
+  const allColumns = useMemo(() => {
+    const columns: Column<Row>[] = [
+      { key: NAME_KEY, header: "Name" },
+      { key: "namespace", header: "Namespace", render: (row) => row.namespace || "—" },
+      ...(resolvesStatus ? [{
+        key: "status",
+        header: "Status",
+        getValue: (row: Row) => row.status ? statusWord(row.status) : "",
+        render: (row: Row) => row.status ? <AppStatus resolved={row.status} showReason /> : <span title="The host returned no status for this resource">—</span>,
+      }] : []),
+      ...printer.map((column, index): Column<Row> => ({
+        key: `printer:${index}:${column.name}`,
+        header: column.name,
+        getValue: (row) => row.columns?.[index] ?? "",
+        render: (row) => <ResultValue value={row.columns?.[index]} column={column.name} />,
+      })),
+      ...appColumns.columns,
+      ...(preview ? [] : [{
+        key: "age",
+        header: "Age",
+        align: "end" as const,
+        getSortValue: ageSortValue,
+        render: (row: Row) => <AgeCell created={row.created} age={row.age} />,
+      }]),
+    ];
+    // A preview keeps the order its card declared.
+    return preview ? columns.map((column) => ({ ...column, sortable: false })) : columns;
+  }, [preview, resolvesStatus, printer, appColumns.columns]);
+  const columnsKey = `extension:${plugin.manifest.id}:${capability}`;
+  const hiddenColumns = useHiddenColumns(columnsKey);
+  const shownColumns = useMemo(
+    () => allColumns.filter((column) => column.key === NAME_KEY || !hiddenColumns.has(column.key)),
+    [allColumns, hiddenColumns],
+  );
+  const rows = useMemo(() => filterTableData(sourceRows, shownColumns, search, null, regex), [sourceRows, shownColumns, search, regex]);
+  const ordered = useMemo(
+    () => previewRows ? previewRows.flatMap((wanted) => rows.filter((row) => row.name === wanted.name && row.namespace === wanted.namespace)) : rows,
+    [previewRows, rows],
+  );
   useEffect(() => {
     if (data.status !== "loading") loaded.current = true;
   }, [data.status]);
@@ -303,23 +331,6 @@ export function ExtensionResults({
         Loading app resources…
       </p>
     );
-  const matches = filterMatcher(search, regex);
-  const rows = sourceRows.filter((row) =>
-    [row.name, row.namespace, ...row.columns, ...(resolvesStatus && row.status ? [row.status.label] : []),
-      ...appColumns.columns.filter((column) => column.filterable === true).map((column) => column.getValue?.(row) ?? "")]
-      .some((value) => matches(String(value))),
-  );
-  const sortColumn = appColumns.columns.find((column) => column.key === columnSort?.key && column.sortable);
-  const collator = new Intl.Collator(undefined, {numeric:true,sensitivity:"base"});
-  const ordered = previewRows ? previewRows.flatMap(wanted=>rows.filter(row=>row.name===wanted.name && row.namespace===wanted.namespace)) : sortColumn && columnSort ? [...rows].sort((left, right) => {
-    const a = sortColumn.getSortValue?.(left) ?? sortColumn.getValue?.(left) ?? "";
-    const b = sortColumn.getSortValue?.(right) ?? sortColumn.getValue?.(right) ?? "";
-    const comparison = typeof a === "number" && typeof b === "number"
-      ? a - b : collator.compare(String(a), String(b));
-    return comparison * (columnSort.direction === "asc" ? 1 : -1);
-  }) : rows;
-  const shown = ordered.slice(0, preview ? ordered.length : visible);
-  const hidden = Math.max(0, rows.length - shown.length);
   // Only a binding the host runs actions against gets a selection column:
   // checkboxes over a table with nothing to do on it are furniture.
   const selectable = !preview && binding?.target === "k8s.listCustomResource";
@@ -327,23 +338,17 @@ export function ExtensionResults({
   // filter no longer shows is a resource the bar cannot act on, and a count
   // that includes it would promise a write that never happens.
   const pickedRows = selectable ? rows.filter((row) => picked.has(bulkResourceKey(row))) : [];
-  const visibleKeys = shown.map((row) => bulkResourceKey(row));
-  const allVisiblePicked = visibleKeys.length > 0 && visibleKeys.every((key) => picked.has(key));
-  const toggleAllVisible = () =>
-    setPicked((prev) => {
-      const next = new Set(prev);
-      // Unticking reaches every row the bar counts: a refresh, sort or filter
-      // puts picked rows past the ones drawn, and the bar still counts them.
-      if (allVisiblePicked) for (const row of pickedRows) next.delete(bulkResourceKey(row));
-      else for (const key of visibleKeys) next.add(key);
-      return next;
-    });
-  const toggleRow = (key: string) =>
-    setPicked((prev) => {
-      const next = new Set(prev);
-      if (!next.delete(key)) next.add(key);
-      return next;
-    });
+  const peekable = binding?.target === "k8s.listCustomResource";
+  const peek = (row: Row) => setSelected({ scope, name: row.name, namespace: row.namespace });
+  const activate = (row: Row) => openResource
+    ? openResource({ id: plugin.manifest.id, revision: plugin.revision, capability, context, namespace: row.namespace, name: row.name })
+    : peek(row);
+  const empty = sourceRows.length
+    ? emptyTableCopy(sourceRows.length, noun, "", "")
+    : { emptyText: `No ${noun}`, emptyHint: listed.length ? "None are in this cluster's collection." : "No resources returned by this app." };
+  const picker = !preview && (
+    <ColumnPicker columns={columnOptionsFor(allColumns)} hidden={hiddenColumns} onToggle={(key) => toggleColumn(columnsKey, key)} pinnedKey={NAME_KEY} />
+  );
   return (
     <section className="extension-results" ref={listRow.ref}>
       <div className="extension-resource-list">
@@ -368,14 +373,15 @@ export function ExtensionResults({
                 : "All namespaces"}
           </span>
           <LiveStatus live={live} />
+          {picker}
           <Button variant="secondary" onClick={data.reload}>
             Refresh
           </Button>
         </div>
       )}
       {hideToolbar && (header
-        ? createPortal(<>{nameFilterAnswered(nameFilter) && <ListCount total={sourceRows.length} shown={rows.length} truncated={data.data?.truncated} noun={noun} />}<LiveStatus live={live} /></>, header)
-        : <div className="extension-live-row"><LiveStatus live={live} /></div>)}
+        ? createPortal(<>{nameFilterAnswered(nameFilter) && <ListCount total={sourceRows.length} shown={rows.length} truncated={data.data?.truncated} noun={noun} />}<LiveStatus live={live} />{picker}</>, header)
+        : <div className="extension-live-row"><LiveStatus live={live} />{picker}</div>)}
       <LiveNotice live={live} what="list" />
       {/* One notice when both are down for one reason; the columns' own only when they differ. */}
       {appColumns.live.state !== live.state && <LiveNotice live={appColumns.live} what="app column values" />}
@@ -389,93 +395,26 @@ export function ExtensionResults({
           barSlot={bulkBar}
         />
       )}
-      {data.status === "loading" ? <p className="extension-message" role="status">Refreshing resources…</p> : data.status === "error" ? <ErrorNotice cluster message={data.error} retry={data.reload}/> : !nameFilterAnswered(nameFilter) ? null : shown.length ? (
-        <div className="extension-table-scroll" data-stale={live.state === "reconnecting" || undefined}>
-          <table>
-            <thead>
-              <tr>
-                {selectable && (
-                  <th className="extension-check" scope="col">
-                    <Checkbox
-                      checked={allVisiblePicked}
-                      indeterminate={!allVisiblePicked && visibleKeys.some((key)=>picked.has(key))}
-                      onChange={toggleAllVisible}
-                      ariaLabel="Select all"
-                    />
-                  </th>
-                )}
-                <th>Name</th>
-                <th>Namespace</th>
-                {resolvesStatus && <th>Status</th>}
-                {columns.map((c, i) => (
-                  <th key={i}>{c.name}</th>
-                ))}
-                {appColumns.columns.map((column) => <th key={column.key} aria-sort={columnSort?.key === column.key ? (columnSort.direction === "asc" ? "ascending" : "descending") : undefined}>
-                  {column.sortable && !preview ? <button type="button" className="extension-column-sort" aria-label={`Sort by ${column.header}`}
-                    onClick={() => setColumnSort((current) => ({key:column.key,direction:current?.key === column.key && current.direction === "asc" ? "desc" : "asc"}))}>
-                    {column.header}{columnSort?.key === column.key && <span aria-hidden="true"> {columnSort.direction === "asc" ? "↑" : "↓"}</span>}
-                  </button> : column.header}
-                </th>)}
-                {!preview && <th>Age</th>}
-              </tr>
-            </thead>
-            <tbody>
-              {shown.map((row) => (
-                <tr key={`${row.namespace}/${row.name}`} aria-selected={selected?.scope===scope && selected.name===row.name && selected.namespace===row.namespace} onDoubleClick={openResource && binding?.target === "k8s.listCustomResource" ? ()=>openResource({id:plugin.manifest.id,revision:plugin.revision,capability,context,namespace:row.namespace,name:row.name}):undefined} onClick={binding?.target === "k8s.listCustomResource" ? ()=>setSelected({scope,name:row.name,namespace:row.namespace}):undefined}>
-                  {selectable && (
-                    // Checking a box picks a row for a bulk action; it does not
-                    // also open the detail peek behind it.
-                    <td className="extension-check" onClick={(event)=>event.stopPropagation()}>
-                      <Checkbox
-                        checked={picked.has(bulkResourceKey(row))}
-                        onChange={()=>toggleRow(bulkResourceKey(row))}
-                        ariaLabel={`Select ${bulkResourceKey(row)}`}
-                      />
-                    </td>
-                  )}
-                  <td>
-                    {binding?.target === "k8s.listCustomResource" ? <button className="extension-resource-link" ref={node=>{const key=`${row.namespace}/${row.name}`;if(node)rowButtons.current.set(key,node);else rowButtons.current.delete(key);}} onKeyDown={e=>{if(e.key==="Enter" && openResource){e.preventDefault();openResource({id:plugin.manifest.id,revision:plugin.revision,capability,context,namespace:row.namespace,name:row.name});}}} onClick={()=>setSelected({scope,name:row.name,namespace:row.namespace})}>{row.name}</button> : <span className="extension-resource-name" title={row.name}>{row.name}</span>}
-                  </td>
-                  <td className="extension-namespace">
-                    {row.namespace || "—"}
-                  </td>
-                  {resolvesStatus && (
-                    <td className="extension-status-cell">
-                      {row.status ? <StatusBadge resolved={row.status} showReason /> : <span title="The host returned no status for this resource">—</span>}
-                    </td>
-                  )}
-                  {columns.map((column, i) => (
-                    <td key={i}>
-                      <ResultValue
-                        value={row.columns?.[i]}
-                        column={column.name}
-                      />
-                    </td>
-                  ))}
-                  {appColumns.columns.map((column) => <td key={column.key}>{column.render?.(row)}</td>)}
-                  {!preview && <td><AgeCell created={row.created} age={row.age} /></td>}
-                </tr>
-              ))}
-            </tbody>
-          </table>
-          {!preview && hidden > 0 && (
-            <p className="extension-message">
-              <Button variant="secondary" onClick={() => setVisible((n) => n + PAGE)}>
-                Show {Math.min(PAGE, hidden).toLocaleString()} more
-              </Button>
-              <span> · {hidden.toLocaleString()} matching rows not shown</span>
-            </p>
-          )}
+      {data.status === "loading" ? <p className="extension-message" role="status">Refreshing resources…</p> : data.status === "error" ? <ErrorNotice cluster message={data.error} retry={data.reload}/> : !nameFilterAnswered(nameFilter) ? null : (
+        <div ref={refocus.scope} className="extension-table-scroll" data-stale={live.state === "reconnecting" || undefined}>
+          <Table
+            columns={shownColumns}
+            data={ordered}
+            getRowKey={bulkResourceKey}
+            selection={selectable ? { selected: picked, onChange: setPicked } : undefined}
+            selectedKey={selected?.scope === scope ? bulkResourceKey(selected) : undefined}
+            sort={columnSort}
+            onSortChange={setColumnSort}
+            onRowClick={peekable ? peek : undefined}
+            onRowActivate={peekable ? activate : undefined}
+            {...empty}
+          />
         </div>
-      ) : (
-        <p className="extension-message">
-          {data.data?.items.length ? "No matching resources." : "No resources returned by this app."}
-        </p>
       )}
       </div>
       {selected?.scope === scope && <div className="extension-detail-peek" style={{width:peekWidth}}>
         <ResizeHandle label="the resource details" width={peekWidth} minWidth={listRow.bounds.minWidth} maxWidth={listRow.bounds.maxWidth} edge="left" onResize={setPeekWidth} onCommit={savePeekWidth}/>
-        <ExtensionResourceDetails key={`${scope}/${selected.namespace}/${selected.name}`} selection={{id:plugin.manifest.id,revision:plugin.revision,capability,context,namespace:selected.namespace,name:selected.name}} onClose={()=>{setSelected(null);rowButtons.current.get(`${selected.namespace}/${selected.name}`)?.focus();}} />
+        <ExtensionResourceDetails key={`${scope}/${selected.namespace}/${selected.name}`} selection={{id:plugin.manifest.id,revision:plugin.revision,capability,context,namespace:selected.namespace,name:selected.name}} onClose={()=>{refocus.remember(bulkResourceKey(selected));setSelected(null);}} />
       </div>}
     </section>
   );
