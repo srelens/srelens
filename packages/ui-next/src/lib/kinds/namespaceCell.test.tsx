@@ -329,6 +329,17 @@ describe("useRowRefocus", () => {
     expect(document.activeElement).toBe(document.body);
   });
 
+  it("falls back to the table's tab stop when other rows came back without it", async () => {
+    // A long table does this too: a row scrolled out of its window isn't drawn.
+    const view = render(<Reloading />);
+    screen.getByRole("button", { name: "Show only namespace monitoring" }).focus();
+    await userEvent.keyboard("{Enter}");
+
+    view.rerender(<Reloading rows={[{ name: "alertmanager-0", namespace: "monitoring" }]} />);
+    act(() => finish());
+    expect(document.activeElement).toBe(rowOf("alertmanager-0"));
+  });
+
   it("gives up after a while rather than moving focus on a reader who has moved on", async () => {
     vi.useFakeTimers({ now: new Date("2026-10-07T10:00:00.000Z"), shouldAdvanceTime: true });
     const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
