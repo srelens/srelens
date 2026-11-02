@@ -19,6 +19,11 @@ describe("Section", () => {
     expect(screen.getByRole("heading", { level: 3, name: "Conditions" })).toBeDefined();
   });
 
+  it("can be named, so a block a page finds by name is a region", () => {
+    render(<Section title="App summary" aria-label="App summary">rows</Section>);
+    expect(screen.getByRole("region", { name: "App summary" })).toBeDefined();
+  });
+
   it("renders its content", () => {
     render(<Section title="Labels">app=web</Section>);
     expect(screen.getByText("app=web")).toBeDefined();

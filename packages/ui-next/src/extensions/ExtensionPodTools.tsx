@@ -34,7 +34,7 @@ import {
   type InstalledExtension,
   type LogTarget,
 } from "@srelens/core";
-import { Button, Combobox, usePortalShowing } from "@srelens/ui-kit";
+import { Button, Combobox, Section, usePortalShowing } from "@srelens/ui-kit";
 import { HostConfirmation } from "../confirm/HostConfirmation";
 import { useProtectedConfirm } from "../lib/protectedConfirm";
 import { useConfirmationApp } from "../confirm/confirmationApp";
@@ -115,10 +115,9 @@ export function ExtensionPodSlot({ context, resource }: { context: string; resou
   // A failed listing is said, with a retry, and never drawn as no app having pod tools here.
   if (inventory.status === "error")
     return (
-      <section className="section extension-pod-tools" aria-label="App pod tools">
-        <h4 className="extension-detail-heading">App pod tools</h4>
+      <Section title="App pod tools" className="extension-pod-tools" aria-label="App pod tools">
         <ErrorNotice title="Could not list the installed apps" message={inventory.error} retry={inventory.reload} />
-      </section>
+      </Section>
     );
   const group = resource.apiVersion.includes("/") ? resource.apiVersion.split("/")[0] : "";
   const kind = contributionKind(resource.kind, group);
@@ -134,14 +133,13 @@ export function ExtensionPodSlot({ context, resource }: { context: string; resou
   return (
     <>
       {limited && lookup.status === "failed" && (
-        <section className="section extension-pod-tools" aria-label="App pod tools">
-          <h4 className="extension-detail-heading">App pod tools</h4>
+        <Section title="App pod tools" className="extension-pod-tools" aria-label="App pod tools">
           <ErrorNotice
             title="Could not list the clusters, so pod tools from apps limited to some clusters are not shown"
             message={lookup.error}
             retry={() => void refreshContextIds()}
           />
-        </section>
+        </Section>
       )}
       {limited && lookup.status === "loading" && (
         <p className="extension-message">Checking which clusters app pod tools are enabled for…</p>
@@ -209,17 +207,15 @@ export function ExtensionPodTools({
   }, [bindings]);
   if (!isTauri()) {
     return (
-      <section className="section extension-pod-tools" aria-label={`${plainText(app)} pod tools`}>
-        <h4 className="extension-detail-heading">{plainText(app)} · pods</h4>
+      <Section title={`${plainText(app)} · pods`} className="extension-pod-tools" aria-label={`${plainText(app)} pod tools`}>
         <p className="extension-message">
           Logs, commands and port-forwards from apps run in the desktop app. The web app does not run app streams yet.
         </p>
-      </section>
+      </Section>
     );
   }
   return (
-    <section className="section extension-pod-tools" aria-label={`${plainText(app)} pod tools`}>
-      <h4 className="extension-detail-heading">{plainText(app)} · pods</h4>
+    <Section title={`${plainText(app)} · pods`} className="extension-pod-tools" aria-label={`${plainText(app)} pod tools`}>
       {groups.map((group) => (
         <PodGroup
           key={scopeKey(group[0])}
@@ -264,7 +260,7 @@ export function ExtensionPodTools({
           ))}
         </div>
       )}
-    </section>
+    </Section>
   );
 }
 

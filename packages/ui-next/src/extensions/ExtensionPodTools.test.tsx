@@ -111,6 +111,11 @@ async function openTools(resource: unknown = deployment) {
   return screen.findByRole("region", { name: "cert-manager pod tools" });
 }
 
+it("keeps a pod's row inside the section's inset, under its heading", async () => {
+  const tools = await openTools();
+  expect(tools.hasAttribute("data-padded")).toBe(false);
+});
+
 describe("which bindings a resource offers", () => {
   it("offers a binding scoped by a reader of this kind, and a namespace grant only on its pods", () => {
     const names = (kind: string, namespace: string) =>
@@ -405,6 +410,7 @@ describe("the pod tools when a listing fails", () => {
     render(<ExtensionPodSlot context="kind-dev" resource={deployment} />);
     const tools = await screen.findByRole("region", { name: "App pod tools" });
     expect(within(tools).getByRole("alert").textContent).toContain("Could not list the clusters");
+    expect(document.querySelector(".extension-detail-heading")).toBeNull();
     expect(screen.queryByRole("region", { name: "cert-manager pod tools" })).toBeNull();
     // Once the clusters list, and this is one the app is enabled for, its tools are there.
     vi.mocked(listContexts).mockResolvedValue({ contexts: [{ name: "kind-dev", key: "/kube/config#kind-dev" }] } as never);

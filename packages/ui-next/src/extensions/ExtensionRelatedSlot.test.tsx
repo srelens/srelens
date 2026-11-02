@@ -49,6 +49,7 @@ it("links each related resource to a route carrying its cluster and app kind", a
   ] })]));
   render(<ExtensionRelatedSlot context="prod" resource={resource}/>);
   expect(screen.getByRole("heading", { name:"Related" })).toBeTruthy();
+  expect(document.querySelector(".extension-detail-heading")).toBeNull();
   const first = await screen.findByRole("button", { name:/Managed by.*Application.*argocd\/guestbook/ });
   await waitFor(() => expect(resolveExtensionLinks).toHaveBeenCalledWith(
     "org.example.argocd", 4, "prod", "team", "apps/Deployment", resource));

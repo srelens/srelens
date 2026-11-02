@@ -3,7 +3,7 @@ import { ExtensionPanelSlot } from "../../extensions/ExtensionPanelSlot";
 import { ExtensionProviderSlot } from "../../extensions/ExtensionProviderSlot";
 import { ExtensionRelatedSlot } from "../../extensions/ExtensionRelatedSlot";
 import { ExtensionPodSlot } from "../../extensions/ExtensionPodTools";
-import { useId, type ReactNode } from "react";
+import type { ReactNode } from "react";
 import {
   ageFromTimestamp,
   asRecord,
@@ -14,22 +14,13 @@ import {
   type K8sObject,
   type ResourceStatusLine,
 } from "@srelens/core";
-import {
-  Breadcrumb,
-  KV,
-  LoadingState,
-  Stat,
-  statusTone,
-  Tabs,
-  type StatProps,
-  type TabItem,
-} from "@srelens/ui-kit";
+import { LoadingState, statusTone, type TabItem } from "@srelens/ui-kit";
 import { FailureState } from "../../lib/errorCopy";
 import { CUSTOM_RESOURCE_ACTIONS } from "../../lib/kinds/custom";
 import { formatCpu, formatMemory } from "../../lib/kinds/columns";
-import { CopyNameButton } from "./CopyNameButton";
 import { DetailActions } from "./DetailActions";
-import { SectionMemory, Section } from "./Section";
+import { ResourceTabFrame, TabFacts, TabMetadata, type Tile } from "./ResourceFrame";
+import { SectionMemory } from "./Section";
 import {
   describeTarget,
   useDetailPaneState,
@@ -40,7 +31,6 @@ import {
   PANE_METRICS,
   PANE_YAML,
 } from "./detailData";
-import type { DetailFact } from "./facts";
 
 export interface ResourceTabViewProps {
   context: string;
@@ -51,9 +41,6 @@ export interface ResourceTabViewProps {
   namespace: string | null;
   name: string;
 }
-
-/** One tile of the strip. Absent facts are omitted, never drawn as em dashes. */
-type Tile = StatProps & { key: string };
 
 /**
  * The pod usage the CPU and Memory tiles show.
@@ -138,41 +125,6 @@ function metricTiles(statusLine: ResourceStatusLine | null, object: K8sObject, u
 }
 
 /**
- * THE FULL TAB'S OWN FACT LAYOUT: three columns of label-above-value, each
- * pair ruled off beneath, filling the width of a page.
- *
- * The mock's grid, built here, by the screen that draws it. The peek reads the
- * very same facts down one column of label-beside-value rows and builds that
- * itself. What the two share is the LIST (`detailFacts`), so they cannot
- * disagree about what a subject says; what neither shares is a line of the
- * other's markup, so a change to this grid changes nothing in the peek.
- *
- * It replaces `FactGrid` — a kit wrapper that took the peek's rendered rows
- * and restyled them into these columns. That wrapper had to describe a layout
- * in terms of children it did not build (`.factgrid .section > :not(.kv)`,
- * then a second rule for tables, and a reviewer's note that a third kind of
- * child was coming), and it made the tab's layout a property of the peek's
- * DOM. `KV`'s own `stacked` form is what a row looks like here; the grid
- * around them is this screen's. (#331)
- *
- * Untitled, like the peek's list and for the same reason: the header above has
- * already named the subject, and an untitled block cannot fold, so Overview
- * can never open showing nothing.
- */
-function TabFacts({ facts }: { facts: DetailFact[] }) {
-  if (facts.length === 0) return null;
-  return (
-    <Section>
-      <div data-slot="fact-grid" className="grid grid-cols-3 gap-x-6">
-        {facts.map((fact) => (
-          <KV key={fact.label} stacked k={fact.label} v={fact.value} mono={fact.mono} />
-        ))}
-      </div>
-    </Section>
-  );
-}
-
-/**
  * The resource FULL TAB: one subject filling a tab of its own, headed by its
  * name and the trail that locates it, its actions on the same line, a strip of
  * figures beneath, then its panes.
@@ -230,9 +182,6 @@ export function ResourceTabView({ context, kind, group, namespace, name }: Resou
     return { data: mine ? { cpu: mine.cpuMillicores, memory: mine.memoryMiB } : null };
   });
 
-  const headingId = useId();
-  const activeLabel = tabs.find((t) => t.id === active)?.label;
-
   if (status === "loading") {
     return <LoadingState label={`Loading ${describeTarget(kind, namespace, name)}`} />;
   }
@@ -253,13 +202,7 @@ export function ResourceTabView({ context, kind, group, namespace, name }: Resou
         <TabFacts facts={subject.facts} />
         {subject.body}
         {subject.containersTable}
-        {/* Two columns, and each wrapped, so neither section is the other's
-            adjacent sibling — `.section + .section` would otherwise rule down
-            the middle of the row instead of across it. */}
-        <div data-slot="metadata-pair" className="border-t border-rule-strong grid grid-cols-2">
-          <div>{subject.labels}</div>
-          <div className="border-l border-rule-strong">{subject.annotations}</div>
-        </div>
+        <TabMetadata labels={subject.labels} annotations={subject.annotations} />
         {subject.afterMetadata}
       </>
     ) : null;
@@ -268,101 +211,48 @@ export function ResourceTabView({ context, kind, group, namespace, name }: Resou
   else if (active === PANE_EVENTS) pane = eventsPane;
 
   return (
-    <section
-      aria-labelledby={headingId}
-      data-slot="resource-tab"
-      className="flex min-h-0 min-w-0 flex-1 flex-col"
-    >
-      <header className="rule-b flex items-center gap-3 px-3 py-2">
-        <div className="name-row flex min-w-0 items-baseline gap-2.5">
-          {/* An `h1`: this is a page, and the tab strip above it is chrome.
-              The peek's subject is an `h2` because a peek sits inside a
-              screen that already has one. */}
-          <h1 id={headingId} className="truncate text-[1.25rem] font-semibold">
-            {name}
-          </h1>
-          {/* The peek's own control, in the same place: directly after the
-              name, shown when this row is hovered or focused (`.name-row`). */}
-          <span data-slot="tab-name-action" className="name-action self-center">
-            <CopyNameButton name={name} />
-          </span>
-          {/* Cluster, namespace, kind — the design's small-caps trail. A
-              cluster-scoped subject has no namespace to place, so the trail is
-              two steps rather than a step reading "—". */}
-          <Breadcrumb
-            className="shrink-0"
-            parts={namespace ? [context, namespace, kind] : [context, kind]}
-          />
-        </div>
-        <span className="flex-1" />
-        <div data-slot="tab-actions" className="flex shrink-0 items-center gap-1.5">
-          <DetailActions
-            host="tab"
-            context={context}
-            kind={kind}
-            group={group}
-            namespace={namespace}
-            name={name}
-            // A kind outside `K8S_KIND` has no descriptor at all — the
-            // custom-resource case — so it inherits `customDescriptor`'s own
-            // action set, Delete withheld and all.
-            actions={descriptor?.actions ?? CUSTOM_RESOURCE_ACTIONS}
-            flagged={statusLine?.flagged ?? false}
-            suspended={object.spec?.suspend === true}
-            unschedulable={object.spec?.unschedulable === true}
-            // Those two are read off this pane's object, so a write made from the
-            // bar has to bring a new one: without it a node cordoned from here
-            // went on being offered Cordon.
-            onChanged={subject.refresh}
-          />
-        </div>
-      </header>
-
-      <div className="rule-b px-3">
-        <Tabs
-          tabs={tabs}
-          active={active}
-          onChange={selectTab}
-          label="Resource views"
-          variant="underline"
+    <ResourceTabFrame
+      name={name}
+      cluster={context}
+      namespace={namespace}
+      kind={kind}
+      tabs={tabs}
+      active={active}
+      onTabChange={selectTab}
+      tiles={tiles}
+      actions={
+        <DetailActions
+          host="tab"
+          context={context}
+          kind={kind}
+          group={group}
+          namespace={namespace}
+          name={name}
+          // A kind outside `K8S_KIND` has no descriptor at all — the
+          // custom-resource case — so it inherits `customDescriptor`'s own
+          // action set, Delete withheld and all.
+          actions={descriptor?.actions ?? CUSTOM_RESOURCE_ACTIONS}
+          flagged={statusLine?.flagged ?? false}
+          suspended={object.spec?.suspend === true}
+          unschedulable={object.spec?.unschedulable === true}
+          // Those two are read off this pane's object, so a write made from the
+          // bar has to bring a new one: without it a node cordoned from here
+          // went on being offered Cordon.
+          onChanged={subject.refresh}
         />
-      </div>
-
-      {/* Between the strip and the panel rather than inside it: these are the
-          subject's vital signs, as worth having beside its manifest as beside
-          its facts. `.stat + .stat` draws the vertical rules the design puts
-          between the tiles; the row sizes them, which is what `Stat`'s own
-          comment asks a caller to do. */}
-      {tiles.length > 0 && (
-        <div data-slot="metric-strip" className="rule-b flex">
-          {tiles.map(({ key, ...tile }) => (
-            <Stat key={key} {...tile} className="flex-1" />
-          ))}
-        </div>
-      )}
-
-      <div
-        className="pane-body"
-        role="tabpanel"
-        // Named rather than pointed at: `Tabs` puts no ids on its buttons, so
-        // `aria-labelledby` would have nothing to reference.
-        aria-label={activeLabel}
-        // A scrolling region has to be reachable, or its content is unreadable
-        // to anyone driving the page from the keyboard.
-        tabIndex={0}
-      >
-        {/* The same fold memory the peek reads, wrapped by this screen around
-            its own pane: the store is keyed by kind, so a block a reader opens
-            in one screen is open in the other without either screen knowing
-            the other exists. A provider renders no element, so the run of
-            sections beneath is unbroken. */}
-        <SectionMemory kind={kind}>{pane}</SectionMemory>
-        {active === PANE_DETAILS && <ExtensionPanelSlot context={context} resource={object}/>}
-        {active === PANE_DETAILS && <ExtensionProviderSlot context={context} resource={object}/>}
-        {active === PANE_DETAILS && <ExtensionRelatedSlot context={context} resource={object}/>}
-        {active === PANE_DETAILS && <ExtensionPodSlot context={context} resource={object}/>}
-        {active === PANE_DETAILS && <ExtensionResourceSlot context={context} kind={object.kind ?? kind} group={object.apiVersion?.includes("/") ? object.apiVersion.split("/")[0] : ""} namespace={namespace} name={name} />}
-      </div>
-    </section>
+      }
+    >
+      {/* The same fold memory the peek reads, wrapped by this screen around
+          its own pane: the store is keyed by kind, so a block a reader opens
+          in one screen is open in the other without either screen knowing
+          the other exists. A provider renders no element, so the run of
+          sections beneath is unbroken. */}
+      <SectionMemory kind={kind}>{pane}</SectionMemory>
+      {active === PANE_DETAILS && <ExtensionPanelSlot context={context} resource={object}/>}
+      {active === PANE_DETAILS && <ExtensionProviderSlot context={context} resource={object}/>}
+      {active === PANE_DETAILS && <ExtensionRelatedSlot context={context} resource={object}/>}
+      {active === PANE_DETAILS && <ExtensionPodSlot context={context} resource={object}/>}
+      {active === PANE_DETAILS && <ExtensionResourceSlot context={context} kind={object.kind ?? kind} group={object.apiVersion?.includes("/") ? object.apiVersion.split("/")[0] : ""} namespace={namespace} name={name} />}
+    </ResourceTabFrame>
   );
 }

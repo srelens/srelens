@@ -28,6 +28,11 @@ export function statusWord(resolved: ResolvedStatus): string {
   return plainText(resolved.label ?? "").trim() || (known ? STATUS_WORD[resolved.status] : STATUS_WORD.unknown);
 }
 
+/** The kind a status is drawn in: its own, or neutral for a word the host doesn't know. */
+export function statusKind(resolved: ResolvedStatus): StatusKind {
+  return Object.hasOwn(STATUS_KIND, resolved.status) ? STATUS_KIND[resolved.status] : "neutral";
+}
+
 /**
  * A status an app's rules resolved, drawn as the standard status: a dot and a word.
  *
@@ -43,7 +48,7 @@ export function AppStatus({ resolved, showReason = false }: { resolved: Resolved
   const reason = resolved.reason ? plainText(resolved.reason) : undefined;
   return (
     <span className="extension-status" data-status={known ? resolved.status : "unknown"} title={reason}>
-      <StatusPill status={statusWord(resolved)} kind={known ? STATUS_KIND[resolved.status] : "neutral"} />
+      <StatusPill status={statusWord(resolved)} kind={statusKind(resolved)} />
       {reason && (showReason
         ? <span className="extension-status-reason">{reason}</span>
         : <span className="sr-only">: {reason}</span>)}

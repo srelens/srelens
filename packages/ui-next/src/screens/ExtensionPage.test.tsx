@@ -4,7 +4,7 @@ const clusters=vi.hoisted(()=>({contexts:[] as {name:string;stableId:string;key?
 vi.mock("@srelens/core",async original=>({...await original<typeof import("@srelens/core")>(),isTauri:()=>true,listExtensions:vi.fn(),listContexts:vi.fn()}));
 vi.mock("../lib/clusters",()=>({useContexts:()=>clusters.contexts,useContextsStatus:()=>clusters.status,useContextsError:()=>clusters.error,getContexts:()=>clusters.contexts,getKubeconfigFiles:()=>[],setContexts:vi.fn()}));
 vi.mock("../lib/tabsStore",()=>({openTab:vi.fn()}));
-vi.mock("../extensions/ExtensionResourceDetails",()=>({ExtensionResourceDetails:({selection,fullPage}:any)=><div data-testid="detail-page">{JSON.stringify({selection,fullPage})}</div>}));
+vi.mock("../extensions/ExtensionResourceDetails",()=>({ExtensionResourceDetails:({selection,fullPage,clusterLabel}:any)=><><div data-testid="detail-page">{JSON.stringify({selection,fullPage})}</div><p>{clusterLabel}</p></>}));
 vi.mock("../extensions/ExtensionWorkspace",async()=>{
  const {useContext}=await import("react");const {ExtensionResourceNavigation}=await import("../extensions/resourceNavigation");
  return {ExtensionWorkspace:(props:{card?:string;cardNamespaces?:string[];onCard?(page:string,namespaces:string[],card:string):void})=>{const open=useContext(ExtensionResourceNavigation);return <><button onClick={()=>props.onCard?.("kustomizations",["team"],"suspended-kustomizations")}>Open overview card</button><button data-card={props.card??""} data-namespaces={(props.cardNamespaces??[]).join(",")} onClick={()=>open?.({id:"org.srelens.flux",revision:1,capability:"kustomizations",context:"wrong-rail-cluster",namespace:"team",name:"apps"})}>Open resource</button></>;}};
@@ -28,6 +28,9 @@ it("renders the independent detail route without mounting the resource list",asy
  const detail=JSON.parse((await screen.findByTestId("detail-page")).textContent!);
  expect(detail).toEqual({selection:{id:manifest.id,revision:1,capability:"kustomizations",context:"srelens-context:cluster/a",namespace:"team",name:"apps"},fullPage:true});
  expect(screen.queryByText("Open resource")).toBeNull();
+ // The frame heads its own page: a second title above it would say the name twice.
+ expect(screen.queryByRole("heading",{level:1})).toBeNull();
+ expect(screen.getByText("cluster/a")).toBeTruthy();
 });
 it("waits for the clusters to be listed before saying a limited app is not enabled",async()=>{
  Object.assign(clusters,{contexts:[],status:"loading"});

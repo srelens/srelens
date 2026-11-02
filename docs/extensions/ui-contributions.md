@@ -55,8 +55,9 @@ with an explicit error notice.
 - **`statusResolvers`** (#541) resolve each listed resource to one of six statuses —
   healthy, warning, error, progressing, suspended, unknown — by the app's first-hit
   rules, evaluated by the host on the whole object. App tables show a **Status**
-  column: the rule's word in a toned badge, and its reason beside it as plain text.
-  A kind with no resolver has no status column.
+  column: the rule's word as a toned status, and its reason beside it as plain text.
+  A resource's details show the same status in their header. A kind with no resolver
+  has no status column, and no status in its details.
 - **`statusColumns`** are deprecated but still accepted on the 0.3 and 0.4 lines. They
   name printer-column indices for `ready`, and optionally `suspended` and `progressing`,
   and map onto the same statuses: suspended, then progressing, then Ready True (healthy) or
