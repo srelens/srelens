@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+### Audit export
+
+The new desktop design can export the local audit trail as JSONL or CSV from
+Settings → AI Assistant. The default includes all retained entries, with
+arguments and error details omitted unless explicitly selected (#371).
+
 Release notes are otherwise generated from commit subjects when `release.yml` publishes a
 release: its Features and Fixes lists. This file holds what a subject cannot say, such as
 what to do when upgrading and which features are previews. Issue and pull request numbers

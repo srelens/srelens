@@ -291,11 +291,11 @@ describe("AuditPane", () => {
     expect(screen.queryByRole("alert")).toBeNull();
   });
 
-  it("says Export is not offered here, once", async () => {
+  it("offers export after the audit window has loaded", async () => {
     render(<AuditPane />);
     await screen.findByText("secret.read");
-    expect(screen.queryByRole("button", { name: /export/i })).toBeNull();
-    expect(screen.getAllByText(/no way to export/i)).toHaveLength(1);
+    expect((screen.getByRole("button", { name: "Export audit trail" }) as HTMLButtonElement).disabled).toBe(false);
+    expect(screen.queryByText(/no way to export/i)).toBeNull();
   });
 
   it("reports a failed read through describeError, never the backend's raw string", async () => {
