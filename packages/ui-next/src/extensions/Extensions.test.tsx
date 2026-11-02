@@ -1,5 +1,7 @@
 import { act, render, screen, fireEvent, waitFor, within } from "@testing-library/react";
 import { beforeEach, expect, it, vi } from "vitest";
+import { ConsoleProvider } from "../console";
+import { setSectionOpen } from "../lib/sectionFolds";
 const host = vi.hoisted(() => ({ tauri: true }));
 vi.mock("@srelens/core", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@srelens/core")>()),
@@ -1737,7 +1739,8 @@ it("opens a clicked resource in its selected namespace and drops detail state on
   vi.mocked(readExtension).mockResolvedValue({items:[{name:"apps",namespace:"team",age:"1d",columns:[]}]});
   vi.mocked(inspectExtensionResource).mockResolvedValue({resource:{kind:"Kustomization",metadata:{name:"apps",namespace:"team",uid:"u",resourceVersion:"1"},status:{conditions:[{type:"Ready",status:"False",message:"Build failed"}]}},actions:[]});
   const app={...plugin,manifest:{...plugin.manifest,capabilities:[{...plugin.manifest.capabilities[0],target:"k8s.listCustomResource"}]}} as any;
-  const view=render(<ExtensionResults plugin={app} capability="list" context="cluster/a"/>);
+  setSectionOpen("Kustomization","Conditions",true);
+  const view=render(<ExtensionResults plugin={app} capability="list" context="cluster/a"/>,{wrapper:ConsoleProvider});
   fireEvent.click(await screen.findByText("apps"));
   expect(await screen.findByText("Build failed")).toBeTruthy();
   expect(within(screen.getByRole("table")).getByText("apps")).toBeTruthy();
@@ -1874,7 +1877,7 @@ it("peeks at a row on a click and opens it with Enter", async () => {
   vi.mocked(readExtension).mockResolvedValue(threeRows as any);
   vi.mocked(inspectExtensionResource).mockResolvedValue(menuDetail as any);
   const open = vi.fn();
-  render(<ExtensionResourceNavigation.Provider value={open}><ExtensionResults plugin={actionable} capability="list" context="cluster/a" /></ExtensionResourceNavigation.Provider>);
+  render(<ExtensionResourceNavigation.Provider value={open}><ExtensionResults plugin={actionable} capability="list" context="cluster/a" /></ExtensionResourceNavigation.Provider>,{wrapper:ConsoleProvider});
   await screen.findByText("apps");
   fireEvent.click(rowOf("apps"));
   expect(rowOf("apps").getAttribute("aria-selected")).toBe("true");
@@ -1886,7 +1889,7 @@ it("peeks with Enter where the page cannot open a tab", async () => {
   const { inspectExtensionResource } = await import("@srelens/core");
   vi.mocked(readExtension).mockResolvedValue(threeRows as any);
   vi.mocked(inspectExtensionResource).mockResolvedValue(menuDetail as any);
-  render(<ExtensionResults plugin={actionable} capability="list" context="cluster/a" />);
+  render(<ExtensionResults plugin={actionable} capability="list" context="cluster/a" />,{wrapper:ConsoleProvider});
   await screen.findByText("apps");
   fireEvent.keyDown(rowOf("apps"), { key: "Enter" });
   expect(rowOf("apps").getAttribute("aria-selected")).toBe("true");
@@ -1896,7 +1899,7 @@ it("puts focus back on the row when its peek closes", async () => {
   const { inspectExtensionResource } = await import("@srelens/core");
   vi.mocked(readExtension).mockResolvedValue(threeRows as any);
   vi.mocked(inspectExtensionResource).mockResolvedValue(menuDetail as any);
-  render(<ExtensionResults plugin={actionable} capability="list" context="cluster/a" />);
+  render(<ExtensionResults plugin={actionable} capability="list" context="cluster/a" />,{wrapper:ConsoleProvider});
   await screen.findByText("apps");
   fireEvent.click(rowOf("apps"));
   fireEvent.click(await screen.findByRole("button", { name: /^Close/ }));

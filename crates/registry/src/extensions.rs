@@ -4353,7 +4353,7 @@ pub(crate) mod tests {
             .revision
     }
     /// The example manifest with a status resolver for its Application reader.
-    fn manifest_with_status() -> Value {
+    pub(super) fn manifest_with_status() -> Value {
         let mut value: Value = serde_json::from_str(&manifest()).unwrap();
         value["contributions"]["statusResolvers"] = json!([{
             "forKinds": ["argoproj.io/Application"],

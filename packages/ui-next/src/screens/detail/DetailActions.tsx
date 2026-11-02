@@ -116,6 +116,60 @@ export interface DetailActionsProps {
   host?: "peek" | "tab";
 }
 
+export interface DetailActionRowProps {
+  /** The cluster `Ask` is about. */
+  context: string;
+  /**
+   * What `Ask`'s question calls the resource. A built-in's name is enough, since
+   * `askContextFor` reads the rest off its route. An app's route says nothing
+   * there, so its row names the kind and namespace here.
+   */
+  subject: string;
+  /** The subject's own health verdict, which decides which question `Ask` sends. */
+  flagged: boolean;
+  actions: ActionBarAction[];
+  /** What the group of actions is called: "Pod actions". */
+  label: string;
+  host?: "peek" | "tab";
+}
+
+/**
+ * The row itself: `Ask`, then the actions, with what does not fit in the
+ * overflow. An app's resource draws this with its own reviewed actions; a
+ * built-in one through {@link DetailActions}.
+ */
+export function DetailActionRow({ context, subject, flagged, actions, label, host = "peek" }: DetailActionRowProps) {
+  const ask = useAsk(context);
+  const question = askQuestion(subject, flagged);
+  const Sparkle = Icons.ask;
+  const inPeek = host === "peek";
+
+  return (
+    <>
+      {/* Wide in the peek, per the design: it takes whatever the kind's own
+          actions leave. In the tab's header row it is a control like any
+          other, because the row is not the only thing on that line.
+          The visible word is short and the same on every subject, so the
+          question goes in the accessible name, where it says what will
+          actually be sent — the same split `AskChip` makes. */}
+      {ask && (
+        <Button
+          type="button"
+          size="sm"
+          className={inPeek ? "flex-1 justify-center" : undefined}
+          aria-label={`Ask: ${question}`}
+          title={`Ask: ${question}`}
+          onClick={() => ask(question)}
+        >
+          <Sparkle size={12} aria-hidden="true" />
+          Ask
+        </Button>
+      )}
+      <ActionBar actions={actions} label={label} max={inPeek ? ON_BAR : ON_HEADER_BAR} />
+    </>
+  );
+}
+
 /**
  * The design's action row: `Ask`, the kind's own actions, an overflow.
  *
@@ -157,7 +211,6 @@ export function DetailActions({
   host = "peek",
   group,
 }: DetailActionsProps) {
-  const ask = useAsk(context);
   const { items, dialog } = useRowMenu({ context, kind, actions, group, onChanged });
 
   // What a table would have handed the hook. `suspended` is not on `ListRow`
@@ -170,35 +223,15 @@ export function DetailActions({
     ...(suspended === undefined ? {} : { suspended }),
     ...(unschedulable === undefined ? {} : { unschedulable }),
   };
-  const question = askQuestion(name, flagged);
-  const Sparkle = Icons.ask;
-  const inPeek = host === "peek";
-
   return (
     <>
-      {/* Wide in the peek, per the design: it takes whatever the kind's own
-          actions leave. In the tab's header row it is a control like any
-          other, because the row is not the only thing on that line.
-          The visible word is short and the same on every subject, so the
-          question goes in the accessible name, where it says what will
-          actually be sent — the same split `AskChip` makes. */}
-      {ask && (
-        <Button
-          type="button"
-          size="sm"
-          className={inPeek ? "flex-1 justify-center" : undefined}
-          aria-label={`Ask: ${question}`}
-          title={`Ask: ${question}`}
-          onClick={() => ask(question)}
-        >
-          <Sparkle size={12} aria-hidden="true" />
-          Ask
-        </Button>
-      )}
-      <ActionBar
+      <DetailActionRow
+        context={context}
+        subject={name}
+        flagged={flagged}
         actions={toBarActions(items(row))}
         label={`${kind} actions`}
-        max={inPeek ? ON_BAR : ON_HEADER_BAR}
+        host={host}
       />
       {dialog}
     </>

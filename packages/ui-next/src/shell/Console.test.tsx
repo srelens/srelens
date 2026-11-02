@@ -13,6 +13,7 @@ import { pinContextKey, resetContexts, setContexts } from "../lib/clusters";
 import { defaultState } from "../lib/tabs";
 import { logsRoute } from "../screens/Logs";
 import * as tabsStore from "../lib/tabsStore";
+import { setNamespaces } from "../lib/workspace";
 import { lockWorkspace, resetLock, __setKnownVaultMode } from "./LockGate";
 import { extensionClusterResourceRoute, extensionClusterRoute, type ClusterContext } from "@srelens/core";
 
@@ -381,6 +382,53 @@ describe("Console", () => {
         }),
       }),
     );
+  });
+
+  /**
+   * An app's page pins its cluster in its route (#695), as a detail tab does
+   * (#834), so the rail can be somewhere else. The dock's label names the tab's
+   * cluster, so a question sent to the rail's names one and reaches the other.
+   */
+  const APP_ROUTES = [
+    ["a list, where a peek opens", extensionClusterRoute("prod", "org.example.argocd", "applications")],
+    ["a resource's tab", extensionClusterResourceRoute("prod", "org.example.argocd", "applications", "payments", "web")],
+  ];
+  const onAppWithTheRailElsewhere = (route: string) => {
+    const contexts = [ctx("prod", "prod-eu"), ctx("stage", "stage-eu")];
+    setContexts(contexts);
+    tabsStore.setState(defaultState(contexts));
+    tabsStore.setActiveCluster("stage", "stage-eu");
+    tabsStore.openTab(route, { clusterName: "prod-eu" });
+    expect(tabsStore.currentWorkspace().activeCluster).toBe("stage");
+  };
+
+  it.each(APP_ROUTES)("asks from %s about the app's cluster, not the rail's", async (_, route) => {
+    const user = userEvent.setup();
+    onAppWithTheRailElsewhere(route);
+    setup();
+    await user.click(screen.getByRole("button", { name: "Ask from elsewhere" }));
+    expect(askAgent).toHaveBeenCalledWith("x", expect.objectContaining({ about: expect.objectContaining({ cluster: "prod-eu" }) }));
+  });
+
+  it.each(APP_ROUTES)("narrows a question from %s to the app's cluster, not the rail's", async (_, route) => {
+    const user = userEvent.setup();
+    onAppWithTheRailElsewhere(route);
+    setNamespaces("prod", ["payments"]);
+    setNamespaces("stage", ["somewhere-else"]);
+    setup();
+    await user.click(screen.getByRole("button", { name: "Ask from elsewhere" }));
+    expect(askAgent).toHaveBeenCalledWith("x", expect.objectContaining({ about: expect.objectContaining({ namespaces: ["payments"] }) }));
+  });
+
+  it("asks about the rail's cluster from an app page that cannot say which cluster it is on", async () => {
+    const user = userEvent.setup();
+    const stage = ctx("stage", "stage-eu");
+    setContexts([stage]);
+    tabsStore.setState(defaultState([stage]));
+    tabsStore.openTab(extensionClusterRoute("gone", "org.example.argocd", "applications"), { clusterName: "gone" });
+    setup();
+    await user.click(screen.getByRole("button", { name: "Ask from elsewhere" }));
+    expect(askAgent).toHaveBeenCalledWith("x", expect.objectContaining({ about: expect.objectContaining({ cluster: "stage-eu" }) }));
   });
 
   it("opens and forwards a question asked from anywhere else", async () => {

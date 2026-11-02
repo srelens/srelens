@@ -645,6 +645,30 @@ const EVENT_COLUMNS: Column<EventSummary>[] = [
   { key: "age", header: "Age" },
 ];
 
+/**
+ * A subject's events as the table every detail draws, with a remark above it
+ * when the list is only part of the story. An app's resource hands in the
+ * events its read carried; {@link EventsPane} loads a built-in one's.
+ */
+export function EventsTable({ events, notice }: { events: EventSummary[]; notice?: ReactNode }) {
+  // `Table` renders `emptyText` itself for a genuinely empty list — an early
+  // `return null` here would leave a healthy, event-free object looking like
+  // a broken pane instead of a labelled one.
+  return (
+    <div className="flex h-full min-h-0 flex-col gap-2">
+      {notice}
+      <div className="min-h-0 flex-1">
+        <Table
+          columns={EVENT_COLUMNS}
+          data={events}
+          getRowKey={(e) => e.name}
+          emptyText="No events"
+        />
+      </div>
+    </div>
+  );
+}
+
 /** The subject's events. Shared for the same reason as {@link YamlPane}: a
  *  table of what happened is content, not a layout either screen owns. */
 function EventsPane({
@@ -669,24 +693,16 @@ function EventsPane({
       />
     );
   }
-  // `Table` renders `emptyText` itself for a genuinely empty list — an early
-  // `return null` here would leave a healthy, event-free object looking like
-  // a broken pane instead of a labelled one.
   return (
-    <div className="flex h-full min-h-0 flex-col gap-2">
-      {state.data.truncated && (
-        <Alert tone="info" title={`Showing the first ${state.data.events.length.toLocaleString()} events`}>
-          More remain on the cluster. This list stops at the shared list row cap.
-        </Alert>
-      )}
-      <div className="min-h-0 flex-1">
-        <Table
-          columns={EVENT_COLUMNS}
-          data={state.data.events}
-          getRowKey={(e) => e.name}
-          emptyText="No events"
-        />
-      </div>
-    </div>
+    <EventsTable
+      events={state.data.events}
+      notice={
+        state.data.truncated && (
+          <Alert tone="info" title={`Showing the first ${state.data.events.length.toLocaleString()} events`}>
+            More remain on the cluster. This list stops at the shared list row cap.
+          </Alert>
+        )
+      }
+    />
   );
 }

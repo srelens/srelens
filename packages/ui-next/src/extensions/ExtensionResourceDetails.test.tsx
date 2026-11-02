@@ -1,26 +1,35 @@
 import fluxManifest from "../../../../examples/extensions/flux.json";
 import argoManifest from "../../../../examples/extensions/argocd.json";
 const declaredMeta = Object.fromEntries([...fluxManifest.actions.filter(action=>action.resource==="helmreleases").map(action=>({...action,name:action.name.replace("helmreleases-","")})),...argoManifest.actions].map(action=>[action.name,{title:action.title,availableWhen:("availableWhen" in action?action.availableWhen:[]) as import("@srelens/core").ActionPredicate[],impact:"medium" as const,confirm:null}]));
-import { act, render, screen, fireEvent, waitFor } from "@testing-library/react";
+import { act, render as bare, screen, fireEvent, waitFor, within } from "@testing-library/react";
+import { useLayoutEffect, type ReactElement, type ReactNode } from "react";
 import { afterEach, beforeEach, expect, it, onTestFinished, vi } from "vitest";
 vi.mock("@srelens/core", async original => ({...await original<typeof import("@srelens/core")>(),inspectExtensionResource:vi.fn(),actOnExtensionResource:vi.fn(),listExtensions:vi.fn(),resolveExtensionPanels:vi.fn(),resolveExtensionLinks:vi.fn(),resolveExtensionReverseLinks:vi.fn()}));
 import { inspectExtensionResource, actOnExtensionResource, listExtensions, resolveExtensionPanels, resolveExtensionLinks, resolveExtensionReverseLinks, EXTENSION_RESOURCE_CHANGED } from "@srelens/core";
 import { ExtensionResourceDetails } from "./ExtensionResourceDetails";
 import { requestExtensionAction } from "./actionRequests";
 import type { ClusterContext } from "@srelens/core";
+import { ConsoleProvider, useConsole } from "../console";
+import { askQuestion } from "../lib/kinds/rowAffordances";
+import { isSectionOpen, loadSectionFolds, setSectionOpen } from "../lib/sectionFolds";
 import { resetContexts, setContexts } from "../lib/clusters";
 import { defaultState } from "../lib/tabs";
 import { getState, setState, setWorkspaceProtected } from "../lib/tabsStore";
 const selection = {id:"org.srelens.flux",revision:1,capability:"kustomizations",context:"cluster/a",namespace:"team",name:"apps"};
 const detail = {resource:{apiVersion:"kustomize.toolkit.fluxcd.io/v1",kind:"Kustomization",metadata:{name:"apps",namespace:"team",uid:"uid-a",resourceVersion:"12"},spec:{suspend:false,path:"./apps",sourceRef:{kind:"GitRepository",name:"platform-config"}},status:{conditions:[{type:"Ready",status:"False",reason:"BuildFailed",message:"Missing source"}],lastAppliedRevision:"main@sha1:abcdef"}},actions:["suspend","resume","reconcile"],actionMeta:declaredMeta};
-beforeEach(()=>{vi.resetAllMocks();vi.mocked(inspectExtensionResource).mockResolvedValue(detail);vi.mocked(actOnExtensionResource).mockResolvedValue({requested:true});});
+const Wrapper=({children}:{children:ReactNode})=><ConsoleProvider>{children}</ConsoleProvider>;
+const render=(ui:ReactElement)=>bare(ui,{wrapper:Wrapper});
+// Conditions and Status open shut on a first visit, like every titled block of a
+// built-in detail. Most of these tests are about what is inside them.
+const forgetFolds=()=>{localStorage.clear();loadSectionFolds();};
+beforeEach(()=>{vi.resetAllMocks();vi.mocked(inspectExtensionResource).mockResolvedValue(detail);vi.mocked(actOnExtensionResource).mockResolvedValue({requested:true});forgetFolds();setSectionOpen("Kustomization","Conditions",true);setSectionOpen("Kustomization","Status",true);});
 it("shows overview and conditions, then confirms the exact pinned resource before requesting an action",async()=>{
  render(<ExtensionResourceDetails selection={selection} onClose={vi.fn()}/>);
  expect(await screen.findByText("Missing source")).toBeTruthy();
  expect(screen.getByText("./apps")).toBeTruthy();
  // Like the real wrapper, an accepted action announces the resource; the view refreshes from that.
  vi.mocked(actOnExtensionResource).mockImplementation(async resource=>{window.dispatchEvent(new CustomEvent(EXTENSION_RESOURCE_CHANGED,{detail:resource}));return {requested:true};});
- expect(screen.getByText("Source Ref")).toBeTruthy();
+ expect(screen.getByText("Source ref")).toBeTruthy();
  expect(screen.getByText("platform-config")).toBeTruthy();
  expect(screen.queryByText("View fields")).toBeNull();
  fireEvent.click(screen.getByRole("button",{name:"Suspend"}));
@@ -47,13 +56,14 @@ it("does not interpret a failed detail request as a missing resource",async()=>{
 
 it("shows the manifest and events, offers Resume for a suspended resource, and rejects unacknowledged writes",async()=>{
   vi.mocked(inspectExtensionResource).mockResolvedValue({...detail,resource:{...detail.resource,spec:{suspend:true}},events:[{type:"Warning",reason:"Error",message:"Source unavailable",count:2}]});
-  render(<ExtensionResourceDetails selection={selection} onClose={vi.fn()}/>);
+  render(<ExtensionResourceDetails selection={selection} fullPage/>);
+  fireEvent.click(await screen.findByRole("tab",{name:"Events"}));
   expect(await screen.findByText("Source unavailable")).toBeTruthy();
   expect(screen.queryByText(/Showing the latest/)).toBeNull();
   // Both stay on screen and say why they do not apply here (#550).
   expect(screen.getByRole("button",{name:"Suspend"}).getAttribute("aria-disabled")).toBe("true");
   expect(screen.getByRole("button",{name:"Reconcile"}).getAttribute("aria-disabled")).toBe("true");
-  fireEvent.click(screen.getByRole("tab",{name:"Manifest"}));expect(screen.getByRole("textbox",{name:"apps manifest"}).getAttribute("contenteditable")).toBe("false");
+  fireEvent.click(screen.getByRole("tab",{name:"YAML"}));expect(screen.getByRole("textbox",{name:"apps manifest"}).getAttribute("contenteditable")).toBe("false");
   expect(screen.getByRole("textbox",{name:"apps manifest"}).textContent).toContain("kind: Kustomization");
   // A read-only manifest a reader opens in order to take it away. (#656 review)
   expect(screen.getByRole("button",{name:"Copy"})).toBeTruthy();
@@ -64,6 +74,7 @@ it("shows the manifest and events, offers Resume for a suspended resource, and r
 it("says when the host returned only the latest events",async()=>{
   vi.mocked(inspectExtensionResource).mockResolvedValue({...detail,events:[{type:"Normal",reason:"Progressing",message:"Applied revision",count:1}],eventsTruncated:true});
   render(<ExtensionResourceDetails selection={selection}/>);
+  fireEvent.click(await screen.findByRole("tab",{name:"Events"}));
   expect(await screen.findByText("Applied revision")).toBeTruthy();
   expect(screen.getByText("Showing the latest 100 events.")).toBeTruthy();
 });
@@ -81,6 +92,7 @@ it("confirms against the version the reader reviewed even after another view ref
 it("does not report no events when the host stopped before reading every page",async()=>{
   vi.mocked(inspectExtensionResource).mockResolvedValue({...detail,events:[],eventsTruncated:true,eventsPartial:true,eventsRead:0});
   render(<ExtensionResourceDetails selection={selection}/>);
+  fireEvent.click(await screen.findByRole("tab",{name:"Events"}));
   expect(await screen.findByText("No events were returned before the host stopped reading. This resource has more events that were not read.")).toBeTruthy();
   expect(screen.queryByText("No events reported.")).toBeNull();
 });
@@ -88,6 +100,7 @@ it("does not claim the latest events when the host stopped before reading them a
   // The host reports what it actually read; the panel must not invent a total.
   vi.mocked(inspectExtensionResource).mockResolvedValue({...detail,events:[{type:"Normal",reason:"Progressing",message:"Applied revision",count:1}],eventsTruncated:true,eventsPartial:true,eventsRead:5000});
   render(<ExtensionResourceDetails selection={selection}/>);
+  fireEvent.click(await screen.findByRole("tab",{name:"Events"}));
   expect(await screen.findByText("Applied revision")).toBeTruthy();
   expect(screen.getByText("Showing the newest 1 of 5,000 events read. This resource has more events that were not read.")).toBeTruthy();
   expect(screen.queryByText("Showing the latest 100 events.")).toBeNull();
@@ -109,8 +122,12 @@ it("refreshes when any view reports an accepted action on this same resource",as
 it("preserves the overview when event access fails and closes with Escape",async()=>{
   vi.mocked(inspectExtensionResource).mockResolvedValue({...detail,eventsError:"Events access denied"});
   const close=vi.fn();render(<ExtensionResourceDetails selection={selection} onClose={close}/>);
-  expect(await screen.findByText("Missing source")).toBeTruthy();expect(screen.getByText("Events access denied")).toBeTruthy();
+  expect(await screen.findByText("Missing source")).toBeTruthy();
   fireEvent.keyDown(screen.getByText("Missing source"),{key:"Escape"});expect(close).toHaveBeenCalledOnce();
+  fireEvent.click(screen.getByRole("tab",{name:"Events"}));
+  expect(screen.getByText("Events access denied")).toBeTruthy();
+  fireEvent.click(screen.getByRole("button",{name:/retry/i}));
+  await waitFor(()=>expect(inspectExtensionResource).toHaveBeenCalledTimes(2));
 });
 
 it("promotes a peek to its own tab while keeping the list's close control separate",async()=>{
@@ -133,7 +150,7 @@ function describedBy(control:HTMLElement) {
 }
 it("disables an action its availability rules exclude and gives the reason as its tooltip",async()=>{
   vi.mocked(inspectExtensionResource).mockResolvedValue({...detail,resource:{...detail.resource,spec:{suspend:true}}});
-  render(<ExtensionResourceDetails selection={selection}/>);
+  render(<ExtensionResourceDetails selection={selection} fullPage/>);
   const reconcile=await screen.findByRole("button",{name:"Reconcile"});
   expect(reconcile.getAttribute("aria-disabled")).toBe("true");
   expect(reconcile.getAttribute("title")).toBe("Resume this resource before requesting reconciliation");
@@ -156,7 +173,7 @@ it("disables an action its availability rules exclude and gives the reason as it
 // reveal and a screen reader always reads. (#668 review)
 it("names the reason from the control, so focus reaches it without a pointer",async()=>{
   vi.mocked(inspectExtensionResource).mockResolvedValue({...detail,resource:{...detail.resource,spec:{suspend:true}},actions:["suspend","resume","reconcile","force","reset"]});
-  render(<ExtensionResourceDetails selection={selection}/>);
+  render(<ExtensionResourceDetails selection={selection} fullPage/>);
   const reconcile=await screen.findByRole("button",{name:"Reconcile"});
   expect(describedBy(reconcile)).toBe("Resume this resource before requesting reconciliation");
   expect(describedBy(screen.getByRole("button",{name:"Suspend"}))).toBe("This resource is already suspended");
@@ -168,37 +185,8 @@ it("names the reason from the control, so focus reaches it without a pointer",as
   const resume=screen.getByRole("button",{name:"Resume"});
   expect(resume.getAttribute("aria-describedby")).toBeNull();
   // Each unavailable control names its own reason, never a shared one.
-  const ids=["Reconcile","Force reconcile","Reset retries"].map(name=>screen.getByRole("button",{name}).getAttribute("aria-describedby"));
+  const ids=["Suspend","Reconcile","Force reconcile"].map(name=>screen.getByRole("button",{name}).getAttribute("aria-describedby"));
   expect(new Set(ids).size).toBe(3);
-});
-// Where the revealed reason is drawn is a layout property jsdom cannot measure,
-// so the contract is pinned in the stylesheet it lives in. Anchored to its own
-// button, the reason ran off the right edge of a 375px screen and, from a
-// button on a wrapped second line, covered the three buttons above it
-// (measured in Chromium, #668 review). Anchored to the row, across its full
-// width and above it, it can do neither.
-it("anchors a revealed reason to the action row, not to its own button",async()=>{
-  const {readFileSync}=await import("node:fs");
-  const {join}=await import("node:path");
-  const css=readFileSync(join(__dirname,"extensions.css"),"utf8");
-  const rule=(selector:string)=>{
-    const at=css.indexOf(`${selector} {`);
-    expect(at,`${selector} has a rule`).toBeGreaterThanOrEqual(0);
-    return css.slice(at,css.indexOf("}",at));
-  };
-  // The button's wrapper is not a containing block, so it cannot anchor.
-  expect(rule(".extension-action")).not.toMatch(/position\s*:/);
-  // The row is, and the revealed reason spans it rather than sizing to itself.
-  expect(rule(".extension-actions")).toMatch(/position\s*:\s*relative/);
-  const shown=rule(".extension-action:focus-within .extension-action-reason");
-  expect(shown).toMatch(/left\s*:\s*0/);
-  expect(shown).toMatch(/right\s*:\s*0/);
-  expect(shown).not.toMatch(/max-content|max-width/);
-  // And the rendered row is the element that carries it.
-  vi.mocked(inspectExtensionResource).mockResolvedValue({...detail,resource:{...detail.resource,spec:{suspend:true}}});
-  render(<ExtensionResourceDetails selection={selection}/>);
-  const reconcile=await screen.findByRole("button",{name:"Reconcile"});
-  expect(reconcile.closest(".extension-action")?.parentElement?.classList.contains("extension-actions")).toBe(true);
 });
 it("does not offer an Argo CD sync while an operation is already running",async()=>{
   // The host refuses this (`gitops.rs`); stating it as a predicate is what
@@ -390,20 +378,22 @@ it("offers a newly declared action title and predicates without a host GitOps na
   expect(action.getAttribute("title")).toBe("Suspend before requesting review");
 });
 
-it("renders conditions through the bounded host catalog without losing transition times", async () => {
-  vi.mocked(inspectExtensionResource).mockResolvedValue({...detail, resource:{...detail.resource,status:{conditions:Array.from({length:25},(_,i)=>({type:`Condition${i}`,status:"True",reason:"Available",message:`Detail ${i}`,lastTransitionTime:"2026-09-22T12:00:00Z"}))}}});
+it("draws conditions as a built-in resource's, with the tone of each",async()=>{
+  vi.mocked(inspectExtensionResource).mockResolvedValue({...detail,resource:{...detail.resource,status:{conditions:[{type:"Ready",status:"True",reason:"Applied",message:"All good"},{type:"Stalled",status:"True",reason:"Stuck"}]}}});
   render(<ExtensionResourceDetails selection={selection}/>);
-  expect(await screen.findByText("Condition0")).toBeTruthy();
-  expect(screen.queryByText("Condition24")).toBeNull();
-  fireEvent.click(screen.getByRole("button",{name:/Show 5 more/}));
-  expect(screen.getByText("Condition24")).toBeTruthy();
-  expect(screen.getAllByText("2026-09-22T12:00:00Z").length).toBe(25);
+  const ready=await screen.findByText("Ready");
+  expect(ready.closest(".status")?.getAttribute("data-kind")).toBe("success");
+  expect(screen.getByText("Stalled").closest(".status")?.getAttribute("data-kind")).toBe("danger");
+  expect(screen.getByText("All good")).toBeTruthy();
 });
-it("reports malformed conditions instead of an empty or successful condition list", async () => {
-  vi.mocked(inspectExtensionResource).mockResolvedValue({...detail, resource:{...detail.resource,status:{conditions:[{type:"Ready",status:"invalid"}]}}});
+// Argo CD writes {type, message, lastTransitionTime} and no status, which the
+// bounded catalog refused whole: "Could not display Conditions" (#1014).
+it("shows an operator's condition that carries no status",async()=>{
+  vi.mocked(inspectExtensionResource).mockResolvedValue({...detail,resource:{...detail.resource,status:{conditions:[{type:"ComparisonError",message:"rpc error",lastTransitionTime:"2026-09-22T12:00:00Z"}]}}});
   render(<ExtensionResourceDetails selection={selection}/>);
-  expect((await screen.findByRole("alert")).textContent).toContain("Could not display Conditions");
-  expect(screen.queryByText("No conditions reported.")).toBeNull();
+  expect(await screen.findByText("rpc error")).toBeTruthy();
+  expect(screen.getByText("ComparisonError")).toBeTruthy();
+  expect(screen.queryByRole("alert")).toBeNull();
 });
 
 // #101: on a protected cluster the review's Confirm waits for the cluster's
@@ -449,4 +439,240 @@ it("asks again when a palette request replaces the open review",async()=>{
   expect(typed().value).toBe("");
   expect(confirm.disabled).toBe(true);
   expect(actOnExtensionResource).not.toHaveBeenCalled();
+});
+
+// ---- #1001: an app's resource, in the built-in detail frame ----
+
+const anHourAgo=()=>new Date(Date.now()-3_600_000).toISOString();
+const stamped=()=>({...detail.resource,metadata:{...detail.resource.metadata,creationTimestamp:anHourAgo()}});
+const failing={status:"error" as const,label:"Failing",reason:"Build failed"};
+const peek=()=>render(<ExtensionResourceDetails selection={selection} onClose={vi.fn()}/>);
+const slot=(name:string)=>document.querySelector(`[data-slot="${name}"]`);
+
+it("heads a peek with the copyable name, the kind and namespace, and the status its list row shows",async()=>{
+  vi.mocked(inspectExtensionResource).mockResolvedValue({...detail,resource:stamped(),status:failing});
+  peek();
+  const pill=await screen.findByText("Failing");
+  expect(pill.closest(".status")?.getAttribute("data-kind")).toBe("danger");
+  expect(screen.getByRole("button",{name:"Copy name apps"})).toBeTruthy();
+  expect(screen.getByText("Kustomization · team")).toBeTruthy();
+  expect(screen.getByText("Age").parentElement?.textContent).toContain("1h");
+});
+it("names a cluster-scoped resource by its kind alone",async()=>{
+  render(<ExtensionResourceDetails selection={{...selection,namespace:""}} onClose={vi.fn()}/>);
+  expect(await screen.findByText("Kustomization")).toBeTruthy();
+  expect(screen.queryByText(/Cluster-scoped/)).toBeNull();
+});
+it("claims no status for an app with no resolver, and gives its age as a fact",async()=>{
+  forgetFolds();
+  vi.mocked(inspectExtensionResource).mockResolvedValue({...detail,resource:stamped()});
+  peek();
+  const created=await screen.findByText("Created");
+  expect(created.parentElement?.textContent).toContain("1h ago");
+  expect(screen.queryByText("Age")).toBeNull();
+  expect(document.querySelector(".status")).toBeNull();
+});
+it("leads with only what the header has not already said",async()=>{
+  const resource=stamped();
+  vi.mocked(inspectExtensionResource).mockResolvedValue({...detail,status:failing,resource:{...resource,metadata:{...resource.metadata,ownerReferences:[{kind:"Application",name:"root"}]}}});
+  peek();
+  await screen.findByText("Failing");
+  for(const said of ["Name","Kind","Namespace","Created"])expect(screen.queryByText(said)).toBeNull();
+  expect(screen.getByText("Controlled by").parentElement?.textContent).toContain("Application/root");
+  expect(screen.getByText("Reason").parentElement?.textContent).toContain("Build failed");
+  expect(screen.getByText("API").parentElement?.textContent).toContain("kustomize.toolkit.fluxcd.io/v1");
+});
+it("offers the same views, in one order, before the resource has loaded",()=>{
+  vi.mocked(inspectExtensionResource).mockReturnValue(new Promise(()=>{}));
+  peek();
+  expect(screen.getAllByRole("tab").map(tab=>tab.textContent)).toEqual(["Overview","Events","YAML"]);
+});
+it("says a field in sentence case, leaves an acronym be, and keeps a map's own keys verbatim",async()=>{
+  vi.mocked(inspectExtensionResource).mockResolvedValue({...detail,resource:{...detail.resource,status:{},spec:{repoURL:"https://example.test",lastAppliedRevision:"main","example.com/owner":"team",values:{replicaCount:2,"image.tag":"v1"}}}});
+  peek();
+  expect(await screen.findByText("Repo URL")).toBeTruthy();
+  expect(screen.getByText("Last applied revision")).toBeTruthy();
+  expect(screen.getByText("example.com/owner")).toBeTruthy();
+  expect(screen.getByText("Values")).toBeTruthy();
+  expect(screen.getByText("replicaCount")).toBeTruthy();
+  expect(screen.getByText("image.tag")).toBeTruthy();
+});
+it("folds deep data and long lists with the kit's section, never a bare disclosure",async()=>{
+  vi.mocked(inspectExtensionResource).mockResolvedValue({...detail,resource:{...detail.resource,spec:{source:{helm:{parameters:{image:"v1"}}}}}});
+  peek();
+  const fold=await screen.findByRole("button",{name:"Parameters"});
+  expect(screen.queryByText(/"image"/)).toBeNull();
+  fireEvent.click(fold);
+  expect(screen.getByText(/"image": "v1"/)).toBeTruthy();
+  expect(document.querySelector(".extension-resource-detail details")).toBeNull();
+});
+it("opens the spec on a first visit, shuts what built-in details shut, and remembers it per kind",async()=>{
+  forgetFolds();
+  peek();
+  expect(await screen.findByText("./apps")).toBeTruthy();
+  expect(screen.queryByText("Missing source")).toBeNull();
+  expect(screen.queryByText("main@sha1:abcdef")).toBeNull();
+  fireEvent.click(screen.getByRole("button",{name:"Conditions"}));
+  expect(screen.getByText("Missing source")).toBeTruthy();
+  expect(isSectionOpen("Kustomization","Conditions")).toBe(true);
+});
+it("draws labels and annotations as a built-in resource's, before the app's own panels",async()=>{
+  const app={...fluxApp,manifest:{...fluxApp.manifest,contributions:{...fluxApp.manifest.contributions,detailPanels:[{
+   id:"summary",title:"App summary",forKinds:["kustomize.toolkit.fluxcd.io/Kustomization"],sections:[],
+  }]}}};
+  installedApps([app]);
+  vi.mocked(resolveExtensionPanels).mockResolvedValue({panels:[{id:"summary",title:"App summary",sections:[]}]});
+  setSectionOpen("Kustomization","Labels",true);setSectionOpen("Kustomization","Annotations",true);
+  vi.mocked(inspectExtensionResource).mockResolvedValue({...detail,resource:{...detail.resource,metadata:{...detail.resource.metadata,labels:{"app.kubernetes.io/name":"apps"},annotations:{"kubectl.kubernetes.io/last-applied-configuration":"{\"kind\":\"the-whole-manifest\"}",owner:"team"}}}});
+  peek();
+  const panel=await screen.findByRole("heading",{name:"App summary"});
+  expect(screen.getByText(/app\.kubernetes\.io\/name/)).toBeTruthy();
+  expect(screen.getByText(/owner/)).toBeTruthy();
+  expect(screen.queryByText(/the-whole-manifest/)).toBeNull();
+  const labels=screen.getByRole("button",{name:"Labels"});
+  expect(labels.compareDocumentPosition(panel)&Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+});
+it("lists events in the standard table, with their age",async()=>{
+  vi.mocked(inspectExtensionResource).mockResolvedValue({...detail,events:[{type:"Warning",reason:"BuildFailed",message:"Source unavailable",count:2,time:new Date(Date.now()-120_000).toISOString()}]});
+  peek();
+  fireEvent.click(await screen.findByRole("tab",{name:"Events"}));
+  const row=(await screen.findByText("Source unavailable")).closest("tr")!;
+  expect(row.textContent).toContain("BuildFailed");
+  expect(row.textContent).toContain("Kustomization/apps");
+  expect(row.textContent).toContain("2m");
+  expect(within(row).getByText("Warning").closest(".status")).toBeTruthy();
+});
+it("says when no events were reported",async()=>{
+  vi.mocked(inspectExtensionResource).mockResolvedValue({...detail,events:[]});
+  peek();
+  fireEvent.click(await screen.findByRole("tab",{name:"Events"}));
+  expect(await screen.findByText("No events")).toBeTruthy();
+});
+it("offers Ask beside the actions, asking after a flagged resource's trouble",async()=>{
+  vi.mocked(inspectExtensionResource).mockResolvedValue({...detail,status:failing});
+  peek();
+  await screen.findByText("Failing");
+  expect(screen.getByRole("button",{name:`Ask: ${askQuestion("Kustomization team/apps",true)}`})).toBeTruthy();
+});
+// `askContextFor` reads a subject off the route, and an app's route names none:
+// on these surfaces the question is all the agent is told about the resource.
+const Asked=({into}:{into:string[]})=>{
+  const {registerSubmit}=useConsole();
+  useLayoutEffect(()=>registerSubmit(question=>void into.push(question)),[registerSubmit]);
+  return null;
+};
+it.each([["a peek",false],["a full tab",true]])("tells the agent the kind and namespace asked about from %s",async(_,fullPage)=>{
+  const asked:string[]=[];
+  vi.mocked(inspectExtensionResource).mockResolvedValue({...detail,status:failing});
+  render(<><Asked into={asked}/><ExtensionResourceDetails selection={selection} fullPage={fullPage}/></>);
+  await screen.findByText("Failing");
+  fireEvent.click(screen.getByRole("button",{name:/^Ask:/}));
+  expect(asked).toEqual(["Why is Kustomization team/apps unhealthy?"]);
+});
+it("names a cluster-scoped resource to the agent by its kind alone",async()=>{
+  const asked:string[]=[];
+  render(<><Asked into={asked}/><ExtensionResourceDetails selection={{...selection,namespace:""}} fullPage/></>);
+  await screen.findByRole("heading",{level:1,name:"apps"});
+  fireEvent.click(await screen.findByRole("button",{name:/^Ask:/}));
+  expect(asked).toEqual(["What is Kustomization apps using right now?"]);
+});
+it("keeps two actions on a peek's bar and folds the rest, and Refresh, into More",async()=>{
+  peek();
+  expect(await screen.findByRole("button",{name:"Suspend"})).toBeTruthy();
+  expect(screen.queryByRole("button",{name:"Reconcile"})).toBeNull();
+  fireEvent.click(screen.getByRole("button",{name:"More actions"}));
+  expect(await screen.findByRole("button",{name:"Reconcile"})).toBeTruthy();
+  fireEvent.click(screen.getByRole("button",{name:"Refresh details"}));
+  await waitFor(()=>expect(inspectExtensionResource).toHaveBeenCalledTimes(2));
+});
+it("keeps what it is showing through a Refresh, until the new read answers",async()=>{
+  vi.mocked(inspectExtensionResource).mockResolvedValueOnce({...detail,status:failing});
+  peek();
+  fireEvent.click(await screen.findByRole("button",{name:"More actions"}));
+  let answer:(next:typeof detail&{status:typeof failing})=>void=()=>{};
+  vi.mocked(inspectExtensionResource).mockReturnValueOnce(new Promise(resolve=>{answer=resolve;}));
+  fireEvent.click(await screen.findByRole("button",{name:"Refresh details"}));
+  await waitFor(()=>expect(inspectExtensionResource).toHaveBeenCalledTimes(2));
+  expect(screen.getByText("Kustomization · team")).toBeTruthy();
+  expect(screen.getByText("Failing")).toBeTruthy();
+  expect(screen.queryByText(/^Loading/)).toBeNull();
+  answer({...detail,status:{...failing,label:"Still failing"}});
+  expect(await screen.findByText("Still failing")).toBeTruthy();
+});
+it("stays where it is when another view's action changes the resource",async()=>{
+  peek();
+  await screen.findByText("Kustomization · team");
+  vi.mocked(inspectExtensionResource).mockReturnValueOnce(new Promise(()=>{}));
+  act(()=>{window.dispatchEvent(new CustomEvent(EXTENSION_RESOURCE_CHANGED,{detail:selection}));});
+  await waitFor(()=>expect(inspectExtensionResource).toHaveBeenCalledTimes(2));
+  expect(screen.getByText("Kustomization · team")).toBeTruthy();
+  expect(screen.queryByText(/^Loading/)).toBeNull();
+});
+it("rules the metadata row off from whatever follows it",async()=>{
+  render(<ExtensionResourceDetails selection={selection} fullPage/>);
+  await screen.findByRole("heading",{level:1,name:"apps"});
+  await waitFor(()=>expect(slot("metadata-pair")).toBeTruthy());
+  // The row is a wrapper, so `.section + .section` does not reach the block after it.
+  expect(slot("metadata-pair")?.className).toContain("[&+.section]:border-t");
+});
+it("draws a high-impact action in the danger tone",async()=>{
+  vi.mocked(inspectExtensionResource).mockResolvedValue(withMeta);
+  peek();
+  expect((await screen.findByRole("button",{name:"Suspend"})).getAttribute("data-variant")).toBe("danger");
+  expect(screen.getByRole("button",{name:"Resume"}).getAttribute("data-variant")).not.toBe("danger");
+});
+it("still offers Refresh while the read has failed",async()=>{
+  vi.mocked(inspectExtensionResource).mockRejectedValue(new Error("Access denied"));
+  peek();
+  expect(await screen.findByRole("button",{name:"Refresh details"})).toBeTruthy();
+});
+// A row in More is unmounted by the pick, so there is nothing to go back to.
+it("brings focus back to the view when a review opened from More is cancelled",async()=>{
+  peek();
+  fireEvent.click(await screen.findByRole("button",{name:"More actions"}));
+  const row=await screen.findByRole("button",{name:"Reconcile"});
+  row.focus();
+  fireEvent.click(row);
+  fireEvent.click(await screen.findByRole("button",{name:"Cancel"}));
+  await waitFor(()=>expect(row.isConnected).toBe(false));
+  expect(document.activeElement?.classList.contains("extension-resource-detail")).toBe(true);
+});
+it("gives a resource's tab the heading, strip, facts and metadata row of a built-in one",async()=>{
+  const resource=stamped();
+  vi.mocked(inspectExtensionResource).mockResolvedValue({...detail,status:{status:"healthy",label:"Healthy"},resource:{...resource,metadata:{...resource.metadata,labels:{a:"b"},annotations:{c:"d"}}}});
+  render(<ExtensionResourceDetails selection={selection} fullPage clusterLabel="Production"/>);
+  expect(await screen.findByText("Healthy")).toBeTruthy();
+  expect(screen.getByRole("heading",{level:1,name:"apps"})).toBeTruthy();
+  expect(screen.getByRole("button",{name:"Copy name apps"})).toBeTruthy();
+  expect(slot("resource-tab")?.textContent).toContain("Production");
+  expect(slot("metric-strip")?.textContent).toContain("Status");
+  expect(slot("metric-strip")?.textContent).toContain("1h");
+  expect(slot("fact-grid")?.textContent).toContain("API");
+  expect(slot("tab-actions")?.textContent).toContain("Suspend");
+  expect(slot("metadata-pair")?.textContent).toContain("Labels");
+  expect(slot("metadata-pair")?.textContent).toContain("Annotations");
+  expect(screen.queryByRole("button",{name:"Open tab"})).toBeNull();
+});
+it("keeps a resource tab's header through loading and failure",async()=>{
+  const header=()=>{
+    expect(screen.getByRole("heading",{level:1,name:"apps"})).toBeTruthy();
+    expect(screen.getByRole("button",{name:"Copy name apps"})).toBeTruthy();
+    expect(slot("resource-tab")?.textContent).toContain("Production");
+    expect(screen.getAllByRole("tab").map(tab=>tab.textContent)).toEqual(["Overview","Events","YAML"]);
+  };
+  vi.mocked(inspectExtensionResource).mockReturnValue(new Promise(()=>{}));
+  const view=render(<ExtensionResourceDetails selection={selection} fullPage clusterLabel="Production"/>);
+  header();
+  view.unmount();
+  vi.mocked(inspectExtensionResource).mockRejectedValue(new Error("Access denied"));
+  render(<ExtensionResourceDetails selection={selection} fullPage clusterLabel="Production"/>);
+  expect(await screen.findByText("Access denied")).toBeTruthy();
+  header();
+});
+it("keeps to the kit's tokens and headings in its stylesheet",async()=>{
+  const {readFileSync}=await import("node:fs");
+  const {join}=await import("node:path");
+  const css=readFileSync(join(__dirname,"extensions.css"),"utf8");
+  expect(css).not.toContain("var(--danger");
+  expect(css).not.toContain(".extension-detail-heading");
 });

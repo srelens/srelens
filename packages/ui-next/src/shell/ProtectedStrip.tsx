@@ -17,7 +17,7 @@ import { isClusterScopedRoute } from "../lib/routes";
  * which is the safe side. Resolve it by `find` here if the strip ever has to
  * agree with the page about which.
  */
-function appPageCluster(route: string, contexts: readonly ClusterContext[]): string | null | undefined {
+export function appPageCluster(route: string, contexts: readonly ClusterContext[]): string | null | undefined {
   const operation = parseExtensionOperationRoute(route);
   if (operation) return contexts.find((c) => c.key === operation.contextKey)?.name ?? null;
   const page = parseExtensionRoute(route);

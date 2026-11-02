@@ -1,5 +1,5 @@
 import { NativeComponent } from "../native-components/NativeComponent";
-import { Button } from "@srelens/ui-kit";
+import { Button, Section } from "@srelens/ui-kit";
 import { contributionKind, extensionEnabledFor, resolveExtensionPanels,
   type ExtensionPanelFormat, type ExtensionResolvedPanel, type InstalledExtension } from "@srelens/core";
 import { plainText } from "./displayText";
@@ -27,8 +27,7 @@ function shown(value: string | null, format?: ExtensionPanelFormat): string {
 }
 
 export function ResolvedPanelView({ panel, onRetry }: { panel: ExtensionResolvedPanel; onRetry: () => void }) {
-  return <section className="section extension-detail-panel" aria-label={panel.title}>
-    <h4 className="extension-detail-heading">{plainText(panel.title)}</h4>
+  return <Section title={plainText(panel.title)} className="extension-detail-panel" aria-label={panel.title}>
     {panel.sections.map((section, index) => section.type === "fields"
       ? <div key={index}>
         <NativeComponent label={`${panel.title} fields ${index + 1}`}
@@ -42,7 +41,7 @@ export function ResolvedPanelView({ panel, onRetry }: { panel: ExtensionResolved
           payload={{ version:1, type:"Conditions", data:{ items:section.items } }}
           state={section.error ? { status:"error", error:section.error } : undefined} onRetry={onRetry}/>
     )}
-  </section>;
+  </Section>;
 }
 
 type PanelResource = {

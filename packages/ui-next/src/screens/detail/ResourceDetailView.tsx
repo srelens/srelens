@@ -5,20 +5,13 @@ import { ExtensionRelatedSlot } from "../../extensions/ExtensionRelatedSlot";
 import { ExtensionPodSlot } from "../../extensions/ExtensionPodTools";
 import type { ReactNode } from "react";
 import { ageFromTimestamp, type K8sObject, type ResourceStatusLine } from "@srelens/core";
-import {
-  Button,
-  Inspector,
-  KV,
-  LoadingState,
-  type InspectorProps,
-  type TabItem,
-} from "@srelens/ui-kit";
+import { Inspector, LoadingState, type InspectorProps, type TabItem } from "@srelens/ui-kit";
 import { FailureState } from "../../lib/errorCopy";
-import { Icons } from "../../lib/icons";
 import { CUSTOM_RESOURCE_ACTIONS } from "../../lib/kinds/custom";
 import { CopyNameButton } from "./CopyNameButton";
 import { DetailActions } from "./DetailActions";
-import { SectionMemory, Section } from "./Section";
+import { OpenTabButton, PeekFacts } from "./ResourceFrame";
+import { SectionMemory } from "./Section";
 import {
   describeTarget,
   useDetailPaneState,
@@ -29,7 +22,6 @@ import {
   PANE_METRICS,
   PANE_YAML,
 } from "./detailData";
-import type { DetailFact } from "./facts";
 
 /**
  * The peek host's own controls, both of them, in one object.
@@ -111,56 +103,6 @@ function statusHeader(
   // core says so in `k8sHealth`'s own comment — so the verdict passes straight
   // through rather than being re-mapped into a second opinion.
   return { status: line.status, statusKind: line.health, facts, flagged: line.flagged };
-}
-
-/**
- * The design's other header affordance: promote this subject to a tab of its
- * own. Outlined and labelled, beside the close rather than instead of it —
- * the mock draws two separate controls, and a peek that could only be left by
- * closing it is a peek the reader has to re-find.
- */
-function OpenTabButton({ onClick }: { onClick: () => void }) {
-  const Glyph = Icons.openTab;
-  return (
-    <Button type="button" variant="outline" size="xs" onClick={onClick}>
-      {/* The word is the accessible name; the glyph only decorates it. */}
-      <Glyph size={12} aria-hidden="true" />
-      Open tab
-    </Button>
-  );
-}
-
-/**
- * THE PEEK'S OWN FACT LAYOUT: a label column and a value column, read down.
- *
- * The mock's two-column list, in a pane about 352px wide — the label in muted
- * ink, the value beside it, one fact per line. The full tab reads the very
- * same facts across three columns of label-above-value and builds that itself;
- * this screen has never seen that layout and cannot be changed by it. What the
- * two share is the LIST (`detailFacts`), not a line of its markup. (#331)
- *
- * Untitled, because the design heads the first block of a detail with nothing:
- * the header above has already given the name, the kind and the namespace. An
- * untitled block also cannot fold, which is what keeps a detail from opening
- * showing nothing at all.
- *
- * A subject with no facts draws no block: an empty section still has its
- * padding and still rules against whatever follows it.
- */
-function PeekFacts({ facts }: { facts: DetailFact[] }) {
-  if (facts.length === 0) return null;
-  return (
-    // Named, so a test can hold this screen to drawing the WHOLE derived list
-    // rather than a fact or two off it — a screen that quietly dropped three
-    // of them would otherwise look exactly right. A class rather than a
-    // wrapper: the block has to stay a direct sibling of what follows it, or
-    // `.section + .section` draws no hairline against it.
-    <Section className="fact-list">
-      {facts.map((fact) => (
-        <KV key={fact.label} k={fact.label} v={fact.value} mono={fact.mono} />
-      ))}
-    </Section>
-  );
 }
 
 /**

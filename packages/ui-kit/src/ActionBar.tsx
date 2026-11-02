@@ -55,7 +55,7 @@ export interface ActionBarProps {
 const DEFAULT_MAX = 4;
 
 /** Dimming is not a message; this is the word that goes with it. */
-const NO_ACCESS = "No access";
+const UNAVAILABLE = "Unavailable";
 
 /**
  * The row of actions on a resource: the first few on the bar, the rest behind a
@@ -325,12 +325,12 @@ function MenuRow({ action: a, close }: { action: ActionBarAction; close: () => v
       <button
         type="button"
         // Named explicitly: otherwise the name is computed from everything in
-        // the row, and a blocked action would be called "Delete No access". It
+        // the row, and a blocked action would be called "Delete Unavailable". It
         // tracks the visible word rather than pinning to `label`, so the name
         // and the text never disagree — see {@link actionWord}.
         aria-label={word}
         aria-disabled={blocked || undefined}
-        // The reason, not the `No access` tag: the tag is a constant, and a
+        // The reason, not the `Unavailable` tag: the tag is a constant, and a
         // description that says less than the `title` beside it is no fix.
         aria-describedby={blocked ? reasonId : undefined}
         title={a.disabledReason}
@@ -355,7 +355,7 @@ function MenuRow({ action: a, close }: { action: ActionBarAction; close: () => v
       >
         {confirming ? <CheckGlyph /> : Icon && <Icon size={12} className="shrink-0" aria-hidden="true" />}
         <span className="flex-1 truncate">{word}</span>
-        {blocked && <span className="path text-faint">{NO_ACCESS}</span>}
+        {blocked && <span className="path text-faint">{UNAVAILABLE}</span>}
       </button>
       {blocked && <BlockedReason id={reasonId}>{a.disabledReason}</BlockedReason>}
     </div>

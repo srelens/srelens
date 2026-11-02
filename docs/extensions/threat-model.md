@@ -179,7 +179,7 @@ Residual risk:
   - **Whole objects:** `extensions.resource` resolves the same binding (`resolve` in
     `crates/registry/src/extensions/resource.rs`) and calls `k8s.getCustomResource`. That
     returns the complete object, with only `managedFields` removed (`inspect` in
-    `crates/kube/src/gitops.rs`). The Manifest tab shows all of it
+    `crates/kube/src/gitops.rs`). The YAML tab shows all of it
     (`packages/ui-next/src/extensions/ExtensionResourceDetails.tsx`), and an MCP client
     can request it without consent. A custom resource can hold values as sensitive as a
     built-in one, for example a CRD whose spec embeds credentials.

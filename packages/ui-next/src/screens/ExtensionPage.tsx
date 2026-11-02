@@ -4,7 +4,7 @@ import { ErrorNotice } from "../extensions/ExtensionResults";
 import { NO_PINNED_ID_MESSAGE, SHARED_CONTEXT_ID_MESSAGE } from "../extensions/contextIds";
 import { plainText } from "../extensions/displayText";
 import { ExtensionResourceNavigation } from "../extensions/resourceNavigation";
-import { extensionCardRoute, extensionEnabledFor, extensionClusterRoute as extensionRoute, extensionClusterResourceRoute as extensionResourceRoute, listContexts, parseExtensionRoute } from "@srelens/core";
+import { extensionCardRoute, extensionEnabledFor, extensionClusterRoute as extensionRoute, extensionClusterResourceRoute as extensionResourceRoute, listContexts, parseExtensionRoute, type ExtensionResourceSelection } from "@srelens/core";
 import { Button, Screen } from "@srelens/ui-kit";
 import { useExtensions } from "../extensions/Extensions";
 import { ExtensionWorkspace } from "../extensions/ExtensionWorkspace";
@@ -70,6 +70,22 @@ export function ExtensionPage({ route }: RoutedScreenProps) {
     : undefined;
   const showAll = () =>
     openTab(extensionRoute(contextKey, target.id, target.page), { clusterName: cluster?.name });
+  const openResource = (resource: ExtensionResourceSelection) =>
+    openTab(extensionResourceRoute(contextKey, target.id, target.page, resource.namespace, resource.name), { clusterName: cluster?.name });
+  // A resource heads its own page through the detail frame. Every state short of
+  // reading it stays on the screen below, which says what is in the way.
+  if (target.resourceName && inventory.status === "ready" && plugin && page && !shared && cluster?.pinnedId && extensionEnabledFor(plugin, cluster.key)) {
+    return (
+      <ExtensionResourceNavigation.Provider value={openResource}>
+        <ExtensionResourceDetails
+          fullPage
+          key={route}
+          clusterLabel={getContextLabel(cluster.stableId, cluster.name)}
+          selection={{ id: target.id, revision: plugin.revision, capability: page.capability, context: hostContext, namespace: target.namespace, name: target.resourceName }}
+        />
+      </ExtensionResourceNavigation.Provider>
+    );
+  }
   return (
     <Screen
       title={target.resourceName ?? page?.title ?? "App"}
@@ -114,7 +130,7 @@ export function ExtensionPage({ route }: RoutedScreenProps) {
             <Button variant="secondary" onClick={showAll}>Show all {plainText(page.title)}</Button>
           </div>
         ) : plugin && page ? (
-          <ExtensionResourceNavigation.Provider value={resource=>openTab(extensionResourceRoute(contextKey,target.id,target.page,resource.namespace,resource.name),{clusterName:cluster?.name})}>
+          <ExtensionResourceNavigation.Provider value={openResource}>
           {card && (
             <div role="status" className="extension-card-filter">
               <span>
@@ -124,7 +140,7 @@ export function ExtensionPage({ route }: RoutedScreenProps) {
               <Button variant="ghost" size="sm" onClick={showAll}>Show all {plainText(page.title)}</Button>
             </div>
           )}
-          {target.resourceName ? <ExtensionResourceDetails fullPage key={route} selection={{id:target.id,revision:plugin.revision,capability:page.capability,context:hostContext,namespace:target.namespace,name:target.resourceName}}/> : <ExtensionWorkspace
+          <ExtensionWorkspace
             card={card?.id}
             cardNamespaces={target.namespaces}
             plugin={plugin}
@@ -136,7 +152,7 @@ export function ExtensionPage({ route }: RoutedScreenProps) {
             route={route}
             actions={actions}
             namespace={card ? target.namespace : undefined}
-          />}
+          />
           </ExtensionResourceNavigation.Provider>
         ) : (
           <p className="extension-message">

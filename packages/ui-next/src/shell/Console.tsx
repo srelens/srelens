@@ -38,6 +38,7 @@ import { openOnNamedCluster } from "../lib/openCluster";
 import { logsRoute } from "../screens/Logs";
 import { Transcript } from "../screens/agent/Transcript";
 import { useWorkspaceSealed } from "./LockGate";
+import { appPageCluster } from "./ProtectedStrip";
 import {
   consoleHeightBounds,
   saveConsoleHeight,
@@ -262,14 +263,20 @@ export function Console({ fullView, spareAbove }: { fullView?: boolean; spareAbo
   // which is where a resource's identity lives — a cluster name alone left the
   // agent with no target for "summarise this stream" and it went searching
   // four namespaces for one.
+  // An app's page pins its cluster in its route, as a detail tab does (#834), so
+  // a question asked from it goes there whatever the rail says, and the page's
+  // narrowing is that cluster's too.
+  // ponytail: found by name, so two contexts sharing one share a narrowing here. `about.cluster` is a name anyway.
+  const askName = appPageCluster(route, contexts);
+  const askCtx = contexts.find((c) => c.name === askName) ?? activeCtx;
   // The active tab's namespace narrowing for this cluster — the picker on the
   // list screens. Without it, a question asked from a list narrowed to one
   // namespace had the agent sweep every namespace in the cluster.
-  const selected = useNamespaces(activeCtx?.stableId);
+  const selected = useNamespaces(askCtx?.stableId);
   // A namespace collection that matches nothing names no namespace to ask about (#881).
   const about = useMemo(
-    () => askContextFor(route, context, selectsNothing(selected) ? [] : selected),
-    [route, context, selected],
+    () => askContextFor(route, askCtx?.name ?? "", selectsNothing(selected) ? [] : selected),
+    [route, askCtx?.name, selected],
   );
   /**
    * The dock shows the conversation about the thing the reader is LOOKING at,

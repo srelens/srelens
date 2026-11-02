@@ -294,8 +294,8 @@ describe("ActionBar", () => {
     it("describes a blocked row in the menu the same way", () => {
       setup({ max: 1, actions: [action("Logs"), ...blocked] });
       return openMenu().then(() => {
-        // `No access` is the row's visible tag, and it is a constant. Pointing
-        // the description at those two words would say less than the `title`
+        // `Unavailable` is the row's visible tag, and it is a constant. Pointing
+        // the description at that word would say less than the `title`
         // already carried; the row has to name the reason too.
         expect(description(screen.getByRole("button", { name: "Delete" }))).toBe(
           "You cannot delete pods in kube-system",
@@ -340,7 +340,8 @@ describe("ActionBar", () => {
       // Opacity is not a message.
       setup({ max: 1, actions: [action("Logs"), ...blocked] });
       return openMenu().then((panel) => {
-        expect(panel.textContent).toContain("No access");
+        // Not "No access": most blocks are the resource's state, not a permission.
+        expect(panel.textContent).toContain("Unavailable");
       });
     });
 
