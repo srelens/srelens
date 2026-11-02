@@ -80,7 +80,7 @@ export const identityFacts: FactsFor = ({ object }) => {
   const owners = meta.ownerReferences ?? [];
   const created = str(meta.creationTimestamp);
   const facts: DetailFact[] = [];
-  if (created) facts.push({ label: "Created", value: `${ageFromTimestamp(created, Date.now())} ago` });
+  if (created) facts.push({ label: "Created", value: `${ageFromTimestamp(created, Date.now())} ago`, tile: "age" });
   if (owners.length > 0) {
     facts.push({
       label: "Controlled by",

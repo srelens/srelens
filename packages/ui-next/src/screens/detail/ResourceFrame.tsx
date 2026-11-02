@@ -62,8 +62,9 @@ export function PeekFacts({ facts }: { facts: DetailFact[] }) {
     // wrapper: the block has to stay a direct sibling of what follows it, or
     // `.section + .section` draws no hairline against it.
     <Section className="fact-list">
-      {facts.map((fact) => (
-        <KV key={fact.label} k={fact.label} v={fact.value} mono={fact.mono} />
+      {facts.map((fact, index) => (
+        // Positional: a printer column may share a generated fact's label.
+        <KV key={`${index}:${fact.label}`} k={fact.label} v={fact.value} mono={fact.mono} />
       ))}
     </Section>
   );

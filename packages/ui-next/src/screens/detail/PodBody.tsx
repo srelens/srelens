@@ -185,7 +185,9 @@ export const podFacts: FactsFor = (input) => {
   }
   // No container status at all means the kubelet has not reported yet: "0
   // restarts" would read as a fact where there is only an absence.
-  if (allContainerStatuses.length > 0) facts.push({ label: "Restarts", value: str(podRestartCount) });
+  if (allContainerStatuses.length > 0) {
+    facts.push({ label: "Restarts", value: str(podRestartCount), tile: "restarts" });
+  }
   if (podLastRestart) {
     facts.push({ label: "Last restart", value: timestampWithAge(podLastRestart, Date.now()) });
   }

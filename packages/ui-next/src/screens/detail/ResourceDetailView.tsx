@@ -183,7 +183,7 @@ export function ResourceDetailView({ context, kind, group, namespace, name, peek
   const header = statusHeader(statusLine, object);
   // The header's age is the Created fact, on a subject that has a line for one.
   const facts = subject.facts.filter(
-    (fact) => fact.label !== "Created" || !header.facts?.some((said) => said.label === "Age"),
+    (fact) => fact.tile !== "age" || !header.facts?.some((said) => said.label === "Age"),
   );
 
   // The peek's Overview pane: a flat run of sibling blocks, the lead facts

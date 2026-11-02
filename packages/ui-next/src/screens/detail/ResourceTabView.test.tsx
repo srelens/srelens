@@ -532,6 +532,27 @@ describe("ResourceTabView — the full tab the design draws", () => {
       expect([...document.querySelectorAll("[data-slot='fact-grid'] .kv-k")].map((el) => el.textContent)).toEqual(["Phase"]);
     });
 
+    it("keeps an operator's column named like a tile, which reads another field", async () => {
+      listCrds.mockResolvedValue({
+        crds: [{
+          name: "widgets.example.com", group: "example.com", version: "v1", kind: "Widget", plural: "widgets", namespaced: true,
+          printerColumns: [{ name: "Created", type: "string", jsonPath: ".status.createdAt" }, { name: "Restarts", type: "string", jsonPath: ".status.restarts" }],
+        }],
+      });
+      getObject.mockResolvedValue({
+        object: {
+          kind: "Widget",
+          metadata: { name: "w-1", namespace: "default", creationTimestamp: daysAgo(3) },
+          status: { createdAt: "upstream-2024", restarts: "upstream-7", containerStatuses: [{ name: "c", restartCount: 1 }] },
+        },
+      });
+      descriptorFor.mockReturnValue(undefined);
+      await openPod({ kind: "Widget", namespace: "default", name: "w-1" });
+      const rows = [...document.querySelectorAll("[data-slot='fact-grid'] .kv")].map((el) => el.textContent);
+      // Two rows, so the generated Created is still the Age tile's alone.
+      expect(rows).toEqual(["Createdupstream-2024", "Restartsupstream-7"]);
+    });
+
     it("draws no fact of the peek's own form, so nothing here is the peek's markup", async () => {
       await openPod();
       const grid = document.querySelector<HTMLElement>("[data-slot='fact-grid']")!;

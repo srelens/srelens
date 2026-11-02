@@ -1301,6 +1301,25 @@ describe("ResourceDetailView", () => {
       expect(document.querySelector(".fact-list")?.textContent).toContain("3/3");
     });
 
+    it("draws a column named Created beside the generated row, with no clash of keys", async () => {
+      const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+      listCrds.mockResolvedValue({
+        crds: [{ ...WIDGET_CRD, printerColumns: [{ name: "Created", jsonPath: ".status.createdAt", type: "string" }] }],
+      });
+      getObject.mockResolvedValue({
+        object: {
+          ...WIDGET,
+          metadata: { ...WIDGET.metadata, creationTimestamp: "2026-01-01T00:00:00Z" },
+          status: { createdAt: "upstream-2024" },
+        },
+      });
+      render(<ResourceDetailView context="ctx" kind="Widget" namespace="default" name="w-1" />);
+      await waitFor(() => expect(document.querySelector(".fact-list")?.textContent).toContain("upstream-2024"));
+      expect([...document.querySelectorAll(".fact-list .kv-k")].map((el) => el.textContent)).toEqual(["Created", "Created"]);
+      expect(logged.mock.calls.flat().join(" ")).not.toContain("same key");
+      logged.mockRestore();
+    });
+
     it("gives a CRD named like a built-in the custom pane, and reads its YAML in its own group", async () => {
       const deployments: CrdRef = {
         ...WIDGET_CRD,

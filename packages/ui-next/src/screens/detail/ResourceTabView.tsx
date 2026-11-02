@@ -215,9 +215,9 @@ export function ResourceTabView({ context, kind, group, namespace, name }: Resou
   }
 
   const tiles = metricTiles(statusLine, object, usageTiles(usage.data?.cpu, usage.data?.memory));
-  // The figures above the grid have said these. The Age tile is the Created fact.
-  const said = new Set(tiles.map((tile) => (tile.key === "age" ? "Created" : tile.label)));
-  const facts = subject.facts.filter((fact) => !said.has(fact.label));
+  // The figures above the grid have said these.
+  const said = new Set(tiles.map((tile) => tile.key));
+  const facts = subject.facts.filter((fact) => !fact.tile || !said.has(fact.tile));
 
   // The tab's Overview: the fact grid, then the kind's own blocks, then the
   // containers table the design folds in here, then Labels and Annotations
