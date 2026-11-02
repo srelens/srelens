@@ -125,41 +125,39 @@ it("shows exactly the rows the card counted in its namespaces, under a banner na
   expect(readExtension).toHaveBeenCalledWith(manifest.id, 4, "certificates", "srelens-context:/work/cluster/a", "", true, "expiring", ["prod", "team"]);
 });
 
-it("shows the card's namespaces in the page's picker, not All namespaces", async () => {
+it("states the card's namespaces read-only, not All namespaces", async () => {
   render(<ExtensionPage ported={[]} onSwitchToClassic={vi.fn()} onLocked={vi.fn()} route={cardRoute} />);
-  const picker = await screen.findByRole("combobox", { name: "App namespace" });
-  expect(picker.textContent).toContain("prod, team");
-  expect(picker.textContent).not.toContain("All namespaces");
+  const bar = await screen.findByRole("search", { name: "Filter certificates" });
+  expect(await within(bar).findByText("prod, team")).toBeTruthy();
+  expect(within(bar).queryByRole("combobox")).toBeNull();
 });
 
-it("leaves a single-namespace card route too, rather than showing the card's rows elsewhere", async () => {
-  const single = extensionCardRoute("cluster/a", manifest.id, "certificates", "team", "expiring");
-  render(<ExtensionPage ported={[]} onSwitchToClassic={vi.fn()} onLocked={vi.fn()} route={single} />);
-  await waitFor(() => expect(shownRows()).toEqual(["web-tls"]));
-  fireEvent.click(screen.getByRole("combobox", { name: "App namespace" }));
-  fireEvent.click(await screen.findByRole("option", { name: "prod" }));
-  expect(openTab).toHaveBeenCalledWith(
-    extensionClusterRoute("cluster/a", manifest.id, "certificates", "prod"),
-    { clusterName: "cluster/a" },
-  );
-  await settle();
-  expect(shownRows()).toEqual(["web-tls"]);
-});
-
-it("leaves the card route when the picker chooses another namespace, and keeps the card's rows until then", async () => {
+it("leaves the card by Show all, and keeps the card's rows until then", async () => {
   render(<ExtensionPage ported={[]} onSwitchToClassic={vi.fn()} onLocked={vi.fn()} route={cardRoute} />);
   await waitFor(() => expect(shownRows()).toEqual(["shop-tls", "web-tls"]));
-  fireEvent.click(screen.getByRole("combobox", { name: "App namespace" }));
-  fireEvent.click(await screen.findByRole("option", { name: "other" }));
-  // The plain page for the new namespace: no card, no namespace list.
+  fireEvent.click(screen.getByRole("button", { name: "Show all Certificates" }));
+  // The plain page: no card, and the namespaces are the tab's to say.
   expect(openTab).toHaveBeenCalledWith(
-    extensionClusterRoute("cluster/a", manifest.id, "certificates", "other"),
+    extensionClusterRoute("cluster/a", manifest.id, "certificates"),
     { clusterName: "cluster/a" },
   );
   // This tab is still the card's route, so it still shows what the card counted.
   await settle();
   expect(shownRows()).toEqual(["shop-tls", "web-tls"]);
-  expect(readExtension).not.toHaveBeenCalledWith(manifest.id, 4, "certificates", "srelens-context:/work/cluster/a", "other", true, "expiring");
   const status = screen.getByText(/counted by/).closest("[role=status]") as HTMLElement;
   expect(within(status).getByText(/in prod and team/)).toBeTruthy();
+});
+
+it("draws the list's count and Refresh in the screen's header", async () => {
+  render(<ExtensionPage ported={[]} onSwitchToClassic={vi.fn()} onLocked={vi.fn()} route={extensionClusterRoute("cluster/a", manifest.id, "certificates")} />);
+  await waitFor(() => expect(shownRows()).toHaveLength(4));
+  const header = document.querySelector("[data-slot=screen-actions]") as HTMLElement;
+  expect(within(header).getByText("4 items")).toBeTruthy();
+  expect(within(header).getByRole("button", { name: "Refresh" })).toBeTruthy();
+});
+
+it("reads the tab's namespaces on a plain page, whatever a route from before names", async () => {
+  render(<ExtensionPage ported={[]} onSwitchToClassic={vi.fn()} onLocked={vi.fn()} route={extensionClusterRoute("cluster/a", manifest.id, "certificates", "team")} />);
+  await waitFor(() => expect(shownRows()).toHaveLength(4));
+  expect(readExtension).toHaveBeenLastCalledWith(manifest.id, 4, "certificates", "srelens-context:/work/cluster/a", "", true);
 });

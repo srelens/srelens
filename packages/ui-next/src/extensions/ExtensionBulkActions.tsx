@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import {
   actOnExtensionResource,
   inspectExtensionResource,
@@ -8,12 +9,13 @@ import {
   type ExtensionResourceDetail,
   type BulkProgress,
 } from "@srelens/core";
-import { Button } from "@srelens/ui-kit";
+import { ActionBar, Button, type ActionBarAction } from "@srelens/ui-kit";
 import { HostConfirmation, boundedPlainText } from "../confirm/HostConfirmation";
 import { useProtectedConfirm } from "../lib/protectedConfirm";
 import { useConfirmationApp } from "../confirm/confirmationApp";
 import { confirmFields } from "../confirm/confirmRequest";
 import { useResource } from "../lib/useResource";
+import { SelectionBar } from "../screens/resourceShell";
 import { plainText } from "./displayText";
 import {
   bulkActionResult,
@@ -68,6 +70,8 @@ export interface ExtensionBulkActionsProps {
   /** Empties the table's selection once the reader is done with the result. */
   onClear(): void;
   available?: BulkActionAvailability;
+  /** Where the bar goes when the page keeps it elsewhere; beside the rest otherwise. */
+  barSlot?: HTMLElement | null;
 }
 
 const count = (n: number, one: string, many: string) => `${n.toLocaleString("en-US")} ${n === 1 ? one : many}`;
@@ -122,7 +126,7 @@ function NameList({ testId, title, items }: { testId: string; title: string; ite
   );
 }
 
-export function ExtensionBulkActions({ target, selection, onClear, available }: ExtensionBulkActionsProps) {
+export function ExtensionBulkActions({ target, selection, onClear, available, barSlot }: ExtensionBulkActionsProps) {
   // Who the host says asked: read from its own installed inventory, never from
   // the app. See `confirmationApp.ts`.
   const app = useConfirmationApp({ id: target.id, revision: target.revision });
@@ -138,7 +142,7 @@ export function ExtensionBulkActions({ target, selection, onClear, available }: 
       inspectionAbort.current = controller;
       const details = new Map<string, ExtensionResourceDetail>();
       const outcomes = await runBulk(selection, async (resource) => {
-        const detail = await inspectExtensionResource({ ...target, ...resource });
+        const detail = await inspectExtensionResource({ ...target, namespace: resource.namespace, name: resource.name });
         details.set(bulkResourceKey(resource), detail);
         return { ok: true };
       }, BULK_CONCURRENCY, { signal: controller.signal });
@@ -262,32 +266,27 @@ export function ExtensionBulkActions({ target, selection, onClear, available }: 
 
   if (selection.length === 0) return null;
 
+  const actions: ActionBarAction[] = menu.status === "error" ? [] : offered.map((action) => ({
+    id: action,
+    label: actionTitle(action),
+    disabledReason: busy ? "A bulk action is running." : pending !== null ? "Another action is under review." : undefined,
+    onSelect: () => {
+      trigger.current = document.activeElement as HTMLButtonElement;
+      setResult(null);
+      setProgress(null);
+      setPending(action);
+    },
+  }));
+  const bar = (
+    <SelectionBar count={selection.length}>
+      {menu.status === "loading" && <span className="text-muted text-[0.8125rem]">Loading actions…</span>}
+      <ActionBar actions={actions} label="Actions on the selection" />
+    </SelectionBar>
+  );
+
   return (
     <div className="extension-bulk">
-      <div className="extension-bulk-bar">
-        <strong data-testid="bulk-count">{count(selection.length, "selected", "selected")}</strong>
-        {menu.status === "loading" && <span className="extension-message">Loading actions…</span>}
-        {menu.status !== "error" &&
-          offered.map((action) => (
-            <Button
-              key={action}
-              variant="outline"
-              size="xs"
-              disabled={busy || pending !== null}
-              onClick={(event) => {
-                trigger.current = event.currentTarget;
-                setResult(null);
-                setProgress(null);
-                setPending(action);
-              }}
-            >
-              {actionTitle(action)}
-            </Button>
-          ))}
-        <Button variant="outline" size="xs" disabled={busy} onClick={onClear}>
-          Clear selection
-        </Button>
-      </div>
+      {barSlot ? createPortal(bar, barSlot) : <div className="extension-bulk-bar">{bar}</div>}
       {menu.status === "error" && (
         // The host could not say which actions it offers. That is a failed
         // read, not an absence of actions, so it says so and offers a retry

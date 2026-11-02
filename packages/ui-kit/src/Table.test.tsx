@@ -1,4 +1,5 @@
 import { readFileSync } from "node:fs";
+import { tableFilterError } from "./filter";
 import { join } from "node:path";
 import { describe, it, expect, vi, afterEach } from "vitest";
 import { act, render, screen, fireEvent } from "@testing-library/react";
@@ -6,7 +7,6 @@ import userEvent from "@testing-library/user-event";
 import {
   Table,
   filterTableData,
-  tableFilterError,
   computeVisibleRange,
   rowPitch,
   type Column,

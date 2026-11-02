@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useState } from "react";
-import { contributionKind, extensionEnabledFor, resolveExtensionColumns, type ExtensionColumnResult, type ExtensionTableColumn, type InstalledExtension } from "@srelens/core";
+import { contributionKind, extensionEnabledFor, resolveExtensionColumns, selectsNothing, watchNamespaceForSelection, type ExtensionColumnResult, type ExtensionTableColumn, type InstalledExtension } from "@srelens/core";
 import { Badge, type Column } from "@srelens/ui-kit";
 import type { ListRow } from "../lib/kinds/types";
+import { scopesFor } from "../lib/resourceList";
 import { plainText } from "./displayText";
 import { StatusBadge } from "./StatusBadge";
 import { useLiveApps } from "./liveReaders";
@@ -73,12 +74,18 @@ export function qualifiedTableKind(kind: string, customGroup?: string): string {
   return contributionKind(kind, groups[kind] ?? "");
 }
 
-/** One host request per contributing app and list refresh, regardless of row count. */
+/**
+ * One host request per contributing app, selected namespace and list refresh,
+ * regardless of row count: a credential scoped to a few namespaces is refused
+ * the cluster-wide read that one request over all of them would need (#688).
+ */
 export function useResolvedColumns<Row extends ListRow>(args: {
-  plugins: InstalledExtension[]; context: string; contextId?: string; namespace: string;
+  plugins: InstalledExtension[]; context: string; contextId?: string;
+  /** What the table lists; none is every namespace, or a cluster-scoped kind. */
+  namespaces: string[];
   kind: string; rows: Row[]; refresh?: number;
 }) {
-  const { plugins, context, contextId, namespace, kind, rows, refresh = 0 } = args;
+  const { plugins, context, contextId, namespaces, kind, rows, refresh = 0 } = args;
   const offers = plugins.filter((plugin) => plugin.enabled && !plugin.quarantined && !plugin.policyBlocked &&
     extensionEnabledFor(plugin, contextId) && (plugin.manifest.contributions.tableColumns?.some((column) => column.forKinds.includes(kind)) ||
       plugin.manifest.contributions.badges?.some((badge) => badge.forKinds.includes(kind))));
@@ -96,8 +103,11 @@ export function useResolvedColumns<Row extends ListRow>(args: {
     return { plugin, capabilities: (contributions.joins ?? []).filter((join) => joinIds.has(join.id)).map((join) => join.capability) };
   });
   const [pulse, setPulse] = useState(0);
-  const liveState = useLiveApps({ apps: watched, context, namespace, label: `columns:${kind}`, onChange: () => setPulse((n) => n + 1) });
-  const scope = JSON.stringify([context, namespace, kind, signature, refresh, retry]);
+  const liveState = useLiveApps({
+    apps: selectsNothing(namespaces) ? [] : watched, context, namespace: watchNamespaceForSelection(namespaces),
+    label: `columns:${kind}`, onChange: () => setPulse((n) => n + 1),
+  });
+  const scope = JSON.stringify([context, namespaces, kind, signature, refresh, retry]);
   const [answer, setAnswer] = useState<{ scope: string; rows: Row[]; results: Result[] } | null>(null);
   useEffect(() => {
     let current = true;
@@ -120,8 +130,15 @@ export function useResolvedColumns<Row extends ListRow>(args: {
           .map((key) => [key, (row as Record<string, unknown>)[key]])),
       };
     });
+    const asks = scopesFor(namespaces).flatMap((namespace) => {
+      const own = namespace ? uids.filter((row) => row.namespace === namespace) : uids;
+      return own.length ? [{ namespace, own }] : [];
+    });
     for (const plugin of offers) {
-      resolveExtensionColumns(plugin.manifest.id, plugin.revision, context, namespace, kind, uids).then(
+      // All or nothing: a namespace left out would read as cells with no value,
+      // where "Couldn't read" is the truth.
+      Promise.all(asks.map(({ namespace, own }) => resolveExtensionColumns(plugin.manifest.id, plugin.revision, context, namespace, kind, own)))
+        .then((answers) => ({ ...answers[0], cells: answers.flatMap((answer) => answer.cells) })).then(
         (data) => {
           if (!current) return;
           setAnswer((previous) => previous?.scope === scope && previous.rows === rows

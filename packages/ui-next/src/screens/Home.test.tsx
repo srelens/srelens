@@ -87,7 +87,7 @@ describe("Home", () => {
     setContexts([PROD, STAGE]);
     setMark(PROD.stableId, { ...defaultMark(PROD.name), name: "Europe" });
     render(<Home />);
-    const filter = screen.getByRole("searchbox", { name: "Find a cluster" });
+    const filter = screen.getByRole("searchbox", { name: "Filter clusters" });
     await userEvent.type(filter, "prod");
     expect(screen.getByRole("button", { name: "Open cluster Europe — Not checked" })).toBeTruthy();
     expect(screen.queryByRole("button", { name: "Open cluster staging — Not checked" })).toBeNull();
@@ -98,6 +98,18 @@ describe("Home", () => {
     expect(screen.getAllByRole("button", { name: /^Open cluster / })).toHaveLength(2);
     act(() => setMark(PROD.stableId, { ...defaultMark(PROD.name), name: "Production renamed" }));
     expect(screen.getByRole("button", { name: "Open cluster Production renamed — Not checked" })).toBeTruthy();
+  });
+
+  it("finds a cluster through the standard filter row", async () => {
+    setContexts([PROD, STAGE]);
+    render(<Home />);
+    expect(screen.getByRole("search", { name: "Filter clusters" })).toBeTruthy();
+    await userEvent.click(screen.getByRole("button", { name: "Use regular expression" }));
+    await userEvent.type(screen.getByRole("searchbox", { name: "Filter clusters" }), "^stag");
+    expect(screen.queryByRole("button", { name: "Open cluster prod — Not checked" })).toBeNull();
+    expect(screen.getByRole("button", { name: "Open cluster staging — Not checked" })).toBeTruthy();
+    await userEvent.keyboard("{Escape}");
+    expect(screen.getAllByRole("button", { name: /^Open cluster / })).toHaveLength(2);
   });
 
   it("distinguishes loading and failed discovery from an empty configuration", () => {

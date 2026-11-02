@@ -11,6 +11,7 @@ import { ActionBar, ConfirmDialog, type ActionBarAction } from "@srelens/ui-kit"
 import { useClusterGate } from "../lib/clusterMoved";
 import { FailureLine, FailureWord } from "../lib/errorCopy";
 import { rowKey, type KindDescriptor, type ListRow } from "../lib/kinds/types";
+import { SelectionBar } from "./resourceShell";
 
 export interface ResourceBulkProps {
   /** Row keys the table's own checkbox column reports — `Table`'s
@@ -188,11 +189,9 @@ export function ResourceBulk({ selected, kind, descriptor, context, rows, onDone
   return (
     <>
       {selectedRows.length > 0 && (
-        // Inline in the filter row, which owns the padding and stays visible.
-        <div className="flex shrink-0 items-center gap-2 whitespace-nowrap">
-          <span className="text-muted text-[0.8125rem]">{selectedRows.length} selected</span>
+        <SelectionBar count={selectedRows.length}>
           <ActionBar actions={actions} label={`${kind} actions`} />
-        </div>
+        </SelectionBar>
       )}
       {pending && (
         <ConfirmDialog

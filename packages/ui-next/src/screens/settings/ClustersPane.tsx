@@ -1,7 +1,7 @@
 import { useId, useRef, useState, type PointerEvent } from "react";
 import { GripVertical } from "lucide-react";
 import { deleteContext, describeError, isTauri, listContexts, removeClusterNamespace, unprefixedName, type ClusterContext } from "@srelens/core";
-import { Button, ConfirmDialog, CustomizeMark, Field, Mark, Switch, TextInput } from "@srelens/ui-kit";
+import { Button, ConfirmDialog, CustomizeMark, Field, FilterBar, Mark, Switch, TextInput, useListFilter } from "@srelens/ui-kit";
 import { getAssistantSaveError, setClusterAssistant, useAssistant } from "../../lib/assistant";
 import { getContexts, getKubeconfigFiles, setContexts, useContexts, useContextsError, useContextsStatus } from "../../lib/clusters";
 import { moveContext, moveContextBy, removeContextFromOrder, useOrderedContexts } from "../../lib/contextOrder";
@@ -48,7 +48,7 @@ export function ClustersPane() {
   const status = useContextsStatus();
   const listingError = useContextsError();
   const [selected, setSelected] = useState<string | null>(null);
-  const [query, setQuery] = useState("");
+  const filter = useListFilter();
   const [pending, setPending] = useState<ClusterContext | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
@@ -92,7 +92,7 @@ export function ClustersPane() {
   const current = contexts.find(c => c.stableId === selected) ?? contexts[0];
   const visible = contexts.filter(c => {
     const mark = getMark(c.stableId, c.name);
-    return [c.name, c.server, mark.name, mark.short].join(" ").toLowerCase().includes(query.toLowerCase());
+    return [c.name, c.server, mark.name, mark.short].some(filter.matches);
   });
   async function reload() {
     setBusy(true);
@@ -150,8 +150,8 @@ export function ClustersPane() {
       status !== "failed" && <p className="p-3 text-[0.75rem] text-muted">No contexts configured. Add a kubeconfig or cluster in Connections.</p> :
       <div className="context-management-layout min-h-0 flex-1">
         <section aria-label="Context order" className="flex min-h-0 min-w-0 flex-col border-r border-rule">
-          <div className="border-b border-rule p-3"><TextInput aria-label="Filter contexts" placeholder="Filter contexts…" value={query} onValueChange={setQuery} />
-            <p id={reorderHint} className="mt-2 text-[0.6875rem] text-muted">Drag to reorder. Focus a handle and use ↑/↓ with a keyboard.</p></div>
+          <FilterBar {...filter} label="Filter contexts" placeholder="Filter contexts…" />
+          <p id={reorderHint} className="border-b border-rule px-3 py-1.5 text-[0.6875rem] text-muted">Drag to reorder. Focus a handle and use ↑/↓ with a keyboard.</p>
           <ul ref={list} className="scroll min-h-0 flex-1" aria-label="Contexts" onDragStart={event => event.preventDefault()}>{visible.map(context => {
             const mark = getMark(context.stableId, context.name);
             const index = contexts.indexOf(context);

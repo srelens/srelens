@@ -130,8 +130,14 @@ it("does not let a post-removal relist overwrite a concurrent context update", a
 it("filters by saved short name and distinguishes list failure from an empty list", async () => {
   const user = userEvent.setup();
   const view = render(<ClustersPane />);
-  await user.type(screen.getByLabelText("Filter contexts"), "PE");
+  expect(screen.getByRole("search", {name: "Filter contexts"})).toBeTruthy();
+  await user.type(screen.getByRole("searchbox", {name: "Filter contexts"}), "PE");
   expect(screen.getAllByRole("listitem")).toHaveLength(1);
+  await user.keyboard("{Escape}");
+  await user.click(screen.getByRole("button", {name: "Use regular expression"}));
+  await user.type(screen.getByRole("searchbox", {name: "Filter contexts"}), "^PE$");
+  expect(screen.getAllByRole("listitem")).toHaveLength(1);
+  await user.keyboard("{Escape}");
   view.unmount();
   setContexts([], "kubeconfig permission denied");
   const added = { ...contexts[1], name: "new-context", stableId: "new-id", key: "new-id" };

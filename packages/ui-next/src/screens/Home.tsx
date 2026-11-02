@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { describeError, listContexts, plural, type ClusterContext } from "@srelens/core";
-import { Badge, Button, EmptyState, LoadingState, Mark, NavIcon, Screen, StatusPill, TextInput, usePortalShowing } from "@srelens/ui-kit";
+import { Badge, Button, EmptyState, FilterBar, LoadingState, Mark, NavIcon, Screen, StatusPill, useListFilter, usePortalShowing } from "@srelens/ui-kit";
 import { useAttention, type ClusterAttention } from "../lib/attention";
 import { getContexts, getKubeconfigFiles, setContexts, useContexts, useContextsError, useContextsStatus } from "../lib/clusters";
 import { useOrderedContexts } from "../lib/contextOrder";
@@ -55,13 +55,12 @@ export function Home() {
   const scans = useAttention(targets, sealed || !showing);
   // `useAttention` minds the window itself; the one-off checks in Pick up are told.
   const hidden = useSyncExternalStore(onVisibilityChange, isWindowHidden, isWindowHidden);
-  const [query, setQuery] = useState("");
+  const filter = useListFilter();
   const [retrying, setRetrying] = useState(false);
   const mounted = useRef(false);
   useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
-  const term = query.trim().toLocaleLowerCase();
   const filtered = ordered.filter(ctx =>
-    [getMark(ctx.stableId, ctx.name).name, ctx.name, ctx.cluster, ctx.server].some(value => value.toLocaleLowerCase().includes(term)),
+    [getMark(ctx.stableId, ctx.name).name, ctx.name, ctx.cluster, ctx.server].some(filter.matches),
   );
 
   async function retry() {
@@ -96,15 +95,15 @@ export function Home() {
             <section className="home-clusters" aria-labelledby="home-clusters-title">
               <div className="home-section-heading">
                 <h2 id="home-clusters-title">Your clusters <span className="text-muted">{contexts.length}</span></h2>
-                {contexts.length > 0 && <TextInput type="search" aria-label="Find a cluster" placeholder="Find a cluster…" value={query} onValueChange={setQuery} />}
               </div>
+              {contexts.length > 0 && <FilterBar {...filter} label="Filter clusters" placeholder="Filter clusters…" />}
               {status === "failed" && <div className="border-b border-rule p-4">
                 <FailureAlert title="Could not load all clusters" error={error} />
                 <Button variant="secondary" size="sm" className="mt-2" disabled={retrying} onClick={() => void retry()}>{retrying ? "Retrying…" : "Retry"}</Button>
               </div>}
               {status === "loading" ? <LoadingState label="Loading clusters…" /> : contexts.length === 0 ? (
                 status === "loaded" && <EmptyState title="No clusters configured" hint="Add a kubeconfig or connect to a cluster to start exploring. Your saved connections will appear here." />
-              ) : filtered.length === 0 ? <EmptyState title="No matching clusters" hint="Search by display name, context, or API server." action={<Button variant="secondary" size="sm" onClick={() => setQuery("")}>Clear search</Button>} /> : (
+              ) : filtered.length === 0 ? <EmptyState title="No matching clusters" hint="Search by display name, context, or API server." action={<Button variant="secondary" size="sm" onClick={() => filter.onValueChange("")}>Clear search</Button>} /> : (
                 <ul className="home-cluster-list" aria-label="Saved clusters">
                   {filtered.map(ctx => <ClusterRow key={ctx.stableId} context={ctx} link={links[ctx.stableId]} paused={workspace.pausedClusters?.includes(ctx.stableId) === true} scan={scans[ctx.stableId]} />)}
                 </ul>

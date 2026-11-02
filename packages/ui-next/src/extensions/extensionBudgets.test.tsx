@@ -219,11 +219,11 @@ describe("extension performance budgets (#581)", () => {
     const argo = joins("org.example.argo", ["applications"]);
     const rows = Array.from({ length: 1_000 }, (_, index) => ({ uid: `uid-${index}`, name: `api-${index}`, namespace: "team" }));
     function Part({ capability }: { capability: string }) {
-      useLiveReaders({ plugin: flux, capabilities: [capability], context: "kind-demo", namespace: "team", label: "part", onChange: () => {} });
+      useLiveReaders({ plugin: flux, capabilities: [capability], context: "kind-demo", namespaces: ["team"], label: "part", onChange: () => {} });
       return null;
     }
     function Table() {
-      useResolvedColumns({ plugins: [security, argo], context: "kind-demo", namespace: "team", kind: "apps/Deployment", rows });
+      useResolvedColumns({ plugins: [security, argo], context: "kind-demo", namespaces: ["team"], kind: "apps/Deployment", rows });
       return null;
     }
     const page = render(

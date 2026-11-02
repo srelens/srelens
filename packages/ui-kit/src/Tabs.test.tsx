@@ -96,6 +96,22 @@ describe("Tabs keyboard behaviour", () => {
   });
 });
 
+describe("Tabs with manual activation", () => {
+  it("moves focus with the arrow keys and changes nothing until a tab is pressed", async () => {
+    const user = userEvent.setup();
+    const onChange = vi.fn();
+    render(<Tabs tabs={tabs} active="pods" onChange={onChange} activation="manual" />);
+
+    screen.getByRole("tab", { name: "Pods" }).focus();
+    await user.keyboard("{ArrowRight}");
+    expect(document.activeElement).toBe(screen.getByRole("tab", { name: "Services" }));
+    expect(onChange).not.toHaveBeenCalled();
+
+    await user.keyboard("{Enter}");
+    expect(onChange).toHaveBeenCalledWith("services");
+  });
+});
+
 describe("Tabs in a narrow container", () => {
   it("carries its own horizontal overflow", () => {
     // Each tab has a 108px minimum and flex items do not shrink past it, so

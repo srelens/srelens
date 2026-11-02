@@ -696,7 +696,7 @@ export function ExtensionResourceSlot({
           plugin={current.plugin}
           capability={current.contribution.capability}
           context={context}
-          namespace={ns}
+          namespaces={ns ? [ns] : []}
         />
         </ExtensionRequirements>
       )}

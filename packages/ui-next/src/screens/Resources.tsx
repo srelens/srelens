@@ -7,7 +7,6 @@ import {
   listCrds,
   namespacePhrase,
   rowInSelection,
-  watchNamespaceForSelection,
   type ClusterContext,
   type CrdRef,
 } from "@srelens/core";
@@ -182,10 +181,6 @@ function KindList({
   // Each selected namespace is listed on its own (#688); none is "all
   // namespaces". A cluster-scoped kind has no namespace to narrow by.
   const list = useResourceList<ListRow>(name, slug, descriptor, clusterScoped ? [] : selection, files);
-  // The one namespace an app column is told the table is scoped to, or ""
-  // for several — its contract is a single namespace, not the list's scopes.
-  const namespace = clusterScoped ? "" : watchNamespaceForSelection(selection);
-
   const scoped = useMemo(
     () => clusterScoped ? list.rows : list.rows.filter((row) => rowInSelection(row.namespace ?? "", selection)),
     [list.rows, clusterScoped, selection],
@@ -206,7 +201,7 @@ function KindList({
   const rows = useMemo(() => narrow(scoped), [narrow, scoped]);
   const inventory = useExtensions();
   const appColumns = useResolvedColumns({
-    plugins: inventory.data?.plugins ?? [], context: name, contextId: context.key, namespace,
+    plugins: inventory.data?.plugins ?? [], context: name, contextId: context.key, namespaces: clusterScoped ? [] : selection,
     kind: qualifiedTableKind(descriptor?.k8sKind ?? "", descriptor?.group), rows,
   });
 

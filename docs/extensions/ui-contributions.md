@@ -100,10 +100,9 @@ namespace-restricted credential is never shown a refusal for namespaces it was n
 going to read; it then reads its one namespace.
 
 A card with a `target` opens that app page narrowed to what the card counted, over the
-same namespaces; the page names them, its namespace picker shows them, and it offers
-the whole list. Choosing another namespace in that picker opens the plain page for it,
-and the card's page keeps showing what the card counted. A card the app no longer
-declares is reported as gone rather than shown as every row. Titles, app names and
+same namespaces; the page names them, shows them read-only in its filter row, and offers
+the whole list, which follows the tab's own namespaces. A card the app no longer declares
+is reported as gone rather than shown as every row. Titles, app names and
 values render as plain text.
 
 ## Detail tabs and detail links

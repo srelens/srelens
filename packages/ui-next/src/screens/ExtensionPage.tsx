@@ -23,6 +23,7 @@ async function relistContexts() {
 export function ExtensionPage({ route }: RoutedScreenProps) {
   const target = parseExtensionRoute(route);
   const [legacyPin, setLegacyPin] = useState<{ route: string; key: string } | null>(null);
+  const [actions, setActions] = useState<HTMLElement | null>(null);
   const inventory = useExtensions();
   const contexts = useContexts();
   const contextsStatus = useContextsStatus();
@@ -68,11 +69,12 @@ export function ExtensionPage({ route }: RoutedScreenProps) {
     ? plugin?.manifest.contributions.dashboardCards?.find((c) => c.id === target.card && c.target?.page === target.page)
     : undefined;
   const showAll = () =>
-    openTab(extensionRoute(contextKey, target.id, target.page, target.namespace), { clusterName: cluster?.name });
+    openTab(extensionRoute(contextKey, target.id, target.page), { clusterName: cluster?.name });
   return (
     <Screen
       title={target.resourceName ?? page?.title ?? "App"}
       eyebrow={getContextLabel(cluster?.stableId ?? "", cluster?.name ?? target.context)}
+      actions={<div ref={setActions} className="contents" />}
       fill
     >
       <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
@@ -125,20 +127,15 @@ export function ExtensionPage({ route }: RoutedScreenProps) {
           {target.resourceName ? <ExtensionResourceDetails fullPage key={route} selection={{id:target.id,revision:plugin.revision,capability:page.capability,context:hostContext,namespace:target.namespace,name:target.resourceName}}/> : <ExtensionWorkspace
             card={card?.id}
             cardNamespaces={target.namespaces}
-            onLeaveCard={(namespace) =>
-              openTab(extensionRoute(contextKey, target.id, target.page, namespace), { clusterName: cluster?.name })
-            }
             plugin={plugin}
             page={page}
-            onCard={(id, namespace, card) => openTab(extensionCardRoute(contextKey, target.id, id, namespace, card, namespace ? [namespace] : []), {clusterName:cluster?.name})}
-            onPage={(id, namespace) =>
-              openTab(
-                extensionRoute(contextKey, target.id, id, namespace),
-                { clusterName: cluster?.name },
-              )
-            }
+            onCard={(id, namespaces, card) => openTab(extensionCardRoute(contextKey, target.id, id, "", card, namespaces), {clusterName:cluster?.name})}
+            onPage={(id) => openTab(extensionRoute(contextKey, target.id, id), { clusterName: cluster?.name })}
+            cluster={cluster!}
             context={hostContext}
-            namespace={target.namespace}
+            route={route}
+            actions={actions}
+            namespace={card ? target.namespace : undefined}
           />}
           </ExtensionResourceNavigation.Provider>
         ) : (
