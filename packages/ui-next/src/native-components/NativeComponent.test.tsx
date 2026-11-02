@@ -81,6 +81,11 @@ it("retains condition generation without treating every true condition as health
   expect(screen.getByText("True").dataset.kind).toBe("danger");
 });
 
+it.each([["Reconciling", "warning"], ["Stalled", "danger"]])("does not draw a true %s as healthy", (type, kind) => {
+  render(<NativeComponent label="Conditions" payload={p("Conditions",{items:[{type,status:"True"}]})}/>);
+  expect(screen.getByText("True").dataset.kind).toBe(kind);
+});
+
 it("opens a Markdown link only on click and reports failures with retry", async () => {
   const open = vi.spyOn(link, "openNativeComponentLink").mockRejectedValueOnce(new Error("No default browser")).mockResolvedValue(undefined);
   render(<NativeComponent label="Notes" payload={p("Markdown", {text:"[Docs](HTTPS://example.com/docs)"})}/>);
