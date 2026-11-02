@@ -2,14 +2,14 @@ import fluxManifest from "../../../../examples/extensions/flux.json";
 import argoManifest from "../../../../examples/extensions/argocd.json";
 const declaredMeta = Object.fromEntries([...fluxManifest.actions.filter(action=>action.resource==="helmreleases").map(action=>({...action,name:action.name.replace("helmreleases-","")})),...argoManifest.actions].map(action=>[action.name,{title:action.title,availableWhen:("availableWhen" in action?action.availableWhen:[]) as import("@srelens/core").ActionPredicate[],impact:"medium" as const,confirm:null}]));
 import { act, render as bare, screen, fireEvent, waitFor, within } from "@testing-library/react";
-import type { ReactElement, ReactNode } from "react";
+import { useLayoutEffect, type ReactElement, type ReactNode } from "react";
 import { afterEach, beforeEach, expect, it, onTestFinished, vi } from "vitest";
 vi.mock("@srelens/core", async original => ({...await original<typeof import("@srelens/core")>(),inspectExtensionResource:vi.fn(),actOnExtensionResource:vi.fn(),listExtensions:vi.fn(),resolveExtensionPanels:vi.fn(),resolveExtensionLinks:vi.fn(),resolveExtensionReverseLinks:vi.fn()}));
 import { inspectExtensionResource, actOnExtensionResource, listExtensions, resolveExtensionPanels, resolveExtensionLinks, resolveExtensionReverseLinks, EXTENSION_RESOURCE_CHANGED } from "@srelens/core";
 import { ExtensionResourceDetails } from "./ExtensionResourceDetails";
 import { requestExtensionAction } from "./actionRequests";
 import type { ClusterContext } from "@srelens/core";
-import { ConsoleProvider } from "../console";
+import { ConsoleProvider, useConsole } from "../console";
 import { askQuestion } from "../lib/kinds/rowAffordances";
 import { isSectionOpen, loadSectionFolds, setSectionOpen } from "../lib/sectionFolds";
 import { resetContexts, setContexts } from "../lib/clusters";
@@ -552,7 +552,29 @@ it("offers Ask beside the actions, asking after a flagged resource's trouble",as
   vi.mocked(inspectExtensionResource).mockResolvedValue({...detail,status:failing});
   peek();
   await screen.findByText("Failing");
-  expect(screen.getByRole("button",{name:`Ask: ${askQuestion("apps",true)}`})).toBeTruthy();
+  expect(screen.getByRole("button",{name:`Ask: ${askQuestion("Kustomization team/apps",true)}`})).toBeTruthy();
+});
+// `askContextFor` reads a subject off the route, and an app's route names none:
+// on these surfaces the question is all the agent is told about the resource.
+const Asked=({into}:{into:string[]})=>{
+  const {registerSubmit}=useConsole();
+  useLayoutEffect(()=>registerSubmit(question=>void into.push(question)),[registerSubmit]);
+  return null;
+};
+it.each([["a peek",false],["a full tab",true]])("tells the agent the kind and namespace asked about from %s",async(_,fullPage)=>{
+  const asked:string[]=[];
+  vi.mocked(inspectExtensionResource).mockResolvedValue({...detail,status:failing});
+  render(<><Asked into={asked}/><ExtensionResourceDetails selection={selection} fullPage={fullPage}/></>);
+  await screen.findByText("Failing");
+  fireEvent.click(screen.getByRole("button",{name:/^Ask:/}));
+  expect(asked).toEqual(["Why is Kustomization team/apps unhealthy?"]);
+});
+it("names a cluster-scoped resource to the agent by its kind alone",async()=>{
+  const asked:string[]=[];
+  render(<><Asked into={asked}/><ExtensionResourceDetails selection={{...selection,namespace:""}} fullPage/></>);
+  await screen.findByRole("heading",{level:1,name:"apps"});
+  fireEvent.click(await screen.findByRole("button",{name:/^Ask:/}));
+  expect(asked).toEqual(["What is Kustomization apps using right now?"]);
 });
 it("keeps two actions on a peek's bar and folds the rest, and Refresh, into More",async()=>{
   peek();

@@ -119,7 +119,12 @@ export interface DetailActionsProps {
 export interface DetailActionRowProps {
   /** The cluster `Ask` is about. */
   context: string;
-  name: string;
+  /**
+   * What `Ask`'s question calls the resource. A built-in's name is enough, since
+   * `askContextFor` reads the rest off its route. An app's route says nothing
+   * there, so its row names the kind and namespace here.
+   */
+  subject: string;
   /** The subject's own health verdict, which decides which question `Ask` sends. */
   flagged: boolean;
   actions: ActionBarAction[];
@@ -133,9 +138,9 @@ export interface DetailActionRowProps {
  * overflow. An app's resource draws this with its own reviewed actions; a
  * built-in one through {@link DetailActions}.
  */
-export function DetailActionRow({ context, name, flagged, actions, label, host = "peek" }: DetailActionRowProps) {
+export function DetailActionRow({ context, subject, flagged, actions, label, host = "peek" }: DetailActionRowProps) {
   const ask = useAsk(context);
-  const question = askQuestion(name, flagged);
+  const question = askQuestion(subject, flagged);
   const Sparkle = Icons.ask;
   const inPeek = host === "peek";
 
@@ -222,7 +227,7 @@ export function DetailActions({
     <>
       <DetailActionRow
         context={context}
-        name={name}
+        subject={name}
         flagged={flagged}
         actions={toBarActions(items(row))}
         label={`${kind} actions`}

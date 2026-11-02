@@ -247,7 +247,7 @@ export function ExtensionResourceDetails({selection,onClose,fullPage=false,clust
     })) : []),
     {id:"refresh-details",label:"Refresh details",disabledReason:held,onSelect:()=>{setError("");setMessage("");refresh();}},
   ];
-  const actionRow=<DetailActionRow context={selection.context} name={selection.name} flagged={tone==="danger"||tone==="warning"} actions={actions} label={`${kind} actions`} host={fullPage?"tab":"peek"}/>;
+  const actionRow=<DetailActionRow context={selection.context} subject={target} flagged={tone==="danger"||tone==="warning"} actions={actions} label={`${kind} actions`} host={fullPage?"tab":"peek"}/>;
   const pane=<>
     {error&&<p role="alert" className="extension-error">{error}</p>}
     {message&&<p role="status" className="extension-message">{message}</p>}
