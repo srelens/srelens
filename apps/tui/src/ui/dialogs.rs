@@ -340,32 +340,66 @@ pub fn render_context_picker_into(
     f.render_widget(list, chunks[1]);
 
     // 3. Footer hint
-    let cancel_hint = if is_mux { ": Cancel Mux" } else { ": Cancel" };
-    let footer = Paragraph::new(Line::from(vec![
-        Span::styled(
-            format!(
-                " Showing {}/{} contexts  •  ",
-                filtered.len(),
-                contexts.len()
+    let footer = if is_mux {
+        Paragraph::new(Line::from(vec![
+            Span::styled(
+                format!(
+                    " Showing {}/{} contexts  •  ",
+                    filtered.len(),
+                    contexts.len()
+                ),
+                Style::default().fg(Theme::DIM),
             ),
-            Style::default().fg(Theme::DIM),
-        ),
-        Span::styled(
-            "Enter",
-            Style::default()
-                .fg(Theme::ACCENT)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(": Select  ", Style::default().fg(Theme::DIM)),
-        Span::styled(
-            "Esc",
-            Style::default()
-                .fg(Theme::YELLOW)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(cancel_hint, Style::default().fg(Theme::DIM)),
-    ]))
-    .alignment(Alignment::Center);
+            Span::styled(
+                "Enter",
+                Style::default()
+                    .fg(Theme::ACCENT)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(": Select  ", Style::default().fg(Theme::DIM)),
+            Span::styled(
+                "Esc",
+                Style::default()
+                    .fg(Theme::YELLOW)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(": Cancel Mux", Style::default().fg(Theme::DIM)),
+        ]))
+        .alignment(Alignment::Center)
+    } else {
+        Paragraph::new(Line::from(vec![
+            Span::styled(
+                format!(
+                    " Showing {}/{} contexts  •  ",
+                    filtered.len(),
+                    contexts.len()
+                ),
+                Style::default().fg(Theme::DIM),
+            ),
+            Span::styled(
+                "Enter",
+                Style::default()
+                    .fg(Theme::ACCENT)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(": Switch  ", Style::default().fg(Theme::DIM)),
+            Span::styled(
+                "Ctrl+i",
+                Style::default()
+                    .fg(Theme::CYAN)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(": Import  ", Style::default().fg(Theme::DIM)),
+            Span::styled(
+                "Esc",
+                Style::default()
+                    .fg(Theme::YELLOW)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(": Cancel", Style::default().fg(Theme::DIM)),
+        ]))
+        .alignment(Alignment::Center)
+    };
     f.render_widget(footer, chunks[2]);
 }
 

@@ -8,7 +8,9 @@
 //! - D7: Visual & Perceptual Reality (Active pane indicator ● ACTIVE, dual pane headers, border styling)
 
 use crossterm::event::{KeyCode, KeyModifiers};
+use srectl::app::ActiveView;
 use srectl::ui::dialogs::Modal;
+use srectl::ui::statusbar::InputMode;
 use srelens_kube::contexts::ContextDto;
 
 use crate::common::{self, ch, click, ctrl, key, mouse, press, render_app, shift, type_str};
@@ -241,4 +243,246 @@ async fn journey_mux_visual_rendering_80x24() {
         screen.contains("● ACTIVE"),
         "Active pane indicator must be rendered:\n{screen}"
     );
+}
+
+/// D1 & D5: Assistant state isolation and command bar reset on focus cycling.
+#[tokio::test]
+async fn journey_mux_assistant_state_and_command_bar_isolation() {
+    let _settings = common::env::isolate_settings();
+    let (mut app, _rx) = common::app_with("cluster-left", "default").await;
+    app.contexts = vec![
+        ctx("cluster-left", "c-left", "default"),
+        ctx("cluster-right", "c-right", "default"),
+    ];
+
+    // Open mux and select cluster-right for pane 2
+    press(&mut app, ch(':')).await;
+    type_str(&mut app, "mux").await;
+    press(&mut app, key(KeyCode::Enter)).await;
+    press(&mut app, key(KeyCode::Enter)).await;
+
+    assert_eq!(app.mux_state.as_ref().unwrap().focused_pane, 1);
+    assert_eq!(app.active_context, "cluster-right");
+
+    // Open assistant in right pane
+    press(&mut app, ch(':')).await;
+    type_str(&mut app, "assistant").await;
+    press(&mut app, key(KeyCode::Enter)).await;
+    assert!(matches!(app.active_view, ActiveView::Assistant));
+
+    // Type text into assistant input in right pane
+    type_str(&mut app, "query-for-right-cluster").await;
+    assert_eq!(app.assistant_state.input, "query-for-right-cluster");
+    assert_eq!(app.assistant_state.context_name, "cluster-right");
+
+    // Cycle focus to Left pane (<Ctrl+b>)
+    press(&mut app, ctrl('b')).await;
+    assert_eq!(app.mux_state.as_ref().unwrap().focused_pane, 0);
+    assert_eq!(app.active_context, "cluster-left");
+
+    // Left pane assistant state must NOT share the prompt from right pane!
+    assert_ne!(app.assistant_state.input, "query-for-right-cluster");
+    assert_eq!(app.assistant_state.input, "");
+
+    // In left pane, open assistant and type a distinct query
+    press(&mut app, ch(':')).await;
+    type_str(&mut app, "assistant").await;
+    press(&mut app, key(KeyCode::Enter)).await;
+    assert!(matches!(app.active_view, ActiveView::Assistant));
+    type_str(&mut app, "query-for-left-cluster").await;
+    assert_eq!(app.assistant_state.input, "query-for-left-cluster");
+
+    // Exit assistant back to table view
+    press(&mut app, key(KeyCode::Esc)).await;
+    assert!(matches!(app.active_view, ActiveView::Table(_)));
+
+    // Enter command mode and type partial command in left pane
+    press(&mut app, ch(':')).await;
+    type_str(&mut app, "partial-command").await;
+    assert_eq!(app.input_mode, InputMode::Command);
+    assert_eq!(app.command_buffer, "partial-command");
+
+    // Switch focus back to right pane (<Ctrl+b>)
+    press(&mut app, ctrl('b')).await;
+    assert_eq!(app.mux_state.as_ref().unwrap().focused_pane, 1);
+    assert_eq!(app.active_context, "cluster-right");
+
+    // Command bar must be cleanly reset to Normal mode with empty buffer!
+    assert_eq!(app.input_mode, InputMode::Normal);
+    assert!(app.command_buffer.is_empty());
+
+    // Right pane was in Assistant view, its input must be preserved!
+    assert!(matches!(app.active_view, ActiveView::Assistant));
+    assert_eq!(app.assistant_state.input, "query-for-right-cluster");
+    assert_eq!(app.assistant_state.context_name, "cluster-right");
+
+    // Switch back to left pane: opening assistant restores its isolated input!
+    press(&mut app, ctrl('b')).await;
+    assert_eq!(app.active_context, "cluster-left");
+    press(&mut app, ch(':')).await;
+    type_str(&mut app, "assistant").await;
+    press(&mut app, key(KeyCode::Enter)).await;
+    assert_eq!(app.assistant_state.input, "query-for-left-cluster");
+}
+
+/// D2 & D6: Modal focus lock and duplicate context collision prevention.
+#[tokio::test]
+async fn journey_mux_modal_focus_lock_and_collision_guard() {
+    let _settings = common::env::isolate_settings();
+    let (mut app, _rx) = common::app_with("cluster-left", "default").await;
+    app.contexts = vec![
+        ctx("cluster-left", "c-left", "default"),
+        ctx("cluster-right", "c-right", "default"),
+    ];
+
+    // Open mux and select cluster-right
+    press(&mut app, ch(':')).await;
+    type_str(&mut app, "mux").await;
+    press(&mut app, key(KeyCode::Enter)).await;
+    press(&mut app, key(KeyCode::Enter)).await;
+
+    // Render to set pane rects
+    let _screen = render_app(&mut app, 100, 30);
+    assert_eq!(app.mux_state.as_ref().unwrap().focused_pane, 1);
+
+    // Open Shift+D close confirm modal
+    press(&mut app, shift(KeyCode::Char('D'))).await;
+    assert!(app.modal.is_some());
+
+    // While modal is open, <Ctrl+b> must NOT change pane focus!
+    press(&mut app, ctrl('b')).await;
+    assert_eq!(
+        app.mux_state.as_ref().unwrap().focused_pane,
+        1,
+        "Focus switch must be locked while modal is open"
+    );
+
+    // While modal is open, mouse click on left pane must NOT switch focus
+    app.handle_mouse(click(20, 10)).await;
+    assert_eq!(
+        app.mux_state.as_ref().unwrap().focused_pane,
+        1,
+        "Mouse click must not switch focus while modal is open"
+    );
+
+    // Dismiss modal with 'n'
+    press(&mut app, ch('n')).await;
+    assert!(app.modal.is_none());
+
+    // Now <Ctrl+b> works normally
+    press(&mut app, ctrl('b')).await;
+    assert_eq!(app.mux_state.as_ref().unwrap().focused_pane, 0);
+    assert_eq!(app.active_context, "cluster-left");
+
+    // Attempting to switch context in left pane to "cluster-right" (already open on right pane)
+    // should be blocked by our collision guard!
+    app.switch_context("cluster-right".to_string()).await;
+
+    assert_eq!(
+        app.active_context, "cluster-left",
+        "Switching to context active in other pane must be refused"
+    );
+    assert!(
+        app.toast
+            .as_ref()
+            .unwrap()
+            .0
+            .contains("already open in the other pane"),
+        "Toast must explain why context switch was refused"
+    );
+}
+
+/// D3: Background stream routing into inactive pane without active namespace corruption.
+#[tokio::test]
+async fn journey_mux_inactive_stream_and_tick_routing() {
+    use serde_json::json;
+
+    let _settings = common::env::isolate_settings();
+    let (mut app, _rx) = common::app_with("cluster-left", "default").await;
+    app.contexts = vec![
+        ctx("cluster-left", "c-left", "default"),
+        ctx("cluster-right", "c-right", "prod-ns"),
+    ];
+
+    // Open mux and select cluster-right
+    press(&mut app, ch(':')).await;
+    type_str(&mut app, "mux").await;
+    press(&mut app, key(KeyCode::Enter)).await;
+    press(&mut app, key(KeyCode::Enter)).await;
+
+    // Focused pane is 1 (cluster-right), inactive pane is 0 (cluster-left)
+    assert_eq!(app.active_context, "cluster-right");
+    let inactive = app
+        .mux_state
+        .as_mut()
+        .unwrap()
+        .inactive_pane
+        .as_mut()
+        .unwrap();
+    inactive.current_watch_channel = Some("watch:cluster-left:default:pods".to_string());
+    inactive.filter_buffer = "filter-term".to_string();
+
+    // Stream event for inactive pane arrives!
+    let pod_data = json!([
+        {"name": "pod-1", "ready": "1/1", "status": "Running", "restarts": "0", "age": "1d"},
+        {"name": "pod-2-filter-term", "ready": "1/1", "status": "Running", "restarts": "0", "age": "2d"}
+    ]);
+    app.handle_stream_event("watch:cluster-left:default:pods".to_string(), pod_data);
+
+    // Verify inactive pane table got the items filtered with its OWN filter_buffer
+    let inactive = app
+        .mux_state
+        .as_ref()
+        .unwrap()
+        .inactive_pane
+        .as_ref()
+        .unwrap();
+    if let ActiveView::Table(ref t) = inactive.active_view {
+        assert_eq!(
+            t.raw_items.len(),
+            2,
+            "inactive pane must store all raw items"
+        );
+        assert_eq!(
+            t.filtered_indices.len(),
+            1,
+            "inactive pane must filter with its own filter_buffer"
+        );
+        assert_eq!(
+            t.raw_items[t.filtered_indices[0]]["name"],
+            "pod-2-filter-term"
+        );
+    } else {
+        panic!("inactive active_view should be Table");
+    }
+
+    // Verify active pane's table was NOT affected or corrupted
+    if let ActiveView::Table(ref t) = app.active_view {
+        assert!(
+            t.raw_items.is_empty(),
+            "active pane's table must remain unaffected"
+        );
+    }
+
+    // Namespace discovery for inactive context
+    let ns_data = json!([
+        {"name": "kube-system"},
+        {"name": "default"},
+        {"name": "monitoring"}
+    ]);
+    app.handle_stream_event("discovery:namespaces:cluster-left".to_string(), ns_data);
+    let inactive = app
+        .mux_state
+        .as_ref()
+        .unwrap()
+        .inactive_pane
+        .as_ref()
+        .unwrap();
+    assert_eq!(
+        inactive.namespaces,
+        vec!["default", "kube-system", "monitoring"]
+    );
+
+    // handle_tick ticks inactive pane without panicking
+    app.handle_tick();
 }

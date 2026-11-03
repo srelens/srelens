@@ -36,6 +36,16 @@ pub struct ClusterPaneState {
     pub namespaces: Vec<String>,
     pub namespace_discovery_error: Option<String>,
     pub cluster_overview_data: Option<crate::views::overview_view::ClusterOverviewData>,
+    pub assistant_state: crate::views::assistant_view::AssistantViewState,
+    pub active_log_channel: Option<String>,
+    pub node_metrics_history: std::collections::HashMap<
+        String,
+        std::collections::VecDeque<srelens_kube::metrics::MetricSample>,
+    >,
+    pub pod_metrics_history: std::collections::HashMap<
+        String,
+        std::collections::VecDeque<srelens_kube::metrics::MetricSample>,
+    >,
 }
 
 impl ClusterPaneState {
@@ -66,6 +76,13 @@ impl ClusterPaneState {
             namespaces: std::mem::take(&mut app.namespaces),
             namespace_discovery_error: app.namespace_discovery_error.take(),
             cluster_overview_data: app.cluster_overview_data.take(),
+            assistant_state: std::mem::replace(
+                &mut app.assistant_state,
+                crate::views::assistant_view::AssistantViewState::new(),
+            ),
+            active_log_channel: app.active_log_channel.take(),
+            node_metrics_history: std::mem::take(&mut app.node_metrics_history),
+            pod_metrics_history: std::mem::take(&mut app.pod_metrics_history),
         }
     }
 
@@ -92,6 +109,10 @@ impl ClusterPaneState {
         app.namespaces = self.namespaces;
         app.namespace_discovery_error = self.namespace_discovery_error;
         app.cluster_overview_data = self.cluster_overview_data;
+        app.assistant_state = self.assistant_state;
+        app.active_log_channel = self.active_log_channel;
+        app.node_metrics_history = self.node_metrics_history;
+        app.pod_metrics_history = self.pod_metrics_history;
     }
 
     /// Swap this pane snapshot with `app`'s active cluster state in place.

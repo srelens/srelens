@@ -709,6 +709,38 @@ impl App {
                 self.assistant_state.spinner_frame = (self.assistant_state.spinner_frame + 1) % 10;
             }
         }
+
+        if let Some(mux) = &mut self.mux_state {
+            if let Some(inactive) = &mut mux.inactive_pane {
+                if matches!(inactive.active_view, ActiveView::Assistant) {
+                    inactive.assistant_state.tick();
+                } else {
+                    if inactive.assistant_state.drag_scroll.is_some() {
+                        inactive.assistant_state.drag_scroll = None;
+                    }
+                    if inactive.assistant_state.is_busy {
+                        inactive.assistant_state.spinner_frame =
+                            (inactive.assistant_state.spinner_frame + 1) % 10;
+                    }
+                }
+
+                // Inactive cluster connection timeout detection
+                if (!inactive.is_connected
+                    || inactive.cluster_version == "Connecting..."
+                    || inactive.cluster_version == "unknown")
+                    && inactive.connection_attempt_start.elapsed() >= Duration::from_secs(8)
+                    && !inactive.cluster_unreachable
+                {
+                    inactive.cluster_unreachable = true;
+                    inactive.is_connected = false;
+                    if let ActiveView::Table(table) = &mut inactive.active_view {
+                        if table.raw_items.is_empty() {
+                            table.is_loading = false;
+                        }
+                    }
+                }
+            }
+        }
         self.consents.prune_closed();
 
         // Clear expired toasts (auto-dismiss after 3s)
@@ -2133,13 +2165,37 @@ impl App {
             return;
         }
 
+        if let Some(mux) = &self.mux_state {
+            if let Some(inactive) = &mux.inactive_pane {
+                if inactive.context == new_context {
+                    self.set_toast(
+                        format!(
+                            "Cannot switch to '{}': already open in the other pane",
+                            new_context
+                        ),
+                        Theme::status_error(),
+                    );
+                    return;
+                }
+            }
+        }
+
         self.stop_active_log_stream();
-        self.logs_manager.shutdown_all();
-        self.watch_manager.shutdown_all();
-        self.active_watch_channels.clear();
-        self.active_watch_pool.clear();
-        self.resource_cache.clear();
-        self.current_watch_channel = None;
+        if self.mux_state.is_some() {
+            for ch in &self.active_watch_channels {
+                self.watch_manager.stop(ch);
+            }
+            self.active_watch_channels.clear();
+            self.active_watch_pool.clear();
+            self.current_watch_channel = None;
+        } else {
+            self.logs_manager.shutdown_all();
+            self.watch_manager.shutdown_all();
+            self.active_watch_channels.clear();
+            self.active_watch_pool.clear();
+            self.resource_cache.clear();
+            self.current_watch_channel = None;
+        }
 
         if self.active_context != new_context {
             // 1. Save outgoing context's assistant view state into map
@@ -4242,6 +4298,15 @@ impl App {
             return;
         }
 
+        // Mux Global shortcut: Ctrl+b cycles focus between panes in any mode when no modal is open
+        if self.mux_state.is_some()
+            && key.code == KeyCode::Char('b')
+            && key.modifiers.contains(KeyModifiers::CONTROL)
+        {
+            self.switch_mux_focus();
+            return;
+        }
+
         // 3. Command Mode (`:`)
         if self.input_mode == InputMode::Command {
             match key.code {
@@ -4739,16 +4804,6 @@ impl App {
                     _ => return,
                 }
             }
-        }
-
-        // Mux Global shortcuts in Normal Mode:
-        // Ctrl+b cycles focus between panes
-        if self.mux_state.is_some()
-            && key.code == KeyCode::Char('b')
-            && key.modifiers.contains(KeyModifiers::CONTROL)
-        {
-            self.switch_mux_focus();
-            return;
         }
 
         // Shift+D prompts to close the active mux split
@@ -8909,58 +8964,60 @@ impl App {
 
         // Mux split-pane focus, item click, and divider drag
         let mut mux_action = None;
-        if let Some(mux) = &mut self.mux_state {
-            let (left_rect, right_rect) = mux.pane_rects;
-            let total_w = left_rect.width + right_rect.width;
+        if self.modal.is_none() {
+            if let Some(mux) = &mut self.mux_state {
+                let (left_rect, right_rect) = mux.pane_rects;
+                let total_w = left_rect.width + right_rect.width;
 
-            if mouse.kind == MouseEventKind::Drag(MouseButton::Left) {
-                if total_w > 0
-                    && mouse.row >= left_rect.y
-                    && mouse.row < left_rect.y + left_rect.height
-                {
-                    let col_offset = mouse.column.saturating_sub(left_rect.x);
-                    let new_ratio = ((col_offset as u32 * 100) / total_w as u32) as u16;
-                    mux.split_ratio = new_ratio.clamp(20, 80);
-                    return;
+                if mouse.kind == MouseEventKind::Drag(MouseButton::Left) {
+                    if total_w > 0
+                        && mouse.row >= left_rect.y
+                        && mouse.row < left_rect.y + left_rect.height
+                    {
+                        let col_offset = mouse.column.saturating_sub(left_rect.x);
+                        let new_ratio = ((col_offset as u32 * 100) / total_w as u32) as u16;
+                        mux.split_ratio = new_ratio.clamp(20, 80);
+                        return;
+                    }
                 }
-            }
 
-            if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
-                let in_left = mouse.column >= left_rect.x
-                    && mouse.column < left_rect.x + left_rect.width
-                    && mouse.row >= left_rect.y
-                    && mouse.row < left_rect.y + left_rect.height;
-                let in_right = mouse.column >= right_rect.x
-                    && mouse.column < right_rect.x + right_rect.width
-                    && mouse.row >= right_rect.y
-                    && mouse.row < right_rect.y + right_rect.height;
+                if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
+                    let in_left = mouse.column >= left_rect.x
+                        && mouse.column < left_rect.x + left_rect.width
+                        && mouse.row >= left_rect.y
+                        && mouse.row < left_rect.y + left_rect.height;
+                    let in_right = mouse.column >= right_rect.x
+                        && mouse.column < right_rect.x + right_rect.width
+                        && mouse.row >= right_rect.y
+                        && mouse.row < right_rect.y + right_rect.height;
 
-                if in_left && mux.focused_pane != 0 {
-                    mux_action = Some("switch");
-                } else if in_right && mux.focused_pane != 1 {
-                    mux_action = Some("switch");
-                } else if in_right && mux.focused_pane == 1 && mux.picker.is_some() {
-                    let list_y = right_rect.y.saturating_add(4);
-                    let list_h = right_rect.height.saturating_sub(5);
-                    if mouse.row >= list_y && mouse.row < list_y + list_h {
-                        let click_row = (mouse.row - list_y) as usize;
-                        let item_offset = click_row / 2;
-                        let picker = mux.picker.as_mut().unwrap();
-                        let filtered_len = picker.filtered_items().len();
-                        let visible_items = (list_h as usize / 2).max(1);
-                        let sel = picker.selected_idx.min(filtered_len.saturating_sub(1));
-                        let start_idx = if sel >= visible_items {
-                            sel + 1 - visible_items
-                        } else {
-                            0
-                        };
-                        let clicked_idx = start_idx + item_offset;
-                        if clicked_idx < filtered_len {
-                            if picker.selected_idx == clicked_idx {
-                                mux_action = Some("activate");
+                    if in_left && mux.focused_pane != 0 {
+                        mux_action = Some("switch");
+                    } else if in_right && mux.focused_pane != 1 {
+                        mux_action = Some("switch");
+                    } else if in_right && mux.focused_pane == 1 && mux.picker.is_some() {
+                        let list_y = right_rect.y.saturating_add(4);
+                        let list_h = right_rect.height.saturating_sub(5);
+                        if mouse.row >= list_y && mouse.row < list_y + list_h {
+                            let click_row = (mouse.row - list_y) as usize;
+                            let item_offset = click_row / 2;
+                            let picker = mux.picker.as_mut().unwrap();
+                            let filtered_len = picker.filtered_items().len();
+                            let visible_items = (list_h as usize / 2).max(1);
+                            let sel = picker.selected_idx.min(filtered_len.saturating_sub(1));
+                            let start_idx = if sel >= visible_items {
+                                sel + 1 - visible_items
                             } else {
-                                picker.selected_idx = clicked_idx;
-                                return;
+                                0
+                            };
+                            let clicked_idx = start_idx + item_offset;
+                            if clicked_idx < filtered_len {
+                                if picker.selected_idx == clicked_idx {
+                                    mux_action = Some("activate");
+                                } else {
+                                    picker.selected_idx = clicked_idx;
+                                    return;
+                                }
                             }
                         }
                     }
@@ -9751,6 +9808,7 @@ impl App {
         let items: Vec<crate::ui::dialogs::ContextPickerItem> = self
             .contexts
             .iter()
+            .filter(|c| c.name != self.active_context)
             .map(|c| crate::ui::dialogs::ContextPickerItem {
                 name: c.name.clone(),
                 cluster: c.cluster.clone(),
@@ -9761,6 +9819,14 @@ impl App {
                 source_file: c.source_file.clone(),
             })
             .collect();
+
+        if items.is_empty() {
+            self.set_toast(
+                "MUX split requires at least two contexts in kubeconfig".to_string(),
+                Theme::status_error(),
+            );
+            return;
+        }
 
         self.mux_state = Some(crate::mux::MuxState {
             focused_pane: 1, // Start focused on right pane context picker
@@ -9847,6 +9913,17 @@ impl App {
         self.namespaces.clear();
         self.namespace_discovery_error = None;
         self.cluster_overview_data = None;
+        self.assistant_state =
+            crate::views::assistant_view::AssistantViewState::for_context(&new_context);
+        self.assistant_state.caveman_level = self.ai_settings.get_caveman_level();
+        self.input_mode = crate::ui::statusbar::InputMode::Normal;
+        self.command_buffer.clear();
+        self.command_suggestion_idx = 0;
+        self.command_tab_base = None;
+        self.command_tab_target = None;
+        self.active_log_channel = None;
+        self.node_metrics_history.clear();
+        self.pod_metrics_history.clear();
 
         self.set_toast(
             format!(
@@ -9865,6 +9942,16 @@ impl App {
     }
 
     pub fn switch_mux_focus(&mut self) {
+        if self.modal.is_some() {
+            return;
+        }
+
+        self.input_mode = crate::ui::statusbar::InputMode::Normal;
+        self.command_buffer.clear();
+        self.command_suggestion_idx = 0;
+        self.command_tab_base = None;
+        self.command_tab_target = None;
+
         let mut mux = match self.mux_state.take() {
             Some(m) => m,
             None => return,
@@ -9898,14 +9985,20 @@ impl App {
                 if mux.focused_pane == 1 {
                     // Left was parked in inactive_pane, restore it back to App!
                     inactive.swap_with_app(self);
-                    // Now inactive holds Right pane's state -> stop its watches
+                    // Now inactive holds Right pane's state -> stop its watches and logs
                     for ch in &inactive.active_watch_channels {
                         self.watch_manager.stop(ch);
                     }
+                    if let Some(log_ch) = &inactive.active_log_channel {
+                        self.logs_manager.stop(log_ch);
+                    }
                 } else {
-                    // Left was already in App, inactive holds Right pane's state -> stop its watches
+                    // Left was already in App, inactive holds Right pane's state -> stop its watches and logs
                     for ch in &inactive.active_watch_channels {
                         self.watch_manager.stop(ch);
+                    }
+                    if let Some(log_ch) = &inactive.active_log_channel {
+                        self.logs_manager.stop(log_ch);
                     }
                 }
             }
@@ -15219,26 +15312,37 @@ impl App {
 
     pub fn handle_stream_event(&mut self, channel: String, payload: serde_json::Value) {
         if channel.starts_with("logs:") {
+            let mut target_views: Vec<&mut crate::views::logs_view::LogsViewState> = Vec::new();
             if let ActiveView::Logs(logs) = &mut self.active_view {
                 if logs.channel == channel {
-                    if let Some(lines) = payload.get("lines").and_then(|v| v.as_array()) {
-                        // A frame (#914): every line since the last one, in order.
-                        for l in lines {
-                            let Some(text) = l.get("line").and_then(|v| v.as_str()) else {
-                                continue;
-                            };
-                            let source = l.get("source").and_then(|v| v.as_str()).map(String::from);
-                            let truncated =
-                                l.get("truncated").and_then(|v| v.as_bool()) == Some(true);
-                            logs.push_log_line(source, text.to_string(), truncated);
+                    target_views.push(logs);
+                }
+            }
+            if let Some(mux) = &mut self.mux_state {
+                if let Some(inactive) = &mut mux.inactive_pane {
+                    if let ActiveView::Logs(logs) = &mut inactive.active_view {
+                        if logs.channel == channel {
+                            target_views.push(logs);
                         }
-                    } else if let Some(status) = payload.get("status").and_then(|v| v.as_str()) {
-                        let source = payload
-                            .get("source")
-                            .and_then(|v| v.as_str())
-                            .map(String::from);
-                        logs.push_entry(source, format!("--- log status: {} ---", status));
                     }
+                }
+            }
+            for logs in target_views {
+                if let Some(lines) = payload.get("lines").and_then(|v| v.as_array()) {
+                    for l in lines {
+                        let Some(text) = l.get("line").and_then(|v| v.as_str()) else {
+                            continue;
+                        };
+                        let source = l.get("source").and_then(|v| v.as_str()).map(String::from);
+                        let truncated = l.get("truncated").and_then(|v| v.as_bool()) == Some(true);
+                        logs.push_log_line(source, text.to_string(), truncated);
+                    }
+                } else if let Some(status) = payload.get("status").and_then(|v| v.as_str()) {
+                    let source = payload
+                        .get("source")
+                        .and_then(|v| v.as_str())
+                        .map(String::from);
+                    logs.push_entry(source, format!("--- log status: {} ---", status));
                 }
             }
             return;
@@ -15294,33 +15398,63 @@ impl App {
                         }
                     }
                 }
+            } else if let Some(mux) = &mut self.mux_state {
+                if let Some(inactive) = &mut mux.inactive_pane {
+                    if ctx == inactive.context {
+                        if let Some(err_msg) = payload.get("error").and_then(|v| v.as_str()) {
+                            inactive.namespace_discovery_error = Some(err_msg.to_string());
+                        } else if let Some(items) = payload.as_array() {
+                            let mut ns_list: Vec<String> = items
+                                .iter()
+                                .filter_map(|item| {
+                                    item.get("name").and_then(|v| v.as_str()).map(String::from)
+                                })
+                                .collect();
+                            ns_list.sort();
+                            if !ns_list.is_empty() {
+                                inactive.namespaces = ns_list;
+                                inactive.namespace_discovery_error = None;
+                            }
+                        }
+                    }
+                }
             }
             return;
         }
 
         if let Some(err_msg) = payload.get("error").and_then(|v| v.as_str()) {
+            let clean_err =
+                if err_msg.contains("404") || err_msg.to_ascii_lowercase().contains("not found") {
+                    "Resource definition not found on cluster (404 Not Found)".to_string()
+                } else if err_msg.to_ascii_lowercase().contains("forbidden") {
+                    "Access forbidden by RBAC permissions (403 Forbidden)".to_string()
+                } else {
+                    let first_line = err_msg.lines().next().unwrap_or(err_msg);
+                    first_line
+                        .split(" (Status {")
+                        .next()
+                        .unwrap_or(first_line)
+                        .trim()
+                        .to_string()
+                };
+
             if let Some(cur_ch) = &self.current_watch_channel {
                 if *cur_ch == channel {
-                    let clean_err = if err_msg.contains("404")
-                        || err_msg.to_ascii_lowercase().contains("not found")
-                    {
-                        "Resource definition not found on cluster (404 Not Found)".to_string()
-                    } else if err_msg.to_ascii_lowercase().contains("forbidden") {
-                        "Access forbidden by RBAC permissions (403 Forbidden)".to_string()
-                    } else {
-                        let first_line = err_msg.lines().next().unwrap_or(err_msg);
-                        first_line
-                            .split(" (Status {")
-                            .next()
-                            .unwrap_or(first_line)
-                            .trim()
-                            .to_string()
-                    };
-
                     if let ActiveView::Table(table) = &mut self.active_view {
                         table.set_error(clean_err.clone());
                     }
                     self.set_toast(format!("Watch error: {}", clean_err), Theme::status_error());
+                }
+            }
+            if let Some(mux) = &mut self.mux_state {
+                if let Some(inactive) = &mut mux.inactive_pane {
+                    if let Some(inact_ch) = &inactive.current_watch_channel {
+                        if *inact_ch == channel {
+                            if let ActiveView::Table(table) = &mut inactive.active_view {
+                                table.set_error(clean_err);
+                            }
+                        }
+                    }
                 }
             }
             return;
@@ -15424,11 +15558,91 @@ impl App {
                     }
                 }
             }
+
+            if let Some(mux) = &mut self.mux_state {
+                if let Some(inactive) = &mut mux.inactive_pane {
+                    if let Some(inact_ch) = &inactive.current_watch_channel {
+                        if *inact_ch == channel {
+                            inactive.is_connected = true;
+                            inactive.cluster_unreachable = false;
+                            if let ActiveView::Table(table) = &mut inactive.active_view {
+                                if table.kind == ResourceKind::Pods {
+                                    let mut merged_items = items.clone();
+                                    let prev_metrics: std::collections::HashMap<
+                                        String,
+                                        (Option<String>, Option<String>),
+                                    > = table
+                                        .raw_items
+                                        .iter()
+                                        .filter_map(|it| {
+                                            let name = it.get("name")?.as_str()?.to_string();
+                                            let cpu = it
+                                                .get("cpu")
+                                                .and_then(|v| v.as_str())
+                                                .map(String::from);
+                                            let mem = it
+                                                .get("memory")
+                                                .and_then(|v| v.as_str())
+                                                .map(String::from);
+                                            Some((name, (cpu, mem)))
+                                        })
+                                        .collect();
+
+                                    for item in merged_items.iter_mut() {
+                                        if let Some(name) =
+                                            item.get("name").and_then(|v| v.as_str())
+                                        {
+                                            if let Some((cpu, mem)) = prev_metrics.get(name) {
+                                                if let Some(obj) = item.as_object_mut() {
+                                                    if let Some(c) = cpu {
+                                                        obj.insert(
+                                                            "cpu".to_string(),
+                                                            serde_json::Value::String(c.clone()),
+                                                        );
+                                                    }
+                                                    if let Some(m) = mem {
+                                                        obj.insert(
+                                                            "memory".to_string(),
+                                                            serde_json::Value::String(m.clone()),
+                                                        );
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                    table.set_items(merged_items, &inactive.filter_buffer);
+                                } else {
+                                    if let ResourceKind::CustomResource(crd) = &mut table.kind {
+                                        if crd.printer_columns.is_empty() {
+                                            if let Some(discovered) =
+                                                inactive.crds.iter().find(|c| {
+                                                    c.crd_name == crd.crd_name
+                                                        || (c.group == crd.group
+                                                            && c.kind == crd.kind)
+                                                })
+                                            {
+                                                crd.printer_columns =
+                                                    discovered.printer_columns.clone();
+                                                table.columns =
+                                                    crate::views::resource_table::default_columns_for_kind(
+                                                        &table.kind,
+                                                    );
+                                            }
+                                        }
+                                    }
+                                    table.set_items(items.clone(), &inactive.filter_buffer);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
         }
 
         if channel.starts_with("watch:") && channel.ends_with(":namespaces") {
             let parts: Vec<&str> = channel.split(':').collect();
-            if parts.len() >= 4 && parts[1] == self.active_context {
+            if parts.len() >= 4 {
+                let watch_ctx = parts[1];
                 if let Some(items) = payload.as_array() {
                     let mut ns_list: Vec<String> = items
                         .iter()
@@ -15438,24 +15652,33 @@ impl App {
                         .collect();
                     ns_list.sort();
                     if !ns_list.is_empty() {
-                        self.namespaces = ns_list;
-                        self.namespace_discovery_error = None;
-                        if self.input_mode == InputMode::Command {
-                            if let Some(ref target) = self.command_tab_target {
-                                let query = self
-                                    .command_tab_base
-                                    .as_deref()
-                                    .unwrap_or(&self.command_buffer);
-                                let suggs = command_suggestions_full(
-                                    query,
-                                    &self.crds,
-                                    &self.namespaces,
-                                    self.namespace_discovery_error.as_deref(),
-                                );
-                                if let Some(pos) =
-                                    suggs.iter().position(|(cmd, _)| &cmd.target == target)
-                                {
-                                    self.command_suggestion_idx = pos;
+                        if watch_ctx == self.active_context {
+                            self.namespaces = ns_list;
+                            self.namespace_discovery_error = None;
+                            if self.input_mode == InputMode::Command {
+                                if let Some(ref target) = self.command_tab_target {
+                                    let query = self
+                                        .command_tab_base
+                                        .as_deref()
+                                        .unwrap_or(&self.command_buffer);
+                                    let suggs = command_suggestions_full(
+                                        query,
+                                        &self.crds,
+                                        &self.namespaces,
+                                        self.namespace_discovery_error.as_deref(),
+                                    );
+                                    if let Some(pos) =
+                                        suggs.iter().position(|(cmd, _)| &cmd.target == target)
+                                    {
+                                        self.command_suggestion_idx = pos;
+                                    }
+                                }
+                            }
+                        } else if let Some(mux) = &mut self.mux_state {
+                            if let Some(inactive) = &mut mux.inactive_pane {
+                                if watch_ctx == inactive.context {
+                                    inactive.namespaces = ns_list;
+                                    inactive.namespace_discovery_error = None;
                                 }
                             }
                         }
@@ -15572,6 +15795,7 @@ impl App {
                 &self.server_url,
                 self.cluster_unreachable,
                 self.connection_attempt_start,
+                &self.assistant_state,
             );
         } else {
             let split_ratio = self
@@ -15632,6 +15856,7 @@ impl App {
                     &self.server_url,
                     self.cluster_unreachable,
                     self.connection_attempt_start,
+                    &self.assistant_state,
                 );
             } else if let Some(inactive) = &mux.inactive_pane {
                 self.render_view_body(
@@ -15643,6 +15868,7 @@ impl App {
                     &inactive.server_url,
                     inactive.cluster_unreachable,
                     inactive.connection_attempt_start,
+                    &inactive.assistant_state,
                 );
             } else {
                 self.render_view_body(
@@ -15654,6 +15880,7 @@ impl App {
                     &self.server_url,
                     self.cluster_unreachable,
                     self.connection_attempt_start,
+                    &self.assistant_state,
                 );
             }
 
@@ -15725,6 +15952,7 @@ impl App {
                         &self.server_url,
                         self.cluster_unreachable,
                         self.connection_attempt_start,
+                        &self.assistant_state,
                     );
                 } else if let Some(inactive) = &mux.inactive_pane {
                     self.render_view_body(
@@ -15736,6 +15964,7 @@ impl App {
                         &inactive.server_url,
                         inactive.cluster_unreachable,
                         inactive.connection_attempt_start,
+                        &inactive.assistant_state,
                     );
                 }
             }
@@ -16415,6 +16644,7 @@ impl App {
         server_url: &str,
         cluster_unreachable: bool,
         connection_attempt_start: Instant,
+        assistant_state: &crate::views::assistant_view::AssistantViewState,
     ) {
         f.render_widget(ratatui::widgets::Clear, area);
         match view {
@@ -16449,7 +16679,7 @@ impl App {
             ActiveView::Overview(ov) => render_overview_view(f, area, ov),
             ActiveView::Toolbox(tb) => render_toolbox_view(f, area, tb),
             ActiveView::Assistant => {
-                render_assistant_view(f, area, &self.assistant_state, &self.ai_settings)
+                render_assistant_view(f, area, assistant_state, &self.ai_settings)
             }
             ActiveView::Settings(s) => render_settings_view(f, area, s),
             ActiveView::TuiConfig(s) => render_tui_config_view(f, area, s, &self.tui_config),
