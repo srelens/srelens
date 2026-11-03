@@ -193,6 +193,182 @@ pub fn format_action_display(action_name: &str) -> String {
     action_name.to_string()
 }
 
+pub fn render_context_picker_into(
+    f: &mut Frame,
+    area: Rect,
+    contexts: &[ContextPickerItem],
+    current_context: &str,
+    selected_idx: usize,
+    filter: &str,
+    is_mux: bool,
+) {
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(3), // Search input box
+            Constraint::Min(5),    // Filtered list
+            Constraint::Length(1), // Footer hint
+        ])
+        .split(area);
+
+    // 1. Search input box
+    let search_block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(Theme::border_type())
+        .border_style(Style::default().fg(Theme::CYAN))
+        .title(" Filter Contexts ");
+    let search_para = Paragraph::new(Line::from(vec![
+        Span::styled(" / ", Style::default().fg(Theme::DIM)),
+        Span::styled(
+            filter,
+            Style::default().fg(Theme::FG).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled("█", Style::default().fg(Theme::CYAN)),
+    ]))
+    .block(search_block);
+    f.render_widget(search_para, chunks[0]);
+
+    // 2. Filter contexts
+    let lower_filter = filter.to_lowercase();
+    let filtered: Vec<&ContextPickerItem> = contexts
+        .iter()
+        .filter(|c| {
+            if lower_filter.is_empty() {
+                true
+            } else {
+                c.name.to_lowercase().contains(&lower_filter)
+                    || c.cluster.to_lowercase().contains(&lower_filter)
+                    || c.provider
+                        .as_deref()
+                        .unwrap_or("")
+                        .to_lowercase()
+                        .contains(&lower_filter)
+                    || c.source_file.to_lowercase().contains(&lower_filter)
+            }
+        })
+        .collect();
+
+    let visible_items = (chunks[1].height as usize / 2).max(1);
+    let sel = selected_idx.min(filtered.len().saturating_sub(1));
+    let start_idx = if sel >= visible_items {
+        sel + 1 - visible_items
+    } else {
+        0
+    };
+    let end_idx = (start_idx + visible_items).min(filtered.len());
+
+    let items: Vec<ListItem> = filtered[start_idx..end_idx]
+        .iter()
+        .enumerate()
+        .map(|(rel_i, c)| {
+            let i = start_idx + rel_i;
+            let is_active = c.name == current_context;
+            let is_sel = i == sel;
+            let color = Theme::context_color(&c.name, c.is_local);
+
+            let prefix = if is_active {
+                "★ "
+            } else if is_sel {
+                "▶ "
+            } else {
+                "  "
+            };
+
+            let provider_badge = if let Some(p) = &c.provider {
+                format!("[{}] ", p)
+            } else if c.is_local {
+                "[local] ".to_string()
+            } else {
+                "[remote] ".to_string()
+            };
+
+            let active_badge = if is_active { " (active)" } else { "" };
+
+            let ns_info = if !c.namespace.is_empty() {
+                format!(" ns:[{}]", c.namespace)
+            } else {
+                String::new()
+            };
+
+            let line1 = Line::from(vec![
+                Span::styled(
+                    prefix,
+                    if is_sel {
+                        Theme::selected_row()
+                    } else {
+                        Style::default().fg(color)
+                    },
+                ),
+                Span::styled(provider_badge, Style::default().fg(Theme::DIM)),
+                Span::styled(
+                    c.name.clone(),
+                    Style::default().fg(color).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    active_badge,
+                    Style::default()
+                        .fg(Theme::GREEN)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(ns_info, Style::default().fg(Theme::CYAN)),
+            ]);
+
+            let file_name = std::path::Path::new(&c.source_file)
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or(&c.source_file);
+
+            let line2 = Line::from(vec![
+                Span::raw("    "),
+                Span::styled(
+                    format!("cluster: {}  •  file: {}", c.cluster, file_name),
+                    Style::default().fg(Theme::DIM),
+                ),
+            ]);
+
+            let style = if is_sel {
+                Theme::selected_row()
+            } else {
+                Style::default()
+            };
+
+            ListItem::new(vec![line1, line2]).style(style)
+        })
+        .collect();
+
+    let list = List::new(items);
+    f.render_widget(list, chunks[1]);
+
+    // 3. Footer hint
+    let cancel_hint = if is_mux { ": Cancel Mux" } else { ": Cancel" };
+    let footer = Paragraph::new(Line::from(vec![
+        Span::styled(
+            format!(
+                " Showing {}/{} contexts  •  ",
+                filtered.len(),
+                contexts.len()
+            ),
+            Style::default().fg(Theme::DIM),
+        ),
+        Span::styled(
+            "Enter",
+            Style::default()
+                .fg(Theme::ACCENT)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(": Select  ", Style::default().fg(Theme::DIM)),
+        Span::styled(
+            "Esc",
+            Style::default()
+                .fg(Theme::YELLOW)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(cancel_hint, Style::default().fg(Theme::DIM)),
+    ]))
+    .alignment(Alignment::Center);
+    f.render_widget(footer, chunks[2]);
+}
+
 pub fn render_modal(f: &mut Frame, area: Rect, modal: &Modal) {
     match modal {
         Modal::Confirm {
@@ -601,178 +777,15 @@ pub fn render_modal(f: &mut Frame, area: Rect, modal: &Modal) {
 
             let inner = block.inner(modal_area);
             f.render_widget(block, modal_area);
-
-            let chunks = Layout::default()
-                .direction(Direction::Vertical)
-                .constraints([
-                    Constraint::Length(3), // Search input box
-                    Constraint::Min(5),    // Filtered list
-                    Constraint::Length(1), // Footer hint
-                ])
-                .split(inner);
-
-            // 1. Search input box
-            let search_block = Block::default()
-                .borders(Borders::ALL)
-                .border_type(Theme::border_type())
-                .border_style(Style::default().fg(Theme::CYAN))
-                .title(" Filter Contexts ");
-            let search_para = Paragraph::new(Line::from(vec![
-                Span::styled(" / ", Style::default().fg(Theme::DIM)),
-                Span::styled(
-                    filter.as_str(),
-                    Style::default().fg(Theme::FG).add_modifier(Modifier::BOLD),
-                ),
-                Span::styled("█", Style::default().fg(Theme::CYAN)),
-            ]))
-            .block(search_block);
-            f.render_widget(search_para, chunks[0]);
-
-            // 2. Filter contexts
-            let lower_filter = filter.to_lowercase();
-            let filtered: Vec<&ContextPickerItem> = contexts
-                .iter()
-                .filter(|c| {
-                    if lower_filter.is_empty() {
-                        true
-                    } else {
-                        c.name.to_lowercase().contains(&lower_filter)
-                            || c.cluster.to_lowercase().contains(&lower_filter)
-                            || c.provider
-                                .as_deref()
-                                .unwrap_or("")
-                                .to_lowercase()
-                                .contains(&lower_filter)
-                            || c.source_file.to_lowercase().contains(&lower_filter)
-                    }
-                })
-                .collect();
-
-            let visible_items = (chunks[1].height as usize / 2).max(1);
-            let sel = (*selected_idx).min(filtered.len().saturating_sub(1));
-            let start_idx = if sel >= visible_items {
-                sel + 1 - visible_items
-            } else {
-                0
-            };
-            let end_idx = (start_idx + visible_items).min(filtered.len());
-
-            let items: Vec<ListItem> = filtered[start_idx..end_idx]
-                .iter()
-                .enumerate()
-                .map(|(rel_i, c)| {
-                    let i = start_idx + rel_i;
-                    let is_active = c.name == *current_context;
-                    let is_sel = i == sel;
-                    let color = Theme::context_color(&c.name, c.is_local);
-
-                    let prefix = if is_active {
-                        "★ "
-                    } else if is_sel {
-                        "▶ "
-                    } else {
-                        "  "
-                    };
-
-                    let provider_badge = if let Some(p) = &c.provider {
-                        format!("[{}] ", p)
-                    } else if c.is_local {
-                        "[local] ".to_string()
-                    } else {
-                        "[remote] ".to_string()
-                    };
-
-                    let active_badge = if is_active { " (active)" } else { "" };
-
-                    let ns_info = if !c.namespace.is_empty() {
-                        format!(" ns:[{}]", c.namespace)
-                    } else {
-                        String::new()
-                    };
-
-                    let line1 = Line::from(vec![
-                        Span::styled(
-                            prefix,
-                            if is_sel {
-                                Theme::selected_row()
-                            } else {
-                                Style::default().fg(color)
-                            },
-                        ),
-                        Span::styled(provider_badge, Style::default().fg(Theme::DIM)),
-                        Span::styled(
-                            c.name.clone(),
-                            Style::default().fg(color).add_modifier(Modifier::BOLD),
-                        ),
-                        Span::styled(
-                            active_badge,
-                            Style::default()
-                                .fg(Theme::GREEN)
-                                .add_modifier(Modifier::BOLD),
-                        ),
-                        Span::styled(ns_info, Style::default().fg(Theme::CYAN)),
-                    ]);
-
-                    let file_name = std::path::Path::new(&c.source_file)
-                        .file_name()
-                        .and_then(|n| n.to_str())
-                        .unwrap_or(&c.source_file);
-
-                    let line2 = Line::from(vec![
-                        Span::raw("    "),
-                        Span::styled(
-                            format!("cluster: {}  •  file: {}", c.cluster, file_name),
-                            Style::default().fg(Theme::DIM),
-                        ),
-                    ]);
-
-                    let style = if is_sel {
-                        Theme::selected_row()
-                    } else {
-                        Style::default()
-                    };
-
-                    ListItem::new(vec![line1, line2]).style(style)
-                })
-                .collect();
-
-            let list = List::new(items);
-            f.render_widget(list, chunks[1]);
-
-            // 3. Footer hint
-            let footer = Paragraph::new(Line::from(vec![
-                Span::styled(
-                    format!(
-                        " Showing {}/{} contexts  •  ",
-                        filtered.len(),
-                        contexts.len()
-                    ),
-                    Style::default().fg(Theme::DIM),
-                ),
-                Span::styled(
-                    "Enter",
-                    Style::default()
-                        .fg(Theme::ACCENT)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(": Switch  ", Style::default().fg(Theme::DIM)),
-                Span::styled(
-                    "Ctrl+i",
-                    Style::default()
-                        .fg(Theme::CYAN)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(": Import  ", Style::default().fg(Theme::DIM)),
-                Span::styled(
-                    "Esc",
-                    Style::default()
-                        .fg(Theme::YELLOW)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(": Cancel", Style::default().fg(Theme::DIM)),
-            ]))
-            .alignment(Alignment::Center);
-            f.render_widget(footer, chunks[2]);
+            render_context_picker_into(
+                f,
+                inner,
+                contexts,
+                current_context,
+                *selected_idx,
+                filter,
+                false,
+            );
         }
         Modal::NamespacePicker {
             namespaces,

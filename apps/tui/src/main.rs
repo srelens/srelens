@@ -90,6 +90,7 @@ mod deep_link;
 mod event;
 mod mcp_server;
 mod model_list;
+mod mux;
 mod sink;
 mod theme;
 mod tui_config;

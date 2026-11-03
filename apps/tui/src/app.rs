@@ -253,6 +253,8 @@ pub struct App {
     /// Where the Assistant, the Agent card and the model picker look for
     /// local agent CLIs; a test points it at its own directory.
     pub agent_search: srelens_kube::toolbox::SearchPaths,
+    /// Multi-cluster terminal multiplexer state (`:mux`).
+    pub mux_state: Option<crate::mux::MuxState>,
 }
 
 pub enum SuspendAction {
@@ -637,6 +639,7 @@ impl App {
             consent_arm_delay: Duration::from_secs(1),
             model_lists: HashMap::new(),
             agent_search: srelens_kube::toolbox::SearchPaths::from_env(),
+            mux_state: None,
         };
 
         if let Some(lvl) = app.ai_settings.get_caveman_level() {
@@ -4683,6 +4686,103 @@ impl App {
         }
 
         // 6. Normal Mode - k9s Global & View Keybindings
+
+        // Mux Right Pane Context Picker handling when right pane is focused
+        if let Some(mux) = &mut self.mux_state {
+            if mux.focused_pane == 1 && mux.picker.is_some() {
+                let picker = mux.picker.as_mut().unwrap();
+                match key.code {
+                    KeyCode::Up => {
+                        picker.selected_idx = picker.selected_idx.saturating_sub(1);
+                        return;
+                    }
+                    KeyCode::Down => {
+                        let max_idx = picker.filtered_items().len().saturating_sub(1);
+                        picker.selected_idx = (picker.selected_idx + 1).min(max_idx);
+                        return;
+                    }
+                    KeyCode::Char('k') if picker.filter.is_empty() => {
+                        picker.selected_idx = picker.selected_idx.saturating_sub(1);
+                        return;
+                    }
+                    KeyCode::Char('j') if picker.filter.is_empty() => {
+                        let max_idx = picker.filtered_items().len().saturating_sub(1);
+                        picker.selected_idx = (picker.selected_idx + 1).min(max_idx);
+                        return;
+                    }
+                    KeyCode::Char('b') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        self.switch_mux_focus();
+                        return;
+                    }
+                    KeyCode::Char(c)
+                        if !key.modifiers.contains(KeyModifiers::CONTROL)
+                            && !key.modifiers.contains(KeyModifiers::ALT) =>
+                    {
+                        picker.filter.push(c);
+                        picker.selected_idx = 0;
+                        return;
+                    }
+                    KeyCode::Backspace => {
+                        picker.filter.pop();
+                        picker.selected_idx = 0;
+                        return;
+                    }
+                    KeyCode::Esc => {
+                        self.mux_state = None;
+                        self.set_toast("MUX split cancelled".to_string(), Theme::status_ok());
+                        return;
+                    }
+                    KeyCode::Enter => {
+                        self.activate_mux_right_context().await;
+                        return;
+                    }
+                    _ => return,
+                }
+            }
+        }
+
+        // Mux Global shortcuts in Normal Mode:
+        // Ctrl+b cycles focus between panes
+        if self.mux_state.is_some()
+            && key.code == KeyCode::Char('b')
+            && key.modifiers.contains(KeyModifiers::CONTROL)
+        {
+            self.switch_mux_focus();
+            return;
+        }
+
+        // Shift+D prompts to close the active mux split
+        if self.mux_state.is_some()
+            && key.code == KeyCode::Char('D')
+            && !key.modifiers.contains(KeyModifiers::CONTROL)
+            && !key.modifiers.contains(KeyModifiers::ALT)
+        {
+            self.modal = Some(Modal::Confirm {
+                title: "Close MUX Split".to_string(),
+                message: "Close split pane and return to single cluster view?".to_string(),
+                action_name: "close_mux".to_string(),
+                is_destructive: false,
+            });
+            return;
+        }
+
+        // Mux dynamic pane resize with Alt+Left / Alt+Right or Alt+h / Alt+l
+        if let Some(mux) = &mut self.mux_state {
+            if key.modifiers.contains(KeyModifiers::ALT) {
+                match key.code {
+                    KeyCode::Left | KeyCode::Char('h') => {
+                        mux.split_ratio = mux.split_ratio.saturating_sub(5).max(20);
+                        return;
+                    }
+                    KeyCode::Right | KeyCode::Char('l') => {
+                        mux.split_ratio = (mux.split_ratio + 5).min(80);
+                        return;
+                    }
+                    _ => {}
+                }
+            }
+        }
+
         match key.code {
             // Enter Command Mode
             KeyCode::Char(':')
@@ -8807,6 +8907,78 @@ impl App {
             }
         }
 
+        // Mux split-pane focus, item click, and divider drag
+        let mut mux_action = None;
+        if let Some(mux) = &mut self.mux_state {
+            let (left_rect, right_rect) = mux.pane_rects;
+            let total_w = left_rect.width + right_rect.width;
+
+            if mouse.kind == MouseEventKind::Drag(MouseButton::Left) {
+                if total_w > 0
+                    && mouse.row >= left_rect.y
+                    && mouse.row < left_rect.y + left_rect.height
+                {
+                    let col_offset = mouse.column.saturating_sub(left_rect.x);
+                    let new_ratio = ((col_offset as u32 * 100) / total_w as u32) as u16;
+                    mux.split_ratio = new_ratio.clamp(20, 80);
+                    return;
+                }
+            }
+
+            if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
+                let in_left = mouse.column >= left_rect.x
+                    && mouse.column < left_rect.x + left_rect.width
+                    && mouse.row >= left_rect.y
+                    && mouse.row < left_rect.y + left_rect.height;
+                let in_right = mouse.column >= right_rect.x
+                    && mouse.column < right_rect.x + right_rect.width
+                    && mouse.row >= right_rect.y
+                    && mouse.row < right_rect.y + right_rect.height;
+
+                if in_left && mux.focused_pane != 0 {
+                    mux_action = Some("switch");
+                } else if in_right && mux.focused_pane != 1 {
+                    mux_action = Some("switch");
+                } else if in_right && mux.focused_pane == 1 && mux.picker.is_some() {
+                    let list_y = right_rect.y.saturating_add(4);
+                    let list_h = right_rect.height.saturating_sub(5);
+                    if mouse.row >= list_y && mouse.row < list_y + list_h {
+                        let click_row = (mouse.row - list_y) as usize;
+                        let item_offset = click_row / 2;
+                        let picker = mux.picker.as_mut().unwrap();
+                        let filtered_len = picker.filtered_items().len();
+                        let visible_items = (list_h as usize / 2).max(1);
+                        let sel = picker.selected_idx.min(filtered_len.saturating_sub(1));
+                        let start_idx = if sel >= visible_items {
+                            sel + 1 - visible_items
+                        } else {
+                            0
+                        };
+                        let clicked_idx = start_idx + item_offset;
+                        if clicked_idx < filtered_len {
+                            if picker.selected_idx == clicked_idx {
+                                mux_action = Some("activate");
+                            } else {
+                                picker.selected_idx = clicked_idx;
+                                return;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        match mux_action {
+            Some("switch") => {
+                self.switch_mux_focus();
+                return;
+            }
+            Some("activate") => {
+                self.activate_mux_right_context().await;
+                return;
+            }
+            _ => {}
+        }
+
         // 1. Check if clicking on header context chips
         if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
             let clicked_ctx = self
@@ -9570,6 +9742,174 @@ impl App {
         });
     }
 
+    pub fn open_mux_split(&mut self) {
+        if self.mux_state.is_some() {
+            self.set_toast("Already in mux split mode".to_string(), Theme::status_ok());
+            return;
+        }
+
+        let items: Vec<crate::ui::dialogs::ContextPickerItem> = self
+            .contexts
+            .iter()
+            .map(|c| crate::ui::dialogs::ContextPickerItem {
+                name: c.name.clone(),
+                cluster: c.cluster.clone(),
+                server: c.server.clone(),
+                namespace: c.namespace.clone(),
+                is_local: c.is_local,
+                provider: c.provider.clone(),
+                source_file: c.source_file.clone(),
+            })
+            .collect();
+
+        self.mux_state = Some(crate::mux::MuxState {
+            focused_pane: 1, // Start focused on right pane context picker
+            split_ratio: 50,
+            pane_rects: (ratatui::layout::Rect::default(), ratatui::layout::Rect::default()),
+            picker: Some(crate::mux::ContextPickerState {
+                contexts: items,
+                selected_idx: 0,
+                filter: String::new(),
+            }),
+            inactive_pane: None,
+        });
+
+        self.set_toast(
+            "MUX split: select a context for the right pane (Ctrl+b to switch, Shift+D to close)"
+                .to_string(),
+            Theme::status_ok(),
+        );
+    }
+
+    pub async fn activate_mux_right_context(&mut self) {
+        let (selected_ctx, target_ns) = if let Some(mux) = &self.mux_state {
+            if let Some(picker) = &mux.picker {
+                let filtered = picker.filtered_items();
+                if let Some(chosen) = filtered.get(picker.selected_idx) {
+                    (Some(chosen.name.clone()), chosen.namespace.clone())
+                } else {
+                    (None, String::new())
+                }
+            } else {
+                (None, String::new())
+            }
+        } else {
+            (None, String::new())
+        };
+
+        let Some(new_context) = selected_ctx else {
+            return;
+        };
+
+        // 1. Snapshot the left pane from App into ClusterPaneState
+        let left_pane = crate::mux::ClusterPaneState::extract_from_app(self);
+
+        // Inherit the left pane's resource view kind if applicable (e.g. Pods, Deployments)
+        let target_kind = match &left_pane.active_view {
+            ActiveView::Table(t) => t.kind.clone(),
+            _ => ResourceKind::Pods,
+        };
+
+        // 2. Park left pane in mux.inactive_pane, clear picker, keep focus on right (pane 1)
+        if let Some(mux) = &mut self.mux_state {
+            mux.picker = None;
+            mux.inactive_pane = Some(left_pane);
+            mux.focused_pane = 1;
+        }
+
+        // 3. Initialize the right cluster in App
+        self.active_context = new_context.clone();
+        if let Some(ctx) = self.contexts.iter().find(|c| c.name == new_context) {
+            self.cluster_name = ctx.cluster.clone();
+            self.server_url = ctx.server.clone();
+            self.active_namespace = if !target_ns.is_empty() {
+                target_ns
+            } else {
+                ctx.namespace.clone()
+            };
+        } else {
+            self.active_namespace = target_ns;
+        }
+
+        self.cluster_version = "Connecting...".to_string();
+        self.is_connected = false;
+        self.connection_attempt_start = Instant::now();
+        self.cluster_unreachable = false;
+        self.active_view = ActiveView::Table(ResourceTableState::new(target_kind));
+        self.nav_stack.clear();
+        self.filter_buffer.clear();
+        self.current_watch_channel = None;
+        self.active_watch_channels.clear();
+        self.active_watch_pool.clear();
+        self.namespaces.clear();
+        self.namespace_discovery_error = None;
+        self.cluster_overview_data = None;
+
+        self.set_toast(
+            format!(
+                "Right pane connected to '{}' (Click or Ctrl+b to switch focus)",
+                new_context
+            ),
+            Theme::status_ok(),
+        );
+
+        self.refresh_cluster_info();
+        self.refresh_cluster_overview();
+        self.crds = crate::commands::load_cached_crds(&self.active_context);
+        self.refresh_crds();
+        self.refresh_namespaces();
+        self.restart_active_watch().await;
+    }
+
+    pub fn switch_mux_focus(&mut self) {
+        let mut mux = match self.mux_state.take() {
+            Some(m) => m,
+            None => return,
+        };
+
+        if mux.picker.is_some() {
+            mux.focused_pane = 1 - mux.focused_pane;
+            self.mux_state = Some(mux);
+            return;
+        }
+
+        if let Some(mut inactive) = mux.inactive_pane.take() {
+            inactive.swap_with_app(self);
+            mux.focused_pane = 1 - mux.focused_pane;
+            let pane_idx = mux.focused_pane + 1;
+            let ctx = self.active_context.clone();
+            mux.inactive_pane = Some(inactive);
+            self.mux_state = Some(mux);
+            self.set_toast(
+                format!("Focused pane {}: '{}'", pane_idx, ctx),
+                Theme::status_ok(),
+            );
+        } else {
+            self.mux_state = Some(mux);
+        }
+    }
+
+    pub fn close_mux_split(&mut self) {
+        if let Some(mux) = self.mux_state.take() {
+            if let Some(mut inactive) = mux.inactive_pane {
+                if mux.focused_pane == 1 {
+                    // Left was parked in inactive_pane, restore it back to App!
+                    inactive.swap_with_app(self);
+                    // Now inactive holds Right pane's state -> stop its watches
+                    for ch in &inactive.active_watch_channels {
+                        self.watch_manager.stop(ch);
+                    }
+                } else {
+                    // Left was already in App, inactive holds Right pane's state -> stop its watches
+                    for ch in &inactive.active_watch_channels {
+                        self.watch_manager.stop(ch);
+                    }
+                }
+            }
+            self.set_toast("Closed MUX split".to_string(), Theme::status_ok());
+        }
+    }
+
     pub fn open_add_cluster_modal(&mut self) {
         let clip = get_clipboard_text().unwrap_or_default();
         let (input, preview_contexts, error_message) = if !clip.trim().is_empty() {
@@ -9873,6 +10213,9 @@ impl App {
             CommandTarget::CustomResource(crd) => self.switch_view_to_crd(crd).await,
             CommandTarget::Contexts => {
                 self.open_context_picker();
+            }
+            CommandTarget::Mux => {
+                self.open_mux_split();
             }
             CommandTarget::AddCluster => {
                 self.open_add_cluster_modal();
@@ -13983,6 +14326,11 @@ impl App {
     }
 
     pub async fn execute_modal_confirm(&mut self, action_name: String) {
+        if action_name == "close_mux" {
+            self.close_mux_split();
+            return;
+        }
+
         if action_name.starts_with("bulk_delete:") {
             let payload = &action_name["bulk_delete:".len()..];
             if let Ok(targets) = serde_json::from_str::<Vec<(String, String, String)>>(payload) {
@@ -15211,50 +15559,174 @@ impl App {
 
         // 2. Render Main View Body — Clear first to prevent ghosting artifacts
         //    (e.g. log lines lingering below the table when switching views)
-        f.render_widget(ratatui::widgets::Clear, chunks[1]);
-        match &self.active_view {
-            ActiveView::Table(table) => {
-                if self.cluster_unreachable && table.raw_items.is_empty() {
-                    let elapsed = self.connection_attempt_start.elapsed().as_secs();
-                    crate::views::cracked_lens::render_cracked_lens(
+        if self.mux_state.is_none() {
+            self.render_view_body(
+                f,
+                chunks[1],
+                &self.active_view,
+                &self.active_context,
+                &self.cluster_name,
+                &self.server_url,
+                self.cluster_unreachable,
+                self.connection_attempt_start,
+            );
+        } else {
+            let split_ratio = self
+                .mux_state
+                .as_ref()
+                .map(|m| m.split_ratio.clamp(20, 80))
+                .unwrap_or(50);
+            let h_chunks = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([
+                    Constraint::Percentage(split_ratio),
+                    Constraint::Percentage(100 - split_ratio),
+                ])
+                .split(chunks[1]);
+
+            if let Some(mux) = self.mux_state.as_mut() {
+                mux.pane_rects = (h_chunks[0], h_chunks[1]);
+            }
+
+            let mux = self.mux_state.as_ref().unwrap();
+
+            let focused = mux.focused_pane;
+
+            // 1. Left Pane
+            let left_is_focused = focused == 0;
+            let left_title = if left_is_focused {
+                format!(" [1: {}] ● ACTIVE ", self.active_context)
+            } else if let Some(inactive) = &mux.inactive_pane {
+                format!(" [1: {}] ", inactive.context)
+            } else {
+                format!(" [1: {}] ", self.active_context)
+            };
+
+            let left_block = ratatui::widgets::Block::default()
+                .borders(ratatui::widgets::Borders::ALL)
+                .border_type(Theme::border_type())
+                .border_style(if left_is_focused {
+                    Style::default()
+                        .fg(Theme::ACCENT)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(Theme::BORDER)
+                })
+                .title(left_title);
+            let left_inner = left_block.inner(h_chunks[0]);
+            f.render_widget(left_block, h_chunks[0]);
+
+            if left_is_focused {
+                self.render_view_body(
+                    f,
+                    left_inner,
+                    &self.active_view,
+                    &self.active_context,
+                    &self.cluster_name,
+                    &self.server_url,
+                    self.cluster_unreachable,
+                    self.connection_attempt_start,
+                );
+            } else if let Some(inactive) = &mux.inactive_pane {
+                self.render_view_body(
+                    f,
+                    left_inner,
+                    &inactive.active_view,
+                    &inactive.context,
+                    &inactive.cluster_name,
+                    &inactive.server_url,
+                    inactive.cluster_unreachable,
+                    inactive.connection_attempt_start,
+                );
+            } else {
+                self.render_view_body(
+                    f,
+                    left_inner,
+                    &self.active_view,
+                    &self.active_context,
+                    &self.cluster_name,
+                    &self.server_url,
+                    self.cluster_unreachable,
+                    self.connection_attempt_start,
+                );
+            }
+
+            // 2. Right Pane
+            let right_is_focused = focused == 1;
+            if let Some(picker) = &mux.picker {
+                let right_block = ratatui::widgets::Block::default()
+                    .borders(ratatui::widgets::Borders::ALL)
+                    .border_type(Theme::border_type())
+                    .border_style(if right_is_focused {
+                        Style::default()
+                            .fg(Theme::ACCENT)
+                            .add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default().fg(Theme::BORDER)
+                    })
+                    .title(if right_is_focused {
+                        " [2: Select Context] ● ACTIVE "
+                    } else {
+                        " [2: Select Context] "
+                    });
+                let right_inner = right_block.inner(h_chunks[1]);
+                f.render_widget(right_block, h_chunks[1]);
+                crate::ui::render_context_picker_into(
+                    f,
+                    right_inner,
+                    &picker.contexts,
+                    &self.active_context,
+                    picker.selected_idx,
+                    &picker.filter,
+                    true,
+                );
+            } else {
+                let right_title = if right_is_focused {
+                    format!(" [2: {}] ● ACTIVE ", self.active_context)
+                } else if let Some(inactive) = &mux.inactive_pane {
+                    format!(" [2: {}] ", inactive.context)
+                } else {
+                    format!(" [2: {}] ", self.active_context)
+                };
+
+                let right_block = ratatui::widgets::Block::default()
+                    .borders(ratatui::widgets::Borders::ALL)
+                    .border_type(Theme::border_type())
+                    .border_style(if right_is_focused {
+                        Style::default()
+                            .fg(Theme::ACCENT)
+                            .add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default().fg(Theme::BORDER)
+                    })
+                    .title(right_title);
+                let right_inner = right_block.inner(h_chunks[1]);
+                f.render_widget(right_block, h_chunks[1]);
+
+                if right_is_focused {
+                    self.render_view_body(
                         f,
-                        chunks[1],
+                        right_inner,
+                        &self.active_view,
                         &self.active_context,
                         &self.cluster_name,
                         &self.server_url,
-                        elapsed,
+                        self.cluster_unreachable,
+                        self.connection_attempt_start,
                     );
-                } else {
-                    render_resource_table(f, chunks[1], table);
+                } else if let Some(inactive) = &mux.inactive_pane {
+                    self.render_view_body(
+                        f,
+                        right_inner,
+                        &inactive.active_view,
+                        &inactive.context,
+                        &inactive.cluster_name,
+                        &inactive.server_url,
+                        inactive.cluster_unreachable,
+                        inactive.connection_attempt_start,
+                    );
                 }
             }
-            ActiveView::Yaml(yaml) => render_yaml_view(f, chunks[1], yaml),
-            ActiveView::Describe(desc) => render_describe_view(f, chunks[1], desc),
-            ActiveView::Logs(logs) => render_logs_view(f, chunks[1], logs),
-            ActiveView::PortForwards(pf) => render_port_forward_view(f, chunks[1], pf),
-            ActiveView::Helm(helm) => render_helm_view(f, chunks[1], helm),
-            ActiveView::HelmDetail(detail) => render_helm_detail_view(f, chunks[1], detail),
-            ActiveView::Argo(argo) => argo_view::render_argo_view(f, chunks[1], argo),
-            ActiveView::ArgoDetail(detail) => argo_detail_view::render_argo_detail_view_with(
-                f,
-                chunks[1],
-                detail,
-                self.tui_config.argo_ui_url.is_some(),
-            ),
-            ActiveView::Overview(ov) => render_overview_view(f, chunks[1], ov),
-            ActiveView::Toolbox(tb) => render_toolbox_view(f, chunks[1], tb),
-            ActiveView::Assistant => {
-                render_assistant_view(f, chunks[1], &self.assistant_state, &self.ai_settings)
-            }
-            ActiveView::Settings(s) => render_settings_view(f, chunks[1], s),
-            ActiveView::TuiConfig(s) => render_tui_config_view(f, chunks[1], s, &self.tui_config),
-            ActiveView::Tree(tree) => render_tree_view(f, chunks[1], tree),
-            ActiveView::NodeInspector(ni) => render_node_inspector_view(f, chunks[1], ni),
-            ActiveView::Topology(topo) => topology_view::render_topology_view(f, chunks[1], topo),
-            ActiveView::GpuInfo(gpu) => gpu_view::render(f, chunks[1], gpu),
-            ActiveView::Bgp(bgp) => render_bgp_view(f, chunks[1], bgp),
-            ActiveView::Top(top) => top_view::render_top_view(f, chunks[1], top),
-            ActiveView::Changed(changed) => render_changed_view(f, chunks[1], changed),
         }
 
         // 3. Render Status Bar
@@ -15918,6 +16390,64 @@ impl App {
         if let Some((anchor, cursor)) = self.screen_selection {
             let text = apply_screen_selection(f.buffer_mut(), anchor, cursor);
             *self.screen_selection_text.borrow_mut() = text;
+        }
+    }
+
+    pub fn render_view_body(
+        &self,
+        f: &mut Frame,
+        area: Rect,
+        view: &ActiveView,
+        context: &str,
+        cluster_name: &str,
+        server_url: &str,
+        cluster_unreachable: bool,
+        connection_attempt_start: Instant,
+    ) {
+        f.render_widget(ratatui::widgets::Clear, area);
+        match view {
+            ActiveView::Table(table) => {
+                if cluster_unreachable && table.raw_items.is_empty() {
+                    let elapsed = connection_attempt_start.elapsed().as_secs();
+                    crate::views::cracked_lens::render_cracked_lens(
+                        f,
+                        area,
+                        context,
+                        cluster_name,
+                        server_url,
+                        elapsed,
+                    );
+                } else {
+                    render_resource_table(f, area, table);
+                }
+            }
+            ActiveView::Yaml(yaml) => render_yaml_view(f, area, yaml),
+            ActiveView::Describe(desc) => render_describe_view(f, area, desc),
+            ActiveView::Logs(logs) => render_logs_view(f, area, logs),
+            ActiveView::PortForwards(pf) => render_port_forward_view(f, area, pf),
+            ActiveView::Helm(helm) => render_helm_view(f, area, helm),
+            ActiveView::HelmDetail(detail) => render_helm_detail_view(f, area, detail),
+            ActiveView::Argo(argo) => argo_view::render_argo_view(f, area, argo),
+            ActiveView::ArgoDetail(detail) => argo_detail_view::render_argo_detail_view_with(
+                f,
+                area,
+                detail,
+                self.tui_config.argo_ui_url.is_some(),
+            ),
+            ActiveView::Overview(ov) => render_overview_view(f, area, ov),
+            ActiveView::Toolbox(tb) => render_toolbox_view(f, area, tb),
+            ActiveView::Assistant => {
+                render_assistant_view(f, area, &self.assistant_state, &self.ai_settings)
+            }
+            ActiveView::Settings(s) => render_settings_view(f, area, s),
+            ActiveView::TuiConfig(s) => render_tui_config_view(f, area, s, &self.tui_config),
+            ActiveView::Tree(tree) => render_tree_view(f, area, tree),
+            ActiveView::NodeInspector(ni) => render_node_inspector_view(f, area, ni),
+            ActiveView::Topology(topo) => topology_view::render_topology_view(f, area, topo),
+            ActiveView::GpuInfo(gpu) => gpu_view::render(f, area, gpu),
+            ActiveView::Bgp(bgp) => render_bgp_view(f, area, bgp),
+            ActiveView::Top(top) => top_view::render_top_view(f, area, top),
+            ActiveView::Changed(changed) => render_changed_view(f, area, changed),
         }
     }
 }
