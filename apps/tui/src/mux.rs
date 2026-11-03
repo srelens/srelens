@@ -163,6 +163,8 @@ pub struct MuxState {
     pub focused_pane: usize,
     /// Percentage split width (default: 50)
     pub split_ratio: u16,
+    /// Whether user is currently dragging the split divider
+    pub is_dragging_divider: bool,
     /// Layout rectangles (left, right) cached during render for mouse hit-testing
     pub pane_rects: (Rect, Rect),
     /// Active when the right pane is prompting for a context

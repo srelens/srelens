@@ -173,11 +173,33 @@ async fn journey_mux_mouse_click_resizing_and_close_confirmation() {
     assert_eq!(app.mux_state.as_ref().unwrap().focused_pane, 1);
     assert_eq!(app.active_context, "cluster-right");
 
-    // Dynamic resizing via mouse drag
+    // Dynamic resizing via mouse drag:
+    // 1. Mouse down inside pane content (col 70, row 10) followed by drag must NOT resize divider!
     use crossterm::event::{MouseButton, MouseEventKind};
+    app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 70, 10))
+        .await;
     app.handle_mouse(mouse(MouseEventKind::Drag(MouseButton::Left), 35, 10))
         .await;
-    assert_eq!(app.mux_state.as_ref().unwrap().split_ratio, 35);
+    assert_eq!(
+        app.mux_state.as_ref().unwrap().split_ratio,
+        50,
+        "content drag must not resize split ratio"
+    );
+    app.handle_mouse(mouse(MouseEventKind::Up(MouseButton::Left), 35, 10))
+        .await;
+
+    // 2. Mouse down on divider boundary (col 50, row 10) followed by drag resizes divider
+    app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 50, 10))
+        .await;
+    app.handle_mouse(mouse(MouseEventKind::Drag(MouseButton::Left), 35, 10))
+        .await;
+    assert_eq!(
+        app.mux_state.as_ref().unwrap().split_ratio,
+        35,
+        "divider drag must resize split ratio"
+    );
+    app.handle_mouse(mouse(MouseEventKind::Up(MouseButton::Left), 35, 10))
+        .await;
 
     // Dynamic resizing via keyboard Alt+Left / Alt+Right
     let mut alt_right = key(KeyCode::Right);
@@ -670,4 +692,181 @@ async fn journey_mux_close_focused_right_pane() {
             .contains("Closed pane 2: 'cluster-right'"),
         "Toast must report closing pane 2 cluster-right"
     );
+}
+
+/// D1: Typing capital 'D' in Assistant input prompt does NOT trigger close split modal.
+#[tokio::test]
+async fn journey_mux_assistant_typing_does_not_trigger_close_modal() {
+    let _settings = common::env::isolate_settings();
+    let (mut app, _rx) = common::app_with("cluster-left", "default").await;
+    app.contexts = vec![
+        ctx("cluster-left", "left", "default"),
+        ctx("cluster-right", "right", "default"),
+    ];
+
+    // Open mux split with cluster-right
+    press(&mut app, ch(':')).await;
+    type_str(&mut app, "mux").await;
+    press(&mut app, key(KeyCode::Enter)).await;
+    press(&mut app, key(KeyCode::Down)).await;
+    press(&mut app, key(KeyCode::Enter)).await;
+
+    // Switch right pane to Assistant view
+    app.active_view = ActiveView::Assistant;
+
+    // Type "Deployment" with capital 'D'
+    press(&mut app, shift(KeyCode::Char('D'))).await;
+    assert!(
+        app.modal.is_none(),
+        "Capital 'D' in Assistant prompt must NOT open close split modal"
+    );
+    type_str(&mut app, "eployment").await;
+
+    assert_eq!(app.assistant_state.input, "Deployment");
+}
+
+/// D1: Paste into mux context picker routes to filter.
+#[tokio::test]
+async fn journey_mux_paste_into_picker() {
+    let _settings = common::env::isolate_settings();
+    let (mut app, _rx) = common::app_with("cluster-left", "default").await;
+    app.contexts = vec![
+        ctx("cluster-left", "left", "default"),
+        ctx("cluster-right", "right", "default"),
+    ];
+
+    // Open mux split: picker is active on right pane
+    press(&mut app, ch(':')).await;
+    type_str(&mut app, "mux").await;
+    press(&mut app, key(KeyCode::Enter)).await;
+
+    let mux = app.mux_state.as_ref().unwrap();
+    assert_eq!(mux.focused_pane, 1);
+    assert!(mux.picker.is_some());
+
+    // Paste text into picker
+    app.handle_paste("right\n".to_string());
+
+    let mux = app.mux_state.as_ref().unwrap();
+    let picker = mux.picker.as_ref().unwrap();
+    assert_eq!(picker.filter, "right");
+    assert_eq!(picker.filtered_items().len(), 1);
+}
+
+/// D1 & D5: Picker key handling has precedence over Settings view.
+#[tokio::test]
+async fn journey_mux_picker_precedence_over_settings() {
+    let _settings = common::env::isolate_settings();
+    let (mut app, _rx) = common::app_with("cluster-left", "default").await;
+    app.contexts = vec![
+        ctx("cluster-left", "left", "default"),
+        ctx("cluster-right", "right", "default"),
+    ];
+
+    // Navigate to Settings
+    app.active_view = ActiveView::Settings(
+        srectl::views::settings_view::SettingsViewState::with_settings(
+            app.ai_settings.clone(),
+            &app.agent_search,
+        ),
+    );
+
+    // Open mux split: picker is active on right pane
+    press(&mut app, ch(':')).await;
+    type_str(&mut app, "mux").await;
+    press(&mut app, key(KeyCode::Enter)).await;
+
+    let mux = app.mux_state.as_ref().unwrap();
+    assert_eq!(mux.focused_pane, 1);
+    assert!(mux.picker.is_some());
+
+    // Type filter in picker
+    type_str(&mut app, "right").await;
+    let mux = app.mux_state.as_ref().unwrap();
+    let picker = mux.picker.as_ref().unwrap();
+    assert_eq!(picker.filter, "right");
+
+    // Press Esc: cancels mux split without breaking Settings view
+    press(&mut app, key(KeyCode::Esc)).await;
+    assert!(app.mux_state.is_none());
+    assert!(matches!(app.active_view, ActiveView::Settings(_)));
+}
+
+/// D2 & D5: Recheck same-context activation blocks duplicate cluster.
+#[tokio::test]
+async fn journey_mux_same_context_activation_recheck() {
+    let _settings = common::env::isolate_settings();
+    let (mut app, _rx) = common::app_with("cluster-left", "default").await;
+    app.contexts = vec![
+        ctx("cluster-left", "left", "default"),
+        ctx("cluster-right", "right", "default"),
+    ];
+
+    // Open mux split: picker has cluster-right available
+    press(&mut app, ch(':')).await;
+    type_str(&mut app, "mux").await;
+    press(&mut app, key(KeyCode::Enter)).await;
+
+    // Switch focus to left pane with Ctrl+b
+    press(&mut app, ctrl('b')).await;
+    assert_eq!(app.mux_state.as_ref().unwrap().focused_pane, 0);
+
+    // Switch left context directly to cluster-right
+    app.switch_context_forced("cluster-right".to_string()).await;
+    assert_eq!(app.active_context, "cluster-right");
+
+    // Switch focus back to right picker with Ctrl+b
+    press(&mut app, ctrl('b')).await;
+    assert_eq!(app.mux_state.as_ref().unwrap().focused_pane, 1);
+
+    // Try to activate cluster-right in right pane -> blocked!
+    press(&mut app, key(KeyCode::Enter)).await;
+
+    let mux = app.mux_state.as_ref().unwrap();
+    assert!(
+        mux.picker.is_some(),
+        "Picker must remain open when selection is rejected"
+    );
+    assert!(
+        app.toast
+            .as_ref()
+            .unwrap()
+            .0
+            .contains("already active in left pane"),
+        "Toast must explain duplicate context rejection"
+    );
+}
+
+/// D5 & D6: Closing pane cancels running assistant turn.
+#[tokio::test]
+async fn journey_mux_close_cancels_active_assistant_turn() {
+    let _settings = common::env::isolate_settings();
+    let (mut app, _rx) = common::app_with("cluster-left", "default").await;
+    app.contexts = vec![
+        ctx("cluster-left", "left", "default"),
+        ctx("cluster-right", "right", "default"),
+    ];
+
+    // Open mux split with cluster-right
+    press(&mut app, ch(':')).await;
+    type_str(&mut app, "mux").await;
+    press(&mut app, key(KeyCode::Enter)).await;
+    press(&mut app, key(KeyCode::Down)).await;
+    press(&mut app, key(KeyCode::Enter)).await;
+
+    // Focus is on pane 1 (cluster-right). Start a running turn.
+    app.assistant_state.is_busy = true;
+    app.assistant_state.busy_status = "Generating answer...".to_string();
+    let task = tokio::spawn(async {
+        tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+    });
+    app.assistant_state.task = Some(task.abort_handle());
+
+    // Close focused right pane
+    press(&mut app, shift(KeyCode::Char('D'))).await;
+    press(&mut app, ch('y')).await;
+
+    assert!(app.mux_state.is_none());
+    assert_eq!(app.active_context, "cluster-left");
+    assert!(!app.assistant_state.is_busy);
 }
