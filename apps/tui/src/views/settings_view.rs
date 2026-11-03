@@ -130,10 +130,8 @@ pub struct SettingsViewState {
 }
 
 impl SettingsViewState {
-    /// The view on the saved settings, with each local agent CLI looked up
-    /// in `agent_search`.
-    pub fn new(agent_search: &SearchPaths) -> Self {
-        let settings = AiSettings::load();
+    /// Initialize with explicit settings (e.g. per-pane settings in Mux).
+    pub fn with_settings(settings: AiSettings, agent_search: &SearchPaths) -> Self {
         let default_idx = ALL_PROVIDERS
             .iter()
             .position(|&p| p == settings.default_provider)
@@ -154,6 +152,12 @@ impl SettingsViewState {
                 .filter_map(|&kind| Some((kind, find_agent_in(kind, agent_search)?)))
                 .collect(),
         }
+    }
+
+    /// The view on the saved settings, with each local agent CLI looked up
+    /// in `agent_search`.
+    pub fn new(agent_search: &SearchPaths) -> Self {
+        Self::with_settings(AiSettings::load(), agent_search)
     }
 
     /// Open the picker on `target`'s list under `key`: Ready on a `cached`

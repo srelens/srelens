@@ -9872,6 +9872,7 @@ impl App {
 
         // 1. Snapshot the left pane from App into ClusterPaneState
         let left_pane = crate::mux::ClusterPaneState::extract_from_app(self);
+        self.ai_settings = left_pane.ai_settings.clone();
 
         // Inherit the left pane's resource view kind if applicable (e.g. Pods, Deployments)
         let target_kind = match &left_pane.active_view {
@@ -9981,28 +9982,28 @@ impl App {
 
     pub fn close_mux_split(&mut self) {
         if let Some(mux) = self.mux_state.take() {
-            if let Some(mut inactive) = mux.inactive_pane {
-                if mux.focused_pane == 1 {
-                    // Left was parked in inactive_pane, restore it back to App!
-                    inactive.swap_with_app(self);
-                    // Now inactive holds Right pane's state -> stop its watches and logs
-                    for ch in &inactive.active_watch_channels {
-                        self.watch_manager.stop(ch);
-                    }
-                    if let Some(log_ch) = &inactive.active_log_channel {
-                        self.logs_manager.stop(log_ch);
-                    }
-                } else {
-                    // Left was already in App, inactive holds Right pane's state -> stop its watches and logs
-                    for ch in &inactive.active_watch_channels {
-                        self.watch_manager.stop(ch);
-                    }
-                    if let Some(log_ch) = &inactive.active_log_channel {
-                        self.logs_manager.stop(log_ch);
-                    }
+            if let Some(inactive) = mux.inactive_pane {
+                let closed_idx = mux.focused_pane + 1;
+                let closed_ctx = self.active_context.clone();
+
+                // 1. Stop active/focused pane's watch channels and log stream
+                for ch in &self.active_watch_channels {
+                    self.watch_manager.stop(ch);
                 }
+                if let Some(log_ch) = &self.active_log_channel {
+                    self.logs_manager.stop(log_ch);
+                }
+
+                // 2. Promote the parked/inactive pane into self as the surviving view
+                inactive.apply_to_app(self);
+
+                self.set_toast(
+                    format!("Closed pane {}: '{}'", closed_idx, closed_ctx),
+                    Theme::status_ok(),
+                );
+            } else {
+                self.set_toast("Cancelled MUX split".to_string(), Theme::status_ok());
             }
-            self.set_toast("Closed MUX split".to_string(), Theme::status_ok());
         }
     }
 
@@ -10688,9 +10689,10 @@ impl App {
             }
             ResourceKind::Toolbox => ActiveView::Toolbox(ToolboxViewState::new()),
             ResourceKind::Assistant => ActiveView::Assistant,
-            ResourceKind::Settings => {
-                ActiveView::Settings(SettingsViewState::new(&self.agent_search))
-            }
+            ResourceKind::Settings => ActiveView::Settings(SettingsViewState::with_settings(
+                self.ai_settings.clone(),
+                &self.agent_search,
+            )),
             ResourceKind::TuiConfig => {
                 let mut cfg = TuiConfigViewState::new();
                 cfg.available_contexts = self.contexts.iter().map(|c| c.name.clone()).collect();
@@ -15796,6 +15798,7 @@ impl App {
                 self.cluster_unreachable,
                 self.connection_attempt_start,
                 &self.assistant_state,
+                &self.ai_settings,
             );
         } else {
             let split_ratio = self
@@ -15857,6 +15860,7 @@ impl App {
                     self.cluster_unreachable,
                     self.connection_attempt_start,
                     &self.assistant_state,
+                    &self.ai_settings,
                 );
             } else if let Some(inactive) = &mux.inactive_pane {
                 self.render_view_body(
@@ -15869,6 +15873,7 @@ impl App {
                     inactive.cluster_unreachable,
                     inactive.connection_attempt_start,
                     &inactive.assistant_state,
+                    &inactive.ai_settings,
                 );
             } else {
                 self.render_view_body(
@@ -15881,6 +15886,7 @@ impl App {
                     self.cluster_unreachable,
                     self.connection_attempt_start,
                     &self.assistant_state,
+                    &self.ai_settings,
                 );
             }
 
@@ -15953,6 +15959,7 @@ impl App {
                         self.cluster_unreachable,
                         self.connection_attempt_start,
                         &self.assistant_state,
+                        &self.ai_settings,
                     );
                 } else if let Some(inactive) = &mux.inactive_pane {
                     self.render_view_body(
@@ -15965,6 +15972,7 @@ impl App {
                         inactive.cluster_unreachable,
                         inactive.connection_attempt_start,
                         &inactive.assistant_state,
+                        &inactive.ai_settings,
                     );
                 }
             }
@@ -16645,6 +16653,7 @@ impl App {
         cluster_unreachable: bool,
         connection_attempt_start: Instant,
         assistant_state: &crate::views::assistant_view::AssistantViewState,
+        ai_settings: &crate::ai_config::AiSettings,
     ) {
         f.render_widget(ratatui::widgets::Clear, area);
         match view {
@@ -16678,9 +16687,7 @@ impl App {
             ),
             ActiveView::Overview(ov) => render_overview_view(f, area, ov),
             ActiveView::Toolbox(tb) => render_toolbox_view(f, area, tb),
-            ActiveView::Assistant => {
-                render_assistant_view(f, area, assistant_state, &self.ai_settings)
-            }
+            ActiveView::Assistant => render_assistant_view(f, area, assistant_state, ai_settings),
             ActiveView::Settings(s) => render_settings_view(f, area, s),
             ActiveView::TuiConfig(s) => render_tui_config_view(f, area, s, &self.tui_config),
             ActiveView::Tree(tree) => render_tree_view(f, area, tree),

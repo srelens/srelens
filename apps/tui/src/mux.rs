@@ -37,6 +37,7 @@ pub struct ClusterPaneState {
     pub namespace_discovery_error: Option<String>,
     pub cluster_overview_data: Option<crate::views::overview_view::ClusterOverviewData>,
     pub assistant_state: crate::views::assistant_view::AssistantViewState,
+    pub ai_settings: crate::ai_config::AiSettings,
     pub active_log_channel: Option<String>,
     pub node_metrics_history: std::collections::HashMap<
         String,
@@ -80,6 +81,7 @@ impl ClusterPaneState {
                 &mut app.assistant_state,
                 crate::views::assistant_view::AssistantViewState::new(),
             ),
+            ai_settings: std::mem::take(&mut app.ai_settings),
             active_log_channel: app.active_log_channel.take(),
             node_metrics_history: std::mem::take(&mut app.node_metrics_history),
             pod_metrics_history: std::mem::take(&mut app.pod_metrics_history),
@@ -110,6 +112,7 @@ impl ClusterPaneState {
         app.namespace_discovery_error = self.namespace_discovery_error;
         app.cluster_overview_data = self.cluster_overview_data;
         app.assistant_state = self.assistant_state;
+        app.ai_settings = self.ai_settings;
         app.active_log_channel = self.active_log_channel;
         app.node_metrics_history = self.node_metrics_history;
         app.pod_metrics_history = self.pod_metrics_history;

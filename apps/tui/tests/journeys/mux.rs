@@ -486,3 +486,188 @@ async fn journey_mux_inactive_stream_and_tick_routing() {
     // handle_tick ticks inactive pane without panicking
     app.handle_tick();
 }
+
+/// D2 & D5: AI Assistant Settings Isolation between Left and Right panes.
+#[tokio::test]
+async fn journey_mux_ai_settings_isolation() {
+    let _settings = common::env::isolate_settings();
+    let (mut app, _rx) = common::app_with("cluster-left", "default").await;
+    app.contexts = vec![
+        ctx("cluster-left", "left", "default"),
+        ctx("cluster-right", "right", "default"),
+    ];
+
+    // Open mux split with cluster-right
+    press(&mut app, ch(':')).await;
+    type_str(&mut app, "mux").await;
+    press(&mut app, key(KeyCode::Enter)).await;
+    press(&mut app, key(KeyCode::Down)).await;
+    press(&mut app, key(KeyCode::Enter)).await;
+
+    assert_eq!(app.active_context, "cluster-right");
+    assert_eq!(app.mux_state.as_ref().unwrap().focused_pane, 1);
+
+    // 1. Configure AI settings in Right pane: set Cursor agent with custom model
+    app.ai_settings.agent = srelens_agent::adapter::AgentKind::Cursor;
+    app.ai_settings.set_agent_model(
+        srelens_agent::adapter::AgentKind::Cursor,
+        Some("claude-3-5-sonnet".to_string()),
+    );
+
+    // 2. Switch focus to Left pane via Ctrl+b
+    press(&mut app, ctrl('b')).await;
+    assert_eq!(app.active_context, "cluster-left");
+    assert_eq!(app.mux_state.as_ref().unwrap().focused_pane, 0);
+
+    // Left pane must retain default Srelens agent and NOT inherit Cursor
+    assert_eq!(
+        app.ai_settings.agent,
+        srelens_agent::adapter::AgentKind::Srelens,
+        "Left pane must not inherit right pane's agent change"
+    );
+
+    // Configure Left pane to use Gemini provider with gemini-1.5-pro
+    app.ai_settings.default_provider = srectl::ai_config::AiProvider::Gemini;
+    app.ai_settings
+        .models
+        .insert("gemini".to_string(), "gemini-1.5-pro".to_string());
+
+    // 3. Switch focus back to Right pane via Ctrl+b
+    press(&mut app, ctrl('b')).await;
+    assert_eq!(app.active_context, "cluster-right");
+    assert_eq!(app.mux_state.as_ref().unwrap().focused_pane, 1);
+
+    // Right pane must preserve its Cursor agent and NOT have Gemini
+    assert_eq!(
+        app.ai_settings.agent,
+        srelens_agent::adapter::AgentKind::Cursor,
+        "Right pane must retain its Cursor agent"
+    );
+    assert_ne!(
+        app.ai_settings.default_provider,
+        srectl::ai_config::AiProvider::Gemini,
+        "Right pane must not inherit left pane's Gemini provider"
+    );
+
+    // Open assistant view in right pane
+    press(&mut app, ch(':')).await;
+    type_str(&mut app, "assistant").await;
+    press(&mut app, key(KeyCode::Enter)).await;
+
+    // Switch to left pane and open assistant view as well
+    press(&mut app, ctrl('b')).await;
+    assert_eq!(app.active_context, "cluster-left");
+    press(&mut app, ch(':')).await;
+    type_str(&mut app, "assistant").await;
+    press(&mut app, key(KeyCode::Enter)).await;
+
+    // 4. Render split screen and verify distinct visual headers for both panes
+    let screen = render_app(&mut app, 140, 30);
+    assert!(
+        screen.contains("Google Gemini") && screen.contains("gemini-1.5-pro"),
+        "Left pane assistant banner must show Google Gemini and gemini-1.5-pro:\n{screen}"
+    );
+    assert!(
+        screen.contains("Cursor") && screen.contains("claude-3-5-sonnet"),
+        "Right pane assistant banner must show Cursor and claude-3-5-sonnet:\n{screen}"
+    );
+}
+
+/// D5 & D6: Shift+D closes the currently focused pane (Left pane close promotion).
+#[tokio::test]
+async fn journey_mux_close_focused_left_pane() {
+    let _settings = common::env::isolate_settings();
+    let (mut app, _rx) = common::app_with("cluster-left", "default").await;
+    app.contexts = vec![
+        ctx("cluster-left", "left", "default"),
+        ctx("cluster-right", "right", "default"),
+    ];
+
+    // Open mux split with cluster-right
+    press(&mut app, ch(':')).await;
+    type_str(&mut app, "mux").await;
+    press(&mut app, key(KeyCode::Enter)).await;
+    press(&mut app, key(KeyCode::Down)).await;
+    press(&mut app, key(KeyCode::Enter)).await;
+
+    assert_eq!(app.active_context, "cluster-right");
+    assert_eq!(app.mux_state.as_ref().unwrap().focused_pane, 1);
+
+    // Switch focus to Left pane (pane 0)
+    press(&mut app, ctrl('b')).await;
+    assert_eq!(app.active_context, "cluster-left");
+    assert_eq!(app.mux_state.as_ref().unwrap().focused_pane, 0);
+
+    // Press Shift+D to initiate close while focused on Left pane
+    press(&mut app, shift(KeyCode::Char('D'))).await;
+    assert!(matches!(
+        app.modal,
+        Some(Modal::Confirm { ref action_name, .. }) if action_name == "close_mux"
+    ));
+
+    // Confirm close with 'y'
+    press(&mut app, ch('y')).await;
+    assert!(app.modal.is_none());
+    assert!(app.mux_state.is_none(), "Mux split must be closed");
+
+    // The focused Left pane was closed; Right pane survives and is now full screen
+    assert_eq!(
+        app.active_context, "cluster-right",
+        "Right pane must survive when Left pane is closed"
+    );
+    assert!(
+        app.toast
+            .as_ref()
+            .unwrap()
+            .0
+            .contains("Closed pane 1: 'cluster-left'"),
+        "Toast must report closing pane 1 cluster-left"
+    );
+}
+
+/// D5 & D6: Shift+D closes the currently focused pane (Right pane close).
+#[tokio::test]
+async fn journey_mux_close_focused_right_pane() {
+    let _settings = common::env::isolate_settings();
+    let (mut app, _rx) = common::app_with("cluster-left", "default").await;
+    app.contexts = vec![
+        ctx("cluster-left", "left", "default"),
+        ctx("cluster-right", "right", "default"),
+    ];
+
+    // Open mux split with cluster-right
+    press(&mut app, ch(':')).await;
+    type_str(&mut app, "mux").await;
+    press(&mut app, key(KeyCode::Enter)).await;
+    press(&mut app, key(KeyCode::Down)).await;
+    press(&mut app, key(KeyCode::Enter)).await;
+
+    assert_eq!(app.active_context, "cluster-right");
+    assert_eq!(app.mux_state.as_ref().unwrap().focused_pane, 1);
+
+    // Press Shift+D while focused on Right pane
+    press(&mut app, shift(KeyCode::Char('D'))).await;
+    assert!(matches!(
+        app.modal,
+        Some(Modal::Confirm { ref action_name, .. }) if action_name == "close_mux"
+    ));
+
+    // Confirm close with 'y'
+    press(&mut app, ch('y')).await;
+    assert!(app.modal.is_none());
+    assert!(app.mux_state.is_none(), "Mux split must be closed");
+
+    // The focused Right pane was closed; Left pane survives and is restored
+    assert_eq!(
+        app.active_context, "cluster-left",
+        "Left pane must survive when Right pane is closed"
+    );
+    assert!(
+        app.toast
+            .as_ref()
+            .unwrap()
+            .0
+            .contains("Closed pane 2: 'cluster-right'"),
+        "Toast must report closing pane 2 cluster-right"
+    );
+}
