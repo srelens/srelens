@@ -9765,7 +9765,10 @@ impl App {
         self.mux_state = Some(crate::mux::MuxState {
             focused_pane: 1, // Start focused on right pane context picker
             split_ratio: 50,
-            pane_rects: (ratatui::layout::Rect::default(), ratatui::layout::Rect::default()),
+            pane_rects: (
+                ratatui::layout::Rect::default(),
+                ratatui::layout::Rect::default(),
+            ),
             picker: Some(crate::mux::ContextPickerState {
                 contexts: items,
                 selected_idx: 0,
@@ -15605,14 +15608,17 @@ impl App {
             let left_block = ratatui::widgets::Block::default()
                 .borders(ratatui::widgets::Borders::ALL)
                 .border_type(Theme::border_type())
-                .border_style(if left_is_focused {
-                    Style::default()
-                        .fg(Theme::ACCENT)
-                        .add_modifier(Modifier::BOLD)
-                } else {
-                    Style::default().fg(Theme::BORDER)
-                })
-                .title(left_title);
+                .border_style(Style::default().fg(Theme::BORDER_FOCUS))
+                .title(ratatui::text::Span::styled(
+                    left_title,
+                    if left_is_focused {
+                        Style::default()
+                            .fg(Theme::CYAN)
+                            .add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default().fg(Theme::DIM)
+                    },
+                ));
             let left_inner = left_block.inner(h_chunks[0]);
             f.render_widget(left_block, h_chunks[0]);
 
@@ -15657,18 +15663,21 @@ impl App {
                 let right_block = ratatui::widgets::Block::default()
                     .borders(ratatui::widgets::Borders::ALL)
                     .border_type(Theme::border_type())
-                    .border_style(if right_is_focused {
-                        Style::default()
-                            .fg(Theme::ACCENT)
-                            .add_modifier(Modifier::BOLD)
-                    } else {
-                        Style::default().fg(Theme::BORDER)
-                    })
-                    .title(if right_is_focused {
-                        " [2: Select Context] ● ACTIVE "
-                    } else {
-                        " [2: Select Context] "
-                    });
+                    .border_style(Style::default().fg(Theme::BORDER_FOCUS))
+                    .title(ratatui::text::Span::styled(
+                        if right_is_focused {
+                            " [2: Select Context] ● ACTIVE "
+                        } else {
+                            " [2: Select Context] "
+                        },
+                        if right_is_focused {
+                            Style::default()
+                                .fg(Theme::CYAN)
+                                .add_modifier(Modifier::BOLD)
+                        } else {
+                            Style::default().fg(Theme::DIM)
+                        },
+                    ));
                 let right_inner = right_block.inner(h_chunks[1]);
                 f.render_widget(right_block, h_chunks[1]);
                 crate::ui::render_context_picker_into(
@@ -15692,14 +15701,17 @@ impl App {
                 let right_block = ratatui::widgets::Block::default()
                     .borders(ratatui::widgets::Borders::ALL)
                     .border_type(Theme::border_type())
-                    .border_style(if right_is_focused {
-                        Style::default()
-                            .fg(Theme::ACCENT)
-                            .add_modifier(Modifier::BOLD)
-                    } else {
-                        Style::default().fg(Theme::BORDER)
-                    })
-                    .title(right_title);
+                    .border_style(Style::default().fg(Theme::BORDER_FOCUS))
+                    .title(ratatui::text::Span::styled(
+                        right_title,
+                        if right_is_focused {
+                            Style::default()
+                                .fg(Theme::CYAN)
+                                .add_modifier(Modifier::BOLD)
+                        } else {
+                            Style::default().fg(Theme::DIM)
+                        },
+                    ));
                 let right_inner = right_block.inner(h_chunks[1]);
                 f.render_widget(right_block, h_chunks[1]);
 

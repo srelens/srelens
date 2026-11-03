@@ -1277,7 +1277,7 @@ pub fn render_assistant_view(
 
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Theme::ACCENT));
+        .border_style(Style::default().fg(Theme::BORDER_FOCUS));
 
     let inner = block.inner(area);
     f.render_widget(block, area);
@@ -1788,7 +1788,7 @@ pub fn render_assistant_view(
 
         let popup_block = Block::default()
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(Theme::ACCENT))
+            .border_style(Style::default().fg(Theme::BORDER_FOCUS))
             .title(Span::styled(
                 popup_title,
                 Style::default()

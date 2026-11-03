@@ -865,7 +865,7 @@ fn hint_line(hints: &[(&'static str, Color, &'static str)]) -> Line<'static> {
 pub fn render_settings_view(f: &mut Frame, area: Rect, state: &SettingsViewState) {
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Theme::ACCENT))
+        .border_style(Style::default().fg(Theme::BORDER_FOCUS))
         .title(Span::styled(
             " SRElens AI & Assistant Settings ",
             Theme::title(),

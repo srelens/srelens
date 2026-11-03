@@ -383,7 +383,7 @@ pub fn render_modal(f: &mut Frame, area: Rect, modal: &Modal) {
             let border_color = if *is_destructive {
                 Theme::RED
             } else {
-                Theme::ACCENT
+                Theme::BORDER_FOCUS
             };
             let block = Block::default()
                 .borders(Borders::ALL)
@@ -557,7 +557,7 @@ pub fn render_modal(f: &mut Frame, area: Rect, modal: &Modal) {
             let block = Block::default()
                 .borders(Borders::ALL)
                 .border_type(Theme::border_type())
-                .border_style(Style::default().fg(Theme::ACCENT))
+                .border_style(Style::default().fg(Theme::BORDER_FOCUS))
                 .title(format!(" Scale Workload: {} ", workload_name));
 
             let inner = block.inner(modal_area);
@@ -608,7 +608,7 @@ pub fn render_modal(f: &mut Frame, area: Rect, modal: &Modal) {
             let block = Block::default()
                 .borders(Borders::ALL)
                 .border_type(Theme::border_type())
-                .border_style(Style::default().fg(Theme::ACCENT))
+                .border_style(Style::default().fg(Theme::BORDER_FOCUS))
                 .title(format!(" 🔑 SSH into Node: {} ", node_name));
 
             let inner = block.inner(modal_area);
@@ -678,7 +678,7 @@ pub fn render_modal(f: &mut Frame, area: Rect, modal: &Modal) {
             let block = Block::default()
                 .borders(Borders::ALL)
                 .border_type(Theme::border_type())
-                .border_style(Style::default().fg(Theme::ACCENT))
+                .border_style(Style::default().fg(Theme::BORDER_FOCUS))
                 .title(title_str);
 
             let inner = block.inner(modal_area);
@@ -736,7 +736,7 @@ pub fn render_modal(f: &mut Frame, area: Rect, modal: &Modal) {
             let block = Block::default()
                 .borders(Borders::ALL)
                 .border_type(Theme::border_type())
-                .border_style(Style::default().fg(Theme::ACCENT))
+                .border_style(Style::default().fg(Theme::BORDER_FOCUS))
                 .title(format!(" {} ({}) ", action_title, pod_name));
 
             let inner = block.inner(modal_area);
@@ -772,7 +772,7 @@ pub fn render_modal(f: &mut Frame, area: Rect, modal: &Modal) {
             let block = Block::default()
                 .borders(Borders::ALL)
                 .border_type(Theme::border_type())
-                .border_style(Style::default().fg(Theme::ACCENT))
+                .border_style(Style::default().fg(Theme::BORDER_FOCUS))
                 .title(" Switch Kubernetes Context (Type to filter, ↑/↓ Navigate, Enter Switch, Esc Close) ");
 
             let inner = block.inner(modal_area);
@@ -799,7 +799,7 @@ pub fn render_modal(f: &mut Frame, area: Rect, modal: &Modal) {
             let block = Block::default()
                 .borders(Borders::ALL)
                 .border_type(Theme::border_type())
-                .border_style(Style::default().fg(Theme::ACCENT))
+                .border_style(Style::default().fg(Theme::BORDER_FOCUS))
                 .title(" Switch Namespace (0: All Namespaces, ↑/↓ Navigate, Enter Select) ");
 
             let inner = block.inner(modal_area);
@@ -881,7 +881,7 @@ pub fn render_modal(f: &mut Frame, area: Rect, modal: &Modal) {
             let block = Block::default()
                 .borders(Borders::ALL)
                 .border_type(Theme::border_type())
-                .border_style(Style::default().fg(Theme::ACCENT))
+                .border_style(Style::default().fg(Theme::BORDER_FOCUS))
                 .title(Span::styled(
                     format!(" ⚡ Actions: {}/{}{} [Type to filter, ↑/↓ Navigate, Enter Run, Esc Close] ", resource_kind, resource_name, ns_str),
                     Theme::title(),
@@ -1193,7 +1193,7 @@ pub fn render_add_cluster_modal(
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(Theme::border_type())
-        .border_style(Style::default().fg(Theme::ACCENT))
+        .border_style(Style::default().fg(Theme::BORDER_FOCUS))
         .title(" Import Cluster / Kubeconfig (:import, :add-cluster) ");
 
     let inner = block.inner(modal_area);
