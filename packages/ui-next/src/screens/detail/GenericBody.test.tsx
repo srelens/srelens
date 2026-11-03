@@ -147,14 +147,18 @@ describe("GenericBody", () => {
 
     it("derives every identity fact, with cross-resource references as plain text", () => {
       renderFacts("Lease", LEASE);
-      expect(screen.getByText("kube-node-lease")).toBeDefined();
       expect(screen.getByText("Node/node-a")).toBeDefined();
 
-      // Namespace and Controlled by are `ResourceLink`/`LinkedResources` in
-      // classic that navigate; nothing here can (`PaneBody` has no
-      // navigation contract — see the task report), so neither renders as a
-      // navigation control.
+      // Controlled by is a `LinkedResources` in classic that navigates; nothing
+      // here can (`PaneBody` has no navigation contract — see the task report),
+      // so it does not render as a navigation control.
       expect(screen.queryByRole("button", { name: /^Open / })).toBeNull();
+    });
+
+    it("drops Namespace, which both headers show (#1001)", () => {
+      renderFacts("Lease", LEASE);
+      expect(screen.queryByText("Namespace")).toBeNull();
+      expect(screen.queryByText("kube-node-lease")).toBeNull();
     });
 
     it("heads the first fact list with nothing, the way the design does", () => {
@@ -303,7 +307,7 @@ describe("GenericBody", () => {
       // section, and both screens keep that order — they place the lead facts
       // above the wrapper. Composed here the way a screen composes it, since
       // the two halves now live on either side of the data/design line.
-      const CM = object("ConfigMap");
+      const CM = object("ConfigMap", {}, {}, { name: "c", creationTimestamp: "2026-08-20T00:00:00Z" });
       const { container } = render(
         <>
           <Lead kind="ConfigMap" object={CM} />
@@ -312,10 +316,10 @@ describe("GenericBody", () => {
           </GenericBody>
         </>,
       );
-      const namespaceKey = screen.getByText("Namespace");
+      const createdKey = screen.getByText("Created");
       const nested = screen.getByRole("heading", { level: 3, name: "Nested kind body" });
       // eslint-disable-next-line no-bitwise
-      expect(namespaceKey.compareDocumentPosition(nested) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+      expect(createdKey.compareDocumentPosition(nested) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
       // And still one unbroken run of siblings across the join.
       expect(runIsUnbroken(container)).toBe(true);
     });
@@ -397,13 +401,11 @@ describe("GenericBody", () => {
       expect(screen.queryByRole("heading", { level: 3, name: "Conditions" })).toBeNull();
     });
 
-    it.each([...SELF_DESCRIBING_KINDS])("gives %s a fact list of its own rather than the identity one", (kind) => {
-      // The other half of the same rule, and the half that used to be a
-      // `SELF_DESCRIBING_KINDS` check inside the wrapper: these four already
-      // state Namespace, Created and their owner, so they must not be handed
-      // the generic list on top of their own.
-      const facts = detailFacts({ kind, object: object(kind) }).map((f) => f.label);
-      expect(facts).not.toEqual(["Namespace"]);
+    it.each([...SELF_DESCRIBING_KINDS])("starts %s's own fact list from the identity every kind leads with (#1001)", (kind) => {
+      const owned = object(kind, {}, {}, { name: "x", creationTimestamp: "2026-08-20T00:00:00Z", ownerReferences: [{ kind: "Thing", name: "t" }] });
+      const facts = detailFacts({ kind, object: owned }).map((f) => f.label);
+      expect(facts.slice(0, 2)).toEqual(["Created", "Controlled by"]);
+      expect(facts.filter((label) => label === "Created")).toHaveLength(1);
     });
 
     // DaemonSet is deliberately NOT in `SELF_DESCRIBING_KINDS` — classic's
@@ -411,7 +413,7 @@ describe("GenericBody", () => {
     // wrapper (and its own DaemonSetBody nests inside it, per classic's
     // `GenericDetail` + `KindBody`).
     it("still wraps DaemonSet, which classic does not special-case", () => {
-      const DS = object("DaemonSet");
+      const DS = object("DaemonSet", {}, {}, { name: "d", creationTimestamp: "2026-08-20T00:00:00Z" });
       render(
         <>
           <Lead kind="DaemonSet" object={DS} />
@@ -423,7 +425,7 @@ describe("GenericBody", () => {
       // It leads with the identity facts every wrapped kind gets — a
       // DaemonSet's own numbers are per-node and state themselves in a titled
       // Scheduling block instead.
-      expect(screen.getByText("Namespace")).toBeDefined();
+      expect(screen.getByText("Created")).toBeDefined();
       expect(screen.getByRole("heading", { level: 3, name: "Scheduling" })).toBeDefined();
     });
   });

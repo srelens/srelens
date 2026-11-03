@@ -1,6 +1,14 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { render, screen } from "@testing-library/react";
 import type { K8sObject } from "@srelens/core";
+
+const { podsOnNode } = vi.hoisted(() => ({ podsOnNode: vi.fn() }));
+
+vi.mock("@srelens/core", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@srelens/core")>()),
+  podsOnNode,
+}));
+
 import { GenericBody } from "./GenericBody";
 import { detailFacts } from "./detailData";
 import { NodeDetailsBody } from "./NodeBody";
@@ -73,7 +81,7 @@ describe("NodeDetailsBody", () => {
 
     it("renders dash for missing internal IP and omits absent external IP", () => {
       render(<NodeDetailsBody object={node({}, { addresses: [] })} />);
-      expect(screen.getByText("—")).toBeDefined();
+      expect(screen.getByText("Internal IP").closest("dl")?.textContent).toBe("Internal IP—");
       expect(screen.queryByText("External IP")).toBeNull();
       expect(screen.queryByText("Hostname")).toBeNull();
     });
@@ -122,6 +130,25 @@ describe("NodeDetailsBody", () => {
     });
   });
 
+  it("draws one dash for a fact the node does not report (#1001)", () => {
+    const { container } = render(<NodeDetailsBody object={node({})} />);
+    const row = [...container.querySelectorAll("dl.kv")].find((dl) => dl.querySelector(".kv-k")?.textContent === "Kubelet");
+    expect(row?.querySelector(".kv-v")?.textContent).toBe("—");
+  });
+
+  it("reads its pods after its own blocks, once there is a cluster to ask (#1001)", async () => {
+    podsOnNode.mockResolvedValue({ pods: [] });
+    const { container } = render(<NodeDetailsBody object={node({})} context="ctx" />);
+    await screen.findByRole("heading", { name: "Pods (0)" });
+    expect(podsOnNode).toHaveBeenCalledWith("ctx", "node-a");
+    expect([...container.children].map((block) => block.querySelector("h3")?.textContent)).toEqual([
+      "Info",
+      "Capacity",
+      "Taints",
+      "Pods (0)",
+    ]);
+  });
+
   it("is a run of flat blocks, not a stack of cards", () => {
     const { container } = render(<NodeDetailsBody object={node({})} />);
     const blocks = [...container.children];
@@ -165,8 +192,16 @@ describe("NodeDetailsBody — Taints", () => {
   it("says so plainly on a node with none, rather than leaving the block out", () => {
     render(<NodeDetailsBody object={node({})} />);
     expect(screen.getByText("Taints")).toBeTruthy();
-    expect(screen.getByText("Count")).toBeTruthy();
-    expect(screen.getByText("0")).toBeTruthy();
+    expect(screen.getByText("No taints")).toBeTruthy();
+  });
+
+  it("keeps a taint out of the key column, where a long one was clipped (#1001)", () => {
+    const { container } = render(
+      <NodeDetailsBody object={node({ taints: [{ key: "node-role.kubernetes.io/control-plane", effect: "NoSchedule" }] })} />,
+    );
+    const block = screen.getByRole("heading", { name: "Taints" }).closest("section")!;
+    expect(block.querySelector(".kv-k")).toBeNull();
+    expect(container.querySelectorAll("li")).toHaveLength(1);
   });
 
   it("lists one taint as key=value:effect", () => {

@@ -112,6 +112,13 @@ function render(ui: ReactElement, options?: Omit<RenderOptions, "wrapper">) {
   return renderBare(ui, { wrapper: Wrapper, ...options });
 }
 
+const SCHEDULED_POD: K8sObject = {
+  kind: "Pod",
+  apiVersion: "v1",
+  metadata: { name: "web-1", namespace: "default" },
+  spec: { nodeName: "node-a" },
+};
+
 const POD: K8sObject = {
   kind: "Pod",
   apiVersion: "v1",
@@ -238,20 +245,20 @@ describe("ResourceDetailView", () => {
     expect(getByText(/loading/i)).toBeDefined();
   });
 
-  it("renders Details, YAML and Events once ready, and no Containers or Metrics for a kind whose descriptor doesn't offer them", async () => {
+  it("renders Overview, Events and YAML once ready, and no Containers or Metrics for a kind whose descriptor doesn't offer them", async () => {
     getObject.mockResolvedValue({ object: POD });
     const { getByRole, queryByRole } = render(
       <ResourceDetailView context="ctx" kind="Pod" namespace="default" name="web-1" />,
     );
-    await waitFor(() => expect(getByRole("tab", { name: "Details" })).toBeDefined());
+    await waitFor(() => expect(getByRole("tab", { name: "Overview" })).toBeDefined());
     expect(getByRole("tab", { name: "YAML" })).toBeDefined();
     expect(getByRole("tab", { name: "Events" })).toBeDefined();
     expect(queryByRole("tab", { name: "Containers" })).toBeNull();
     expect(queryByRole("tab", { name: "Metrics" })).toBeNull();
   });
 
-  it("places app panels after the peek's host facts only on Details", async () => {
-    getObject.mockResolvedValue({ object: POD });
+  it("places app panels after the peek's host facts only on Overview", async () => {
+    getObject.mockResolvedValue({ object: SCHEDULED_POD });
     render(<ResourceDetailView context="ctx" kind="Pod" namespace="default" name="web-1" />);
     const panel = await screen.findByTestId("peek-extension-panel");
     const facts = document.querySelector(".fact-list");
@@ -261,8 +268,8 @@ describe("ResourceDetailView", () => {
     expect(screen.queryByTestId("peek-extension-panel")).toBeNull();
   });
 
-  it("places app metrics and traces after the peek's host facts only on Details (#569)", async () => {
-    getObject.mockResolvedValue({ object: POD });
+  it("places app metrics and traces after the peek's host facts only on Overview (#569)", async () => {
+    getObject.mockResolvedValue({ object: SCHEDULED_POD });
     render(<ResourceDetailView context="ctx" kind="Pod" namespace="default" name="web-1" />);
     const providers = await screen.findByTestId("peek-providers");
     expect(providers.textContent).toBe("Pod metrics and traces on ctx");
@@ -272,8 +279,8 @@ describe("ResourceDetailView", () => {
     expect(screen.queryByTestId("peek-providers")).toBeNull();
   });
 
-  it("places the Related section after the peek's host facts only on Details (#545)", async () => {
-    getObject.mockResolvedValue({ object: POD });
+  it("places the Related section after the peek's host facts only on Overview (#545)", async () => {
+    getObject.mockResolvedValue({ object: SCHEDULED_POD });
     render(<ResourceDetailView context="ctx" kind="Pod" namespace="default" name="web-1" />);
     const related = await screen.findByTestId("peek-related");
     expect(related.textContent).toBe("Pod related on ctx");
@@ -346,7 +353,7 @@ describe("ResourceDetailView", () => {
     expect(queryByRole("tab", { name: "Containers" })).toBeNull();
   });
 
-  it("places a Node's scheduled pods after its annotations", async () => {
+  it("places a Node's scheduled pods before its Labels and Annotations", async () => {
     getObject.mockResolvedValue({
       object: {
         kind: "Node",
@@ -361,7 +368,7 @@ describe("ResourceDetailView", () => {
     const podsHeading = await screen.findByRole("heading", { level: 3, name: "Pods (0)" });
     const annotations = screen.getByRole("heading", { level: 3, name: "Annotations" }).closest("section")!;
     const pods = podsHeading.closest("section")!;
-    expect(annotations.compareDocumentPosition(pods) & Node.DOCUMENT_POSITION_FOLLOWING).not.toBe(0);
+    expect(annotations.compareDocumentPosition(pods) & Node.DOCUMENT_POSITION_PRECEDING).not.toBe(0);
   });
 
   it("loads YAML and Events lazily, only once each pane is opened, and never refetches a pane already opened", async () => {
@@ -385,7 +392,7 @@ describe("ResourceDetailView", () => {
 
     // Switching back to Details, then to both already-opened panes again,
     // must not re-fire any of the three loads.
-    await userEvent.click(getByRole("tab", { name: "Details" }));
+    await userEvent.click(getByRole("tab", { name: "Overview" }));
     await userEvent.click(getByRole("tab", { name: "YAML" }));
     await userEvent.click(getByRole("tab", { name: "Events" }));
 
@@ -432,8 +439,8 @@ describe("ResourceDetailView", () => {
     // "Usable" means the rest of the shell still works after the failure —
     // other tabs remain clickable and render, rather than the whole
     // component wedging on the one failed pane.
-    await userEvent.click(getByRole("tab", { name: "Details" }));
-    await waitFor(() => expect(getByRole("tab", { name: "Details" }).getAttribute("aria-selected")).toBe("true"));
+    await userEvent.click(getByRole("tab", { name: "Overview" }));
+    await waitFor(() => expect(getByRole("tab", { name: "Overview" }).getAttribute("aria-selected")).toBe("true"));
   });
 
   it("renders event rows once the Events pane is opened for a resource with events", async () => {
@@ -612,7 +619,7 @@ describe("ResourceDetailView", () => {
     expect(getByRole("tab", { name: "YAML" }).getAttribute("aria-selected")).toBe("true");
   });
 
-  it("falls back to Details when the newly selected subject's kind doesn't offer the previously selected pane", async () => {
+  it("falls back to Overview when the newly selected subject's kind doesn't offer the previously selected pane", async () => {
     descriptorFor.mockImplementation((slug: string) =>
       slug === "pods" ? baseDescriptor({ panes: { containers: true } }) : undefined,
     );
@@ -634,7 +641,7 @@ describe("ResourceDetailView", () => {
 
     await waitFor(() => expect(getByRole("heading").textContent).toBe("cm-1"));
     expect(queryByRole("tab", { name: "Containers" })).toBeNull();
-    expect(getByRole("tab", { name: "Details" }).getAttribute("aria-selected")).toBe("true");
+    expect(getByRole("tab", { name: "Overview" }).getAttribute("aria-selected")).toBe("true");
   });
 
   it("never commits a frame that pairs the new subject's heading with the previous subject's content", async () => {
@@ -721,14 +728,14 @@ describe("ResourceDetailView", () => {
       descriptorFor.mockReturnValue(baseDescriptor({ panes: { containers: true } }));
 
       const asPeek = render(<ResourceDetailView {...props} peek={{ onClose: vi.fn(), onOpenTab: vi.fn() }} />);
-      await waitFor(() => expect(asPeek.getByRole("tab", { name: "Details" })).toBeDefined());
+      await waitFor(() => expect(asPeek.getByRole("tab", { name: "Overview" })).toBeDefined());
       expect(getObject).toHaveBeenCalledTimes(1);
       const fromPeek = getObject.mock.calls[0];
       asPeek.unmount();
 
       getObject.mockClear();
       const asTab = render(<ResourceTabView {...props} />);
-      await waitFor(() => expect(asTab.getByRole("tab", { name: "Overview" })).toBeDefined());
+      await waitFor(() => expect(document.querySelector(".pane-body")?.textContent).not.toMatch(/^Loading /));
       expect(getObject).toHaveBeenCalledTimes(1);
       expect(getObject.mock.calls[0]).toEqual(fromPeek);
     });
@@ -740,8 +747,9 @@ describe("ResourceDetailView", () => {
       // therefore fixed in both by construction — the property the deleted
       // tree comparison was standing in for, asserted where it actually lives.
       const facts = detailFacts({ kind: "Pod", object: RUNNING_POD });
-      expect(facts.map((f) => f.label)).toContain("Status");
-      expect(facts.map((f) => f.label)).toContain("Containers ready");
+      // The header says a subject's status and how much of it is ready.
+      expect(facts.map((f) => f.label)).not.toContain("Status");
+      expect(facts.map((f) => f.label)).not.toContain("Containers ready");
       // Pure and stable: two readings of one subject are the same list, so
       // two screens rendering it cannot drift apart between them.
       expect(detailFacts({ kind: "Pod", object: RUNNING_POD }).map((f) => f.label)).toEqual(
@@ -749,14 +757,13 @@ describe("ResourceDetailView", () => {
       );
       // And it is a kind's OWN list, dispatched on the route's kind: a
       // ConfigMap gets the identity facts, not a pod's.
-      expect(detailFacts({ kind: "ConfigMap", object: AGED_CONFIGMAP }).map((f) => f.label)).toEqual([
-        "Namespace",
-        "Created",
-      ]);
+      expect(detailFacts({ kind: "ConfigMap", object: AGED_CONFIGMAP }).map((f) => f.label)).toEqual(["Created"]);
     });
 
     it("draws the WHOLE list in each screen, in that screen's own layout and no other's", async () => {
-      getObject.mockResolvedValue({ object: RUNNING_POD });
+      // Scheduled, so it has a fact neither header says.
+      const pod = { ...RUNNING_POD, spec: { nodeName: "node-a" } };
+      getObject.mockResolvedValue({ object: pod });
       descriptorFor.mockReturnValue(baseDescriptor({ panes: { containers: true } }));
 
       // EQUALS, not contains. A screen that quietly dropped three of the
@@ -765,25 +772,30 @@ describe("ResourceDetailView", () => {
       // retired both-hosts comparison used to catch. Each screen is held to
       // the derived list instead — which catches the same drift without
       // either screen's markup standing in for the other's.
-      const derived = detailFacts({ kind: "Pod", object: RUNNING_POD }).map((f) => f.label);
-      expect(derived.length).toBeGreaterThan(3);
+      const derived = detailFacts({ kind: "Pod", object: pod }).map((f) => f.label);
+      expect(derived).toContain("Created");
+      expect(derived).toContain("Restarts");
 
       const asPeek = render(<ResourceDetailView {...props} peek={{ onClose: vi.fn(), onOpenTab: vi.fn() }} />);
-      await waitFor(() => expect(asPeek.getByRole("tab", { name: "Details" })).toBeDefined());
+      await waitFor(() => expect(asPeek.getByRole("tab", { name: "Overview" })).toBeDefined());
       // The peek's own form: a label column beside a value column, and no
       // grid — the mock's two-column list, in a 352px pane.
       expect(document.querySelectorAll(".kv[data-stacked]")).toHaveLength(0);
       expect(document.querySelector("[data-slot='fact-grid']")).toBeNull();
-      expect(labelsIn(".fact-list")).toEqual(derived);
+      // Less what its own header has just said: this pod has a verdict, so
+      // the age sits beside it.
+      expect(labelsIn(".fact-list")).toEqual(derived.filter((label) => label !== "Created"));
       asPeek.unmount();
 
-      const asTab = render(<ResourceTabView {...props} />);
-      await waitFor(() => expect(asTab.getByRole("tab", { name: "Overview" })).toBeDefined());
+      render(<ResourceTabView {...props} />);
+      await waitFor(() => expect(document.querySelector("[data-slot='fact-grid']")).not.toBeNull());
       // The tab's own: three columns of label-above-value, built by the tab.
       const grid = document.querySelector<HTMLElement>("[data-slot='fact-grid']");
       expect(grid).not.toBeNull();
-      expect(grid!.querySelectorAll(".kv[data-stacked='true']")).toHaveLength(derived.length);
-      expect(labelsIn("[data-slot='fact-grid']")).toEqual(derived);
+      // Less what its strip has just said.
+      const belowTheStrip = derived.filter((label) => label !== "Created" && label !== "Restarts");
+      expect(grid!.querySelectorAll(".kv[data-stacked='true']")).toHaveLength(belowTheStrip.length);
+      expect(labelsIn("[data-slot='fact-grid']")).toEqual(belowTheStrip);
     });
 
     it("neither refetches a pane it has already opened, and neither fetches one it has not", async () => {
@@ -791,7 +803,7 @@ describe("ResourceDetailView", () => {
       descriptorFor.mockReturnValue(baseDescriptor({ panes: { containers: true } }));
 
       const asTab = render(<ResourceTabView {...props} />);
-      await waitFor(() => expect(asTab.getByRole("tab", { name: "Overview" })).toBeDefined());
+      await waitFor(() => expect(document.querySelector(".pane-body")?.textContent).not.toMatch(/^Loading /));
       // Lazy: nothing behind YAML or Events has been asked for yet.
       expect(getManifest).not.toHaveBeenCalled();
       expect(listEvents).not.toHaveBeenCalled();
@@ -809,7 +821,7 @@ describe("ResourceDetailView", () => {
       descriptorFor.mockReturnValue(baseDescriptor());
 
       const asPeek = render(<ResourceDetailView {...props} peek={{ onClose: vi.fn(), onOpenTab: vi.fn() }} />);
-      await waitFor(() => expect(asPeek.getByRole("tab", { name: "Details" })).toBeDefined());
+      await waitFor(() => expect(asPeek.getByRole("tab", { name: "Overview" })).toBeDefined());
       expect(asPeek.getByRole("button", { name: "Close inspector" })).toBeDefined();
       expect(asPeek.getByRole("button", { name: "Open tab" })).toBeDefined();
       asPeek.unmount();
@@ -817,7 +829,7 @@ describe("ResourceDetailView", () => {
       // The tab IS the tab: closing it is the window strip's job, and an
       // "Open tab" there would open a second copy of what you are reading.
       const asTab = render(<ResourceTabView {...props} />);
-      await waitFor(() => expect(asTab.getByRole("tab", { name: "Overview" })).toBeDefined());
+      await waitFor(() => expect(document.querySelector(".pane-body")?.textContent).not.toMatch(/^Loading /));
       expect(asTab.queryByRole("button", { name: "Close inspector" })).toBeNull();
       expect(asTab.queryByRole("button", { name: "Open tab" })).toBeNull();
     });
@@ -850,7 +862,7 @@ describe("ResourceDetailView", () => {
     async function open(kind: string, meta: Record<string, unknown>) {
       getObject.mockResolvedValue({ object: withMeta(kind, meta) });
       const view = render(<ResourceDetailView context="ctx" kind={kind} namespace="default" name="subject-1" />);
-      await waitFor(() => expect(view.getByRole("tab", { name: "Details" })).toBeDefined());
+      await waitFor(() => expect(view.getByRole("tab", { name: "Overview" })).toBeDefined());
       return view;
     }
 
@@ -951,7 +963,7 @@ describe("ResourceDetailView", () => {
     async function open(kind: string, meta: Record<string, unknown> = {}) {
       getObject.mockResolvedValue({ object: withMeta(kind, meta) });
       const view = render(<ResourceDetailView context="ctx" kind={kind} namespace="default" name="subject-1" />);
-      await waitFor(() => expect(view.getByRole("tab", { name: "Details" })).toBeDefined());
+      await waitFor(() => expect(view.getByRole("tab", { name: "Overview" })).toBeDefined());
       return view;
     }
 
@@ -1029,7 +1041,7 @@ describe("ResourceDetailView", () => {
         const view = render(
           <ResourceDetailView context="ctx" kind="ConfigMap" namespace="default" name="subject-1" />,
         );
-        await waitFor(() => expect(view.getByRole("tab", { name: "Details" })).toBeDefined());
+        await waitFor(() => expect(view.getByRole("tab", { name: "Overview" })).toBeDefined());
         expect(screen.getByText("level=info")).toBeDefined();
       });
 
@@ -1050,7 +1062,7 @@ describe("ResourceDetailView", () => {
         const view = render(
           <ResourceDetailView context="ctx" kind="Secret" namespace="default" name="subject-1" />,
         );
-        await waitFor(() => expect(view.getByRole("tab", { name: "Details" })).toBeDefined());
+        await waitFor(() => expect(view.getByRole("tab", { name: "Overview" })).toBeDefined());
         expect(screen.getByRole("button", { name: /^Data/ }).getAttribute("aria-expanded")).toBe("false");
         expect(screen.queryByRole("button", { name: "Reveal" })).toBeNull();
       });
@@ -1067,8 +1079,7 @@ describe("ResourceDetailView", () => {
       }
       // The lead fact list has no heading, so there is nothing to hang a
       // control on — and a pane that opens showing nothing at all is hostile.
-      expect(screen.getByText("Namespace")).toBeDefined();
-      expect(screen.getByText("default")).toBeDefined();
+      expect(screen.getByText("Created")).toBeDefined();
     });
 
     it("remembers what the reader opened, for the next subject of that kind", async () => {
@@ -1131,7 +1142,7 @@ describe("ResourceDetailView", () => {
   });
 
   describe("the Secret YAML pane's redaction", () => {
-    // The Details pane gates a Secret's values behind an explicit reveal.
+    // The Overview pane gates a Secret's values behind an explicit reveal.
     // The YAML pane sits one tab over and, left alone, would hand the very
     // same values over with no gate at all whenever `k8s.getManifest` carries
     // them — the host blanks them now (#661), and the pane redacts again on
@@ -1170,7 +1181,7 @@ describe("ResourceDetailView", () => {
       // so it never collides with the pane's own error state.
       const notice = getByRole("status").textContent ?? "";
       expect(notice.toLowerCase()).toContain("redacted");
-      expect(notice).toContain("Details");
+      expect(notice).toContain("Overview");
     });
 
     it("shows an error, and never the raw manifest, when a Secret's manifest cannot be redacted", async () => {
@@ -1275,12 +1286,12 @@ describe("ResourceDetailView", () => {
       status: { ready: "3/3", conditions: [{ type: "Ready", status: "True", reason: "AllGood" }] },
     };
 
-    it("reads it through its CRD and offers Status, YAML and Events", async () => {
+    it("reads it through its CRD and offers Overview, Events and YAML", async () => {
       listCrds.mockResolvedValue({ crds: [WIDGET_CRD] });
       getObject.mockResolvedValue({ object: WIDGET });
       render(<ResourceDetailView context="ctx" kind="Widget" namespace="default" name="w-1" />);
-      await waitFor(() => expect(screen.getByRole("tab", { name: "Status" })).toBeDefined());
-      expect(screen.getAllByRole("tab").map((t) => t.textContent)).toEqual(["Status", "YAML", "Events"]);
+      await waitFor(() => expect(screen.getByRole("tab", { name: "Overview" })).toBeDefined());
+      expect(screen.getAllByRole("tab").map((t) => t.textContent)).toEqual(["Overview", "Events", "YAML"]);
       expect(getObject).toHaveBeenCalledWith("ctx", "Widget", "default", "w-1", undefined, {
         group: "example.com",
         version: "v1",
@@ -1288,6 +1299,25 @@ describe("ResourceDetailView", () => {
       });
       // The CRD's own printer column leads the pane.
       expect(document.querySelector(".fact-list")?.textContent).toContain("3/3");
+    });
+
+    it("draws a column named Created beside the generated row, with no clash of keys", async () => {
+      const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+      listCrds.mockResolvedValue({
+        crds: [{ ...WIDGET_CRD, printerColumns: [{ name: "Created", jsonPath: ".status.createdAt", type: "string" }] }],
+      });
+      getObject.mockResolvedValue({
+        object: {
+          ...WIDGET,
+          metadata: { ...WIDGET.metadata, creationTimestamp: "2026-01-01T00:00:00Z" },
+          status: { createdAt: "upstream-2024" },
+        },
+      });
+      render(<ResourceDetailView context="ctx" kind="Widget" namespace="default" name="w-1" />);
+      await waitFor(() => expect(document.querySelector(".fact-list")?.textContent).toContain("upstream-2024"));
+      expect([...document.querySelectorAll(".fact-list .kv-k")].map((el) => el.textContent)).toEqual(["Created", "Created"]);
+      expect(logged.mock.calls.flat().join(" ")).not.toContain("same key");
+      logged.mockRestore();
     });
 
     it("gives a CRD named like a built-in the custom pane, and reads its YAML in its own group", async () => {
@@ -1301,7 +1331,7 @@ describe("ResourceDetailView", () => {
       listCrds.mockResolvedValue({ crds: [deployments] });
       getObject.mockResolvedValue({ object: { kind: "Deployment", metadata: { name: "api", namespace: "default" } } });
       render(<ResourceDetailView context="ctx" kind="Deployment" group="acme.io" namespace="default" name="api" />);
-      await waitFor(() => expect(screen.getByRole("tab", { name: "Status" })).toBeDefined());
+      await waitFor(() => expect(screen.getByRole("tab", { name: "Overview" })).toBeDefined());
       // The built-in Deployment's descriptor is never consulted for it.
       expect(descriptorFor).not.toHaveBeenCalled();
       await userEvent.click(screen.getByRole("tab", { name: "YAML" }));
@@ -1326,7 +1356,7 @@ describe("ResourceDetailView", () => {
       listCrds.mockResolvedValue({ crds: [deployments] });
       getObject.mockResolvedValue({ object: { kind: "Deployment", metadata: { name: "api", namespace: "default" } } });
       render(<ResourceDetailView context="ctx" kind="Deployment" group="acme.io" namespace="default" name="api" />);
-      await waitFor(() => expect(screen.getByRole("tab", { name: "Status" })).toBeDefined());
+      await waitFor(() => expect(screen.getByRole("tab", { name: "Overview" })).toBeDefined());
       await userEvent.click(screen.getByRole("button", { name: "Edit" }));
       expect(tabsStore.currentWorkspace().tabs.map((t) => t.route)).toContain("/edit/ctx/acme.io%2FDeployment/default/api");
     });
@@ -1343,7 +1373,7 @@ describe("ResourceDetailView", () => {
       listCrds.mockResolvedValue({ crds: [deployments] });
       getObject.mockResolvedValue({ object: { kind: "Deployment", metadata: { name: "api", namespace: "default" } } });
       render(<ResourceTabView context="ctx" kind="Deployment" group="acme.io" namespace="default" name="api" />);
-      await waitFor(() => expect(screen.getByRole("tab", { name: "Status" })).toBeDefined());
+      await waitFor(() => expect(screen.getByRole("tab", { name: "Overview" })).toBeDefined());
       await userEvent.click(screen.getByRole("button", { name: "Edit" }));
       expect(tabsStore.currentWorkspace().tabs.map((t) => t.route)).toContain("/edit/ctx/acme.io%2FDeployment/default/api");
     });
@@ -1437,16 +1467,69 @@ describe("ResourceDetailView", () => {
       <ResourceDetailView context="ctx" kind="Pod" namespace="checkout" name="cart-session-store-0" />,
     );
     await waitFor(() => expect(getByRole("tab", { name: "Metrics" })).toBeDefined());
-    // `Details Containers YAML Events Metrics`. Metrics is deferred and no
-    // kind's descriptor asks for it yet, so this order only bites the day one
-    // does — which is exactly when nobody would think to check it.
+    // Overview, the kind's own, Events, then YAML last. Metrics is deferred and
+    // no kind's descriptor asks for it yet, so this order only bites the day
+    // one does — which is exactly when nobody would think to check it.
     expect(getAllByRole("tab").map((t) => t.textContent)).toEqual([
-      "Details",
+      "Overview",
       "Containers",
-      "YAML",
-      "Events",
       "Metrics",
+      "Events",
+      "YAML",
     ]);
+  });
+
+  it("leaves Created to the header beside a verdict, and says it for a kind with none", async () => {
+    getObject.mockResolvedValue({ object: RUNNING_POD });
+    const pod = render(<ResourceDetailView context="ctx" kind="Pod" namespace="checkout" name="cart-session-store-0" />);
+    await waitFor(() => expect(pod.getByRole("tab", { name: "Overview" })).toBeDefined());
+    expect(labelsIn(".fact-list")).not.toContain("Created");
+    pod.unmount();
+
+    // No verdict, so no line in the header for an age to sit on.
+    getObject.mockResolvedValue({ object: AGED_CONFIGMAP });
+    const map = render(<ResourceDetailView context="ctx" kind="ConfigMap" namespace="default" name="cm-1" />);
+    await waitFor(() => expect(map.getByRole("tab", { name: "Overview" })).toBeDefined());
+    expect(labelsIn(".fact-list")).toEqual(["Created"]);
+  });
+
+  it("offers Retry on a read that failed, and reads again", async () => {
+    getObject.mockResolvedValue({ error: "the cluster went away" });
+    render(<ResourceDetailView context="ctx" kind="Pod" namespace="default" name="web-1" />);
+    await waitFor(() => expect(screen.getByText(/Could not load Pod default\/web-1/)).toBeDefined());
+
+    getObject.mockResolvedValue({ object: POD });
+    await userEvent.click(screen.getByRole("button", { name: "Retry" }));
+    await waitFor(() => expect(screen.getByRole("tab", { name: "Overview" })).toBeDefined());
+    expect(getObject).toHaveBeenCalledTimes(2);
+  });
+
+  it("offers Retry on a manifest that failed, and reads it again", async () => {
+    getObject.mockResolvedValue({ object: POD });
+    getManifest.mockResolvedValue({ error: "the cluster went away" });
+    render(<ResourceDetailView context="ctx" kind="Pod" namespace="default" name="web-1" />);
+    await waitFor(() => expect(screen.getByRole("tab", { name: "YAML" })).toBeDefined());
+    await userEvent.click(screen.getByRole("tab", { name: "YAML" }));
+    await waitFor(() => expect(screen.getByText(/Could not load Pod default\/web-1's manifest/)).toBeDefined());
+
+    getManifest.mockResolvedValue({ yaml: "kind: Pod\n" });
+    await userEvent.click(screen.getByRole("button", { name: "Retry" }));
+    await waitFor(() => expect(screen.queryByText(/Could not load/)).toBeNull());
+    expect(getManifest).toHaveBeenCalledTimes(2);
+  });
+
+  it("offers Retry on events that failed, and reads them again", async () => {
+    getObject.mockResolvedValue({ object: POD });
+    listEvents.mockResolvedValue({ error: "the cluster went away" } as never);
+    render(<ResourceDetailView context="ctx" kind="Pod" namespace="default" name="web-1" />);
+    await waitFor(() => expect(screen.getByRole("tab", { name: "Events" })).toBeDefined());
+    await userEvent.click(screen.getByRole("tab", { name: "Events" }));
+    await waitFor(() => expect(screen.getByText(/Could not load events for Pod default\/web-1/)).toBeDefined());
+
+    listEvents.mockResolvedValue({ events: [] });
+    await userEvent.click(screen.getByRole("button", { name: "Retry" }));
+    await waitFor(() => expect(screen.getByText("No events")).toBeDefined());
+    expect(listEvents).toHaveBeenCalledTimes(2);
   });
 
   it("offers Open tab in the peek host only, and leaves the promotion to the host", async () => {
@@ -1456,7 +1539,7 @@ describe("ResourceDetailView", () => {
     const props = { context: "ctx", kind: "Pod", namespace: "default", name: "web-1" } as const;
 
     const asPeek = render(<ResourceDetailView {...props} peek={{ onClose, onOpenTab }} />);
-    await waitFor(() => expect(asPeek.getByRole("tab", { name: "Details" })).toBeDefined());
+    await waitFor(() => expect(asPeek.getByRole("tab", { name: "Overview" })).toBeDefined());
     await userEvent.click(asPeek.getByRole("button", { name: "Open tab" }));
     expect(onOpenTab).toHaveBeenCalledTimes(1);
     // Promoting is not dismissing: what the peek does with itself afterwards
@@ -1466,7 +1549,7 @@ describe("ResourceDetailView", () => {
 
     // The tab host IS the tab. An Open tab there would open itself.
     const asTab = render(<ResourceDetailView {...props} />);
-    await waitFor(() => expect(asTab.getByRole("tab", { name: "Details" })).toBeDefined());
+    await waitFor(() => expect(asTab.getByRole("tab", { name: "Overview" })).toBeDefined());
     expect(asTab.queryByRole("button", { name: "Open tab" })).toBeNull();
   });
 
@@ -1572,7 +1655,7 @@ describe("ResourceDetailView", () => {
       const { getByRole } = render(
         <ResourceDetailView context="ctx" kind="Deployment" namespace="checkout" name="checkout-api" />,
       );
-      await waitFor(() => expect(getByRole("tab", { name: "Details" })).toBeDefined());
+      await waitFor(() => expect(getByRole("tab", { name: "Overview" })).toBeDefined());
 
       expect(barWords()).toEqual(["Ask", "Logs", "Edit", "More actions"]);
     });
@@ -1583,7 +1666,7 @@ describe("ResourceDetailView", () => {
       const { getByRole } = render(
         <ResourceDetailView context="ctx" kind="Pod" namespace="checkout" name="cart-session-store-0" />,
       );
-      await waitFor(() => expect(getByRole("tab", { name: "Details" })).toBeDefined());
+      await waitFor(() => expect(getByRole("tab", { name: "Overview" })).toBeDefined());
 
       expect(barWords()).toEqual(["Ask", "Logs", "Shell", "More actions"]);
     });
@@ -1594,7 +1677,7 @@ describe("ResourceDetailView", () => {
       const { getByRole } = render(
         <ResourceDetailView context="ctx" kind="Deployment" namespace="checkout" name="checkout-api" />,
       );
-      await waitFor(() => expect(getByRole("tab", { name: "Details" })).toBeDefined());
+      await waitFor(() => expect(getByRole("tab", { name: "Overview" })).toBeDefined());
       await userEvent.click(within(footer()!).getByRole("button", { name: /^Ask/ }));
 
       // The same phrasing a list row's chip sends — one question per gesture,
@@ -1609,7 +1692,7 @@ describe("ResourceDetailView", () => {
       const { getByRole } = render(
         <ResourceDetailView context="ctx" kind="Pod" namespace="checkout" name="cart-session-store-0" />,
       );
-      await waitFor(() => expect(getByRole("tab", { name: "Details" })).toBeDefined());
+      await waitFor(() => expect(getByRole("tab", { name: "Overview" })).toBeDefined());
       expect(within(footer()!).queryByRole("button", { name: /^Ask/ })).toBeNull();
     });
 
@@ -1619,7 +1702,7 @@ describe("ResourceDetailView", () => {
       const { getByRole } = render(
         <ResourceDetailView context="ctx" kind="Pod" namespace="checkout" name="cart-session-store-0" />,
       );
-      await waitFor(() => expect(getByRole("tab", { name: "Details" })).toBeDefined());
+      await waitFor(() => expect(getByRole("tab", { name: "Overview" })).toBeDefined());
       await userEvent.click(within(footer()!).getByRole("button", { name: /^Ask/ }));
 
       expect(asked).toEqual(["What is cart-session-store-0 using right now?"]);
@@ -1631,7 +1714,7 @@ describe("ResourceDetailView", () => {
       const { getByRole } = render(
         <ResourceDetailView context="ctx" kind="Deployment" namespace="checkout" name="checkout-api" />,
       );
-      await waitFor(() => expect(getByRole("tab", { name: "Details" })).toBeDefined());
+      await waitFor(() => expect(getByRole("tab", { name: "Overview" })).toBeDefined());
       await userEvent.click(getByRole("button", { name: "More actions" }));
 
       const menu = await screen.findByRole("dialog");
@@ -1670,7 +1753,7 @@ describe("ResourceDetailView", () => {
       const { getByRole } = render(
         <ResourceDetailView context="ctx" kind="Pod" namespace="checkout" name="cart-session-store-0" />,
       );
-      await waitFor(() => expect(getByRole("tab", { name: "Details" })).toBeDefined());
+      await waitFor(() => expect(getByRole("tab", { name: "Overview" })).toBeDefined());
       expect(barWords()).toEqual(["Ask", "Logs", "Shell", "More actions"]);
 
       await userEvent.click(getByRole("button", { name: "More actions" }));
@@ -1694,7 +1777,7 @@ describe("ResourceDetailView", () => {
       const { getByRole, queryByRole } = render(
         <ResourceDetailView context="ctx" kind="Widget" namespace="default" name="w-1" />,
       );
-      await waitFor(() => expect(getByRole("tab", { name: "Status" })).toBeDefined());
+      await waitFor(() => expect(getByRole("tab", { name: "Overview" })).toBeDefined());
 
       expect(barWords()).toEqual(["Ask", "Edit", "Copy as kubectl"]);
       // Nothing was left over to fold, so there is no overflow to open onto an
@@ -1708,7 +1791,7 @@ describe("ResourceDetailView", () => {
       const props = { context: "ctx", kind: "Pod", namespace: "checkout", name: "cart-session-store-0" } as const;
 
       const asPeek = render(<ResourceDetailView {...props} peek={{ onClose: vi.fn(), onOpenTab: vi.fn() }} />);
-      await waitFor(() => expect(asPeek.getByRole("tab", { name: "Details" })).toBeDefined());
+      await waitFor(() => expect(asPeek.getByRole("tab", { name: "Overview" })).toBeDefined());
       expect(barWords()).toEqual(["Ask", "Logs", "Shell", "More actions"]);
       asPeek.unmount();
 
@@ -1717,7 +1800,7 @@ describe("ResourceDetailView", () => {
       // instead of two. The ACTIONS are the row menu's in both — the placement
       // and the count are the only things the host decides.
       const asTab = render(<ResourceTabView {...props} />);
-      await waitFor(() => expect(asTab.getByRole("tab", { name: "Overview" })).toBeDefined());
+      await waitFor(() => expect(document.querySelector(".pane-body")?.textContent).not.toMatch(/^Loading /));
       const header = document.querySelector("[data-slot='tab-actions']") as HTMLElement;
       expect(Array.from(header.querySelectorAll("button")).map((b) => b.textContent)).toEqual([
         "Ask",
@@ -1770,7 +1853,7 @@ describe("ResourceDetailView", () => {
       getObject.mockResolvedValue({ object: cronJob(suspend) });
       descriptorFor.mockReturnValue(cronJobDescriptor());
       const view = render(<ResourceDetailView context="ctx" kind="CronJob" namespace="batch" name="nightly-backup" />);
-      await waitFor(() => expect(view.getByRole("tab", { name: "Details" })).toBeDefined());
+      await waitFor(() => expect(view.getByRole("tab", { name: "Overview" })).toBeDefined());
       const words = await allFooterActions();
       view.unmount();
       return words;
@@ -1803,7 +1886,7 @@ describe("ResourceDetailView", () => {
       });
       descriptorFor.mockReturnValue(baseDescriptor({ k8sKind: "Node", actions: { cordon: true, drain: true } }));
       const view = render(<ResourceDetailView context="ctx" kind="Node" namespace={null} name="worker-1" />);
-      await waitFor(() => expect(view.getByRole("tab", { name: "Details" })).toBeDefined());
+      await waitFor(() => expect(view.getByRole("tab", { name: "Overview" })).toBeDefined());
       const words = await allFooterActions();
       view.unmount();
       return words;

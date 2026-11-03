@@ -1,6 +1,5 @@
 import type { ReactNode } from "react";
 import {
-  ageFromTimestamp,
   asArray,
   asRecord,
   containerLastRestartTime,
@@ -12,7 +11,6 @@ import {
   podContainerStatuses,
   portText,
   probeChips,
-  resourceStatusLine,
   resourceSummary,
   resourceText,
   restartTotal,
@@ -33,6 +31,7 @@ import {
   type Column,
 } from "@srelens/ui-kit";
 import { ForwardAction } from "../forwards/ForwardAction";
+import { identityFacts } from "./GenericBody";
 import { Section } from "./Section";
 import { ConditionsSection, StringList } from "./sections";
 import type { DetailFact, FactsFor } from "./facts";
@@ -108,9 +107,8 @@ function ImageValue({ images }: { images: string[] }) {
 }
 
 /**
- * The pod's facts, in the order the design's own Pod frame reads them:
- * Status, Node, Pod IP, QoS class, Service account, Containers ready,
- * Restarts, Controlled by, Created, Image.
+ * The pod's facts: the identity every kind leads with, then Node, Pod IP, QoS
+ * class, Service account, Restarts and Image.
  *
  * DATA, so each of the two detail screens can lay the list out its own way —
  * the peek down one column, the full tab across three. Neither draws the
@@ -122,47 +120,39 @@ function ImageValue({ images }: { images: string[] }) {
  * namespace — and there is no `Name` fact either, which repeated that header
  * verbatim.
  *
- * The frame's ten facts are not everything srelens knows, and the extras it
+ * The design's frame is not everything srelens knows, and the extras it
  * carries over from classic (Pod IPs, Priority class, Runtime class, Image
  * pull secrets, Last restart) stay, as do the pod's Reason and Message when
- * the API sets them: the frame is a design, not a schema. They
- * sit beside their own kin rather than in a heap at the end, so the reading
- * order the frame set survives them.
+ * the API sets them: the frame is a design, not a schema. They sit beside their
+ * own kin rather than in a heap at the end.
  *
  * `Image` is new here. It used to live only on the Containers pane, which
  * meant the one question asked of a pod more often than any other — what is
  * it running — took a tab change to answer.
  *
- * The status word comes from core's `resourceStatusLine`, the same reading the
- * pane's header and the list row use. Nothing here derives a second opinion:
- * a pod whose container sits in `CrashLoopBackOff` still reports phase
- * "Running", so a fact list reading `status.phase` by itself would print
- * "Running" under a header saying "CrashLoopBackOff".
+ * No Status and no Containers ready: the header says both, and a second
+ * reading of a verdict is a chance for the two to disagree.
  *
- * Namespace, Node, Service account, Priority class, Runtime class, Controlled
- * by and Image pull secrets are `ResourceLink`s in classic that navigate;
- * they render here as plain text (see the task report for the full list).
+ * Node, Service account, Priority class, Runtime class and Image pull secrets
+ * are `ResourceLink`s in classic that navigate; they render here as plain text
+ * (see the task report for the full list).
  */
-export const podFacts: FactsFor = ({ object }) => {
-  const meta = object.metadata ?? {};
+export const podFacts: FactsFor = (input) => {
+  const { object } = input;
   const spec = asRecord(object.spec);
   const status = asRecord(object.status);
-  const owners = meta.ownerReferences ?? [];
   const podIPs = asArray(status.podIPs)
     .map((p) => str(asRecord(p).ip))
     .filter(Boolean);
   const imagePullSecrets = asArray(spec.imagePullSecrets)
     .map((secret) => str(asRecord(secret).name))
     .filter(Boolean);
-  const containerStatuses = asArray(status.containerStatuses).map(asRecord);
   // Core's read, not a second one: the full tab's Restarts tile shows the very
   // same number, and two reduces over one field is how two surfaces start
   // disagreeing about how often a pod has restarted.
   const allContainerStatuses = podContainerStatuses(status);
   const podRestartCount = restartTotal(allContainerStatuses);
   const podLastRestart = latestRestartTime(allContainerStatuses);
-  const containersReady = containerStatuses.filter((c) => c.ready === true).length;
-  const created = str(meta.creationTimestamp);
   const nodeName = str(spec.nodeName);
   const podIP = str(status.podIP);
   const serviceAccountName = str(spec.serviceAccountName);
@@ -170,21 +160,14 @@ export const podFacts: FactsFor = ({ object }) => {
   const runtimeClassName = str(spec.runtimeClassName);
   const qosClass = str(status.qosClass);
   const images = imagesOf(spec.containers);
-  const statusLine = resourceStatusLine("Pod", object);
   // The pod's own why, set only when the pod as a whole is in trouble
   // (Evicted, NodeLost, …) and often the only place it is written — no
-  // container status carries it. Under Status, where `kubectl describe pod`
-  // prints them. (#619)
+  // container status carries it. First among the pod's own facts, as
+  // `kubectl describe pod` prints them under Status. (#619)
   const reason = str(status.reason);
   const message = str(status.message);
 
-  const facts: DetailFact[] = [];
-  if (statusLine) {
-    facts.push({
-      label: "Status",
-      value: <StatusPill status={statusLine.status} kind={statusLine.health} tinted />,
-    });
-  }
+  const facts: DetailFact[] = identityFacts(input);
   if (reason) facts.push({ label: "Reason", value: reason });
   if (message) facts.push({ label: "Message", value: message });
   if (nodeName) facts.push({ label: "Node", value: <NodeLink name={nodeName} />, mono: true });
@@ -200,24 +183,14 @@ export const podFacts: FactsFor = ({ object }) => {
       value: <StringList items={imagePullSecrets.map((name) => `Secret/${name}`)} />,
     });
   }
-  // No container status at all means the kubelet has not reported yet:
-  // "0 of 0" and "0 restarts" would read as facts where there is only an
-  // absence.
-  if (containerStatuses.length > 0) {
-    facts.push({ label: "Containers ready", value: `${containersReady} of ${containerStatuses.length}` });
+  // No container status at all means the kubelet has not reported yet: "0
+  // restarts" would read as a fact where there is only an absence.
+  if (allContainerStatuses.length > 0) {
+    facts.push({ label: "Restarts", value: str(podRestartCount), tile: "restarts" });
   }
-  if (allContainerStatuses.length > 0) facts.push({ label: "Restarts", value: str(podRestartCount) });
   if (podLastRestart) {
     facts.push({ label: "Last restart", value: timestampWithAge(podLastRestart, Date.now()) });
   }
-  if (owners.length > 0) {
-    facts.push({
-      label: "Controlled by",
-      value: <StringList items={owners.map((o) => `${o.kind}/${o.name}`)} />,
-    });
-  }
-  if (meta.namespace) facts.push({ label: "Namespace", value: str(meta.namespace), mono: true });
-  if (created) facts.push({ label: "Created", value: `${ageFromTimestamp(created, Date.now())} ago` });
   if (images.length > 0) facts.push({ label: "Image", value: <ImageValue images={images} /> });
   return facts;
 };
@@ -272,7 +245,7 @@ function PodVolumesSection({ object }: { object: K8sObject }) {
   const volumes = asArray(spec.volumes).map(asRecord);
   if (volumes.length === 0) return null;
   return (
-    <Section title="Pod Volumes" padded={false}>
+    <Section title="Pod volumes" padded={false}>
       <Table columns={VOLUME_COLUMNS} data={volumes} getRowKey={(v) => str(v.name)} />
     </Section>
   );
@@ -281,8 +254,8 @@ function PodVolumesSection({ object }: { object: K8sObject }) {
 
 
 /**
- * A pod's Details pane, as a flat run of blocks divided by hairline rules —
- * Scheduling and Pod Volumes, then Conditions.
+ * A pod's Overview pane, as a flat run of blocks divided by hairline rules —
+ * Scheduling and Pod volumes, then Conditions.
  *
  * The lead fact list is NOT here: it is data ({@link podFacts}), and the
  * screen drawing the pane lays it out above this in its own layout.
@@ -295,7 +268,7 @@ function PodVolumesSection({ object }: { object: K8sObject }) {
  *
  * Conditions close the body rather than following the facts immediately as the
  * design frame draws them. The frame has no Scheduling or Volumes block to
- * place, and `GenericBody` already ends every other kind's Details this way —
+ * place, and `GenericBody` already ends every other kind's Overview this way —
  * so a reader moving between kinds finds the same block in the same place.
  *
  * Labels and Annotations are not here at all: they close every kind, so the
@@ -521,7 +494,7 @@ function forwardSubject(
  * {@link ContainerPorts}: each port is the control that forwards it, into
  * §A.4's dialog.
  *
- * Flat blocks, like the Details pane beside it: the two panes are read in the
+ * Flat blocks, like the Overview pane beside it: the two panes are read in the
  * same 352px column, and a card here beside a rule there is two answers to
  * one question.
  */

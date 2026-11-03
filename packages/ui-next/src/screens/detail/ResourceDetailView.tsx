@@ -5,7 +5,7 @@ import { ExtensionRelatedSlot } from "../../extensions/ExtensionRelatedSlot";
 import { ExtensionPodSlot } from "../../extensions/ExtensionPodTools";
 import type { ReactNode } from "react";
 import { ageFromTimestamp, type K8sObject, type ResourceStatusLine } from "@srelens/core";
-import { Inspector, LoadingState, type InspectorProps, type TabItem } from "@srelens/ui-kit";
+import { Inspector, LoadingState, type InspectorProps } from "@srelens/ui-kit";
 import { FailureState } from "../../lib/errorCopy";
 import { CUSTOM_RESOURCE_ACTIONS } from "../../lib/kinds/custom";
 import { CopyNameButton } from "./CopyNameButton";
@@ -14,6 +14,7 @@ import { OpenTabButton, PeekFacts } from "./ResourceFrame";
 import { SectionMemory } from "./Section";
 import {
   describeTarget,
+  detailTabs,
   useDetailPaneState,
   useDetailSubject,
   PANE_CONTAINERS,
@@ -112,9 +113,9 @@ function statusHeader(
  *
  * ONE OF TWO SCREENS, and it knows nothing about the other. Spec rule R-5 said
  * the peek and the full tab were one component differing by a prop; the user's
- * full-tab mock retired it, and the two now have their own chrome, their own
- * tab labels and their own layouts — a compact header and a footer action bar
- * here, a breadcrumb, a metric strip and a three-column fact grid there.
+ * full-tab mock retired it, and the two now have their own chrome and their
+ * own layouts — a compact header and a footer action bar here, a breadcrumb, a
+ * metric strip and a three-column fact grid there.
  *
  * What they still share is everything that is not a look, and it is shared
  * through `detailData` rather than by being written twice: one read of the
@@ -127,20 +128,14 @@ export function ResourceDetailView({ context, kind, group, namespace, name, peek
   const subject = useDetailSubject({ context, kind, namespace, name, group });
   const { object, status, error, descriptor, statusLine, hasContainers, hasMetrics } = subject;
 
-  // THIS SCREEN'S STRIP: `Details Containers YAML Events Metrics`, the mock's
-  // five. Containers is a tab of its own here because the pane is 352px wide
-  // and a table of containers is not; the full tab folds the same fact into
-  // its Overview. Metrics trails the panes every kind has because it is the
-  // one nothing offers yet — no descriptor sets `panes.metrics` — and getting
-  // the order right now is cheaper than remembering it later.
-  const tabs: TabItem[] = [
-    // #919: a custom resource's first pane is its status.
-    { id: PANE_DETAILS, label: subject.custom ? "Status" : "Details" },
+  // Containers is a tab of its own here because the pane is 352px wide and a
+  // table of containers is not; the full tab folds the same fact into its
+  // Overview. No descriptor sets `panes.metrics` yet, and getting the order
+  // right now is cheaper than remembering it later.
+  const tabs = detailTabs([
     ...(hasContainers ? [{ id: PANE_CONTAINERS, label: "Containers" }] : []),
-    { id: PANE_YAML, label: "YAML" },
-    { id: PANE_EVENTS, label: "Events" },
     ...(hasMetrics ? [{ id: PANE_METRICS, label: "Metrics" }] : []),
-  ];
+  ]);
   const { active, selectTab, yamlPane, eventsPane } = useDetailPaneState({
     context,
     kind,
@@ -174,7 +169,11 @@ export function ResourceDetailView({ context, kind, group, namespace, name, peek
     // open at once, and a bare failure doesn't say which one broke.
     return (
       <Inspector name={name} nameAction={copyName} subtitle={subtitle} actions={actions} onClose={peek?.onClose}>
-        <FailureState title={`Could not load ${describeTarget(kind, namespace, name)}`} error={error} />
+        <FailureState
+          title={`Could not load ${describeTarget(kind, namespace, name)}`}
+          error={error}
+          onRetry={subject.reload}
+        />
       </Inspector>
     );
   }
@@ -182,19 +181,22 @@ export function ResourceDetailView({ context, kind, group, namespace, name, peek
   // Read once: the header draws the verdict, and the footer's Ask asks a
   // different question of an unhealthy subject than of a healthy one.
   const header = statusHeader(statusLine, object);
+  // The header's age is the Created fact, on a subject that has a line for one.
+  const facts = subject.facts.filter(
+    (fact) => fact.tile !== "age" || !header.facts?.some((said) => said.label === "Age"),
+  );
 
-  // The peek's Details pane: a flat run of sibling blocks, the lead facts
+  // The peek's Overview pane: a flat run of sibling blocks, the lead facts
   // first and Labels and Annotations last. Nothing may be wrapped around any
   // one of them — `.section + .section` is what draws the hairlines between
   // them, so a div around one quietly removes the rule on both its sides.
   let pane: ReactNode =
     active === PANE_DETAILS ? (
       <>
-        <PeekFacts facts={subject.facts} />
+        <PeekFacts facts={facts} />
         {subject.body}
         {subject.labels}
         {subject.annotations}
-        {subject.afterMetadata}
       </>
     ) : null;
   if (active === PANE_CONTAINERS) pane = subject.containersPane;

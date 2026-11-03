@@ -14,14 +14,14 @@ import { Section } from "./Section";
 function ConfigEntry({ name, value }: { name: string; value: string }) {
   return (
     <div className="flex flex-col gap-1">
-      <span className="font-mono text-[0.8125rem] font-medium">{name}</span>
-      <pre className="whitespace-pre-wrap break-all font-mono text-[0.8125rem] text-muted">{value}</pre>
+      <span className="font-mono text-[0.75rem] font-medium">{name}</span>
+      <pre className="whitespace-pre-wrap break-all font-mono text-[0.75rem] text-ink">{value}</pre>
     </div>
   );
 }
 
 /**
- * A ConfigMap's Details pane: its `data` keys and values — classic's
+ * A ConfigMap's Overview pane: its `data` keys and values — classic's
  * `ConfigBody`, minus the inline edit/save affordance (`ConfigDataEditor`):
  * this pane is read-only. `ServiceBody`'s Ports table and `PodBody`'s
  * Containers pane once made the same call about classic's inline port-forward

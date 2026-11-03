@@ -20,7 +20,7 @@ export function JobDetailsBody({ object }: { object: K8sObject }) {
     ? durationBetween(startTime, completionTime)
     : startTime
       ? `${ageFromTimestamp(startTime, now)} (running)`
-      : "—";
+      : "";
 
   return (
     <Section title="Job">
@@ -29,8 +29,8 @@ export function JobDetailsBody({ object }: { object: K8sObject }) {
       <KV k="Succeeded" v={str(status.succeeded) || "0"} />
       <KV k="Failed" v={str(status.failed) || "0"} />
       <KV k="Active" v={str(status.active) || "0"} />
-      <KV k="Started" v={startTime ? timestampWithAge(startTime, now) : "—"} />
-      <KV k="Completed" v={completionTime ? timestampWithAge(completionTime, now) : "—"} />
+      <KV k="Started" v={startTime && timestampWithAge(startTime, now)} />
+      <KV k="Completed" v={completionTime && timestampWithAge(completionTime, now)} />
       <KV k="Duration" v={duration} />
     </Section>
   );

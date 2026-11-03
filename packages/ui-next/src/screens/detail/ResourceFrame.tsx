@@ -62,8 +62,9 @@ export function PeekFacts({ facts }: { facts: DetailFact[] }) {
     // wrapper: the block has to stay a direct sibling of what follows it, or
     // `.section + .section` draws no hairline against it.
     <Section className="fact-list">
-      {facts.map((fact) => (
-        <KV key={fact.label} k={fact.label} v={fact.value} mono={fact.mono} />
+      {facts.map((fact, index) => (
+        // Positional: a printer column may share a generated fact's label.
+        <KV key={`${index}:${fact.label}`} k={fact.label} v={fact.value} mono={fact.mono} />
       ))}
     </Section>
   );
@@ -127,8 +128,8 @@ export interface ResourceTabFrameProps {
   cluster: string;
   namespace: string | null;
   kind: string;
-  /** The subject's action row, on the header's line. */
-  actions: ReactNode;
+  /** The subject's action row, on the header's line. None until it has loaded. */
+  actions?: ReactNode;
   tabs: TabItem[];
   active: string;
   onTabChange: (id: string) => void;
@@ -163,7 +164,7 @@ export function ResourceTabFrame({
       data-slot="resource-tab"
       className="flex min-h-0 min-w-0 flex-1 flex-col"
     >
-      <header className="rule-b flex items-center gap-3 px-3 py-2">
+      <header className="border-b border-rule-strong flex items-center gap-3 px-3 py-2">
         <div className="name-row flex min-w-0 items-baseline gap-2.5">
           {/* An `h1`: this is a page, and the tab strip above it is chrome.
               The peek's subject is an `h2` because a peek sits inside a
@@ -190,7 +191,7 @@ export function ResourceTabFrame({
         </div>
       </header>
 
-      <div className="rule-b px-3">
+      <div className="border-b border-rule-strong px-3">
         <Tabs
           tabs={tabs}
           active={active}
@@ -206,7 +207,7 @@ export function ResourceTabFrame({
           between the tiles; the row sizes them, which is what `Stat`'s own
           comment asks a caller to do. */}
       {tiles.length > 0 && (
-        <div data-slot="metric-strip" className="rule-b flex">
+        <div data-slot="metric-strip" className="border-b border-rule-strong flex">
           {tiles.map(({ key, ...tile }) => (
             <Stat key={key} {...tile} className="flex-1" />
           ))}

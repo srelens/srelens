@@ -91,7 +91,7 @@ function IngressSection({ object }: { object: K8sObject }) {
   return (
     <Section title="Ingress">
       <KV k="Class" v={str(spec.ingressClassName)} />
-      <KV k="TLS hosts" v={tls.length ? tls.join(", ") : ""} />
+      <KV k="TLS hosts" v={tls.join(", ")} />
       <KV
         k="TLS secrets"
         v={
@@ -178,7 +178,7 @@ function RulesSection({ object }: { object: K8sObject }) {
 }
 
 /**
- * An Ingress's Details pane: Class/TLS and the path → service Rules table, in
+ * An Ingress's Overview pane: Class/TLS and the path → service Rules table, in
  * classic's own order (`IngressBody`). This is what was missing from
  * `DETAILS_BODY`: without it the new design fell through to
  * `GenericBody` alone and never showed how traffic is routed.
