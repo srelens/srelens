@@ -1234,14 +1234,31 @@ impl App {
             for it in items {
                 let name = it.get("name").and_then(|v| v.as_str()).unwrap_or("");
                 let namespace = it.get("namespace").and_then(|v| v.as_str()).unwrap_or(ns);
-                let ready = it.get("ready").and_then(|v| v.as_str()).unwrap_or("0/0");
+                let desired = it
+                    .get("desired")
+                    .and_then(|v| v.as_i64())
+                    .or_else(|| {
+                        it.get("desired")
+                            .and_then(|v| v.as_str())
+                            .and_then(|s| s.parse::<i64>().ok())
+                    })
+                    .unwrap_or(0);
+                let ready_num = it
+                    .get("ready")
+                    .and_then(|v| v.as_i64())
+                    .or_else(|| {
+                        it.get("ready")
+                            .and_then(|v| v.as_str())
+                            .and_then(|s| s.parse::<i64>().ok())
+                    })
+                    .unwrap_or(0);
+                let ready_str = format!("{}/{}", ready_num, desired);
                 let age = it.get("age").and_then(|v| v.as_str()).unwrap_or("");
                 let created_at = it.get("createdAt").and_then(|v| v.as_str()).unwrap_or("");
 
-                let (have, want) = parse_ready_ratio(ready);
-                let status = if want == 0 {
-                    "Scaled down"
-                } else if have < want {
+                let status = if desired == 0 {
+                    "Not scheduled"
+                } else if ready_num < desired {
                     "Degraded"
                 } else {
                     "Running"
@@ -1251,7 +1268,7 @@ impl App {
                     "name": name,
                     "namespace": namespace,
                     "kind": "DaemonSet",
-                    "ready": ready,
+                    "ready": ready_str,
                     "status": status,
                     "restarts": serde_json::Value::Null,
                     "cpu": serde_json::Value::Null,
@@ -1304,7 +1321,7 @@ impl App {
                     "memory": memory,
                     "age": age,
                     "createdAt": created_at,
-                    "image": image,
+                    "image": if image.is_empty() { serde_json::Value::Null } else { serde_json::Value::String(image.to_string()) },
                 }));
             }
         }
@@ -1316,11 +1333,15 @@ impl App {
             for it in items {
                 let name = it.get("name").and_then(|v| v.as_str()).unwrap_or("");
                 let namespace = it.get("namespace").and_then(|v| v.as_str()).unwrap_or(ns);
-                let suspend = it.get("suspend").and_then(|v| v.as_bool()).unwrap_or(false);
+                let suspended = it
+                    .get("suspended")
+                    .and_then(|v| v.as_bool())
+                    .or_else(|| it.get("suspend").and_then(|v| v.as_bool()))
+                    .unwrap_or(false);
                 let age = it.get("age").and_then(|v| v.as_str()).unwrap_or("");
                 let created_at = it.get("createdAt").and_then(|v| v.as_str()).unwrap_or("");
 
-                let status = if suspend { "Suspended" } else { "Active" };
+                let status = if suspended { "Suspended" } else { "Active" };
 
                 unified.push(serde_json::json!({
                     "name": name,
