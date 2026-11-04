@@ -100,6 +100,35 @@ function tabName(tab: StripTab): string {
   return `${tab.title}${filled(tab.sub) ? ` · ${tab.sub}` : ""}${context}${tab.pinned ? ", pinned" : ""}`;
 }
 
+function counts(values: readonly string[]): Map<string, number> {
+  const result = new Map<string, number>();
+  for (const value of values) result.set(value, (result.get(value) ?? 0) + 1);
+  return result;
+}
+
+/**
+ * Give every document tab a distinct spoken name without making the common
+ * case verbose. Same-named resources in one cluster use the route-derived
+ * kind/namespace detail; if a caller still supplies identical metadata, their
+ * strip order is the final deterministic distinction.
+ */
+function distinctTabNames(tabs: readonly StripTab[]): string[] {
+  const base = tabs.map(tabName);
+  const baseCounts = counts(base);
+  const detailed = base.map((name, index) =>
+    (baseCounts.get(name) ?? 0) > 1 && filled(tabs[index].detail) ? `${name} · ${tabs[index].detail}` : name,
+  );
+  const detailedCounts = counts(detailed);
+  const seen = new Map<string, number>();
+  return detailed.map(name => {
+    const total = detailedCounts.get(name) ?? 0;
+    if (total < 2) return name;
+    const ordinal = (seen.get(name) ?? 0) + 1;
+    seen.set(name, ordinal);
+    return `${name}, tab ${ordinal} of ${total}`;
+  });
+}
+
 function ClusterColor({ tab }: { tab: StripTab }) {
   if (!filled(tab.sub) || !filled(tab.clusterColor)) return null;
   return (
@@ -205,9 +234,10 @@ export function TabStrip({
   const [dropAt, setDropAt] = useState<number | null>(null);
   const [announcement, setAnnouncement] = useState("");
   const moved = useRef<{ id: string; to: number; focus: boolean } | null>(null);
-  const titleCounts = new Map<string, number>();
-  for (const tab of tabs) titleCounts.set(tab.title, (titleCounts.get(tab.title) ?? 0) + 1);
-  const controlName = (tab: StripTab) => (titleCounts.get(tab.title) ?? 0) > 1 ? tabName(tab) : tab.title;
+  const titleCounts = counts(tabs.map(tab => tab.title));
+  const spokenNames = distinctTabNames(tabs);
+  const controlName = (tab: StripTab, index: number) =>
+    (titleCounts.get(tab.title) ?? 0) > 1 ? spokenNames[index] : tab.title;
   useEffect(() => {
     const move = moved.current;
     if (!move || tabs.findIndex(t => t.id === move.id) !== move.to) return;
@@ -441,7 +471,7 @@ export function TabStrip({
               data-pinned={tab.pinned ? "true" : undefined}
               aria-selected={current}
               aria-keyshortcuts={onMove ? "Control+Shift+ArrowLeft Control+Shift+ArrowRight Meta+Shift+ArrowLeft Meta+Shift+ArrowRight" : undefined}
-              aria-label={tabName(tab)}
+              aria-label={spokenNames[index]}
               tabIndex={tab.id === roving ? 0 : -1}
               onFocus={() => setFocusedId(tab.id)}
               onClick={() => { if (!suppressClick.current) onSelect(tab.id); }}
@@ -484,7 +514,7 @@ export function TabStrip({
                     // comment: the tab stays one focusable node, and Delete is
                     // the keyboard's way to this.
                     tabIndex={-1}
-                    aria-label={`Close ${controlName(tab)}`}
+                    aria-label={`Close ${controlName(tab, index)}`}
                     onClick={(event) => {
                       // The button sits inside the tab, so its click reaches
                       // the tab's own handler otherwise — and closing a tab you
@@ -511,7 +541,7 @@ export function TabStrip({
             {filled(tab.detail) && <div>{tab.detail}</div>}
           </div>}>{node}</Tooltip>;
           return menuFor ? (
-            <ContextMenu key={tab.id} items={menuFor(tab)} label={`${controlName(tab)} actions`}>
+            <ContextMenu key={tab.id} items={menuFor(tab)} label={`${controlName(tab, index)} actions`}>
               {hinted}
             </ContextMenu>
           ) : (
@@ -559,7 +589,7 @@ export function TabStrip({
         >
           {(close) => (
             <>
-              {tabs.map((tab) => {
+              {tabs.map((tab, index) => {
                 const current = tab.id === activeId;
                 return (
                   <button
@@ -567,7 +597,7 @@ export function TabStrip({
                     type="button"
                     className="ns-row"
                     data-on={current}
-                    aria-label={tabName(tab)}
+                    aria-label={spokenNames[index]}
                     // Which one you are on, said rather than only shown.
                     aria-current={current || undefined}
                     onClick={() => {

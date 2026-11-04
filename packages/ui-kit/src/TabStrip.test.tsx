@@ -325,6 +325,36 @@ describe("TabStrip closing", () => {
     expect(screen.queryByRole("button", { name: "Close worker-1" })).toBeNull();
   });
 
+  it("adds resource detail when same-title close buttons share one context", () => {
+    setup({
+      tabs: [
+        { id: "payments", title: "worker-1", sub: "prod", detail: "Pod · payments" },
+        { id: "queues", title: "worker-1", sub: "prod", detail: "Pod · queues" },
+      ],
+      activeId: "payments",
+      onClose: () => {},
+    });
+
+    expect(screen.getByRole("tab", { name: "worker-1 · prod · Pod · payments" })).toBeDefined();
+    expect(screen.getByRole("tab", { name: "worker-1 · prod · Pod · queues" })).toBeDefined();
+    expect(screen.getByRole("button", { name: "Close worker-1 · prod · Pod · payments" })).toBeDefined();
+    expect(screen.getByRole("button", { name: "Close worker-1 · prod · Pod · queues" })).toBeDefined();
+  });
+
+  it("numbers same-title controls when all available identity is identical", () => {
+    setup({
+      tabs: [
+        { id: "first", title: "worker-1", sub: "prod", detail: "Pod · payments" },
+        { id: "second", title: "worker-1", sub: "prod", detail: "Pod · payments" },
+      ],
+      activeId: "first",
+      onClose: () => {},
+    });
+
+    expect(screen.getByRole("button", { name: "Close worker-1 · prod · Pod · payments, tab 1 of 2" })).toBeDefined();
+    expect(screen.getByRole("button", { name: "Close worker-1 · prod · Pod · payments, tab 2 of 2" })).toBeDefined();
+  });
+
   it("does not select the tab it closes", async () => {
     // The close button sits inside the tab, so its click reaches the tab's own
     // handler unless stopped — and closing the tab you were not on should not
@@ -498,6 +528,20 @@ describe("TabStrip context menu", () => {
 
     fireEvent.contextMenu(screen.getByRole("tab", { name: "worker-1 · stage" }));
     expect(await screen.findByRole("menu", { name: "worker-1 · stage actions" })).toBeDefined();
+  });
+
+  it("adds resource detail when same-title context menus share one context", async () => {
+    setup({
+      tabs: [
+        { id: "payments", title: "worker-1", sub: "prod", detail: "Pod · payments" },
+        { id: "queues", title: "worker-1", sub: "prod", detail: "Pod · queues" },
+      ],
+      activeId: "payments",
+      menuFor: () => [{ label: "Close", onPick: () => {} }],
+    });
+
+    fireEvent.contextMenu(screen.getByRole("tab", { name: "worker-1 · prod · Pod · queues" }));
+    expect(await screen.findByRole("menu", { name: "worker-1 · prod · Pod · queues actions" })).toBeDefined();
   });
 });
 
