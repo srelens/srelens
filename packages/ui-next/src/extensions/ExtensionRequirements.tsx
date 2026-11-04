@@ -3,6 +3,7 @@ import { listCrds, type ExtensionPage, type InstalledExtension } from "@srelens/
 import { useResource } from "../lib/useResource";
 import { Button } from "@srelens/ui-kit";
 import { ErrorNotice } from "./ExtensionResults";
+import { crdRequirements, pageReaders, requirementStatus } from "./requirements";
 
 /** Installation is global; only the APIs needed by this view are cluster-specific. */
 export function ExtensionRequirements({ plugin, page, context, refresh, children }: {
@@ -12,13 +13,7 @@ export function ExtensionRequirements({ plugin, page, context, refresh, children
   refresh: number;
   children: ReactNode;
 }) {
-  const capabilities = new Set([page.capability, ...(page.dashboard?.pages ?? []).flatMap(id =>
-    plugin.manifest.contributions.pages.filter(p => p.id === id).map(p => p.capability))]);
-  // A reader accepts its `versions` in preference order, or the one `arguments.version` it
-  // fixes (#547); the host reads the first one the cluster serves, and nothing else.
-  const required = plugin.manifest.capabilities.filter(b => capabilities.has(b.name) && b.target === "k8s.listCustomResource")
-    .map(b => ({ group: String(b.arguments.group), versions: b.versions?.length ? b.versions : [String(b.arguments.version)], plural: String(b.arguments.plural), kind: String(b.arguments.kind), namespaced: b.arguments.namespaced === true }))
-    .filter((r, i, rows) => rows.findIndex(other => other.group === r.group && other.versions.join() === r.versions.join() && other.plural === r.plural && other.namespaced === r.namespaced) === i);
+  const required = crdRequirements(plugin, pageReaders(plugin, page));
   const key = JSON.stringify([context, plugin.manifest.id, plugin.revision, required]);
   const result = useResource(async () => {
     if (!context || !required.length) return null;
@@ -32,11 +27,8 @@ export function ExtensionRequirements({ plugin, page, context, refresh, children
     return <p className="extension-message" role="status">Checking app requirements…</p>;
   const error = result.data?.error;
   const requirements = required.map(r => {
-    const crd = result.data?.crds?.find(c => c.group === r.group && c.plural === r.plural && c.kind === r.kind);
-    const served = crd ? (crd.versions ?? [crd.version]) : [];
-    const resolved = r.versions.find(version => served.includes(version));
-    const status = error ? "Not verified" : !crd ? "Missing CRD" : !resolved ? "Required version unavailable" : crd.namespaced !== r.namespaced ? "Scope mismatch" : "Available";
-    return { ...r, resolved, status };
+    const { resolved, status } = requirementStatus(r, result.data?.crds ?? []);
+    return { ...r, resolved, status: error ? "Not verified" : status };
   });
   const missing = !error && requirements.some(r => r.status !== "Available");
   if (!missing && !error) return <>{children}</>;

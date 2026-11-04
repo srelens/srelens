@@ -120,9 +120,14 @@ export function Nav({ contexts }: NavProps) {
   const nodes = useMemo<ResourceNode[]>(() => {
     // App routes and app scope both name the cluster by its key, which no two contexts share
     // (#623, #695); a window opened for one of two sharing a stable ID pins its key.
-    const apps = ctx && extensions.data ? appNavigation(extensions.data.plugins, ctx.key) : [];
+    // A page reading a CRD the cluster doesn't serve is left out (#1024), and one that may
+    // is held back until discovery answers: a row that appears is easier on the pointer than
+    // one that vanishes from under it. A failed discovery, or a paused cluster that is not
+    // asked, is unknown rather than missing, so every page shows.
+    const served = discovery.status === "error" || paused ? undefined : discovery.data ?? [];
+    const apps = ctx && extensions.data ? appNavigation(extensions.data.plugins, ctx.key, served) : [];
     return navNodes({ counts, apps, crds: crdChildren, agent: assistantOn });
-  }, [crdChildren, ctx, extensions.data, counts, assistantOn]);
+  }, [crdChildren, ctx, extensions.data, counts, assistantOn, discovery.status, discovery.data, paused]);
 
   const link = ctx
     ? (paused ? { word: "Paused", kind: "neutral" as const } : view.links[ctx.stableId] ? LINK[view.links[ctx.stableId].state] : UNKNOWN)

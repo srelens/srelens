@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 const core = vi.hoisted(() => ({
   listExtensions: vi.fn(),
   resolveDashboardCards: vi.fn(),
+  listCrds: vi.fn(),
   onExtensionInventoryChanged: vi.fn(async () => () => {}),
   openExtensionView: vi.fn(),
 }));
@@ -86,6 +87,7 @@ beforeEach(() => {
   __resetCollectionsForTests();
   __resetCollectionScopeForTests();
   namespaceOptions.useNamespaceOptions.mockReturnValue({ namespaces: ["prod", "team"], scope: "", error: "" });
+  core.listCrds.mockResolvedValue({ crds: [] });
   // A host that never answers an open: the cards stay as read, and say they are connecting.
   core.openExtensionView.mockImplementation((id: string) => ({ view: id, close: async () => {}, open: () => new Promise(() => {}) }));
 });
@@ -498,5 +500,79 @@ describe("DashboardCards", () => {
     const alert = await screen.findByRole("alert");
     expect((alert).textContent).toMatch(/App cards could not be listed/);
     expect((alert).textContent).toMatch(/unreadable/);
+  });
+});
+
+// #1024: a card over a CRD this cluster doesn't serve would only say "Couldn't
+// read", and its watch would stop the band's live updates. So it isn't drawn.
+describe("on a cluster without an app's CRDs", () => {
+  const CERT = { name: "certificates.cert-manager.io", group: "cert-manager.io", version: "v1", versions: ["v1"], plural: "certificates", kind: "Certificate", namespaced: true };
+  function certManager(cards = [card({ id: "expiring", title: "Expiring" }), card({ id: "pods", title: "Issuer pods", source: "pods" })]) {
+    const plugin = app(cards);
+    plugin.manifest.capabilities = [
+      { name: "certificates", title: "Certificates", target: "k8s.listCustomResource", inputs: [], arguments: { group: "cert-manager.io", version: "v1", plural: "certificates", kind: "Certificate", namespaced: true } },
+      { name: "pods", title: "Pods", target: "k8s.listPods", inputs: [], arguments: {} },
+    ];
+    return plugin;
+  }
+  function watching() {
+    const watched: string[] = [];
+    core.openExtensionView.mockImplementation((id: string) => ({
+      view: id, close: vi.fn(async () => {}),
+      open: async (request: { source: { capability: string } }) => {
+        watched.push(request.source.capability);
+        return { stream: "s", cancel: vi.fn(async () => {}) };
+      },
+    }));
+    return watched;
+  }
+  beforeEach(() => answer([{ id: "expiring", state: "count", count: 2 }, { id: "pods", state: "count", count: 3 }]));
+
+  it.each([
+    ["missing", []],
+    ["served at no accepted version", [{ ...CERT, version: "v1alpha1", versions: ["v1alpha1"] }]],
+    ["of the other scope", [{ ...CERT, namespaced: false }]],
+  ])("draws and follows no card over a CRD %s", async (_, crds) => {
+    core.listCrds.mockResolvedValue({ crds });
+    const watched = watching();
+    installed(certManager());
+    render(<DashboardCards context={CTX} />);
+    await waitFor(() => expect(cardRegion("Issuer pods").getAttribute("data-state")).toBe("value"));
+    expect(screen.queryByRole("region", { name: "Expiring" })).toBeNull();
+    expect(core.listCrds).toHaveBeenCalledWith(CTX.pinnedId);
+    await waitFor(() => expect(watched).toEqual(["pods"]));
+  });
+
+  it("draws every card the cluster serves", async () => {
+    core.listCrds.mockResolvedValue({ crds: [CERT] });
+    installed(certManager());
+    render(<DashboardCards context={CTX} />);
+    await waitFor(() => expect(cardRegion("Expiring").getAttribute("data-state")).toBe("value"));
+    expect(cardRegion("Issuer pods")).toBeTruthy();
+  });
+
+  it("draws every card when discovery fails, which doesn't mean the CRD is missing", async () => {
+    core.listCrds.mockResolvedValue({ error: "customresourcedefinitions is forbidden" });
+    installed(certManager());
+    render(<DashboardCards context={CTX} />);
+    await waitFor(() => expect(cardRegion("Expiring").getAttribute("data-state")).toBe("value"));
+    expect(cardRegion("Issuer pods")).toBeTruthy();
+  });
+
+  it("draws no band when no card is left", async () => {
+    installed(certManager([card({ id: "expiring", title: "Expiring" })]));
+    render(<DashboardCards context={CTX} />);
+    await waitFor(() => expect(core.listCrds).toHaveBeenCalled());
+    await act(async () => {});
+    expect(screen.queryByText("App cards")).toBeNull();
+    expect(core.resolveDashboardCards).not.toHaveBeenCalled();
+  });
+
+  it("asks nothing of a cluster when no card reads a CRD", async () => {
+    installed(app([card({ id: "c", title: "Expiring" })]));
+    answer([{ id: "c", state: "count", count: 1 }]);
+    render(<DashboardCards context={CTX} />);
+    await waitFor(() => expect(cardRegion("Expiring").getAttribute("data-state")).toBe("value"));
+    expect(core.listCrds).not.toHaveBeenCalled();
   });
 });
