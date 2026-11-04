@@ -38,6 +38,16 @@ function assertExplicitTrackedInputs(body) {
     assert.ok(body.includes(`':(glob)**/${workspaceFile}'`), `missing Go workspace guard for ${workspaceFile}`);
   }
   assert.match(body, /Go workspace overlays are not supported by this audit/);
+  for (const unsupported of [
+    'package-lock.json',
+    'npm-shrinkwrap.json',
+    'yarn.lock',
+    'bun.lock',
+    'bun.lockb',
+  ]) {
+    assert.ok(body.includes(`':(glob)**/${unsupported}'`), `missing unsupported-input guard for ${unsupported}`);
+  }
+  assert.match(body, /Unsupported dependency input/);
   assert.doesNotMatch(body, /--recursive/);
 }
 
@@ -93,6 +103,7 @@ test('pull requests compare raw base and head scans with the pinned upstream rep
   assert.equal((differential.match(/--no-ignore/g) || []).length, 1);
   assert.match(differential, /reject_dependency_symlinks "\$tree"/);
   assert.match(differential, /reject_go_workspace_overlays "\$tree"/);
+  assert.match(differential, /reject_unsupported_dependency_inputs "\$tree"/);
   assert.match(differential, /git -C "\$tree" ls-files -s -z/);
   for (const input of ['Cargo.toml', 'Cargo.lock', 'package.json', 'pnpm-lock.yaml', 'go.mod', 'go.sum']) {
     assert.ok(differential.includes(`*/${input}`), `missing symlink guard for ${input}`);
@@ -130,6 +141,7 @@ test('weekly inventory uploads every raw finding without failing on vulnerabilit
   assert.equal((full.match(/--no-ignore/g) || []).length, 1);
   assert.match(full, /reject_dependency_symlinks "\$GITHUB_WORKSPACE"/);
   assert.match(full, /reject_go_workspace_overlays "\$GITHUB_WORKSPACE"/);
+  assert.match(full, /reject_unsupported_dependency_inputs "\$GITHUB_WORKSPACE"/);
   assertExplicitTrackedInputs(full);
   assert.match(full, /--config "\$empty_config"/);
   assert.match(full, /if \[\[ \$status -ne 0 && \$status -ne 1 \]\]/);
@@ -157,6 +169,34 @@ test('Go workspace overlay guard rejects a tracked go.work file', () => {
     execFileSync('git', ['add', 'go.work'], { cwd: repository });
     assert.throws(runGuard, (error) => {
       assert.match(error.stderr, /Go workspace overlays are not supported by this audit: go\.work/);
+      return true;
+    });
+  } finally {
+    rmSync(repository, { recursive: true, force: true });
+  }
+});
+
+test('unsupported lockfile guard rejects tracked npm and Yarn inputs before filtering', () => {
+  const marker = '          reject_unsupported_dependency_inputs() {';
+  const start = workflow.indexOf(marker);
+  const end = workflow.indexOf('\n          }\n', start);
+  assert.notEqual(start, -1, 'missing unsupported dependency-input guard');
+  assert.notEqual(end, -1, 'unterminated unsupported dependency-input guard');
+  const guard = workflow.slice(start, end + '\n          }'.length).replace(/^ {10}/gm, '');
+  const repository = mkdtempSync(join(tmpdir(), 'srelens-osv-unsupported-lock-'));
+  const runGuard = () => execFileSync(
+    'bash',
+    ['-c', `set -euo pipefail\n${guard}\nreject_unsupported_dependency_inputs "$1"`, 'guard', repository],
+    { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] },
+  );
+
+  try {
+    execFileSync('git', ['init', '-q'], { cwd: repository });
+    assert.doesNotThrow(runGuard);
+    writeFileSync(join(repository, 'yarn.lock'), '# yarn lockfile v1\n');
+    execFileSync('git', ['add', 'yarn.lock'], { cwd: repository });
+    assert.throws(runGuard, (error) => {
+      assert.match(error.stderr, /Unsupported dependency input: yarn\.lock/);
       return true;
     });
   } finally {

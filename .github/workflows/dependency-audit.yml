@@ -200,6 +200,22 @@ jobs:
             fi
           }
 
+          reject_unsupported_dependency_inputs() {
+            local tree="$1"
+            local unsupported_input
+            if IFS= read -r -d '' unsupported_input < <(
+              git -C "$tree" ls-files -z -- \
+                ':(glob)**/package-lock.json' \
+                ':(glob)**/npm-shrinkwrap.json' \
+                ':(glob)**/yarn.lock' \
+                ':(glob)**/bun.lock' \
+                ':(glob)**/bun.lockb'
+            ); then
+              printf 'Unsupported dependency input: %q\n' "$unsupported_input" >&2
+              return 1
+            fi
+          }
+
           scan_tree() {
             local tree="$1"
             local output="$2"
@@ -212,6 +228,7 @@ jobs:
             )
             reject_dependency_symlinks "$tree"
             reject_go_workspace_overlays "$tree"
+            reject_unsupported_dependency_inputs "$tree"
             while IFS= read -r -d '' input; do
               if [[ "$input" =~ [[:cntrl:]] ]]; then
                 printf 'Dependency input path contains a forbidden control character: %q\n' "$input" >&2
@@ -344,8 +361,25 @@ jobs:
             fi
           }
 
+          reject_unsupported_dependency_inputs() {
+            local tree="$1"
+            local unsupported_input
+            if IFS= read -r -d '' unsupported_input < <(
+              git -C "$tree" ls-files -z -- \
+                ':(glob)**/package-lock.json' \
+                ':(glob)**/npm-shrinkwrap.json' \
+                ':(glob)**/yarn.lock' \
+                ':(glob)**/bun.lock' \
+                ':(glob)**/bun.lockb'
+            ); then
+              printf 'Unsupported dependency input: %q\n' "$unsupported_input" >&2
+              return 1
+            fi
+          }
+
           reject_dependency_symlinks "$GITHUB_WORKSPACE"
           reject_go_workspace_overlays "$GITHUB_WORKSPACE"
+          reject_unsupported_dependency_inputs "$GITHUB_WORKSPACE"
           input_count=0
           scan_args=(
             scan source
