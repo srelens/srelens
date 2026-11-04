@@ -1,7 +1,7 @@
 import { fireEvent, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { ClusterContext, EventSummary, NodeSummary, PodSummary } from "@srelens/core";
+import { SELECTS_NOTHING, type ClusterContext, type EventSummary, type NodeSummary, type PodSummary } from "@srelens/core";
 import type { EventRow } from "../lib/kinds/events";
 import type { PodRow } from "../lib/kinds/columns";
 import type { ResourceList } from "../lib/resourceList";
@@ -24,6 +24,7 @@ const mocks = vi.hoisted(() => ({
   openTab: vi.fn(),
   useTabs: vi.fn(),
   useNow: vi.fn(),
+  namespaces: vi.fn(),
   namespaceOptions: vi.fn(),
 }));
 
@@ -51,7 +52,7 @@ vi.mock("@srelens/core/react", async (original) => ({
 }));
 vi.mock("../lib/workspace", async (original) => ({
   ...(await original<typeof import("../lib/workspace")>()),
-  useNamespaces: () => [],
+  useNamespaces: mocks.namespaces,
   useFallbackNamespace: () => undefined,
 }));
 vi.mock("./collections/NamespaceScope", () => ({
@@ -114,6 +115,8 @@ function listed<Row>(rows: Row[], over: Partial<ResourceList<Row>> = {}): Resour
     namespaceFailures: [],
     stale: false,
     watch: "live",
+    fresh: true,
+    refreshing: false,
     reload: vi.fn(),
     ...over,
   };
@@ -130,6 +133,7 @@ beforeEach(() => {
   mocks.activeContext.mockReturnValue(context);
   mocks.useTabs.mockReturnValue({ workspace: { pausedClusters: [] } });
   mocks.useNow.mockReturnValue(NOW);
+  mocks.namespaces.mockReturnValue([]);
   mocks.namespaceOptions.mockReturnValue({ namespaces: ["checkout", "platform"], items: [], complete: true, scope: "all", error: "" });
   lists = {
     pods: listed([pod("web-7d4b", "CrashLoopBackOff"), pod("healthy", "Running", { ready: "1/1" })]) as ResourceList<never>,
@@ -221,5 +225,104 @@ describe("Problems", () => {
     fireEvent.click(logs);
     expect(mocks.openTab).toHaveBeenCalledTimes(1);
     expect(within(logs.closest("tr")!).getByText("web-7d4b")).toBeTruthy();
+  });
+
+  it("keeps Logs keyboard and double-click gestures inside the nested action", async () => {
+    draw();
+    const logs = screen.getByRole("button", { name: "Follow logs for Pod checkout/web-7d4b" });
+    const logRoute = logsRoute("Pod", "checkout", "web-7d4b");
+
+    logs.focus();
+    await userEvent.keyboard("{Enter}");
+    await userEvent.keyboard(" ");
+    await userEvent.dblClick(logs);
+
+    expect(mocks.openTab).toHaveBeenCalled();
+    expect(mocks.openTab.mock.calls.every(([route]) => route === logRoute)).toBe(true);
+    expect(mocks.openTab).not.toHaveBeenCalledWith(
+      detailRoute("Pod", "checkout", "web-7d4b", { cluster: "prod" }),
+      { clusterName: "prod" },
+    );
+  });
+
+  it("labels reconnecting rows last-known, reports the lost stream, and never calls them current", () => {
+    lists.pods = listed([pod("web-7d4b", "CrashLoopBackOff")], {
+      watch: "reconnecting",
+      fresh: false,
+      refreshing: true,
+    }) as ResourceList<never>;
+    draw();
+
+    expect(screen.getByText("3 last-known problems")).toBeTruthy();
+    expect(screen.getByText("Stream lost")).toBeTruthy();
+    expect(screen.queryByText("3 current problems")).toBeNull();
+    expect(screen.getByText(/Showing last-known results/)).toBeTruthy();
+  });
+
+  it("checks a cached empty remount again instead of declaring the cluster clean", () => {
+    lists.pods = listed([], { status: "empty", fresh: false, refreshing: true }) as ResourceList<never>;
+    lists.nodes = listed([], { status: "empty", fresh: false, refreshing: true }) as ResourceList<never>;
+    lists.events = listed([], { status: "empty", fresh: false, refreshing: true }) as ResourceList<never>;
+    draw();
+
+    expect(screen.queryByText("No problems detected")).toBeNull();
+    expect(screen.getByText("Checking pods, nodes, and warning events")).toBeTruthy();
+  });
+
+  it("shows a source failure and the remaining loading progress together", () => {
+    lists.pods = listed([], {
+      status: "error",
+      error: "pods forbidden",
+      fresh: false,
+      refreshing: false,
+    }) as ResourceList<never>;
+    lists.nodes = listed([], { status: "loading", fresh: false, refreshing: true }) as ResourceList<never>;
+    lists.events = listed([], { status: "loading", fresh: false, refreshing: true }) as ResourceList<never>;
+    draw();
+
+    expect(screen.getByText("Pods could not be checked")).toBeTruthy();
+    expect(screen.getByText("Checking the 2 remaining sources")).toBeTruthy();
+    expect(screen.queryByText("No problems detected")).toBeNull();
+  });
+
+  it("applies a namespace selection to both watched sources while Nodes stay cluster-scoped", () => {
+    mocks.namespaces.mockReturnValue(["checkout"]);
+    lists.pods = listed([
+      pod("checkout-pod", "CrashLoopBackOff"),
+      pod("platform-pod", "CrashLoopBackOff", { namespace: "platform" }),
+    ]) as ResourceList<never>;
+    lists.nodes = listed([node("worker-2", { unschedulable: true })]) as ResourceList<never>;
+    lists.events = listed([
+      event("Deployment/api"),
+      event("Deployment/controller", { namespace: "platform" }),
+    ]) as ResourceList<never>;
+    draw();
+
+    expect(screen.getByText("checkout-pod")).toBeTruthy();
+    expect(screen.getByText("api")).toBeTruthy();
+    expect(screen.getByText("worker-2")).toBeTruthy();
+    expect(screen.queryByText("platform-pod")).toBeNull();
+    expect(screen.queryByText("controller")).toBeNull();
+    expect(mocks.resourceList.mock.calls.map((call) => [call[1], call[3]])).toEqual([
+      ["pods", ["checkout"]],
+      ["nodes", []],
+      ["events", ["checkout"]],
+    ]);
+  });
+
+  it("does not leak cached namespaced or cluster rows through SELECTS_NOTHING, or call that scope clean", () => {
+    mocks.namespaces.mockReturnValue([...SELECTS_NOTHING]);
+    draw();
+
+    expect(screen.queryByText("web-7d4b")).toBeNull();
+    expect(screen.queryByText("api")).toBeNull();
+    expect(screen.queryByText("worker-2")).toBeNull();
+    expect(screen.queryByText("No problems detected")).toBeNull();
+    expect(screen.getByText("No namespaces in scope")).toBeTruthy();
+    expect(mocks.resourceList.mock.calls.map((call) => [call[1], call[3]])).toEqual([
+      ["pods", [...SELECTS_NOTHING]],
+      ["nodes", []],
+      ["events", [...SELECTS_NOTHING]],
+    ]);
   });
 });

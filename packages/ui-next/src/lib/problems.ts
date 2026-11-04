@@ -6,6 +6,15 @@ import { involvedObject, type EventRow } from "./kinds/events";
 /** One hour: the same window Home uses for a warning that is still current. */
 export const RECENT_WARNING_MS = 60 * 60 * 1000;
 
+/**
+ * Kubernetes defines no universal "high restart" threshold. Ten is a
+ * deliberately conservative UI threshold: it ignores ordinary startup churn
+ * while still surfacing a two-digit cumulative count that deserves triage.
+ * Only a currently Running pod can qualify by this count; a completed pod
+ * never becomes a current problem because of its history.
+ */
+export const HIGH_RESTART_COUNT = 10;
+
 export type ProblemSource = "pod" | "node" | "event";
 export type ProblemSeverity = "critical" | "warning" | "unknown";
 
@@ -82,6 +91,48 @@ interface EventGroup {
   name: string;
 }
 
+interface RecentWarning {
+  event: EventRow;
+  at: number;
+  object: ReturnType<typeof involvedObject>;
+  group?: string;
+}
+
+function recentWarnings(events: readonly EventRow[], now: number): RecentWarning[] {
+  const warnings: RecentWarning[] = [];
+  for (const event of events) {
+    if (!eventVerdict(event.type).bad) continue;
+    const at = Date.parse(event.created ?? "");
+    if (!Number.isFinite(at) || now - at > RECENT_WARNING_MS) continue;
+    const object = involvedObject(event);
+    if (!object.kind || !object.name) continue;
+    const group = eventRouteGroup(object.kind, event.objectApiVersion);
+    warnings.push({ event, at, object, ...(group ? { group } : {}) });
+  }
+  return warnings;
+}
+
+function podIdentity(namespace: string, name: string): string {
+  return `${namespace}\u0000${name}`;
+}
+
+function readyCounts(text: string): { ready: number; total: number } | null {
+  const match = /^(\d+)\/(\d+)$/.exec(text.trim());
+  if (!match) return null;
+  const ready = Number(match[1]);
+  const total = Number(match[2]);
+  return Number.isSafeInteger(ready) && Number.isSafeInteger(total) ? { ready, total } : null;
+}
+
+const NON_PROBLEM_POD_WORDS = new Set([
+  "Completed",
+  "ContainerCreating",
+  "PodInitializing",
+  "SchedulingGated",
+  "Succeeded",
+  "Terminating",
+]);
+
 /**
  * Derive the screen's rows from the three existing live-list surfaces.
  *
@@ -92,19 +143,50 @@ interface EventGroup {
  */
 export function deriveProblems({ pods, nodes, events, now = Date.now() }: ProblemInput): ProblemRow[] {
   const rows: ProblemRow[] = [];
+  const warnings = recentWarnings(events, now);
+  const failedScheduling = new Set(
+    warnings.flatMap(({ event, object, group }) =>
+      group === undefined && object.kind === "Pod" && event.reason === "FailedScheduling"
+        ? [podIdentity(event.namespace, object.name)]
+        : [],
+    ),
+  );
 
   for (const pod of pods) {
     const verdict = podStatus(pod);
-    if (!verdict.flagged) continue;
+    const word = String(verdict.status);
+
+    // A finished pod is historical, even if it accumulated many restarts.
+    // The other words are kubectl's ordinary progress/termination states, not
+    // evidence that the pod is stuck. Pending is admitted only below, when a
+    // recent scheduler warning names this exact pod.
+    if (pod.phase === "Succeeded" || NON_PROBLEM_POD_WORDS.has(word)) continue;
+    const unschedulable = word === "Pending" && failedScheduling.has(podIdentity(pod.namespace, pod.name));
+    if (word === "Pending" && !unschedulable) continue;
+
+    const counts = readyCounts(pod.ready);
+    const ordinarilyRunning = pod.phase === "Running" && word === "Running";
+    const unready = ordinarilyRunning && counts !== null && counts.total > 0 && counts.ready < counts.total;
+    const highRestart = ordinarilyRunning && pod.restarts >= HIGH_RESTART_COUNT;
+    const explicitlyBroken = verdict.health === "danger";
+    const unreadable = verdict.health === "neutral" && verdict.flagged;
+    if (!unschedulable && !unready && !highRestart && !explicitlyBroken && !unreadable) continue;
+
+    const health: HealthKind = explicitlyBroken ? "danger" : unreadable ? "neutral" : "warning";
+    const reasons: string[] = [];
+    if (explicitlyBroken || unreadable) reasons.push(word);
+    if (unschedulable) reasons.push("Pending", "FailedScheduling");
+    if (unready) reasons.push("NotReady");
+    if (highRestart) reasons.push("HighRestartCount");
     const row: ProblemRow = {
       key: "",
       source: "pod",
-      severity: severity(verdict.health),
-      health: verdict.health,
+      severity: severity(health),
+      health,
       kind: "Pod",
       namespace: pod.namespace,
       name: pod.name,
-      reason: String(verdict.status),
+      reason: [...new Set(reasons)].join(","),
       detail: `${pod.ready} ready · ${pod.restarts} restarts`,
       created: pod.created,
       age: pod.age,
@@ -137,13 +219,7 @@ export function deriveProblems({ pods, nodes, events, now = Date.now() }: Proble
   }
 
   const grouped = new Map<string, EventGroup>();
-  for (const event of events) {
-    if (!eventVerdict(event.type).bad) continue;
-    const at = Date.parse(event.created ?? "");
-    if (!Number.isFinite(at) || now - at > RECENT_WARNING_MS) continue;
-    const object = involvedObject(event);
-    if (!object.kind || !object.name) continue;
-    const group = eventRouteGroup(object.kind, event.objectApiVersion);
+  for (const { event, at, object, group } of warnings) {
     const groupKey = [group ?? "", object.kind, event.namespace, object.name].join("\u0000");
     const held = grouped.get(groupKey);
     if (!held) {

@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { EventSummary, NodeSummary, PodSummary } from "@srelens/core";
 import type { EventRow } from "./kinds/events";
 import type { PodRow } from "./kinds/columns";
-import { deriveProblems, type ProblemRow } from "./problems";
+import { deriveProblems, HIGH_RESTART_COUNT, type ProblemRow } from "./problems";
 
 const NOW = Date.parse("2026-11-04T12:00:00Z");
 
@@ -61,14 +61,17 @@ const brief = (rows: ProblemRow[]) => rows.map((row) =>
 );
 
 describe("deriveProblems", () => {
-  it("uses core's pod verdict, including Pending and Failed, and omits healthy or completed pods", () => {
+  it("keeps explicit pod failures but excludes progress, termination, success, and unsupported generic Pending", () => {
     const rows = deriveProblems({
       pods: [
         pod("crashing", "CrashLoopBackOff"),
-        pod("waiting", "Pending", { phase: "Pending" }),
         pod("failed", "Failed", { phase: "Failed" }),
+        pod("creating", "ContainerCreating", { phase: "Pending" }),
+        pod("waiting", "Pending", { phase: "Pending" }),
+        pod("terminating", "Terminating"),
         pod("healthy", "Running", { ready: "1/1" }),
-        pod("finished", "Completed", { phase: "Succeeded", ready: "0/1" }),
+        pod("completed", "Completed", { phase: "Succeeded", ready: "0/1", restarts: HIGH_RESTART_COUNT }),
+        pod("succeeded", "Succeeded", { phase: "Succeeded", ready: "0/1", restarts: HIGH_RESTART_COUNT }),
       ],
       nodes: [],
       events: [],
@@ -78,7 +81,47 @@ describe("deriveProblems", () => {
     expect(brief(rows)).toEqual([
       "pod:critical:Pod:checkout/crashing:CrashLoopBackOff",
       "pod:critical:Pod:checkout/failed:Failed",
-      "pod:warning:Pod:checkout/waiting:Pending",
+    ]);
+  });
+
+  it("calls a Pending pod unschedulable only when a recent FailedScheduling warning names that pod", () => {
+    const rows = deriveProblems({
+      pods: [
+        pod("blocked", "Pending", { phase: "Pending" }),
+        pod("old-warning", "Pending", { phase: "Pending" }),
+        pod("different-warning", "Pending", { phase: "Pending" }),
+      ],
+      nodes: [],
+      events: [
+        warning("a", "Pod/blocked", "FailedScheduling", 2),
+        warning("b", "Pod/old-warning", "FailedScheduling", 61),
+        warning("c", "Pod/different-warning", "FailedMount", 2),
+      ],
+      now: NOW,
+    });
+
+    expect(brief(rows.filter((row) => row.source === "pod"))).toEqual([
+      "pod:warning:Pod:checkout/blocked:Pending,FailedScheduling",
+    ]);
+  });
+
+  it("surfaces Running pods that are unready or truly high-restart, at a documented threshold", () => {
+    const rows = deriveProblems({
+      pods: [
+        pod("unready", "Running", { ready: "1/2", restarts: 0 }),
+        pod("high-restart", "Running", { ready: "1/1", restarts: HIGH_RESTART_COUNT }),
+        pod("both", "Running", { ready: "0/1", restarts: HIGH_RESTART_COUNT + 4 }),
+        pod("below-threshold", "Running", { ready: "1/1", restarts: HIGH_RESTART_COUNT - 1 }),
+      ],
+      nodes: [],
+      events: [],
+      now: NOW,
+    });
+
+    expect(brief(rows)).toEqual([
+      "pod:warning:Pod:checkout/both:NotReady,HighRestartCount",
+      "pod:warning:Pod:checkout/high-restart:HighRestartCount",
+      "pod:warning:Pod:checkout/unready:NotReady",
     ]);
   });
 
@@ -146,7 +189,7 @@ describe("deriveProblems", () => {
   it("orders critical before warning before unknown, then keeps rows stable by kind, namespace, and name", () => {
     const rows = deriveProblems({
       pods: [
-        pod("z-pending", "Pending", { phase: "Pending" }),
+        pod("z-unready", "Running", { ready: "0/1" }),
         pod("a-crash", "CrashLoopBackOff"),
         pod("unknown", "BrandNewState", { phase: "BrandNewState" }),
       ],
@@ -158,7 +201,7 @@ describe("deriveProblems", () => {
     expect(rows.map((row) => `${row.severity}:${row.kind}/${row.name}`)).toEqual([
       "critical:Node/b-node",
       "critical:Pod/a-crash",
-      "warning:Pod/z-pending",
+      "warning:Pod/z-unready",
       "unknown:Pod/unknown",
     ]);
     expect(new Set(rows.map((row) => row.key)).size).toBe(rows.length);

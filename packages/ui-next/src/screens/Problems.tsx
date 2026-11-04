@@ -1,7 +1,8 @@
-import { useMemo, useState, type MouseEvent } from "react";
+import { useMemo, useState, type KeyboardEvent, type MouseEvent } from "react";
 import {
   plural,
   rowInSelection,
+  selectsNothing,
   type ClusterContext,
   type NodeSummary,
 } from "@srelens/core";
@@ -12,6 +13,7 @@ import {
   EmptyState,
   Eyebrow,
   FilterBar,
+  LiveSignal,
   LoadingState,
   RawError,
   Screen,
@@ -74,15 +76,19 @@ function ClusterProblems({ title, context }: { title: string; context: ClusterCo
   const nodes = useResourceList<ListRow>(name, "nodes", descriptorFor("nodes"), [], files);
   const events = useResourceList<EventRow>(name, "events", EVENT_DESCRIPTOR, selection, files);
   const now = useNow();
+  const emptyScope = selectsNothing(selection);
 
   const rows = useMemo(() => deriveProblems({
     // The descriptors guarantee these shapes; each cast is at the same seam
     // Workloads uses before applying its per-kind verdict.
     pods: pods.rows.filter((row) => rowInSelection(row.namespace ?? "", selection)) as PodRow[],
-    nodes: nodes.rows as NodeSummary[],
+    // SELECTS_NOTHING means a namespace collection resolved to no scope at
+    // all. Suppress cluster-scoped rows too: "nothing is listed" must not be
+    // contradicted by a Node row or certified as a clean cluster check.
+    nodes: emptyScope ? [] : nodes.rows as NodeSummary[],
     events: events.rows.filter((row) => rowInSelection(row.namespace, selection)),
     now,
-  }), [pods.rows, nodes.rows, events.rows, selection, now]);
+  }), [pods.rows, nodes.rows, events.rows, selection, emptyScope, now]);
 
   const [segment, setSegment] = useState(ALL);
   const [filter, setFilter] = useState("");
@@ -97,9 +103,21 @@ function ClusterProblems({ title, context }: { title: string; context: ClusterCo
   );
 
   const lists = [pods, nodes, events] as const;
-  const pending = lists.filter((list) => list.status === "loading").length;
+  const pending = lists.filter((list) => list.refreshing).length;
   const failed = lists.some((list) => Boolean(list.error));
-  const completelyChecked = pending === 0 && !failed;
+  const reconnecting = pods.watch === "reconnecting" || events.watch === "reconnecting";
+  const current = !emptyScope && lists.every((list) =>
+    list.fresh && !list.refreshing && !list.error && !list.stale && list.watch === "live",
+  );
+  const countLabel = emptyScope
+    ? "No namespaces in scope"
+    : current
+      ? plural(rows.length, "current problem")
+      : rows.length > 0
+        ? plural(rows.length, "last-known problem")
+        : pending > 0
+          ? `Checking ${plural(pending, "source")}`
+          : "Problem status unavailable";
   const refresh = () => lists.forEach((list) => list.reload());
 
   return (
@@ -109,7 +127,12 @@ function ClusterProblems({ title, context }: { title: string; context: ClusterCo
       fill
       actions={
         <>
-          <Eyebrow>{plural(rows.length, "current problem")}</Eyebrow>
+          <Eyebrow>{countLabel}</Eyebrow>
+          <LiveSignal
+            label={reconnecting ? "Stream lost" : current ? "Live" : pending > 0 ? "Checking" : "Not current"}
+            tone={reconnecting || (!current && pending === 0) ? "warn" : current ? "ok" : "info"}
+            className="shrink-0"
+          />
           <Button variant="secondary" size="sm" aria-label="Refresh problems" onClick={refresh}>Refresh</Button>
         </>
       }
@@ -133,16 +156,21 @@ function ClusterProblems({ title, context }: { title: string; context: ClusterCo
       <ProblemFailure noun="nodes" list={nodes} />
       <ProblemFailure noun="warning events" list={events} />
 
-      {pending > 0 && rows.length > 0 && (
+      {!emptyScope && !current && rows.length > 0 && (reconnecting || pending > 0) && (
         <p className="rule-b px-3 py-2 text-xs text-muted" role="status">
-          Still checking {plural(pending, "source")}…
+          {reconnecting
+            ? "Stream lost. Showing last-known results while the live watch reconnects…"
+            : `Refreshing ${plural(pending, "source")}. Showing last-known results…`}
         </p>
       )}
 
       <div className="scroll min-h-0 flex-1">
-        {rows.length === 0 && pending > 0 && !failed ? (
-          <LoadingState label="Checking pods, nodes, and warning events" />
-        ) : rows.length === 0 && completelyChecked ? (
+        {!emptyScope && rows.length === 0 && pending > 0 ? (
+          <LoadingState label={failed
+            ? `Checking the ${plural(pending, "remaining source")}`
+            : "Checking pods, nodes, and warning events"}
+          />
+        ) : rows.length === 0 && current ? (
           <EmptyState
             title="No problems detected"
             hint={`Checked pods, nodes, and warning events from the last hour on ${name}.`}
@@ -213,6 +241,10 @@ function stop(event: MouseEvent<HTMLButtonElement>) {
   event.stopPropagation();
 }
 
+function stopActionKey(event: KeyboardEvent<HTMLButtonElement>) {
+  if (event.key === "Enter" || event.key === " ") event.stopPropagation();
+}
+
 function problemColumns(context: string): Column<ProblemRow>[] {
   return [
     {
@@ -278,6 +310,8 @@ function problemColumns(context: string): Column<ProblemRow>[] {
                 variant="secondary"
                 size="xs"
                 aria-label={`Follow logs for ${kind} ${path}`}
+                onKeyDown={stopActionKey}
+                onDoubleClick={stop}
                 onClick={(event) => {
                   stop(event);
                   openTab(logsRoute("Pod", row.namespace, row.name), { clusterName: context });
@@ -290,6 +324,8 @@ function problemColumns(context: string): Column<ProblemRow>[] {
               variant="secondary"
               size="xs"
               aria-label={`Open ${kind} ${path}`}
+              onKeyDown={stopActionKey}
+              onDoubleClick={stop}
               onClick={(event) => {
                 stop(event);
                 openProblem(row, context);
