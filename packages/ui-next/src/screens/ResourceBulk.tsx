@@ -6,9 +6,11 @@ import {
   runBulk,
   summarize,
   type BulkOutcome,
+  type DynamicGvk,
 } from "@srelens/core";
 import { ActionBar, ConfirmDialog, type ActionBarAction } from "@srelens/ui-kit";
 import { useClusterGate } from "../lib/clusterMoved";
+import { deleteTarget } from "../lib/crdGvk";
 import { FailureLine, FailureWord } from "../lib/errorCopy";
 import { rowKey, type KindDescriptor, type ListRow } from "../lib/kinds/types";
 import { SelectionBar } from "./resourceShell";
@@ -70,12 +72,12 @@ interface Report {
   outcomes: BulkOutcome<ListRow>[];
 }
 
-function opFor(type: ActionType, context: string, kind: string) {
+function opFor(type: ActionType, context: string, kind: string, crd?: DynamicGvk) {
   return (row: ListRow) => {
     const ns = row.namespace ?? "";
     switch (type) {
       case "delete":
-        return deleteResource(context, kind, row.namespace ?? null, row.name);
+        return deleteResource(context, kind, row.namespace ?? null, row.name, undefined, crd);
       case "evict":
         return evictPod(context, ns, row.name);
       case "restart":
@@ -161,8 +163,17 @@ export function ResourceBulk({ selected, kind, descriptor, context, rows, onDone
     }
     setRefused("");
     setBusy(true);
+    // A custom kind's CRD, looked up once for the whole batch rather than per
+    // row. Not found, or claimed twice, nothing is sent.
+    const target =
+      pending.type === "delete" ? await deleteTarget(pending.context, descriptor.k8sKind, descriptor.group) : {};
+    if (target.error) {
+      setBusy(false);
+      setRefused(target.error);
+      return;
+    }
     // `pending.context`, never the live prop. See {@link Pending.context}.
-    const outcomes = await runBulk(pending.rows, opFor(pending.type, pending.context, descriptor.k8sKind));
+    const outcomes = await runBulk(pending.rows, opFor(pending.type, pending.context, descriptor.k8sKind, target.crd));
     setBusy(false);
     const { failed } = summarize(outcomes);
     const { type } = pending;
@@ -182,9 +193,7 @@ export function ResourceBulk({ selected, kind, descriptor, context, rows, onDone
   if (descriptor.actions.evict) {
     actions.push({ id: "evict", label: "Evict", danger: true, onSelect: () => open("evict") });
   }
-  if (descriptor.actions.delete !== false) {
-    actions.push({ id: "delete", label: "Delete", danger: true, onSelect: () => open("delete") });
-  }
+  actions.push({ id: "delete", label: "Delete", danger: true, onSelect: () => open("delete") });
 
   return (
     <>
