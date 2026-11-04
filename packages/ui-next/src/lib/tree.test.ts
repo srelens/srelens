@@ -1,4 +1,5 @@
 import { describe, it, expect } from "vitest";
+import { BadgeCheck } from "lucide-react";
 import type { CrdRef } from "@srelens/core";
 import { Icons } from "./icons";
 import type { ResourceNode } from "@srelens/ui-kit";
@@ -121,8 +122,16 @@ describe("crdNodes", () => {
     for (const group of crdNodes([CERTS, ARGO])) expect(group.defaultExpanded).toBe(false);
   });
 
-  it("gives each custom resource its group's icon, not the fallback", () => {
-    expect(crdNodes([CERTS])[0].children?.[0].icon).toBe(Icons.crds);
+  it("gives a group and each custom resource in it the group's icon", () => {
+    const [group] = crdNodes([CERTS]);
+    expect(group.icon).toBe(BadgeCheck);
+    expect(group.children?.[0].icon).toBe(BadgeCheck);
+  });
+
+  it("keeps the generic glyph for a group with no icon of its own", () => {
+    const [group] = crdNodes([crd("widgets.example.com", "example.com", "Widget")]);
+    expect(group.icon).toBe(Icons.crds);
+    expect(group.children?.[0].icon).toBe(Icons.crds);
   });
 
   it("is empty for no CRDs", () => {
