@@ -1,0 +1,396 @@
+name: Dependency audit
+
+# Flag newly vulnerable dependencies without making today's findings every
+# contributor's cleanup project. Pull requests compare raw scans of the base and
+# head trees. A weekly/manual scan publishes the complete raw inventory.
+on:
+  pull_request:
+    branches: [dev, main, feat/ui-next]
+  schedule:
+    # Off the hour because new advisories can affect an unchanged lockfile.
+    - cron: "23 6 * * 3"
+  workflow_dispatch:
+
+concurrency:
+  group: dependency-audit-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+env:
+  # Official v2.7.0 Linux amd64 release asset. The digest is published on the
+  # release and verified before the binary is made executable.
+  OSV_SCANNER_VERSION: v2.7.0
+  OSV_SCANNER_SHA256: 160c6253e2922e9e0a6a9771c5c4c40a4b3c6090b34a3cdd5e80c96cc2e4218b
+  # Build the matching upstream diff reporter from the exact release commit.
+  OSV_REPORTER_REVISION: bfe2f84abd2f09fe0b83ba7f6dad40d296762f40
+
+jobs:
+  pull-request-diff:
+    name: newly introduced vulnerabilities
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: read
+    steps:
+      - name: Check out proposed merge
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Install verified OSV-Scanner
+        shell: bash
+        run: |
+          set -euo pipefail
+          scanner="$RUNNER_TEMP/osv-scanner"
+          url="https://github.com/google/osv-scanner/releases/download/${OSV_SCANNER_VERSION}/osv-scanner_linux_amd64"
+          curl --fail --location --proto '=https' --proto-redir '=https' --tlsv1.2 --retry 3 \
+            "$url" --output "$scanner"
+          echo "$OSV_SCANNER_SHA256  $scanner" | sha256sum --check --strict
+          chmod 0755 "$scanner"
+          "$scanner" --version
+
+      - name: Set up pinned Go toolchain
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: "1.27.0"
+          cache: false
+
+      - name: Build pinned OSV Reporter
+        shell: bash
+        env:
+          GOBIN: ${{ runner.temp }}/osv-reporter-bin
+          GOTOOLCHAIN: local
+          GOWORK: "off"
+        run: |
+          set -euo pipefail
+          mkdir -p "$GOBIN"
+          go install "github.com/google/osv-scanner/v2/cmd/osv-reporter@${OSV_REPORTER_REVISION}"
+          "$GOBIN/osv-reporter" --version
+          # Keep this offline contract test in the protected workflow itself.
+          # Executing a helper from the proposed tree here would let that helper
+          # replace the scanner or Reporter before the security check runs.
+          node - "$GOBIN/osv-reporter" <<'NODE'
+          const { spawnSync } = require('node:child_process');
+          const { mkdirSync, mkdtempSync, rmSync, writeFileSync } = require('node:fs');
+          const { tmpdir } = require('node:os');
+          const { join } = require('node:path');
+
+          const reporter = process.argv[2];
+          const fixtureRoot = mkdtempSync(join(tmpdir(), 'osv-reporter-smoke-'));
+          const repository = join(fixtureRoot, 'repository');
+          const sameSource = join(repository, 'go.mod');
+          const differentSource = join(fixtureRoot, 'different-repository', 'go.mod');
+          const vulnerability = (id) => ({ id });
+          const packageResult = (vulnerabilities, groups) => ({
+            package: {
+              name: 'example.invalid/dependency',
+              version: '1.0.0',
+              ecosystem: 'Go',
+            },
+            vulnerabilities,
+            groups,
+          });
+          const resultAt = (sourcePath) => ({
+            source: { path: sourcePath, type: 'lockfile' },
+            packages: [packageResult(
+              [vulnerability('GO-BASELINE'), vulnerability('GO-NEW-UNCALLED')],
+              [
+                { ids: ['GO-BASELINE'], aliases: ['GO-BASELINE'] },
+                {
+                  ids: ['GO-NEW-UNCALLED'],
+                  aliases: ['GO-NEW-UNCALLED'],
+                  experimental_analysis: {
+                    'GO-NEW-UNCALLED': { called: false, unimportant: false },
+                  },
+                },
+              ],
+            )],
+          });
+          const oldResult = {
+            results: [{
+              source: { path: sameSource, type: 'lockfile' },
+              packages: [packageResult(
+                [vulnerability('GO-BASELINE')],
+                [{ ids: ['GO-BASELINE'], aliases: ['GO-BASELINE'] }],
+              )],
+            }],
+          };
+
+          function runFixture(label, newResult, expectedStatus) {
+            const oldPath = join(fixtureRoot, 'old.json');
+            const newPath = join(fixtureRoot, `${label}.json`);
+            const outputPath = join(fixtureRoot, `${label}-result.json`);
+            writeFileSync(oldPath, JSON.stringify(oldResult));
+            writeFileSync(newPath, JSON.stringify({ results: [newResult] }));
+            const completed = spawnSync(reporter, [
+              '--old', oldPath,
+              '--new', newPath,
+              `--output-files=json:${outputPath}`,
+              '--fail-on-vuln=true',
+            ], { cwd: repository, encoding: 'utf8' });
+            if (completed.error) throw completed.error;
+            if (completed.status !== expectedStatus) {
+              throw new Error([
+                `${label}: expected Reporter status ${expectedStatus}, got ${completed.status}`,
+                completed.stdout,
+                completed.stderr,
+              ].filter(Boolean).join('\n'));
+            }
+          }
+
+          try {
+            mkdirSync(repository, { recursive: true });
+            runFixture('same-source', resultAt(sameSource), 0);
+            // This control proves the fixture detects unequal scan roots:
+            // the unchanged, unanalyzed baseline is then classified as new.
+            runFixture('different-source-control', resultAt(differentSource), 1);
+            console.log('OSV Reporter source-path smoke test passed');
+          } finally {
+            rmSync(fixtureRoot, { recursive: true, force: true });
+          }
+          NODE
+
+      - name: Scan base and proposed merge
+        shell: bash
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -euo pipefail
+          scanner="$RUNNER_TEMP/osv-scanner"
+          scan_tree_root="$RUNNER_TEMP/osv-tree"
+          base_output="$RUNNER_TEMP/osv-base.json"
+          head_output="$RUNNER_TEMP/osv-head.json"
+          reporter="$RUNNER_TEMP/osv-reporter-bin/osv-reporter"
+          empty_config="$RUNNER_TEMP/osv-empty.toml"
+          : > "$empty_config"
+
+          # Results stay outside the untrusted tree. In particular, a tracked
+          # symlink cannot redirect either scan over the other result.
+
+          reject_dependency_symlinks() {
+            local tree="$1"
+            local entry mode path
+            local failed=0
+            while IFS= read -r -d '' entry; do
+              mode="${entry%% *}"
+              path="${entry#*$'\t'}"
+              [[ "$mode" == "120000" ]] || continue
+              case "/$path" in
+                */Cargo.toml|*/Cargo.lock|*/package.json|*/package-lock.json|*/npm-shrinkwrap.json|*/pnpm-lock.yaml|*/pnpm-workspace.yaml|*/yarn.lock|*/bun.lock|*/bun.lockb|*/go.mod|*/go.sum|*/go.work|*/go.work.sum)
+                  printf 'Dependency input must not be a symbolic link: %q\n' "$path" >&2
+                  failed=1
+                  ;;
+              esac
+            done < <(git -C "$tree" ls-files -s -z)
+            (( failed == 0 ))
+          }
+
+          reject_go_workspace_overlays() {
+            local tree="$1"
+            local workspace_file
+            if IFS= read -r -d '' workspace_file < <(
+              git -C "$tree" ls-files -z -- \
+                ':(glob)**/go.work' \
+                ':(glob)**/go.work.sum'
+            ); then
+              printf 'Go workspace overlays are not supported by this audit: %q\n' "$workspace_file" >&2
+              return 1
+            fi
+          }
+
+          scan_tree() {
+            local tree="$1"
+            local output="$2"
+            local input parse_as status
+            local input_count=0
+            local -a scan_args=(
+              scan source
+              --no-ignore
+              --config "$empty_config"
+            )
+            reject_dependency_symlinks "$tree"
+            reject_go_workspace_overlays "$tree"
+            while IFS= read -r -d '' input; do
+              if [[ "$input" =~ [[:cntrl:]] ]]; then
+                printf 'Dependency input path contains a forbidden control character: %q\n' "$input" >&2
+                return 1
+              fi
+              case "$input" in
+                Cargo.lock|*/Cargo.lock) parse_as='Cargo.lock' ;;
+                pnpm-lock.yaml|*/pnpm-lock.yaml) parse_as='pnpm-lock.yaml' ;;
+                go.mod|*/go.mod) parse_as='go.mod' ;;
+                *) printf 'Unsupported dependency input: %q\n' "$input" >&2; return 1 ;;
+              esac
+              scan_args+=(--lockfile "${parse_as}:${input}")
+              (( input_count += 1 ))
+            done < <(
+              git -C "$tree" ls-files -z -- \
+                ':(glob)**/Cargo.lock' \
+                ':(glob)**/pnpm-lock.yaml' \
+                ':(glob)**/go.mod'
+            )
+            if (( input_count == 0 )); then
+              echo "No tracked dependency inputs found in $tree" >&2
+              exit 1
+            fi
+            set +e
+            (
+              cd "$tree"
+              "$scanner" "${scan_args[@]}" \
+                --format json \
+                --output-file "$output"
+            )
+            status=$?
+            set -e
+            if [[ $status -ne 0 && $status -ne 1 ]]; then
+              echo "OSV-Scanner failed for $tree with status $status" >&2
+              exit "$status"
+            fi
+            test -s "$output"
+          }
+
+          # Reporter identifies a source by its recorded path when any
+          # vulnerability count increases. Materialize and scan both revisions
+          # at this exact absolute path so unchanged findings retain identity.
+          head_sha="$(git rev-parse HEAD)"
+          git worktree add --detach "$scan_tree_root" "$BASE_SHA"
+          scan_tree "$scan_tree_root" "$base_output"
+          git worktree remove --force "$scan_tree_root"
+          git worktree add --detach "$scan_tree_root" "$head_sha"
+          scan_tree "$scan_tree_root" "$head_output"
+
+          # Every tracked input is explicit, so OSV treats extraction failures
+          # as fatal. Also reject a malformed or truncated aggregate result.
+          node -e '
+            const fs = require("node:fs");
+            for (const path of process.argv.slice(1)) {
+              const value = JSON.parse(fs.readFileSync(path, "utf8"));
+              if (!value || typeof value !== "object" || !Array.isArray(value.results)) {
+                throw new Error(path + " does not contain an OSV results array");
+              }
+            }
+          ' "$base_output" "$head_output"
+
+          (
+            cd "$scan_tree_root"
+            "$reporter" --old "$base_output" --new "$head_output" \
+              "--output-files=gh-annotations:#stderr" \
+              --fail-on-vuln=true
+          )
+
+  full-inventory:
+    name: full dependency inventory
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-22.04
+    permissions:
+      actions: read
+      contents: read
+      security-events: write
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install verified OSV-Scanner
+        shell: bash
+        run: |
+          set -euo pipefail
+          scanner="$RUNNER_TEMP/osv-scanner"
+          url="https://github.com/google/osv-scanner/releases/download/${OSV_SCANNER_VERSION}/osv-scanner_linux_amd64"
+          curl --fail --location --proto '=https' --proto-redir '=https' --tlsv1.2 --retry 3 \
+            "$url" --output "$scanner"
+          echo "$OSV_SCANNER_SHA256  $scanner" | sha256sum --check --strict
+          chmod 0755 "$scanner"
+          "$scanner" --version
+
+      - name: Build raw SARIF inventory
+        shell: bash
+        run: |
+          set -euo pipefail
+          scanner="$RUNNER_TEMP/osv-scanner"
+          output="$RUNNER_TEMP/osv-results.sarif"
+          empty_config="$RUNNER_TEMP/osv-empty.toml"
+          : > "$empty_config"
+
+          reject_dependency_symlinks() {
+            local tree="$1"
+            local entry mode path
+            local failed=0
+            while IFS= read -r -d '' entry; do
+              mode="${entry%% *}"
+              path="${entry#*$'\t'}"
+              [[ "$mode" == "120000" ]] || continue
+              case "/$path" in
+                */Cargo.toml|*/Cargo.lock|*/package.json|*/package-lock.json|*/npm-shrinkwrap.json|*/pnpm-lock.yaml|*/pnpm-workspace.yaml|*/yarn.lock|*/bun.lock|*/bun.lockb|*/go.mod|*/go.sum|*/go.work|*/go.work.sum)
+                  printf 'Dependency input must not be a symbolic link: %q\n' "$path" >&2
+                  failed=1
+                  ;;
+              esac
+            done < <(git -C "$tree" ls-files -s -z)
+            (( failed == 0 ))
+          }
+
+          reject_go_workspace_overlays() {
+            local tree="$1"
+            local workspace_file
+            if IFS= read -r -d '' workspace_file < <(
+              git -C "$tree" ls-files -z -- \
+                ':(glob)**/go.work' \
+                ':(glob)**/go.work.sum'
+            ); then
+              printf 'Go workspace overlays are not supported by this audit: %q\n' "$workspace_file" >&2
+              return 1
+            fi
+          }
+
+          reject_dependency_symlinks "$GITHUB_WORKSPACE"
+          reject_go_workspace_overlays "$GITHUB_WORKSPACE"
+          input_count=0
+          scan_args=(
+            scan source
+            --no-ignore
+            --config "$empty_config"
+          )
+          while IFS= read -r -d '' input; do
+            if [[ "$input" =~ [[:cntrl:]] ]]; then
+              printf 'Dependency input path contains a forbidden control character: %q\n' "$input" >&2
+              exit 1
+            fi
+            case "$input" in
+              Cargo.lock|*/Cargo.lock) parse_as='Cargo.lock' ;;
+              pnpm-lock.yaml|*/pnpm-lock.yaml) parse_as='pnpm-lock.yaml' ;;
+              go.mod|*/go.mod) parse_as='go.mod' ;;
+              *) printf 'Unsupported dependency input: %q\n' "$input" >&2; exit 1 ;;
+            esac
+            scan_args+=(--lockfile "${parse_as}:${input}")
+            (( input_count += 1 ))
+          done < <(
+            git -C "$GITHUB_WORKSPACE" ls-files -z -- \
+              ':(glob)**/Cargo.lock' \
+              ':(glob)**/pnpm-lock.yaml' \
+              ':(glob)**/go.mod'
+          )
+          if (( input_count == 0 )); then
+            echo "No tracked dependency inputs found" >&2
+            exit 1
+          fi
+          set +e
+          (
+            cd "$GITHUB_WORKSPACE"
+            "$scanner" "${scan_args[@]}" \
+              --format sarif \
+              --output-file "$output"
+          )
+          status=$?
+          set -e
+          if [[ $status -ne 0 && $status -ne 1 ]]; then
+            exit "$status"
+          fi
+          test -s "$output"
+
+      - name: Publish dependency findings
+        uses: github/codeql-action/upload-sarif@b96794f015dfd88f77b49b1c93e0fa7110f94c63 # v4.38.0
+        with:
+          sarif_file: ${{ runner.temp }}/osv-results.sarif
+          category: osv-scanner
