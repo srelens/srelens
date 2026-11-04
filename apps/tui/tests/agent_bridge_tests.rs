@@ -579,19 +579,48 @@ async fn a_cli_agents_write_asks_the_user_and_cancelling_the_turn_denies_it() {
     )));
 
     let (url, authorization) = mcp_server_of(dir.path()).await;
+    let client = reqwest::Client::new();
+    let initialized = client
+        .post(&url)
+        .header("Authorization", &authorization)
+        .header("Content-Type", "application/json")
+        .body(
+            serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+            })
+            .to_string(),
+        )
+        .send()
+        .await
+        .expect("the MCP session initializes");
+    assert!(
+        initialized.status().is_success(),
+        "{}",
+        initialized.status()
+    );
+    let session = initialized
+        .headers()
+        .get("mcp-session-id")
+        .expect("initialize returns an MCP session id")
+        .to_str()
+        .expect("the MCP session id is visible ASCII")
+        .to_string();
     let call = tokio::spawn(async move {
         let body = serde_json::json!({
             "jsonrpc": "2.0",
-            "id": 1,
+            "id": 2,
             "method": "tools/call",
             "params": {
                 "name": "k8s.deletePod",
                 "arguments": { "context": "kind-dev", "namespace": "payments", "name": "api-0" },
             },
         });
-        let response = reqwest::Client::new()
+        let response = client
             .post(url)
             .header("Authorization", authorization)
+            .header("Mcp-Session-Id", session)
             .header("Content-Type", "application/json")
             .body(body.to_string())
             .send()
