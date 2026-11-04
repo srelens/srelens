@@ -145,7 +145,8 @@ pub struct DeleteResourceIn {
     pub name: String,
     /// For a custom resource, its CRD's group, version and plural (e.g.
     /// "traefik.io", "v1alpha1", "ingressroutes"), as `k8s.getManifest` takes
-    /// them. A kind outside the built-in table is refused without all three.
+    /// them. Give all three or none: a kind outside the built-in table is
+    /// refused without them, and any one of them alone is refused too.
     #[serde(default)]
     pub group: Option<String>,
     #[serde(default)]
@@ -225,6 +226,14 @@ pub fn delete_resource_capability(cache: Arc<ClientCache>) -> Capability {
         move |input: DeleteResourceIn| {
             let cache = cache.clone();
             async move {
+                // All three or none: a group given without its version and
+                // plural must not be dropped on the way to the built-in table.
+                let given = [&input.group, &input.version, &input.plural].iter().filter(|f| f.is_some()).count();
+                if given != 0 && given != 3 {
+                    return Err(CapabilityError::Handler(
+                        "a custom resource needs its group, version and plural together".into(),
+                    ));
+                }
                 // Resolved before anything reaches the cluster, by the reads'
                 // own resolver: a custom kind by its group/version/plural, a
                 // built-in by the table, anything else refused.
@@ -678,6 +687,31 @@ mod tests {
         };
         assert!(message.contains("Secret"), "{message}");
         assert_eq!(seen, ["GET /api/v1"], "nothing may be deleted");
+    }
+
+    /// A group without its version and plural must not be dropped on the way
+    /// to the built-in table: `Deployment` in `acme.io` would delete `apps/v1`'s.
+    #[tokio::test]
+    async fn delete_resource_refuses_a_custom_resource_given_only_part_of_its_coordinates() {
+        for (group, version, plural) in [
+            (Some("acme.io"), None, None),
+            (Some("acme.io"), Some("v1"), None),
+            (Some("acme.io"), None, Some("deployments")),
+            (None, Some("v1"), Some("deployments")),
+        ] {
+            let mut input = json!({ "context": "prod", "kind": "Deployment", "namespace": "default", "name": "api" });
+            for (field, value) in [("group", group), ("version", version), ("plural", plural)] {
+                if let Some(value) = value {
+                    input[field] = json!(value);
+                }
+            }
+            let (out, seen) = delete(input, 200, deleted("Deployment", "api")).await;
+            let Err(CapabilityError::Handler(message)) = out else {
+                panic!("{group:?}/{version:?}/{plural:?} must be refused, got {out:?}");
+            };
+            assert!(message.contains("group, version and plural"), "{message}");
+            assert!(seen.is_empty(), "nothing may reach the cluster for {group:?}/{version:?}/{plural:?}: {seen:?}");
+        }
     }
 
     /// The scope is the cluster's answer, not a guess from whether a namespace
