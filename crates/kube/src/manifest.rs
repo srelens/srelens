@@ -212,6 +212,19 @@ pub(crate) fn resolve_kind(
     plural: Option<&str>,
 ) -> Result<(ApiResource, bool), CapabilityError> {
     if let (Some(g), Some(v), Some(p)) = (group, version, plural) {
+        // Each becomes a path segment of the request, so each must be a name
+        // Kubernetes could have given it; the core group is the empty one.
+        use crate::collections::{check_name, NameRule};
+        for (what, value, rule) in [
+            ("group", g, NameRule::Subdomain),
+            ("version", v, NameRule::Label),
+            ("plural", p, NameRule::Label),
+        ] {
+            if !(what == "group" && value.is_empty()) {
+                check_name(value, rule)
+                    .map_err(|why| CapabilityError::Handler(format!("{what} {value:?} is not valid: {why}")))?;
+            }
+        }
         let namespaced = namespace.is_some_and(|s| !s.is_empty());
         // The plural decides what the request reaches; the caller's kind is
         // only a label. Where the group and plural are a built-in kind's, that
