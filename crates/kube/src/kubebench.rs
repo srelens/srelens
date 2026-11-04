@@ -27,6 +27,45 @@ pub const DEFAULT_IMAGE: &str = "docker.io/aquasec/kube-bench:latest";
 /// How long the capability waits for the benchmark by default, and at most.
 const DEFAULT_WAIT_SECS: u64 = 300;
 const MAX_WAIT_SECS: u64 = 900;
+/// Slack past the client's wait before the API server stops the Job itself.
+const DEADLINE_MARGIN_SECS: u64 = 60;
+
+/// How long the caller will wait, within bounds.
+fn wait_secs(input: &RunKubeBenchIn) -> u64 {
+    input.timeout_seconds.unwrap_or(DEFAULT_WAIT_SECS).clamp(10, MAX_WAIT_SECS)
+}
+
+/// Deletes the Job when dropped unless disarmed. Cancelling a scan aborts the
+/// task at an await point, so code after `wait_and_read` never runs; a drop
+/// guard still does.
+struct JobCleanup {
+    jobs: Api<Job>,
+    name: String,
+    armed: bool,
+}
+
+impl JobCleanup {
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for JobCleanup {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        // Best effort: without a runtime (shutdown) the Job's deadline reaps it.
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            let jobs = self.jobs.clone();
+            let name = std::mem::take(&mut self.name);
+            handle.spawn(async move {
+                let dp = DeleteParams { propagation_policy: Some(PropagationPolicy::Background), ..Default::default() };
+                let _ = tokio::time::timeout(request_timeout(), jobs.delete(&name, &dp)).await;
+            });
+        }
+    }
+}
 /// A Job that outlives a crashed srectl removes itself after this long.
 const JOB_TTL_SECS: i64 = 600;
 /// Findings listed in full; the rest are counted.
@@ -156,6 +195,10 @@ pub fn build_job(name: &str, namespace: &str, input: &RunKubeBenchIn) -> Result<
         "spec": {
             "backoffLimit": 0,
             "ttlSecondsAfterFinished": JOB_TTL_SECS,
+            // Server-side stop: a Job stuck pulling its image or waiting to be
+            // scheduled never "finishes", so the TTL alone would never reap it,
+            // and a cancelled client cannot clean up after itself.
+            "activeDeadlineSeconds": wait_secs(input) + DEADLINE_MARGIN_SECS,
             "template": {
                 "metadata": { "labels": { "app.kubernetes.io/name": "kube-bench" } },
                 "spec": pod_spec
@@ -375,7 +418,7 @@ async fn run(cache: Arc<ClientCache>, input: RunKubeBenchIn) -> Result<KubeBench
     let name = unique_name();
     let job = build_job(&name, &namespace, &input).map_err(handler)?;
     let keep = input.keep_job.unwrap_or(false);
-    let wait = Duration::from_secs(input.timeout_seconds.unwrap_or(DEFAULT_WAIT_SECS).clamp(10, MAX_WAIT_SECS));
+    let wait = Duration::from_secs(wait_secs(&input));
 
     let client = cache.get(&input.context).await.map_err(handler)?;
     let jobs: Api<Job> = crate::scoped_api(client.clone(), &namespace);
@@ -386,12 +429,15 @@ async fn run(cache: Arc<ClientCache>, input: RunKubeBenchIn) -> Result<KubeBench
         .map_err(|_| handler("creating the kube-bench Job timed out".into()))?
         .map_err(|e| handler(format!("creating the kube-bench Job failed: {e}")))?;
 
-    // From here on the Job exists: clean it up however this ends.
+    // From here on the Job exists: clean it up however this ends, including
+    // this future being dropped mid-wait by a cancel or the watchdog.
+    let mut cleanup = JobCleanup { jobs: jobs.clone(), name: name.clone(), armed: !keep };
     let outcome = wait_and_read(&jobs, &pods, &name, wait).await;
     if !keep {
         let dp = DeleteParams { propagation_policy: Some(PropagationPolicy::Background), ..Default::default() };
         let _ = tokio::time::timeout(request_timeout(), jobs.delete(&name, &dp)).await;
     }
+    cleanup.disarm();
     let logs = outcome.map_err(handler)?;
     let report = parse_report(&logs).map_err(handler)?;
     Ok(KubeBenchOut {
@@ -474,6 +520,63 @@ mod tests {
 
     fn job_json(job: &Job) -> Value {
         serde_json::to_value(job).unwrap()
+    }
+
+    #[test]
+    fn the_job_carries_a_server_side_deadline_past_the_clients_wait() {
+        let v = job_json(&build_job("j", "ns", &input()).unwrap());
+        assert_eq!(v["spec"]["activeDeadlineSeconds"], DEFAULT_WAIT_SECS + DEADLINE_MARGIN_SECS);
+        let mut i = input();
+        i.timeout_seconds = Some(100_000);
+        let v = job_json(&build_job("j", "ns", &i).unwrap());
+        assert_eq!(v["spec"]["activeDeadlineSeconds"], MAX_WAIT_SECS + DEADLINE_MARGIN_SECS);
+    }
+
+    fn recording_jobs() -> (Api<Job>, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let captured = seen.clone();
+        let service = tower::service_fn(move |req: http::Request<kube::client::Body>| {
+            let captured = captured.clone();
+            async move {
+                captured.lock().unwrap().push(format!("{} {}", req.method(), req.uri().path()));
+                Ok::<_, std::convert::Infallible>(
+                    http::Response::builder()
+                        .status(200)
+                        .header("content-type", "application/json")
+                        .body(kube::client::Body::from(b"{}".to_vec()))
+                        .unwrap(),
+                )
+            }
+        });
+        let client = kube::Client::new(service, "default");
+        (Api::namespaced(client, "ns"), seen)
+    }
+
+    #[tokio::test]
+    async fn a_dropped_scan_still_deletes_its_job() {
+        let (jobs, seen) = recording_jobs();
+        let guard = JobCleanup { jobs, name: "kube-bench-x".into(), armed: true };
+        drop(guard); // what aborting the task does to the future that holds it
+        for _ in 0..50 {
+            if !seen.lock().unwrap().is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let calls = seen.lock().unwrap().clone();
+        assert_eq!(calls.len(), 1, "{calls:?}");
+        assert!(calls[0].starts_with("DELETE ") && calls[0].ends_with("/jobs/kube-bench-x"), "{calls:?}");
+    }
+
+    #[tokio::test]
+    async fn a_finished_scan_does_not_delete_twice_or_when_the_job_is_kept() {
+        let (jobs, seen) = recording_jobs();
+        let mut done = JobCleanup { jobs: jobs.clone(), name: "a".into(), armed: true };
+        done.disarm();
+        drop(done);
+        drop(JobCleanup { jobs, name: "b".into(), armed: false });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(seen.lock().unwrap().is_empty());
     }
 
     #[test]

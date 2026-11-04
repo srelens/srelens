@@ -1456,6 +1456,15 @@ async fn run_suite() {
 
     let gpu_inv = h.ok("k8s.gpuInventory", json!({ "context": ctx })).await;
     assert!(gpu_inv["total_gpu_nodes"].is_number() || gpu_inv["nodes"].is_array());
+    let cost = h
+        .ok(
+            "k8s.costOverview",
+            json!({ "context": ctx, "cpuCoreHour": 0.05 }),
+        )
+        .await;
+    assert!(cost["nodes"].as_array().is_some_and(|n| !n.is_empty()), "the cluster has nodes: {cost}");
+    assert_eq!(cost["rates"]["cpuCoreHour"], 0.05);
+    assert!(cost["rates"]["memGibHour"].as_f64().is_some_and(|m| m > 0.0), "the other price defaults on its own");
     let nd = h
         .ok(
             "k8s.createNodeDebugPod",

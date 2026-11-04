@@ -51,6 +51,7 @@ fn data() -> ClusterCompute {
         usage_note: None,
         provider: None,
         provider_note: None,
+        discovery_note: None,
     }
 }
 
@@ -353,10 +354,11 @@ async fn waiting_for_data_does_not_wait_forever() {
     let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app().await;
     on_cost(&mut app).await;
-    if let ActiveView::Cost(c) = &mut app.active_view {
-        c.install = InstallState::Running(Step::WaitingForData);
-        c.install_since = Some(Instant::now() - Duration::from_secs(20 * 60));
-    }
+    app.set_install(
+        "test-cluster",
+        InstallState::Running(Step::WaitingForData),
+        Some(Instant::now() - Duration::from_secs(20 * 60)),
+    );
     app.handle_tick();
     assert_eq!(install_state(&app), InstallState::Idle, "gave up quietly");
     let (msg, _, _) = app.toast.clone().expect("told the user");
@@ -394,4 +396,98 @@ async fn switching_clusters_does_not_kill_an_install_in_progress() {
     app.switch_context("staging".into()).await;
     // Killing helm half way would leave a half-installed release behind.
     assert!(app.kubecost_install_task.is_some(), "the task is left to finish");
+}
+
+// ---- a dashboard left under another screen -----------------------------------
+
+#[tokio::test]
+async fn a_saved_dashboard_hears_about_an_install_that_finished_while_it_was_away() {
+    let _settings = common::env::isolate_settings();
+    let (mut app, _rx) = common::app().await;
+    on_cost(&mut app).await;
+    app.handle_cost_result("test-cluster", Ok(data()));
+    common::press(&mut app, common::key(KeyCode::Esc)).await; // decline the offer
+    app.start_kubecost_install();
+    assert_eq!(install_state(&app), InstallState::Running(Step::AddingRepo));
+
+    // Open :pods over it; the dashboard is parked on the back stack.
+    app.switch_view_to_kind(ResourceKind::Pods).await;
+    assert!(!matches!(app.active_view, ActiveView::Cost(_)));
+
+    app.handle_cost_install_done("test-cluster", Err("Installing Kubecost: no space".into()));
+    let parked = app
+        .nav_stack
+        .iter()
+        .find_map(|v| match v {
+            ActiveView::Cost(c) => Some(c.install.clone()),
+            _ => None,
+        })
+        .expect("the dashboard is saved under the pods view");
+    assert!(matches!(parked, InstallState::Failed(_)), "not stuck on Running: {parked:?}");
+
+    // Esc back: the failure is what it shows, so `i` can offer a retry.
+    common::press(&mut app, common::key(KeyCode::Esc)).await;
+    assert!(matches!(install_state(&app), InstallState::Failed(_)));
+}
+
+#[tokio::test]
+async fn a_dashboard_opened_later_on_the_same_cluster_knows_an_install_is_running() {
+    let _settings = common::env::isolate_settings();
+    let (mut app, _rx) = common::app().await;
+    on_cost(&mut app).await;
+    app.handle_cost_result("test-cluster", Ok(data()));
+    common::press(&mut app, common::key(KeyCode::Esc)).await;
+    app.start_kubecost_install();
+    app.switch_view_to_kind(ResourceKind::Pods).await;
+    on_cost(&mut app).await;
+    assert_eq!(install_state(&app), InstallState::Running(Step::AddingRepo));
+}
+
+#[tokio::test]
+async fn a_late_step_does_not_resurrect_a_finished_install() {
+    let _settings = common::env::isolate_settings();
+    let (mut app, _rx) = common::app().await;
+    on_cost(&mut app).await;
+    app.handle_cost_result("test-cluster", Ok(data()));
+    common::press(&mut app, common::key(KeyCode::Esc)).await;
+    app.start_kubecost_install();
+    app.handle_cost_install_done("test-cluster", Err("boom".into()));
+    app.handle_cost_install_step("test-cluster", Step::Installing);
+    assert!(matches!(install_state(&app), InstallState::Failed(_)));
+}
+
+// ---- the note is readable on a small terminal --------------------------------
+
+#[tokio::test]
+async fn the_install_note_scrolls_and_keeps_the_choice_visible_at_80x24() {
+    let _settings = common::env::isolate_settings();
+    let (mut app, _rx) = common::app().await;
+    on_cost(&mut app).await;
+    app.handle_cost_result("test-cluster", Ok(data()));
+    assert!(matches!(app.modal, Some(Modal::KubecostInstall { .. })));
+
+    let top = common::render_app(&mut app, 80, 24);
+    assert!(top.contains("[Enter/y]") && top.contains("[Esc/n]"), "the choice is always on screen:\n{top}");
+    assert!(!top.contains("helm uninstall"), "the removal commands are below the fold at first:\n{top}");
+
+    common::press(&mut app, common::key(KeyCode::End)).await;
+    let end = common::render_app(&mut app, 80, 24);
+    assert!(end.contains("helm uninstall"), "scrolled to the removal commands:\n{end}");
+    assert!(end.contains("[Enter/y]") && end.contains("[Esc/n]"), "and the choice is still there:\n{end}");
+
+    // Down at the end builds no hidden offset: one Up moves at once.
+    for _ in 0..20 {
+        common::press(&mut app, common::key(KeyCode::Down)).await;
+    }
+    common::press(&mut app, common::key(KeyCode::Up)).await;
+    let up = common::render_app(&mut app, 80, 24);
+    assert_ne!(end, up, "one step up changes the view");
+
+    common::press(&mut app, common::key(KeyCode::Home)).await;
+    let home = common::render_app(&mut app, 80, 24);
+    assert_eq!(top, home);
+
+    // Scrolling never answers the question.
+    assert!(matches!(app.modal, Some(Modal::KubecostInstall { .. })));
+    assert_eq!(install_state(&app), InstallState::Idle);
 }
