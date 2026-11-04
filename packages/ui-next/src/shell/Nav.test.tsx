@@ -401,7 +401,7 @@ describe("Nav arrangement", () => {
     const sequence = [...tree.querySelectorAll(":scope > li")].map((li) =>
       li.getAttribute("data-slot") === "band-rule" ? "—" : li.querySelector(".truncate")?.textContent);
     expect(sequence).toEqual([
-      "Overview", "Nodes", "Namespaces", "Events",
+      "Overview", "Problems", "Nodes", "Namespaces", "Events",
       "—",
       "Workloads", "Config", "Network", "Storage", "Access control", "Custom resources",
       "—",
