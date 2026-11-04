@@ -1,7 +1,7 @@
 import { appNavigation } from "../extensions/appNavigation";
 import { useExtensions } from "../extensions/Extensions";
 import { symbolFor } from "../lib/markSymbols";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { listCrds, type ClusterContext, type CrdRef } from "@srelens/core";
 import { Mark, ResourceTree, Sidebar, StatusPill, type ResourceNode, type StatusKind } from "@srelens/ui-kit";
 import { saveNavigationWidth, setNavigationWidth, useNavigationWidth } from "../lib/navigationWidth";
@@ -102,6 +102,14 @@ export function Nav({ contexts }: NavProps) {
     },
     [name, paused],
   );
+  // App pages are hidden by this list (#1024), so it is read again, quietly, when the
+  // window gets focus: that is where a CRD installed by another process, helm in a
+  // terminal say, shows — as the app inventory does.
+  const { refresh: rediscover } = discovery;
+  useEffect(() => {
+    window.addEventListener("focus", rediscover);
+    return () => window.removeEventListener("focus", rediscover);
+  }, [rediscover]);
   const crds = useMemo(() => discovery.data ?? [], [discovery.data]);
   // How many of each kind, for the rows under an open fold (#402).
   const counts = useSidebarCounts({ ctx, paused, expanded: ctx ? view.expanded[ctx.stableId] ?? NO_FOLDS : NO_FOLDS, crds });

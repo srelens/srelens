@@ -449,6 +449,14 @@ describe("app pages on a cluster without their CRDs", () => {
     render(<Nav contexts={[PROD]} />);
     expect(await pages()).toBe(2);
   });
+  it("asks again when the window gets focus, so an operator installed since shows its page", async () => {
+    render(<Nav contexts={[PROD]} />);
+    expect(await pages()).toBe(1);
+    listCrds.mockResolvedValue({ crds: [{ ...CERTS, versions: ["v1"] }] });
+    act(() => { window.dispatchEvent(new Event("focus")); });
+    await waitFor(() => expect(screen.getByRole("treeitem", { name: "Cert manager" }).hasAttribute("aria-expanded")).toBe(true));
+    expect(listCrds).toHaveBeenCalledTimes(2);
+  });
   it("offers every page when discovery fails", async () => {
     listCrds.mockResolvedValue({ error: "crds forbidden" });
     render(<Nav contexts={[PROD]} />);
