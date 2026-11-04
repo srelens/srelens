@@ -71,6 +71,11 @@ jobs:
         run: pnpm test
       - name: Release workflow tests
         run: node --test .github/scripts/*.test.cjs
+      - name: Homebrew renderer tests
+        # The cask is generated only after a stable release is public. Keep its
+        # version, checksum, placeholder, and architecture guards exercised on
+        # every PR instead of finding a broken renderer during publication.
+        run: node --test packaging/homebrew/*.test.mjs
       - name: Performance-baseline script tests
         # The size classifier decides which artifacts are compared against
         # which (#31) — a wrong bucket silently publishes a bogus comparison.
