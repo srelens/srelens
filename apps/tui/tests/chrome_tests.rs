@@ -20,7 +20,7 @@ use srectl::commands::command_suggestions;
 use srectl::ui::dialogs::{
     render_modal, ContainerAction, ContextPickerItem, Modal, QuickActionId, QuickActionItem,
 };
-use srectl::ui::header::{render_header, ContextChipInfo, HeaderProps};
+use srectl::ui::header::{render_header, AlertBadge, ContextChipInfo, HeaderProps};
 use srectl::ui::help::{centered_rect, render_help_modal};
 use srectl::ui::statusbar::{command_popup_rect, render_statusbar, InputMode, StatusBarProps};
 use srectl::views::assistant_view::{
@@ -147,6 +147,7 @@ fn header_props<'a>(contexts: &'a [ContextChipInfo]) -> HeaderProps<'a> {
         contexts,
         context_chip_rects: None,
         update_available: None,
+        alert_badge: AlertBadge::default(),
     }
 }
 
@@ -2857,4 +2858,52 @@ fn oversized_helm_errors_preserve_recovery_and_stale_rows() {
             }
         }
     }
+}
+
+
+// ---------------------------------------------------------------------------
+// The alert badge
+// ---------------------------------------------------------------------------
+
+fn badge_cell_bg(count: usize, has_error: bool) -> (String, Option<ratatui::style::Color>) {
+    let ctxs: Vec<ContextChipInfo> = vec![];
+    let mut props = header_props(&ctxs);
+    props.alert_badge = AlertBadge { count, has_error };
+    let buf = common::render_buffer(140, 4, |f| {
+        render_header(f, Rect::new(0, 0, 140, 4), props)
+    });
+    let lines = common::buffer_lines(&buf);
+    let row = lines[0].clone();
+    // Find the badge's "!" and read the background of the cell holding it.
+    let bg = (0..buf.area.width)
+        .find(|&x| buf[(x, 0)].symbol() == "!")
+        .map(|x| buf[(x, 0)].bg);
+    (row, bg)
+}
+
+#[test]
+fn no_badge_is_drawn_when_nothing_is_unread() {
+    let (row, bg) = badge_cell_bg(0, false);
+    assert!(bg.is_none(), "no badge expected: {row}");
+}
+
+#[test]
+fn the_badge_shows_the_unread_count() {
+    let (row, bg) = badge_cell_bg(3, true);
+    assert!(bg.is_some(), "badge expected: {row}");
+    assert!(row.contains("! 3"), "count beside the mark: {row}");
+}
+
+#[test]
+fn an_unread_error_makes_the_badge_red_and_warnings_only_make_it_yellow() {
+    let (_, red) = badge_cell_bg(2, true);
+    let (_, yellow) = badge_cell_bg(2, false);
+    assert_eq!(red, Some(srectl::theme::Theme::red()));
+    assert_eq!(yellow, Some(srectl::theme::Theme::yellow()));
+}
+
+#[test]
+fn a_large_count_is_capped_so_the_badge_stays_small() {
+    let (row, _) = badge_cell_bg(250, true);
+    assert!(row.contains("99+"), "{row}");
 }

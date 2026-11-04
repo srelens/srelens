@@ -8,7 +8,7 @@
 
 use crate::event::AppEvent;
 use crossterm::event::{KeyCode, KeyEvent};
-use srelens_mcp::policy::{ConfirmPolicy, ConsentRequest, Decision};
+use srelens_mcp::policy::{ConfirmPolicy, ConsentKind, ConsentRequest, Decision};
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -147,6 +147,44 @@ impl ConsentQueue {
     /// A new front prompt has not been drawn yet.
     fn front_changed(&mut self) {
         self.front_shown = None;
+    }
+}
+
+/// A read-only persona's policy: a write is refused without asking anyone,
+/// whatever the user might have said. Reading something sensitive is not a
+/// change, so that still goes to the wrapped policy (and its prompt).
+///
+/// The one exception is a short list of named scan tools (kube-bench creates
+/// a Job to read a node's configuration). Those still go to the wrapped
+/// policy, so the user is asked first; they are not approved here.
+pub struct ReadOnly<P> {
+    inner: P,
+    allowed: &'static [&'static str],
+}
+
+impl<P> ReadOnly<P> {
+    pub fn new(inner: P) -> Self {
+        Self { inner, allowed: &[] }
+    }
+
+    /// Let these tools (by exact capability id) through to the wrapped policy.
+    pub fn allowing(mut self, tools: &'static [&'static str]) -> Self {
+        self.allowed = tools;
+        self
+    }
+}
+
+#[async_trait::async_trait]
+impl<P: ConfirmPolicy> ConfirmPolicy for ReadOnly<P> {
+    async fn confirm(&self, request: &ConsentRequest) -> Decision {
+        if request.kind == ConsentKind::Destructive && !self.allowed.contains(&request.tool.as_str()) {
+            return Decision::Denied(format!(
+                "`{}` {}, and this persona is read-only. Describe the change for the user to make instead.",
+                request.tool,
+                request.kind.effect()
+            ));
+        }
+        self.inner.confirm(request).await
     }
 }
 

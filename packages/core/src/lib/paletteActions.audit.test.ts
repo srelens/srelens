@@ -16,6 +16,7 @@ const EXCLUDED: Record<string, string> = {
   "k8s.requestCordonNode": "reviewed app action adapter; the palette uses k8s.cordonNode without a reviewed UID/resourceVersion",
   "k8s.mergePatch": "a host action primitive: reached only through an app's declared action, on a reviewed resource",
   "k8s.nodeServiceRestart": "node service remediation is surfaced in Node view / incident actions and requires an SSH target",
+  "k8s.runKubeBench": "a node-level CIS benchmark run by the Security assistant persona in srectl and over MCP, not a resource-targeted palette action",
   "extensions.action": "not a static entry: reached only through an app's contributed action command (see below), which opens the host confirmation in the app resource inspector",
   "extensions.runJob": "reached through an installed executable app's explicit scan operation, with its reviewed Job binding and host confirmation",
   "extensions.configure": "extension lifecycle and permissions are managed in Settings → Apps",

@@ -383,7 +383,10 @@ async fn a_reachable_apiserver_reports_its_version_and_node_and_pod_counts() {
     let payload = action_result(&mut rx, "cluster_info_updated")
         .await
         .expect("a reachable apiserver reports Ok");
-    assert_eq!(payload, "v1.31.7|2|3");
+    assert_eq!(
+        payload, "v1.31.7|2|3|srelens-fake-apiserver-ctx",
+        "the payload names the context it was fetched for"
+    );
 
     app.handle_cluster_info_update(&payload);
     assert!(app.is_connected);
@@ -417,7 +420,7 @@ async fn unlistable_nodes_and_pods_still_report_a_version_with_zero_counts() {
     let payload = action_result(&mut rx, "cluster_info_updated")
         .await
         .expect("version alone is enough");
-    assert_eq!(payload, "v1.31.7|0|0");
+    assert_eq!(payload, "v1.31.7|0|0|srelens-fake-apiserver-ctx");
 }
 
 // ---------------------------------------------------------------------------

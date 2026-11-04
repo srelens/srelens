@@ -507,6 +507,9 @@ pub struct CliTurn {
     pub resume: Option<String>,
     /// Where Cursor chats are kept ([`process_cursor_chats_root`]).
     pub chat_root: PathBuf,
+    /// A read-only persona: the turn's writes are refused, not asked about,
+    /// except for the named scan tools in the list. `None` is not read-only.
+    pub read_only: Option<&'static [&'static str]>,
 }
 
 /// `cmd` with Cursor's API key in the child's environment — never in argv,
@@ -575,6 +578,7 @@ pub async fn run_cli_agent_turn(turn: CliTurn) {
         conversation_id,
         resume,
         chat_root,
+        read_only,
     } = turn;
     let send = |action: &str, result: Result<String, String>| {
         let _ = tx.send(AppEvent::ActionResult {
@@ -613,9 +617,13 @@ pub async fn run_cli_agent_turn(turn: CliTurn) {
     let consent =
         crate::consent::TuiConsent::new(tx.clone(), kind.label(), &ctx).for_turn(turn_over.clone());
     let waiting = consent.waiting();
+    let policy: Arc<dyn srelens_mcp::policy::ConfirmPolicy> = match read_only {
+        Some(scan_tools) => Arc::new(crate::consent::ReadOnly::new(consent).allowing(scan_tools)),
+        None => Arc::new(consent),
+    };
     let registry = srelens_registry::build_registry_with_paths(cache.clone(), kubeconfig_paths);
     let server = McpServer::new(Arc::new(registry))
-        .with_policy(Arc::new(consent))
+        .with_policy(policy)
         // #968: the desktop app's AI Assistant switches hold here too.
         .with_assistant(Arc::new(srelens_registry::assistant::SettingsAssistant::new(
             srelens_registry::default_settings_path(),

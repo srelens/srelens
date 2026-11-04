@@ -7,11 +7,11 @@ Everything this server exposes over MCP, generated from the live registry so it 
 
 ## Tools
 
-139 tools, grouped by area and then by how a call is gated. Argument schemas are not reproduced here — call `tools/list` for those, which cannot go stale.
+141 tools, grouped by area and then by how a call is gated. Argument schemas are not reproduced here — call `tools/list` for those, which cannot go stale.
 
 **Impact** is how much a successful call disturbs — `low`, `medium` or `high` — and is a different question from the section heading, which is how the call is gated. A capability that accepts several named operations carries the highest level any of them reaches; the per-operation level travels with the resource.
 
-### Kubernetes — read-only (66)
+### Kubernetes — read-only (67)
 
 | Tool | Impact | Summary |
 | --- | --- | --- |
@@ -19,6 +19,7 @@ Everything this server exposes over MCP, generated from the live registry so it 
 | `k8s.canI` | low | check whether the current user can perform actions (SelfSubjectAccessReview, batched) |
 | `k8s.clusterFacts` | low | report a cluster's provider, region and metrics-server availability |
 | `k8s.clusterInfo` | low | connect to a kube context and report server version and reachability |
+| `k8s.costOverview` | low | compute capacity, what pods request, idle compute and an estimated cost for a cluster, plus real per-namespace spend when Kubecost or OpenCost is installed |
 | `k8s.countResources` | low | how many objects of each kind there are, counted without listing them: one metadata-only request per kind (and per namespace) asking for a single object, plus the API server's remainingItemCount. Omit `namespaces` to count all namespaces; cluster-scoped kinds ignore it. For a custom resource pass `group`, `version`, `plural` and `namespaced` as well as `kind`. A kind that could not be counted (refused, timed out, or the server did not say) has `count: null` and an `error`, never 0. |
 | `k8s.diffManifest` | low | diff a manifest against the cluster via server dry-run apply (per document) |
 | `k8s.getCustomResource` | low | Inspect one custom resource and its events |
@@ -93,7 +94,7 @@ Everything this server exposes over MCP, generated from the live registry so it 
 | `k8s.podConnections` | medium | read the established TCP connections of pods, from their own /proc/net/tcp |
 | `k8s.topologyProbe` | medium | the topology graph, plus each pod's open connections read over pods/exec (one exec per pod) |
 
-### Kubernetes — needs confirmation (14)
+### Kubernetes — needs confirmation (15)
 
 | Tool | Impact | Summary |
 | --- | --- | --- |
@@ -107,6 +108,7 @@ Everything this server exposes over MCP, generated from the live registry so it 
 | `k8s.requestRolloutRestart` | high | Request a rolling restart of the reviewed built-in workload; requires confirmation |
 | `k8s.rolloutRestart` | medium | trigger a rolling restart of a workload |
 | `k8s.rolloutUndo` | medium | roll a Deployment back to an earlier revision (kubectl rollout undo --to-revision) |
+| `k8s.runKubeBench` | high | run the CIS Kubernetes Benchmark (kube-bench) on a node as a one-off Job, wait for it, and return the failed and manual-review checks with their remediation |
 | `k8s.scale` | medium | set the replica count of a workload (Deployment/StatefulSet/ReplicaSet) |
 | `k8s.setFields` | medium | Set fixed spec fields on the reviewed resource, as an app's action declares them; requires confirmation |
 | `k8s.setStatusCondition` | medium | Write one status condition on the reviewed resource through the status subresource, as an app's action declares it; requires confirmation |

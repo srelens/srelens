@@ -1265,14 +1265,19 @@ pub fn render_assistant_view(
         Some(lvl) => format!(" [🦖 CAVEMAN: {}]", lvl.display_name().to_uppercase()),
         None => String::new(),
     };
+    let persona_tag = match settings.persona.as_deref().and_then(crate::ai_personas::find) {
+        Some(p) if p.read_only => format!(" [{} · read-only]", p.name),
+        Some(p) => format!(" [{}]", p.name),
+        None => String::new(),
+    };
     let back_or_cancel = if state.is_busy {
         "<Ctrl+c> Cancel, <Esc> Back"
     } else {
         "<Esc> Back"
     };
     let title = format!(
-        " SRElens AI Assistant{}{}[{}] [{}{}, {}, <Ctrl+o> Save, <Ctrl+l> Clear, <Ctrl+s> Settings, {}] ",
-        cluster_tag, caveman_tag, route, token_hint, copy_hint, tools_hint, back_or_cancel
+        " SRElens AI Assistant{}{}{}[{}] [{}{}, {}, <Ctrl+o> Save, <Ctrl+l> Clear, <Ctrl+s> Settings, {}] ",
+        cluster_tag, persona_tag, caveman_tag, route, token_hint, copy_hint, tools_hint, back_or_cancel
     );
 
     let block = Block::default()

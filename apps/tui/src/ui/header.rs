@@ -16,6 +16,14 @@ pub struct ContextChipInfo {
     pub index: usize,
 }
 
+/// The unread-alert badge at the right edge of the header.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct AlertBadge {
+    pub count: usize,
+    /// At least one unread alert is an error: red instead of yellow.
+    pub has_error: bool,
+}
+
 pub struct HeaderProps<'a> {
     pub context: &'a str,
     pub cluster: &'a str,
@@ -29,6 +37,7 @@ pub struct HeaderProps<'a> {
     pub contexts: &'a [ContextChipInfo],
     pub context_chip_rects: Option<&'a std::cell::RefCell<Vec<(Rect, String)>>>,
     pub update_available: Option<&'a str>,
+    pub alert_badge: AlertBadge,
 }
 
 pub fn render_header(f: &mut Frame, area: Rect, props: HeaderProps) {
@@ -331,7 +340,31 @@ pub fn render_header(f: &mut Frame, area: Rect, props: HeaderProps) {
     }
 }
 
+/// The stats line with the alert badge on its right edge, where it stays put
+/// as the other numbers change width.
 pub fn build_stats_line(props: &HeaderProps) -> Line<'static> {
+    let mut line = build_stats_core(props);
+    let AlertBadge { count, has_error } = props.alert_badge;
+    if count > 0 {
+        let shown = if count > 99 {
+            "99+".to_string()
+        } else {
+            count.to_string()
+        };
+        let bg = if has_error { Theme::red() } else { Theme::yellow() };
+        line.spans.push(Span::raw("  "));
+        line.spans.push(Span::styled(
+            format!(" ! {shown} "),
+            Style::default()
+                .bg(bg)
+                .fg(ratatui::style::Color::Black)
+                .add_modifier(Modifier::BOLD),
+        ));
+    }
+    line
+}
+
+fn build_stats_core(props: &HeaderProps) -> Line<'static> {
     let header_style = Theme::header_style();
     let bullet = Theme::bullet_glyph();
     let status_color = if props.is_connected {

@@ -521,6 +521,9 @@ fn build_with(
     reg.register(srelens_kube::cronjobs::cronjob_trigger_now_capability(
         cache.clone(),
     ));
+    reg.register(srelens_kube::kubebench::run_kube_bench_capability(
+        cache.clone(),
+    ));
     reg.register(srelens_kube::configmaps::list_configmaps_capability(
         cache.clone(),
     ));
@@ -636,6 +639,7 @@ fn build_with(
     reg.register(srelens_kube::gpu_info::gpu_inventory_capability(
         cache.clone(),
     ));
+    reg.register(srelens_kube::cost::cost_overview_capability(cache.clone()));
     reg.register(srelens_kube::node_ssh::node_service_status_capability(
         cache.clone(),
     ));

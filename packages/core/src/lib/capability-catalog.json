@@ -312,6 +312,15 @@
     "confirm": "Change scheduling[ on {resource}][ in cluster {cluster}]?"
   },
   {
+    "id": "k8s.costOverview",
+    "readOnly": true,
+    "destructive": false,
+    "requiresConfirm": false,
+    "sensitive": false,
+    "impact": "low",
+    "confirm": null
+  },
+  {
     "id": "k8s.countResources",
     "readOnly": true,
     "destructive": false,
@@ -1094,6 +1103,15 @@
     "sensitive": false,
     "impact": "medium",
     "confirm": "Roll back Deployment[ {namespace}/{name}][ in cluster {cluster}] to an earlier revision?"
+  },
+  {
+    "id": "k8s.runKubeBench",
+    "readOnly": false,
+    "destructive": false,
+    "requiresConfirm": true,
+    "sensitive": false,
+    "impact": "high",
+    "confirm": "Run kube-bench, a Job with host PID access[ in namespace {namespace}][ in cluster {cluster}]?"
   },
   {
     "id": "k8s.scale",

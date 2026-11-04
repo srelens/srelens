@@ -61,6 +61,7 @@ impl DeepLink {
                             crate::commands::ResourceKind::TuiConfig => "config".to_string(),
                             crate::commands::ResourceKind::ArgoApplications => "argo".to_string(),
                             crate::commands::ResourceKind::BgpPeers => "bgp".to_string(),
+                            crate::commands::ResourceKind::Cost => "cost".to_string(),
                             other => other.to_string().to_lowercase(),
                         };
                         (Some(ns.as_str()), name)
@@ -77,6 +78,7 @@ impl DeepLink {
                             crate::commands::ResourceKind::TuiConfig => "config".to_string(),
                             crate::commands::ResourceKind::ArgoApplications => "argo".to_string(),
                             crate::commands::ResourceKind::BgpPeers => "bgp".to_string(),
+                            crate::commands::ResourceKind::Cost => "cost".to_string(),
                             other => other.to_string().to_lowercase(),
                         };
                         (namespace.as_deref(), name)
@@ -85,12 +87,15 @@ impl DeepLink {
                         (namespace.as_deref(), crd.plural.to_lowercase())
                     }
                     CommandTarget::Help => (namespace.as_deref(), "help".to_string()),
+                    CommandTarget::Notifications => (namespace.as_deref(), "notifications".to_string()),
                     CommandTarget::Contexts => (namespace.as_deref(), "contexts".to_string()),
                     CommandTarget::AddCluster => (namespace.as_deref(), "import".to_string()),
                     CommandTarget::Namespaces => (namespace.as_deref(), "namespaces".to_string()),
                     CommandTarget::Quit => (namespace.as_deref(), "quit".to_string()),
                     CommandTarget::ThemePicker => (namespace.as_deref(), "themes".to_string()),
                     CommandTarget::SetTheme(t) => (namespace.as_deref(), format!("theme/{}", t)),
+                    CommandTarget::Persona => (namespace.as_deref(), "persona".to_string()),
+                    CommandTarget::SetPersona(p) => (namespace.as_deref(), format!("persona/{}", p)),
                     CommandTarget::FeatureBanner => (namespace.as_deref(), "features".to_string()),
                     CommandTarget::OpenUrl(u) => (namespace.as_deref(), format!("open/{}", u)),
                     CommandTarget::Update => (namespace.as_deref(), "update".to_string()),
@@ -159,7 +164,11 @@ impl DeepLink {
                     } else {
                         Some(raw_ns.to_string())
                     };
-                    let view_str = parts[3];
+                    // `to_url` writes argument-taking targets as `persona/security` and
+                    // `theme/nord`; rejoin the tail so `:persona security` resolves to the
+                    // setter instead of the bare picker.
+                    let view_str = parts[3..].join(" ");
+                    let view_str = view_str.as_str();
                     let target = resolve_command(format!(":{}", view_str).as_str())
                         .or_else(|| resolve_command(view_str))
                         .ok_or_else(|| format!("Unknown view target: '{}'", view_str))?;
@@ -241,6 +250,18 @@ impl DeepLink {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn persona_and_theme_setters_round_trip_through_a_url() {
+        for target in [
+            CommandTarget::SetPersona("security".to_string()),
+            CommandTarget::SetTheme("nord".to_string()),
+        ] {
+            let link = DeepLink::View { context: None, namespace: None, target: target.clone() };
+            let parsed = DeepLink::parse(&link.to_url()).expect("should parse");
+            assert_eq!(parsed, link, "{:?} must survive to_url -> parse", target);
+        }
+    }
 
     #[test]
     fn test_parse_resource_deep_link() {

@@ -44,6 +44,7 @@ pub enum ResourceKind {
     Workloads,
     Topology,
     GpuInfo,
+    Cost,
     TopPods,
     TopNodes,
     BgpPeers,
@@ -196,6 +197,7 @@ impl ResourceKind {
             Self::Workloads => "Workloads",
             Self::Topology => "Workload & Traffic Topology",
             Self::GpuInfo => "GPU Info & VRAM Allocation",
+            Self::Cost => "Cost & Compute",
             Self::TopPods => "Top Pods",
             Self::TopNodes => "Top Nodes",
             Self::BgpPeers => "BGP Peering & Routes",
@@ -310,6 +312,7 @@ impl ResourceKind {
             | Self::Toolbox
             | Self::Assistant
             | Self::BgpPeers
+            | Self::Cost
             | Self::PriorityClasses
             | Self::RuntimeClasses
             | Self::MutatingWebhookConfigurations
@@ -377,10 +380,15 @@ pub enum CommandTarget {
     Contexts,
     Namespaces,
     Help,
+    Notifications,
     Quit,
     OpenUrl(String),
     ThemePicker,
     SetTheme(String),
+    /// The Assistant persona picker (`:persona`).
+    Persona,
+    /// `:persona <name>`; also `off` / `none` to go back to the plain assistant.
+    SetPersona(String),
     FeatureBanner,
     Update,
     AddCluster,
@@ -393,6 +401,13 @@ pub const COMMAND_REGISTRY: &[CommandDef] = &[
         description: "Interactive theme selector (Catppuccin, Tokyo Night, Dracula, Nord, Gruvbox, etc.)",
         search_terms: "",
         target: CommandTarget::ThemePicker,
+    },
+    CommandDef {
+        name: "persona",
+        aliases: &["personas", "role"],
+        description: "Pick the Assistant's role: Platform Engineer, Kubernetes Security Engineer or K8s Network Engineer",
+        search_terms: "assistant ai agent role platform security network engineer sre",
+        target: CommandTarget::Persona,
     },
     CommandDef {
         name: "workloads",
@@ -414,6 +429,13 @@ pub const COMMAND_REGISTRY: &[CommandDef] = &[
         description: "GPU nodes, VRAM allocation & GPU workloads (:gpuinfo, :gpu, :gpus)",
         search_terms: "",
         target: CommandTarget::Resource(ResourceKind::GpuInfo),
+    },
+    CommandDef {
+        name: "cost",
+        aliases: &["costs", "compute", "finops"],
+        description: "Cost & compute dashboard for the selected cluster: capacity, requests, idle, estimated spend",
+        search_terms: "cost money spend finops price dollars billing capacity compute idle waste kubecost",
+        target: CommandTarget::Resource(ResourceKind::Cost),
     },
     CommandDef {
         name: "top",
@@ -795,6 +817,13 @@ pub const COMMAND_REGISTRY: &[CommandDef] = &[
         target: CommandTarget::Help,
     },
     CommandDef {
+        name: "notifications",
+        aliases: &["notif", "alerts", "bell"],
+        description: "Show recent alerts: failing pods, restarts, errors and what the toast dropped",
+        search_terms: "alert notification history events errors bell",
+        target: CommandTarget::Notifications,
+    },
+    CommandDef {
         name: "quit",
         aliases: &["q", "exit"],
         description: "Quit srectl session",
@@ -918,6 +947,7 @@ pub fn resource_category(kind: &ResourceKind) -> &'static str {
         ResourceKind::TuiConfig => "Configuration",
         ResourceKind::Topology => "Topology",
         ResourceKind::GpuInfo => "GPU / Hardware",
+        ResourceKind::Cost => "Cost",
         ResourceKind::TopPods | ResourceKind::TopNodes => "Hotspots",
         ResourceKind::Changed => "Triage",
         ResourceKind::CustomResource(_) => "Custom Resource",
@@ -950,9 +980,11 @@ impl DynamicCommandDef {
             CommandTarget::Resource(kind) => resource_category(kind),
             CommandTarget::CustomResource(_) => "CRD",
             CommandTarget::ThemePicker | CommandTarget::SetTheme(_) => "Themes",
+            CommandTarget::Persona | CommandTarget::SetPersona(_) => "Assistant",
             CommandTarget::Contexts | CommandTarget::AddCluster => "Context",
             CommandTarget::Namespaces => "Namespace",
             CommandTarget::Help => "Help",
+            CommandTarget::Notifications => "Notifications",
             CommandTarget::FeatureBanner => "Guide",
             CommandTarget::Quit => "System",
             CommandTarget::Update => "System",
@@ -982,12 +1014,16 @@ impl DynamicCommandDef {
             CommandTarget::Resource(ResourceKind::TuiConfig) => ":config",
             CommandTarget::Resource(ResourceKind::Assistant) => ":assistant",
             CommandTarget::Resource(ResourceKind::Toolbox) => ":toolbox",
+            CommandTarget::Resource(ResourceKind::Cost) => ":cost",
             CommandTarget::ThemePicker => ":themes",
             CommandTarget::SetTheme(_) => ":theme <name>",
+            CommandTarget::Persona => ":persona",
+            CommandTarget::SetPersona(_) => ":persona <name>",
             CommandTarget::Namespaces => ":namespaces",
             CommandTarget::Contexts => ":contexts",
             CommandTarget::AddCluster => ":import",
             CommandTarget::Help => ":help",
+            CommandTarget::Notifications => ":notifications",
             CommandTarget::FeatureBanner => ":features",
             CommandTarget::Quit => ":quit",
             CommandTarget::Update => ":update",
@@ -1055,6 +1091,16 @@ pub fn resolve_command_with_crds(input: &str, crds: &[CrdMeta]) -> Option<Comman
             let name = rest.trim();
             if !name.is_empty() {
                 return Some(CommandTarget::SetTheme(name.to_string()));
+            }
+        }
+    }
+
+    // Direct persona setter (e.g. ":persona security" or ":role off")
+    for prefix in &["persona ", "persona:", "role ", "role:"] {
+        if let Some(rest) = trimmed.strip_prefix(prefix) {
+            let name = rest.trim();
+            if !name.is_empty() {
+                return Some(CommandTarget::SetPersona(name.to_string()));
             }
         }
     }

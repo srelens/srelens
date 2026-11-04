@@ -776,6 +776,7 @@ async fn a_cursor_turn_reports_a_missing_binary_and_finishes() {
         conversation_id: "conv-1".into(),
         resume: None,
         chat_root: root.path().to_path_buf(),
+        read_only: None,
     })
     .await;
 
@@ -2216,6 +2217,8 @@ fn tui_config_file_paths_clamping_and_round_trip() {
         argo_hub_kubeconfig: None,
         argo_ui_url: None,
         argo_timeout_secs: None,
+        cost_cpu_core_hour: None,
+        cost_mem_gib_hour: None,
         update_available: None,
     };
     cfg.save().expect("save succeeds");
@@ -2266,6 +2269,8 @@ fn tui_config_file_paths_clamping_and_round_trip() {
         argo_hub_kubeconfig: None,
         argo_ui_url: None,
         argo_timeout_secs: None,
+        cost_cpu_core_hour: None,
+        cost_mem_gib_hour: None,
         update_available: None,
     };
     clamped.clamp();
@@ -2286,6 +2291,8 @@ fn tui_config_file_paths_clamping_and_round_trip() {
         argo_hub_kubeconfig: None,
         argo_ui_url: None,
         argo_timeout_secs: None,
+        cost_cpu_core_hour: None,
+        cost_mem_gib_hour: None,
         update_available: None,
     };
     low.clamp();

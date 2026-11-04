@@ -186,7 +186,7 @@ pub fn normalize_argo_ui_url(input: &str) -> Result<Option<String>, String> {
 /// with defaults, silently discarding popup width, visible rows, density, the
 /// banner flag and the Argo hub settings on upgrade. `field_added_later_does_not_discard_the_rest`
 /// below is the regression test; do not drop this attribute.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct TuiConfig {
     pub command_popup_max_width: u16,
@@ -204,6 +204,11 @@ pub struct TuiConfig {
     /// Timeout for ArgoCD reads (`:argo`), in seconds. `None` follows the
     /// process-wide request timeout.
     pub argo_timeout_secs: Option<u64>,
+    /// Price of one CPU core-hour for the `:cost` estimate. `None` (or a value
+    /// that is not a positive number) uses the placeholder default.
+    pub cost_cpu_core_hour: Option<f64>,
+    /// Price of one GiB-hour of memory for the `:cost` estimate.
+    pub cost_mem_gib_hour: Option<f64>,
     #[serde(skip)]
     pub update_available: Option<String>,
 }
@@ -221,6 +226,8 @@ impl Default for TuiConfig {
             argo_hub_kubeconfig: None,
             argo_ui_url: None,
             argo_timeout_secs: None,
+            cost_cpu_core_hour: None,
+            cost_mem_gib_hour: None,
             update_available: None,
         }
     }

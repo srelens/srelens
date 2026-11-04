@@ -6,6 +6,7 @@ pub mod changed_view;
 pub mod cracked_lens;
 pub mod describe_view;
 pub mod exec_view;
+pub mod cost_view;
 pub mod gpu_view;
 pub mod helm_detail_view;
 pub mod helm_view;

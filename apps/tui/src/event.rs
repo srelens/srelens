@@ -36,6 +36,22 @@ pub enum AppEvent {
         namespaces: Vec<String>,
         result: Result<srelens_kube::topology::TopologyGraphOut, String>,
     },
+    CostResult {
+        /// Which fetch this answers; only the latest is accepted.
+        request: u64,
+        context: String,
+        result: Result<srelens_kube::cost::ClusterCompute, String>,
+    },
+    /// The Kubecost install (started from `:cost`) moved on to `step`.
+    CostInstallStep {
+        context: String,
+        step: srelens_kube::kubecost_install::Step,
+    },
+    /// The Kubecost install ended; `Err` carries what went wrong and where.
+    CostInstallDone {
+        context: String,
+        result: Result<(), String>,
+    },
     GpuInfoResult {
         context: String,
         result: Result<srelens_kube::gpu_info::GpuClusterInfo, String>,
