@@ -543,6 +543,17 @@ describe("on a cluster without an app's CRDs", () => {
     await waitFor(() => expect(watched).toEqual(["pods"]));
   });
 
+  it("asks the cluster again on Refresh, so an operator installed since shows its cards", async () => {
+    installed(certManager());
+    render(<DashboardCards context={CTX} />);
+    await waitFor(() => expect(cardRegion("Issuer pods").getAttribute("data-state")).toBe("value"));
+    expect(screen.queryByRole("region", { name: "Expiring" })).toBeNull();
+    core.listCrds.mockResolvedValue({ crds: [CERT] });
+    await userEvent.click(screen.getByRole("button", { name: "Refresh app cards" }));
+    await waitFor(() => expect(cardRegion("Expiring").getAttribute("data-state")).toBe("value"));
+    expect(core.listCrds).toHaveBeenCalledTimes(2);
+  });
+
   it("draws every card the cluster serves", async () => {
     core.listCrds.mockResolvedValue({ crds: [CERT] });
     installed(certManager());

@@ -90,10 +90,12 @@ function ServedCards({ context, apps }: { context: ClusterContext; apps: Install
     .map((plugin) => ({ ...plugin, manifest: { ...plugin.manifest, contributions: { ...plugin.manifest.contributions,
       dashboardCards: cardsOf(plugin).filter((card) => readersServed(plugin, new Set([card.source]), crds)) } } }))
     .filter((plugin) => plugin.manifest.contributions.dashboardCards.length);
-  return served.length ? <CardsBand context={context} apps={served} /> : null;
+  // Refresh asks again too, so an operator installed since shows its cards. Quietly: the band
+  // stays up until the answer lands.
+  return served.length ? <CardsBand context={context} apps={served} recheck={discovery.refresh} /> : null;
 }
 
-function CardsBand({ context, apps }: { context: ClusterContext; apps: InstalledExtension[] }) {
+function CardsBand({ context, apps, recheck }: { context: ClusterContext; apps: InstalledExtension[]; recheck(): void }) {
   const selection = useNamespaces(context.stableId);
   const setNamespaces = useSetNamespaces();
   const namespaceOptions = useNamespaceOptions(context.name, getKubeconfigFiles());
@@ -130,7 +132,7 @@ function CardsBand({ context, apps }: { context: ClusterContext; apps: Installed
       <div className="dashboard-cards-toolbar">
         <NamespaceScopePicker context={context} options={namespaceOptions} />
         <LiveStatus live={live} />
-        <Button variant="secondary" size="sm" aria-label="Refresh app cards" onClick={() => setRefresh((n) => n + 1)}>
+        <Button variant="secondary" size="sm" aria-label="Refresh app cards" onClick={() => { recheck(); setRefresh((n) => n + 1); }}>
           Refresh
         </Button>
       </div>
