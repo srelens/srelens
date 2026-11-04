@@ -1020,6 +1020,33 @@ mod tests {
         }
     }
 
+    /// Drain at most `max_buffered` already-queued frames and require the body
+    /// itself to reach end-of-stream. A timeout is a failure here: treating it
+    /// as closure would let a half-open SSE connection pass lifecycle tests.
+    async fn assert_stream_ends(
+        body: &mut axum::body::BodyDataStream,
+        max_buffered: usize,
+        context: &str,
+    ) {
+        use futures_core::Stream as _;
+        use std::future::poll_fn;
+
+        let mut flushed = 0;
+        loop {
+            let fut = poll_fn(|cx| Pin::new(&mut *body).poll_next(cx));
+            match tokio::time::timeout(std::time::Duration::from_secs(2), fut).await {
+                Ok(None) => return,
+                Ok(Some(Ok(_))) if flushed < max_buffered => flushed += 1,
+                Ok(Some(Ok(bytes))) => panic!(
+                    "{context} must end after at most {max_buffered} buffered frames, got: {:?}",
+                    String::from_utf8_lossy(&bytes)
+                ),
+                Ok(Some(Err(error))) => panic!("{context} failed instead of ending: {error}"),
+                Err(_) => panic!("{context} stayed open past the two-second bound"),
+            }
+        }
+    }
+
     #[tokio::test]
     async fn the_sse_route_sits_behind_the_same_token_check() {
         let app = router_inner(
@@ -1225,14 +1252,7 @@ mod tests {
         }
 
         let mut body = stream_resp.into_body().into_data_stream();
-        let mut flushed = 0;
-        loop {
-            match next_chunk(&mut body).await {
-                None => break,
-                Some(_) if flushed < 3 => flushed += 1,
-                Some(chunk) => panic!("the deleted session's stream must end, got: {chunk:?}"),
-            }
-        }
+        assert_stream_ends(&mut body, 3, "the deleted session's stream").await;
     }
 
     #[test]
@@ -1644,14 +1664,7 @@ mod tests {
         let mut body = stream_resp.into_body().into_data_stream();
 
         push.end_streams();
-        let mut flushed = 0;
-        loop {
-            match next_chunk(&mut body).await {
-                None => break,
-                Some(_) if flushed < 3 => flushed += 1,
-                Some(chunk) => panic!("the stream must end at shutdown, got: {chunk:?}"),
-            }
-        }
+        assert_stream_ends(&mut body, 3, "the stream at shutdown").await;
         // In production hyper drops the completed body, which is what runs
         // the guard; the drop is explicit here.
         drop(body);
@@ -1689,14 +1702,7 @@ mod tests {
         // already-queued frames, not linger half-dead.
         let second = app.clone().oneshot(sse_get_with_session(&session)).await.unwrap();
         assert_eq!(second.status(), StatusCode::OK);
-        let mut flushed = 0;
-        loop {
-            match next_chunk(&mut first_body).await {
-                None => break,
-                Some(_) if flushed < 3 => flushed += 1,
-                Some(chunk) => panic!("the replaced stream must end, got: {chunk:?}"),
-            }
-        }
+        assert_stream_ends(&mut first_body, 3, "the replaced stream").await;
         drop(first_body);
         // ...and its watch dies with it.
         let join = joins.lock().unwrap().pop().unwrap();
