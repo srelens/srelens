@@ -115,6 +115,21 @@ describe("deriveProblems", () => {
     ]);
   });
 
+  it("keeps both distinct failures from a multi-container pod searchable", () => {
+    const rows = deriveProblems({
+      pods: [pod("multi-failure", "OOMKilled", {
+        waitingReason: "ImagePullBackOff",
+      })],
+      nodes: [],
+      events: [],
+      now: NOW,
+    });
+
+    expect(brief(rows)).toEqual([
+      "pod:critical:Pod:checkout/multi-failure:OOMKilled,ImagePullBackOff",
+    ]);
+  });
+
   it("calls a Pending pod unschedulable only when a recent FailedScheduling warning names that pod", () => {
     const rows = deriveProblems({
       pods: [

@@ -185,7 +185,8 @@ export function deriveProblems({ pods, nodes, events, now = Date.now() }: Proble
 
     const health: HealthKind = explicitlyBroken ? "danger" : unreadable ? "neutral" : "warning";
     const reasons: string[] = [];
-    if (explicitlyBroken || unreadable || failedWaiting) reasons.push(failedWaiting ? waitingReason : word);
+    if (explicitlyBroken || unreadable) reasons.push(word);
+    if (failedWaiting) reasons.push(waitingReason);
     if (unschedulable) reasons.push("Pending", "FailedScheduling");
     if (unready) reasons.push("NotReady");
     if (highRestart) reasons.push("HighRestartCount");
