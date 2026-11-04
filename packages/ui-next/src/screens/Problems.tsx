@@ -305,7 +305,7 @@ function problemColumns(context: string): Column<ProblemRow>[] {
         const path = displayPath(row);
         return (
           <span className="flex justify-end gap-1">
-            {row.kind === "Pod" && row.namespace && (
+            {row.kind === "Pod" && !row.group && row.namespace && (
               <Button
                 variant="secondary"
                 size="xs"

@@ -133,6 +133,15 @@ const NON_PROBLEM_POD_WORDS = new Set([
   "Terminating",
 ]);
 
+/** Kubelet waits that cannot resolve through ordinary startup progress. */
+const FAILED_WAITING_REASONS = new Set([
+  "CreateContainerConfigError",
+  "CreateContainerError",
+  "ErrImagePull",
+  "ImagePullBackOff",
+  "InvalidImageName",
+]);
+
 /**
  * Derive the screen's rows from the three existing live-list surfaces.
  *
@@ -168,13 +177,15 @@ export function deriveProblems({ pods, nodes, events, now = Date.now() }: Proble
     const ordinarilyRunning = pod.phase === "Running" && word === "Running";
     const unready = ordinarilyRunning && counts !== null && counts.total > 0 && counts.ready < counts.total;
     const highRestart = ordinarilyRunning && pod.restarts >= HIGH_RESTART_COUNT;
+    const waitingReason = pod.waitingReason ?? "";
+    const failedWaiting = FAILED_WAITING_REASONS.has(waitingReason);
     const explicitlyBroken = verdict.health === "danger";
     const unreadable = verdict.health === "neutral" && verdict.flagged;
-    if (!unschedulable && !unready && !highRestart && !explicitlyBroken && !unreadable) continue;
+    if (!unschedulable && !unready && !highRestart && !failedWaiting && !explicitlyBroken && !unreadable) continue;
 
     const health: HealthKind = explicitlyBroken ? "danger" : unreadable ? "neutral" : "warning";
     const reasons: string[] = [];
-    if (explicitlyBroken || unreadable) reasons.push(word);
+    if (explicitlyBroken || unreadable || failedWaiting) reasons.push(failedWaiting ? waitingReason : word);
     if (unschedulable) reasons.push("Pending", "FailedScheduling");
     if (unready) reasons.push("NotReady");
     if (highRestart) reasons.push("HighRestartCount");

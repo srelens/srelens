@@ -84,6 +84,37 @@ describe("deriveProblems", () => {
     ]);
   });
 
+  it("surfaces known waiting-container failures while ordinary startup waits stay excluded", () => {
+    const rows = deriveProblems({
+      pods: [
+        pod("bad-config", "CreateContainerConfigError", {
+          phase: "Pending",
+          waitingReason: "CreateContainerConfigError",
+        }),
+        pod("create-error", "CreateContainerError", {
+          phase: "Pending",
+          waitingReason: "CreateContainerError",
+        }),
+        pod("pull-error", "ErrImagePull", { phase: "Pending", waitingReason: "ErrImagePull" }),
+        pod("bad-image", "InvalidImageName", { phase: "Pending", waitingReason: "InvalidImageName" }),
+        pod("pull-backoff", "ImagePullBackOff", { phase: "Pending", waitingReason: "ImagePullBackOff" }),
+        pod("creating", "ContainerCreating", { phase: "Pending", waitingReason: "ContainerCreating" }),
+        pod("initializing", "PodInitializing", { phase: "Pending", waitingReason: "PodInitializing" }),
+      ],
+      nodes: [],
+      events: [],
+      now: NOW,
+    });
+
+    expect(brief(rows)).toEqual([
+      "pod:critical:Pod:checkout/pull-backoff:ImagePullBackOff",
+      "pod:warning:Pod:checkout/bad-config:CreateContainerConfigError",
+      "pod:warning:Pod:checkout/bad-image:InvalidImageName",
+      "pod:warning:Pod:checkout/create-error:CreateContainerError",
+      "pod:warning:Pod:checkout/pull-error:ErrImagePull",
+    ]);
+  });
+
   it("calls a Pending pod unschedulable only when a recent FailedScheduling warning names that pod", () => {
     const rows = deriveProblems({
       pods: [

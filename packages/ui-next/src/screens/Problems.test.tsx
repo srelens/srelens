@@ -182,6 +182,18 @@ describe("Problems", () => {
     );
   });
 
+  it("does not offer built-in Pod logs for a custom resource that reuses the Pod kind", () => {
+    lists.pods = listed([]) as ResourceList<never>;
+    lists.nodes = listed([]) as ResourceList<never>;
+    lists.events = listed([
+      event("Pod/synthetic", { objectApiVersion: "acme.io/v1" }),
+    ]) as ResourceList<never>;
+    draw();
+
+    expect(screen.getByRole("button", { name: "Open acme.io/Pod checkout/synthetic" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /Follow logs/ })).toBeNull();
+  });
+
   it("keeps partial read failures visible beside the rows that did answer, and retries each source", async () => {
     const podReload = vi.fn();
     lists.pods = listed([], { status: "error", error: "pods forbidden", reload: podReload }) as ResourceList<never>;
