@@ -2,6 +2,7 @@ import { ExtensionLogo } from "./ExtensionLogo";
 import { useEffect, useRef, useState } from "react";
 import { isTauri, listExtensionCatalog, reviewCatalogExtension, openExternal, type ExtensionCatalogSnapshot, type ExtensionReview, type InstalledExtension } from "@srelens/core";
 import { Button, FilterBar, useListFilter } from "@srelens/ui-kit";
+import { FailureAlert } from "../lib/errorCopy";
 
 export function ExtensionCatalog({ installed, onReview, onReviewStart, autoLoad = false }: {
   autoLoad?: boolean;
@@ -44,13 +45,13 @@ export function ExtensionCatalog({ installed, onReview, onReviewStart, autoLoad 
     {data && <FilterBar {...filter} label="Filter apps" placeholder="Filter apps…" />}
     {!data && <p className="extension-message">Discover native apps from the srelens catalog. Each app is maintained in its own repository.</p>}
     {busy && <p className="extension-message" role="status">Loading…</p>}
-    {error && <p className="extension-error" role="alert">{error}</p>}
+    {error && <FailureAlert tone="sev" title="Could not load the catalog" error={error} domain="http" />}
     {data && <>
       <p className="extension-message extension-catalog-meta">{data.stale ? "Cached catalog" : "Catalog checked"} · {new Date(data.fetchedAt * 1000).toLocaleString()} · Host API {data.hostApiVersions.join(", ")}</p>
       {/* The web server shares one catalog between its users and fetches it itself (#515), so a
           Refresh here shows its copy rather than fetching one: say so, or the time above reads as wrong. */}
       {!isTauri() && <p className="extension-message">This server keeps one catalog for everyone who signs in, and fetches it again once a day.</p>}
-      {data.error && <p className="extension-warning" role="alert">Refresh failed: {data.error}. Showing the cached catalog.</p>}
+      {data.error && <FailureAlert title="Could not refresh the catalog, so this is the cached one" error={data.error} domain="http" />}
       <p className="extension-message">An app whose ID is in a publisher's namespace installs only with that publisher's signature, verified before installation review. Review permissions before installing.</p>
       {entries?.length === 0 && <p className="extension-message">No matching apps.</p>}
       {entries?.map(entry => {

@@ -8,7 +8,7 @@ import {
   type InstalledExtension,
 } from "@srelens/core";
 import { Button } from "@srelens/ui-kit";
-import { ErrorNotice } from "./ExtensionResults";
+import { FailureAlert } from "../lib/errorCopy";
 import { plainText } from "./displayText";
 import { extensionLabel } from "./inventoryStore";
 
@@ -139,7 +139,7 @@ export function ExtensionLogs({ plugin }: { plugin: InstalledExtension }) {
           </Button>
         ))}
       </div>
-      {error !== undefined && <ErrorNotice title="Could not read this app's log" message={error} retry={retry} />}
+      {error !== undefined && <FailureAlert tone="sev" title="Could not read this app's log" error={error} domain="local" onRetry={retry} />}
       {lines.length > 0 ? (
         // Focusable: it scrolls both ways, and a keyboard must be able to reach the rest.
         <div

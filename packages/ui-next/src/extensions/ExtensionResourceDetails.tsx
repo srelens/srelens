@@ -8,7 +8,7 @@ import { Alert, Inspector, Button, CodeEditor, KV, LoadingState, Section as Bloc
 import { plainText } from "./displayText";
 import { statusKind, statusWord } from "./AppStatus";
 import { AgeCell } from "../lib/ageCell";
-import { FailureState } from "../lib/errorCopy";
+import { FailureAlert, FailureState } from "../lib/errorCopy";
 import { CopyNameButton } from "../screens/detail/CopyNameButton";
 import { DetailActionRow } from "../screens/detail/DetailActions";
 import { EventsTable, describeTarget } from "../screens/detail/detailData";
@@ -17,7 +17,6 @@ import { identityFacts } from "../screens/detail/GenericBody";
 import { OpenTabButton, PeekFacts, ResourceTabFrame, TabFacts, TabMetadata, type Tile } from "../screens/detail/ResourceFrame";
 import { AnnotationsSection, ConditionsSection, LabelsSection } from "../screens/detail/sections";
 import { Section, SectionMemory } from "../screens/detail/Section";
-import { ErrorNotice } from "./ExtensionResults";
 import { useResource } from "../lib/useResource";
 import { HostConfirmation } from "../confirm/HostConfirmation";
 import { useProtectedConfirm } from "../lib/protectedConfirm";
@@ -249,7 +248,7 @@ export function ExtensionResourceDetails({selection,onClose,fullPage=false,clust
   ];
   const actionRow=<DetailActionRow context={selection.context} subject={target} flagged={tone==="danger"||tone==="warning"} actions={actions} label={`${kind} actions`} host={fullPage?"tab":"peek"}/>;
   const pane=<>
-    {error&&<p role="alert" className="extension-error">{error}</p>}
+    {error&&<FailureAlert tone="sev" title="Could not run this action" error={error}/>}
     {message&&<p role="status" className="extension-message">{message}</p>}
     {data.status==="error"?<FailureState title={`Could not load ${target}`} error={data.error} onRetry={data.reload}/>:data.status==="loading"?<LoadingState label={`Loading ${target}`}/>:resource&&<>
       {pending&&<div className="extension-action-review" role="dialog" aria-label={`Review ${label(pending.action)}`} tabIndex={-1} ref={review}>
@@ -272,7 +271,7 @@ export function ExtensionResourceDetails({selection,onClose,fullPage=false,clust
         />
       </div>}
       {tab==="yaml"?<div className="flex h-full min-h-0 flex-col"><div className="min-h-0 flex-1"><CodeEditor value={formatResourceManifest(resource)} readOnly language="yaml" fill copy ariaLabel={`${selection.name} manifest`}/></div></div>
-      :tab==="events"?data.data?.eventsError ? <ErrorNotice cluster message={data.data.eventsError} retry={data.reload}/> : <Events detail={data.data} kind={kind} selection={selection}/>
+      :tab==="events"?data.data?.eventsError ? <FailureState title="Could not list events" error={data.data.eventsError} onRetry={data.reload}/> : <Events detail={data.data} kind={kind} selection={selection}/>
       :<Overview selection={selection} resource={resource} verdict={verdict} fullPage={fullPage}/>}
     </>}
   </>;

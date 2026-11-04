@@ -1,10 +1,10 @@
 import { useEffect, useRef, useState } from "react";
 import { listContexts, callExtensionOperation, describeError, describeStreamEnd, extensionEnabledFor, extensionOperationRoute, openExtensionView, parseExtensionOperationRoute, relativeTime, type ExtensionOperation as Operation, type ExtensionView, type ExtensionStream } from "@srelens/core";
 import { useNamespaceOptions } from "@srelens/core/react";
-import { ActionBar, Badge, Button, Combobox, FilterBar, Popover, Screen, Table, Tabs, TextInput, useListFilter, type BadgeTone } from "@srelens/ui-kit";
+import { ActionBar, Alert, Badge, Button, Combobox, FilterBar, Popover, Screen, Table, Tabs, TextInput, useListFilter, type BadgeTone } from "@srelens/ui-kit";
 import { ExtensionLogo } from "../extensions/ExtensionLogo";
 import { useExtensions } from "../extensions/inventoryStore";
-import { ErrorNotice } from "../extensions/ExtensionResults";
+import { FailureState } from "../lib/errorCopy";
 import { plainText } from "../extensions/displayText";
 import { getContexts, getKubeconfigFiles, setContexts, useContexts, useContextsError, useContextsStatus } from "../lib/clusters";
 import type { RoutedScreenProps } from "../lib/routes";
@@ -109,7 +109,7 @@ function OperationResult({ value, operations, current, onOpen }: { value: unknow
   const warnings = object(value) && Array.isArray(value.warnings) ? value.warnings.filter((warning): warning is string => typeof warning === "string") : [];
   const lists = fields.filter(([key, value]) => key !== "warnings" && Array.isArray(value) && !compactList(key, value));
   return <div className="app-results scroll min-h-0 min-w-0 flex-1">
-    {warnings.length > 0 && <div className="extension-message" role="alert">{warnings.map((warning, index) => <p key={index}>{plainText(warning)}</p>)}</div>}
+    {warnings.length > 0 && <Alert tone="warn" title="The app reported warnings">{warnings.map((warning, index) => <p key={index}>{plainText(warning)}</p>)}</Alert>}
     {reports ? <div className="app-report-intro"><h2>Security reports <span>{object(value) ? cell(value.totalReports ?? (value.items as unknown[]).length) : ""}</span></h2><p>Scan history and Operator reports. Severity counts belong to each report.</p></div> : metadata.length > 0 && <dl className="flex flex-wrap gap-x-6 gap-y-2 border-b px-3 py-2" style={{ borderColor: "var(--rule)" }}>
       {metadata.filter(([key]) => !technical(key) || key === "scope").map(([key, value]) => <div key={key} className="min-w-0 max-w-full"><dt className="text-xs text-muted">{label(key)}</dt><dd className={`text-[0.8125rem] ${prose(key) ? "whitespace-normal" : "overflow-auto whitespace-nowrap"}`}><ResultValue field={key} value={value} compact={compactList(key, value)} /></dd></div>)}
       {identity.length > 0 && <div className="min-w-0 basis-full"><ResultDetails entries={identity} title="Technical details" /></div>}
@@ -214,7 +214,10 @@ function OperationForm({ id, revision, context, contextKey, operation, operation
       }}>Cancel</Button>}
     </form>
     {busy && <p className="extension-message" role="status">Running {operation.title.toLowerCase()}…</p>}
-    {error && <div className="app-operation-error" role="alert"><strong>Could not load {operation.title.toLowerCase()}</strong><p>{error}</p>{error.includes("narrow the namespace") && <p>Select a namespace above to reduce the inventory.</p>}<Button variant="secondary" onClick={() => void run(cursor.current)}>Retry</Button>{history.length > 0 && <Button variant="secondary" onClick={() => {setHistory([]);void run();}}>Start from first page</Button>}</div>}
+    {error && <FailureState title={`Could not load ${operation.title.toLowerCase()}`} error={error} domain="local"
+      detail={error.includes("narrow the namespace") ? `${error} Select a namespace above to reduce the inventory.` : undefined}
+      onRetry={() => void run(cursor.current)}
+      action={history.length > 0 ? { label: "Start from first page", onClick: () => { setHistory([]); void run(); } } : undefined} />}
     {result !== undefined && <OperationResult value={result} operations={operations} current={operation.name} onOpen={(operation, params) => openTab(extensionOperationRoute(contextKey, id, revision, operation, params))} />}
     {!busy && !error && result === undefined && <p className="extension-message">Run {operation.title.toLowerCase()} to load its data.</p>}
     {(next || history.length > 0) && <div className="flex shrink-0 justify-end gap-2 border-t px-3 py-2" style={{ borderColor: "var(--rule)" }}><Button variant="secondary" disabled={busy || !history.length} onClick={() => { const previous = history.at(-1)!; setHistory(history.slice(0, -1)); void run(previous); }}>Previous page</Button><Button variant="secondary" disabled={busy || !next} onClick={() => { setHistory([...history, cursor.current]); void run(next); }}>Next page</Button></div>}
@@ -245,9 +248,9 @@ export function ExtensionOperation({ route }: RoutedScreenProps) {
   return <Screen title={<span className="flex min-w-0 items-center gap-2"><ExtensionLogo icon={app?.icon} name={app?.manifest.name ?? target.id} size={22} /><span className="text-muted">{app?.manifest.name ?? target.id}</span><span className="text-faint">/</span><span>{operation?.title ?? "App"}</span></span>} actions={<span className="block max-w-56 truncate text-xs text-muted" title={cluster?.name ?? target.contextKey}>{cluster?.name ?? target.contextKey}</span>} fill>
     <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
       {inventory.status === "loading" || status === "loading" ? <p className="extension-message" role="status">Loading app…</p>
-        : inventory.status === "error" ? <ErrorNotice title="Could not load apps" message={inventory.error} retry={inventory.reload} />
-        : !cluster && status === "failed" ? <ErrorNotice title="Could not load clusters" message={contextError} retry={() => { void retryContexts(); }} />
-        : error ? <p className="extension-message" role="alert">{error}</p>
+        : inventory.status === "error" ? <FailureState title="Could not load apps" error={inventory.error} domain="local" onRetry={inventory.reload} />
+        : !cluster && status === "failed" ? <FailureState title="Could not load clusters" error={contextError} domain="local" onRetry={() => { void retryContexts(); }} />
+        : error ? <FailureState title="Could not open this screen" error={error} domain="local" />
         : <OperationForm key={route} id={target.id} revision={target.revision} contextKey={target.contextKey} context={cluster!.pinnedId!} operation={operation!} operations={app!.manifest.sidecar!.operations} initial={target.params} />}
     </div>
   </Screen>;

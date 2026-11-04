@@ -8,7 +8,7 @@ import {
   type InstalledExtension,
 } from "@srelens/core";
 import { Button, Combobox } from "@srelens/ui-kit";
-import { ErrorNotice } from "./ExtensionResults";
+import { FailureAlert } from "../lib/errorCopy";
 import { plainText } from "./displayText";
 import { extensionLabel } from "./inventoryStore";
 import { useResource } from "../lib/useResource";
@@ -140,7 +140,7 @@ export function ExtensionSettingsForm({
     } catch (e) {
       const { fields, rest } = splitRefusal(e instanceof Error ? e.message : String(e));
       setProblems(fields);
-      setFailure(rest || (Object.keys(fields).length ? "" : "The settings were not saved."));
+      setFailure(rest || (Object.keys(fields).length ? "" : "The host gave no reason."));
     } finally {
       setSaving(false);
     }
@@ -163,9 +163,7 @@ export function ExtensionSettingsForm({
         <>
           <p className="extension-message">The host checks every value when you save, whatever this form allows.</p>
           {failure && (
-            <p role="alert" className="extension-error">
-              {failure}
-            </p>
+            <FailureAlert tone="sev" title="Could not save the settings" error={failure} domain="local" />
           )}
           {declared.map((setting) =>
             isSecret(setting) ? (
@@ -574,14 +572,10 @@ function useContexts() {
 /** Why the clusters could not be listed, whole or in part. */
 function ContextsProblem({ contexts }: { contexts: ReturnType<typeof useContexts> }) {
   if (contexts.status === "error")
-    return <ErrorNotice title="Could not list clusters" message={contexts.error} retry={contexts.reload} />;
+    return <FailureAlert tone="sev" title="Could not list clusters" error={contexts.error} domain="local" onRetry={contexts.reload} />;
   if (contexts.data?.partial)
     return (
-      <ErrorNotice
-        title="Some clusters could not be listed"
-        message={contexts.data.partial}
-        retry={contexts.reload}
-      />
+      <FailureAlert tone="sev" title="Some clusters could not be listed" error={contexts.data.partial} domain="local" onRetry={contexts.reload} />
     );
   return null;
 }
@@ -680,7 +674,7 @@ function NamespaceChoice({
         </p>
       )}
       {from && namespaces.status === "error" && (
-        <ErrorNotice title="Could not list namespaces" message={namespaces.error} retry={namespaces.reload} cluster />
+        <FailureAlert tone="sev" title="Could not list namespaces" error={namespaces.error} onRetry={namespaces.reload} />
       )}
       {!from && <p className="extension-setting-note">Choose a cluster to list its namespaces.</p>}
     </>

@@ -44,20 +44,6 @@
 .extension-message {
   padding: 10px 12px;
 }
-.extension-error,
-.extension-warning {
-  padding: 10px 12px;
-  border-bottom: 1px solid var(--rule, var(--fl-color-border));
-}
-.extension-error {
-  color: var(--sev, var(--fl-color-danger));
-  display: flex;
-  align-items: center;
-  gap: 12px;
-}
-.extension-warning {
-  color: var(--warn, var(--fl-color-warning));
-}
 .extension-table-scroll {
   overflow: auto;
 }
@@ -96,20 +82,6 @@
   font-style: italic;
 }
 
-
-.extension-error pre {
-  max-width: 100%;
-  overflow: auto;
-  white-space: pre;
-}
-
-.extension-error > div {
-  min-width: 0;
-  flex: 1;
-}
-.extension-error > button {
-  flex-shrink: 0;
-}
 
 .extension-workspace {
   min-width: 0;
@@ -604,7 +576,6 @@
   border-bottom: 1px solid var(--rule, var(--fl-color-border));
 }
 .extension-settings > .extension-message { padding: 0; }
-.extension-settings > .extension-error { border-bottom: 0; padding: 0; }
 .extension-setting {
   display: grid;
   grid-template-columns: minmax(0, 32rem);
@@ -860,18 +831,6 @@
 }
 .extension-inspector-table th { font-weight: 600; color: var(--ink-muted, var(--fl-color-text-muted)); }
 .extension-inspector-table code { font-family: var(--font-mono); }
-/* A crashed sidecar's headline: ruled in the danger colour, with the reason in words. */
-.extension-process-alert {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr);
-  gap: 6px;
-  padding: 10px 12px;
-  background: var(--surface-sunk, var(--fl-color-surface-alt));
-  box-shadow: inset 3px 0 0 var(--sev, var(--fl-color-danger));
-}
-.extension-process-alert strong { color: var(--sev, var(--fl-color-danger)); }
-.extension-process-alert p { margin: 0; }
-.extension-process-alert .extension-toolbar { padding: 0; border: 0; }
 .extension-log-levels { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; }
 .extension-log-levels > span { margin-right: 4px; color: var(--ink-muted, var(--fl-color-text-muted)); }
 .extension-log-levels [aria-pressed="true"] {
