@@ -791,7 +791,7 @@ server-minted session ID. Missing IDs are rejected; unknown or ended IDs return
 404 so the client initializes again. `DELETE /mcp` with that bearer token and
 session ID explicitly ends the session and its stream.
 
-**Settings → MCP → Active HTTP clients** is a local view of those server-held
+**Settings → MCP → HTTP client sessions** is a local view of those server-held
 sessions. It shows the bounded, control-stripped `clientInfo.name` and
 `clientInfo.version` a client supplied during `initialize`, when that session
 last made a request, and whether its notification stream is open. The labels
@@ -800,7 +800,11 @@ request headers and peer addresses are never included. A row represents a
 server-held session, not proof that the client process is still running. The
 list is bounded by the same 64-session LRU registry as the transport;
 `DELETE`, capacity-driven idle retirement, server stop and token rotation
-remove the corresponding rows.
+remove the corresponding rows. Each refresh reads listener liveness, its URL,
+and that listener generation's sessions as one atomic snapshot. A running
+server with no sessions therefore remains distinct from a stopped server, and
+the Settings status and session view update together if another window stops
+the listener.
 
 Up to 32
 subscriptions can be live at once; re-subscribing to a URI you already hold

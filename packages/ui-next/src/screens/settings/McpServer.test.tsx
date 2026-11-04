@@ -5,7 +5,7 @@ import userEvent from "@testing-library/user-event";
 const core = vi.hoisted(() => ({
   getMcpToken: vi.fn(),
   mcpHttpStatus: vi.fn(),
-  mcpConnectedClients: vi.fn(),
+  mcpHttpSnapshot: vi.fn(),
   rotateMcpToken: vi.fn(),
   revokeMcpToken: vi.fn(),
   startMcpHttp: vi.fn(),
@@ -62,7 +62,11 @@ describe("McpServer", () => {
     vi.clearAllMocks();
     core.getMcpToken.mockResolvedValue(TOKEN);
     core.mcpHttpStatus.mockResolvedValue(STATUS_URL);
-    core.mcpConnectedClients.mockResolvedValue([]);
+    // Most tests exercise the main status read in isolation. Keep the
+    // independent polling snapshot pending unless a test is specifically
+    // about session/status reconciliation, so it cannot inject a conflicting
+    // second fixture into that test's premise.
+    core.mcpHttpSnapshot.mockImplementation(() => new Promise(() => {}));
     core.rotateMcpToken.mockResolvedValue(TOKEN);
     core.revokeMcpToken.mockResolvedValue(undefined);
     core.startMcpHttp.mockResolvedValue(PORT_URL);
@@ -119,18 +123,36 @@ describe("McpServer", () => {
   });
 
   it("shows the connected-client snapshot in the active MCP settings pane", async () => {
-    core.mcpConnectedClients.mockResolvedValue([
-      {
-        name: "Claude Code",
-        version: "1.2.3",
-        connectedAt: Date.now() / 1000,
-        lastSeen: Date.now() / 1000,
-        notificationsConnected: true,
-      },
-    ]);
+    core.mcpHttpSnapshot.mockResolvedValue({
+      running: true,
+      url: STATUS_URL,
+      clients: [
+        {
+          name: "Claude Code",
+          version: "1.2.3",
+          connectedAt: Date.now() / 1000,
+          lastSeen: Date.now() / 1000,
+          notificationsConnected: true,
+        },
+      ],
+    });
     render(<McpServer />);
-    expect(await screen.findByRole("heading", { name: "Active HTTP clients" })).toBeTruthy();
+    expect(await screen.findByRole("heading", { name: "HTTP client sessions" })).toBeTruthy();
     expect(await screen.findByText("Claude Code")).toBeTruthy();
+  });
+
+  it("updates the main status and address when the client snapshot observes a stop", async () => {
+    core.mcpHttpSnapshot.mockResolvedValue({ running: true, url: STATUS_URL, clients: [] });
+    render(<McpServer />);
+    expect(await screen.findByText("running")).toBeTruthy();
+    expect(address()).toContain(`Listening at ${STATUS_URL}`);
+
+    core.mcpHttpSnapshot.mockResolvedValue({ running: false, url: null, clients: [] });
+    await userEvent.click(screen.getByRole("button", { name: "Refresh" }));
+
+    expect(await screen.findByText("not running")).toBeTruthy();
+    expect(address()).toContain(`Not listening. Start binds ${PORT_URL}`);
+    expect(screen.getByText(/server is stopped/i)).toBeTruthy();
   });
 
   it("hides the token again once the reader is done looking", async () => {

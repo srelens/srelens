@@ -26,9 +26,18 @@ export interface ConnectedMcpClient {
   notificationsConnected: boolean;
 }
 
-/** Active HTTP client sessions, most recently used first. */
-export async function mcpConnectedClients(): Promise<ConnectedMcpClient[]> {
-  return invokeCommand<ConnectedMcpClient[]>("mcp_connected_clients");
+/** One atomic view of the in-app HTTP server and the sessions belonging to
+ * that exact listener generation. A stopped server always has a null URL and
+ * no clients; a running server can legitimately have an empty client list. */
+export interface McpHttpSnapshot {
+  running: boolean;
+  url: string | null;
+  clients: ConnectedMcpClient[];
+}
+
+/** Read server liveness, address, and HTTP client sessions together. */
+export async function mcpHttpSnapshot(): Promise<McpHttpSnapshot> {
+  return invokeCommand<McpHttpSnapshot>("mcp_http_snapshot");
 }
 
 export interface CliStatus {

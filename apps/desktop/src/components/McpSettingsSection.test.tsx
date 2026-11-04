@@ -6,8 +6,7 @@ const { mcp } = vi.hoisted(() => ({
   mcp: {
     startMcpHttp: vi.fn(),
     stopMcpHttp: vi.fn(),
-    mcpHttpStatus: vi.fn(),
-    mcpConnectedClients: vi.fn(),
+    mcpHttpSnapshot: vi.fn(),
     installSrelensCli: vi.fn(),
     srelensCliStatus: vi.fn(),
   },
@@ -39,8 +38,7 @@ afterEach(() => Object.defineProperty(navigator, "platform", { configurable: tru
 beforeEach(() => {
   localStorage.clear();
   Object.values(mcp).forEach((m) => m.mockReset());
-  mcp.mcpHttpStatus.mockResolvedValue(null);
-  mcp.mcpConnectedClients.mockResolvedValue([]);
+  mcp.mcpHttpSnapshot.mockResolvedValue({ running: false, url: null, clients: [] });
   mcp.srelensCliStatus.mockResolvedValue({
     installed: false,
     path: "/home/u/.local/bin/srelens",
@@ -70,11 +68,36 @@ describe("McpSettingsSection", () => {
   });
 
   it("starts the MCP HTTP server when toggled on and shows the URL", async () => {
-    mcp.startMcpHttp.mockResolvedValue("http://127.0.0.1:8765/mcp");
+    mcp.startMcpHttp.mockImplementation(async () => {
+      mcp.mcpHttpSnapshot.mockResolvedValue({
+        running: true,
+        url: "http://127.0.0.1:8765/mcp",
+        clients: [],
+      });
+      return "http://127.0.0.1:8765/mcp";
+    });
     render(<McpSettingsSection />);
     fireEvent.click(screen.getByLabelText("Run MCP HTTP server"));
     await waitFor(() => expect(mcp.startMcpHttp).toHaveBeenCalledWith(8765));
     expect(await screen.findByText("http://127.0.0.1:8765/mcp")).toBeDefined();
+  });
+
+  it("updates the whole server status when the atomic session snapshot observes a stop", async () => {
+    mcp.mcpHttpSnapshot.mockResolvedValue({
+      running: true,
+      url: "http://127.0.0.1:8765/mcp",
+      clients: [],
+    });
+    render(<McpSettingsSection />);
+
+    expect(await screen.findByRole("heading", { name: "HTTP client sessions" })).toBeDefined();
+    expect(await screen.findByText("Listening at")).toBeDefined();
+
+    mcp.mcpHttpSnapshot.mockResolvedValue({ running: false, url: null, clients: [] });
+    fireEvent.click(screen.getByRole("button", { name: "Refresh HTTP client sessions" }));
+
+    expect(await screen.findByText(/server is stopped/i)).toBeDefined();
+    expect(screen.queryByText("Listening at")).toBeNull();
   });
 
   it("surfaces a bind error and leaves the toggle off", async () => {

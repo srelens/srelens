@@ -27,6 +27,28 @@ struct Running {
     token: srelens_mcp::auth::Token,
 }
 
+/// One point-in-time view of the in-app HTTP server and the sessions owned by
+/// that exact listener generation. Keeping liveness, address, and sessions in
+/// one value prevents Settings from combining an old `running` read with a
+/// newer (empty) session list after another window stops the server.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct McpHttpSnapshot {
+    pub running: bool,
+    pub url: Option<String>,
+    pub clients: Vec<srelens_mcp::http::ConnectedHttpClient>,
+}
+
+impl McpHttpSnapshot {
+    fn stopped() -> Self {
+        Self {
+            running: false,
+            url: None,
+            clients: Vec::new(),
+        }
+    }
+}
+
 /// Tauri-managed state owning the running MCP HTTP server (if any).
 pub struct McpHttpManager {
     cache: Arc<ClientCache>,
@@ -107,16 +129,30 @@ impl McpHttpManager {
             .map(|r| url_for(r.addr))
     }
 
-    /// Active sessions from the currently-running server only. The registry's
-    /// public shape contains bounded clientInfo and server timestamps, never
-    /// session credentials, headers, tokens or peer addresses.
-    pub fn connected_clients(&self) -> Vec<srelens_mcp::http::ConnectedHttpClient> {
+    /// Atomically identify the current listener generation and snapshot its
+    /// active sessions. The registry's public shape contains bounded
+    /// `clientInfo` and server timestamps, never session credentials, headers,
+    /// tokens or peer addresses. A second liveness check prevents a task that
+    /// finishes while its registry is read from being reported as running.
+    pub fn http_snapshot(&self) -> McpHttpSnapshot {
         let running = self.running.lock().unwrap();
-        running
+        let Some(server) = running
             .as_ref()
             .filter(|server| !server.handle.is_finished())
-            .map(|server| server.sessions.connected_clients())
-            .unwrap_or_default()
+        else {
+            return McpHttpSnapshot::stopped();
+        };
+
+        let clients = server.sessions.connected_clients();
+        if server.handle.is_finished() {
+            return McpHttpSnapshot::stopped();
+        }
+
+        McpHttpSnapshot {
+            running: true,
+            url: Some(url_for(server.addr)),
+            clients,
+        }
     }
 
     /// Build an `McpServer` wired with the same registry, consent policy, audit,
@@ -366,14 +402,12 @@ pub fn mcp_http_status(manager: State<'_, McpHttpManager>) -> Option<String> {
     manager.status_url()
 }
 
-/// Active HTTP client sessions for the local Settings pane. This is a Tauri
-/// command only; the MCP listener has no introspection route that could reveal
-/// which other clients are using it.
+/// The local Settings pane's atomic HTTP-server/session snapshot. This is a
+/// Tauri command only; the MCP listener has no introspection route that could
+/// reveal which other clients are using it.
 #[tauri::command]
-pub fn mcp_connected_clients(
-    manager: State<'_, McpHttpManager>,
-) -> Vec<srelens_mcp::http::ConnectedHttpClient> {
-    manager.connected_clients()
+pub fn mcp_http_snapshot(manager: State<'_, McpHttpManager>) -> McpHttpSnapshot {
+    manager.http_snapshot()
 }
 
 /// Resolve a pending MCP confirm dialog. `approved` decides whether the
@@ -1025,14 +1059,62 @@ mod tests {
         connection.read_to_string(&mut response).await.unwrap();
         assert!(response.starts_with("HTTP/1.1 200"), "{response}");
 
-        let clients = manager.connected_clients();
-        assert_eq!(clients.len(), 1);
-        assert_eq!(clients[0].name, "Cursor");
-        assert_eq!(clients[0].version.as_deref(), Some("2.0"));
+        let snapshot = manager.http_snapshot();
+        let expected_url = format!("http://127.0.0.1:{port}/mcp");
+        assert!(snapshot.running);
+        assert_eq!(snapshot.url.as_deref(), Some(expected_url.as_str()));
+        assert_eq!(snapshot.clients.len(), 1);
+        assert_eq!(snapshot.clients[0].name, "Cursor");
+        assert_eq!(snapshot.clients[0].version.as_deref(), Some("2.0"));
 
         let lifecycle = manager.lifecycle().await;
         stop_running(&manager, &pending, &lifecycle).await;
-        assert!(manager.connected_clients().is_empty());
+        let stopped = manager.http_snapshot();
+        assert!(!stopped.running);
+        assert_eq!(stopped.url, None);
+        assert!(stopped.clients.is_empty());
+    }
+
+    #[tokio::test]
+    async fn snapshot_command_distinguishes_running_empty_from_stopped() {
+        let app = tauri::test::mock_app();
+        app.manage(McpHttpManager::new(ClientCache::new_many(vec![])));
+
+        let stopped = mcp_http_snapshot(app.state());
+        assert!(!stopped.running);
+        assert_eq!(stopped.url, None);
+        assert!(stopped.clients.is_empty());
+
+        let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+            .await
+            .unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (tx, rx) = oneshot::channel::<()>();
+        let handle = tokio::spawn(async move {
+            let _ = rx.await;
+            drop(listener);
+        });
+        let manager = app.state::<McpHttpManager>();
+        *manager.running.lock().unwrap() = Some(Running {
+            addr,
+            shutdown: Some(tx),
+            handle,
+            sessions: srelens_mcp::http::HttpSessionRegistry::default(),
+            token: srelens_mcp::auth::Token::generate(),
+        });
+
+        let running = mcp_http_snapshot(app.state());
+        let expected_url = url_for(addr);
+        assert!(running.running);
+        assert_eq!(running.url.as_deref(), Some(expected_url.as_str()));
+        assert!(
+            running.clients.is_empty(),
+            "running-empty must not collapse into stopped"
+        );
+
+        let pending = crate::mcp_confirm::Pending::default();
+        let lifecycle = manager.lifecycle().await;
+        stop_running(&manager, &pending, &lifecycle).await;
     }
 
     #[tokio::test]

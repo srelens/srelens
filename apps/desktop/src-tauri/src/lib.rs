@@ -55,7 +55,7 @@ use helm::{helm_op_close, start_helm_op};
 use logs::{export_log_spool, quit as quit_logs, read_log_spool, start_log_stream, stop_log_stream};
 use mcp::{
     install_srelens_cli, mcp_audit_tail, mcp_confirm_pending, mcp_confirm_respond,
-    mcp_connected_clients, mcp_http_start, mcp_http_status, mcp_http_stop, mcp_prompt_issues,
+    mcp_http_snapshot, mcp_http_start, mcp_http_status, mcp_http_stop, mcp_prompt_issues,
     mcp_token_get, mcp_token_revoke, mcp_token_rotate, mcp_token_storage, srelens_cli_status,
     McpAuditPath, McpHttpManager, McpPromptsDir,
 };
@@ -576,7 +576,7 @@ pub fn run() {
             mcp_http_start,
             mcp_http_stop,
             mcp_http_status,
-            mcp_connected_clients,
+            mcp_http_snapshot,
             mcp_confirm_respond,
             mcp_confirm_pending,
             mcp_token_get,

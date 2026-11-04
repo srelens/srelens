@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import React, { useCallback, useEffect, useState } from "react";
 import { Copy, Download, Eye, EyeOff, Radio, RefreshCw, Trash2 } from "lucide-react";
 import { Button, ConfirmDialog, TextInput } from "../ui";
 import { notify } from "@srelens/core";
@@ -10,10 +10,10 @@ import {
 import {
   startMcpHttp,
   stopMcpHttp,
-  mcpHttpStatus,
   installSrelensCli,
   srelensCliStatus,
   type CliStatus,
+  type McpHttpSnapshot,
 } from "@srelens/core";
 import { getMcpToken, revokeMcpToken, rotateMcpToken } from "@srelens/core";
 import { mcpClientConfig, MCP_TOOLS, type McpTool, type McpTransport } from "@srelens/core";
@@ -42,7 +42,10 @@ async function copy(text: string) {
  */
 export function McpSettingsSection() {
   const [settings, setSettings] = useState<McpSettings>(loadMcpSettings);
-  const [runningUrl, setRunningUrl] = useState<string | null>(null);
+  // undefined = not read yet, null = definitely stopped. The atomic snapshot
+  // below owns this distinction; an unresolved or failed read must not make a
+  // stopped claim.
+  const [runningUrl, setRunningUrl] = useState<string | null | undefined>(undefined);
   const [serverError, setServerError] = useState("");
   const [cli, setCli] = useState<CliStatus | null>(null);
   const [cliLoading, setCliLoading] = useState(true);
@@ -93,9 +96,12 @@ export function McpSettingsSection() {
   }
 
   useEffect(() => {
-    void mcpHttpStatus().then(setRunningUrl).catch(() => {});
     void refreshCli();
     void refreshToken();
+  }, []);
+
+  const establishHttpSnapshot = useCallback((snapshot: McpHttpSnapshot) => {
+    setRunningUrl(snapshot.url);
   }, []);
 
   function persist(next: McpSettings) {
@@ -179,9 +185,8 @@ export function McpSettingsSection() {
       notify.success("Token revoked. The MCP HTTP server has stopped.");
       // The server stops as a side effect of revocation; reflect that instead
       // of leaving the toggle showing a server that's no longer listening.
-      const status = await mcpHttpStatus().catch(() => null);
-      setRunningUrl(status);
-      if (!status) persist({ ...settings, enabled: false });
+      setRunningUrl(null);
+      persist({ ...settings, enabled: false });
       setTokenConfirm(null);
     } catch (e) {
       setTokenError(String(e));
@@ -226,7 +231,7 @@ export function McpSettingsSection() {
             />
           </label>
         </div>
-        {settings.enabled && runningUrl && (
+        {runningUrl && (
           <div className="flex items-center gap-2 text-sm">
             <Radio className="size-4 text-green-600 dark:text-green-500" aria-hidden />
             <span>Listening at</span>
@@ -413,8 +418,12 @@ export function McpSettingsSection() {
       </section>
 
       <section className="flex flex-col gap-2">
-        <h4 className="text-sm font-medium">Active HTTP clients</h4>
-        <McpClientsList running={Boolean(runningUrl)} />
+        <h4 className="text-sm font-medium">HTTP client sessions</h4>
+        <McpClientsList
+          running={runningUrl === undefined ? null : runningUrl !== null}
+          serverUrl={runningUrl}
+          onServerSnapshot={establishHttpSnapshot}
+        />
       </section>
     </div>
   );

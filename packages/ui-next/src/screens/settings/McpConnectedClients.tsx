@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
-  mcpConnectedClients,
+  mcpHttpSnapshot,
   relativeTime,
-  type ConnectedMcpClient,
+  type McpHttpSnapshot,
 } from "@srelens/core";
 import { Badge, Button, LoadingState, Panel } from "@srelens/ui-kit";
 import { FailureAlert } from "../../lib/errorCopy";
@@ -14,34 +14,44 @@ const REFRESH_MS = 5_000;
  * `null` means the parent has not established whether the server is running;
  * it must not be collapsed into the definite claim that the server is stopped.
  */
-export function McpConnectedClients({ running }: { running: boolean | null }) {
-  const [clients, setClients] = useState<ConnectedMcpClient[] | null>(null);
+interface McpConnectedClientsProps {
+  running: boolean | null;
+  serverUrl?: string | null;
+  onServerSnapshot?: (snapshot: McpHttpSnapshot) => void;
+}
+
+export function McpConnectedClients({
+  running,
+  serverUrl,
+  onServerSnapshot,
+}: McpConnectedClientsProps) {
+  const [snapshot, setSnapshot] = useState<McpHttpSnapshot | null>(null);
   const [error, setError] = useState<unknown>(null);
   const requestGeneration = useRef(0);
+  const onServerSnapshotRef = useRef(onServerSnapshot);
+
+  useEffect(() => {
+    onServerSnapshotRef.current = onServerSnapshot;
+  }, [onServerSnapshot]);
 
   const refresh = useCallback(async () => {
     const generation = ++requestGeneration.current;
     try {
-      const next = await mcpConnectedClients();
+      const next = await mcpHttpSnapshot();
       if (generation !== requestGeneration.current) return;
-      setClients(next);
+      setSnapshot(next);
       setError(null);
+      onServerSnapshotRef.current?.(next);
     } catch (nextError) {
       if (generation !== requestGeneration.current) return;
-      setClients(null);
+      setSnapshot(null);
       setError(nextError);
     }
   }, []);
 
   useEffect(() => {
-    if (running !== true) {
-      requestGeneration.current += 1;
-      setClients([]);
-      setError(null);
-      return;
-    }
-
-    setClients(null);
+    requestGeneration.current += 1;
+    setSnapshot(null);
     setError(null);
     void refresh();
     const timer = window.setInterval(() => void refresh(), REFRESH_MS);
@@ -49,11 +59,14 @@ export function McpConnectedClients({ running }: { running: boolean | null }) {
       requestGeneration.current += 1;
       window.clearInterval(timer);
     };
-  }, [refresh, running]);
+  }, [refresh, running, serverUrl]);
+
+  const effectiveRunning = snapshot?.running ?? running;
+  const clients = snapshot?.clients ?? null;
 
   return (
     <Panel
-      title="Active HTTP clients"
+      title="HTTP client sessions"
       description="Sessions held by this process's Streamable HTTP server, most recently used first."
     >
       <div className="flex flex-wrap items-start gap-2">
@@ -62,29 +75,29 @@ export function McpConnectedClients({ running }: { running: boolean | null }) {
           view keeps no network addresses, credentials, or session IDs. A row is a server session,
           not proof that the client process is still running.
         </p>
-        {running === true && error === null && clients !== null && (
+        {effectiveRunning === true && error === null && clients !== null && (
           <Button variant="ghost" size="xs" onClick={() => void refresh()}>
             Refresh
           </Button>
         )}
       </div>
 
-      {running === null ? (
-        <p className="mt-3 text-[0.75rem] text-muted">
-          Active sessions appear once the server status is known.
-        </p>
-      ) : running === false ? (
-        <p className="mt-3 text-[0.75rem] text-muted">The MCP HTTP server is stopped.</p>
-      ) : error !== null ? (
+      {error !== null ? (
         <FailureAlert
           className="mt-3"
-          title="Active MCP clients could not be read"
+          title="HTTP client sessions could not be read"
           error={error}
           domain="local"
           onRetry={() => void refresh()}
         />
+      ) : effectiveRunning === null ? (
+        <p className="mt-3 text-[0.75rem] text-muted">
+          Active sessions appear once the server status is known.
+        </p>
+      ) : effectiveRunning === false ? (
+        <p className="mt-3 text-[0.75rem] text-muted">The MCP HTTP server is stopped.</p>
       ) : clients === null ? (
-        <LoadingState compact className="mt-3" label="Loading active MCP clients" />
+        <LoadingState compact className="mt-3" label="Loading HTTP client sessions" />
       ) : clients.length === 0 ? (
         <p className="mt-3 text-[0.75rem] text-muted">No active HTTP client sessions.</p>
       ) : (

@@ -1,4 +1,7 @@
-import { mcpConnectedClients, type ConnectedMcpClient } from "@srelens/core/lib/mcp";
+import {
+  mcpHttpSnapshot,
+  type McpHttpSnapshot,
+} from "@srelens/core/lib/mcp";
 import { relativeTime } from "@srelens/core/lib/relativeTime";
 import { describeError } from "@srelens/core";
 import { Badge, Button, ErrorState, Spinner } from "../ui";
@@ -12,34 +15,43 @@ const REFRESH_MS = 5_000;
  * Identity is self-reported `clientInfo`; the host contributes only time and
  * stream state, and intentionally keeps credentials and network data out.
  */
-export function McpClientsList({ running }: { running: boolean }) {
-  const [clients, setClients] = useState<ConnectedMcpClient[] | null>(null);
+interface McpClientsListProps {
+  /** Last status known by the parent, or null while no status is established. */
+  running: boolean | null;
+  /** Invalidates an in-flight read when a parent action changes generations. */
+  serverUrl?: string | null;
+  /** Lets the parent use the same atomic read for its main server status. */
+  onServerSnapshot?: (snapshot: McpHttpSnapshot) => void;
+}
+
+export function McpClientsList({ running, serverUrl, onServerSnapshot }: McpClientsListProps) {
+  const [snapshot, setSnapshot] = useState<McpHttpSnapshot | null>(null);
   const [error, setError] = useState<unknown>(null);
   const requestGeneration = useRef(0);
+  const onServerSnapshotRef = useRef(onServerSnapshot);
+
+  useEffect(() => {
+    onServerSnapshotRef.current = onServerSnapshot;
+  }, [onServerSnapshot]);
 
   const refresh = useCallback(async () => {
     const generation = ++requestGeneration.current;
     try {
-      const next = await mcpConnectedClients();
+      const next = await mcpHttpSnapshot();
       if (generation !== requestGeneration.current) return;
-      setClients(next);
+      setSnapshot(next);
       setError(null);
+      onServerSnapshotRef.current?.(next);
     } catch (nextError) {
       if (generation !== requestGeneration.current) return;
-      setClients(null);
+      setSnapshot(null);
       setError(nextError);
     }
   }, []);
 
   useEffect(() => {
-    if (!running) {
-      requestGeneration.current += 1;
-      setClients([]);
-      setError(null);
-      return;
-    }
-
-    setClients(null);
+    requestGeneration.current += 1;
+    setSnapshot(null);
     setError(null);
     void refresh();
     const timer = window.setInterval(() => void refresh(), REFRESH_MS);
@@ -47,25 +59,32 @@ export function McpClientsList({ running }: { running: boolean }) {
       requestGeneration.current += 1;
       window.clearInterval(timer);
     };
-  }, [refresh, running]);
-
-  if (!running) {
-    return <p className="text-sm text-muted-foreground">The MCP HTTP server is stopped.</p>;
-  }
+  }, [refresh, running, serverUrl]);
 
   if (error !== null) {
     return (
       <ErrorState
-        title="Active MCP clients could not be read"
+        title="HTTP client sessions could not be read"
         detail={describeError(error, { domain: "local" }).detail}
         onRetry={() => void refresh()}
       />
     );
   }
 
-  if (clients === null) {
-    return <Spinner label="Loading active MCP clients" />;
+  const effectiveRunning = snapshot?.running ?? running;
+  if (effectiveRunning === null) {
+    return <Spinner label="Checking MCP HTTP server" />;
   }
+
+  if (!effectiveRunning) {
+    return <p className="text-sm text-muted-foreground">The MCP HTTP server is stopped.</p>;
+  }
+
+  if (snapshot === null) {
+    return <Spinner label="Loading HTTP client sessions" />;
+  }
+
+  const clients = snapshot.clients;
 
   return (
     <div className="flex flex-col gap-2">
@@ -80,7 +99,7 @@ export function McpClientsList({ running }: { running: boolean }) {
           size="sm"
           className="ml-auto shrink-0"
           onClick={() => void refresh()}
-          aria-label="Refresh active MCP clients"
+          aria-label="Refresh HTTP client sessions"
         >
           <RefreshCw data-icon="inline-start" />
           Refresh
@@ -98,7 +117,7 @@ export function McpClientsList({ running }: { running: boolean }) {
                 {client.version && <code className="fl-mono">{client.version}</code>}
                 <span
                   className="text-xs text-muted-foreground"
-                  title={`Connected ${new Date(client.connectedAt * 1000).toLocaleString()}`}
+                  title={`Session started ${new Date(client.connectedAt * 1000).toLocaleString()}`}
                 >
                   Last request {relativeTime(client.lastSeen * 1000, Date.now())}
                 </span>

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   getMcpToken,
   loadMcpSettings,
@@ -9,6 +9,7 @@ import {
   saveMcpSettings,
   startMcpHttp,
   stopMcpHttp,
+  type McpHttpSnapshot,
 } from "@srelens/core";
 import { Badge, Button, ConfirmDialog, Field, Panel, SubHead, TextInput } from "@srelens/ui-kit";
 import { FailureAlert } from "../../lib/errorCopy";
@@ -346,10 +347,18 @@ export function McpServer() {
    *  any read still in flight. Bumps the sequence FIRST: an in-flight fetch
    *  must be told it has been superseded before the authoritative value lands,
    *  or its late response can overwrite it right back. */
-  function establishStatus(url: string | null) {
+  const establishStatus = useCallback((url: string | null) => {
     statusSeq.current += 1;
     setStatusRead({ kind: "ready", value: url });
-  }
+  }, []);
+
+  // The sessions pane polls a single manager-owned snapshot. Feed its URL
+  // back into the main card so a cross-window or spontaneous stop updates the
+  // badge and address at the same instant as the session list.
+  const establishSnapshot = useCallback(
+    (snapshot: McpHttpSnapshot) => establishStatus(snapshot.url),
+    [establishStatus],
+  );
 
   async function changePort(target: number) {
     setBusy(true); setPortError(null);
@@ -625,7 +634,11 @@ export function McpServer() {
         />
       )}
     </Panel>
-    <McpConnectedClients running={statusRead.kind === "ready" ? running : null} />
+    <McpConnectedClients
+      running={statusRead.kind === "ready" ? running : null}
+      serverUrl={statusRead.kind === "ready" ? statusRead.value : undefined}
+      onServerSnapshot={establishSnapshot}
+    />
     <McpClientSetup url={address} token={token}
       statusLoading={statusRead.kind === "loading"} tokenLoading={tokenRead.kind === "loading"}
       statusError={statusRead.kind === "error" ? statusRead.error : undefined}
