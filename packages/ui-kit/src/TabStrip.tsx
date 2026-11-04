@@ -15,7 +15,13 @@ export interface StripTab {
   title: string;
   /** The quiet tag after the title — the cluster, the namespace, "logs". */
   sub?: string;
-  /** Full context name, even when the visible tag uses a short display name. */
+  /**
+   * The cluster's identity colour. It is drawn only beside a non-empty `sub`,
+   * so the written cluster name remains the identity and colour only helps a
+   * reader scan across tabs.
+   */
+  clusterColor?: string;
+  /** Unique context identity, even when the visible tag uses a custom display name. */
   context?: string;
   /** Resource kind and namespace, when the route carries them. */
   detail?: string;
@@ -85,10 +91,25 @@ const ChevronGlyph = () => (
  * keyboard, announced inconsistently, and not the tab's accessible name. Set
  * explicitly here for a second reason — the close button lives inside the tab,
  * and a name computed from the contents would read "Pods prod-eu Close Pods".
+ * A custom visible context name keeps the unique underlying identity here too,
+ * so two aliases that sound alike do not turn into the same spoken tab.
  * Pinned is in the name because it is why Delete does nothing.
  */
 function tabName(tab: StripTab): string {
-  return `${tab.title}${filled(tab.sub) ? ` · ${tab.sub}` : ""}${tab.pinned ? ", pinned" : ""}`;
+  const context = filled(tab.context) && tab.context !== tab.sub ? `, context ${tab.context}` : "";
+  return `${tab.title}${filled(tab.sub) ? ` · ${tab.sub}` : ""}${context}${tab.pinned ? ", pinned" : ""}`;
+}
+
+function ClusterColor({ tab }: { tab: StripTab }) {
+  if (!filled(tab.sub) || !filled(tab.clusterColor)) return null;
+  return (
+    <span
+      data-slot="tab-cluster-color"
+      className="tab-cluster-color"
+      style={{ background: tab.clusterColor }}
+      aria-hidden="true"
+    />
+  );
 }
 
 /**
@@ -184,6 +205,9 @@ export function TabStrip({
   const [dropAt, setDropAt] = useState<number | null>(null);
   const [announcement, setAnnouncement] = useState("");
   const moved = useRef<{ id: string; to: number; focus: boolean } | null>(null);
+  const titleCounts = new Map<string, number>();
+  for (const tab of tabs) titleCounts.set(tab.title, (titleCounts.get(tab.title) ?? 0) + 1);
+  const controlName = (tab: StripTab) => (titleCounts.get(tab.title) ?? 0) > 1 ? tabName(tab) : tab.title;
   useEffect(() => {
     const move = moved.current;
     if (!move || tabs.findIndex(t => t.id === move.id) !== move.to) return;
@@ -441,7 +465,12 @@ export function TabStrip({
                 </span>
               )}
               <span className="tab-title truncate">{tab.title}</span>
-              {filled(tab.sub) && <span className="tab-sub truncate">{tab.sub}</span>}
+              {filled(tab.sub) && (
+                <span data-slot="tab-cluster-identity" className="tab-cluster-identity">
+                  <span className="tab-sub">{tab.sub}</span>
+                  <ClusterColor tab={tab} />
+                </span>
+              )}
               {tab.pinned ? (
                 // A dot in the stylesheet, not a glyph. Hidden: the tab's own
                 // name says "pinned", which is where it is any use.
@@ -455,7 +484,7 @@ export function TabStrip({
                     // comment: the tab stays one focusable node, and Delete is
                     // the keyboard's way to this.
                     tabIndex={-1}
-                    aria-label={`Close ${tab.title}`}
+                    aria-label={`Close ${controlName(tab)}`}
                     onClick={(event) => {
                       // The button sits inside the tab, so its click reaches
                       // the tab's own handler otherwise — and closing a tab you
@@ -482,7 +511,7 @@ export function TabStrip({
             {filled(tab.detail) && <div>{tab.detail}</div>}
           </div>}>{node}</Tooltip>;
           return menuFor ? (
-            <ContextMenu key={tab.id} items={menuFor(tab)} label={`${tab.title} actions`}>
+            <ContextMenu key={tab.id} items={menuFor(tab)} label={`${controlName(tab)} actions`}>
               {hinted}
             </ContextMenu>
           ) : (
@@ -538,6 +567,7 @@ export function TabStrip({
                     type="button"
                     className="ns-row"
                     data-on={current}
+                    aria-label={tabName(tab)}
                     // Which one you are on, said rather than only shown.
                     aria-current={current || undefined}
                     onClick={() => {
@@ -552,7 +582,12 @@ export function TabStrip({
                       {tab.icon && <NavIcon icon={tab.icon} />}
                     </span>
                     <span className="flex-1 truncate text-left">{tab.title}</span>
-                    {filled(tab.sub) && <span className="path shrink-0 text-faint">{tab.sub}</span>}
+                    {filled(tab.sub) && (
+                      <span data-slot="tab-overflow-context" className="tab-overflow-context">
+                        <ClusterColor tab={tab} />
+                        <span className="tab-overflow-label path text-faint">{tab.sub}</span>
+                      </span>
+                    )}
                   </button>
                 );
               })}
