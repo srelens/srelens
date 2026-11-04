@@ -7,6 +7,7 @@ const { mcp } = vi.hoisted(() => ({
     startMcpHttp: vi.fn(),
     stopMcpHttp: vi.fn(),
     mcpHttpStatus: vi.fn(),
+    mcpConnectedClients: vi.fn(),
     installSrelensCli: vi.fn(),
     srelensCliStatus: vi.fn(),
   },
@@ -39,6 +40,7 @@ beforeEach(() => {
   localStorage.clear();
   Object.values(mcp).forEach((m) => m.mockReset());
   mcp.mcpHttpStatus.mockResolvedValue(null);
+  mcp.mcpConnectedClients.mockResolvedValue([]);
   mcp.srelensCliStatus.mockResolvedValue({
     installed: false,
     path: "/home/u/.local/bin/srelens",

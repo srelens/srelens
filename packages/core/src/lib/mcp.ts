@@ -15,6 +15,22 @@ export async function mcpHttpStatus(): Promise<string | null> {
   return invokeCommand<string | null>("mcp_http_status");
 }
 
+/** One active Streamable HTTP session. Client identity is self-reported by
+ * the initialize handshake; the host deliberately omits session IDs, tokens,
+ * headers, and network addresses from this local Settings snapshot. */
+export interface ConnectedMcpClient {
+  name: string;
+  version: string | null;
+  connectedAt: number;
+  lastSeen: number;
+  notificationsConnected: boolean;
+}
+
+/** Active HTTP client sessions, most recently used first. */
+export async function mcpConnectedClients(): Promise<ConnectedMcpClient[]> {
+  return invokeCommand<ConnectedMcpClient[]>("mcp_connected_clients");
+}
+
 export interface CliStatus {
   installed: boolean;
   path: string;

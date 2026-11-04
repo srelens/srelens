@@ -13,6 +13,7 @@ import {
 import { Badge, Button, ConfirmDialog, Field, Panel, SubHead, TextInput } from "@srelens/ui-kit";
 import { FailureAlert } from "../../lib/errorCopy";
 import { McpClientSetup } from "./McpClientSetup";
+import { McpConnectedClients } from "./McpConnectedClients";
 import { useMcpAutoStart } from "../../lib/mcpAutoStart";
 import { useAssistant } from "../../lib/assistant";
 
@@ -624,6 +625,7 @@ export function McpServer() {
         />
       )}
     </Panel>
+    <McpConnectedClients running={statusRead.kind === "ready" ? running : null} />
     <McpClientSetup url={address} token={token}
       statusLoading={statusRead.kind === "loading"} tokenLoading={tokenRead.kind === "loading"}
       statusError={statusRead.kind === "error" ? statusRead.error : undefined}

@@ -17,6 +17,10 @@ struct Running {
     addr: SocketAddr,
     shutdown: Option<oneshot::Sender<()>>,
     handle: JoinHandle<()>,
+    /// The session registry belonging to this exact listener generation.
+    /// Keeping it on `Running` makes the liveness check and snapshot atomic
+    /// with respect to stop/restart/token-rotation transitions.
+    sessions: srelens_mcp::http::HttpSessionRegistry,
     // The Settings token: what an external MCP client presents. The
     // assistant's own CLIs present a per-turn token instead (#393, see
     // `McpHttpManager::mint_turn_token`).
@@ -101,6 +105,18 @@ impl McpHttpManager {
             .as_ref()
             .filter(|r| !r.handle.is_finished())
             .map(|r| url_for(r.addr))
+    }
+
+    /// Active sessions from the currently-running server only. The registry's
+    /// public shape contains bounded clientInfo and server timestamps, never
+    /// session credentials, headers, tokens or peer addresses.
+    pub fn connected_clients(&self) -> Vec<srelens_mcp::http::ConnectedHttpClient> {
+        let running = self.running.lock().unwrap();
+        running
+            .as_ref()
+            .filter(|server| !server.handle.is_finished())
+            .map(|server| server.sessions.connected_clients())
+            .unwrap_or_default()
     }
 
     /// Build an `McpServer` wired with the same registry, consent policy, audit,
@@ -237,9 +253,9 @@ fn url_for(addr: SocketAddr) -> String {
 /// rotated token takes effect at once instead of leaving the old token
 /// accepted by an already-running listener). Bind happens before anything
 /// else so a port conflict is reported to the caller immediately.
-async fn start_server(
+async fn start_server<R: tauri::Runtime>(
     port: u16,
-    app: &tauri::AppHandle,
+    app: &tauri::AppHandle<R>,
     manager: &McpHttpManager,
     pending: &Arc<crate::mcp_confirm::Pending>,
     token: srelens_mcp::auth::Token,
@@ -264,16 +280,19 @@ async fn start_server(
         .map_err(|e| format!("Could not bind {addr}: {e}"))?;
 
     let server = manager.build_server(app, pending, audit_path, prompts_dir);
+    let sessions = srelens_mcp::http::HttpSessionRegistry::default();
+    let server_sessions = sessions.clone();
     let running_token = token.clone();
     let (tx, rx) = oneshot::channel();
     let handle = tokio::spawn(async move {
-        let _ = srelens_mcp::http::serve_http_with_shutdown(
+        let _ = srelens_mcp::http::serve_http_with_shutdown_and_sessions(
             server,
             listener,
             async {
                 let _ = rx.await;
             },
             token,
+            server_sessions,
         )
         .await;
     });
@@ -282,6 +301,7 @@ async fn start_server(
         addr,
         shutdown: Some(tx),
         handle,
+        sessions,
         token: running_token,
     });
     Ok(url_for(addr))
@@ -344,6 +364,16 @@ pub async fn mcp_http_stop(
 #[tauri::command]
 pub fn mcp_http_status(manager: State<'_, McpHttpManager>) -> Option<String> {
     manager.status_url()
+}
+
+/// Active HTTP client sessions for the local Settings pane. This is a Tauri
+/// command only; the MCP listener has no introspection route that could reveal
+/// which other clients are using it.
+#[tauri::command]
+pub fn mcp_connected_clients(
+    manager: State<'_, McpHttpManager>,
+) -> Vec<srelens_mcp::http::ConnectedHttpClient> {
+    manager.connected_clients()
 }
 
 /// Resolve a pending MCP confirm dialog. `approved` decides whether the
@@ -695,6 +725,7 @@ pub fn install_srelens_cli() -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     #[cfg(unix)]
     #[test]
@@ -835,6 +866,7 @@ mod tests {
             addr,
             shutdown: Some(tx),
             handle,
+            sessions: srelens_mcp::http::HttpSessionRegistry::default(),
             token: srelens_mcp::auth::Token::generate(),
         });
         Ok(())
@@ -878,6 +910,7 @@ mod tests {
                 addr,
                 shutdown: Some(tx),
                 handle,
+                sessions: srelens_mcp::http::HttpSessionRegistry::default(),
                 token: srelens_mcp::auth::Token::generate(),
             });
             addr
@@ -918,6 +951,7 @@ mod tests {
                 addr: bound_addr,
                 shutdown: Some(tx),
                 handle,
+                sessions: srelens_mcp::http::HttpSessionRegistry::default(),
                 token: srelens_mcp::auth::Token::generate(),
             });
 
@@ -930,6 +964,75 @@ mod tests {
                 panic!("rebind attempt {i} on {bound_addr} failed: {e}")
             });
         }
+    }
+
+    #[tokio::test]
+    async fn desktop_manager_reports_the_clients_from_its_running_server() {
+        let app = tauri::test::mock_app();
+        let manager = McpHttpManager::new(ClientCache::new_many(vec![]));
+        let pending = Arc::new(crate::mcp_confirm::Pending::default());
+        let dir = scratch("connected-clients");
+        let probe = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+            .await
+            .unwrap();
+        let port = probe.local_addr().unwrap().port();
+        drop(probe);
+        let token = srelens_mcp::auth::Token::generate();
+
+        {
+            let lifecycle = manager.lifecycle().await;
+            start_server(
+                port,
+                app.handle(),
+                &manager,
+                &pending,
+                token.clone(),
+                &dir.join("audit.jsonl"),
+                &dir.join("prompts"),
+                &lifecycle,
+            )
+            .await
+            .unwrap();
+        }
+
+        let body = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-03-26",
+                "capabilities": {},
+                "clientInfo": { "name": "Cursor", "version": "2.0" }
+            }
+        })
+        .to_string();
+        let mut connection = tokio::net::TcpStream::connect((Ipv4Addr::LOCALHOST, port))
+            .await
+            .unwrap();
+        connection
+            .write_all(
+                format!(
+                    "POST /mcp HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nAuthorization: Bearer {}\r\n\
+                     Content-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    token.as_str(),
+                    body.len()
+                )
+                .as_bytes(),
+            )
+            .await
+            .unwrap();
+        let mut response = String::new();
+        connection.read_to_string(&mut response).await.unwrap();
+        assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+
+        let clients = manager.connected_clients();
+        assert_eq!(clients.len(), 1);
+        assert_eq!(clients[0].name, "Cursor");
+        assert_eq!(clients[0].version.as_deref(), Some("2.0"));
+
+        let lifecycle = manager.lifecycle().await;
+        stop_running(&manager, &pending, &lifecycle).await;
+        assert!(manager.connected_clients().is_empty());
     }
 
     #[tokio::test]
@@ -957,6 +1060,7 @@ mod tests {
             addr: bound_addr,
             shutdown: Some(tx),
             handle,
+            sessions: srelens_mcp::http::HttpSessionRegistry::default(),
             token: t.clone(),
         });
 
@@ -976,6 +1080,7 @@ mod tests {
             addr,
             shutdown: None,
             handle,
+            sessions: srelens_mcp::http::HttpSessionRegistry::default(),
             token: srelens_mcp::auth::Token::generate(),
         });
         // `start_server` and `mcp_http_status` both require `!is_finished()`;
@@ -1175,7 +1280,13 @@ mod tests {
             drop(listener);
         });
         let settings = srelens_mcp::auth::Token::generate();
-        *mgr.running.lock().unwrap() = Some(Running { addr, shutdown: Some(tx), handle, token: settings.clone() });
+        *mgr.running.lock().unwrap() = Some(Running {
+            addr,
+            shutdown: Some(tx),
+            handle,
+            sessions: srelens_mcp::http::HttpSessionRegistry::default(),
+            token: settings.clone(),
+        });
         settings
     }
 

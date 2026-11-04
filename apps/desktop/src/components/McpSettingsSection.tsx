@@ -18,6 +18,7 @@ import {
 import { getMcpToken, revokeMcpToken, rotateMcpToken } from "@srelens/core";
 import { mcpClientConfig, MCP_TOOLS, type McpTool, type McpTransport } from "@srelens/core";
 import { McpAuditList } from "./McpAuditList";
+import { McpClientsList } from "./McpClientsList";
 import { McpPromptIssues } from "./McpPromptIssues";
 
 /** Masked by default: only the last 4 characters are shown until revealed. */
@@ -409,6 +410,11 @@ export function McpSettingsSection() {
             Copy
           </Button>
         </div>
+      </section>
+
+      <section className="flex flex-col gap-2">
+        <h4 className="text-sm font-medium">Active HTTP clients</h4>
+        <McpClientsList running={Boolean(runningUrl)} />
       </section>
     </div>
   );

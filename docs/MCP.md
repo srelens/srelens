@@ -789,7 +789,20 @@ restarts the server) releases every watch, and the client re-subscribes on
 its new stream. Every HTTP request after `initialize` must carry the
 server-minted session ID. Missing IDs are rejected; unknown or ended IDs return
 404 so the client initializes again. `DELETE /mcp` with that bearer token and
-session ID explicitly ends the session and its stream. Up to 32
+session ID explicitly ends the session and its stream.
+
+**Settings → MCP → Active HTTP clients** is a local view of those server-held
+sessions. It shows the bounded, control-stripped `clientInfo.name` and
+`clientInfo.version` a client supplied during `initialize`, when that session
+last made a request, and whether its notification stream is open. The labels
+are self-reported, not authenticated identities. Session IDs, bearer tokens,
+request headers and peer addresses are never included. A row represents a
+server-held session, not proof that the client process is still running. The
+list is bounded by the same 64-session LRU registry as the transport;
+`DELETE`, capacity-driven idle retirement, server stop and token rotation
+remove the corresponding rows.
+
+Up to 32
 subscriptions can be live at once; re-subscribing to a URI you already hold
 replaces it in place rather than counting twice, and past the cap you need
 to unsubscribe from something before adding another.

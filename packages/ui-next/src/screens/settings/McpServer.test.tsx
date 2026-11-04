@@ -5,6 +5,7 @@ import userEvent from "@testing-library/user-event";
 const core = vi.hoisted(() => ({
   getMcpToken: vi.fn(),
   mcpHttpStatus: vi.fn(),
+  mcpConnectedClients: vi.fn(),
   rotateMcpToken: vi.fn(),
   revokeMcpToken: vi.fn(),
   startMcpHttp: vi.fn(),
@@ -61,6 +62,7 @@ describe("McpServer", () => {
     vi.clearAllMocks();
     core.getMcpToken.mockResolvedValue(TOKEN);
     core.mcpHttpStatus.mockResolvedValue(STATUS_URL);
+    core.mcpConnectedClients.mockResolvedValue([]);
     core.rotateMcpToken.mockResolvedValue(TOKEN);
     core.revokeMcpToken.mockResolvedValue(undefined);
     core.startMcpHttp.mockResolvedValue(PORT_URL);
@@ -116,10 +118,19 @@ describe("McpServer", () => {
     expect(await screen.findByText(/drops in-flight requests/i)).toBeTruthy();
   });
 
-  it("offers no client list, and says why", async () => {
+  it("shows the connected-client snapshot in the active MCP settings pane", async () => {
+    core.mcpConnectedClients.mockResolvedValue([
+      {
+        name: "Claude Code",
+        version: "1.2.3",
+        connectedAt: Date.now() / 1000,
+        lastSeen: Date.now() / 1000,
+        notificationsConnected: true,
+      },
+    ]);
     render(<McpServer />);
-    expect(screen.queryByText(/claude code|cursor/i)).toBeNull();
-    expect(screen.queryByRole("heading", { name: "Connected clients" })).toBeNull();
+    expect(await screen.findByRole("heading", { name: "Active HTTP clients" })).toBeTruthy();
+    expect(await screen.findByText("Claude Code")).toBeTruthy();
   });
 
   it("hides the token again once the reader is done looking", async () => {
