@@ -534,8 +534,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 AppEvent::TopologyResult { context, namespaces, result } => {
                     app.handle_topology_result(&context, namespaces, result);
                 }
-                AppEvent::CostResult { context, result } => {
-                    app.handle_cost_result(&context, result);
+                AppEvent::CostResult { request, context, result } => {
+                    app.handle_cost_reply(request, &context, result);
                 }
                 AppEvent::CostInstallStep { context, step } => {
                     app.handle_cost_install_step(&context, step);

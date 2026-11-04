@@ -35,7 +35,7 @@ const WINDOW_DAYS: f64 = 7.0;
 /// Days in the average month the monthly figures are scaled to.
 const DAYS_PER_MONTH: f64 = 730.0 / 24.0;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, schemars::JsonSchema)]
 pub enum Source {
     Kubecost,
     OpenCost,
@@ -131,7 +131,8 @@ pub fn allocation_path(c: &Candidate) -> String {
 }
 
 /// One namespace's real cost over the window.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, schemars::JsonSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct NamespaceSpend {
     pub name: String,
     pub total: f64,
@@ -143,7 +144,8 @@ pub struct NamespaceSpend {
     pub efficiency: Option<f64>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, schemars::JsonSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct ProviderCosts {
     pub source: Source,
     /// Where it was read from, for the screen.
@@ -236,8 +238,12 @@ pub fn parse_allocation(
     let mut minutes = 0.0f64;
     for step in steps {
         let Some(map) = step.as_object() else { continue };
+        // A step covers one span; its namespaces all report that span, so take
+        // the longest within the step and add the steps up. Taking the longest
+        // across steps would scale N steps of spend as if they were one.
+        let mut step_minutes = 0.0f64;
         for (name, entry) in map {
-            minutes = minutes.max(num(entry, "minutes"));
+            step_minutes = step_minutes.max(num(entry, "minutes"));
             let row = by_name.entry(name.clone()).or_insert_with(|| NamespaceSpend {
                 name: name.clone(),
                 total: 0.0,
@@ -261,6 +267,7 @@ pub fn parse_allocation(
                 }
             }
         }
+        minutes += step_minutes;
     }
     if by_name.is_empty() {
         // Answered, but with nothing in it: a tool installed minutes ago has
@@ -294,14 +301,33 @@ pub fn parse_allocation(
     Ok(ProviderCosts { source, location, window_days, total, idle, namespaces })
 }
 
+/// Why real costs could not be had. The two must not read alike: one says
+/// nothing about what is installed, the other says something IS installed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CostLookupError {
+    /// The look for a cost tool failed (cannot list Services, say), so whether
+    /// one is installed is not known.
+    Discovery(String),
+    /// A cost tool was found and did not give usable figures.
+    Provider(String),
+}
+
+impl std::fmt::Display for CostLookupError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Discovery(s) | Self::Provider(s) => f.write_str(s),
+        }
+    }
+}
+
 /// Ask the cluster for real costs. `Ok(None)` is "no Kubecost or OpenCost
-/// here", which is not a failure; `Err` is one that is installed but did not
-/// answer, and says which.
-pub async fn fetch_costs(client: &kube::Client) -> Result<Option<ProviderCosts>, String> {
+/// here", which is not a failure; `Err(Provider)` is one that is installed but
+/// did not answer, and says which; `Err(Discovery)` is that we could not tell.
+pub async fn fetch_costs(client: &kube::Client) -> Result<Option<ProviderCosts>, CostLookupError> {
     let api: Api<Service> = Api::all(client.clone());
     let (services, _) = crate::list_cap::list_capped(&api, ListParams::default())
         .await
-        .map_err(|e| format!("Failed to list services: {e}"))?;
+        .map_err(|e| CostLookupError::Discovery(format!("Failed to list services: {e}")))?;
     let found = candidates(&services);
     if found.is_empty() {
         return Ok(None);
@@ -310,7 +336,9 @@ pub async fn fetch_costs(client: &kube::Client) -> Result<Option<ProviderCosts>,
     let mut last = String::new();
     for c in &found {
         let path = allocation_path(c);
-        let req = Request::get(&path).body(Vec::new()).map_err(|e| e.to_string())?;
+        let req = Request::get(&path)
+            .body(Vec::new())
+            .map_err(|e| CostLookupError::Provider(e.to_string()))?;
         let place = format!("{}/{}", c.namespace, c.service);
         match tokio::time::timeout(request_timeout(), client.request::<Value>(req)).await {
             Err(_) => last = format!("{} at {place} timed out", c.source.label()),
@@ -321,7 +349,7 @@ pub async fn fetch_costs(client: &kube::Client) -> Result<Option<ProviderCosts>,
             },
         }
     }
-    Err(last)
+    Err(CostLookupError::Provider(last))
 }
 
 /// `7.0` -> `7`, `1.5` -> `1.5`.
@@ -444,6 +472,9 @@ mod tests {
         let b = json!({"code": 200, "data": [one.clone(), one.clone(), one]});
         let c = parse_allocation(&b, Source::OpenCost, "x".into()).unwrap();
         assert!((c.total - 3.0).abs() < 1e-9);
+        // Three one-day steps are a three-day window: 3 over 3 days, not 3 over 1.
+        assert!((c.window_days - 3.0).abs() < 1e-9);
+        assert!((c.total_monthly() - 3.0 / 3.0 * (730.0 / 24.0)).abs() < 1e-6);
     }
 
     #[test]

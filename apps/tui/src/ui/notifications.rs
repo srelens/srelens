@@ -18,19 +18,35 @@ fn ago(secs: u64) -> String {
     }
 }
 
-pub fn render_notifications_modal(f: &mut Frame, area: Rect, center: &NotificationCenter) {
+/// What the overlay showed: how many rows fit, and the scroll offset actually
+/// used (the caller's, held inside the history).
+pub struct Shown {
+    pub rows: usize,
+    pub scroll: usize,
+}
+
+/// Draw the history from entry `scroll` (0 = newest). Returns what fit, so the
+/// caller can page by it and mark only the visible entries as read.
+pub fn render_notifications_modal(
+    f: &mut Frame,
+    area: Rect,
+    center: &NotificationCenter,
+    scroll: usize,
+) -> Shown {
     let modal_area = centered_rect(80, 80, area);
     f.render_widget(Clear, modal_area);
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(Theme::border_type())
         .border_style(Style::default().fg(Theme::accent()))
-        .title(" Notifications  (c clear, Esc close) ");
+        .title(" Notifications  (j/k scroll, c clear, Esc close) ");
     let inner = block.inner(modal_area);
     f.render_widget(block, modal_area);
 
+    let rows = inner.height as usize;
+    let scroll = scroll.min(center.len().saturating_sub(rows));
     let mut lines: Vec<Line> = Vec::new();
-    for n in center.items().take(inner.height as usize) {
+    for n in center.items().skip(scroll).take(rows) {
         let mut spans = vec![
             Span::styled(n.level.label(), n.level.style()),
             Span::raw(" "),
@@ -55,4 +71,5 @@ pub fn render_notifications_modal(f: &mut Frame, area: Rect, center: &Notificati
         )));
     }
     f.render_widget(Paragraph::new(lines), inner);
+    Shown { rows, scroll }
 }

@@ -10,6 +10,11 @@
 //! preferred when one is present; see [`crate::opencost`].
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
+
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
+use srelens_capability::{Annotations, Capability, CapabilityError};
 
 use k8s_openapi::api::core::v1::{Node, Pod};
 
@@ -20,7 +25,8 @@ use crate::why_pending::calculate_pod_resource_requests;
 pub const HOURS_PER_MONTH: f64 = 730.0;
 
 /// Price of one unit of compute for one hour.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct Rates {
     /// Per CPU core-hour.
     pub cpu_core_hour: f64,
@@ -44,7 +50,8 @@ impl Rates {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct NodeCompute {
     pub name: String,
     pub instance_type: Option<String>,
@@ -61,7 +68,8 @@ pub struct NodeCompute {
     pub hourly: f64,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct NamespaceCompute {
     pub namespace: String,
     pub pods: usize,
@@ -77,7 +85,8 @@ impl NamespaceCompute {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct ClusterCompute {
     pub rates: Rates,
     pub nodes: Vec<NodeCompute>,
@@ -105,6 +114,10 @@ pub struct ClusterCompute {
     /// Why `provider` is missing when one IS installed (it did not answer).
     /// `None` with no provider means none was found.
     pub provider_note: Option<String>,
+    /// Why we could not even look for a cost tool (e.g. Services could not be
+    /// listed). Then nothing is known about what is installed: not "none", and
+    /// not "one is installed".
+    pub discovery_note: Option<String>,
 }
 
 impl ClusterCompute {
@@ -252,6 +265,7 @@ pub fn summarize(
         usage_note: None,
         provider: None,
         provider_note: None,
+        discovery_note: None,
         nodes: node_rows,
         namespaces: namespace_rows,
     }
@@ -281,6 +295,53 @@ pub fn friendly_usage_note(raw: &str) -> String {
     format!("metrics-server returned an error: {short}")
 }
 
+/// Input payload for `k8s.costOverview`.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CostOverviewIn {
+    pub context: String,
+    /// Price per CPU core-hour for the estimate; the placeholder default when
+    /// missing or not a positive number.
+    #[serde(default)]
+    pub cpu_core_hour: Option<f64>,
+    /// Price per GiB-hour of memory; same fallback.
+    #[serde(default)]
+    pub mem_gib_hour: Option<f64>,
+}
+
+impl CostOverviewIn {
+    /// Each price falls back on its own.
+    pub fn rates(&self) -> Rates {
+        let d = Rates::default();
+        let ok = |v: Option<f64>| v.filter(|x| x.is_finite() && *x > 0.0);
+        Rates {
+            cpu_core_hour: ok(self.cpu_core_hour).unwrap_or(d.cpu_core_hour),
+            mem_gib_hour: ok(self.mem_gib_hour).unwrap_or(d.mem_gib_hour),
+        }
+    }
+}
+
+/// `k8s.costOverview` — what the cluster's nodes offer, what pods request and
+/// an estimated cost, with real per-namespace spend from Kubecost or OpenCost
+/// when one is installed. The terminal `:cost` dashboard calls [`fetch_compute`],
+/// the function this wraps.
+pub fn cost_overview_capability(cache: Arc<crate::client_cache::ClientCache>) -> Capability {
+    Capability::typed::<CostOverviewIn, ClusterCompute, _, _>(
+        "k8s.costOverview",
+        "compute capacity, what pods request, idle compute and an estimated cost for a cluster, \
+         plus real per-namespace spend when Kubecost or OpenCost is installed",
+        Annotations::READ_ONLY,
+        move |input: CostOverviewIn| {
+            let cache = cache.clone();
+            async move {
+                fetch_compute(cache, &input.context, input.rates())
+                    .await
+                    .map_err(CapabilityError::Handler)
+            }
+        },
+    )
+}
+
 /// Read the nodes, pods and (if metrics-server answers) node usage of
 /// `context` and summarise them.
 pub async fn fetch_compute(
@@ -306,15 +367,17 @@ pub async fn fetch_compute(
         Err(e) => (None, Some(friendly_usage_note(&e))),
     };
     // Real spend is a bonus: its absence or failure never fails the dashboard.
-    let (provider, provider_note) = match crate::opencost::fetch_costs(&client).await {
-        Ok(found) => (found, None),
-        Err(why) => (None, Some(why)),
+    let (provider, provider_note, discovery_note) = match crate::opencost::fetch_costs(&client).await {
+        Ok(found) => (found, None, None),
+        Err(crate::opencost::CostLookupError::Provider(why)) => (None, Some(why), None),
+        Err(crate::opencost::CostLookupError::Discovery(why)) => (None, None, Some(why)),
     };
     let mut summary = summarize(&nodes, &pods, usage.as_deref(), rates);
     summary.truncated = nodes_cut || pods_cut;
     summary.usage_note = usage_note;
     summary.provider = provider;
     summary.provider_note = provider_note;
+    summary.discovery_note = discovery_note;
     Ok(summary)
 }
 
@@ -322,6 +385,32 @@ pub async fn fetch_compute(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn the_capability_reads_the_callers_spelling_and_refuses_the_structs() {
+        let ok: CostOverviewIn =
+            serde_json::from_value(json!({ "context": "c", "cpuCoreHour": 0.05 })).unwrap();
+        assert_eq!(ok.cpu_core_hour, Some(0.05));
+        assert!(serde_json::from_value::<CostOverviewIn>(json!({ "context": "c", "cpu_core_hour": 0.05 })).is_err());
+    }
+
+    #[test]
+    fn each_price_falls_back_on_its_own() {
+        let d = Rates::default();
+        let only_cpu: CostOverviewIn =
+            serde_json::from_value(json!({ "context": "c", "cpuCoreHour": 0.05 })).unwrap();
+        assert_eq!(only_cpu.rates(), Rates { cpu_core_hour: 0.05, mem_gib_hour: d.mem_gib_hour });
+        let bad_cpu: CostOverviewIn =
+            serde_json::from_value(json!({ "context": "c", "cpuCoreHour": -1.0, "memGibHour": 0.006 })).unwrap();
+        assert_eq!(bad_cpu.rates(), Rates { cpu_core_hour: d.cpu_core_hour, mem_gib_hour: 0.006 });
+    }
+
+    #[test]
+    fn it_is_a_read_only_capability() {
+        let cap = cost_overview_capability(crate::client_cache::ClientCache::new(std::path::PathBuf::from("/x")));
+        assert_eq!(cap.id, "k8s.costOverview");
+        assert!(cap.annotations.read_only && !cap.annotations.requires_confirm);
+    }
 
     const R: Rates = Rates { cpu_core_hour: 0.04, mem_gib_hour: 0.005 };
 
@@ -515,7 +604,7 @@ mod tests {
         let c = summarize(&[], &[], None, R);
         assert!(!c.truncated);
         assert_eq!(c.usage_note, None);
-        assert!(c.provider.is_none() && c.provider_note.is_none());
+        assert!(c.provider.is_none() && c.provider_note.is_none() && c.discovery_note.is_none());
     }
 
     #[test]

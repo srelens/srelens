@@ -9,7 +9,7 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
 use ratatui::Frame;
-use srelens_kube::cost::{ClusterCompute, HOURS_PER_MONTH};
+use srelens_kube::cost::{ClusterCompute, NamespaceCompute, HOURS_PER_MONTH};
 use srelens_kube::kubecost_install::Step;
 
 use crate::theme::Theme;
@@ -27,10 +27,17 @@ pub enum InstallState {
 pub struct CostViewState {
     /// The cluster this view is for; a result for any other is dropped.
     pub context: String,
+    /// The fetch whose answer this view is waiting for; older answers are dropped.
+    pub request: u64,
     pub data: Option<ClusterCompute>,
     pub error: Option<String>,
     pub is_loading: bool,
     pub scroll: u16,
+    /// Columns scrolled off the left edge. The tables are wider than a small
+    /// terminal, so the right-hand columns are reached by scrolling sideways.
+    pub hscroll: u16,
+    /// How far sideways the last frame could scroll; the keys stop there.
+    max_hscroll: std::cell::Cell<u16>,
     pub install: InstallState,
     /// When the current install, or its wait for data, began.
     pub install_since: Option<std::time::Instant>,
@@ -40,10 +47,13 @@ impl CostViewState {
     pub fn new(context: &str) -> Self {
         Self {
             context: context.to_string(),
+            request: 0,
             data: None,
             error: None,
             is_loading: true,
             scroll: 0,
+            hscroll: 0,
+            max_hscroll: std::cell::Cell::new(0),
             install: InstallState::Idle,
             install_since: None,
         }
@@ -80,6 +90,14 @@ impl CostViewState {
 
     pub fn page_up(&mut self, page: u16) {
         self.scroll = self.scroll.saturating_sub(page.max(1));
+    }
+
+    pub fn scroll_right(&mut self, step: u16) {
+        self.hscroll = self.hscroll.saturating_add(step).min(self.max_hscroll.get());
+    }
+
+    pub fn scroll_left(&mut self, step: u16) {
+        self.hscroll = self.hscroll.saturating_sub(step);
     }
 
     pub fn scroll_to_top(&mut self) {
@@ -282,7 +300,26 @@ fn lines_for(data: &ClusterCompute, width: usize, can_offer_install: bool) -> Ve
         ),
         Theme::status_dim(),
     )));
-    for ns in &data.namespaces {
+    // The rows are what pods request now, plus any namespace the cost tool
+    // billed over its window that has nothing running now (its Jobs finished):
+    // that spend is in the total, so it must have a row.
+    let mut rows: Vec<NamespaceCompute> = data.namespaces.clone();
+    if let Some(p) = &data.provider {
+        let mut gone: Vec<&srelens_kube::opencost::NamespaceSpend> = p
+            .namespaces
+            .iter()
+            .filter(|r| !rows.iter().any(|ns| ns.namespace == r.name))
+            .collect();
+        gone.sort_by(|a, b| b.total.partial_cmp(&a.total).unwrap_or(std::cmp::Ordering::Equal));
+        rows.extend(gone.into_iter().map(|r| NamespaceCompute {
+            namespace: r.name.clone(),
+            pods: 0,
+            requested_cpu_m: 0,
+            requested_mem_mib: 0,
+            hourly: 0.0,
+        }));
+    }
+    for ns in &rows {
         let share = if data.requested_hourly > 0.0 { ns.hourly / data.requested_hourly * 100.0 } else { 0.0 };
         let real = match &data.provider {
             None => String::new(),
@@ -319,6 +356,14 @@ fn lines_for(data: &ClusterCompute, width: usize, can_offer_install: bool) -> Ve
         ),
     )];
     match (&data.provider, &data.provider_note) {
+        // The look itself failed: say so, and do not claim anything either way.
+        (None, None) if data.discovery_note.is_some() => notes.push((
+            "COST SOURCE ",
+            format!(
+                "Could not check whether Kubecost or OpenCost is installed: {}. Showing the estimate; press r to retry.",
+                data.discovery_note.as_deref().unwrap_or_default()
+            ),
+        )),
         (Some(p), _) => notes.push((
             "REAL ",
             format!(
@@ -473,5 +518,10 @@ pub fn render(f: &mut Frame, area: Rect, state: &CostViewState) {
     // blank screen.
     let max_scroll = (lines.len() as u16).saturating_sub(inner.height);
     let scroll = state.scroll.min(max_scroll);
-    f.render_widget(Paragraph::new(lines).scroll((scroll, 0)), inner);
+    // Same for sideways: only as far as the widest line reaches past the edge.
+    let widest = lines.iter().map(|l| l.width()).max().unwrap_or(0);
+    let max_h = widest.saturating_sub(inner.width as usize).min(u16::MAX as usize) as u16;
+    state.max_hscroll.set(max_h);
+    let hscroll = state.hscroll.min(max_h);
+    f.render_widget(Paragraph::new(lines).scroll((scroll, hscroll)), inner);
 }

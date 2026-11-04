@@ -56,6 +56,7 @@ fn data() -> ClusterCompute {
         usage_note: None,
         provider: None,
         provider_note: None,
+        discovery_note: None,
     }
 }
 
@@ -334,6 +335,15 @@ async fn the_rates_come_from_the_tui_config_and_bad_ones_fall_back() {
     app.tui_config.cost_mem_gib_hour = Some(0.006);
     assert_eq!(app.cost_rates(), Rates { cpu_core_hour: 0.05, mem_gib_hour: 0.006 });
 
+    // Each price falls back on its own: one custom price is kept, the other defaults.
+    let defaults = Rates::default();
+    app.tui_config.cost_cpu_core_hour = Some(0.05);
+    app.tui_config.cost_mem_gib_hour = None;
+    assert_eq!(app.cost_rates(), Rates { cpu_core_hour: 0.05, mem_gib_hour: defaults.mem_gib_hour });
+    app.tui_config.cost_cpu_core_hour = Some(f64::NAN);
+    app.tui_config.cost_mem_gib_hour = Some(0.006);
+    assert_eq!(app.cost_rates(), Rates { cpu_core_hour: defaults.cpu_core_hour, mem_gib_hour: 0.006 });
+
     for bad in [-1.0, f64::NAN, f64::INFINITY, 0.0] {
         app.tui_config.cost_cpu_core_hour = Some(bad);
         app.tui_config.cost_mem_gib_hour = Some(bad);
@@ -488,4 +498,154 @@ fn a_short_sample_is_labelled_in_minutes_and_flagged_as_extrapolated() {
 fn a_full_window_carries_no_short_sample_warning() {
     let s = render(&with_provider(), 170, 70).to_lowercase();
     assert!(!s.contains("extrapolat"), "{s}");
+}
+
+#[tokio::test]
+async fn an_older_fetch_finishing_last_cannot_replace_newer_figures() {
+    let _settings = common::env::isolate_settings();
+    let (mut app, _rx) = common::app().await;
+    app.switch_view_to_kind(ResourceKind::Cost).await;
+    let first = match &app.active_view {
+        ActiveView::Cost(c) => c.request,
+        _ => panic!(),
+    };
+    app.reload_cost_view(); // `r` while the first fetch is still running
+    let second = match &app.active_view {
+        ActiveView::Cost(c) => c.request,
+        _ => panic!(),
+    };
+    assert_ne!(first, second, "each fetch has its own number");
+
+    app.handle_cost_reply(second, "test-cluster", Ok(data()));
+    // The first, slower fetch lands afterwards, as a failure.
+    app.handle_cost_reply(first, "test-cluster", Err("timed out".into()));
+    match &app.active_view {
+        ActiveView::Cost(c) => {
+            assert!(c.data.is_some() && c.error.is_none(), "the refresh that succeeded stays: {:?}", c.error);
+        }
+        _ => panic!(),
+    }
+}
+
+#[tokio::test]
+async fn a_reply_to_a_closed_dashboard_does_not_land_on_the_reopened_one() {
+    let _settings = common::env::isolate_settings();
+    let (mut app, _rx) = common::app().await;
+    app.switch_view_to_kind(ResourceKind::Cost).await;
+    let old = match &app.active_view {
+        ActiveView::Cost(c) => c.request,
+        _ => panic!(),
+    };
+    common::press(&mut app, common::key(KeyCode::Esc)).await;
+    app.switch_view_to_kind(ResourceKind::Cost).await; // same cluster, new dashboard
+    app.handle_cost_reply(old, "test-cluster", Ok(data()));
+    match &app.active_view {
+        ActiveView::Cost(c) => assert!(c.data.is_none() && c.is_loading, "still waiting for its own fetch"),
+        _ => panic!(),
+    }
+}
+
+fn data_with_provider(extra: &[(&str, f64)]) -> ClusterCompute {
+    let mut d = data();
+    let mut namespaces = vec![NamespaceSpend {
+        name: "payments".into(),
+        total: 7.0,
+        cpu: 4.0,
+        ram: 3.0,
+        storage: 0.0,
+        network: 0.0,
+        efficiency: Some(0.5),
+    }];
+    for (name, total) in extra {
+        namespaces.push(NamespaceSpend {
+            name: (*name).into(),
+            total: *total,
+            cpu: *total,
+            ram: 0.0,
+            storage: 0.0,
+            network: 0.0,
+            efficiency: None,
+        });
+    }
+    let total: f64 = namespaces.iter().map(|n| n.total).sum();
+    d.provider = Some(ProviderCosts {
+        source: Source::Kubecost,
+        location: "kubecost/kubecost-cost-analyzer".into(),
+        window_days: 7.0,
+        total,
+        idle: 0.0,
+        namespaces,
+    });
+    d
+}
+
+#[tokio::test]
+async fn a_namespace_billed_over_the_window_but_idle_now_still_gets_a_row() {
+    let _settings = common::env::isolate_settings();
+    let (mut app, _rx) = common::app().await;
+    app.switch_view_to_kind(ResourceKind::Cost).await;
+    // nightly-batch's Jobs have finished: no pods now, but it cost real money.
+    app.handle_cost_result("test-cluster", Ok(data_with_provider(&[("nightly-batch", 3.0)])));
+    let screen = common::render_app(&mut app, 200, 80);
+    assert!(screen.contains("nightly-batch"), "its spend has a row:\n{screen}");
+    assert!(screen.contains("payments") && screen.contains("kube-system"));
+}
+
+#[tokio::test]
+async fn the_cost_columns_are_reachable_on_an_80_column_terminal() {
+    let _settings = common::env::isolate_settings();
+    let (mut app, _rx) = common::app().await;
+    app.switch_view_to_kind(ResourceKind::Cost).await;
+    app.handle_cost_result("test-cluster", Ok(data_with_provider(&[])));
+
+    let screen = common::render_app(&mut app, 80, 60);
+    assert!(!screen.contains("REAL $/MO"), "off-screen to the right at first:\n{screen}");
+
+    for _ in 0..20 {
+        common::press(&mut app, common::key(KeyCode::Right)).await;
+    }
+    let screen = common::render_app(&mut app, 80, 60);
+    assert!(screen.contains("REAL $/MO") && screen.contains("EFF"), "scrolled into view:\n{screen}");
+
+    // Past the end does not wind up a hidden counter: one step back moves.
+    let at_end = match &app.active_view {
+        ActiveView::Cost(c) => c.hscroll,
+        _ => panic!(),
+    };
+    for _ in 0..30 {
+        common::press(&mut app, common::key(KeyCode::Right)).await;
+    }
+    common::render_app(&mut app, 80, 60);
+    common::press(&mut app, common::ch('h')).await;
+    match &app.active_view {
+        ActiveView::Cost(c) => assert!(c.hscroll < at_end, "h moves back from the end at once"),
+        _ => panic!(),
+    }
+    common::press(&mut app, common::key(KeyCode::Home)).await;
+    let screen = common::render_app(&mut app, 80, 60);
+    assert!(!screen.contains("REAL $/MO"), "Home returns to the left edge");
+}
+
+#[tokio::test]
+async fn a_failed_look_for_a_cost_tool_is_not_reported_as_an_installed_one() {
+    let _settings = common::env::isolate_settings();
+    let (mut app, _rx) = common::app().await;
+    app.switch_view_to_kind(ResourceKind::Cost).await;
+    let mut d = data();
+    d.discovery_note = Some("Failed to list services: forbidden".into());
+    app.handle_cost_result("test-cluster", Ok(d));
+    let screen = common::render_app(&mut app, 200, 80);
+    assert!(
+        screen.contains("Could not check whether Kubecost or OpenCost is installed")
+            && screen.contains("forbidden"),
+        "says what failed:\n{screen}"
+    );
+    assert!(!screen.contains("A cost tool is installed"), "no claim about the cluster:\n{screen}");
+    assert!(!screen.contains("No Kubecost or OpenCost was found"), "nor the opposite:\n{screen}");
+    assert!(app.modal.is_none(), "an install is not offered when we do not know it is absent");
+
+    common::press(&mut app, common::ch('i')).await;
+    assert!(app.modal.is_none());
+    let (msg, _, _) = app.toast.clone().expect("told the user");
+    assert!(msg.contains("Could not check"), "{msg}");
 }

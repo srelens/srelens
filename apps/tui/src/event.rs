@@ -37,6 +37,8 @@ pub enum AppEvent {
         result: Result<srelens_kube::topology::TopologyGraphOut, String>,
     },
     CostResult {
+        /// Which fetch this answers; only the latest is accepted.
+        request: u64,
         context: String,
         result: Result<srelens_kube::cost::ClusterCompute, String>,
     },

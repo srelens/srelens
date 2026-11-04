@@ -72,6 +72,11 @@ pub struct Notification {
     pub at: Instant,
     /// How many times in a row this exact message was raised.
     pub count: u32,
+    /// How many of those times have not been seen on screen yet (warnings and
+    /// errors only).
+    unseen: u32,
+    /// The value of `NotificationCenter::raised()` when it last happened.
+    seq: u64,
 }
 
 /// What the watcher remembers about one pod between refreshes.
@@ -113,8 +118,45 @@ impl NotificationCenter {
     }
 
     pub fn mark_read(&mut self) {
-        self.unread = 0;
-        self.unread_errors = 0;
+        self.mark_seen(usize::MAX, u64::MAX);
+    }
+
+    /// The newest `depth` entries are on screen: they have been seen. Older
+    /// unread ones stay unread until the reader scrolls to them.
+    ///
+    /// Only entries raised at or before `upto` (a value of `raised()`) count:
+    /// one that lands while the overlay is already open was not there to be
+    /// read when it opened, and stays unread.
+    pub fn mark_seen(&mut self, depth: usize, upto: u64) {
+        for n in self.items.iter_mut().take(depth) {
+            if n.seq <= upto {
+                n.unseen = 0;
+            }
+        }
+        self.recount();
+    }
+
+    /// How many alerts have ever been raised; a bookmark for `mark_seen`.
+    pub fn raised(&self) -> u64 {
+        self.total_raised
+    }
+
+    fn recount(&mut self) {
+        self.unread = self.items.iter().map(|n| n.unseen as usize).sum();
+        self.unread_errors = self
+            .items
+            .iter()
+            .filter(|n| n.level == Level::Error)
+            .map(|n| n.unseen as usize)
+            .sum();
+    }
+
+    pub fn len(&self) -> usize {
+        self.items.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.items.is_empty()
     }
 
     pub fn clear(&mut self) {
@@ -126,16 +168,14 @@ impl NotificationCenter {
     pub fn push(&mut self, level: Level, source: &str, message: impl Into<String>) {
         let message = message.into();
         self.total_raised += 1;
-        if level.needs_attention() {
-            self.unread += 1;
-        }
-        if level == Level::Error {
-            self.unread_errors += 1;
-        }
+        let unseen = u32::from(level.needs_attention());
         if let Some(latest) = self.items.front_mut() {
             if latest.level == level && latest.source == source && latest.message == message {
                 latest.count += 1;
+                latest.unseen += unseen;
+                latest.seq = self.total_raised;
                 latest.at = Instant::now();
+                self.recount();
                 return;
             }
         }
@@ -145,8 +185,11 @@ impl NotificationCenter {
             message,
             at: Instant::now(),
             count: 1,
+            unseen,
+            seq: self.total_raised,
         });
         self.items.truncate(CAPACITY);
+        self.recount();
     }
 
     /// Compare this refresh of a namespace's pods with the last one and raise
@@ -163,11 +206,14 @@ impl NotificationCenter {
         let before = self.total_raised;
         let scope = (context.to_string(), namespace.to_string());
         let first_look = self.baselined.insert(scope);
+        let mut present: std::collections::HashSet<(String, String, String)> =
+            std::collections::HashSet::with_capacity(items.len());
         for item in items {
             let Some((ns, name, state)) = pod_state(item, namespace) else {
                 continue;
             };
             let key = (context.to_string(), ns.clone(), name.clone());
+            present.insert(key.clone());
             let previous = self.pods.insert(key, state.clone());
             if first_look {
                 continue;
@@ -197,6 +243,15 @@ impl NotificationCenter {
                 }
             }
         }
+        // A snapshot omits deleted pods. Forget the ones this snapshot covers
+        // that are no longer in it, so a pod recreated under the same name
+        // (a StatefulSet's) starts from nothing instead of inheriting the old
+        // one's failure, and the map does not grow as pods come and go.
+        // An empty namespace is the all-namespaces watch: it covers them all.
+        self.pods.retain(|key, _| {
+            let covered = key.0 == context && (namespace.is_empty() || key.1 == namespace);
+            !covered || present.contains(key)
+        });
         let fresh = (self.total_raised - before) as usize;
         let mut raised: Vec<(Level, String)> = self
             .items

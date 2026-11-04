@@ -53,6 +53,7 @@ fn cluster(nodes: usize, namespaces: usize) -> ClusterCompute {
         usage_note: Some("metrics-server is not installed in this cluster".into()),
         provider: None,
         provider_note: None,
+        discovery_note: None,
     }
 }
 

@@ -164,7 +164,11 @@ impl DeepLink {
                     } else {
                         Some(raw_ns.to_string())
                     };
-                    let view_str = parts[3];
+                    // `to_url` writes argument-taking targets as `persona/security` and
+                    // `theme/nord`; rejoin the tail so `:persona security` resolves to the
+                    // setter instead of the bare picker.
+                    let view_str = parts[3..].join(" ");
+                    let view_str = view_str.as_str();
                     let target = resolve_command(format!(":{}", view_str).as_str())
                         .or_else(|| resolve_command(view_str))
                         .ok_or_else(|| format!("Unknown view target: '{}'", view_str))?;
@@ -246,6 +250,18 @@ impl DeepLink {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn persona_and_theme_setters_round_trip_through_a_url() {
+        for target in [
+            CommandTarget::SetPersona("security".to_string()),
+            CommandTarget::SetTheme("nord".to_string()),
+        ] {
+            let link = DeepLink::View { context: None, namespace: None, target: target.clone() };
+            let parsed = DeepLink::parse(&link.to_url()).expect("should parse");
+            assert_eq!(parsed, link, "{:?} must survive to_url -> parse", target);
+        }
+    }
 
     #[test]
     fn test_parse_resource_deep_link() {

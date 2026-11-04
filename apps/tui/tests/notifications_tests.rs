@@ -179,10 +179,10 @@ async fn the_notifications_command_opens_the_history_and_reads_it() {
     app.set_toast("it broke".into(), Theme::status_error());
     app.execute_command_target(CommandTarget::Notifications).await;
     assert!(app.show_notifications);
-    assert_eq!(app.notifications.unread(), 0);
 
     let screen = common::render_app(&mut app, 120, 40);
     assert!(screen.contains("it broke"), "the overlay lists the message:\n{screen}");
+    assert_eq!(app.notifications.unread(), 0, "drawn, so read");
 
     common::press(&mut app, common::key(KeyCode::Esc)).await;
     assert!(!app.show_notifications);
@@ -302,4 +302,73 @@ fn the_center_says_whether_an_unread_alert_is_an_error() {
     assert!(c.unread_has_error());
     c.mark_read();
     assert!(!c.unread_has_error());
+}
+
+#[test]
+fn a_pod_recreated_under_the_same_name_does_not_inherit_the_old_ones_state() {
+    let mut c = NotificationCenter::default();
+    c.observe_pods("ctx", "prod", &[flat("db-0", "Running", 0)]);
+    c.observe_pods("ctx", "prod", &[flat("db-0", "CrashLoopBackOff", 3)]);
+    assert_eq!(c.items().count(), 1);
+
+    // db-0 is deleted: the snapshot no longer lists it.
+    c.observe_pods("ctx", "prod", &[flat("web", "Running", 0)]);
+    // Its healthy replacement must not be reported as a recovery...
+    c.observe_pods("ctx", "prod", &[flat("web", "Running", 0), flat("db-0", "Running", 0)]);
+    assert_eq!(c.items().count(), 1, "no false recovery for a new pod");
+
+    // ...and a replacement that fails is a new failure, not a suppressed repeat.
+    c.observe_pods("ctx", "prod", &[flat("web", "Running", 0)]);
+    c.observe_pods("ctx", "prod", &[flat("web", "Running", 0), flat("db-0", "ImagePullBackOff", 0)]);
+    assert_eq!(c.items().count(), 2);
+    assert_eq!(c.items().next().unwrap().level, Level::Error);
+}
+
+#[test]
+fn pruning_stays_inside_the_snapshots_namespace() {
+    let mut c = NotificationCenter::default();
+    c.observe_pods("ctx", "prod", &[flat("a", "Running", 0)]);
+    c.observe_pods("ctx", "dev", &[flat("b", "Running", 0)]);
+    // A prod snapshot without "a" must not forget dev's "b".
+    c.observe_pods("ctx", "prod", &[]);
+    c.observe_pods("ctx", "dev", &[flat("b", "CrashLoopBackOff", 1)]);
+    assert_eq!(c.items().count(), 1, "dev/b was still known, so this is a real transition");
+}
+
+#[tokio::test]
+async fn older_alerts_can_be_scrolled_to_and_stay_unread_until_they_are() {
+    let _settings = common::env::isolate_settings();
+    let (mut app, _rx) = common::app().await;
+    for i in 0..100 {
+        app.notifications.push(Level::Error, "ctx", format!("boom-{i:03}"));
+    }
+    app.execute_command_target(CommandTarget::Notifications).await;
+    let screen = common::render_app(&mut app, 120, 24);
+    let rows = app.notifications_rows;
+    assert!(rows < 100 && screen.contains("boom-099"));
+    assert!(!screen.contains("boom-000"), "the oldest is below the fold");
+    assert_eq!(app.notifications.unread(), 100 - rows, "only what was drawn is read");
+    assert!(app.notifications.unread_has_error());
+
+    common::press(&mut app, common::key(KeyCode::PageDown)).await;
+    let screen = common::render_app(&mut app, 120, 24);
+    assert!(!screen.contains("boom-099"), "paged past the newest:\n{screen}");
+    assert_eq!(app.notifications.unread(), 100 - 2 * rows);
+
+    common::press(&mut app, common::ch('G')).await;
+    let screen = common::render_app(&mut app, 120, 24);
+    assert!(screen.contains("boom-000"), "End reaches the oldest:\n{screen}");
+    assert_eq!(app.notifications.unread(), 0);
+
+    // Pushing past the end does not wind up a hidden counter.
+    for _ in 0..30 {
+        common::press(&mut app, common::key(KeyCode::Down)).await;
+    }
+    common::press(&mut app, common::ch('k')).await;
+    let screen = common::render_app(&mut app, 120, 24);
+    assert!(screen.contains("boom-001"), "one step up shows one newer entry:\n{screen}");
+
+    common::press(&mut app, common::key(KeyCode::Home)).await;
+    let screen = common::render_app(&mut app, 120, 24);
+    assert!(screen.contains("boom-099"));
 }

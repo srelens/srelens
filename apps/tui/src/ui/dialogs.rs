@@ -80,6 +80,8 @@ pub enum Modal {
     /// Asks before installing Kubecost into `context` for the `:cost` view.
     KubecostInstall {
         context: String,
+        /// Lines of the note scrolled off the top.
+        scroll: u16,
     },
     PersonaPicker {
         selected_idx: usize,
@@ -1025,8 +1027,8 @@ pub fn render_modal(f: &mut Frame, area: Rect, modal: &Modal) {
                 active_filter.as_deref(),
             );
         }
-        Modal::KubecostInstall { context } => {
-            render_kubecost_install(f, area, context);
+        Modal::KubecostInstall { context, scroll } => {
+            render_kubecost_install(f, area, context, *scroll);
         }
         Modal::PersonaPicker {
             selected_idx,
@@ -2125,9 +2127,50 @@ fn render_persona_picker(f: &mut Frame, area: Rect, selected_idx: usize, active:
     f.render_widget(Paragraph::new(lines), inner);
 }
 
+/// How far the Kubecost note could scroll in the last frame. The key handler
+/// stops there, so holding Down at the end does not build up an offset that
+/// Up must then unwind.
+static KUBECOST_NOTE_MAX_SCROLL: std::sync::atomic::AtomicU16 = std::sync::atomic::AtomicU16::new(0);
+
+pub fn kubecost_note_max_scroll() -> u16 {
+    KUBECOST_NOTE_MAX_SCROLL.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Break `text` into pieces no wider than `width` columns, at spaces where it can.
+fn wrap_columns(text: &str, width: usize) -> Vec<String> {
+    use unicode_width::UnicodeWidthStr;
+    let width = width.max(8);
+    let mut out = Vec::new();
+    // Keep a hanging indent so a wrapped bullet stays under its text.
+    let indent: String = text.chars().take_while(|c| *c == ' ').collect();
+    let mut current = String::new();
+    for word in text.split_whitespace() {
+        let sep = if current.is_empty() { 0 } else { 1 };
+        if !current.is_empty() && current.width() + sep + word.width() > width {
+            out.push(std::mem::take(&mut current));
+        }
+        if current.is_empty() {
+            current.push_str(&indent);
+            if !out.is_empty() {
+                current.push_str("  ");
+            }
+        } else {
+            current.push(' ');
+        }
+        current.push_str(word);
+    }
+    if !current.is_empty() || out.is_empty() {
+        out.push(current);
+    }
+    out
+}
+
 /// The note shown before Kubecost is installed. Everything in it was measured
 /// on an install of this exact chart version, not recalled.
-fn render_kubecost_install(f: &mut Frame, area: Rect, context: &str) {
+///
+/// The body scrolls; the Install / Not now line stays pinned underneath it, so
+/// the choice is visible however small the terminal.
+fn render_kubecost_install(f: &mut Frame, area: Rect, context: &str, scroll: u16) {
     use srelens_kube::kubecost_install as kc;
 
     let modal_area = centered_rect(86, 90, area);
@@ -2142,21 +2185,30 @@ fn render_kubecost_install(f: &mut Frame, area: Rect, context: &str) {
         ));
     let inner = block.inner(modal_area);
     f.render_widget(block, modal_area);
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(1), Constraint::Length(2)])
+        .split(inner);
+    let (body_area, footer_area) = (chunks[0], chunks[1]);
 
     let bold = Style::default().add_modifier(Modifier::BOLD);
-    let mut lines: Vec<Line> = Vec::new();
+    let plain = Style::default();
+    // (style, text) per logical line; wrapped to the width below so the number
+    // of screen lines is known exactly and the scroll can stop at the end.
+    let mut note: Vec<(Style, String)> = Vec::new();
     if kc::looks_like_production(context) {
-        lines.push(Line::from(Span::styled(
-            format!("PRODUCTION? '{context}' looks like a production cluster. Installing software there is a change to make deliberately."),
+        note.push((
             Theme::status_error(),
-        )));
-        lines.push(Line::raw(""));
+            format!("PRODUCTION? '{context}' looks like a production cluster. Installing software there is a change to make deliberately."),
+        ));
+        note.push((plain, String::new()));
     }
-    lines.push(Line::from(
-        "No Kubecost or OpenCost was found, so :cost can only estimate. Kubecost reports real spend per namespace.",
+    note.push((
+        plain,
+        "No Kubecost or OpenCost was found, so :cost can only estimate. Kubecost reports real spend per namespace.".to_string(),
     ));
-    lines.push(Line::raw(""));
-    lines.push(Line::from(Span::styled("What this does", bold)));
+    note.push((plain, String::new()));
+    note.push((bold, "What this does".to_string()));
     for text in [
         format!("Adds the Helm repository {} (downloads from the internet).", kc::REPO_URL),
         format!(
@@ -2167,27 +2219,51 @@ fn render_kubecost_install(f: &mut Frame, area: Rect, context: &str) {
         "Creates 3 cluster-wide ClusterRoles (and bindings) so it can read cluster resources.".to_string(),
         "Needs the helm command on your PATH, and takes a few minutes to start.".to_string(),
     ] {
-        lines.push(Line::from(format!("  - {text}")));
+        note.push((plain, format!("  - {text}")));
     }
-    lines.push(Line::raw(""));
-    lines.push(Line::from(Span::styled("After it installs", bold)));
-    lines.push(Line::from(
-        "  Figures start within minutes, but monthly numbers extrapolate from a short sample at first and settle over hours and days.",
+    note.push((plain, String::new()));
+    note.push((bold, "After it installs".to_string()));
+    note.push((
+        plain,
+        "  Figures start within minutes, but monthly numbers extrapolate from a short sample at first and settle over hours and days.".to_string(),
     ));
-    lines.push(Line::from(
-        "  Kubecost is a third-party product with its own license terms; check them before using it beyond a test cluster.",
+    note.push((
+        plain,
+        "  Kubecost is a third-party product with its own license terms; check them before using it beyond a test cluster.".to_string(),
     ));
-    lines.push(Line::raw(""));
-    lines.push(Line::from(Span::styled("To remove it later", bold)));
+    note.push((plain, String::new()));
+    note.push((bold, "To remove it later".to_string()));
     for step in kc::removal_steps(context) {
-        lines.push(Line::from(Span::styled(format!("  {step}"), Theme::status_dim())));
+        note.push((Theme::status_dim(), format!("  {step}")));
     }
-    lines.push(Line::raw(""));
-    lines.push(Line::from(vec![
-        Span::styled("[Enter/y]", Theme::key_hint_key()),
-        Span::raw(" Install    "),
-        Span::styled("[Esc/n]", Theme::key_hint_key()),
-        Span::raw(" Not now (press i in :cost to be asked again)"),
-    ]));
-    f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
+
+    let mut lines: Vec<Line> = Vec::new();
+    for (style, text) in &note {
+        for piece in wrap_columns(text, body_area.width as usize) {
+            lines.push(Line::from(Span::styled(piece, *style)));
+        }
+    }
+    let max_scroll = (lines.len() as u16).saturating_sub(body_area.height);
+    KUBECOST_NOTE_MAX_SCROLL.store(max_scroll, std::sync::atomic::Ordering::Relaxed);
+    let scroll = scroll.min(max_scroll);
+    f.render_widget(Paragraph::new(lines).scroll((scroll, 0)), body_area);
+
+    let more = if max_scroll > 0 {
+        if scroll < max_scroll { "  ↓/PgDn more" } else { "  (end)" }
+    } else {
+        ""
+    };
+    let footer = vec![
+        Line::from(vec![
+            Span::styled("[Enter/y]", Theme::key_hint_key()),
+            Span::raw(" Install    "),
+            Span::styled("[Esc/n]", Theme::key_hint_key()),
+            Span::raw(" Not now (press i in :cost to be asked again)"),
+        ]),
+        Line::from(Span::styled(
+            format!("↑/↓ j/k PgUp/PgDn scroll the note{more}"),
+            Theme::status_dim(),
+        )),
+    ];
+    f.render_widget(Paragraph::new(footer), footer_area);
 }

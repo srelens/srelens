@@ -197,6 +197,13 @@ pub struct App {
     pub show_help: bool,
     /// The notification history overlay (`:notifications`).
     pub show_notifications: bool,
+    /// First history entry shown in that overlay (0 = newest), and how many
+    /// rows it had last frame, so keys can page by the real viewport.
+    pub notifications_scroll: usize,
+    pub notifications_rows: usize,
+    /// Alerts raised up to this bookmark were there when the reader last opened
+    /// or moved the overlay; only those are marked read as they are drawn.
+    notifications_seen_upto: u64,
     /// What the one-slot toast loses, plus alerts raised by the pod watcher.
     pub notifications: crate::notifications::NotificationCenter,
     pub toast: Option<(String, Instant, Style)>,
@@ -231,6 +238,12 @@ pub struct App {
     /// Clusters `:cost` has already offered to install Kubecost into this
     /// session, so a refresh or a declined offer is not repeated.
     pub kubecost_offered: std::collections::HashSet<String>,
+    /// Where each cluster's Kubecost install stands. Held here, not in a view,
+    /// so a dashboard parked under another screen (and one reopened later)
+    /// shows the install's real state instead of the one it was left in.
+    pub kubecost_installs: std::collections::HashMap<String, (cost_view::InstallState, Option<Instant>)>,
+    /// Numbers cost fetches, so a reply is accepted only from the latest one.
+    cost_request_seq: u64,
     /// The install started from `:cost`. Never aborted on a cluster switch:
     /// killing Helm half way leaves a half-installed release behind.
     pub kubecost_install_task: Option<tokio::task::AbortHandle>,
@@ -611,6 +624,9 @@ impl App {
             modal: None,
             show_help: false,
             show_notifications: false,
+            notifications_scroll: 0,
+            notifications_rows: 10,
+            notifications_seen_upto: 0,
             notifications: Default::default(),
             toast: None,
             client_cache,
@@ -639,6 +655,8 @@ impl App {
             cluster_unreachable: false,
             unreachable_offered_for: None,
             kubecost_offered: Default::default(),
+            kubecost_installs: Default::default(),
+            cost_request_seq: 0,
             kubecost_install_task: None,
             ai_settings: crate::ai_config::AiSettings::load(),
             tui_config,
@@ -790,21 +808,20 @@ impl App {
 
         // While Kubecost has installed but not yet reported, ask again every
         // ~10 seconds; give up quietly after 15 minutes.
-        let waiting_since = match &self.active_view {
-            ActiveView::Cost(c)
-                if c.install
-                    == cost_view::InstallState::Running(srelens_kube::kubecost_install::Step::WaitingForData) =>
-            {
-                Some(c.install_since)
-            }
+        let waiting_since = match (&self.active_view, self.kubecost_installs.get(&self.active_context)) {
+            (
+                ActiveView::Cost(_),
+                Some((
+                    cost_view::InstallState::Running(srelens_kube::kubecost_install::Step::WaitingForData),
+                    since,
+                )),
+            ) => Some(*since),
             _ => None,
         };
         if let Some(since) = waiting_since {
             if since.is_some_and(|t| t.elapsed() > Duration::from_secs(15 * 60)) {
-                if let ActiveView::Cost(c) = &mut self.active_view {
-                    c.install = cost_view::InstallState::Idle;
-                    c.install_since = None;
-                }
+                let ctx = self.active_context.clone();
+                self.set_install(&ctx, cost_view::InstallState::Idle, None);
                 self.set_toast(
                     "Kubecost is installed but has no data yet; run :cost again in a while".to_string(),
                     Theme::status_warn(),
@@ -2316,6 +2333,7 @@ impl App {
         if matches!(self.active_view, ActiveView::Cost(_)) {
             // The dashboard follows the cluster: drop the old numbers, load these.
             self.active_view = ActiveView::Cost(cost_view::CostViewState::new(&self.active_context));
+            self.sync_cost_install();
             self.reload_cost_view();
         }
         self.set_toast(
@@ -2822,9 +2840,33 @@ impl App {
         if self.show_notifications {
             match key.code {
                 KeyCode::Esc | KeyCode::Char('q') => self.show_notifications = false,
-                KeyCode::Char('c') => self.notifications.clear(),
+                KeyCode::Char('c') => {
+                    self.notifications.clear();
+                    self.notifications_scroll = 0;
+                }
+                KeyCode::Up | KeyCode::Char('k') => {
+                    self.notifications_scroll = self.notifications_scroll.saturating_sub(1)
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    self.notifications_scroll = self.notifications_scroll.saturating_add(1)
+                }
+                KeyCode::PageUp => {
+                    let page = self.notifications_rows.max(1);
+                    self.notifications_scroll = self.notifications_scroll.saturating_sub(page)
+                }
+                KeyCode::PageDown => {
+                    let page = self.notifications_rows.max(1);
+                    self.notifications_scroll = self.notifications_scroll.saturating_add(page)
+                }
+                KeyCode::Home | KeyCode::Char('g') => self.notifications_scroll = 0,
+                KeyCode::End | KeyCode::Char('G') => self.notifications_scroll = usize::MAX,
                 _ => {}
             }
+            // Keep the offset inside the history so Down at the end does not
+            // wind up an invisible counter that Up then has to unwind.
+            let max = self.notifications.len().saturating_sub(self.notifications_rows);
+            self.notifications_scroll = self.notifications_scroll.min(max);
+            self.notifications_seen_upto = self.notifications.raised();
             return;
         }
 
@@ -4319,16 +4361,26 @@ impl App {
                         });
                     }
                 },
-                Modal::KubecostInstall { .. } => match key.code {
-                    KeyCode::Enter | KeyCode::Char('y') | KeyCode::Char('Y') => {
-                        self.modal = None;
-                        self.start_kubecost_install();
+                Modal::KubecostInstall { context, scroll } => {
+                    let max = crate::ui::dialogs::kubecost_note_max_scroll();
+                    let to = |scroll: u16| Some(Modal::KubecostInstall { context: context.clone(), scroll: scroll.min(max) });
+                    match key.code {
+                        KeyCode::Enter | KeyCode::Char('y') | KeyCode::Char('Y') => {
+                            self.modal = None;
+                            self.start_kubecost_install();
+                        }
+                        KeyCode::Esc | KeyCode::Char('n') | KeyCode::Char('N') => {
+                            self.modal = None;
+                        }
+                        KeyCode::Down | KeyCode::Char('j') => self.modal = to(scroll.saturating_add(1)),
+                        KeyCode::Up | KeyCode::Char('k') => self.modal = to(scroll.saturating_sub(1)),
+                        KeyCode::PageDown => self.modal = to(scroll.saturating_add(8)),
+                        KeyCode::PageUp => self.modal = to(scroll.saturating_sub(8)),
+                        KeyCode::Home | KeyCode::Char('g') => self.modal = to(0),
+                        KeyCode::End | KeyCode::Char('G') => self.modal = to(max),
+                        _ => {}
                     }
-                    KeyCode::Esc | KeyCode::Char('n') | KeyCode::Char('N') => {
-                        self.modal = None;
-                    }
-                    _ => {}
-                },
+                }
                 Modal::PersonaPicker {
                     mut selected_idx,
                     active_idx,
@@ -7859,9 +7911,14 @@ impl App {
                 }
                 KeyCode::Down | KeyCode::Char('j') => cost.scroll_down(),
                 KeyCode::Up | KeyCode::Char('k') => cost.scroll_up(),
+                KeyCode::Right | KeyCode::Char('l') => cost.scroll_right(8),
+                KeyCode::Left | KeyCode::Char('h') => cost.scroll_left(8),
                 KeyCode::PageDown => cost.page_down(10),
                 KeyCode::PageUp => cost.page_up(10),
-                KeyCode::Home | KeyCode::Char('g') => cost.scroll_to_top(),
+                KeyCode::Home | KeyCode::Char('g') => {
+                    cost.scroll_to_top();
+                    cost.hscroll = 0;
+                }
                 KeyCode::End | KeyCode::Char('G') => cost.scroll_to_bottom(),
                 KeyCode::Char('r') => {
                     self.reload_cost_view();
@@ -10171,8 +10228,11 @@ impl App {
                 self.is_running = false;
             }
             CommandTarget::Notifications => {
+                // Opening is not reading: entries are marked read as they are
+                // drawn, so alerts below the fold stay unread until scrolled to.
                 self.show_notifications = true;
-                self.notifications.mark_read();
+                self.notifications_scroll = 0;
+                self.notifications_seen_upto = self.notifications.raised();
             }
             CommandTarget::Persona => {
                 let active = crate::ai_personas::row_of(self.ai_settings.persona.as_deref());
@@ -10575,8 +10635,12 @@ impl App {
                 ActiveView::Topology(topo_state)
             }
             ResourceKind::Cost => {
-                let state = cost_view::CostViewState::new(&self.active_context);
-                self.spawn_cost_fetch();
+                let mut state = cost_view::CostViewState::new(&self.active_context);
+                state.request = self.spawn_cost_fetch();
+                if let Some((install, since)) = self.kubecost_installs.get(&self.active_context) {
+                    state.install = install.clone();
+                    state.install_since = *since;
+                }
                 ActiveView::Cost(state)
             }
             ResourceKind::GpuInfo => {
@@ -12011,39 +12075,91 @@ impl App {
     /// number.
     pub fn cost_rates(&self) -> srelens_kube::cost::Rates {
         let defaults = srelens_kube::cost::Rates::default();
+        // Each price is optional and falls back on its own: setting only the CPU
+        // price must not discard it, nor leave the memory estimate unpriced.
         let ok = |v: Option<f64>| v.filter(|x| x.is_finite() && *x > 0.0);
-        match (ok(self.tui_config.cost_cpu_core_hour), ok(self.tui_config.cost_mem_gib_hour)) {
-            (Some(cpu_core_hour), Some(mem_gib_hour)) => {
-                srelens_kube::cost::Rates { cpu_core_hour, mem_gib_hour }
-            }
-            // Half a price list is no price list: use the defaults for both.
-            _ => defaults,
+        srelens_kube::cost::Rates {
+            cpu_core_hour: ok(self.tui_config.cost_cpu_core_hour).unwrap_or(defaults.cpu_core_hour),
+            mem_gib_hour: ok(self.tui_config.cost_mem_gib_hour).unwrap_or(defaults.mem_gib_hour),
         }
     }
 
-    fn spawn_cost_fetch(&self) {
+    /// Start a cost fetch for the active cluster and return its number. Only a
+    /// reply carrying the latest number is accepted, so an older, slower fetch
+    /// can neither replace newer figures nor turn a good refresh into an error.
+    fn spawn_cost_fetch(&mut self) -> u64 {
+        self.cost_request_seq += 1;
+        let request = self.cost_request_seq;
         let ctx = self.active_context.clone();
         let cache = self.client_cache.clone();
         let event_tx = self.event_tx.clone();
         let rates = self.cost_rates();
         tokio::spawn(async move {
             let result = srelens_kube::cost::fetch_compute(cache, &ctx, rates).await;
-            let _ = event_tx.send(crate::event::AppEvent::CostResult { context: ctx, result });
+            let _ = event_tx.send(crate::event::AppEvent::CostResult { request, context: ctx, result });
         });
+        request
     }
 
     pub fn reload_cost_view(&mut self) {
-        if let ActiveView::Cost(cost) = &mut self.active_view {
-            cost.start_reload();
-            self.spawn_cost_fetch();
+        if matches!(self.active_view, ActiveView::Cost(_)) {
+            let request = self.spawn_cost_fetch();
+            if let ActiveView::Cost(cost) = &mut self.active_view {
+                cost.start_reload();
+                cost.request = request;
+            }
         }
     }
 
-    /// An answer for the cost dashboard. One for a cluster we have since left
-    /// is dropped, so it can never put the old cluster's spend under the new
-    /// cluster's name.
+    /// Record where a cluster's Kubecost install stands and show it on every
+    /// dashboard for that cluster, including ones parked under other screens.
+    pub fn set_install(
+        &mut self,
+        context: &str,
+        install: cost_view::InstallState,
+        since: Option<Instant>,
+    ) {
+        if install == cost_view::InstallState::Idle {
+            self.kubecost_installs.remove(context);
+        } else {
+            self.kubecost_installs.insert(context.to_string(), (install, since));
+        }
+        self.sync_cost_install();
+    }
+
+    fn sync_cost_install(&mut self) {
+        let installs = &self.kubecost_installs;
+        for view in self.nav_stack.iter_mut().chain(std::iter::once(&mut self.active_view)) {
+            if let ActiveView::Cost(cost) = view {
+                let (install, since) = installs
+                    .get(&cost.context)
+                    .cloned()
+                    .unwrap_or((cost_view::InstallState::Idle, None));
+                cost.install = install;
+                cost.install_since = since;
+            }
+        }
+    }
+
+    /// An answer for the cost dashboard's latest fetch. See `handle_cost_reply`.
     pub fn handle_cost_result(
         &mut self,
+        context: &str,
+        result: Result<srelens_kube::cost::ClusterCompute, String>,
+    ) {
+        let request = match &self.active_view {
+            ActiveView::Cost(c) => c.request,
+            _ => return,
+        };
+        self.handle_cost_reply(request, context, result);
+    }
+
+    /// An answer for fetch number `request`. One for an older fetch, or for a
+    /// cluster we have since left, is dropped, so it can never put stale or
+    /// another cluster's spend on the screen.
+    pub fn handle_cost_reply(
+        &mut self,
+        request: u64,
         context: &str,
         result: Result<srelens_kube::cost::ClusterCompute, String>,
     ) {
@@ -12053,45 +12169,49 @@ impl App {
         let mut offer = false;
         let mut ready = false;
         if let ActiveView::Cost(cost) = &mut self.active_view {
-            if cost.context != context {
+            if cost.context != context || cost.request != request {
                 return;
             }
             match result {
                 Ok(data) => {
-                    let nothing_found = data.provider.is_none() && data.provider_note.is_none();
+                    // Not found means the look succeeded and came back empty. If the
+                    // look itself failed we know nothing, so we do not offer an install.
+                    let nothing_found = data.provider.is_none()
+                        && data.provider_note.is_none()
+                        && data.discovery_note.is_none();
                     let has_provider = data.provider.is_some();
                     cost.set_data(data);
-                    if has_provider
-                        && cost.install == cost_view::InstallState::Running(srelens_kube::kubecost_install::Step::WaitingForData)
-                    {
-                        cost.install = cost_view::InstallState::Idle;
-                        cost.install_since = None;
-                        ready = true;
-                    }
                     // Offer only when nothing was found (not when something is
                     // installed but quiet) and no install is in hand.
                     offer = nothing_found && cost.install == cost_view::InstallState::Idle;
+                    ready = has_provider
+                        && cost.install
+                            == cost_view::InstallState::Running(srelens_kube::kubecost_install::Step::WaitingForData);
                 }
                 Err(err) => cost.set_error(err),
             }
         }
         if ready {
+            self.set_install(context, cost_view::InstallState::Idle, None);
             self.set_toast("Kubecost is ready: showing real spend".to_string(), Theme::status_ok());
         }
         if offer && self.modal.is_none() && self.kubecost_offered.insert(context.to_string()) {
-            self.modal = Some(Modal::KubecostInstall { context: context.to_string() });
+            self.modal = Some(Modal::KubecostInstall { context: context.to_string(), scroll: 0 });
         }
     }
 
     /// `i` on the cost dashboard: offer the install again, or say why not.
     fn offer_kubecost_install_on_request(&mut self) {
         let ctx = self.active_context.clone();
-        let (install, loaded, nothing_found, has_provider) = match &self.active_view {
+        let (install, loaded, nothing_found, has_provider, could_not_look) = match &self.active_view {
             ActiveView::Cost(c) => (
                 c.install.clone(),
                 c.data.is_some(),
-                c.data.as_ref().is_some_and(|d| d.provider.is_none() && d.provider_note.is_none()),
+                c.data.as_ref().is_some_and(|d| {
+                    d.provider.is_none() && d.provider_note.is_none() && d.discovery_note.is_none()
+                }),
                 c.data.as_ref().is_some_and(|d| d.provider.is_some()),
+                c.data.as_ref().is_some_and(|d| d.discovery_note.is_some()),
             ),
             _ => return,
         };
@@ -12101,6 +12221,9 @@ impl App {
             Some("Kubecost or OpenCost is already installed here and is being used")
         } else if !loaded {
             Some("Wait for the dashboard to load first")
+        } else if could_not_look {
+            // We never learned whether one is installed; say that, not the opposite.
+            Some("Could not check for Kubecost or OpenCost; press r to retry")
         } else if !nothing_found {
             Some("A cost tool is already installed here; give it time to collect data")
         } else {
@@ -12111,7 +12234,7 @@ impl App {
             None => {
                 if self.modal.is_none() {
                     self.kubecost_offered.insert(ctx.clone());
-                    self.modal = Some(Modal::KubecostInstall { context: ctx });
+                    self.modal = Some(Modal::KubecostInstall { context: ctx, scroll: 0 });
                 }
             }
         }
@@ -12129,10 +12252,11 @@ impl App {
             self.set_toast("A Kubecost install is already running".to_string(), Theme::status_warn());
             return;
         }
-        if let ActiveView::Cost(c) = &mut self.active_view {
-            c.install = cost_view::InstallState::Running(srelens_kube::kubecost_install::Step::AddingRepo);
-            c.install_since = Some(Instant::now());
-        }
+        self.set_install(
+            &ctx,
+            cost_view::InstallState::Running(srelens_kube::kubecost_install::Step::AddingRepo),
+            Some(Instant::now()),
+        );
         let cache = self.client_cache.clone();
         let tx = self.event_tx.clone();
         let handle = tokio::spawn(async move {
@@ -12179,48 +12303,45 @@ impl App {
     }
 
     pub fn handle_cost_install_step(&mut self, context: &str, step: srelens_kube::kubecost_install::Step) {
-        if self.active_context != context {
-            return;
-        }
-        if let ActiveView::Cost(cost) = &mut self.active_view {
-            if cost.context == context {
-                cost.install = cost_view::InstallState::Running(step);
-            }
-        }
+        // Only an install in hand moves on; a late step after a failure or a
+        // finish must not bring a dead install back.
+        let since = match self.kubecost_installs.get(context) {
+            Some((cost_view::InstallState::Running(_), since)) => *since,
+            _ => return,
+        };
+        self.set_install(context, cost_view::InstallState::Running(step), since);
     }
 
     pub fn handle_cost_install_done(&mut self, context: &str, result: Result<(), String>) {
         let showing = self.active_context == context
             && matches!(&self.active_view, ActiveView::Cost(c) if c.context == context);
-        if !showing {
-            // Finished on a cluster we are no longer looking at: say so, show nothing.
-            let (msg, style) = match result {
-                Ok(()) => (
-                    format!("Kubecost installed on {context}. Open :cost there to see it."),
-                    Theme::status_ok(),
-                ),
-                Err(e) => (format!("Kubecost install on {context} failed: {e}"), Theme::status_error()),
-            };
-            self.set_toast(msg, style);
-            return;
-        }
         match result {
             Ok(()) => {
-                if let ActiveView::Cost(cost) = &mut self.active_view {
-                    cost.install = cost_view::InstallState::Running(
-                        srelens_kube::kubecost_install::Step::WaitingForData,
+                // Recorded for the cluster, so a dashboard left under another
+                // screen comes back saying so instead of "running" forever.
+                self.set_install(
+                    context,
+                    cost_view::InstallState::Running(srelens_kube::kubecost_install::Step::WaitingForData),
+                    Some(Instant::now()),
+                );
+                if showing {
+                    self.set_toast("Kubecost installed. Waiting for its first figures...".to_string(), Theme::status_ok());
+                    self.reload_cost_view();
+                } else {
+                    self.set_toast(
+                        format!("Kubecost installed on {context}. Open :cost there to see it."),
+                        Theme::status_ok(),
                     );
-                    cost.install_since = Some(Instant::now());
                 }
-                self.set_toast("Kubecost installed. Waiting for its first figures...".to_string(), Theme::status_ok());
-                self.reload_cost_view();
             }
             Err(e) => {
-                if let ActiveView::Cost(cost) = &mut self.active_view {
-                    cost.install = cost_view::InstallState::Failed(e.clone());
-                    cost.install_since = None;
-                }
-                self.set_toast(format!("Kubecost install failed: {e}"), Theme::status_error());
+                self.set_install(context, cost_view::InstallState::Failed(e.clone()), None);
+                let msg = if showing {
+                    format!("Kubecost install failed: {e}")
+                } else {
+                    format!("Kubecost install on {context} failed: {e}")
+                };
+                self.set_toast(msg, Theme::status_error());
             }
         }
     }
@@ -16008,6 +16129,7 @@ impl App {
                 &[
                     ("<:>", "Cmd"),
                     ("<↑/↓>", "Scroll"),
+                    ("<←/→>", "Columns"),
                     ("<r>", "Refresh"),
                     ("<Esc>", "Back"),
                     ("<?>", "Help"),
@@ -16444,7 +16566,16 @@ impl App {
         } else if self.show_help {
             render_help_modal(f, size);
         } else if self.show_notifications {
-            crate::ui::render_notifications_modal(f, size, &self.notifications);
+            let shown = crate::ui::render_notifications_modal(
+                f,
+                size,
+                &self.notifications,
+                self.notifications_scroll,
+            );
+            self.notifications_rows = shown.rows;
+            self.notifications_scroll = shown.scroll;
+            self.notifications
+                .mark_seen(shown.scroll + shown.rows, self.notifications_seen_upto);
         }
 
         // An agent's approval prompt, over every view and dialog. Before the
