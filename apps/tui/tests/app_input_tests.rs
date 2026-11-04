@@ -97,6 +97,7 @@ fn ctx(name: &str, cluster: &str, namespace: &str) -> ContextDto {
         is_current: false,
         is_local: false,
         provider: None,
+        distribution: None,
         // Deliberately free of the substrings the picker tests filter on:
         // the picker matches the source file too, so "kubeconfig" (which
         // contains "be") would match every context.

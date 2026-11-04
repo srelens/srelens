@@ -523,6 +523,7 @@ impl App {
                 is_current: rc.is_current,
                 is_local: false,
                 provider: None,
+                distribution: None,
                 source_file: rc.source.to_string_lossy().into_owned(),
                 auth_kind: "token".to_string(),
             })
@@ -9801,6 +9802,7 @@ impl App {
                 is_current: rc.is_current,
                 is_local: false,
                 provider: None,
+                distribution: None,
                 source_file: rc.source.to_string_lossy().into_owned(),
                 auth_kind: rc.auth_kind.clone(),
             })
