@@ -154,7 +154,11 @@ export function FailureState({ title, error, domain, detail, ...rest }: FailureS
     // different failures under one of their titles would claim too little.
     const titles = [...new Set(errors.filter((e) => e !== "").map((e) => friendly(e).title))];
     const fallback = titles.length === 1 ? titles[0] : friendly("").title;
-    return <ErrorState title={title ?? fallback} detail={detail ?? said} raw={raw} {...rest} />;
+    if (detail === undefined) return <ErrorState title={title ?? fallback} detail={said} raw={raw} {...rest} />;
+    // The screen's explanation replaces the sentences, so every original is
+    // offered, including those `summarise` left out for saying the same.
+    const originals = [...new Set(errors.map((e) => describeError(e).raw).filter((r) => r !== ""))].join("\n\n");
+    return <ErrorState title={title ?? fallback} detail={detail} raw={originals || undefined} {...rest} />;
   }
   const copy = explained(error, domain, detail);
   return <ErrorState title={title ?? copy.title} detail={copy.detail} raw={copy.raw} {...rest} />;

@@ -162,6 +162,19 @@ describe("FailureState", () => {
     expect(container.querySelector('[data-slot="raw"]')?.textContent).toContain("discovery: boom");
   });
 
+  it("keeps every original of a list behind its own explanation (#1030 review)", () => {
+    const { container } = render(
+      <FailureState
+        title="Could not check requirements"
+        detail="CRD discovery failed."
+        error={["discovery: boom", "discovery: bust"]}
+      />,
+    );
+    const raw = container.querySelector('[data-slot="raw"]')?.textContent;
+    expect(raw).toContain("discovery: boom");
+    expect(raw).toContain("discovery: bust");
+  });
+
   it("passes the caller's domain to the classifier", () => {
     render(
       <FailureState
