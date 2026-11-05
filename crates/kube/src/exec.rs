@@ -21,11 +21,17 @@ pub fn terminal_size(cols: u16, rows: u16) -> TerminalSize {
 
 use crate::client_cache::ClientCache;
 
-/// Candidate shells to try, in order — busybox images often lack bash.
+/// The shell to exec: the one asked for, else bash when the image has it, else
+/// `/bin/sh`. Plain `/bin/sh` is dash on Debian and Ubuntu images, which has no
+/// line editing or bracketed paste, so arrow keys print `^[[A` and a pasted
+/// block runs line by line (#1040). Busybox images lack bash, so sh stays the
+/// fallback.
 pub fn shell_command(requested: Option<&str>) -> Vec<String> {
     match requested {
         Some(s) if !s.is_empty() => vec![s.to_string()],
-        _ => vec!["/bin/sh".to_string()],
+        _ => ["/bin/sh", "-c", "command -v bash >/dev/null 2>&1 && exec bash; exec /bin/sh"]
+            .map(String::from)
+            .to_vec(),
     }
 }
 
@@ -213,10 +219,50 @@ mod tests {
     use super::*;
 
     #[test]
-    fn shell_command_defaults_to_sh() {
-        assert_eq!(shell_command(None), vec!["/bin/sh".to_string()]);
-        assert_eq!(shell_command(Some("")), vec!["/bin/sh".to_string()]);
+    fn shell_command_runs_an_explicit_shell_as_asked() {
         assert_eq!(shell_command(Some("/bin/bash")), vec!["/bin/bash".to_string()]);
+        assert_eq!(shell_command(Some("")), shell_command(None));
+    }
+
+    /// Run the default shell command with `PATH` set to `path` and `stdin`
+    /// piped in, returning what it printed.
+    #[cfg(unix)]
+    fn run_default_shell(path: &std::path::Path, stdin: &str) -> String {
+        use std::io::Write;
+        let cmd = shell_command(None);
+        let mut child = std::process::Command::new(&cmd[0])
+            .args(&cmd[1..])
+            .env_clear()
+            .env("PATH", path)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        child.stdin.take().unwrap().write_all(stdin.as_bytes()).unwrap();
+        String::from_utf8(child.wait_with_output().unwrap().stdout).unwrap()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn default_shell_prefers_bash_when_the_image_has_it() {
+        // #1040: plain `/bin/sh` is dash on Debian/Ubuntu images — no line
+        // editing, so arrow keys print `^[[A`, and no bracketed paste, so a
+        // multi-line paste runs line by line. bash has both.
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let bash = dir.path().join("bash");
+        std::fs::write(&bash, "#!/bin/sh\necho picked-bash\n").unwrap();
+        std::fs::set_permissions(&bash, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        assert_eq!(run_default_shell(dir.path(), "echo picked-sh\n"), "picked-bash\n");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn default_shell_falls_back_to_sh_without_bash() {
+        // busybox and alpine images have no bash; their sh must still open.
+        let empty = tempfile::tempdir().unwrap();
+        assert_eq!(run_default_shell(empty.path(), "echo picked-sh\n"), "picked-sh\n");
     }
 
     #[test]
