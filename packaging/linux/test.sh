@@ -83,10 +83,11 @@ bundle() {
     chmod 755 "$dir/appimage/srelens_1.0.0_amd64.AppImage"
 }
 
-# expect NAME STATUS TEXT DIR: the check over DIR exits STATUS and says TEXT.
+# expect NAME STATUS TEXT DIR [FLAG]: the check over DIR, given FLAG, exits
+# STATUS and says TEXT.
 expect() {
     set +e
-    out="$(sh "$check" "$4" 2>&1)"
+    out="$(sh "$check" "$4" ${5:+"$5"} 2>&1)"
     got=$?
     set -e
     if [ "$got" -eq "$2" ] && printf '%s' "$out" | grep -qF "$3"; then
@@ -123,6 +124,12 @@ expect an-rpm-rpm-cannot-read 1 "rpm cannot list" "$work/unreadable-rpm"
 bundle "$work/two-debs" 755 755 125
 cp "$work/two-debs/deb/srelens_1.0.0_amd64.deb" "$work/two-debs/deb/srelens_1.0.1_amd64.deb"
 expect two-debs 1 "more than one deb/*.deb under" "$work/two-debs"
+
+# A pre-release build has no rpm (#1026). Only --no-rpm lets that pass.
+bundle "$work/no-rpm" 755 755 125
+rm "$work/no-rpm/rpm/"*.rpm
+expect no-rpm-with-the-flag 0 "OK: the deb and AppImage ship" "$work/no-rpm" --no-rpm
+expect no-rpm-without-it 1 "no rpm/*.rpm under" "$work/no-rpm"
 
 rm "$work/all-three-ship-it/appimage/"*.AppImage
 expect no-appimage 1 "no appimage/*.AppImage under" "$work/all-three-ship-it"

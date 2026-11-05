@@ -29,7 +29,7 @@ import { askContextFor, runKeyFor } from "../lib/askContext";
 import { useNamespaces } from "../lib/workspace";
 import { readImageFile } from "../lib/pastedImages";
 import { invalidateAgentInventory, useAgentInventoryVersion } from "../lib/agentInventory";
-import { describeError, isTauri, listAgents, selectsNothing, type AgentInfo } from "@srelens/core";
+import { describeError, isTauri, listAgents, parseExtensionRoute, selectsNothing, type AgentInfo } from "@srelens/core";
 import { useActiveContext, useContexts } from "../lib/clusters";
 import { detailRoute } from "../lib/detailRoute";
 import { hint } from "../lib/shortcuts";
@@ -38,7 +38,7 @@ import { openOnNamedCluster } from "../lib/openCluster";
 import { logsRoute } from "../screens/Logs";
 import { Transcript } from "../screens/agent/Transcript";
 import { useWorkspaceSealed } from "./LockGate";
-import { appPageCluster } from "./ProtectedStrip";
+import { appPageContext } from "./ProtectedStrip";
 import {
   consoleHeightBounds,
   saveConsoleHeight,
@@ -266,9 +266,15 @@ export function Console({ fullView, spareAbove }: { fullView?: boolean; spareAbo
   // An app's page pins its cluster in its route, as a detail tab does (#834), so
   // a question asked from it goes there whatever the rail says, and the page's
   // narrowing is that cluster's too.
-  // ponytail: found by name, so two contexts sharing one share a narrowing here. `about.cluster` is a name anyway.
-  const askName = appPageCluster(route, contexts);
-  const askCtx = contexts.find((c) => c.name === askName) ?? activeCtx;
+  const appContext = appPageContext(route, contexts);
+  const appPage = parseExtensionRoute(route);
+  const unresolvedLegacyAppPage =
+    appContext === null && appPage !== null && appPage.contextKey === undefined && appPage.clusterId === undefined;
+  // A missing keyed context keeps the established rail fallback. A legacy
+  // name-only route cannot: ExtensionPage pins its first resolution locally,
+  // so a later name lookup could silently send the question to a replacement.
+  // Until that pin is shared, no target is safer than a different target.
+  const askCtx = appContext === undefined || (appContext === null && !unresolvedLegacyAppPage) ? activeCtx : appContext;
   // The active tab's namespace narrowing for this cluster — the picker on the
   // list screens. Without it, a question asked from a list narrowed to one
   // namespace had the agent sweep every namespace in the cluster.
@@ -330,7 +336,11 @@ export function Console({ fullView, spareAbove }: { fullView?: boolean; spareAbo
   // selected conversation outranks the active workspace, because it is what
   // `askAgent` will be given.
   const askAbout = shown?.about ?? about;
-  const askCluster = askAbout.cluster || context;
+  // Do not fill a deliberately unresolved legacy app page from the rail. The
+  // page may still be showing the context it resolved when it mounted, while
+  // the same display name now belongs to another context. Refusing the ask is
+  // the only target we can prove correct until ExtensionPage shares its pin.
+  const askCluster = askAbout.cluster || (unresolvedLegacyAppPage ? "" : context);
   const askPaused = contexts.some(c => c.name === askCluster && workspace.pausedClusters?.includes(c.stableId));
   const shownClusterLabel = useContextLabel(shown?.about.cluster ?? "", contexts.find(c => c.name === shown?.about.cluster)?.stableId);
   const askScope = shown ? contextLabelFor(shown.route, shownClusterLabel) : scope;

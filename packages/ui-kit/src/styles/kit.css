@@ -43,6 +43,13 @@
 }
 
 @layer components {
+  /* A visible 10px scrollbar leaves too little horizontal room for a 30px
+     cluster mark and its active bar inside the 46px rail. The list remains
+     wheel-, touch-, and keyboard-scrollable; like the tab strip, it does not
+     spend the narrow navigation axis on scrollbar chrome. */
+  .cluster-rail-list { scrollbar-width: none; }
+  .cluster-rail-list::-webkit-scrollbar { display: none; }
+
   /* --- surfaces ------------------------------------------------ */
   .card {
     background: var(--ground-surface);
@@ -1401,14 +1408,46 @@
      shrinks first — by a factor large enough that it is gone before the title
      loses a character — and only then does the title truncate. */
   .tab-title { flex: 0 1 auto; min-width: 0; }
-  .tab-sub {
+  .tab-cluster-color {
+    width: 6px;
+    height: 6px;
+    border-radius: 99px;
+    flex-shrink: 0;
+  }
+  .tab-cluster-identity {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
     flex: 1 1 0;
     min-width: 0;
+    overflow: hidden;
+  }
+  .tab-sub {
+    flex: 0 1 auto;
+    min-width: 1ch;
+    overflow: hidden;
+    text-overflow: clip;
+    white-space: nowrap;
     font-family: var(--font-mono);
     font-size: var(--text-meta);
     letter-spacing: 0.02em;
     font-weight: var(--weight-medium);
     color: var(--ink-faint);
+  }
+  .tab-overflow-context {
+    display: flex;
+    align-items: center;
+    gap: 0.3rem;
+    flex: 0 1 50%;
+    min-width: 0;
+    max-width: 50%;
+  }
+  .tab-overflow-label {
+    flex: 1 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
   .tab-close {
     display: inline-flex;

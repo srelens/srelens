@@ -44,7 +44,7 @@ import { useLogStream, type LogSourceOpener } from "../lib/logStream";
 import { useResource } from "../lib/useResource";
 import { refreshContextIds, useContextLookup } from "./contextIds";
 import { commandArgument, plainText } from "./displayText";
-import { ErrorNotice } from "./ExtensionResults";
+import { FailureAlert, FailureState } from "../lib/errorCopy";
 import { extensionLabel, useExtensions } from "./inventoryStore";
 
 type PodBinding = ExtensionManifest["capabilities"][number];
@@ -116,7 +116,7 @@ export function ExtensionPodSlot({ context, resource }: { context: string; resou
   if (inventory.status === "error")
     return (
       <Section title="App pod tools" className="extension-pod-tools" aria-label="App pod tools">
-        <ErrorNotice title="Could not list the installed apps" message={inventory.error} retry={inventory.reload} />
+        <FailureState title="Could not list the installed apps" error={inventory.error} domain="local" onRetry={inventory.reload} />
       </Section>
     );
   const group = resource.apiVersion.includes("/") ? resource.apiVersion.split("/")[0] : "";
@@ -134,10 +134,12 @@ export function ExtensionPodSlot({ context, resource }: { context: string; resou
     <>
       {limited && lookup.status === "failed" && (
         <Section title="App pod tools" className="extension-pod-tools" aria-label="App pod tools">
-          <ErrorNotice
+          <FailureAlert
+            tone="sev"
             title="Could not list the clusters, so pod tools from apps limited to some clusters are not shown"
-            message={lookup.error}
-            retry={() => void refreshContextIds()}
+            error={lookup.error}
+            domain="local"
+            onRetry={() => void refreshContextIds()}
           />
         </Section>
       )}
@@ -304,7 +306,7 @@ function PodGroup({
   const [containers, setContainers] = useState<Record<string, string>>({});
   if (pods.status === "loading") return <p className="extension-message">Listing the pods {plainText(first.title)} may reach…</p>;
   if (pods.status === "error" || !pods.data)
-    return <ErrorNotice title="Could not list the pods this app may reach" message={pods.error} retry={pods.reload} cluster />;
+    return <FailureState title="Could not list the pods this app may reach" error={pods.error} onRetry={pods.reload} />;
   const shown = place.kind === "pod" ? pods.data.pods.filter((pod) => pod.name === place.pod) : pods.data.pods;
   const podBindings = bindings.filter((binding) => !(binding.target === POD_FORWARD && binding.arguments.service === true));
   const serviceBindings = bindings.filter((binding) => binding.target === POD_FORWARD && binding.arguments.service === true);
@@ -747,10 +749,10 @@ function ForwardSession({
       </p>
       {failed && (
         // The cluster refused connections through it; the forward itself still listens.
-        <p className="extension-message extension-stale-notice" role="alert">
-          {failed.count === 1 ? "1 connection through it failed" : `${failed.count.toLocaleString("en-US")} connections through it failed`}
-          , the last because: {plainText(failed.message)}
-        </p>
+        <FailureAlert
+          title={failed.count === 1 ? "1 connection through it failed" : `${failed.count.toLocaleString("en-US")} connections through it failed`}
+          error={plainText(failed.message)}
+        />
       )}
     </>
   );

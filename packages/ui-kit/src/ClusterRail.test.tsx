@@ -1,6 +1,8 @@
 import { describe, it, expect, vi } from "vitest";
 import { render, screen, fireEvent, createEvent, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { ClusterRail, type ClusterRailItem } from "./ClusterRail";
 
 // jsdom has no ResizeObserver, and Radix's popper — which Tooltip sits on —
@@ -71,6 +73,43 @@ describe("ClusterRail", () => {
     // the reader how many there are before they start arrowing through them.
     setup();
     expect(screen.getAllByRole("listitem")).toHaveLength(3);
+  });
+
+  it("keeps a large fleet scrollable while fixed actions stay outside the list", () => {
+    setup({
+      items: Array.from({ length: 24 }, (_, index) => ({
+        id: `cluster-${index}`,
+        name: `cluster-${index}`,
+        mark: <span>{index}</span>,
+      })),
+      onAdd: () => {},
+    });
+
+    const list = screen.getByRole("list");
+    expect(list.className).toContain("min-h-0");
+    expect(list.className).toContain("flex-1");
+    expect(list.className).toContain("overflow-y-auto");
+    expect(list.contains(chip("Connect a cluster"))).toBe(false);
+  });
+
+  it("keeps the active indicator inside a narrow scroll viewport", () => {
+    const { container } = setup();
+    const list = screen.getByRole("list");
+    const indicator = container.querySelector<HTMLElement>('[data-slot="active-indicator"]');
+    const css = readFileSync(join(__dirname, "styles/kit.css"), "utf8");
+
+    expect(list.className).toContain("cluster-rail-list");
+    expect(indicator?.style.left).toBe("-8px");
+    expect(css).toMatch(/\.cluster-rail-list\s*\{[^}]*scrollbar-width:\s*none/);
+    expect(css).toContain(".cluster-rail-list::-webkit-scrollbar");
+  });
+
+  it("speaks the human group label without exposing the grouping key", () => {
+    setup({
+      items: [{ id: "prod", name: "prod", mark: <span>P</span>, group: "gke", groupLabel: "GKE distribution" }],
+    });
+    expect(chip("prod, GKE distribution")).toBeDefined();
+    expect(screen.queryByRole("button", { name: "prod, gke" })).toBeNull();
   });
 
   it("only prints the names under the marks when asked", () => {

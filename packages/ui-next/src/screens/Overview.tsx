@@ -269,8 +269,7 @@ function Stale({ overview }: { overview: OverviewData }) {
  * Four `Section`s and nothing around them. `SideRail` drops what it is handed
  * straight into one box and `.section + .section` is what rules between them,
  * so a wrapper per child would break that adjacency and the rail would read as
- * one undivided block. `AboutKind` renders its sections the same way and for
- * the same reason; the kit's suite pins it.
+ * one undivided block; the kit's suite pins it.
  */
 function AtAGlance({ context, overview }: { context: ClusterContext; overview: OverviewData }) {
   return (

@@ -15,7 +15,7 @@ import { logsRoute } from "../screens/Logs";
 import * as tabsStore from "../lib/tabsStore";
 import { setNamespaces } from "../lib/workspace";
 import { lockWorkspace, resetLock, __setKnownVaultMode } from "./LockGate";
-import { extensionClusterResourceRoute, extensionClusterRoute, type ClusterContext } from "@srelens/core";
+import { extensionClusterResourceRoute, extensionClusterRoute, extensionRoute, type ClusterContext } from "@srelens/core";
 
 const {
   useAgentRun,
@@ -418,6 +418,35 @@ describe("Console", () => {
     setup();
     await user.click(screen.getByRole("button", { name: "Ask from elsewhere" }));
     expect(askAgent).toHaveBeenCalledWith("x", expect.objectContaining({ about: expect.objectContaining({ namespaces: ["payments"] }) }));
+  });
+
+  it("does not retarget a legacy app page when another context reuses its old display name", async () => {
+    const user = userEvent.setup();
+    const original = ctx("original-id", "cluster/a");
+    const stage = ctx("stage-id", "stage");
+    const initial = [original, stage];
+    setContexts(initial);
+    tabsStore.setState(defaultState(initial));
+    tabsStore.setActiveCluster(stage.stableId, stage.name);
+    tabsStore.openTab(extensionRoute("cluster/a", "org.example.argocd", "applications"), {
+      clusterName: original.name,
+    });
+
+    // ExtensionPage has pinned `original-id` locally. Its static route still
+    // says `cluster/a`, so a fresh name lookup after this listing would point
+    // the console at the replacement while the visible page stays original.
+    const renamed = { ...original, name: "first/cluster/a" };
+    const replacement = ctx("replacement-id", "cluster/a");
+    setContexts([renamed, replacement, stage]);
+    setNamespaces(replacement.stableId, ["replacement-only"]);
+
+    setup();
+    await user.click(screen.getByRole("button", { name: "Ask from elsewhere" }));
+    const box = screen.getByRole("textbox", { name: "Console prompt" });
+    await user.type(box, "what is on this page");
+    fireEvent.keyDown(box, { key: "Enter" });
+    expect(await screen.findByText(/no cluster is active/i)).toBeTruthy();
+    expect(askAgent).not.toHaveBeenCalled();
   });
 
   it("asks about the rail's cluster from an app page that cannot say which cluster it is on", async () => {

@@ -568,8 +568,9 @@ also notify, so changes between reading and subscribing are not missed. The
 32-subscription limit and existing resource restrictions still apply; pod log
 resources remain readable but cannot be subscribed to. Over stdio,
 notifications arrive on the server's stdout. Over HTTP, the client first opens
-the push channel — `GET /mcp` with `Accept: text/event-stream`, same bearer
-token — and notifications arrive as SSE events on that stream; subscribing
+the push channel — `GET /mcp` with `Accept: text/event-stream`, the same bearer
+token, and the `Mcp-Session-Id` returned by its successful `initialize` request
+— and notifications arrive as SSE events on that stream; subscribing
 without the stream connected is refused, since the notifications would have
 nowhere to go. Subscriptions live exactly as long as the stream that carries
 them: if the stream drops — client disconnect, a reconnect replacing it, or
@@ -578,6 +579,10 @@ stops being accepted immediately — every watch it carried is released, and the
 client is expected to reconnect (with the new token, after a rotation) and
 subscribe again. That is deliberate: rotation is meant to cut off existing
 clients, and a subscription that silently survived it would be a leak.
+HTTP clients include that server-minted session ID on every request after
+`initialize`; a missing ID is rejected, and an expired or ended ID returns 404
+so the client can initialize again. A client can end its session explicitly
+with `DELETE /mcp` carrying the same bearer token and session ID.
 
 You can also start a server directly:
 

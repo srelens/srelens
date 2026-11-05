@@ -1765,24 +1765,31 @@ describe("ResourceDetailView", () => {
       expect(await within(menu).findByRole("button", { name: "Copied" })).toBeDefined();
     });
 
-    it("withholds Delete from a custom resource, whose GVK the backend cannot resolve", async () => {
+    it("offers Delete on a custom resource, and deletes it through its CRD", async () => {
       getObject.mockResolvedValue({ object: { kind: "Widget", metadata: { name: "w-1", namespace: "default" } } });
       listCrds.mockResolvedValue({
         crds: [{ name: "widgets.example.com", group: "example.com", version: "v1", kind: "Widget", plural: "widgets", namespaced: true }],
       });
-      // No descriptor is exactly what a kind outside `K8S_KIND` gets, and it is
-      // the same verdict `customDescriptor` reaches: Delete would always fail,
-      // and an action that cannot work is worse than an absent one.
+      // No descriptor is exactly what a kind outside `K8S_KIND` gets.
       descriptorFor.mockReturnValue(undefined);
-      const { getByRole, queryByRole } = render(
-        <ResourceDetailView context="ctx" kind="Widget" namespace="default" name="w-1" />,
+      const { getByRole } = render(
+        <ResourceDetailView context="ctx" kind="Widget" group="example.com" namespace="default" name="w-1" />,
       );
       await waitFor(() => expect(getByRole("tab", { name: "Overview" })).toBeDefined());
 
-      expect(barWords()).toEqual(["Ask", "Edit", "Copy as kubectl"]);
-      // Nothing was left over to fold, so there is no overflow to open onto an
-      // empty menu.
-      expect(queryByRole("button", { name: "More actions" })).toBeNull();
+      await userEvent.click(getByRole("button", { name: "More actions" }));
+      const menu = await screen.findByRole("dialog");
+      await userEvent.click(within(menu).getByRole("button", { name: "Delete" }));
+      const confirm = within(await screen.findByRole("dialog", { name: "Delete Widget?" }));
+      await userEvent.click(confirm.getByRole("button", { name: "Delete" }));
+
+      await waitFor(() =>
+        expect(deleteResource).toHaveBeenCalledWith("ctx", "Widget", "default", "w-1", undefined, {
+          group: "example.com",
+          version: "v1",
+          plural: "widgets",
+        }),
+      );
     });
 
     it("offers the same actions in the tab's header row, only more of them on the bar", async () => {

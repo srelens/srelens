@@ -87,6 +87,31 @@ describe("Rail", () => {
     expect(activeRoute()).toBe("/overview");
   });
 
+  it("rules off distribution transitions without changing the saved order", () => {
+    const contexts = [
+      { ...ctx("gke-a"), distribution: "gke" },
+      { ...ctx("eks-a"), distribution: "eks" },
+      { ...ctx("gke-b"), distribution: "gke" },
+      { ...ctx("gke-c"), distribution: "gke" },
+      ctx("bare-metal"),
+    ];
+    setState(defaultState(contexts));
+
+    const { container } = setup({ contexts });
+
+    const buttons = screen
+      .getAllByRole("button")
+      .filter((button) => contexts.some((context) => button.getAttribute("aria-label")?.startsWith(context.name)));
+    expect(buttons.map((button) => button.getAttribute("aria-label"))).toEqual([
+      "gke-a, GKE distribution",
+      "eks-a, EKS distribution",
+      "gke-b, GKE distribution",
+      "gke-c, GKE distribution",
+      "bare-metal",
+    ]);
+    expect(container.querySelectorAll("[data-slot='group-rule']")).toHaveLength(3);
+  });
+
   it("says why a cluster is out of reach in its name, classified rather than quoted", () => {
     setLink("prod-eu", "error", "dial tcp 10.1.2.3:6443: connect: connection refused");
     setup();

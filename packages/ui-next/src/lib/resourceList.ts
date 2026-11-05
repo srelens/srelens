@@ -14,6 +14,18 @@ export interface ResourceList<Row> {
   rows: Row[];
   status: ResourceListStatus;
   error?: string;
+  /**
+   * True only after this mounted view's current fetch generation produced a
+   * successful list. Cached rows deliberately start false: they are useful
+   * last-known data, but cannot certify what exists in the cluster now.
+   */
+  fresh: boolean;
+  /**
+   * This generation is still waiting for its replacement list. Unlike
+   * `status === "loading"`, this stays true while cached rows remain visible
+   * and while a disconnected watch waits for its replacement snapshot.
+   */
+  refreshing: boolean;
   /** True when the polled list stopped at a backend row cap (#609). */
   truncated?: boolean;
   /**
@@ -141,6 +153,8 @@ interface ListState {
    */
   unscoped: boolean;
   loading: boolean;
+  fresh: boolean;
+  refreshing: boolean;
   watch: WatchStatus;
   forKey: string;
 }
@@ -195,12 +209,28 @@ export function useResourceList<Row extends ListRow>(
   const key = viewKey(context, namespaces, kind);
   const gen = useRef(0);
   const [tick, setTick] = useState(0);
-  const reload = useCallback(() => setTick((t) => t + 1), []);
 
   const [state, setState] = useState<ListState>(() => {
     const cached = cacheGet(key);
-    return { rows: cached?.rows ?? [], truncated: cached?.truncated, error: undefined, errors: NO_ERRORS, unscoped: false, loading: cached === undefined, watch: "live", forKey: key };
+    return {
+      rows: cached?.rows ?? [],
+      truncated: cached?.truncated,
+      error: undefined,
+      errors: NO_ERRORS,
+      unscoped: false,
+      loading: cached === undefined,
+      fresh: false,
+      refreshing: true,
+      watch: "live",
+      forKey: key,
+    };
   });
+  const reload = useCallback(() => {
+    // Invalidate "current" synchronously. The rows stay on screen as useful
+    // last-known data while this generation obtains its replacement list.
+    setState((s) => ({ ...s, fresh: false, refreshing: true }));
+    setTick((t) => t + 1);
+  }, []);
 
   // Held apart from `state`: enrichment (pod/node metrics) runs on its own
   // cadence and must never gate or fail the list itself. Merged into the
@@ -210,7 +240,18 @@ export function useResourceList<Row extends ListRow>(
   useEffect(() => {
     const mine = ++gen.current;
     const cached = cacheGet(key);
-    setState({ rows: cached?.rows ?? [], truncated: cached?.truncated, error: undefined, errors: NO_ERRORS, unscoped: false, loading: cached === undefined, watch: "live", forKey: key });
+    setState({
+      rows: cached?.rows ?? [],
+      truncated: cached?.truncated,
+      error: undefined,
+      errors: NO_ERRORS,
+      unscoped: false,
+      loading: cached === undefined,
+      fresh: false,
+      refreshing: true,
+      watch: "live",
+      forKey: key,
+    });
     setMetrics(undefined);
 
     if (!descriptor) {
@@ -220,7 +261,7 @@ export function useResourceList<Row extends ListRow>(
     // namespace here (#881) — is an empty list, and nothing is asked of the
     // cluster for it.
     if (selectsNothing(namespaces)) {
-      setState((s) => ({ ...s, rows: [], loading: false }));
+      setState((s) => ({ ...s, rows: [], loading: false, fresh: true, refreshing: false }));
       return;
     }
 
@@ -257,11 +298,27 @@ export function useResourceList<Row extends ListRow>(
         (rows) => {
           if (gen.current !== mine) return;
           cacheSet(key, rows);
-          setState((s) => ({ ...s, rows, loading: false }));
+          setState((s) => ({
+            ...s,
+            rows,
+            loading: false,
+            // In a multi-namespace watch, a still-live sibling can publish a
+            // merged update while another sibling remains disconnected. That
+            // update is useful last-known data, not the missing replacement
+            // snapshot. Only a snapshot while the aggregate watch is live can
+            // certify this generation as current.
+            fresh: s.watch === "live" && s.errors.size === 0 && !s.unscoped,
+            refreshing: s.watch !== "live",
+          }));
         },
         (status) => {
           if (gen.current !== mine) return;
-          setState((s) => ({ ...s, watch: status }));
+          // A live transport alone cannot prove nothing was missed during a
+          // disconnect. Only the next onRows replacement snapshot restores
+          // freshness; therefore "live" preserves these flags.
+          setState((s) => status === "reconnecting"
+            ? { ...s, watch: status, fresh: false, refreshing: true }
+            : { ...s, watch: status });
         },
         (error, ns) => {
           if (gen.current !== mine) return;
@@ -270,7 +327,14 @@ export function useResourceList<Row extends ListRow>(
             // Still loading while another namespace may yet answer: a fast
             // refusal must not flash the whole list as failed first.
             const loading = s.loading && errors.size < scopes.length;
-            return { ...s, errors, error: firstError(errors), loading };
+            return {
+              ...s,
+              errors,
+              error: firstError(errors),
+              loading,
+              fresh: false,
+              refreshing: s.refreshing && errors.size < scopes.length,
+            };
           });
         },
         files,
@@ -289,7 +353,14 @@ export function useResourceList<Row extends ListRow>(
           // must surface as `error`, not leave the hook on `loading`
           // forever — errors are returned, never thrown.
           if (gen.current !== mine) return;
-          setState((s) => ({ ...s, error: e instanceof Error ? e.message : String(e), unscoped: true, loading: false }));
+          setState((s) => ({
+            ...s,
+            error: e instanceof Error ? e.message : String(e),
+            unscoped: true,
+            loading: false,
+            fresh: false,
+            refreshing: false,
+          }));
         },
       );
 
@@ -339,7 +410,14 @@ export function useResourceList<Row extends ListRow>(
           // what is known about them is kept too. Clearing `truncated` here
           // left a capped list's rows standing with nothing to say they were
           // capped.
-          setState((s) => ({ ...s, errors, error: firstError(errors), loading: false }));
+          setState((s) => ({
+            ...s,
+            errors,
+            error: firstError(errors),
+            loading: false,
+            fresh: false,
+            refreshing: false,
+          }));
           return;
         }
         cacheSet(key, rows, truncated);
@@ -350,6 +428,8 @@ export function useResourceList<Row extends ListRow>(
           error: firstError(errors),
           truncated: truncated || undefined,
           loading: false,
+          fresh: errors.size === 0,
+          refreshing: false,
         }));
       });
     };
@@ -376,7 +456,18 @@ export function useResourceList<Row extends ListRow>(
   // guard above; the required field is what stops a future full write from
   // dropping it.
   if (state.forKey !== key) {
-    return { rows: [], status: "loading", error: undefined, truncated: undefined, namespaceFailures: [], stale: false, watch: "live", reload };
+    return {
+      rows: [],
+      status: "loading",
+      error: undefined,
+      truncated: undefined,
+      fresh: false,
+      refreshing: true,
+      namespaceFailures: [],
+      stale: false,
+      watch: "live",
+      reload,
+    };
   }
 
   return {
@@ -384,6 +475,8 @@ export function useResourceList<Row extends ListRow>(
     status: deriveStatus(state.rows, state.error, state.loading),
     error: state.error,
     truncated: state.truncated,
+    fresh: state.fresh,
+    refreshing: state.refreshing,
     namespaceFailures: failuresOf(state.errors, scopes),
     // Every scope failed, or the watch could not start at all (whatever some
     // scopes had already reported): either way nothing is refreshing.

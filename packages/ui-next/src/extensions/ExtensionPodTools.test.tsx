@@ -273,8 +273,8 @@ describe("the pod tools on a Deployment (#567)", () => {
       stream.opened[0].handlers.onData({ event: "connectionFailed", count: 2, message: "pods \"web-1\" is forbidden" }, 2),
     );
     expect(
-      (await within(tools).findByText(/2 connections through it failed/)).textContent,
-    ).toContain('the last because: pods "web-1" is forbidden');
+      (await within(tools).findByText(/2 connections through it failed/)).closest('[role="status"]')?.textContent,
+    ).toContain('pods "web-1" is forbidden');
     expect(within(tools).getByText(/Forwarding/).textContent).toContain("127.0.0.1:54321");
     fireEvent.click(within(tools).getByRole("button", { name: "Stop forwarding" }));
     await waitFor(() => expect(stream.opened[0].cancel).toHaveBeenCalled());

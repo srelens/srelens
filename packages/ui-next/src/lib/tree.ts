@@ -1,6 +1,7 @@
 import type { ReactNode } from "react";
 import { RESOURCE_LABELS, type CrdRef, type ResourceKind } from "@srelens/core";
 import type { IconComponent, ResourceNode } from "@srelens/ui-kit";
+import { crdIcon } from "./crdIcons";
 import { Icons } from "./icons";
 
 /**
@@ -60,7 +61,7 @@ export const NAV_GROUPS: ReadonlyArray<{ id: string; label: string; kinds: Resou
   },
 ];
 
-/** The kinds that stand in the cluster band as rows of their own, after Overview. */
+/** The kinds that stand in the cluster band as rows of their own, after Problems. */
 export const CLUSTER_KINDS: ResourceKind[] = ["nodes", "namespaces", "events"];
 
 /**
@@ -150,7 +151,7 @@ export interface NavInput {
 
 /**
  * The whole sidebar, in three unlabelled bands (#1001): the cluster itself
- * (Overview, Nodes, Namespaces, Events), its resources (the kind groups, then
+ * (Overview, Problems, Nodes, Namespaces, Events), its resources (the kind groups, then
  * Custom resources), then apps and tools (each app, Helm releases, Port
  * forwards, Topology, Incidents, Agent). Apps follow the built-ins, as they do
  * in Lens. The kit draws a rule where the band changes.
@@ -164,7 +165,16 @@ export function navNodes({ counts, apps = [], crds, agent }: NavInput): Resource
     ...counted(`route:${tool.route}`, counts),
   }));
   return [
-    ...[routeNode("overview", "/overview", counts), ...CLUSTER_KINDS.map((kind) => kindNode(kind, counts))].map(inBand("cluster")),
+    ...[
+      routeNode("overview", "/overview", counts),
+      {
+        id: "route:/problems",
+        label: "Problems",
+        icon: Icons.incidents,
+        ...counted("route:/problems", counts),
+      },
+      ...CLUSTER_KINDS.map((kind) => kindNode(kind, counts)),
+    ].map(inBand("cluster")),
     ...[
       ...kindNodes(counts),
       { id: "crds", label: "Custom resources", icon: Icons.crds, defaultExpanded: false, children: crds },
@@ -184,6 +194,8 @@ export function navNodes({ counts, apps = [], crds, agent }: NavInput): Resource
  *
  * Every group starts folded shut. Expanding all of them by default would drown
  * the built-in kinds above them the moment one operator is installed.
+ *
+ * A group and its CRDs draw the group's glyph from {@link crdIcon} (#1027).
  */
 export function crdNodes(crds: CrdRef[], counts?: NodeCounts): ResourceNode[] {
   const groups = new Map<string, CrdRef[]>();
@@ -195,15 +207,18 @@ export function crdNodes(crds: CrdRef[], counts?: NodeCounts): ResourceNode[] {
   }
   return [...groups.entries()]
     .sort(([a], [b]) => a.localeCompare(b))
-    .map(([group, list]) => ({
-      id: `crdgroup:${group}`,
-      label: group,
-      icon: Icons.crds,
-      defaultExpanded: false,
-      children: [...list]
-        .sort((a, b) => a.kind.localeCompare(b.kind))
-        .map((crd) => ({ id: `crd:${crd.name}`, label: crd.kind, icon: Icons.crds, ...counted(`crd:${crd.name}`, counts) })),
-    }));
+    .map(([group, list]) => {
+      const icon = crdIcon(group);
+      return {
+        id: `crdgroup:${group}`,
+        label: group,
+        icon,
+        defaultExpanded: false,
+        children: [...list]
+          .sort((a, b) => a.kind.localeCompare(b.kind))
+          .map((crd) => ({ id: `crd:${crd.name}`, label: crd.kind, icon, ...counted(`crd:${crd.name}`, counts) })),
+      };
+    });
 }
 
 /**
