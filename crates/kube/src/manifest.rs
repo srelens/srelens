@@ -195,7 +195,8 @@ fn resolve_api_resource(input: &ManifestIn) -> Result<(ApiResource, bool), Capab
 }
 
 /// The one resolver `getObject`, `getManifest` and `listResource` share, so a
-/// kind one of them can reach the others can too (#932).
+/// kind one of them can reach the others can too (#932). `deleteResource`
+/// resolves through it as well (#1025), so what can be listed can be deleted.
 ///
 /// With group, version and plural all given it is a custom resource, built
 /// from them; its scope is not known here, so a namespace given means
@@ -203,7 +204,7 @@ fn resolve_api_resource(input: &ManifestIn) -> Result<(ApiResource, bool), Capab
 /// namespace". Otherwise the kind must be in the built-in table, and the
 /// refusal says what to pass for one that is not: an agent that is told only
 /// "unsupported kind" does not learn that the tool can read it.
-fn resolve_kind(
+pub(crate) fn resolve_kind(
     kind: &str,
     namespace: Option<&str>,
     group: Option<&str>,
@@ -211,6 +212,19 @@ fn resolve_kind(
     plural: Option<&str>,
 ) -> Result<(ApiResource, bool), CapabilityError> {
     if let (Some(g), Some(v), Some(p)) = (group, version, plural) {
+        // Each becomes a path segment of the request, so each must be a name
+        // Kubernetes could have given it; the core group is the empty one.
+        use crate::collections::{check_name, NameRule};
+        for (what, value, rule) in [
+            ("group", g, NameRule::Subdomain),
+            ("version", v, NameRule::Label),
+            ("plural", p, NameRule::Label),
+        ] {
+            if !(what == "group" && value.is_empty()) {
+                check_name(value, rule)
+                    .map_err(|why| CapabilityError::Handler(format!("{what} {value:?} is not valid: {why}")))?;
+            }
+        }
         let namespaced = namespace.is_some_and(|s| !s.is_empty());
         // The plural decides what the request reaches; the caller's kind is
         // only a label. Where the group and plural are a built-in kind's, that

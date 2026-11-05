@@ -229,7 +229,7 @@ it("says the cluster switch could not be saved, and shows what the file holds", 
   await user.click(screen.getByRole("switch", { name: "Allow AI Assistant" }));
   await act(async () => { await assistantSaved(); });
   onTestFinished(__resetAssistantForTests);
-  const alert = screen.getByText(/Could not save the AI Assistant setting/);
+  const alert = screen.getByText(/Could not save the AI Assistant setting/).closest("[role]") as HTMLElement;
   expect(alert.getAttribute("role")).toBe("alert");
   expect(alert.textContent).toContain("settings.json is locked");
 });

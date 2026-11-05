@@ -4,6 +4,7 @@ import {
   describeError,
   extensionCardRoute,
   extensionEnabledFor,
+  listCrds,
   resolveDashboardCards,
   type ClusterContext,
   type ExtensionDashboardCard,
@@ -24,6 +25,7 @@ import { NO_PINNED_ID_MESSAGE } from "./contextIds";
 import { plainText } from "./displayText";
 import { extensionLabel, useExtensions } from "./inventoryStore";
 import { LiveNotice, LiveStatus, useLiveApps } from "./liveReaders";
+import { crdRequirements, readersServed } from "./requirements";
 
 /**
  * The cluster dashboard's app cards (#540): one band of host-drawn figures,
@@ -64,10 +66,36 @@ export function DashboardCards({ context }: { context: ClusterContext }) {
   // Still listing, or nothing declares a card: there is no band to draw, and a
   // placeholder on every cluster's overview would be furniture.
   if (apps.length === 0) return null;
-  return <CardsBand context={context} apps={apps} />;
+  return <ServedCards context={context} apps={apps} />;
 }
 
-function CardsBand({ context, apps }: { context: ClusterContext; apps: InstalledExtension[] }) {
+/**
+ * The band, over only the cards whose reader this cluster serves (#1024): a
+ * card over a missing CRD would only say "Couldn't read", and its watch would
+ * stop the band's live updates. No band while that is unknown, nor when no card
+ * is left. A discovery that fails is unknown rather than missing — ordinary
+ * RBAC often refuses it — so every card shows, as on the app's own page.
+ */
+function ServedCards({ context, apps }: { context: ClusterContext; apps: InstalledExtension[] }) {
+  const cardsOf = (plugin: InstalledExtension) => plugin.manifest.contributions.dashboardCards ?? [];
+  const needed = apps.some((plugin) => cardsOf(plugin).some((card) => crdRequirements(plugin, new Set([card.source])).length));
+  // The cluster is asked, by pinned ID, only when a card reads a CRD. An answer
+  // to another question — another cluster's, say — is no answer.
+  const key = (needed && context.pinnedId) || "";
+  // ponytail: one uncached listCrds per Overview; share the sidebar's if it shows up in a profile.
+  const discovery = useResource(async () => ({ key, ...(key ? await listCrds(key) : {}) }), [key]);
+  if (discovery.data?.key !== key) return null;
+  const crds = discovery.data.crds;
+  const served = apps
+    .map((plugin) => ({ ...plugin, manifest: { ...plugin.manifest, contributions: { ...plugin.manifest.contributions,
+      dashboardCards: cardsOf(plugin).filter((card) => readersServed(plugin, new Set([card.source]), crds)) } } }))
+    .filter((plugin) => plugin.manifest.contributions.dashboardCards.length);
+  // Refresh asks again too, so an operator installed since shows its cards. Quietly: the band
+  // stays up until the answer lands.
+  return served.length ? <CardsBand context={context} apps={served} recheck={discovery.refresh} /> : null;
+}
+
+function CardsBand({ context, apps, recheck }: { context: ClusterContext; apps: InstalledExtension[]; recheck(): void }) {
   const selection = useNamespaces(context.stableId);
   const setNamespaces = useSetNamespaces();
   const namespaceOptions = useNamespaceOptions(context.name, getKubeconfigFiles());
@@ -104,7 +132,7 @@ function CardsBand({ context, apps }: { context: ClusterContext; apps: Installed
       <div className="dashboard-cards-toolbar">
         <NamespaceScopePicker context={context} options={namespaceOptions} />
         <LiveStatus live={live} />
-        <Button variant="secondary" size="sm" aria-label="Refresh app cards" onClick={() => setRefresh((n) => n + 1)}>
+        <Button variant="secondary" size="sm" aria-label="Refresh app cards" onClick={() => { recheck(); setRefresh((n) => n + 1); }}>
           Refresh
         </Button>
       </div>

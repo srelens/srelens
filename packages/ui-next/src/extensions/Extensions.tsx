@@ -28,9 +28,10 @@ import {
 
 import { ExtensionCatalog } from "./ExtensionCatalog";
 import { ServerPolicy } from "./ServerPolicy";
-import { Button, Tabs } from "@srelens/ui-kit";
-import { ErrorNotice, ExtensionResults } from "./ExtensionResults";
-export { ErrorNotice, ExtensionResults } from "./ExtensionResults";
+import { Alert, Button, Tabs } from "@srelens/ui-kit";
+import { FailureAlert, FailureState } from "../lib/errorCopy";
+import { ExtensionResults } from "./ExtensionResults";
+export { ExtensionResults } from "./ExtensionResults";
 
 
 import { extensionLabel as label, extensionSigner, useExtensions } from "./inventoryStore";
@@ -85,7 +86,7 @@ export function ExtensionManager({ show }: { show?: { tab: string } } = {}) {
   }, [show]);
   const inventory = useExtensions();
   const [source, setSource] = useState("");
-  const [error, setError] = useState("");
+  const [error, setError] = useState<{ title: string; reason: string } | null>(null);
   const [busy, setBusy] = useState(false);
   const [removing, setRemoving] = useState<InstalledExtension | null>(null);
   /** The ID of the app whose details are open. */
@@ -150,7 +151,7 @@ export function ExtensionManager({ show }: { show?: { tab: string } } = {}) {
   }
   async function change(action: ExtensionChange) {
     setBusy(true);
-    setError("");
+    setError(null);
     try {
       await configureExtensions(action);
       inventory.reload();
@@ -158,7 +159,7 @@ export function ExtensionManager({ show }: { show?: { tab: string } } = {}) {
       if (action.action === "install" || action.action === "installPackage" || action.action === "installCatalogPackage") setTab("installed");
       return true;
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      setError({ title: "Could not update apps", reason: e instanceof Error ? e.message : String(e) });
       return false;
     } finally {
       setBusy(false);
@@ -185,7 +186,7 @@ export function ExtensionManager({ show }: { show?: { tab: string } } = {}) {
     const name = typeof parsed.name === "string" ? parsed.name : "This manifest";
     beginReview();
     const request = {};
-    setError("");
+    setError(null);
     setReview({
       request,
       id: ++reviews.current,
@@ -216,10 +217,10 @@ export function ExtensionManager({ show }: { show?: { tab: string } } = {}) {
   async function reviewPackageFile(file: File | undefined) {
     if (!file) return;
     const current = beginReview();
-    setError("");
+    setError(null);
     setReview(null);
     if (file.size > MAX_EXTENSION_PACKAGE_BYTES) {
-      setError(`${file.name} is ${bytes(file.size)}; a package may be at most ${bytes(MAX_EXTENSION_PACKAGE_BYTES)}.`);
+      setError({ title: `Could not review ${file.name}`, reason: `It is ${bytes(file.size)}; a package may be at most ${bytes(MAX_EXTENSION_PACKAGE_BYTES)}.` });
       return;
     }
     setBusy(true);
@@ -232,7 +233,7 @@ export function ExtensionManager({ show }: { show?: { tab: string } } = {}) {
         kind: "packageFile", package: verified.package, file: content,
       }, verified.keyId);
     } catch (e) {
-      if (current()) setError(`Could not review ${file.name}: ${e instanceof Error ? e.message : String(e)}`);
+      if (current()) setError({ title: `Could not review ${file.name}`, reason: e instanceof Error ? e.message : String(e) });
     } finally {
       setBusy(false);
     }
@@ -264,7 +265,7 @@ export function ExtensionManager({ show }: { show?: { tab: string } } = {}) {
       </p>
     );
   if (inventory.status === "error")
-    return <ErrorNotice message={inventory.error} retry={inventory.reload} />;
+    return <FailureState title="Could not list the installed apps" error={inventory.error} domain="local" onRetry={inventory.reload} />;
   const state = inventory.data!;
   /** Whether the administrator's policy makes every user keep this app (#578). */
   const required = (plugin: InstalledExtension) => state.policy?.requiredApps.includes(plugin.manifest.id) ?? false;
@@ -304,11 +305,7 @@ export function ExtensionManager({ show }: { show?: { tab: string } } = {}) {
         {signedOnly && <p className="extension-message">This server's policy allows only signed apps.</p>}
         <p className="extension-message">Off by default. Read-only declarative apps need only their permission grants. Turning this off disables affected apps and keeps their settings. Turning it on does not re-enable them. {executableAppsHint}</p>
       </div>
-      {error && (
-        <p role="alert" className="extension-error">
-          {error}
-        </p>
-      )}
+      {error && <FailureAlert tone="sev" title={error.title} error={error.reason} domain="local" />}
       <Tabs variant="underline" label="App settings" tabs={[
         { id: "installed", label: "Apps" },
         { id: "catalog", label: "Catalog" },
@@ -376,10 +373,12 @@ export function ExtensionManager({ show }: { show?: { tab: string } } = {}) {
             )}
             <ReviewManifest key={review.id} text={review.text} />
             {review.checkError ? (
-              <ErrorNotice
+              <FailureAlert
+                tone="sev"
                 title="Could not check the manifest"
-                message={review.checkError}
-                retry={() => void reviewManifest(review.source, review.signature, review.origin, review.keyId)}
+                error={review.checkError}
+                domain="local"
+                onRetry={() => void reviewManifest(review.source, review.signature, review.origin, review.keyId)}
               />
             ) : !review.errors ? (
               <p role="status" className="extension-message">Checking the manifest…</p>
@@ -400,7 +399,7 @@ export function ExtensionManager({ show }: { show?: { tab: string } } = {}) {
                 </ul>
               </div>
             ) : !review.permissionDiff ? (
-              <ErrorNotice title="Could not review access changes" message="The host did not return an access comparison. Review this manifest again." retry={() => void reviewManifest(review.source, review.signature, review.origin, review.keyId)} />
+              <FailureAlert tone="sev" title="Could not review access changes" error="The host did not return an access comparison. Review this manifest again." domain="local" onRetry={() => void reviewManifest(review.source, review.signature, review.origin, review.keyId)} />
             ) : (
               <Button
                 disabled={busy}
@@ -532,7 +531,7 @@ export function ExtensionManager({ show }: { show?: { tab: string } } = {}) {
           </div>
           <p className="extension-message">{plugin.manifest.id}</p>
           {(plugin.quarantined || plugin.policyBlocked) && (
-            <p className="extension-error">Disabled: {inactiveReason(plugin)}</p>
+            <Alert tone="warn" title="Disabled">{inactiveReason(plugin)}</Alert>
           )}
           {!plugin.quarantined && !plugin.signatureProof && (plugin.manifest.actions?.length ?? 0) > 0 && (
             <p className="extension-message">Requires permission to run unsigned apps that modify clusters.</p>
@@ -552,7 +551,7 @@ export function ExtensionManager({ show }: { show?: { tab: string } } = {}) {
             />
           )}
           {details === plugin.manifest.id && (
-            <ExtensionDetails plugin={plugin} busy={busy} change={change} onError={setError} />
+            <ExtensionDetails plugin={plugin} busy={busy} change={change} onError={(title, reason) => setError({ title, reason })} />
           )}
         </section>
       ))}
@@ -641,19 +640,10 @@ export function ExtensionResourceSlot({
       ? [...tabs, current]
       : tabs;
   if (inventory.status === "error")
-    return <ErrorNotice message={inventory.error} retry={inventory.reload} />;
+    return <FailureState title="Could not list the installed apps" error={inventory.error} domain="local" onRetry={inventory.reload} />;
   // An uncheckable cluster hides limited apps' views; say why instead of dropping them silently.
   const lookupNotice = lookupProblem !== undefined && (
-    lookupProblem.retry ? (
-      <ErrorNotice title={lookupProblem.title} message={lookupProblem.message} retry={lookupProblem.retry} />
-    ) : (
-      <div className="extension-error" role="alert">
-        <div>
-          <strong>{lookupProblem.title}</strong>
-          <p>{lookupProblem.message}</p>
-        </div>
-      </div>
-    )
+    <FailureAlert tone="sev" title={lookupProblem.title} error={lookupProblem.message} domain="local" onRetry={lookupProblem.retry} />
   );
   if (!tabs.length && !links.length) return lookupNotice || null;
   const ns = contributionKind(kind, group) === "/Namespace" ? name : (namespace ?? "");

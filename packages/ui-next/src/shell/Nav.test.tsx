@@ -310,7 +310,7 @@ describe("Nav", () => {
 
 it("groups app pages under their display name", async () => {
   extensionState.data = { plugins: [
-    { enabled: true, manifest: { id: "org.srelens.flux", name: "Flux", contributions: { pages: [
+    { enabled: true, manifest: { capabilities: [], id: "org.srelens.flux", name: "Flux", contributions: { pages: [
       { id: "kustomizations", title: "Kustomizations" },
       { id: "repositories", title: "Git repositories", group: "Sources" },
     ] } } },
@@ -333,7 +333,7 @@ it("groups app pages under their display name", async () => {
 const packageIcon = `data:image/svg+xml;base64,${btoa("<svg xmlns=\"http://www.w3.org/2000/svg\"/>")}`;
 it("draws an installed package's logo on its app in the sidebar (#562)", async () => {
   extensionState.data = { plugins: [
-    { enabled: true, icon: packageIcon, manifest: { id: "org.example.packaged", name: "Packaged", contributions: { pages: [
+    { enabled: true, icon: packageIcon, manifest: { capabilities: [], id: "org.example.packaged", name: "Packaged", contributions: { pages: [
       { id: "applications", title: "Applications" },
     ] } } },
   ] };
@@ -351,7 +351,7 @@ describe("two contexts that share a stable ID (#695)", () => {
   // a window opened for one of them pins its key.
   const first = { ...ctx("b#c"), stableId: "/kube/a#b#c", key: "/kube/a#b%23c" };
   const second = { ...ctx("c"), stableId: "/kube/a#b#c", key: "/kube/a%23b#c" };
-  const flux = { enabled: true, manifest: { id: "org.srelens.flux", name: "Flux", contributions: { pages: [
+  const flux = { enabled: true, manifest: { capabilities: [], id: "org.srelens.flux", name: "Flux", contributions: { pages: [
     { id: "kustomizations", title: "Kustomizations" },
   ] } } };
   beforeEach(() => setState(defaultState([first, second])));
@@ -389,7 +389,7 @@ describe("two contexts that share a stable ID (#695)", () => {
 describe("Nav arrangement", () => {
   it("draws the cluster, its resources, then apps and tools, with a rule between each", async () => {
     extensionState.data = { plugins: [
-      { enabled: true, manifest: { id: "org.srelens.flux", name: "Flux", contributions: { pages: [
+      { enabled: true, manifest: { capabilities: [], id: "org.srelens.flux", name: "Flux", contributions: { pages: [
         { id: "kustomizations", title: "Kustomizations" },
         { id: "helmreleases", title: "Helm releases" },
       ] } } },
@@ -401,7 +401,7 @@ describe("Nav arrangement", () => {
     const sequence = [...tree.querySelectorAll(":scope > li")].map((li) =>
       li.getAttribute("data-slot") === "band-rule" ? "—" : li.querySelector(".truncate")?.textContent);
     expect(sequence).toEqual([
-      "Overview", "Nodes", "Namespaces", "Events",
+      "Overview", "Problems", "Nodes", "Namespaces", "Events",
       "—",
       "Workloads", "Config", "Network", "Storage", "Access control", "Custom resources",
       "—",
@@ -418,5 +418,63 @@ describe("Nav arrangement", () => {
     expect(workloads.getAttribute("aria-current")).toBe("location");
     expect(workloads.getAttribute("aria-expanded")).toBe("false");
     expect(screen.getByRole("treeitem", { name: "Config" }).getAttribute("aria-current")).toBeNull();
+  });
+});
+
+// #1024: a page reading a CRD this cluster doesn't serve is not offered. With
+// one page left the app is a row of its own, with both a group of two.
+describe("app pages on a cluster without their CRDs", () => {
+  const certManager = { enabled: true, manifest: { id: "org.example.certs", name: "Cert manager", capabilities: [
+    { name: "certs", target: "k8s.listCustomResource", arguments: { group: "cert-manager.io", version: "v1", plural: "certificates", kind: "Certificate", namespaced: true } },
+    { name: "pods", target: "k8s.listPods", arguments: {} },
+  ], contributions: { pages: [
+    { id: "certs", title: "Certs", capability: "certs" },
+    { id: "pods", title: "Issuer pods", capability: "pods" },
+  ] } } };
+  const pages = async () => {
+    await screen.findByRole("treeitem", { name: "Cert manager" });
+    await waitFor(() => expect(listCrds).toHaveBeenCalled());
+    await act(async () => {});
+    // A row of its own has no fold.
+    return screen.getByRole("treeitem", { name: "Cert manager" }).hasAttribute("aria-expanded") ? 2 : 1;
+  };
+  beforeEach(() => { extensionState.data = { plugins: [certManager] }; });
+
+  it("leaves out the page whose CRD is missing", async () => {
+    render(<Nav contexts={[PROD]} />);
+    expect(await pages()).toBe(1);
+  });
+  it("offers it once the cluster serves the CRD", async () => {
+    listCrds.mockResolvedValue({ crds: [{ ...CERTS, versions: ["v1"] }] });
+    render(<Nav contexts={[PROD]} />);
+    expect(await pages()).toBe(2);
+  });
+  it("asks again when the window gets focus, so an operator installed since shows its page", async () => {
+    render(<Nav contexts={[PROD]} />);
+    expect(await pages()).toBe(1);
+    listCrds.mockResolvedValue({ crds: [{ ...CERTS, versions: ["v1"] }] });
+    act(() => { window.dispatchEvent(new Event("focus")); });
+    await waitFor(() => expect(screen.getByRole("treeitem", { name: "Cert manager" }).hasAttribute("aria-expanded")).toBe(true));
+    expect(listCrds).toHaveBeenCalledTimes(2);
+  });
+  it("offers every page when discovery fails", async () => {
+    listCrds.mockResolvedValue({ error: "crds forbidden" });
+    render(<Nav contexts={[PROD]} />);
+    expect(await pages()).toBe(2);
+  });
+  it("offers every page on a paused cluster, which is not asked", async () => {
+    const paused = defaultState([PROD]);
+    paused.workspaces[0].pausedClusters = [PROD.stableId];
+    setState(paused);
+    render(<Nav contexts={[PROD]} />);
+    const row = await screen.findByRole("treeitem", { name: "Cert manager" });
+    await act(async () => {});
+    expect(row.getAttribute("aria-expanded")).toBe("false");
+    expect(listCrds).not.toHaveBeenCalled();
+  });
+  it("holds a CRD's page back until discovery answers, rather than drawing a row that may vanish", async () => {
+    listCrds.mockReturnValue(new Promise(() => {}));
+    render(<Nav contexts={[PROD]} />);
+    expect(await pages()).toBe(1);
   });
 });

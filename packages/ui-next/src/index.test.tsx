@@ -66,7 +66,7 @@ describe("NextApp", () => {
     await screen.findByRole("tablist");
     act(() => openTab("/incidents"));
     await userEvent.click(screen.getByRole("button", { name: /open in classic/i }));
-    expect(screen.getByText(/storage refused/).getAttribute("role")).toBe("alert");
+    expect(screen.getByText(/storage refused/).closest("[role]")?.getAttribute("role")).toBe("alert");
   });
 
   it("keeps the exit error on screen rather than below the fold", async () => {
@@ -80,7 +80,7 @@ describe("NextApp", () => {
     act(() => openTab("/incidents"));
     await userEvent.click(screen.getByRole("button", { name: /open in classic/i }));
 
-    const alert = screen.getByText(/storage refused/);
+    const alert = screen.getByText(/storage refused/).closest('[role="alert"]') as HTMLElement;
     const container = alert.parentElement;
     expect(container?.className).toMatch(/\bflex\b/);
     expect(container?.className).toMatch(/\bflex-col\b/);

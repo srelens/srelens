@@ -7,7 +7,7 @@ import {
   type InstalledExtension,
 } from "@srelens/core";
 import { Button, Combobox } from "@srelens/ui-kit";
-import { ErrorNotice } from "./ExtensionResults";
+import { FailureAlert } from "../lib/errorCopy";
 import { useResource } from "../lib/useResource";
 
 /**
@@ -73,7 +73,7 @@ export function ExtensionClusters({
       {limited && (
         <>
           {failure ? (
-            <ErrorNotice title="Could not list clusters" message={failure} retry={listing.reload} />
+            <FailureAlert tone="sev" title="Could not list clusters" error={failure} domain="local" onRetry={listing.reload} />
           ) : (
             listing.status === "loading" && (
               <p role="status" className="extension-message">

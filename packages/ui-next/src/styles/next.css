@@ -37,9 +37,6 @@
 .app-report-inspector dl > div { padding-block: 8px; border-bottom: 1px solid var(--rule); }
 .app-report-inspector dt { font-size: 11px; color: var(--ink-muted); margin-bottom: 3px; }
 .app-report-inspector dd { font-size: 12px; overflow: auto; }
-.app-operation-error { padding: 20px; border-bottom: 1px solid var(--rule); background: var(--surface); }
-.app-operation-error strong { display: block; font-size: 14px; color: var(--sev); }
-.app-operation-error p { max-width: 80ch; margin-block: 6px 12px; font-size: 13px; line-height: 1.6; overflow-wrap: anywhere; color: var(--ink-muted); }
 
 /* Settings can be narrow even in a wide window, beside both navigation rails. */
 .context-management { container-type: inline-size; }

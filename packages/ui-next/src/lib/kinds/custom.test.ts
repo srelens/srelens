@@ -86,23 +86,6 @@ describe("custom columns", () => {
 });
 
 describe("customDescriptor", () => {
-  // Whole-branch review (FIX 3): the backend resolves kind→GVR through a
-  // closed match with no CRD path, so Delete on a custom resource always
-  // fails — offering it is worse than not offering it.
-  it("withholds Delete, since the backend has no kind→GVR path for a CRD's kind", () => {
-    expect(customDescriptor(crd()).actions.delete).toBe(false);
-  });
-});
-
-describe("customDescriptor", () => {
-  // `customDescriptorFor(slug, crds)` used to live here and wrap this in a
-  // `crds.find`. It was deleted rather than kept as a seam once `Resources`
-  // stopped calling it: that screen needs the `CrdRef` itself, not only the
-  // descriptor built from it, because the "About this kind" rail reads the
-  // kind, the scope and the versions straight off it. Two finds over the same
-  // list — one for the columns and one for the rail — is two chances for the
-  // table and the rail to describe different definitions, and an exported
-  // function whose only caller is its own test is a seam nobody is holding.
   it("names the kind by its CRD, not by the slug that routed to it", () => {
     expect(customDescriptor(crd()).k8sKind).toBe("Widget");
   });

@@ -120,7 +120,7 @@ Everything this server exposes over MCP, generated from the live registry so it 
 | `k8s.debugPod` | high | attach an ephemeral debug container to a running pod and return its name; exec into that container for a debugger shell (destructive) |
 | `k8s.deleteContext` | high | delete a context and its associated cluster and user from its kubeconfig source |
 | `k8s.deletePod` | high | delete a pod in a connected kube context (destructive) |
-| `k8s.deleteResource` | high | delete any supported resource by kind/namespace/name (destructive) |
+| `k8s.deleteResource` | high | delete any supported resource by kind/namespace/name (destructive); a custom resource also takes its group, version and plural |
 | `k8s.drainNode` | high | cordon a node and evict its evictable pods (destructive) |
 | `k8s.evictPod` | high | evict a pod via the eviction API (respects PodDisruptionBudgets) |
 | `k8s.nodeServiceRestart` | high | restart a system service (e.g. rke2-server, kubelet) on a node via SSH (confirm-gated) |

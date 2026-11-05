@@ -9,7 +9,6 @@ import { useContext, useMemo, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import {
   ageSortValue,
-  describeError,
   onExtensionResourceChanged,
   readExtension,
   rowInSelection,
@@ -24,7 +23,7 @@ import { AppStatus, statusWord } from "./AppStatus";
 import { LiveNotice, LiveStatus, useLiveReaders } from "./liveReaders";
 import { readAcross, readerKind, readerNamespaces } from "./readAcross";
 import { nameFilterAnswered, useCollectionNameFilter } from "../lib/collectionNameFilter";
-import { NamespaceFailuresAlert } from "../lib/errorCopy";
+import { FailureAlert, FailureState, NamespaceFailuresAlert } from "../lib/errorCopy";
 import { CollectionNameNotice } from "../screens/collections/NamespaceScope";
 import { ListCount } from "../screens/ListCount";
 import { columnOptionsFor, emptyTableCopy } from "../screens/resourceShell";
@@ -37,41 +36,6 @@ type Row = ExtensionResourceResult["items"][number];
 const NAME_KEY = "name";
 const NO_COLUMNS: { name: string }[] = [];
 
-export function ErrorNotice({
-  message,
-  retry,
-  cluster = false,
-  title,
-  guidance,
-}: {
-  message?: string;
-  retry: () => void;
-  cluster?: boolean;
-  /** Names what failed, keeping the reason `describeError` gives. */
-  title?: string;
-  guidance?: { title: string; detail: string };
-}) {
-  const error = describeError(message, {
-    domain: cluster ? "cluster" : "local",
-  });
-  return (
-    <div className="extension-error" role="alert">
-      <div>
-        <strong>{guidance?.title ?? title ?? error.title}</strong>
-        <p>{guidance?.detail ?? error.detail}</p>
-        {error.raw !== (guidance?.detail ?? error.detail) && (
-          <details>
-            <summary>Original error</summary>
-            <pre>{error.raw}</pre>
-          </details>
-        )}
-      </div>
-      <Button variant="secondary" onClick={retry}>
-        Retry
-      </Button>
-    </div>
-  );
-}
 /** A printer column's value: the standard status where it names a state, and text otherwise. */
 function ResultValue({ value, column }: { value?: string; column: string }) {
   const raw = value || "—";
@@ -310,14 +274,7 @@ export function ExtensionResults({
             detail: `This extension reads ${args.plural} from ${args.group}/${versions.join(" or ")}. Check that the selected cluster serves ${versions.length > 1 ? "one of these API versions" : "this API version"}. Installing an extension does not install its Kubernetes APIs.`,
           }
         : undefined;
-    return (
-      <ErrorNotice
-        cluster
-        message={data.error}
-        retry={data.reload}
-        guidance={guidance}
-      />
-    );
+    return <FailureState title={guidance?.title} detail={guidance?.detail} error={data.error} onRetry={data.reload} />;
   }
   // Only the FIRST load of a scope replaces the section. A later refresh is
   // reported inside it ("Refreshing resources…"), because the section is not
@@ -353,7 +310,7 @@ export function ExtensionResults({
     <section className="extension-results" ref={listRow.ref}>
       <div className="extension-resource-list">
       {appColumns.errors.map((error) => (
-        <ErrorNotice key={error.id} cluster title={`Couldn’t read ${error.title} columns`} message={error.message} retry={appColumns.reload} />
+        <FailureAlert tone="sev" key={error.id} title={`Couldn’t read ${error.title} columns`} error={error.message} onRetry={appColumns.reload} />
       ))}
       <NamespaceFailuresAlert what={noun} failures={data.data?.failures ?? []} />
       <CollectionNameNotice filter={nameFilter} noun={noun} />
@@ -395,7 +352,7 @@ export function ExtensionResults({
           barSlot={bulkBar}
         />
       )}
-      {data.status === "loading" ? <p className="extension-message" role="status">Refreshing resources…</p> : data.status === "error" ? <ErrorNotice cluster message={data.error} retry={data.reload}/> : !nameFilterAnswered(nameFilter) ? null : (
+      {data.status === "loading" ? <p className="extension-message" role="status">Refreshing resources…</p> : data.status === "error" ? <FailureState error={data.error} onRetry={data.reload} /> : !nameFilterAnswered(nameFilter) ? null : (
         <div ref={refocus.scope} className="extension-table-scroll" data-stale={live.state === "reconnecting" || undefined}>
           <Table
             columns={shownColumns}

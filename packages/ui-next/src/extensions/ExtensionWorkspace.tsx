@@ -23,12 +23,12 @@ import { AppCards } from "./DashboardCards";
 import { plainText } from "./displayText";
 import { STATUS_WORD } from "./AppStatus";
 import { Button, ColumnPicker, FilterBar, StatusPill, Table, Tabs, filterMatcher, tableFilterError, type Column } from "@srelens/ui-kit";
-import { ErrorNotice, ExtensionResults } from "./ExtensionResults";
+import { ExtensionResults } from "./ExtensionResults";
 import { useResource } from "../lib/useResource";
 import { LiveNotice, LiveReaders, LiveStatus, useLiveReaders } from "./liveReaders";
 import { readAcross, readerKind, readerNamespaces, readsClusterScope } from "./readAcross";
 import { nameFilterAnswered, useCollectionNameFilter } from "../lib/collectionNameFilter";
-import { NamespaceFailuresAlert } from "../lib/errorCopy";
+import { FailureAlert, FailureState, NamespaceFailuresAlert } from "../lib/errorCopy";
 import { useFallbackNamespace, useInCollectionScope, useNamespaces, useSetNamespaces } from "../lib/workspace";
 import { CollectionNameNotice, CollectionScopeNotice, NamespaceScopePicker } from "../screens/collections/NamespaceScope";
 import { ListCount } from "../screens/ListCount";
@@ -179,7 +179,7 @@ function Summary({
       <NamespaceFailuresAlert what={plainText(page.title).toLowerCase()} failures={data.data?.failures ?? []} />
       <CollectionNameNotice filter={nameFilter} noun={plainText(page.title).toLowerCase()} />
       {data.status === "error" ? (
-        <ErrorNotice cluster message={data.error} retry={data.reload} />
+        <FailureState error={data.error} onRetry={data.reload} />
       ) : data.status === "loading" ? (
         <p role="status">Loading…</p>
       ) : !nameFilterAnswered(nameFilter) ? null : (
@@ -273,7 +273,7 @@ function Events({
   const hidden = useHiddenColumns(columnsKey);
   const columns = useMemo(() => EVENT_COLUMNS.filter((column) => column.key === EVENT_PINNED || !hidden.has(column.key)), [hidden]);
   if (result.status === "error")
-    return <ErrorNotice cluster message={result.error} retry={result.reload} />;
+    return <FailureState error={result.error} onRetry={result.reload} />;
   if (result.status === "loading")
     return (
       <p className="extension-message" role="status">
@@ -468,11 +468,7 @@ export function ExtensionWorkspace({
         </FilterBar>
       ) : scopeControl && <div className="extension-toolbar extension-scope">{scopeControl}</div>}
       {namespaceError && (
-        <ErrorNotice
-          cluster
-          message={namespaceError}
-          retry={()=>setRefresh(v=>v+1)}
-        />
+        <FailureAlert tone="sev" title="Could not list namespaces" error={namespaceError} onRetry={()=>setRefresh(v=>v+1)} />
       )}
       {!card && !clusterScoped && (
         <>

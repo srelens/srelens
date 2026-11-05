@@ -62,6 +62,16 @@ export function friendly(error: unknown, domain: ErrorDomain = "cluster"): Frien
 }
 
 /**
+ * {@link friendly}, but for a screen that gave its own explanation: that replaces
+ * the detail, and the original is then always offered, since nothing on screen says it.
+ */
+function explained(error: unknown, domain: ErrorDomain | undefined, said: ReactNode | undefined) {
+  const copy = friendly(error, domain);
+  if (said === undefined) return copy;
+  return { ...copy, detail: said, raw: describeError(error, { domain }).raw || undefined };
+}
+
+/**
  * Several failures at once, as one piece of copy.
  *
  * The overview's fan-out sections are the shape this is for: `Not ready`
@@ -121,6 +131,12 @@ export interface FailureStateProps {
    * like `summarise`, classified as cluster failures whatever `domain` says.
    */
   error: unknown;
+  /**
+   * The screen's own explanation, when it knows more than the classification
+   * can: an API this app reads that the cluster may not serve. The original is
+   * still offered under it.
+   */
+  detail?: ReactNode;
   /** What the failing operation contacted; cluster preserves the default copy. */
   domain?: ErrorDomain;
   onRetry?: () => void;
@@ -130,17 +146,21 @@ export interface FailureStateProps {
 }
 
 /** A content area whose load failed, said in words the reader can act on. */
-export function FailureState({ title, error, domain, ...rest }: FailureStateProps) {
+export function FailureState({ title, error, domain, detail, ...rest }: FailureStateProps) {
   if (Array.isArray(error)) {
     const errors = error.map(String);
-    const { detail, raw } = summarise(errors);
+    const { detail: said, raw } = summarise(errors);
     // The classification's headline only when every reason shares it: two
     // different failures under one of their titles would claim too little.
     const titles = [...new Set(errors.filter((e) => e !== "").map((e) => friendly(e).title))];
     const fallback = titles.length === 1 ? titles[0] : friendly("").title;
-    return <ErrorState title={title ?? fallback} detail={detail} raw={raw} {...rest} />;
+    if (detail === undefined) return <ErrorState title={title ?? fallback} detail={said} raw={raw} {...rest} />;
+    // The screen's explanation replaces the sentences, so every original is
+    // offered, including those `summarise` left out for saying the same.
+    const originals = [...new Set(errors.map((e) => describeError(e).raw).filter((r) => r !== ""))].join("\n\n");
+    return <ErrorState title={title ?? fallback} detail={detail} raw={originals || undefined} {...rest} />;
   }
-  const copy = friendly(error, domain);
+  const copy = explained(error, domain, detail);
   return <ErrorState title={title ?? copy.title} detail={copy.detail} raw={copy.raw} {...rest} />;
 }
 
@@ -153,6 +173,12 @@ export interface FailureAlertProps {
    */
   title: ReactNode;
   error: unknown;
+  /**
+   * The screen's own explanation, when it knows more than the classification
+   * can: an API this app reads that the cluster may not serve. The original is
+   * still offered under it.
+   */
+  detail?: ReactNode;
   /** What the failing operation contacted; cluster preserves the default copy. */
   domain?: ErrorDomain;
   /** `warn` by default: a banner over surviving rows is a warning, not a stop. */
@@ -174,12 +200,13 @@ export interface FailureAlertProps {
 export function FailureAlert({
   title,
   error,
+  detail,
   domain,
   tone = "warn",
   onRetry,
   className,
 }: FailureAlertProps) {
-  const copy = friendly(error, domain);
+  const copy = explained(error, domain, detail);
   return (
     <Alert tone={tone} title={title} className={className}>
       {copy.detail}

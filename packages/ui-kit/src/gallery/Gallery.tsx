@@ -175,9 +175,9 @@ export function Gallery() {
   const [drawer, setDrawer] = useState(false);
   const [workspace, setWorkspace] = useState("local");
   const [openTabs, setOpenTabs] = useState([
-    { id: "control", title: "Control room", sub: "prod-eu", pinned: true },
-    { id: "workloads", title: "Workloads", sub: "prod-eu" },
-    { id: "logs", title: "checkout-api logs", sub: "prod-eu", preview: true },
+    { id: "control", title: "Control room", sub: "prod-eu", clusterColor: "var(--mark-teal)", pinned: true },
+    { id: "workloads", title: "Workloads", sub: "prod-eu", clusterColor: "var(--mark-teal)" },
+    { id: "logs", title: "checkout-api logs", sub: "stage-eu", clusterColor: "var(--mark-orange)", preview: true },
   ]);
   const [openTab, setOpenTab] = useState("workloads");
   const [boxes, setBoxes] = useState({ a: true, b: false });
@@ -1991,7 +1991,10 @@ export function Gallery() {
           onSelect={setOpenTab}
           onClose={(id) => setOpenTabs((t) => t.filter((tab) => tab.id !== id))}
           onNew={() =>
-            setOpenTabs((t) => [...t, { id: `tab-${t.length}`, title: "Pods", sub: "prod-eu" }])
+            setOpenTabs((t) => [
+              ...t,
+              { id: `tab-${t.length}`, title: "Pods", sub: "prod-eu", clusterColor: "var(--mark-teal)" },
+            ])
           }
           newHint="⌘T"
           menuFor={(tab) => [
