@@ -21,6 +21,9 @@ export interface EventRow extends ListRow {
   object: string;
   message: string;
   count: number;
+  /** API version of the involved object, needed to route a custom kind without
+   *  collapsing it onto a built-in kind with the same name. */
+  objectApiVersion?: string;
   /** `creationTimestamp` (RFC 3339), for a LIVE age (#405). */
   created?: string | null;
   age: string;

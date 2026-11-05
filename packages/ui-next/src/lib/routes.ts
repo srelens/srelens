@@ -14,6 +14,7 @@ import { Helm } from "../screens/Helm";
 import { Logs, parseLogsRoute } from "../screens/Logs";
 import { Home } from "../screens/Home";
 import { Overview } from "../screens/Overview";
+import { Problems } from "../screens/Problems";
 import { ReleaseNotes } from "../screens/ReleaseNotes";
 import { ResourceDetailScreen, Resources } from "../screens/Resources";
 import { EditResource } from "../screens/Edit";
@@ -74,6 +75,7 @@ const APP_SCOPED: Record<string, Omit<RouteInfo, "route" | "sub">> =
 const CLUSTER_SCOPED: Record<string, Omit<RouteInfo, "route" | "sub">> =
   Object.assign(Object.create(null), {
     "/incidents": { title: "Incidents", kind: "incidents" },
+    "/problems": { title: "Problems", kind: "incidents" },
     "/agent": { title: "Agent", kind: "agent" },
     "/resources": { title: "Workloads", kind: "workloads" },
     "/logs": { title: "Logs", kind: "logs" },
@@ -318,6 +320,7 @@ const SCREENS: Record<string, ScreenComponent> = Object.assign(Object.create(nul
   "/new": EditResource,
   "/events": Events,
   "/overview": Overview,
+  "/problems": Problems,
   // The bare route. Its deeper `/logs/<kind>/<namespace>/<name>` shape reaches
   // the same screen through `parseLogsRoute` in `screenFor` — one screen, two
   // shapes, because telling them apart is the screen's own job.

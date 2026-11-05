@@ -76,16 +76,16 @@ describe("navNodes", () => {
 
   it("arranges the tree in three bands: the cluster, its resources, then apps and tools", () => {
     expect(ids(tree)).toEqual([
-      "route:/overview", "kind:nodes", "kind:namespaces", "kind:events",
+      "route:/overview", "route:/problems", "kind:nodes", "kind:namespaces", "kind:events",
       "workloads", "config", "network", "storage", "access", "crds",
       "extension:flux", "route:/helm", "route:/forwards", "route:/topology", "route:/incidents", "route:/agent",
     ]);
     expect(tree.map((n) => n.band)).toEqual([
-      ...Array(4).fill("cluster"),
+      ...Array(5).fill("cluster"),
       ...Array(6).fill("resources"),
       ...Array(6).fill("tools"),
     ]);
-    expect(labels(tree.slice(10))).toEqual(["Flux", "Helm releases", "Port forwards", "Topology", "Incidents", "Agent"]);
+    expect(labels(tree.slice(11))).toEqual(["Flux", "Helm releases", "Port forwards", "Topology", "Incidents", "Agent"]);
   });
 
   it("has no Home: that is a new tab's start screen, not a place in a cluster", () => {

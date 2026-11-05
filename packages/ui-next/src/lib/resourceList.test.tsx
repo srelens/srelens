@@ -57,10 +57,14 @@ describe("useResourceList", () => {
   it("starts on loading and settles on the first snapshot", async () => {
     const { result } = renderHook(() => useResourceList("prod", "pods", watched, ["default"], []));
     expect(result.current.status).toBe("loading");
+    expect(result.current.fresh).toBe(false);
+    expect(result.current.refreshing).toBe(true);
     await waitFor(() => expect(mockState.emitRows).not.toBeNull());
     act(() => mockState.emitRows!([{ name: "a" }]));
     expect(result.current.status).toBe("ready");
     expect(result.current.rows).toHaveLength(1);
+    expect(result.current.fresh).toBe(true);
+    expect(result.current.refreshing).toBe(false);
   });
 
   /**
@@ -75,6 +79,8 @@ describe("useResourceList", () => {
     const polledList = renderHook(() => useResourceList("prod", "configmaps", polled, [...SELECTS_NOTHING], []));
     await waitFor(() => expect(watchedList.result.current.status).toBe("empty"));
     expect(polledList.result.current.status).toBe("empty");
+    expect(watchedList.result.current).toMatchObject({ fresh: true, refreshing: false });
+    expect(polledList.result.current).toMatchObject({ fresh: true, refreshing: false });
     expect(watchNamespaces).not.toHaveBeenCalled();
     expect(load).not.toHaveBeenCalled();
   });
@@ -101,6 +107,20 @@ describe("useResourceList", () => {
     act(() => mockState.emitStatus!("reconnecting"));
     expect(result.current.watch).toBe("reconnecting");
     expect(result.current.rows).toHaveLength(1);
+    expect(result.current).toMatchObject({ fresh: false, refreshing: true });
+
+    // Another namespace can still publish its own update while the aggregate
+    // watch is reconnecting. That is not the disconnected namespace's
+    // replacement snapshot and must not certify the merged list as current.
+    act(() => mockState.emitRows!([{ name: "a" }, { name: "from-live-sibling" }]));
+    expect(result.current).toMatchObject({ fresh: false, refreshing: true, watch: "reconnecting" });
+
+    // Reopening the stream is not enough: only the replacement snapshot can
+    // prove no event was missed during the gap.
+    act(() => mockState.emitStatus!("live"));
+    expect(result.current).toMatchObject({ fresh: false, refreshing: true });
+    act(() => mockState.emitRows!([{ name: "a" }, { name: "b" }]));
+    expect(result.current).toMatchObject({ fresh: true, refreshing: false, watch: "live" });
   });
 
   it("stops the old watch before the new view starts one", async () => {
@@ -131,6 +151,23 @@ describe("useResourceList", () => {
     first.unmount();
     const second = renderHook(() => useResourceList("prod", "pods", watched, ["default"], []));
     expect(second.result.current.rows).toHaveLength(1);
+    expect(second.result.current).toMatchObject({ fresh: false, refreshing: true });
+  });
+
+  it("does not certify a cached empty remount as a fresh clean read", async () => {
+    const first = renderHook(() => useResourceList("prod", "pods", watched, ["default"], []));
+    await waitFor(() => expect(mockState.emitRows).not.toBeNull());
+    act(() => mockState.emitRows!([]));
+    expect(first.result.current).toMatchObject({ status: "empty", fresh: true, refreshing: false });
+    first.unmount();
+
+    const second = renderHook(() => useResourceList("prod", "pods", watched, ["default"], []));
+    expect(second.result.current).toMatchObject({
+      rows: [],
+      status: "empty",
+      fresh: false,
+      refreshing: true,
+    });
   });
 
   it("keeps the cached rows when a poll fails, and says why above them", async () => {
@@ -140,9 +177,12 @@ describe("useResourceList", () => {
     const polled: KindDescriptor<ListRow> = { ...watched, source: "poll", load };
     const { result } = renderHook(() => useResourceList("prod", "leases", polled, ["default"], []));
     await waitFor(() => expect(result.current.rows).toHaveLength(1));
+    expect(result.current).toMatchObject({ fresh: true, refreshing: false });
     act(() => result.current.reload());
+    expect(result.current).toMatchObject({ fresh: false, refreshing: true });
     await waitFor(() => expect(result.current.error).toBe("connection refused"));
     expect(result.current.rows).toHaveLength(1);
+    expect(result.current).toMatchObject({ fresh: false, refreshing: false, stale: true });
   });
 
   it("stores truncated from a capped poll and keeps it while those rows stay on screen after a failed poll", async () => {
