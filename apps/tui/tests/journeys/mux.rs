@@ -27,6 +27,7 @@ fn ctx(name: &str, cluster: &str, namespace: &str) -> ContextDto {
         is_current: false,
         is_local: false,
         provider: None,
+        distribution: None,
         source_file: "cluster-config.yaml".to_string(),
         auth_kind: "token".to_string(),
     }
