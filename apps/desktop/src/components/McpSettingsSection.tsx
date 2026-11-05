@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import { Copy, Download, Eye, EyeOff, Radio, RefreshCw, Trash2 } from "lucide-react";
 import { Button, ConfirmDialog, TextInput } from "../ui";
 import { notify } from "@srelens/core";
@@ -46,6 +46,8 @@ export function McpSettingsSection() {
   // below owns this distinction; an unresolved or failed read must not make a
   // stopped claim.
   const [runningUrl, setRunningUrl] = useState<string | null | undefined>(undefined);
+  const snapshotActionGenerationRef = useRef(0);
+  const [snapshotActionGeneration, setSnapshotActionGeneration] = useState(0);
   const [serverError, setServerError] = useState("");
   const [cli, setCli] = useState<CliStatus | null>(null);
   const [cliLoading, setCliLoading] = useState(true);
@@ -109,19 +111,38 @@ export function McpSettingsSection() {
     saveMcpSettings(next);
   }
 
+  function invalidateSnapshotReads() {
+    const next = snapshotActionGenerationRef.current + 1;
+    snapshotActionGenerationRef.current = next;
+    setSnapshotActionGeneration(next);
+  }
+
+  /**
+   * Fence both sides of a server/session mutation. The first bump rejects
+   * reads already in flight; the second rejects any interval/manual read that
+   * began while the backend action itself was still running.
+   */
+  async function runSnapshotAction<T>(action: () => Promise<T>): Promise<T> {
+    invalidateSnapshotReads();
+    try {
+      return await action();
+    } finally {
+      invalidateSnapshotReads();
+    }
+  }
 
   async function toggleServer(enabled: boolean) {
     setServerError("");
     persist({ ...settings, enabled });
     try {
       if (enabled) {
-        setRunningUrl(await startMcpHttp(settings.port));
+        setRunningUrl(await runSnapshotAction(() => startMcpHttp(settings.port)));
         // Starting the server for the first time is also the first place a
         // token can get minted (`mcp_http_start` mints one on first use), so
         // the previously-fetched `null` may now be stale.
         void refreshToken();
       } else {
-        await stopMcpHttp();
+        await runSnapshotAction(() => stopMcpHttp());
         setRunningUrl(null);
       }
     } catch (e) {
@@ -138,7 +159,7 @@ export function McpSettingsSection() {
     if (settings.enabled) {
       setServerError("");
       try {
-        setRunningUrl(await startMcpHttp(port));
+        setRunningUrl(await runSnapshotAction(() => startMcpHttp(port)));
       } catch (e) {
         setServerError(String(e));
       }
@@ -163,7 +184,7 @@ export function McpSettingsSection() {
     setTokenBusy(true);
     setTokenError("");
     try {
-      const next = await rotateMcpToken();
+      const next = await runSnapshotAction(() => rotateMcpToken());
       setToken(next);
       setTokenRevealed(false);
       notify.success("Token rotated — the server restarted and connected clients need the new value.");
@@ -179,7 +200,7 @@ export function McpSettingsSection() {
     setTokenBusy(true);
     setTokenError("");
     try {
-      await revokeMcpToken();
+      await runSnapshotAction(() => revokeMcpToken());
       await refreshToken();
       setTokenRevealed(false);
       notify.success("Token revoked. The MCP HTTP server has stopped.");
@@ -422,6 +443,8 @@ export function McpSettingsSection() {
         <McpClientsList
           running={runningUrl === undefined ? null : runningUrl !== null}
           serverUrl={runningUrl}
+          actionGeneration={snapshotActionGeneration}
+          actionGenerationRef={snapshotActionGenerationRef}
           onServerSnapshot={establishHttpSnapshot}
         />
       </section>

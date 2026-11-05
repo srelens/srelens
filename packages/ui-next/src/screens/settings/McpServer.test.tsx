@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { act, render, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 
 const core = vi.hoisted(() => ({
@@ -153,6 +153,51 @@ describe("McpServer", () => {
     expect(await screen.findByText("not running")).toBeTruthy();
     expect(address()).toContain(`Not listening. Start binds ${PORT_URL}`);
     expect(screen.getByText(/server is stopped/i)).toBeTruthy();
+  });
+
+  it("does not let a snapshot started before Stop undo the completed action", async () => {
+    let answerSnapshot!: (snapshot: {
+      running: true;
+      url: string;
+      clients: never[];
+    }) => void;
+    let answerStop!: () => void;
+    core.mcpHttpSnapshot.mockResolvedValue({ running: true, url: STATUS_URL, clients: [] });
+    core.stopMcpHttp.mockImplementationOnce(
+      () =>
+        new Promise<void>((resolve) => {
+          answerStop = resolve;
+        }),
+    );
+
+    render(<McpServer />);
+    const refresh = await screen.findByRole("button", { name: "Refresh" });
+    const stop = await screen.findByRole("button", { name: "Stop server" });
+    const initialReads = core.mcpHttpSnapshot.mock.calls.length;
+
+    core.mcpHttpSnapshot.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          answerSnapshot = resolve;
+        }),
+    );
+    fireEvent.click(refresh);
+    await waitFor(() => expect(core.mcpHttpSnapshot).toHaveBeenCalledTimes(initialReads + 1));
+
+    expect(stop.hasAttribute("disabled")).toBe(false);
+    fireEvent.click(stop);
+    await waitFor(() => expect(core.stopMcpHttp).toHaveBeenCalledTimes(1));
+    core.mcpHttpSnapshot.mockResolvedValue({ running: false, url: null, clients: [] });
+
+    await act(async () => {
+      answerStop();
+      answerSnapshot({ running: true, url: STATUS_URL, clients: [] });
+      await Promise.resolve();
+    });
+
+    expect(await screen.findByText("not running")).toBeTruthy();
+    expect(screen.queryByText("running")).toBeNull();
+    expect(address()).toContain(`Not listening. Start binds ${PORT_URL}`);
   });
 
   it("hides the token again once the reader is done looking", async () => {

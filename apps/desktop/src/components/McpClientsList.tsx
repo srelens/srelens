@@ -20,11 +20,24 @@ interface McpClientsListProps {
   running: boolean | null;
   /** Invalidates an in-flight read when a parent action changes generations. */
   serverUrl?: string | null;
+  /**
+   * Numeric render key for action boundaries. The ref is the synchronous
+   * half: parents bump it before awaiting Start/Stop/token actions, so a read
+   * can reject itself even before React runs this effect's cleanup.
+   */
+  actionGeneration: number;
+  actionGenerationRef: Readonly<{ current: number }>;
   /** Lets the parent use the same atomic read for its main server status. */
   onServerSnapshot?: (snapshot: McpHttpSnapshot) => void;
 }
 
-export function McpClientsList({ running, serverUrl, onServerSnapshot }: McpClientsListProps) {
+export function McpClientsList({
+  running,
+  serverUrl,
+  actionGeneration,
+  actionGenerationRef,
+  onServerSnapshot,
+}: McpClientsListProps) {
   const [snapshot, setSnapshot] = useState<McpHttpSnapshot | null>(null);
   const [error, setError] = useState<unknown>(null);
   const requestGeneration = useRef(0);
@@ -36,18 +49,29 @@ export function McpClientsList({ running, serverUrl, onServerSnapshot }: McpClie
 
   const refresh = useCallback(async () => {
     const generation = ++requestGeneration.current;
+    const parentGeneration = actionGenerationRef.current;
     try {
       const next = await mcpHttpSnapshot();
-      if (generation !== requestGeneration.current) return;
+      if (
+        generation !== requestGeneration.current ||
+        parentGeneration !== actionGenerationRef.current
+      ) {
+        return;
+      }
       setSnapshot(next);
       setError(null);
       onServerSnapshotRef.current?.(next);
     } catch (nextError) {
-      if (generation !== requestGeneration.current) return;
+      if (
+        generation !== requestGeneration.current ||
+        parentGeneration !== actionGenerationRef.current
+      ) {
+        return;
+      }
       setSnapshot(null);
       setError(nextError);
     }
-  }, []);
+  }, [actionGenerationRef]);
 
   useEffect(() => {
     requestGeneration.current += 1;
@@ -59,7 +83,7 @@ export function McpClientsList({ running, serverUrl, onServerSnapshot }: McpClie
       requestGeneration.current += 1;
       window.clearInterval(timer);
     };
-  }, [refresh, running, serverUrl]);
+  }, [actionGeneration, refresh, running, serverUrl]);
 
   if (error !== null) {
     return (
@@ -112,7 +136,7 @@ export function McpClientsList({ running, serverUrl, onServerSnapshot }: McpClie
         <dl className="fl-kv">
           {clients.map((client, index) => (
             <Fragment key={`${client.name}\u0000${client.version ?? ""}\u0000${client.connectedAt}\u0000${index}`}>
-              <dt>{client.name}</dt>
+              <dt className="break-words">{client.name}</dt>
               <dd className="flex flex-wrap items-center gap-x-2 gap-y-1">
                 {client.version && <code className="fl-mono">{client.version}</code>}
                 <span

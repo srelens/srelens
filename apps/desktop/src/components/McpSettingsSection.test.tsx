@@ -1,5 +1,5 @@
 import { afterEach, describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen, fireEvent, waitFor } from "@testing-library/react";
+import { act, render, screen, fireEvent, waitFor } from "@testing-library/react";
 import React from "react";
 
 const { mcp } = vi.hoisted(() => ({
@@ -80,6 +80,40 @@ describe("McpSettingsSection", () => {
     fireEvent.click(screen.getByLabelText("Run MCP HTTP server"));
     await waitFor(() => expect(mcp.startMcpHttp).toHaveBeenCalledWith(8765));
     expect(await screen.findByText("http://127.0.0.1:8765/mcp")).toBeDefined();
+  });
+
+  it("does not let a snapshot started before Start undo the completed action", async () => {
+    const url = "http://127.0.0.1:8765/mcp";
+    let answerSnapshot!: (snapshot: { running: false; url: null; clients: never[] }) => void;
+    let answerStart!: (url: string) => void;
+    mcp.mcpHttpSnapshot
+      .mockResolvedValue({ running: true, url, clients: [] })
+      .mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            answerSnapshot = resolve;
+          }),
+      );
+    mcp.startMcpHttp.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          answerStart = resolve;
+        }),
+    );
+
+    render(<McpSettingsSection />);
+    await waitFor(() => expect(mcp.mcpHttpSnapshot).toHaveBeenCalledTimes(1));
+    fireEvent.click(screen.getByLabelText("Run MCP HTTP server"));
+    await waitFor(() => expect(mcp.startMcpHttp).toHaveBeenCalledWith(8765));
+
+    await act(async () => {
+      answerStart(url);
+      answerSnapshot({ running: false, url: null, clients: [] });
+      await Promise.resolve();
+    });
+
+    expect(await screen.findByText("Listening at")).toBeDefined();
+    expect(screen.queryByText(/server is stopped/i)).toBeNull();
   });
 
   it("updates the whole server status when the atomic session snapshot observes a stop", async () => {

@@ -17,12 +17,17 @@ const REFRESH_MS = 5_000;
 interface McpConnectedClientsProps {
   running: boolean | null;
   serverUrl?: string | null;
+  /** See the classic list: the ref fences reads before effect cleanup. */
+  actionGeneration: number;
+  actionGenerationRef: Readonly<{ current: number }>;
   onServerSnapshot?: (snapshot: McpHttpSnapshot) => void;
 }
 
 export function McpConnectedClients({
   running,
   serverUrl,
+  actionGeneration,
+  actionGenerationRef,
   onServerSnapshot,
 }: McpConnectedClientsProps) {
   const [snapshot, setSnapshot] = useState<McpHttpSnapshot | null>(null);
@@ -36,18 +41,29 @@ export function McpConnectedClients({
 
   const refresh = useCallback(async () => {
     const generation = ++requestGeneration.current;
+    const parentGeneration = actionGenerationRef.current;
     try {
       const next = await mcpHttpSnapshot();
-      if (generation !== requestGeneration.current) return;
+      if (
+        generation !== requestGeneration.current ||
+        parentGeneration !== actionGenerationRef.current
+      ) {
+        return;
+      }
       setSnapshot(next);
       setError(null);
       onServerSnapshotRef.current?.(next);
     } catch (nextError) {
-      if (generation !== requestGeneration.current) return;
+      if (
+        generation !== requestGeneration.current ||
+        parentGeneration !== actionGenerationRef.current
+      ) {
+        return;
+      }
       setSnapshot(null);
       setError(nextError);
     }
-  }, []);
+  }, [actionGenerationRef]);
 
   useEffect(() => {
     requestGeneration.current += 1;
@@ -59,7 +75,7 @@ export function McpConnectedClients({
       requestGeneration.current += 1;
       window.clearInterval(timer);
     };
-  }, [refresh, running, serverUrl]);
+  }, [actionGeneration, refresh, running, serverUrl]);
 
   const effectiveRunning = snapshot?.running ?? running;
   const clients = snapshot?.clients ?? null;
