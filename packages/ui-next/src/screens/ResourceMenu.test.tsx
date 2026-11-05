@@ -55,9 +55,12 @@ const {
   drainNode,
   isTauri,
   notifySuccess,
+  listCrds,
 } =
   vi.hoisted(() => ({
     deleteResource: vi.fn(async (): Promise<ActionResult> => ({ ok: true })),
+    // A custom kind's Delete looks its CRD up first; none by default.
+    listCrds: vi.fn(async (): Promise<{ crds?: CrdRef[]; error?: string }> => ({ crds: [] })),
     scaleResource: vi.fn(async (): Promise<ActionResult> => ({ ok: true })),
     rolloutRestart: vi.fn(async (): Promise<ActionResult> => ({ ok: true })),
     rolloutUndo: vi.fn(async (): Promise<ActionResult> => ({ ok: true })),
@@ -140,12 +143,14 @@ vi.mock("@srelens/core", async (importOriginal) => {
   cronjobSetSuspend,
   cronjobTriggerNow,
   getObject,
+  listCrds,
   ...forwardCore,
   };
 });
 
 import { useRowMenu, type UseRowMenuArgs } from "./ResourceMenu";
 import type { ContextMenuItem } from "@srelens/ui-kit";
+import type { CrdRef } from "@srelens/core";
 import type { ListRow } from "../lib/kinds/types";
 import * as store from "../lib/tabsStore";
 import { defaultState } from "../lib/tabs";
@@ -220,28 +225,51 @@ describe("useRowMenu", () => {
     expect(cmLabels).not.toContain("Open shell");
     expect(cmLabels).not.toContain("Port forward");
     expect(cmLabels).not.toContain("Evict");
-    // Edit and Open in new tab are not gated by KindActions at all — every
-    // kind gets them. Delete defaults to offered the same way (every one of
-    // the 34 built-in kinds passes `actions: {}` and still gets it) — but,
-    // unlike every other entry in `KindActions`, it can be turned off, for
-    // the one family that needs to: see the `actions.delete === false` test
-    // below.
+    // Edit, Open in new tab and Delete are not gated by KindActions at all —
+    // every kind gets them, custom resources included.
     expect(cmLabels).toEqual(expect.arrayContaining(["Open in new tab", "Edit", "Copy as kubectl", "Delete"]));
   });
 
-  // Whole-branch review (FIX 3): a custom resource's `k8sKind` is the CRD's
-  // own kind, and the backend resolves kind→GVR through a closed match with
-  // no CRD path — Delete on a custom resource's row always fails, with a
-  // confirm dialog (and a kubectl preview that lies, by falling back to
-  // lowercasing) that makes it look like a real operation right up until it
-  // isn't. `actions.delete === false` is the one way to turn Delete off;
-  // every other `KindActions` field turns something on.
-  it("withholds Delete when the kind's actions say so, without touching anything else", () => {
-    const labels = menuItems({ context: "prod", kind: "Widget", actions: { delete: false } }, CM_ROW).map((i) =>
-      i.kind === "sep" ? "—" : i.label,
-    );
-    expect(labels).not.toContain("Delete");
-    expect(labels).toEqual(expect.arrayContaining(["Open in new tab", "Edit", "Copy as kubectl"]));
+  describe("Delete on a custom resource", () => {
+    const WIDGET_ARGS: UseRowMenuArgs = { context: "prod", kind: "Widget", actions: {}, group: "example.com" };
+    const WIDGET_ROW: ListRow = { name: "left", namespace: "default" };
+
+    it("asks as it does for a built-in, then deletes through the CRD's group, version and plural", async () => {
+      listCrds.mockResolvedValue({
+        crds: [{ name: "widgets.example.com", group: "example.com", version: "v1", kind: "Widget", plural: "widgets", namespaced: true }],
+      });
+      render(<Harness args={WIDGET_ARGS} row={WIDGET_ROW} />);
+      await userEvent.click(screen.getByRole("button", { name: "Delete" }));
+      const dialog = within(screen.getByRole("dialog", { name: "Delete Widget?" }));
+      expect(dialog.getByText(/This cannot be undone/).textContent).toBe("Delete left in default? This cannot be undone.");
+      await userEvent.click(dialog.getByRole("button", { name: "Delete" }));
+      await waitFor(() =>
+        expect(deleteResource).toHaveBeenCalledWith("prod", "Widget", "default", "left", undefined, {
+          group: "example.com",
+          version: "v1",
+          plural: "widgets",
+        }),
+      );
+    });
+
+    it("shows the kubectl for the CRD's own resource, not a built-in of the same name", async () => {
+      // Lowercased to `deployments`, kubectl would delete the built-in.
+      render(
+        <Harness args={{ context: "prod", kind: "Deployment", actions: {}, group: "acme.io" }} row={{ name: "api", namespace: "default" }} />,
+      );
+      await userEvent.click(screen.getByRole("button", { name: "Delete" }));
+      expect(screen.getByText("kubectl delete deployment.acme.io api -n default --context prod")).toBeDefined();
+    });
+
+    it("deletes nothing, and says why, when the kind's CRD is not on the cluster", async () => {
+      listCrds.mockResolvedValue({ crds: [] });
+      render(<Harness args={WIDGET_ARGS} row={WIDGET_ROW} />);
+      await userEvent.click(screen.getByRole("button", { name: "Delete" }));
+      const dialog = within(screen.getByRole("dialog"));
+      await userEvent.click(dialog.getByRole("button", { name: "Delete" }));
+      expect(await dialog.findByText(/no matching CustomResourceDefinition/)).toBeDefined();
+      expect(deleteResource).not.toHaveBeenCalled();
+    });
   });
 
   it("opens the resource in a tab, at its /k/<kind>/<namespace>/<name> route", async () => {
@@ -251,7 +279,7 @@ describe("useRowMenu", () => {
   });
 
   it("carries a custom kind's group into Open in new tab's route (#919)", async () => {
-    const args: UseRowMenuArgs = { context: "prod", kind: "Deployment", actions: { delete: false }, group: "acme.io" };
+    const args: UseRowMenuArgs = { context: "prod", kind: "Deployment", actions: {}, group: "acme.io" };
     render(<Harness args={args} row={{ name: "api", namespace: "default" }} />);
     await userEvent.click(screen.getByRole("button", { name: "Open in new tab" }));
     expect(
@@ -292,7 +320,7 @@ describe("useRowMenu", () => {
   });
 
   it("carries a custom kind's group into Edit's route, so a CRD reusing a built-in's name opens its own object", async () => {
-    const args: UseRowMenuArgs = { context: "prod", kind: "Deployment", actions: { delete: false }, group: "acme.io" };
+    const args: UseRowMenuArgs = { context: "prod", kind: "Deployment", actions: {}, group: "acme.io" };
     render(<Harness args={args} row={{ name: "api", namespace: "default" }} />);
     await userEvent.click(screen.getByRole("button", { name: "Edit" }));
     expect(
@@ -484,7 +512,7 @@ describe("useRowMenu", () => {
     await userEvent.click(screen.getByRole("button", { name: "Delete" }));
     const dialog = within(screen.getByRole("dialog"));
     await userEvent.click(dialog.getByRole("button", { name: "Delete" }));
-    await waitFor(() => expect(deleteResource).toHaveBeenCalledWith("prod", "Pod", "kube-system", "web-0"));
+    await waitFor(() => expect(deleteResource).toHaveBeenCalledWith("prod", "Pod", "kube-system", "web-0", undefined, undefined));
   });
 
   it("shows the kubectl the action is equivalent to, so the reader can check it first", async () => {
@@ -1044,7 +1072,7 @@ describe("useRowMenu — the cluster the row was picked on", () => {
     await userEvent.click(box().getByRole("button", { name: "Delete" }));
 
     await waitFor(() => expect(deleteResource).toHaveBeenCalledTimes(1));
-    expect(deleteResource).toHaveBeenCalledWith(PINNED, "Deployment", "default", "checkout");
+    expect(deleteResource).toHaveBeenCalledWith(PINNED, "Deployment", "default", "checkout", undefined, undefined);
   });
 
   it("refuses the write until the reader confirms which cluster, and says why", async () => {
@@ -1062,7 +1090,7 @@ describe("useRowMenu — the cluster the row was picked on", () => {
     await userEvent.click(tickFor("delete"));
     await userEvent.click(box().getByRole("button", { name: "Delete" }));
     await waitFor(() => expect(deleteResource).toHaveBeenCalledTimes(1));
-    expect(deleteResource).toHaveBeenCalledWith(PINNED, "Deployment", "default", "checkout");
+    expect(deleteResource).toHaveBeenCalledWith(PINNED, "Deployment", "default", "checkout", undefined, undefined);
   });
 
   it("says the rail moved, first, above the row's own name", async () => {
@@ -1101,7 +1129,7 @@ describe("useRowMenu — the cluster the row was picked on", () => {
     // One click, exactly as before this fix existed.
     await userEvent.click(box().getByRole("button", { name: "Delete" }));
     await waitFor(() => expect(deleteResource).toHaveBeenCalledTimes(1));
-    expect(deleteResource).toHaveBeenCalledWith(PINNED, "Deployment", "default", "checkout");
+    expect(deleteResource).toHaveBeenCalledWith(PINNED, "Deployment", "default", "checkout", undefined, undefined);
   });
 
   it("re-arms when the rail moves on again, rather than carrying the tick over", async () => {
@@ -1341,7 +1369,7 @@ describe("useRowMenu — on a protected cluster (#101)", () => {
     await userEvent.clear(typed());
     await userEvent.type(typed(), "prod");
     await userEvent.click(box().getByRole("button", { name: "Delete" }));
-    await waitFor(() => expect(deleteResource).toHaveBeenCalledWith("prod", "Pod", "kube-system", "web-0"));
+    await waitFor(() => expect(deleteResource).toHaveBeenCalledWith("prod", "Pod", "kube-system", "web-0", undefined, undefined));
   });
 
   it("puts Run now behind a confirm that asks for the cluster's name", async () => {

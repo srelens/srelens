@@ -29,8 +29,7 @@ export interface StreamPod {
   name: string;
   /**
    * `rev 119`. Absent for a subject whose revision nothing has told us; the
-   * row then omits the label rather than drawing it blank, which is the rule
-   * `AboutKind` follows for a CRD field the cluster did not report.
+   * row then omits the label rather than drawing it blank.
    */
   revision?: string;
   /** Whether this pod's lines are in view. */

@@ -24,6 +24,20 @@ describe("resource actions", () => {
     expect(out.ok).toBe(true);
   });
 
+  it("deleteResource tells the backend a custom resource's group, version and plural", async () => {
+    const invoke = vi.fn().mockResolvedValue({ ok: true });
+    await deleteResource("c", "Widget", null, "big", invoke, { group: "acme.io", version: "v1", plural: "widgets" });
+    expect(invoke).toHaveBeenCalledWith("k8s.deleteResource", {
+      context: "c",
+      kind: "Widget",
+      namespace: "",
+      name: "big",
+      group: "acme.io",
+      version: "v1",
+      plural: "widgets",
+    });
+  });
+
   it("scaleResource passes replicas", async () => {
     const invoke = vi.fn().mockResolvedValue({ ok: true });
     await scaleResource("c", "Deployment", "default", "web", 3, invoke);
