@@ -4,13 +4,15 @@
 # Linux bundle under DIR ships it as /usr/bin/srelens-sandbox-launch with
 # mode 0755, and the AppImage's copy is the launcher itself.
 #
-#   sh packaging/linux/check-launcher.sh target/release/bundle
+#   sh packaging/linux/check-launcher.sh target/release/bundle [--no-rpm]
+#
+# --no-rpm is for a pre-release build, which skips the rpm (#1026).
 #
 # release.yml runs it over the bundles it is about to publish; test.sh runs it
 # over fixtures. Needs dpkg-deb and rpm.
 set -eu
 
-dir="${1:?usage: check-launcher.sh BUNDLE_DIR}"
+dir="${1:?usage: check-launcher.sh BUNDLE_DIR [--no-rpm]}"
 path="usr/bin/srelens-sandbox-launch"
 
 fail() {
@@ -51,10 +53,14 @@ listing="$(dpkg-deb -c "$deb" 2> "$work/err")" ||
     fail "dpkg-deb cannot list $deb: $(cat "$work/err")"
 listed "$listing" "$deb"
 
-rpm="$(only 'rpm/*.rpm')"
-listing="$(rpm -qlpv "$rpm" 2> "$work/err")" ||
-    fail "rpm cannot list $rpm: $(cat "$work/err")"
-listed "$listing" "$rpm"
+shipped="the deb and AppImage"
+if [ "${2:-}" != --no-rpm ]; then
+    rpm="$(only 'rpm/*.rpm')"
+    listing="$(rpm -qlpv "$rpm" 2> "$work/err")" ||
+        fail "rpm cannot list $rpm: $(cat "$work/err")"
+    listed "$listing" "$rpm"
+    shipped="the deb, rpm and AppImage"
+fi
 
 appimage="$(only 'appimage/*.AppImage')"
 case "$appimage" in
@@ -78,4 +84,4 @@ case "$said" in
     *) fail "$appimage's /$path is not the sandbox launcher: $said" ;;
 esac
 
-echo "OK: the deb, rpm and AppImage ship /$path"
+echo "OK: $shipped ship /$path"
