@@ -1,6 +1,7 @@
 import type { ReactNode } from "react";
 import { RESOURCE_LABELS, type CrdRef, type ResourceKind } from "@srelens/core";
 import type { IconComponent, ResourceNode } from "@srelens/ui-kit";
+import { crdIcon } from "./crdIcons";
 import { Icons } from "./icons";
 
 /**
@@ -184,6 +185,8 @@ export function navNodes({ counts, apps = [], crds, agent }: NavInput): Resource
  *
  * Every group starts folded shut. Expanding all of them by default would drown
  * the built-in kinds above them the moment one operator is installed.
+ *
+ * A group and its CRDs draw the group's glyph from {@link crdIcon} (#1027).
  */
 export function crdNodes(crds: CrdRef[], counts?: NodeCounts): ResourceNode[] {
   const groups = new Map<string, CrdRef[]>();
@@ -195,15 +198,18 @@ export function crdNodes(crds: CrdRef[], counts?: NodeCounts): ResourceNode[] {
   }
   return [...groups.entries()]
     .sort(([a], [b]) => a.localeCompare(b))
-    .map(([group, list]) => ({
-      id: `crdgroup:${group}`,
-      label: group,
-      icon: Icons.crds,
-      defaultExpanded: false,
-      children: [...list]
-        .sort((a, b) => a.kind.localeCompare(b.kind))
-        .map((crd) => ({ id: `crd:${crd.name}`, label: crd.kind, icon: Icons.crds, ...counted(`crd:${crd.name}`, counts) })),
-    }));
+    .map(([group, list]) => {
+      const icon = crdIcon(group);
+      return {
+        id: `crdgroup:${group}`,
+        label: group,
+        icon,
+        defaultExpanded: false,
+        children: [...list]
+          .sort((a, b) => a.kind.localeCompare(b.kind))
+          .map((crd) => ({ id: `crd:${crd.name}`, label: crd.kind, icon, ...counted(`crd:${crd.name}`, counts) })),
+      };
+    });
 }
 
 /**
