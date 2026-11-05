@@ -4,7 +4,7 @@ import { ExtensionPodSlot } from "./ExtensionPodTools";
 import { ExtensionResourceNavigation } from "./resourceNavigation";
 import { useContext, useEffect, useRef, useState, type ReactNode } from "react";
 import { ageFromTimestamp, asArray, inspectExtensionResource, actOnExtensionResource, formatResourceManifest, onExtensionResourceChanged, renderConfirmTemplate, unmetPredicate, type Condition, type EventSummary, type ExtensionResourceDetail, type ExtensionResourceSelection, type K8sObject, type ResolvedStatus } from "@srelens/core";
-import { Alert, Inspector, Button, CodeEditor, KV, LoadingState, Section as Block, StatusPill, SubHead, type ActionBarAction } from "@srelens/ui-kit";
+import { Alert, Inspector, Button, CodeEditor, EmptyState, KV, LoadingState, Section as Block, StatusPill, SubHead, type ActionBarAction } from "@srelens/ui-kit";
 import { plainText } from "./displayText";
 import { statusKind, statusWord } from "./AppStatus";
 import { AgeCell } from "../lib/ageCell";
@@ -43,7 +43,7 @@ function Entries({label,items}:{label:string;items:unknown[]}) {
     {items.length ? <div className="extension-entries-scroll" tabIndex={0} role="region" aria-label={`${label} list`}>
       <table aria-label={label}><thead><tr>{columns.map(column=><th scope="col" key={column}>{column==="id"?"ID":column==="v"?"Version":fieldLabel(column)}</th>)}</tr></thead>
       <tbody>{rows.map((row,index)=><tr key={index}>{columns.map(column=><td key={column}>{cell(row[column])}</td>)}</tr>)}</tbody></table>
-    </div> : <p className="extension-message">No entries.</p>}
+    </div> : <EmptyState compact title="No entries"/>}
   </Fold>;
 }
 function Fields({value,depth=0}:{value:Record<string,unknown>;depth?:number}) {

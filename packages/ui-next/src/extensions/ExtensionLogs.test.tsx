@@ -71,19 +71,26 @@ it("says a declarative app has no process to write its log, and that the log sta
   vi.mocked(extensionLogs).mockResolvedValue(read([], { runtime: "declarative" }));
   await open();
   expect(extensionLogs).toHaveBeenCalledWith("org.test.sidecar", { minLevel: "trace" });
+  expect(screen.getByText("No log")).toBeTruthy();
   expect(screen.getByText("This app has no process, so nothing writes to its log.")).toBeTruthy();
   expect(
     screen.getByText(
       "Kept in srelens's memory only: never written to disk, and never sent to an agent or anywhere else. The last 1,000 lines are kept.",
     ),
   ).toBeTruthy();
-  expect(screen.queryByText("Nothing logged yet.")).toBeNull();
+  expect(screen.queryByText("Nothing logged yet")).toBeNull();
+});
+
+it("says it is loading the log until the first read answers", async () => {
+  vi.mocked(extensionLogs).mockImplementation(() => new Promise(() => {}));
+  await open();
+  expect(screen.getByRole("status", { name: "Loading the log" })).toBeTruthy();
 });
 
 it("says nothing is logged yet for a sidecar that has written nothing", async () => {
   vi.mocked(extensionLogs).mockResolvedValue(read([]));
   await open();
-  expect(screen.getByText("Nothing logged yet.")).toBeTruthy();
+  expect(screen.getByText("Nothing logged yet")).toBeTruthy();
   expect(screen.queryByText(/has no process/)).toBeNull();
 });
 
@@ -177,8 +184,8 @@ it("says no line reaches the chosen level, rather than that nothing was logged",
   await open();
   fireEvent.click(screen.getByRole("button", { name: "error" }));
   await wait(0);
-  expect(screen.getByText("No lines at error or above.")).toBeTruthy();
-  expect(screen.queryByText("Nothing logged yet.")).toBeNull();
+  expect(screen.getByText("No lines at error or above")).toBeTruthy();
+  expect(screen.queryByText("Nothing logged yet")).toBeNull();
 });
 
 it("ignores an answer for a level that is no longer chosen", async () => {
@@ -216,7 +223,7 @@ it("says a failed read failed, never that the log is empty, and reads again on R
   const alert = screen.getByRole("alert");
   expect(alert.textContent).toContain("Could not read this app's log");
   expect(alert.textContent).toContain("bridge timed out");
-  expect(screen.queryByText("Nothing logged yet.")).toBeNull();
+  expect(screen.queryByText("Nothing logged yet")).toBeNull();
   expect(screen.queryByText(/has no process/)).toBeNull();
   // No poll while the failure stands: the reader chooses when to try again.
   await wait(4000);

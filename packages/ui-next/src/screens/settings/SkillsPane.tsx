@@ -11,7 +11,7 @@ import {
   skillsDirPath,
   type SkillMeta,
 } from "@srelens/core";
-import { Badge, Button, ConfirmDialog, Dialog, EmptyState, Field, FilterBar, Switch, TextInput, useListFilter } from "@srelens/ui-kit";
+import { Badge, Button, ConfirmDialog, Dialog, EmptyState, Field, FilterBar, LoadingState, Switch, TextInput, useListFilter } from "@srelens/ui-kit";
 import { FailureAlert } from "../../lib/errorCopy";
 import {
   estimateTokens,
@@ -229,9 +229,7 @@ export function SkillsPane() {
           </Button>
         </div>
       ) : read.state === "loading" && skills.length === 0 ? (
-        <p className="px-4 py-3 text-muted" role="status">
-          Loading skills…
-        </p>
+        <LoadingState label="Loading skills" />
       ) : shown.length === 0 ? (
         <EmptyState
           compact

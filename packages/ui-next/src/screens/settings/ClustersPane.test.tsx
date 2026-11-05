@@ -3,7 +3,7 @@ import { act, render, screen, within, fireEvent } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { loadClusterNamespaces, loadContextProfiles, loadContextOrder, readAssistantSetting, saveClusterNamespaces, saveContextProfiles, saveContextOrder, type ClusterContext } from "@srelens/core";
 import { __resetAssistantForTests, assistantSaved, setAssistantEnabled, setClusterAssistant } from "../../lib/assistant";
-import { setContexts } from "../../lib/clusters";
+import { resetContexts, setContexts } from "../../lib/clusters";
 import { loadMarks } from "../../lib/marks";
 import { ClustersPane } from "./ClustersPane";
 import { activeCluster, currentWorkspace, setState } from "../../lib/tabsStore";
@@ -151,6 +151,12 @@ it("filters by saved short name and distinguishes list failure from an empty lis
   await user.click(screen.getByRole("button", { name: "Retry" }));
   expect(await screen.findByRole("button", { name: "Edit staging" })).toBeTruthy();
   expect(screen.getByRole("button", { name: "Edit new-context" })).toBeTruthy();
+});
+
+it("says it is loading the contexts until the listing answers", () => {
+  resetContexts();
+  render(<ClustersPane />);
+  expect(screen.getByRole("status", { name: "Loading contexts" })).toBeTruthy();
 });
 
 it("reorders through the pointer drag handle and cancels without saving", async () => {

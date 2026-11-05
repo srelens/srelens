@@ -7,7 +7,7 @@ import {
   type ExtensionRuntime,
   type InstalledExtension,
 } from "@srelens/core";
-import { Button } from "@srelens/ui-kit";
+import { Button, EmptyState, LoadingState } from "@srelens/ui-kit";
 import { FailureAlert } from "../lib/errorCopy";
 import { plainText } from "./displayText";
 import { extensionLabel } from "./inventoryStore";
@@ -158,17 +158,11 @@ export function ExtensionLogs({ plugin }: { plugin: InstalledExtension }) {
           ))}
         </div>
       ) : error !== undefined ? null : !ready ? (
-        <p role="status" className="extension-message">
-          Loading the log…
-        </p>
+        <LoadingState compact label="Loading the log" />
+      ) : store?.runtime === "declarative" ? (
+        <EmptyState compact title="No log" hint="This app has no process, so nothing writes to its log." />
       ) : (
-        <p className="extension-message">
-          {store?.runtime === "declarative"
-            ? "This app has no process, so nothing writes to its log."
-            : level === "trace"
-              ? "Nothing logged yet."
-              : `No lines at ${level} or above.`}
-        </p>
+        <EmptyState compact title={level === "trace" ? "Nothing logged yet" : `No lines at ${level} or above`} />
       )}
     </div>
   );

@@ -10,7 +10,7 @@ import {
   startMcpHttp,
   stopMcpHttp,
 } from "@srelens/core";
-import { Badge, Button, ConfirmDialog, Field, Panel, SubHead, TextInput } from "@srelens/ui-kit";
+import { Badge, Button, ConfirmDialog, Field, LoadingState, Panel, SubHead, TextInput } from "@srelens/ui-kit";
 import { FailureAlert } from "../../lib/errorCopy";
 import { McpClientSetup } from "./McpClientSetup";
 import { useMcpAutoStart } from "../../lib/mcpAutoStart";
@@ -553,7 +553,7 @@ export function McpServer() {
       )}
 
       {tokenRead.kind === "loading" ? (
-        <p className="mt-3 text-[0.75rem] text-muted">Checking the MCP server…</p>
+        <LoadingState compact label="Checking the MCP server" className="mt-3" />
       ) : tokenRead.kind === "ready" && hasToken ? (
         <>
           <SubHead className="mt-4">Bearer token</SubHead>

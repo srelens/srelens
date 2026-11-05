@@ -1,7 +1,7 @@
 import { type ReactNode } from "react";
 import { listCrds, type ExtensionPage, type InstalledExtension } from "@srelens/core";
 import { useResource } from "../lib/useResource";
-import { Button } from "@srelens/ui-kit";
+import { Button, LoadingState } from "@srelens/ui-kit";
 import { FailureAlert } from "../lib/errorCopy";
 import { crdRequirements, pageReaders, requirementStatus } from "./requirements";
 
@@ -24,7 +24,7 @@ export function ExtensionRequirements({ plugin, page, context, refresh, children
   }, [key, refresh]);
   if (!context || !required.length) return <>{children}</>;
   if (result.status === "loading" || result.data?.key !== key)
-    return <p className="extension-message" role="status">Checking app requirements…</p>;
+    return <LoadingState label="Checking app requirements" />;
   const error = result.data?.error;
   const requirements = required.map(r => {
     const { resolved, status } = requirementStatus(r, result.data?.crds ?? []);

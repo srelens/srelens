@@ -10,7 +10,7 @@ import {
   type TopologyProbe,
   selectsNothing,
 } from "@srelens/core";
-import { Button, EmptyState, Screen, StatusPill, type StatusKind } from "@srelens/ui-kit";
+import { Button, EmptyState, LoadingState, Screen, StatusPill, type StatusKind } from "@srelens/ui-kit";
 import { useNamespaceOptions } from "@srelens/core/react";
 import { getKubeconfigFiles, useActiveContext } from "../lib/clusters";
 import {
@@ -242,9 +242,7 @@ function TopologyGraph({ context }: { context: ClusterContext }) {
           </div>
           <div className="relative min-h-0 flex-1">
             {graph.status === "loading" && (
-              <p className="grid h-full place-items-center text-sm text-muted">
-                Reading the cluster…
-              </p>
+              <LoadingState label="Reading the cluster" className="h-full" />
             )}
             {graph.status === "error" && (
               <div className="p-4">

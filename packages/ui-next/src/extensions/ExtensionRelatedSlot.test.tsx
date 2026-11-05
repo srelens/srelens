@@ -116,7 +116,7 @@ it("shows a cluster-limited app's links on its own resource page, which asks the
 it("says no related resources only when every link answered", async () => {
   vi.mocked(resolveExtensionLinks).mockResolvedValue(answer([link({})]));
   render(<ExtensionRelatedSlot context="prod" resource={resource}/>);
-  expect(await screen.findByText("No related resources.")).toBeTruthy();
+  expect(await screen.findByText("No related resources")).toBeTruthy();
   expect(screen.queryByRole("alert")).toBeNull();
 });
 
@@ -130,17 +130,17 @@ it("shows a failed link as a failure with a retry, never as no related resources
   render(<ExtensionRelatedSlot context="prod" resource={resource}/>);
   const row = await screen.findByText(/Couldn’t read/);
   expect(row.textContent).toContain(detail);
-  expect(screen.queryByText("No related resources.")).toBeNull();
+  expect(screen.queryByText("No related resources")).toBeNull();
   vi.mocked(resolveExtensionLinks).mockResolvedValue(answer([link({})]));
   await userEvent.click(screen.getByRole("button", { name:/Retry/ }));
-  expect(await screen.findByText("No related resources.")).toBeTruthy();
+  expect(await screen.findByText("No related resources")).toBeTruthy();
 });
 
 it("shows a failed resolver call as a failure too", async () => {
   vi.mocked(resolveExtensionLinks).mockRejectedValue(new Error("Extension was disabled or updated; refresh the view"));
   render(<ExtensionRelatedSlot context="prod" resource={resource}/>);
   expect(await screen.findByText(/Couldn’t read related resources from Argo CD/)).toBeTruthy();
-  expect(screen.queryByText("No related resources.")).toBeNull();
+  expect(screen.queryByText("No related resources")).toBeNull();
 });
 
 it("names a target the cluster does not have without linking to it", async () => {
@@ -160,7 +160,7 @@ it("names a target the host did not look up, with why, and does not call it miss
   render(<ExtensionRelatedSlot context="prod" resource={resource}/>);
   expect(await screen.findByText(/guestbook.*namespace unknown/)).toBeTruthy();
   expect(screen.queryByText(/not found on this cluster/)).toBeNull();
-  expect(screen.queryByText("No related resources.")).toBeNull();
+  expect(screen.queryByText("No related resources")).toBeNull();
   expect(screen.queryByRole("button", { name:/guestbook/ })).toBeNull();
   expect(screen.queryByText(/Couldn’t read/)).toBeNull();
 });
@@ -328,7 +328,7 @@ it("shows what names this resource under the reverse relation, from the same dec
     [extensionClusterResourceRoute("cluster-key", "org.example.argocd", "kustomizations", "flux-system", "apps"), { clusterName:"prod" }],
   ]);
   expect(within(manages).getByRole("button", { name:"Deployment web/front" })).toBeTruthy();
-  expect(screen.queryByText("No related resources.")).toBeNull();
+  expect(screen.queryByText("No related resources")).toBeNull();
 });
 
 it("says a reverse list may be incomplete, and which resources it could not read", async () => {
@@ -355,10 +355,10 @@ it("shows a reverse link that failed as a failure with a retry, never as nothing
   render(<ExtensionRelatedSlot context="prod" resource={application}/>);
   const manages = await screen.findByRole("group", { name:"Manages" });
   expect(within(manages).getByText(/^Deployment: Couldn’t read/)).toBeTruthy();
-  expect(screen.queryByText("No related resources.")).toBeNull();
+  expect(screen.queryByText("No related resources")).toBeNull();
   vi.mocked(resolveExtensionReverseLinks).mockResolvedValue(reverseAnswer([reverse({})]));
   await userEvent.click(screen.getByRole("button", { name:/Retry/ }));
-  expect(await screen.findByText("No related resources.")).toBeTruthy();
+  expect(await screen.findByText("No related resources")).toBeTruthy();
 });
 
 it("shows a failed reverse resolver call as its own failure", async () => {
@@ -368,7 +368,7 @@ it("shows a failed reverse resolver call as its own failure", async () => {
   vi.mocked(resolveExtensionReverseLinks).mockRejectedValue(new Error("Extension was disabled or updated; refresh the view"));
   render(<ExtensionRelatedSlot context="prod" resource={application}/>);
   expect(await screen.findByText(/Couldn’t read related resources from Argo CD/)).toBeTruthy();
-  expect(screen.queryByText("No related resources.")).toBeNull();
+  expect(screen.queryByText("No related resources")).toBeNull();
 });
 
 it("reads both directions for a kind that is both a link's source and another's target", async () => {

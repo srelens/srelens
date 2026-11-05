@@ -23,6 +23,7 @@ import {
   ConfirmDialog,
   DiffLines,
   EmptyState,
+  LoadingState,
   Screen,
   type EditorDiagnostic,
 } from "@srelens/ui-kit";
@@ -432,8 +433,8 @@ function Changes({ docs, computing, error }: { docs: DiffDoc[] | null; computing
       </div>
     );
   }
-  if (computing && !docs) return <p className="p-3 text-sm text-muted">Comparing with the cluster…</p>;
-  if (!docs || docs.length === 0) return <p className="p-3 text-sm text-muted">No changes.</p>;
+  if (computing && !docs) return <LoadingState compact label="Comparing with the cluster" className="p-3" />;
+  if (!docs || docs.length === 0) return <EmptyState compact title="No changes" />;
   return (
     <div className="flex flex-col gap-4 p-3">
       {docs.map((d, i) => (
@@ -743,7 +744,7 @@ function EditExisting({ context, parts }: { context: ClusterContext; parts: Edit
               gutter; a document does not. */}
           <div className="min-h-0 min-w-0 flex-1">
             {manifest.status === "loading" ? (
-              <p className="p-3 text-sm text-muted">Loading the manifest…</p>
+              <LoadingState label="Loading the manifest" />
             ) : manifest.status === "error" ? null : (
               <CodeEditor
                 value={yaml}

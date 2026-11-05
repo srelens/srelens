@@ -1,4 +1,4 @@
-import { Button, Section } from "@srelens/ui-kit";
+import { Button, EmptyState, Section } from "@srelens/ui-kit";
 import { contributionKind, describeError, extensionClusterResourceRoute, extensionEnabledFor, resolveExtensionLinks,
   resolveExtensionReverseLinks, type ExtensionLinkRelation, type ExtensionLinkTarget, type ExtensionResolvedLink,
   type ExtensionReverseLink, type InstalledExtension } from "@srelens/core";
@@ -160,7 +160,7 @@ function RelatedLinks({ plugins, context, kind, resource }: {
     .map(link => <LinkRow
     key={`${answer.plugin.manifest.id}/${link.id}`} plugin={answer.plugin} link={link} at={at}/>));
   return <>
-    {none ? <p className="extension-message">No related resources.</p> : <>
+    {none ? <EmptyState compact title="No related resources" /> : <>
       {(callFailures.length > 0 || forward.length > 0) && <ul className="extension-related">{callFailures}{forward}</ul>}
       {groups.map(group => <div key={group.relation} role="group" aria-label={REVERSE[group.relation]}>
         <p className="extension-related-group">{REVERSE[group.relation]}</p>

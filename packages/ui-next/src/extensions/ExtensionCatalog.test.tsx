@@ -16,7 +16,7 @@ it("browses on demand, searches, and reviews exact verified bytes before any ins
   expect(screen.getByText(/Preview/)).toBeTruthy();
   expect(screen.getByText(/Host API 0.1.0, 0.2.0/)).toBeTruthy();
   fireEvent.change(screen.getByRole("searchbox", { name: "Filter apps" }), { target: { value: "argo" } });
-  expect(screen.getByText("No matching apps.")).toBeTruthy();
+  expect(screen.getByText("No matching apps")).toBeTruthy();
   fireEvent.change(screen.getByRole("searchbox", { name: "Filter apps" }), { target: { value: "flux" } });
   fireEvent.click(screen.getByText("Review installation"));
   await waitFor(() => expect(review).toHaveBeenCalledWith({ manifest: '{"name":"Flux","permissions":[]}' }, { id: entry.id, sha256: "abc" }));
@@ -31,7 +31,7 @@ it("filters the catalog with the standard filter row, field by field", async () 
   fireEvent.change(filter, { target: { value: "^flux$" } });
   expect(screen.getByText("Flux")).toBeTruthy();
   fireEvent.change(filter, { target: { value: "^lux" } });
-  expect(screen.getByText("No matching apps.")).toBeTruthy();
+  expect(screen.getByText("No matching apps")).toBeTruthy();
   fireEvent.keyDown(filter, { key: "Escape" });
   expect(screen.getByText("Flux")).toBeTruthy();
 });
@@ -64,7 +64,7 @@ it("reports a first-load failure with retry, not an empty catalog", async () => 
   render(<ExtensionCatalog onReview={vi.fn()} installed={[]} />);
   fireEvent.click(screen.getByText("Browse catalog"));
   expect(await screen.findByText("offline")).toBeTruthy();
-  expect(screen.queryByText("No matching apps.")).toBeNull();
+  expect(screen.queryByText("No matching apps")).toBeNull();
   fireEvent.click(screen.getByText("Browse catalog"));
   expect(await screen.findByText("Flux")).toBeTruthy();
 });
@@ -77,7 +77,7 @@ it("does not open a review that a newer one replaced while the release downloade
   render(<ExtensionCatalog onReview={review} onReviewStart={onReviewStart} installed={[]} autoLoad />);
   fireEvent.click(await screen.findByText("Review installation"));
   await waitFor(() => expect(reviewCatalogExtension).toHaveBeenCalledTimes(1));
-  await waitFor(() => expect(screen.queryByText("Loading…")).toBeNull());
+  await waitFor(() => expect(screen.queryByRole("status")).toBeNull());
   expect(onReviewStart).toHaveBeenCalledTimes(1);
   expect(review).not.toHaveBeenCalled();
   latest = true;

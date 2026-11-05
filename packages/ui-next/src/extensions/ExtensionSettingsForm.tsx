@@ -7,7 +7,7 @@ import {
   type ExtensionSetting,
   type InstalledExtension,
 } from "@srelens/core";
-import { Button, Combobox } from "@srelens/ui-kit";
+import { Button, Combobox, EmptyState, LoadingState } from "@srelens/ui-kit";
 import { FailureAlert } from "../lib/errorCopy";
 import { plainText } from "./displayText";
 import { extensionLabel } from "./inventoryStore";
@@ -158,7 +158,7 @@ export function ExtensionSettingsForm({
     >
       <strong>Settings</strong>
       {declared.length === 0 ? (
-        <p className="extension-message">This app declares no settings.</p>
+        <EmptyState compact title="This app declares no settings" />
       ) : (
         <>
           <p className="extension-message">The host checks every value when you save, whatever this form allows.</p>
@@ -600,11 +600,7 @@ function ClusterChoice({
   return (
     <>
       <ContextsProblem contexts={contexts} />
-      {contexts.status === "loading" && (
-        <p role="status" className="extension-setting-note">
-          Loading clusters…
-        </p>
-      )}
+      {contexts.status === "loading" && <LoadingState compact label="Loading clusters" />}
       <Choice
         label={label}
         value={value}
@@ -668,11 +664,7 @@ function NamespaceChoice({
           state={state}
         />
       </div>
-      {from && namespaces.status === "loading" && (
-        <p role="status" className="extension-setting-note">
-          Loading namespaces…
-        </p>
-      )}
+      {from && namespaces.status === "loading" && <LoadingState compact label="Loading namespaces" />}
       {from && namespaces.status === "error" && (
         <FailureAlert tone="sev" title="Could not list namespaces" error={namespaces.error} onRetry={namespaces.reload} />
       )}

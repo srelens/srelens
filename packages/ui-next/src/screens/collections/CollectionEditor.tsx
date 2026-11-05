@@ -10,7 +10,7 @@ import {
   type CollectionProblem,
   type NamespaceResolution,
 } from "@srelens/core";
-import { Button, Checkbox, Dialog, Field, MultiSelect, Switch, TextInput } from "@srelens/ui-kit";
+import { Button, Checkbox, Dialog, Field, LoadingState, MultiSelect, Switch, TextInput } from "@srelens/ui-kit";
 import { FailureAlert } from "../../lib/errorCopy";
 import { useCollections, saveCollection } from "../../lib/collections";
 import { friendly } from "../../lib/errorCopy";
@@ -352,7 +352,7 @@ function Preview({
   } else if (!valid) {
     body = <p className="text-muted">Correct the members, patterns or label selector above to see what they match.</p>;
   } else if (result === null) {
-    body = <p className="text-muted">Working out what this matches on {where}…</p>;
+    body = <LoadingState compact label={`Working out what this matches on ${where}`} />;
   } else {
     const match = result.collections[0];
     const matched = match?.matched ?? [];

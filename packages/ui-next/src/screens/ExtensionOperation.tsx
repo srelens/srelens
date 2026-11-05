@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { listContexts, callExtensionOperation, describeError, describeStreamEnd, extensionEnabledFor, extensionOperationRoute, openExtensionView, parseExtensionOperationRoute, relativeTime, type ExtensionOperation as Operation, type ExtensionView, type ExtensionStream } from "@srelens/core";
 import { useNamespaceOptions } from "@srelens/core/react";
-import { ActionBar, Alert, Badge, Button, Combobox, FilterBar, Popover, Screen, Table, Tabs, TextInput, useListFilter, type BadgeTone } from "@srelens/ui-kit";
+import { ActionBar, Alert, Badge, Button, Combobox, EmptyState, FilterBar, LoadingState, Popover, Screen, Table, Tabs, TextInput, useListFilter, type BadgeTone } from "@srelens/ui-kit";
 import { ExtensionLogo } from "../extensions/ExtensionLogo";
 import { useExtensions } from "../extensions/inventoryStore";
 import { FailureState } from "../lib/errorCopy";
@@ -213,13 +213,13 @@ function OperationForm({ id, revision, context, contextKey, operation, operation
         const owned = view.current; view.current = undefined; void owned?.close();
       }}>Cancel</Button>}
     </form>
-    {busy && <p className="extension-message" role="status">Running {operation.title.toLowerCase()}…</p>}
+    {busy && <LoadingState compact label={`Running ${operation.title.toLowerCase()}`} className="px-3" />}
     {error && <FailureState title={`Could not load ${operation.title.toLowerCase()}`} error={error} domain="local"
       detail={error.includes("narrow the namespace") ? `${error} Select a namespace above to reduce the inventory.` : undefined}
       onRetry={() => void run(cursor.current)}
       action={history.length > 0 ? { label: "Start from first page", onClick: () => { setHistory([]); void run(); } } : undefined} />}
     {result !== undefined && <OperationResult value={result} operations={operations} current={operation.name} onOpen={(operation, params) => openTab(extensionOperationRoute(contextKey, id, revision, operation, params))} />}
-    {!busy && !error && result === undefined && <p className="extension-message">Run {operation.title.toLowerCase()} to load its data.</p>}
+    {!busy && !error && result === undefined && <EmptyState title="Nothing loaded yet" hint={`Run ${operation.title.toLowerCase()} to load its data.`} />}
     {(next || history.length > 0) && <div className="flex shrink-0 justify-end gap-2 border-t px-3 py-2" style={{ borderColor: "var(--rule)" }}><Button variant="secondary" disabled={busy || !history.length} onClick={() => { const previous = history.at(-1)!; setHistory(history.slice(0, -1)); void run(previous); }}>Previous page</Button><Button variant="secondary" disabled={busy || !next} onClick={() => { setHistory([...history, cursor.current]); void run(next); }}>Next page</Button></div>}
   </>;
 }
@@ -247,7 +247,7 @@ export function ExtensionOperation({ route }: RoutedScreenProps) {
     : !operation ? "This app does not declare this operation." : "";
   return <Screen title={<span className="flex min-w-0 items-center gap-2"><ExtensionLogo icon={app?.icon} name={app?.manifest.name ?? target.id} size={22} /><span className="text-muted">{app?.manifest.name ?? target.id}</span><span className="text-faint">/</span><span>{operation?.title ?? "App"}</span></span>} actions={<span className="block max-w-56 truncate text-xs text-muted" title={cluster?.name ?? target.contextKey}>{cluster?.name ?? target.contextKey}</span>} fill>
     <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
-      {inventory.status === "loading" || status === "loading" ? <p className="extension-message" role="status">Loading app…</p>
+      {inventory.status === "loading" || status === "loading" ? <LoadingState label="Loading app" />
         : inventory.status === "error" ? <FailureState title="Could not load apps" error={inventory.error} domain="local" onRetry={inventory.reload} />
         : !cluster && status === "failed" ? <FailureState title="Could not load clusters" error={contextError} domain="local" onRetry={() => { void retryContexts(); }} />
         : error ? <FailureState title="Could not open this screen" error={error} domain="local" />

@@ -272,7 +272,7 @@ describe("CollectionScopeNotice", () => {
     saveCollection({ name: "prod", type: "namespace", patterns: ["prod-*"] });
     paint();
     await choose("prod");
-    expect(screen.getByText(/Working out which namespaces prod covers on kind-shop/)).toBeDefined();
+    expect(screen.getByRole("status", { name: "Working out which namespaces prod covers on kind-shop" })).toBeDefined();
     await act(async () => answer(resolution(["prod-eu"])));
     expect(screen.queryByText(/Working out/)).toBeNull();
   });

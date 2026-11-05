@@ -1021,7 +1021,7 @@ describe("useRowMenu — Roll back (#389)", () => {
     listReplicaSets.mockRejectedValueOnce(new Error("socket closed"));
     const dialog = await openRollback();
     expect(await dialog.findByText(/socket closed/)).toBeDefined();
-    expect(dialog.queryByText("Reading revisions…")).toBeNull();
+    expect(dialog.queryByRole("status", { name: "Reading revisions" })).toBeNull();
   });
 
   it("says why the revisions could not be listed, and writes nothing", async () => {

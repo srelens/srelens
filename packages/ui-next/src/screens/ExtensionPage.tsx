@@ -5,7 +5,7 @@ import { NO_PINNED_ID_MESSAGE, SHARED_CONTEXT_ID_MESSAGE } from "../extensions/c
 import { plainText } from "../extensions/displayText";
 import { ExtensionResourceNavigation } from "../extensions/resourceNavigation";
 import { extensionCardRoute, extensionEnabledFor, extensionClusterRoute as extensionRoute, extensionClusterResourceRoute as extensionResourceRoute, listContexts, parseExtensionRoute, type ExtensionResourceSelection } from "@srelens/core";
-import { Button, Screen } from "@srelens/ui-kit";
+import { Button, EmptyState, LoadingState, Screen } from "@srelens/ui-kit";
 import { useExtensions } from "../extensions/Extensions";
 import { ExtensionWorkspace } from "../extensions/ExtensionWorkspace";
 import { openTab } from "../lib/tabsStore";
@@ -95,33 +95,30 @@ export function ExtensionPage({ route }: RoutedScreenProps) {
     >
       <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
         {inventory.status === "loading" || (unchecked && contextsStatus === "loading") ? (
-          <p className="extension-message" role="status">
-            Loading app…
-          </p>
+          <LoadingState label="Loading app" />
         ) : inventory.status === "error" ? (
           <FailureState title="Could not list the installed apps" error={inventory.error} domain="local" onRetry={inventory.reload} />
         ) : unchecked && contextsStatus === "failed" ? (
           <FailureState title="Could not list clusters" error={contextsError} domain="local" onRetry={() => void relistContexts()} />
         ) : shared ? (
-          <p className="extension-message">{SHARED_CONTEXT_ID_MESSAGE}</p>
+          <EmptyState title="This app page cannot be opened" hint={SHARED_CONTEXT_ID_MESSAGE} />
         ) : plugin && cluster && !cluster.pinnedId ? (
-          <p className="extension-message">{NO_PINNED_ID_MESSAGE}</p>
+          <EmptyState title="This app page cannot be opened" hint={NO_PINNED_ID_MESSAGE} />
         ) : unchecked ? (
-          <p className="extension-message">
-            This cluster is no longer in your kubeconfig files, so its apps cannot be opened here.
-            Manage your kubeconfig files in Settings → Contexts.
-          </p>
+          <EmptyState
+            title="This cluster is no longer in your kubeconfig files"
+            hint="Its apps cannot be opened here. Manage your kubeconfig files in Settings → Contexts."
+          />
         ) : plugin && page && !extensionEnabledFor(plugin, cluster?.key) ? (
-          <p className="extension-message">
-            This app is not enabled for this cluster. Manage it in Settings → Apps.
-          </p>
+          <EmptyState title="This app is not enabled for this cluster" hint="Manage it in Settings → Apps." />
         ) : plugin && page && target.card && !card ? (
           // A card the app has since dropped: filtering by it is impossible, and
           // showing every row would present the whole list as the card's answer.
-          <div className="extension-message">
-            <p>{plainText(plugin.manifest.name)} no longer declares this dashboard card, so there is nothing to narrow this list to.</p>
-            <Button variant="secondary" onClick={showAll}>Show all {plainText(page.title)}</Button>
-          </div>
+          <EmptyState
+            title={`${plainText(plugin.manifest.name)} no longer declares this dashboard card`}
+            hint="There is nothing to narrow this list to."
+            action={<Button variant="secondary" onClick={showAll}>Show all {plainText(page.title)}</Button>}
+          />
         ) : plugin && page ? (
           <ExtensionResourceNavigation.Provider value={openResource}>
           {card && (
@@ -148,10 +145,10 @@ export function ExtensionPage({ route }: RoutedScreenProps) {
           />
           </ExtensionResourceNavigation.Provider>
         ) : (
-          <p className="extension-message">
-            This app page is disabled, removed, or no longer available.
-            Manage it in Settings → Apps.
-          </p>
+          <EmptyState
+            title="This app page is not available"
+            hint="It is disabled, removed, or no longer declared. Manage it in Settings → Apps."
+          />
         )}
       </div>
     </Screen>

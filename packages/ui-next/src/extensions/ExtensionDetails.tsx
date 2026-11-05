@@ -9,7 +9,7 @@ import {
   type ExtensionPreviousVersion,
   type InstalledExtension,
 } from "@srelens/core";
-import { Button, CodeEditor, Tabs } from "@srelens/ui-kit";
+import { Button, CodeEditor, EmptyState, Tabs } from "@srelens/ui-kit";
 import { saveOrDownload } from "../lib/saveOrDownload";
 import { ExtensionClusters } from "./ExtensionClusters";
 import { ExtensionNetwork } from "./ExtensionNetwork";
@@ -192,7 +192,7 @@ export function ExtensionDetails({
 
           <h3>Previous versions</h3>
           {plugin.history.length === 0 ? (
-            <p className="extension-message">No earlier version is kept. Each update keeps up to three.</p>
+            <EmptyState compact title="No earlier version is kept" hint="Each update keeps up to three." />
           ) : (
             <ul className="extension-versions" aria-label="Previous versions">
               {plugin.history.map((version) => (

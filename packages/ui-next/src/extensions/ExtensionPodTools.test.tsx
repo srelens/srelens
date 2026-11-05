@@ -263,7 +263,7 @@ describe("the pod tools on a Deployment (#567)", () => {
     fireEvent.click(await within(tools).findByRole("button", { name: "Forward · Metrics (web-1)" }));
     await waitFor(() => expect(stream.opened).toHaveLength(1));
     expect(stream.opened[0].request.source).toEqual({ kind: "portForward", capability: "metrics", name: "web", pod: "web-1" });
-    expect(within(tools).getByText("Opening a local port…")).toBeTruthy();
+    expect(within(tools).getByRole("status", { name: "Opening a local port" })).toBeTruthy();
     act(() => stream.opened[0].handlers.onData({ event: "ready", localPort: 54321, pod: "web-1", port: 9402 }, 1));
     const status = await within(tools).findByText(/Forwarding/);
     expect(status.textContent).toContain("127.0.0.1:54321");

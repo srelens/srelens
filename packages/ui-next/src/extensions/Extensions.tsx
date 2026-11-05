@@ -28,7 +28,7 @@ import {
 
 import { ExtensionCatalog } from "./ExtensionCatalog";
 import { ServerPolicy } from "./ServerPolicy";
-import { Alert, Button, Tabs } from "@srelens/ui-kit";
+import { Alert, Button, EmptyState, LoadingState, Tabs } from "@srelens/ui-kit";
 import { FailureAlert, FailureState } from "../lib/errorCopy";
 import { ExtensionResults } from "./ExtensionResults";
 export { ExtensionResults } from "./ExtensionResults";
@@ -258,12 +258,7 @@ export function ExtensionManager({ show }: { show?: { tab: string } } = {}) {
         return { action: "installCatalogPackage", id: origin.id, sha256: origin.sha256, packageSha256: origin.package.sha256, grants: current.permissions, ...reviewed };
     }
   }
-  if (inventory.status === "loading")
-    return (
-      <p role="status" className="extension-message">
-        Loading apps…
-      </p>
-    );
+  if (inventory.status === "loading") return <LoadingState label="Loading apps" />;
   if (inventory.status === "error")
     return <FailureState title="Could not list the installed apps" error={inventory.error} domain="local" onRetry={inventory.reload} />;
   const state = inventory.data!;
@@ -381,7 +376,7 @@ export function ExtensionManager({ show }: { show?: { tab: string } } = {}) {
                 onRetry={() => void reviewManifest(review.source, review.signature, review.origin, review.keyId)}
               />
             ) : !review.errors ? (
-              <p role="status" className="extension-message">Checking the manifest…</p>
+              <LoadingState compact label="Checking the manifest" />
             ) : review.errors.length > 0 ? (
               <div className="extension-problems">
                 <p>
@@ -476,9 +471,7 @@ export function ExtensionManager({ show }: { show?: { tab: string } } = {}) {
       </details>
 
       <p className="extension-message extension-catalog-meta">Apps are installed app-wide and are available on every cluster unless an app's Details limit it to chosen clusters. Each page checks the APIs it needs when opened.</p>
-      {state.plugins.length === 0 && (
-        <p className="extension-message">No apps installed.</p>
-      )}
+      {state.plugins.length === 0 && <EmptyState title="No apps installed" />}
       {state.plugins.map((plugin) => (
         <section className="extension-installed" key={plugin.manifest.id}>
           <div className="extension-toolbar">

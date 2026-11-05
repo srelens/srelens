@@ -271,7 +271,7 @@ it("draws its inputs with the form-control boundary, not the panel divider", asy
 
 it("says so when an app declares no settings", () => {
   form(app([]));
-  expect(screen.getByText("This app declares no settings.")).toBeTruthy();
+  expect(screen.getByText("This app declares no settings")).toBeTruthy();
   expect(screen.queryByRole("button", { name: "Save settings" })).toBeNull();
 });
 

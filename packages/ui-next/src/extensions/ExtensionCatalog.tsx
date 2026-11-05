@@ -1,7 +1,7 @@
 import { ExtensionLogo } from "./ExtensionLogo";
 import { useEffect, useRef, useState } from "react";
 import { isTauri, listExtensionCatalog, reviewCatalogExtension, openExternal, type ErrorDomain, type ExtensionCatalogSnapshot, type ExtensionReview, type InstalledExtension } from "@srelens/core";
-import { Button, FilterBar, useListFilter } from "@srelens/ui-kit";
+import { Button, EmptyState, FilterBar, LoadingState, useListFilter } from "@srelens/ui-kit";
 import { FailureAlert } from "../lib/errorCopy";
 
 export function ExtensionCatalog({ installed, onReview, onReviewStart, autoLoad = false }: {
@@ -44,7 +44,8 @@ export function ExtensionCatalog({ installed, onReview, onReviewStart, autoLoad 
     </div>
     {data && <FilterBar {...filter} label="Filter apps" placeholder="Filter apps…" />}
     {!data && <p className="extension-message">Discover native apps from the srelens catalog. Each app is maintained in its own repository.</p>}
-    {busy && <p className="extension-message" role="status">Loading…</p>}
+    {/* `busy` also covers opening a repository and reviewing a release, so the kit's own word. */}
+    {busy && <LoadingState compact />}
     {error && <FailureAlert tone="sev" title={error.title} error={error.reason} domain={error.domain} />}
     {data && <>
       <p className="extension-message extension-catalog-meta">{data.stale ? "Cached catalog" : "Catalog checked"} · {new Date(data.fetchedAt * 1000).toLocaleString()} · Host API {data.hostApiVersions.join(", ")}</p>
@@ -53,7 +54,7 @@ export function ExtensionCatalog({ installed, onReview, onReviewStart, autoLoad 
       {!isTauri() && <p className="extension-message">This server keeps one catalog for everyone who signs in, and fetches it again once a day.</p>}
       {data.error && <FailureAlert title="Could not refresh the catalog, so this is the cached one" error={data.error} domain="http" />}
       <p className="extension-message">An app whose ID is in a publisher's namespace installs only with that publisher's signature, verified before installation review. Review permissions before installing.</p>
-      {entries?.length === 0 && <p className="extension-message">No matching apps.</p>}
+      {entries?.length === 0 && <EmptyState title="No matching apps" />}
       {entries?.map(entry => {
         const current = installed.find(p => p.manifest.id === entry.id);
         const incompatible = data.incompatible.includes(entry.id);
