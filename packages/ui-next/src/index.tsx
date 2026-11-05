@@ -1,6 +1,7 @@
 import { useState, useSyncExternalStore } from "react";
 import { Gallery } from "@srelens/ui-kit/gallery";
 import { Window } from "./shell/Window";
+import { FailureAlert } from "./lib/errorCopy";
 import { ConsoleProvider } from "./console";
 
 export { ConsoleProvider, useConsole, type ConsoleValue } from "./console";
@@ -152,9 +153,7 @@ export function NextApp({
         </div>
       )}
       {error && (
-        <p role="alert" className="shrink-0 px-3 py-2 text-[0.75rem] text-[var(--sev)]">
-          Could not switch design. {error}
-        </p>
+        <FailureAlert tone="sev" className="mx-3 my-2 shrink-0" title="Could not switch design" error={error} domain="local" />
       )}
     </div>
   );

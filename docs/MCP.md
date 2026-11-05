@@ -778,14 +778,18 @@ notification carries only the URI, and the client re-reads to get the new
 content. Over stdio, notifications arrive on the server's stdout. Over HTTP
 ([issue #193](https://github.com/srelens/srelens/issues/193)), the client
 first opens the push channel — `GET /mcp` with `Accept: text/event-stream`,
-authenticated with the same bearer token and covered by the same loopback
-`Host` check — and notifications arrive as SSE events on that stream.
+authenticated with the same bearer token, carrying the `Mcp-Session-Id` from
+its successful `initialize` response, and covered by the same loopback `Host`
+check — and notifications arrive as SSE events on that stream.
 Subscribing with no stream connected is refused rather than silently
 accepted, since the notifications would have nowhere to go, and
 subscriptions live exactly as long as the stream that carries them: a
 disconnect, a reconnect replacing the stream, or a token rotation (which
 restarts the server) releases every watch, and the client re-subscribes on
-its new stream. Up to 32
+its new stream. Every HTTP request after `initialize` must carry the
+server-minted session ID. Missing IDs are rejected; unknown or ended IDs return
+404 so the client initializes again. `DELETE /mcp` with that bearer token and
+session ID explicitly ends the session and its stream. Up to 32
 subscriptions can be live at once; re-subscribing to a URI you already hold
 replaces it in place rather than counting twice, and past the cap you need
 to unsubscribe from something before adding another.

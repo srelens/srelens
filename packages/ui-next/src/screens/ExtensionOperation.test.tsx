@@ -257,7 +257,7 @@ it("can cancel while the host is still opening a scan stream", async () => {
 it("keeps partial report data visible with an actionable warning", async () => {
  host.answer = { items: [{ reportId: "retained", image: "alpine:3.10" }], warnings: ["sbom-reports discovery failed: permission denied"] };
  open();fireEvent.change(await screen.findByLabelText("Image"),{target:{value:"alpine:3.10"}});fireEvent.click(screen.getByRole("button",{name:"Scan image"}));
- expect((await screen.findByRole("alert")).textContent).toContain("permission denied");
+ expect((await screen.findByText(/permission denied/)).closest('[role="status"]')?.textContent).toMatch(/^The app reported warnings/);
  expect(screen.getByText("alpine:3.10")).toBeTruthy();
 });
 

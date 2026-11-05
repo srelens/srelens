@@ -922,7 +922,7 @@ fn every_theme_style_uses_its_palette_colour() {
     assert_eq!(badge.bg, Some(Theme::RED));
     assert_eq!(badge.fg, Some(Theme::SEL_FG));
     assert!(bold(badge));
-    assert_eq!(Theme::BORDER_FOCUS, Theme::ACCENT);
+    assert_eq!(Theme::BORDER_FOCUS, Color::Black);
     assert_eq!(Theme::BG, Color::Reset);
 }
 

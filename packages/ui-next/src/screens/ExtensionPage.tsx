@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { ExtensionResourceDetails } from "../extensions/ExtensionResourceDetails";
-import { ErrorNotice } from "../extensions/ExtensionResults";
+import { FailureState } from "../lib/errorCopy";
 import { NO_PINNED_ID_MESSAGE, SHARED_CONTEXT_ID_MESSAGE } from "../extensions/contextIds";
 import { plainText } from "../extensions/displayText";
 import { ExtensionResourceNavigation } from "../extensions/resourceNavigation";
@@ -99,16 +99,9 @@ export function ExtensionPage({ route }: RoutedScreenProps) {
             Loading app…
           </p>
         ) : inventory.status === "error" ? (
-          <div role="alert" className="extension-message">
-            {inventory.error}
-            <Button onClick={inventory.reload}>Retry</Button>
-          </div>
+          <FailureState title="Could not list the installed apps" error={inventory.error} domain="local" onRetry={inventory.reload} />
         ) : unchecked && contextsStatus === "failed" ? (
-          <ErrorNotice
-            title="Could not list clusters"
-            message={contextsError}
-            retry={() => void relistContexts()}
-          />
+          <FailureState title="Could not list clusters" error={contextsError} domain="local" onRetry={() => void relistContexts()} />
         ) : shared ? (
           <p className="extension-message">{SHARED_CONTEXT_ID_MESSAGE}</p>
         ) : plugin && cluster && !cluster.pinnedId ? (

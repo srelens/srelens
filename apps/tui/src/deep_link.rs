@@ -86,6 +86,7 @@ impl DeepLink {
                     }
                     CommandTarget::Help => (namespace.as_deref(), "help".to_string()),
                     CommandTarget::Contexts => (namespace.as_deref(), "contexts".to_string()),
+                    CommandTarget::Mux => (namespace.as_deref(), "mux".to_string()),
                     CommandTarget::AddCluster => (namespace.as_deref(), "import".to_string()),
                     CommandTarget::Namespaces => (namespace.as_deref(), "namespaces".to_string()),
                     CommandTarget::Quit => (namespace.as_deref(), "quit".to_string()),

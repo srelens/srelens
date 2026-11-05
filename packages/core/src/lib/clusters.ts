@@ -27,6 +27,13 @@ export interface ClusterContext {
   isLocal?: boolean;
   /** The detected local provider (e.g. "kind", "vind"), when `isLocal`. */
   provider?: string;
+  /**
+   * A provider-generated Kubernetes distribution identifier (for example
+   * `gke`, `eks`, `aks`, or a precise local provider). Absent when the
+   * kubeconfig does not supply enough evidence; never inferred from a loose
+   * human label alone.
+   */
+  distribution?: string;
   /** The kubeconfig this context was declared in. */
   sourceFile: string;
   /** The credential MECHANISM — never the credential. See the Rust side. */

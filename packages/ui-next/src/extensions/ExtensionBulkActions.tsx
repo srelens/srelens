@@ -10,6 +10,7 @@ import {
   type BulkProgress,
 } from "@srelens/core";
 import { ActionBar, Button, type ActionBarAction } from "@srelens/ui-kit";
+import { FailureAlert } from "../lib/errorCopy";
 import { HostConfirmation, boundedPlainText } from "../confirm/HostConfirmation";
 import { useProtectedConfirm } from "../lib/protectedConfirm";
 import { useConfirmationApp } from "../confirm/confirmationApp";
@@ -291,15 +292,12 @@ export function ExtensionBulkActions({ target, selection, onClear, available, ba
         // The host could not say which actions it offers. That is a failed
         // read, not an absence of actions, so it says so and offers a retry
         // rather than drawing an empty bar.
-        <div className="extension-error" role="alert">
-          <div>
-            <strong>Could not read actions and availability for the selection</strong>
-            <p>{boundedPlainText(menu.error ?? "The resource could not be read.")}</p>
-          </div>
-          <Button variant="outline" size="xs" onClick={menu.reload}>
-            Retry
-          </Button>
-        </div>
+        <FailureAlert
+          tone="sev"
+          title="Could not read actions and availability for the selection"
+          error={boundedPlainText(menu.error ?? "The resource could not be read.")}
+          onRetry={menu.reload}
+        />
       )}
       {pending !== null && (
         <div ref={review} tabIndex={-1} onKeyDown={(event) => {

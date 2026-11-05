@@ -1,5 +1,6 @@
 //! MCP over HTTP, Streamable-HTTP shaped (#193): `POST /mcp` for JSON-RPC,
-//! `GET /mcp` for the server→client SSE stream that carries
+//! `GET /mcp` for the server→client SSE stream, and `DELETE /mcp` to end the
+//! caller's session. The SSE stream delivers
 //! `notifications/resources/updated` — the channel that makes
 //! `resources/subscribe` real on this transport. A networked transport for
 //! MCP clients that can't spawn the stdio binary. Binds loopback only unless
@@ -9,7 +10,7 @@
 //! token as its only barrier (#607). Destructive tools are consent-gated in
 //! the shared request handler.
 
-use std::collections::{BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::net::SocketAddr;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -35,6 +36,14 @@ use crate::McpServer;
 /// (each carrying up to `MAX_SUBSCRIPTIONS` watches) without bound.
 const MAX_PUSH_SESSIONS: usize = 8;
 
+/// Bound initialized HTTP sessions independently from their optional SSE
+/// streams. Most clients use one session; this leaves room for reconnects and
+/// several IDEs while ensuring abandoned initialize handshakes cannot grow
+/// server memory without limit. At capacity the least-recently-used session
+/// without a live stream is retired; its next request receives the protocol's
+/// required 404 and the client re-initializes.
+const MAX_HTTP_SESSIONS: usize = 64;
+
 /// The push half of the transport: one SSE stream PER SESSION, keyed by the
 /// `Mcp-Session-Id` this server minted at `initialize` (see `rpc`). Distinct
 /// clients — a configured IDE and an assistant CLI, say — get distinct
@@ -47,11 +56,13 @@ const MAX_PUSH_SESSIONS: usize = 8;
 /// send them, the exact failure shape #195 eliminated.
 #[derive(Default)]
 struct PushState {
-    sessions: Mutex<std::collections::BTreeMap<String, PushChannels>>,
+    sessions: Mutex<BTreeMap<String, HttpSession>>,
     /// Distinguishes streams so a dying stream's guard can only clear ITS
     /// slot, never a successor's (same shape as the subscription registry's
     /// generations).
     next_id: AtomicU64,
+    /// Monotonic recency marker for bounded-session LRU retirement.
+    next_touch: AtomicU64,
     /// Set by `end_streams` at graceful shutdown. Checked under the
     /// `sessions` lock on install, so a GET that was already accepted when
     /// shutdown began cannot slip a fresh stream in after the teardown and
@@ -59,27 +70,110 @@ struct PushState {
     closed: std::sync::atomic::AtomicBool,
 }
 
+struct HttpSession {
+    stream: Option<PushChannels>,
+    touched: u64,
+}
+
 impl PushState {
+    fn next_touch(&self) -> u64 {
+        self.next_touch.fetch_add(1, Ordering::Relaxed)
+    }
+
+    /// Register a session only after an initialize request has produced a
+    /// successful JSON-RPC result. IDs contain 256 random bits encoded as
+    /// lowercase hex: globally unique in practice, cryptographically secure,
+    /// and entirely within the visible-ASCII range required by MCP.
+    fn create_session(&self) -> Result<String, StatusCode> {
+        let mut sessions = self.sessions.lock().unwrap_or_else(|e| e.into_inner());
+        if self.closed.load(Ordering::Relaxed) {
+            return Err(StatusCode::SERVICE_UNAVAILABLE);
+        }
+
+        // A stream whose receiver disappeared can be treated as inactive even
+        // if its guard has not run yet. Never evict a live stream: doing so
+        // would silently terminate a connected client's session.
+        for session in sessions.values_mut() {
+            if session.stream.as_ref().is_some_and(|stream| stream.wake.is_closed()) {
+                session.stream = None;
+            }
+        }
+        if sessions.len() >= MAX_HTTP_SESSIONS {
+            let evict = sessions
+                .iter()
+                .filter(|(_, session)| session.stream.is_none())
+                .min_by_key(|(_, session)| session.touched)
+                .map(|(id, _)| id.clone());
+            match evict {
+                Some(id) => {
+                    sessions.remove(&id);
+                }
+                None => return Err(StatusCode::TOO_MANY_REQUESTS),
+            }
+        }
+
+        loop {
+            let id = mint_session_id();
+            if !sessions.contains_key(&id) {
+                sessions.insert(
+                    id.clone(),
+                    HttpSession {
+                        stream: None,
+                        touched: self.next_touch(),
+                    },
+                );
+                return Ok(id);
+            }
+        }
+    }
+
+    /// Validate and refresh an existing session before any non-initialize
+    /// request is allowed to reach the MCP handler.
+    fn touch_session(&self, session: &str) -> Result<(), StatusCode> {
+        let mut sessions = self.sessions.lock().unwrap_or_else(|e| e.into_inner());
+        if self.closed.load(Ordering::Relaxed) {
+            return Err(StatusCode::SERVICE_UNAVAILABLE);
+        }
+        let Some(existing) = sessions.get_mut(session) else {
+            return Err(StatusCode::NOT_FOUND);
+        };
+        existing.touched = self.next_touch();
+        Ok(())
+    }
+
     /// Install `chans` as `session`'s stream, unless the server is shutting
     /// down or the session cap is hit by OTHER sessions. Returns whether it
     /// was installed. Dropping a previous same-session occupant here is what
-    /// ends a replaced stream (the reconnect case): its close signal fires
-    /// and its guard aborts the watches it owned.
+    /// ends a replaced stream (the reconnect case): dropping its channels
+    /// closes the body and aborts the server-side work it owned immediately.
     fn install(&self, session: &str, chans: PushChannels) -> Result<(), StatusCode> {
         let mut sessions = self.sessions.lock().unwrap_or_else(|e| e.into_inner());
         if self.closed.load(Ordering::Relaxed) {
             return Err(StatusCode::SERVICE_UNAVAILABLE);
         }
-        if !sessions.contains_key(session) && sessions.len() >= MAX_PUSH_SESSIONS {
-            // Reap sessions whose stream already died before refusing —
-            // mirrors the subscription registry's cap-time reaping.
-            sessions.retain(|_, c| !c.wake.is_closed());
-            if sessions.len() >= MAX_PUSH_SESSIONS {
+        let Some(existing) = sessions.get(session) else {
+            return Err(StatusCode::NOT_FOUND);
+        };
+        let replacing = existing.stream.is_some();
+        if !replacing {
+            for existing in sessions.values_mut() {
+                if existing.stream.as_ref().is_some_and(|stream| stream.wake.is_closed()) {
+                    existing.stream = None;
+                }
+            }
+            if sessions.values().filter(|session| session.stream.is_some()).count() >= MAX_PUSH_SESSIONS {
                 return Err(StatusCode::TOO_MANY_REQUESTS);
             }
         }
-        sessions.insert(session.to_string(), chans);
+        let existing = sessions.get_mut(session).expect("session checked above");
+        existing.touched = self.next_touch();
+        existing.stream = Some(chans);
         Ok(())
+    }
+
+    fn terminate(&self, session: &str) -> Result<(), StatusCode> {
+        let mut sessions = self.sessions.lock().unwrap_or_else(|e| e.into_inner());
+        sessions.remove(session).map(|_| ()).ok_or(StatusCode::NOT_FOUND)
     }
 
     /// Graceful-shutdown teardown (#193 review): drop every session's
@@ -101,15 +195,29 @@ impl PushState {
 /// `handle_subscription` clones it into `on_change`/`on_dead`, and the real
 /// `CacheWatcher` moves those into its long-lived watch task, so with any
 /// real subscription active the wake channel stays open long after this
-/// struct is dropped (the first shutdown fix relied on exactly that and
-/// deadlocked: stream waits for watches to drop, watches drop when the
-/// guard runs, the guard runs when the stream ends).
+/// struct is dropped. Its `Drop` therefore both aborts that work and closes
+/// the dedicated signal, making teardown immediate and breaking the cycle.
 struct PushChannels {
     id: u64,
     subs: Arc<SubscriptionRegistry>,
     dirty: Arc<Mutex<BTreeSet<String>>>,
     wake: tokio::sync::mpsc::Sender<()>,
     _close: tokio::sync::oneshot::Sender<()>,
+    /// Follows the app tools for this stream (#574); ends with it.
+    tools: Option<tokio::task::JoinHandle<()>>,
+}
+
+impl Drop for PushChannels {
+    fn drop(&mut self) {
+        // Session termination, replacement, and graceful shutdown all drop
+        // this value while holding the sessions lock. Abort before that lock
+        // is released: no concurrent subscription can register after this
+        // sweep and escape the lifecycle boundary.
+        self.subs.abort_all();
+        if let Some(tools) = &self.tools {
+            tools.abort();
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -118,41 +226,22 @@ struct AppState {
     push: Arc<PushState>,
 }
 
-/// Aborts the stream's watches when the stream itself is dropped — client
-/// disconnect, replacement by a newer stream, or server shutdown all land
-/// here, so the "no watch outlives its stream" contract has one enforcement
-/// point. Clears its session's slot only when it still holds this stream.
+/// Clears the session's stream slot when the SSE body is dropped by a client,
+/// but only when it still holds this stream. Dropping the slot performs the
+/// synchronous server-side teardown in [`PushChannels::drop`].
 struct StreamGuard {
     push: Arc<PushState>,
-    subs: Arc<SubscriptionRegistry>,
     session: String,
     id: u64,
-    /// Follows the app tools for this stream (#574); ends with it.
-    tools: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl Drop for StreamGuard {
     fn drop(&mut self) {
-        // Slot removal FIRST, abort SECOND — and the removal takes the same
-        // lock every subscribe POST holds across its registration. After the
-        // slot is gone no POST can reach this registry (it finds no session
-        // and refuses), so the abort that follows closes the set for good.
-        // The reverse order had a window: a POST already holding the lock
-        // could insert its watch AFTER an early abort_all saw an empty
-        // registry, and the slot removal wouldn't abort again — an orphan
-        // watch surviving its stream. (A POST that completed before removal
-        // still answers success for a watch this abort kills moments later —
-        // but its stream is the one that just died, so the client sees the
-        // disconnect and resubscribes; no watch outlives the stream.)
-        {
-            let mut sessions = self.push.sessions.lock().unwrap_or_else(|e| e.into_inner());
-            if sessions.get(&self.session).is_some_and(|a| a.id == self.id) {
-                sessions.remove(&self.session);
+        let mut sessions = self.push.sessions.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(session) = sessions.get_mut(&self.session) {
+            if session.stream.as_ref().is_some_and(|stream| stream.id == self.id) {
+                session.stream = None;
             }
-        }
-        self.subs.abort_all();
-        if let Some(tools) = &self.tools {
-            tools.abort();
         }
     }
 }
@@ -268,6 +357,15 @@ fn accepts_event_stream(accept: &str) -> bool {
 /// connections open through proxies and lets a dead client surface as a
 /// write error instead of a silent zombie.
 async fn sse(State(st): State<AppState>, headers: axum::http::HeaderMap) -> Response {
+    let session = match presented_session(&headers) {
+        Ok(Some(session)) => session.to_string(),
+        Ok(None) | Err(StatusCode::BAD_REQUEST) => return session_error(StatusCode::BAD_REQUEST),
+        Err(status) => return session_error(status),
+    };
+    if let Err(status) = st.push.touch_session(&session) {
+        return session_error(status);
+    }
+
     // The spec has clients send `Accept: text/event-stream`; a GET that
     // refuses it gets 406 rather than a stream it won't parse. An absent
     // Accept header is allowed (curl convenience).
@@ -283,7 +381,6 @@ async fn sse(State(st): State<AppState>, headers: axum::http::HeaderMap) -> Resp
         return (StatusCode::NOT_ACCEPTABLE, "this endpoint streams text/event-stream").into_response();
     }
 
-    let session = presented_session(&headers).unwrap_or_else(|| DEFAULT_SESSION.to_string());
     let (wake_tx, wake_rx) = tokio::sync::mpsc::channel(1);
     let (close_tx, close_rx) = tokio::sync::oneshot::channel();
     let tools_changed = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -299,6 +396,7 @@ async fn sse(State(st): State<AppState>, headers: axum::http::HeaderMap) -> Resp
         dirty: Arc::default(),
         wake: wake_tx,
         _close: close_tx,
+        tools,
     };
     let stream = PushStream {
         wake: wake_rx,
@@ -308,16 +406,15 @@ async fn sse(State(st): State<AppState>, headers: axum::http::HeaderMap) -> Resp
         pending: VecDeque::new(),
         _guard: StreamGuard {
             push: st.push.clone(),
-            subs: chans.subs.clone(),
             session: session.clone(),
             id: chans.id,
-            tools,
         },
     };
-    // Install as this session's stream (see `PushState::install` for
-    // replacement, cap, and shutdown semantics).
+    // Install only into a session created by a successful initialize (see
+    // `PushState::install` for validation, replacement, cap, and shutdown).
     if let Err(status) = st.push.install(&session, chans) {
         let message = match status {
+            StatusCode::NOT_FOUND => "MCP session not found; initialize a new session",
             StatusCode::TOO_MANY_REQUESTS => "too many concurrent push sessions",
             _ => "the server is shutting down",
         };
@@ -362,7 +459,7 @@ async fn follow_app_tools(
     }
 }
 
-/// The `Mcp-Session-Id` header name, surfaced on every `/mcp` response.
+/// The `Mcp-Session-Id` header name.
 static MCP_SESSION_ID: HeaderName = HeaderName::from_static("mcp-session-id");
 
 /// Mint a fresh MCP session id for one `initialize`. Streamable-HTTP clients
@@ -376,19 +473,42 @@ static MCP_SESSION_ID: HeaderName = HeaderName::from_static("mcp-session-id");
 /// reconnect would tear down the other's stream. The bearer token, not this
 /// id, is what authorizes a request; the id is routing, never auth.
 fn mint_session_id() -> String {
-    static COUNTER: AtomicU64 = AtomicU64::new(0);
-    format!("srelens-{}-{}", std::process::id(), COUNTER.fetch_add(1, Ordering::Relaxed))
+    let mut bytes = [0u8; 32];
+    getrandom::getrandom(&mut bytes).expect("system randomness for MCP session id");
+    let mut id = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        use std::fmt::Write as _;
+        write!(&mut id, "{byte:02x}").expect("writing to a String cannot fail");
+    }
+    id
 }
 
-/// The session id a request presents, if any. Absent for `initialize` (the
-/// client has none yet) and for hand-rolled callers (curl); those fall back
-/// to a shared default slot so single-client use needs no header discipline.
-fn presented_session(headers: &axum::http::HeaderMap) -> Option<String> {
-    headers.get(&MCP_SESSION_ID).and_then(|v| v.to_str().ok()).map(str::to_string)
+/// Parse the visible-ASCII form Streamable HTTP permits. Reject duplicate,
+/// non-visible, and unreasonably large values as malformed instead of
+/// treating them as map keys. A well-formed but unknown value is distinguished
+/// later with the protocol-required 404.
+fn presented_session(headers: &axum::http::HeaderMap) -> Result<Option<&str>, StatusCode> {
+    let mut values = headers.get_all(&MCP_SESSION_ID).iter();
+    let Some(value) = values.next() else {
+        return Ok(None);
+    };
+    if values.next().is_some() {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    let value = value.to_str().map_err(|_| StatusCode::BAD_REQUEST)?;
+    let valid = !value.is_empty() && value.len() <= 128 && value.bytes().all(|b| matches!(b, 0x21..=0x7e));
+    valid.then_some(Some(value)).ok_or(StatusCode::BAD_REQUEST)
 }
 
-/// The slot key for requests that present no session id.
-const DEFAULT_SESSION: &str = "default";
+fn session_error(status: StatusCode) -> Response {
+    let message = match status {
+        StatusCode::BAD_REQUEST => "a valid Mcp-Session-Id is required",
+        StatusCode::NOT_FOUND => "MCP session not found; initialize a new session",
+        StatusCode::TOO_MANY_REQUESTS => "too many active MCP sessions",
+        _ => "the server is shutting down",
+    };
+    (status, message).into_response()
+}
 
 async fn rpc(
     State(st): State<AppState>,
@@ -398,6 +518,40 @@ async fn rpc(
     Json(req): Json<Value>,
 ) -> Response {
     let method = req.get("method").and_then(Value::as_str).unwrap_or("");
+    let presented = match presented_session(&headers) {
+        Ok(session) => session.map(str::to_string),
+        Err(status) => return session_error(status),
+    };
+
+    // A session begins only when initialize itself succeeded. A client that
+    // already has (or chooses) an id must not be able to make that value
+    // valid by attaching it to another initialize request.
+    if method == "initialize" {
+        if presented.is_some() {
+            return (
+                StatusCode::BAD_REQUEST,
+                "initialize must not include an Mcp-Session-Id",
+            )
+                .into_response();
+        }
+        let caller = caller.map(|axum::Extension(caller)| caller);
+        return match handle_request_as(&st.server, &req, crate::Transport::Http, caller).await {
+            Some(resp) if resp.get("result").is_some() => match st.push.create_session() {
+                Ok(session) => ([(MCP_SESSION_ID.clone(), session)], Json(resp)).into_response(),
+                Err(status) => session_error(status),
+            },
+            Some(resp) => Json(resp).into_response(),
+            None => StatusCode::ACCEPTED.into_response(),
+        };
+    }
+
+    let Some(session) = presented else {
+        return session_error(StatusCode::BAD_REQUEST);
+    };
+    if let Err(status) = st.push.touch_session(&session) {
+        return session_error(status);
+    }
+
     // Subscription methods are handled here, not in `handle_request` — same
     // split as the stdio serve loop, because they need this transport's push
     // machinery: the registry, dirty set, and wakeup of the caller's OWN
@@ -410,23 +564,25 @@ async fn rpc(
     let resp = if refused.is_some() {
         refused
     } else if method == "resources/subscribe" || method == "resources/unsubscribe" {
-        let session = presented_session(&headers).unwrap_or_else(|| DEFAULT_SESSION.to_string());
         // The sessions lock is held across `handle_subscription`, which is
         // entirely synchronous (no await), so registration is SERIALIZED
         // with stream replacement — `PushState::install` takes this same
         // lock. The race this closes: a reconnecting GET replacing the
         // stream between lookup and registration would leave the watch in
-        // the old registry (whose guard then aborts it) while the client
+        // the old registry (whose channels then abort it) while the client
         // holds a success response for a subscription the new stream will
         // never deliver.
         let sessions = st.push.sessions.lock().unwrap_or_else(|e| e.into_inner());
-        match sessions.get(&session) {
-            Some(c) => {
-                handle_subscription(
-                    &st.server, &c.subs, &c.dirty, &c.wake, &req, method,
-                    crate::Transport::Http,
-                )
-            }
+        match sessions.get(&session).and_then(|session| session.stream.as_ref()) {
+            Some(c) => handle_subscription(
+                &st.server,
+                &c.subs,
+                &c.dirty,
+                &c.wake,
+                &req,
+                method,
+                crate::Transport::Http,
+            ),
             None => req.get("id").cloned().map(|id| {
                 json!({"jsonrpc": "2.0", "id": id, "error": {"code": -32002, "message":
                     "no notification stream is connected for this session: open GET /mcp \
@@ -439,21 +595,30 @@ async fn rpc(
         let caller = caller.map(|axum::Extension(caller)| caller);
         handle_request_as(&st.server, &req, crate::Transport::Http, caller).await
     };
-    // Streamable-HTTP session id: `initialize` MINTS a fresh one (each client
-    // then presents the id it was given, which is what keeps clients'
-    // sessions apart); every other response echoes the presented id back.
-    let sid = match presented_session(&headers) {
-        Some(sid) => sid,
-        None => mint_session_id(),
-    };
     match resp {
-        // `Json` sets `content-type: application/json`; we add the session-id
-        // header the streamable-HTTP handshake needs.
-        Some(resp) => ([(MCP_SESSION_ID.clone(), sid)], Json(resp)).into_response(),
+        // `Json` sets `content-type: application/json`; echo the established
+        // session id so responses remain self-identifying.
+        Some(resp) => ([(MCP_SESSION_ID.clone(), session)], Json(resp)).into_response(),
         // A JSON-RPC notification (no `id`) expects no body. Streamable-HTTP
         // wants `202 Accepted` here, not `200` with a `{}` body — the latter
         // is what stalled Codex's client.
         None => StatusCode::ACCEPTED.into_response(),
+    }
+}
+
+/// End an HTTP session at the client's request. Dropping its stream channels
+/// immediately aborts every watch it owns and closes any connected SSE body.
+/// The id is removed before the 204 is returned, so all later requests receive
+/// 404 and must initialize again, as Streamable HTTP specifies.
+async fn end_session(State(st): State<AppState>, headers: axum::http::HeaderMap) -> Response {
+    let session = match presented_session(&headers) {
+        Ok(Some(session)) => session,
+        Ok(None) | Err(StatusCode::BAD_REQUEST) => return session_error(StatusCode::BAD_REQUEST),
+        Err(status) => return session_error(status),
+    };
+    match st.push.terminate(session) {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(status) => session_error(status),
     }
 }
 
@@ -610,7 +775,7 @@ async fn token_guard(State(auth): State<TokenAuth>, mut req: Request, next: Next
 }
 
 /// Build the MCP HTTP router (POST /mcp for JSON-RPC, GET /mcp for the SSE
-/// push stream, GET /healthz). Requires a
+/// push stream, DELETE /mcp to end a session, GET /healthz). Requires a
 /// token: there is no way to ask this crate for an unauthenticated production
 /// server, because an `Option` here is an invitation to pass `None` by accident.
 /// `exposure` says which `Host` values the router answers to (see
@@ -647,10 +812,10 @@ fn router_inner_with_push(
     let push = Arc::new(PushState::default());
     let state = AppState { server: Arc::new(server), push: push.clone() };
     let router = Router::new()
-        // POST and GET share the route, so the token `route_layer` below
+        // All MCP methods share the route, so the token `route_layer` below
         // covers the SSE stream exactly like the JSON-RPC endpoint — a
         // long-lived stream is established under the same bearer check.
-        .route("/mcp", post(rpc).get(sse))
+        .route("/mcp", post(rpc).get(sse).delete(end_session))
         .route_layer(middleware::from_fn_with_state(auth, token_guard))
         .route("/healthz", get(|| async { "ok" }))
         // Set rather than inherited from axum's default, so the documented
@@ -843,18 +1008,6 @@ mod tests {
             .unwrap()
     }
 
-    fn subscribe_post(uri: &str) -> Request<Body> {
-        let body = json!({"jsonrpc":"2.0","id":7,"method":"resources/subscribe",
-            "params":{"uri": uri}});
-        Request::builder()
-            .method("POST")
-            .uri("/mcp")
-            .header("host", "127.0.0.1:8765")
-            .header("content-type", "application/json")
-            .body(Body::from(body.to_string()))
-            .unwrap()
-    }
-
     /// Next data chunk of a streaming body, under a bound so a regression
     /// hangs the test for two seconds instead of forever.
     async fn next_chunk(body: &mut axum::body::BodyDataStream) -> Option<String> {
@@ -864,6 +1017,33 @@ mod tests {
         match tokio::time::timeout(std::time::Duration::from_secs(2), fut).await {
             Ok(Some(Ok(bytes))) => Some(String::from_utf8_lossy(&bytes).to_string()),
             _ => None,
+        }
+    }
+
+    /// Drain at most `max_buffered` already-queued frames and require the body
+    /// itself to reach end-of-stream. A timeout is a failure here: treating it
+    /// as closure would let a half-open SSE connection pass lifecycle tests.
+    async fn assert_stream_ends(
+        body: &mut axum::body::BodyDataStream,
+        max_buffered: usize,
+        context: &str,
+    ) {
+        use futures_core::Stream as _;
+        use std::future::poll_fn;
+
+        let mut flushed = 0;
+        loop {
+            let fut = poll_fn(|cx| Pin::new(&mut *body).poll_next(cx));
+            match tokio::time::timeout(std::time::Duration::from_secs(2), fut).await {
+                Ok(None) => return,
+                Ok(Some(Ok(_))) if flushed < max_buffered => flushed += 1,
+                Ok(Some(Ok(bytes))) => panic!(
+                    "{context} must end after at most {max_buffered} buffered frames, got: {:?}",
+                    String::from_utf8_lossy(&bytes)
+                ),
+                Ok(Some(Err(error))) => panic!("{context} failed instead of ending: {error}"),
+                Err(_) => panic!("{context} stayed open past the two-second bound"),
+            }
         }
     }
 
@@ -897,14 +1077,17 @@ mod tests {
     #[tokio::test]
     async fn a_subscription_to_a_disabled_cluster_is_refused_over_http() {
         let joins = Arc::new(Mutex::new(Vec::new()));
-        let app = router(
-            subscribable_server(joins.clone())
-                .with_assistant(crate::assistant::Scripted::off_for("c", &["c"])),
-        );
-        let stream_resp = app.clone().oneshot(sse_get()).await.unwrap();
+        let app =
+            router(subscribable_server(joins.clone()).with_assistant(crate::assistant::Scripted::off_for("c", &["c"])));
+        let session = initialize_session(app.clone()).await;
+        let stream_resp = app.clone().oneshot(sse_get_with_session(&session)).await.unwrap();
         assert_eq!(stream_resp.status(), StatusCode::OK);
 
-        let resp = app.clone().oneshot(subscribe_post("k8s://c/ns/Pod/web-0")).await.unwrap();
+        let resp = app
+            .clone()
+            .oneshot(subscribe_post_with_session("k8s://c/ns/Pod/web-0", &session))
+            .await
+            .unwrap();
         let body = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
         let v: Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(v["error"]["message"], json!("The srelens AI Assistant is turned off for cluster c."), "{v}");
@@ -927,9 +1110,14 @@ mod tests {
         let app = router(subscribable_server(joins).with_audit(spy.clone()));
 
         // A stream must exist for the subscribe to reach the handler at all.
-        let stream_resp = app.clone().oneshot(sse_get()).await.unwrap();
+        let session = initialize_session(app.clone()).await;
+        let stream_resp = app.clone().oneshot(sse_get_with_session(&session)).await.unwrap();
         assert_eq!(stream_resp.status(), StatusCode::OK);
-        let _ = app.clone().oneshot(subscribe_post("k8s://c/ns/Pod/web-0")).await.unwrap();
+        let _ = app
+            .clone()
+            .oneshot(subscribe_post_with_session("k8s://c/ns/Pod/web-0", &session))
+            .await
+            .unwrap();
 
         let seen = spy.0.lock().unwrap().clone();
         let subscribes: Vec<_> =
@@ -948,7 +1136,11 @@ mod tests {
     async fn subscribe_without_a_stream_is_refused() {
         let joins = Arc::new(Mutex::new(Vec::new()));
         let app = router(subscribable_server(joins.clone()));
-        let resp = app.oneshot(subscribe_post("k8s://c/ns/Pod/web-0")).await.unwrap();
+        let session = initialize_session(app.clone()).await;
+        let resp = app
+            .oneshot(subscribe_post_with_session("k8s://c/ns/Pod/web-0", &session))
+            .await
+            .unwrap();
         let body = axum::body::to_bytes(resp.into_body(), 64 * 1024).await.unwrap();
         let v: Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(v["error"]["code"], json!(-32002));
@@ -964,7 +1156,8 @@ mod tests {
         let joins = Arc::new(Mutex::new(Vec::new()));
         let app = router(subscribable_server(joins));
 
-        let stream_resp = app.clone().oneshot(sse_get()).await.unwrap();
+        let session = initialize_session(app.clone()).await;
+        let stream_resp = app.clone().oneshot(sse_get_with_session(&session)).await.unwrap();
         assert_eq!(stream_resp.status(), StatusCode::OK);
         assert!(
             stream_resp
@@ -976,7 +1169,10 @@ mod tests {
         );
         let mut body = stream_resp.into_body().into_data_stream();
 
-        let sub_resp = app.oneshot(subscribe_post("k8s://c/ns/Pod/web-0")).await.unwrap();
+        let sub_resp = app
+            .oneshot(subscribe_post_with_session("k8s://c/ns/Pod/web-0", &session))
+            .await
+            .unwrap();
         let sub_body = axum::body::to_bytes(sub_resp.into_body(), 64 * 1024).await.unwrap();
         let v: Value = serde_json::from_slice(&sub_body).unwrap();
         assert!(v.get("error").is_none(), "subscribe must succeed with a live stream: {v}");
@@ -1007,19 +1203,56 @@ mod tests {
         let joins = Arc::new(Mutex::new(Vec::new()));
         let app = router(subscribable_server(joins.clone()));
 
-        let stream_resp = app.clone().oneshot(sse_get()).await.unwrap();
-        let sub_resp = app.oneshot(subscribe_post("k8s://c/ns/Pod/web-0")).await.unwrap();
+        let session = initialize_session(app.clone()).await;
+        let stream_resp = app.clone().oneshot(sse_get_with_session(&session)).await.unwrap();
+        let sub_resp = app
+            .clone()
+            .oneshot(subscribe_post_with_session("k8s://c/ns/Pod/web-0", &session))
+            .await
+            .unwrap();
         assert_eq!(sub_resp.status(), StatusCode::OK);
         assert_eq!(joins.lock().unwrap().len(), 1, "the subscribe spawned a watch");
 
-        // Client disconnect: hyper drops the response body; the stream guard
-        // must abort the watch — no watch outlives the stream that asked.
+        // Client disconnect: hyper drops the response body; its guard removes
+        // the channels, whose teardown aborts the watch.
         drop(stream_resp);
         let join = joins.lock().unwrap().pop().unwrap();
         match tokio::time::timeout(std::time::Duration::from_secs(2), join).await {
             Ok(Err(e)) if e.is_cancelled() => {}
             other => panic!("the watch must be cancelled when its stream drops: {other:?}"),
         }
+
+        // A disconnected stream is not a terminated session: the same
+        // initialized client can reconnect without another initialize.
+        let reconnected = app.oneshot(sse_get_with_session(&session)).await.unwrap();
+        assert_eq!(reconnected.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn deleting_a_session_ends_its_stream_and_releases_its_watch() {
+        let joins = Arc::new(Mutex::new(Vec::new()));
+        let app = router(subscribable_server(joins.clone()));
+        let session = initialize_session(app.clone()).await;
+        let stream_resp = app.clone().oneshot(sse_get_with_session(&session)).await.unwrap();
+        let subscribed = app
+            .clone()
+            .oneshot(subscribe_post_with_session("k8s://c/ns/Pod/web-0", &session))
+            .await
+            .unwrap();
+        assert_eq!(subscribed.status(), StatusCode::OK);
+
+        let deleted = app.oneshot(delete_session_request(Some(&session))).await.unwrap();
+        assert_eq!(deleted.status(), StatusCode::NO_CONTENT);
+        // Server-side work stops immediately on DELETE, even when a
+        // backpressured client has not polled or dropped its SSE body.
+        let join = joins.lock().unwrap().pop().unwrap();
+        match tokio::time::timeout(std::time::Duration::from_secs(2), join).await {
+            Ok(Err(e)) if e.is_cancelled() => {}
+            other => panic!("the deleted session's watch must be cancelled immediately: {other:?}"),
+        }
+
+        let mut body = stream_resp.into_body().into_data_stream();
+        assert_stream_ends(&mut body, 3, "the deleted session's stream").await;
     }
 
     #[test]
@@ -1064,6 +1297,65 @@ mod tests {
             .unwrap()
     }
 
+    fn initialize_post() -> Request<Body> {
+        let body = json!({"jsonrpc":"2.0","id":1,"method":"initialize"});
+        Request::builder()
+            .method("POST")
+            .uri("/mcp")
+            .header("host", "127.0.0.1:8765")
+            .header("content-type", "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap()
+    }
+
+    async fn initialize_session(app: Router) -> String {
+        let resp = app.oneshot(initialize_post()).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        resp.headers()
+            .get(&MCP_SESSION_ID)
+            .expect("successful initialize must mint a session")
+            .to_str()
+            .unwrap()
+            .to_string()
+    }
+
+    async fn initialize_session_with_authorization(app: Router, authorization: &str) -> String {
+        let mut req = initialize_post();
+        req.headers_mut()
+            .insert(axum::http::header::AUTHORIZATION, authorization.parse().unwrap());
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        resp.headers()
+            .get(&MCP_SESSION_ID)
+            .expect("authenticated initialize must mint a session")
+            .to_str()
+            .unwrap()
+            .to_string()
+    }
+
+    fn tools_list_post(session: Option<&str>) -> Request<Body> {
+        let mut request = Request::builder()
+            .method("POST")
+            .uri("/mcp")
+            .header("host", "127.0.0.1:8765")
+            .header("content-type", "application/json");
+        if let Some(session) = session {
+            request = request.header(&MCP_SESSION_ID, session);
+        }
+        request.body(call_body()).unwrap()
+    }
+
+    fn delete_session_request(session: Option<&str>) -> Request<Body> {
+        let mut request = Request::builder()
+            .method("DELETE")
+            .uri("/mcp")
+            .header("host", "127.0.0.1:8765");
+        if let Some(session) = session {
+            request = request.header(&MCP_SESSION_ID, session);
+        }
+        request.body(Body::empty()).unwrap()
+    }
+
     /// Repeated `Accept` field lines are one combined list per HTTP — a
     /// client sending `application/json` and `text/event-stream` as separate
     /// lines is a valid SSE client whichever line the header map yields
@@ -1071,12 +1363,14 @@ mod tests {
     #[tokio::test]
     async fn multiple_accept_field_lines_are_combined() {
         let app = router(test_server());
+        let session = initialize_session(app.clone()).await;
         let req = Request::builder()
             .method("GET")
             .uri("/mcp")
             .header("host", "127.0.0.1:8765")
             .header("accept", "application/json")
             .header("accept", "text/event-stream")
+            .header(&MCP_SESSION_ID, session)
             .body(Body::empty())
             .unwrap();
         let resp = app.oneshot(req).await.unwrap();
@@ -1091,8 +1385,10 @@ mod tests {
         let joins = Arc::new(Mutex::new(Vec::new()));
         let app = router(subscribable_server(joins.clone()));
 
-        let a = app.clone().oneshot(sse_get_with_session("sess-a")).await.unwrap();
-        let b = app.clone().oneshot(sse_get_with_session("sess-b")).await.unwrap();
+        let session_a = initialize_session(app.clone()).await;
+        let session_b = initialize_session(app.clone()).await;
+        let a = app.clone().oneshot(sse_get_with_session(&session_a)).await.unwrap();
+        let b = app.clone().oneshot(sse_get_with_session(&session_b)).await.unwrap();
         assert_eq!(a.status(), StatusCode::OK);
         assert_eq!(b.status(), StatusCode::OK);
         let mut a_body = a.into_body().into_data_stream();
@@ -1101,7 +1397,7 @@ mod tests {
         // A subscribes; the notification reaches A's stream...
         let sub = app
             .clone()
-            .oneshot(subscribe_post_with_session("k8s://c/ns/Pod/web-0", "sess-a"))
+            .oneshot(subscribe_post_with_session("k8s://c/ns/Pod/web-0", &session_a))
             .await
             .unwrap();
         let sub_body = axum::body::to_bytes(sub.into_body(), 64 * 1024).await.unwrap();
@@ -1126,7 +1422,7 @@ mod tests {
         assert!(next_chunk(&mut b_body).await.is_none(), "B must not receive A's notification");
 
         // B's own GET reconnect replaces only B's stream: A's watch survives.
-        let b2 = app.clone().oneshot(sse_get_with_session("sess-b")).await.unwrap();
+        let b2 = app.clone().oneshot(sse_get_with_session(&session_b)).await.unwrap();
         assert_eq!(b2.status(), StatusCode::OK);
         assert_eq!(joins.lock().unwrap().len(), 1, "A's watch still exists");
         let join = joins.lock().unwrap().pop().unwrap();
@@ -1140,25 +1436,210 @@ mod tests {
     #[tokio::test]
     async fn initialize_mints_a_unique_session_id_per_client() {
         let app = router(test_server());
-        let init = |app: Router| async move {
-            let body = json!({"jsonrpc":"2.0","id":1,"method":"initialize"});
-            let resp = app
-                .oneshot(
-                    Request::builder()
-                        .method("POST")
-                        .uri("/mcp")
-                        .header("host", "127.0.0.1:8765")
-                        .header("content-type", "application/json")
-                        .body(Body::from(body.to_string()))
-                        .unwrap(),
-                )
-                .await
-                .unwrap();
-            resp.headers().get("mcp-session-id").unwrap().to_str().unwrap().to_string()
-        };
-        let first = init(app.clone()).await;
-        let second = init(app).await;
+        let first = initialize_session(app.clone()).await;
+        let second = initialize_session(app).await;
         assert_ne!(first, second, "each client must get its own session id");
+        for id in [&first, &second] {
+            assert_eq!(id.len(), 64, "a 256-bit id is encoded as 64 hex characters");
+            assert!(
+                id.bytes().all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase()),
+                "the generated id must be visible ASCII in the documented lowercase-hex form: {id:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn non_initialize_posts_require_a_known_server_minted_session() {
+        let app = router(test_server());
+
+        let missing = app.clone().oneshot(tools_list_post(None)).await.unwrap();
+        assert_eq!(missing.status(), StatusCode::BAD_REQUEST);
+        assert!(missing.headers().get(&MCP_SESSION_ID).is_none());
+
+        let attacker_chosen = "a".repeat(64);
+        let unknown = app
+            .clone()
+            .oneshot(tools_list_post(Some(&attacker_chosen)))
+            .await
+            .unwrap();
+        assert_eq!(unknown.status(), StatusCode::NOT_FOUND);
+
+        let minted = initialize_session(app.clone()).await;
+        let valid = app.oneshot(tools_list_post(Some(&minted))).await.unwrap();
+        assert_eq!(valid.status(), StatusCode::OK);
+        assert_eq!(valid.headers().get(&MCP_SESSION_ID).unwrap(), minted.as_str());
+    }
+
+    #[tokio::test]
+    async fn initialize_rejects_a_caller_chosen_session_id() {
+        let app = router(test_server());
+        let chosen = "b".repeat(64);
+        let mut req = initialize_post();
+        req.headers_mut().insert(&MCP_SESSION_ID, chosen.parse().unwrap());
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        assert!(resp.headers().get(&MCP_SESSION_ID).is_none());
+
+        let still_unknown = app.oneshot(sse_get_with_session(&chosen)).await.unwrap();
+        assert_eq!(still_unknown.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn get_requires_a_known_session_and_cannot_create_one() {
+        let app = router(test_server());
+        let missing = app.clone().oneshot(sse_get()).await.unwrap();
+        assert_eq!(missing.status(), StatusCode::BAD_REQUEST);
+
+        let chosen = "c".repeat(64);
+        let unknown = app.clone().oneshot(sse_get_with_session(&chosen)).await.unwrap();
+        assert_eq!(unknown.status(), StatusCode::NOT_FOUND);
+
+        let wrong_accept = Request::builder()
+            .method("GET")
+            .uri("/mcp")
+            .header("host", "127.0.0.1:8765")
+            .header("accept", "application/json")
+            .header(&MCP_SESSION_ID, &chosen)
+            .body(Body::empty())
+            .unwrap();
+        let unknown_before_content_negotiation = app.clone().oneshot(wrong_accept).await.unwrap();
+        assert_eq!(unknown_before_content_negotiation.status(), StatusCode::NOT_FOUND);
+
+        let minted = initialize_session(app.clone()).await;
+        let valid = app.oneshot(sse_get_with_session(&minted)).await.unwrap();
+        assert_eq!(valid.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn delete_terminates_a_session_and_future_requests_get_404() {
+        let app = router(test_server());
+        let minted = initialize_session(app.clone()).await;
+        let ended = app
+            .clone()
+            .oneshot(delete_session_request(Some(&minted)))
+            .await
+            .unwrap();
+        assert_eq!(ended.status(), StatusCode::NO_CONTENT);
+
+        let later = app.clone().oneshot(tools_list_post(Some(&minted))).await.unwrap();
+        assert_eq!(later.status(), StatusCode::NOT_FOUND);
+        let later_get = app.oneshot(sse_get_with_session(&minted)).await.unwrap();
+        assert_eq!(later_get.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn malformed_and_duplicate_session_headers_are_400() {
+        let app = router(test_server());
+        let oversized = "x".repeat(129);
+        let resp = app.clone().oneshot(tools_list_post(Some(&oversized))).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+        // Any visible-ASCII shape is syntactically valid per MCP; it is still
+        // unknown unless this server minted it, so it receives 404, not 400.
+        let unknown = app
+            .clone()
+            .oneshot(tools_list_post(Some("caller-chosen")))
+            .await
+            .unwrap();
+        assert_eq!(unknown.status(), StatusCode::NOT_FOUND);
+
+        let valid_shape = "d".repeat(64);
+        let req = Request::builder()
+            .method("POST")
+            .uri("/mcp")
+            .header("host", "127.0.0.1:8765")
+            .header("content-type", "application/json")
+            .header(&MCP_SESSION_ID, &valid_shape)
+            .header(&MCP_SESSION_ID, &valid_shape)
+            .body(call_body())
+            .unwrap();
+        let duplicate = app.oneshot(req).await.unwrap();
+        assert_eq!(duplicate.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn unknown_sessions_are_rejected_before_a_tool_can_run() {
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counted = calls.clone();
+        let mut reg = Registry::new();
+        reg.register(Capability::read_only("counted", "count calls", move |_| {
+            let counted = counted.clone();
+            async move {
+                counted.fetch_add(1, Ordering::SeqCst);
+                Ok(json!({}))
+            }
+        }));
+        let app = router(McpServer::new(Arc::new(reg)));
+        let body = json!({"jsonrpc":"2.0","id":1,"method":"tools/call",
+            "params":{"name":"counted","arguments":{}}});
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/mcp")
+                    .header("host", "127.0.0.1:8765")
+                    .header("content-type", "application/json")
+                    .header(&MCP_SESSION_ID, "e".repeat(64))
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            0,
+            "an unknown session cannot reach a tool"
+        );
+    }
+
+    #[tokio::test]
+    async fn initialize_notification_does_not_mint_or_register_a_session() {
+        let (app, push) = router_inner_with_push(test_server(), None, Exposure::Loopback);
+        let body = json!({"jsonrpc":"2.0","method":"initialize"});
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/mcp")
+                    .header("host", "127.0.0.1:8765")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::ACCEPTED);
+        assert!(resp.headers().get(&MCP_SESSION_ID).is_none());
+        assert!(push.sessions.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn delete_requires_a_known_session() {
+        let app = router(test_server());
+        let missing = app.clone().oneshot(delete_session_request(None)).await.unwrap();
+        assert_eq!(missing.status(), StatusCode::BAD_REQUEST);
+        let unknown_id = "f".repeat(64);
+        let unknown = app.oneshot(delete_session_request(Some(&unknown_id))).await.unwrap();
+        assert_eq!(unknown.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn bounded_sessions_retire_an_idle_session_but_preserve_a_live_stream() {
+        let app = router(test_server());
+        let live = initialize_session(app.clone()).await;
+        let stream = app.clone().oneshot(sse_get_with_session(&live)).await.unwrap();
+        assert_eq!(stream.status(), StatusCode::OK);
+
+        let mut idle = Vec::new();
+        for _ in 0..MAX_HTTP_SESSIONS {
+            idle.push(initialize_session(app.clone()).await);
+        }
+        let retired = app.clone().oneshot(tools_list_post(Some(&idle[0]))).await.unwrap();
+        assert_eq!(retired.status(), StatusCode::NOT_FOUND);
+        let live_still_valid = app.oneshot(tools_list_post(Some(&live))).await.unwrap();
+        assert_eq!(live_still_valid.status(), StatusCode::OK);
+        drop(stream);
     }
 
     /// The graceful-shutdown deadlock from review: the state and the stream
@@ -1172,20 +1653,18 @@ mod tests {
         let (app, push) =
             router_inner_with_push(subscribable_server(joins.clone()), None, Exposure::Loopback);
 
-        let stream_resp = app.clone().oneshot(sse_get()).await.unwrap();
-        let sub = app.clone().oneshot(subscribe_post("k8s://c/ns/Pod/web-0")).await.unwrap();
+        let session = initialize_session(app.clone()).await;
+        let stream_resp = app.clone().oneshot(sse_get_with_session(&session)).await.unwrap();
+        let sub = app
+            .clone()
+            .oneshot(subscribe_post_with_session("k8s://c/ns/Pod/web-0", &session))
+            .await
+            .unwrap();
         assert_eq!(sub.status(), StatusCode::OK);
         let mut body = stream_resp.into_body().into_data_stream();
 
         push.end_streams();
-        let mut flushed = 0;
-        loop {
-            match next_chunk(&mut body).await {
-                None => break,
-                Some(_) if flushed < 3 => flushed += 1,
-                Some(chunk) => panic!("the stream must end at shutdown, got: {chunk:?}"),
-            }
-        }
+        assert_stream_ends(&mut body, 3, "the stream at shutdown").await;
         // In production hyper drops the completed body, which is what runs
         // the guard; the drop is explicit here.
         drop(body);
@@ -1197,7 +1676,7 @@ mod tests {
 
         // An already-accepted GET racing the shutdown cannot reopen a stream
         // and stall it all over again.
-        let late = app.oneshot(sse_get()).await.unwrap();
+        let late = app.oneshot(sse_get_with_session(&session)).await.unwrap();
         assert_eq!(late.status(), StatusCode::SERVICE_UNAVAILABLE);
     }
 
@@ -1206,8 +1685,13 @@ mod tests {
         let joins = Arc::new(Mutex::new(Vec::new()));
         let app = router(subscribable_server(joins.clone()));
 
-        let first = app.clone().oneshot(sse_get()).await.unwrap();
-        let sub = app.clone().oneshot(subscribe_post("k8s://c/ns/Pod/web-0")).await.unwrap();
+        let session = initialize_session(app.clone()).await;
+        let first = app.clone().oneshot(sse_get_with_session(&session)).await.unwrap();
+        let sub = app
+            .clone()
+            .oneshot(subscribe_post_with_session("k8s://c/ns/Pod/web-0", &session))
+            .await
+            .unwrap();
         assert_eq!(sub.status(), StatusCode::OK);
         let mut first_body = first.into_body().into_data_stream();
 
@@ -1216,16 +1700,9 @@ mod tests {
         // survives the sender dropping), so drain to end-of-stream rather
         // than expecting an instant close — but it must END within those
         // already-queued frames, not linger half-dead.
-        let second = app.clone().oneshot(sse_get()).await.unwrap();
+        let second = app.clone().oneshot(sse_get_with_session(&session)).await.unwrap();
         assert_eq!(second.status(), StatusCode::OK);
-        let mut flushed = 0;
-        loop {
-            match next_chunk(&mut first_body).await {
-                None => break,
-                Some(_) if flushed < 3 => flushed += 1,
-                Some(chunk) => panic!("the replaced stream must end, got: {chunk:?}"),
-            }
-        }
+        assert_stream_ends(&mut first_body, 3, "the replaced stream").await;
         drop(first_body);
         // ...and its watch dies with it.
         let join = joins.lock().unwrap().pop().unwrap();
@@ -1235,7 +1712,10 @@ mod tests {
         }
 
         // The new stream subscribes cleanly — replacement leaves no residue.
-        let resub = app.oneshot(subscribe_post("k8s://c/ns/Pod/web-0")).await.unwrap();
+        let resub = app
+            .oneshot(subscribe_post_with_session("k8s://c/ns/Pod/web-0", &session))
+            .await
+            .unwrap();
         let body = axum::body::to_bytes(resub.into_body(), 64 * 1024).await.unwrap();
         let v: Value = serde_json::from_slice(&body).unwrap();
         assert!(v.get("error").is_none(), "resubscribe on the new stream must succeed: {v}");
@@ -1245,6 +1725,8 @@ mod tests {
     async fn the_request_body_limit_is_the_documented_one() {
         // Padded beside the arguments, not in them: `ping` echoes its
         // arguments, and an echo this size is over the result limit.
+        let app = router(test_server());
+        let session = initialize_session(app.clone()).await;
         let post = |padding: usize| {
             let body = json!({"jsonrpc":"2.0","id":1,"method":"tools/call",
                 "params":{"name":"ping","arguments":{},"padding":"x".repeat(padding)}})
@@ -1254,9 +1736,10 @@ mod tests {
                 .uri("/mcp")
                 .header("host", "127.0.0.1:8765")
                 .header("content-type", "application/json")
+                .header(&MCP_SESSION_ID, &session)
                 .body(Body::from(body))
                 .unwrap();
-            router(test_server()).oneshot(request)
+            app.clone().oneshot(request)
         };
         // Over axum's 2 MiB default, within ours: answered.
         let resp = post(3 * 1024 * 1024).await.unwrap();
@@ -1274,6 +1757,7 @@ mod tests {
     #[tokio::test]
     async fn http_handles_tools_call() {
         let app = router(test_server());
+        let session = initialize_session(app.clone()).await;
         let body = json!({"jsonrpc":"2.0","id":1,"method":"tools/call",
             "params":{"name":"ping","arguments":"hi"}});
         let resp = app
@@ -1283,19 +1767,17 @@ mod tests {
                     .uri("/mcp")
                     .header("host", "127.0.0.1:8765")
                     .header("content-type", "application/json")
+                    .header(&MCP_SESSION_ID, &session)
                     .body(Body::from(body.to_string()))
                     .unwrap(),
             )
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
-        // Streamable-HTTP clients (Codex) require a session id on the response.
-        assert!(
-            resp.headers()
-                .get("mcp-session-id")
-                .and_then(|v| v.to_str().ok())
-                .is_some_and(|s| !s.is_empty()),
-            "an /mcp JSON-RPC response must carry a non-empty Mcp-Session-Id header"
+        assert_eq!(
+            resp.headers().get(&MCP_SESSION_ID).unwrap(),
+            session.as_str(),
+            "a subsequent JSON-RPC response echoes the established session"
         );
         let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024).await.unwrap();
         let v: Value = serde_json::from_slice(&bytes).unwrap();
@@ -1309,6 +1791,7 @@ mod tests {
         // expects 202 Accepted and an empty body, not 200 with `{}` (which
         // stalled Codex's client).
         let app = router(test_server());
+        let session = initialize_session(app.clone()).await;
         let body = json!({"jsonrpc":"2.0","method":"notifications/initialized"});
         let resp = app
             .oneshot(
@@ -1317,6 +1800,7 @@ mod tests {
                     .uri("/mcp")
                     .header("host", "127.0.0.1:8765")
                     .header("content-type", "application/json")
+                    .header(&MCP_SESSION_ID, session)
                     .body(Body::from(body.to_string()))
                     .unwrap(),
             )
@@ -1395,11 +1879,12 @@ mod tests {
         (McpServer::new(Arc::new(reg)).with_policy(Arc::new(Saw(saw.clone()))), saw)
     }
 
-    fn post_gated_call(bearer: &str) -> Request<Body> {
+    fn post_gated_call(bearer: &str, session: &str) -> Request<Body> {
         Request::post("/mcp")
             .header("host", "127.0.0.1:8765")
             .header("authorization", format!("Bearer {bearer}"))
             .header("content-type", "application/json")
+            .header(&MCP_SESSION_ID, session)
             .body(Body::from(
                 serde_json::to_vec(&json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
                     "params": {"name": "danger", "arguments": {}}}))
@@ -1415,7 +1900,8 @@ mod tests {
         let (server, saw) = gated_server_recording_caller();
         let guard = server.caller_tokens().mint("sess-7");
         let app = router_with_auth(server, crate::auth::Token::generate(), Exposure::Loopback);
-        let resp = app.oneshot(post_gated_call(guard.token())).await.unwrap();
+        let session = initialize_session_with_authorization(app.clone(), &format!("Bearer {}", guard.token())).await;
+        let resp = app.oneshot(post_gated_call(guard.token(), &session)).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
         assert_eq!(*saw.lock().unwrap(), Some(Some(crate::policy::Caller::Chat("sess-7".into()))));
     }
@@ -1426,7 +1912,8 @@ mod tests {
         let (server, saw) = gated_server_recording_caller();
         let token = crate::auth::Token::generate();
         let app = router_with_auth(server, token.clone(), Exposure::Loopback);
-        let resp = app.oneshot(post_gated_call(token.as_str())).await.unwrap();
+        let session = initialize_session_with_authorization(app.clone(), &format!("Bearer {}", token.as_str())).await;
+        let resp = app.oneshot(post_gated_call(token.as_str(), &session)).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
         assert_eq!(*saw.lock().unwrap(), Some(None));
     }
@@ -1437,7 +1924,7 @@ mod tests {
         let (server, _) = gated_server_recording_caller();
         let presented = server.caller_tokens().mint("sess-7").token().to_string();
         let app = router_with_auth(server, crate::auth::Token::generate(), Exposure::Loopback);
-        let resp = app.oneshot(post_gated_call(&presented)).await.unwrap();
+        let resp = app.oneshot(post_gated_call(&presented, &"a".repeat(64))).await.unwrap();
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
     }
 
@@ -1448,12 +1935,15 @@ mod tests {
     async fn accepts_a_lowercase_bearer_scheme() {
         let token = crate::auth::Token::generate();
         let app = router_with_auth(test_server(), token.clone(), Exposure::Loopback);
+        let authorization = format!("bearer {}", token.as_str());
+        let session = initialize_session_with_authorization(app.clone(), &authorization).await;
         let resp = app
             .oneshot(
                 Request::post("/mcp")
                     .header("host", "127.0.0.1:8765")
-                    .header("authorization", format!("bearer {}", token.as_str()))
+                    .header("authorization", authorization)
                     .header("content-type", "application/json")
+                    .header(&MCP_SESSION_ID, session)
                     .body(call_body())
                     .unwrap(),
             )
@@ -1466,12 +1956,15 @@ mod tests {
     async fn accepts_the_right_token() {
         let token = crate::auth::Token::generate();
         let app = router_with_auth(test_server(), token.clone(), Exposure::Loopback);
+        let authorization = format!("Bearer {}", token.as_str());
+        let session = initialize_session_with_authorization(app.clone(), &authorization).await;
         let resp = app
             .oneshot(
                 Request::post("/mcp")
                     .header("host", "127.0.0.1:8765")
-                    .header("authorization", format!("Bearer {}", token.as_str()))
+                    .header("authorization", authorization)
                     .header("content-type", "application/json")
+                    .header(&MCP_SESSION_ID, session)
                     .body(call_body())
                     .unwrap(),
             )

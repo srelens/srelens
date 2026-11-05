@@ -11,6 +11,7 @@ import {
   type NamespaceResolution,
 } from "@srelens/core";
 import { Button, Checkbox, Dialog, Field, MultiSelect, Switch, TextInput } from "@srelens/ui-kit";
+import { FailureAlert } from "../../lib/errorCopy";
 import { useCollections, saveCollection } from "../../lib/collections";
 import { friendly } from "../../lib/errorCopy";
 import { useListing } from "../../lib/collectionScope";
@@ -270,9 +271,7 @@ export function CollectionDialog({ editing, members, clusterId, clusterName, onC
           </>
         )}
         {checkError !== null && (
-          <p role="alert" style={{ color: "var(--sev)" }}>
-            The collection could not be checked: {checkError}
-          </p>
+          <FailureAlert tone="sev" title="Could not check the collection" error={checkError} domain="local" />
         )}
         <Preview
           collection={collection}
@@ -349,7 +348,7 @@ function Preview({
   } else if (empty) {
     body = <p className="text-muted">Add members, a pattern or a label selector to see what it matches on {where}.</p>;
   } else if (error !== null) {
-    body = <p style={{ color: "var(--sev)" }}>The preview could not be worked out: {error}</p>;
+    body = <FailureAlert tone="sev" title="Could not work out the preview" error={error} />;
   } else if (!valid) {
     body = <p className="text-muted">Correct the members, patterns or label selector above to see what they match.</p>;
   } else if (result === null) {

@@ -303,7 +303,7 @@ describe("Settings", () => {
       await assistantSaved();
     });
     onTestFinished(__resetAssistantForTests);
-    const alert = screen.getByText(/Could not save the AI Assistant setting/);
+    const alert = screen.getByText(/Could not save the AI Assistant setting/).closest("[role]") as HTMLElement;
     expect(alert.getAttribute("role")).toBe("alert");
     expect(alert.textContent).toContain("settings.json is locked");
   });

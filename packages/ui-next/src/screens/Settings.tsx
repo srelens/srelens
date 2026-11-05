@@ -4,8 +4,9 @@ import { onSettingsRequested, takeSettingsRequest } from "../lib/settingsRequest
 import { useTabScope } from "../lib/tabScope";
 import { openTab } from "../lib/tabsStore";
 import { useId, useLayoutEffect, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
-import { describeError, isTauri } from "@srelens/core";
+import { isTauri } from "@srelens/core";
 import { Panel, Screen, Switch } from "@srelens/ui-kit";
+import { FailureAlert } from "../lib/errorCopy";
 import { getAssistantSaveError, setAssistantEnabled, useAssistant } from "../lib/assistant";
 import type { RoutedScreenProps } from "../lib/routes";
 import { ApplicationLogsPane, KubernetesPane, WorkspacePane } from "./settings/PreferencePanes";
@@ -240,9 +241,7 @@ export function Settings({ ported, onSwitchToClassic, onLocked }: SettingsProps)
               {/* The switch shows what the file holds; when a change did not
                   reach it, say so rather than let the switch flip back silently. */}
               {saveError !== null && (
-                <p role="alert" className="mt-3 text-[0.75rem] leading-relaxed" style={{ color: "var(--sev)" }}>
-                  Could not save the AI Assistant setting: {describeError(saveError).detail}
-                </p>
+                <FailureAlert tone="sev" className="mt-3" title="Could not save the AI Assistant setting" error={saveError} domain="local" />
               )}
             </Panel>
             <AgentAccess />

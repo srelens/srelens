@@ -50,7 +50,8 @@ export function ExtensionDetails({
   plugin: InstalledExtension;
   busy: boolean;
   change(action: ExtensionChange): Promise<boolean>;
-  onError(message: string): void;
+  /** What failed, as a headline, and the reason under it. */
+  onError(title: string, reason: string): void;
 }) {
   // The Overview first, as Details opened before the Inspector and Logs (#575) existed.
   const [tab, setTab] = useState<DetailsTab>("overview");
@@ -72,7 +73,7 @@ export function ExtensionDetails({
       try {
         await clearExtensionSecret(manifest.id);
       } catch (e) {
-        onError(e instanceof Error ? e.message : String(e));
+        onError("Could not reset the settings", e instanceof Error ? e.message : String(e));
         return;
       }
     }
@@ -84,7 +85,7 @@ export function ExtensionDetails({
       // A browser download on the web, which has no `save_text_file` command.
       await saveOrDownload(`${manifest.id}-settings.json`, `${JSON.stringify(plugin.settings, null, 2)}\n`);
     } catch (e) {
-      onError(e instanceof Error ? e.message : String(e));
+      onError("Could not export the settings", e instanceof Error ? e.message : String(e));
     }
   }
 

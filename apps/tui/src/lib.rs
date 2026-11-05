@@ -11,6 +11,7 @@ pub mod deep_link;
 pub mod event;
 pub mod mcp_server;
 pub mod model_list;
+pub mod mux;
 pub mod self_update;
 pub mod sink;
 pub mod theme;
