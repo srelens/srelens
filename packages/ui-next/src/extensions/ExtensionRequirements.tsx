@@ -2,7 +2,7 @@ import { type ReactNode } from "react";
 import { listCrds, type ExtensionPage, type InstalledExtension } from "@srelens/core";
 import { useResource } from "../lib/useResource";
 import { Button } from "@srelens/ui-kit";
-import { ErrorNotice } from "./ExtensionResults";
+import { FailureAlert } from "../lib/errorCopy";
 
 /** Installation is global; only the APIs needed by this view are cluster-specific. */
 export function ExtensionRequirements({ plugin, page, context, refresh, children }: {
@@ -42,7 +42,7 @@ export function ExtensionRequirements({ plugin, page, context, refresh, children
   if (!missing && !error) return <>{children}</>;
   return <>
     <section className="extension-requirements" aria-label={`${plugin.manifest.name} requirements`}>
-      {error ? <ErrorNotice cluster message={error} retry={result.reload} guidance={{ title: "Could not check requirements", detail: "CRD discovery failed. This does not mean the APIs are missing; resource reads will still use your existing permissions." }} /> : <div className="extension-toolbar">
+      {error ? <FailureAlert tone="sev" title="Could not check requirements" detail="CRD discovery failed. This does not mean the APIs are missing; resource reads will still use your existing permissions." error={error} onRetry={result.reload} /> : <div className="extension-toolbar">
         <strong>Missing requirements</strong>
         <Button variant="secondary" onClick={result.reload}>Check again</Button>
       </div>}

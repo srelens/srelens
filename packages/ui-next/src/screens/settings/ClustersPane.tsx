@@ -2,6 +2,7 @@ import { useId, useRef, useState, type PointerEvent } from "react";
 import { GripVertical } from "lucide-react";
 import { deleteContext, describeError, isTauri, listContexts, removeClusterNamespace, unprefixedName, type ClusterContext } from "@srelens/core";
 import { Button, ConfirmDialog, CustomizeMark, Field, FilterBar, Mark, Switch, TextInput, useListFilter } from "@srelens/ui-kit";
+import { FailureAlert } from "../../lib/errorCopy";
 import { getAssistantSaveError, setClusterAssistant, useAssistant } from "../../lib/assistant";
 import { getContexts, getKubeconfigFiles, setContexts, useContexts, useContextsError, useContextsStatus } from "../../lib/clusters";
 import { moveContext, moveContextBy, removeContextFromOrder, useOrderedContexts } from "../../lib/contextOrder";
@@ -35,8 +36,9 @@ function ContextEditor({ context, onRemove }: { context: ClusterContext; onRemov
       <Switch label="Allow AI Assistant" on={!assistant.disabledClusters.includes(context.stableId)}
         disabled={!assistant.enabled} hint={assistant.enabled ? undefined : "Turned off for every cluster in Settings › AI Assistant."}
         onChange={on => setClusterAssistant(context.stableId, on)} />
-      {getAssistantSaveError() !== null && <p role="alert" className="mt-2 text-[0.75rem]" style={{ color: "var(--sev)" }}>
-        Could not save the AI Assistant setting: {describeError(getAssistantSaveError()).detail}</p>}
+      {getAssistantSaveError() !== null && (
+        <FailureAlert tone="sev" className="mt-2" title="Could not save the AI Assistant setting" error={getAssistantSaveError()} domain="local" />
+      )}
     </div>
     {isTauri() && <div className="border-t border-rule p-3"><Button variant="danger" onClick={onRemove}>Remove context</Button></div>}
   </section>;
@@ -142,10 +144,8 @@ export function ClustersPane() {
       <div><h2 className="text-[0.8125rem] font-semibold">Contexts</h2><p className="text-[0.75rem] text-muted">Names, appearance and order are shared with the classic design.</p></div>
       <Button variant="secondary" onClick={() => openTab("/connections")}>Open Connections</Button>
     </header>
-    {error && <p role="alert" className="border-b border-rule p-3 text-[0.75rem]">Could not remove context: {error}</p>}
-    {status === "failed" && <div role="alert" className="border-b border-rule p-3 text-[0.75rem]">
-      Could not list contexts: {describeError(listingError).raw} <Button disabled={busy} onClick={() => void reload()}>Retry</Button>
-    </div>}
+    {error && <FailureAlert tone="sev" className="m-3" title="Could not remove the context" error={error} domain="local" />}
+    {status === "failed" && <FailureAlert tone="sev" className="m-3" title="Could not list contexts" error={listingError} domain="local" onRetry={() => void reload()} />}
     {status === "loading" ? <p role="status" className="p-3 text-muted">Loading contexts…</p> : contexts.length === 0 ?
       status !== "failed" && <p className="p-3 text-[0.75rem] text-muted">No contexts configured. Add a kubeconfig or cluster in Connections.</p> :
       <div className="context-management-layout min-h-0 flex-1">

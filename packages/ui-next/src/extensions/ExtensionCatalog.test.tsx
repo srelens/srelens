@@ -52,9 +52,12 @@ it("surfaces download and browser errors without a developer-mode gate", async (
   vi.mocked(reviewCatalogExtension).mockRejectedValue(new Error("checksum mismatch"));
   fireEvent.click(screen.getByText("Review installation"));
   expect(await screen.findByText("checksum mismatch")).toBeTruthy();
+  // The catalog itself loaded: the headline names the action that failed (#1030 review).
+  expect(screen.getByRole("alert").textContent).toMatch(/^Could not review Flux/);
   vi.mocked(openExternal).mockRejectedValue(new Error("browser unavailable"));
   fireEvent.click(screen.getByText("Repository"));
   expect(await screen.findByText("browser unavailable")).toBeTruthy();
+  expect(screen.getByRole("alert").textContent).toMatch(/^Could not open Flux's repository/);
 });
 it("reports a first-load failure with retry, not an empty catalog", async () => {
   vi.mocked(listExtensionCatalog).mockRejectedValueOnce(new Error("offline"));

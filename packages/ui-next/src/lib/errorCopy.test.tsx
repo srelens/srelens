@@ -146,6 +146,35 @@ describe("FailureState", () => {
     expect(screen.getByText("Something went wrong")).toBeDefined();
   });
 
+  // #1001: what ErrorNotice's `guidance` did, so a screen that knows more can say it.
+  it("says the screen's own explanation in place of the classification's", () => {
+    const { container } = render(
+      <FailureState title="Application API unavailable" detail="This app reads applications from argoproj.io/v1alpha1." error={API_401} />,
+    );
+    expect(container.querySelector('[data-slot="detail"]')?.textContent).toBe("This app reads applications from argoproj.io/v1alpha1.");
+    expect(screen.queryByText(/rejected your credentials/)).toBeNull();
+  });
+
+  it("keeps the original behind its own explanation, even one nothing classified", () => {
+    const { container } = render(
+      <FailureState title="Could not check requirements" detail="CRD discovery failed." error="discovery: boom" />,
+    );
+    expect(container.querySelector('[data-slot="raw"]')?.textContent).toContain("discovery: boom");
+  });
+
+  it("keeps every original of a list behind its own explanation (#1030 review)", () => {
+    const { container } = render(
+      <FailureState
+        title="Could not check requirements"
+        detail="CRD discovery failed."
+        error={["discovery: boom", "discovery: bust"]}
+      />,
+    );
+    const raw = container.querySelector('[data-slot="raw"]')?.textContent;
+    expect(raw).toContain("discovery: boom");
+    expect(raw).toContain("discovery: bust");
+  });
+
   it("passes the caller's domain to the classifier", () => {
     render(
       <FailureState
@@ -196,6 +225,14 @@ describe("FailureAlert", () => {
   it("carries the original under it", () => {
     const { container } = render(<FailureAlert title="These pods are stale" error={API_401} />);
     expect(container.querySelector('[data-slot="raw"]')?.textContent).toContain("ListMeta");
+  });
+
+  it("says the screen's own explanation, and keeps the original behind it", () => {
+    const { container } = render(
+      <FailureAlert title="Could not check requirements" detail="CRD discovery failed." error="discovery: boom" />,
+    );
+    expect(container.querySelector('[data-slot="alert-body"]')?.textContent).toMatch(/^CRD discovery failed./);
+    expect(container.querySelector('[data-slot="raw"]')?.textContent).toContain("discovery: boom");
   });
 });
 

@@ -7,8 +7,8 @@ import {
   type ExtensionProcess,
   type InstalledExtension,
 } from "@srelens/core";
-import { Button } from "@srelens/ui-kit";
-import { ErrorNotice } from "./ExtensionResults";
+import { Alert, Button } from "@srelens/ui-kit";
+import { FailureAlert } from "../lib/errorCopy";
 import { LogLineRow, clock } from "./ExtensionLogs";
 import { bytes, describeGrant, inactiveReason, installedOn, origin } from "./detailsText";
 import { plainText } from "./displayText";
@@ -171,10 +171,9 @@ function Process({
   return (
     <>
       {process.message && (
-        <div className="extension-process-alert" role="alert">
-          <strong>{plainText(process.message)}</strong>
+        <Alert tone="sev" title={plainText(process.message)}>
           {process.reason && <p>{plainText(process.reason)}</p>}
-          <div className="extension-toolbar">
+          <div className="mt-2 flex flex-wrap gap-2">
             {/* The supervisor offers "restart" too, but no host capability restarts a sidecar yet (#574). */}
             {process.actions.includes("viewLogs") && (
               <Button variant="secondary" onClick={onViewLogs}>
@@ -191,7 +190,7 @@ function Process({
               </Button>
             )}
           </div>
-        </div>
+        </Alert>
       )}
       <Facts rows={rows} />
     </>
@@ -325,7 +324,7 @@ export function ExtensionInspector({
         )}
       </Part>
 
-      {error !== undefined && <ErrorNotice title="Could not inspect this app" message={error} retry={retry} />}
+      {error !== undefined && <FailureAlert tone="sev" title="Could not inspect this app" error={error} domain="local" onRetry={retry} />}
       {!inspection ? (
         error === undefined && (
           <p role="status" className="extension-message">

@@ -275,9 +275,9 @@ it("sends an unsigned app under a reserved ID to the Catalog for the signed rele
     ],
   } as any);
   render(<ExtensionManager />);
-  expect((await screen.findByText(new RegExp(reason))).textContent).toBe(
-    `Disabled: ${reason}. Remove it or reinstall it from the Catalog.`,
-  );
+  const said = await screen.findByText(new RegExp(reason));
+  expect(said.textContent).toBe(`${reason}. Remove it or reinstall it from the Catalog.`);
+  expect(said.closest('[role="status"]')?.textContent).toMatch(/^Disabled/);
   expect(screen.getByText(/Unsigned local/)).toBeTruthy();
   const toggle = screen.getByLabelText("Enable org.srelens.gitops") as HTMLInputElement;
   expect(toggle.checked).toBe(false);
@@ -356,16 +356,17 @@ it("says why a package file was refused, and refuses one over the limit before r
   render(<ExtensionManager />);
   const input = await screen.findByLabelText("Local app package (.srelens-extension)");
   fireEvent.change(input, { target: { files: [new File([new Uint8Array([1])], "tampered.srelens-extension")] } });
-  expect((await screen.findByRole("alert")).textContent).toBe(
-    "Could not review tampered.srelens-extension: README.md does not match its digest",
-  );
+  // The headline names the file; the reason is said once, under it.
+  const refused = await screen.findByRole("alert");
+  expect(within(refused).getByText("Could not review tampered.srelens-extension")).toBeTruthy();
+  expect(within(refused).getByText("README.md does not match its digest")).toBeTruthy();
   expect(screen.queryByRole("region", { name: "Review app permissions" })).toBeNull();
   const large = new File([new Uint8Array([1])], "large.srelens-extension");
   Object.defineProperty(large, "size", { value: 513 * 1024 * 1024 });
   fireEvent.change(input, { target: { files: [large] } });
-  expect((await screen.findByRole("alert")).textContent).toBe(
-    "large.srelens-extension is 513.0 MiB; a package may be at most 512.0 MiB.",
-  );
+  const tooLarge = await screen.findByRole("alert");
+  expect(within(tooLarge).getByText("Could not review large.srelens-extension")).toBeTruthy();
+  expect(within(tooLarge).getByText("It is 513.0 MiB; a package may be at most 512.0 MiB.")).toBeTruthy();
   expect(reviewExtensionPackage).toHaveBeenCalledTimes(1);
   expect(configureExtensions).not.toHaveBeenCalled();
 });
@@ -574,7 +575,7 @@ it("shows a quarantined app by ID, not by a name this host no longer accepts", a
     ],
   } as any);
   render(<ExtensionManager />);
-  await screen.findByText(/Disabled:/);
+  await screen.findByText("Disabled");
   expect(document.body.textContent).not.toContain("‮");
   // Its stored manifest is shown with the character written as an escape, not drawn.
   fireEvent.click(screen.getByLabelText(`Details for ${plugin.manifest.id}`));
@@ -763,6 +764,14 @@ it("inspects an installed app's source, grants and manifest, and exports or rese
   await waitFor(() =>
     expect(configureExtensions).toHaveBeenCalledWith({ action: "settings", id: "org.test.gitops", settings: {} }),
   );
+});
+it("says which of an app's settings actions failed, under a headline of its own (#1001)", async () => {
+  vi.mocked(saveTextFile).mockRejectedValue(new Error("disk full"));
+  const details = await openDetails(updated());
+  fireEvent.click(within(details).getByRole("button", { name: "Export settings" }));
+  const failed = await screen.findByRole("alert");
+  expect(within(failed).getByText("Could not export the settings")).toBeTruthy();
+  expect(failed.textContent).toContain("disk full");
 });
 it("resets settings to their defaults, keeps a required one, which has none, and deletes the app's secrets", async () => {
   vi.mocked(clearExtensionSecret).mockResolvedValue({ set: false });
@@ -2095,7 +2104,7 @@ it("persists the unsigned apps policy and explains affected apps without removin
   const policy = await screen.findByLabelText("Allow unsigned apps to modify clusters and run code") as HTMLInputElement;
   expect(policy.checked).toBe(false);
   expect((screen.getByLabelText("Enable GitOps") as HTMLInputElement).disabled).toBe(true);
-  expect(screen.getByText(/Disabled: Turn on/)).toBeTruthy();
+  expect(screen.getByText(/^Turn on/).closest('[role="status"]')?.textContent).toMatch(/^Disabled/);
   expect(screen.getByText("Remove")).toBeTruthy();
   vi.mocked(listExtensions).mockResolvedValue({ schemaVersion: 1, nextRevision: 2, allowUnsignedApps: true, plugins: [{ ...plugin, enabled: false, source: "catalog" }] } as any);
   fireEvent.click(policy);
