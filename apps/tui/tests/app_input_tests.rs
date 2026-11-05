@@ -142,7 +142,12 @@ async fn await_action_result(
     tokio::time::timeout(Duration::from_secs(10), async {
         loop {
             match rx.recv().await {
-                Some(AppEvent::ActionResult { title: t, result }) if t == title => return result,
+                Some(AppEvent::ActionResult { title: t, result })
+                    if t == title
+                        || t.split_once(':').map(|(a, _)| a == title).unwrap_or(false) =>
+                {
+                    return result
+                }
                 Some(_) => continue,
                 None => panic!("event channel closed"),
             }

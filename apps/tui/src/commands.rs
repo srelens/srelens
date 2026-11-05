@@ -384,6 +384,7 @@ pub enum CommandTarget {
     FeatureBanner,
     Update,
     AddCluster,
+    Mux,
 }
 
 pub const COMMAND_REGISTRY: &[CommandDef] = &[
@@ -739,6 +740,13 @@ pub const COMMAND_REGISTRY: &[CommandDef] = &[
         target: CommandTarget::Contexts,
     },
     CommandDef {
+        name: "mux",
+        aliases: &[],
+        description: "Split view to compare two clusters side-by-side (Ctrl+b to cycle, Shift+D to close)",
+        search_terms: "tmux split multi-cluster compare",
+        target: CommandTarget::Mux,
+    },
+    CommandDef {
         name: "import",
         aliases: &["add-cluster", "import-kubeconfig", "add-ctx", "kubeconfig-add"],
         description: "Import a new Kubernetes cluster / kubeconfig from clipboard or file path",
@@ -951,6 +959,7 @@ impl DynamicCommandDef {
             CommandTarget::CustomResource(_) => "CRD",
             CommandTarget::ThemePicker | CommandTarget::SetTheme(_) => "Themes",
             CommandTarget::Contexts | CommandTarget::AddCluster => "Context",
+            CommandTarget::Mux => "View",
             CommandTarget::Namespaces => "Namespace",
             CommandTarget::Help => "Help",
             CommandTarget::FeatureBanner => "Guide",
@@ -986,6 +995,7 @@ impl DynamicCommandDef {
             CommandTarget::SetTheme(_) => ":theme <name>",
             CommandTarget::Namespaces => ":namespaces",
             CommandTarget::Contexts => ":contexts",
+            CommandTarget::Mux => ":mux",
             CommandTarget::AddCluster => ":import",
             CommandTarget::Help => ":help",
             CommandTarget::FeatureBanner => ":features",
