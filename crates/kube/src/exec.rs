@@ -21,18 +21,27 @@ pub fn terminal_size(cols: u16, rows: u16) -> TerminalSize {
 
 use crate::client_cache::ClientCache;
 
-/// The shell to exec: the one asked for, else bash when the image has it, else
-/// `/bin/sh`. Plain `/bin/sh` is dash on Debian and Ubuntu images, which has no
-/// line editing or bracketed paste, so arrow keys print `^[[A` and a pasted
-/// block runs line by line (#1040). Busybox images lack bash, so sh stays the
-/// fallback.
+/// The shell to exec: the one asked for, else [`interactive_shell`] for the OS
+/// srelens runs on.
 pub fn shell_command(requested: Option<&str>) -> Vec<String> {
     match requested {
         Some(s) if !s.is_empty() => vec![s.to_string()],
-        _ => ["/bin/sh", "-c", "command -v bash >/dev/null 2>&1 && exec bash; exec /bin/sh"]
-            .map(String::from)
-            .to_vec(),
+        _ => interactive_shell(cfg!(target_os = "macos")),
     }
+}
+
+/// `/bin/sh` handing over to the first shell the image has of zsh then bash on
+/// macOS, or bash elsewhere, and staying in `/bin/sh` without one. Plain
+/// `/bin/sh` is dash on Debian and Ubuntu images, which has no line editing or
+/// bracketed paste, so arrow keys print `^[[A` and a pasted block runs line by
+/// line (#1040). zsh is macOS's login shell. Busybox images have neither.
+///
+/// The desktop and web pages send the same script from `interactiveShell` in
+/// `@srelens/core`, by the reader's own OS.
+fn interactive_shell(macos: bool) -> Vec<String> {
+    let shells = if macos { "zsh bash" } else { "bash" };
+    let script = format!("for s in {shells}; do command -v $s >/dev/null 2>&1 && exec $s; done; exec /bin/sh");
+    vec!["/bin/sh".into(), "-c".into(), script]
 }
 
 /// Whether `container` (or any container, if `None`) is in the Running state —
@@ -224,45 +233,60 @@ mod tests {
         assert_eq!(shell_command(Some("")), shell_command(None));
     }
 
-    /// Run the default shell command with `PATH` set to `path` and `stdin`
-    /// piped in, returning what it printed.
+    /// Run the interactive shell command for `macos` in an "image" whose only
+    /// programs are fakes of `shells`, each printing `picked-<name>`. What
+    /// `/bin/sh` itself runs comes from stdin, so staying in sh prints
+    /// `picked-sh`.
     #[cfg(unix)]
-    fn run_default_shell(path: &std::path::Path, stdin: &str) -> String {
+    fn picked(macos: bool, shells: &[&str]) -> String {
         use std::io::Write;
-        let cmd = shell_command(None);
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        for shell in shells {
+            let fake = dir.path().join(shell);
+            std::fs::write(&fake, format!("#!/bin/sh\necho picked-{shell}\n")).unwrap();
+            std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let cmd = interactive_shell(macos);
         let mut child = std::process::Command::new(&cmd[0])
             .args(&cmd[1..])
             .env_clear()
-            .env("PATH", path)
+            .env("PATH", dir.path())
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .spawn()
             .unwrap();
-        child.stdin.take().unwrap().write_all(stdin.as_bytes()).unwrap();
-        String::from_utf8(child.wait_with_output().unwrap().stdout).unwrap()
+        child.stdin.take().unwrap().write_all(b"echo picked-sh\n").unwrap();
+        let out = String::from_utf8(child.wait_with_output().unwrap().stdout).unwrap();
+        out.trim_end().to_string()
     }
 
     #[cfg(unix)]
     #[test]
-    fn default_shell_prefers_bash_when_the_image_has_it() {
+    fn interactive_shell_prefers_bash_off_macos() {
         // #1040: plain `/bin/sh` is dash on Debian/Ubuntu images — no line
         // editing, so arrow keys print `^[[A`, and no bracketed paste, so a
         // multi-line paste runs line by line. bash has both.
-        use std::os::unix::fs::PermissionsExt;
-        let dir = tempfile::tempdir().unwrap();
-        let bash = dir.path().join("bash");
-        std::fs::write(&bash, "#!/bin/sh\necho picked-bash\n").unwrap();
-        std::fs::set_permissions(&bash, std::fs::Permissions::from_mode(0o755)).unwrap();
-
-        assert_eq!(run_default_shell(dir.path(), "echo picked-sh\n"), "picked-bash\n");
+        assert_eq!(picked(false, &["bash"]), "picked-bash");
+        // zsh is a macOS habit; elsewhere bash is what a reader expects.
+        assert_eq!(picked(false, &["zsh", "bash"]), "picked-bash");
     }
 
     #[cfg(unix)]
     #[test]
-    fn default_shell_falls_back_to_sh_without_bash() {
-        // busybox and alpine images have no bash; their sh must still open.
-        let empty = tempfile::tempdir().unwrap();
-        assert_eq!(run_default_shell(empty.path(), "echo picked-sh\n"), "picked-sh\n");
+    fn interactive_shell_prefers_zsh_then_bash_on_macos() {
+        // zsh is macOS's login shell, so a Mac reader gets it when the image
+        // has it, and bash when it does not.
+        assert_eq!(picked(true, &["zsh", "bash"]), "picked-zsh");
+        assert_eq!(picked(true, &["bash"]), "picked-bash");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn interactive_shell_falls_back_to_sh() {
+        // busybox and alpine images have neither; their sh must still open.
+        assert_eq!(picked(false, &[]), "picked-sh");
+        assert_eq!(picked(true, &[]), "picked-sh");
     }
 
     #[test]

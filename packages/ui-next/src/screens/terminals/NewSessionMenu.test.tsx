@@ -37,7 +37,7 @@ const sessions = vi.hoisted(() => ({
 vi.mock("../../lib/sessions", () => sessions);
 
 import { NewSessionMenu } from "./NewSessionMenu";
-import type { ClusterContext } from "@srelens/core";
+import { interactiveShell, type ClusterContext } from "@srelens/core";
 import { resetContexts, setContexts } from "../../lib/clusters";
 import { defaultState } from "../../lib/tabs";
 import { getState, setState, setWorkspaceProtected } from "../../lib/tabsStore";
@@ -173,6 +173,8 @@ describe("NewSessionMenu", () => {
         namespace: "kube-system",
         pod: "node-debug-abc12",
         kind: "node",
+        // The host's shell, by the reader's OS, as a pod shell picks one (#1040).
+        command: ["nsenter", "--target", "1", "--mount", "--uts", "--ipc", "--net", "--pid", "--", ...interactiveShell()],
       }),
     );
     expect(onStarted).toHaveBeenCalledWith(9);

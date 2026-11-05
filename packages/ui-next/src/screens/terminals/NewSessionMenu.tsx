@@ -4,6 +4,7 @@ import {
   defaultContainer,
   execCandidates,
   getObject,
+  interactiveShell,
   isTauri,
   listNamespaces,
   listNodes,
@@ -22,7 +23,8 @@ const WIDTH = 420;
 
 /**
  * Enter the host's namespaces from the privileged debug pod for a real node
- * shell — run via `exec`, the pod itself just stays alive holding it open.
+ * shell — run via `exec`, the pod itself just stays alive holding it open —
+ * then the host's own shell, picked as a pod shell's is.
  * Mirrors classic's `NodeCordonAction.NODE_SHELL_COMMAND`, which this
  * replaces: that component is `apps/desktop`'s, and this screen does not
  * reach across into it for one array.
@@ -37,7 +39,7 @@ const NODE_SHELL_COMMAND = [
   "--net",
   "--pid",
   "--",
-  "/bin/sh",
+  ...interactiveShell(),
 ];
 
 /** The container name `k8s.createNodeDebugPod` always attaches under. */
