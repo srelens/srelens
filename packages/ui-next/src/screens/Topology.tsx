@@ -1030,28 +1030,30 @@ function Zoom({
 }) {
   return (
     <div className="absolute bottom-3 left-3 flex items-center gap-1 rounded-md border border-rule bg-surface/90 p-1">
-      <button
+      <Button
         type="button"
-        className="text-btn px-2 py-0.5 text-sm"
+        variant="text"
+        className="px-2 py-0.5 text-sm"
         aria-label="Zoom out"
         onClick={() => onZoom(1 / 1.25)}
       >
         −
-      </button>
+      </Button>
       <span ref={readout} className="num w-10 text-center text-[11px]">
         100%
       </span>
-      <button
+      <Button
         type="button"
-        className="text-btn px-2 py-0.5 text-sm"
+        variant="text"
+        className="px-2 py-0.5 text-sm"
         aria-label="Zoom in"
         onClick={() => onZoom(1.25)}
       >
         +
-      </button>
-      <button type="button" className="text-btn px-2 py-0.5 text-[11px]" onClick={onFit}>
+      </Button>
+      <Button type="button" variant="text" className="px-2 py-0.5 text-[11px]" onClick={onFit}>
         Fit
-      </button>
+      </Button>
     </div>
   );
 }

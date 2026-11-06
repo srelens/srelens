@@ -65,7 +65,7 @@ function RuleAddress({ address, open }: { address: IngressRuleAddress | null; op
   return (
     <span className="flex items-center gap-1">
       {address.kind === "url" ? (
-        <Button variant="ghost" size="xs" className="-mx-1 text-accent" onClick={() => open(address.url)}>
+        <Button type="button" variant="link" onClick={() => open(address.url)}>
           <span className="whitespace-nowrap font-mono">{address.url}</span>
         </Button>
       ) : (

@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { Alert, ConsoleDock, Eyebrow, cx } from "@srelens/ui-kit";
+import { Alert, Button, ConsoleDock, Eyebrow, cx } from "@srelens/ui-kit";
 import { useConsole } from "../console";
 import {
   askAgent,
@@ -643,9 +643,9 @@ export function Console({ fullView, spareAbove }: { fullView?: boolean; spareAbo
     children = (
       <p className="min-w-0 break-words text-sm text-muted">
         {assistantEverywhere ? `AI Assistant is off for ${offLabel}` : "AI Assistant is off"}{" "}
-        <button type="button" className="text-btn" onClick={() => openSettings("agent")}>
+        <Button type="button" variant="text" onClick={() => openSettings("agent")}>
           Open Settings
-        </button>
+        </Button>
       </p>
     );
   } else if (isFullView || turns.length === 0) {
@@ -836,16 +836,16 @@ export function Console({ fullView, spareAbove }: { fullView?: boolean; spareAbo
             ) : (
               <span className="chip" style={{ color: "var(--sev)" }}>
                 <span>Agents could not be listed: {describeError(agents.error, { domain: "local" }).detail}</span>
-                <button
+                <Button
                   type="button"
-                  className="text-btn"
+                  variant="text"
                   onClick={() => {
                     setRetrying(true);
                     invalidateAgentInventory();
                   }}
                 >
                   Retry
-                </button>
+                </Button>
               </span>
             ))}
           {askPaused && (
