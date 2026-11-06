@@ -9,7 +9,11 @@ vi.mock("../transport/transport", () => ({
   subscribe: subscribeMock,
 }));
 
-import { startPodExec, SUBSCRIBE_TIMEOUT_MS } from "./exec";
+import { spawnSync } from "node:child_process";
+import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { interactiveShell, startPodExec, SUBSCRIBE_TIMEOUT_MS } from "./exec";
 import { describeError } from "./errors";
 
 /** The subscription token `startPodExec` handed the backend, read back off
@@ -36,6 +40,47 @@ beforeEach(() => {
   subscribeMock.mockReset();
 });
 
+/** Which shell `interactiveShell(platform)` lands in, in an "image" whose only
+ *  programs are fakes of `shells`, each printing `picked-<name>`. What
+ *  `/bin/sh` runs itself comes from stdin, so staying in sh prints
+ *  `picked-sh`. */
+function picked(platform: string, shells: string[]): string {
+  const dir = mkdtempSync(join(tmpdir(), "srelens-shell-"));
+  try {
+    for (const shell of shells) {
+      writeFileSync(join(dir, shell), `#!/bin/sh\necho picked-${shell}\n`);
+      chmodSync(join(dir, shell), 0o755);
+    }
+    const [sh, ...args] = interactiveShell(platform);
+    return spawnSync(sh, args, { env: { PATH: dir }, input: "echo picked-sh\n", encoding: "utf8" }).stdout.trim();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+// The script runs under a POSIX `/bin/sh`, which CI's Linux runners have and
+// Windows does not.
+describe.skipIf(process.platform === "win32")("interactiveShell", () => {
+  it("prefers bash off a Mac", () => {
+    // #1040: plain `/bin/sh` is dash on Debian/Ubuntu images — no line
+    // editing, so arrow keys print `^[[A`, and no bracketed paste, so a
+    // multi-line paste runs line by line. bash has both.
+    expect(picked("Linux x86_64", ["bash"])).toBe("picked-bash");
+    expect(picked("Win32", ["zsh", "bash"])).toBe("picked-bash");
+  });
+
+  it("prefers zsh, then bash, on a Mac", () => {
+    expect(picked("MacIntel", ["zsh", "bash"])).toBe("picked-zsh");
+    expect(picked("MacIntel", ["bash"])).toBe("picked-bash");
+  });
+
+  it("stays in sh when the image has neither", () => {
+    // busybox and alpine images: their sh must still open.
+    expect(picked("Linux x86_64", [])).toBe("picked-sh");
+    expect(picked("MacIntel", [])).toBe("picked-sh");
+  });
+});
+
 describe("startPodExec", () => {
   it("starts a session, wires output/exit, and sends input + close", async () => {
     invokeCommandMock.mockResolvedValueOnce(7); // session id
@@ -52,7 +97,7 @@ describe("startPodExec", () => {
       pod: "web-1",
       container: null,
       shell: null,
-      command: null,
+      command: interactiveShell(),
       channel,
       cols: null,
       rows: null,
@@ -82,7 +127,7 @@ describe("startPodExec", () => {
       pod: "web-1",
       container: "sidecar",
       shell: null,
-      command: null,
+      command: interactiveShell(),
       channel: channelOf(),
       cols: null,
       rows: null,
