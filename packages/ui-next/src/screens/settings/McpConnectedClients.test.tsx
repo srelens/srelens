@@ -49,7 +49,8 @@ describe("McpConnectedClients", () => {
 
   it("distinguishes a running server with no sessions", async () => {
     render(<McpConnectedClients {...actionProps} running />);
-    expect(await screen.findByText(/no active HTTP client sessions/i)).toBeTruthy();
+    // The kit's empty state: its title, with no full stop (#1001, step 7a).
+    expect(await screen.findByText("No active HTTP client sessions")).toBeTruthy();
     expect(core.mcpHttpSnapshot).toHaveBeenCalledTimes(1);
   });
 
