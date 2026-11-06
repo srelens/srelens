@@ -22,7 +22,7 @@ import {
 import { AppCards } from "./DashboardCards";
 import { plainText } from "./displayText";
 import { STATUS_WORD } from "./AppStatus";
-import { Button, ColumnPicker, FilterBar, StatusPill, Table, Tabs, filterMatcher, tableFilterError, type Column } from "@srelens/ui-kit";
+import { Button, ColumnPicker, EmptyState, FilterBar, LoadingState, StatusPill, Table, Tabs, filterMatcher, tableFilterError, type Column } from "@srelens/ui-kit";
 import { ExtensionResults } from "./ExtensionResults";
 import { useResource } from "../lib/useResource";
 import { LiveNotice, LiveReaders, LiveStatus, useLiveReaders } from "./liveReaders";
@@ -181,7 +181,7 @@ function Summary({
       {data.status === "error" ? (
         <FailureState error={data.error} onRetry={data.reload} />
       ) : data.status === "loading" ? (
-        <p role="status">Loading…</p>
+        <LoadingState compact label={`Counting ${plainText(page.title).toLowerCase()}`} />
       ) : !nameFilterAnswered(nameFilter) ? null : (
         <div className="extension-summary-body">
           <div
@@ -274,12 +274,7 @@ function Events({
   const columns = useMemo(() => EVENT_COLUMNS.filter((column) => column.key === EVENT_PINNED || !hidden.has(column.key)), [hidden]);
   if (result.status === "error")
     return <FailureState error={result.error} onRetry={result.reload} />;
-  if (result.status === "loading")
-    return (
-      <p className="extension-message" role="status">
-        Loading events…
-      </p>
-    );
+  if (result.status === "loading") return <LoadingState compact label="Loading events" />;
   const matches = filterMatcher(search, regex);
   const ours = (result.data?.events ?? []).filter((event) => config.apiGroups.includes(event.objectApiVersion?.split("/")[0] ?? ""));
   const events = ours.filter((event) =>
@@ -399,12 +394,7 @@ export function ExtensionWorkspace({
   const openCard = (opened: ExtensionDashboardCard) => {
     if (opened.target) onCard(opened.target.page, namespaces, opened.id);
   };
-  if (!context)
-    return (
-      <p className="extension-message">
-        Choose a cluster before opening an app page.
-      </p>
-    );
+  if (!context) return <EmptyState title="No cluster in focus" hint="Pick a cluster in the rail to open this app page." />;
   const noun = page.dashboard ? "events" : plainText(page.title).toLowerCase();
   const scopeControl = card
     ? <span className="extension-card-scope">{cardNamespace || cardNamespaces?.join(", ") || "All namespaces"}</span>
@@ -476,7 +466,7 @@ export function ExtensionWorkspace({
           <StaleSelectionAlert selection={selection} namespaces={listed} onReset={() => setNamespaces(cluster.stableId, [])} />
         </>
       )}
-      {listed === null ? <p role="status" className="extension-message">Loading namespaces…</p> : page.dashboard ? (
+      {listed === null ? <LoadingState label="Loading namespaces" /> : page.dashboard ? (
         <>
           <div className={cards.length ? "extension-overview" : "extension-summaries"}>
             {page.dashboard.pages.map((id,index) => {

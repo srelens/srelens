@@ -207,6 +207,12 @@ describe("EditResource", () => {
     expect(screen.getByRole("button", { name: "Apply" })).toHaveProperty("disabled", true);
   });
 
+  it("says it is loading the manifest until the cluster answers", async () => {
+    core.getManifest.mockReturnValue(new Promise(() => {}));
+    render(<EditResource route={ROUTE} />);
+    expect(await screen.findByRole("status", { name: "Loading the manifest" })).toBeTruthy();
+  });
+
   it("offers a Copy control over the manifest", async () => {
     // Asserted at the CALL site, not only in the kit: the prop is this
     // screen's, and dropping it would leave every editor test green. (#656)
@@ -436,7 +442,7 @@ describe("EditResource", () => {
     act(() => latestEditor().onChange(EDITED));
     await userEvent.click(screen.getByRole("button", { name: "Diff" }));
     expect(await screen.findByText("Could not compare with the cluster", {}, { timeout: 3000 })).toBeDefined();
-    expect(screen.queryByText("No changes.")).toBeNull();
+    expect(screen.queryByText("No changes")).toBeNull();
     // And the header says so, whether or not the panel is open.
     expect(screen.getByText("Not compared")).toBeDefined();
   });

@@ -58,7 +58,7 @@ export function NeedsAttention({ targets, scans }: NeedsAttentionProps) {
           hint="This reads the clusters in this workspace that are connected and not paused. Open a cluster to connect it."
         />
       ) : pending === targets.length ? (
-        <LoadingState label={`Checking ${plural(targets.length, "cluster")}…`} />
+        <LoadingState label={`Checking ${plural(targets.length, "cluster")}`} />
       ) : (
         <>
           {failed.map((t) => {

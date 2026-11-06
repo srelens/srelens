@@ -1,5 +1,5 @@
 import type { ReactNode } from "react";
-import { Button, type EditorDiagnostic } from "@srelens/ui-kit";
+import { Button, LoadingState, type EditorDiagnostic } from "@srelens/ui-kit";
 import { FailureAlert } from "../lib/errorCopy";
 import type { KeysHere, SchemaStatus } from "../lib/manifestSchema";
 
@@ -156,7 +156,7 @@ export function EditAnalysis({
         {schema === "none" ? (
           <p className="text-xs text-muted">Name an apiVersion and a kind to see what goes here.</p>
         ) : schema === "loading" ? (
-          <p className="text-xs text-muted">Loading the schema…</p>
+          <LoadingState compact label="Loading the schema" />
         ) : schema === "failed" ? (
           // Not "the cluster has no schema for Secret": the cluster was not
           // heard from. Which it is changes what the reader does next.

@@ -34,7 +34,7 @@ import {
   type InstalledExtension,
   type LogTarget,
 } from "@srelens/core";
-import { Button, Combobox, Section, usePortalShowing } from "@srelens/ui-kit";
+import { Button, Combobox, EmptyState, LoadingState, Section, usePortalShowing } from "@srelens/ui-kit";
 import { HostConfirmation } from "../confirm/HostConfirmation";
 import { useProtectedConfirm } from "../lib/protectedConfirm";
 import { useConfirmationApp } from "../confirm/confirmationApp";
@@ -144,7 +144,7 @@ export function ExtensionPodSlot({ context, resource }: { context: string; resou
         </Section>
       )}
       {limited && lookup.status === "loading" && (
-        <p className="extension-message">Checking which clusters app pod tools are enabled for…</p>
+        <LoadingState compact label="Checking which clusters app pod tools are enabled for" />
       )}
       {offered.map(({ plugin, bindings }) => (
         <ExtensionPodTools
@@ -304,7 +304,7 @@ function PodGroup({
     () => false,
   );
   const [containers, setContainers] = useState<Record<string, string>>({});
-  if (pods.status === "loading") return <p className="extension-message">Listing the pods {plainText(first.title)} may reach…</p>;
+  if (pods.status === "loading") return <LoadingState compact label={`Listing the pods ${plainText(first.title)} may reach`} />;
   if (pods.status === "error" || !pods.data)
     return <FailureState title="Could not list the pods this app may reach" error={pods.error} onRetry={pods.reload} />;
   const shown = place.kind === "pod" ? pods.data.pods.filter((pod) => pod.name === place.pod) : pods.data.pods;
@@ -318,9 +318,10 @@ function PodGroup({
         {pods.data.truncated ? " (more than the host lists)" : ""}.
       </p>
       {shown.length === 0 ? (
-        <p className="extension-message">
-          {place.kind === "pod" ? "This pod is not one the app may reach." : `The cluster reports no such pods right now.`}
-        </p>
+        <EmptyState
+          compact
+          title={place.kind === "pod" ? "This pod is not one the app may reach" : "The cluster reports no such pods right now"}
+        />
       ) : (
         // One block per pod, not a table: the Inspector is narrow, and a row of a pod's
         // name, state, container and every binding's control does not fit across it.
@@ -602,7 +603,7 @@ function LogsSession({
       {/* Focusable: it scrolls both ways, and a keyboard must be able to reach the rest. */}
       <div className="extension-pod-log" role="log" aria-label={`Logs of ${label}`} tabIndex={0}>
         {stream.lines.length === 0 ? (
-          <p className="extension-message">{end || stream.status === "error" ? "No lines." : "Nothing logged yet."}</p>
+          <EmptyState compact title={end || stream.status === "error" ? "No lines" : "Nothing logged yet"} />
         ) : (
           // Compact rows rather than the Logs screen's four-column line: the pod and
           // container are the session's, named in its header, and the Inspector is narrow.
@@ -740,7 +741,7 @@ function ForwardSession({
   );
   if (refused) return <p className="extension-message" role="status">The host refused the forward: {refused}</p>;
   if (end) return <p className="extension-message" role="status">{describeStreamEnd(end)}</p>;
-  if (!ready) return <p className="extension-message" role="status">Opening a local port…</p>;
+  if (!ready) return <LoadingState compact label="Opening a local port" />;
   return (
     <>
       <p className="extension-message" role="status">

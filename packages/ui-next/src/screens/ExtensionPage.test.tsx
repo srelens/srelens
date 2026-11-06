@@ -38,7 +38,7 @@ it("waits for the clusters to be listed before saying a limited app is not enabl
  openKustomizations();
  // The title changes once the inventory is in, so the loading message is the clusters'.
  expect(await screen.findByText("Kustomizations")).toBeTruthy();
- expect(screen.getByRole("status").textContent).toContain("Loading app");
+ expect(screen.getByRole("status",{name:"Loading app"})).toBeTruthy();
  expect(screen.queryByText(/not enabled for this cluster/)).toBeNull();
 });
 it("says the clusters could not be listed rather than that a limited app is not enabled, and retries",async()=>{

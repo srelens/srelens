@@ -60,7 +60,7 @@ function isEmpty(component: NativeComponentPayload) {
 /** The production rendering boundary accepts unknown JSON and fails closed. */
 export function NativeComponent({ payload, label, state, onRetry, fill }: NativeComponentProps) {
   let content: ReactNode;
-  if (state?.status === "loading") content = <LoadingState label={`Loading ${label}…`}/>;
+  if (state?.status === "loading") content = <LoadingState label={`Loading ${label}`}/>;
   else if (state?.status === "error") {
     const error = describeError(state.error);
     content = <ErrorState title={`Could not load ${label}`} detail={error.detail} raw={error.raw} onRetry={onRetry}/>;

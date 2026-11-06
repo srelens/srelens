@@ -1,7 +1,7 @@
 import { useId, useRef, useState, type PointerEvent } from "react";
 import { GripVertical } from "lucide-react";
 import { deleteContext, describeError, isTauri, listContexts, removeClusterNamespace, unprefixedName, type ClusterContext } from "@srelens/core";
-import { Button, ConfirmDialog, CustomizeMark, Field, FilterBar, Mark, Switch, TextInput, useListFilter } from "@srelens/ui-kit";
+import { Button, ConfirmDialog, CustomizeMark, EmptyState, Field, FilterBar, LoadingState, Mark, Switch, TextInput, useListFilter } from "@srelens/ui-kit";
 import { FailureAlert } from "../../lib/errorCopy";
 import { getAssistantSaveError, setClusterAssistant, useAssistant } from "../../lib/assistant";
 import { getContexts, getKubeconfigFiles, setContexts, useContexts, useContextsError, useContextsStatus } from "../../lib/clusters";
@@ -146,8 +146,8 @@ export function ClustersPane() {
     </header>
     {error && <FailureAlert tone="sev" className="m-3" title="Could not remove the context" error={error} domain="local" />}
     {status === "failed" && <FailureAlert tone="sev" className="m-3" title="Could not list contexts" error={listingError} domain="local" onRetry={() => void reload()} />}
-    {status === "loading" ? <p role="status" className="p-3 text-muted">Loading contexts…</p> : contexts.length === 0 ?
-      status !== "failed" && <p className="p-3 text-[0.75rem] text-muted">No contexts configured. Add a kubeconfig or cluster in Connections.</p> :
+    {status === "loading" ? <LoadingState label="Loading contexts" /> : contexts.length === 0 ?
+      status !== "failed" && <EmptyState title="No contexts configured" hint="Add a kubeconfig or cluster in Connections." /> :
       <div className="context-management-layout min-h-0 flex-1">
         <section aria-label="Context order" className="flex min-h-0 min-w-0 flex-col border-r border-rule">
           <FilterBar {...filter} label="Filter contexts" placeholder="Filter contexts…" />
@@ -183,7 +183,7 @@ export function ClustersPane() {
               </button>
             </li>;
           })}</ul>
-          {visible.length === 0 && <p className="p-3 text-[0.75rem] text-muted">No matching contexts.</p>}
+          {visible.length === 0 && <EmptyState compact title="No matching contexts" />}
         </section>
         {current && <ContextEditor key={current.stableId} context={current} onRemove={() => { setError(""); setPending(current); }} />}
       </div>}

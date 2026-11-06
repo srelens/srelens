@@ -6,7 +6,7 @@ import {
   type ExtensionChange,
   type InstalledExtension,
 } from "@srelens/core";
-import { Button, Combobox } from "@srelens/ui-kit";
+import { Button, Combobox, EmptyState, LoadingState } from "@srelens/ui-kit";
 import { FailureAlert } from "../lib/errorCopy";
 import { useResource } from "../lib/useResource";
 
@@ -75,11 +75,7 @@ export function ExtensionClusters({
           {failure ? (
             <FailureAlert tone="sev" title="Could not list clusters" error={failure} domain="local" onRetry={listing.reload} />
           ) : (
-            listing.status === "loading" && (
-              <p role="status" className="extension-message">
-                Loading clusters…
-              </p>
-            )
+            listing.status === "loading" && <LoadingState compact label="Loading clusters" />
           )}
           <Combobox
             value=""
@@ -92,7 +88,7 @@ export function ExtensionClusters({
             ariaLabel="Add a cluster"
           />
           {chosen.length === 0 ? (
-            <p className="extension-message">No cluster chosen yet.</p>
+            <EmptyState compact title="No cluster chosen yet" />
           ) : (
             <ul className="extension-cluster-list" aria-label="Chosen clusters">
               {chosen.map((id) => (

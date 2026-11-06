@@ -1,5 +1,5 @@
 import { extensionClusterRoute, extensionEnabledFor, type InstalledExtension } from "@srelens/core";
-import { Badge, Button, LoadingState, type BadgeTone } from "@srelens/ui-kit";
+import { Badge, Button, EmptyState, LoadingState, type BadgeTone } from "@srelens/ui-kit";
 import { ExtensionLogo } from "../../extensions/ExtensionLogo";
 import { extensionLabel, useExtensions } from "../../extensions/inventoryStore";
 import { useActiveContext } from "../../lib/clusters";
@@ -39,7 +39,7 @@ export function Apps() {
         Apps {plugins.length > 0 && <span className="text-muted">{plugins.length}</span>}
       </h2>
       {inventory.status === "loading" ? (
-        <LoadingState label="Reading your apps…" />
+        <LoadingState compact label="Reading your apps" />
       ) : inventory.status === "error" ? (
         <>
           <FailureAlert title="Could not read your apps" error={inventory.error} className="home-section-alert" />
@@ -48,7 +48,7 @@ export function Apps() {
           </div>
         </>
       ) : plugins.length === 0 ? (
-        <p className="home-note">No apps installed</p>
+        <EmptyState compact title="No apps installed" />
       ) : (
         <ul className="home-side-group home-pick-list" aria-label="Installed apps">
           {plugins.map((plugin) => {

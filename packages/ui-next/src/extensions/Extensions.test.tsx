@@ -232,6 +232,11 @@ it("keeps a missing access comparison distinct from a new installation", async (
   expect(within(review).queryByText("Complete incoming bindings")).toBeNull();
   expect(within(review).queryByRole("button", { name: /grant permissions/ })).toBeNull();
 });
+it("says it is loading the apps until the list answers", () => {
+  vi.mocked(listExtensions).mockReturnValue(new Promise(() => {}));
+  render(<ExtensionManager />);
+  expect(screen.getByRole("status", { name: "Loading apps" })).toBeTruthy();
+});
 it("shows backend errors and retries instead of claiming no apps", async () => {
   vi.mocked(listExtensions).mockRejectedValueOnce(new Error("disk unreadable"));
   render(<ExtensionManager />);
@@ -239,7 +244,7 @@ it("shows backend errors and retries instead of claiming no apps", async () => {
     "disk unreadable",
   );
   fireEvent.click(screen.getByText("Retry"));
-  expect(await screen.findByText("No apps installed.")).toBeTruthy();
+  expect(await screen.findByText("No apps installed")).toBeTruthy();
 });
 it("says why an app was quarantined and does not offer to re-enable it", async () => {
   vi.mocked(listExtensions).mockResolvedValue({
@@ -693,9 +698,10 @@ it("says in the Inspector and Logs that a declarative app has no process (#575)"
   vi.mocked(extensionLogs).mockResolvedValue({ runtime: "declarative", lines: [], capacity: 1000, dropped: 0 });
   const details = await openDetails(inspected());
   fireEvent.click(within(details).getByRole("tab", { name: "Inspector" }));
-  expect(await within(details).findByText(/^No process\. This is a declarative app/)).toBeTruthy();
-  expect(within(details).getByText("No open streams.")).toBeTruthy();
-  expect(within(details).getByText("No watches.")).toBeTruthy();
+  expect(await within(details).findByText("No process")).toBeTruthy();
+  expect(within(details).getByText(/^This is a declarative app/)).toBeTruthy();
+  expect(within(details).getByText("No open streams")).toBeTruthy();
+  expect(within(details).getByText("No watches")).toBeTruthy();
   // The Overview's own content is not drawn under another tab.
   expect(within(details).queryByRole("textbox", { name: "GitOps manifest" })).toBeNull();
   fireEvent.click(within(details).getByRole("tab", { name: "Logs" }));
@@ -1729,9 +1735,9 @@ it("separates installed apps from the catalog and collapses local installation b
   expect(listExtensionCatalog).not.toHaveBeenCalled();
   fireEvent.click(screen.getByRole("tab", { name: "Catalog" }));
   await waitFor(() => expect(listExtensionCatalog).toHaveBeenCalledWith(false));
-  expect(screen.getByText("No apps installed.").closest("[hidden]")).not.toBeNull();
+  expect(screen.getByText("No apps installed").closest("[hidden]")).not.toBeNull();
   fireEvent.click(screen.getByRole("tab", { name: "Apps" }));
-  expect(screen.getByText("No apps installed.").closest("[hidden]")).toBeNull();
+  expect(screen.getByText("No apps installed").closest("[hidden]")).toBeNull();
 });
 
 it("keeps app settings global without cluster selection or page launchers", async () => {
@@ -1769,7 +1775,9 @@ it("uses CRD printer columns instead of app-defined generic columns",async()=>{
 it("reports CRD discovery failure while retaining the fallback resource columns",async()=>{
  vi.mocked(readExtension).mockResolvedValue({printerColumns:[{name:"Ready",jsonPath:".status.ready"}],columnsError:"Forbidden",items:[{name:"apps",namespace:"team",age:"1d",columns:["True"]}]});
  render(<ExtensionResults plugin={plugin} capability="list" context="prod"/>);
- expect(await screen.findByText(/Could not load CRD columns: Forbidden/)).toBeTruthy();
+ // A failure drawn as one, its reason under the headline (#1001).
+ expect(await screen.findByText("Could not load the CRD's columns, so these are the app's own")).toBeTruthy();
+ expect(screen.getAllByText(/Forbidden/).length).toBeGreaterThan(0);
  expect(await screen.findByRole("columnheader",{name:/Ready/})).toBeTruthy();
 });
 
@@ -1996,7 +2004,8 @@ it("keeps a bulk run on screen while the writes it accepts refresh the list unde
   // reported as refreshing inside the section rather than replacing it.
   expect(screen.queryByTestId("bulk-result")).not.toBeNull();
   expect(screen.getByTestId("bulk-count").textContent).toBe("3 selected");
-  expect(screen.queryByText("Loading app resources…")).toBeNull();
+  expect(screen.queryByRole("status", { name: "Loading app resources" })).toBeNull();
+  expect(screen.getByRole("status", { name: "Refreshing resources" })).toBeTruthy();
 });
 
 it("passes the host's availability predicate through to the count the bar shows", async () => {

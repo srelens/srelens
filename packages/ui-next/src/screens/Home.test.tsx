@@ -114,7 +114,7 @@ describe("Home", () => {
 
   it("distinguishes loading and failed discovery from an empty configuration", () => {
     const view = render(<Home />);
-    expect(screen.getByText("Loading clusters…")).toBeTruthy();
+    expect(screen.getByRole("status", { name: "Loading clusters" })).toBeTruthy();
     expect(screen.queryByText("No clusters configured")).toBeNull();
     act(() => setContexts([], "kubeconfig unreadable"));
     view.rerender(<Home />);

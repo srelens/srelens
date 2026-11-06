@@ -82,7 +82,7 @@ describe("a live app page (#566)", () => {
     emit({ event: "changed" }, 2);
     // The list stays on screen while it is read again; no "Refreshing" flash.
     expect(screen.getByText("web")).toBeTruthy();
-    expect(screen.queryByText("Refreshing resources…")).toBeNull();
+    expect(screen.queryByRole("status", { name: "Refreshing resources" })).toBeNull();
     await act(async () => { finish(rows("web", "api")); });
     expect(screen.getByText("api")).toBeTruthy();
   });

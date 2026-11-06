@@ -3,7 +3,7 @@ import {
   appVersion, bundledReleaseNotes, checkForUpdate, installUpdate, loadUpdateChannel, parseReleaseNotes,
   loadUpdateNotes, openExternal, relaunchApp, saveUpdateChannel, type UpdateChannel, type UpdateMeta,
 } from "@srelens/core";
-import { Button, Progress, Select } from "@srelens/ui-kit";
+import { Button, LoadingState, Progress, Select } from "@srelens/ui-kit";
 import { FailureAlert } from "../../lib/errorCopy";
 import { Notes } from "../Notes";
 
@@ -124,7 +124,7 @@ export function UpdatesPane() {
           {versionError && !releaseVersion ? <div className="flex flex-col items-start gap-2">
             <FailureAlert tone="sev" title="Could not load the installed version" error={versionError} />
             <Button variant="secondary" onClick={() => setVersionAttempt((value) => value + 1)}>Retry installed version</Button>
-          </div> : !releaseVersion || notes.loading ? <p className="text-muted">Loading release notes…</p> : notes.error !== null ? <div className="flex flex-col items-start gap-2">
+          </div> : !releaseVersion || notes.loading ? <LoadingState compact label="Loading release notes" /> : notes.error !== null ? <div className="flex flex-col items-start gap-2">
             <FailureAlert tone="sev" title="Could not load release notes" error={notes.error} domain="http" />
             <Button variant="secondary" onClick={() => setNotesAttempt((value) => value + 1)}>Retry release notes</Button>
           </div> : notes.text.trim() ? <Notes blocks={parseReleaseNotes(notes.text)} /> : <p className="text-muted">This release has no published notes.</p>}

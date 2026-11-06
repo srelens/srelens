@@ -2,7 +2,7 @@ import { AgeCell } from "../lib/ageCell";
 import { ExtensionResourceDetails } from "./ExtensionResourceDetails";
 import { ExtensionBulkActions, type BulkActionAvailability } from "./ExtensionBulkActions";
 import { bulkResourceKey } from "./bulkActions";
-import { Button, ColumnPicker, ResizeHandle, StatusPill, Table, filterTableData, type Column, type TableSort } from "@srelens/ui-kit";
+import { Button, ColumnPicker, EmptyState, LoadingState, ResizeHandle, StatusPill, Table, filterTableData, type Column, type TableSort } from "@srelens/ui-kit";
 import { clampPeekWidth, savePeekWidth, setPeekWidth, usePeekBounds, usePeekWidth } from "../lib/peekWidth";
 import { ExtensionResourceNavigation } from "./resourceNavigation";
 import { useContext, useMemo, useEffect, useRef, useState } from "react";
@@ -243,12 +243,7 @@ export function ExtensionResults({
   useEffect(() => {
     if (data.status !== "loading") loaded.current = true;
   }, [data.status]);
-  if (!context)
-    return (
-      <p className="extension-message">
-        Choose a cluster before opening an app page.
-      </p>
-    );
+  if (!context) return <EmptyState title="No cluster in focus" hint="Pick a cluster in the rail to open this app page." />;
   if (data.status === "error" && selected?.scope !== scope) {
     // A 404 identifies an unavailable endpoint, not why it is unavailable.
     // Name the required API without claiming that discovery proved it absent.
@@ -277,17 +272,13 @@ export function ExtensionResults({
     return <FailureState title={guidance?.title} detail={guidance?.detail} error={data.error} onRetry={data.reload} />;
   }
   // Only the FIRST load of a scope replaces the section. A later refresh is
-  // reported inside it ("Refreshing resources…"), because the section is not
+  // reported inside it ("Refreshing resources"), because the section is not
   // only the table: an accepted write announces its resource and reloads this
   // list, so tearing the section down on every refresh took a running bulk
   // action's progress and its result away with it at the first acceptance —
   // and, before that, flashed the whole list away after every single write.
   if (data.status === "loading" && !loaded.current && selected?.scope !== scope)
-    return (
-      <p role="status" className="extension-message">
-        Loading app resources…
-      </p>
-    );
+    return <LoadingState label="Loading app resources" />;
   // Only a binding the host runs actions against gets a selection column:
   // checkboxes over a table with nothing to do on it are furniture.
   const selectable = !preview && binding?.target === "k8s.listCustomResource";
@@ -314,7 +305,7 @@ export function ExtensionResults({
       ))}
       <NamespaceFailuresAlert what={noun} failures={data.data?.failures ?? []} />
       <CollectionNameNotice filter={nameFilter} noun={noun} />
-      {data.data?.columnsError && <p className="extension-message" role="status">Could not load CRD columns: {data.data.columnsError}. Showing app-defined columns.</p>}
+      {data.data?.columnsError && <FailureAlert title="Could not load the CRD's columns, so these are the app's own" error={data.data.columnsError} />}
       {data.data?.truncated && (
         <p className="extension-message" role="status">
           Showing the first {data.data.items.length.toLocaleString()} resources; more remain on the cluster.
@@ -352,7 +343,7 @@ export function ExtensionResults({
           barSlot={bulkBar}
         />
       )}
-      {data.status === "loading" ? <p className="extension-message" role="status">Refreshing resources…</p> : data.status === "error" ? <FailureState error={data.error} onRetry={data.reload} /> : !nameFilterAnswered(nameFilter) ? null : (
+      {data.status === "loading" ? <LoadingState compact label="Refreshing resources" /> : data.status === "error" ? <FailureState error={data.error} onRetry={data.reload} /> : !nameFilterAnswered(nameFilter) ? null : (
         <div ref={refocus.scope} className="extension-table-scroll" data-stale={live.state === "reconnecting" || undefined}>
           <Table
             columns={shownColumns}

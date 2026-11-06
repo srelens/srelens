@@ -101,7 +101,7 @@ export function Home() {
                 <FailureAlert title="Could not load all clusters" error={error} />
                 <Button variant="secondary" size="sm" className="mt-2" disabled={retrying} onClick={() => void retry()}>{retrying ? "Retrying…" : "Retry"}</Button>
               </div>}
-              {status === "loading" ? <LoadingState label="Loading clusters…" /> : contexts.length === 0 ? (
+              {status === "loading" ? <LoadingState label="Loading clusters" /> : contexts.length === 0 ? (
                 status === "loaded" && <EmptyState title="No clusters configured" hint="Add a kubeconfig or connect to a cluster to start exploring. Your saved connections will appear here." />
               ) : filtered.length === 0 ? <EmptyState title="No matching clusters" hint="Search by display name, context, or API server." action={<Button variant="secondary" size="sm" onClick={() => filter.onValueChange("")}>Clear search</Button>} /> : (
                 <ul className="home-cluster-list" aria-label="Saved clusters">
