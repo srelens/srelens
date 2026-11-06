@@ -23,6 +23,14 @@ describe("IconButton", () => {
     expect(screen.getByRole("button").title).toBe("No container selected");
   });
 
+  it("draws no tooltip when told to, for a label that carries data", () => {
+    // "Exclude <a term from the log>": a tooltip is a value nobody asked to
+    // have shown, and a log line is the kind of string that carries a secret.
+    render(<IconButton icon={Dot} label="Exclude token=abc" title={null} />);
+    const button = screen.getByRole("button", { name: "Exclude token=abc" });
+    expect(button.hasAttribute("title")).toBe(false);
+  });
+
   it("hides the icon from assistive technology", () => {
     // The button already has a name; the icon announcing itself repeats it.
     render(<IconButton icon={Dot} label="Delete" />);

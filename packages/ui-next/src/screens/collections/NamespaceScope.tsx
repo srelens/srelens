@@ -162,9 +162,11 @@ export function NamespaceScopePicker({
         }}
         footerExtra={
           <>
-            <button
+            <Button
               type="button"
-              className="btn whitespace-nowrap !py-0"
+              variant="secondary"
+              size="xs"
+              className="whitespace-nowrap"
               disabled={handPicked.length === 0}
               title={
                 handPicked.length > 0
@@ -176,16 +178,18 @@ export function NamespaceScopePicker({
               onClick={() => setSaving(handPicked)}
             >
               Save as collection…
-            </button>
-            <button
+            </Button>
+            <Button
               type="button"
-              className="btn ml-auto whitespace-nowrap !py-0"
+              variant="secondary"
+              size="xs"
+              className="ml-auto whitespace-nowrap"
               aria-label="Manage collections…"
               title="Manage collections in Settings"
               onClick={() => openSettings("collections")}
             >
               Manage…
-            </button>
+            </Button>
           </>
         }
       />

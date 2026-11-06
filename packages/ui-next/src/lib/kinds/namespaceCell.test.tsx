@@ -64,11 +64,10 @@ describe("withNamespaceSelect", () => {
 
   it("reads as a link before it is hovered — underlined at rest, not only under the pointer", () => {
     renderList([], vi.fn());
+    // The kit's link button, whose dotted-at-rest, solid-under-the-pointer
+    // rule ui-kit's Button.test pins.
     const classes = screen.getByRole("button", { name: "Show only namespace shop" }).className.split(/\s+/);
-    expect(classes).toContain("underline");
-    expect(classes).toContain("decoration-dotted");
-    expect(classes).toContain("hover:decoration-solid");
-    expect(classes).toContain("focus-visible:decoration-solid");
+    expect(classes).toContain("link-btn");
   });
 
   it("hands the clicked namespace to onAdd, and leaves the row beneath it alone", async () => {

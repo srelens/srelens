@@ -1,4 +1,5 @@
 import { useState, type ReactNode } from "react";
+import { Button } from "./Button";
 import { Picker, PickerRow, optionLabel, type ComboboxOption } from "./picker";
 import { Tabs } from "./Tabs";
 import { filled } from "./slot";
@@ -180,15 +181,15 @@ export function MultiSelect({
                 {selection.length === 0 ? "all" : selection.length} selected
               </span>
               {selectAll && (
-                <button type="button" className="btn !py-0" onClick={() => onChange(options.map((o) => o.value))}>
+                <Button type="button" variant="secondary" size="xs" onClick={() => onChange(options.map((o) => o.value))}>
                   Select all
-                </button>
+                </Button>
               )}
             </>
           )}
-          <button type="button" className="btn !py-0" onClick={() => onChange([])}>
+          <Button type="button" variant="secondary" size="xs" onClick={() => onChange([])}>
             Reset
-          </button>
+          </Button>
           {footerExtra !== undefined && (
             <div className="flex w-full basis-full items-center gap-1.5">{footerExtra}</div>
           )}

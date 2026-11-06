@@ -4,7 +4,7 @@ import {
   relativeTime,
   type McpHttpSnapshot,
 } from "@srelens/core";
-import { Badge, Button, LoadingState, Panel } from "@srelens/ui-kit";
+import { Badge, Button, EmptyState, LoadingState, Panel } from "@srelens/ui-kit";
 import { FailureAlert } from "../../lib/errorCopy";
 
 const REFRESH_MS = 5_000;
@@ -115,7 +115,7 @@ export function McpConnectedClients({
       ) : clients === null ? (
         <LoadingState compact className="mt-3" label="Loading HTTP client sessions" />
       ) : clients.length === 0 ? (
-        <p className="mt-3 text-[0.75rem] text-muted">No active HTTP client sessions.</p>
+        <EmptyState compact className="mt-3" title="No active HTTP client sessions" />
       ) : (
         <ul className="mt-2">
           {clients.map((client, index) => (

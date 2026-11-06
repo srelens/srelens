@@ -453,9 +453,9 @@ function KindsPicker({
       ? (
           <>
             {`Could not read the kinds ${clusterName} serves. ${friendly(error).detail} `}
-            <button type="button" className="btn !py-0" onClick={() => setAttempt((n) => n + 1)}>
+            <Button type="button" variant="text" onClick={() => setAttempt((n) => n + 1)}>
               Try again
-            </button>
+            </Button>
           </>
         )
       : served === null

@@ -41,13 +41,11 @@ describe("NodeLink", () => {
 
   it("reads as a link before it is hovered — underlined at rest, not only under the pointer", () => {
     // Underlined only on hover, the name was indistinguishable from the
-    // plain text it replaced (PR #833 review).
+    // plain text it replaced (PR #833 review). The kit's link button, whose
+    // dotted-at-rest, solid-under-the-pointer rule ui-kit's Button.test pins.
     render(<NodeLink name="worker-2" />);
     const classes = screen.getByRole("button", { name: "Open node worker-2" }).className.split(/\s+/);
-    expect(classes).toContain("underline");
-    expect(classes).toContain("decoration-dotted");
-    expect(classes).toContain("hover:decoration-solid");
-    expect(classes).toContain("focus-visible:decoration-solid");
+    expect(classes).toContain("link-btn");
   });
 
   it("opens the node's detail in a tab, on the cluster in focus", async () => {

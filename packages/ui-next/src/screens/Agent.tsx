@@ -129,9 +129,9 @@ export function Agent(_props: { route: string }) {
       <Screen title="Agent" eyebrow={context || undefined}>
         <p className="max-w-prose p-3 text-[0.8125rem] leading-relaxed text-muted">
           AI Assistant is off{" "}
-          <button type="button" className="text-btn" onClick={() => openSettings("agent")}>
+          <Button type="button" variant="text" onClick={() => openSettings("agent")}>
             Open Settings
-          </button>
+          </Button>
         </p>
       </Screen>
     );
@@ -235,9 +235,9 @@ export function Agent(_props: { route: string }) {
                  conversation on this cluster stays readable below. */
               <p className="mx-auto max-w-prose pt-10 text-[0.8125rem] leading-relaxed text-muted">
                 AI Assistant is off for {runLabel}{" "}
-                <button type="button" className="text-btn" onClick={() => openSettings("agent")}>
+                <Button type="button" variant="text" onClick={() => openSettings("agent")}>
                   Open Settings
-                </button>
+                </Button>
               </p>
             ) : turns.length === 0 ? (
               /* An empty screen said nothing at all — reported as "page looks

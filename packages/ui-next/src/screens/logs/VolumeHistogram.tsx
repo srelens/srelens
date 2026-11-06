@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState, type KeyboardEvent } from "react";
 import { inRange, volumeBuckets, type QueryClause, type QueryLine, type TimeRange, type VolumeBucket } from "@srelens/core";
-import { statusTone, toneColor, toneWash } from "@srelens/ui-kit";
+import { Button, statusTone, toneColor, toneWash } from "@srelens/ui-kit";
 import { groupNumber } from "../../lib/numbers";
 import { setSectionOpen, useSectionOpen } from "../../lib/sectionFolds";
 import { clockTime, dateTime, DAY, MINUTE, niceCeil, spansDays, stepLabel, tickLabels, timeTicks } from "./time";
@@ -44,16 +44,17 @@ function CaptionRow({ open, caption, onToggle }: { open: boolean; caption: strin
       <div data-slot="volume-caption" className="path min-w-0 text-faint">
         {caption}
       </div>
-      <button
+      <Button
         type="button"
+        variant="text"
         // The caption's size (.path is 0.75rem): a bare button would take the page's larger one.
-        className="text-btn shrink-0 text-[0.75rem]"
+        className="shrink-0 text-[0.75rem]"
         aria-expanded={open}
         aria-label={open ? "Hide the volume chart" : "Show the volume chart"}
         onClick={onToggle}
       >
         {open ? "Hide" : "Show"}
-      </button>
+      </Button>
     </div>
   );
 }

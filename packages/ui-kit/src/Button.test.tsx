@@ -1,6 +1,18 @@
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { describe, it, expect, vi } from "vitest";
 import { render, screen, fireEvent } from "@testing-library/react";
 import { Button } from "./Button";
+
+const kit = readFileSync(join(__dirname, "styles/kit.css"), "utf8").replace(/\/\*[\s\S]*?\*\//g, "");
+
+/** The declarations of the first rule whose selector list names `selector` exactly. */
+function rule(selector: string): string {
+  for (const [, selectors, body] of kit.matchAll(/([^{}]+)\{([^{}]*)\}/g)) {
+    if (selectors.split(",").some((s) => s.trim() === selector)) return body;
+  }
+  throw new Error(`no rule for ${selector}`);
+}
 
 /**
  * The first three are the classic component's own tests, carried over
@@ -51,11 +63,36 @@ describe("Button", () => {
     expect(screen.getByRole("button").className).toBe("btn");
   });
 
+  it("draws a text button as the kit's borderless one, sized by its words", () => {
+    // `.text-btn`, not `.btn` with overrides: a bordered surface button that
+    // has its border, fill and padding taken back off is two looks fighting.
+    render(<Button variant="text">Open Settings</Button>);
+    expect(screen.getByRole("button", { name: "Open Settings" }).className).toBe("text-btn");
+  });
+
+  it("draws a link button as text with a dotted underline, in the colour around it", () => {
+    render(<Button variant="link">Open node a</Button>);
+    expect(screen.getByRole("button", { name: "Open node a" }).className).toBe("link-btn");
+  });
+
   it("exposes the size on the element for the stylesheet to act on", () => {
     const { rerender } = render(<Button size="xs">X</Button>);
     expect(screen.getByRole("button").dataset.size).toBe("xs");
     rerender(<Button size="icon-sm">X</Button>);
     expect(screen.getByRole("button").dataset.size).toBe("icon-sm");
+  });
+
+  // jsdom attaches no stylesheet, so the look these two promise is read off
+  // the sheet itself.
+  it.each([".btn", ".icon-btn", ".text-btn", ".link-btn"])("dims %s when it is disabled", (cls) => {
+    expect(rule(`${cls}:disabled`)).toContain("opacity: 0.5");
+    expect(rule(`${cls}[aria-disabled="true"]`)).toContain("opacity: 0.5");
+  });
+
+  it("underlines a link button dotted at rest and solid under the pointer or the keyboard", () => {
+    expect(rule(".link-btn")).toContain("text-decoration-style: dotted");
+    expect(rule(".link-btn:hover")).toContain("text-decoration-style: solid");
+    expect(rule(".link-btn:focus-visible")).toContain("text-decoration-style: solid");
   });
 
   it("leaves the button type alone", () => {
