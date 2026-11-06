@@ -28,7 +28,7 @@ describe("one way to draw a button", () => {
 
   it("puts no kit button class on an element by hand, but for the one kept on purpose", () => {
     expect(
-      unexpected(/className=\{?["'`][^"'`]*(?<![\w-])(?:btn|text-btn|icon-btn)(?![\w-])[^"'`]*["'`]/g, {
+      unexpected(/className=\{?["'`][^"'`]*(?<![\w-])(?:btn|text-btn|icon-btn|link-btn)(?![\w-])[^"'`]*["'`]/g, {
         // A Popover's trigger is the content of the Popover's own button, so
         // the look goes on a span inside it: a `Button` there would be a
         // button inside a button.
