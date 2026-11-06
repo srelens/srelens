@@ -51,6 +51,18 @@ just Linux — is being enabled; see
 
 ## Windows
 
+**winget** is the shortest path:
+
+```powershell
+winget install srelens.srelens
+```
+
+It runs the same installer listed below, silently and for your user only, so
+it needs no administrator. `winget upgrade srelens.srelens` moves it forward,
+and the in-app updater in **Settings → Updates** keeps working alongside it.
+
+**Or by hand:**
+
 1. Download and run one of:
    - Installer: `srelens_<version>_x64-setup.exe` (recommended)
    - MSI: `srelens_<version>_x64_en-US.msi`
@@ -59,6 +71,10 @@ just Linux — is being enabled; see
 > [roadmap](https://github.com/orgs/srelens/projects/1), so Windows may show a
 > "Windows protected your PC" prompt. Click **More info → Run anyway** to
 > proceed. Signed installers will remove this step in a future release.
+
+The multi-user **web server** has no winget package: it ships as the
+`ghcr.io/srelens/srelens` container image, which runs on Windows under Docker
+Desktop. [WEB.md](WEB.md) has the `docker run` and Compose setups.
 
 ## Terminal UI (`srectl`)
 
@@ -201,7 +217,25 @@ sudo mv srectl /usr/local/bin/
 srectl --version
 ```
 
-**Windows.** Extract the `.zip` and move `srectl.exe` somewhere on your
+**On Windows, winget** is the shortest path:
+
+```powershell
+winget install srelens.srectl
+```
+
+It unpacks the same archive listed above and registers `srectl` as a
+command on your `PATH`. There is no installer to run and nothing is written
+into Program Files, but winget does register the package so it can track it:
+it appears in Apps & Features, and `winget uninstall srelens.srectl` or that
+entry will remove it again.
+
+`winget upgrade srelens.srectl` moves it forward. Name the package: a bare
+`winget upgrade` only lists what is upgradable without touching anything,
+and `winget upgrade --all` moves everything on the machine. Since winget
+owns that copy, `srectl update` will decline to replace it and point you
+back at winget.
+
+**Or by hand, on Windows.** Extract the `.zip` and move `srectl.exe` somewhere on your
 `PATH`, then run `srectl --version` in a terminal. Windows may warn that
 the file came from the internet, for the same reason the desktop installer
 does: code signing is on the roadmap ([#32]).
@@ -529,6 +563,8 @@ the commands above will otherwise stop at the same point.
 - **Linux** — `sudo apt remove srelens` / `sudo dnf remove srelens`, or delete
   the AppImage.
 - **Windows** — uninstall via **Settings → Apps**, or the MSI/installer entry.
+  Installed with winget: `winget uninstall srelens.srelens`, and
+  `winget uninstall srelens.srectl` for the terminal UI.
 
 Application data lives in your OS config directory; remove it manually if you
 want a clean uninstall.

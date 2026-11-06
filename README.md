@@ -221,7 +221,7 @@ verifying downloads and uninstalling on each platform.
 | --- | --- | --- |
 | macOS | `.dmg` for Apple Silicon and Intel | Developer ID signed and notarized |
 | Linux | `.AppImage`, `.deb`, `.rpm`, and [`srelens-bin`](https://aur.archlinux.org/packages/srelens-bin) on the AUR | The AppImage supports the in-app updater |
-| Windows | `.exe`, `.msi` | Windows may show a SmartScreen prompt while code signing remains on the roadmap |
+| Windows | `.exe`, `.msi`, and `winget install srelens.srelens` | Windows may show a SmartScreen prompt while code signing remains on the roadmap |
 
 ### Terminal UI
 
@@ -231,6 +231,12 @@ macOS (Homebrew):
 
 ```bash
 brew install srelens/tap/srectl
+```
+
+Windows (winget):
+
+```powershell
+winget install srelens.srectl
 ```
 
 Linux, in one line:

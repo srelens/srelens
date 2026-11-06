@@ -90,6 +90,12 @@ jobs:
         # The install commands in docs/INSTALL.md, the exact pnpm version, and
         # a hash for every git crate importCargoLock has to vendor.
         run: node --test packaging/nix/flake.test.mjs
+      - name: winget renderer
+        # The renderer builds every manifest submitted to winget-pkgs, and a
+        # wrong hash there fails on a stranger's machine at install time --
+        # after moderation has approved it, with nothing pointing back here.
+        # The tests pass `--sums`, so they need no release and no network.
+        run: node --test packaging/winget/render.test.mjs
 
   nix:
     name: Nix packages
