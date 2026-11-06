@@ -44,6 +44,52 @@ const MAX_PUSH_SESSIONS: usize = 8;
 /// required 404 and the client re-initializes.
 const MAX_HTTP_SESSIONS: usize = 64;
 
+/// `clientInfo` comes from the remote peer. Keep only the two display fields
+/// Settings needs, and cap both by characters so a hostile initialize cannot
+/// turn the session registry into an unbounded string store.
+const MAX_CLIENT_NAME_CHARS: usize = 80;
+const MAX_CLIENT_VERSION_CHARS: usize = 40;
+const UNKNOWN_CLIENT_NAME: &str = "Unknown MCP client";
+
+/// One active Streamable HTTP session as the desktop Settings pane may see it.
+///
+/// Deliberately excludes the session id, bearer token, headers and peer
+/// address. `name`/`version` are bounded display metadata from the MCP
+/// `initialize` handshake; the timestamps and stream flag are server-owned.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConnectedHttpClient {
+    pub name: String,
+    pub version: Option<String>,
+    pub connected_at: u64,
+    pub last_seen: u64,
+    pub notifications_connected: bool,
+}
+
+/// A read-only handle to the HTTP transport's bounded session registry.
+/// Hosts keep this beside the server task so their local Settings surface can
+/// report active sessions without adding a remotely reachable introspection
+/// endpoint.
+#[derive(Clone)]
+pub struct HttpSessionRegistry {
+    push: Arc<PushState>,
+}
+
+impl Default for HttpSessionRegistry {
+    fn default() -> Self {
+        Self { push: Arc::new(PushState::default()) }
+    }
+}
+
+impl HttpSessionRegistry {
+    /// Active sessions, most recently used first. The internal monotonic touch
+    /// counter makes the order deterministic even when wall-clock timestamps
+    /// share the same second.
+    pub fn connected_clients(&self) -> Vec<ConnectedHttpClient> {
+        self.push.connected_clients()
+    }
+}
+
 /// The push half of the transport: one SSE stream PER SESSION, keyed by the
 /// `Mcp-Session-Id` this server minted at `initialize` (see `rpc`). Distinct
 /// clients — a configured IDE and an assistant CLI, say — get distinct
@@ -73,6 +119,87 @@ struct PushState {
 struct HttpSession {
     stream: Option<PushChannels>,
     touched: u64,
+    name: String,
+    version: Option<String>,
+    connected_at: u64,
+    last_seen: u64,
+}
+
+#[derive(Debug)]
+struct ClientIdentity {
+    name: String,
+    version: Option<String>,
+}
+
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0)
+}
+
+fn unsafe_display_control(ch: char) -> bool {
+    ch.is_control()
+        || matches!(
+            ch,
+            '\u{061c}'
+                | '\u{200b}'..='\u{200f}'
+                | '\u{202a}'..='\u{202e}'
+                | '\u{2060}'..='\u{206f}'
+                | '\u{feff}'
+                | '\u{fff9}'..='\u{fffb}'
+                | '\u{e0001}'
+                | '\u{e0020}'..='\u{e007f}'
+        )
+}
+
+/// Collapse whitespace, discard controls (including invisible/bidirectional
+/// display controls), and stop after `max_chars`. This is display sanitation,
+/// not authentication: clientInfo is a self-reported label and the UI says so.
+fn bounded_client_text(value: Option<&Value>, max_chars: usize) -> Option<String> {
+    let raw = value?.as_str()?;
+    let mut out = String::new();
+    let mut chars = 0usize;
+    let mut pending_space = false;
+
+    for ch in raw.chars() {
+        if ch.is_whitespace() {
+            pending_space = !out.is_empty();
+            continue;
+        }
+        if unsafe_display_control(ch) {
+            continue;
+        }
+        if chars >= max_chars {
+            break;
+        }
+        // Leave room for the visible character after the separator; a
+        // truncated label must never end in whitespace.
+        if pending_space {
+            if chars + 1 >= max_chars {
+                break;
+            }
+            out.push(' ');
+            chars += 1;
+        }
+        pending_space = false;
+        out.push(ch);
+        chars += 1;
+    }
+
+    (!out.is_empty()).then_some(out)
+}
+
+fn client_identity(request: &Value) -> ClientIdentity {
+    let info = request.get("params").and_then(|params| params.get("clientInfo"));
+    ClientIdentity {
+        name: bounded_client_text(info.and_then(|value| value.get("name")), MAX_CLIENT_NAME_CHARS)
+            .unwrap_or_else(|| UNKNOWN_CLIENT_NAME.to_string()),
+        version: bounded_client_text(
+            info.and_then(|value| value.get("version")),
+            MAX_CLIENT_VERSION_CHARS,
+        ),
+    }
 }
 
 impl PushState {
@@ -84,7 +211,7 @@ impl PushState {
     /// successful JSON-RPC result. IDs contain 256 random bits encoded as
     /// lowercase hex: globally unique in practice, cryptographically secure,
     /// and entirely within the visible-ASCII range required by MCP.
-    fn create_session(&self) -> Result<String, StatusCode> {
+    fn create_session(&self, client: ClientIdentity) -> Result<String, StatusCode> {
         let mut sessions = self.sessions.lock().unwrap_or_else(|e| e.into_inner());
         if self.closed.load(Ordering::Relaxed) {
             return Err(StatusCode::SERVICE_UNAVAILABLE);
@@ -115,11 +242,16 @@ impl PushState {
         loop {
             let id = mint_session_id();
             if !sessions.contains_key(&id) {
+                let now = unix_now();
                 sessions.insert(
                     id.clone(),
                     HttpSession {
                         stream: None,
                         touched: self.next_touch(),
+                        name: client.name,
+                        version: client.version,
+                        connected_at: now,
+                        last_seen: now,
                     },
                 );
                 return Ok(id);
@@ -138,6 +270,7 @@ impl PushState {
             return Err(StatusCode::NOT_FOUND);
         };
         existing.touched = self.next_touch();
+        existing.last_seen = unix_now();
         Ok(())
     }
 
@@ -167,6 +300,7 @@ impl PushState {
         }
         let existing = sessions.get_mut(session).expect("session checked above");
         existing.touched = self.next_touch();
+        existing.last_seen = unix_now();
         existing.stream = Some(chans);
         Ok(())
     }
@@ -185,6 +319,40 @@ impl PushState {
         let mut sessions = self.sessions.lock().unwrap_or_else(|e| e.into_inner());
         self.closed.store(true, Ordering::Relaxed);
         sessions.clear();
+    }
+
+    fn connected_clients(&self) -> Vec<ConnectedHttpClient> {
+        let mut sessions = self.sessions.lock().unwrap_or_else(|e| e.into_inner());
+        // A response body may have disappeared before its StreamGuard got a
+        // poll; report that channel as closed and release it while taking the
+        // snapshot, just as cap-time reaping does.
+        for session in sessions.values_mut() {
+            if session.stream.as_ref().is_some_and(|stream| stream.wake.is_closed()) {
+                session.stream = None;
+            }
+        }
+        let mut clients: Vec<_> = sessions
+            .values()
+            .map(|session| {
+                (
+                    session.touched,
+                    ConnectedHttpClient {
+                        name: session.name.clone(),
+                        version: session.version.clone(),
+                        connected_at: session.connected_at,
+                        last_seen: session.last_seen,
+                        notifications_connected: session.stream.is_some(),
+                    },
+                )
+            })
+            .collect();
+        clients.sort_by(|(touch_a, client_a), (touch_b, client_b)| {
+            touch_b
+                .cmp(touch_a)
+                .then_with(|| client_a.name.cmp(&client_b.name))
+                .then_with(|| client_a.version.cmp(&client_b.version))
+        });
+        clients.into_iter().map(|(_, client)| client).collect()
     }
 }
 
@@ -536,7 +704,7 @@ async fn rpc(
         }
         let caller = caller.map(|axum::Extension(caller)| caller);
         return match handle_request_as(&st.server, &req, crate::Transport::Http, caller).await {
-            Some(resp) if resp.get("result").is_some() => match st.push.create_session() {
+            Some(resp) if resp.get("result").is_some() => match st.push.create_session(client_identity(&req)) {
                 Ok(session) => ([(MCP_SESSION_ID.clone(), session)], Json(resp)).into_response(),
                 Err(status) => session_error(status),
             },
@@ -806,12 +974,27 @@ fn router_inner_with_push(
     token: Option<crate::auth::Token>,
     exposure: Exposure,
 ) -> (Router, Arc<PushState>) {
+    let sessions = HttpSessionRegistry::default();
+    let push = sessions.push.clone();
+    let router = router_inner_with_sessions(server, token, exposure, sessions);
+    (router, push)
+}
+
+/// Build a router over a host-owned session handle. The handle exposes only a
+/// privacy-limited snapshot; all routing and teardown state stays private to
+/// this module.
+fn router_inner_with_sessions(
+    server: McpServer,
+    token: Option<crate::auth::Token>,
+    exposure: Exposure,
+    sessions: HttpSessionRegistry,
+) -> Router {
     // Read off the server before it moves into the state: the tokens a host
     // mints for its chats are the ones the server it built was given.
     let auth = TokenAuth { token, callers: server.caller_tokens().clone() };
-    let push = Arc::new(PushState::default());
+    let push = sessions.push;
     let state = AppState { server: Arc::new(server), push: push.clone() };
-    let router = Router::new()
+    Router::new()
         // All MCP methods share the route, so the token `route_layer` below
         // covers the SSE stream exactly like the JSON-RPC endpoint — a
         // long-lived stream is established under the same bearer check.
@@ -823,8 +1006,7 @@ fn router_inner_with_push(
         // it is buffered past the limit.
         .layer(DefaultBodyLimit::max(crate::MAX_REQUEST_BYTES))
         .layer(middleware::from_fn_with_state(exposure, host_guard))
-        .with_state(state);
-    (router, push)
+        .with_state(state)
 }
 
 /// Test-only convenience: a router with authentication disabled. Never
@@ -936,7 +1118,31 @@ pub async fn serve_http_with_shutdown<F>(
 where
     F: std::future::Future<Output = ()> + Send + 'static,
 {
-    let (router, push) = router_inner_with_push(server, Some(token), Exposure::Loopback);
+    serve_http_with_shutdown_and_sessions(
+        server,
+        listener,
+        shutdown,
+        token,
+        HttpSessionRegistry::default(),
+    )
+    .await
+}
+
+/// The desktop variant of [`serve_http_with_shutdown`]: the host keeps the
+/// supplied registry handle to render its local connected-clients snapshot.
+/// It does not add a network route and exposes no session credentials.
+pub async fn serve_http_with_shutdown_and_sessions<F>(
+    server: McpServer,
+    listener: tokio::net::TcpListener,
+    shutdown: F,
+    token: crate::auth::Token,
+    sessions: HttpSessionRegistry,
+) -> std::io::Result<()>
+where
+    F: std::future::Future<Output = ()> + Send + 'static,
+{
+    let push = sessions.push.clone();
+    let router = router_inner_with_sessions(server, Some(token), Exposure::Loopback, sessions);
     // End the live SSE stream BEFORE axum starts waiting on in-flight
     // bodies, or an idle connected client would hold the shutdown open
     // forever (see `PushState::end_streams`).
@@ -1308,6 +1514,26 @@ mod tests {
             .unwrap()
     }
 
+    fn initialize_post_with_client_info(name: Value, version: Value) -> Request<Body> {
+        let body = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-03-26",
+                "capabilities": {},
+                "clientInfo": { "name": name, "version": version }
+            }
+        });
+        Request::builder()
+            .method("POST")
+            .uri("/mcp")
+            .header("host", "127.0.0.1:8765")
+            .header("content-type", "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap()
+    }
+
     async fn initialize_session(app: Router) -> String {
         let resp = app.oneshot(initialize_post()).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
@@ -1331,6 +1557,121 @@ mod tests {
             .to_str()
             .unwrap()
             .to_string()
+    }
+
+    #[tokio::test]
+    async fn connected_clients_snapshot_names_initialized_clients_without_exposing_session_ids() {
+        let sessions = HttpSessionRegistry::default();
+        let app = router_inner_with_sessions(
+            test_server(),
+            None,
+            Exposure::Loopback,
+            sessions.clone(),
+        );
+
+        let response = app
+            .clone()
+            .oneshot(initialize_post_with_client_info(
+                json!("Claude Code"),
+                json!("1.2.3"),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let session = response
+            .headers()
+            .get(&MCP_SESSION_ID)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_owned();
+
+        let clients = sessions.connected_clients();
+        assert_eq!(clients.len(), 1);
+        assert_eq!(clients[0].name, "Claude Code");
+        assert_eq!(clients[0].version.as_deref(), Some("1.2.3"));
+        assert!(!clients[0].notifications_connected);
+        assert!(clients[0].connected_at > 0);
+        assert!(clients[0].last_seen >= clients[0].connected_at);
+
+        let serialized = serde_json::to_value(&clients).unwrap();
+        let text = serialized.to_string();
+        assert!(!text.contains(&session), "session credentials must never enter the Settings snapshot");
+        let fields = serialized[0].as_object().unwrap();
+        assert_eq!(fields.len(), 5, "the snapshot must not grow privacy-sensitive fields");
+        for field in ["name", "version", "connectedAt", "lastSeen", "notificationsConnected"] {
+            assert!(fields.contains_key(field), "missing public field {field}");
+        }
+
+        let stream = app.oneshot(sse_get_with_session(&session)).await.unwrap();
+        assert_eq!(stream.status(), StatusCode::OK);
+        assert!(sessions.connected_clients()[0].notifications_connected);
+        drop(stream);
+    }
+
+    #[tokio::test]
+    async fn client_identity_is_sanitized_bounded_and_cannot_grow_the_session_snapshot() {
+        let sessions = HttpSessionRegistry::default();
+        let app = router_inner_with_sessions(
+            test_server(),
+            None,
+            Exposure::Loopback,
+            sessions.clone(),
+        );
+        let oversized = format!("\u{0}\u{202e}  Cursor\nNightly  {}", "x".repeat(10_000));
+
+        for index in 0..(MAX_HTTP_SESSIONS + 5) {
+            // Put the oversized identity last so the LRU bound keeps it in the
+            // final snapshot; the malformed identities before it still prove
+            // they cannot make that snapshot exceed the cap.
+            let (name, version) = if index == MAX_HTTP_SESSIONS + 4 {
+                (json!(oversized), json!({ "not": "a string" }))
+            } else {
+                (json!({ "not": "a string" }), json!(["also", "not", "a", "string"]))
+            };
+            let response = app
+                .clone()
+                .oneshot(initialize_post_with_client_info(name, version))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+        }
+
+        let clients = sessions.connected_clients();
+        assert_eq!(clients.len(), MAX_HTTP_SESSIONS, "the public snapshot inherits the bounded session registry");
+        assert!(clients.iter().all(|client| client.name.chars().count() <= MAX_CLIENT_NAME_CHARS));
+        assert!(clients.iter().all(|client| !client.name.chars().any(char::is_control)));
+        assert!(clients.iter().all(|client| !client.name.contains('\u{202e}')));
+        assert!(clients.iter().all(|client| client.version.as_ref().map_or(true, |version| {
+            version.chars().count() <= MAX_CLIENT_VERSION_CHARS
+                && !version.chars().any(char::is_control)
+        })));
+        assert!(clients.iter().any(|client| client.name.starts_with("Cursor Nightly")));
+        assert!(clients.iter().any(|client| client.name == UNKNOWN_CLIENT_NAME));
+        serde_json::to_value(clients).expect("malformed clientInfo must not break the Settings snapshot");
+    }
+
+    #[test]
+    fn connected_clients_are_deterministically_most_recent_first() {
+        let sessions = HttpSessionRegistry::default();
+        let first = sessions
+            .push
+            .create_session(ClientIdentity { name: "First".into(), version: None })
+            .unwrap();
+        sessions
+            .push
+            .create_session(ClientIdentity { name: "Second".into(), version: None })
+            .unwrap();
+        assert_eq!(
+            sessions.connected_clients().iter().map(|client| client.name.as_str()).collect::<Vec<_>>(),
+            ["Second", "First"]
+        );
+
+        sessions.push.touch_session(&first).unwrap();
+        assert_eq!(
+            sessions.connected_clients().iter().map(|client| client.name.as_str()).collect::<Vec<_>>(),
+            ["First", "Second"]
+        );
     }
 
     fn tools_list_post(session: Option<&str>) -> Request<Body> {

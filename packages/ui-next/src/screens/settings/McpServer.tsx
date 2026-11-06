@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   getMcpToken,
   loadMcpSettings,
@@ -9,10 +9,12 @@ import {
   saveMcpSettings,
   startMcpHttp,
   stopMcpHttp,
+  type McpHttpSnapshot,
 } from "@srelens/core";
 import { Badge, Button, ConfirmDialog, Field, Panel, SubHead, TextInput } from "@srelens/ui-kit";
 import { FailureAlert } from "../../lib/errorCopy";
 import { McpClientSetup } from "./McpClientSetup";
+import { McpConnectedClients } from "./McpConnectedClients";
 import { useMcpAutoStart } from "../../lib/mcpAutoStart";
 import { useAssistant } from "../../lib/assistant";
 
@@ -235,6 +237,8 @@ export function McpServer() {
   /** The running server's own URL, or `null` for "not running" — the value
    *  `mcpHttpStatus()` actually returns, kept rather than reduced to a flag. */
   const [statusRead, setStatusRead] = useState<Read<string | null>>(LOADING);
+  const snapshotActionGenerationRef = useRef(0);
+  const [snapshotActionGeneration, setSnapshotActionGeneration] = useState(0);
   const [tokenNonce, setTokenNonce] = useState(0);
   const [statusNonce, setStatusNonce] = useState(0);
   const [revealed, setRevealed] = useState(false);
@@ -345,9 +349,33 @@ export function McpServer() {
    *  any read still in flight. Bumps the sequence FIRST: an in-flight fetch
    *  must be told it has been superseded before the authoritative value lands,
    *  or its late response can overwrite it right back. */
-  function establishStatus(url: string | null) {
+  const establishStatus = useCallback((url: string | null) => {
     statusSeq.current += 1;
     setStatusRead({ kind: "ready", value: url });
+  }, []);
+
+  // The sessions pane polls a single manager-owned snapshot. Feed its URL
+  // back into the main card so a cross-window or spontaneous stop updates the
+  // badge and address at the same instant as the session list.
+  const establishSnapshot = useCallback(
+    (snapshot: McpHttpSnapshot) => establishStatus(snapshot.url),
+    [establishStatus],
+  );
+
+  function invalidateSnapshotReads() {
+    const next = snapshotActionGenerationRef.current + 1;
+    snapshotActionGenerationRef.current = next;
+    setSnapshotActionGeneration(next);
+  }
+
+  /** Keep session polls on the same action generation as the status card. */
+  async function runSnapshotAction<T>(action: () => Promise<T>): Promise<T> {
+    invalidateSnapshotReads();
+    try {
+      return await action();
+    } finally {
+      invalidateSnapshotReads();
+    }
   }
 
   async function changePort(target: number) {
@@ -356,7 +384,7 @@ export function McpServer() {
     // Invalidate earlier reads and re-read status if the restart fails.
     statusSeq.current += 1;
     try {
-      if (running) establishStatus(await startMcpHttp(target));
+      if (running) establishStatus(await runSnapshotAction(() => startMcpHttp(target)));
       setPort(target); setPortDraft(String(target));
       saveMcpSettings({ enabled: running, port: target });
     } catch (error) {
@@ -386,7 +414,7 @@ export function McpServer() {
     setBusy(true);
     setServerError(null);
     try {
-      establishStatus(await startMcpHttp(port));
+      establishStatus(await runSnapshotAction(() => startMcpHttp(port)));
       saveMcpSettings({ enabled: true, port });
       // The first start is also the first place a token can exist:
       // `mcp_http_start` mints one when none is stored (`mcp.rs`), so a
@@ -417,7 +445,7 @@ export function McpServer() {
     setBusy(true);
     setServerError(null);
     try {
-      await stopMcpHttp();
+      await runSnapshotAction(() => stopMcpHttp());
       establishStatus(null);
       saveMcpSettings({ enabled: false, port });
     } catch (e) {
@@ -434,7 +462,7 @@ export function McpServer() {
     setBusy(true);
     setActionError(null);
     try {
-      const next = await rotateMcpToken();
+      const next = await runSnapshotAction(() => rotateMcpToken());
       setTokenRead({ kind: "ready", value: next });
       setRevealed(false);
       // Rotating never changes whether the server is listening — it restarts
@@ -455,7 +483,7 @@ export function McpServer() {
     setBusy(true);
     setActionError(null);
     try {
-      await revokeMcpToken();
+      await runSnapshotAction(() => revokeMcpToken());
       setTokenRead({ kind: "ready", value: null });
       setRevealed(false);
       // Revoking always stops the server too — "it must never serve
@@ -624,6 +652,13 @@ export function McpServer() {
         />
       )}
     </Panel>
+    <McpConnectedClients
+      running={statusRead.kind === "ready" ? running : null}
+      serverUrl={statusRead.kind === "ready" ? statusRead.value : undefined}
+      actionGeneration={snapshotActionGeneration}
+      actionGenerationRef={snapshotActionGenerationRef}
+      onServerSnapshot={establishSnapshot}
+    />
     <McpClientSetup url={address} token={token}
       statusLoading={statusRead.kind === "loading"} tokenLoading={tokenRead.kind === "loading"}
       statusError={statusRead.kind === "error" ? statusRead.error : undefined}

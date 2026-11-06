@@ -15,6 +15,31 @@ export async function mcpHttpStatus(): Promise<string | null> {
   return invokeCommand<string | null>("mcp_http_status");
 }
 
+/** One active Streamable HTTP session. Client identity is self-reported by
+ * the initialize handshake; the host deliberately omits session IDs, tokens,
+ * headers, and network addresses from this local Settings snapshot. */
+export interface ConnectedMcpClient {
+  name: string;
+  version: string | null;
+  connectedAt: number;
+  lastSeen: number;
+  notificationsConnected: boolean;
+}
+
+/** One atomic view of the in-app HTTP server and the sessions belonging to
+ * that exact listener generation. A stopped server always has a null URL and
+ * no clients; a running server can legitimately have an empty client list. */
+export interface McpHttpSnapshot {
+  running: boolean;
+  url: string | null;
+  clients: ConnectedMcpClient[];
+}
+
+/** Read server liveness, address, and HTTP client sessions together. */
+export async function mcpHttpSnapshot(): Promise<McpHttpSnapshot> {
+  return invokeCommand<McpHttpSnapshot>("mcp_http_snapshot");
+}
+
 export interface CliStatus {
   installed: boolean;
   path: string;
