@@ -7,7 +7,7 @@ import {
   type ExtensionSetting,
   type InstalledExtension,
 } from "@srelens/core";
-import { Button, Combobox, EmptyState, LoadingState } from "@srelens/ui-kit";
+import { Button, Checkbox, Combobox, EmptyState, LoadingState, TextInput } from "@srelens/ui-kit";
 import { FailureAlert } from "../lib/errorCopy";
 import { plainText } from "./displayText";
 import { extensionLabel } from "./inventoryStore";
@@ -266,7 +266,7 @@ function SettingField({
             {title}
             {setting.required && <span className="extension-setting-required"> (required)</span>}
           </label>
-          <input
+          <TextInput
             id={id}
             type={setting.type === "number" ? "number" : setting.type === "url" ? "url" : "text"}
             inputMode={setting.type === "number" ? (setting.integer ? "numeric" : "decimal") : undefined}
@@ -277,9 +277,9 @@ function SettingField({
             step={setting.type === "number" ? (setting.integer ? 1 : "any") : undefined}
             spellCheck={false}
             aria-required={setting.required || undefined}
-            aria-invalid={invalid}
+            invalid={invalid}
             aria-describedby={described}
-            onChange={(event) => onChange(event.target.value)}
+            onValueChange={onChange}
           />
           {notes}
         </div>
@@ -287,16 +287,14 @@ function SettingField({
     case "boolean":
       return (
         <div className="extension-setting">
-          <label className="extension-setting-check">
-            <input
-              type="checkbox"
-              checked={typeof value === "boolean" ? value : setting.default === true}
-              aria-invalid={invalid}
-              aria-describedby={described}
-              onChange={(event) => onChange(event.target.checked)}
-            />
-            {title}
-          </label>
+          <Checkbox
+            className="extension-setting-check"
+            checked={typeof value === "boolean" ? value : setting.default === true}
+            invalid={invalid}
+            aria-describedby={described}
+            onChange={onChange}
+            label={title}
+          />
           {notes}
         </div>
       );
@@ -309,20 +307,15 @@ function SettingField({
             {setting.required && <span className="extension-setting-required"> (required)</span>}
           </legend>
           {(setting.options ?? []).map((option) => (
-            <label key={option.value} className="extension-setting-check">
-              <input
-                type="checkbox"
-                checked={chosen.includes(option.value)}
-                onChange={(event) =>
-                  onChange(
-                    event.target.checked
-                      ? [...chosen, option.value]
-                      : chosen.filter((each) => each !== option.value),
-                  )
-                }
-              />
-              {plainText(option.label)}
-            </label>
+            <Checkbox
+              key={option.value}
+              className="extension-setting-check"
+              checked={chosen.includes(option.value)}
+              onChange={(on) =>
+                onChange(on ? [...chosen, option.value] : chosen.filter((each) => each !== option.value))
+              }
+              label={plainText(option.label)}
+            />
           ))}
           {notes}
         </fieldset>
@@ -458,7 +451,7 @@ function SecretField({
         </p>
       )}
       <div className="extension-setting-pair">
-        <input
+        <TextInput
           id={id}
           aria-labelledby={`${id}-title`}
           type="password"
@@ -467,19 +460,14 @@ function SecretField({
           value={typed}
           disabled={Boolean(refusal) || busy}
           placeholder={isSet ? "Enter a new value to replace it" : "Enter the secret"}
-          aria-invalid={failure ? true : undefined}
+          invalid={Boolean(failure)}
           aria-describedby={described}
-          onChange={(event) => {
-            setTyped(event.target.value);
+          onValueChange={(value) => {
+            setTyped(value);
             setDone("");
           }}
-          onKeyDown={(event) => {
-            // Enter keeps this secret; it does not submit the other settings.
-            if (event.key === "Enter") {
-              event.preventDefault();
-              save();
-            }
-          }}
+          // Enter keeps this secret; it does not submit the other settings.
+          onEnter={save}
         />
         <Button type="button" disabled={Boolean(refusal) || busy || !typed} onClick={save}>
           {isSet ? "Replace secret" : "Save secret"}

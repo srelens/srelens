@@ -245,3 +245,51 @@ describe("Tabs, underlined", () => {
     expect(body).not.toContain("background");
   });
 });
+
+/**
+ * A choice of one from a few, in the segmented look (#1001, step 7c). Before,
+ * screens drew it four ways: pressed ghost buttons, primary and secondary
+ * buttons, and hidden radios inside `.seg-btn` labels. It is a setting, not a
+ * set of panes, so it says radio rather than tab.
+ */
+describe("Tabs as a radio group", () => {
+  const sizes = [
+    { id: "s", label: "Small" },
+    { id: "m", label: "Medium" },
+    { id: "l", label: "Large" },
+  ];
+
+  it("is a named radio group whose chosen option is checked", () => {
+    render(<Tabs tabs={sizes} active="m" onChange={() => {}} variant="segmented" mode="radio" label="Size" />);
+    expect(screen.getByRole("radiogroup", { name: "Size" })).toBeDefined();
+    expect(screen.queryByRole("tablist")).toBeNull();
+    expect(screen.queryByRole("tab")).toBeNull();
+    expect(screen.getAllByRole("radio").map((each) => each.getAttribute("aria-checked"))).toEqual(["false", "true", "false"]);
+    expect(screen.getByRole("radio", { name: "Medium" }).hasAttribute("aria-selected")).toBe(false);
+  });
+
+  it("is one tab stop, landing on the chosen option", () => {
+    render(<Tabs tabs={sizes} active="l" onChange={() => {}} variant="segmented" mode="radio" label="Size" />);
+    expect(screen.getAllByRole("radio").map((each) => each.getAttribute("tabindex"))).toEqual(["-1", "-1", "0"]);
+  });
+
+  it("chooses with all four arrow keys, as a radio group does", async () => {
+    const onChange = vi.fn();
+    render(<Tabs tabs={sizes} active="s" onChange={onChange} variant="segmented" mode="radio" label="Size" />);
+    screen.getByRole("radio", { name: "Small" }).focus();
+    await userEvent.keyboard("{ArrowDown}");
+    expect(onChange).toHaveBeenLastCalledWith("m");
+    await userEvent.keyboard("{ArrowUp}");
+    expect(onChange).toHaveBeenLastCalledWith("s");
+    await userEvent.keyboard("{ArrowLeft}");
+    expect(onChange).toHaveBeenLastCalledWith("l");
+    await userEvent.keyboard("{ArrowRight}");
+    expect(onChange).toHaveBeenLastCalledWith("s");
+  });
+
+  it("wears the segmented look, marked the way the tabs are", () => {
+    const { container } = render(<Tabs tabs={sizes} active="m" onChange={() => {}} variant="segmented" mode="radio" label="Size" />);
+    expect(container.querySelector(".seg[data-variant='segmented']")).not.toBeNull();
+    expect([...container.querySelectorAll('.seg-btn[data-active="true"]')].map((each) => each.textContent)).toEqual(["Medium"]);
+  });
+});

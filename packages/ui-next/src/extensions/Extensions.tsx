@@ -28,7 +28,7 @@ import {
 
 import { ExtensionCatalog } from "./ExtensionCatalog";
 import { ServerPolicy } from "./ServerPolicy";
-import { Alert, Button, EmptyState, LoadingState, Tabs } from "@srelens/ui-kit";
+import { Alert, Button, Checkbox, EmptyState, LoadingState, Tabs, TextArea } from "@srelens/ui-kit";
 import { FailureAlert, FailureState } from "../lib/errorCopy";
 import { ExtensionResults } from "./ExtensionResults";
 export { ExtensionResults } from "./ExtensionResults";
@@ -292,11 +292,9 @@ export function ExtensionManager({ show }: { show?: { tab: string } } = {}) {
         </p>
       )}
       <div className="extension-install">
-        <label>
-          <input type="checkbox" checked={state.allowUnsignedApps ?? false} disabled={busy || signedOnly}
-            onChange={(event) => void change({ action: "unsignedApps", allowUnsignedApps: event.target.checked })} />{" "}
-          Allow unsigned apps to modify clusters and run code
-        </label>
+        <Checkbox checked={state.allowUnsignedApps ?? false} disabled={busy || signedOnly}
+          onChange={(allowUnsignedApps) => void change({ action: "unsignedApps", allowUnsignedApps })}
+          label="Allow unsigned apps to modify clusters and run code" />
         {signedOnly && <p className="extension-message">This server's policy allows only signed apps.</p>}
         <p className="extension-message">Off by default. Read-only declarative apps need only their permission grants. Turning this off disables affected apps and keeps their settings. Turning it on does not re-enable them. {executableAppsHint}</p>
       </div>
@@ -425,11 +423,11 @@ export function ExtensionManager({ show }: { show?: { tab: string } } = {}) {
         <label htmlFor="extension-manifest">
           Local app manifest (JSON)
         </label>
-        <textarea
+        <TextArea
           id="extension-manifest"
           value={source}
-          onChange={(e) => {
-            setSource(e.target.value);
+          onValueChange={(value) => {
+            setSource(value);
             setReview(null);
           }}
           spellCheck={false}
@@ -480,16 +478,15 @@ export function ExtensionManager({ show }: { show?: { tab: string } } = {}) {
             <span>{plugin.manifest.version} · {!plugin.signatureProof ? (plugin.source === "catalog" ? "Unsigned · Catalog" : "Unsigned local") : plainText(extensionSigner(plugin))}</span>
             {required(plugin) && <span>Required by this server</span>}
             <label>
-              <input
-                aria-label={`Enable ${label(plugin)}`}
-                type="checkbox"
+              <Checkbox
+                ariaLabel={`Enable ${label(plugin)}`}
                 checked={plugin.enabled}
                 disabled={busy || Boolean(plugin.quarantined) || Boolean(plugin.policyBlocked) || (required(plugin) && plugin.enabled)}
-                onChange={(e) =>
+                onChange={(enabled) =>
                   void change({
                     action: "enable",
                     id: plugin.manifest.id,
-                    enabled: e.target.checked,
+                    enabled,
                   })
                 }
               />{" "}

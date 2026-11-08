@@ -6,7 +6,7 @@ import {
   type ExtensionChange,
   type InstalledExtension,
 } from "@srelens/core";
-import { Button, Combobox, EmptyState, LoadingState } from "@srelens/ui-kit";
+import { Button, Combobox, EmptyState, LoadingState, Radio } from "@srelens/ui-kit";
 import { FailureAlert } from "../lib/errorCopy";
 import { useResource } from "../lib/useResource";
 
@@ -62,14 +62,8 @@ export function ExtensionClusters({
   return (
     <fieldset className="extension-clusters">
       <legend>Clusters</legend>
-      <label>
-        <input type="radio" name={group} checked={!limited} disabled={busy} onChange={() => setLimited(false)} />{" "}
-        All clusters
-      </label>
-      <label>
-        <input type="radio" name={group} checked={limited} disabled={busy} onChange={() => setLimited(true)} />{" "}
-        Only these clusters
-      </label>
+      <Radio name={group} checked={!limited} disabled={busy} onChange={() => setLimited(false)} label="All clusters" />
+      <Radio name={group} checked={limited} disabled={busy} onChange={() => setLimited(true)} label="Only these clusters" />
       {limited && (
         <>
           {failure ? (

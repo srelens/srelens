@@ -19,6 +19,7 @@ import {
   Field,
   LoadingState,
   Mark,
+  TextArea,
   type IconComponent,
 } from "@srelens/ui-kit";
 import {
@@ -401,14 +402,7 @@ function PasteDialog({
             own beside…" — the label plus a paragraph. The label is the name;
             this is a remark beside it. */}
         <Field label="Kubeconfig YAML">
-          <textarea
-            value={yaml}
-            onChange={(e) => setYaml(e.target.value)}
-            rows={12}
-            spellCheck={false}
-            className="w-full rounded-md border px-2 py-1 font-mono text-[0.75rem] leading-relaxed outline-none"
-            style={{ background: "var(--surface-sunk)", borderColor: "var(--rule)" }}
-          />
+          <TextArea value={yaml} onValueChange={setYaml} rows={12} spellCheck={false} />
         </Field>
         {/* **Where the file actually goes.** This said "beside your other
             kubeconfigs" and it does not go there: `savePastedKubeconfig` ->

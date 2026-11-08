@@ -71,6 +71,7 @@ import { Switch } from "../Switch";
 import { Table, type Column } from "../Table";
 import { TabStrip } from "../TabStrip";
 import { Tabs } from "../Tabs";
+import { TextArea } from "../TextArea";
 import { TextInput } from "../TextInput";
 import { Titlebar } from "../Titlebar";
 import { Toast } from "../Toast";
@@ -311,6 +312,15 @@ export function Gallery() {
           />
           <TextInput value="bad name" onValueChange={() => {}} invalid aria-label="an invalid input" />
           <TextInput value="frozen" onValueChange={() => {}} disabled aria-label="a disabled input" />
+        </div>
+      </section>
+
+      <section>
+        <h2>TextArea</h2>
+        <div className="kit-gallery__row">
+          <TextArea value={"kind: Config\nclusters: []"} onValueChange={() => {}} rows={3} aria-label="a filled text area" />
+          <TextArea value="" onValueChange={() => {}} rows={3} placeholder={"prod-*\n*-canary"} aria-label="an empty text area" />
+          <TextArea value="not: [valid" onValueChange={() => {}} rows={3} invalid aria-label="an invalid text area" />
         </div>
       </section>
 

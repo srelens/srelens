@@ -11,7 +11,7 @@ import {
   skillsDirPath,
   type SkillMeta,
 } from "@srelens/core";
-import { Badge, Button, ConfirmDialog, Dialog, EmptyState, Field, FilterBar, LoadingState, Switch, TextInput, useListFilter } from "@srelens/ui-kit";
+import { Badge, Button, ConfirmDialog, Dialog, EmptyState, Field, FilterBar, LoadingState, Switch, TextArea, TextInput, useListFilter } from "@srelens/ui-kit";
 import { FailureAlert } from "../../lib/errorCopy";
 import {
   estimateTokens,
@@ -446,12 +446,7 @@ function InstallSkillDialog({
           <TextInput value={description} onValueChange={setDescription} placeholder="How this team rolls back a release" />
         </Field>
         <Field label="Instructions" hint={body === "" ? "What the agent should do, step by step." : `≈${formatTokens(estimateTokens(body))} tokens when on`}>
-          <textarea
-            value={body}
-            onChange={(e) => setBody(e.target.value)}
-            rows={9}
-            className="scroll w-full rounded-md border border-[var(--control-line)] bg-transparent px-2 py-1.5 font-mono text-[0.75rem] outline-none focus:border-[var(--accent)]"
-          />
+          <TextArea value={body} onValueChange={setBody} rows={9} />
         </Field>
         {replaces && (
           <p className="text-muted" role="status">

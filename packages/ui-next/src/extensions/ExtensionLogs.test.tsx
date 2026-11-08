@@ -159,19 +159,20 @@ it("reloads from the start at the chosen minimum level, among the five levels", 
     .mockResolvedValueOnce(read([line(2, "error", "boom")]))
     .mockResolvedValue(read([]));
   await open();
-  const levels = screen.getByRole("group", { name: "Minimum level" });
-  expect(within(levels).getAllByRole("button").map((button) => button.textContent)).toEqual([
+  // A choice of one, so the kit's segmented radio group (#1001, step 7c).
+  const levels = screen.getByRole("radiogroup", { name: "Minimum level" });
+  expect(within(levels).getAllByRole("radio").map((radio) => radio.textContent)).toEqual([
     "trace",
     "debug",
     "info",
     "warn",
     "error",
   ]);
-  expect(within(levels).getByRole("button", { name: "trace" }).getAttribute("aria-pressed")).toBe("true");
-  fireEvent.click(within(levels).getByRole("button", { name: "warn" }));
+  expect(within(levels).getByRole("radio", { name: "trace" }).getAttribute("aria-checked")).toBe("true");
+  fireEvent.click(within(levels).getByRole("radio", { name: "warn" }));
   await wait(0);
   expect(extensionLogs).toHaveBeenLastCalledWith("org.test.sidecar", { after: 0, minLevel: "warn" });
-  expect(within(levels).getByRole("button", { name: "warn" }).getAttribute("aria-pressed")).toBe("true");
+  expect(within(levels).getByRole("radio", { name: "warn" }).getAttribute("aria-checked")).toBe("true");
   expect(rows()).toEqual(["14:03:05.002 error app boom"]);
   await wait(2000);
   expect(extensionLogs).toHaveBeenLastCalledWith("org.test.sidecar", { after: 2, minLevel: "warn" });
@@ -182,7 +183,7 @@ it("says no line reaches the chosen level, rather than that nothing was logged",
     .mockResolvedValueOnce(read([line(1, "debug", "tick")]))
     .mockResolvedValue(read([]));
   await open();
-  fireEvent.click(screen.getByRole("button", { name: "error" }));
+  fireEvent.click(screen.getByRole("radio", { name: "error" }));
   await wait(0);
   expect(screen.getByText("No lines at error or above")).toBeTruthy();
   expect(screen.queryByText("Nothing logged yet")).toBeNull();
@@ -195,7 +196,7 @@ it("ignores an answer for a level that is no longer chosen", async () => {
     .mockResolvedValueOnce(read([line(5, "error", "boom")]))
     .mockResolvedValue(read([]));
   await open();
-  fireEvent.click(screen.getByRole("button", { name: "error" }));
+  fireEvent.click(screen.getByRole("radio", { name: "error" }));
   await wait(0);
   await act(async () => answerTrace(read([line(4, "debug", "tick")])));
   expect(rows()).toEqual(["14:03:05.005 error app boom"]);
