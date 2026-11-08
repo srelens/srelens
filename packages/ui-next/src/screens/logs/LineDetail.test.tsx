@@ -47,6 +47,15 @@ describe("LineDetail", () => {
     expect(screen.queryByRole("button", { name: "Filter for bad key = x" })).toBeNull();
   });
 
+  it("puts no log text in a title attribute", () => {
+    // The filter buttons are named after the field and its value. A title is
+    // a value nobody asked to have shown, and a log line is exactly the kind
+    // of string that carries a secret through one.
+    const { container } = detail();
+    const titles = Array.from(container.querySelectorAll("[title]"), (e) => e.getAttribute("title") ?? "");
+    expect(titles.filter((t) => t.includes("Skipping") || t.includes("camlog"))).toEqual([]);
+  });
+
   it("filters for and against a field through the one toggle", async () => {
     const { onToggle } = detail();
     await userEvent.click(screen.getByRole("button", { name: "Filter out system = camlog" }));

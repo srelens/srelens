@@ -211,8 +211,9 @@
      is what a control that must also explain itself needs: a keyboard and a
      screen reader can reach it and read the reason. The caller ignores the
      click; the appearance is the kit's. */
-  .btn:disabled, .icon-btn:disabled,
-  .btn[aria-disabled="true"], .icon-btn[aria-disabled="true"] { opacity: 0.5; cursor: not-allowed; }
+  .btn:disabled, .icon-btn:disabled, .text-btn:disabled, .link-btn:disabled,
+  .btn[aria-disabled="true"], .icon-btn[aria-disabled="true"],
+  .text-btn[aria-disabled="true"], .link-btn[aria-disabled="true"] { opacity: 0.5; cursor: not-allowed; }
 
   /* --- badges --------------------------------------------------- */
   .badge {
@@ -1288,6 +1289,24 @@
     -webkit-app-region: no-drag;
   }
   .text-btn:hover { background: var(--field); color: var(--ink); }
+
+  /* A word that goes somewhere: a node's name in a pod's row, "Forgot your
+     passphrase?", an address to open. No box and no colour of its own (it
+     takes the text it sits in), so the underline is what says it can be
+     pressed. Dotted at rest, because a column of these is one in every row and
+     a column of solid underlines is a column of rules; solid under the pointer
+     or the keyboard. The button's own `inline-block` is kept, so a caller can
+     truncate it. */
+  .link-btn {
+    text-align: inherit;
+    text-decoration-line: underline;
+    text-decoration-style: dotted;
+    text-underline-offset: 2px;
+    cursor: pointer;
+    -webkit-app-region: no-drag;
+  }
+  .link-btn:hover { text-decoration-style: solid; }
+  .link-btn:focus-visible { text-decoration-style: solid; }
 
   /* The composer: context chips, a multi-line input, a footer of controls.
      A box rather than a single line, because a screenshot, an agent picker and

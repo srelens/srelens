@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, type RefObject } from "react";
-import type { Column } from "@srelens/ui-kit";
+import { Button, type Column } from "@srelens/ui-kit";
 import type { ListRow } from "./types";
 
 /** The column this decorates — every namespaced kind's set spells it this way. */
@@ -72,12 +72,12 @@ export function withNamespaceSelect<Row extends ListRow>(
         if (selection.includes(namespace)) return namespace;
         const label = hint(selection, namespace);
         return (
-          <button
+          <Button
             type="button"
-            // Dotted at rest, solid under the pointer or the keyboard: a
-            // name with nothing drawn on it reads as text, and nobody clicks
-            // text to find out. Dotted because this is one cell in every row.
-            className="max-w-full cursor-pointer truncate text-left underline decoration-dotted underline-offset-2 hover:decoration-solid focus-visible:decoration-solid"
+            // The kit's link: underlined at rest, because a name with nothing
+            // drawn on it reads as text, and nobody clicks text to find out.
+            variant="link"
+            className="max-w-full truncate text-left"
             title={label}
             aria-label={label}
             onClick={(e) => {
@@ -98,7 +98,7 @@ export function withNamespaceSelect<Row extends ListRow>(
             }}
           >
             {namespace}
-          </button>
+          </Button>
         );
       },
     };

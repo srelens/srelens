@@ -117,6 +117,14 @@ describe("FilterPills", () => {
     }
   });
 
+  it("puts no clause in a title attribute", () => {
+    // A clause is often a value lifted off a log line, and a title is a value
+    // nobody asked to have shown.
+    const { container } = pills("token=abc123");
+    const titles = Array.from(container.querySelectorAll("[title]"), (e) => e.getAttribute("title") ?? "");
+    expect(titles.filter((t) => t.includes("abc123"))).toEqual([]);
+  });
+
   it("keeps the remove button outside the scrolling label, where a long clause cannot push it out of view", () => {
     const { container } = pills("x".repeat(120));
     const pill = container.querySelector('[data-slot="pill"]') as HTMLElement;

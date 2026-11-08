@@ -630,8 +630,9 @@ export function AgentPane() {
                     //
                     // Shrinkable here, unlike the badge: this sentence carries a
                     // CLI's name and is the long one in the row.
-                    <button
+                    <Button
                       type="button"
+                      variant="link"
                       onClick={() => {
                         const url = a.installUrl;
                         if (!url) return;
@@ -640,10 +641,10 @@ export function AgentPane() {
                           setInstallError((e) => ({ ...e, [a.kind]: err })),
                         );
                       }}
-                      className="min-w-0 truncate text-[0.75rem] text-muted underline"
+                      className="min-w-0 truncate text-[0.75rem] text-muted"
                     >
                       not installed — install {a.label}
-                    </button>
+                    </Button>
                   ) : (
                     <span className="min-w-0 truncate text-[0.75rem] text-muted">
                       not installed
