@@ -86,11 +86,14 @@ export function parseAppLog(raw: string): AppLogLine[] {
       // timestamp, so a prefixed line the level regex missed still loses its
       // prefix rather than repeating it in the message column.
       const from = level ? level.index! + level[0].length : (ts?.[0].length ?? 0);
+      // Only the one space the logger writes after the prefix goes. Any other
+      // leading whitespace is the message's own, like a backtrace's indent (#1053).
+      const message = from > 0 ? line.slice(from).replace(/^ /, "") : line;
       return {
         ts: ts ? ts[2] : "",
         source: source ? source[1] : "",
         level: (level?.[1] as Level) ?? "INFO",
-        message: line.slice(from).trim(),
+        message: message.trimEnd(),
         raw: line,
       };
     });

@@ -39,15 +39,25 @@ describe("parseAppLog", () => {
     expect(entry.source).toBe("srelens::cluster");
   });
 
-  it("keeps a line the logger did not write, whole", () => {
+  it("keeps a line the logger did not write, whole, indent and all", () => {
     const [entry] = parseAppLog("    at srelens::cluster::connect");
     expect(entry).toEqual({
       ts: "",
       source: "",
       level: "INFO",
-      message: "at srelens::cluster::connect",
+      message: "    at srelens::cluster::connect",
       raw: "    at srelens::cluster::connect",
     });
+  });
+
+  it("drops a line's trailing whitespace, a Windows line ending's \\r included", () => {
+    const parsed = parseAppLog(`${line("INFO", "one")}\r\n    at two\r\n`);
+    expect(parsed.map((e) => e.message)).toEqual(["one", "    at two"]);
+  });
+
+  it("drops only the one space after the level bracket", () => {
+    const [entry] = parseAppLog(line("ERROR", "  two spaces in"));
+    expect(entry.message).toBe("  two spaces in");
   });
 
   it("drops blank lines and keeps the rest in order", () => {
