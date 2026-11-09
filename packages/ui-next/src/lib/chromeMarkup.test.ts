@@ -30,6 +30,12 @@ describe("one way to draw a toolbar and a pane's opening", () => {
     expect(unexpected(/extension-toolbar/g, {})).toEqual({});
   });
 
+  it("wraps a toolbar that opens with a title, so the title cannot push its actions off the pane", () => {
+    // A title can't shrink below its longest word, and an app's card title is
+    // the app's own text. The app toolbars these replace all wrapped.
+    expect(unexpected(/<Toolbar>\s*<\w+ className="toolbar-title/g, {})).toEqual({});
+  });
+
   it("opens no settings pane with a heading of its own", () => {
     expect(
       unexpected(

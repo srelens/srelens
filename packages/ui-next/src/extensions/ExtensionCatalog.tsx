@@ -38,7 +38,7 @@ export function ExtensionCatalog({ installed, onReview, onReviewStart, autoLoad 
   useEffect(() => { if (autoLoad) load(false); }, [autoLoad]);
   const entries = data?.catalog.extensions.filter(e => [e.name, e.id, e.description].some(filter.matches));
   return <section className="extension-catalog" aria-label="App catalog">
-    <Toolbar>
+    <Toolbar wrap>
       <strong className="toolbar-title mr-auto">Available apps</strong>
       <Button variant="secondary" disabled={busy} onClick={() => load(Boolean(data))}>{data ? "Refresh catalog" : "Browse catalog"}</Button>
     </Toolbar>

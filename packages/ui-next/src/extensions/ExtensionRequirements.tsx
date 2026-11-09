@@ -34,7 +34,7 @@ export function ExtensionRequirements({ plugin, page, context, refresh, children
   if (!missing && !error) return <>{children}</>;
   return <>
     <section className="extension-requirements" aria-label={`${plugin.manifest.name} requirements`}>
-      {error ? <FailureAlert tone="sev" title="Could not check requirements" detail="CRD discovery failed. This does not mean the APIs are missing; resource reads will still use your existing permissions." error={error} onRetry={result.reload} /> : <Toolbar>
+      {error ? <FailureAlert tone="sev" title="Could not check requirements" detail="CRD discovery failed. This does not mean the APIs are missing; resource reads will still use your existing permissions." error={error} onRetry={result.reload} /> : <Toolbar wrap>
         <strong className="toolbar-title mr-auto">Missing requirements</strong>
         <Button variant="secondary" onClick={result.reload}>Check again</Button>
       </Toolbar>}
