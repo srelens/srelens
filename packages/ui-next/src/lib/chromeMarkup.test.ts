@@ -64,13 +64,37 @@ describe("one way to draw a toolbar and a pane's opening", () => {
     expect(unexpected(/<d[lt]\b|\bextension-facts\b/g, { "confirm/HostConfirmation.tsx": 5 })).toEqual({});
   });
 
+  /**
+   * A card's class in a `className`, written out or in a string inside its
+   * expression (`cx(…)`, a template). The expression is read up to its first
+   * `}`, so a prop named `card` after it is not the class.
+   */
+  const CARD_CLASS =
+    /className=(?:"[^"]*|\{[^}]*?["'`][^"'`}]*?)(?<![\w-])card(?:-head|-title)?(?![\w-])/g;
+
   it("draws no card of its own", () => {
     // A card is the kit's `Panel`, title, count and all. Connect wrote the
     // card's classes itself because `Panel` had no place for its count. (#1064)
     // Stylesheets that restyle a kit `Panel` where it sits are not markup.
-    expect(
-      unexpected(/className="[^"]*(?<![\w-])card(?:-head|-title)?(?![\w-])/g, {}, /\.tsx$/),
-    ).toEqual({});
+    expect(unexpected(CARD_CLASS, {}, /\.tsx$/)).toEqual({});
+  });
+
+  it("knows a card's class however the className is written", () => {
+    const caught = [
+      'className="card min-w-0"',
+      'className={"card"}',
+      "className={`card ${open}`}",
+      'className={cx("min-w-0", "card-head")}',
+      'className={cx(\n  "card",\n  open,\n)}',
+    ];
+    const passed = [
+      'className="rounded-card"',
+      'className={cx("extension-card-scope")}',
+      "const card = target.card",
+      "<Body className={rows} hideToolbar\n  card={found} />",
+    ];
+    expect(caught.filter((markup) => !markup.match(CARD_CLASS))).toEqual([]);
+    expect(passed.filter((markup) => markup.match(CARD_CLASS))).toEqual([]);
   });
 
   it("opens no settings pane with a heading of its own", () => {
