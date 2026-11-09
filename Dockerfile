@@ -60,7 +60,7 @@ COPY --from=frontend /src/apps/desktop/dist apps/desktop/dist
 RUN cargo build --release -p srelens-server --bin srelens-server
 
 # ---- Stage 3: slim runtime --------------------------------------------------
-FROM debian:bookworm-slim@sha256:99c0b25c46d0214d5a2091092e7908907dcaecd6a962cde0ac700acee222b6f3 AS runtime
+FROM debian:bookworm-slim@sha256:734a72b3d6142a71993b4bc580ca01d8ca687f77a2c422d96a961d3376b179bc AS runtime
 ARG KUBECTL_VERSION=v1.36.3
 # Helm is pinned to the 3.x line on purpose: Helm 4 has breaking CLI/behavior
 # changes the helm capabilities aren't validated against yet.
