@@ -612,18 +612,32 @@ pub fn gvk_for(kind: &str) -> Option<(GroupVersionKind, bool)> {
 /// Secret's `data`, `stringData` and annotations reached any MCP client
 /// outside the consent-gated `k8s.getSecret`.
 ///
-/// Only a Secret takes the JSON round trip. `serde_json::Value` sorts a map's
-/// keys, so routing every kind through it would reorder every manifest the
-/// editor and the detail pane show, for no gain on a resource that carries
-/// nothing to redact.
-fn manifest_yaml(obj: &DynamicObject, ar: &ApiResource) -> Result<String, CapabilityError> {
+/// The object comes in as the `serde_yaml::Mapping` the API server sent,
+/// which keeps its order, so the YAML reads in the server's order as Freelens
+/// and Lens show it (#1046), with `apiVersion` and `kind` hoisted to the top
+/// and `managedFields` dropped. Only a Secret takes the JSON round trip, which
+/// sorts its keys: `serde_json::Value`'s maps are `BTreeMap`s.
+fn manifest_yaml(
+    mut rest: serde_yaml::Mapping,
+    ar: &ApiResource,
+) -> Result<String, CapabilityError> {
+    if let Some(metadata) = rest.get_mut("metadata").and_then(|m| m.as_mapping_mut()) {
+        metadata.shift_remove("managedFields");
+    }
+    let mut ordered = serde_yaml::Mapping::new();
+    for key in ["apiVersion", "kind"] {
+        if let Some(value) = rest.shift_remove(key) {
+            ordered.insert(key.into(), value);
+        }
+    }
+    ordered.extend(rest);
     if is_core_secret(ar) {
         let mut object =
-            serde_json::to_value(obj).map_err(|e| CapabilityError::Handler(e.to_string()))?;
+            serde_json::to_value(&ordered).map_err(|e| CapabilityError::Handler(e.to_string()))?;
         crate::secrets::redact_secret_data(&mut object);
         return serde_yaml::to_string(&object).map_err(|e| CapabilityError::Handler(e.to_string()));
     }
-    serde_yaml::to_string(obj).map_err(|e| CapabilityError::Handler(e.to_string()))
+    serde_yaml::to_string(&ordered).map_err(|e| CapabilityError::Handler(e.to_string()))
 }
 
 /// `k8s.getManifest` — return a resource's manifest as YAML.
@@ -650,14 +664,18 @@ pub fn get_manifest_capability(cache: Arc<ClientCache>) -> Capability {
                 } else {
                     Api::all_with(client, &ar)
                 };
-                let mut obj = tokio::time::timeout(request_timeout(), api.get(&input.name))
-                    .await
-                    .map_err(|_| CapabilityError::Handler("get manifest timed out".into()))?
+                // `api.get` would decode into a `DynamicObject` and lose the
+                // server's key order; see `manifest_yaml`.
+                let request = kube::core::Request::new(api.resource_url())
+                    .get(&input.name, &kube::api::GetParams::default())
                     .map_err(|e| CapabilityError::Handler(e.to_string()))?;
-                // Drop noisy server-managed fields for a readable manifest.
-                obj.metadata.managed_fields = None;
+                let object: serde_yaml::Mapping =
+                    tokio::time::timeout(request_timeout(), api.into_client().request(request))
+                        .await
+                        .map_err(|_| CapabilityError::Handler("get manifest timed out".into()))?
+                        .map_err(|e| CapabilityError::Handler(e.to_string()))?;
                 Ok(ManifestOut {
-                    yaml: manifest_yaml(&obj, &ar)?,
+                    yaml: manifest_yaml(object, &ar)?,
                 })
             }
         },
@@ -1739,6 +1757,11 @@ mod tests {
         assert!(cap.annotations.read_only);
     }
 
+    /// `obj` as the map `get_manifest_capability` decodes the response into.
+    fn fetched(obj: &DynamicObject) -> serde_yaml::Mapping {
+        serde_yaml::from_value(serde_yaml::to_value(obj).unwrap()).unwrap()
+    }
+
     /// Build a fetched Secret as the API server hands one back: base64 `data`,
     /// plaintext `stringData`, and the whole applied manifest echoed into the
     /// annotation `kubectl` writes.
@@ -1768,7 +1791,7 @@ mod tests {
     #[test]
     fn get_manifest_redacts_a_secrets_values_and_annotations() {
         let (ar, obj) = fetched_secret();
-        let yaml = manifest_yaml(&obj, &ar).expect("serializes");
+        let yaml = manifest_yaml(fetched(&obj), &ar).expect("serializes");
         assert!(
             !yaml.contains("aHVudGVyMg=="),
             "the base64 `data` value leaked: {yaml}"
@@ -1835,6 +1858,38 @@ mod tests {
         );
     }
 
+    /// #1046: the YAML keeps the order the API server sent, as Freelens and
+    /// Lens show it, with `apiVersion` and `kind` on top as kubectl puts them.
+    /// The body is raw text because `mock_slow_pages` serves a
+    /// `serde_json::Value`, which has sorted its keys already.
+    #[tokio::test]
+    async fn the_get_manifest_handler_keeps_the_servers_key_order() {
+        let served = r#"{"kind":"ConfigMap","apiVersion":"v1","metadata":{"name":"web","namespace":"team","uid":"u1","resourceVersion":"7","labels":{"tier":"web","app":"shop"},"managedFields":[{"manager":"kubectl"}]},"data":{"zeta":"1","alpha":"2"}}"#;
+        let service = tower::service_fn(move |_: http::Request<kube::client::Body>| async move {
+            Ok::<_, std::convert::Infallible>(
+                http::Response::builder()
+                    .header("content-type", "application/json")
+                    .body(kube::client::Body::from(served.as_bytes().to_vec()))
+                    .unwrap(),
+            )
+        });
+        let cache = ClientCache::new(PathBuf::from("/x"));
+        cache
+            .preload("fake", kube::Client::new(service, "default"))
+            .await;
+
+        let out = (get_manifest_capability(cache).handler)(serde_json::json!({
+            "context": "fake", "kind": "ConfigMap", "namespace": "team", "name": "web"
+        }))
+        .await
+        .expect("the fake API server answers");
+
+        assert_eq!(
+            out["yaml"].as_str().expect("the capability returns YAML"),
+            "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: web\n  namespace: team\n  uid: u1\n  resourceVersion: '7'\n  labels:\n    tier: web\n    app: shop\ndata:\n  zeta: '1'\n  alpha: '2'\n",
+        );
+    }
+
     /// #980 review: a custom kind read by its hints, whose scope the cluster
     /// cannot give (discovery refused, or not listing it), is read where the
     /// namespace asked for says, as before discovery was consulted. Assuming
@@ -1887,7 +1942,7 @@ mod tests {
         let mut obj = DynamicObject::new("app", &ar).within("team");
         obj.data = serde_json::json!({ "data": { "greeting": "hello" } });
         assert_eq!(
-            manifest_yaml(&obj, &ar).expect("serializes"),
+            manifest_yaml(fetched(&obj), &ar).expect("serializes"),
             serde_yaml::to_string(&obj).expect("serializes"),
         );
     }
@@ -3106,7 +3161,7 @@ metadata:
             !readable.contains("aHVudGVyMg==") && !readable.contains("hunter2"),
             "{readable}"
         );
-        let yaml = manifest_yaml(&object, &ar).unwrap();
+        let yaml = manifest_yaml(fetched(&object), &ar).unwrap();
         assert!(
             !yaml.contains("aHVudGVyMg==") && !yaml.contains("hunter2"),
             "{yaml}"
