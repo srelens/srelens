@@ -266,3 +266,21 @@ describe("KVList", () => {
     expect(source.replace(/\/\*[\s\S]*?\*\/|\/\/.*/g, "")).not.toContain("title=");
   });
 });
+
+// Machine text does not wrap (AGENTS.md): a context, a server URL or a kubeconfig
+// path broken across two lines is misread, and `prod` beside `prod-eu` must stay
+// whole. Wrapping stays the default, as for `DiffLines`. (#1001)
+describe("a KV that does not wrap", () => {
+  it("keeps the value on one line, spaces and all, and scrolls it sideways", () => {
+    const { container } = render(<KV k="API server" v="https://10.0.0.1:6443" mono wrap={false} />);
+    const value = container.querySelector(".kv-v") as HTMLElement;
+    expect(value.className).toMatch(/(^|\s)whitespace-pre(\s|$)/);
+    expect(value.className).toMatch(/(^|\s)overflow-x-auto(\s|$)/);
+  });
+
+  it("wraps by default", () => {
+    const { container } = render(<KV k="Detail" v="Two replicas are not ready" />);
+    const value = container.querySelector(".kv-v") as HTMLElement;
+    expect(value.className).not.toMatch(/whitespace-pre|overflow-x-auto/);
+  });
+});

@@ -614,20 +614,11 @@
   font-weight: 600;
   color: var(--ink-muted, var(--fl-color-text-muted));
 }
-.extension-facts {
-  display: grid;
-  grid-template-columns: max-content minmax(0, 1fr);
-  gap: 2px 16px;
-  margin: 0;
-}
-.extension-facts > div { display: contents; }
-.extension-facts dt { color: var(--ink-muted, var(--fl-color-text-muted)); }
-.extension-facts dd { margin: 0; min-width: 0; overflow-wrap: anywhere; }
-.extension-facts code { font-family: var(--font-mono); }
+.extension-inspector-part .kv-v code { font-family: var(--font-mono); }
 /* The state is a word; its tint only helps. */
-.extension-facts [data-state="disabled"],
-.extension-facts [data-state="refused"] { color: var(--sev, var(--fl-color-danger)); font-weight: 600; }
-.extension-facts [data-state="restarting"] { color: var(--warn, var(--fl-color-warning)); font-weight: 600; }
+.extension-inspector-part [data-state="disabled"],
+.extension-inspector-part [data-state="refused"] { color: var(--sev, var(--fl-color-danger)); font-weight: 600; }
+.extension-inspector-part [data-state="restarting"] { color: var(--warn, var(--fl-color-warning)); font-weight: 600; }
 .extension-inspector-counts,
 .extension-inspector-streams {
   display: grid;

@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { listContexts, callExtensionOperation, describeError, describeStreamEnd, extensionEnabledFor, extensionOperationRoute, openExtensionView, parseExtensionOperationRoute, relativeTime, type ExtensionOperation as Operation, type ExtensionView, type ExtensionStream } from "@srelens/core";
 import { useNamespaceOptions } from "@srelens/core/react";
-import { ActionBar, Alert, Badge, Button, Checkbox, Combobox, EmptyState, FilterBar, LoadingState, Popover, Screen, Table, Tabs, TextInput, useListFilter, type BadgeTone } from "@srelens/ui-kit";
+import { ActionBar, Alert, Badge, Button, Checkbox, Combobox, EmptyState, FilterBar, KV, LoadingState, Popover, Screen, Table, Tabs, TextInput, useListFilter, type BadgeTone } from "@srelens/ui-kit";
 import { ExtensionLogo } from "../extensions/ExtensionLogo";
 import { useExtensions } from "../extensions/inventoryStore";
 import { FailureState } from "../lib/errorCopy";
@@ -83,7 +83,7 @@ function ResultValue({ field, value, compact = false }: { field: string; value: 
 }
 
 function ResultDetails({ entries, title }: { entries: Array<[string, unknown]>; title: string }) {
-  return <details className="min-w-0 text-xs"><summary className="cursor-pointer py-1 text-muted">{title}</summary><dl className="space-y-2 py-2">{entries.map(([key, value]) => <div key={key}><dt className="text-xs text-muted">{label(key)}</dt><dd className="max-w-full overflow-auto whitespace-nowrap text-[0.8125rem]">{cell(value)}</dd></div>)}</dl></details>;
+  return <details className="min-w-0 text-xs"><summary className="cursor-pointer py-1 text-muted">{title}</summary><div className="pb-1">{entries.map(([key, value]) => <KV key={key} stacked k={label(key)} v={cell(value)} mono wrap={false} />)}</div></details>;
 }
 
 function NamespaceInput({ context, value, onChange, required }: { context: string; value: string; onChange: (value: string) => void; required?: boolean }) {
@@ -110,10 +110,10 @@ function OperationResult({ value, operations, current, onOpen }: { value: unknow
   const lists = fields.filter(([key, value]) => key !== "warnings" && Array.isArray(value) && !compactList(key, value));
   return <div className="app-results scroll min-h-0 min-w-0 flex-1">
     {warnings.length > 0 && <Alert tone="warn" title="The app reported warnings">{warnings.map((warning, index) => <p key={index}>{plainText(warning)}</p>)}</Alert>}
-    {reports ? <div className="app-report-intro"><h2>Security reports <span>{object(value) ? cell(value.totalReports ?? (value.items as unknown[]).length) : ""}</span></h2><p>Scan history and Operator reports. Severity counts belong to each report.</p></div> : metadata.length > 0 && <dl className="flex flex-wrap gap-x-6 gap-y-2 border-b px-3 py-2" style={{ borderColor: "var(--rule)" }}>
-      {metadata.filter(([key]) => !technical(key) || key === "scope").map(([key, value]) => <div key={key} className="min-w-0 max-w-full"><dt className="text-xs text-muted">{label(key)}</dt><dd className={`text-[0.8125rem] ${prose(key) ? "whitespace-normal" : "overflow-auto whitespace-nowrap"}`}><ResultValue field={key} value={value} compact={compactList(key, value)} /></dd></div>)}
-      {identity.length > 0 && <div className="min-w-0 basis-full"><ResultDetails entries={identity} title="Technical details" /></div>}
-    </dl>}
+    {reports ? <div className="app-report-intro"><h2>Security reports <span>{object(value) ? cell(value.totalReports ?? (value.items as unknown[]).length) : ""}</span></h2><p>Scan history and Operator reports. Severity counts belong to each report.</p></div> : metadata.length > 0 && <div className="grid grid-cols-[repeat(auto-fill,minmax(12rem,1fr))] gap-x-6 border-b px-3 py-1" style={{ borderColor: "var(--rule)" }}>
+      {metadata.filter(([key]) => !technical(key) || key === "scope").map(([key, value]) => <KV key={key} stacked k={label(key)} v={<ResultValue field={key} value={value} compact={compactList(key, value)} />} wrap={prose(key)} />)}
+      {identity.length > 0 && <div className="col-span-full min-w-0"><ResultDetails entries={identity} title="Technical details" /></div>}
+    </div>}
     {lists.length > 0 && <FilterBar {...filter} label={reports ? "Filter reports" : "Filter results"} placeholder={reports ? "Filter reports…" : "Filter results…"}>{reports && <Tabs variant="segmented" label="Report source" active={source} onChange={setSource} tabs={[{id:"",label:"All sources"},{id:"app",label:"App scans"},{id:"operator",label:"Operator reports"}]}/>}</FilterBar>}
     {lists.map(([key, values]) => {
       const all = (values as unknown[]).map((value, index) => ({ index, data: object(value) ? value : { value } }));

@@ -7,7 +7,7 @@ import {
   type ExtensionProcess,
   type InstalledExtension,
 } from "@srelens/core";
-import { Alert, Button, EmptyState, LoadingState } from "@srelens/ui-kit";
+import { Alert, Button, EmptyState, KVList, LoadingState } from "@srelens/ui-kit";
 import { FailureAlert } from "../lib/errorCopy";
 import { AppLogLine, clock } from "./ExtensionLogs";
 import { bytes, describeGrant, inactiveReason, installedOn, origin } from "./detailsText";
@@ -79,16 +79,12 @@ function Part({ title, children }: { title: string; children: ReactNode }) {
   );
 }
 
+/** One block in its part's grid, so the part's gap falls around the rows, not between them. */
 function Facts({ rows }: { rows: Array<[string, ReactNode]> }) {
   return (
-    <dl className="extension-facts">
-      {rows.map(([term, value]) => (
-        <div key={term}>
-          <dt>{term}</dt>
-          <dd>{value}</dd>
-        </div>
-      ))}
-    </dl>
+    <div>
+      <KVList rows={rows} />
+    </div>
   );
 }
 

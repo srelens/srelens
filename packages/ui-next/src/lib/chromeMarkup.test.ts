@@ -13,6 +13,10 @@ import { fileURLToPath } from "node:url";
  * And one way to draw a figure, a live signal and a log line (step 7e): the
  * kit's `MetricTile`, `LiveSignal` and `LogLine`, where apps drew
  * `.dashboard-card`, `.extension-live` and `LogLineRow`.
+ *
+ * And one way to draw a key and its value (step 7f): the kit's `KV`, where the
+ * Inspector, Topology, the Clusters pane and an app's operation screen each drew
+ * their own `<dl>`.
  */
 describe("one way to draw a toolbar and a pane's opening", () => {
   const src = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -51,6 +55,13 @@ describe("one way to draw a toolbar and a pane's opening", () => {
         {},
       ),
     ).toEqual({});
+  });
+
+  it("draws no key/value list of its own", () => {
+    // The host confirmation keeps its list: classic's MCP dialog and Assistant
+    // conversation render it too, and classic loads no kit stylesheet, so a `KV`
+    // there would come out unstyled on a security prompt.
+    expect(unexpected(/<d[lt]\b|\bextension-facts\b/g, { "confirm/HostConfirmation.tsx": 5 })).toEqual({});
   });
 
   it("opens no settings pane with a heading of its own", () => {

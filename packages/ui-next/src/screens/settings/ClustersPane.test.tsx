@@ -239,3 +239,17 @@ it("says the cluster switch could not be saved, and shows what the file holds", 
   expect(alert.getAttribute("role")).toBe("alert");
   expect(alert.textContent).toContain("settings.json is locked");
 });
+
+it("lists a context's connection details as the kit's rows, each identifier whole on one line", async () => {
+  // #1001: machine text does not wrap. A server URL or a kubeconfig path broken
+  // mid-token is misread; a long one scrolls, with no second copy in a title.
+  const user = userEvent.setup(); render(<ClustersPane />);
+  await user.click(screen.getByRole("button", { name: "Edit Production Europe" }));
+  const details = within(screen.getByRole("region", { name: "Context details" }));
+  expect(details.getAllByRole("term").map(term => term.textContent)).toEqual(["Context", "Cluster", "API server", "Kubeconfig", "Authentication", "Namespace"]);
+  const server = details.getByText("https://prod");
+  expect(server.closest("dl")?.classList.contains("kv")).toBe(true);
+  expect(server.classList.contains("code")).toBe(true);
+  expect(server.classList.contains("whitespace-pre")).toBe(true);
+  expect(server.hasAttribute("title")).toBe(false);
+});

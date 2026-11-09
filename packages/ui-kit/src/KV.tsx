@@ -20,6 +20,15 @@ export interface KVProps {
    * A caller that wants this layout asks the row for it. (#331)
    */
   stacked?: boolean;
+  /**
+   * Wrap a value too long for the column (the default), or keep it on one line,
+   * spaces and all, and scroll it sideways.
+   *
+   * Wrapping is right for prose and wrong for machine text: a kubeconfig path or
+   * an API server URL broken mid-token is misread, and `prod` beside `prod-eu`
+   * has to stay whole. Named as on `DiffLines`. (#1001)
+   */
+  wrap?: boolean;
   className?: string;
 }
 
@@ -48,13 +57,13 @@ export interface KVProps {
  * four ways across the detail panes, and a row is the one place every caller
  * passes through. A zero is a value and stays. (#1001)
  */
-export function KV({ k, v, mono, stacked, className }: KVProps) {
+export function KV({ k, v, mono, stacked, wrap = true, className }: KVProps) {
   return (
     // A data attribute rather than a second class: the form is a state of
     // this row, and the stylesheet reads it off the row it is laying out.
     <dl className={cx("kv", className)} data-stacked={stacked ? "true" : undefined}>
       <dt className="kv-k">{k}</dt>
-      <dd className={cx("kv-v", mono && "code")}>{filled(v) ? v : "—"}</dd>
+      <dd className={cx("kv-v", mono && "code", !wrap && "overflow-x-auto whitespace-pre")}>{filled(v) ? v : "—"}</dd>
     </dl>
   );
 }

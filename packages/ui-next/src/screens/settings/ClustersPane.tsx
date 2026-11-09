@@ -1,7 +1,7 @@
 import { useId, useRef, useState, type PointerEvent } from "react";
 import { GripVertical } from "lucide-react";
 import { deleteContext, describeError, isTauri, listContexts, removeClusterNamespace, unprefixedName, type ClusterContext } from "@srelens/core";
-import { Button, ConfirmDialog, CustomizeMark, EmptyState, Field, FilterBar, LoadingState, Mark, PaneIntro, Switch, TextInput, useListFilter } from "@srelens/ui-kit";
+import { Button, ConfirmDialog, CustomizeMark, EmptyState, Field, FilterBar, KV, LoadingState, Mark, PaneIntro, Switch, TextInput, useListFilter } from "@srelens/ui-kit";
 import { FailureAlert } from "../../lib/errorCopy";
 import { getAssistantSaveError, setClusterAssistant, useAssistant } from "../../lib/assistant";
 import { getContexts, getKubeconfigFiles, setContexts, useContexts, useContextsError, useContextsStatus } from "../../lib/clusters";
@@ -23,13 +23,13 @@ function ContextEditor({ context, onRemove }: { context: ClusterContext; onRemov
       <TextInput value={mark.imageSrc ?? ""} onValueChange={imageSrc => setMark(context.stableId, { ...mark, imageSrc })} />
     </Field></div>}
     <div className="pane-head border-t border-rule">Connection details</div>
-    <dl className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-4 gap-y-2 p-3 text-[0.75rem]">
+    {/* Identifiers, so each stays whole on its line and scrolls (#1001). */}
+    <div className="p-3">
       {[["Context", context.name], ["Cluster", context.cluster], ["API server", context.server],
         ["Kubeconfig", context.sourceFile], ["Authentication", context.authKind],
-        ["Namespace", context.namespace || "default"]].map(([label, value]) => <div key={label} className="contents">
-        <dt className="text-muted">{label}</dt><dd className="overflow-x-auto whitespace-nowrap font-mono" title={value}>{value}</dd>
-      </div>)}
-    </dl>
+        ["Namespace", context.namespace || "default"]].map(([label, value]) =>
+        <KV key={label} k={label} v={value} mono wrap={false} />)}
+    </div>
     {/* #968: off-only. Global off wins, and this cluster's choice is kept for when it is back on. */}
     <div className="pane-head border-t border-rule">AI Assistant</div>
     <div className="p-3">
