@@ -138,4 +138,14 @@ describe("LogLine", () => {
     const { container } = render(<LogLine ts="14:02:11" message="x" className="extra" />);
     expect(container.querySelector(".logline.extra")).not.toBeNull();
   });
+
+  it("keeps a message's runs of spaces, and leaves wrapping to the screen", () => {
+    // (#1051) `nowrap` and `normal` both collapse spaces, so a stack trace or an
+    // aligned table lost its shape on screen and in the copy. Collapse alone is
+    // set here; whether a long line wraps is the screen's Wrap, inherited.
+    const { container } = render(<LogLine ts="14:02:11" message="    at reconcile   retry=3" />);
+    const message = cell(container, "message");
+    expect(message.className).toContain("[white-space-collapse:preserve]");
+    expect(message.className).not.toMatch(/(^|\s)whitespace-/);
+  });
 });

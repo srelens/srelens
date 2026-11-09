@@ -80,6 +80,12 @@ const LEVEL_TONE: Record<string, Tone> = {
  * fixed column truncates inside an inline box of its width, because a table
  * cell grows to fit text that will not wrap, and a block there would put its
  * own line breaks back into the copy. (#1001)
+ *
+ * The message keeps its spaces and tabs as written: a stack trace's indent and
+ * an aligned table are part of what it says. Only the collapse is set here
+ * (`white-space-collapse`), not the whole `white-space`, so whether a long line
+ * wraps stays the screen's choice, inherited. A line holds no newline — a
+ * stream is split on them — so nothing here can break an unwrapped row. (#1051)
  */
 export function LogLine({
   ts,
@@ -104,7 +110,7 @@ export function LogLine({
       <span data-slot="level" className="table-cell pr-3 align-top uppercase" style={{ color: toneColor(resolved) }}>
         <span className="inline-block w-[44px] truncate align-top">{level}</span>
       </span>
-      <span data-slot="message" className="table-cell w-full break-all align-top text-soft">
+      <span data-slot="message" className="table-cell w-full break-all align-top text-soft [white-space-collapse:preserve]">
         {filled(message) ? message : <span className="text-faint">(no message)</span>}
       </span>
       {filled(children) && (
