@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1
 
 # ---- Stage 1: build the frontend bundle -------------------------------------
-FROM node:26-slim@sha256:e4db4c914bf8ad241bd24804fc25d272d89bad97e68cdc8a1414862790a02c39 AS frontend
+FROM node:26-slim@sha256:5adad64f9a1fca2d51972caa65983634c8a774eb300d72b20f7f2a0f60368072 AS frontend
 WORKDIR /src
 # package.json alone, ahead of the lockfile: it names the pnpm version, and
 # copying it by itself keeps the pnpm install layer cached when only the
