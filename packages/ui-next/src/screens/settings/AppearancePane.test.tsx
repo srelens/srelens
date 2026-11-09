@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { act, fireEvent, render, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -79,6 +79,13 @@ function rootAttributes(): Record<string, string | undefined> {
  */
 function onPlatform(platform: string) {
   vi.spyOn(navigator, "platform", "get").mockReturnValue(platform);
+}
+
+/** A choice of one, drawn as the kit's segmented radio group (#1001, step 7c): its options in order. */
+function options(group: string): string[] {
+  const radios = within(screen.getByRole("radiogroup", { name: group })).getAllByRole("radio");
+  expect(radios.map((radio) => `${radio.tagName}.${radio.className}`)).toEqual(radios.map(() => "BUTTON.seg-btn"));
+  return radios.map((radio) => radio.textContent ?? "");
 }
 
 function stored(): unknown {
@@ -222,11 +229,7 @@ describe("AppearancePane", () => {
   describe("density", () => {
     it("offers the three densities the stylesheet defines", () => {
       paint();
-      expect(screen.getAllByTestId("density-label").map((label) => label.textContent)).toEqual([
-        "Compact",
-        "Default",
-        "Comfortable",
-      ]);
+      expect(options("Density")).toEqual(["Compact", "Default", "Comfortable"]);
       for (const density of DENSITIES) {
         if (density.id === "default") {
           expect(TOKENS).not.toContain(`[data-density="default"]`);
@@ -260,7 +263,7 @@ describe("AppearancePane", () => {
   describe("interface zoom", () => {
     it("offers exactly the scales core supports", () => {
       paint();
-      const offered = screen.getAllByTestId("zoom-label").map((l) => l.textContent);
+      const offered = options("Interface zoom");
       expect(offered).toEqual(ZOOM_STEPS.map((percent) => `${percent}%`));
       // Derived, not transcribed: every option must be a value `setUiScale`
       // stores unchanged, and both ends of core's range must be reachable.
@@ -291,7 +294,7 @@ describe("AppearancePane", () => {
     it("offers no zoom control on the web, where the browser's own zoom applies", () => {
       core.isTauri.mockReturnValue(false);
       paint();
-      expect(screen.queryAllByTestId("zoom-label")).toHaveLength(0);
+      expect(screen.queryByRole("radiogroup", { name: "Interface zoom" })).toBeNull();
       expect(screen.getByText(/browser/i)).toBeTruthy();
     });
   });

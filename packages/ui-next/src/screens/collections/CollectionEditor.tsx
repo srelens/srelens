@@ -10,7 +10,7 @@ import {
   type CollectionProblem,
   type NamespaceResolution,
 } from "@srelens/core";
-import { Button, Checkbox, Dialog, Field, LoadingState, MultiSelect, Switch, TextInput } from "@srelens/ui-kit";
+import { Button, Checkbox, Dialog, Field, LoadingState, MultiSelect, Switch, TextArea, TextInput } from "@srelens/ui-kit";
 import { FailureAlert } from "../../lib/errorCopy";
 import { useCollections, saveCollection } from "../../lib/collections";
 import { friendly } from "../../lib/errorCopy";
@@ -20,9 +20,6 @@ import { useListing } from "../../lib/collectionScope";
 const SETTLE_MS = 200;
 /** How many matched namespaces the preview lists before it counts the rest. */
 const PREVIEW_SHOWN = 40;
-
-const TEXTAREA =
-  "scroll w-full rounded-md border border-[var(--control-line)] bg-transparent px-2 py-1.5 font-mono text-[0.75rem] outline-none focus:border-[var(--accent)]";
 
 /** What a draft says, as a collection; empty fields left out. */
 function draftCollection(fields: Draft): Collection {
@@ -195,13 +192,12 @@ export function CollectionDialog({ editing, members, clusterId, clusterName, onC
           hint="Always included. One per line, or paste a comma-separated list."
           error={problemText(shown, "members")}
         >
-          <textarea
+          <TextArea
             id={ids.members}
             aria-label="Members"
             value={draft.members}
-            onChange={(e) => set("members")(e.target.value)}
+            onValueChange={set("members")}
             rows={3}
-            className={TEXTAREA}
             placeholder={"payments\ncheckout"}
           />
         </Field>
@@ -210,13 +206,12 @@ export function CollectionDialog({ editing, members, clusterId, clusterName, onC
           hint="One per line; * matches any characters, e.g. prod-*, *-canary."
           error={problemText(shown, "patterns")}
         >
-          <textarea
+          <TextArea
             id={ids.patterns}
             aria-label="Patterns"
             value={draft.patterns}
-            onChange={(e) => set("patterns")(e.target.value)}
+            onValueChange={set("patterns")}
             rows={2}
-            className={TEXTAREA}
             placeholder="prod-*"
           />
         </Field>

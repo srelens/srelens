@@ -1,4 +1,5 @@
 import { networkHosts, type ExtensionChange, type InstalledExtension } from "@srelens/core";
+import { Checkbox } from "@srelens/ui-kit";
 import { HostText } from "./networkText";
 
 /**
@@ -30,15 +31,12 @@ export function ExtensionNetwork({
           </li>
         ))}
       </ul>
-      <label>
-        <input
-          type="checkbox"
-          checked={allowed}
-          disabled={busy}
-          onChange={() => void change({ action: "loopbackHttp", id: plugin.manifest.id, allowLoopbackHttp: !allowed })}
-        />{" "}
-        Allow plain HTTP to this computer (loopback)
-      </label>
+      <Checkbox
+        checked={allowed}
+        disabled={busy}
+        onChange={() => void change({ action: "loopbackHttp", id: plugin.manifest.id, allowLoopbackHttp: !allowed })}
+        label="Allow plain HTTP to this computer (loopback)"
+      />
       <p className="extension-message">
         Only for one of the hosts above on this computer, such as a port-forwarded Prometheus. Requests anywhere else
         stay HTTPS.

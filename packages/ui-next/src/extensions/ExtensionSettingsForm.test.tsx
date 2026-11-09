@@ -254,19 +254,18 @@ it("announces every picker's required, invalid and help state like a text input'
   expect(other.hasAttribute("aria-required")).toBe(false);
 });
 
-it("draws its inputs with the form-control boundary, not the panel divider", async () => {
-  const { readFileSync } = await import("node:fs");
-  const { join } = await import("node:path");
-  const css = readFileSync(join(__dirname, "extensions.css"), "utf8");
-  const selector = '.extension-setting input:not([type="checkbox"])';
-  const at = css.indexOf(`${selector} {`);
-  expect(at, `${selector} has a rule`).toBeGreaterThanOrEqual(0);
-  const rule = css.slice(at, css.indexOf("}", at));
+it("draws its fields with the kit's inputs, on the form-control boundary", () => {
   // The kit's `--control-line` is the 3:1 boundary every theme defines for
-  // inputs and pickers (the pickers beside these already use it); `--rule` is
-  // the hairline between regions.
-  expect(rule).toMatch(/border: 1px solid var\(--control-line,/);
-  expect(rule).not.toContain("--rule");
+  // inputs and pickers; `--rule` is the hairline between regions. Before
+  // #1001's step 7c these were bare inputs, given that boundary by this
+  // feature's own stylesheet.
+  const { form: region } = form();
+  expect(within(region).getByRole("textbox", { name: /^Note/ }).style.borderColor).toBe("var(--control-line)");
+  expect(within(region).getByRole("spinbutton", { name: /^Warn before expiry/ }).style.borderColor).toBe("var(--control-line)");
+  // The kit's box, in the accent: a yes/no, and each option of a multi-select.
+  for (const name of ["Verbose", "Alpha", "Beta"]) {
+    expect(within(region).getByRole("checkbox", { name }).classList).toContain("accent-[var(--accent)]");
+  }
 });
 
 it("says so when an app declares no settings", () => {

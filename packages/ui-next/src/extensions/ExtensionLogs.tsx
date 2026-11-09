@@ -1,4 +1,4 @@
-import { useEffect, useId, useLayoutEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import {
   EXTENSION_LOG_LEVELS,
   extensionLogs,
@@ -7,7 +7,7 @@ import {
   type ExtensionRuntime,
   type InstalledExtension,
 } from "@srelens/core";
-import { Button, EmptyState, LoadingState } from "@srelens/ui-kit";
+import { EmptyState, LoadingState, Tabs } from "@srelens/ui-kit";
 import { FailureAlert } from "../lib/errorCopy";
 import { plainText } from "./displayText";
 import { extensionLabel } from "./inventoryStore";
@@ -60,7 +60,6 @@ export function LogLineRow({ line, level = true }: { line: ExtensionLogLine; lev
  */
 export function ExtensionLogs({ plugin }: { plugin: InstalledExtension }) {
   const id = plugin.manifest.id;
-  const levelsLabel = useId();
   const [level, setLevel] = useState<ExtensionLogLevel>("trace");
   const [lines, setLines] = useState<ExtensionLogLine[]>([]);
   /** Whether the lines held answer the chosen level; false until its first read comes back. */
@@ -131,13 +130,17 @@ export function ExtensionLogs({ plugin }: { plugin: InstalledExtension }) {
           }`}
         </p>
       )}
-      <div className="extension-log-levels" role="group" aria-labelledby={levelsLabel}>
-        <span id={levelsLabel}>Minimum level</span>
-        {EXTENSION_LOG_LEVELS.map((each) => (
-          <Button key={each} variant="ghost" size="xs" aria-pressed={each === level} onClick={() => choose(each)}>
-            {each}
-          </Button>
-        ))}
+      <div className="extension-log-levels">
+        {/* Shown, and said once: the group carries the same name. */}
+        <span aria-hidden="true">Minimum level</span>
+        <Tabs
+          variant="segmented"
+          mode="radio"
+          label="Minimum level"
+          tabs={EXTENSION_LOG_LEVELS.map((each) => ({ id: each, label: each }))}
+          active={level}
+          onChange={(each) => choose(each as ExtensionLogLevel)}
+        />
       </div>
       {error !== undefined && <FailureAlert tone="sev" title="Could not read this app's log" error={error} domain="local" onRetry={retry} />}
       {lines.length > 0 ? (

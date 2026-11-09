@@ -28,16 +28,6 @@
   padding: 12px;
   border-bottom: 1px solid var(--rule, var(--fl-color-border));
 }
-.extension-install textarea {
-  width: 100%;
-  padding: 8px;
-  border: 1px solid var(--rule, var(--fl-color-border));
-  border-radius: 4px;
-  background: var(--surface, var(--fl-color-surface));
-  color: inherit;
-  font-family: var(--font-mono);
-  resize: vertical;
-}
 .extension-installed {
   border-bottom: 1px solid var(--rule, var(--fl-color-border));
 }
@@ -592,31 +582,8 @@
   overflow-wrap: anywhere;
 }
 .extension-setting > legend { padding: 0; margin-bottom: 4px; }
-.extension-setting input:not([type="checkbox"]) {
-  width: 100%;
-  min-width: 0;
-  padding: 6px 8px;
-  /* The kit's control boundary (3:1 in every theme), as the pickers beside it use. */
-  border: 1px solid var(--control-line, var(--fl-color-border));
-  border-radius: 4px;
-  background: var(--surface, var(--fl-color-surface));
-  color: inherit;
-  font: inherit;
-}
-.extension-setting input:focus-visible {
-  outline: 2px solid var(--accent, var(--fl-color-primary));
-  outline-offset: 1px;
-}
-.extension-setting input[aria-invalid="true"] {
-  border-color: var(--sev, var(--fl-color-danger));
-}
 /* An option in a group is not a field's label; a lone checkbox's label is. */
-.extension-setting > .extension-setting-check {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  font-weight: 400;
-}
+.extension-setting > .extension-setting-check { font-weight: 400; }
 .extension-setting > .extension-setting-check:first-child { font-weight: 600; }
 .extension-setting-pair {
   display: flex;
@@ -833,10 +800,6 @@
 .extension-inspector-table code { font-family: var(--font-mono); }
 .extension-log-levels { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; }
 .extension-log-levels > span { margin-right: 4px; color: var(--ink-muted, var(--fl-color-text-muted)); }
-.extension-log-levels [aria-pressed="true"] {
-  color: var(--accent, var(--fl-color-accent));
-  box-shadow: inset 0 -2px currentColor;
-}
 /* An app's log is machine text: each line runs on and the region scrolls both ways on
    its own, flush with the Details' edges and divided from them by hairlines. */
 .extension-app-log {

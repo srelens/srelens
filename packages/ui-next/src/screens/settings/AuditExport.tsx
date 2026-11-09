@@ -1,6 +1,6 @@
 import { useRef, useState } from "react";
 import { retainedAudit, saveAuditExport, serializeAuditExport, type AuditEntry, type AuditExportFormat, type AuditExportScope } from "@srelens/core";
-import { Button, Select } from "@srelens/ui-kit";
+import { Button, Checkbox, Select } from "@srelens/ui-kit";
 import { FailureAlert } from "../../lib/errorCopy";
 
 /** Export is local and deliberate; details stay out unless the reader opts in. */
@@ -45,10 +45,13 @@ export function AuditExport({ entries, disabled }: { entries: AuditEntry[]; disa
           {busy ? "Exporting…" : "Export audit trail"}
         </Button>
       </div>
-      <label className="mt-2 flex items-center gap-2">
-        <input type="checkbox" checked={details} disabled={busy} onChange={event => setDetails(event.target.checked)} />
-        Include arguments and error details (may contain sensitive data)
-      </label>
+      <Checkbox
+        className="mt-2"
+        checked={details}
+        disabled={busy}
+        onChange={setDetails}
+        label="Include arguments and error details (may contain sensitive data)"
+      />
       <p className="mt-2 leading-relaxed text-muted">
         Saves a local file through the desktop save dialog. All retained entries includes the active and rotated log;
         current view saves the loaded rows. Older deleted records cannot be recovered.

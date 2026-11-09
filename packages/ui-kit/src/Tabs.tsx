@@ -25,6 +25,12 @@ export interface TabsProps {
    * leave the page the reader is still choosing from.
    */
   activation?: "automatic" | "manual";
+  /**
+   * `radio` makes it a radio group: a choice of one setting from a few, not a
+   * set of panes. Same look, same tab stop; it says radio and checked, and the
+   * up and down arrows choose too. (#1001)
+   */
+  mode?: "tabs" | "radio";
 }
 
 /**
@@ -66,9 +72,10 @@ const SKIN: Record<TabsVariant, { list: string; tab: string }> = {
  * Selection follows focus, which is the expected pattern for tabs whose panels
  * are already rendered and cheap to switch. (#318)
  */
-export function Tabs({ tabs, active, onChange, label, variant = "strip", activation = "automatic" }: TabsProps) {
+export function Tabs({ tabs, active, onChange, label, variant = "strip", activation = "automatic", mode = "tabs" }: TabsProps) {
   const refs = useRef(new Map<string, HTMLButtonElement>());
   const skin = SKIN[variant];
+  const radio = mode === "radio";
 
   function focus(id: string) {
     if (activation === "automatic") onChange(id);
@@ -87,8 +94,8 @@ export function Tabs({ tabs, active, onChange, label, variant = "strip", activat
     const index = focused >= 0 ? focused : tabs.findIndex((t) => t.id === active);
     if (index < 0) return;
     let next: number | null = null;
-    if (event.key === "ArrowRight") next = (index + 1) % tabs.length;
-    else if (event.key === "ArrowLeft") next = (index - 1 + tabs.length) % tabs.length;
+    if (event.key === "ArrowRight" || (radio && event.key === "ArrowDown")) next = (index + 1) % tabs.length;
+    else if (event.key === "ArrowLeft" || (radio && event.key === "ArrowUp")) next = (index - 1 + tabs.length) % tabs.length;
     else if (event.key === "Home") next = 0;
     else if (event.key === "End") next = tabs.length - 1;
     if (next === null) return;
@@ -104,7 +111,7 @@ export function Tabs({ tabs, active, onChange, label, variant = "strip", activat
     <div
       className={skin.list}
       data-variant={variant}
-      role="tablist"
+      role={radio ? "radiogroup" : "tablist"}
       aria-label={label}
       onKeyDown={onKeyDown}
     >
@@ -112,10 +119,11 @@ export function Tabs({ tabs, active, onChange, label, variant = "strip", activat
         <button
           key={t.id}
           type="button"
-          role="tab"
+          role={radio ? "radio" : "tab"}
           className={skin.tab}
           data-active={t.id === active}
-          aria-selected={t.id === active}
+          aria-selected={radio ? undefined : t.id === active}
+          aria-checked={radio ? t.id === active : undefined}
           tabIndex={t.id === active ? 0 : -1}
           ref={(node) => {
             if (node) refs.current.set(t.id, node);

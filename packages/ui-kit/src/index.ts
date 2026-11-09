@@ -105,6 +105,7 @@ export { filterMatcher, tableFilterError, useListFilter } from "./filter";
 export { Table, computeVisibleRange, filterTableData, nextSort, type Column, type TableProps, type TableSelection, type TableSort } from "./Table";
 export { Tabs, type TabItem, type TabsProps, type TabsVariant } from "./Tabs";
 export { TabStrip, type StripTab, type TabStripProps } from "./TabStrip";
+export { TextArea, type TextAreaProps } from "./TextArea";
 export { TextInput, type TextInputProps } from "./TextInput";
 export { Titlebar, type TitlebarProps } from "./Titlebar";
 export { Toast, type ToastProps } from "./Toast";

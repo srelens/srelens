@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type ReactNode, type Ref } from "react";
 import { ageFromTimestamp } from "@srelens/core";
-import { Button, EmptyState, IconButton, Section, StatusPill, toneColor, toneWash, type StatusKind } from "@srelens/ui-kit";
+import { Button, EmptyState, IconButton, Section, StatusPill, TextInput, toneColor, toneWash, type StatusKind } from "@srelens/ui-kit";
 import { Icons } from "../../lib/icons";
 import type { SessionKind, SessionState, TerminalSessionRow } from "../../lib/sessions";
 
@@ -130,26 +130,20 @@ function RenameField({
     settled.current = true;
     onDone(next, byKey);
   };
+  // Finishing hands focus back to the row's button within the same keystroke;
+  // TextInput keeps the rest of an Enter or Escape it handles from then
+  // pressing that button, and leaves an input method's own keys alone.
   return (
-    <input
+    <TextInput
       aria-label={`Rename ${title}`}
       value={draft}
       autoFocus
       onFocus={(e) => e.currentTarget.select()}
-      onChange={(e) => setDraft(e.target.value)}
+      onValueChange={setDraft}
       onBlur={() => finish(draft, false)}
-      onKeyDown={(e) => {
-        if (e.key !== "Enter" && e.key !== "Escape") return;
-        // An input method is still composing: this Enter picks a candidate
-        // and this Escape drops one. Neither is about the field.
-        if (e.nativeEvent.isComposing) return;
-        // Finishing hands focus back to the row's button within this same
-        // keystroke; left to its default, the rest of the keystroke would
-        // then press that button and select a row the reader only renamed.
-        e.preventDefault();
-        finish(e.key === "Enter" ? draft : null, true);
-      }}
-      className="min-w-0 flex-1 rounded border border-rule bg-transparent px-1 py-0.5 text-[0.8125rem] font-medium outline-none focus:border-[var(--accent)]"
+      onEnter={() => finish(draft, true)}
+      onEscape={() => finish(null, true)}
+      className="min-w-0 flex-1 font-medium"
     />
   );
 }

@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { listContexts, callExtensionOperation, describeError, describeStreamEnd, extensionEnabledFor, extensionOperationRoute, openExtensionView, parseExtensionOperationRoute, relativeTime, type ExtensionOperation as Operation, type ExtensionView, type ExtensionStream } from "@srelens/core";
 import { useNamespaceOptions } from "@srelens/core/react";
-import { ActionBar, Alert, Badge, Button, Combobox, EmptyState, FilterBar, LoadingState, Popover, Screen, Table, Tabs, TextInput, useListFilter, type BadgeTone } from "@srelens/ui-kit";
+import { ActionBar, Alert, Badge, Button, Checkbox, Combobox, EmptyState, FilterBar, LoadingState, Popover, Screen, Table, Tabs, TextInput, useListFilter, type BadgeTone } from "@srelens/ui-kit";
 import { ExtensionLogo } from "../extensions/ExtensionLogo";
 import { useExtensions } from "../extensions/inventoryStore";
 import { FailureState } from "../lib/errorCopy";
@@ -203,7 +203,7 @@ function OperationForm({ id, revision, context, contextKey, operation, operation
     <form className="flex flex-wrap items-end gap-2 border-b px-3 py-2" style={{ borderColor: "var(--rule)" }} onSubmit={(event) => { event.preventDefault(); setHistory([]); void run(); }}>
       {inputs.map((input) => input.name === "namespace" ? <NamespaceInput key={input.name} required={input.required} context={context} value={String(values.namespace ?? "")} onChange={(namespace) => { if (!busy || operation.view?.autoRun) setValues({ ...values, namespace }); }} /> : <label key={input.name} className="flex min-w-40 flex-col gap-1 text-xs text-muted">
         {input.title ?? label(input.name)}
-        {input.type === "boolean" ? <input type="checkbox" checked={values[input.name] === true} disabled={busy} onChange={(event) => setValues({ ...values, [input.name]: event.target.checked })} />
+        {input.type === "boolean" ? <Checkbox checked={values[input.name] === true} disabled={busy} onChange={(checked) => setValues({ ...values, [input.name]: checked })} />
           : <TextInput value={String(values[input.name] ?? "")} type={input.type === "string" ? "text" : "number"} disabled={busy} onValueChange={(value) => setValues({ ...values, [input.name]: value })} />}
       </label>)}
       <Button type="submit" variant={operation.view?.autoRun ? "secondary" : "primary"} disabled={busy}>{busy ? "Running…" : operation.view?.autoRun ? "Refresh" : operation.title}</Button>
