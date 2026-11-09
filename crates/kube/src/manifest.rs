@@ -612,25 +612,12 @@ pub fn gvk_for(kind: &str) -> Option<(GroupVersionKind, bool)> {
 /// Secret's `data`, `stringData` and annotations reached any MCP client
 /// outside the consent-gated `k8s.getSecret`.
 ///
-/// The object comes in as the `serde_yaml::Mapping` the API server sent,
-/// which keeps its order, so the YAML reads in the server's order as Freelens
-/// and Lens show it (#1046), with `apiVersion` and `kind` hoisted to the top
-/// and `managedFields` dropped. Only a Secret takes the JSON round trip, which
-/// sorts its keys: `serde_json::Value`'s maps are `BTreeMap`s.
-fn manifest_yaml(
-    mut rest: serde_yaml::Mapping,
-    ar: &ApiResource,
-) -> Result<String, CapabilityError> {
-    if let Some(metadata) = rest.get_mut("metadata").and_then(|m| m.as_mapping_mut()) {
-        metadata.shift_remove("managedFields");
-    }
-    let mut ordered = serde_yaml::Mapping::new();
-    for key in ["apiVersion", "kind"] {
-        if let Some(value) = rest.shift_remove(key) {
-            ordered.insert(key.into(), value);
-        }
-    }
-    ordered.extend(rest);
+/// The object comes in as [`get_in_server_order`] read it and leaves through
+/// [`readable_manifest`], so the YAML reads in the server's order. Only a
+/// Secret takes the JSON round trip, which sorts its keys:
+/// `serde_json::Value`'s maps are `BTreeMap`s.
+fn manifest_yaml(object: serde_yaml::Mapping, ar: &ApiResource) -> Result<String, CapabilityError> {
+    let ordered = readable_manifest(object);
     if is_core_secret(ar) {
         let mut object =
             serde_json::to_value(&ordered).map_err(|e| CapabilityError::Handler(e.to_string()))?;
@@ -638,6 +625,37 @@ fn manifest_yaml(
         return serde_yaml::to_string(&object).map_err(|e| CapabilityError::Handler(e.to_string()));
     }
     serde_yaml::to_string(&ordered).map_err(|e| CapabilityError::Handler(e.to_string()))
+}
+
+/// GET `name` through `api` as the map the API server sent, in its key order,
+/// as Freelens and Lens show a manifest (#1046). `api.get` decodes into a
+/// `DynamicObject` and loses that order: `ObjectMeta` serializes its fields
+/// alphabetically and the rest is a `serde_json::Value`, whose maps are
+/// `BTreeMap`s.
+pub async fn get_in_server_order(
+    api: Api<DynamicObject>,
+    name: &str,
+) -> kube::Result<serde_yaml::Mapping> {
+    let request = kube::core::Request::new(api.resource_url())
+        .get(name, &kube::api::GetParams::default())
+        .map_err(kube::Error::BuildRequest)?;
+    api.into_client().request(request).await
+}
+
+/// `object` as a reader wants it: `managedFields` dropped, `apiVersion` and
+/// `kind` on top as kubectl prints them, every other key where it was.
+pub fn readable_manifest(mut object: serde_yaml::Mapping) -> serde_yaml::Mapping {
+    if let Some(metadata) = object.get_mut("metadata").and_then(|m| m.as_mapping_mut()) {
+        metadata.shift_remove("managedFields");
+    }
+    let mut ordered = serde_yaml::Mapping::new();
+    for key in ["apiVersion", "kind"] {
+        if let Some(value) = object.shift_remove(key) {
+            ordered.insert(key.into(), value);
+        }
+    }
+    ordered.extend(object);
+    ordered
 }
 
 /// `k8s.getManifest` — return a resource's manifest as YAML.
@@ -664,13 +682,8 @@ pub fn get_manifest_capability(cache: Arc<ClientCache>) -> Capability {
                 } else {
                     Api::all_with(client, &ar)
                 };
-                // `api.get` would decode into a `DynamicObject` and lose the
-                // server's key order; see `manifest_yaml`.
-                let request = kube::core::Request::new(api.resource_url())
-                    .get(&input.name, &kube::api::GetParams::default())
-                    .map_err(|e| CapabilityError::Handler(e.to_string()))?;
-                let object: serde_yaml::Mapping =
-                    tokio::time::timeout(request_timeout(), api.into_client().request(request))
+                let object =
+                    tokio::time::timeout(request_timeout(), get_in_server_order(api, &input.name))
                         .await
                         .map_err(|_| CapabilityError::Handler("get manifest timed out".into()))?
                         .map_err(|e| CapabilityError::Handler(e.to_string()))?;

@@ -977,6 +977,29 @@ async fn the_yaml_view_serialises_the_live_object_for_builtin_and_custom_kinds()
     assert_eq!(app.nav_stack.len(), 4, "each view stacks on the last");
 }
 
+/// #1046: the YAML view keeps the order the API server sent, as Freelens and
+/// Lens show it, with `apiVersion` and `kind` on top as kubectl puts them.
+/// The body is raw text because `route` serves a `serde_json::Value`, which
+/// has sorted its keys already.
+#[tokio::test]
+async fn the_yaml_view_keeps_the_servers_key_order() {
+    let cluster = fake_cluster(vec![Route {
+        prefix: "/api/v1/namespaces/default/configmaps/web".into(),
+        status: 200,
+        body: r#"{"kind":"ConfigMap","apiVersion":"v1","metadata":{"name":"web","namespace":"default","uid":"u1","resourceVersion":"7","labels":{"tier":"web","app":"shop"},"managedFields":[{"manager":"kubectl"}]},"data":{"zeta":"1","alpha":"2"}}"#.into(),
+    }])
+    .await;
+    let (_settings, mut app, _rx) = app_on(&cluster).await;
+
+    app.open_yaml_view("web".into(), "ConfigMap".into(), Some("default".into()))
+        .await;
+
+    assert_eq!(
+        yaml_text(&app),
+        "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: web\n  namespace: default\n  uid: u1\n  resourceVersion: '7'\n  labels:\n    tier: web\n    app: shop\ndata:\n  zeta: '1'\n  alpha: '2'\n",
+    );
+}
+
 /// The YAML view holds no manifest: its first line names the object, the
 /// reasons follow, and the failure is recorded so edit refuses.
 fn assert_fetch_failed(app: &App, first_line: &str) {
