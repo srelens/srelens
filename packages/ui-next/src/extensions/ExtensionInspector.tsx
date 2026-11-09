@@ -9,7 +9,7 @@ import {
 } from "@srelens/core";
 import { Alert, Button, EmptyState, LoadingState } from "@srelens/ui-kit";
 import { FailureAlert } from "../lib/errorCopy";
-import { LogLineRow, clock } from "./ExtensionLogs";
+import { AppLogLine, clock } from "./ExtensionLogs";
 import { bytes, describeGrant, inactiveReason, installedOn, origin } from "./detailsText";
 import { plainText } from "./displayText";
 
@@ -366,7 +366,7 @@ export function ExtensionInspector({
               // Focusable: it scrolls both ways, and a keyboard must be able to reach the rest.
               <div className="extension-app-log" role="log" aria-label="Recent errors" tabIndex={0}>
                 {inspection.recentErrors.map((line) => (
-                  <LogLineRow key={line.seq} line={line} level={false} />
+                  <AppLogLine key={line.seq} line={line} level={false} />
                 ))}
               </div>
             )}

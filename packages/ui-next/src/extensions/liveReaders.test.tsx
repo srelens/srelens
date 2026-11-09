@@ -192,4 +192,28 @@ describe("live readers (#566)", () => {
     expect(screen.getByText("Reconnecting…")).toBeTruthy();
     expect(screen.getAllByText("Not live")).toHaveLength(2);
   });
+
+  it("pulses only while something is arriving or about to, and says why on hover", () => {
+    // On the kit's LiveSignal (#1001): its pulse reads as "arriving", which a
+    // view that has stopped following is not.
+    const states: LiveState[] = [
+      { state: "live" }, { state: "connecting" },
+      { state: "reconnecting", message: "reset" },
+      { state: "stopped", message: "refused" }, { state: "off", reason: "web" },
+    ];
+    const pulses = states.map((state) => {
+      const { container, unmount } = render(<LiveStatus live={state} />);
+      const pulse = container.querySelector(".live-dot") !== null;
+      const why = container.querySelector("[title]")?.getAttribute("title");
+      unmount();
+      return [pulse, why];
+    });
+    expect(pulses).toEqual([
+      [true, "Updates as the cluster changes"],
+      [true, "Starting live updates"],
+      [true, "Lost the watch: reset"],
+      [false, "Live updates stopped: refused"],
+      [false, "web"],
+    ]);
+  });
 });

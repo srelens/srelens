@@ -9,6 +9,10 @@ import { fileURLToPath } from "node:url";
  * `PaneIntro`. Before, apps drew their own `.extension-toolbar` 13 times while
  * the kit's Toolbar had no direct use, and six settings panes each drew their
  * opening heading with their own sizes and insets.
+ *
+ * And one way to draw a figure, a live signal and a log line (step 7e): the
+ * kit's `MetricTile`, `LiveSignal` and `LogLine`, where apps drew
+ * `.dashboard-card`, `.extension-live` and `LogLineRow`.
  */
 describe("one way to draw a toolbar and a pane's opening", () => {
   const src = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -34,6 +38,19 @@ describe("one way to draw a toolbar and a pane's opening", () => {
     // A title can't shrink below its longest word, and an app's card title is
     // the app's own text. The app toolbars these replace all wrapped.
     expect(unexpected(/<Toolbar>\s*<\w+ className="toolbar-title/g, {})).toEqual({});
+  });
+
+  it("draws no figure tile, live signal or log line of its own", () => {
+    // The band's own layout (`.dashboard-cards`, `.dashboard-cards-band`), the
+    // live row beside a picker and the log's level picker stay: they place the
+    // kit's parts, they don't draw them. So does `LiveStatus`, which only says
+    // which word and tone a live state takes on the kit's signal.
+    expect(
+      unexpected(
+        /\bdashboard-card(?!s(?:-band)?(?![\w-]))|extension-live(?:-dot)?(?![\w-])|\bLogLineRow\b|extension-app-log-line|extension-log-(?:time|level|source|text)(?![\w-])/g,
+        {},
+      ),
+    ).toEqual({});
   });
 
   it("opens no settings pane with a heading of its own", () => {

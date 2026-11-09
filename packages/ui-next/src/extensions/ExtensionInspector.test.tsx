@@ -291,7 +291,10 @@ it("shows recent errors with their local time, who wrote them and their text", a
   );
   await open();
   const errors = within(region("Recent errors")).getByRole("log", { name: "Recent errors" });
-  expect(Array.from(errors.children).map((row) => row.textContent)).toEqual([
+  // Each line is the kit's LogLine; read its fields in order, one space apart.
+  const fields = (row: Element) =>
+    Array.from(row.querySelectorAll("[data-slot]"), (field) => field.textContent).filter(Boolean).join(" ");
+  expect(Array.from(errors.children).map(fields)).toEqual([
     "14:03:05.042 app panic: index out of range",
     "14:03:05.043 srelens The request timed out after 30 s.",
   ]);

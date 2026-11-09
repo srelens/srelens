@@ -185,6 +185,8 @@ export interface FailureAlertProps {
   tone?: Tone;
   /** Read it again. Left out, the banner offers no button. */
   onRetry?: () => void;
+  /** Retry's accessible name, where several banners sit side by side: "Retry Expiring". */
+  retryLabel?: string;
   className?: string;
 }
 
@@ -204,6 +206,7 @@ export function FailureAlert({
   domain,
   tone = "warn",
   onRetry,
+  retryLabel,
   className,
 }: FailureAlertProps) {
   const copy = explained(error, domain, detail);
@@ -213,7 +216,7 @@ export function FailureAlert({
       <RawError text={copy.raw ?? ""} className="mt-1" />
       {onRetry && (
         <div className="mt-2">
-          <Button type="button" variant="secondary" size="xs" onClick={onRetry}>
+          <Button type="button" variant="secondary" size="xs" aria-label={retryLabel} onClick={onRetry}>
             Retry
           </Button>
         </div>

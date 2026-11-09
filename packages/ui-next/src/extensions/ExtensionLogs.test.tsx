@@ -46,7 +46,11 @@ const read = (lines: ExtensionLogLine[], more: Partial<ExtensionLogRead> = {}): 
 });
 
 const log = () => screen.getByRole("log", { name: "Sidecar app log" });
-const rows = () => Array.from(log().querySelectorAll(".extension-app-log-line")).map((row) => row.textContent);
+/** Each line as the kit's LogLine draws it: its fields in order, one space apart. */
+const rows = () =>
+  Array.from(log().querySelectorAll(".logline")).map((row) =>
+    Array.from(row.querySelectorAll("[data-slot]"), (field) => field.textContent).filter(Boolean).join(" "),
+  );
 
 async function open() {
   let view!: ReturnType<typeof render>;
@@ -100,11 +104,13 @@ it("shows each line's local time to the millisecond, its level and writer as wor
   );
   await open();
   expect(rows()).toEqual([
-    "14:03:05.007 warn app cache miss for org/app",
-    "14:03:05.008 error srelens sidecar handshake refused",
+    "14:03:05.007 app warn cache miss for org/app",
+    "14:03:05.008 srelens error sidecar handshake refused",
   ]);
-  const first = log().querySelector(".extension-app-log-line")!;
-  expect(within(first as HTMLElement).getByText("warn").getAttribute("data-level")).toBe("warn");
+  // The level is a word; the kit tints it from that word.
+  const first = log().querySelector(".logline")!;
+  expect(first.querySelector<HTMLElement>('[data-slot="level"]')!.style.color).toContain("var(--warn)");
+  expect(first.querySelector("time")?.getAttribute("dateTime")).toBe(new Date(at(14, 3, 5, 7)).toISOString());
 });
 
 it("draws a line's control and direction characters as escapes, never as text that reorders the row", async () => {
@@ -127,9 +133,9 @@ it("polls every two seconds for the lines after the last one it has, and appends
   await wait(1);
   expect(extensionLogs).toHaveBeenLastCalledWith("org.test.sidecar", { after: 2, minLevel: "trace" });
   expect(rows()).toEqual([
-    "14:03:05.001 info app starting",
-    "14:03:05.002 info app listening",
-    "14:03:05.003 warn app slow reply",
+    "14:03:05.001 app info starting",
+    "14:03:05.002 app info listening",
+    "14:03:05.003 app warn slow reply",
   ]);
   await wait(2000);
   expect(extensionLogs).toHaveBeenLastCalledWith("org.test.sidecar", { after: 3, minLevel: "trace" });
@@ -173,7 +179,7 @@ it("reloads from the start at the chosen minimum level, among the five levels", 
   await wait(0);
   expect(extensionLogs).toHaveBeenLastCalledWith("org.test.sidecar", { after: 0, minLevel: "warn" });
   expect(within(levels).getByRole("radio", { name: "warn" }).getAttribute("aria-checked")).toBe("true");
-  expect(rows()).toEqual(["14:03:05.002 error app boom"]);
+  expect(rows()).toEqual(["14:03:05.002 app error boom"]);
   await wait(2000);
   expect(extensionLogs).toHaveBeenLastCalledWith("org.test.sidecar", { after: 2, minLevel: "warn" });
 });
@@ -199,7 +205,7 @@ it("ignores an answer for a level that is no longer chosen", async () => {
   fireEvent.click(screen.getByRole("radio", { name: "error" }));
   await wait(0);
   await act(async () => answerTrace(read([line(4, "debug", "tick")])));
-  expect(rows()).toEqual(["14:03:05.005 error app boom"]);
+  expect(rows()).toEqual(["14:03:05.005 app error boom"]);
 });
 
 it("says how many older lines the host dropped", async () => {
@@ -233,7 +239,7 @@ it("says a failed read failed, never that the log is empty, and reads again on R
   await wait(0);
   expect(extensionLogs).toHaveBeenCalledTimes(2);
   expect(screen.queryByRole("alert")).toBeNull();
-  expect(rows()).toEqual(["14:03:05.001 info app listening"]);
+  expect(rows()).toEqual(["14:03:05.001 app info listening"]);
 });
 
 it("keeps the lines it has when a later poll fails, and resumes after them on Retry", async () => {
@@ -244,7 +250,7 @@ it("keeps the lines it has when a later poll fails, and resumes after them on Re
   await open();
   await wait(2000);
   expect(screen.getByRole("alert").textContent).toContain("bridge timed out");
-  expect(rows()).toEqual(["14:03:05.001 info app listening"]);
+  expect(rows()).toEqual(["14:03:05.001 app info listening"]);
   fireEvent.click(screen.getByRole("button", { name: "Retry" }));
   await wait(0);
   expect(extensionLogs).toHaveBeenLastCalledWith("org.test.sidecar", { after: 1, minLevel: "trace" });

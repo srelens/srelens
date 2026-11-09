@@ -34,8 +34,6 @@ describe("one way to draw loading and empty", () => {
         "extensions/useResolvedColumns.tsx": 2,
         // Beside the bulk-action buttons in a toolbar: the toolbars step (7d).
         "extensions/ExtensionBulkActions.tsx": 1,
-        // A card's own figure: the tiles step (7e) moves cards onto the kit.
-        "extensions/DashboardCards.tsx": 1,
         // Chips in the prompt's status row, beside the ones that say other things.
         "shell/Console.tsx": 2,
         // A disabled picker standing in for the one still loading, with the kit's Spinner in it.
@@ -54,8 +52,6 @@ describe("one way to draw loading and empty", () => {
   it("draws no empty paragraph by hand, but for the ones kept on purpose", () => {
     expect(
       unexpected(/<p\b[^>]*>\s*(?:No|Nothing)\b[^<]*<\/p>/g, {
-        // A card's figure: the tiles step (7e) moves cards onto the kit.
-        "extensions/DashboardCards.tsx": 1,
         // A fact about one row of the permission review, beside the other rows' details.
         "extensions/ExtensionBindings.tsx": 1,
         // A note inside the file row it describes.

@@ -73,6 +73,13 @@ const LEVEL_TONE: Record<string, Tone> = {
  * is indistinguishable from a rendering fault. Nothing here is interactive and
  * nothing carries a `title`: the text is all in the DOM, so a screen reader
  * reads the source in full even where the column truncates it on screen. (#320)
+ *
+ * The line is one table row, not a flex row. A browser copies each item of a
+ * flex or grid row onto a line of its own, so a selected log line came out of
+ * the clipboard as four lines; table cells come out tab-separated on one. A
+ * fixed column truncates inside an inline box of its width, because a table
+ * cell grows to fit text that will not wrap, and a block there would put its
+ * own line breaks back into the copy. (#1001)
  */
 export function LogLine({
   ts,
@@ -87,29 +94,21 @@ export function LogLine({
   const resolved = tone ?? LEVEL_TONE[(level ?? "").trim().toLowerCase()] ?? "muted";
 
   return (
-    <div className={cx("logline flex items-start gap-3 px-2.5 py-[2px]", className)}>
-      <span data-slot="ts" className="w-[86px] shrink-0 truncate text-faint">
-        {ts}
+    <div className={cx("logline table w-full px-2.5 py-[2px]", className)}>
+      <span data-slot="ts" className="table-cell pr-3 align-top text-faint">
+        <span className="inline-block w-[86px] truncate align-top">{ts}</span>
       </span>
-      <span
-        data-slot="source"
-        className="w-[104px] shrink-0 truncate"
-        style={{ color: toneColor(sourceTone) }}
-      >
-        {source}
+      <span data-slot="source" className="table-cell pr-3 align-top" style={{ color: toneColor(sourceTone) }}>
+        <span className="inline-block w-[104px] truncate align-top">{source}</span>
       </span>
-      <span
-        data-slot="level"
-        className="w-[44px] shrink-0 truncate uppercase"
-        style={{ color: toneColor(resolved) }}
-      >
-        {level}
+      <span data-slot="level" className="table-cell pr-3 align-top uppercase" style={{ color: toneColor(resolved) }}>
+        <span className="inline-block w-[44px] truncate align-top">{level}</span>
       </span>
-      <span data-slot="message" className="min-w-0 flex-1 break-all text-soft">
+      <span data-slot="message" className="table-cell w-full break-all align-top text-soft">
         {filled(message) ? message : <span className="text-faint">(no message)</span>}
       </span>
       {filled(children) && (
-        <span data-slot="trailing" className="shrink-0">
+        <span data-slot="trailing" className="table-cell w-px whitespace-nowrap pl-3 align-top">
           {children}
         </span>
       )}

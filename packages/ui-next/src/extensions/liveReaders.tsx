@@ -14,6 +14,7 @@ import {
   type ExtensionView,
   type InstalledExtension,
 } from "@srelens/core";
+import { LiveSignal } from "@srelens/ui-kit";
 
 /**
  * What a live view may claim about what it shows. Only `live` is current;
@@ -251,18 +252,20 @@ export function useLiveApps(args: {
   return live;
 }
 
-/** The state, in words: colour is never the only signal. */
+/**
+ * The state, in words, on the kit's live signal: colour is never the only
+ * signal. The title says why, which for "off" is said nowhere else.
+ */
 export function LiveStatus({ live }: { live: LiveState }) {
-  const [word, detail] =
-    live.state === "live" ? ["Live", "Updates as the cluster changes"]
-      : live.state === "connecting" ? ["Connecting…", "Starting live updates"]
-        : live.state === "reconnecting" ? ["Reconnecting…", `Lost the watch: ${live.message}`]
-          : ["Not live", live.state === "off" ? live.reason : `Live updates stopped: ${live.message}`];
+  const [word, tone, detail] =
+    live.state === "live" ? ["Live", "ok", "Updates as the cluster changes"] as const
+      : live.state === "connecting" ? ["Connecting…", "muted", "Starting live updates"] as const
+        : live.state === "reconnecting" ? ["Reconnecting…", "warn", `Lost the watch: ${live.message}`] as const
+          : ["Not live", "muted", live.state === "off" ? live.reason : `Live updates stopped: ${live.message}`] as const;
   return (
-    <span className="extension-live" data-live={live.state} title={detail} role="status">
-      <span className="extension-live-dot" aria-hidden="true" />
-      {word}
-    </span>
+    <div title={detail}>
+      <LiveSignal label={word} tone={tone} still={live.state === "stopped" || live.state === "off"} />
+    </div>
   );
 }
 

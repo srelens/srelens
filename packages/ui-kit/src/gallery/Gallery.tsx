@@ -641,6 +641,19 @@ export function Gallery() {
               context around the number, not the number itself. */}
           <MetricTile label="Pending" value={3} tone="warn" action={<Button size="xs">view</Button>} />
         </div>
+        {/* An app's dashboard card: it opens the list behind its figure, shows
+            a breakdown under it, and says no figure at all while loading. */}
+        <div className="kit-gallery__row">
+          <MetricTile label="Certificates" value={12} onOpen={() => {}} description="cert-manager">
+            <ul className="text-[0.75rem]">
+              <li className="flex justify-between gap-2"><span>Ready</span> <span className="num">10</span></li>
+              <li className="flex justify-between gap-2"><span>Expiring</span> <span className="num">2</span></li>
+            </ul>
+          </MetricTile>
+          <MetricTile label="Issuers" description="cert-manager">
+            <LoadingState compact />
+          </MetricTile>
+        </div>
       </section>
 
       <section>
@@ -1202,6 +1215,8 @@ export function Gallery() {
           {/* `label={connected && "Streaming"}` is how a caller makes it
               conditional; a bare coloured dot would say nothing at all. */}
           <LiveSignal label={false} tone="muted" />
+          {/* Stopped: the dot stays, still, because nothing is arriving. */}
+          <LiveSignal label="Not live" tone="muted" still />
         </div>
       </section>
 

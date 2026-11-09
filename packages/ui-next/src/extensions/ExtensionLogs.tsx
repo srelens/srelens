@@ -7,7 +7,7 @@ import {
   type ExtensionRuntime,
   type InstalledExtension,
 } from "@srelens/core";
-import { EmptyState, LoadingState, Tabs } from "@srelens/ui-kit";
+import { EmptyState, LoadingState, LogLine, Tabs } from "@srelens/ui-kit";
 import { FailureAlert } from "../lib/errorCopy";
 import { plainText } from "./displayText";
 import { extensionLabel } from "./inventoryStore";
@@ -28,29 +28,20 @@ export function clock(ms: number, milliseconds = true) {
 export const writer = (source: ExtensionLogLine["source"]) => (source === "sidecar" ? "app" : "srelens");
 
 /**
- * One line of an app's log (#575), as one row of machine text that does not wrap. The
- * fields are separated by spaces, not only by layout, so a copied line reads as one.
- * `level` is left out where every line has the same one, as in the Inspector's errors.
+ * One line of an app's log (#575) on the kit's `LogLine`, as the built-in logs draw
+ * theirs. `level` is left out where every line has the same one, as in the Inspector's
+ * errors.
  */
-export function LogLineRow({ line, level = true }: { line: ExtensionLogLine; level?: boolean }) {
+export function AppLogLine({ line, level = true }: { line: ExtensionLogLine; level?: boolean }) {
   return (
-    <div className="extension-app-log-line">
-      <time className="extension-log-time" dateTime={new Date(line.at).toISOString()}>
-        {clock(line.at)}
-      </time>{" "}
-      {level && (
-        <>
-          {/* The level is a word; its tint only helps. */}
-          <span className="extension-log-level" data-level={line.level}>
-            {line.level}
-          </span>{" "}
-        </>
-      )}
-      <span className="extension-log-source">{writer(line.source)}</span>{" "}
-      {/* The host has redacted it, but it is still the app's text: its control and
-          direction characters are drawn as escapes, so it cannot reorder the row. */}
-      <span className="extension-log-text">{plainText(line.text)}</span>
-    </div>
+    <LogLine
+      ts={<time dateTime={new Date(line.at).toISOString()}>{clock(line.at)}</time>}
+      source={writer(line.source)}
+      level={level ? line.level : undefined}
+      // The host has redacted it, but it is still the app's text: its control and
+      // direction characters are drawn as escapes, so it cannot reorder the row.
+      message={plainText(line.text)}
+    />
   );
 }
 
@@ -157,7 +148,7 @@ export function ExtensionLogs({ plugin }: { plugin: InstalledExtension }) {
           }}
         >
           {lines.map((line) => (
-            <LogLineRow key={line.seq} line={line} />
+            <AppLogLine key={line.seq} line={line} />
           ))}
         </div>
       ) : error !== undefined ? null : !ready ? (

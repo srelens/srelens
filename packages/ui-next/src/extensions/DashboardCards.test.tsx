@@ -77,7 +77,10 @@ function answer(cards: ResolvedDashboardCard[]) {
   core.resolveDashboardCards.mockResolvedValue({ cards });
 }
 
-const cardRegion = (title: string) => screen.getByRole("region", { name: title });
+/** A card: the kit's tile, named by its title. */
+const cardRegion = (title: string) => screen.getByRole("article", { name: title });
+/** The band's cell around a card, which says its state and size. */
+const cell = (title: string) => cardRegion(title).parentElement!;
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -95,22 +98,15 @@ afterEach(cleanup);
 
 // A card's title and app name are app prose of up to 120 characters. Cut off
 // with an ellipsis, the rest was reachable only by pointer hover, never by
-// keyboard focus or touch. So they wrap, and a long unbroken word breaks
-// rather than overflowing the tile. jsdom has no layout, so the contract is
-// pinned in the stylesheet it lives in, as ExtensionResourceDetails does.
-it("shows a card's whole title and app name rather than cutting them off", async () => {
-  const { readFileSync } = await import("node:fs");
-  const { join } = await import("node:path");
-  const css = readFileSync(join(__dirname, "extensions.css"), "utf8");
-  const rule = (selector: string) => {
-    const at = css.indexOf(`${selector} {`);
-    expect(at, `${selector} has a rule`).toBeGreaterThanOrEqual(0);
-    return css.slice(at, css.indexOf("}", at));
-  };
-  for (const selector of [".dashboard-card-title", ".dashboard-card-app"]) {
-    expect(rule(selector), selector).not.toMatch(/text-overflow|white-space\s*:\s*nowrap/);
-    expect(rule(selector), selector).toMatch(/overflow-wrap\s*:\s*anywhere/);
-  }
+// keyboard focus or touch. So they are the kit tile's label and description,
+// which wrap and break a long unbroken word (MetricTile's own tests, #1001).
+it("draws a card's title as the tile's label, and its app's name under the figure", async () => {
+  installed(app([card({ id: "c", title: "Expiring" })]));
+  answer([{ id: "c", state: "count", count: 2 }]);
+  render(<DashboardCards context={CTX} />);
+  await waitFor(() => expect(cell("Expiring").getAttribute("data-state")).toBe("value"));
+  expect(cardRegion("Expiring").querySelector(".eyebrow")?.textContent).toBe("Expiring");
+  expect(cardRegion("Expiring").querySelector("p")?.textContent).toBe("Matching · Certificates");
 });
 
 // What a reconnecting view shows is marked without fading it (#566): an
@@ -133,14 +129,14 @@ describe("DashboardCards", () => {
     installed(app([card({ id: "upcoming", title: "Upcoming expirations", type: "list", size: "l" })]));
     answer([{ id: "upcoming", state: "list", total: 0, rows: [] }]);
     render(<DashboardCards context={CTX} />);
-    await waitFor(() => expect(cardRegion("Upcoming expirations").getAttribute("data-state")).toBe("zero"));
-    expect(cardRegion("Upcoming expirations").getAttribute("data-size")).toBe("s");
+    await waitFor(() => expect(cell("Upcoming expirations").getAttribute("data-state")).toBe("zero"));
+    expect(cell("Upcoming expirations").getAttribute("data-size")).toBe("s");
     expect(cardRegion("Upcoming expirations").textContent).toMatch(/None match/);
 
     answer([{ id: "upcoming", state: "list", total: 1, rows: [{ namespace: "team", name: "web" }] }]);
     await userEvent.click(screen.getByRole("button", { name: "Refresh app cards" }));
     await within(cardRegion("Upcoming expirations")).findByText("team/web");
-    expect(cardRegion("Upcoming expirations").getAttribute("data-size")).toBe("l");
+    expect(cell("Upcoming expirations").getAttribute("data-size")).toBe("l");
   });
 
   it("draws loading, couldn't read and zero as three different things", async () => {
@@ -154,9 +150,9 @@ describe("DashboardCards", () => {
     render(<DashboardCards context={CTX} />);
 
     // Loading: a status, and no figure at all.
-    const loading = await screen.findByRole("region", { name: "Loading card" });
-    expect((loading).getAttribute("data-state")).toBe("loading");
-    expect((within(loading).getByRole("status")).textContent).toMatch(/Loading/);
+    const loading = await screen.findByRole("article", { name: "Loading card" });
+    expect(loading.parentElement!.getAttribute("data-state")).toBe("loading");
+    expect(within(loading).getByRole("status", { name: /Loading/ })).toBeTruthy();
     expect((loading).textContent).not.toMatch(/\d/);
 
     await act(async () => finish({ cards: [
@@ -167,7 +163,7 @@ describe("DashboardCards", () => {
 
     // Couldn't read: the reason and a retry, and still no figure.
     const failed = cardRegion("Failed card");
-    expect((failed).getAttribute("data-state")).toBe("error");
+    expect(failed.parentElement!.getAttribute("data-state")).toBe("error");
     expect((within(failed).getByRole("alert")).textContent).toMatch(/Couldn.t read/);
     expect((failed).textContent).toMatch(/forbidden/);
     expect(within(failed).getByRole("button", { name: /Retry/ })).toBeTruthy();
@@ -175,12 +171,12 @@ describe("DashboardCards", () => {
 
     // Zero: a figure, said as an answer.
     const zero = cardRegion("Zero card");
-    expect((zero).getAttribute("data-state")).toBe("zero");
+    expect(zero.parentElement!.getAttribute("data-state")).toBe("zero");
     expect((zero).textContent).toMatch("0");
     expect((zero).textContent).toMatch(/None match/);
     expect(within(zero).queryByRole("alert")).toBeNull();
 
-    expect((cardRegion("Loading card")).getAttribute("data-state")).toBe("value");
+    expect(cell("Loading card").getAttribute("data-state")).toBe("value");
     expect((cardRegion("Loading card")).textContent).toMatch("7");
   });
 
@@ -201,8 +197,8 @@ describe("DashboardCards", () => {
     core.resolveDashboardCards.mockRejectedValue(new Error("Extension was disabled or updated; refresh the view"));
     render(<DashboardCards context={CTX} />);
     for (const title of ["First", "Second"]) {
-      await waitFor(() => expect((cardRegion(title)).getAttribute("data-state")).toBe("error"));
-      expect((cardRegion(title)).textContent).toMatch(/refresh the view/);
+      await waitFor(() => expect(cardRegion(title).parentElement!.getAttribute("data-state")).toBe("error"));
+      expect(cardRegion(title).textContent).toMatch(/refresh the view/);
     }
   });
 
@@ -210,9 +206,9 @@ describe("DashboardCards", () => {
     installed(app([card({ id: "s", title: "By status", type: "countByStatus", size: "m" })]));
     answer([{ id: "s", state: "countByStatus", total: 0, statuses: [] }]);
     render(<DashboardCards context={CTX} />);
-    await waitFor(() => expect((cardRegion("By status")).getAttribute("data-state")).toBe("zero"));
+    await waitFor(() => expect(cell("By status").getAttribute("data-state")).toBe("zero"));
     const region = cardRegion("By status");
-    expect(region.querySelector(".dashboard-card-figure")?.textContent).toBe("0");
+    expect(region.querySelector(".stat-value")?.textContent).toBe("0");
     expect((region).textContent).toMatch(/None match/);
     expect(within(region).queryByRole("alert")).toBeNull();
   });
@@ -236,19 +232,19 @@ describe("DashboardCards", () => {
       ] },
     ]);
     render(<DashboardCards context={CTX} />);
-    await waitFor(() => expect((cardRegion("Soonest")).getAttribute("data-state")).toBe("value"));
-    expect((cardRegion("Health")).getAttribute("data-size")).toBe("m");
+    await waitFor(() => expect(cell("Soonest").getAttribute("data-state")).toBe("value"));
+    expect(cell("Health").getAttribute("data-size")).toBe("m");
     expect((cardRegion("Health")).textContent).toMatch(/Degraded\s*2/);
     expect((cardRegion("Health")).textContent).toMatch(/Healthy\s*1/);
     // Formatted in the reader's locale, as every other figure in the app is.
     expect((cardRegion("Critical CVEs")).textContent).toContain((12345).toLocaleString());
     // A minimum of nothing is no value, not zero.
-    expect((cardRegion("Oldest")).getAttribute("data-state")).toBe("zero");
+    expect(cell("Oldest").getAttribute("data-state")).toBe("zero");
     expect((cardRegion("Oldest")).textContent).toMatch(/No value/);
     expect((cardRegion("Oldest")).textContent).toMatch(/No matching resource has a number at \.report\.age/);
     expect((cardRegion("Oldest")).textContent).not.toMatch(/\b0\b/);
     const list = cardRegion("Soonest");
-    expect((list).getAttribute("data-size")).toBe("l");
+    expect(list.parentElement!.getAttribute("data-size")).toBe("l");
     expect(within(list).getAllByRole("listitem")).toHaveLength(2);
     expect((list).textContent).toMatch(/team\/web/);
     expect((list).textContent).toMatch(/2 of 12/);
@@ -327,8 +323,8 @@ describe("DashboardCards", () => {
     installed(app([card({ id: "c", title: "Expiring" })]));
     answer([{ id: "c", state: "count", count: 2 }]);
     const view = render(<DashboardCards context={CTX} />);
-    const region = await screen.findByRole("region", { name: "Expiring" });
-    expect(region.getAttribute("data-state")).toBe("loading");
+    const region = await screen.findByRole("article", { name: "Expiring" });
+    expect(region.parentElement!.getAttribute("data-state")).toBe("loading");
     await act(async () => {});
     expect(core.resolveDashboardCards).not.toHaveBeenCalled();
     // Nothing is followed yet either, and the band says why — not the web's reason.
@@ -337,7 +333,7 @@ describe("DashboardCards", () => {
     expect(core.openExtensionView).not.toHaveBeenCalled();
     namespaceOptions.useNamespaceOptions.mockReturnValue({ namespaces: ["team"], scope: "team", error: "" });
     view.rerender(<DashboardCards context={CTX} />);
-    await waitFor(() => expect(cardRegion("Expiring").getAttribute("data-state")).toBe("value"));
+    await waitFor(() => expect(cell("Expiring").getAttribute("data-state")).toBe("value"));
     expect(core.resolveDashboardCards).toHaveBeenCalledTimes(1);
     expect(core.resolveDashboardCards).toHaveBeenLastCalledWith("org.example.certs", 4, CTX.pinnedId, ["team"]);
   });
@@ -357,7 +353,7 @@ describe("DashboardCards", () => {
       .mockResolvedValueOnce({ cards: [{ id: "c", state: "count", count: 1 }, { id: "d", state: "count", count: 0 }] })
       .mockResolvedValue({ cards: [{ id: "c", state: "count", count: 4 }, { id: "d", state: "count", count: 0 }] });
     render(<DashboardCards context={CTX} />);
-    const figure = () => cardRegion("Expiring").querySelector(".dashboard-card-figure")?.textContent;
+    const figure = () => cardRegion("Expiring").querySelector(".stat-value")?.textContent;
     await waitFor(() => expect(figure()).toBe("1"));
     // Two cards over one reader: one watch, in the selected namespace, on the pinned cluster.
     await waitFor(() => expect(watched.map((w) => [w.capability, w.namespace, w.context])).toEqual([["certificates", "team", CTX.pinnedId]]));
@@ -376,7 +372,7 @@ describe("DashboardCards", () => {
       .mockResolvedValueOnce({ cards: [{ id: "c", state: "count", count: 1 }] })
       .mockResolvedValueOnce({ cards: [{ id: "c", state: "count", count: 5 }] });
     render(<DashboardCards context={CTX} />);
-    const figure = () => cardRegion("Expiring").querySelector(".dashboard-card-figure")?.textContent;
+    const figure = () => cardRegion("Expiring").querySelector(".stat-value")?.textContent;
     await waitFor(() => expect(figure()).toBe("1"));
     await userEvent.click(screen.getByRole("button", { name: "Refresh app cards" }));
     // The new answer is drawn, not merely requested.
@@ -537,8 +533,8 @@ describe("on a cluster without an app's CRDs", () => {
     const watched = watching();
     installed(certManager());
     render(<DashboardCards context={CTX} />);
-    await waitFor(() => expect(cardRegion("Issuer pods").getAttribute("data-state")).toBe("value"));
-    expect(screen.queryByRole("region", { name: "Expiring" })).toBeNull();
+    await waitFor(() => expect(cell("Issuer pods").getAttribute("data-state")).toBe("value"));
+    expect(screen.queryByRole("article", { name: "Expiring" })).toBeNull();
     expect(core.listCrds).toHaveBeenCalledWith(CTX.pinnedId);
     await waitFor(() => expect(watched).toEqual(["pods"]));
   });
@@ -546,11 +542,11 @@ describe("on a cluster without an app's CRDs", () => {
   it("asks the cluster again on Refresh, so an operator installed since shows its cards", async () => {
     installed(certManager());
     render(<DashboardCards context={CTX} />);
-    await waitFor(() => expect(cardRegion("Issuer pods").getAttribute("data-state")).toBe("value"));
-    expect(screen.queryByRole("region", { name: "Expiring" })).toBeNull();
+    await waitFor(() => expect(cell("Issuer pods").getAttribute("data-state")).toBe("value"));
+    expect(screen.queryByRole("article", { name: "Expiring" })).toBeNull();
     core.listCrds.mockResolvedValue({ crds: [CERT] });
     await userEvent.click(screen.getByRole("button", { name: "Refresh app cards" }));
-    await waitFor(() => expect(cardRegion("Expiring").getAttribute("data-state")).toBe("value"));
+    await waitFor(() => expect(cell("Expiring").getAttribute("data-state")).toBe("value"));
     expect(core.listCrds).toHaveBeenCalledTimes(2);
   });
 
@@ -558,7 +554,7 @@ describe("on a cluster without an app's CRDs", () => {
     core.listCrds.mockResolvedValue({ crds: [CERT] });
     installed(certManager());
     render(<DashboardCards context={CTX} />);
-    await waitFor(() => expect(cardRegion("Expiring").getAttribute("data-state")).toBe("value"));
+    await waitFor(() => expect(cell("Expiring").getAttribute("data-state")).toBe("value"));
     expect(cardRegion("Issuer pods")).toBeTruthy();
   });
 
@@ -566,7 +562,7 @@ describe("on a cluster without an app's CRDs", () => {
     core.listCrds.mockResolvedValue({ error: "customresourcedefinitions is forbidden" });
     installed(certManager());
     render(<DashboardCards context={CTX} />);
-    await waitFor(() => expect(cardRegion("Expiring").getAttribute("data-state")).toBe("value"));
+    await waitFor(() => expect(cell("Expiring").getAttribute("data-state")).toBe("value"));
     expect(cardRegion("Issuer pods")).toBeTruthy();
   });
 
@@ -583,7 +579,7 @@ describe("on a cluster without an app's CRDs", () => {
     installed(app([card({ id: "c", title: "Expiring" })]));
     answer([{ id: "c", state: "count", count: 1 }]);
     render(<DashboardCards context={CTX} />);
-    await waitFor(() => expect(cardRegion("Expiring").getAttribute("data-state")).toBe("value"));
+    await waitFor(() => expect(cell("Expiring").getAttribute("data-state")).toBe("value"));
     expect(core.listCrds).not.toHaveBeenCalled();
   });
 });
