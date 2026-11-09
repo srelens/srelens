@@ -1292,7 +1292,7 @@ fn settings_view_finish_editing_stores_trimmed_values_and_removes_blanks() {
     assert!(!state.settings.models.contains_key("openai"));
     assert_eq!(
         state.settings.get_model(AiProvider::OpenAi),
-        "gpt-4o",
+        "gpt-6-luna",
         "falls back to the default"
     );
 
@@ -1425,7 +1425,7 @@ fn settings_view_lists_each_provider_on_one_row_and_expands_only_the_one_under_t
     assert_eq!(text.matches("API Key:").count(), 1, "{text}");
     let openai = row_of(&lines, "OpenAI (GPT-4o)");
     assert!(lines[openai + 1].contains("API Key: no key set"), "{text}");
-    assert!(lines[openai + 2].contains("Model:   gpt-4o"), "{text}");
+    assert!(lines[openai + 2].contains("Model:   gpt-6-luna"), "{text}");
     assert!(lines[openai + 3].contains("Timeout: 120s"), "{text}");
     assert!(lines[openai + 4].contains("● Google Gemini"), "{text}");
 
@@ -1687,7 +1687,7 @@ fn settings_view_highlights_the_focused_field_on_the_selected_row() {
     let openai_row = row_of(&lines, "OpenAI (GPT-4o)");
     let model_row = openai_row + 2;
     assert!(
-        lines[model_row].contains("Model:   gpt-4o"),
+        lines[model_row].contains("Model:   gpt-6-luna"),
         "{}",
         lines[model_row]
     );
@@ -1697,7 +1697,7 @@ fn settings_view_highlights_the_focused_field_on_the_selected_row() {
         Theme::YELLOW,
         "focused label is yellow"
     );
-    let value_x = col(&lines[model_row], "gpt-4o");
+    let value_x = col(&lines[model_row], "gpt-6-luna");
     assert_eq!(
         buf[(value_x, model_row as u16)].fg,
         Theme::YELLOW,
@@ -1805,7 +1805,7 @@ fn settings_view_edit_modal_names_the_field_and_shows_the_buffer() {
     let text = render_settings(160, 40, &state);
     assert!(text.contains("Edit Model ID for OpenAI (GPT-4o)"), "{text}");
     assert!(text.contains("Enter new value for Model ID:"), "{text}");
-    assert!(text.contains("gpt-4o-mini█"), "{text}");
+    assert!(text.contains("gpt-6-luna-mini█"), "{text}");
     assert!(
         text.contains("<Enter> Confirm  |  <Ctrl+v> Paste  |  <Ctrl+w> Rubout  |  <Esc> Cancel"),
         "{text}"

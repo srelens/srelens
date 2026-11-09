@@ -1260,6 +1260,7 @@ fn settings_missing_optional_fields_deserialize_with_defaults() {
     assert_eq!(s.caveman_level, None);
     // Blank maps fall back to the provider defaults.
     assert_eq!(s.get_model(AiProvider::Gemini), "gemini-2.5-flash");
+    assert_eq!(s.get_model(AiProvider::OpenAi), "gpt-6-luna");
     assert_eq!(
         s.get_base_url(AiProvider::Anthropic),
         "https://api.anthropic.com"
@@ -1274,7 +1275,7 @@ fn blank_model_url_and_zero_timeout_fall_back_to_defaults() {
     s.base_urls.insert("openai".into(), "".into());
     s.timeouts.clear();
     s.timeout_seconds = 0;
-    assert_eq!(s.get_model(AiProvider::OpenAi), "gpt-4o");
+    assert_eq!(s.get_model(AiProvider::OpenAi), "gpt-6-luna");
     assert_eq!(
         s.get_base_url(AiProvider::OpenAi),
         "https://api.openai.com/v1"
