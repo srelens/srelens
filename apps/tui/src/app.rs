@@ -11939,10 +11939,11 @@ impl App {
                         }
                         _ => kube::Api::all_with(client.clone(), &ar),
                     };
-                    match api.get(&n).await {
-                        Ok(mut obj) => {
-                            obj.metadata.managed_fields = None;
-                            if let Ok(y) = serde_yaml::to_string(&obj) {
+                    match srelens_kube::manifest::get_in_server_order(api, &n).await {
+                        Ok(obj) => {
+                            if let Ok(y) = serde_yaml::to_string(
+                                &srelens_kube::manifest::readable_manifest(obj),
+                            ) {
                                 return Ok(y);
                             }
                         }
@@ -11972,10 +11973,11 @@ impl App {
                     } else {
                         kube::Api::all_with(client.clone(), &ar)
                     };
-                    match api.get(&n).await {
-                        Ok(mut obj) => {
-                            obj.metadata.managed_fields = None;
-                            if let Ok(y) = serde_yaml::to_string(&obj) {
+                    match srelens_kube::manifest::get_in_server_order(api, &n).await {
+                        Ok(obj) => {
+                            if let Ok(y) = serde_yaml::to_string(
+                                &srelens_kube::manifest::readable_manifest(obj),
+                            ) {
                                 return Ok(y);
                             }
                         }
@@ -11998,10 +12000,11 @@ impl App {
                     } else {
                         kube::Api::all_with(client.clone(), &ar)
                     };
-                    match api.get(&n).await {
-                        Ok(mut obj) => {
-                            obj.metadata.managed_fields = None;
-                            if let Ok(y) = serde_yaml::to_string(&obj) {
+                    match srelens_kube::manifest::get_in_server_order(api, &n).await {
+                        Ok(obj) => {
+                            if let Ok(y) = serde_yaml::to_string(
+                                &srelens_kube::manifest::readable_manifest(obj),
+                            ) {
                                 return Ok(y);
                             }
                         }
@@ -12031,9 +12034,11 @@ impl App {
                         };
                         let api: kube::Api<kube::core::DynamicObject> =
                             kube::Api::all_with(client.clone(), &ar);
-                        if let Ok(mut obj) = api.get(&n).await {
-                            obj.metadata.managed_fields = None;
-                            if let Ok(y) = serde_yaml::to_string(&obj) {
+                        if let Ok(obj) = srelens_kube::manifest::get_in_server_order(api, &n).await
+                        {
+                            if let Ok(y) = serde_yaml::to_string(
+                                &srelens_kube::manifest::readable_manifest(obj),
+                            ) {
                                 return Ok(y);
                             }
                         }
@@ -12047,9 +12052,10 @@ impl App {
                         ns.as_deref().unwrap_or("argocd"),
                         &ar,
                     );
-                    if let Ok(mut obj) = api.get(&n).await {
-                        obj.metadata.managed_fields = None;
-                        if let Ok(y) = serde_yaml::to_string(&obj) {
+                    if let Ok(obj) = srelens_kube::manifest::get_in_server_order(api, &n).await {
+                        if let Ok(y) =
+                            serde_yaml::to_string(&srelens_kube::manifest::readable_manifest(obj))
+                        {
                             return Ok(y);
                         }
                     }
