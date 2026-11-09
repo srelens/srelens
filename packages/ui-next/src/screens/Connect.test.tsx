@@ -181,9 +181,17 @@ function open() {
   return render(<Connect route={ROUTE} />);
 }
 
+/** The card's count slot: the kit `Panel`'s, at the end of its head. (#1064) */
+function countSlot(): Element | null {
+  return screen
+    .getByRole("heading", { name: "Contexts found" })
+    .closest(".card")!
+    .querySelector('[data-slot="count"]');
+}
+
 /** The count as it is drawn, read from its own node rather than from the page. */
 function countText(): string {
-  return screen.getByTestId("connect-count").textContent ?? "";
+  return countSlot()?.textContent ?? "";
 }
 
 /** One row's cells, by test id — never a read of the whole row, which would let
@@ -371,7 +379,7 @@ describe("Connect", () => {
       await screen.findByText("Contexts found");
       // A count of nothing asserted as a fact is the same fault as a count that
       // disagrees with its rows.
-      expect(screen.queryByTestId("connect-count")).toBeNull();
+      expect(countSlot()).toBeNull();
     });
   });
 

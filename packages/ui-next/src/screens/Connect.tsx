@@ -19,6 +19,7 @@ import {
   Field,
   LoadingState,
   Mark,
+  Panel,
   TextArea,
   type IconComponent,
 } from "@srelens/ui-kit";
@@ -631,17 +632,8 @@ export function Connect({ route }: { route: string }) {
           </p>
         </header>
 
-        <div className="card min-w-0">
-          <div className="card-head">
-            <span className="card-title">Contexts found</span>
-            {count !== undefined && (
-              <span data-testid="connect-count" className="eyebrow shrink-0">
-                {count}
-              </span>
-            )}
-          </div>
-
-          <div className="flex min-w-0 flex-col gap-2 p-2.5">
+        <Panel title="Contexts found" count={count} className="min-w-0">
+          <div className="flex min-w-0 flex-col gap-2">
             {addError !== null && (
               // `sev`: the reader asked for a file to be added and it was not.
               // This is not a remark about the rows under it.
@@ -705,7 +697,7 @@ export function Connect({ route }: { route: string }) {
               <p className="px-1 py-1 text-[0.8125rem] leading-relaxed text-muted">{WEB_ONLY}</p>
             )}
           </div>
-        </div>
+        </Panel>
 
         <div
           data-testid="connect-footer"

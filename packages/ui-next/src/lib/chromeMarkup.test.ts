@@ -64,6 +64,15 @@ describe("one way to draw a toolbar and a pane's opening", () => {
     expect(unexpected(/<d[lt]\b|\bextension-facts\b/g, { "confirm/HostConfirmation.tsx": 5 })).toEqual({});
   });
 
+  it("draws no card of its own", () => {
+    // A card is the kit's `Panel`, title, count and all. Connect wrote the
+    // card's classes itself because `Panel` had no place for its count. (#1064)
+    // Stylesheets that restyle a kit `Panel` where it sits are not markup.
+    expect(
+      unexpected(/className="[^"]*(?<![\w-])card(?:-head|-title)?(?![\w-])/g, {}, /\.tsx$/),
+    ).toEqual({});
+  });
+
   it("opens no settings pane with a heading of its own", () => {
     expect(
       unexpected(
