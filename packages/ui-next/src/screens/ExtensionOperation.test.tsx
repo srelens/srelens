@@ -116,6 +116,33 @@ it("keeps report navigation available and lets scope prose wrap", async () => {
  expect(screen.getByText((host.answer as { scope: string }).scope).className).toContain("whitespace-normal");
 });
 
+it("lays a result's facts out as the kit's stacked rows, prose wrapping and the rest whole", async () => {
+ // #1001: one way to draw a key and its value. Machine text does not wrap.
+ host.answer = { scope: "Only workload templates are inventoried; vulnerability scanning has not completed.", engine: "trivy 0.75.0", items: [{ reportId: "a".repeat(64), image: "alpine:3.9" }] };
+ open();
+ fireEvent.change(await screen.findByLabelText("Image"), { target: { value: "alpine:3.9" } });
+ fireEvent.click(screen.getByRole("button", { name: "Scan image" }));
+ await screen.findByRole("button", { name: "Findings" });
+ const row = (term: string) => screen.getByText(term, { selector: "dt" }).closest("dl") as HTMLElement;
+ for (const term of ["Scope", "Engine"]) {
+  expect(row(term).classList.contains("kv"), term).toBe(true);
+  expect(row(term).dataset.stacked, term).toBe("true");
+ }
+ expect(row("Engine").querySelector("dd")?.classList.contains("whitespace-pre")).toBe(true);
+ expect(row("Scope").querySelector("dd")?.classList.contains("whitespace-pre")).toBe(false);
+});
+
+it("folds a result's identifiers into Technical details as the kit's rows, each whole on one line", async () => {
+ const scannerImage = "aquasec/trivy@sha256:" + "a".repeat(64);
+ host.answer = { metadata: { summary: { CRITICAL: 1 }, scannerImage }, items: [{ id: "CVE-one" }] };
+ open(); fireEvent.change(await screen.findByLabelText("Image"), { target: { value: "alpine:3.10" } }); fireEvent.click(screen.getByRole("button", { name: "Scan image" }));
+ const value = await screen.findByText(scannerImage);
+ expect(value.closest("dl")?.classList.contains("kv")).toBe(true);
+ expect(value.closest("dl")?.getAttribute("data-stacked")).toBe("true");
+ expect(value.classList.contains("code")).toBe(true);
+ expect(value.classList.contains("whitespace-pre")).toBe(true);
+});
+
 it("shows shared cluster identity once above the table so container data stays visible", async () => {
  const clusterId = "srelens-context:config#demo";
  host.answer = { clusterId, items: [

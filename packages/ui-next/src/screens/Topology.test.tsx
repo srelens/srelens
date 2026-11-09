@@ -697,6 +697,18 @@ describe("Topology", () => {
     expect(panel.textContent).toContain("0 nodes");
   });
 
+  it("lays the node's facts out as the kit's key/value rows", async () => {
+    // #1001: one way to draw a key and its value.
+    render(<Topology />);
+    await userEvent.click(await screen.findByRole("button", { name: "Ingress web" }));
+
+    const panel = within(screen.getByRole("complementary", { name: "Selected node" }));
+    const facts = Object.fromEntries(
+      panel.getAllByRole("term").map((term) => [term.textContent, term.closest("dl.kv")?.querySelector("dd")?.textContent]),
+    );
+    expect(facts).toMatchObject({ Depth: "Entry point", Downstream: "2 nodes", Upstream: "0 nodes" });
+  });
+
   it("lays a call chain out left to right, by hops rather than by kind", async () => {
     // The argument this whole layout makes. `payments`' Service is called BY a
     // Deployment, so it belongs after it; the old kind-per-column layout put

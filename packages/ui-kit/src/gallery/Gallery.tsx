@@ -1044,6 +1044,8 @@ export function Gallery() {
             through a list. */}
         <KV k="Status" v="Running" />
         <KV k="Image" v="nginx:1.25" mono />
+        {/* Machine text keeps its line and scrolls rather than breaking mid-token. */}
+        <KV k="Kubeconfig" v="/home/sre/.kube/clusters/prod-eu-west-1/platform-team-admin.kubeconfig.yaml" mono wrap={false} />
       </section>
 
       <section>

@@ -414,3 +414,22 @@ it("says a failed read failed, never that the app has no process or streams, and
   expect(screen.queryByRole("alert")).toBeNull();
   expect(screen.getByText("No open streams")).toBeTruthy();
 });
+
+it("draws its facts as the kit's key/value rows", async () => {
+  // #1001: one way to draw a key and its value.
+  vi.mocked(inspectExtension).mockResolvedValue(sidecar());
+  await open();
+  for (const [section, term] of [["Identity", "ID"], ["Process", "State"], ["Streams and watches", "Ended with their window"]]) {
+    expect(within(region(section)).getByText(term).closest("dl")?.classList.contains("kv"), term).toBe(true);
+  }
+});
+
+it("still tints a process state that needs attention, beside its word", async () => {
+  const { readFileSync } = await import("node:fs");
+  const { join } = await import("node:path");
+  const css = readFileSync(join(__dirname, "extensions.css"), "utf8").replace(/\/\*[\s\S]*?\*\//g, "");
+  const tint = (state: string) => css.match(new RegExp(`\\.extension-inspector-part \\[data-state="${state}"\\][^{]*\\{([^}]*)\\}`))?.[1];
+  expect(tint("disabled")).toContain("--sev");
+  expect(tint("refused")).toContain("--sev");
+  expect(tint("restarting")).toContain("--warn");
+});

@@ -10,7 +10,7 @@ import {
   type TopologyProbe,
   selectsNothing,
 } from "@srelens/core";
-import { Button, EmptyState, LoadingState, Screen, StatusPill, type StatusKind } from "@srelens/ui-kit";
+import { Button, EmptyState, KV, LoadingState, Screen, StatusPill, type StatusKind } from "@srelens/ui-kit";
 import { useNamespaceOptions } from "@srelens/core/react";
 import { getKubeconfigFiles, useActiveContext } from "../lib/clusters";
 import {
@@ -1190,48 +1190,36 @@ function Inspector({
           <StatusPill kind={pillKind(node.health)} status={node.health} />
         </div>
       )}
-      <dl className="mt-4 grid grid-cols-[auto_1fr] gap-x-4 gap-y-1 text-sm">
-        <dt className="text-muted">Depth</dt>
-        <dd>
-          {node.rank === null
-            ? // Said as a fact about what is KNOWN, not about the node: nothing
-              // declared, routed or measured touches it, which is a different
-              // thing from it talking to nobody.
-              "On no known path"
-            : node.rank < layout.entryRank
-              ? "Entry point"
-              : node.rank === layout.entryRank
-                ? layout.entryRank > 0
-                  ? "Entry service"
-                  : "Entry point"
-                : `${node.rank - layout.entryRank} hop${node.rank - layout.entryRank === 1 ? "" : "s"} in`}
-        </dd>
-        {node.ready !== null && node.desired !== null && (
-          <>
-            <dt className="text-muted">Ready</dt>
-            <dd>
-              {node.ready} / {node.desired}
-            </dd>
-          </>
-        )}
-        {node.detail && (
-          <>
-            <dt className="text-muted">Detail</dt>
-            <dd>{node.detail}</dd>
-          </>
-        )}
+      <div className="mt-4">
+        <KV
+          k="Depth"
+          v={
+            node.rank === null
+              ? // Said as a fact about what is KNOWN, not about the node: nothing
+                // declared, routed or measured touches it, which is a different
+                // thing from it talking to nobody.
+                "On no known path"
+              : node.rank < layout.entryRank
+                ? "Entry point"
+                : node.rank === layout.entryRank
+                  ? layout.entryRank > 0
+                    ? "Entry service"
+                    : "Entry point"
+                  : `${node.rank - layout.entryRank} hop${node.rank - layout.entryRank === 1 ? "" : "s"} in`
+          }
+        />
+        {node.ready !== null && node.desired !== null && <KV k="Ready" v={`${node.ready} / ${node.desired}`} />}
+        {node.detail && <KV k="Detail" v={node.detail} />}
         {trace && (
           <>
             {/* The question an SRE actually has about a node is not what it
                 touches but what goes with it. That is transitive, and it is
                 what the trace already computed for the canvas. */}
-            <dt className="text-muted">Downstream</dt>
-            <dd>{count(trace.downstream.size, "node")}</dd>
-            <dt className="text-muted">Upstream</dt>
-            <dd>{count(trace.upstream.size, "node")}</dd>
+            <KV k="Downstream" v={count(trace.downstream.size, "node")} />
+            <KV k="Upstream" v={count(trace.upstream.size, "node")} />
           </>
         )}
-      </dl>
+      </div>
       {node.revisions.length > 0 && (
         // Where the folded ReplicaSets went. Newest first, which is the one
         // serving.
