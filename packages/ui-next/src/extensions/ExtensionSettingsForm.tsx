@@ -188,7 +188,8 @@ export function ExtensionSettingsForm({
           )}
         </>
       )}
-      <div className="extension-toolbar extension-settings-actions">
+      {/* The form's own buttons, under its fields: a button row, not a toolbar strip. */}
+      <div className="flex flex-wrap items-center gap-3">
         {declared.length > 0 && (
           <Button type="submit" disabled={saving}>
             Save settings

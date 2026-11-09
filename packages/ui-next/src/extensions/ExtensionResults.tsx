@@ -2,7 +2,7 @@ import { AgeCell } from "../lib/ageCell";
 import { ExtensionResourceDetails } from "./ExtensionResourceDetails";
 import { ExtensionBulkActions, type BulkActionAvailability } from "./ExtensionBulkActions";
 import { bulkResourceKey } from "./bulkActions";
-import { Button, ColumnPicker, EmptyState, LoadingState, ResizeHandle, StatusPill, Table, filterTableData, type Column, type TableSort } from "@srelens/ui-kit";
+import { Button, ColumnPicker, EmptyState, LoadingState, ResizeHandle, StatusPill, Table, Toolbar, filterTableData, type Column, type TableSort } from "@srelens/ui-kit";
 import { clampPeekWidth, savePeekWidth, setPeekWidth, usePeekBounds, usePeekWidth } from "../lib/peekWidth";
 import { ExtensionResourceNavigation } from "./resourceNavigation";
 import { useContext, useMemo, useEffect, useRef, useState } from "react";
@@ -312,7 +312,7 @@ export function ExtensionResults({
         </p>
       )}
       {!hideToolbar && (
-        <div className="extension-toolbar">
+        <Toolbar wrap>
           <span>
             {binding?.arguments.namespaced === false
               ? "Cluster-scoped resources"
@@ -325,7 +325,7 @@ export function ExtensionResults({
           <Button variant="secondary" onClick={data.reload}>
             Refresh
           </Button>
-        </div>
+        </Toolbar>
       )}
       {hideToolbar && (header
         ? createPortal(<>{nameFilterAnswered(nameFilter) && <ListCount total={sourceRows.length} shown={rows.length} truncated={data.data?.truncated} noun={noun} />}<LiveStatus live={live} />{picker}</>, header)

@@ -9,7 +9,7 @@ import {
   type ExtensionPreviousVersion,
   type InstalledExtension,
 } from "@srelens/core";
-import { Button, CodeEditor, EmptyState, Tabs } from "@srelens/ui-kit";
+import { Button, CodeEditor, EmptyState, Tabs, Toolbar } from "@srelens/ui-kit";
 import { saveOrDownload } from "../lib/saveOrDownload";
 import { ExtensionClusters } from "./ExtensionClusters";
 import { ExtensionNetwork } from "./ExtensionNetwork";
@@ -155,14 +155,14 @@ export function ExtensionDetails({
           <p className="extension-message">
             Settings are exported as saved. A secret is never saved in settings, so an export never holds one.
           </p>
-          <div className="extension-toolbar">
+          <Toolbar wrap>
             <Button variant="secondary" disabled={busy} onClick={() => void exportSettings()}>
               Export settings
             </Button>
             <Button variant="secondary" disabled={busy} onClick={() => setResetting(true)}>
               Reset settings
             </Button>
-          </div>
+          </Toolbar>
           {resetting && (
             <div
               className="extension-install"

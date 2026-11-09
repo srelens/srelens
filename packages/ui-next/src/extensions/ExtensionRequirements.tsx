@@ -1,7 +1,7 @@
 import { type ReactNode } from "react";
 import { listCrds, type ExtensionPage, type InstalledExtension } from "@srelens/core";
 import { useResource } from "../lib/useResource";
-import { Button, LoadingState } from "@srelens/ui-kit";
+import { Button, LoadingState, Toolbar } from "@srelens/ui-kit";
 import { FailureAlert } from "../lib/errorCopy";
 import { crdRequirements, pageReaders, requirementStatus } from "./requirements";
 
@@ -34,10 +34,10 @@ export function ExtensionRequirements({ plugin, page, context, refresh, children
   if (!missing && !error) return <>{children}</>;
   return <>
     <section className="extension-requirements" aria-label={`${plugin.manifest.name} requirements`}>
-      {error ? <FailureAlert tone="sev" title="Could not check requirements" detail="CRD discovery failed. This does not mean the APIs are missing; resource reads will still use your existing permissions." error={error} onRetry={result.reload} /> : <div className="extension-toolbar">
-        <strong>Missing requirements</strong>
+      {error ? <FailureAlert tone="sev" title="Could not check requirements" detail="CRD discovery failed. This does not mean the APIs are missing; resource reads will still use your existing permissions." error={error} onRetry={result.reload} /> : <Toolbar wrap>
+        <strong className="toolbar-title mr-auto">Missing requirements</strong>
         <Button variant="secondary" onClick={result.reload}>Check again</Button>
-      </div>}
+      </Toolbar>}
       <p className="extension-message">{plugin.manifest.name} is installed for the whole app. This page requires the following APIs on the selected cluster. {!error && "Install the corresponding operator/CRDs, or select a cluster that provides them. "}Installing the extension does not change your cluster.</p>
       <div className="extension-table-scroll extension-results">
         <table><thead><tr><th>Required CRD</th><th>Accepted API versions</th><th>Reads</th><th>Status</th></tr></thead>

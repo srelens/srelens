@@ -359,40 +359,44 @@ export function AuditPane() {
     // app's, where plain reads are deliberately left out — and a title that
     // overstates the coverage is exactly how a reader concludes an absent row
     // means an absent action.
-    <Panel title="Audit · every call an agent made, and every change made here">
-      {/* flex-wrap rather than a fixed row: the sentence is the long half and
-          grows in translation, and a flex child with nothing to stop it
-          shrinking is where `min-width: auto` has cost this migration eight
-          defects. */}
-      <div className="flex flex-wrap items-start justify-between gap-2">
-        <p className="min-w-0 flex-1 text-[0.75rem] leading-relaxed text-muted">
-          Showing the most recent {LIMIT} capability calls. Older calls exist only in the log file itself, not here.
-          Every call an agent made over MCP is recorded; from srelens itself, and from an installed app's sidecar,
-          only the calls that changed something or read secret material are — reads alone are not events. The log
-          is a file on this machine and is never sent anywhere.
-        </p>
-        <Button
-          variant="secondary"
-          size="sm"
-          disabled={(loading || issuesLoading) && error === null && issuesError === null}
-          onClick={() => setNonce((n) => n + 1)}
-        >
-          {(loading || issuesLoading) && error === null && issuesError === null ? "Reading…" : "Refresh"}
-        </Button>
-      </div>
-      {issuesError !== null && <FailureAlert tone="sev" title="Prompt file diagnostics could not be read" error={issuesError} />}
-      {!issuesLoading && issues.length > 0 && <div className="mt-3 border-y border-rule py-2 text-[0.75rem]">
-        <p className="font-medium">{issues.length} prompt {issues.length === 1 ? "file" : "files"} could not be loaded</p>
-        <ul className="mt-1 space-y-1">{issues.map(issue => <li key={`${issue.file}:${issue.problem}`}>
-          <code className="block overflow-x-auto whitespace-nowrap">{issue.file}</code><span className="text-muted">{issue.problem}</span>
-        </li>)}</ul>
-      </div>}
-      {loading ? (
-        <LoadingState label="Reading the audit trail" />
-      ) : error !== null ? (
-        <FailureState title="The audit trail could not be read" error={error} />
-      ) : (
-        <Section padded={false} className="mt-2">
+    <Panel title="Audit · every call an agent made, and every change made here" flush>
+      {/* Flush, so the table's rules meet the card's border; the rest takes its inset from a Section. */}
+      <Section>
+        {/* flex-wrap rather than a fixed row: the sentence is the long half and
+            grows in translation, and a flex child with nothing to stop it
+            shrinking is where `min-width: auto` has cost this migration eight
+            defects. */}
+        <div className="flex flex-wrap items-start justify-between gap-2">
+          <p className="min-w-0 flex-1 text-[0.75rem] leading-relaxed text-muted">
+            Showing the most recent {LIMIT} capability calls. Older calls exist only in the log file itself, not here.
+            Every call an agent made over MCP is recorded; from srelens itself, and from an installed app's sidecar,
+            only the calls that changed something or read secret material are — reads alone are not events. The log
+            is a file on this machine and is never sent anywhere.
+          </p>
+          <Button
+            variant="secondary"
+            size="sm"
+            disabled={(loading || issuesLoading) && error === null && issuesError === null}
+            onClick={() => setNonce((n) => n + 1)}
+          >
+            {(loading || issuesLoading) && error === null && issuesError === null ? "Reading…" : "Refresh"}
+          </Button>
+        </div>
+        {issuesError !== null && <FailureAlert tone="sev" title="Prompt file diagnostics could not be read" error={issuesError} />}
+        {!issuesLoading && issues.length > 0 && <div className="mt-3 border-y border-rule py-2 text-[0.75rem]">
+          <p className="font-medium">{issues.length} prompt {issues.length === 1 ? "file" : "files"} could not be loaded</p>
+          <ul className="mt-1 space-y-1">{issues.map(issue => <li key={`${issue.file}:${issue.problem}`}>
+            <code className="block overflow-x-auto whitespace-nowrap">{issue.file}</code><span className="text-muted">{issue.problem}</span>
+          </li>)}</ul>
+        </div>}
+        {loading ? (
+          <LoadingState label="Reading the audit trail" />
+        ) : error !== null && (
+          <FailureState title="The audit trail could not be read" error={error} />
+        )}
+      </Section>
+      {!loading && error === null && (
+        <Section padded={false}>
           <Table
             columns={columns}
             data={entries}
@@ -402,7 +406,9 @@ export function AuditPane() {
           />
         </Section>
       )}
-      <AuditExport entries={entries} disabled={loading || error !== null} />
+      <Section>
+        <AuditExport entries={entries} disabled={loading || error !== null} />
+      </Section>
     </Panel>
   );
 }

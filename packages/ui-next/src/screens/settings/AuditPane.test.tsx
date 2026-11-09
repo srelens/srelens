@@ -134,6 +134,14 @@ describe("AuditPane", () => {
     core.readPromptIssues.mockResolvedValue([]);
   });
 
+  it("runs the trail's table to the card's edges", async () => {
+    // Inside the card's inset, the table's row rules stopped short of its border.
+    render(<AuditPane />);
+    const table = await screen.findByRole("table");
+    expect(table.closest(".card")).not.toBeNull();
+    expect(table.closest(".section-body")).toBeNull();
+  });
+
   it("says how much of the trail it is showing", async () => {
     render(<AuditPane />);
     expect(await screen.findByText(new RegExp(String(LIMIT)))).toBeTruthy();

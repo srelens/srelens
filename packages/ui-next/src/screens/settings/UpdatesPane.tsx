@@ -3,7 +3,7 @@ import {
   appVersion, bundledReleaseNotes, checkForUpdate, installUpdate, loadUpdateChannel, parseReleaseNotes,
   loadUpdateNotes, openExternal, relaunchApp, saveUpdateChannel, type UpdateChannel, type UpdateMeta,
 } from "@srelens/core";
-import { Button, LoadingState, Progress, Select } from "@srelens/ui-kit";
+import { Button, LoadingState, PaneIntro, Progress, Select } from "@srelens/ui-kit";
 import { FailureAlert } from "../../lib/errorCopy";
 import { Notes } from "../Notes";
 
@@ -74,28 +74,30 @@ export function UpdatesPane() {
   }
   return (
     <div className="min-w-0 text-[0.8125rem]">
-      <section className="flex flex-wrap items-center gap-x-6 gap-y-3 border-b border-rule px-4 py-3" aria-label="Update preferences">
-        <div className="min-w-0 flex-1">
-          <h2 className="font-semibold text-ink">Updates</h2>
-        </div>
-        <label className="flex items-center gap-2">
-          <span className="text-muted">Update channel</span>
-          <Select value={channel} disabled={busy || phase === "ready"}
-            options={[{ value: "stable", label: "Stable" }, { value: "dev", label: "Dev" }]}
-            onValueChange={(value) => {
-              const next = value as UpdateChannel;
-              saveUpdateChannel(next); setChannel(next); setPhase("idle"); setUpdate(null); setError(null);
-            }} />
-        </label>
-        {phase !== "installing" && phase !== "ready" && phase !== "restarting" && (
-          <Button variant="secondary" disabled={busy} onClick={() => void check()}>{phase === "checking" ? "Checking…" : "Check for updates"}</Button>
-        )}
-      </section>
-      {channel === "dev" && <p className="border-b border-rule px-4 py-2 text-[0.75rem] text-muted">Dev follows rolling pre-releases, which may be less stable.</p>}
-      {phase === "current" && <p role="status" className="px-4 py-3">srelens is up to date.</p>}
-      {error && <div className="px-4 py-3"><FailureAlert tone="sev" title={error.title} error={error.cause} domain="http" /></div>}
+      <PaneIntro
+        title="Updates"
+        actions={
+          <>
+            <label className="flex items-center gap-2">
+              <span className="text-muted">Update channel</span>
+              <Select value={channel} disabled={busy || phase === "ready"}
+                options={[{ value: "stable", label: "Stable" }, { value: "dev", label: "Dev" }]}
+                onValueChange={(value) => {
+                  const next = value as UpdateChannel;
+                  saveUpdateChannel(next); setChannel(next); setPhase("idle"); setUpdate(null); setError(null);
+                }} />
+            </label>
+            {phase !== "installing" && phase !== "ready" && phase !== "restarting" && (
+              <Button variant="secondary" disabled={busy} onClick={() => void check()}>{phase === "checking" ? "Checking…" : "Check for updates"}</Button>
+            )}
+          </>
+        }
+      />
+      {channel === "dev" && <p className="border-b border-rule px-3 py-2 text-[0.75rem] text-muted">Dev follows rolling pre-releases, which may be less stable.</p>}
+      {phase === "current" && <p role="status" className="px-3 py-3">srelens is up to date.</p>}
+      {error && <div className="px-3 py-3"><FailureAlert tone="sev" title={error.title} error={error.cause} domain="http" /></div>}
       <section aria-label={releaseVersion ? `Version ${releaseVersion}` : "Installed release"}>
-        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-rule px-4 py-3">
+        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-rule px-3 py-3">
           <div>
             <h2 className="font-semibold">{releaseVersion ? <>Version <span>{releaseVersion}</span></> : "Installed release"}</h2>
             <p className="mt-0.5 text-[0.75rem] text-muted">{phase === "ready" || phase === "restarting" ? "Installed — restart to finish" : update ? `Available to update · Installed ${version ?? update.currentVersion}` : "Current release"}</p>
@@ -103,13 +105,13 @@ export function UpdatesPane() {
           {update && !update.external && phase === "available" && <Button variant="primary" onClick={() => void install()}>Download &amp; install</Button>}
           {update && !update.external && (phase === "ready" || phase === "restarting") && <Button variant="primary" disabled={busy} onClick={() => void restart()}>{phase === "restarting" ? "Restarting…" : "Restart srelens"}</Button>}
         </div>
-        {update?.external && <p className="px-4 py-3 text-muted">This install is managed by your system package manager. Update it there. On Arch: <code>paru -Syu</code> or <code>yay -Syu</code>.</p>}
-        {update && !update.external && update.elevates && phase === "available" && <p className="px-4 py-2 text-muted">Installing this update needs administrator rights. Your system will ask for your password.</p>}
-        {phase === "installing" && <div className="border-b border-rule px-4 py-3">
+        {update?.external && <p className="px-3 py-3 text-muted">This install is managed by your system package manager. Update it there. On Arch: <code>paru -Syu</code> or <code>yay -Syu</code>.</p>}
+        {update && !update.external && update.elevates && phase === "available" && <p className="px-3 py-2 text-muted">Installing this update needs administrator rights. Your system will ask for your password.</p>}
+        {phase === "installing" && <div className="border-b border-rule px-3 py-3">
           <p role="status">{percent === null ? "Downloading…" : `Downloading — ${percent}%`}</p>
           {percent !== null && <Progress value={percent} ariaLabel="Downloading update" />}
         </div>}
-        <div className="px-4 py-3">
+        <div className="px-3 py-3">
           <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
             <h3 className="font-semibold">Release notes</h3>
             {releaseVersion && <a className="text-accent underline" href={`https://github.com/srelens/srelens/releases/tag/${encodeURIComponent(`srelens-v${releaseVersion}`)}`} target="_blank" rel="noreferrer" onClick={(event) => {

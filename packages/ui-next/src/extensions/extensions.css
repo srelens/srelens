@@ -3,22 +3,6 @@
 .extension-results {
   min-width: 0;
 }
-.extension-toolbar {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  padding: 10px 12px;
-  flex-wrap: wrap;
-  border-bottom: 1px solid var(--rule, var(--fl-color-border));
-}
-.extension-toolbar > strong {
-  margin-right: auto;
-}
-.extension-toolbar label {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-}
 .extension-install {
   display: grid;
   /* One track that never grows past the pane: a grid column is as wide as its widest
@@ -129,18 +113,8 @@
   font-family: inherit;
   font-size: var(--text-body, 0.8125rem);
 }
-.extension-navigation {
-  gap: 2px;
-  padding: 0 8px;
-  min-height: 32px;
-  flex-wrap: nowrap;
-  overflow-x: auto;
-}
 .extension-subnavigation {
   background: var(--surface-sunk, var(--fl-color-bg));
-}
-.extension-scope {
-  padding: 6px 10px;
 }
 .extension-card-scope {
   font-size: var(--text-meta, 0.6875rem);
@@ -215,7 +189,6 @@
   white-space: nowrap;
   overflow-x: auto;
 }
-.extension-catalog-entry > .extension-toolbar { border-bottom: 0; }
 .extension-catalog-entry .extension-catalog-meta { margin-top: 3px; }
 .extension-permission-review { background: var(--surface, var(--fl-color-surface)); }
 .extension-access-diff { min-width: 0; }
@@ -376,21 +349,18 @@
 .extension-related + button, [role="group"]:has(> .extension-related) + button { margin: 0 12px 8px; }
 .extension-resource-detail pre { white-space: pre; overflow: auto; max-width: 100%; font-family: var(--font-mono); font-size: inherit; }
 .extension-action-review { padding: 12px; border-block: 1px solid var(--rule, var(--fl-color-border)); background: var(--surface, var(--fl-color-surface)); }
-.extension-action-review .extension-toolbar { padding: 0; border: 0; }
 
 /* App resources use the same list + independently scrolling right-hand peek as core resources. */
 .extension-workspace { display: flex; flex-direction: column; min-height: 0; height: 100%; overflow: auto; }
-.extension-workspace > nav, .extension-workspace > .extension-toolbar { flex-shrink: 0; }
+.extension-workspace > nav { flex-shrink: 0; }
 .extension-results { display: flex; flex: 1; min-height: 0; overflow: hidden; }
 .extension-resource-list { display: flex; flex-direction: column; flex: 1; min-width: 0; min-height: 0; }
-.extension-resource-list > .extension-toolbar { flex-shrink: 0; }
 .extension-resource-list > .extension-table-scroll { flex: 1; min-height: 0; }
 /* The kit's table draws only the rows in view of a scroller with a height of its own. */
 .extension-resource-slot .extension-results { max-height: 60vh; }
 .extension-detail-peek { position: relative; display: flex; flex-direction: column; flex-shrink: 0; min-height: 0; }
 .extension-detail-peek > .extension-resource-detail { flex: 1; min-height: 0; }
 .extension-resource-detail { flex: 1; min-height: 0; }
-.extension-detail-peek .extension-toolbar { gap: 6px; padding: 8px 12px; }
 
 .extension-field-value { display: block; overflow-x: auto; white-space: nowrap; }
 .extension-nested-fields { padding: 6px 0 6px 10px; border-left: 1px solid var(--rule, var(--fl-color-border)); }
@@ -601,7 +571,6 @@
   color: var(--sev, var(--fl-color-danger));
   overflow-wrap: anywhere;
 }
-.extension-settings-actions { padding: 0; border-bottom: 0; }
 .extension-settings-saved { color: var(--ink-muted, var(--fl-color-text-muted)); }
 
 /* Live app views (#566). The word says the state; the dot only repeats it. */
@@ -852,8 +821,6 @@
 .extension-overview .dashboard-card-figure { font-size: 48px; margin-top: 16px; }
 .extension-overview-live { order: 2; grid-column: 1 / -1; padding: 6px 12px; border-bottom: 1px solid var(--rule, var(--fl-color-border)); }
 .extension-overview-list { order: 3; grid-column: 1 / -1; min-width: 0; border-bottom: 1px solid var(--rule, var(--fl-color-border)); }
-.extension-overview-list > header { justify-content: space-between; }
-.extension-overview-list h3 { font-size: 13px; font-weight: 600; }
 .extension-overview-list .extension-results { min-height: 160px; max-height: 340px; }
 @container (max-width: 48rem) {
   .extension-overview .extension-summary-body { flex-wrap: wrap; gap: 12px; }

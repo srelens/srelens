@@ -70,6 +70,7 @@ export { PickerGroup, PickerRow, type PickerRowProps } from "./picker";
 export { NavIcon, type NavIconProps } from "./NavIcon";
 export { PairList, type PairListProps } from "./PairList";
 export { Panel, type PanelProps } from "./Panel";
+export { PaneIntro, type PaneIntroProps } from "./PaneIntro";
 export { OptionCheck } from "./OptionCheck";
 export { Popover, type PopoverProps } from "./Popover";
 export {

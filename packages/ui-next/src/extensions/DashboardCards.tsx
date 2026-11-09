@@ -13,7 +13,7 @@ import {
   selectsNothing,
 } from "@srelens/core";
 import { useNamespaceOptions } from "@srelens/core/react";
-import { Button, RawError, Section, Spinner } from "@srelens/ui-kit";
+import { Button, RawError, Section, Spinner, Toolbar } from "@srelens/ui-kit";
 import { getKubeconfigFiles } from "../lib/clusters";
 import { FailureAlert } from "../lib/errorCopy";
 import { openTab } from "../lib/tabsStore";
@@ -222,7 +222,7 @@ export function AppCards({
         const target = card.target;
         if (previewLists && card.type === "list" && answer?.state === "list" && answer.total > 0) {
           return <section key={card.id} className="extension-overview-list" aria-label={plainText(card.title)}>
-            <header className="extension-toolbar"><h3>{plainText(card.title)}</h3>{target && <Button variant="ghost" onClick={()=>onOpen(card)}>View all matching</Button>}</header>
+            <Toolbar wrap><h3 className="toolbar-title mr-auto">{plainText(card.title)}</h3>{target && <Button variant="ghost" onClick={()=>onOpen(card)}>View all matching</Button>}</Toolbar>
             <ExtensionResults plugin={plugin} capability={card.source} context={host} namespaces={selection} refresh={refresh} hideToolbar card={card.id} previewRows={answer.rows}/>
           </section>;
         }

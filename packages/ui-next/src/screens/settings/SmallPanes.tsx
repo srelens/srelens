@@ -197,18 +197,20 @@ export function DeepLinksPane() {
         </p>
       </Panel>
 
-      <Panel title="Link forms">
+      <Panel title="Link forms" flush>
         <Section padded={false}>
           <Table columns={LINK_COLUMNS} data={LINK_FORMS} getRowKey={(row) => row.link} />
         </Section>
-        <p className="mt-2 text-[0.75rem] leading-relaxed text-muted">
-          <code className="code">&lt;kind&gt;</code> is the Kubernetes kind, such as{" "}
-          <code className="code">Pod</code>, <code className="code">Deployment</code> or{" "}
-          <code className="code">Node</code>. Use <code className="code">-</code> in place of the
-          namespace for a cluster-scoped kind, such as a Node. Percent-encode any part that contains
-          a <code className="code">/</code> or a <code className="code">:</code>, which OpenShift
-          context names usually do.
-        </p>
+        <Section>
+          <p className="text-[0.75rem] leading-relaxed text-muted">
+            <code className="code">&lt;kind&gt;</code> is the Kubernetes kind, such as{" "}
+            <code className="code">Pod</code>, <code className="code">Deployment</code> or{" "}
+            <code className="code">Node</code>. Use <code className="code">-</code> in place of the
+            namespace for a cluster-scoped kind, such as a Node. Percent-encode any part that contains
+            a <code className="code">/</code> or a <code className="code">:</code>, which OpenShift
+            context names usually do.
+          </p>
+        </Section>
       </Panel>
 
       <Panel title="Why the namespace is required">
