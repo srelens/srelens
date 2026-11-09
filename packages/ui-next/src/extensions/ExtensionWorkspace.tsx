@@ -22,7 +22,7 @@ import {
 import { AppCards } from "./DashboardCards";
 import { plainText } from "./displayText";
 import { STATUS_WORD } from "./AppStatus";
-import { Button, ColumnPicker, EmptyState, FilterBar, LoadingState, StatusPill, Table, Tabs, filterMatcher, tableFilterError, type Column } from "@srelens/ui-kit";
+import { Button, ColumnPicker, EmptyState, FilterBar, LoadingState, StatusPill, Table, Tabs, Toolbar, filterMatcher, tableFilterError, type Column } from "@srelens/ui-kit";
 import { ExtensionResults } from "./ExtensionResults";
 import { useResource } from "../lib/useResource";
 import { LiveNotice, LiveReaders, LiveStatus, useLiveReaders } from "./liveReaders";
@@ -413,33 +413,32 @@ export function ExtensionWorkspace({
       actions,
     )}
     <div className="extension-workspace">
-      <nav
-        className="extension-toolbar extension-navigation"
-        aria-label={`${plugin.manifest.name} pages`}
-      >
-        <ExtensionLogo icon={plugin.icon} name={plugin.manifest.name} />
-        <Tabs
-          variant="underline"
-          activation="manual"
-          label={`${plugin.manifest.name} sections`}
-          tabs={groups.map((group) => ({ id: group, label: group }))}
-          active={page.group ?? page.title}
-          onChange={(group) => onPage(pages.find((p) => (p.group ?? p.title) === group)!.id)}
-        />
-      </nav>
-      {page.group && (
-        <nav
-          className="extension-toolbar extension-navigation extension-subnavigation"
-          aria-label={`${page.group} pages`}
-        >
+      {/* A page's tabs scroll sideways rather than wrapping, as the built-in tab strip does. */}
+      <nav aria-label={`${plugin.manifest.name} pages`}>
+        <Toolbar className="overflow-x-auto">
+          <ExtensionLogo icon={plugin.icon} name={plugin.manifest.name} />
           <Tabs
             variant="underline"
             activation="manual"
-            label={`${page.group} pages`}
-            tabs={pages.filter((p) => p.group === page.group).map((p) => ({ id: p.id, label: p.title }))}
-            active={page.id}
-            onChange={onPage}
+            label={`${plugin.manifest.name} sections`}
+            tabs={groups.map((group) => ({ id: group, label: group }))}
+            active={page.group ?? page.title}
+            onChange={(group) => onPage(pages.find((p) => (p.group ?? p.title) === group)!.id)}
           />
+        </Toolbar>
+      </nav>
+      {page.group && (
+        <nav aria-label={`${page.group} pages`}>
+          <Toolbar className="extension-subnavigation overflow-x-auto">
+            <Tabs
+              variant="underline"
+              activation="manual"
+              label={`${page.group} pages`}
+              tabs={pages.filter((p) => p.group === page.group).map((p) => ({ id: p.id, label: p.title }))}
+              active={page.id}
+              onChange={onPage}
+            />
+          </Toolbar>
         </nav>
       )}
       <ExtensionRequirements plugin={plugin} page={page} context={context} refresh={refresh}>
@@ -456,7 +455,7 @@ export function ExtensionWorkspace({
         >
           {scopeControl}
         </FilterBar>
-      ) : scopeControl && <div className="extension-toolbar extension-scope">{scopeControl}</div>}
+      ) : scopeControl && <Toolbar wrap>{scopeControl}</Toolbar>}
       {namespaceError && (
         <FailureAlert tone="sev" title="Could not list namespaces" error={namespaceError} onRetry={()=>setRefresh(v=>v+1)} />
       )}

@@ -46,6 +46,7 @@ import { MetricTile } from "../MetricTile";
 import { NavIcon } from "../NavIcon";
 import { PairList } from "../PairList";
 import { Panel } from "../Panel";
+import { PaneIntro } from "../PaneIntro";
 import { OptionCheck } from "../OptionCheck";
 import { Popover } from "../Popover";
 import { Progress } from "../Progress";
@@ -529,6 +530,22 @@ export function Gallery() {
         <Panel description="No title, still a header">Body.</Panel>
         {/* Untitled omits the header rather than ruling off an empty one. */}
         <Panel>No title at all.</Panel>
+        {/* Flush: the table's rules meet the card's border. */}
+        <Panel title="Link forms" flush>
+          <Section padded={false}>
+            <Table
+              columns={[{ key: "link", header: "Link" }] as Column<{ link: string }>[]}
+              data={[{ link: "srelens://pod/default/web" }]}
+              getRowKey={(row) => row.link}
+            />
+          </Section>
+        </Panel>
+      </section>
+
+      <section>
+        <h2>PaneIntro</h2>
+        <PaneIntro title="Workspaces" description="Each workspace has its own clusters and tabs." />
+        <PaneIntro title="Apps" actions={<Button variant="secondary">Refresh</Button>} />
       </section>
 
       <section>

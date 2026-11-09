@@ -1,7 +1,7 @@
 import { useId, useRef, useState, type PointerEvent } from "react";
 import { GripVertical } from "lucide-react";
 import { deleteContext, describeError, isTauri, listContexts, removeClusterNamespace, unprefixedName, type ClusterContext } from "@srelens/core";
-import { Button, ConfirmDialog, CustomizeMark, EmptyState, Field, FilterBar, LoadingState, Mark, Switch, TextInput, useListFilter } from "@srelens/ui-kit";
+import { Button, ConfirmDialog, CustomizeMark, EmptyState, Field, FilterBar, LoadingState, Mark, PaneIntro, Switch, TextInput, useListFilter } from "@srelens/ui-kit";
 import { FailureAlert } from "../../lib/errorCopy";
 import { getAssistantSaveError, setClusterAssistant, useAssistant } from "../../lib/assistant";
 import { getContexts, getKubeconfigFiles, setContexts, useContexts, useContextsError, useContextsStatus } from "../../lib/clusters";
@@ -140,10 +140,8 @@ export function ClustersPane() {
     finally { setBusy(false); }
   }
   return <div className="context-management flex h-full min-h-0 flex-col">
-    <header className="flex flex-wrap items-center justify-between gap-2 border-b border-rule px-3 py-2">
-      <div><h2 className="text-[0.8125rem] font-semibold">Contexts</h2><p className="text-[0.75rem] text-muted">Names, appearance and order are shared with the classic design.</p></div>
-      <Button variant="secondary" onClick={() => openTab("/connections")}>Open Connections</Button>
-    </header>
+    <PaneIntro title="Contexts" description="Names, appearance and order are shared with the classic design."
+      actions={<Button variant="secondary" onClick={() => openTab("/connections")}>Open Connections</Button>} />
     {error && <FailureAlert tone="sev" className="m-3" title="Could not remove the context" error={error} domain="local" />}
     {status === "failed" && <FailureAlert tone="sev" className="m-3" title="Could not list contexts" error={listingError} domain="local" onRetry={() => void reload()} />}
     {status === "loading" ? <LoadingState label="Loading contexts" /> : contexts.length === 0 ?

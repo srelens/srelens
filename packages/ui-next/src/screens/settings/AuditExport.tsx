@@ -33,7 +33,7 @@ export function AuditExport({ entries, disabled }: { entries: AuditEntry[]; disa
   }
 
   return (
-    <div className="mt-3 border-t border-rule pt-3 text-[0.75rem]">
+    <div className="text-[0.75rem]">
       <div className="flex flex-wrap items-center gap-2">
         <Select aria-label="Export scope" value={scope} disabled={busy}
           onValueChange={value => setScope(value as AuditExportScope)}

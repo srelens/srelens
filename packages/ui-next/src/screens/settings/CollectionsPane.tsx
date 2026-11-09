@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import type { Collection } from "@srelens/core";
-import { Button, Checkbox, ConfirmDialog, EmptyState } from "@srelens/ui-kit";
+import { Button, Checkbox, ConfirmDialog, EmptyState, PaneIntro } from "@srelens/ui-kit";
 import { deleteCollections, refreshCollections, useCollections } from "../../lib/collections";
 import { useActiveContext } from "../../lib/clusters";
 import { CollectionDialog } from "../collections/CollectionEditor";
@@ -50,17 +50,19 @@ export function CollectionsPane() {
 
   return (
     <div className="min-w-0 text-[0.8125rem]">
-      <section className="border-b border-rule px-4 py-3" aria-label="About collections">
-        <h2 className="font-semibold text-ink">Namespace collections</h2>
-        <p className="mt-1 max-w-[70ch] text-muted">
-          Saved groups of namespaces — by name pattern (prod-*), by label (env=prod), or picked by hand — that every
-          namespace picker offers above the namespaces. Choosing one scopes the list to whatever it matches on the
-          cluster you are looking at, so one collection works on every cluster. Members are always included; with
-          both patterns and a label selector, a namespace has to match both.
-        </p>
-      </section>
+      <PaneIntro
+        title="Namespace collections"
+        description={
+          <>
+            Saved groups of namespaces — by name pattern (prod-*), by label (env=prod), or picked by hand — that every
+            namespace picker offers above the namespaces. Choosing one scopes the list to whatever it matches on the
+            cluster you are looking at, so one collection works on every cluster. Members are always included; with
+            both patterns and a label selector, a namespace has to match both.
+          </>
+        }
+      />
 
-      <section className="flex flex-wrap items-center gap-2 border-b border-rule px-4 py-2" aria-label="Collection actions">
+      <section className="flex flex-wrap items-center gap-2 border-b border-rule px-3 py-2" aria-label="Collection actions">
         <Button variant="primary" onClick={() => setEditing("new")}>
           New collection…
         </Button>
@@ -83,7 +85,7 @@ export function CollectionsPane() {
       ) : (
         <ul aria-label="Namespace collections">
           {collections.map((c) => (
-            <li key={c.name} className="flex items-start gap-3 border-b border-rule px-4 py-2.5" data-collection={c.name}>
+            <li key={c.name} className="flex items-start gap-3 border-b border-rule px-3 py-2.5" data-collection={c.name}>
               <Checkbox
                 checked={picked.has(c.name)}
                 onChange={(on) => toggle(c.name, on)}

@@ -11,7 +11,7 @@ import {
   skillsDirPath,
   type SkillMeta,
 } from "@srelens/core";
-import { Badge, Button, ConfirmDialog, Dialog, EmptyState, Field, FilterBar, LoadingState, Switch, TextArea, TextInput, useListFilter } from "@srelens/ui-kit";
+import { Badge, Button, ConfirmDialog, Dialog, EmptyState, Field, FilterBar, LoadingState, PaneIntro, Switch, TextArea, TextInput, useListFilter } from "@srelens/ui-kit";
 import { FailureAlert } from "../../lib/errorCopy";
 import {
   estimateTokens,
@@ -145,17 +145,19 @@ export function SkillsPane() {
 
   return (
     <div className="min-w-0 text-[0.8125rem]">
-      <section className="border-b border-rule px-4 py-3" aria-label="About skills">
-        <h2 className="font-semibold text-ink">Skills</h2>
-        <p className="mt-1 max-w-[70ch] text-muted">
-          Short runbooks the agent follows: how to triage a crash loop, what to check before a rollout is called
-          stuck. A skill that is on is sent with every question, in every new conversation, until you turn it off.
-          The switches on the agent screen are separate: they turn a skill on or off for the conversations in that
-          window until it is closed, and do not change what is kept here.
-        </p>
-      </section>
+      <PaneIntro
+        title="Skills"
+        description={
+          <>
+            Short runbooks the agent follows: how to triage a crash loop, what to check before a rollout is called
+            stuck. A skill that is on is sent with every question, in every new conversation, until you turn it off.
+            The switches on the agent screen are separate: they turn a skill on or off for the conversations in that
+            window until it is closed, and do not change what is kept here.
+          </>
+        }
+      />
 
-      <section className="border-b border-rule px-4 py-3" aria-label="What the skills that are on cost">
+      <section className="border-b border-rule px-3 py-3" aria-label="What the skills that are on cost">
         <p className="flex flex-wrap items-baseline gap-x-2">
           <span className="eyebrow">Added to every question</span>
           <span className="num text-[1.125rem] text-ink" data-slot="skills-cost">
@@ -175,7 +177,7 @@ export function SkillsPane() {
         </p>
       </section>
 
-      <section className="flex flex-wrap items-center gap-2 border-b border-rule px-4 py-2" aria-label="Installed skills">
+      <section className="flex flex-wrap items-center gap-2 border-b border-rule px-3 py-2" aria-label="Installed skills">
         <span className="mr-auto font-semibold">Installed ({skills.length})</span>
         <Button variant="secondary" disabled={read.state === "loading"} onClick={() => setAttempt((n) => n + 1)}>
           {read.state === "loading" ? "Refreshing…" : "Refresh"}
@@ -185,7 +187,7 @@ export function SkillsPane() {
         </Button>
       </section>
 
-      <section className="flex flex-wrap items-center gap-x-3 gap-y-1 border-b border-rule px-4 py-2" aria-label="Where skill files are kept">
+      <section className="flex flex-wrap items-center gap-x-3 gap-y-1 border-b border-rule px-3 py-2" aria-label="Where skill files are kept">
         <span className="text-muted">Skills you install are kept in</span>
         {folder === null ? (
           <span className="text-muted">a folder that could not be found.</span>
@@ -208,13 +210,13 @@ export function SkillsPane() {
       </section>
 
       {fileError !== null && (
-        <div className="px-4 py-3">
+        <div className="px-3 py-3">
           <FailureAlert tone="sev" title={fileError.title} error={fileError.cause} />
         </div>
       )}
 
       {removeError !== null && (
-        <div className="px-4 py-3">
+        <div className="px-3 py-3">
           <FailureAlert tone="sev" title="Could not remove the skill" error={removeError} />
         </div>
       )}
@@ -222,7 +224,7 @@ export function SkillsPane() {
       <FilterBar {...filter} label="Filter skills" placeholder="Filter skills…" />
 
       {read.state === "failed" ? (
-        <div className="flex flex-col items-start gap-2 px-4 py-3">
+        <div className="flex flex-col items-start gap-2 px-3 py-3">
           <FailureAlert tone="sev" title="Could not load skills" error={read.error} />
           <Button variant="secondary" onClick={() => setAttempt((n) => n + 1)}>
             Try again
@@ -242,7 +244,7 @@ export function SkillsPane() {
             const isOn = on.includes(skill.name);
             const used = uses[skill.name] ?? 0;
             return (
-              <li key={skill.name} className="border-b border-rule px-4 py-2.5" data-skill={skill.name}>
+              <li key={skill.name} className="border-b border-rule px-3 py-2.5" data-skill={skill.name}>
                 <div className="flex items-start gap-3">
                   <div className="min-w-0 flex-1">
                     <p className="flex flex-wrap items-center gap-2">

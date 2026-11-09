@@ -54,6 +54,24 @@ describe("Panel", () => {
     );
     expect(container.querySelector(".card-head")).toBeNull();
   });
+  it("insets its content by default", () => {
+    const { container } = render(<Panel title="Cluster">body</Panel>);
+    expect(container.querySelector(".section-body")?.textContent).toBe("body");
+  });
+
+  it("runs its content to both edges when flush", () => {
+    // A table inside the inset draws its row rules short of the card's edge.
+    const { container } = render(
+      <Panel title="Link forms" flush>
+        <table />
+      </Panel>,
+    );
+    expect(container.querySelector(".section-body")).toBeNull();
+    expect(container.querySelector(".card table")).not.toBeNull();
+    // The head keeps its own inset; only the content runs flush.
+    expect(container.querySelector(".card-head")).not.toBeNull();
+  });
+
   it("renders the title as a section heading", () => {
     // The classic SectionPanel this replaces rendered its title as an h2, and
     // its call sites are real sections of a page — ClusterOverview's among

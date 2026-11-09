@@ -117,6 +117,9 @@ const SECTIONS: ReadonlyArray<{ id: SectionId; label: string; desktopOnly?: true
   { id: "extensions", label: "Apps" },
 ];
 
+/** Panes made of ruled bands, opened by a PaneIntro: they run to the column's edges. The rest are cards on an inset. */
+const UNPADDED = new Set<SectionId>(["extensions", "updates", "clusters", "agent", "skills", "collections", "workspaces"]);
+
 /**
  * Nothing of its own. The four fields every routed screen is handed —
  * `route`, `ported`, `onSwitchToClassic` and `onLocked` — are the only props
@@ -384,7 +387,7 @@ export function Settings({ ported, onSwitchToClassic, onLocked }: SettingsProps)
           // The one Tab stop into the pane's own content, so a reader arrowing
           // to a section can Tab straight into it.
           tabIndex={0}
-          className={`scroll min-h-0 min-w-0 flex-1${active === "extensions" || active === "updates" || active === "clusters" || active === "agent" ? "" : " p-3"}`}
+          className={`scroll min-h-0 min-w-0 flex-1${UNPADDED.has(active) ? "" : " p-3"}`}
         >
           {pane(active)}
           {desktop && updatesOpened && (

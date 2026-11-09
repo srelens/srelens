@@ -1,7 +1,7 @@
 import { ExtensionLogo } from "./ExtensionLogo";
 import { useEffect, useRef, useState } from "react";
 import { isTauri, listExtensionCatalog, reviewCatalogExtension, openExternal, type ErrorDomain, type ExtensionCatalogSnapshot, type ExtensionReview, type InstalledExtension } from "@srelens/core";
-import { Button, EmptyState, FilterBar, LoadingState, useListFilter } from "@srelens/ui-kit";
+import { Button, EmptyState, FilterBar, LoadingState, Toolbar, useListFilter } from "@srelens/ui-kit";
 import { FailureAlert } from "../lib/errorCopy";
 
 export function ExtensionCatalog({ installed, onReview, onReviewStart, autoLoad = false }: {
@@ -38,10 +38,10 @@ export function ExtensionCatalog({ installed, onReview, onReviewStart, autoLoad 
   useEffect(() => { if (autoLoad) load(false); }, [autoLoad]);
   const entries = data?.catalog.extensions.filter(e => [e.name, e.id, e.description].some(filter.matches));
   return <section className="extension-catalog" aria-label="App catalog">
-    <div className="extension-toolbar">
-      <strong>Available apps</strong>
+    <Toolbar>
+      <strong className="toolbar-title mr-auto">Available apps</strong>
       <Button variant="secondary" disabled={busy} onClick={() => load(Boolean(data))}>{data ? "Refresh catalog" : "Browse catalog"}</Button>
-    </div>
+    </Toolbar>
     {data && <FilterBar {...filter} label="Filter apps" placeholder="Filter apps…" />}
     {!data && <p className="extension-message">Discover native apps from the srelens catalog. Each app is maintained in its own repository.</p>}
     {/* `busy` also covers opening a repository and reviewing a release, so the kit's own word. */}
@@ -59,7 +59,8 @@ export function ExtensionCatalog({ installed, onReview, onReviewStart, autoLoad 
         const current = installed.find(p => p.manifest.id === entry.id);
         const incompatible = data.incompatible.includes(entry.id);
         return <article className="extension-installed extension-catalog-entry" aria-label={entry.name} key={entry.id}>
-          <div className="extension-toolbar">
+          {/* A list row, not a strip of controls over content: no Toolbar. */}
+          <div className="flex flex-wrap items-center gap-3 px-3 py-2.5">
             <ExtensionLogo name={entry.name} size={28} />
             <div className="extension-catalog-description">
               <strong>{entry.name}</strong>

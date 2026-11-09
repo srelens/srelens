@@ -28,7 +28,7 @@ import {
 
 import { ExtensionCatalog } from "./ExtensionCatalog";
 import { ServerPolicy } from "./ServerPolicy";
-import { Alert, Button, Checkbox, EmptyState, LoadingState, Tabs, TextArea } from "@srelens/ui-kit";
+import { Alert, Button, Checkbox, EmptyState, LoadingState, PaneIntro, Tabs, TextArea, Toolbar } from "@srelens/ui-kit";
 import { FailureAlert, FailureState } from "../lib/errorCopy";
 import { ExtensionResults } from "./ExtensionResults";
 export { ExtensionResults } from "./ExtensionResults";
@@ -271,17 +271,15 @@ export function ExtensionManager({ show }: { show?: { tab: string } } = {}) {
     : "Executable apps run sandboxed on Windows and on Linux with Landlock and a delegated cgroup. On macOS they use Seatbelt with host-enforced memory and CPU limits.";
   return (
     <div className="extension-manager">
-      <div className="extension-toolbar">
-        <strong>Apps</strong>
-        <Button variant="secondary" onClick={inventory.reload}>
-          Refresh
-        </Button>
-      </div>
-      {!isTauri() && (
-        <p className="extension-message">
-          The apps you install here are yours: everyone who signs in to this server has their own.
-        </p>
-      )}
+      <PaneIntro
+        title="Apps"
+        description={!isTauri() && "The apps you install here are yours: everyone who signs in to this server has their own."}
+        actions={
+          <Button variant="secondary" onClick={inventory.reload}>
+            Refresh
+          </Button>
+        }
+      />
       {state.policy && (
         <ServerPolicy policy={state.policy} plugins={state.plugins}
           openCatalog={() => { setTab("catalog"); setCatalogOpened(true); }} />
@@ -472,12 +470,12 @@ export function ExtensionManager({ show }: { show?: { tab: string } } = {}) {
       {state.plugins.length === 0 && <EmptyState title="No apps installed" />}
       {state.plugins.map((plugin) => (
         <section className="extension-installed" key={plugin.manifest.id}>
-          <div className="extension-toolbar">
+          <Toolbar wrap>
             <ExtensionLogo icon={plugin.icon} name={label(plugin)} size={24} />
-            <strong>{label(plugin)}</strong>
+            <strong className="toolbar-title mr-auto">{label(plugin)}</strong>
             <span>{plugin.manifest.version} · {!plugin.signatureProof ? (plugin.source === "catalog" ? "Unsigned · Catalog" : "Unsigned local") : plainText(extensionSigner(plugin))}</span>
             {required(plugin) && <span>Required by this server</span>}
-            <label>
+            <label className="flex items-center gap-1.5">
               <Checkbox
                 ariaLabel={`Enable ${label(plugin)}`}
                 checked={plugin.enabled}
@@ -518,7 +516,7 @@ export function ExtensionManager({ show }: { show?: { tab: string } } = {}) {
             >
               Remove
             </Button>
-          </div>
+          </Toolbar>
           <p className="extension-message">{plugin.manifest.id}</p>
           {(plugin.quarantined || plugin.policyBlocked) && (
             <Alert tone="warn" title="Disabled">{inactiveReason(plugin)}</Alert>
@@ -640,8 +638,8 @@ export function ExtensionResourceSlot({
   return (
     <section className="extension-installed extension-resource-slot">
       {lookupNotice}
-      <div className="extension-toolbar">
-        <strong>Apps</strong>
+      <Toolbar wrap>
+        <strong className="toolbar-title mr-auto">Apps</strong>
         {links.length > 0 && (
           <details>
             <summary>App links</summary>
@@ -656,7 +654,7 @@ export function ExtensionResourceSlot({
             ))}
           </details>
         )}
-      </div>
+      </Toolbar>
       {panelTabs.length > 0 && (
         <Tabs
           variant="underline"

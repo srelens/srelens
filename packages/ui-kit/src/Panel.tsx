@@ -6,6 +6,12 @@ export interface PanelProps {
   title?: ReactNode;
   /** A line under the title saying what the section holds. */
   description?: ReactNode;
+  /**
+   * Run the content to both edges of the card: for a table or a run of list
+   * rows, whose rules would otherwise stop short of the card's border. Text
+   * beside them takes its own inset, from a `Section`.
+   */
+  flush?: boolean;
   children: ReactNode;
   className?: string;
 }
@@ -22,7 +28,7 @@ export interface PanelProps {
  * kit, the line moved here — so the header appears when there is anything to
  * put in it, which now includes a description standing on its own. (#318)
  */
-export function Panel({ title, description, children, className }: PanelProps) {
+export function Panel({ title, description, flush = false, children, className }: PanelProps) {
   return (
     <section className={cx("card", className)}>
       {(filled(title) || filled(description)) && (
@@ -35,7 +41,7 @@ export function Panel({ title, description, children, className }: PanelProps) {
           {filled(description) && <p className="text-[0.75rem] text-muted">{description}</p>}
         </div>
       )}
-      <div className="section-body">{children}</div>
+      <div className={flush ? undefined : "section-body"}>{children}</div>
     </section>
   );
 }
