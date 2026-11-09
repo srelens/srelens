@@ -605,7 +605,7 @@ it("shows app cards inside an overview and opens their filtered page in its name
   const onCard = vi.fn();
   pick("team");
   render(<Workspace plugin={app} page={app.manifest.contributions.pages[0]} context="staging" onCard={onCard} />);
-  const card = await screen.findByRole("region", { name: "Certificates expiring soon" });
+  const card = await screen.findByRole("article", { name: "Certificates expiring soon" });
   // The region is drawn before its count resolves ("Loading…"); wait for the
   // count rather than reading it the moment the card appears.
   await waitFor(() => expect(card.textContent).toContain("2"));
@@ -616,12 +616,12 @@ it("keeps overview card failures distinct from zero and retries them", async () 
   const app = withCards();
   vi.mocked(resolveDashboardCards).mockRejectedValue(new Error("expiry read timed out"));
   render(<Workspace plugin={app} page={app.manifest.contributions.pages[0]} context="staging" />);
-  const card = await screen.findByRole("region", { name: "Certificates expiring soon" });
-  await waitFor(() => expect(card.getAttribute("data-state")).toBe("error"));
+  const card = await screen.findByRole("article", { name: "Certificates expiring soon" });
+  await waitFor(() => expect(card.parentElement!.getAttribute("data-state")).toBe("error"));
   expect(card.textContent).toContain("expiry read timed out");
   vi.mocked(resolveDashboardCards).mockResolvedValue({ cards: [{ id: "expiring", state: "count", count: 0 }] });
   fireEvent.click(screen.getByRole("button", { name: "Retry Certificates expiring soon" }));
-  await waitFor(() => expect(card.getAttribute("data-state")).toBe("zero"));
+  await waitFor(() => expect(card.parentElement!.getAttribute("data-state")).toBe("zero"));
   expect(card.textContent).toContain("None match");
 });
 it("previews soonest expirations with issuer and status, bounded to the declared list limit", async () => {

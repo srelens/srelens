@@ -29,8 +29,6 @@ describe("one way to draw a failure", () => {
     // A field's own message, under the field: the inputs step (7c) gives fields one.
     "screens/Logs.tsx": 3,
     "extensions/ExtensionSettingsForm.tsx": 1,
-    // A dashboard card's failure: the tiles step (7e) moves cards onto the kit.
-    "extensions/DashboardCards.tsx": 1,
     // A conflict to decide, with Force apply in it: the panels step (7d).
     "screens/Edit.tsx": 1,
   };

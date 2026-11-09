@@ -118,6 +118,17 @@ describe("LogLine", () => {
     expect(cell(container, "trailing")).toBeNull();
   });
 
+  it("lays the fields out as the cells of one row, so a copied line comes out as one line", () => {
+    // A browser copies each item of a flex or grid row onto a line of its own:
+    // the line came out of the clipboard as four lines. Table cells come out
+    // tab-separated on one. (Seen in Chromium; jsdom does no layout, so this
+    // pins the structure and the live run checks the copy.)
+    const { container } = render(<LogLine ts="14:02:11" source="app" level="error" message="x" />);
+    expect(container.querySelector(".logline")?.classList.contains("table")).toBe(true);
+    for (const slot of ["ts", "source", "level", "message"])
+      expect(cell(container, slot).classList.contains("table-cell"), slot).toBe(true);
+  });
+
   it("wears the class the stylesheet hovers", () => {
     const { container } = render(<LogLine ts="14:02:11" message="x" />);
     expect(container.querySelector(".logline")).not.toBeNull();

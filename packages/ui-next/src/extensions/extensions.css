@@ -400,118 +400,25 @@
 .extension-bulk-name[data-expanded="true"] { overflow-x: auto; text-overflow: clip; }
 .extension-bulk-name:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 
-/* Dashboard cards (#540). Flush tiles divided by hairlines, like the capacity
-   strip's `.stat`s: no gap, no radius, no lifted surface. Each wrapped row
-   shares its space, with lists taking more room beside the figures. */
+/* Dashboard cards (#540): the kit's MetricTile, one per cell. Flush tiles divided by
+   hairlines, like the capacity strip's: no gap, no radius, no lifted surface. Each
+   wrapped row shares its space, with lists taking more room beside the figures. */
 .dashboard-cards-band { container-type: inline-size; }
-.dashboard-cards-toolbar {
-  display: flex;
-  align-items: center;
-  justify-content: flex-end;
-  gap: 8px;
-  flex-wrap: wrap;
-  padding: 6px 12px;
-  border-bottom: 1px solid var(--rule, var(--fl-color-border));
-}
-.dashboard-cards-message { display: flex; flex-direction: column; align-items: flex-start; gap: 8px; padding: 10px 12px; }
 .dashboard-cards {
   display: flex;
   flex-wrap: wrap;
 }
-.dashboard-cards > .dashboard-card { flex: 1 1 14rem; }
-.dashboard-cards > .dashboard-card[data-size="m"] { flex: 2 1 28rem; }
-.dashboard-cards > .dashboard-card[data-size="l"] { flex: 4 1 28rem; }
-.dashboard-card {
+.dashboard-cards > .dashboard-tile { flex: 1 1 14rem; }
+.dashboard-cards > .dashboard-tile[data-size="m"] { flex: 2 1 28rem; }
+.dashboard-cards > .dashboard-tile[data-size="l"] { flex: 4 1 28rem; }
+.dashboard-tile {
   display: flex;
-  flex-direction: column;
-  gap: 2px;
   min-width: 0;
-  padding: 0.5rem 0.75rem;
   /* Every tile rules its right and bottom edge; the band clips the outer ones. */
   border-right: 1px solid var(--rule, var(--fl-color-border));
   border-bottom: 1px solid var(--rule, var(--fl-color-border));
 }
-.dashboard-card[data-size="s"] { grid-column: span 1; }
-.dashboard-card[data-size="m"] { grid-column: span 2; }
-.dashboard-card[data-size="l"] { grid-column: 1 / -1; }
-.dashboard-card-head { display: flex; flex-direction: column; min-width: 0; }
-/* App prose, not machine text: it wraps, so the whole of it is readable
-   without a pointer, and a long unbroken word breaks inside the tile. */
-.dashboard-card-app {
-  font-size: 0.6875rem;
-  color: var(--ink-faint, var(--fl-color-text-muted));
-  overflow-wrap: anywhere;
-}
-.dashboard-card-title {
-  margin: 0;
-  font-size: 0.8125rem;
-  font-weight: 500;
-  color: var(--ink-soft, inherit);
-  overflow-wrap: anywhere;
-}
-.dashboard-card-link {
-  display: block;
-  max-width: 100%;
-  padding: 0;
-  border: 0;
-  background: none;
-  text-align: left;
-  color: var(--accent, var(--fl-color-primary));
-  text-decoration: underline;
-  text-underline-offset: 2px;
-  cursor: pointer;
-}
-.dashboard-card-link:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-.dashboard-card-figure {
-  margin: 0.15rem 0 0;
-  font-size: 1.375rem;
-  font-weight: 600;
-  letter-spacing: -0.015em;
-  font-variant-numeric: tabular-nums;
-}
-/* None is an answer, drawn quieter than a count but still a figure. */
-.dashboard-card[data-state="zero"] .dashboard-card-figure { color: var(--ink-muted, var(--fl-color-text-muted)); }
-.dashboard-card-caption {
-  margin: 0;
-  font-size: 0.75rem;
-  color: var(--ink-muted, var(--fl-color-text-muted));
-}
-.dashboard-card-loading {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  margin: 0.4rem 0 0;
-  font-size: 0.75rem;
-  color: var(--ink-muted, var(--fl-color-text-muted));
-}
-/* A failed read: words first, colour second, and never a figure. */
-.dashboard-card-error {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: 4px;
-  margin-top: 0.25rem;
-  font-size: 0.75rem;
-}
-.dashboard-card-error p { margin: 0; }
-.dashboard-card-error strong { color: var(--sev, var(--fl-color-danger)); }
-.dashboard-card-statuses,
-.dashboard-card-rows {
-  margin: 0.25rem 0 0;
-  padding: 0;
-  list-style: none;
-  font-size: 0.75rem;
-}
-.dashboard-card-statuses li { display: flex; justify-content: space-between; gap: 8px; }
-/* Machine text keeps its line and scrolls rather than wrapping. */
-.dashboard-card-row {
-  display: flex;
-  gap: 8px;
-  justify-content: space-between;
-  white-space: nowrap;
-  overflow-x: auto;
-}
-.dashboard-card-row-value { color: var(--ink-muted, var(--fl-color-text-muted)); font-variant-numeric: tabular-nums; }
+.dashboard-tile > .stat { flex: 1; min-width: 0; border-left: 0; }
 
 /* A dashboard card's target page says what it is narrowed to. */
 .extension-card-filter {
@@ -573,24 +480,7 @@
 }
 .extension-settings-saved { color: var(--ink-muted, var(--fl-color-text-muted)); }
 
-/* Live app views (#566). The word says the state; the dot only repeats it. */
-.extension-live {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  color: var(--ink-muted, var(--fl-color-text-muted));
-  font-size: var(--text-body, 0.8125rem);
-  white-space: nowrap;
-}
-.extension-live-dot {
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  background: var(--ink-faint, var(--fl-color-text-muted));
-}
-.extension-live[data-live="live"] .extension-live-dot { background: var(--ok, var(--fl-color-success)); }
-.extension-live[data-live="reconnecting"] .extension-live-dot { background: var(--warn, var(--fl-color-warning)); }
-.extension-live[data-live="reconnecting"] { color: var(--warn, var(--fl-color-warning)); }
+/* Live app views (#566): the kit's LiveSignal, beside a picker. */
 .extension-live-row {
   display: flex;
   justify-content: flex-end;
@@ -769,8 +659,10 @@
 .extension-inspector-table code { font-family: var(--font-mono); }
 .extension-log-levels { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; }
 .extension-log-levels > span { margin-right: 4px; color: var(--ink-muted, var(--fl-color-text-muted)); }
-/* An app's log is machine text: each line runs on and the region scrolls both ways on
-   its own, flush with the Details' edges and divided from them by hairlines. */
+/* An app's log, in the kit's log lines. A message is machine text: each line stays whole,
+   spaces and all, and the region scrolls sideways, as the built-in Logs do until Wrap is
+   pressed. The region scrolls on its own, flush with the Details' edges and divided from
+   them by hairlines. */
 .extension-app-log {
   max-height: 24rem;
   margin: 0 -12px;
@@ -787,17 +679,6 @@
   outline: 2px solid var(--accent, var(--fl-color-primary));
   outline-offset: -2px;
 }
-.extension-app-log-line { width: max-content; min-width: 100%; padding: 1px 12px; }
-.extension-app-log-line:hover { background: var(--field, var(--fl-color-surface-alt)); }
-.extension-log-time,
-.extension-log-source { color: var(--ink-muted, var(--fl-color-text-muted)); }
-.extension-log-level { display: inline-block; min-width: 5ch; }
-.extension-log-source { display: inline-block; min-width: 7ch; }
-/* The level is a word on the line; its tint only helps. */
-.extension-log-level[data-level="error"] { color: var(--sev, var(--fl-color-danger)); font-weight: 600; }
-.extension-log-level[data-level="warn"] { color: var(--warn, var(--fl-color-warning)); }
-.extension-log-level[data-level="trace"],
-.extension-log-level[data-level="debug"] { color: var(--ink-muted, var(--fl-color-text-muted)); }
 
 /* Metric and trace providers (#569): the kit's section, flush, its range and Refresh a
    toolbar under the title, then a panel per provider that says which app asked for it. */
@@ -811,14 +692,13 @@
 .extension-overview { flex: 0 0 auto; display: grid; grid-template-columns: repeat(3,minmax(0,1fr)); min-width: 0; container-type: inline-size; }
 .extension-overview > .extension-summary { order: 4; border-bottom: 1px solid var(--rule, var(--fl-color-border)); }
 .extension-overview > .extension-summary:first-child { order: 0; grid-column: span 2; }
-.extension-overview > .dashboard-card { order: 1; padding: 20px 24px; }
-.extension-overview > .dashboard-card[data-size="l"] { grid-column: 1 / -1; order: 3; }
-.extension-overview > .dashboard-card[data-size="m"] { grid-column: span 2; }
+.extension-overview > .dashboard-tile { order: 1; }
+.extension-overview > .dashboard-tile[data-size="l"] { grid-column: 1 / -1; order: 3; }
+.extension-overview > .dashboard-tile[data-size="m"] { grid-column: span 2; }
 .extension-overview .extension-summary-body { display: flex; gap: 24px; align-items: center; justify-content: center; padding-top: 12px; }
 .extension-overview .extension-summary ul, .extension-overview .extension-donut { margin: 0; }
 .extension-overview .extension-summary:not(:first-child) .extension-donut { width: 64px; height: 64px; flex-shrink: 0; }
 .extension-overview .extension-summary:not(:first-child) .extension-donut > span { width: 54px; height: 54px; font-size: 18px; }
-.extension-overview .dashboard-card-figure { font-size: 48px; margin-top: 16px; }
 .extension-overview-live { order: 2; grid-column: 1 / -1; padding: 6px 12px; border-bottom: 1px solid var(--rule, var(--fl-color-border)); }
 .extension-overview-list { order: 3; grid-column: 1 / -1; min-width: 0; border-bottom: 1px solid var(--rule, var(--fl-color-border)); }
 .extension-overview-list .extension-results { min-height: 160px; max-height: 340px; }
@@ -827,6 +707,6 @@
 }
 @container (max-width: 900px) {
   .extension-overview { grid-template-columns: minmax(0,1fr); }
-  .extension-overview > .extension-summary:first-child, .extension-overview > .dashboard-card[data-size] { grid-column: 1; }
+  .extension-overview > .extension-summary:first-child, .extension-overview > .dashboard-tile[data-size] { grid-column: 1; }
   .extension-overview .extension-summary-body { flex-wrap: nowrap; }
 }

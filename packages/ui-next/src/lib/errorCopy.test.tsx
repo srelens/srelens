@@ -205,6 +205,13 @@ describe("FailureAlert", () => {
     expect(line?.className).toContain("mt-2");
   });
 
+  it("names Retry for what it reads again, where several sit side by side", () => {
+    // A row of app cards that each failed: "Retry, Retry, Retry" out of context
+    // says nothing about which one.
+    render(<FailureAlert title="Couldn’t read" error={API_401} onRetry={() => {}} retryLabel="Retry Expiring" />);
+    expect(screen.getByRole("button", { name: "Retry Expiring" }).textContent).toBe("Retry");
+  });
+
   it("offers no button when there is not", () => {
     render(<FailureAlert title="These pods are stale" error={API_401} />);
     expect(screen.queryByRole("button", { name: "Retry" })).toBeNull();
