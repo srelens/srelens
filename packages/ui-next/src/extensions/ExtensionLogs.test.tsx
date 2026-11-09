@@ -287,3 +287,16 @@ it("follows new lines while the reader is at the bottom, and stays put once they
   await wait(2000);
   expect(region.scrollTop).toBe(120);
 });
+
+// A log message is machine text (#1047 review): a JSON payload wrapped through the
+// kit's `break-all` cell hid the lines around it, and a stack trace lost its
+// indentation on screen and in the copy. The region keeps each line whole and
+// scrolls sideways, as the built-in Logs do until Wrap is pressed.
+it("keeps each app log line whole, spaces and all, and scrolls the region sideways", async () => {
+  const { readFileSync } = await import("node:fs");
+  const { join } = await import("node:path");
+  const css = readFileSync(join(__dirname, "extensions.css"), "utf8").replace(/\/\*[\s\S]*?\*\//g, "");
+  const body = css.match(/\.extension-app-log\s*\{([^}]*)\}/)?.[1];
+  expect(body).toMatch(/white-space:\s*pre;/);
+  expect(body).toMatch(/overflow:\s*auto;/);
+});

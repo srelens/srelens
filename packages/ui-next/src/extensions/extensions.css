@@ -659,9 +659,10 @@
 .extension-inspector-table code { font-family: var(--font-mono); }
 .extension-log-levels { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; }
 .extension-log-levels > span { margin-right: 4px; color: var(--ink-muted, var(--fl-color-text-muted)); }
-/* An app's log, in the kit's log lines: a long message wraps in its own column, as in
-   the built-in logs. The region scrolls on its own, flush with the Details' edges and
-   divided from them by hairlines. */
+/* An app's log, in the kit's log lines. A message is machine text: each line stays whole,
+   spaces and all, and the region scrolls sideways, as the built-in Logs do until Wrap is
+   pressed. The region scrolls on its own, flush with the Details' edges and divided from
+   them by hairlines. */
 .extension-app-log {
   max-height: 24rem;
   margin: 0 -12px;
@@ -672,6 +673,7 @@
   background: var(--surface-sunk, var(--fl-color-surface-alt));
   font-family: var(--font-mono, ui-monospace, monospace);
   font-size: 0.75rem;
+  white-space: pre;
 }
 .extension-app-log:focus-visible {
   outline: 2px solid var(--accent, var(--fl-color-primary));
