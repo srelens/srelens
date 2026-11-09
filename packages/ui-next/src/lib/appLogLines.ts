@@ -72,9 +72,14 @@ export function logLineLevel(line: string): Level {
  *
  * Blank lines are dropped — a trailing newline is not an entry — but anything
  * with text on it survives, prefix or no prefix.
+ *
+ * A line with no prefix at all continues the entry above it (a backtrace, a
+ * multi-line error), so it takes that entry's level, and a level filter keeps
+ * the entry whole (#1055). Before any entry, it reads INFO.
  */
 export function parseAppLog(raw: string): AppLogLine[] {
   if (!raw) return [];
+  let entryLevel: Level = "INFO";
   return raw
     .split("\n")
     .filter((line) => line.trim() !== "")
@@ -89,10 +94,11 @@ export function parseAppLog(raw: string): AppLogLine[] {
       // Only the one space the logger writes after the prefix goes. Any other
       // leading whitespace is the message's own, like a backtrace's indent (#1053).
       const message = from > 0 ? line.slice(from).replace(/^ /, "") : line;
+      if (level || ts) entryLevel = (level?.[1] as Level) ?? "INFO";
       return {
         ts: ts ? ts[2] : "",
         source: source ? source[1] : "",
-        level: (level?.[1] as Level) ?? "INFO",
+        level: entryLevel,
         message: message.trimEnd(),
         raw: line,
       };
