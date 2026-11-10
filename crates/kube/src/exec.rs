@@ -237,28 +237,35 @@ mod tests {
     /// programs are fakes of `shells`, each printing `picked-<name>`. What
     /// `/bin/sh` itself runs comes from stdin, so staying in sh prints
     /// `picked-sh`.
+    ///
+    /// Two races made this flaky (#1067):
+    /// - Stdin is a file, not a pipe: the fakes exit without reading it, and a
+    ///   write into a pipe nobody reads any more fails with `EPIPE`.
+    /// - A child writes the fakes, never this process: Linux will not exec a
+    ///   file still open for writing, and a sibling test that forks while
+    ///   this process holds one open keeps that fd until it execs, so sh's
+    ///   `exec` fails with `ETXTBSY` (rust-lang/rust#114554).
     #[cfg(unix)]
     fn picked(macos: bool, shells: &[&str]) -> String {
-        use std::io::Write;
-        use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().unwrap();
-        for shell in shells {
-            let fake = dir.path().join(shell);
-            std::fs::write(&fake, format!("#!/bin/sh\necho picked-{shell}\n")).unwrap();
-            std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
+        let wrote = std::process::Command::new("/bin/sh")
+            .args(["-c", r#"set -e; for s; do printf '#!/bin/sh\necho picked-%s\n' "$s" > "$s"; chmod 755 "$s"; done"#, "sh"])
+            .args(shells)
+            .current_dir(dir.path())
+            .status()
+            .unwrap();
+        assert!(wrote.success());
+        let stdin = dir.path().join("stdin");
+        std::fs::write(&stdin, "echo picked-sh\n").unwrap();
         let cmd = interactive_shell(macos);
-        let mut child = std::process::Command::new(&cmd[0])
+        let out = std::process::Command::new(&cmd[0])
             .args(&cmd[1..])
             .env_clear()
             .env("PATH", dir.path())
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::piped())
-            .spawn()
+            .stdin(std::fs::File::open(&stdin).unwrap())
+            .output()
             .unwrap();
-        child.stdin.take().unwrap().write_all(b"echo picked-sh\n").unwrap();
-        let out = String::from_utf8(child.wait_with_output().unwrap().stdout).unwrap();
-        out.trim_end().to_string()
+        String::from_utf8(out.stdout).unwrap().trim_end().to_string()
     }
 
     #[cfg(unix)]
