@@ -972,15 +972,18 @@
 
   .section-body { padding: 0.6rem; }
 
-  /* key/value rows: fixed label column, values left-aligned beside it */
+  /* key/value rows: fixed label column, values left-aligned beside it.
+     A third of the pane, capped at 9rem: past ~420px a third is wider than any
+     label needs, and at a 700px peek it held the values ~240px from their
+     labels (#1070). Below that the cap never bites. */
   .kv {
     display: grid;
-    grid-template-columns: minmax(88px, 34%) 1fr;
+    grid-template-columns: minmax(88px, min(34%, 9rem)) 1fr;
     align-items: baseline;
     gap: 0 0.75rem;
     padding: 0.22rem 0;
   }
-  /* The key column is a `minmax(88px, 34%)` track, so its max is fixed and the
+  /* The key column is a `minmax(88px, min(34%, 9rem))` track, so its max is fixed and the
      track never grows to fit an outsized key. Without `min-width: 0` the grid
      item's automatic minimum is its min-content size, and a long key painted
      straight through the value column and out past the right edge of its

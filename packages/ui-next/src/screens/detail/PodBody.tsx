@@ -171,8 +171,10 @@ export const podFacts: FactsFor = (input) => {
   if (reason) facts.push({ label: "Reason", value: reason });
   if (message) facts.push({ label: "Message", value: message });
   if (nodeName) facts.push({ label: "Node", value: <NodeLink name={nodeName} />, mono: true });
-  if (podIP) facts.push({ label: "Pod IP", value: podIP, mono: true });
-  if (podIPs.length > 0) facts.push({ label: "Pod IPs", value: <StringList items={podIPs} /> });
+  // One fact either way: `podIPs` repeats `podIP` as its first entry, so a
+  // single-stack pod printed its address twice under two labels (#1070).
+  if (podIPs.length > 1) facts.push({ label: "Pod IPs", value: <StringList items={podIPs} /> });
+  else if (podIP || podIPs[0]) facts.push({ label: "Pod IP", value: podIP || podIPs[0], mono: true });
   if (qosClass) facts.push({ label: "QoS class", value: qosClass });
   if (serviceAccountName) facts.push({ label: "Service account", value: serviceAccountName, mono: true });
   if (priorityClassName) facts.push({ label: "Priority class", value: priorityClassName, mono: true });
@@ -197,32 +199,34 @@ export const podFacts: FactsFor = (input) => {
 
 /**
  * Where and how the pod is placed — classic's "Scheduling" section, shown
- * only when there is something to say (a node, a selector, an affinity rule
- * or a toleration), same as classic's `hasScheduling` gate.
+ * only when there is something to say: a selector, an affinity rule or a
+ * toleration.
+ *
+ * Not the node. That is one of the pod's own facts, drawn above this, and the
+ * pane used to say it twice (#1070). What stays here is its absence: a pod with
+ * no node has no Node fact, and "Not scheduled" is the answer to where it was
+ * placed.
  */
 function SchedulingSection({ object }: { object: K8sObject }) {
   const spec = asRecord(object.spec);
   const nodeSelector = (spec.nodeSelector ?? {}) as Record<string, string>;
   const affinityLines = summarizeAffinity(asRecord(spec.affinity));
   const tolerations = asArray(spec.tolerations);
-  const hasScheduling =
-    !!spec.nodeName || Object.keys(nodeSelector).length > 0 || affinityLines.length > 0 || tolerations.length > 0;
+  const hasScheduling = Object.keys(nodeSelector).length > 0 || affinityLines.length > 0 || tolerations.length > 0;
 
   if (!hasScheduling) return null;
 
   return (
     <Section title="Scheduling">
-      <KV
-        k="Node"
-        v={spec.nodeName ? <NodeLink name={str(spec.nodeName)} /> : "Not scheduled"}
-        mono={!!spec.nodeName}
-      />
+      {!spec.nodeName && <KV k="Node" v="Not scheduled" />}
       {Object.keys(nodeSelector).length > 0 && (
         <KV k="Node selector" v={<PairList pairs={Object.entries(nodeSelector)} breakValues />} />
       )}
       {affinityLines.length > 0 && <KV k="Affinity" v={<StringList items={affinityLines} />} />}
+      {/* Machine text: one line each, scrolled rather than broken mid-clause
+          (AGENTS.md, #1070). */}
       {tolerations.length > 0 && (
-        <KV k="Tolerations" v={<StringList items={tolerations.map(tolerationText)} />} />
+        <KV k="Tolerations" v={<StringList items={tolerations.map(tolerationText)} />} wrap={false} />
       )}
     </Section>
   );

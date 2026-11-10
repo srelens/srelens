@@ -55,9 +55,22 @@ describe("ConditionsSection", () => {
     expect(screen.getByText("True · ReplicaSetUpdated")).toBeDefined();
   });
 
-  it("stands an em dash in for a condition that reports no reason", () => {
-    render(<ConditionsSection conditions={DEPLOYMENT_CONDITIONS} />);
-    expect(screen.getByText("False · —")).toBeDefined();
+  it("reads a condition that reports no reason as its status alone (#1070)", () => {
+    // It used to read "False · —". On a healthy pod that was five rows of
+    // "True · —": a dash standing in for nothing, beside a word that was
+    // already the whole answer.
+    const { container } = render(<ConditionsSection conditions={DEPLOYMENT_CONDITIONS} />);
+    expect(screen.getByText("False")).toBeDefined();
+    expect(container.textContent).not.toContain("—");
+  });
+
+  it("prints nothing beside a condition with neither a status nor a reason (#1070)", () => {
+    // Argo CD's shape, with only a message: the name and the message say it.
+    const { container } = render(
+      <ConditionsSection conditions={[{ type: "ComparisonError", message: "repository not found" } as unknown as Condition]} />,
+    );
+    expect(screen.getByText("repository not found")).toBeDefined();
+    expect(container.textContent).not.toContain("—");
   });
 
   it("prints a condition's message under its status and reason (#919)", () => {
@@ -124,7 +137,7 @@ describe("ConditionsSection", () => {
     );
     expect(container.querySelectorAll("li")).toHaveLength(2);
     expect(container.textContent).not.toContain("[object Object]");
-    expect(screen.getByText("False · —")).toBeDefined();
+    expect(screen.getByText("False")).toBeDefined();
   });
 
   it("renders two conditions of one type without a key clash", () => {
@@ -165,7 +178,7 @@ describe("ConditionsSection", () => {
     //
     //   (danger)  Available       False · MinimumReplicasUnavailable   red name
     //   (warn)    Progressing     True  · ReplicaSetUpdated            amber name
-    //   (ok)      ReplicaFailure  False · —                            plain name
+    //   (ok)      ReplicaFailure  False                                plain name
     //
     // Every tone is core's `conditionKindWithReason`; this section keeps no
     // second heuristic, which is why the two bugs the frame exposed could be
@@ -223,7 +236,7 @@ describe("ConditionsSection", () => {
     );
     expect(screen.getByText("Initialized")).toBeDefined();
     expect(screen.getByText("Ready")).toBeDefined();
-    expect(screen.getAllByText("True · —")).toHaveLength(2);
+    expect(screen.getAllByText("True")).toHaveLength(2);
   });
 });
 

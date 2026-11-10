@@ -106,8 +106,10 @@ export interface ConditionsSectionProps {
  * rule applies here.
  *
  * The status and reason read as one value, `False · MinimumReplicasUnavailable`,
- * with an em dash standing in when there is no reason — an empty half of a
- * two-part value reads as a rendering fault. A condition's message, when it
+ * and a condition with no reason reads its status alone. An em dash used to
+ * stand in for the missing half, on the grounds that an empty half reads as a
+ * rendering fault — but with no separator there is no half, and on a healthy
+ * pod it made five rows of `True · —` (#1070). A condition's message, when it
  * has one, reads beneath that in the content's own ink: an operator puts its useful words
  * there ("ComparisonError: repository not found"), and a custom resource's
  * conditions are often all a reader gets of its state (#919).
@@ -139,7 +141,8 @@ export function ConditionsSection({ conditions }: ConditionsSectionProps) {
           const hasStatus = typeof condition.status === "string";
           // Text or nothing, like the message: an operator's object here would
           // take the window down, or read "[object Object]" (#940).
-          const reason = typeof condition.reason === "string" && condition.reason ? condition.reason : "—";
+          const reason = typeof condition.reason === "string" ? condition.reason : "";
+          const said = [hasStatus ? condition.status : "", reason].filter(Boolean).join(" · ");
           return (
             // Positional: an operator may report one type twice.
             <li key={`${index}:${condition.type}`} className="[overflow-wrap:anywhere]">
@@ -149,7 +152,7 @@ export function ConditionsSection({ conditions }: ConditionsSectionProps) {
                   kind={conditionKindWithReason(hasStatus ? condition : { ...condition, status: "Unknown" })}
                   tinted
                 />
-                <span>{hasStatus ? `${condition.status} · ${reason}` : reason}</span>
+                {said && <span>{said}</span>}
               </div>
               {typeof condition.message === "string" && condition.message && (
                 <span data-slot="condition-message" className="block text-ink">
