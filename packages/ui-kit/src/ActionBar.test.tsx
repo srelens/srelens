@@ -580,4 +580,24 @@ describe("ActionBar — drawn as icons", () => {
     });
     expect(screen.getByRole("button", { name: "Copied" })).toBeDefined();
   });
+
+  // The worded bar's text says "… failed"; an icon has no text, and a name or
+  // a tooltip the reader has to hover again for is a silent failure. So the
+  // glyph itself changes, and takes the danger tone. (#1073 review)
+  it("shows a failed copy on the icon itself, not only in its name", async () => {
+    render(
+      <ActionBar
+        label="Pod actions"
+        iconOnly
+        actions={[action("Copy as kubectl", { icon: Glyph, confirmLabel: "Copied", onSelect: () => Promise.resolve(false) })]}
+      />,
+    );
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Copy as kubectl" }));
+    });
+    const failed = screen.getByRole("button", { name: "Copy as kubectl failed" });
+    expect(failed.querySelector('[data-glyph="failed"]')).not.toBeNull();
+    expect(screen.queryByTestId("glyph")).toBeNull();
+    expect(failed.style.color).toBe("var(--sev)");
+  });
 });

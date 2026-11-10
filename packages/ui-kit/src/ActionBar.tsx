@@ -205,6 +205,16 @@ function CheckGlyph() {
   );
 }
 
+/* An X: what an icon-only action shows when its confirmation failed. Inline
+   for the same reason as the check. */
+function FailGlyph() {
+  return (
+    <svg data-glyph="failed" width="12" height="12" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+      <path d="M18 6 6 18M6 6l12 12" stroke="currentColor" strokeWidth="3" strokeLinecap="round" />
+    </svg>
+  );
+}
+
 /**
  * One action on the bar.
  *
@@ -233,16 +243,19 @@ function BarButton({ action: a, iconOnly }: { action: ActionBarAction; iconOnly:
   if (iconOnly && Icon) {
     // The word is the name and the tooltip, and tracks the confirmation the
     // same way the worded button's text does. A blocked action's tooltip is
-    // its reason instead, as on the worded bar.
+    // its reason instead, as on the worded bar. An icon has no text to say
+    // "failed" in, so a failure swaps the glyph and takes the danger tone:
+    // a name the reader must hover again for is a silent failure. (#1073)
     const word = actionWord(a, state);
+    const failing = filled(a.confirmLabel) && state === "failed";
     return (
       <span className="action-slot">
         <Tooltip label={reason ?? word}>
           <IconButton
-            icon={confirming ? CheckGlyph : Icon}
+            icon={confirming ? CheckGlyph : failing ? FailGlyph : Icon}
             label={word}
             title={null}
-            danger={a.danger}
+            danger={a.danger || failing}
             aria-disabled={blocked || undefined}
             aria-describedby={blocked ? reasonId : undefined}
             className="aria-disabled:cursor-not-allowed aria-disabled:opacity-50"
