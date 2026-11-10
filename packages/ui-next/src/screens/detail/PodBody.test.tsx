@@ -401,14 +401,14 @@ describe("PodDetailsBody", () => {
   describe("the pod's facts, which each screen lays out itself", () => {
     it("leads with the identity every kind leads with, and heads it with nothing", () => {
       // Created, Controlled by, then the pod's own. The extras srelens shows
-      // beyond the design frame sit beside their own kin (Pod IPs after Pod
-      // IP, Last restart after Restarts) rather than at the end.
+      // beyond the design frame sit beside their own kin (Last restart after
+      // Restarts) rather than at the end. A dual-stack pod's addresses are
+      // one fact, not the first address and then all of them (#1070).
       const { container } = renderFacts(FULL_POD);
       expect(factLabels(container)).toEqual([
         "Created",
         "Controlled by",
         "Node",
-        "Pod IP",
         "Pod IPs",
         "QoS class",
         "Service account",
@@ -421,6 +421,24 @@ describe("PodDetailsBody", () => {
       // No heading over the first block: the pane's header has already said
       // which pod this is.
       expect(screen.queryByRole("heading", { name: "Properties" })).toBeNull();
+    });
+
+    it("gives a single-stack pod's address once, as Pod IP (#1070)", () => {
+      // `status.podIPs` always holds `status.podIP` as its first entry, so on
+      // the ordinary pod the two facts printed one address twice.
+      const { container } = renderFacts(
+        pod({}, { podIP: "10.0.0.5", podIPs: [{ ip: "10.0.0.5" }] }, { name: "web-1" }),
+      );
+      expect(factLabels(container)).toContain("Pod IP");
+      expect(factLabels(container)).not.toContain("Pod IPs");
+      expect(screen.getAllByText("10.0.0.5")).toHaveLength(1);
+    });
+
+    it("lists every address of a dual-stack pod under Pod IPs, each once (#1070)", () => {
+      const { container } = renderFacts(FULL_POD);
+      expect(factLabels(container)).not.toContain("Pod IP");
+      expect(screen.getAllByText("10.0.0.5")).toHaveLength(1);
+      expect(screen.getAllByText("fd00::5")).toHaveLength(1);
     });
 
     it("shows the pod's image, which used to live only on the Containers pane", () => {
@@ -568,9 +586,10 @@ describe("PodDetailsBody", () => {
         "ContainersReady",
         "Ready",
       ]);
-      // The shared block's form: status and reason as one value, no
-      // last-transition column.
-      expect(screen.getAllByText("True · —")).toHaveLength(4);
+      // The shared block's form: the status, and its reason when it has one;
+      // no last-transition column. A pod's lifecycle conditions carry no
+      // reason, so each reads its status alone (#1070).
+      expect(screen.getAllByText("True")).toHaveLength(4);
     });
 
     it("omits the Conditions block when the pod reports none", () => {
@@ -594,10 +613,9 @@ describe("PodDetailsBody", () => {
       );
       render(<PodDetailsBody object={scheduled} />);
       expect(screen.getByRole("heading", { name: "Scheduling" })).toBeDefined();
-      // Once here. The node is also one of the pod's own facts, which the
-      // screen draws above this — the same duplication classic has, now
-      // asserted where each half lives.
-      expect(screen.getAllByText("node-b")).toHaveLength(1);
+      // Not here at all: the node is one of the pod's own facts, which the
+      // screen draws above this, and the pane said it twice (#1070).
+      expect(screen.queryByText("node-b")).toBeNull();
       expect(podFacts({ kind: "Pod", object: scheduled }).map((f) => f.label)).toContain("Node");
       expect(screen.getByText("disktype=")).toBeDefined();
       expect(screen.getByText("ssd")).toBeDefined();
@@ -631,8 +649,9 @@ describe("PodDetailsBody", () => {
         store.setState(defaultState([]));
       });
 
-      it("makes the node under Scheduling the way to that node", async () => {
-        render(<PodDetailsBody object={scheduled()} />);
+      it("makes the pod's Node fact the way to that node", async () => {
+        const fact = podFacts({ kind: "Pod", object: scheduled() }).find((f) => f.label === "Node")!;
+        render(<>{fact.value}</>);
         await userEvent.click(screen.getByRole("button", { name: "Open node node-b" }));
 
         const tab = store.currentWorkspace().tabs.find((t) => t.route === detailRoute("Node", null, "node-b", { cluster: "prod-eu" }));
@@ -660,6 +679,37 @@ describe("PodDetailsBody", () => {
 
     it("omits the Scheduling block when the pod has no placement info", () => {
       render(<PodDetailsBody object={pod({}, {}, { name: "web-3" })} />);
+      expect(screen.queryByText("Scheduling")).toBeNull();
+    });
+
+    it("keeps each toleration on one line and scrolls it, as machine text (#1070)", () => {
+      // "node.kubernetes.io/not-ready exists → NoExecute for" / "300s" broke a
+      // clause in half in the value column. AGENTS.md: long machine text does
+      // not wrap. Every pod carries this pair, added by the API server.
+      render(
+        <PodDetailsBody
+          object={pod(
+            {
+              tolerations: [
+                { key: "node.kubernetes.io/not-ready", operator: "Exists", effect: "NoExecute", tolerationSeconds: 300 },
+                { key: "node.kubernetes.io/unreachable", operator: "Exists", effect: "NoExecute", tolerationSeconds: 300 },
+              ],
+            },
+            {},
+            { name: "web-5" },
+          )}
+        />,
+      );
+      const value = screen.getByText("Tolerations").closest("dl")!.querySelector("dd")!;
+      expect(value.className).toContain("whitespace-pre");
+      expect(value.className).toContain("overflow-x-auto");
+      expect(screen.getByText("node.kubernetes.io/not-ready exists → NoExecute for 300s")).toBeDefined();
+    });
+
+    it("omits the Scheduling block when its node is all it would say (#1070)", () => {
+      // The node is a lead fact; a block repeating it and nothing else is the
+      // duplicate this removed.
+      render(<PodDetailsBody object={pod({ nodeName: "node-b" }, {}, { name: "web-4" })} />);
       expect(screen.queryByText("Scheduling")).toBeNull();
     });
 

@@ -177,6 +177,19 @@ describe("the key column's rules", () => {
     expect(body).toContain("overflow: hidden");
   });
 
+  it("caps the key column, so a wide pane does not hold its values a third of the way across", () => {
+    // A third of the pane is right at 352px (about 120px) and wrong at the
+    // ~700px a reader drags the peek to: the column grew to ~240px, and Pod
+    // facts sat across a gap from their labels while a toleration broke onto a
+    // second line for want of the width the labels were not using (#1070).
+    // 9rem is under a third at every width past ~420px and over it below, so
+    // a narrow pane keeps exactly the column it had.
+    const rule = components.slice(components.indexOf("  .kv {"));
+    expect(rule.slice(0, rule.indexOf("}"))).toContain(
+      "grid-template-columns: minmax(88px, min(34%, 9rem)) 1fr;",
+    );
+  });
+
   it("sets a code value at the size of any other value", () => {
     // Identifiers were the smallest text in the pane: 11px beside 12px.
     expect(components).not.toMatch(/\.kv-v\.code\s*\{/);
