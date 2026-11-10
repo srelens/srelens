@@ -306,7 +306,7 @@ export interface DetailSubject {
   /** The kind's own row actions and extra panes, or `undefined` for a CRD. */
   descriptor: ReturnType<typeof descriptorFor>;
   /** Core's one verdict on this subject — the peek's status line and the
-   *  tab's metric strip are two renderings of it, never two readings. */
+   *  metric strip's Ready tile are two renderings of it, never two readings. */
   statusLine: ResourceStatusLine | null;
   /** Whether this kind's descriptor offers containers, and metrics. What each
    *  screen DOES with that differs: the peek gives containers a tab, the tab

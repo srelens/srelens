@@ -51,6 +51,7 @@ vi.mock("../../extensions/ExtensionProviderSlot", () => ({
 
 import { ConsoleProvider } from "../../console";
 import { loadSectionFolds, setSectionOpen } from "../../lib/sectionFolds";
+import { __resetUsageHistoryForTests } from "../../lib/usageHistory";
 import { detailFacts } from "./detailData";
 import { ResourceTabView } from "./ResourceTabView";
 
@@ -166,6 +167,8 @@ describe("ResourceTabView — the full tab the design draws", () => {
     listEvents.mockResolvedValue({ events: [] });
     listCrds.mockResolvedValue({ crds: [] });
     podMetrics.mockResolvedValue({ metrics: [] });
+    // The usage history outlives a render, as it outlives a screen.
+    __resetUsageHistoryForTests();
     podsForSelector.mockResolvedValue({ pods: [] });
     descriptorFor.mockReturnValue(podDescriptor());
     // The fold memory is a module-level store, so a block one test opens
@@ -412,7 +415,7 @@ describe("ResourceTabView — the full tab the design draws", () => {
       expect(strip[4].value).toBe("211d");
     });
 
-    it("shows the usage the metrics server reports, and says what each figure is", async () => {
+    it("shows the usage the metrics server reports, against the pod's limits, with a graph of each (#1074)", async () => {
       podMetrics.mockResolvedValue({
         metrics: [{ name: "cart-session-store-1", cpuMillicores: 101, memoryMiB: 962 }] as PodMetric[],
       });
@@ -420,8 +423,12 @@ describe("ResourceTabView — the full tab the design draws", () => {
       await waitFor(() => expect(tiles()[2].value).not.toBe("—"));
       const strip = tiles();
       expect(strip[2].value).toBe("101m");
-      expect(strip[2].caption).toBe("current");
-      expect(strip[3].caption).toBe("working set");
+      // 101m of 2 + 0.2 cores, and 962 Mi of 1 Gi + 256 Mi: both containers set
+      // both limits, so the pod has a whole ceiling for each.
+      expect(strip[2].caption).toBe("5% of limit");
+      expect(strip[3].caption).toBe("75% of limit");
+      const graphs = Array.from(document.querySelectorAll("[data-slot='metric-strip'] .stat svg"));
+      expect(graphs.map((g) => g.getAttribute("aria-label"))).toEqual(["CPU", "Memory"]);
     });
 
     it("omits the usage tiles rather than drawing em dashes when nothing reports any", async () => {

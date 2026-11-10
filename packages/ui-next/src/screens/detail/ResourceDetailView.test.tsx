@@ -1,8 +1,8 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { createElement, useLayoutEffect, type ReactElement, type ReactNode } from "react";
 import { render as renderBare, screen, waitFor, within, type RenderOptions } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import type { CrdRef, EventSummary, K8sObject } from "@srelens/core";
+import type { CrdRef, EventSummary, K8sObject, PodMetric } from "@srelens/core";
 import { toneColor } from "@srelens/ui-kit";
 import type { KindDescriptor, ListRow } from "../../lib/kinds/types";
 
@@ -12,7 +12,7 @@ import type { KindDescriptor, ListRow } from "../../lib/kinds/types";
 // manifest. All four are core's, mocked here so a test controls what "the
 // cluster said" without one — `importOriginal` keeps everything else
 // (K8S_KIND, and the real types) intact.
-const { getObject, getManifest, listEvents, listCrds, deleteResource, podsOnNode } = vi.hoisted(() => ({
+const { getObject, getManifest, listEvents, listCrds, deleteResource, podsOnNode, podMetrics } = vi.hoisted(() => ({
   getObject: vi.fn(async (): Promise<{ object?: K8sObject; error?: string }> => ({})),
   getManifest: vi.fn(async (): Promise<{ yaml?: string; error?: string }> => ({ yaml: "" })),
   listEvents: vi.fn(async (): Promise<{ events?: EventSummary[]; truncated?: boolean; error?: string }> => ({ events: [] })),
@@ -21,6 +21,9 @@ const { getObject, getManifest, listEvents, listCrds, deleteResource, podsOnNode
   // for is mocked here too — a confirm that is never taken must reach nothing.
   deleteResource: vi.fn(async (): Promise<{ error?: string }> => ({})),
   podsOnNode: vi.fn(async () => ({ pods: [] })),
+  // The CPU and Memory tiles' reading. Empty by default: a cluster with no
+  // metrics-server, which costs the strip those two tiles and nothing else.
+  podMetrics: vi.fn(async (): Promise<{ metrics?: PodMetric[]; error?: string }> => ({ metrics: [] })),
 }));
 
 vi.mock("@srelens/core", async (importOriginal) => ({
@@ -31,6 +34,7 @@ vi.mock("@srelens/core", async (importOriginal) => ({
   listCrds,
   deleteResource,
   podsOnNode,
+  podMetrics,
   // The web server's answer for a user with no apps (#515): the app slot stays empty.
   listExtensions: async () => ({ schemaVersion: 1, nextRevision: 1, plugins: [] }),
 }));
@@ -77,6 +81,7 @@ vi.mock("@srelens/ui-kit", async (importOriginal) => {
 import { ConsoleProvider, useConsole } from "../../console";
 import { setClusterAssistant } from "../../lib/assistant";
 import { loadSectionFolds, setSectionOpen } from "../../lib/sectionFolds";
+import { __resetUsageHistoryForTests, recordUsage } from "../../lib/usageHistory";
 import { defaultState } from "../../lib/tabs";
 import * as tabsStore from "../../lib/tabsStore";
 import { detailFacts } from "./detailData";
@@ -220,6 +225,9 @@ describe("ResourceDetailView", () => {
     listEvents.mockResolvedValue({ events: [] });
     listCrds.mockResolvedValue({ crds: [] });
     podsOnNode.mockResolvedValue({ pods: [] });
+    podMetrics.mockResolvedValue({ metrics: [] });
+    // The usage history outlives a render, as it outlives a screen.
+    __resetUsageHistoryForTests();
     descriptorFor.mockReturnValue(undefined);
     codeEditorProps.length = 0;
     asked.length = 0;
@@ -782,9 +790,8 @@ describe("ResourceDetailView", () => {
       // grid — the mock's two-column list, in a 352px pane.
       expect(document.querySelectorAll(".kv[data-stacked]")).toHaveLength(0);
       expect(document.querySelector("[data-slot='fact-grid']")).toBeNull();
-      // Less what its own header has just said: this pod has a verdict, so
-      // the age sits beside it.
-      expect(labelsIn(".fact-list")).toEqual(derived.filter((label) => label !== "Created"));
+      // Less what its strip has just said, as the tab below (#1074).
+      expect(labelsIn(".fact-list")).toEqual(derived.filter((label) => label !== "Created" && label !== "Restarts"));
       asPeek.unmount();
 
       render(<ResourceTabView {...props} />);
@@ -1077,9 +1084,10 @@ describe("ResourceDetailView", () => {
       for (const name of ["Labels", "Annotations"]) {
         expect(screen.getByRole("button", { name }).getAttribute("aria-expanded")).toBe("false");
       }
-      // The lead fact list has no heading, so there is nothing to hang a
+      // The lead blocks have no heading, so there is nothing to hang a
       // control on — and a pane that opens showing nothing at all is hostile.
-      expect(screen.getByText("Created")).toBeDefined();
+      // A ConfigMap's lead is the strip's one tile, its age (#1074).
+      expect(document.querySelector("[data-slot='metric-strip']")?.textContent).toContain("Age");
     });
 
     it("remembers what the reader opened, for the next subject of that kind", async () => {
@@ -1315,7 +1323,9 @@ describe("ResourceDetailView", () => {
       });
       render(<ResourceDetailView context="ctx" kind="Widget" namespace="default" name="w-1" />);
       await waitFor(() => expect(document.querySelector(".fact-list")?.textContent).toContain("upstream-2024"));
-      expect([...document.querySelectorAll(".fact-list .kv-k")].map((el) => el.textContent)).toEqual(["Created", "Created"]);
+      // The generated age is the strip's tile now (#1074), so only the
+      // printer column's Created is a row.
+      expect([...document.querySelectorAll(".fact-list .kv-k")].map((el) => el.textContent)).toEqual(["Created"]);
       expect(logged.mock.calls.flat().join(" ")).not.toContain("same key");
       logged.mockRestore();
     });
@@ -1379,44 +1389,182 @@ describe("ResourceDetailView", () => {
     });
   });
 
+  describe("the metric strip, as the tab draws it (#1074)", () => {
+    const props = { context: "ctx", kind: "Pod", namespace: "checkout", name: "cart-session-store-0" } as const;
+    const reading = (cpu: number, memory = 64) => ({
+      metrics: [{ name: props.name, namespace: props.namespace, cpuMillicores: cpu, memoryMiB: memory }],
+    });
+    const strip = () => document.querySelector<HTMLElement>("[data-slot='metric-strip']");
+    const tile = (label: string) =>
+      Array.from(strip()?.querySelectorAll<HTMLElement>(".stat") ?? []).find(
+        (t) => t.querySelector(".eyebrow")?.textContent === label,
+      );
+    const value = (label: string) => tile(label)?.querySelector(".stat-value")?.textContent;
+    const caption = (label: string) => tile(label)?.querySelector(".num")?.textContent;
+    const graph = (label: string) => tile(label)?.querySelector("svg")?.getAttribute("aria-label");
+
+    beforeEach(() => {
+      getObject.mockResolvedValue({ object: RUNNING_POD });
+      descriptorFor.mockReturnValue(baseDescriptor({ panes: { containers: true } }));
+    });
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    it("heads the Overview pane with the tab's tiles", async () => {
+      podMetrics.mockResolvedValue(reading(4, 28));
+      render(<ResourceDetailView {...props} />);
+      await waitFor(() => expect(value("CPU")).toBe("4m"));
+      expect(Array.from(strip()!.querySelectorAll(".stat .eyebrow")).map((e) => e.textContent)).toEqual([
+        "Ready",
+        "Restarts",
+        "CPU",
+        "Memory",
+        "Age",
+      ]);
+      expect(value("Memory")).toBe("28 Mi");
+      // First in the pane, above the facts, and one block of its run.
+      expect(document.querySelector(".pane-body")?.firstElementChild).toBe(strip());
+      expect(strip()!.matches("section.section")).toBe(true);
+    });
+
+    it("draws it on Overview alone", async () => {
+      render(<ResourceDetailView {...props} />);
+      await waitFor(() => expect(strip()).not.toBeNull());
+      await userEvent.click(screen.getByRole("tab", { name: "YAML" }));
+      expect(strip()).toBeNull();
+    });
+
+    it("graphs CPU and memory, and keeps reading while it is open", async () => {
+      vi.useFakeTimers({ shouldAdvanceTime: true });
+      podMetrics.mockResolvedValue(reading(100));
+      render(<ResourceDetailView {...props} />);
+      await waitFor(() => expect(value("CPU")).toBe("100m"));
+      expect(graph("CPU")).toBe("CPU");
+
+      podMetrics.mockResolvedValue(reading(150));
+      await vi.advanceTimersByTimeAsync(10_000);
+      podMetrics.mockResolvedValue(reading(200, 80));
+      await vi.advanceTimersByTimeAsync(10_000);
+      await waitFor(() => expect(value("CPU")).toBe("200m"));
+      expect(value("Memory")).toBe("80 Mi");
+      expect(graph("CPU")).toBe("CPU over the last 20 seconds");
+      expect(graph("Memory")).toBe("Memory over the last 20 seconds");
+    });
+
+    it("drops the usage when a later read fails, as the Pods list does, and draws it again when one succeeds", async () => {
+      vi.useFakeTimers({ shouldAdvanceTime: true });
+      podMetrics.mockResolvedValue(reading(100));
+      render(<ResourceDetailView {...props} />);
+      await waitFor(() => expect(value("CPU")).toBe("100m"));
+
+      // The last good reading is not "current" once the next one failed.
+      podMetrics.mockResolvedValue({ error: "metrics-server unavailable" });
+      await vi.advanceTimersByTimeAsync(10_000);
+      await waitFor(() => expect(tile("CPU")).toBeUndefined());
+      expect(tile("Memory")).toBeUndefined();
+
+      podMetrics.mockRejectedValue(new Error("connection refused"));
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(tile("CPU")).toBeUndefined();
+
+      // A pod the metrics no longer mention has no reading either.
+      podMetrics.mockResolvedValue({ metrics: [] });
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(tile("CPU")).toBeUndefined();
+
+      podMetrics.mockResolvedValue(reading(120));
+      await vi.advanceTimersByTimeAsync(10_000);
+      await waitFor(() => expect(value("CPU")).toBe("120m"));
+    });
+
+    it("never starts a read while one is still out, so a slow old answer cannot overwrite a newer one", async () => {
+      vi.useFakeTimers({ shouldAdvanceTime: true });
+      podMetrics.mockResolvedValue(reading(100));
+      render(<ResourceDetailView {...props} />);
+      await waitFor(() => expect(value("CPU")).toBe("100m"));
+
+      // The next read hangs, as one can under a long request timeout.
+      let fail!: (e: Error) => void;
+      podMetrics.mockImplementationOnce(() => new Promise((_, reject) => (fail = reject)));
+      await vi.advanceTimersByTimeAsync(10_000);
+      const asked = podMetrics.mock.calls.length;
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(podMetrics.mock.calls.length).toBe(asked);
+
+      // It settles, and only then is the next one asked for.
+      fail(new Error("timed out"));
+      await waitFor(() => expect(tile("CPU")).toBeUndefined());
+      podMetrics.mockResolvedValue(reading(140));
+      await vi.advanceTimersByTimeAsync(10_000);
+      await waitFor(() => expect(value("CPU")).toBe("140m"));
+      expect(podMetrics.mock.calls.length).toBe(asked + 1);
+    });
+
+    it("stops reading once it is closed", async () => {
+      vi.useFakeTimers({ shouldAdvanceTime: true });
+      podMetrics.mockResolvedValue(reading(100));
+      const view = render(<ResourceDetailView {...props} />);
+      await waitFor(() => expect(value("CPU")).toBe("100m"));
+      const asked = podMetrics.mock.calls.length;
+      view.unmount();
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(podMetrics.mock.calls.length).toBe(asked);
+    });
+
+    it("starts the graph from what the Pods list has already read", async () => {
+      const now = Date.now();
+      recordUsage("ctx", [{ key: "checkout/cart-session-store-0", cpu: 40, memory: 60 }], now - 120_000);
+      recordUsage("ctx", [{ key: "checkout/cart-session-store-0", cpu: 60, memory: 62 }], now - 60_000);
+      podMetrics.mockResolvedValue(reading(80));
+      render(<ResourceDetailView {...props} />);
+      await waitFor(() => expect(value("CPU")).toBe("80m"));
+      expect(graph("CPU")).toBe("CPU over the last 2 minutes");
+    });
+
+    it("measures the figure against the pod's limit, as the Pods list does", async () => {
+      getObject.mockResolvedValue({
+        object: {
+          ...RUNNING_POD,
+          spec: { containers: [{ name: "redis", resources: { limits: { cpu: "200m", memory: "256Mi" } } }] },
+        },
+      });
+      podMetrics.mockResolvedValue(reading(50, 192));
+      render(<ResourceDetailView {...props} />);
+      await waitFor(() => expect(value("CPU")).toBe("50m"));
+      expect(caption("CPU")).toBe("25% of limit");
+      expect(caption("Memory")).toBe("75% of limit");
+    });
+
+    it("says what each figure is when the pod sets no bound", async () => {
+      podMetrics.mockResolvedValue(reading(50, 192));
+      render(<ResourceDetailView {...props} />);
+      await waitFor(() => expect(value("CPU")).toBe("50m"));
+      expect(caption("CPU")).toBe("current");
+      expect(caption("Memory")).toBe("working set");
+    });
+
+    it("asks the metrics server nothing about a kind with no pod usage", async () => {
+      getObject.mockResolvedValue({ object: DEGRADED_DEPLOYMENT });
+      render(<ResourceDetailView context="ctx" kind="Deployment" namespace="checkout" name="checkout-api" />);
+      await waitFor(() => expect(strip()).not.toBeNull());
+      expect(podMetrics).not.toHaveBeenCalled();
+    });
+  });
+
   describe("the header the design draws", () => {
-    it("reads the state, the ready ratio and the age across one line", async () => {
+    it("says the state alone, and leaves the figures to the strip (#1074)", async () => {
       getObject.mockResolvedValue({ object: DEGRADED_DEPLOYMENT });
-      const { getByText, container } = render(
+      const { container } = render(
         <ResourceDetailView context="ctx" kind="Deployment" namespace="checkout" name="checkout-api" />,
       );
-      await waitFor(() => expect(getByText("Degraded")).toBeDefined());
-      // Bare figures, each carrying its own noun — the user's call, taken over
-      // the kit's own objection (see `Inspector`'s doc comment).
-      expect(getByText("9/12 ready")).toBeDefined();
-      expect(getByText("84d")).toBeDefined();
-      expect(container.querySelector("header")?.textContent).not.toContain("Ready 9/12");
-    });
-
-    it("names every bare figure for a reader who cannot see it", async () => {
-      getObject.mockResolvedValue({ object: DEGRADED_DEPLOYMENT });
-      const { container, getByText } = render(
-        <ResourceDetailView context="ctx" kind="Deployment" namespace="checkout" name="checkout-api" />,
-      );
-      await waitFor(() => expect(getByText("Degraded")).toBeDefined());
-      // `InspectorFact.label` is never drawn — it is an `sr-only` `dt`. A fact
-      // handed a label that merely repeats what the value already says on
-      // screen leaves a screen reader with nothing, which is the whole reason
-      // the user's bare-figure ruling was survivable.
-      const terms = Array.from(container.querySelectorAll("header dt"));
-      expect(terms.map((t) => t.textContent)).toEqual(["Progress", "Age"]);
-      terms.forEach((t) => expect(t.className).toContain("sr-only"));
-    });
-
-    it("draws the age quietly and the ready ratio in normal ink", async () => {
-      getObject.mockResolvedValue({ object: DEGRADED_DEPLOYMENT });
-      const { getByText } = render(
-        <ResourceDetailView context="ctx" kind="Deployment" namespace="checkout" name="checkout-api" />,
-      );
-      await waitFor(() => expect(getByText("Degraded")).toBeDefined());
-      expect(getByText("84d").style.color).toBe(toneColor("muted"));
-      // A fact defaults to normal ink; only the age is quiet in the mock.
-      expect(getByText("9/12 ready").style.color).toBe("");
+      await waitFor(() => expect(container.querySelector("header .status")?.textContent).toBe("Degraded"));
+      // The ready figure and the age are tiles now, and saying them twice
+      // within an inch of each other is the noise #1070 took out.
+      expect(container.querySelector("header dl")).toBeNull();
+      const strip = container.querySelector("[data-slot='metric-strip']");
+      expect(strip?.textContent).toContain("9/12 ready");
+      expect(strip?.textContent).toContain("84d");
     });
 
     it("colours the state and marks the name only when the subject is unhealthy", async () => {
@@ -1424,7 +1572,8 @@ describe("ResourceDetailView", () => {
       const bad = render(
         <ResourceDetailView context="ctx" kind="Deployment" namespace="checkout" name="checkout-api" />,
       );
-      await waitFor(() => expect(bad.getByText("Degraded")).toBeDefined());
+      // Read off the header: the Ready tile's caption says the word too.
+      await waitFor(() => expect(bad.container.querySelector("header .status")?.textContent).toBe("Degraded"));
       expect(bad.container.querySelector("header .status")?.getAttribute("data-bad")).toBe("true");
       // The mock's dot before the NAME. Colour alone says nothing to a
       // colour-blind reader and nothing at all to a screen reader, so the kit
@@ -1479,18 +1628,19 @@ describe("ResourceDetailView", () => {
     ]);
   });
 
-  it("leaves Created to the header beside a verdict, and says it for a kind with none", async () => {
+  it("leaves Created to the strip's Age, for a kind with a verdict and one without (#1074)", async () => {
     getObject.mockResolvedValue({ object: RUNNING_POD });
     const pod = render(<ResourceDetailView context="ctx" kind="Pod" namespace="checkout" name="cart-session-store-0" />);
     await waitFor(() => expect(pod.getByRole("tab", { name: "Overview" })).toBeDefined());
     expect(labelsIn(".fact-list")).not.toContain("Created");
+    expect(document.querySelector("[data-slot='metric-strip']")?.textContent).toContain("211d");
     pod.unmount();
 
-    // No verdict, so no line in the header for an age to sit on.
     getObject.mockResolvedValue({ object: AGED_CONFIGMAP });
     const map = render(<ResourceDetailView context="ctx" kind="ConfigMap" namespace="default" name="cm-1" />);
     await waitFor(() => expect(map.getByRole("tab", { name: "Overview" })).toBeDefined());
-    expect(labelsIn(".fact-list")).toEqual(["Created"]);
+    expect(labelsIn(".fact-list")).not.toContain("Created");
+    expect(document.querySelector("[data-slot='metric-strip']")?.textContent).toBe("Age30d");
   });
 
   it("offers Retry on a read that failed, and reads again", async () => {

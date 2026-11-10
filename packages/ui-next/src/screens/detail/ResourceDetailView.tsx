@@ -4,13 +4,14 @@ import { ExtensionProviderSlot } from "../../extensions/ExtensionProviderSlot";
 import { ExtensionRelatedSlot } from "../../extensions/ExtensionRelatedSlot";
 import { ExtensionPodSlot } from "../../extensions/ExtensionPodTools";
 import type { ReactNode } from "react";
-import { ageFromTimestamp, type K8sObject, type ResourceStatusLine } from "@srelens/core";
+import type { ResourceStatusLine } from "@srelens/core";
 import { Inspector, LoadingState, type InspectorProps } from "@srelens/ui-kit";
 import { FailureState } from "../../lib/errorCopy";
 import { CUSTOM_RESOURCE_ACTIONS } from "../../lib/kinds/custom";
 import { CopyNameButton } from "./CopyNameButton";
 import { DetailActions } from "./DetailActions";
-import { OpenTabButton, PeekFacts } from "./ResourceFrame";
+import { factsBelow, useMetricTiles } from "./metricTiles";
+import { MetricStrip, OpenTabButton, PeekFacts } from "./ResourceFrame";
 import { SectionMemory } from "./Section";
 import {
   describeTarget,
@@ -62,48 +63,22 @@ export interface ResourceDetailViewProps {
 }
 
 /**
- * The design's third header line, for a kind that has one.
- *
- * THIS SCREEN'S, and the full tab draws the same verdict as a strip of metric
- * tiles instead, off the very same `ResourceStatusLine`: the shared layer
- * reads it once and hands it to whichever screen is drawing, so the two can
- * never disagree about a subject's health while looking nothing alike.
+ * The design's third header line, for a kind that has one: the verdict alone.
  *
  * `resourceStatusLine` decides the word, its tone and the unhealthy dot
- * together, off the fetched object; the age is not in its answer because it
- * is not a health fact, so it comes off the metadata here. `null` back from it
- * is an ANSWER, not a gap — a ConfigMap has no health and a custom resource's
- * `status` is its own operator's business — and it takes the whole line with
- * it, age included: a lone age with nothing to qualify it reads as the rest
- * having gone missing.
+ * together, off the fetched object. `null` back from it is an ANSWER, not a
+ * gap: a ConfigMap has no health, and it takes the whole line with it.
  *
- * Two things about the facts that are silent when wrong, both of them
- * `InspectorFact`'s doing:
- *
- * - `label` is never drawn — it is an `sr-only` `dt`. So the VALUE carries its
- *   own noun ("9/12 ready", not "9/12"), which is the user's ruling over the
- *   kit's objection, and the label is the term a screen reader hears. It has
- *   to say something the value does not. "Progress" rather than "Ready"
- *   because the phrase is not always about readiness: a Job's reads
- *   "3/3 complete".
- * - a fact defaults to normal ink. Only the age is quiet in the mock, so only
- *   the age asks for a tone.
+ * The line once carried the ready figure and the age beside the word. Both are
+ * tiles at the top of Overview now (#1074), and the same two figures an inch
+ * apart is the noise #1070 took out of this pane.
  */
-function statusHeader(
-  line: ResourceStatusLine | null,
-  object: K8sObject,
-): Pick<InspectorProps, "status" | "statusKind" | "facts" | "flagged"> {
+function statusHeader(line: ResourceStatusLine | null): Pick<InspectorProps, "status" | "statusKind" | "flagged"> {
   if (!line) return {};
-  const facts: InspectorProps["facts"] = [];
-  if (line.readyText) facts.push({ label: "Progress", value: line.readyText });
-  const created = object.metadata?.creationTimestamp;
-  // Only when there is one: `ageFromTimestamp` answers "—" for an absent
-  // stamp, and an em dash in the header is noise, not information.
-  if (created) facts.push({ label: "Age", value: ageFromTimestamp(created), tone: "muted" });
   // `HealthKind` and `StatusKind` are the same five words by construction —
   // core says so in `k8sHealth`'s own comment — so the verdict passes straight
   // through rather than being re-mapped into a second opinion.
-  return { status: line.status, statusKind: line.health, facts, flagged: line.flagged };
+  return { status: line.status, statusKind: line.health, flagged: line.flagged };
 }
 
 /**
@@ -114,8 +89,9 @@ function statusHeader(
  * ONE OF TWO SCREENS, and it knows nothing about the other. Spec rule R-5 said
  * the peek and the full tab were one component differing by a prop; the user's
  * full-tab mock retired it, and the two now have their own chrome and their
- * own layouts — a compact header with quick tools under the name here, a breadcrumb, a
- * metric strip and a three-column fact grid there.
+ * own layouts — a compact header with quick tools under the name here, a
+ * breadcrumb and a three-column fact grid there. The strip of tiles is the
+ * one block both draw, through the one `MetricStrip` (#1074).
  *
  * What they still share is everything that is not a look, and it is shared
  * through `detailData` rather than by being written twice: one read of the
@@ -127,6 +103,9 @@ function statusHeader(
 export function ResourceDetailView({ context, kind, group, namespace, name, peek }: ResourceDetailViewProps) {
   const subject = useDetailSubject({ context, kind, namespace, name, group });
   const { object, status, error, descriptor, statusLine, hasContainers, hasMetrics } = subject;
+  // Before any early return: the usage it reads is never conditional on the
+  // object having arrived.
+  const tiles = useMetricTiles(subject, { context, kind, namespace, name });
 
   // Containers is a tab of its own here because the pane is 352px wide and a
   // table of containers is not; the full tab folds the same fact into its
@@ -180,19 +159,21 @@ export function ResourceDetailView({ context, kind, group, namespace, name, peek
 
   // Read once: the header draws the verdict, and the tools' Ask asks a
   // different question of an unhealthy subject than of a healthy one.
-  const header = statusHeader(statusLine, object);
-  // The header's age is the Created fact, on a subject that has a line for one.
-  const facts = subject.facts.filter(
-    (fact) => fact.tile !== "age" || !header.facts?.some((said) => said.label === "Age"),
-  );
+  const header = statusHeader(statusLine);
+  // The tiles above them have said these.
+  const facts = factsBelow(subject.facts, tiles);
 
-  // The peek's Overview pane: a flat run of sibling blocks, the lead facts
-  // first and Labels and Annotations last. Nothing may be wrapped around any
-  // one of them — `.section + .section` is what draws the hairlines between
-  // them, so a div around one quietly removes the rule on both its sides.
+  // The peek's Overview pane: the tab's strip of tiles (#1074), then a flat
+  // run of sibling blocks, the lead facts first and Labels and Annotations
+  // last. The strip is on Overview alone: two rows of tiles above a manifest
+  // are most of a 352px pane, and the header's word says the verdict on every
+  // pane. Nothing may be wrapped around any one of them — `.section +
+  // .section` is what draws the hairlines between them, so a div around one
+  // quietly removes the rule on both its sides.
   let pane: ReactNode =
     active === PANE_DETAILS ? (
       <>
+        <MetricStrip tiles={tiles} />
         <PeekFacts facts={facts} />
         {subject.body}
         {subject.labels}

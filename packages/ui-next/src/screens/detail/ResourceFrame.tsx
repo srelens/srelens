@@ -20,6 +20,40 @@ import type { DetailFact } from "./facts";
 export type Tile = StatProps & { key: string };
 
 /**
+ * The strip of tiles, for both screens: across the full tab, and at the top of
+ * the peek's Overview (#1074).
+ *
+ * It wraps. Five tiles across a 352px peek are five columns too narrow for
+ * "1/1 ready" or a graph, so a tile asks for 6.5rem and a row takes as many
+ * as fit; the tiles of a short last row share its width between them.
+ *
+ * The rules between the tiles are each tile's own shadow, cast to its left
+ * and above, rather than `.stat + .stat`'s left border: a border knows the
+ * tile before it, not whether that tile is on the same row, so the first tile
+ * of a second row drew a rule against nothing and no rule above itself. The
+ * strip clips the shadows that fall outside it, which are exactly the first
+ * column's and the first row's.
+ *
+ * A `.section` with no padding of its own, so in the peek it is one more block
+ * in the Overview's run and `.section + .section` draws the rule under it. The
+ * tab draws it outside its panes and passes its own rule in `className`.
+ */
+export function MetricStrip({ tiles, className }: { tiles: Tile[]; className?: string }) {
+  if (tiles.length === 0) return null;
+  return (
+    <section data-slot="metric-strip" className={`section flex flex-wrap overflow-hidden p-0 ${className ?? ""}`}>
+      {tiles.map(({ key, ...tile }) => (
+        <Stat
+          key={key}
+          {...tile}
+          className="min-w-0 flex-[1_1_6.5rem] border-l-0 shadow-[-1px_0_0_var(--rule),0_-1px_0_var(--rule)]"
+        />
+      ))}
+    </section>
+  );
+}
+
+/**
  * The design's other header affordance: promote this subject to a tab of its
  * own. Outlined and labelled, beside the close rather than instead of it —
  * the mock draws two separate controls, and a peek that could only be left by
@@ -203,16 +237,9 @@ export function ResourceTabFrame({
 
       {/* Between the strip and the panel rather than inside it: these are the
           subject's vital signs, as worth having beside its manifest as beside
-          its facts. `.stat + .stat` draws the vertical rules the design puts
-          between the tiles; the row sizes them, which is what `Stat`'s own
-          comment asks a caller to do. */}
-      {tiles.length > 0 && (
-        <div data-slot="metric-strip" className="border-b border-rule-strong flex">
-          {tiles.map(({ key, ...tile }) => (
-            <Stat key={key} {...tile} className="flex-1" />
-          ))}
-        </div>
-      )}
+          its facts. */}
+      <MetricStrip tiles={tiles} className="border-b border-rule-strong" />
+
 
       <div
         className="pane-body"

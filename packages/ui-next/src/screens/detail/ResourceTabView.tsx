@@ -4,21 +4,11 @@ import { ExtensionProviderSlot } from "../../extensions/ExtensionProviderSlot";
 import { ExtensionRelatedSlot } from "../../extensions/ExtensionRelatedSlot";
 import { ExtensionPodSlot } from "../../extensions/ExtensionPodTools";
 import type { ReactNode } from "react";
-import {
-  ageFromTimestamp,
-  asRecord,
-  podContainerStatuses,
-  podMetrics,
-  restartTotal,
-  str,
-  type K8sObject,
-  type ResourceStatusLine,
-} from "@srelens/core";
-import { LoadingState, StatusPill, statusTone } from "@srelens/ui-kit";
+import { LoadingState } from "@srelens/ui-kit";
 import { FailureState } from "../../lib/errorCopy";
 import { CUSTOM_RESOURCE_ACTIONS } from "../../lib/kinds/custom";
-import { formatCpu, formatMemory } from "../../lib/kinds/columns";
 import { DetailActions } from "./DetailActions";
+import { factsBelow, useMetricTiles } from "./metricTiles";
 import { ResourceTabFrame, TabFacts, TabMetadata, type Tile } from "./ResourceFrame";
 import { SectionMemory } from "./Section";
 import {
@@ -26,7 +16,6 @@ import {
   detailTabs,
   useDetailPaneState,
   useDetailSubject,
-  useLoad,
   PANE_DETAILS,
   PANE_EVENTS,
   PANE_METRICS,
@@ -41,96 +30,6 @@ export interface ResourceTabViewProps {
   group?: string;
   namespace: string | null;
   name: string;
-}
-
-/**
- * The pod usage the CPU and Memory tiles show.
- *
- * Only a Pod has this, and that is a fact about where the data comes from
- * rather than a taste: `k8s.podMetrics` reports per-pod usage in a namespace,
- * so there is nothing to look this subject up by unless the subject IS a pod.
- * A workload's own usage would be the sum of its pods' and is a different
- * question, asked of a different call.
- *
- * Best-effort, exactly as `RelatedPodsSection` treats the same call: a cluster
- * with no metrics-server must cost the reader two tiles, not the page. It
- * rides `useLoad`, so it is target-gated like every other fetch in this
- * screen — a tile can never show the previous subject's usage — and it is
- * fetched once per subject rather than per pane switch.
- */
-function usageTiles(cpuMillicores?: number, memoryMiB?: number): Tile[] {
-  if (cpuMillicores === undefined || memoryMiB === undefined) return [];
-  return [
-    // The captions are the mock's, and they name what the figure IS — a
-    // reading taken now, and the resident set the kernel counts. Neither is a
-    // verdict, so neither takes a tone: a tone here would be this file
-    // deciding what "a lot of memory" means, which is not a thing srelens
-    // knows about someone else's workload.
-    { key: "cpu", label: "CPU", value: formatCpu(cpuMillicores), delta: "current" },
-    { key: "memory", label: "Memory", value: formatMemory(memoryMiB), delta: "working set" },
-  ];
-}
-
-/**
- * The design's strip: Ready, Restarts, CPU, Memory, Age — and only the ones
- * this subject actually has. THIS SCREEN'S ALONE; the peek states the same
- * verdict as one line of words under the subject's name.
- *
- * Same discipline as the tab strip above it: a ConfigMap has no health, no
- * containers and no usage, so it gets one tile rather than four em dashes
- * dressed up as figures.
- *
- * THE READY TILE TAKES NO OPINION OF ITS OWN. Its figure, its caption and its
- * tone are all `resourceStatusLine`'s — core's single verdict on a subject,
- * the very one the peek's header word and the list row's pill are drawn from.
- * The mock's caption reads "all available"; srelens's word for that state is
- * whatever core says, which for a healthy pod is "Running" and for a Job is
- * "Complete". Writing the mock's phrase here would have meant a table pairing
- * a form of words with a colour, and six of those have been found and removed
- * on this branch.
- *
- * The figure is core's whole ready PHRASE ("1/1 ready", "3/3 complete") rather
- * than a ratio cut out of it. The noun belongs to the phrase because it is not
- * "ready" for every kind, and slicing it off here would be this file parsing a
- * string core deliberately assembled.
- */
-function metricTiles(statusLine: ResourceStatusLine | null, object: K8sObject, usage: Tile[]): Tile[] {
-  const tiles: Tile[] = [];
-  if (statusLine?.readyText) {
-    tiles.push({
-      key: "ready",
-      label: "Ready",
-      value: statusLine.readyText,
-      delta: statusLine.status,
-      tone: statusTone(statusLine.health),
-    });
-  } else if (statusLine) {
-    // A verdict with no ready figure to hang it on: a Node, a CronJob, a Pod the
-    // kubelet has not reported yet. The header has no line of its own for it.
-    tiles.push({
-      key: "status",
-      label: "Status",
-      value: <StatusPill status={statusLine.status} kind={statusLine.health} tinted />,
-    });
-  }
-  const statuses = podContainerStatuses(object.status);
-  if (statuses.length > 0) {
-    const restarts = restartTotal(statuses);
-    tiles.push({
-      key: "restarts",
-      label: "Restarts",
-      // "none" for zero, and nothing at all otherwise: the count is already
-      // on the tile, and a caption repeating it in words says nothing. It is
-      // NOT toned — how many restarts are too many is the reader's judgement
-      // about their own workload, and core has no verdict to lend here.
-      value: str(restarts),
-      ...(restarts === 0 ? { delta: "none" } : {}),
-    });
-  }
-  tiles.push(...usage);
-  const created = str(asRecord(object.metadata).creationTimestamp);
-  if (created) tiles.push({ key: "age", label: "Age", value: ageFromTimestamp(created) });
-  return tiles;
 }
 
 /**
@@ -172,16 +71,9 @@ export function ResourceTabView({ context, kind, group, namespace, name }: Resou
     group,
   });
 
-  // Hooks before any early return, so the fetch below is never conditional on
-  // the object having arrived. Only a Pod is looked up — see `usageTiles`.
-  const target = [context, kind, namespace, name] as const;
-  // Never for a custom kind called Pod: the usage would be the built-in pod's (#919).
-  const wantsUsage = !subject.custom && kind === "Pod" && namespace !== null;
-  const usage = useLoad<{ cpu: number; memory: number } | null>(wantsUsage, target, async () => {
-    const result = await podMetrics(context, namespace ?? "");
-    const mine = result.metrics?.find((m) => m.name === name);
-    return { data: mine ? { cpu: mine.cpuMillicores, memory: mine.memoryMiB } : null };
-  });
+  // Before any early return: the usage it reads is never conditional on the
+  // object having arrived.
+  const tiles = useMetricTiles(subject, { context, kind, namespace, name });
 
   // Every state draws the frame: the name and the trail are the route's, not the
   // object's, so a read that is slow or failed still says what it was reading.
@@ -214,10 +106,8 @@ export function ResourceTabView({ context, kind, group, namespace, name }: Resou
     );
   }
 
-  const tiles = metricTiles(statusLine, object, usageTiles(usage.data?.cpu, usage.data?.memory));
   // The figures above the grid have said these.
-  const said = new Set(tiles.map((tile) => tile.key));
-  const facts = subject.facts.filter((fact) => !fact.tile || !said.has(fact.tile));
+  const facts = factsBelow(subject.facts, tiles);
 
   // The tab's Overview: the fact grid, then the kind's own blocks, then the
   // containers table the design folds in here, then Labels and Annotations
