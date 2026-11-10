@@ -1260,7 +1260,7 @@ mod tests {
         s.picker.as_mut().unwrap().query = "-x".into();
         assert!(s.pick_model().is_err());
         assert!(s.picker.is_some());
-        assert_eq!(s.settings.get_model(AiProvider::OpenAi), "gpt-4o");
+        assert_eq!(s.settings.get_model(AiProvider::OpenAi), "gpt-6-luna");
 
         s.picker.as_mut().unwrap().query = "gpt-x".into();
         assert_eq!(s.pick_model(), Ok(Some("gpt-x".to_string())));

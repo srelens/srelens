@@ -96,7 +96,7 @@ async fn journey_settings_space_on_a_provider_and_on_an_agent_each_change_their_
     assert_eq!(app.ai_settings.default_provider, AiProvider::OpenAi);
 
     let screen = common::render_app(&mut app, 160, 40);
-    assert!(screen.contains("● OpenAI (GPT-4o)  [DEFAULT]"), "{screen}");
+    assert!(screen.contains("● OpenAI  [DEFAULT]"), "{screen}");
     assert!(screen.contains("○ Anthropic (Claude)"), "{screen}");
     assert!(screen.contains("● Claude Code"), "{screen}");
     assert!(screen.contains("○ srelens (built-in)"), "{screen}");
@@ -257,7 +257,7 @@ async fn journey_settings_both_lists_read_whole_at_200x50_and_scroll_at_80x24() 
     let wide = common::render_app(&mut app, 200, 50);
     for row in [
         "● Anthropic (Claude)  [DEFAULT]",
-        "○ OpenAI (GPT-4o)",
+        "○ OpenAI",
         "○ Google Gemini",
         "○ OpenAI-Compatible / Ollama (Local)",
         "● srelens (built-in)",
