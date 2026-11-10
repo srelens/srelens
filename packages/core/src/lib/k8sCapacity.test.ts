@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { nodeUsage, clusterCapacity, podUsage } from "./k8sCapacity";
+import { nodeUsage, clusterCapacity, podBounds, podUsage } from "./k8sCapacity";
 import type { NodeSummary, NodeMetric } from "./manifest";
 
 function node(overrides: Partial<NodeSummary> = {}): NodeSummary {
@@ -242,6 +242,73 @@ describe("podUsage", () => {
     expect(podUsage(whole, { cpuMillicores: 0, memoryMiB: 0 })).toEqual({
       cpu: { percent: 0, of: "limit", bound: 500 },
       memory: { percent: 0, of: "limit", bound: 400 },
+    });
+  });
+});
+
+describe("podBounds — a raw pod's requests and limits, read as the backend's PodSummary reads them", () => {
+  const pod = (spec: Record<string, unknown>) => ({ kind: "Pod", metadata: { name: "p" }, spec });
+  const res = (requests?: Record<string, string>, limits?: Record<string, string>) => ({ resources: { requests, limits } });
+
+  it("sums every app container, CPU in millicores and memory in MiB", () => {
+    const bounds = podBounds(
+      pod({
+        containers: [
+          { name: "a", ...res({ cpu: "100m", memory: "64Mi" }, { cpu: "500m", memory: "128Mi" }) },
+          { name: "b", ...res({ cpu: "0.25", memory: "1Gi" }, { cpu: "1", memory: "1Gi" }) },
+        ],
+      }),
+    );
+    expect(bounds).toEqual({
+      cpuReqMillicores: 350,
+      cpuLimMillicores: 1500,
+      memReqMiB: 1088,
+      memLimMiB: 1152,
+      cpuLimAll: true,
+      memLimAll: true,
+    });
+  });
+
+  it("is no whole ceiling when one container sets no limit", () => {
+    const bounds = podBounds(
+      pod({ containers: [{ name: "a", ...res({}, { cpu: "500m" }) }, { name: "b", ...res({ cpu: "100m" }) }] }),
+    );
+    expect(bounds.cpuLimAll).toBe(false);
+    expect(bounds.memLimAll).toBe(false);
+    expect(bounds.cpuLimMillicores).toBe(500);
+  });
+
+  it("counts a native sidecar and leaves out an init container that has finished", () => {
+    const bounds = podBounds(
+      pod({
+        containers: [{ name: "app", ...res({ cpu: "100m" }, { cpu: "200m" }) }],
+        initContainers: [
+          { name: "migrate", ...res({ cpu: "2" }, { cpu: "4" }) },
+          { name: "proxy", restartPolicy: "Always", ...res({ cpu: "50m" }) },
+        ],
+      }),
+    );
+    expect(bounds.cpuReqMillicores).toBe(150);
+    // The sidecar has no limit, so the pod has no CPU ceiling.
+    expect(bounds.cpuLimAll).toBe(false);
+  });
+
+  it("has no ceiling at all for a pod with no spec", () => {
+    expect(podBounds({ kind: "Pod", metadata: { name: "p" } })).toEqual({
+      cpuReqMillicores: 0,
+      cpuLimMillicores: 0,
+      memReqMiB: 0,
+      memLimMiB: 0,
+      cpuLimAll: false,
+      memLimAll: false,
+    });
+  });
+
+  it("measures a reading against what it reads", () => {
+    const bounds = podBounds(pod({ containers: [{ name: "a", ...res({}, { cpu: "200m", memory: "256Mi" }) }] }));
+    expect(podUsage(bounds, { cpuMillicores: 50, memoryMiB: 64 })).toEqual({
+      cpu: { percent: 25, of: "limit", bound: 200 },
+      memory: { percent: 25, of: "limit", bound: 256 },
     });
   });
 });

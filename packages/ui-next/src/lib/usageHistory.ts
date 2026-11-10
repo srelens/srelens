@@ -15,6 +15,9 @@
 /** How much past is kept and drawn. */
 export const USAGE_WINDOW_MS = 10 * 60 * 1000;
 
+/** How often a screen that draws usage asks for a new reading: the Pods list and a pod's detail alike. */
+export const USAGE_POLL_MS = 10_000;
+
 /**
  * Readings closer together than this are one reading. Two tabs on the same
  * list poll on their own clocks, and a point per poll per tab would draw the

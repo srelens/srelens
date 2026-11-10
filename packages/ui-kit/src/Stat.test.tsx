@@ -71,4 +71,22 @@ describe("Stat", () => {
     const { container } = render(<Stat label="Nodes" value={12} className="extra" />);
     expect(container.querySelector(".stat.extra")).not.toBeNull();
   });
+
+  it("draws what it is given under the figure, before the delta", () => {
+    const { container } = render(
+      <Stat label="CPU" value="4m" delta="12% of limit">
+        <svg data-testid="trend" />
+      </Stat>,
+    );
+    const stat = container.querySelector(".stat")!;
+    const order = Array.from(stat.children).map((child) =>
+      child.classList.contains("stat-value") ? "value" : child.querySelector("[data-testid=trend]") ? "trend" : child.textContent,
+    );
+    expect(order).toEqual(["CPU", "value", "trend", "12% of limit"]);
+  });
+
+  it("adds nothing under the figure when given nothing", () => {
+    const { container } = render(<Stat label="Nodes" value={12} />);
+    expect(container.querySelector(".stat")!.children).toHaveLength(2);
+  });
 });
