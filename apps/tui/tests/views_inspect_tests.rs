@@ -1412,7 +1412,7 @@ fn settings_view_lists_each_provider_on_one_row_and_expands_only_the_one_under_t
         row_end(row("OpenAI-Compatible / Ollama (Local)")).ends_with("  key optional · llama3.2"),
         "{text}"
     );
-    let ends: Vec<usize> = ["Anthropic (Claude)", "OpenAI (GPT-4o)", "Google Gemini"]
+    let ends: Vec<usize> = ["Anthropic (Claude)", "OpenAI", "Google Gemini"]
         .iter()
         .map(|n| row_end(row(n)).chars().count())
         .collect();
@@ -1423,7 +1423,7 @@ fn settings_view_lists_each_provider_on_one_row_and_expands_only_the_one_under_t
 
     // Only the row under the cursor shows its fields, right below it.
     assert_eq!(text.matches("API Key:").count(), 1, "{text}");
-    let openai = row_of(&lines, "OpenAI (GPT-4o)");
+    let openai = row_of(&lines, "OpenAI");
     assert!(lines[openai + 1].contains("API Key: no key set"), "{text}");
     assert!(lines[openai + 2].contains("Model:   gpt-6-luna"), "{text}");
     assert!(lines[openai + 3].contains("Timeout: 120s"), "{text}");
@@ -1620,7 +1620,7 @@ fn settings_view_masks_stored_api_keys_and_flags_missing_ones() {
         "{text}"
     );
     // A blank stored key counts as unset, regardless of the developer's shell.
-    assert!(row("OpenAI (GPT-4o)").ends_with("  no key"), "{text}");
+    assert!(row("OpenAI").ends_with("  no key"), "{text}");
 
     // The row under the cursor shows the key itself, masked.
     assert!(
@@ -1684,7 +1684,7 @@ fn settings_view_highlights_the_focused_field_on_the_selected_row() {
     let lines = common::render_lines(120, 40, |f| render_settings_view(f, f.area(), &state));
     let buf = render_buffer(120, 40, |f| render_settings_view(f, f.area(), &state));
 
-    let openai_row = row_of(&lines, "OpenAI (GPT-4o)");
+    let openai_row = row_of(&lines, "OpenAI");
     let model_row = openai_row + 2;
     assert!(
         lines[model_row].contains("Model:   gpt-6-luna"),
@@ -1803,7 +1803,7 @@ fn settings_view_edit_modal_names_the_field_and_shows_the_buffer() {
     state.start_editing();
     state.edit_buffer.push_str("-mini");
     let text = render_settings(160, 40, &state);
-    assert!(text.contains("Edit Model ID for OpenAI (GPT-4o)"), "{text}");
+    assert!(text.contains("Edit Model ID for OpenAI"), "{text}");
     assert!(text.contains("Enter new value for Model ID:"), "{text}");
     assert!(text.contains("gpt-6-luna-mini█"), "{text}");
     assert!(
@@ -1818,7 +1818,7 @@ fn settings_view_edit_modal_names_the_field_and_shows_the_buffer() {
     state.start_editing();
     let text = render_settings(160, 40, &state);
     assert!(
-        text.contains("Edit Turn Timeout (seconds, e.g. 120) for OpenAI (GPT-4o)"),
+        text.contains("Edit Turn Timeout (seconds, e.g. 120) for OpenAI"),
         "{text}"
     );
     assert!(text.contains("120█"), "{text}");
@@ -1827,7 +1827,7 @@ fn settings_view_edit_modal_names_the_field_and_shows_the_buffer() {
     state.selected_field = SettingField::ApiKey;
     state.start_editing();
     let text = render_settings(160, 40, &state);
-    assert!(text.contains("Edit API Key for OpenAI (GPT-4o)"), "{text}");
+    assert!(text.contains("Edit API Key for OpenAI"), "{text}");
     assert!(text.contains("Enter new value for API Key:"), "{text}");
 
     state.cancel_editing();

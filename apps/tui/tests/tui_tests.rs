@@ -1277,7 +1277,7 @@ mod tests {
         .await;
 
         for name in [
-            "○ OpenAI (GPT-4o)",
+            "○ OpenAI",
             "○ Google Gemini",
             "○ OpenAI-Compatible / Ollama (Local)",
             "● srelens (built-in)",

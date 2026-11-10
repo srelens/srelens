@@ -46,7 +46,7 @@ pub fn provider_slug(kind: AiProvider) -> &'static str {
 pub fn provider_display_name(kind: AiProvider) -> &'static str {
     match kind {
         AiProvider::Anthropic => "Anthropic (Claude)",
-        AiProvider::OpenAi => "OpenAI (GPT-4o)",
+        AiProvider::OpenAi => "OpenAI",
         AiProvider::Gemini => "Google Gemini",
         AiProvider::OpenAiCompatible => "OpenAI-Compatible / Ollama (Local)",
     }
