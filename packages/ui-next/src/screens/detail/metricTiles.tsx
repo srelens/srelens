@@ -46,22 +46,28 @@ function usePodUsage(enabled: boolean, context: string, namespace: string, name:
   useEffect(() => {
     if (!enabled) return;
     let live = true;
-    const failed = () => {
-      if (live) setRead({ subject, samples: [] });
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    // One read out at a time: the next is asked for only once this one has
+    // settled. Overlapping reads (a request timeout can be far longer than
+    // the cadence) could settle out of order, and a slow old failure would
+    // then hide the newer reading that beat it back.
+    const settle = (samples: UsageSample[]) => {
+      if (!live) return;
+      setRead({ subject, samples });
+      timer = setTimeout(poll, USAGE_POLL_MS);
     };
-    const poll = () =>
+    const poll = () => {
       podMetrics(context, namespace).then((out) => {
-        const mine = out.metrics?.find((m) => m.name === name);
-        if (!mine) return failed();
-        if (!live) return;
+        const mine = live ? out.metrics?.find((m) => m.name === name) : undefined;
+        if (!mine) return settle([]);
         const past = recordUsage(context, [{ key, cpu: mine.cpuMillicores, memory: mine.memoryMiB }]);
-        setRead({ subject, samples: past.get(key) ?? [] });
-      }, failed);
-    void poll();
-    const timer = setInterval(poll, USAGE_POLL_MS);
+        settle(past.get(key) ?? []);
+      }, () => settle([]));
+    };
+    poll();
     return () => {
       live = false;
-      clearInterval(timer);
+      clearTimeout(timer);
     };
   }, [enabled, context, namespace, name, key, subject]);
 

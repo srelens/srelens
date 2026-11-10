@@ -1478,6 +1478,29 @@ describe("ResourceDetailView", () => {
       await waitFor(() => expect(value("CPU")).toBe("120m"));
     });
 
+    it("never starts a read while one is still out, so a slow old answer cannot overwrite a newer one", async () => {
+      vi.useFakeTimers({ shouldAdvanceTime: true });
+      podMetrics.mockResolvedValue(reading(100));
+      render(<ResourceDetailView {...props} />);
+      await waitFor(() => expect(value("CPU")).toBe("100m"));
+
+      // The next read hangs, as one can under a long request timeout.
+      let fail!: (e: Error) => void;
+      podMetrics.mockImplementationOnce(() => new Promise((_, reject) => (fail = reject)));
+      await vi.advanceTimersByTimeAsync(10_000);
+      const asked = podMetrics.mock.calls.length;
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(podMetrics.mock.calls.length).toBe(asked);
+
+      // It settles, and only then is the next one asked for.
+      fail(new Error("timed out"));
+      await waitFor(() => expect(tile("CPU")).toBeUndefined());
+      podMetrics.mockResolvedValue(reading(140));
+      await vi.advanceTimersByTimeAsync(10_000);
+      await waitFor(() => expect(value("CPU")).toBe("140m"));
+      expect(podMetrics.mock.calls.length).toBe(asked + 1);
+    });
+
     it("stops reading once it is closed", async () => {
       vi.useFakeTimers({ shouldAdvanceTime: true });
       podMetrics.mockResolvedValue(reading(100));
