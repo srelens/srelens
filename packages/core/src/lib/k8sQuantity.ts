@@ -14,11 +14,16 @@ export function formatBytes(bytes: number): string {
 
 /** Parse a Kubernetes quantity (e.g. "500m", "2Gi", "4") to a base-unit number. */
 export function parseQuantity(q: string): number | null {
-  const m = /^([0-9.]+)\s*([a-zA-Z]*)$/.exec((q ?? "").trim());
+  // A decimal exponent ("1e9", "12E6") is a form of its own, tried before the
+  // suffixes so its "e"/"E" is not read as a unit; a bare "E" is still exa.
+  const m = /^([0-9.]+)(?:([eE][+-]?[0-9]+)|\s*([a-zA-Z]*))$/.exec((q ?? "").trim());
   if (!m) return null;
   const n = parseFloat(m[1]);
   if (Number.isNaN(n)) return null;
-  const unit = m[2];
+  if (m[2]) return n * 10 ** Number(m[2].slice(1));
+  const unit = m[3];
+  if (unit === "n") return n / 1e9;
+  if (unit === "u") return n / 1e6;
   const binary: Record<string, number> = { Ki: 2 ** 10, Mi: 2 ** 20, Gi: 2 ** 30, Ti: 2 ** 40, Pi: 2 ** 50, Ei: 2 ** 60 };
   const decimal: Record<string, number> = { k: 1e3, M: 1e6, G: 1e9, T: 1e12, P: 1e15, E: 1e18 };
   if (unit === "") return n;

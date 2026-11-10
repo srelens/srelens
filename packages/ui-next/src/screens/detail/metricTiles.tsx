@@ -31,9 +31,12 @@ import type { Tile } from "./ResourceFrame";
  * labelled "current" stops being current ten seconds later.
  *
  * Best-effort, as the list treats the same call: a cluster with no
- * metrics-server costs the reader two tiles, not the page. Keyed by the
- * subject, so a tile never shows the previous subject's usage while the next
- * one's first reading is on its way.
+ * metrics-server costs the reader two tiles, not the page. A read that fails,
+ * or no longer mentions the pod, takes the tiles away until one succeeds, as
+ * a failed poll takes a list row's figures away: the last good reading is not
+ * "current" once the next one has failed. The past stays in the store, so the
+ * graph comes back whole. Keyed by the subject, so a tile never shows the
+ * previous subject's usage while the next one's first reading is on its way.
  */
 function usePodUsage(enabled: boolean, context: string, namespace: string, name: string): UsageSample[] {
   const key = rowKey({ name, namespace });
@@ -43,16 +46,17 @@ function usePodUsage(enabled: boolean, context: string, namespace: string, name:
   useEffect(() => {
     if (!enabled) return;
     let live = true;
+    const failed = () => {
+      if (live) setRead({ subject, samples: [] });
+    };
     const poll = () =>
-      podMetrics(context, namespace).then(
-        (out) => {
-          const mine = out.metrics?.find((m) => m.name === name);
-          if (!live || !mine) return;
-          const past = recordUsage(context, [{ key, cpu: mine.cpuMillicores, memory: mine.memoryMiB }]);
-          setRead({ subject, samples: past.get(key) ?? [] });
-        },
-        () => {},
-      );
+      podMetrics(context, namespace).then((out) => {
+        const mine = out.metrics?.find((m) => m.name === name);
+        if (!mine) return failed();
+        if (!live) return;
+        const past = recordUsage(context, [{ key, cpu: mine.cpuMillicores, memory: mine.memoryMiB }]);
+        setRead({ subject, samples: past.get(key) ?? [] });
+      }, failed);
     void poll();
     const timer = setInterval(poll, USAGE_POLL_MS);
     return () => {

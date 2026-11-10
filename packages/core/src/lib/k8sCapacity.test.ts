@@ -304,6 +304,14 @@ describe("podBounds — a raw pod's requests and limits, read as the backend's P
     });
   });
 
+  it("reads a limit written with an exponent, as the backend does", () => {
+    // `crates/kube/src/metrics.rs` asserts `mem_mib("1e9") == 953`.
+    const bounds = podBounds(pod({ containers: [{ name: "a", ...res({}, { cpu: "1e0", memory: "1e9" }) }] }));
+    expect(bounds.memLimMiB).toBe(953);
+    expect(bounds.cpuLimMillicores).toBe(1000);
+    expect(bounds.memLimAll).toBe(true);
+  });
+
   it("measures a reading against what it reads", () => {
     const bounds = podBounds(pod({ containers: [{ name: "a", ...res({}, { cpu: "200m", memory: "256Mi" }) }] }));
     expect(podUsage(bounds, { cpuMillicores: 50, memoryMiB: 64 })).toEqual({

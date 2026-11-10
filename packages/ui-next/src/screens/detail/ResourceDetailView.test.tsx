@@ -1452,6 +1452,32 @@ describe("ResourceDetailView", () => {
       expect(graph("Memory")).toBe("Memory over the last 20 seconds");
     });
 
+    it("drops the usage when a later read fails, as the Pods list does, and draws it again when one succeeds", async () => {
+      vi.useFakeTimers({ shouldAdvanceTime: true });
+      podMetrics.mockResolvedValue(reading(100));
+      render(<ResourceDetailView {...props} />);
+      await waitFor(() => expect(value("CPU")).toBe("100m"));
+
+      // The last good reading is not "current" once the next one failed.
+      podMetrics.mockResolvedValue({ error: "metrics-server unavailable" });
+      await vi.advanceTimersByTimeAsync(10_000);
+      await waitFor(() => expect(tile("CPU")).toBeUndefined());
+      expect(tile("Memory")).toBeUndefined();
+
+      podMetrics.mockRejectedValue(new Error("connection refused"));
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(tile("CPU")).toBeUndefined();
+
+      // A pod the metrics no longer mention has no reading either.
+      podMetrics.mockResolvedValue({ metrics: [] });
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(tile("CPU")).toBeUndefined();
+
+      podMetrics.mockResolvedValue(reading(120));
+      await vi.advanceTimersByTimeAsync(10_000);
+      await waitFor(() => expect(value("CPU")).toBe("120m"));
+    });
+
     it("stops reading once it is closed", async () => {
       vi.useFakeTimers({ shouldAdvanceTime: true });
       podMetrics.mockResolvedValue(reading(100));
