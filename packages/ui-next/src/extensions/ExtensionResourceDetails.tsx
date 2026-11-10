@@ -295,7 +295,7 @@ export function ExtensionResourceDetails({selection,onClose,fullPage=false,clust
       actions={openResource ? <OpenTabButton disabled={busy} onClick={()=>openResource(selection)}/> : undefined}
       tabs={TABS}
       activeTab={tab} onTabChange={setTab} tabsLabel="Resource views"
-      footer={actionRow}
+      toolbar={actionRow}
     >{pane}</Inspector>}
   </div>;
 }

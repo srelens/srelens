@@ -69,12 +69,19 @@ export interface InspectorProps {
   emptyLabel?: ReactNode;
   /** The bar across the bottom — the actions that apply to the whole subject. */
   footer?: ReactNode;
+  /**
+   * A row of tools under the name and status line, last in the header: where
+   * classic's drawer puts a resource's actions, one click away and in view
+   * before anything below is read. The same actions as `footer`, placed at
+   * the top instead; a caller picks one. (#1072)
+   */
+  toolbar?: ReactNode;
   className?: string;
 }
 
 /**
  * The peek: one subject, identified at the top, its panes beneath, its actions
- * along the bottom. Selecting a row fills it, and it never navigates — the full
+ * along the bottom or under the name. Selecting a row fills it, and it never navigates — the full
  * view is a control in the header, which is the caller's to place.
  *
  * Two different things are called a mock in this component's history, so
@@ -145,6 +152,7 @@ export function Inspector({
   children,
   emptyLabel = "Nothing to show",
   footer,
+  toolbar,
   className,
 }: InspectorProps) {
   const headingId = useId();
@@ -283,6 +291,12 @@ export function Inspector({
                 ))}
               </dl>
             )}
+          </div>
+        )}
+
+        {filled(toolbar) && (
+          <div data-slot="inspector-toolbar" className="mt-2 flex items-center gap-1">
+            {toolbar}
           </div>
         )}
       </header>

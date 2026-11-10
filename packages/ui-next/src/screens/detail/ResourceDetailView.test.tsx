@@ -1635,21 +1635,25 @@ describe("ResourceDetailView", () => {
   });
 
   /**
-   * The design's footer: a wide `Ask`, the kind's own two actions, and an
-   * overflow. The middle pair varies by kind and comes off `KindActions` — no
-   * branch on a kind's name lives here — while `Ask` and the overflow are the
-   * pane's own shape.
+   * The quick tools under the name, as classic's drawer has them: every one of
+   * the kind's actions as an icon, nothing behind an overflow, and a compact
+   * `Ask` at the end (#1072). The tools vary by kind and come off
+   * `KindActions` — no branch on a kind's name lives here.
    */
-  describe("the footer action bar", () => {
+  describe("the quick tools under the name", () => {
     const podDescriptor = () => baseDescriptor({ actions: { logs: true, shell: true, forward: true, evict: true } });
     const deploymentDescriptor = () =>
       baseDescriptor({ k8sKind: "Deployment", actions: { logs: true, scale: true, restart: true } });
 
-    /** `Inspector` puts it last inside the pane, and nowhere else. */
+    /** `Inspector` puts it last in the header, under the status line. */
+    const toolbar = () =>
+      document.querySelector('section.pane > header [data-slot="inspector-toolbar"]') as HTMLElement | null;
     const footer = () => document.querySelector("section.pane > footer") as HTMLElement | null;
-    const barWords = () => Array.from(footer()?.querySelectorAll("button") ?? []).map((b) => b.textContent);
+    /** What each tool is called: Ask's word, or an icon's name. */
+    const toolNames = () =>
+      Array.from(toolbar()?.querySelectorAll("button") ?? []).map((b) => b.textContent || b.getAttribute("aria-label"));
 
-    it("puts Logs and Edit on a Deployment's bar, behind Ask and before the overflow", async () => {
+    it("draws every one of a Deployment's actions as a tool, Ask last, with no footer", async () => {
       getObject.mockResolvedValue({ object: DEGRADED_DEPLOYMENT });
       descriptorFor.mockReturnValue(deploymentDescriptor());
       const { getByRole } = render(
@@ -1657,10 +1661,12 @@ describe("ResourceDetailView", () => {
       );
       await waitFor(() => expect(getByRole("tab", { name: "Overview" })).toBeDefined());
 
-      expect(barWords()).toEqual(["Ask", "Logs", "Edit", "More actions"]);
+      expect(toolNames()).toEqual(["Logs", "Edit", "Copy as kubectl", "Scale", "Restart rollout", "Delete", "Ask"]);
+      expect(footer()).toBeNull();
+      expect(within(toolbar()!).queryByRole("button", { name: "More actions" })).toBeNull();
     });
 
-    it("swaps that Edit for Shell on a Pod, off the descriptor rather than the kind's name", async () => {
+    it("draws a Pod's own tools, off the descriptor rather than the kind's name", async () => {
       getObject.mockResolvedValue({ object: RUNNING_POD });
       descriptorFor.mockReturnValue(podDescriptor());
       const { getByRole } = render(
@@ -1668,7 +1674,20 @@ describe("ResourceDetailView", () => {
       );
       await waitFor(() => expect(getByRole("tab", { name: "Overview" })).toBeDefined());
 
-      expect(barWords()).toEqual(["Ask", "Logs", "Shell", "More actions"]);
+      expect(toolNames()).toEqual(["Logs", "Shell", "Forward", "Edit", "Copy as kubectl", "Evict", "Delete", "Ask"]);
+    });
+
+    it("sizes Ask like the tools beside it rather than across the row", async () => {
+      getObject.mockResolvedValue({ object: RUNNING_POD });
+      descriptorFor.mockReturnValue(podDescriptor());
+      const { getByRole } = render(
+        <ResourceDetailView context="ctx" kind="Pod" namespace="checkout" name="cart-session-store-0" />,
+      );
+      await waitFor(() => expect(getByRole("tab", { name: "Overview" })).toBeDefined());
+
+      const ask = within(toolbar()!).getByRole("button", { name: /^Ask/ });
+      expect(ask.getAttribute("data-variant")).toBe("secondary");
+      expect(ask.className).not.toContain("flex-1");
     });
 
     it("asks the console about this very subject, and asks WHY when it is unhealthy", async () => {
@@ -1678,7 +1697,7 @@ describe("ResourceDetailView", () => {
         <ResourceDetailView context="ctx" kind="Deployment" namespace="checkout" name="checkout-api" />,
       );
       await waitFor(() => expect(getByRole("tab", { name: "Overview" })).toBeDefined());
-      await userEvent.click(within(footer()!).getByRole("button", { name: /^Ask/ }));
+      await userEvent.click(within(toolbar()!).getByRole("button", { name: /^Ask/ }));
 
       // The same phrasing a list row's chip sends — one question per gesture,
       // not two spellings of it.
@@ -1693,7 +1712,7 @@ describe("ResourceDetailView", () => {
         <ResourceDetailView context="ctx" kind="Pod" namespace="checkout" name="cart-session-store-0" />,
       );
       await waitFor(() => expect(getByRole("tab", { name: "Overview" })).toBeDefined());
-      expect(within(footer()!).queryByRole("button", { name: /^Ask/ })).toBeNull();
+      expect(within(toolbar()!).queryByRole("button", { name: /^Ask/ })).toBeNull();
     });
 
     it("asks the other question of a healthy subject", async () => {
@@ -1703,47 +1722,35 @@ describe("ResourceDetailView", () => {
         <ResourceDetailView context="ctx" kind="Pod" namespace="checkout" name="cart-session-store-0" />,
       );
       await waitFor(() => expect(getByRole("tab", { name: "Overview" })).toBeDefined());
-      await userEvent.click(within(footer()!).getByRole("button", { name: /^Ask/ }));
+      await userEvent.click(within(toolbar()!).getByRole("button", { name: /^Ask/ }));
 
       expect(asked).toEqual(["What is cart-session-store-0 using right now?"]);
     });
 
-    it("folds the rest behind the overflow, and confirms a destructive one before it runs", async () => {
+    it("tints the destructive tools, and confirms one before it runs", async () => {
       getObject.mockResolvedValue({ object: DEGRADED_DEPLOYMENT });
       descriptorFor.mockReturnValue(deploymentDescriptor());
       const { getByRole } = render(
         <ResourceDetailView context="ctx" kind="Deployment" namespace="checkout" name="checkout-api" />,
       );
       await waitFor(() => expect(getByRole("tab", { name: "Overview" })).toBeDefined());
-      await userEvent.click(getByRole("button", { name: "More actions" }));
 
-      const menu = await screen.findByRole("dialog");
-      expect(Array.from(menu.querySelectorAll("button")).map((b) => b.textContent)).toEqual([
-        "Copy as kubectl",
-        "Scale",
-        "Restart rollout",
-        "Delete",
-      ]);
       // Marked destructive, not merely present: the same tone the row menu
       // gives the same entries.
-      const del = within(menu).getByRole("button", { name: "Delete" });
-      expect((del as HTMLElement).style.color).toBe(toneColor("sev"));
+      const del = within(toolbar()!).getByRole("button", { name: "Delete" });
+      expect(del.style.color).toBe(toneColor("sev"));
 
       // And it takes a confirm. The pane has to RENDER `useRowMenu`'s dialog,
-      // not just its items — a footer wired to the items alone offers Delete
+      // not just its items — a row wired to the items alone offers Delete
       // and then does nothing at all.
       await userEvent.click(del);
       expect(await screen.findByRole("heading", { name: "Delete Deployment?" })).toBeDefined();
       expect(deleteResource).not.toHaveBeenCalled();
     });
 
-    // The click #410 actually reports, on the kind it reports it on. A Pod's
-    // peek footer keeps two actions on the bar and Copy as kubectl is fifth in
-    // the row menu's order, so it is behind the overflow — where a
-    // confirmation the bar alone could draw never reached it. It confirmed on a
-    // ConfigMap (no logs, no shell, no forward ahead of it) and not on a Pod,
-    // in the same footer. (#413 review)
-    it("confirms Copy as kubectl in the peek footer, where a Pod keeps it behind the overflow", async () => {
+    // The click #410 reports, on the kind it reports it on: an icon has no
+    // word to swap, so the confirmation is the name. (#413 review, #1072)
+    it("confirms Copy as kubectl on its tool", async () => {
       Object.defineProperty(navigator, "clipboard", {
         value: { writeText: vi.fn().mockResolvedValue(undefined) },
         configurable: true,
@@ -1754,15 +1761,11 @@ describe("ResourceDetailView", () => {
         <ResourceDetailView context="ctx" kind="Pod" namespace="checkout" name="cart-session-store-0" />,
       );
       await waitFor(() => expect(getByRole("tab", { name: "Overview" })).toBeDefined());
-      expect(barWords()).toEqual(["Ask", "Logs", "Shell", "More actions"]);
 
-      await userEvent.click(getByRole("button", { name: "More actions" }));
-      const menu = await screen.findByRole("dialog");
-      await userEvent.click(within(menu).getByRole("button", { name: "Copy as kubectl" }));
+      await userEvent.click(within(toolbar()!).getByRole("button", { name: "Copy as kubectl" }));
 
       expect(navigator.clipboard.writeText).toHaveBeenCalled();
-      // The row itself says so, and the menu is still there to say it on.
-      expect(await within(menu).findByRole("button", { name: "Copied" })).toBeDefined();
+      expect(await within(toolbar()!).findByRole("button", { name: "Copied" })).toBeDefined();
     });
 
     it("offers Delete on a custom resource, and deletes it through its CRD", async () => {
@@ -1777,9 +1780,7 @@ describe("ResourceDetailView", () => {
       );
       await waitFor(() => expect(getByRole("tab", { name: "Overview" })).toBeDefined());
 
-      await userEvent.click(getByRole("button", { name: "More actions" }));
-      const menu = await screen.findByRole("dialog");
-      await userEvent.click(within(menu).getByRole("button", { name: "Delete" }));
+      await userEvent.click(within(toolbar()!).getByRole("button", { name: "Delete" }));
       const confirm = within(await screen.findByRole("dialog", { name: "Delete Widget?" }));
       await userEvent.click(confirm.getByRole("button", { name: "Delete" }));
 
@@ -1792,20 +1793,19 @@ describe("ResourceDetailView", () => {
       );
     });
 
-    it("offers the same actions in the tab's header row, only more of them on the bar", async () => {
+    it("offers the same actions in the tab's header row, worded, with the rest behind More", async () => {
       getObject.mockResolvedValue({ object: RUNNING_POD });
       descriptorFor.mockReturnValue(podDescriptor());
       const props = { context: "ctx", kind: "Pod", namespace: "checkout", name: "cart-session-store-0" } as const;
 
       const asPeek = render(<ResourceDetailView {...props} peek={{ onClose: vi.fn(), onOpenTab: vi.fn() }} />);
       await waitFor(() => expect(asPeek.getByRole("tab", { name: "Overview" })).toBeDefined());
-      expect(barWords()).toEqual(["Ask", "Logs", "Shell", "More actions"]);
+      expect(toolNames()).toEqual(["Logs", "Shell", "Forward", "Edit", "Copy as kubectl", "Evict", "Delete", "Ask"]);
       asPeek.unmount();
 
-      // The design puts this row in a footer in the peek and in the header in
-      // the tab, and gives the wider surface four of the kind's own actions
-      // instead of two. The ACTIONS are the row menu's in both — the placement
-      // and the count are the only things the host decides.
+      // The peek draws every action as an icon under the name; the tab keeps
+      // its worded row of four. The ACTIONS are the row menu's in both — the
+      // placement and the drawing are the only things the host decides.
       const asTab = render(<ResourceTabView {...props} />);
       await waitFor(() => expect(document.querySelector(".pane-body")?.textContent).not.toMatch(/^Loading /));
       const header = document.querySelector("[data-slot='tab-actions']") as HTMLElement;
@@ -1844,34 +1844,27 @@ describe("ResourceDetailView", () => {
       status: {},
     });
 
-    /** Every action the footer offers: the two on the bar plus whatever the
-     *  overflow holds. Suspend/Resume is the third entry for a CronJob, so a
-     *  reader has to open the overflow to reach it. */
-    async function allFooterActions(): Promise<(string | null)[]> {
-      const bar = barWords();
-      await userEvent.click(within(footer()!).getByRole("button", { name: "More actions" }));
-      const menu = await screen.findByRole("dialog");
-      const folded = Array.from(menu.querySelectorAll("button")).map((b) => b.textContent);
-      await userEvent.keyboard("{Escape}");
-      return [...bar, ...folded];
+    /** Every action the peek offers: all of them are tools now. */
+    async function allPeekActions(): Promise<(string | null)[]> {
+      return toolNames();
     }
 
-    async function footerActionsFor(suspend: boolean): Promise<(string | null)[]> {
+    async function peekActionsFor(suspend: boolean): Promise<(string | null)[]> {
       getObject.mockResolvedValue({ object: cronJob(suspend) });
       descriptorFor.mockReturnValue(cronJobDescriptor());
       const view = render(<ResourceDetailView context="ctx" kind="CronJob" namespace="batch" name="nightly-backup" />);
       await waitFor(() => expect(view.getByRole("tab", { name: "Overview" })).toBeDefined());
-      const words = await allFooterActions();
+      const words = await allPeekActions();
       view.unmount();
       return words;
     }
 
     it("offers Suspend on a running CronJob and Resume on a suspended one — the pane's own spec, not a default", async () => {
-      const running = await footerActionsFor(false);
+      const running = await peekActionsFor(false);
       expect(running).toContain("Suspend");
       expect(running).not.toContain("Resume");
 
-      const suspended = await footerActionsFor(true);
+      const suspended = await peekActionsFor(true);
       expect(suspended).toContain("Resume");
       expect(suspended).not.toContain("Suspend");
     });
@@ -1881,7 +1874,7 @@ describe("ResourceDetailView", () => {
      * what makes the pane offer Uncordon on a node that is already cordoned,
      * rather than Cordon again. Both directions, for the reason given above.
      */
-    async function nodeFooterActionsFor(unschedulable: boolean): Promise<(string | null)[]> {
+    async function nodePeekActionsFor(unschedulable: boolean): Promise<(string | null)[]> {
       getObject.mockResolvedValue({
         object: {
           kind: "Node",
@@ -1894,18 +1887,18 @@ describe("ResourceDetailView", () => {
       descriptorFor.mockReturnValue(baseDescriptor({ k8sKind: "Node", actions: { cordon: true, drain: true } }));
       const view = render(<ResourceDetailView context="ctx" kind="Node" namespace={null} name="worker-1" />);
       await waitFor(() => expect(view.getByRole("tab", { name: "Overview" })).toBeDefined());
-      const words = await allFooterActions();
+      const words = await allPeekActions();
       view.unmount();
       return words;
     }
 
     it("offers Cordon and Drain on a node, and Uncordon on one that is already cordoned", async () => {
-      const schedulable = await nodeFooterActionsFor(false);
+      const schedulable = await nodePeekActionsFor(false);
       expect(schedulable).toContain("Cordon");
       expect(schedulable).toContain("Drain");
       expect(schedulable).not.toContain("Uncordon");
 
-      const cordoned = await nodeFooterActionsFor(true);
+      const cordoned = await nodePeekActionsFor(true);
       expect(cordoned).toContain("Uncordon");
       expect(cordoned).toContain("Drain");
       expect(cordoned).not.toContain("Cordon");
