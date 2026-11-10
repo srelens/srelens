@@ -498,8 +498,9 @@ async fn run_flow(driver: &WebDriver, context: &str, full: bool) -> Result<(), F
     // ---- 5. The fixture pod is in the default namespace, which a fresh
     // profile's "all namespaces" includes. A single click on its row opens
     // the peek beside the list. Rows the table renders aria-hidden — its
-    // row-height sample — are not the row a reader clicks. The peek's action
-    // bar (Logs and Shell on it, the rest in its overflow) is the proof.
+    // row-height sample — are not the row a reader clicks. The peek's quick
+    // tools under its name are the proof. They are icons, so each is found
+    // by its accessible name, not by visible text (#1072).
     let actions = "//*[@role='group' and @aria-label='Pod actions']";
     click_until(
         driver,
@@ -510,22 +511,12 @@ async fn run_flow(driver: &WebDriver, context: &str, full: bool) -> Result<(), F
     .await?;
 
     if full {
-        // ---- 5F. Port-forward: Forward is in the bar's overflow. The dialog
-        // arrives with the pod and its namespace filled in; remote 8080 →
-        // explicit local 18080 are typed (a blank local port would let the
-        // backend pick one this test could not know), then real bytes are
+        // ---- 5F. Port-forward: Forward is one of the peek's tools. The
+        // dialog arrives with the pod and its namespace filled in; remote
+        // 8080 → explicit local 18080 are typed (a blank local port would let
+        // the backend pick one this test could not know), then real bytes are
         // fetched through it from OUTSIDE the app.
-        click(driver, By::XPath(format!("{actions}//button[normalize-space()='More actions']")), 30)
-            .await?;
-        click(
-            driver,
-            By::XPath(
-                "//*[@role='dialog' and @aria-label='More actions']//button[@aria-label='Forward']"
-                    .to_string(),
-            ),
-            15,
-        )
-        .await?;
+        click(driver, By::XPath(format!("{actions}//button[@aria-label='Forward']")), 30).await?;
         let dialog = "//*[@role='dialog'][.//*[normalize-space()='New port forward']]";
         for (label, port) in [("Local port", "18080"), ("Remote port", "8080")] {
             let field = wait_for(
@@ -566,10 +557,10 @@ async fn run_flow(driver: &WebDriver, context: &str, full: bool) -> Result<(), F
             tokio::time::sleep(Duration::from_secs(2)).await;
         }
 
-        // ---- 6F. Exec: Shell on the bar starts a session in the pod's one
+        // ---- 6F. Exec: the Shell tool starts a session in the pod's one
         // container and opens the Terminals tab on it. xterm's input is the
         // textarea it names "Terminal input".
-        click(driver, By::XPath(format!("{actions}//button[normalize-space()='Shell']")), 30).await?;
+        click(driver, By::XPath(format!("{actions}//button[@aria-label='Shell']")), 30).await?;
         let input = wait_for(driver, By::Css("textarea[aria-label='Terminal input']"), 30).await?;
         // Prove the keystrokes actually EXECUTE in the pod via a side effect
         // observed from OUTSIDE the app (kubectl), not from the terminal's
@@ -614,14 +605,14 @@ async fn run_flow(driver: &WebDriver, context: &str, full: bool) -> Result<(), F
         .await?;
     }
 
-    // ---- 7. Logs: the bar's Logs opens the pod's log stream in a tab, and
+    // ---- 7. Logs: the Logs tool opens the pod's log stream in a tab, and
     // the marker must appear INSIDE that stream (`role="log"` named
     // `<pod> logs`, screens/Logs.tsx) — a global text match could be
     // satisfied by the pod SPEC in the peek's YAML, which embeds the
     // fixture's command (also why the command logs the marker via an
     // expansion the spec doesn't contain). Only real log output can put it
     // here.
-    click(driver, By::XPath(format!("{actions}//button[normalize-space()='Logs']")), 30).await?;
+    click(driver, By::XPath(format!("{actions}//button[@aria-label='Logs']")), 30).await?;
     wait_for(
         driver,
         By::XPath(format!(

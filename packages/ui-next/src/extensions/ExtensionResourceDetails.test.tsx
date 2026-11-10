@@ -585,6 +585,15 @@ it("keeps two actions on a peek's bar and folds the rest, and Refresh, into More
   fireEvent.click(screen.getByRole("button",{name:"Refresh details"}));
   await waitFor(()=>expect(inspectExtensionResource).toHaveBeenCalledTimes(2));
 });
+// The built-in peek's place for its tools (#1072). An app's actions carry no
+// icons, so they keep their words, two of them, and More holds the rest.
+it("puts a peek's actions under the name, Ask last, with no footer",async()=>{
+  peek();
+  await screen.findByRole("button",{name:"Suspend"});
+  const toolbar=document.querySelector('section.pane > header [data-slot="inspector-toolbar"]');
+  expect([...toolbar?.querySelectorAll("button")??[]].map(b=>b.textContent)).toEqual(["Suspend","Resume","More actions","Ask"]);
+  expect(document.querySelector("section.pane > footer")).toBeNull();
+});
 it("keeps what it is showing through a Refresh, until the new read answers",async()=>{
   vi.mocked(inspectExtensionResource).mockResolvedValueOnce({...detail,status:failing});
   peek();

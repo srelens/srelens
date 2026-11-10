@@ -107,14 +107,14 @@ function statusHeader(
 }
 
 /**
- * The detail PEEK: one subject, identified at the top, its panes beneath, its
- * actions along the bottom — the pane `mock-detail-pane.md` draws, inside the
- * resource list.
+ * The detail PEEK: one subject, identified at the top with its quick tools
+ * under the name, its panes beneath — the pane `mock-detail-pane.md` draws,
+ * inside the resource list, with the tools moved up from its footer (#1072).
  *
  * ONE OF TWO SCREENS, and it knows nothing about the other. Spec rule R-5 said
  * the peek and the full tab were one component differing by a prop; the user's
  * full-tab mock retired it, and the two now have their own chrome and their
- * own layouts — a compact header and a footer action bar here, a breadcrumb, a
+ * own layouts — a compact header with quick tools under the name here, a breadcrumb, a
  * metric strip and a three-column fact grid there.
  *
  * What they still share is everything that is not a look, and it is shared
@@ -178,7 +178,7 @@ export function ResourceDetailView({ context, kind, group, namespace, name, peek
     );
   }
 
-  // Read once: the header draws the verdict, and the footer's Ask asks a
+  // Read once: the header draws the verdict, and the tools' Ask asks a
   // different question of an unhealthy subject than of a healthy one.
   const header = statusHeader(statusLine, object);
   // The header's age is the Created fact, on a subject that has a line for one.
@@ -216,13 +216,14 @@ export function ResourceDetailView({ context, kind, group, namespace, name, peek
       onTabChange={selectTab}
       tabsLabel="Resource views"
       onClose={peek?.onClose}
-      // The design's bar. Nothing about it comes from `peek`: the actions a
-      // subject offers are the kind's, not the screen's, and the full tab
-      // draws the very same row in its header through the very same
-      // component. It is not offered on the loading or error states above —
-      // Suspend/Resume reads the object's own `spec`, and half of these
-      // actions are writes against something the pane could not even read.
-      footer={
+      // The quick tools, under the name as classic's drawer has them (#1072).
+      // Nothing about them comes from `peek`: the actions a subject offers are
+      // the kind's, not the screen's, and the full tab draws the very same row
+      // in its header through the very same component. They are not offered
+      // on the loading or error states above — Suspend/Resume reads the
+      // object's own `spec`, and half of these actions are writes against
+      // something the pane could not even read.
+      toolbar={
         <DetailActions
           context={context}
           kind={kind}

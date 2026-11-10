@@ -412,6 +412,20 @@ describe("Inspector's flag dot", () => {
     expect(screen.getByText("Nothing to show")).toBeDefined();
   });
 
+  it("draws a toolbar inside the header, under the status line (#1072)", () => {
+    const { container } = setup({ status: "Running", toolbar: <button type="button">Logs</button> });
+    const header = container.querySelector("header")!;
+    const toolbar = header.querySelector('[data-slot="inspector-toolbar"]');
+    expect(toolbar?.contains(screen.getByRole("button", { name: "Logs" }))).toBe(true);
+    // Last in the header: the name, then the status line, then the tools.
+    expect(header.lastElementChild).toBe(toolbar);
+  });
+
+  it("omits the toolbar when there is nothing in it", () => {
+    const { container } = setup({ toolbar: false });
+    expect(container.querySelector('[data-slot="inspector-toolbar"]')).toBeNull();
+  });
+
   it("renders the footer when there is one", () => {
     setup({ footer: <button type="button">Ask</button> });
     expect(screen.getByRole("button", { name: "Ask" })).toBeDefined();
