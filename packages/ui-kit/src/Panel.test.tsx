@@ -72,6 +72,26 @@ describe("Panel", () => {
     expect(container.querySelector(".card-head")).not.toBeNull();
   });
 
+  it("puts a count at the end of the head, in the label voice", () => {
+    const { container } = render(
+      <Panel title="Contexts found" count="3 in 2 files">
+        body
+      </Panel>,
+    );
+    const head = container.querySelector(".card-head");
+    const count = head?.lastElementChild;
+    expect(count?.getAttribute("data-slot")).toBe("count");
+    expect(count?.textContent).toBe("3 in 2 files");
+    expect(count?.classList.contains("eyebrow")).toBe(true);
+    // The title stays a heading beside it.
+    expect(screen.getByRole("heading", { level: 2, name: "Contexts found" })).toBeDefined();
+  });
+
+  it("draws no count slot when there is no count", () => {
+    const { container } = render(<Panel title="Contexts found">body</Panel>);
+    expect(container.querySelector('[data-slot="count"]')).toBeNull();
+  });
+
   it("renders the title as a section heading", () => {
     // The classic SectionPanel this replaces rendered its title as an h2, and
     // its call sites are real sections of a page — ClusterOverview's among
