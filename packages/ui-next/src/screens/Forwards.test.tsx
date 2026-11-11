@@ -845,12 +845,14 @@ describe("Forwards — the Local cell opens", () => {
     // it the face that makes a host:port readable.
     const mono = localCell("svc/checkout-api").querySelector(".code") as HTMLElement;
     expect(mono.textContent).toBe(`${window.location.origin}/pf/1/`);
-    // A proxy URL is long and the button is a flex box, whose items refuse to
-    // shrink below their content without `min-w-0`. jsdom lays nothing out, so
-    // this asserts the mechanism — the same way the Cluster cell's does, after
-    // column overflow shipped unnoticed three times on this project.
+    // A proxy URL is long. The kit's link button is an inline-block bounded by
+    // the cell, and `truncate` does nothing to the inline span inside it, so
+    // the span is a block. jsdom lays nothing out, so this asserts the
+    // mechanism — the same way the Cluster cell's does, after column overflow
+    // shipped unnoticed three times on this project.
     expect(mono.className).toContain("truncate");
-    expect(mono.className).toContain("min-w-0");
+    expect(mono.className).toContain("block");
+    expect(mono.closest("button")?.className.split(/\s+/)).toEqual(expect.arrayContaining(["link-btn", "max-w-full"]));
   });
 
   it("opens the desktop address with the scheme a browser needs", async () => {

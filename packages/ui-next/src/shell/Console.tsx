@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { Alert, ConsoleDock, Eyebrow, cx } from "@srelens/ui-kit";
+import { Alert, Button, ConsoleDock, Eyebrow, cx } from "@srelens/ui-kit";
 import { useConsole } from "../console";
 import {
   askAgent,
@@ -29,7 +29,7 @@ import { askContextFor, runKeyFor } from "../lib/askContext";
 import { useNamespaces } from "../lib/workspace";
 import { readImageFile } from "../lib/pastedImages";
 import { invalidateAgentInventory, useAgentInventoryVersion } from "../lib/agentInventory";
-import { describeError, isTauri, listAgents, selectsNothing, type AgentInfo } from "@srelens/core";
+import { describeError, isTauri, listAgents, parseExtensionRoute, selectsNothing, type AgentInfo } from "@srelens/core";
 import { useActiveContext, useContexts } from "../lib/clusters";
 import { detailRoute } from "../lib/detailRoute";
 import { hint } from "../lib/shortcuts";
@@ -38,6 +38,7 @@ import { openOnNamedCluster } from "../lib/openCluster";
 import { logsRoute } from "../screens/Logs";
 import { Transcript } from "../screens/agent/Transcript";
 import { useWorkspaceSealed } from "./LockGate";
+import { appPageContext } from "./ProtectedStrip";
 import {
   consoleHeightBounds,
   saveConsoleHeight,
@@ -262,14 +263,26 @@ export function Console({ fullView, spareAbove }: { fullView?: boolean; spareAbo
   // which is where a resource's identity lives — a cluster name alone left the
   // agent with no target for "summarise this stream" and it went searching
   // four namespaces for one.
+  // An app's page pins its cluster in its route, as a detail tab does (#834), so
+  // a question asked from it goes there whatever the rail says, and the page's
+  // narrowing is that cluster's too.
+  const appContext = appPageContext(route, contexts);
+  const appPage = parseExtensionRoute(route);
+  const unresolvedLegacyAppPage =
+    appContext === null && appPage !== null && appPage.contextKey === undefined && appPage.clusterId === undefined;
+  // A missing keyed context keeps the established rail fallback. A legacy
+  // name-only route cannot: ExtensionPage pins its first resolution locally,
+  // so a later name lookup could silently send the question to a replacement.
+  // Until that pin is shared, no target is safer than a different target.
+  const askCtx = appContext === undefined || (appContext === null && !unresolvedLegacyAppPage) ? activeCtx : appContext;
   // The active tab's namespace narrowing for this cluster — the picker on the
   // list screens. Without it, a question asked from a list narrowed to one
   // namespace had the agent sweep every namespace in the cluster.
-  const selected = useNamespaces(activeCtx?.stableId);
+  const selected = useNamespaces(askCtx?.stableId);
   // A namespace collection that matches nothing names no namespace to ask about (#881).
   const about = useMemo(
-    () => askContextFor(route, context, selectsNothing(selected) ? [] : selected),
-    [route, context, selected],
+    () => askContextFor(route, askCtx?.name ?? "", selectsNothing(selected) ? [] : selected),
+    [route, askCtx?.name, selected],
   );
   /**
    * The dock shows the conversation about the thing the reader is LOOKING at,
@@ -323,7 +336,11 @@ export function Console({ fullView, spareAbove }: { fullView?: boolean; spareAbo
   // selected conversation outranks the active workspace, because it is what
   // `askAgent` will be given.
   const askAbout = shown?.about ?? about;
-  const askCluster = askAbout.cluster || context;
+  // Do not fill a deliberately unresolved legacy app page from the rail. The
+  // page may still be showing the context it resolved when it mounted, while
+  // the same display name now belongs to another context. Refusing the ask is
+  // the only target we can prove correct until ExtensionPage shares its pin.
+  const askCluster = askAbout.cluster || (unresolvedLegacyAppPage ? "" : context);
   const askPaused = contexts.some(c => c.name === askCluster && workspace.pausedClusters?.includes(c.stableId));
   const shownClusterLabel = useContextLabel(shown?.about.cluster ?? "", contexts.find(c => c.name === shown?.about.cluster)?.stableId);
   const askScope = shown ? contextLabelFor(shown.route, shownClusterLabel) : scope;
@@ -626,9 +643,9 @@ export function Console({ fullView, spareAbove }: { fullView?: boolean; spareAbo
     children = (
       <p className="min-w-0 break-words text-sm text-muted">
         {assistantEverywhere ? `AI Assistant is off for ${offLabel}` : "AI Assistant is off"}{" "}
-        <button type="button" className="text-btn" onClick={() => openSettings("agent")}>
+        <Button type="button" variant="text" onClick={() => openSettings("agent")}>
           Open Settings
-        </button>
+        </Button>
       </p>
     );
   } else if (isFullView || turns.length === 0) {
@@ -819,16 +836,16 @@ export function Console({ fullView, spareAbove }: { fullView?: boolean; spareAbo
             ) : (
               <span className="chip" style={{ color: "var(--sev)" }}>
                 <span>Agents could not be listed: {describeError(agents.error, { domain: "local" }).detail}</span>
-                <button
+                <Button
                   type="button"
-                  className="text-btn"
+                  variant="text"
                   onClick={() => {
                     setRetrying(true);
                     invalidateAgentInventory();
                   }}
                 >
                   Retry
-                </button>
+                </Button>
               </span>
             ))}
           {askPaused && (

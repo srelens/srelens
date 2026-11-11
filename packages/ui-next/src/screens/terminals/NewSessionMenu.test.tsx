@@ -37,7 +37,7 @@ const sessions = vi.hoisted(() => ({
 vi.mock("../../lib/sessions", () => sessions);
 
 import { NewSessionMenu } from "./NewSessionMenu";
-import type { ClusterContext } from "@srelens/core";
+import { interactiveShell, type ClusterContext } from "@srelens/core";
 import { resetContexts, setContexts } from "../../lib/clusters";
 import { defaultState } from "../../lib/tabs";
 import { getState, setState, setWorkspaceProtected } from "../../lib/tabsStore";
@@ -97,7 +97,28 @@ describe("NewSessionMenu", () => {
       <NewSessionMenu context={CONTEXT} namespace={NAMESPACE} onStarted={onStarted} onClose={onClose} />,
     );
 
-    expect(screen.getByRole("button", { name: "Local shell" })).not.toBeNull();
+    // A choice of one, so the kit's segmented radio group (#1001, step 7c).
+    const kinds = within(screen.getByRole("radiogroup", { name: "Session kind" })).getAllByRole("radio");
+    expect(kinds.map((kind) => [kind.textContent, kind.getAttribute("aria-checked")])).toEqual([
+      ["Pod", "true"],
+      ["Node", "false"],
+      ["Local shell", "false"],
+    ]);
+  });
+
+  it("keeps the kind chosen when its caption is pressed", async () => {
+    // A caption that is a <label> around the group hands its clicks, and its
+    // hover, to the first option: pressing "Kind" chose Pod, and Pod lit up
+    // under the pointer whatever segment it was over.
+    core.isTauri.mockReturnValue(true);
+    render(
+      <NewSessionMenu context={CONTEXT} namespace={NAMESPACE} onStarted={onStarted} onClose={onClose} />,
+    );
+    const user = userEvent.setup();
+    await user.click(screen.getByRole("radio", { name: "Node" }));
+    await user.click(screen.getByText("Kind"));
+    expect(screen.getByRole("radio", { name: "Node" }).getAttribute("aria-checked")).toBe("true");
+    expect(screen.getByRole("radiogroup", { name: "Session kind" }).closest("label")).toBeNull();
   });
 
   it("does not offer a local shell in the browser, and says once why", () => {
@@ -106,7 +127,7 @@ describe("NewSessionMenu", () => {
       <NewSessionMenu context={CONTEXT} namespace={NAMESPACE} onStarted={onStarted} onClose={onClose} />,
     );
 
-    expect(screen.queryByRole("button", { name: "Local shell" })).toBeNull();
+    expect(screen.queryByRole("radio", { name: "Local shell" })).toBeNull();
     // Said once for the whole menu — not a sentence that would have to repeat
     // itself for Pod and again for Node.
     expect(
@@ -160,7 +181,7 @@ describe("NewSessionMenu", () => {
       <NewSessionMenu context={CONTEXT} namespace={NAMESPACE} onStarted={onStarted} onClose={onClose} />,
     );
 
-    await user.click(screen.getByRole("button", { name: "Node" }));
+    await user.click(screen.getByRole("radio", { name: "Node" }));
     await waitFor(() => expect((screen.getByLabelText("Node") as HTMLSelectElement).disabled).toBe(false));
     await user.selectOptions(screen.getByLabelText("Node"), "eu-w4-c3-standard-a1");
     await user.click(screen.getByRole("button", { name: "Start session" }));
@@ -173,6 +194,8 @@ describe("NewSessionMenu", () => {
         namespace: "kube-system",
         pod: "node-debug-abc12",
         kind: "node",
+        // The host's shell, by the reader's OS, as a pod shell picks one (#1040).
+        command: ["nsenter", "--target", "1", "--mount", "--uts", "--ipc", "--net", "--pid", "--", ...interactiveShell()],
       }),
     );
     expect(onStarted).toHaveBeenCalledWith(9);
@@ -189,7 +212,7 @@ describe("NewSessionMenu", () => {
     const user = userEvent.setup();
     render(<NewSessionMenu context="" onStarted={onStarted} onClose={onClose} />);
 
-    await user.click(screen.getByRole("button", { name: "Local shell" }));
+    await user.click(screen.getByRole("radio", { name: "Local shell" }));
     const start = screen.getByRole("button", { name: "Start session" });
     expect(start.hasAttribute("disabled")).toBe(true);
 
@@ -206,7 +229,7 @@ describe("NewSessionMenu", () => {
       <NewSessionMenu context={CONTEXT} namespace={NAMESPACE} onStarted={onStarted} onClose={onClose} />,
     );
 
-    await user.click(screen.getByRole("button", { name: "Local shell" }));
+    await user.click(screen.getByRole("radio", { name: "Local shell" }));
     await user.click(screen.getByRole("button", { name: "Start session" }));
 
     await waitFor(() => expect(sessions.startLocalSession).toHaveBeenCalledTimes(1));
@@ -257,7 +280,7 @@ describe("NewSessionMenu — on a protected cluster (#101)", () => {
   it("creates no debug pod for a node shell until the cluster's name is typed", async () => {
     const user = userEvent.setup();
     render(<NewSessionMenu context={CONTEXT} namespace={NAMESPACE} onStarted={onStarted} onClose={onClose} />);
-    await user.click(screen.getByRole("button", { name: "Node" }));
+    await user.click(screen.getByRole("radio", { name: "Node" }));
     await waitFor(() => expect((screen.getByLabelText("Node") as HTMLSelectElement).disabled).toBe(false));
     await user.selectOptions(screen.getByLabelText("Node"), "eu-w4-c3-standard-a1");
     expect(start().hasAttribute("disabled")).toBe(true);
@@ -273,7 +296,7 @@ describe("NewSessionMenu — on a protected cluster (#101)", () => {
   it("asks nothing of the local shell, whose guard is the read-only terminal", async () => {
     const user = userEvent.setup();
     render(<NewSessionMenu context={CONTEXT} namespace={NAMESPACE} onStarted={onStarted} onClose={onClose} />);
-    await user.click(screen.getByRole("button", { name: "Local shell" }));
+    await user.click(screen.getByRole("radio", { name: "Local shell" }));
     expect(screen.queryByRole("textbox", { name: `Type ${CONTEXT} to confirm` })).toBeNull();
     await user.click(start());
     await waitFor(() => expect(sessions.startLocalSession).toHaveBeenCalledTimes(1));
@@ -311,7 +334,7 @@ describe("NewSessionMenu — a local shell on a protected cluster (#101)", () =>
     const user = userEvent.setup();
     render(<NewSessionMenu context={CONTEXT} namespace={NAMESPACE} onStarted={onStarted} onClose={onClose} />);
 
-    await user.click(screen.getByRole("button", { name: "Local shell" }));
+    await user.click(screen.getByRole("radio", { name: "Local shell" }));
     expect(screen.getByText(WARNING)).toBeTruthy();
     const start = screen.getByRole("button", { name: "Start session" });
     expect(start.hasAttribute("disabled")).toBe(true);
@@ -331,7 +354,7 @@ describe("NewSessionMenu — a local shell on a protected cluster (#101)", () =>
     const user = userEvent.setup();
     render(<NewSessionMenu context={CONTEXT} namespace={NAMESPACE} onStarted={onStarted} onClose={onClose} />);
 
-    await user.click(screen.getByRole("button", { name: "Local shell" }));
+    await user.click(screen.getByRole("radio", { name: "Local shell" }));
     expect(screen.queryByText(WARNING)).toBeNull();
     expect(screen.queryByRole("textbox", { name: FIELD })).toBeNull();
     expect(screen.getByRole("button", { name: "Start session" }).hasAttribute("disabled")).toBe(false);
@@ -342,7 +365,7 @@ describe("NewSessionMenu — a local shell on a protected cluster (#101)", () =>
     const user = userEvent.setup();
     render(<NewSessionMenu context={CONTEXT} namespace={NAMESPACE} onStarted={onStarted} onClose={onClose} />);
 
-    await user.click(screen.getByRole("button", { name: "Local shell" }));
+    await user.click(screen.getByRole("radio", { name: "Local shell" }));
     expect(screen.queryByText(WARNING)).toBeNull();
     expect(screen.getByRole("button", { name: "Start session" }).hasAttribute("disabled")).toBe(false);
   });

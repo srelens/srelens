@@ -94,7 +94,8 @@ pub async fn agent_models(
         };
     };
     let binary = binary.ok_or_else(|| format!("{label} is not installed"))?;
-    let mut child = tokio::process::Command::new(binary)
+    let mut command = tokio::process::Command::new(binary);
+    command
         .args(args)
         .envs(
             cursor_key
@@ -104,9 +105,20 @@ pub async fn agent_models(
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
-        .kill_on_drop(true)
-        .spawn()
-        .map_err(|e| format!("Could not run {label}: {e}"))?;
+        .kill_on_drop(true);
+    // A CLI just written can be busy for a moment (`ETXTBSY`): an installer
+    // still closing it, or a fork in another thread holding a copy of its
+    // write fd until that fork execs (rust-lang/rust#114554).
+    let mut busy = 0;
+    let mut child = loop {
+        match command.spawn() {
+            Err(e) if e.kind() == std::io::ErrorKind::ExecutableFileBusy && busy < 10 => {
+                busy += 1;
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            spawned => break spawned.map_err(|e| format!("Could not run {label}: {e}"))?,
+        }
+    };
     let mut stdout = child.stdout.take().expect("stdout is piped");
     let mut out = Vec::new();
     // A `let`, so the future's borrow of `child` ends before the kill below.
@@ -250,5 +262,47 @@ mod tests {
             .unwrap_err();
         assert!(err.starts_with("Cursor could not list its models"), "{err}");
         assert!(err.contains("Not logged in"), "{err}");
+    }
+
+    /// Linux will not exec a file that is open for writing (`ETXTBSY`). A CLI
+    /// an installer has just written can be busy like that for a moment, and
+    /// so can every fake here: a fork in another test thread keeps a copy of
+    /// the script's write fd until it execs (rust-lang/rust#114554). Holding
+    /// a write handle open makes the spawn hit it on purpose.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn a_cli_busy_for_a_moment_still_lists_its_models() {
+        let dir = tempfile::tempdir().unwrap();
+        let cli = fake_cli(dir.path(), "m-1 - Model One", 0);
+        let writer = std::fs::OpenOptions::new().write(true).open(&cli).unwrap();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(200));
+            drop(writer);
+        });
+        let models = agent_models(AgentKind::Cursor, Some(&cli), None)
+            .await
+            .unwrap();
+        assert_eq!(
+            models,
+            [ModelChoice {
+                id: "m-1".into(),
+                label: "Model One".into()
+            }]
+        );
+    }
+
+    /// ...but one that stays busy is reported, not waited on forever.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn a_cli_that_stays_busy_is_an_error_not_a_hang() {
+        let dir = tempfile::tempdir().unwrap();
+        let cli = fake_cli(dir.path(), "m-1 - Model One", 0);
+        let _writer = std::fs::OpenOptions::new().write(true).open(&cli).unwrap();
+        let listing = agent_models(AgentKind::Cursor, Some(&cli), None);
+        let err = tokio::time::timeout(Duration::from_secs(10), listing)
+            .await
+            .expect("a busy CLI is retried a few times, not forever")
+            .unwrap_err();
+        assert!(err.starts_with("Could not run Cursor: "), "{err}");
     }
 }

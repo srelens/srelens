@@ -46,6 +46,7 @@ import { MetricTile } from "../MetricTile";
 import { NavIcon } from "../NavIcon";
 import { PairList } from "../PairList";
 import { Panel } from "../Panel";
+import { PaneIntro } from "../PaneIntro";
 import { OptionCheck } from "../OptionCheck";
 import { Popover } from "../Popover";
 import { Progress } from "../Progress";
@@ -71,13 +72,13 @@ import { Switch } from "../Switch";
 import { Table, type Column } from "../Table";
 import { TabStrip } from "../TabStrip";
 import { Tabs } from "../Tabs";
+import { TextArea } from "../TextArea";
 import { TextInput } from "../TextInput";
 import { Titlebar } from "../Titlebar";
 import { Toast } from "../Toast";
 import { Toolbar } from "../Toolbar";
 import { Tooltip } from "../Tooltip";
 import { WorkspaceSwitcher } from "../WorkspaceSwitcher";
-import { WorkspaceTree } from "../WorkspaceTree";
 import type { Tone } from "../tone";
 
 const TONES: Tone[] = ["muted", "ok", "info", "accent", "warn", "sev"];
@@ -176,9 +177,9 @@ export function Gallery() {
   const [drawer, setDrawer] = useState(false);
   const [workspace, setWorkspace] = useState("local");
   const [openTabs, setOpenTabs] = useState([
-    { id: "control", title: "Control room", sub: "prod-eu", pinned: true },
-    { id: "workloads", title: "Workloads", sub: "prod-eu" },
-    { id: "logs", title: "checkout-api logs", sub: "prod-eu", preview: true },
+    { id: "control", title: "Control room", sub: "prod-eu", clusterColor: "var(--mark-teal)", pinned: true },
+    { id: "workloads", title: "Workloads", sub: "prod-eu", clusterColor: "var(--mark-teal)" },
+    { id: "logs", title: "checkout-api logs", sub: "stage-eu", clusterColor: "var(--mark-orange)", preview: true },
   ]);
   const [openTab, setOpenTab] = useState("workloads");
   const [boxes, setBoxes] = useState({ a: true, b: false });
@@ -312,6 +313,15 @@ export function Gallery() {
           />
           <TextInput value="bad name" onValueChange={() => {}} invalid aria-label="an invalid input" />
           <TextInput value="frozen" onValueChange={() => {}} disabled aria-label="a disabled input" />
+        </div>
+      </section>
+
+      <section>
+        <h2>TextArea</h2>
+        <div className="kit-gallery__row">
+          <TextArea value={"kind: Config\nclusters: []"} onValueChange={() => {}} rows={3} aria-label="a filled text area" />
+          <TextArea value="" onValueChange={() => {}} rows={3} placeholder={"prod-*\n*-canary"} aria-label="an empty text area" />
+          <TextArea value="not: [valid" onValueChange={() => {}} rows={3} invalid aria-label="an invalid text area" />
         </div>
       </section>
 
@@ -520,6 +530,22 @@ export function Gallery() {
         <Panel description="No title, still a header">Body.</Panel>
         {/* Untitled omits the header rather than ruling off an empty one. */}
         <Panel>No title at all.</Panel>
+        {/* Flush: the table's rules meet the card's border. */}
+        <Panel title="Link forms" flush>
+          <Section padded={false}>
+            <Table
+              columns={[{ key: "link", header: "Link" }] as Column<{ link: string }>[]}
+              data={[{ link: "srelens://pod/default/web" }]}
+              getRowKey={(row) => row.link}
+            />
+          </Section>
+        </Panel>
+      </section>
+
+      <section>
+        <h2>PaneIntro</h2>
+        <PaneIntro title="Workspaces" description="Each workspace has its own clusters and tabs." />
+        <PaneIntro title="Apps" actions={<Button variant="secondary">Refresh</Button>} />
       </section>
 
       <section>
@@ -614,6 +640,19 @@ export function Gallery() {
           {/* The figure stays in the body colour whatever the tone: severity is
               context around the number, not the number itself. */}
           <MetricTile label="Pending" value={3} tone="warn" action={<Button size="xs">view</Button>} />
+        </div>
+        {/* An app's dashboard card: it opens the list behind its figure, shows
+            a breakdown under it, and says no figure at all while loading. */}
+        <div className="kit-gallery__row">
+          <MetricTile label="Certificates" value={12} onOpen={() => {}} description="cert-manager">
+            <ul className="text-[0.75rem]">
+              <li className="flex justify-between gap-2"><span>Ready</span> <span className="num">10</span></li>
+              <li className="flex justify-between gap-2"><span>Expiring</span> <span className="num">2</span></li>
+            </ul>
+          </MetricTile>
+          <MetricTile label="Issuers" description="cert-manager">
+            <LoadingState compact />
+          </MetricTile>
         </div>
       </section>
 
@@ -1005,6 +1044,8 @@ export function Gallery() {
             through a list. */}
         <KV k="Status" v="Running" />
         <KV k="Image" v="nginx:1.25" mono />
+        {/* Machine text keeps its line and scrolls rather than breaking mid-token. */}
+        <KV k="Kubeconfig" v="/home/sre/.kube/clusters/prod-eu-west-1/platform-team-admin.kubeconfig.yaml" mono wrap={false} />
       </section>
 
       <section>
@@ -1176,6 +1217,8 @@ export function Gallery() {
           {/* `label={connected && "Streaming"}` is how a caller makes it
               conditional; a bare coloured dot would say nothing at all. */}
           <LiveSignal label={false} tone="muted" />
+          {/* Stopped: the dot stays, still, because nothing is arriving. */}
+          <LiveSignal label="Not live" tone="muted" still />
         </div>
       </section>
 
@@ -1495,70 +1538,6 @@ export function Gallery() {
             onActivate={() => {}}
             emptyTitle="No resources"
             emptyHint="Nothing in this cluster answers to an API group this build knows."
-          />
-        </div>
-      </section>
-
-      <section>
-        <h2>WorkspaceTree</h2>
-        {/* Deliberately a list rather than a tree: each row is three controls,
-            and Tab reaches every one of them. */}
-        <div className="card overflow-hidden" style={{ width: 320 }}>
-          <WorkspaceTree
-            name="Acme platform"
-            active={cluster}
-            onActivate={setCluster}
-            onConnect={() => {}}
-            onDrillIn={() => {}}
-            renderExpanded={(c) => (
-              <ResourceTree
-                label={`${c.name} resources`}
-                nodes={RESOURCE_NODES}
-                active={resource}
-                onActivate={setResource}
-              />
-            )}
-            clusters={[
-              {
-                id: "prod-eu",
-                name: "prod-eu",
-                chip: <Mark decorative name="prod-eu" short="PE" size="sm" />,
-                detail: "eks · eu-west-1",
-                count: 412,
-              },
-              {
-                id: "prod-us",
-                name: "prod-us",
-                chip: <Mark decorative name="prod-us" short="PU" size="sm" color="var(--ok)" />,
-                link: "connecting",
-              },
-              {
-                id: "staging",
-                name: "staging",
-                chip: <Mark decorative name="staging" short="ST" size="sm" color="var(--info)" />,
-                link: "disconnected",
-              },
-              {
-                // The reason sits under the row and is tied to it, rather than
-                // shouted through a live region while something else is read.
-                id: "sandbox",
-                name: "sandbox",
-                chip: <Mark decorative name="sandbox" short="SB" size="sm" color="var(--warn)" />,
-                link: "error",
-                error: "dial tcp 10.0.4.7:6443: i/o timeout",
-              },
-            ]}
-          />
-        </div>
-        {/* An empty workspace keeps the way out of being empty. */}
-        <div className="card overflow-hidden" style={{ width: 320 }}>
-          <WorkspaceTree
-            name="New workspace"
-            clusters={[]}
-            onActivate={() => {}}
-            emptyTitle="No clusters"
-            emptyHint="Connect one to see what is in it."
-            emptyAction={<Button size="xs">Connect a cluster</Button>}
           />
         </div>
       </section>
@@ -2056,7 +2035,10 @@ export function Gallery() {
           onSelect={setOpenTab}
           onClose={(id) => setOpenTabs((t) => t.filter((tab) => tab.id !== id))}
           onNew={() =>
-            setOpenTabs((t) => [...t, { id: `tab-${t.length}`, title: "Pods", sub: "prod-eu" }])
+            setOpenTabs((t) => [
+              ...t,
+              { id: `tab-${t.length}`, title: "Pods", sub: "prod-eu", clusterColor: "var(--mark-teal)" },
+            ])
           }
           newHint="⌘T"
           menuFor={(tab) => [

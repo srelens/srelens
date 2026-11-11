@@ -7,15 +7,11 @@ import type { KindActions, ListRow } from "../../lib/kinds/types";
 import { useRowMenu } from "../ResourceMenu";
 
 /**
- * How many of the kind's own actions stay on the bar before the rest fold into
- * the overflow, in the peek's footer.
- *
- * Two, because the design draws two — `Logs` and then `Edit` on a Deployment,
- * `Logs` and then `Shell` on a Pod — and because the bar shares a pane that is
- * 260px wide at its narrowest. It is not a per-kind choice: the row menu's own
- * order puts the read-only affordances first and the destructive group last, so
- * taking the first two is what produces the design's pair for every kind
- * without anything here naming one.
+ * How many WORDED actions stay on the peek's row before the rest fold into
+ * the overflow. Every action with an icon is drawn as one and always stays:
+ * that is classic's quick tools row, and a built-in kind's actions all have
+ * icons (#1072). An app's actions have none, so they keep their words, and
+ * two words fit beside `Ask` in a pane 260px wide at its narrowest.
  */
 const ON_BAR = 2;
 
@@ -23,11 +19,10 @@ const ON_BAR = 2;
  * The same count for the full tab's header row, which the design draws with
  * four — `Logs`, `Shell`, `Debug`, `Edit` beside `Ask` and the overflow.
  *
- * A number rather than a second component, because that is the whole of the
- * difference between the two: the actions, their order, their icons, their
- * confirms and their kubectl previews are the row menu's, in both hosts. What
- * changes between a 260px footer and a window-wide header is how many of them
- * fit.
+ * The actions, their order, their icons, their confirms and their kubectl
+ * previews are the row menu's in both hosts. What changes between the peek's
+ * quick tools and a window-wide header is how they are drawn and how many
+ * stay out of the overflow.
  */
 const ON_HEADER_BAR = 4;
 
@@ -105,9 +100,9 @@ export interface DetailActionsProps {
    *  the two fields above are the object's as it now is. */
   onChanged?: () => void;
   /**
-   * Which host is drawing the row. The peek's footer gives `Ask` whatever the
-   * kind's own actions leave and keeps two of them on the bar; the full tab's
-   * header sizes `Ask` like every other control and has room for four.
+   * Which host is drawing the row. The peek draws every action as a quick
+   * tool under the name with a compact `Ask` last; the full tab's header puts
+   * `Ask` first and has room for four worded actions.
    *
    * The two hosts are no longer one pane (R-5 is retired), but their actions
    * still are — so what varies is a layout, named here once, rather than a
@@ -116,13 +111,78 @@ export interface DetailActionsProps {
   host?: "peek" | "tab";
 }
 
+export interface DetailActionRowProps {
+  /** The cluster `Ask` is about. */
+  context: string;
+  /**
+   * What `Ask`'s question calls the resource. A built-in's name is enough, since
+   * `askContextFor` reads the rest off its route. An app's route says nothing
+   * there, so its row names the kind and namespace here.
+   */
+  subject: string;
+  /** The subject's own health verdict, which decides which question `Ask` sends. */
+  flagged: boolean;
+  actions: ActionBarAction[];
+  /** What the group of actions is called: "Pod actions". */
+  label: string;
+  host?: "peek" | "tab";
+}
+
 /**
- * The design's action row: `Ask`, the kind's own actions, an overflow.
+ * The row itself. In the peek: the actions as quick tools, icons where they
+ * have one, then a compact `Ask` at the end (#1072). In the tab's header:
+ * `Ask`, then four worded actions, then the overflow. An app's resource draws
+ * this with its own reviewed actions; a built-in one through
+ * {@link DetailActions}.
+ */
+export function DetailActionRow({ context, subject, flagged, actions, label, host = "peek" }: DetailActionRowProps) {
+  const ask = useAsk(context);
+  const question = askQuestion(subject, flagged);
+  const Sparkle = Icons.ask;
+  const inPeek = host === "peek";
+
+  // The visible word is short and the same on every subject, so the question
+  // goes in the accessible name, where it says what will actually be sent —
+  // the same split `AskChip` makes. In the peek it is one more tool, sized
+  // like them and pushed to the end, its sparkle carrying the accent the
+  // filled button used to.
+  const askButton = ask && (
+    <Button
+      type="button"
+      size="sm"
+      variant={inPeek ? "secondary" : undefined}
+      className={inPeek ? "ml-auto" : undefined}
+      aria-label={`Ask: ${question}`}
+      title={`Ask: ${question}`}
+      onClick={() => ask(question)}
+    >
+      <Sparkle size={12} aria-hidden="true" className={inPeek ? "text-accent" : undefined} />
+      Ask
+    </Button>
+  );
+
+  if (!inPeek) {
+    return (
+      <>
+        {askButton}
+        <ActionBar actions={actions} label={label} max={ON_HEADER_BAR} />
+      </>
+    );
+  }
+  return (
+    <>
+      <ActionBar actions={actions} label={label} iconOnly max={actions.filter((a) => a.icon).length + ON_BAR} />
+      {askButton}
+    </>
+  );
+}
+
+/**
+ * The design's action row: `Ask` and the kind's own actions.
  *
- * Drawn along the bottom of the peek and along the top of the full tab — the
- * design puts it in a footer in one and in the header in the other — which is
- * a placement the host chooses, not two sets of actions. `host` says which
- * layout, and nothing else about this row varies between them.
+ * Drawn under the name in the peek, as quick tools, and along the top of the
+ * full tab — a placement the host chooses, not two sets of actions. `host`
+ * says which layout, and nothing else about this row varies between them.
  *
  * Every action in it is the list's row menu, unchanged — `useRowMenu` already
  * owns Follow logs, Open shell, Port forward, Edit, Copy as kubectl,
@@ -157,7 +217,6 @@ export function DetailActions({
   host = "peek",
   group,
 }: DetailActionsProps) {
-  const ask = useAsk(context);
   const { items, dialog } = useRowMenu({ context, kind, actions, group, onChanged });
 
   // What a table would have handed the hook. `suspended` is not on `ListRow`
@@ -170,35 +229,15 @@ export function DetailActions({
     ...(suspended === undefined ? {} : { suspended }),
     ...(unschedulable === undefined ? {} : { unschedulable }),
   };
-  const question = askQuestion(name, flagged);
-  const Sparkle = Icons.ask;
-  const inPeek = host === "peek";
-
   return (
     <>
-      {/* Wide in the peek, per the design: it takes whatever the kind's own
-          actions leave. In the tab's header row it is a control like any
-          other, because the row is not the only thing on that line.
-          The visible word is short and the same on every subject, so the
-          question goes in the accessible name, where it says what will
-          actually be sent — the same split `AskChip` makes. */}
-      {ask && (
-        <Button
-          type="button"
-          size="sm"
-          className={inPeek ? "flex-1 justify-center" : undefined}
-          aria-label={`Ask: ${question}`}
-          title={`Ask: ${question}`}
-          onClick={() => ask(question)}
-        >
-          <Sparkle size={12} aria-hidden="true" />
-          Ask
-        </Button>
-      )}
-      <ActionBar
+      <DetailActionRow
+        context={context}
+        subject={name}
+        flagged={flagged}
         actions={toBarActions(items(row))}
         label={`${kind} actions`}
-        max={inPeek ? ON_BAR : ON_HEADER_BAR}
+        host={host}
       />
       {dialog}
     </>

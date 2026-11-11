@@ -4,6 +4,7 @@ import {
   defaultContainer,
   execCandidates,
   getObject,
+  interactiveShell,
   isTauri,
   listNamespaces,
   listNodes,
@@ -11,7 +12,7 @@ import {
   podContainerChoices,
   type ContainerChoice,
 } from "@srelens/core";
-import { Alert, Button, Dialog, Field, Select } from "@srelens/ui-kit";
+import { Alert, Button, Dialog, Field, Select, Tabs } from "@srelens/ui-kit";
 import { FailureAlert } from "../../lib/errorCopy";
 import { startLocalSession, startPodSession } from "../../lib/sessions";
 import { useProtectedConfirm } from "../../lib/protectedConfirm";
@@ -22,7 +23,8 @@ const WIDTH = 420;
 
 /**
  * Enter the host's namespaces from the privileged debug pod for a real node
- * shell — run via `exec`, the pod itself just stays alive holding it open.
+ * shell — run via `exec`, the pod itself just stays alive holding it open —
+ * then the host's own shell, picked as a pod shell's is.
  * Mirrors classic's `NodeCordonAction.NODE_SHELL_COMMAND`, which this
  * replaces: that component is `apps/desktop`'s, and this screen does not
  * reach across into it for one array.
@@ -37,7 +39,7 @@ const NODE_SHELL_COMMAND = [
   "--net",
   "--pid",
   "--",
-  "/bin/sh",
+  ...interactiveShell(),
 ];
 
 /** The container name `k8s.createNodeDebugPod` always attaches under. */
@@ -324,22 +326,19 @@ export function NewSessionMenu({ context, namespace: initial, moved, onStarted, 
         {moved}
         {failure && <FailureAlert tone="sev" title={failure.title} error={failure.error} />}
 
-        <Field label="Kind">
-          <div className="flex gap-1.5" role="group" aria-label="Session kind">
-            {kindsFor(desktop).map((k) => (
-              <Button
-                key={k}
-                type="button"
-                variant={kind === k ? "primary" : "secondary"}
-                size="sm"
-                aria-pressed={kind === k}
-                onClick={() => setKind(k)}
-              >
-                {KIND_LABEL[k]}
-              </Button>
-            ))}
-          </div>
-        </Field>
+        {/* Not a Field: a Field's <label> around the group would hand its
+            clicks and its hover to the first option, Pod. Same markup otherwise. */}
+        <div className="py-1">
+          <span className="field-label mb-0.5">Kind</span>
+          <Tabs
+            variant="segmented"
+            mode="radio"
+            label="Session kind"
+            tabs={kindsFor(desktop).map((k) => ({ id: k, label: KIND_LABEL[k] }))}
+            active={kind}
+            onChange={(k) => setKind(k as Kind)}
+          />
+        </div>
 
         {!desktop && (
           // Said once for the whole menu, not per kind: a local shell is not

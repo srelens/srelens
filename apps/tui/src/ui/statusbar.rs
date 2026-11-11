@@ -496,7 +496,7 @@ pub fn render_statusbar(f: &mut Frame, area: Rect, props: StatusBarProps) {
                         Block::default()
                             .borders(Borders::ALL)
                             .border_type(Theme::border_type())
-                            .border_style(Style::default().fg(Theme::accent()))
+                            .border_style(Style::default().fg(Theme::border_focus()))
                             .title(title),
                     );
                     f.render_widget(list, popup_area);

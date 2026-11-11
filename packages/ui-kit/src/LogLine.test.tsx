@@ -118,6 +118,17 @@ describe("LogLine", () => {
     expect(cell(container, "trailing")).toBeNull();
   });
 
+  it("lays the fields out as the cells of one row, so a copied line comes out as one line", () => {
+    // A browser copies each item of a flex or grid row onto a line of its own:
+    // the line came out of the clipboard as four lines. Table cells come out
+    // tab-separated on one. (Seen in Chromium; jsdom does no layout, so this
+    // pins the structure and the live run checks the copy.)
+    const { container } = render(<LogLine ts="14:02:11" source="app" level="error" message="x" />);
+    expect(container.querySelector(".logline")?.classList.contains("table")).toBe(true);
+    for (const slot of ["ts", "source", "level", "message"])
+      expect(cell(container, slot).classList.contains("table-cell"), slot).toBe(true);
+  });
+
   it("wears the class the stylesheet hovers", () => {
     const { container } = render(<LogLine ts="14:02:11" message="x" />);
     expect(container.querySelector(".logline")).not.toBeNull();
@@ -126,5 +137,15 @@ describe("LogLine", () => {
   it("forwards className onto the line", () => {
     const { container } = render(<LogLine ts="14:02:11" message="x" className="extra" />);
     expect(container.querySelector(".logline.extra")).not.toBeNull();
+  });
+
+  it("keeps a message's runs of spaces, and leaves wrapping to the screen", () => {
+    // (#1051) `nowrap` and `normal` both collapse spaces, so a stack trace or an
+    // aligned table lost its shape on screen and in the copy. Collapse alone is
+    // set here; whether a long line wraps is the screen's Wrap, inherited.
+    const { container } = render(<LogLine ts="14:02:11" message="    at reconcile   retry=3" />);
+    const message = cell(container, "message");
+    expect(message.className).toContain("[white-space-collapse:preserve]");
+    expect(message.className).not.toMatch(/(^|\s)whitespace-/);
   });
 });

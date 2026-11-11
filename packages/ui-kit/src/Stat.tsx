@@ -10,6 +10,8 @@ export interface StatProps {
   /** The reading behind the figure: a change, a share, a count of what is wrong. */
   delta?: ReactNode;
   tone?: Tone;
+  /** More under the figure, before the delta: a sparkline of where it has been. */
+  children?: ReactNode;
   className?: string;
 }
 
@@ -36,11 +38,12 @@ export interface StatProps {
  * cannot be undone through `className`; the row that lays these out sizes them
  * instead. (#320)
  */
-export function Stat({ label, value, delta, tone = "muted", className }: StatProps) {
+export function Stat({ label, value, delta, tone = "muted", children, className }: StatProps) {
   return (
     <div className={cx("stat", className)} data-tone={tone}>
       <Eyebrow>{label}</Eyebrow>
       <div className="stat-value">{value}</div>
+      {filled(children) && <div className="mt-1">{children}</div>}
       {filled(delta) && (
         <div className="num mt-1 text-[0.6875rem]" style={{ color: toneColor(tone) }}>
           {delta}

@@ -207,6 +207,12 @@ describe("EditResource", () => {
     expect(screen.getByRole("button", { name: "Apply" })).toHaveProperty("disabled", true);
   });
 
+  it("says it is loading the manifest until the cluster answers", async () => {
+    core.getManifest.mockReturnValue(new Promise(() => {}));
+    render(<EditResource route={ROUTE} />);
+    expect(await screen.findByRole("status", { name: "Loading the manifest" })).toBeTruthy();
+  });
+
   it("offers a Copy control over the manifest", async () => {
     // Asserted at the CALL site, not only in the kit: the prop is this
     // screen's, and dropping it would leave every editor test green. (#656)
@@ -276,7 +282,7 @@ describe("EditResource", () => {
 
     await userEvent.click(within(dialog).getByRole("button", { name: "Delete" }));
     await waitFor(() =>
-      expect(core.deleteResource).toHaveBeenCalledWith("prod-eu", "ConfigMap", "checkout", "web"),
+      expect(core.deleteResource).toHaveBeenCalledWith("prod-eu", "ConfigMap", "checkout", "web", undefined, undefined),
     );
     // The tab says what happened rather than showing an editor over nothing.
     expect(await screen.findByText(/ConfigMap web was deleted/)).toBeDefined();
@@ -335,9 +341,16 @@ describe("EditResource", () => {
       version: "v1",
       plural: "widgets",
     });
-    // `k8s.deleteResource` has no CRD path, so Delete on a custom resource
-    // would fail every time; it is withheld, as the list menu withholds it.
-    expect(screen.queryByRole("button", { name: "Delete" })).toBeNull();
+    // And Delete is told the same group, version and plural.
+    await userEvent.click(screen.getByRole("button", { name: "Delete" }));
+    await userEvent.click(within(await screen.findByRole("dialog")).getByRole("button", { name: "Delete" }));
+    await waitFor(() =>
+      expect(core.deleteResource).toHaveBeenCalledWith("prod-eu", "Widget", "checkout", "w1", undefined, {
+        group: "acme.io",
+        version: "v1",
+        plural: "widgets",
+      }),
+    );
   });
 
   it("keeps the cluster it opened on when the rail moves, and asks before writing there", async () => {
@@ -429,7 +442,7 @@ describe("EditResource", () => {
     act(() => latestEditor().onChange(EDITED));
     await userEvent.click(screen.getByRole("button", { name: "Diff" }));
     expect(await screen.findByText("Could not compare with the cluster", {}, { timeout: 3000 })).toBeDefined();
-    expect(screen.queryByText("No changes.")).toBeNull();
+    expect(screen.queryByText("No changes")).toBeNull();
     // And the header says so, whether or not the panel is open.
     expect(screen.getByText("Not compared")).toBeDefined();
   });
@@ -602,9 +615,17 @@ describe("EditResource", () => {
       version: "v1",
       plural: "deployments",
     });
-    // And no Delete: `k8s.deleteResource` resolves by kind alone, which here
-    // would be the built-in Deployment of the same name.
-    expect(screen.queryByRole("button", { name: "Delete" })).toBeNull();
+    // And Delete reaches this group's object, not the built-in Deployment of
+    // the same name.
+    await userEvent.click(screen.getByRole("button", { name: "Delete" }));
+    await userEvent.click(within(await screen.findByRole("dialog")).getByRole("button", { name: "Delete" }));
+    await waitFor(() =>
+      expect(core.deleteResource).toHaveBeenCalledWith("prod-eu", "Deployment", "checkout", "api", undefined, {
+        group: "acme.io",
+        version: "v1",
+        plural: "deployments",
+      }),
+    );
   });
 
   it("says when the manifest could not be read, instead of an empty editor", async () => {
@@ -716,7 +737,7 @@ describe("EditResource on a protected cluster (#101)", () => {
 
     await userEvent.type(typedIn(dialog), "prod-eu");
     await userEvent.click(within(dialog).getByRole("button", { name: "Delete" }));
-    await waitFor(() => expect(core.deleteResource).toHaveBeenCalledWith("prod-eu", "ConfigMap", "checkout", "web"));
+    await waitFor(() => expect(core.deleteResource).toHaveBeenCalledWith("prod-eu", "ConfigMap", "checkout", "web", undefined, undefined));
   });
 
   it("puts Force apply behind its own confirm, asking for the name afresh", async () => {

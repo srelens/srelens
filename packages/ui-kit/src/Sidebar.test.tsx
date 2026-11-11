@@ -28,6 +28,16 @@ describe("Sidebar", () => {
     expect(screen.getByText("agent is watching")).toBeDefined();
   });
 
+  it("rules the header and the filter off from the tree with the band rule", () => {
+    render(
+      <Sidebar label="Resources" header={<p>prod-eu</p>} query="" onQueryChange={() => {}}>
+        <p>tree</p>
+      </Sidebar>,
+    );
+    expect(screen.getByText("prod-eu").parentElement!.className).toContain("border-rule-strong");
+    expect(screen.getByRole("searchbox").closest("div.border-b")?.className).toContain("border-rule-strong");
+  });
+
   it("spends no band on a slot that turned out to be empty", () => {
     // `header={showHeader && <X />}` is how a caller makes a slot conditional,
     // and it hands over `false` — which renders nothing but would still take

@@ -100,4 +100,13 @@ describe("Checkbox", () => {
     const { container } = render(<Checkbox checked={false} onChange={() => {}} ariaLabel="Select all" className="extra" />);
     expect(container.querySelector("input.extra")).not.toBeNull();
   });
+
+  it("says when it failed validation and where that is explained, and only when judged", () => {
+    // An app's yes/no setting with a problem under it (#1001, step 7c).
+    const { rerender } = render(<Checkbox checked={false} onChange={() => {}} label="Verbose" />);
+    expect(screen.getByRole("checkbox").getAttribute("aria-invalid")).toBeNull();
+    rerender(<Checkbox checked={false} onChange={() => {}} label="Verbose" invalid aria-describedby="problem" />);
+    expect(screen.getByRole("checkbox").getAttribute("aria-invalid")).toBe("true");
+    expect(screen.getByRole("checkbox").getAttribute("aria-describedby")).toBe("problem");
+  });
 });

@@ -1,7 +1,7 @@
-import { useEffect, useId, useRef, useState, type ReactNode } from "react";
+import { Fragment, useEffect, useId, useRef, useState, type ReactNode } from "react";
 import { Button } from "./Button";
 import { cx } from "./cx";
-import type { IconComponent } from "./IconButton";
+import { IconButton, type IconComponent } from "./IconButton";
 import { Tooltip } from "./Tooltip";
 import { Popover } from "./Popover";
 import { filled } from "./slot";
@@ -48,6 +48,14 @@ export interface ActionBarProps {
   moreLabel?: string;
   /** A ruled-off row under the menu — copy commands, deep links. */
   menuFooter?: ReactNode;
+  /**
+   * Draws the bar as a row of icon buttons, classic's quick tools: each action
+   * with an icon becomes one, named by its label, with the label as its
+   * tooltip on hover and focus. An action with no icon keeps its word, since
+   * there is nothing else to draw. The destructive ones are set off by a
+   * divider in front of the first, unless it leads. (#1072)
+   */
+  iconOnly?: boolean;
   className?: string;
 }
 
@@ -55,7 +63,7 @@ export interface ActionBarProps {
 const DEFAULT_MAX = 4;
 
 /** Dimming is not a message; this is the word that goes with it. */
-const NO_ACCESS = "No access";
+const UNAVAILABLE = "Unavailable";
 
 /**
  * The row of actions on a resource: the first few on the bar, the rest behind a
@@ -118,6 +126,7 @@ export function ActionBar({
   max = DEFAULT_MAX,
   moreLabel = "More actions",
   menuFooter,
+  iconOnly = false,
   className,
 }: ActionBarProps) {
   // An empty group is still a group: a named box, with padding, announced to a
@@ -127,14 +136,22 @@ export function ActionBar({
   const limit = Number.isFinite(max) ? Math.max(1, Math.floor(max)) : DEFAULT_MAX;
   const head = actions.slice(0, limit);
   const rest = actions.slice(limit);
+  const firstDanger = iconOnly ? head.findIndex((a) => a.danger) : -1;
 
   return (
     <div
       role="group"
       aria-label={label}
-      className={cx("flex flex-wrap items-center gap-1.5", className)}
+      className={cx("flex flex-wrap items-center", iconOnly ? "gap-0.5" : "gap-1.5", className)}
     >
-      {head.map((a) => <BarButton key={a.id} action={a} />)}
+      {head.map((a, i) => (
+        <Fragment key={a.id}>
+          {i > 0 && i === firstDanger && (
+            <span data-slot="action-divider" aria-hidden="true" className="mx-1 h-4 w-px bg-rule-strong" />
+          )}
+          <BarButton action={a} iconOnly={iconOnly} />
+        </Fragment>
+      ))}
 
       {rest.length > 0 && (
         <Popover
@@ -188,6 +205,16 @@ function CheckGlyph() {
   );
 }
 
+/* An X: what an icon-only action shows when its confirmation failed. Inline
+   for the same reason as the check. */
+function FailGlyph() {
+  return (
+    <svg data-glyph="failed" width="12" height="12" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+      <path d="M18 6 6 18M6 6l12 12" stroke="currentColor" strokeWidth="3" strokeLinecap="round" />
+    </svg>
+  );
+}
+
 /**
  * One action on the bar.
  *
@@ -198,19 +225,54 @@ function CheckGlyph() {
  * two of them from sharing one: copying and then restarting must not flash
  * "Copied" on Restart.
  */
-function BarButton({ action: a }: { action: ActionBarAction }) {
+function BarButton({ action: a, iconOnly }: { action: ActionBarAction; iconOnly: boolean }) {
   const { state, run } = useCopied();
   const reasonId = useId();
   const blocked = filled(a.disabledReason);
   const Icon = a.icon;
   const confirming = filled(a.confirmLabel) && state === "copied";
+  const reason = blocked ? <span className="block max-w-[min(18rem,calc(100vw-2rem))] whitespace-normal break-words">{a.disabledReason}</span> : null;
+  const select = () => {
+    if (blocked) return;
+    // Only an action that asked to confirm is awaited for its answer;
+    // every other one keeps the fire-and-forget call it had.
+    if (filled(a.confirmLabel)) void run(a.onSelect);
+    else void a.onSelect();
+  };
+
+  if (iconOnly && Icon) {
+    // The word is the name and the tooltip, and tracks the confirmation the
+    // same way the worded button's text does. A blocked action's tooltip is
+    // its reason instead, as on the worded bar. An icon has no text to say
+    // "failed" in, so a failure swaps the glyph and takes the danger tone:
+    // a name the reader must hover again for is a silent failure. (#1073)
+    const word = actionWord(a, state);
+    const failing = filled(a.confirmLabel) && state === "failed";
+    return (
+      <span className="action-slot">
+        <Tooltip label={reason ?? word}>
+          <IconButton
+            icon={confirming ? CheckGlyph : failing ? FailGlyph : Icon}
+            label={word}
+            title={null}
+            danger={a.danger || failing}
+            aria-disabled={blocked || undefined}
+            aria-describedby={blocked ? reasonId : undefined}
+            className="aria-disabled:cursor-not-allowed aria-disabled:opacity-50"
+            onClick={select}
+          />
+        </Tooltip>
+        {blocked && <BlockedReason id={reasonId}>{a.disabledReason}</BlockedReason>}
+      </span>
+    );
+  }
 
   return (
     // The slot is there whether or not the action is blocked. Wrapping only a
     // blocked button would remount it the moment a verdict arrived, and a
     // verdict can arrive while the button has focus.
     <span className="action-slot">
-      <Tooltip label={blocked ? <span className="block max-w-[min(18rem,calc(100vw-2rem))] whitespace-normal break-words">{a.disabledReason}</span> : null} disabled={!blocked}>
+      <Tooltip label={reason} disabled={!blocked}>
       <Button
         type="button"
         variant={a.danger ? "danger" : "secondary"}
@@ -220,13 +282,7 @@ function BarButton({ action: a }: { action: ActionBarAction }) {
         aria-describedby={blocked ? reasonId : undefined}
         title={a.disabledReason}
         className="aria-disabled:cursor-not-allowed aria-disabled:opacity-50"
-        onClick={() => {
-          if (blocked) return;
-          // Only an action that asked to confirm is awaited for its answer;
-          // every other one keeps the fire-and-forget call it had.
-          if (filled(a.confirmLabel)) void run(a.onSelect);
-          else void a.onSelect();
-        }}
+        onClick={select}
       >
         {confirming ? <CheckGlyph /> : Icon && <Icon size={12} aria-hidden="true" />}
         {actionWord(a, state)}
@@ -325,12 +381,12 @@ function MenuRow({ action: a, close }: { action: ActionBarAction; close: () => v
       <button
         type="button"
         // Named explicitly: otherwise the name is computed from everything in
-        // the row, and a blocked action would be called "Delete No access". It
+        // the row, and a blocked action would be called "Delete Unavailable". It
         // tracks the visible word rather than pinning to `label`, so the name
         // and the text never disagree — see {@link actionWord}.
         aria-label={word}
         aria-disabled={blocked || undefined}
-        // The reason, not the `No access` tag: the tag is a constant, and a
+        // The reason, not the `Unavailable` tag: the tag is a constant, and a
         // description that says less than the `title` beside it is no fix.
         aria-describedby={blocked ? reasonId : undefined}
         title={a.disabledReason}
@@ -355,7 +411,7 @@ function MenuRow({ action: a, close }: { action: ActionBarAction; close: () => v
       >
         {confirming ? <CheckGlyph /> : Icon && <Icon size={12} className="shrink-0" aria-hidden="true" />}
         <span className="flex-1 truncate">{word}</span>
-        {blocked && <span className="path text-faint">{NO_ACCESS}</span>}
+        {blocked && <span className="path text-faint">{UNAVAILABLE}</span>}
       </button>
       {blocked && <BlockedReason id={reasonId}>{a.disabledReason}</BlockedReason>}
     </div>

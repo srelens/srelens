@@ -85,8 +85,17 @@ describe("Nav counts (#402)", () => {
     await waitFor(() => expect(pods.querySelector(".tree-count")?.textContent).toBe("2"));
     const deployments = screen.getByRole("treeitem", { name: /^Deployments/ });
     expect(deployments.querySelector(".tree-count")).toBeNull();
-    const zeros = [...document.querySelectorAll(".tree-count")].filter((c) => c.textContent === "0");
+    // Port forwards' 0 is an answer (no tunnels open); a kind's would be a guess.
+    const zeros = [...document.querySelectorAll('[role="treeitem"][aria-level="2"] .tree-count')].filter((c) => c.textContent === "0");
     expect(zeros).toHaveLength(0);
+  });
+
+  it("counts the cluster band's kinds without a fold being opened", async () => {
+    counting({ Node: 3 });
+    render(<Nav contexts={[PROD]} />);
+
+    const nodes = screen.getByRole("treeitem", { name: /^Nodes/ });
+    await waitFor(() => expect(nodes.querySelector(".tree-count")?.textContent).toBe("3"));
   });
 
   it("a paused cluster shows no counts and asks for none", async () => {
@@ -113,7 +122,7 @@ describe("Nav", () => {
     // opposite of what a tab strip is for.
     render(<Nav contexts={[PROD]} />);
 
-    for (const group of ["Workloads", "Network", "Cluster"]) {
+    for (const group of ["Workloads", "Network"]) {
       await userEvent.click(screen.getByRole("treeitem", { name: group }));
     }
     for (const kind of ["Pods", "Deployments", "Services", "Nodes"]) {
@@ -161,18 +170,16 @@ describe("Nav", () => {
     expect(listCrds).toHaveBeenCalledWith("prod-eu");
   });
 
-  it("opens an app screen from the Investigate group", async () => {
+  it("opens a tool screen from the last band", async () => {
     render(<Nav contexts={[PROD]} />);
 
-    await userEvent.click(screen.getByRole("treeitem", { name: "Investigate" }));
     await userEvent.click(await screen.findByRole("treeitem", { name: "Incidents" }));
 
     expect(tabFor("/incidents")?.preview).toBeFalsy();
   });
 
-  it("lists Agent under Investigate only while the AI Assistant is on for the cluster (#968)", async () => {
+  it("lists Agent only while the AI Assistant is on for the cluster (#968)", async () => {
     const view = render(<Nav contexts={[PROD]} />);
-    await userEvent.click(screen.getByRole("treeitem", { name: "Investigate" }));
     expect(await screen.findByRole("treeitem", { name: "Agent" })).toBeDefined();
 
     act(() => { setClusterAssistant(PROD.stableId, false); });
@@ -303,17 +310,15 @@ describe("Nav", () => {
 
 it("groups app pages under their display name", async () => {
   extensionState.data = { plugins: [
-    { enabled: true, manifest: { id: "org.srelens.flux", name: "Flux", contributions: { pages: [
+    { enabled: true, manifest: { capabilities: [], id: "org.srelens.flux", name: "Flux", contributions: { pages: [
       { id: "kustomizations", title: "Kustomizations" },
       { id: "repositories", title: "Git repositories", group: "Sources" },
     ] } } },
   ] };
   render(<Nav contexts={[PROD]} />);
-  await userEvent.click(await screen.findByRole("treeitem", { name: "Apps" }));
-  const apps = screen.getByRole("treeitem", {name:"Apps"});
-  expect(screen.getByRole("treeitem",{name:"Cluster"}).compareDocumentPosition(apps) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-  expect(apps.compareDocumentPosition(screen.getByRole("treeitem",{name:"Workloads"})) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   const fluxNode = await screen.findByRole("treeitem", { name: "Flux" });
+  // After the built-ins, as in Lens: the cluster's own kinds come first.
+  expect(screen.getByRole("treeitem",{name:"Custom resources"}).compareDocumentPosition(fluxNode) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   // No package, so no logo but initials: nothing is chosen by the app's ID (#562).
   expect(fluxNode.querySelector("[data-extension-logo]")?.getAttribute("data-extension-logo")).toBe("initials");
   await userEvent.click(fluxNode);
@@ -328,14 +333,16 @@ it("groups app pages under their display name", async () => {
 const packageIcon = `data:image/svg+xml;base64,${btoa("<svg xmlns=\"http://www.w3.org/2000/svg\"/>")}`;
 it("draws an installed package's logo on its app in the sidebar (#562)", async () => {
   extensionState.data = { plugins: [
-    { enabled: true, icon: packageIcon, manifest: { id: "org.example.packaged", name: "Packaged", contributions: { pages: [
+    { enabled: true, icon: packageIcon, manifest: { capabilities: [], id: "org.example.packaged", name: "Packaged", contributions: { pages: [
       { id: "applications", title: "Applications" },
     ] } } },
   ] };
   render(<Nav contexts={[PROD]} />);
-  await userEvent.click(await screen.findByRole("treeitem", { name: "Apps" }));
+  // One page: the app is the row, its logo in the same 13px box as every icon (#1001).
   const app = await screen.findByRole("treeitem", { name: "Packaged" });
+  expect(app.getAttribute("aria-expanded")).toBeNull();
   expect(app.querySelector("[data-extension-logo]")?.getAttribute("data-extension-logo")).toBe("package");
+  expect(app.querySelector("[data-extension-logo]")?.getAttribute("width")).toBe("13");
   expect(app.querySelector("image")?.getAttribute("href")).toBe(packageIcon);
 });
 
@@ -344,7 +351,7 @@ describe("two contexts that share a stable ID (#695)", () => {
   // a window opened for one of them pins its key.
   const first = { ...ctx("b#c"), stableId: "/kube/a#b#c", key: "/kube/a#b%23c" };
   const second = { ...ctx("c"), stableId: "/kube/a#b#c", key: "/kube/a%23b#c" };
-  const flux = { enabled: true, manifest: { id: "org.srelens.flux", name: "Flux", contributions: { pages: [
+  const flux = { enabled: true, manifest: { capabilities: [], id: "org.srelens.flux", name: "Flux", contributions: { pages: [
     { id: "kustomizations", title: "Kustomizations" },
   ] } } };
   beforeEach(() => setState(defaultState([first, second])));
@@ -352,15 +359,9 @@ describe("two contexts that share a stable ID (#695)", () => {
 
   it("opens each one's app page in a tab of its own", async () => {
     extensionState.data = { plugins: [flux] };
-    // Folds are kept per stable ID, so the pair shares them: open a group only when it is shut.
-    const unfold = async (name: string) => {
-      const group = await screen.findByRole("treeitem", { name });
-      if (group.getAttribute("aria-expanded") !== "true") await userEvent.click(group);
-    };
+    // One page, so Flux is the row that opens it.
     const open = async () => {
-      await unfold("Apps");
-      await unfold("Flux");
-      await userEvent.click(await screen.findByRole("treeitem", { name: "Kustomizations" }));
+      await userEvent.click(await screen.findByRole("treeitem", { name: "Flux" }));
     };
     pinContextKey(first.key);
     const mounted = render(<Nav contexts={[first, second]} />);
@@ -377,9 +378,103 @@ describe("two contexts that share a stable ID (#695)", () => {
     extensionState.data = { plugins: [{ ...flux, contexts: [second.key] }] };
     pinContextKey(first.key);
     const mounted = render(<Nav contexts={[first, second]} />);
-    expect(screen.queryByRole("treeitem", { name: "Apps" })).toBeNull();
+    expect(screen.queryByRole("treeitem", { name: "Flux" })).toBeNull();
     pinContextKey(second.key);
     mounted.rerender(<Nav contexts={[first, second]} />);
-    expect(screen.getByRole("treeitem", { name: "Apps" })).toBeTruthy();
+    expect(screen.getByRole("treeitem", { name: "Flux" })).toBeTruthy();
+  });
+});
+
+/** #1001: three bands, and where you are even with every group shut. */
+describe("Nav arrangement", () => {
+  it("draws the cluster, its resources, then apps and tools, with a rule between each", async () => {
+    extensionState.data = { plugins: [
+      { enabled: true, manifest: { capabilities: [], id: "org.srelens.flux", name: "Flux", contributions: { pages: [
+        { id: "kustomizations", title: "Kustomizations" },
+        { id: "helmreleases", title: "Helm releases" },
+      ] } } },
+    ] };
+    render(<Nav contexts={[PROD]} />);
+    await screen.findByRole("treeitem", { name: "Flux" });
+
+    const tree = screen.getByRole("tree", { name: "Cluster resources" });
+    const sequence = [...tree.querySelectorAll(":scope > li")].map((li) =>
+      li.getAttribute("data-slot") === "band-rule" ? "—" : li.querySelector(".truncate")?.textContent);
+    expect(sequence).toEqual([
+      "Overview", "Problems", "Nodes", "Namespaces", "Events",
+      "—",
+      "Workloads", "Config", "Network", "Storage", "Access control", "Custom resources",
+      "—",
+      "Flux", "Helm releases", "Port forwards", "Topology", "Incidents", "Agent",
+    ]);
+    expect(screen.queryByRole("treeitem", { name: "Home" })).toBeNull();
+  });
+
+  it("marks the closed group that holds the open page, and leaves it closed", () => {
+    openTab("/k/pods", { clusterName: PROD.name });
+    render(<Nav contexts={[PROD]} />);
+
+    const workloads = screen.getByRole("treeitem", { name: "Workloads" });
+    expect(workloads.getAttribute("aria-current")).toBe("location");
+    expect(workloads.getAttribute("aria-expanded")).toBe("false");
+    expect(screen.getByRole("treeitem", { name: "Config" }).getAttribute("aria-current")).toBeNull();
+  });
+});
+
+// #1024: a page reading a CRD this cluster doesn't serve is not offered. With
+// one page left the app is a row of its own, with both a group of two.
+describe("app pages on a cluster without their CRDs", () => {
+  const certManager = { enabled: true, manifest: { id: "org.example.certs", name: "Cert manager", capabilities: [
+    { name: "certs", target: "k8s.listCustomResource", arguments: { group: "cert-manager.io", version: "v1", plural: "certificates", kind: "Certificate", namespaced: true } },
+    { name: "pods", target: "k8s.listPods", arguments: {} },
+  ], contributions: { pages: [
+    { id: "certs", title: "Certs", capability: "certs" },
+    { id: "pods", title: "Issuer pods", capability: "pods" },
+  ] } } };
+  const pages = async () => {
+    await screen.findByRole("treeitem", { name: "Cert manager" });
+    await waitFor(() => expect(listCrds).toHaveBeenCalled());
+    await act(async () => {});
+    // A row of its own has no fold.
+    return screen.getByRole("treeitem", { name: "Cert manager" }).hasAttribute("aria-expanded") ? 2 : 1;
+  };
+  beforeEach(() => { extensionState.data = { plugins: [certManager] }; });
+
+  it("leaves out the page whose CRD is missing", async () => {
+    render(<Nav contexts={[PROD]} />);
+    expect(await pages()).toBe(1);
+  });
+  it("offers it once the cluster serves the CRD", async () => {
+    listCrds.mockResolvedValue({ crds: [{ ...CERTS, versions: ["v1"] }] });
+    render(<Nav contexts={[PROD]} />);
+    expect(await pages()).toBe(2);
+  });
+  it("asks again when the window gets focus, so an operator installed since shows its page", async () => {
+    render(<Nav contexts={[PROD]} />);
+    expect(await pages()).toBe(1);
+    listCrds.mockResolvedValue({ crds: [{ ...CERTS, versions: ["v1"] }] });
+    act(() => { window.dispatchEvent(new Event("focus")); });
+    await waitFor(() => expect(screen.getByRole("treeitem", { name: "Cert manager" }).hasAttribute("aria-expanded")).toBe(true));
+    expect(listCrds).toHaveBeenCalledTimes(2);
+  });
+  it("offers every page when discovery fails", async () => {
+    listCrds.mockResolvedValue({ error: "crds forbidden" });
+    render(<Nav contexts={[PROD]} />);
+    expect(await pages()).toBe(2);
+  });
+  it("offers every page on a paused cluster, which is not asked", async () => {
+    const paused = defaultState([PROD]);
+    paused.workspaces[0].pausedClusters = [PROD.stableId];
+    setState(paused);
+    render(<Nav contexts={[PROD]} />);
+    const row = await screen.findByRole("treeitem", { name: "Cert manager" });
+    await act(async () => {});
+    expect(row.getAttribute("aria-expanded")).toBe("false");
+    expect(listCrds).not.toHaveBeenCalled();
+  });
+  it("holds a CRD's page back until discovery answers, rather than drawing a row that may vanish", async () => {
+    listCrds.mockReturnValue(new Promise(() => {}));
+    render(<Nav contexts={[PROD]} />);
+    expect(await pages()).toBe(1);
   });
 });

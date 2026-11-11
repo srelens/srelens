@@ -310,14 +310,14 @@ pub struct NameMatches {
 // -- names, kinds and patterns -------------------------------------------------
 
 #[derive(Clone, Copy)]
-enum NameRule {
+pub(crate) enum NameRule {
     /// RFC 1123 label: a namespace.
     Label,
     /// RFC 1123 subdomain: most object names.
     Subdomain,
 }
 
-fn check_name(name: &str, rule: NameRule) -> Result<(), String> {
+pub(crate) fn check_name(name: &str, rule: NameRule) -> Result<(), String> {
     let max = match rule {
         NameRule::Label => 63,
         NameRule::Subdomain => 253,

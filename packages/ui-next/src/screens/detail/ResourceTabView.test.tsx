@@ -51,6 +51,7 @@ vi.mock("../../extensions/ExtensionProviderSlot", () => ({
 
 import { ConsoleProvider } from "../../console";
 import { loadSectionFolds, setSectionOpen } from "../../lib/sectionFolds";
+import { __resetUsageHistoryForTests } from "../../lib/usageHistory";
 import { detailFacts } from "./detailData";
 import { ResourceTabView } from "./ResourceTabView";
 
@@ -145,7 +146,7 @@ async function openPod(props: Partial<{ kind: string; namespace: string | null; 
       name={props.name ?? "cart-session-store-1"}
     />,
   );
-  await waitFor(() => expect(screen.getAllByRole("tab").length).toBeGreaterThan(0));
+  await waitFor(() => expect(document.querySelector(".pane-body")?.textContent).not.toMatch(/^Loading /));
   return view;
 }
 
@@ -166,6 +167,8 @@ describe("ResourceTabView — the full tab the design draws", () => {
     listEvents.mockResolvedValue({ events: [] });
     listCrds.mockResolvedValue({ crds: [] });
     podMetrics.mockResolvedValue({ metrics: [] });
+    // The usage history outlives a render, as it outlives a screen.
+    __resetUsageHistoryForTests();
     podsForSelector.mockResolvedValue({ pods: [] });
     descriptorFor.mockReturnValue(podDescriptor());
     // The fold memory is a module-level store, so a block one test opens
@@ -174,14 +177,14 @@ describe("ResourceTabView — the full tab the design draws", () => {
     loadSectionFolds();
   });
 
-  it("heads a custom resource's first pane Status, opened from a route with no group (#919)", async () => {
+  it("heads a custom resource's first pane Overview, opened from a route with no group (#919)", async () => {
     listCrds.mockResolvedValue({
       crds: [{ name: "widgets.example.com", group: "example.com", version: "v1", kind: "Widget", plural: "widgets", namespaced: true }],
     });
     getObject.mockResolvedValue({ object: { kind: "Widget", metadata: { name: "w-1", namespace: "default" } } });
     descriptorFor.mockReturnValue(undefined);
     await openPod({ kind: "Widget", namespace: "default", name: "w-1" });
-    expect(screen.getAllByRole("tab").map((t) => t.textContent)).toEqual(["Status", "YAML", "Events"]);
+    expect(screen.getAllByRole("tab").map((t) => t.textContent)).toEqual(["Overview", "Events", "YAML"]);
   });
 
   it("reads no pod usage for a custom kind that happens to be called Pod (#919)", async () => {
@@ -191,7 +194,9 @@ describe("ResourceTabView — the full tab the design draws", () => {
     getObject.mockResolvedValue({ object: { kind: "Pod", metadata: { name: "p-1", namespace: "default" } } });
     descriptorFor.mockReturnValue(undefined);
     render_(<ResourceTabView context="prod-eu" kind="Pod" group="acme.io" namespace="default" name="p-1" />);
-    await waitFor(() => expect(screen.getAllByRole("tab").map((t) => t.textContent)).toEqual(["Status", "YAML", "Events"]));
+    await waitFor(() => expect(getObject).toHaveBeenCalled());
+    await waitFor(() => expect(document.querySelector(".pane-body")?.textContent).not.toMatch(/^Loading /));
+    expect(screen.getAllByRole("tab").map((t) => t.textContent)).toEqual(["Overview", "Events", "YAML"]);
     // The built-in pod of the same name's usage is not this resource's.
     expect(podMetrics).not.toHaveBeenCalled();
   });
@@ -222,7 +227,7 @@ describe("ResourceTabView — the full tab the design draws", () => {
       ]);
     });
 
-    it("places a Node's scheduled pods after the Labels/Annotations pair", async () => {
+    it("places a Node's scheduled pods before the Labels/Annotations pair", async () => {
       getObject.mockResolvedValue({
         object: {
           kind: "Node",
@@ -237,7 +242,39 @@ describe("ResourceTabView — the full tab the design draws", () => {
 
       const pair = document.querySelector<HTMLElement>('[data-slot="metadata-pair"]')!;
       const pods = (await screen.findByRole("heading", { level: 3, name: "Pods (0)" })).closest("section")!;
-      expect(pair.compareDocumentPosition(pods) & Node.DOCUMENT_POSITION_FOLLOWING).not.toBe(0);
+      expect(pair.compareDocumentPosition(pods) & Node.DOCUMENT_POSITION_PRECEDING).not.toBe(0);
+    });
+
+    it.each([
+      ["while the read is out", () => new Promise<never>(() => {}), /^Loading Pod checkout\/cart-session-store-1/],
+      ["after it failed", async () => ({ error: "the cluster went away" }), /^Could not load Pod checkout\/cart-session-store-1/],
+    ])("keeps the name and the trail %s", async (_, read, pane) => {
+      getObject.mockImplementation(read);
+      render_(<ResourceTabView context="prod-eu" kind="Pod" namespace="checkout" name="cart-session-store-1" />);
+      await waitFor(() => expect(document.querySelector(".pane-body")?.textContent).toMatch(pane));
+      expect(screen.getByRole("heading", { level: 1, name: "cart-session-store-1" })).toBeDefined();
+      expect(screen.getByRole("button", { name: "Copy name cart-session-store-1" })).toBeDefined();
+      expect(screen.getByRole("navigation", { name: "Breadcrumb" }).textContent).toContain("checkout");
+      expect(tiles()).toEqual([]);
+    });
+
+    it("offers Retry on a read that failed, and draws the page when it lands", async () => {
+      getObject.mockResolvedValue({ error: "the cluster went away" });
+      await openPod();
+      getObject.mockResolvedValue({ object: POD });
+      await userEvent.click(screen.getByRole("button", { name: "Retry" }));
+      await waitFor(() => expect(document.querySelector("[data-slot='fact-grid']")).not.toBeNull());
+      expect(getObject).toHaveBeenCalledTimes(2);
+    });
+
+    it("rules the header, the tab strip and the figures at the sections' weight", async () => {
+      await openPod();
+      const frame = document.querySelector("[data-slot='resource-tab']")!;
+      const rows = [frame.querySelector("header")!, frame.querySelector(".utabs")!.parentElement!, frame.querySelector("[data-slot='metric-strip']")!];
+      for (const row of rows) {
+        expect(row.className).toContain("border-b border-rule-strong");
+        expect(row.className).not.toContain("rule-b");
+      }
     });
 
     it("offers the name to copy, directly after the heading, in the row that reveals it (#827)", async () => {
@@ -335,11 +372,17 @@ describe("ResourceTabView — the full tab the design draws", () => {
   });
 
   describe("the tab strip", () => {
-    it("names Overview rather than the peek's Details, and shows only the panes that exist", async () => {
+    it("reads Overview, Events then YAML, and shows only the panes that exist", async () => {
       await openPod();
       // Relations, Drill and Metrics are deferred and have no body; the strip
       // names a pane only when there is something behind it.
-      expect(tabNames()).toEqual(["Overview", "YAML", "Events"]);
+      expect(tabNames()).toEqual(["Overview", "Events", "YAML"]);
+    });
+
+    it("puts a kind's own panes after Overview, with YAML still last", async () => {
+      descriptorFor.mockReturnValue(podDescriptor({ panes: { containers: true, metrics: true } }));
+      await openPod();
+      expect(tabNames()).toEqual(["Overview", "Metrics", "Events", "YAML"]);
     });
 
     it("keeps Containers off the strip — its table is inline on Overview", async () => {
@@ -372,7 +415,7 @@ describe("ResourceTabView — the full tab the design draws", () => {
       expect(strip[4].value).toBe("211d");
     });
 
-    it("shows the usage the metrics server reports, and says what each figure is", async () => {
+    it("shows the usage the metrics server reports, against the pod's limits, with a graph of each (#1074)", async () => {
       podMetrics.mockResolvedValue({
         metrics: [{ name: "cart-session-store-1", cpuMillicores: 101, memoryMiB: 962 }] as PodMetric[],
       });
@@ -380,8 +423,12 @@ describe("ResourceTabView — the full tab the design draws", () => {
       await waitFor(() => expect(tiles()[2].value).not.toBe("—"));
       const strip = tiles();
       expect(strip[2].value).toBe("101m");
-      expect(strip[2].caption).toBe("current");
-      expect(strip[3].caption).toBe("working set");
+      // 101m of 2 + 0.2 cores, and 962 Mi of 1 Gi + 256 Mi: both containers set
+      // both limits, so the pod has a whole ceiling for each.
+      expect(strip[2].caption).toBe("5% of limit");
+      expect(strip[3].caption).toBe("75% of limit");
+      const graphs = Array.from(document.querySelectorAll("[data-slot='metric-strip'] .stat svg"));
+      expect(graphs.map((g) => g.getAttribute("aria-label"))).toEqual(["CPU", "Memory"]);
     });
 
     it("omits the usage tiles rather than drawing em dashes when nothing reports any", async () => {
@@ -399,6 +446,17 @@ describe("ResourceTabView — the full tab the design draws", () => {
       // A ConfigMap has no health, no containers and no usage — one tile, not
       // four em dashes pretending to be figures.
       expect(tiles().map((t) => t.label)).toEqual(["Age"]);
+    });
+
+    it.each([
+      ["a Node", "Node", null, "worker-1", { kind: "Node", apiVersion: "v1", metadata: { name: "worker-1" }, status: { conditions: [{ type: "Ready", status: "True" }] } }, "Ready"],
+      ["a CronJob", "CronJob", "default", "nightly", { kind: "CronJob", apiVersion: "batch/v1", metadata: { name: "nightly", namespace: "default" }, spec: {} }, "Active"],
+      ["a Pod the kubelet has not reported", "Pod", "checkout", "just-made", { kind: "Pod", apiVersion: "v1", metadata: { name: "just-made", namespace: "checkout" }, status: { phase: "Pending" } }, "Pending"],
+    ])("says the verdict of %s, which has no ready figure to hang it on", async (_, kind, namespace, name, object, word) => {
+      getObject.mockResolvedValue({ object: object as K8sObject });
+      descriptorFor.mockReturnValue(podDescriptor({ k8sKind: kind, panes: {} }));
+      await openPod({ kind, namespace, name });
+      expect(tiles().find((tile) => tile.label === "Status")?.value).toBe(word);
     });
 
     it("does not ask the metrics server about a kind that has no pod usage", async () => {
@@ -449,7 +507,7 @@ describe("ResourceTabView — the full tab the design draws", () => {
       expect(within(grid).getByText("Burstable")).toBeDefined();
     });
 
-    it("draws every fact it was handed, not a selection of them", async () => {
+    it("draws every fact it was handed, bar what the strip above it says", async () => {
       await openPod();
       // EQUALS the derived list, in its order. A screen that filtered three
       // facts out of the list it shares with the peek would pass every other
@@ -458,11 +516,48 @@ describe("ResourceTabView — the full tab the design draws", () => {
       // used to catch, caught here without either screen's markup standing in
       // for the other's.
       const derived = detailFacts({ kind: "Pod", object: POD }).map((f) => f.label);
-      expect(derived.length).toBeGreaterThan(3);
+      expect(derived).toContain("Created");
+      expect(derived).toContain("Restarts");
       const drawn = [...document.querySelectorAll("[data-slot='fact-grid'] .kv-k")].map(
         (el) => el.textContent ?? "",
       );
-      expect(drawn).toEqual(derived);
+      expect(drawn).toEqual(derived.filter((label) => label !== "Created" && label !== "Restarts"));
+    });
+
+    it("drops a custom resource's Age column, which the strip already says", async () => {
+      listCrds.mockResolvedValue({
+        crds: [{
+          name: "widgets.example.com", group: "example.com", version: "v1", kind: "Widget", plural: "widgets", namespaced: true,
+          printerColumns: [{ name: "Age", type: "date", jsonPath: ".metadata.creationTimestamp" }, { name: "Phase", type: "string", jsonPath: ".status.phase" }],
+        }],
+      });
+      getObject.mockResolvedValue({
+        object: { kind: "Widget", metadata: { name: "w-1", namespace: "default", creationTimestamp: daysAgo(3) }, status: { phase: "Up" } },
+      });
+      descriptorFor.mockReturnValue(undefined);
+      await openPod({ kind: "Widget", namespace: "default", name: "w-1" });
+      expect([...document.querySelectorAll("[data-slot='fact-grid'] .kv-k")].map((el) => el.textContent)).toEqual(["Phase"]);
+    });
+
+    it("keeps an operator's column named like a tile, which reads another field", async () => {
+      listCrds.mockResolvedValue({
+        crds: [{
+          name: "widgets.example.com", group: "example.com", version: "v1", kind: "Widget", plural: "widgets", namespaced: true,
+          printerColumns: [{ name: "Created", type: "string", jsonPath: ".status.createdAt" }, { name: "Restarts", type: "string", jsonPath: ".status.restarts" }],
+        }],
+      });
+      getObject.mockResolvedValue({
+        object: {
+          kind: "Widget",
+          metadata: { name: "w-1", namespace: "default", creationTimestamp: daysAgo(3) },
+          status: { createdAt: "upstream-2024", restarts: "upstream-7", containerStatuses: [{ name: "c", restartCount: 1 }] },
+        },
+      });
+      descriptorFor.mockReturnValue(undefined);
+      await openPod({ kind: "Widget", namespace: "default", name: "w-1" });
+      const rows = [...document.querySelectorAll("[data-slot='fact-grid'] .kv")].map((el) => el.textContent);
+      // Two rows, so the generated Created is still the Age tile's alone.
+      expect(rows).toEqual(["Createdupstream-2024", "Restartsupstream-7"]);
     });
 
     it("draws no fact of the peek's own form, so nothing here is the peek's markup", async () => {
@@ -519,9 +614,11 @@ describe("ResourceTabView — the full tab the design draws", () => {
       // by hand: one above the row, where the sibling rule would have drawn
       // against the block before it, and one down the middle, between the two
       // columns. The peek needs neither and has neither — it stacks them.
+      // Both at the sibling rule's own weight, --rule-strong (#1001), or the
+      // two hand-drawn rules are the only faint dividers in the tab.
       const pair = breaks[0];
-      expect(pair.className).toContain("rule-t");
-      expect([...pair.children].map((column) => column.className)).toEqual(["", "rule-l"]);
+      expect(pair.className).toContain("border-t border-rule-strong");
+      expect([...pair.children].map((column) => column.className)).toEqual(["", "border-l border-rule-strong"]);
     });
 
     it("reads Labels and Annotations side by side", async () => {

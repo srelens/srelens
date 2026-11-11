@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from "react";
 import { ArrowDownToLine, CircleCheck, CircleSlash2, SquareTerminal } from "lucide-react";
 import { getObject } from "@srelens/core";
-import { cordonNode, drainNode, createNodeDebugPod } from "@srelens/core";
+import { cordonNode, drainNode, createNodeDebugPod, interactiveShell } from "@srelens/core";
 import { notify } from "@srelens/core";
 import { useAccess, rbac, denyReason, reportActionError } from "@srelens/core/react";
 import { IconButton, ConfirmDialog, KubectlPreview } from "../ui";
@@ -9,9 +9,10 @@ import { toKubectl } from "@srelens/core";
 import { copyKubectlCommand } from "@srelens/core";
 
 /** Enter the host's namespaces from the privileged debug pod for a real node
- *  shell — run via exec (the pod itself just stays alive). */
+ *  shell — run via exec (the pod itself just stays alive) — then the host's
+ *  own shell, picked as a pod shell's is. */
 const NODE_SHELL_COMMAND = [
-  "nsenter", "--target", "1", "--mount", "--uts", "--ipc", "--net", "--pid", "--", "/bin/sh",
+  "nsenter", "--target", "1", "--mount", "--uts", "--ipc", "--net", "--pid", "--", ...interactiveShell(),
 ];
 
 /**

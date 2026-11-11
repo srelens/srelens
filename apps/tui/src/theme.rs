@@ -101,7 +101,7 @@ pub static ALL_THEMES: &[ThemePalette] = &[
         red: Color::Rgb(239, 68, 68),
         orange: Color::Rgb(249, 115, 22),
         border: Color::Rgb(75, 85, 99),
-        border_focus: Color::Rgb(139, 92, 246),
+        border_focus: Color::Black,
         sel_bg: Color::Rgb(45, 55, 72),
         sel_fg: Color::Rgb(255, 255, 255),
         marked_bg: Color::Rgb(60, 40, 90),
@@ -161,7 +161,7 @@ pub static ALL_THEMES: &[ThemePalette] = &[
         red: Color::Rgb(255, 85, 85),
         orange: Color::Rgb(255, 184, 108),
         border: Color::Rgb(68, 71, 90),
-        border_focus: Color::Rgb(189, 147, 249),
+        border_focus: Color::Black,
         sel_bg: Color::Rgb(68, 71, 90),
         sel_fg: Color::Rgb(255, 255, 255),
         marked_bg: Color::Rgb(70, 45, 85),
@@ -616,7 +616,7 @@ impl Theme {
     pub const RED: Color = Color::Rgb(239, 68, 68); // Error / CrashLoop / Failed
     pub const ORANGE: Color = Color::Rgb(249, 115, 22); // Terminating / Evicted
     pub const BORDER: Color = Color::Rgb(75, 85, 99); // Border gray
-    pub const BORDER_FOCUS: Color = Color::Rgb(139, 92, 246); // Border active
+    pub const BORDER_FOCUS: Color = Color::Black; // Border active (black)
     pub const SEL_BG: Color = Color::Rgb(45, 55, 72); // Selected row background
     pub const SEL_FG: Color = Color::Rgb(255, 255, 255); // Selected row foreground
 

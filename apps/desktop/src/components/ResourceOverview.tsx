@@ -1,4 +1,3 @@
-import { ExtensionResourceSlot } from "./Extensions";
 import React, { useEffect, useMemo, useState } from "react";
 import { ArrowLeftRight, ChevronDown, ChevronUp, ScrollText, SquareTerminal } from "lucide-react";
 import { formatTaint, orderTaints, parseTaints, taintTimeAddedText } from "@srelens/core";
@@ -2755,7 +2754,6 @@ export function ResourceOverview({
   if (error) return <p style={{ color: "var(--fl-color-danger)" }}>Error: {error}</p>;
   if (obj === null) return <Spinner label="Loading details" />;
   return (
-    <>
     <ObjectDetail
       kind={kind}
       obj={obj}
@@ -2766,7 +2764,5 @@ export function ResourceOverview({
       onOpenLogs={onOpenLogs}
       onOpenExec={onOpenExec}
     />
-    <ExtensionResourceSlot context={context} kind={obj.kind ?? kind} group={obj.apiVersion?.includes("/") ? obj.apiVersion.split("/")[0] : ""} namespace={namespace} name={name} />
-    </>
   );
 }

@@ -131,6 +131,10 @@ pub(super) fn register(
                 }
                 detail["actions"] = json!(actions);
                 detail["actionMeta"] = Value::Object(meta);
+                // The verdict the list draws for this row, from the same rules (#541).
+                if let Some(rules) = plugin.manifest.status_rules_for_binding(&binding_name) {
+                    detail["status"] = json!(srelens_capability::status::resolve_status(rules, &detail["resource"]));
+                }
                 Ok(detail)
             }
         },
@@ -304,6 +308,59 @@ mod tests {
             .await
             .is_err());
         assert_eq!(CALLS.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+    /// A resource's details say what its list row says: one verdict from one set of rules,
+    /// on the object this read returned (#1001).
+    #[tokio::test]
+    async fn a_resource_carries_the_status_its_list_row_shows() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("apps.json");
+        let mut core = (*super::super::tests::fake_core()).clone();
+        let mut cap = core.get("k8s.getCustomResource").unwrap().clone();
+        cap.handler = Arc::new(|_| {
+            Box::pin(async move {
+                Ok(json!({"resource":{"status":{"health":{"status":"Healthy"}}},"events":[]}))
+            })
+        });
+        core.register(cap);
+        let core = Arc::new(core);
+        let mut reg = Registry::new();
+        register(
+            &mut reg,
+            Store::file(path.clone()),
+            core.clone(),
+            srelens_kube::client_cache::ClientCache::new_many(vec![]),
+        );
+        let selected = |revision: u64| json!({"id":"org.example.argocd","revision":revision,"capability":"applications","context":"cluster/a","namespace":"team","name":"app"});
+        let revision = mutate(
+            &path,
+            core.clone(),
+            Configure::Install {
+                signature: None,
+                key_id: None,
+                manifest: super::super::tests::manifest_with_status().to_string(),
+                grants: vec!["k8s.listCustomResource".into()],
+                reviewed_revision: None,
+            },
+        )
+        .unwrap()
+        .plugins[0]
+            .revision;
+        let detail = reg
+            .invoke("extensions.resource", selected(revision))
+            .await
+            .unwrap();
+        assert_eq!(
+            detail["status"],
+            json!({"status":"healthy","label":"Healthy"})
+        );
+        // An app with no resolver for the kind claims nothing, not "unknown".
+        let revision = super::super::tests::install(&path, core.clone());
+        let detail = reg
+            .invoke("extensions.resource", selected(revision))
+            .await
+            .unwrap();
+        assert!(detail.get("status").is_none(), "{detail}");
     }
     #[tokio::test]
     async fn action_dispatch_uses_bound_api_and_mcp_cannot_bypass_confirmation() {

@@ -264,6 +264,37 @@ flag plus `_confirm: true` on that call.
 Review tool calls and use appropriate Kubernetes RBAC, especially with
 critical clusters.
 
+## Exporting the local audit trail
+
+In the desktop app's new design, open **Settings → AI Assistant → Audit**.
+Choose **All retained entries** (the default) or **Current view**, select
+JSONL or CSV, then **Export audit trail** to choose a destination in the
+native save dialog. Web mode has no audit pane or audit export endpoint.
+
+All retained entries reads the active log and its one retained rotation,
+oldest file first. Current view exports the loaded rows without refreshing
+them. Deleted rotations cannot be recovered. Malformed lines are skipped and
+their count is included in an all-retained export. A read or save failure is
+reported as a failure; cancelling the save dialog produces no success notice.
+
+JSONL starts with an `audit-export` metadata record (version, scope, count,
+first/last Unix timestamps, skipped-line count, and whether details are included),
+followed by one JSON object per entry. CSV repeats the scope metadata in each
+row; an empty export has one metadata-only row. CSV cells that could be
+interpreted as spreadsheet formulas are prefixed with an apostrophe; use JSONL
+when exact text matters.
+
+Both formats preserve the authorization decision and execution outcome as
+separate fields. Arguments and error details are omitted unless you select
+**Include arguments and error details**. Existing log redaction is preserved,
+but retained details may still contain sensitive information: review any file
+before sharing it. Export files are replaced atomically and created with
+owner-only permissions on Unix.
+
+This is a local diagnostic snapshot, not a tamper-evident or compliance-verifiable
+record. Reads coordinate with the desktop's audit writer, but a separately
+running headless process has its own lock and can rotate concurrently.
+
 ## The catalog and its safety classes
 
 [mcp-catalog.md](mcp-catalog.md) enumerates every tool, the built-in prompts,
@@ -747,14 +778,35 @@ notification carries only the URI, and the client re-reads to get the new
 content. Over stdio, notifications arrive on the server's stdout. Over HTTP
 ([issue #193](https://github.com/srelens/srelens/issues/193)), the client
 first opens the push channel — `GET /mcp` with `Accept: text/event-stream`,
-authenticated with the same bearer token and covered by the same loopback
-`Host` check — and notifications arrive as SSE events on that stream.
+authenticated with the same bearer token, carrying the `Mcp-Session-Id` from
+its successful `initialize` response, and covered by the same loopback `Host`
+check — and notifications arrive as SSE events on that stream.
 Subscribing with no stream connected is refused rather than silently
 accepted, since the notifications would have nowhere to go, and
 subscriptions live exactly as long as the stream that carries them: a
 disconnect, a reconnect replacing the stream, or a token rotation (which
 restarts the server) releases every watch, and the client re-subscribes on
-its new stream. Up to 32
+its new stream. Every HTTP request after `initialize` must carry the
+server-minted session ID. Missing IDs are rejected; unknown or ended IDs return
+404 so the client initializes again. `DELETE /mcp` with that bearer token and
+session ID explicitly ends the session and its stream.
+
+**Settings → MCP → HTTP client sessions** is a local view of those server-held
+sessions. It shows the bounded, control-stripped `clientInfo.name` and
+`clientInfo.version` a client supplied during `initialize`, when that session
+last made a request, and whether its notification stream is open. The labels
+are self-reported, not authenticated identities. Session IDs, bearer tokens,
+request headers and peer addresses are never included. A row represents a
+server-held session, not proof that the client process is still running. The
+list is bounded by the same 64-session LRU registry as the transport;
+`DELETE`, capacity-driven idle retirement, server stop and token rotation
+remove the corresponding rows. Each refresh reads listener liveness, its URL,
+and that listener generation's sessions as one atomic snapshot. A running
+server with no sessions therefore remains distinct from a stopped server, and
+the Settings status and session view update together if another window stops
+the listener.
+
+Up to 32
 subscriptions can be live at once; re-subscribing to a URI you already hold
 replaces it in place rather than counting twice, and past the cap you need
 to unsubscribe from something before adding another.

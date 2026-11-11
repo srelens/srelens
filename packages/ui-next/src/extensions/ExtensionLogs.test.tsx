@@ -46,7 +46,11 @@ const read = (lines: ExtensionLogLine[], more: Partial<ExtensionLogRead> = {}): 
 });
 
 const log = () => screen.getByRole("log", { name: "Sidecar app log" });
-const rows = () => Array.from(log().querySelectorAll(".extension-app-log-line")).map((row) => row.textContent);
+/** Each line as the kit's LogLine draws it: its fields in order, one space apart. */
+const rows = () =>
+  Array.from(log().querySelectorAll(".logline")).map((row) =>
+    Array.from(row.querySelectorAll("[data-slot]"), (field) => field.textContent).filter(Boolean).join(" "),
+  );
 
 async function open() {
   let view!: ReturnType<typeof render>;
@@ -71,19 +75,26 @@ it("says a declarative app has no process to write its log, and that the log sta
   vi.mocked(extensionLogs).mockResolvedValue(read([], { runtime: "declarative" }));
   await open();
   expect(extensionLogs).toHaveBeenCalledWith("org.test.sidecar", { minLevel: "trace" });
+  expect(screen.getByText("No log")).toBeTruthy();
   expect(screen.getByText("This app has no process, so nothing writes to its log.")).toBeTruthy();
   expect(
     screen.getByText(
       "Kept in srelens's memory only: never written to disk, and never sent to an agent or anywhere else. The last 1,000 lines are kept.",
     ),
   ).toBeTruthy();
-  expect(screen.queryByText("Nothing logged yet.")).toBeNull();
+  expect(screen.queryByText("Nothing logged yet")).toBeNull();
+});
+
+it("says it is loading the log until the first read answers", async () => {
+  vi.mocked(extensionLogs).mockImplementation(() => new Promise(() => {}));
+  await open();
+  expect(screen.getByRole("status", { name: "Loading the log" })).toBeTruthy();
 });
 
 it("says nothing is logged yet for a sidecar that has written nothing", async () => {
   vi.mocked(extensionLogs).mockResolvedValue(read([]));
   await open();
-  expect(screen.getByText("Nothing logged yet.")).toBeTruthy();
+  expect(screen.getByText("Nothing logged yet")).toBeTruthy();
   expect(screen.queryByText(/has no process/)).toBeNull();
 });
 
@@ -93,11 +104,13 @@ it("shows each line's local time to the millisecond, its level and writer as wor
   );
   await open();
   expect(rows()).toEqual([
-    "14:03:05.007 warn app cache miss for org/app",
-    "14:03:05.008 error srelens sidecar handshake refused",
+    "14:03:05.007 app warn cache miss for org/app",
+    "14:03:05.008 srelens error sidecar handshake refused",
   ]);
-  const first = log().querySelector(".extension-app-log-line")!;
-  expect(within(first as HTMLElement).getByText("warn").getAttribute("data-level")).toBe("warn");
+  // The level is a word; the kit tints it from that word.
+  const first = log().querySelector(".logline")!;
+  expect(first.querySelector<HTMLElement>('[data-slot="level"]')!.style.color).toContain("var(--warn)");
+  expect(first.querySelector("time")?.getAttribute("dateTime")).toBe(new Date(at(14, 3, 5, 7)).toISOString());
 });
 
 it("draws a line's control and direction characters as escapes, never as text that reorders the row", async () => {
@@ -120,9 +133,9 @@ it("polls every two seconds for the lines after the last one it has, and appends
   await wait(1);
   expect(extensionLogs).toHaveBeenLastCalledWith("org.test.sidecar", { after: 2, minLevel: "trace" });
   expect(rows()).toEqual([
-    "14:03:05.001 info app starting",
-    "14:03:05.002 info app listening",
-    "14:03:05.003 warn app slow reply",
+    "14:03:05.001 app info starting",
+    "14:03:05.002 app info listening",
+    "14:03:05.003 app warn slow reply",
   ]);
   await wait(2000);
   expect(extensionLogs).toHaveBeenLastCalledWith("org.test.sidecar", { after: 3, minLevel: "trace" });
@@ -152,20 +165,21 @@ it("reloads from the start at the chosen minimum level, among the five levels", 
     .mockResolvedValueOnce(read([line(2, "error", "boom")]))
     .mockResolvedValue(read([]));
   await open();
-  const levels = screen.getByRole("group", { name: "Minimum level" });
-  expect(within(levels).getAllByRole("button").map((button) => button.textContent)).toEqual([
+  // A choice of one, so the kit's segmented radio group (#1001, step 7c).
+  const levels = screen.getByRole("radiogroup", { name: "Minimum level" });
+  expect(within(levels).getAllByRole("radio").map((radio) => radio.textContent)).toEqual([
     "trace",
     "debug",
     "info",
     "warn",
     "error",
   ]);
-  expect(within(levels).getByRole("button", { name: "trace" }).getAttribute("aria-pressed")).toBe("true");
-  fireEvent.click(within(levels).getByRole("button", { name: "warn" }));
+  expect(within(levels).getByRole("radio", { name: "trace" }).getAttribute("aria-checked")).toBe("true");
+  fireEvent.click(within(levels).getByRole("radio", { name: "warn" }));
   await wait(0);
   expect(extensionLogs).toHaveBeenLastCalledWith("org.test.sidecar", { after: 0, minLevel: "warn" });
-  expect(within(levels).getByRole("button", { name: "warn" }).getAttribute("aria-pressed")).toBe("true");
-  expect(rows()).toEqual(["14:03:05.002 error app boom"]);
+  expect(within(levels).getByRole("radio", { name: "warn" }).getAttribute("aria-checked")).toBe("true");
+  expect(rows()).toEqual(["14:03:05.002 app error boom"]);
   await wait(2000);
   expect(extensionLogs).toHaveBeenLastCalledWith("org.test.sidecar", { after: 2, minLevel: "warn" });
 });
@@ -175,10 +189,10 @@ it("says no line reaches the chosen level, rather than that nothing was logged",
     .mockResolvedValueOnce(read([line(1, "debug", "tick")]))
     .mockResolvedValue(read([]));
   await open();
-  fireEvent.click(screen.getByRole("button", { name: "error" }));
+  fireEvent.click(screen.getByRole("radio", { name: "error" }));
   await wait(0);
-  expect(screen.getByText("No lines at error or above.")).toBeTruthy();
-  expect(screen.queryByText("Nothing logged yet.")).toBeNull();
+  expect(screen.getByText("No lines at error or above")).toBeTruthy();
+  expect(screen.queryByText("Nothing logged yet")).toBeNull();
 });
 
 it("ignores an answer for a level that is no longer chosen", async () => {
@@ -188,10 +202,10 @@ it("ignores an answer for a level that is no longer chosen", async () => {
     .mockResolvedValueOnce(read([line(5, "error", "boom")]))
     .mockResolvedValue(read([]));
   await open();
-  fireEvent.click(screen.getByRole("button", { name: "error" }));
+  fireEvent.click(screen.getByRole("radio", { name: "error" }));
   await wait(0);
   await act(async () => answerTrace(read([line(4, "debug", "tick")])));
-  expect(rows()).toEqual(["14:03:05.005 error app boom"]);
+  expect(rows()).toEqual(["14:03:05.005 app error boom"]);
 });
 
 it("says how many older lines the host dropped", async () => {
@@ -216,7 +230,7 @@ it("says a failed read failed, never that the log is empty, and reads again on R
   const alert = screen.getByRole("alert");
   expect(alert.textContent).toContain("Could not read this app's log");
   expect(alert.textContent).toContain("bridge timed out");
-  expect(screen.queryByText("Nothing logged yet.")).toBeNull();
+  expect(screen.queryByText("Nothing logged yet")).toBeNull();
   expect(screen.queryByText(/has no process/)).toBeNull();
   // No poll while the failure stands: the reader chooses when to try again.
   await wait(4000);
@@ -225,7 +239,7 @@ it("says a failed read failed, never that the log is empty, and reads again on R
   await wait(0);
   expect(extensionLogs).toHaveBeenCalledTimes(2);
   expect(screen.queryByRole("alert")).toBeNull();
-  expect(rows()).toEqual(["14:03:05.001 info app listening"]);
+  expect(rows()).toEqual(["14:03:05.001 app info listening"]);
 });
 
 it("keeps the lines it has when a later poll fails, and resumes after them on Retry", async () => {
@@ -236,7 +250,7 @@ it("keeps the lines it has when a later poll fails, and resumes after them on Re
   await open();
   await wait(2000);
   expect(screen.getByRole("alert").textContent).toContain("bridge timed out");
-  expect(rows()).toEqual(["14:03:05.001 info app listening"]);
+  expect(rows()).toEqual(["14:03:05.001 app info listening"]);
   fireEvent.click(screen.getByRole("button", { name: "Retry" }));
   await wait(0);
   expect(extensionLogs).toHaveBeenLastCalledWith("org.test.sidecar", { after: 1, minLevel: "trace" });
@@ -272,4 +286,17 @@ it("follows new lines while the reader is at the bottom, and stays put once they
   height = 600;
   await wait(2000);
   expect(region.scrollTop).toBe(120);
+});
+
+// A log message is machine text (#1047 review): a JSON payload wrapped through the
+// kit's `break-all` cell hid the lines around it, and a stack trace lost its
+// indentation on screen and in the copy. The region keeps each line whole and
+// scrolls sideways, as the built-in Logs do until Wrap is pressed.
+it("keeps each app log line whole, spaces and all, and scrolls the region sideways", async () => {
+  const { readFileSync } = await import("node:fs");
+  const { join } = await import("node:path");
+  const css = readFileSync(join(__dirname, "extensions.css"), "utf8").replace(/\/\*[\s\S]*?\*\//g, "");
+  const body = css.match(/\.extension-app-log\s*\{([^}]*)\}/)?.[1];
+  expect(body).toMatch(/white-space:\s*pre;/);
+  expect(body).toMatch(/overflow:\s*auto;/);
 });

@@ -253,6 +253,8 @@ pub struct App {
     /// Where the Assistant, the Agent card and the model picker look for
     /// local agent CLIs; a test points it at its own directory.
     pub agent_search: srelens_kube::toolbox::SearchPaths,
+    /// Multi-cluster terminal multiplexer state (`:mux`).
+    pub mux_state: Option<crate::mux::MuxState>,
 }
 
 pub enum SuspendAction {
@@ -523,6 +525,7 @@ impl App {
                 is_current: rc.is_current,
                 is_local: false,
                 provider: None,
+                distribution: None,
                 source_file: rc.source.to_string_lossy().into_owned(),
                 auth_kind: "token".to_string(),
             })
@@ -637,6 +640,7 @@ impl App {
             consent_arm_delay: Duration::from_secs(1),
             model_lists: HashMap::new(),
             agent_search: srelens_kube::toolbox::SearchPaths::from_env(),
+            mux_state: None,
         };
 
         if let Some(lvl) = app.ai_settings.get_caveman_level() {
@@ -679,8 +683,65 @@ impl App {
         self.toast = Some((msg, Instant::now(), style));
     }
 
+    pub fn copy_selection_and_toast(&mut self, text: String) {
+        let trimmed = text.trim_end_matches('\n');
+        if trimmed.trim().is_empty() {
+            return;
+        }
+        let copy_text = trimmed.to_string();
+        tokio::spawn(async move {
+            let _ = copy_to_clipboard(&copy_text);
+        });
+        self.set_toast(
+            "✓ Copied selection to clipboard".to_string(),
+            Theme::status_ok(),
+        );
+    }
+
     pub fn handle_tick(&mut self) {
-        self.assistant_state.tick();
+        if matches!(self.active_view, ActiveView::Assistant) {
+            self.assistant_state.tick();
+        } else {
+            // Cancel active drag-scroll if Assistant lost input focus
+            if self.assistant_state.drag_scroll.is_some() {
+                self.assistant_state.drag_scroll = None;
+            }
+            if self.assistant_state.is_busy {
+                self.assistant_state.spinner_frame = (self.assistant_state.spinner_frame + 1) % 10;
+            }
+        }
+
+        if let Some(mux) = &mut self.mux_state {
+            if let Some(inactive) = &mut mux.inactive_pane {
+                if matches!(inactive.active_view, ActiveView::Assistant) {
+                    inactive.assistant_state.tick();
+                } else {
+                    if inactive.assistant_state.drag_scroll.is_some() {
+                        inactive.assistant_state.drag_scroll = None;
+                    }
+                    if inactive.assistant_state.is_busy {
+                        inactive.assistant_state.spinner_frame =
+                            (inactive.assistant_state.spinner_frame + 1) % 10;
+                    }
+                }
+
+                // Inactive cluster connection timeout detection
+                if (!inactive.is_connected
+                    || inactive.cluster_version == "Connecting..."
+                    || inactive.cluster_version == "unknown")
+                    && inactive.connection_attempt_start.elapsed() >= Duration::from_secs(8)
+                    && !inactive.cluster_unreachable
+                {
+                    inactive.cluster_unreachable = true;
+                    inactive.is_connected = false;
+                    if let ActiveView::Table(table) = &mut inactive.active_view {
+                        if table.raw_items.is_empty() {
+                            table.is_loading = false;
+                        }
+                    }
+                }
+            }
+        }
         self.consents.prune_closed();
 
         // Clear expired toasts (auto-dismiss after 3s)
@@ -796,6 +857,29 @@ impl App {
         }
     }
 
+    pub fn assistant_state_mut_for_context(
+        &mut self,
+        ctx: Option<&str>,
+    ) -> &mut crate::views::assistant_view::AssistantViewState {
+        let ctx = match ctx {
+            Some(c) => c,
+            None => return &mut self.assistant_state,
+        };
+        if ctx == self.active_context {
+            return &mut self.assistant_state;
+        }
+        if let Some(mux) = &mut self.mux_state {
+            if let Some(inactive) = &mut mux.inactive_pane {
+                if inactive.context == ctx {
+                    return &mut inactive.assistant_state;
+                }
+            }
+        }
+        self.assistant_states
+            .entry(ctx.to_string())
+            .or_insert_with(|| crate::views::assistant_view::AssistantViewState::for_context(ctx))
+    }
+
     pub fn refresh_pod_metrics(&self) {
         let event_tx = self.event_tx.clone();
         let cache = self.client_cache.clone();
@@ -806,7 +890,7 @@ impl App {
             if let Ok(metrics) = srelens_kube::metrics::fetch_pod_metrics(cache, &ctx, &ns).await {
                 if let Ok(json_str) = serde_json::to_string(&metrics) {
                     let _ = event_tx.send(crate::event::AppEvent::ActionResult {
-                        title: "pod_metrics_updated".to_string(),
+                        title: format!("pod_metrics_updated:{}", ctx),
                         result: Ok(json_str),
                     });
                 }
@@ -815,6 +899,10 @@ impl App {
     }
 
     pub fn handle_pod_metrics_update(&mut self, payload: &str) {
+        self.handle_pod_metrics_update_for_context(None, payload);
+    }
+
+    pub fn handle_pod_metrics_update_for_context(&mut self, ctx: Option<&str>, payload: &str) {
         let metrics: Vec<srelens_kube::metrics::PodMetric> = match serde_json::from_str(payload) {
             Ok(m) => m,
             Err(_) => return,
@@ -824,44 +912,103 @@ impl App {
             return;
         }
 
+        let target_ctx = ctx.unwrap_or(&self.active_context);
         let now_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_millis() as u64;
 
-        for m in &metrics {
-            let sample = srelens_kube::metrics::MetricSample {
-                timestamp_epoch_ms: now_ms,
-                cpu_millicores: m.cpu_millicores.max(0) as u64,
-                memory_mib: m.memory_mib.max(0) as u64,
-            };
-            let history = self
-                .pod_metrics_history
-                .entry(m.name.clone())
-                .or_insert_with(std::collections::VecDeque::new);
-            history.push_back(sample);
-            if history.len() > 720 {
-                history.pop_front();
-            }
-        }
-
-        if let Some(Modal::MetricsTimeline(ref mut panel)) = self.modal {
-            if panel.target_kind == "Pod" {
-                if let Some(hist) = self.pod_metrics_history.get(&panel.target_name) {
-                    panel.update_samples(&hist.iter().cloned().collect::<Vec<_>>());
+        if target_ctx == self.active_context {
+            for m in &metrics {
+                let sample = srelens_kube::metrics::MetricSample {
+                    timestamp_epoch_ms: now_ms,
+                    cpu_millicores: m.cpu_millicores.max(0) as u64,
+                    memory_mib: m.memory_mib.max(0) as u64,
+                };
+                let history = self
+                    .pod_metrics_history
+                    .entry(m.name.clone())
+                    .or_insert_with(std::collections::VecDeque::new);
+                history.push_back(sample);
+                if history.len() > 720 {
+                    history.pop_front();
                 }
             }
-        }
 
-        let metric_map: std::collections::HashMap<String, (i64, i64)> = metrics
-            .into_iter()
-            .map(|m| (m.name, (m.cpu_millicores, m.memory_mib)))
-            .collect();
+            if let Some(Modal::MetricsTimeline(ref mut panel)) = self.modal {
+                if panel.target_kind == "Pod" {
+                    if let Some(hist) = self.pod_metrics_history.get(&panel.target_name) {
+                        panel.update_samples(&hist.iter().cloned().collect::<Vec<_>>());
+                    }
+                }
+            }
 
-        // 1. Update in active table view if currently viewing Pods or Workloads
-        if let ActiveView::Table(table) = &mut self.active_view {
-            if table.kind == ResourceKind::Pods {
-                for item in table.raw_items.iter_mut() {
+            let metric_map: std::collections::HashMap<String, (i64, i64)> = metrics
+                .into_iter()
+                .map(|m| (m.name, (m.cpu_millicores, m.memory_mib)))
+                .collect();
+
+            // 1. Update in active table view if currently viewing Pods or Workloads
+            if let ActiveView::Table(table) = &mut self.active_view {
+                if table.kind == ResourceKind::Pods {
+                    for item in table.raw_items.iter_mut() {
+                        let name = item.get("name").and_then(|v| v.as_str()).unwrap_or("");
+                        if let Some(&(cpu, mem)) = metric_map.get(name) {
+                            if let Some(obj) = item.as_object_mut() {
+                                let mem_str = if mem >= 1024 {
+                                    format!("{:.1}Gi", mem as f64 / 1024.0)
+                                } else {
+                                    format!("{}Mi", mem)
+                                };
+                                obj.insert(
+                                    "cpu".to_string(),
+                                    serde_json::Value::String(format!("{}m", cpu)),
+                                );
+                                obj.insert(
+                                    "memory".to_string(),
+                                    serde_json::Value::String(mem_str),
+                                );
+                            }
+                        }
+                    }
+                    table.apply_filter(&self.filter_buffer);
+                } else if table.kind == ResourceKind::Workloads {
+                    for item in table.raw_items.iter_mut() {
+                        let kind = item.get("kind").and_then(|v| v.as_str()).unwrap_or("");
+                        if kind != "Pod" {
+                            continue;
+                        }
+                        let name = item.get("name").and_then(|v| v.as_str()).unwrap_or("");
+                        if let Some(&(cpu, mem)) = metric_map.get(name) {
+                            if let Some(obj) = item.as_object_mut() {
+                                let mem_str = if mem >= 1024 {
+                                    format!("{:.1}Gi", mem as f64 / 1024.0)
+                                } else {
+                                    format!("{}Mi", mem)
+                                };
+                                obj.insert(
+                                    "cpu".to_string(),
+                                    serde_json::Value::String(format!("{}m", cpu)),
+                                );
+                                obj.insert(
+                                    "memory".to_string(),
+                                    serde_json::Value::String(mem_str),
+                                );
+                            }
+                        }
+                    }
+                    table.apply_filter(&self.filter_buffer);
+                }
+            }
+
+            // 2. Also update in-memory resource_cache so switching views retains metrics
+            let key = (
+                self.active_context.clone(),
+                self.active_namespace.clone(),
+                "pods".to_string(),
+            );
+            if let Some(cached_items) = self.resource_cache.get_mut(&key) {
+                for item in cached_items.iter_mut() {
                     let name = item.get("name").and_then(|v| v.as_str()).unwrap_or("");
                     if let Some(&(cpu, mem)) = metric_map.get(name) {
                         if let Some(obj) = item.as_object_mut() {
@@ -878,75 +1025,144 @@ impl App {
                         }
                     }
                 }
-                table.apply_filter(&self.filter_buffer);
-            } else if table.kind == ResourceKind::Workloads {
-                for item in table.raw_items.iter_mut() {
-                    let kind = item.get("kind").and_then(|v| v.as_str()).unwrap_or("");
-                    if kind != "Pod" {
-                        continue;
-                    }
-                    let name = item.get("name").and_then(|v| v.as_str()).unwrap_or("");
-                    if let Some(&(cpu, mem)) = metric_map.get(name) {
-                        if let Some(obj) = item.as_object_mut() {
-                            let mem_str = if mem >= 1024 {
-                                format!("{:.1}Gi", mem as f64 / 1024.0)
-                            } else {
-                                format!("{}Mi", mem)
-                            };
-                            obj.insert(
-                                "cpu".to_string(),
-                                serde_json::Value::String(format!("{}m", cpu)),
-                            );
-                            obj.insert("memory".to_string(), serde_json::Value::String(mem_str));
-                        }
-                    }
-                }
-                table.apply_filter(&self.filter_buffer);
             }
-        }
-
-        // 2. Also update in-memory resource_cache so switching views retains metrics
-        let key = (
-            self.active_context.clone(),
-            self.active_namespace.clone(),
-            "pods".to_string(),
-        );
-        if let Some(cached_items) = self.resource_cache.get_mut(&key) {
-            for item in cached_items.iter_mut() {
-                let name = item.get("name").and_then(|v| v.as_str()).unwrap_or("");
-                if let Some(&(cpu, mem)) = metric_map.get(name) {
-                    if let Some(obj) = item.as_object_mut() {
-                        let mem_str = if mem >= 1024 {
-                            format!("{:.1}Gi", mem as f64 / 1024.0)
-                        } else {
-                            format!("{}Mi", mem)
+            self.refresh_top_view_data();
+        } else if let Some(mux) = &mut self.mux_state {
+            if let Some(inactive) = &mut mux.inactive_pane {
+                if inactive.context == target_ctx {
+                    for m in &metrics {
+                        let sample = srelens_kube::metrics::MetricSample {
+                            timestamp_epoch_ms: now_ms,
+                            cpu_millicores: m.cpu_millicores.max(0) as u64,
+                            memory_mib: m.memory_mib.max(0) as u64,
                         };
-                        obj.insert(
-                            "cpu".to_string(),
-                            serde_json::Value::String(format!("{}m", cpu)),
+                        let history = inactive
+                            .pod_metrics_history
+                            .entry(m.name.clone())
+                            .or_insert_with(std::collections::VecDeque::new);
+                        history.push_back(sample);
+                        if history.len() > 720 {
+                            history.pop_front();
+                        }
+                    }
+
+                    let metric_map: std::collections::HashMap<String, (i64, i64)> = metrics
+                        .into_iter()
+                        .map(|m| (m.name, (m.cpu_millicores, m.memory_mib)))
+                        .collect();
+
+                    if let ActiveView::Table(table) = &mut inactive.active_view {
+                        if table.kind == ResourceKind::Pods {
+                            for item in table.raw_items.iter_mut() {
+                                let name = item.get("name").and_then(|v| v.as_str()).unwrap_or("");
+                                if let Some(&(cpu, mem)) = metric_map.get(name) {
+                                    if let Some(obj) = item.as_object_mut() {
+                                        let mem_str = if mem >= 1024 {
+                                            format!("{:.1}Gi", mem as f64 / 1024.0)
+                                        } else {
+                                            format!("{}Mi", mem)
+                                        };
+                                        obj.insert(
+                                            "cpu".to_string(),
+                                            serde_json::Value::String(format!("{}m", cpu)),
+                                        );
+                                        obj.insert(
+                                            "memory".to_string(),
+                                            serde_json::Value::String(mem_str),
+                                        );
+                                    }
+                                }
+                            }
+                            table.apply_filter(&inactive.filter_buffer);
+                        } else if table.kind == ResourceKind::Workloads {
+                            for item in table.raw_items.iter_mut() {
+                                let kind = item.get("kind").and_then(|v| v.as_str()).unwrap_or("");
+                                if kind != "Pod" {
+                                    continue;
+                                }
+                                let name = item.get("name").and_then(|v| v.as_str()).unwrap_or("");
+                                if let Some(&(cpu, mem)) = metric_map.get(name) {
+                                    if let Some(obj) = item.as_object_mut() {
+                                        let mem_str = if mem >= 1024 {
+                                            format!("{:.1}Gi", mem as f64 / 1024.0)
+                                        } else {
+                                            format!("{}Mi", mem)
+                                        };
+                                        obj.insert(
+                                            "cpu".to_string(),
+                                            serde_json::Value::String(format!("{}m", cpu)),
+                                        );
+                                        obj.insert(
+                                            "memory".to_string(),
+                                            serde_json::Value::String(mem_str),
+                                        );
+                                    }
+                                }
+                            }
+                            table.apply_filter(&inactive.filter_buffer);
+                        }
+                    }
+
+                    let key = (
+                        inactive.context.clone(),
+                        inactive.namespace.clone(),
+                        "pods".to_string(),
+                    );
+                    if let Some(cached_items) = self.resource_cache.get_mut(&key) {
+                        for item in cached_items.iter_mut() {
+                            let name = item.get("name").and_then(|v| v.as_str()).unwrap_or("");
+                            if let Some(&(cpu, mem)) = metric_map.get(name) {
+                                if let Some(obj) = item.as_object_mut() {
+                                    let mem_str = if mem >= 1024 {
+                                        format!("{:.1}Gi", mem as f64 / 1024.0)
+                                    } else {
+                                        format!("{}Mi", mem)
+                                    };
+                                    obj.insert(
+                                        "cpu".to_string(),
+                                        serde_json::Value::String(format!("{}m", cpu)),
+                                    );
+                                    obj.insert(
+                                        "memory".to_string(),
+                                        serde_json::Value::String(mem_str),
+                                    );
+                                }
+                            }
+                        }
+                    }
+
+                    if let ActiveView::Top(top) = &mut inactive.active_view {
+                        let (pods, nodes) = Self::build_top_rows_for(
+                            &self.resource_cache,
+                            &inactive.context,
+                            &inactive.namespace,
+                            &inactive.pod_metrics_history,
+                            &inactive.node_metrics_history,
                         );
-                        obj.insert("memory".to_string(), serde_json::Value::String(mem_str));
+                        top.set_data(pods, nodes);
                     }
                 }
             }
         }
-        self.refresh_top_view_data();
     }
 
-    pub fn rebuild_workloads_table(&mut self) {
-        let ctx = self.active_context.clone();
-        let ns = self.active_namespace.clone();
-
+    pub fn rebuild_workloads_data(
+        resource_cache: &std::collections::HashMap<
+            (String, String, String),
+            Vec<serde_json::Value>,
+        >,
+        ctx: &str,
+        ns: &str,
+    ) -> (Vec<serde_json::Value>, bool) {
         let mut unified: Vec<serde_json::Value> = Vec::new();
 
         // 1. Deployments
         if let Some(items) =
-            self.resource_cache
-                .get(&(ctx.clone(), ns.clone(), "deployments".to_string()))
+            resource_cache.get(&(ctx.to_string(), ns.to_string(), "deployments".to_string()))
         {
             for it in items {
                 let name = it.get("name").and_then(|v| v.as_str()).unwrap_or("");
-                let namespace = it.get("namespace").and_then(|v| v.as_str()).unwrap_or(&ns);
+                let namespace = it.get("namespace").and_then(|v| v.as_str()).unwrap_or(ns);
                 let ready = it.get("ready").and_then(|v| v.as_str()).unwrap_or("0/0");
                 let age = it.get("age").and_then(|v| v.as_str()).unwrap_or("");
                 let created_at = it.get("createdAt").and_then(|v| v.as_str()).unwrap_or("");
@@ -978,12 +1194,11 @@ impl App {
 
         // 2. StatefulSets
         if let Some(items) =
-            self.resource_cache
-                .get(&(ctx.clone(), ns.clone(), "statefulsets".to_string()))
+            resource_cache.get(&(ctx.to_string(), ns.to_string(), "statefulsets".to_string()))
         {
             for it in items {
                 let name = it.get("name").and_then(|v| v.as_str()).unwrap_or("");
-                let namespace = it.get("namespace").and_then(|v| v.as_str()).unwrap_or(&ns);
+                let namespace = it.get("namespace").and_then(|v| v.as_str()).unwrap_or(ns);
                 let ready = it.get("ready").and_then(|v| v.as_str()).unwrap_or("0/0");
                 let age = it.get("age").and_then(|v| v.as_str()).unwrap_or("");
                 let created_at = it.get("createdAt").and_then(|v| v.as_str()).unwrap_or("");
@@ -1015,12 +1230,11 @@ impl App {
 
         // 3. DaemonSets
         if let Some(items) =
-            self.resource_cache
-                .get(&(ctx.clone(), ns.clone(), "daemonsets".to_string()))
+            resource_cache.get(&(ctx.to_string(), ns.to_string(), "daemonsets".to_string()))
         {
             for it in items {
                 let name = it.get("name").and_then(|v| v.as_str()).unwrap_or("");
-                let namespace = it.get("namespace").and_then(|v| v.as_str()).unwrap_or(&ns);
+                let namespace = it.get("namespace").and_then(|v| v.as_str()).unwrap_or(ns);
                 let desired = it
                     .get("desired")
                     .and_then(|v| v.as_i64())
@@ -1068,13 +1282,12 @@ impl App {
         }
 
         // 4. Pods
-        if let Some(items) = self
-            .resource_cache
-            .get(&(ctx.clone(), ns.clone(), "pods".to_string()))
+        if let Some(items) =
+            resource_cache.get(&(ctx.to_string(), ns.to_string(), "pods".to_string()))
         {
             for it in items {
                 let name = it.get("name").and_then(|v| v.as_str()).unwrap_or("");
-                let namespace = it.get("namespace").and_then(|v| v.as_str()).unwrap_or(&ns);
+                let namespace = it.get("namespace").and_then(|v| v.as_str()).unwrap_or(ns);
                 let phase = it
                     .get("phase")
                     .and_then(|v| v.as_str())
@@ -1091,10 +1304,6 @@ impl App {
                 let cpu = it.get("cpu").cloned().unwrap_or(serde_json::Value::Null);
                 let memory = it.get("memory").cloned().unwrap_or(serde_json::Value::Null);
 
-                // kubectl's word, which the backend puts on every pod row as
-                // `status`: the word the Pods table shows for the same pod. A
-                // row without one falls back to a finished phase, else the
-                // waiting reason, else the phase.
                 let status = match it.get("status").and_then(|v| v.as_str()) {
                     Some(word) if !word.is_empty() => word.to_string(),
                     _ if phase == "Succeeded" || phase == "Failed" => phase.to_string(),
@@ -1120,27 +1329,20 @@ impl App {
 
         // 5. CronJobs
         if let Some(items) =
-            self.resource_cache
-                .get(&(ctx.clone(), ns.clone(), "cronjobs".to_string()))
+            resource_cache.get(&(ctx.to_string(), ns.to_string(), "cronjobs".to_string()))
         {
             for it in items {
                 let name = it.get("name").and_then(|v| v.as_str()).unwrap_or("");
-                let namespace = it.get("namespace").and_then(|v| v.as_str()).unwrap_or(&ns);
+                let namespace = it.get("namespace").and_then(|v| v.as_str()).unwrap_or(ns);
                 let suspended = it
                     .get("suspended")
                     .and_then(|v| v.as_bool())
+                    .or_else(|| it.get("suspend").and_then(|v| v.as_bool()))
                     .unwrap_or(false);
-                let active = it.get("active").and_then(|v| v.as_i64()).unwrap_or(0);
                 let age = it.get("age").and_then(|v| v.as_str()).unwrap_or("");
                 let created_at = it.get("createdAt").and_then(|v| v.as_str()).unwrap_or("");
 
-                let status = if suspended {
-                    "Suspended"
-                } else if active > 0 {
-                    "Active"
-                } else {
-                    "Active"
-                };
+                let status = if suspended { "Suspended" } else { "Active" };
 
                 unified.push(serde_json::json!({
                     "name": name,
@@ -1178,10 +1380,17 @@ impl App {
             "cronjobs",
         ]
         .iter()
-        .any(|k| {
-            self.resource_cache
-                .contains_key(&(ctx.clone(), ns.clone(), k.to_string()))
-        });
+        .any(|k| resource_cache.contains_key(&(ctx.to_string(), ns.to_string(), k.to_string())));
+
+        (unified, has_any_cache)
+    }
+
+    pub fn rebuild_workloads_table(&mut self) {
+        let (unified, has_any_cache) = Self::rebuild_workloads_data(
+            &self.resource_cache,
+            &self.active_context,
+            &self.active_namespace,
+        );
 
         if let ActiveView::Table(table) = &mut self.active_view {
             if table.kind == ResourceKind::Workloads {
@@ -1197,6 +1406,27 @@ impl App {
         }
     }
 
+    pub fn rebuild_workloads_table_into(
+        resource_cache: &std::collections::HashMap<
+            (String, String, String),
+            Vec<serde_json::Value>,
+        >,
+        ctx: &str,
+        ns: &str,
+        filter: &str,
+        table: &mut crate::views::resource_table::ResourceTableState,
+    ) {
+        let (unified, has_any_cache) = Self::rebuild_workloads_data(resource_cache, ctx, ns);
+        if !has_any_cache {
+            table.is_loading = true;
+            table.raw_items.clear();
+            table.filtered_indices.clear();
+        } else {
+            table.set_items(unified, filter);
+            table.is_loading = false;
+        }
+    }
+
     pub fn refresh_node_metrics(&self) {
         let event_tx = self.event_tx.clone();
         let cache = self.client_cache.clone();
@@ -1206,7 +1436,7 @@ impl App {
             if let Ok(metrics) = srelens_kube::metrics::fetch_node_metrics(cache, &ctx).await {
                 if let Ok(json_str) = serde_json::to_string(&metrics) {
                     let _ = event_tx.send(crate::event::AppEvent::ActionResult {
-                        title: "node_metrics_updated".to_string(),
+                        title: format!("node_metrics_updated:{}", ctx),
                         result: Ok(json_str),
                     });
                 }
@@ -1215,6 +1445,10 @@ impl App {
     }
 
     pub fn handle_node_metrics_update(&mut self, payload: &str) {
+        self.handle_node_metrics_update_for_context(None, payload);
+    }
+
+    pub fn handle_node_metrics_update_for_context(&mut self, ctx: Option<&str>, payload: &str) {
         let metrics: Vec<srelens_kube::metrics::NodeMetric> = match serde_json::from_str(payload) {
             Ok(m) => m,
             Err(_) => return,
@@ -1224,46 +1458,88 @@ impl App {
             return;
         }
 
+        let target_ctx = ctx.unwrap_or(&self.active_context);
         let now_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_millis() as u64;
 
-        for m in &metrics {
-            let sample = srelens_kube::metrics::MetricSample {
-                timestamp_epoch_ms: now_ms,
-                cpu_millicores: m.cpu_millicores.max(0) as u64,
-                memory_mib: m.memory_mib.max(0) as u64,
-            };
-            let history = self
-                .node_metrics_history
-                .entry(m.name.clone())
-                .or_insert_with(std::collections::VecDeque::new);
-            history.push_back(sample);
-            if history.len() > 720 {
-                history.pop_front();
+        if target_ctx == self.active_context {
+            for m in &metrics {
+                let sample = srelens_kube::metrics::MetricSample {
+                    timestamp_epoch_ms: now_ms,
+                    cpu_millicores: m.cpu_millicores.max(0) as u64,
+                    memory_mib: m.memory_mib.max(0) as u64,
+                };
+                let history = self
+                    .node_metrics_history
+                    .entry(m.name.clone())
+                    .or_insert_with(std::collections::VecDeque::new);
+                history.push_back(sample);
+                if history.len() > 720 {
+                    history.pop_front();
+                }
             }
-        }
 
-        // If viewing NodeInspector, update its history:
-        if let ActiveView::NodeInspector(ref mut ni) = self.active_view {
-            if let Some(hist) = self.node_metrics_history.get(&ni.node_name) {
-                let cpu: Vec<u64> = hist.iter().map(|s| s.cpu_millicores).collect();
-                let mem: Vec<u64> = hist.iter().map(|s| s.memory_mib).collect();
-                ni.update_metrics_history(&cpu, &mem);
+            // If viewing NodeInspector, update its history:
+            if let ActiveView::NodeInspector(ref mut ni) = self.active_view {
+                if let Some(hist) = self.node_metrics_history.get(&ni.node_name) {
+                    let cpu: Vec<u64> = hist.iter().map(|s| s.cpu_millicores).collect();
+                    let mem: Vec<u64> = hist.iter().map(|s| s.memory_mib).collect();
+                    ni.update_metrics_history(&cpu, &mem);
+                }
             }
-        }
 
-        // If MetricsTimeline modal is open for a Node, update its samples!
-        if let Some(Modal::MetricsTimeline(ref mut panel)) = self.modal {
-            if panel.target_kind == "Node" {
-                if let Some(hist) = self.node_metrics_history.get(&panel.target_name) {
-                    panel.update_samples(&hist.iter().cloned().collect::<Vec<_>>());
+            // If MetricsTimeline modal is open for a Node, update its samples!
+            if let Some(Modal::MetricsTimeline(ref mut panel)) = self.modal {
+                if panel.target_kind == "Node" {
+                    if let Some(hist) = self.node_metrics_history.get(&panel.target_name) {
+                        panel.update_samples(&hist.iter().cloned().collect::<Vec<_>>());
+                    }
+                }
+            }
+
+            self.refresh_top_view_data();
+        } else if let Some(mux) = &mut self.mux_state {
+            if let Some(inactive) = &mut mux.inactive_pane {
+                if inactive.context == target_ctx {
+                    for m in &metrics {
+                        let sample = srelens_kube::metrics::MetricSample {
+                            timestamp_epoch_ms: now_ms,
+                            cpu_millicores: m.cpu_millicores.max(0) as u64,
+                            memory_mib: m.memory_mib.max(0) as u64,
+                        };
+                        let history = inactive
+                            .node_metrics_history
+                            .entry(m.name.clone())
+                            .or_insert_with(std::collections::VecDeque::new);
+                        history.push_back(sample);
+                        if history.len() > 720 {
+                            history.pop_front();
+                        }
+                    }
+
+                    if let ActiveView::NodeInspector(ref mut ni) = inactive.active_view {
+                        if let Some(hist) = inactive.node_metrics_history.get(&ni.node_name) {
+                            let cpu: Vec<u64> = hist.iter().map(|s| s.cpu_millicores).collect();
+                            let mem: Vec<u64> = hist.iter().map(|s| s.memory_mib).collect();
+                            ni.update_metrics_history(&cpu, &mem);
+                        }
+                    }
+
+                    if let ActiveView::Top(top) = &mut inactive.active_view {
+                        let (pods, nodes) = Self::build_top_rows_for(
+                            &self.resource_cache,
+                            &inactive.context,
+                            &inactive.namespace,
+                            &inactive.pod_metrics_history,
+                            &inactive.node_metrics_history,
+                        );
+                        top.set_data(pods, nodes);
+                    }
                 }
             }
         }
-
-        self.refresh_top_view_data();
     }
 
     pub fn refresh_cluster_info(&self) {
@@ -1291,20 +1567,20 @@ impl App {
                                 .unwrap_or(0);
 
                         let _ = event_tx.send(AppEvent::ActionResult {
-                            title: "cluster_info_updated".to_string(),
+                            title: format!("cluster_info_updated:{}", context),
                             result: Ok(format!("{}|{}|{}", version, node_count, pod_count)),
                         });
                     }
                     Err(err) => {
                         let _ = event_tx.send(AppEvent::ActionResult {
-                            title: "cluster_info_failed".to_string(),
+                            title: format!("cluster_info_failed:{}", context),
                             result: Err(err.to_string()),
                         });
                     }
                 },
                 Err(err) => {
                     let _ = event_tx.send(AppEvent::ActionResult {
-                        title: "cluster_info_failed".to_string(),
+                        title: format!("cluster_info_failed:{}", context),
                         result: Err(err.to_string()),
                     });
                 }
@@ -1422,20 +1698,20 @@ impl App {
                     crate::commands::save_cached_crds(&ctx, &crds);
                     if let Ok(json_str) = serde_json::to_string(&crds) {
                         let _ = event_tx.send(AppEvent::ActionResult {
-                            title: "crds_updated".to_string(),
+                            title: format!("crds_updated:{}", ctx),
                             result: Ok(json_str),
                         });
                     }
                 }
                 Ok(Err(err)) => {
                     let _ = event_tx.send(AppEvent::ActionResult {
-                        title: "crds_failed".to_string(),
+                        title: format!("crds_failed:{}", ctx),
                         result: Err(err),
                     });
                 }
                 Err(_) => {
                     let _ = event_tx.send(AppEvent::ActionResult {
-                        title: "crds_failed".to_string(),
+                        title: format!("crds_failed:{}", ctx),
                         result: Err("CRD discovery timed out after 15s".to_string()),
                     });
                 }
@@ -1443,9 +1719,8 @@ impl App {
         });
     }
 
-    pub fn crds_to_table_items(&self) -> Vec<serde_json::Value> {
-        self.crds
-            .iter()
+    pub fn crds_to_table_items_from(crds: &[CrdMeta]) -> Vec<serde_json::Value> {
+        crds.iter()
             .map(|c| {
                 let age = if let Some(ts) = &c.created_at {
                     if let Ok(parsed_ts) = ts.parse::<srelens_kube::k8s_openapi::jiff::Timestamp>()
@@ -1475,30 +1750,71 @@ impl App {
             .collect()
     }
 
-    pub fn handle_crds_update(&mut self, json_str: &str) {
-        if let Ok(crds) = serde_json::from_str::<Vec<CrdMeta>>(json_str) {
-            crate::commands::save_cached_crds(&self.active_context, &crds);
-            self.crds = crds;
+    pub fn crds_to_table_items(&self) -> Vec<serde_json::Value> {
+        Self::crds_to_table_items_from(&self.crds)
+    }
 
-            let is_crd_view = matches!(self.active_view, ActiveView::Table(ref table) if table.kind == ResourceKind::CustomResourceDefinitions);
-            if is_crd_view {
-                let items = self.crds_to_table_items();
-                if let ActiveView::Table(ref mut table) = self.active_view {
-                    table.set_items(items, &self.filter_buffer);
-                    table.is_loading = false;
+    pub fn handle_crds_update(&mut self, json_str: &str) {
+        self.handle_crds_update_for_context(None, json_str);
+    }
+
+    pub fn handle_crds_update_for_context(&mut self, ctx: Option<&str>, json_str: &str) {
+        if let Ok(crds) = serde_json::from_str::<Vec<CrdMeta>>(json_str) {
+            let target_ctx = ctx.unwrap_or(&self.active_context);
+            crate::commands::save_cached_crds(target_ctx, &crds);
+            if target_ctx == self.active_context {
+                self.crds = crds;
+
+                let is_crd_view = matches!(self.active_view, ActiveView::Table(ref table) if table.kind == ResourceKind::CustomResourceDefinitions);
+                if is_crd_view {
+                    let items = self.crds_to_table_items();
+                    if let ActiveView::Table(ref mut table) = self.active_view {
+                        table.set_items(items, &self.filter_buffer);
+                        table.is_loading = false;
+                    }
+                }
+            } else if let Some(mux) = &mut self.mux_state {
+                if let Some(inactive) = &mut mux.inactive_pane {
+                    if inactive.context == target_ctx {
+                        inactive.crds = crds;
+                        if let ActiveView::Table(ref mut table) = inactive.active_view {
+                            if table.kind == ResourceKind::CustomResourceDefinitions {
+                                let items = Self::crds_to_table_items_from(&inactive.crds);
+                                table.set_items(items, &inactive.filter_buffer);
+                                table.is_loading = false;
+                            }
+                        }
+                    }
                 }
             }
         }
     }
 
     pub fn handle_crds_failed(&mut self, err: &str) {
-        if let ActiveView::Table(ref mut table) = self.active_view {
-            if table.kind == ResourceKind::CustomResourceDefinitions {
-                table.is_loading = false;
-                self.set_toast(
-                    format!("Failed to load CRDs: {}", err),
-                    Theme::status_error(),
-                );
+        self.handle_crds_failed_for_context(None, err);
+    }
+
+    pub fn handle_crds_failed_for_context(&mut self, ctx: Option<&str>, err: &str) {
+        let target_ctx = ctx.unwrap_or(&self.active_context);
+        if target_ctx == self.active_context {
+            if let ActiveView::Table(ref mut table) = self.active_view {
+                if table.kind == ResourceKind::CustomResourceDefinitions {
+                    table.is_loading = false;
+                    self.set_toast(
+                        format!("Failed to load CRDs: {}", err),
+                        Theme::status_error(),
+                    );
+                }
+            }
+        } else if let Some(mux) = &mut self.mux_state {
+            if let Some(inactive) = &mut mux.inactive_pane {
+                if inactive.context == target_ctx {
+                    if let ActiveView::Table(ref mut table) = inactive.active_view {
+                        if table.kind == ResourceKind::CustomResourceDefinitions {
+                            table.is_loading = false;
+                        }
+                    }
+                }
             }
         }
     }
@@ -1771,39 +2087,98 @@ impl App {
     }
 
     pub fn handle_cluster_info_update(&mut self, payload: &str) {
+        self.handle_cluster_info_update_for_context(None, payload);
+    }
+
+    pub fn handle_cluster_info_update_for_context(&mut self, ctx: Option<&str>, payload: &str) {
         let parts: Vec<&str> = payload.split('|').collect();
         if parts.len() == 3 {
-            self.cluster_version = parts[0].to_string();
-            self.node_count = parts[1].parse().unwrap_or(0);
-            self.pod_count = parts[2].parse().unwrap_or(0);
-            if self.cluster_version != "unknown" && !self.cluster_version.is_empty() {
-                self.is_connected = true;
-                self.cluster_unreachable = false;
-            }
+            let target_ctx = ctx.unwrap_or(&self.active_context);
+            let version = parts[0].to_string();
+            let node_count = parts[1].parse().unwrap_or(0);
+            let pod_count = parts[2].parse().unwrap_or(0);
 
-            if let ActiveView::Overview(ov) = &mut self.active_view {
-                ov.data.context_name = self.active_context.clone();
-                ov.data.cluster_name = self.cluster_name.clone();
-                ov.data.server_url = self.server_url.clone();
-                ov.data.k8s_version = self.cluster_version.clone();
-                ov.data.is_reachable = true;
-                if ov.data.node_count == 0 {
-                    ov.data.node_count = self.node_count;
+            if target_ctx == self.active_context {
+                self.cluster_version = version;
+                self.node_count = node_count;
+                self.pod_count = pod_count;
+                if self.cluster_version != "unknown" && !self.cluster_version.is_empty() {
+                    self.is_connected = true;
+                    self.cluster_unreachable = false;
                 }
-                if ov.data.total_pods == 0 {
-                    ov.data.total_pods = self.pod_count;
+
+                if let ActiveView::Overview(ov) = &mut self.active_view {
+                    ov.data.context_name = self.active_context.clone();
+                    ov.data.cluster_name = self.cluster_name.clone();
+                    ov.data.server_url = self.server_url.clone();
+                    ov.data.k8s_version = self.cluster_version.clone();
+                    ov.data.is_reachable = true;
+                    if ov.data.node_count == 0 {
+                        ov.data.node_count = self.node_count;
+                    }
+                    if ov.data.total_pods == 0 {
+                        ov.data.total_pods = self.pod_count;
+                    }
+                }
+            } else if let Some(mux) = &mut self.mux_state {
+                if let Some(inactive) = &mut mux.inactive_pane {
+                    if inactive.context == target_ctx {
+                        inactive.cluster_version = version;
+                        inactive.node_count = node_count;
+                        inactive.pod_count = pod_count;
+                        if inactive.cluster_version != "unknown"
+                            && !inactive.cluster_version.is_empty()
+                        {
+                            inactive.is_connected = true;
+                            inactive.cluster_unreachable = false;
+                        }
+                        if let ActiveView::Overview(ov) = &mut inactive.active_view {
+                            ov.data.context_name = inactive.context.clone();
+                            ov.data.cluster_name = inactive.cluster_name.clone();
+                            ov.data.server_url = inactive.server_url.clone();
+                            ov.data.k8s_version = inactive.cluster_version.clone();
+                            ov.data.is_reachable = true;
+                            if ov.data.node_count == 0 {
+                                ov.data.node_count = inactive.node_count;
+                            }
+                            if ov.data.total_pods == 0 {
+                                ov.data.total_pods = inactive.pod_count;
+                            }
+                        }
+                    }
                 }
             }
         }
     }
 
-    pub fn handle_cluster_info_failure(&mut self, _err: &str) {
-        self.is_connected = false;
-        if self.connection_attempt_start.elapsed() >= Duration::from_secs(8) {
-            self.cluster_unreachable = true;
-            if let ActiveView::Table(table) = &mut self.active_view {
-                if table.raw_items.is_empty() {
-                    table.is_loading = false;
+    pub fn handle_cluster_info_failure(&mut self, err: &str) {
+        self.handle_cluster_info_failure_for_context(None, err);
+    }
+
+    pub fn handle_cluster_info_failure_for_context(&mut self, ctx: Option<&str>, _err: &str) {
+        let target_ctx = ctx.unwrap_or(&self.active_context);
+        if target_ctx == self.active_context {
+            self.is_connected = false;
+            if self.connection_attempt_start.elapsed() >= Duration::from_secs(8) {
+                self.cluster_unreachable = true;
+                if let ActiveView::Table(table) = &mut self.active_view {
+                    if table.raw_items.is_empty() {
+                        table.is_loading = false;
+                    }
+                }
+            }
+        } else if let Some(mux) = &mut self.mux_state {
+            if let Some(inactive) = &mut mux.inactive_pane {
+                if inactive.context == target_ctx {
+                    inactive.is_connected = false;
+                    if inactive.connection_attempt_start.elapsed() >= Duration::from_secs(8) {
+                        inactive.cluster_unreachable = true;
+                        if let ActiveView::Table(table) = &mut inactive.active_view {
+                            if table.raw_items.is_empty() {
+                                table.is_loading = false;
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -1825,6 +2200,22 @@ impl App {
                     ov.set_data(data.clone());
                 }
                 self.cluster_overview_data = Some(data);
+            } else if let Some(mux) = &mut self.mux_state {
+                if let Some(inactive) = &mut mux.inactive_pane {
+                    if inactive.context == data.context_name {
+                        inactive.cluster_version = data.k8s_version.clone();
+                        inactive.node_count = data.node_count;
+                        inactive.pod_count = data.total_pods;
+                        inactive.is_connected = data.is_reachable;
+                        if data.is_reachable {
+                            inactive.cluster_unreachable = false;
+                        }
+                        if let ActiveView::Overview(ov) = &mut inactive.active_view {
+                            ov.set_data(data.clone());
+                        }
+                        inactive.cluster_overview_data = Some(data);
+                    }
+                }
             }
         }
     }
@@ -2105,13 +2496,37 @@ impl App {
             return;
         }
 
+        if let Some(mux) = &self.mux_state {
+            if let Some(inactive) = &mux.inactive_pane {
+                if inactive.context == new_context {
+                    self.set_toast(
+                        format!(
+                            "Cannot switch to '{}': already open in the other pane",
+                            new_context
+                        ),
+                        Theme::status_error(),
+                    );
+                    return;
+                }
+            }
+        }
+
         self.stop_active_log_stream();
-        self.logs_manager.shutdown_all();
-        self.watch_manager.shutdown_all();
-        self.active_watch_channels.clear();
-        self.active_watch_pool.clear();
-        self.resource_cache.clear();
-        self.current_watch_channel = None;
+        if self.mux_state.is_some() {
+            for ch in &self.active_watch_channels {
+                self.watch_manager.stop(ch);
+            }
+            self.active_watch_channels.clear();
+            self.active_watch_pool.clear();
+            self.current_watch_channel = None;
+        } else {
+            self.logs_manager.shutdown_all();
+            self.watch_manager.shutdown_all();
+            self.active_watch_channels.clear();
+            self.active_watch_pool.clear();
+            self.resource_cache.clear();
+            self.current_watch_channel = None;
+        }
 
         if self.active_context != new_context {
             // 1. Save outgoing context's assistant view state into map
@@ -4214,6 +4629,15 @@ impl App {
             return;
         }
 
+        // Mux Global shortcut: Ctrl+b cycles focus between panes in any mode when no modal is open
+        if self.mux_state.is_some()
+            && key.code == KeyCode::Char('b')
+            && key.modifiers.contains(KeyModifiers::CONTROL)
+        {
+            self.switch_mux_focus();
+            return;
+        }
+
         // 3. Command Mode (`:`)
         if self.input_mode == InputMode::Command {
             match key.code {
@@ -4630,6 +5054,60 @@ impl App {
             return;
         }
 
+        // Mux Right Pane Context Picker handling when right pane is focused (precedence over view handlers)
+        if let Some(mux) = &mut self.mux_state {
+            if mux.focused_pane == 1 && mux.picker.is_some() {
+                let picker = mux.picker.as_mut().unwrap();
+                match key.code {
+                    KeyCode::Up => {
+                        picker.selected_idx = picker.selected_idx.saturating_sub(1);
+                        return;
+                    }
+                    KeyCode::Down => {
+                        let max_idx = picker.filtered_items().len().saturating_sub(1);
+                        picker.selected_idx = (picker.selected_idx + 1).min(max_idx);
+                        return;
+                    }
+                    KeyCode::Char('k') if picker.filter.is_empty() => {
+                        picker.selected_idx = picker.selected_idx.saturating_sub(1);
+                        return;
+                    }
+                    KeyCode::Char('j') if picker.filter.is_empty() => {
+                        let max_idx = picker.filtered_items().len().saturating_sub(1);
+                        picker.selected_idx = (picker.selected_idx + 1).min(max_idx);
+                        return;
+                    }
+                    KeyCode::Char('b') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        self.switch_mux_focus();
+                        return;
+                    }
+                    KeyCode::Char(c)
+                        if !key.modifiers.contains(KeyModifiers::CONTROL)
+                            && !key.modifiers.contains(KeyModifiers::ALT) =>
+                    {
+                        picker.filter.push(c);
+                        picker.selected_idx = 0;
+                        return;
+                    }
+                    KeyCode::Backspace => {
+                        picker.filter.pop();
+                        picker.selected_idx = 0;
+                        return;
+                    }
+                    KeyCode::Esc => {
+                        self.mux_state = None;
+                        self.set_toast("MUX split cancelled".to_string(), Theme::status_ok());
+                        return;
+                    }
+                    KeyCode::Enter => {
+                        self.activate_mux_right_context().await;
+                        return;
+                    }
+                    _ => return,
+                }
+            }
+        }
+
         // 5. Settings View Dedicated Key Handling
         if matches!(self.active_view, ActiveView::Settings(_)) {
             if let ActiveView::Settings(s) = &self.active_view {
@@ -4658,6 +5136,40 @@ impl App {
         }
 
         // 6. Normal Mode - k9s Global & View Keybindings
+
+        // Shift+D prompts to close the active mux split
+        if self.mux_state.is_some()
+            && !matches!(self.active_view, ActiveView::Assistant)
+            && key.code == KeyCode::Char('D')
+            && !key.modifiers.contains(KeyModifiers::CONTROL)
+            && !key.modifiers.contains(KeyModifiers::ALT)
+        {
+            self.modal = Some(Modal::Confirm {
+                title: "Close MUX Split".to_string(),
+                message: "Close split pane and return to single cluster view?".to_string(),
+                action_name: "close_mux".to_string(),
+                is_destructive: false,
+            });
+            return;
+        }
+
+        // Mux dynamic pane resize with Alt+Left / Alt+Right or Alt+h / Alt+l
+        if let Some(mux) = &mut self.mux_state {
+            if key.modifiers.contains(KeyModifiers::ALT) {
+                match key.code {
+                    KeyCode::Left | KeyCode::Char('h') => {
+                        mux.split_ratio = mux.split_ratio.saturating_sub(5).max(20);
+                        return;
+                    }
+                    KeyCode::Right | KeyCode::Char('l') => {
+                        mux.split_ratio = (mux.split_ratio + 5).min(80);
+                        return;
+                    }
+                    _ => {}
+                }
+            }
+        }
+
         match key.code {
             // Enter Command Mode
             KeyCode::Char(':')
@@ -6992,24 +7504,24 @@ impl App {
                                 self.switch_view_to_kind(ResourceKind::Pods).await;
                             }
                         }
-                        KeyCode::Char('j') | KeyCode::Down => settings.select_next_provider(),
-                        KeyCode::Char('k') | KeyCode::Up => settings.select_prev_provider(),
+                        KeyCode::Char('j') | KeyCode::Down => settings.select_next_row(),
+                        KeyCode::Char('k') | KeyCode::Up => settings.select_prev_row(),
                         KeyCode::Tab | KeyCode::Right | KeyCode::Char('l') => {
                             settings.select_next_field()
                         }
                         KeyCode::BackTab | KeyCode::Left | KeyCode::Char('h') => {
                             settings.select_prev_field()
                         }
-                        // On the Agent card, Space steps the agent from any of
-                        // its fields; `e`/Enter steps it from the Agent field,
-                        // lists models from the Model field, and edits
-                        // Cursor's API Key like a provider's.
+                        // On an agent's row, Space makes it the Assistant's
+                        // agent from any of its fields; `e`/Enter does from the
+                        // Agent field, lists models from the Model field, and
+                        // edits Cursor's API Key like a provider's.
                         KeyCode::Char(' ' | 'e') | KeyCode::Enter
-                            if settings.agent_card_focused
+                            if settings.agents_focused
                                 && (key.code == KeyCode::Char(' ')
                                     || settings.selected_field == SettingField::Agent) =>
                         {
-                            let agent = settings.cycle_agent();
+                            let agent = settings.use_focused_agent();
                             self.ai_settings = settings.settings.clone();
                             match settings.save() {
                                 Ok(_) => self.set_toast(
@@ -7023,7 +7535,7 @@ impl App {
                             }
                         }
                         KeyCode::Char('e') | KeyCode::Enter
-                            if settings.agent_card_focused
+                            if settings.agents_focused
                                 && settings.selected_field == SettingField::Model =>
                         {
                             let target = settings.agent_picker_target();
@@ -8782,6 +9294,96 @@ impl App {
             }
         }
 
+        // Mux split-pane focus, item click, and divider drag
+        let mut mux_action = None;
+        if self.modal.is_none() {
+            if let Some(mux) = &mut self.mux_state {
+                let (left_rect, right_rect) = mux.pane_rects;
+                let total_w = left_rect.width + right_rect.width;
+
+                if mouse.kind == MouseEventKind::Up(MouseButton::Left) {
+                    mux.is_dragging_divider = false;
+                }
+
+                if mouse.kind == MouseEventKind::Drag(MouseButton::Left) {
+                    if mux.is_dragging_divider
+                        && total_w > 0
+                        && mouse.row >= left_rect.y
+                        && mouse.row < left_rect.y + left_rect.height
+                    {
+                        let col_offset = mouse.column.saturating_sub(left_rect.x);
+                        let new_ratio = ((col_offset as u32 * 100) / total_w as u32) as u16;
+                        mux.split_ratio = new_ratio.clamp(20, 80);
+                        return;
+                    }
+                }
+
+                if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
+                    let divider_col = left_rect.x + left_rect.width;
+                    if total_w > 0
+                        && mouse.row >= left_rect.y
+                        && mouse.row < left_rect.y + left_rect.height
+                        && (mouse.column as i32 - divider_col as i32).abs() <= 1
+                    {
+                        mux.is_dragging_divider = true;
+                    } else {
+                        mux.is_dragging_divider = false;
+                    }
+
+                    let in_left = mouse.column >= left_rect.x
+                        && mouse.column < left_rect.x + left_rect.width
+                        && mouse.row >= left_rect.y
+                        && mouse.row < left_rect.y + left_rect.height;
+                    let in_right = mouse.column >= right_rect.x
+                        && mouse.column < right_rect.x + right_rect.width
+                        && mouse.row >= right_rect.y
+                        && mouse.row < right_rect.y + right_rect.height;
+
+                    if in_left && mux.focused_pane != 0 {
+                        mux_action = Some("switch");
+                    } else if in_right && mux.focused_pane != 1 {
+                        mux_action = Some("switch");
+                    } else if in_right && mux.focused_pane == 1 && mux.picker.is_some() {
+                        let list_y = right_rect.y.saturating_add(4);
+                        let list_h = right_rect.height.saturating_sub(5);
+                        if mouse.row >= list_y && mouse.row < list_y + list_h {
+                            let click_row = (mouse.row - list_y) as usize;
+                            let item_offset = click_row / 2;
+                            let picker = mux.picker.as_mut().unwrap();
+                            let filtered_len = picker.filtered_items().len();
+                            let visible_items = (list_h as usize / 2).max(1);
+                            let sel = picker.selected_idx.min(filtered_len.saturating_sub(1));
+                            let start_idx = if sel >= visible_items {
+                                sel + 1 - visible_items
+                            } else {
+                                0
+                            };
+                            let clicked_idx = start_idx + item_offset;
+                            if clicked_idx < filtered_len {
+                                if picker.selected_idx == clicked_idx {
+                                    mux_action = Some("activate");
+                                } else {
+                                    picker.selected_idx = clicked_idx;
+                                    return;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        match mux_action {
+            Some("switch") => {
+                self.switch_mux_focus();
+                return;
+            }
+            Some("activate") => {
+                self.activate_mux_right_context().await;
+                return;
+            }
+            _ => {}
+        }
+
         // 1. Check if clicking on header context chips
         if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
             let clicked_ctx = self
@@ -8837,44 +9439,62 @@ impl App {
             }
         }
 
-        if let ActiveView::Assistant = &self.active_view {
+        if matches!(self.active_view, ActiveView::Assistant) {
             let vp = self.assistant_state.last_viewport_rect.get();
-            if mouse.column >= vp.x
+            let is_inside_vp = mouse.column >= vp.x
                 && mouse.column < vp.x + vp.width
                 && mouse.row >= vp.y
-                && mouse.row < vp.y + vp.height
-            {
-                let screen_row = mouse.row.saturating_sub(vp.y) as usize;
-                let screen_col = mouse.column.saturating_sub(vp.x + 1) as usize;
-                let line_idx = self.assistant_state.effective_scroll() + screen_row;
+                && mouse.row < vp.y + vp.height;
 
-                if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
-                    if self
-                        .assistant_state
-                        .tool_chip_lines
-                        .borrow()
-                        .contains(&line_idx)
-                    {
-                        self.assistant_state.toggle_tools_expansion();
-                        return;
-                    }
+            // Handle scroll wheel within assistant viewport
+            if is_inside_vp {
+                if mouse.kind == MouseEventKind::ScrollUp {
+                    self.assistant_state.scroll_up(3);
+                    return;
+                } else if mouse.kind == MouseEventKind::ScrollDown {
+                    self.assistant_state.scroll_down(3);
+                    return;
                 }
+            }
 
+            // Implicit release if mouse moved without buttons pressed while selecting:
+            // finalize at the last recorded selection endpoint rather than overwriting with hover coordinates.
+            if mouse.kind == MouseEventKind::Moved && self.assistant_state.is_selecting {
+                if let Some(text) = self.assistant_state.finish_implicit_release() {
+                    self.copy_selection_and_toast(text);
+                }
+                return;
+            }
+
+            if self.assistant_state.is_selecting {
                 match mouse.kind {
-                    MouseEventKind::Down(MouseButton::Left) => {
-                        self.assistant_state.start_selection(line_idx, screen_col);
-                    }
                     MouseEventKind::Drag(MouseButton::Left) => {
-                        self.assistant_state.update_selection(line_idx, screen_col);
+                        self.assistant_state.mouse_drag(mouse.row, mouse.column);
                     }
                     MouseEventKind::Up(MouseButton::Left) => {
-                        self.assistant_state.finish_selection(line_idx, screen_col);
+                        if let Some(text) = self.assistant_state.mouse_up(mouse.row, mouse.column) {
+                            self.copy_selection_and_toast(text);
+                        }
+                    }
+                    MouseEventKind::Down(MouseButton::Left) => {
+                        self.assistant_state.clear_selection();
+                        if is_inside_vp {
+                            self.assistant_state.mouse_down(mouse.row, mouse.column);
+                        }
                     }
                     _ => {}
+                }
+            } else if is_inside_vp {
+                if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
+                    self.assistant_state.mouse_down(mouse.row, mouse.column);
                 }
             } else if matches!(mouse.kind, MouseEventKind::Down(_)) {
                 self.assistant_state.clear_selection();
             }
+        } else if self.assistant_state.is_selecting {
+            // Mouse event arrived in another view while Assistant selection was pending:
+            // cancel active drag-scroll and selection to prevent background drift.
+            self.assistant_state.clear_selection();
         }
 
         if let ActiveView::Yaml(yaml) = &mut self.active_view {
@@ -8896,13 +9516,7 @@ impl App {
                     }
                     MouseEventKind::Up(MouseButton::Left) => {
                         if let Some(selected) = yaml.finish_selection(line_idx) {
-                            tokio::spawn(async move {
-                                let _ = copy_to_clipboard(&selected);
-                            });
-                            self.set_toast(
-                                "✓ Copied selection to clipboard".to_string(),
-                                Theme::status_ok(),
-                            );
+                            self.copy_selection_and_toast(selected);
                         }
                     }
                     MouseEventKind::ScrollDown => {
@@ -9250,6 +9864,15 @@ impl App {
             self.apply_current_filter();
             return;
         }
+        if let Some(mux) = &mut self.mux_state {
+            if mux.focused_pane == 1 && mux.picker.is_some() {
+                let picker = mux.picker.as_mut().unwrap();
+                let cleaned = text.replace(['\r', '\n'], "");
+                picker.filter.push_str(&cleaned);
+                picker.selected_idx = 0;
+                return;
+            }
+        }
         if let ActiveView::Assistant = &mut self.active_view {
             // The Assistant input is multi-line: keep a pasted log's lines,
             // and paste at the cursor rather than at the end.
@@ -9533,6 +10156,224 @@ impl App {
         });
     }
 
+    pub fn open_mux_split(&mut self) {
+        if self.mux_state.is_some() {
+            self.set_toast("Already in mux split mode".to_string(), Theme::status_ok());
+            return;
+        }
+
+        let items: Vec<crate::ui::dialogs::ContextPickerItem> = self
+            .contexts
+            .iter()
+            .filter(|c| c.name != self.active_context)
+            .map(|c| crate::ui::dialogs::ContextPickerItem {
+                name: c.name.clone(),
+                cluster: c.cluster.clone(),
+                server: c.server.clone(),
+                namespace: c.namespace.clone(),
+                is_local: c.is_local,
+                provider: c.provider.clone(),
+                source_file: c.source_file.clone(),
+            })
+            .collect();
+
+        if items.is_empty() {
+            self.set_toast(
+                "MUX split requires at least two contexts in kubeconfig".to_string(),
+                Theme::status_error(),
+            );
+            return;
+        }
+
+        self.mux_state = Some(crate::mux::MuxState {
+            focused_pane: 1, // Start focused on right pane context picker
+            split_ratio: 50,
+            is_dragging_divider: false,
+            pane_rects: (
+                ratatui::layout::Rect::default(),
+                ratatui::layout::Rect::default(),
+            ),
+            picker: Some(crate::mux::ContextPickerState {
+                contexts: items,
+                selected_idx: 0,
+                filter: String::new(),
+            }),
+            inactive_pane: None,
+        });
+
+        self.set_toast(
+            "MUX split: select a context for the right pane (Ctrl+b to switch, Shift+D to close)"
+                .to_string(),
+            Theme::status_ok(),
+        );
+    }
+
+    pub async fn activate_mux_right_context(&mut self) {
+        let (selected_ctx, target_ns) = if let Some(mux) = &self.mux_state {
+            if let Some(picker) = &mux.picker {
+                let filtered = picker.filtered_items();
+                if let Some(chosen) = filtered.get(picker.selected_idx) {
+                    (Some(chosen.name.clone()), chosen.namespace.clone())
+                } else {
+                    (None, String::new())
+                }
+            } else {
+                (None, String::new())
+            }
+        } else {
+            (None, String::new())
+        };
+
+        let Some(new_context) = selected_ctx else {
+            return;
+        };
+
+        if new_context == self.active_context {
+            self.set_toast(
+                format!("Cluster '{}' is already active in left pane", new_context),
+                Theme::status_error(),
+            );
+            return;
+        }
+
+        // 1. Snapshot the left pane from App into ClusterPaneState
+        let left_pane = crate::mux::ClusterPaneState::extract_from_app(self);
+        self.ai_settings = left_pane.ai_settings.clone();
+
+        // Inherit the left pane's resource view kind if applicable (e.g. Pods, Deployments)
+        let target_kind = match &left_pane.active_view {
+            ActiveView::Table(t) => t.kind.clone(),
+            _ => ResourceKind::Pods,
+        };
+
+        // 2. Park left pane in mux.inactive_pane, clear picker, keep focus on right (pane 1)
+        if let Some(mux) = &mut self.mux_state {
+            mux.picker = None;
+            mux.inactive_pane = Some(left_pane);
+            mux.focused_pane = 1;
+        }
+
+        // 3. Initialize the right cluster in App
+        self.active_context = new_context.clone();
+        if let Some(ctx) = self.contexts.iter().find(|c| c.name == new_context) {
+            self.cluster_name = ctx.cluster.clone();
+            self.server_url = ctx.server.clone();
+            self.active_namespace = if !target_ns.is_empty() {
+                target_ns
+            } else {
+                ctx.namespace.clone()
+            };
+        } else {
+            self.active_namespace = target_ns;
+        }
+
+        self.cluster_version = "Connecting...".to_string();
+        self.is_connected = false;
+        self.connection_attempt_start = Instant::now();
+        self.cluster_unreachable = false;
+        self.active_view = ActiveView::Table(ResourceTableState::new(target_kind));
+        self.nav_stack.clear();
+        self.filter_buffer.clear();
+        self.current_watch_channel = None;
+        self.active_watch_channels.clear();
+        self.active_watch_pool.clear();
+        self.namespaces.clear();
+        self.namespace_discovery_error = None;
+        self.cluster_overview_data = None;
+        self.assistant_state =
+            crate::views::assistant_view::AssistantViewState::for_context(&new_context);
+        self.assistant_state.caveman_level = self.ai_settings.get_caveman_level();
+        self.input_mode = crate::ui::statusbar::InputMode::Normal;
+        self.command_buffer.clear();
+        self.command_suggestion_idx = 0;
+        self.command_tab_base = None;
+        self.command_tab_target = None;
+        self.active_log_channel = None;
+        self.node_metrics_history.clear();
+        self.pod_metrics_history.clear();
+
+        self.set_toast(
+            format!(
+                "Right pane connected to '{}' (Click or Ctrl+b to switch focus)",
+                new_context
+            ),
+            Theme::status_ok(),
+        );
+
+        self.refresh_cluster_info();
+        self.refresh_cluster_overview();
+        self.crds = crate::commands::load_cached_crds(&self.active_context);
+        self.refresh_crds();
+        self.refresh_namespaces();
+        self.restart_active_watch().await;
+    }
+
+    pub fn switch_mux_focus(&mut self) {
+        if self.modal.is_some() {
+            return;
+        }
+
+        self.input_mode = crate::ui::statusbar::InputMode::Normal;
+        self.command_buffer.clear();
+        self.command_suggestion_idx = 0;
+        self.command_tab_base = None;
+        self.command_tab_target = None;
+
+        let mut mux = match self.mux_state.take() {
+            Some(m) => m,
+            None => return,
+        };
+
+        if mux.picker.is_some() {
+            mux.focused_pane = 1 - mux.focused_pane;
+            self.mux_state = Some(mux);
+            return;
+        }
+
+        if let Some(mut inactive) = mux.inactive_pane.take() {
+            inactive.swap_with_app(self);
+            mux.focused_pane = 1 - mux.focused_pane;
+            let pane_idx = mux.focused_pane + 1;
+            let ctx = self.active_context.clone();
+            mux.inactive_pane = Some(inactive);
+            self.mux_state = Some(mux);
+            self.set_toast(
+                format!("Focused pane {}: '{}'", pane_idx, ctx),
+                Theme::status_ok(),
+            );
+        } else {
+            self.mux_state = Some(mux);
+        }
+    }
+
+    pub fn close_mux_split(&mut self) {
+        if let Some(mux) = self.mux_state.take() {
+            if let Some(inactive) = mux.inactive_pane {
+                let closed_idx = mux.focused_pane + 1;
+                let closed_ctx = self.active_context.clone();
+
+                // 1. Stop active/focused pane's watch channels and log stream
+                for ch in &self.active_watch_channels {
+                    self.watch_manager.stop(ch);
+                }
+                if let Some(log_ch) = &self.active_log_channel {
+                    self.logs_manager.stop(log_ch);
+                }
+                self.assistant_state.cancel_turn();
+
+                // 2. Promote the parked/inactive pane into self as the surviving view
+                inactive.apply_to_app(self);
+
+                self.set_toast(
+                    format!("Closed pane {}: '{}'", closed_idx, closed_ctx),
+                    Theme::status_ok(),
+                );
+            } else {
+                self.set_toast("Cancelled MUX split".to_string(), Theme::status_ok());
+            }
+        }
+    }
+
     pub fn open_add_cluster_modal(&mut self) {
         let clip = get_clipboard_text().unwrap_or_default();
         let (input, preview_contexts, error_message) = if !clip.trim().is_empty() {
@@ -9764,6 +10605,7 @@ impl App {
                 is_current: rc.is_current,
                 is_local: false,
                 provider: None,
+                distribution: None,
                 source_file: rc.source.to_string_lossy().into_owned(),
                 auth_kind: rc.auth_kind.clone(),
             })
@@ -9836,6 +10678,9 @@ impl App {
             CommandTarget::CustomResource(crd) => self.switch_view_to_crd(crd).await,
             CommandTarget::Contexts => {
                 self.open_context_picker();
+            }
+            CommandTarget::Mux => {
+                self.open_mux_split();
             }
             CommandTarget::AddCluster => {
                 self.open_add_cluster_modal();
@@ -10212,9 +11057,10 @@ impl App {
             }
             ResourceKind::Toolbox => ActiveView::Toolbox(ToolboxViewState::new()),
             ResourceKind::Assistant => ActiveView::Assistant,
-            ResourceKind::Settings => {
-                ActiveView::Settings(SettingsViewState::new(&self.agent_search))
-            }
+            ResourceKind::Settings => ActiveView::Settings(SettingsViewState::with_settings(
+                self.ai_settings.clone(),
+                &self.agent_search,
+            )),
             ResourceKind::TuiConfig => {
                 let mut cfg = TuiConfigViewState::new();
                 cfg.available_contexts = self.contexts.iter().map(|c| c.name.clone()).collect();
@@ -10635,7 +11481,10 @@ impl App {
         let mut matching_pods = Vec::new();
 
         // 1. Check in-memory resource_cache
-        for ((_, ns, kind), items) in &self.resource_cache {
+        for ((ctx, ns, kind), items) in &self.resource_cache {
+            if ctx != &self.active_context {
+                continue;
+            }
             if kind.eq_ignore_ascii_case("pods") && (ns == namespace || ns.is_empty()) {
                 for item in items {
                     let pod_name = item
@@ -10722,9 +11571,16 @@ impl App {
         matching_pods
     }
 
-    fn find_cached_node_allocatable(&self, node_name: &str) -> (i64, i64) {
-        for ((_, _, kind), items) in &self.resource_cache {
-            if kind.eq_ignore_ascii_case("nodes") {
+    fn find_cached_node_allocatable_for(
+        resource_cache: &std::collections::HashMap<
+            (String, String, String),
+            Vec<serde_json::Value>,
+        >,
+        target_ctx: &str,
+        node_name: &str,
+    ) -> (i64, i64) {
+        for ((ctx, _, kind), items) in resource_cache {
+            if ctx == target_ctx && kind.eq_ignore_ascii_case("nodes") {
                 for item in items {
                     let name = item
                         .get("name")
@@ -10758,15 +11614,39 @@ impl App {
         (0, 0)
     }
 
-    pub fn build_top_rows(
-        &self,
+    fn find_cached_node_allocatable(&self, node_name: &str) -> (i64, i64) {
+        Self::find_cached_node_allocatable_for(
+            &self.resource_cache,
+            &self.active_context,
+            node_name,
+        )
+    }
+
+    pub fn build_top_rows_for(
+        resource_cache: &std::collections::HashMap<
+            (String, String, String),
+            Vec<serde_json::Value>,
+        >,
+        target_ctx: &str,
+        active_namespace: &str,
+        pod_metrics_history: &std::collections::HashMap<
+            String,
+            std::collections::VecDeque<srelens_kube::metrics::MetricSample>,
+        >,
+        node_metrics_history: &std::collections::HashMap<
+            String,
+            std::collections::VecDeque<srelens_kube::metrics::MetricSample>,
+        >,
     ) -> (
         Vec<crate::views::top_view::TopPodRow>,
         Vec<crate::views::top_view::TopNodeRow>,
     ) {
         let mut pod_rows = Vec::new();
 
-        for ((_, ns, kind), items) in &self.resource_cache {
+        for ((ctx, ns, kind), items) in resource_cache {
+            if ctx != target_ctx {
+                continue;
+            }
             if kind.eq_ignore_ascii_case("pods") {
                 for item in items {
                     let name = item
@@ -10785,7 +11665,7 @@ impl App {
                         .unwrap_or(ns)
                         .to_string();
 
-                    if !self.active_namespace.is_empty() && namespace != self.active_namespace {
+                    if !active_namespace.is_empty() && namespace != active_namespace {
                         continue;
                     }
                     if pod_rows
@@ -10800,8 +11680,7 @@ impl App {
                     let (req_cpu, lim_cpu, req_mem, lim_mem) =
                         crate::views::top_view::TopViewState::extract_pod_resources(item);
 
-                    let (cur_cpu, cur_mem) = self
-                        .pod_metrics_history
+                    let (cur_cpu, cur_mem) = pod_metrics_history
                         .get(&name)
                         .and_then(|h| h.back())
                         .map(|s| (s.cpu_millicores as i64, s.memory_mib as i64))
@@ -10821,11 +11700,11 @@ impl App {
             }
         }
 
-        for (pname, history) in &self.pod_metrics_history {
+        for (pname, history) in pod_metrics_history {
             if !pod_rows.iter().any(|r| &r.name == pname) {
                 if let Some(latest) = history.back() {
                     pod_rows.push(crate::views::top_view::TopPodRow {
-                        namespace: self.active_namespace.clone(),
+                        namespace: active_namespace.to_string(),
                         name: pname.clone(),
                         cpu_millicores: latest.cpu_millicores as i64,
                         cpu_req_millicores: 0,
@@ -10839,7 +11718,10 @@ impl App {
         }
 
         let mut node_rows = Vec::new();
-        for ((_, _, kind), items) in &self.resource_cache {
+        for ((ctx, _, kind), items) in resource_cache {
+            if ctx != target_ctx {
+                continue;
+            }
             if kind.eq_ignore_ascii_case("nodes") {
                 for item in items {
                     let name = item
@@ -10883,8 +11765,7 @@ impl App {
                         })
                         .unwrap_or(0);
 
-                    let (cur_cpu, cur_mem) = self
-                        .node_metrics_history
+                    let (cur_cpu, cur_mem) = node_metrics_history
                         .get(&name)
                         .and_then(|h| h.back())
                         .map(|s| (s.cpu_millicores as i64, s.memory_mib as i64))
@@ -10902,10 +11783,11 @@ impl App {
             }
         }
 
-        for (nname, history) in &self.node_metrics_history {
+        for (nname, history) in node_metrics_history {
             if !node_rows.iter().any(|r| &r.name == nname) {
                 if let Some(latest) = history.back() {
-                    let (alloc_cpu, alloc_mem) = self.find_cached_node_allocatable(nname);
+                    let (alloc_cpu, alloc_mem) =
+                        Self::find_cached_node_allocatable_for(resource_cache, target_ctx, nname);
                     node_rows.push(crate::views::top_view::TopNodeRow {
                         name: nname.clone(),
                         status: "Ready".to_string(),
@@ -10919,6 +11801,21 @@ impl App {
         }
 
         (pod_rows, node_rows)
+    }
+
+    pub fn build_top_rows(
+        &self,
+    ) -> (
+        Vec<crate::views::top_view::TopPodRow>,
+        Vec<crate::views::top_view::TopNodeRow>,
+    ) {
+        Self::build_top_rows_for(
+            &self.resource_cache,
+            &self.active_context,
+            &self.active_namespace,
+            &self.pod_metrics_history,
+            &self.node_metrics_history,
+        )
     }
 
     pub fn refresh_top_view_data(&mut self) {
@@ -11042,10 +11939,11 @@ impl App {
                         }
                         _ => kube::Api::all_with(client.clone(), &ar),
                     };
-                    match api.get(&n).await {
-                        Ok(mut obj) => {
-                            obj.metadata.managed_fields = None;
-                            if let Ok(y) = serde_yaml::to_string(&obj) {
+                    match srelens_kube::manifest::get_in_server_order(api, &n).await {
+                        Ok(obj) => {
+                            if let Ok(y) = serde_yaml::to_string(
+                                &srelens_kube::manifest::readable_manifest(obj),
+                            ) {
                                 return Ok(y);
                             }
                         }
@@ -11075,10 +11973,11 @@ impl App {
                     } else {
                         kube::Api::all_with(client.clone(), &ar)
                     };
-                    match api.get(&n).await {
-                        Ok(mut obj) => {
-                            obj.metadata.managed_fields = None;
-                            if let Ok(y) = serde_yaml::to_string(&obj) {
+                    match srelens_kube::manifest::get_in_server_order(api, &n).await {
+                        Ok(obj) => {
+                            if let Ok(y) = serde_yaml::to_string(
+                                &srelens_kube::manifest::readable_manifest(obj),
+                            ) {
                                 return Ok(y);
                             }
                         }
@@ -11101,10 +12000,11 @@ impl App {
                     } else {
                         kube::Api::all_with(client.clone(), &ar)
                     };
-                    match api.get(&n).await {
-                        Ok(mut obj) => {
-                            obj.metadata.managed_fields = None;
-                            if let Ok(y) = serde_yaml::to_string(&obj) {
+                    match srelens_kube::manifest::get_in_server_order(api, &n).await {
+                        Ok(obj) => {
+                            if let Ok(y) = serde_yaml::to_string(
+                                &srelens_kube::manifest::readable_manifest(obj),
+                            ) {
                                 return Ok(y);
                             }
                         }
@@ -11134,9 +12034,11 @@ impl App {
                         };
                         let api: kube::Api<kube::core::DynamicObject> =
                             kube::Api::all_with(client.clone(), &ar);
-                        if let Ok(mut obj) = api.get(&n).await {
-                            obj.metadata.managed_fields = None;
-                            if let Ok(y) = serde_yaml::to_string(&obj) {
+                        if let Ok(obj) = srelens_kube::manifest::get_in_server_order(api, &n).await
+                        {
+                            if let Ok(y) = serde_yaml::to_string(
+                                &srelens_kube::manifest::readable_manifest(obj),
+                            ) {
                                 return Ok(y);
                             }
                         }
@@ -11150,9 +12052,10 @@ impl App {
                         ns.as_deref().unwrap_or("argocd"),
                         &ar,
                     );
-                    if let Ok(mut obj) = api.get(&n).await {
-                        obj.metadata.managed_fields = None;
-                        if let Ok(y) = serde_yaml::to_string(&obj) {
+                    if let Ok(obj) = srelens_kube::manifest::get_in_server_order(api, &n).await {
+                        if let Ok(y) =
+                            serde_yaml::to_string(&srelens_kube::manifest::readable_manifest(obj))
+                        {
                             return Ok(y);
                         }
                     }
@@ -13946,6 +14849,11 @@ impl App {
     }
 
     pub async fn execute_modal_confirm(&mut self, action_name: String) {
+        if action_name == "close_mux" {
+            self.close_mux_split();
+            return;
+        }
+
         if action_name.starts_with("bulk_delete:") {
             let payload = &action_name["bulk_delete:".len()..];
             if let Ok(targets) = serde_json::from_str::<Vec<(String, String, String)>>(payload) {
@@ -14831,26 +15739,37 @@ impl App {
 
     pub fn handle_stream_event(&mut self, channel: String, payload: serde_json::Value) {
         if channel.starts_with("logs:") {
+            let mut target_views: Vec<&mut crate::views::logs_view::LogsViewState> = Vec::new();
             if let ActiveView::Logs(logs) = &mut self.active_view {
                 if logs.channel == channel {
-                    if let Some(lines) = payload.get("lines").and_then(|v| v.as_array()) {
-                        // A frame (#914): every line since the last one, in order.
-                        for l in lines {
-                            let Some(text) = l.get("line").and_then(|v| v.as_str()) else {
-                                continue;
-                            };
-                            let source = l.get("source").and_then(|v| v.as_str()).map(String::from);
-                            let truncated =
-                                l.get("truncated").and_then(|v| v.as_bool()) == Some(true);
-                            logs.push_log_line(source, text.to_string(), truncated);
+                    target_views.push(logs);
+                }
+            }
+            if let Some(mux) = &mut self.mux_state {
+                if let Some(inactive) = &mut mux.inactive_pane {
+                    if let ActiveView::Logs(logs) = &mut inactive.active_view {
+                        if logs.channel == channel {
+                            target_views.push(logs);
                         }
-                    } else if let Some(status) = payload.get("status").and_then(|v| v.as_str()) {
-                        let source = payload
-                            .get("source")
-                            .and_then(|v| v.as_str())
-                            .map(String::from);
-                        logs.push_entry(source, format!("--- log status: {} ---", status));
                     }
+                }
+            }
+            for logs in target_views {
+                if let Some(lines) = payload.get("lines").and_then(|v| v.as_array()) {
+                    for l in lines {
+                        let Some(text) = l.get("line").and_then(|v| v.as_str()) else {
+                            continue;
+                        };
+                        let source = l.get("source").and_then(|v| v.as_str()).map(String::from);
+                        let truncated = l.get("truncated").and_then(|v| v.as_bool()) == Some(true);
+                        logs.push_log_line(source, text.to_string(), truncated);
+                    }
+                } else if let Some(status) = payload.get("status").and_then(|v| v.as_str()) {
+                    let source = payload
+                        .get("source")
+                        .and_then(|v| v.as_str())
+                        .map(String::from);
+                    logs.push_entry(source, format!("--- log status: {} ---", status));
                 }
             }
             return;
@@ -14906,43 +15825,94 @@ impl App {
                         }
                     }
                 }
+            } else if let Some(mux) = &mut self.mux_state {
+                if let Some(inactive) = &mut mux.inactive_pane {
+                    if ctx == inactive.context {
+                        if let Some(err_msg) = payload.get("error").and_then(|v| v.as_str()) {
+                            inactive.namespace_discovery_error = Some(err_msg.to_string());
+                        } else if let Some(items) = payload.as_array() {
+                            let mut ns_list: Vec<String> = items
+                                .iter()
+                                .filter_map(|item| {
+                                    item.get("name").and_then(|v| v.as_str()).map(String::from)
+                                })
+                                .collect();
+                            ns_list.sort();
+                            if !ns_list.is_empty() {
+                                inactive.namespaces = ns_list;
+                                inactive.namespace_discovery_error = None;
+                            }
+                        }
+                    }
+                }
             }
             return;
         }
 
         if let Some(err_msg) = payload.get("error").and_then(|v| v.as_str()) {
+            let clean_err =
+                if err_msg.contains("404") || err_msg.to_ascii_lowercase().contains("not found") {
+                    "Resource definition not found on cluster (404 Not Found)".to_string()
+                } else if err_msg.to_ascii_lowercase().contains("forbidden") {
+                    "Access forbidden by RBAC permissions (403 Forbidden)".to_string()
+                } else {
+                    let first_line = err_msg.lines().next().unwrap_or(err_msg);
+                    first_line
+                        .split(" (Status {")
+                        .next()
+                        .unwrap_or(first_line)
+                        .trim()
+                        .to_string()
+                };
+
             if let Some(cur_ch) = &self.current_watch_channel {
                 if *cur_ch == channel {
-                    let clean_err = if err_msg.contains("404")
-                        || err_msg.to_ascii_lowercase().contains("not found")
-                    {
-                        "Resource definition not found on cluster (404 Not Found)".to_string()
-                    } else if err_msg.to_ascii_lowercase().contains("forbidden") {
-                        "Access forbidden by RBAC permissions (403 Forbidden)".to_string()
-                    } else {
-                        let first_line = err_msg.lines().next().unwrap_or(err_msg);
-                        first_line
-                            .split(" (Status {")
-                            .next()
-                            .unwrap_or(first_line)
-                            .trim()
-                            .to_string()
-                    };
-
                     if let ActiveView::Table(table) = &mut self.active_view {
                         table.set_error(clean_err.clone());
                     }
                     self.set_toast(format!("Watch error: {}", clean_err), Theme::status_error());
                 }
             }
+            if let Some(mux) = &mut self.mux_state {
+                if let Some(inactive) = &mut mux.inactive_pane {
+                    if let Some(inact_ch) = &inactive.current_watch_channel {
+                        if *inact_ch == channel {
+                            if let ActiveView::Table(table) = &mut inactive.active_view {
+                                table.set_error(clean_err);
+                            }
+                        }
+                    }
+                }
+            }
             return;
         }
 
         if let Some(items) = payload.as_array() {
-            if !items.is_empty() {
+            let ch_ctx = if channel.starts_with("watch:") {
+                channel.split(':').nth(1)
+            } else if channel.starts_with("workloads:") {
+                channel.split(':').nth(1)
+            } else {
+                None
+            };
+
+            if let Some(ctx) = ch_ctx {
+                if ctx == self.active_context && !items.is_empty() {
+                    self.is_connected = true;
+                    self.cluster_unreachable = false;
+                } else if let Some(mux) = &mut self.mux_state {
+                    if let Some(inactive) = &mut mux.inactive_pane {
+                        if inactive.context == ctx && !items.is_empty() {
+                            inactive.is_connected = true;
+                            inactive.cluster_unreachable = false;
+                        }
+                    }
+                }
+            } else if !items.is_empty() {
                 self.is_connected = true;
                 self.cluster_unreachable = false;
             }
+
             // Save to in-memory Informer Cache if this is a watch stream
             if channel.starts_with("watch:") {
                 let parts: Vec<&str> = channel.split(':').collect();
@@ -14951,25 +15921,64 @@ impl App {
                     let ns = parts[2].to_string();
                     let kind = parts[3].to_string();
                     self.resource_cache
-                        .insert((ctx, ns, kind.clone()), items.clone());
+                        .insert((ctx.clone(), ns.clone(), kind.clone()), items.clone());
 
-                    let is_wl_table = if let ActiveView::Table(table) = &self.active_view {
-                        table.kind == ResourceKind::Workloads
-                    } else {
-                        false
-                    };
-                    if is_wl_table
-                        && matches!(
-                            kind.as_str(),
-                            "deployments" | "statefulsets" | "daemonsets" | "pods" | "cronjobs"
-                        )
-                    {
-                        self.rebuild_workloads_table();
-                    }
-                    if matches!(self.active_view, ActiveView::Top(_))
-                        && matches!(kind.as_str(), "nodes" | "pods")
-                    {
-                        self.refresh_top_view_data();
+                    if ctx == self.active_context {
+                        let is_wl_table = if let ActiveView::Table(table) = &self.active_view {
+                            table.kind == ResourceKind::Workloads
+                        } else {
+                            false
+                        };
+                        if is_wl_table
+                            && matches!(
+                                kind.as_str(),
+                                "deployments" | "statefulsets" | "daemonsets" | "pods" | "cronjobs"
+                            )
+                        {
+                            self.rebuild_workloads_table();
+                        }
+                        if matches!(self.active_view, ActiveView::Top(_))
+                            && matches!(kind.as_str(), "nodes" | "pods")
+                        {
+                            self.refresh_top_view_data();
+                        }
+                    } else if let Some(mux) = &mut self.mux_state {
+                        if let Some(inactive) = &mut mux.inactive_pane {
+                            if inactive.context == ctx {
+                                if matches!(
+                                    kind.as_str(),
+                                    "deployments"
+                                        | "statefulsets"
+                                        | "daemonsets"
+                                        | "pods"
+                                        | "cronjobs"
+                                ) {
+                                    if let ActiveView::Table(table) = &mut inactive.active_view {
+                                        if table.kind == ResourceKind::Workloads {
+                                            Self::rebuild_workloads_table_into(
+                                                &self.resource_cache,
+                                                &inactive.context,
+                                                &inactive.namespace,
+                                                &inactive.filter_buffer,
+                                                table,
+                                            );
+                                        }
+                                    }
+                                }
+                                if matches!(kind.as_str(), "nodes" | "pods") {
+                                    if let ActiveView::Top(top) = &mut inactive.active_view {
+                                        let (pods, nodes) = Self::build_top_rows_for(
+                                            &self.resource_cache,
+                                            &inactive.context,
+                                            &inactive.namespace,
+                                            &inactive.pod_metrics_history,
+                                            &inactive.node_metrics_history,
+                                        );
+                                        top.set_data(pods, nodes);
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -15036,11 +16045,91 @@ impl App {
                     }
                 }
             }
+
+            if let Some(mux) = &mut self.mux_state {
+                if let Some(inactive) = &mut mux.inactive_pane {
+                    if let Some(inact_ch) = &inactive.current_watch_channel {
+                        if *inact_ch == channel {
+                            inactive.is_connected = true;
+                            inactive.cluster_unreachable = false;
+                            if let ActiveView::Table(table) = &mut inactive.active_view {
+                                if table.kind == ResourceKind::Pods {
+                                    let mut merged_items = items.clone();
+                                    let prev_metrics: std::collections::HashMap<
+                                        String,
+                                        (Option<String>, Option<String>),
+                                    > = table
+                                        .raw_items
+                                        .iter()
+                                        .filter_map(|it| {
+                                            let name = it.get("name")?.as_str()?.to_string();
+                                            let cpu = it
+                                                .get("cpu")
+                                                .and_then(|v| v.as_str())
+                                                .map(String::from);
+                                            let mem = it
+                                                .get("memory")
+                                                .and_then(|v| v.as_str())
+                                                .map(String::from);
+                                            Some((name, (cpu, mem)))
+                                        })
+                                        .collect();
+
+                                    for item in merged_items.iter_mut() {
+                                        if let Some(name) =
+                                            item.get("name").and_then(|v| v.as_str())
+                                        {
+                                            if let Some((cpu, mem)) = prev_metrics.get(name) {
+                                                if let Some(obj) = item.as_object_mut() {
+                                                    if let Some(c) = cpu {
+                                                        obj.insert(
+                                                            "cpu".to_string(),
+                                                            serde_json::Value::String(c.clone()),
+                                                        );
+                                                    }
+                                                    if let Some(m) = mem {
+                                                        obj.insert(
+                                                            "memory".to_string(),
+                                                            serde_json::Value::String(m.clone()),
+                                                        );
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                    table.set_items(merged_items, &inactive.filter_buffer);
+                                } else {
+                                    if let ResourceKind::CustomResource(crd) = &mut table.kind {
+                                        if crd.printer_columns.is_empty() {
+                                            if let Some(discovered) =
+                                                inactive.crds.iter().find(|c| {
+                                                    c.crd_name == crd.crd_name
+                                                        || (c.group == crd.group
+                                                            && c.kind == crd.kind)
+                                                })
+                                            {
+                                                crd.printer_columns =
+                                                    discovered.printer_columns.clone();
+                                                table.columns =
+                                                    crate::views::resource_table::default_columns_for_kind(
+                                                        &table.kind,
+                                                    );
+                                            }
+                                        }
+                                    }
+                                    table.set_items(items.clone(), &inactive.filter_buffer);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
         }
 
         if channel.starts_with("watch:") && channel.ends_with(":namespaces") {
             let parts: Vec<&str> = channel.split(':').collect();
-            if parts.len() >= 4 && parts[1] == self.active_context {
+            if parts.len() >= 4 {
+                let watch_ctx = parts[1];
                 if let Some(items) = payload.as_array() {
                     let mut ns_list: Vec<String> = items
                         .iter()
@@ -15050,24 +16139,33 @@ impl App {
                         .collect();
                     ns_list.sort();
                     if !ns_list.is_empty() {
-                        self.namespaces = ns_list;
-                        self.namespace_discovery_error = None;
-                        if self.input_mode == InputMode::Command {
-                            if let Some(ref target) = self.command_tab_target {
-                                let query = self
-                                    .command_tab_base
-                                    .as_deref()
-                                    .unwrap_or(&self.command_buffer);
-                                let suggs = command_suggestions_full(
-                                    query,
-                                    &self.crds,
-                                    &self.namespaces,
-                                    self.namespace_discovery_error.as_deref(),
-                                );
-                                if let Some(pos) =
-                                    suggs.iter().position(|(cmd, _)| &cmd.target == target)
-                                {
-                                    self.command_suggestion_idx = pos;
+                        if watch_ctx == self.active_context {
+                            self.namespaces = ns_list;
+                            self.namespace_discovery_error = None;
+                            if self.input_mode == InputMode::Command {
+                                if let Some(ref target) = self.command_tab_target {
+                                    let query = self
+                                        .command_tab_base
+                                        .as_deref()
+                                        .unwrap_or(&self.command_buffer);
+                                    let suggs = command_suggestions_full(
+                                        query,
+                                        &self.crds,
+                                        &self.namespaces,
+                                        self.namespace_discovery_error.as_deref(),
+                                    );
+                                    if let Some(pos) =
+                                        suggs.iter().position(|(cmd, _)| &cmd.target == target)
+                                    {
+                                        self.command_suggestion_idx = pos;
+                                    }
+                                }
+                            }
+                        } else if let Some(mux) = &mut self.mux_state {
+                            if let Some(inactive) = &mut mux.inactive_pane {
+                                if watch_ctx == inactive.context {
+                                    inactive.namespaces = ns_list;
+                                    inactive.namespace_discovery_error = None;
                                 }
                             }
                         }
@@ -15174,50 +16272,195 @@ impl App {
 
         // 2. Render Main View Body — Clear first to prevent ghosting artifacts
         //    (e.g. log lines lingering below the table when switching views)
-        f.render_widget(ratatui::widgets::Clear, chunks[1]);
-        match &self.active_view {
-            ActiveView::Table(table) => {
-                if self.cluster_unreachable && table.raw_items.is_empty() {
-                    let elapsed = self.connection_attempt_start.elapsed().as_secs();
-                    crate::views::cracked_lens::render_cracked_lens(
+        if self.mux_state.is_none() {
+            self.render_view_body(
+                f,
+                chunks[1],
+                &self.active_view,
+                &self.active_context,
+                &self.cluster_name,
+                &self.server_url,
+                self.cluster_unreachable,
+                self.connection_attempt_start,
+                &self.assistant_state,
+                &self.ai_settings,
+            );
+        } else {
+            let split_ratio = self
+                .mux_state
+                .as_ref()
+                .map(|m| m.split_ratio.clamp(20, 80))
+                .unwrap_or(50);
+            let h_chunks = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([
+                    Constraint::Percentage(split_ratio),
+                    Constraint::Percentage(100 - split_ratio),
+                ])
+                .split(chunks[1]);
+
+            if let Some(mux) = self.mux_state.as_mut() {
+                mux.pane_rects = (h_chunks[0], h_chunks[1]);
+            }
+
+            let mux = self.mux_state.as_ref().unwrap();
+
+            let focused = mux.focused_pane;
+
+            // 1. Left Pane
+            let left_is_focused = focused == 0;
+            let left_title = if left_is_focused {
+                format!(" [1: {}] ● ACTIVE ", self.active_context)
+            } else if let Some(inactive) = &mux.inactive_pane {
+                format!(" [1: {}] ", inactive.context)
+            } else {
+                format!(" [1: {}] ", self.active_context)
+            };
+
+            let left_block = ratatui::widgets::Block::default()
+                .borders(ratatui::widgets::Borders::ALL)
+                .border_type(Theme::border_type())
+                .border_style(Style::default().fg(Theme::BORDER_FOCUS))
+                .title(ratatui::text::Span::styled(
+                    left_title,
+                    if left_is_focused {
+                        Style::default()
+                            .fg(Theme::CYAN)
+                            .add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default().fg(Theme::DIM)
+                    },
+                ));
+            let left_inner = left_block.inner(h_chunks[0]);
+            f.render_widget(left_block, h_chunks[0]);
+
+            if left_is_focused {
+                self.render_view_body(
+                    f,
+                    left_inner,
+                    &self.active_view,
+                    &self.active_context,
+                    &self.cluster_name,
+                    &self.server_url,
+                    self.cluster_unreachable,
+                    self.connection_attempt_start,
+                    &self.assistant_state,
+                    &self.ai_settings,
+                );
+            } else if let Some(inactive) = &mux.inactive_pane {
+                self.render_view_body(
+                    f,
+                    left_inner,
+                    &inactive.active_view,
+                    &inactive.context,
+                    &inactive.cluster_name,
+                    &inactive.server_url,
+                    inactive.cluster_unreachable,
+                    inactive.connection_attempt_start,
+                    &inactive.assistant_state,
+                    &inactive.ai_settings,
+                );
+            } else {
+                self.render_view_body(
+                    f,
+                    left_inner,
+                    &self.active_view,
+                    &self.active_context,
+                    &self.cluster_name,
+                    &self.server_url,
+                    self.cluster_unreachable,
+                    self.connection_attempt_start,
+                    &self.assistant_state,
+                    &self.ai_settings,
+                );
+            }
+
+            // 2. Right Pane
+            let right_is_focused = focused == 1;
+            if let Some(picker) = &mux.picker {
+                let right_block = ratatui::widgets::Block::default()
+                    .borders(ratatui::widgets::Borders::ALL)
+                    .border_type(Theme::border_type())
+                    .border_style(Style::default().fg(Theme::BORDER_FOCUS))
+                    .title(ratatui::text::Span::styled(
+                        if right_is_focused {
+                            " [2: Select Context] ● ACTIVE "
+                        } else {
+                            " [2: Select Context] "
+                        },
+                        if right_is_focused {
+                            Style::default()
+                                .fg(Theme::CYAN)
+                                .add_modifier(Modifier::BOLD)
+                        } else {
+                            Style::default().fg(Theme::DIM)
+                        },
+                    ));
+                let right_inner = right_block.inner(h_chunks[1]);
+                f.render_widget(right_block, h_chunks[1]);
+                crate::ui::render_context_picker_into(
+                    f,
+                    right_inner,
+                    &picker.contexts,
+                    &self.active_context,
+                    picker.selected_idx,
+                    &picker.filter,
+                    true,
+                );
+            } else {
+                let right_title = if right_is_focused {
+                    format!(" [2: {}] ● ACTIVE ", self.active_context)
+                } else if let Some(inactive) = &mux.inactive_pane {
+                    format!(" [2: {}] ", inactive.context)
+                } else {
+                    format!(" [2: {}] ", self.active_context)
+                };
+
+                let right_block = ratatui::widgets::Block::default()
+                    .borders(ratatui::widgets::Borders::ALL)
+                    .border_type(Theme::border_type())
+                    .border_style(Style::default().fg(Theme::BORDER_FOCUS))
+                    .title(ratatui::text::Span::styled(
+                        right_title,
+                        if right_is_focused {
+                            Style::default()
+                                .fg(Theme::CYAN)
+                                .add_modifier(Modifier::BOLD)
+                        } else {
+                            Style::default().fg(Theme::DIM)
+                        },
+                    ));
+                let right_inner = right_block.inner(h_chunks[1]);
+                f.render_widget(right_block, h_chunks[1]);
+
+                if right_is_focused {
+                    self.render_view_body(
                         f,
-                        chunks[1],
+                        right_inner,
+                        &self.active_view,
                         &self.active_context,
                         &self.cluster_name,
                         &self.server_url,
-                        elapsed,
+                        self.cluster_unreachable,
+                        self.connection_attempt_start,
+                        &self.assistant_state,
+                        &self.ai_settings,
                     );
-                } else {
-                    render_resource_table(f, chunks[1], table);
+                } else if let Some(inactive) = &mux.inactive_pane {
+                    self.render_view_body(
+                        f,
+                        right_inner,
+                        &inactive.active_view,
+                        &inactive.context,
+                        &inactive.cluster_name,
+                        &inactive.server_url,
+                        inactive.cluster_unreachable,
+                        inactive.connection_attempt_start,
+                        &inactive.assistant_state,
+                        &inactive.ai_settings,
+                    );
                 }
             }
-            ActiveView::Yaml(yaml) => render_yaml_view(f, chunks[1], yaml),
-            ActiveView::Describe(desc) => render_describe_view(f, chunks[1], desc),
-            ActiveView::Logs(logs) => render_logs_view(f, chunks[1], logs),
-            ActiveView::PortForwards(pf) => render_port_forward_view(f, chunks[1], pf),
-            ActiveView::Helm(helm) => render_helm_view(f, chunks[1], helm),
-            ActiveView::HelmDetail(detail) => render_helm_detail_view(f, chunks[1], detail),
-            ActiveView::Argo(argo) => argo_view::render_argo_view(f, chunks[1], argo),
-            ActiveView::ArgoDetail(detail) => argo_detail_view::render_argo_detail_view_with(
-                f,
-                chunks[1],
-                detail,
-                self.tui_config.argo_ui_url.is_some(),
-            ),
-            ActiveView::Overview(ov) => render_overview_view(f, chunks[1], ov),
-            ActiveView::Toolbox(tb) => render_toolbox_view(f, chunks[1], tb),
-            ActiveView::Assistant => {
-                render_assistant_view(f, chunks[1], &self.assistant_state, &self.ai_settings)
-            }
-            ActiveView::Settings(s) => render_settings_view(f, chunks[1], s),
-            ActiveView::TuiConfig(s) => render_tui_config_view(f, chunks[1], s, &self.tui_config),
-            ActiveView::Tree(tree) => render_tree_view(f, chunks[1], tree),
-            ActiveView::NodeInspector(ni) => render_node_inspector_view(f, chunks[1], ni),
-            ActiveView::Topology(topo) => topology_view::render_topology_view(f, chunks[1], topo),
-            ActiveView::GpuInfo(gpu) => gpu_view::render(f, chunks[1], gpu),
-            ActiveView::Bgp(bgp) => render_bgp_view(f, chunks[1], bgp),
-            ActiveView::Top(top) => top_view::render_top_view(f, chunks[1], top),
-            ActiveView::Changed(changed) => render_changed_view(f, chunks[1], changed),
         }
 
         // 3. Render Status Bar
@@ -15881,6 +17124,64 @@ impl App {
         if let Some((anchor, cursor)) = self.screen_selection {
             let text = apply_screen_selection(f.buffer_mut(), anchor, cursor);
             *self.screen_selection_text.borrow_mut() = text;
+        }
+    }
+
+    pub fn render_view_body(
+        &self,
+        f: &mut Frame,
+        area: Rect,
+        view: &ActiveView,
+        context: &str,
+        cluster_name: &str,
+        server_url: &str,
+        cluster_unreachable: bool,
+        connection_attempt_start: Instant,
+        assistant_state: &crate::views::assistant_view::AssistantViewState,
+        ai_settings: &crate::ai_config::AiSettings,
+    ) {
+        f.render_widget(ratatui::widgets::Clear, area);
+        match view {
+            ActiveView::Table(table) => {
+                if cluster_unreachable && table.raw_items.is_empty() {
+                    let elapsed = connection_attempt_start.elapsed().as_secs();
+                    crate::views::cracked_lens::render_cracked_lens(
+                        f,
+                        area,
+                        context,
+                        cluster_name,
+                        server_url,
+                        elapsed,
+                    );
+                } else {
+                    render_resource_table(f, area, table);
+                }
+            }
+            ActiveView::Yaml(yaml) => render_yaml_view(f, area, yaml),
+            ActiveView::Describe(desc) => render_describe_view(f, area, desc),
+            ActiveView::Logs(logs) => render_logs_view(f, area, logs),
+            ActiveView::PortForwards(pf) => render_port_forward_view(f, area, pf),
+            ActiveView::Helm(helm) => render_helm_view(f, area, helm),
+            ActiveView::HelmDetail(detail) => render_helm_detail_view(f, area, detail),
+            ActiveView::Argo(argo) => argo_view::render_argo_view(f, area, argo),
+            ActiveView::ArgoDetail(detail) => argo_detail_view::render_argo_detail_view_with(
+                f,
+                area,
+                detail,
+                self.tui_config.argo_ui_url.is_some(),
+            ),
+            ActiveView::Overview(ov) => render_overview_view(f, area, ov),
+            ActiveView::Toolbox(tb) => render_toolbox_view(f, area, tb),
+            ActiveView::Assistant => render_assistant_view(f, area, assistant_state, ai_settings),
+            ActiveView::Settings(s) => render_settings_view(f, area, s),
+            ActiveView::TuiConfig(s) => render_tui_config_view(f, area, s, &self.tui_config),
+            ActiveView::Tree(tree) => render_tree_view(f, area, tree),
+            ActiveView::NodeInspector(ni) => render_node_inspector_view(f, area, ni),
+            ActiveView::Topology(topo) => topology_view::render_topology_view(f, area, topo),
+            ActiveView::GpuInfo(gpu) => gpu_view::render(f, area, gpu),
+            ActiveView::Bgp(bgp) => render_bgp_view(f, area, bgp),
+            ActiveView::Top(top) => top_view::render_top_view(f, area, top),
+            ActiveView::Changed(changed) => render_changed_view(f, area, changed),
         }
     }
 }

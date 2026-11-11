@@ -1,4 +1,4 @@
-import { useContext, useId, useState, type ReactNode } from "react";
+import { useId, useState, type ReactNode } from "react";
 import {
   getLiveKubeconfigFiles,
   listContexts,
@@ -7,8 +7,8 @@ import {
   type ExtensionSetting,
   type InstalledExtension,
 } from "@srelens/core";
-import { ExtensionControls } from "./ExtensionControls";
-import { ErrorNotice } from "./ExtensionResults";
+import { Button, Checkbox, Combobox, EmptyState, LoadingState, TextInput } from "@srelens/ui-kit";
+import { FailureAlert } from "../lib/errorCopy";
 import { plainText } from "./displayText";
 import { extensionLabel } from "./inventoryStore";
 import { useResource } from "../lib/useResource";
@@ -115,7 +115,6 @@ export function ExtensionSettingsForm({
   onClearSecret?(setting: string): Promise<void>;
   onClose(): void;
 }) {
-  const { Button } = useContext(ExtensionControls);
   const declared = plugin.manifest.settings ?? [];
   const name = extensionLabel(plugin);
   const [draft, setDraft] = useState<Draft>(() => initial(declared, plugin.settings));
@@ -141,7 +140,7 @@ export function ExtensionSettingsForm({
     } catch (e) {
       const { fields, rest } = splitRefusal(e instanceof Error ? e.message : String(e));
       setProblems(fields);
-      setFailure(rest || (Object.keys(fields).length ? "" : "The settings were not saved."));
+      setFailure(rest || (Object.keys(fields).length ? "" : "The host gave no reason."));
     } finally {
       setSaving(false);
     }
@@ -159,14 +158,12 @@ export function ExtensionSettingsForm({
     >
       <strong>Settings</strong>
       {declared.length === 0 ? (
-        <p className="extension-message">This app declares no settings.</p>
+        <EmptyState compact title="This app declares no settings" />
       ) : (
         <>
           <p className="extension-message">The host checks every value when you save, whatever this form allows.</p>
           {failure && (
-            <p role="alert" className="extension-error">
-              {failure}
-            </p>
+            <FailureAlert tone="sev" title="Could not save the settings" error={failure} domain="local" />
           )}
           {declared.map((setting) =>
             isSecret(setting) ? (
@@ -191,7 +188,8 @@ export function ExtensionSettingsForm({
           )}
         </>
       )}
-      <div className="extension-toolbar extension-settings-actions">
+      {/* The form's own buttons, under its fields: a button row, not a toolbar strip. */}
+      <div className="flex flex-wrap items-center gap-3">
         {declared.length > 0 && (
           <Button type="submit" disabled={saving}>
             Save settings
@@ -269,7 +267,7 @@ function SettingField({
             {title}
             {setting.required && <span className="extension-setting-required"> (required)</span>}
           </label>
-          <input
+          <TextInput
             id={id}
             type={setting.type === "number" ? "number" : setting.type === "url" ? "url" : "text"}
             inputMode={setting.type === "number" ? (setting.integer ? "numeric" : "decimal") : undefined}
@@ -280,9 +278,9 @@ function SettingField({
             step={setting.type === "number" ? (setting.integer ? 1 : "any") : undefined}
             spellCheck={false}
             aria-required={setting.required || undefined}
-            aria-invalid={invalid}
+            invalid={invalid}
             aria-describedby={described}
-            onChange={(event) => onChange(event.target.value)}
+            onValueChange={onChange}
           />
           {notes}
         </div>
@@ -290,16 +288,14 @@ function SettingField({
     case "boolean":
       return (
         <div className="extension-setting">
-          <label className="extension-setting-check">
-            <input
-              type="checkbox"
-              checked={typeof value === "boolean" ? value : setting.default === true}
-              aria-invalid={invalid}
-              aria-describedby={described}
-              onChange={(event) => onChange(event.target.checked)}
-            />
-            {title}
-          </label>
+          <Checkbox
+            className="extension-setting-check"
+            checked={typeof value === "boolean" ? value : setting.default === true}
+            invalid={invalid}
+            aria-describedby={described}
+            onChange={onChange}
+            label={title}
+          />
           {notes}
         </div>
       );
@@ -312,20 +308,15 @@ function SettingField({
             {setting.required && <span className="extension-setting-required"> (required)</span>}
           </legend>
           {(setting.options ?? []).map((option) => (
-            <label key={option.value} className="extension-setting-check">
-              <input
-                type="checkbox"
-                checked={chosen.includes(option.value)}
-                onChange={(event) =>
-                  onChange(
-                    event.target.checked
-                      ? [...chosen, option.value]
-                      : chosen.filter((each) => each !== option.value),
-                  )
-                }
-              />
-              {plainText(option.label)}
-            </label>
+            <Checkbox
+              key={option.value}
+              className="extension-setting-check"
+              checked={chosen.includes(option.value)}
+              onChange={(on) =>
+                onChange(on ? [...chosen, option.value] : chosen.filter((each) => each !== option.value))
+              }
+              label={plainText(option.label)}
+            />
           ))}
           {notes}
         </fieldset>
@@ -409,7 +400,6 @@ function SecretField({
   onSet?(secret: string): Promise<void>;
   onClear?(): Promise<void>;
 }) {
-  const { Button } = useContext(ExtensionControls);
   const id = useId();
   const [typed, setTyped] = useState("");
   const [busy, setBusy] = useState(false);
@@ -462,7 +452,7 @@ function SecretField({
         </p>
       )}
       <div className="extension-setting-pair">
-        <input
+        <TextInput
           id={id}
           aria-labelledby={`${id}-title`}
           type="password"
@@ -471,19 +461,14 @@ function SecretField({
           value={typed}
           disabled={Boolean(refusal) || busy}
           placeholder={isSet ? "Enter a new value to replace it" : "Enter the secret"}
-          aria-invalid={failure ? true : undefined}
+          invalid={Boolean(failure)}
           aria-describedby={described}
-          onChange={(event) => {
-            setTyped(event.target.value);
+          onValueChange={(value) => {
+            setTyped(value);
             setDone("");
           }}
-          onKeyDown={(event) => {
-            // Enter keeps this secret; it does not submit the other settings.
-            if (event.key === "Enter") {
-              event.preventDefault();
-              save();
-            }
-          }}
+          // Enter keeps this secret; it does not submit the other settings.
+          onEnter={save}
         />
         <Button type="button" disabled={Boolean(refusal) || busy || !typed} onClick={save}>
           {isSet ? "Replace secret" : "Save secret"}
@@ -545,7 +530,6 @@ function Choice({
   onChange(value: string): void;
   state?: PickerState;
 }) {
-  const { Combobox } = useContext(ExtensionControls);
   // A saved value the list no longer has is still what is saved: shown, so it can be changed.
   const listed = value && !options.some((option) => option.value === value) ? [{ value, label: value }, ...options] : options;
   return (
@@ -577,14 +561,10 @@ function useContexts() {
 /** Why the clusters could not be listed, whole or in part. */
 function ContextsProblem({ contexts }: { contexts: ReturnType<typeof useContexts> }) {
   if (contexts.status === "error")
-    return <ErrorNotice title="Could not list clusters" message={contexts.error} retry={contexts.reload} />;
+    return <FailureAlert tone="sev" title="Could not list clusters" error={contexts.error} domain="local" onRetry={contexts.reload} />;
   if (contexts.data?.partial)
     return (
-      <ErrorNotice
-        title="Some clusters could not be listed"
-        message={contexts.data.partial}
-        retry={contexts.reload}
-      />
+      <FailureAlert tone="sev" title="Some clusters could not be listed" error={contexts.data.partial} domain="local" onRetry={contexts.reload} />
     );
   return null;
 }
@@ -609,11 +589,7 @@ function ClusterChoice({
   return (
     <>
       <ContextsProblem contexts={contexts} />
-      {contexts.status === "loading" && (
-        <p role="status" className="extension-setting-note">
-          Loading clusters…
-        </p>
-      )}
+      {contexts.status === "loading" && <LoadingState compact label="Loading clusters" />}
       <Choice
         label={label}
         value={value}
@@ -648,7 +624,6 @@ function NamespaceChoice({
   onChange(value: string): void;
   state?: PickerState;
 }) {
-  const { Combobox } = useContext(ExtensionControls);
   const contexts = useContexts();
   const [from, setFrom] = useState("");
   const namespaces = useResource(async () => {
@@ -678,13 +653,9 @@ function NamespaceChoice({
           state={state}
         />
       </div>
-      {from && namespaces.status === "loading" && (
-        <p role="status" className="extension-setting-note">
-          Loading namespaces…
-        </p>
-      )}
+      {from && namespaces.status === "loading" && <LoadingState compact label="Loading namespaces" />}
       {from && namespaces.status === "error" && (
-        <ErrorNotice title="Could not list namespaces" message={namespaces.error} retry={namespaces.reload} cluster />
+        <FailureAlert tone="sev" title="Could not list namespaces" error={namespaces.error} onRetry={namespaces.reload} />
       )}
       {!from && <p className="extension-setting-note">Choose a cluster to list its namespaces.</p>}
     </>

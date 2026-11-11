@@ -119,3 +119,4 @@ export * from "./lib/actionPredicates";
 
 export * from "./lib/nativeComponents";
 export * from "./lib/nativeComponentLink";
+export * from "./lib/auditExport";

@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach, onTestFinished } from "vitest";
-import { render, screen, fireEvent, act, waitFor } from "@testing-library/react";
+import { render, screen, fireEvent, act, waitFor, within } from "@testing-library/react";
 import React from "react";
 
 // Capture the Tauri event handler App registers for the macOS Cmd+W menu item,
@@ -102,17 +102,14 @@ vi.mock("./components/AssistantTab", () => ({
 vi.mock("./components/Sidebar", () => ({
   Sidebar: ({
     onSelect,
-    onOpenApp,
     activeKind,
     activeCluster,
   }: {
     onSelect: (c: string, k: string) => void;
-    onOpenApp: (c:string,id:string,page:string) => void;
     activeKind?:string;
     activeCluster: string;
-  }) => <><span data-testid="sidebar-active-kind">{activeKind}</span><button onClick={() => onSelect(activeCluster, "services")}>nav-services</button><button onClick={()=>onOpenApp(activeCluster,"org.srelens.flux","kustomizations")}>nav-app</button></>,
+  }) => <><span data-testid="sidebar-active-kind">{activeKind}</span><button onClick={() => onSelect(activeCluster, "services")}>nav-services</button></>,
 }));
-vi.mock("./components/Extensions",()=>({ClassicAppPage:({context,id,page,namespace,onNamespace}:{context:string;id:string;page:string;namespace:string;onNamespace?(namespace:string):void})=><><div data-testid="app-page">{context}:{id}:{page}</div><div data-testid="app-namespace">{namespace}</div><button onClick={()=>onNamespace?.("flux-system")}>app-namespace-change</button></>}));
 vi.mock("./components/ClusterOverview", () => ({
   ClusterOverview: ({ context }: { context: string }) => (
     <div data-testid="overview">{context}</div>
@@ -199,7 +196,9 @@ vi.mock("./components/ResourceBrowser", () => ({
   ),
 }));
 vi.mock("./components/SettingsView", () => ({
-  SettingsView: () => <div data-testid="settings">workspace settings</div>,
+  SettingsView: ({ unsavedDrafts }: { unsavedDrafts?: number }) => (
+    <div data-testid="settings" data-unsaved-drafts={unsavedDrafts}>workspace settings</div>
+  ),
 }));
 // The dock hosts xterm, which is dynamically imported and has no place in
 // jsdom; these tests only care about whether it is mounted and with what.
@@ -362,6 +361,20 @@ describe("App", () => {
     });
     fireEvent.click(screen.getByRole("button", { name: "Switch to the new design" }));
     expect(await screen.findByText(/discards 1 unsaved editor draft/i)).toBeDefined();
+  });
+
+  it("tells Settings about unsaved editor drafts, for the Apps notice's switch", () => {
+    // Settings → Apps in classic is the new-design notice, whose switch reloads
+    // the window; without the count it would drop these drafts without asking.
+    render(<App />);
+    fireEvent.click(screen.getByText("open-kind-dev"));
+    fireEvent.click(screen.getByText("nav-services"));
+    fireEvent.click(screen.getByText("new-secret"));
+    fireEvent.change(screen.getByLabelText("mock new draft"), {
+      target: { value: "kind: Secret\nmetadata:\n  name: unsaved\n" },
+    });
+    fireEvent.click(screen.getByText("open-settings"));
+    expect(screen.getByTestId("settings").dataset.unsavedDrafts).toBe("1");
   });
 
   it("counts an edit tab as unsaved only once its manifest has been changed", async () => {
@@ -958,29 +971,29 @@ it("does not show an app developer banner on the landing screen or settings", ()
   expect(screen.queryByTestId("extension-warning")).toBeNull();
 });
 
-it("opens classic app pages in distinct cluster-bound tabs without replacing Overview",()=>{
- render(<App/>);fireEvent.click(screen.getByText("open-kind-dev"));fireEvent.click(screen.getByText("nav-app"));
- expect(screen.getByTestId("app-page").textContent).toBe("kind-dev:org.srelens.flux:kustomizations");
- expect(screen.getByTestId("sidebar-active-kind").textContent).toBe("");
- expect(screen.getByText("kustomizations")).toBeTruthy();
- fireEvent.click(screen.getByText("open-prod"));fireEvent.click(screen.getByText("nav-app"));
- expect(screen.getByTestId("app-page").textContent).toBe("prod:org.srelens.flux:kustomizations");
- fireEvent.click(screen.getByRole("tab",{name:/kustomizations · kind-dev/}));
- expect(screen.getByTestId("app-page").textContent).toContain("kind-dev:");
- fireEvent.click(screen.getByRole("tab",{name:/Overview · kind-dev/}));
- expect(screen.getByTestId("overview").textContent).toBe("kind-dev");
-});
+it("opens a restored classic app tab on the new-design notice, which knows about drafts", async () => {
+  // Classic no longer draws apps (#1001), but a tab an older build saved can
+  // still come back. Its switch reloads the window like the banner's does.
+  onTestFinished(() => localStorage.removeItem("srelens.openTabs"));
+  localStorage.setItem(
+    "srelens.openTabs",
+    JSON.stringify({
+      tabs: [{ id: 1, cluster: "kind-dev", kind: "overview", app: { id: "org.srelens.flux", page: "kustomizations" } }],
+      activeTabId: 1,
+    }),
+  );
+  render(<App />);
+  expect(await screen.findByRole("heading", { name: "Apps open in the new design" })).toBeDefined();
 
-it("retains each classic app tab namespace across tab switches",()=>{
- render(<App/>);
- fireEvent.click(screen.getByText("open-kind-dev"));
- fireEvent.click(screen.getByText("nav-app"));
- fireEvent.click(screen.getByText("app-namespace-change"));
- fireEvent.click(screen.getByText("open-prod"));
- fireEvent.click(screen.getByText("nav-app"));
- expect(screen.getByTestId("app-namespace").textContent).toBe("");
- fireEvent.click(screen.getByRole("tab",{name:/kustomizations · kind-dev/}));
- expect(screen.getByTestId("app-namespace").textContent).toBe("flux-system");
+  fireEvent.click(screen.getByText("nav-services"));
+  fireEvent.click(screen.getByText("new-secret"));
+  fireEvent.change(screen.getByLabelText("mock new draft"), {
+    target: { value: "kind: Secret\nmetadata:\n  name: unsaved\n" },
+  });
+  fireEvent.click(screen.getByRole("tab", { name: /kustomizations · kind-dev/ }));
+  const notice = screen.getByRole("heading", { name: "Apps open in the new design" }).parentElement!;
+  fireEvent.click(within(notice).getByRole("button", { name: "Switch to the new design" }));
+  expect(within(notice).getByText(/discards 1 unsaved editor draft/i)).toBeDefined();
 });
 
 // #735: a helm operation outlives the window that started it, and the desktop

@@ -92,7 +92,7 @@ const REDACTION_FAILED = "This Secret's manifest is not shown, because it could 
  * The backend blanks Secret values on every ungated read, `k8s.getManifest`
  * included since #661 (see `crates/kube/src/manifest.rs`). This is the
  * frontend's second pass on top of that, run on arrival rather than trusting
- * the host alone: the new design's Secret Details pane gates its values
+ * the host alone: the new design's Secret Overview pane gates its values
  * behind an explicit reveal, so the YAML pane beside it runs the manifest
  * through here first — otherwise the gate would be worth nothing to anyone
  * who clicks one tab over — and classic's drawer YAML view does the same
@@ -119,7 +119,7 @@ const REDACTION_FAILED = "This Secret's manifest is not shown, because it could 
  * - So the annotation's KEY is printed and its VALUE never is. The reader
  *   still sees which controllers touched the Secret, which is what the key is
  *   for; the value can be read on the object's own YAML for a kind where an
- *   annotation is not the material. This mirrors the Details pane, which gates
+ *   annotation is not the material. This mirrors the Overview pane, which gates
  *   a Secret's whole annotation map behind a reveal rather than one key of it.
  *
  * WHAT THIS DOES NOT COVER, and must not be read as covering:

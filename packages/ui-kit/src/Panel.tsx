@@ -6,6 +6,18 @@ export interface PanelProps {
   title?: ReactNode;
   /** A line under the title saying what the section holds. */
   description?: ReactNode;
+  /**
+   * The figure at the end of the head, in the label voice: how many of what the
+   * section lists ("3 in 2 files"). Connect drew its own card for want of this
+   * slot. (#1064)
+   */
+  count?: ReactNode;
+  /**
+   * Run the content to both edges of the card: for a table or a run of list
+   * rows, whose rules would otherwise stop short of the card's border. Text
+   * beside them takes its own inset, from a `Section`.
+   */
+  flush?: boolean;
   children: ReactNode;
   className?: string;
 }
@@ -22,20 +34,27 @@ export interface PanelProps {
  * kit, the line moved here — so the header appears when there is anything to
  * put in it, which now includes a description standing on its own. (#318)
  */
-export function Panel({ title, description, children, className }: PanelProps) {
+export function Panel({ title, description, count, flush = false, children, className }: PanelProps) {
   return (
     <section className={cx("card", className)}>
-      {(filled(title) || filled(description)) && (
-        <div className="card-head flex-col items-start gap-0.5">
-          {/* A heading, not a div: these are the sections of a page, and the
-              classic SectionPanel this replaces rendered an h2. Fixed rather
-              than configurable — no panel in the app nests inside another.
-              (#325 review) */}
-          {filled(title) && <h2 className="card-title">{title}</h2>}
-          {filled(description) && <p className="text-[0.75rem] text-muted">{description}</p>}
+      {(filled(title) || filled(description) || filled(count)) && (
+        <div className="card-head">
+          <div className="flex min-w-0 flex-col items-start gap-0.5">
+            {/* A heading, not a div: these are the sections of a page, and the
+                classic SectionPanel this replaces rendered an h2. Fixed rather
+                than configurable — no panel in the app nests inside another.
+                (#325 review) */}
+            {filled(title) && <h2 className="card-title">{title}</h2>}
+            {filled(description) && <p className="text-[0.75rem] text-muted">{description}</p>}
+          </div>
+          {filled(count) && (
+            <span data-slot="count" className="eyebrow shrink-0">
+              {count}
+            </span>
+          )}
         </div>
       )}
-      <div className="section-body">{children}</div>
+      <div className={flush ? undefined : "section-body"}>{children}</div>
     </section>
   );
 }

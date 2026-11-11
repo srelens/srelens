@@ -1,7 +1,7 @@
 import fluxManifest from "../../../../examples/extensions/flux.json";
 import argoManifest from "../../../../examples/extensions/argocd.json";
 const declaredMeta = Object.fromEntries([...fluxManifest.actions.filter(action=>action.resource==="helmreleases").map(action=>({...action,name:action.name.replace("helmreleases-","")})),...argoManifest.actions].map(action=>[action.name,{title:action.title,availableWhen:("availableWhen" in action?action.availableWhen:[]) as import("@srelens/core").ActionPredicate[],impact:"medium" as const,confirm:null}]));
-import { act, render, screen, fireEvent, waitFor } from "@testing-library/react";
+import { act, render, screen, fireEvent, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 vi.mock("@srelens/core", async (original) => ({
@@ -12,6 +12,7 @@ vi.mock("@srelens/core", async (original) => ({
 }));
 import { actOnExtensionResource, inspectExtensionResource, listExtensions } from "@srelens/core";
 import { ExtensionBulkActions } from "./ExtensionBulkActions";
+import { ResourceBulk } from "../screens/ResourceBulk";
 import type { BulkResource } from "./bulkActions";
 import type { ClusterContext } from "@srelens/core";
 import { resetContexts, setContexts } from "../lib/clusters";
@@ -65,6 +66,57 @@ const openConfirmation = async (label = "Reconcile") => {
   fireEvent.click(await screen.findByRole("button", { name: label }));
   return screen.findByRole("dialog");
 };
+
+describe("in a list's filter row", () => {
+  const slot = () => {
+    const element = document.createElement("div");
+    document.body.append(element);
+    return element;
+  };
+
+  it("is dressed exactly as a built-in list's selection is", async () => {
+    // jsdom has no layout, so the row's height cannot be measured here. Sharing
+    // the built-in list's markup is what keeps ticking a row from moving the table.
+    const row = slot();
+    render(<ExtensionBulkActions target={target} selection={rows(1)} onClear={vi.fn()} barSlot={row} />);
+    const count = await within(row).findByTestId("bulk-count");
+    const { container } = render(
+      <ResourceBulk
+        selected={new Set(["team/app-0"])}
+        kind="pods"
+        descriptor={{ k8sKind: "Pod", columns: [], source: "watch", scope: "namespaced", actions: { evict: true } }}
+        context="cluster/a"
+        rows={[{ name: "app-0", namespace: "team" }]}
+        onDone={vi.fn()}
+      />,
+    );
+    const builtIn = within(container).getByText("1 selected");
+    expect(count.className).toBe(builtIn.className);
+    expect(count.parentElement?.className).toBe(builtIn.parentElement?.className);
+  });
+
+  it("offers the app's actions and nothing else", async () => {
+    const row = slot();
+    render(<ExtensionBulkActions target={target} selection={rows(1)} onClear={vi.fn()} barSlot={row} />);
+    await within(row).findByRole("button", { name: "Reconcile" });
+    expect(within(row).getAllByRole("button").map((button) => button.textContent)).toEqual(["Suspend", "Resume", "Reconcile"]);
+  });
+
+  it("holds the other actions while one is under review", async () => {
+    const row = slot();
+    render(<ExtensionBulkActions target={target} selection={rows(1)} onClear={vi.fn()} barSlot={row} />);
+    fireEvent.click(await within(row).findByRole("button", { name: "Reconcile" }));
+    const dialog = await screen.findByRole("dialog", { name: "Review Reconcile on 1 resource" });
+    fireEvent.click(within(row).getByRole("button", { name: "Suspend" }));
+    expect(within(row).getByRole("button", { name: "Suspend" }).getAttribute("aria-disabled")).toBe("true");
+    expect(dialog.isConnected).toBe(true);
+  });
+
+  it("keeps its own padding when the page gives it no row to sit in", async () => {
+    render(<ExtensionBulkActions target={target} selection={rows(1)} onClear={vi.fn()} />);
+    expect((await screen.findByTestId("bulk-count")).closest(".extension-bulk-bar")).not.toBeNull();
+  });
+});
 
 describe("bulk actions over an app's resource table", () => {
   it("asks once for the whole selection and names every resource in it", async () => {
@@ -210,6 +262,14 @@ describe("bulk actions over an app's resource table", () => {
     expect(succeeded).toContain("…");
     expect(succeeded.length).toBeLessThan(120);
     expect(result.getAttribute("data-status")).toBe("partial");
+  });
+
+  it("asks the host about a table row by its identity alone", async () => {
+    // A table row also carries its age and columns, and the host refuses a field it does not know.
+    const row = { namespace: "team", name: "app-0", age: "1d", columns: ["True"] } as BulkResource;
+    vi.mocked(inspectExtensionResource).mockResolvedValue(detailFor("app-0") as never);
+    render(<ExtensionBulkActions target={target} selection={[row]} onClear={() => {}} />);
+    await waitFor(() => expect(inspectExtensionResource).toHaveBeenCalledWith({ ...target, namespace: "team", name: "app-0" }));
   });
 
   it("does not offer an action the host does not list for this kind", async () => {

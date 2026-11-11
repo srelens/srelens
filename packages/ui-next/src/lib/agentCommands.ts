@@ -159,11 +159,13 @@ function resourceCommands(deps: CommandDeps): Command[] {
   if (!detail) return [];
   const { kind, namespace, name } = detail;
   const ns = namespace ?? "";
-  const slug = SLUG_BY_K8S_KIND[kind];
-  // A kind absent from `K8S_KIND` (a CRD) resolves no descriptor and offers
-  // no `Action`/`Go` command here — the same refusal `KindActions` documents
-  // for Delete on a custom resource: offering an action that cannot say what
-  // it would run against is worse than not offering it.
+  // A route with a group names a custom kind even when the kind is spelled
+  // like a built-in one: `Deployment` in `acme.io` is not a Deployment (#1066).
+  const slug = detail.group ? undefined : SLUG_BY_K8S_KIND[kind];
+  // A custom kind resolves no descriptor and offers no `Action`/`Go` command
+  // here — the same refusal `KindActions` documents for Delete on a custom
+  // resource: offering an action that cannot say what it would run against
+  // is worse than not offering it.
   const actions = slug ? (descriptorFor(slug)?.actions ?? {}) : {};
   // Read once, into every command's closure below — see the module doc. A
   // detail tab pinned to its own cluster (#834) is about that cluster's object.

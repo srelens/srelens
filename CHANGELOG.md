@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+### Audit export
+
+The new desktop design can export the local audit trail as JSONL or CSV from
+Settings → AI Assistant. The default includes all retained entries, with
+arguments and error details omitted unless explicitly selected (#371).
+
 Release notes are otherwise generated from commit subjects when `release.yml` publishes a
 release: its Features and Fixes lists. This file holds what a subject cannot say, such as
 what to do when upgrading and which features are previews. Issue and pull request numbers
@@ -17,6 +23,10 @@ The classic design is deprecated and will be removed in a future version. While 
 banner says so and offers **Switch to the new design**; dismissing the banner hides it for
 the rest of the session. **Settings → Appearance → Design** still switches between the two
 and labels classic **Classic (deprecated)**.
+
+Apps are in the new design only ([#1001](https://github.com/srelens/srelens/issues/1001)).
+In classic, an app tab and **Settings → Apps** say **Apps open in the new design** and offer
+the same switch; the sidebar's Apps group and the app views in resource details are gone.
 
 ### Extension platform
 
@@ -120,6 +130,11 @@ listed in [security.md](docs/extensions/security.md#not-yet-protected).
   ([specification.md](docs/extensions/specification.md#versioning)).
 - Flux and Argo CD actions moved from core into app manifests (srelens/srelens#674). Fields
   first added to 0.3 moved to a new 0.4 line (srelens/srelens#715).
+- App pages use the same filter row, count and namespace picker as built-in lists, and
+  several namespaces can be selected (srelens/srelens#1001). A page follows its tab's
+  namespaces, so a saved tab whose app route names a namespace opens on the tab's selection
+  instead. Over several namespaces a page keeps one cluster-wide watch: a credential that
+  cannot watch the whole cluster sees it as not live, and Refresh still reads each namespace.
 - App logos come from packages, not the bundle (srelens/srelens#741). Flux and Argo CD show
   their initials until their releases ship as packages.
 - The sidecar protocol crate's JSON Schema generation, `schema()` and the `JsonSchema`

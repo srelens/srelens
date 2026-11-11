@@ -116,10 +116,14 @@ returns.
   which is a card in a design that has none. A component that IS a region
   fills it; a control inside one keeps its frame (that is what `CodeEditor`'s
   `flush` distinguishes). Prose still gets a gutter — a document does not.
-- **Machine text does not wrap.** A `last-applied-configuration` annotation is
-  one line of a thousand characters; `break-all` turns it into a
+- **Long machine text does not wrap.** A `last-applied-configuration`
+  annotation is one line of a thousand characters; `break-all` turns it into a
   paragraph-shaped block that hides the short lines around it. Let it run and
-  scroll the block.
+  scroll the block. The same goes for a manifest, a diff, and a path or URL in a
+  wide pane (`KV wrap={false}`). A short identifier in a narrow pane — an
+  image, a node name, an IP in a detail pane — may wrap: `KV`'s
+  `overflow-wrap: anywhere` breaks it at a space or hyphen first, and scrolled
+  instead it would hide its tag or the end of its name. (#1062)
 - **Do not render walls.** A manifest diff is almost entirely unchanged lines.
   Collapse long unchanged runs behind a counted, expandable gap and keep a few
   lines of context — but leave a run shorter than the marker that would

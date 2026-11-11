@@ -1,4 +1,4 @@
-import { useContext, useState, type ReactNode } from "react";
+import { useState, type ReactNode } from "react";
 import {
   CAPABILITY_CATALOG,
   NETWORK_HTTP,
@@ -10,8 +10,7 @@ import {
   podNamespaces,
   renderConfirmTemplate,
 } from "@srelens/core";
-import { CodeEditor } from "@srelens/ui-kit";
-import { ExtensionControls } from "./ExtensionControls";
+import { Button, CodeEditor } from "@srelens/ui-kit";
 import { commandArgument, escapeFormatCharacters, plainText } from "./displayText";
 import { HostText, settingReference, settingTitle } from "./networkText";
 
@@ -593,7 +592,6 @@ export function ExtensionBindings({ manifest, permissions }: { manifest: unknown
  * something other than what it holds.
  */
 export function ReviewManifest({ text }: { text: string }) {
-  const { Button } = useContext(ExtensionControls);
   const [open, setOpen] = useState(false);
   return (
     <>

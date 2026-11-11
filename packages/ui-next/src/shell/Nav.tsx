@@ -1,7 +1,7 @@
 import { appNavigation } from "../extensions/appNavigation";
 import { useExtensions } from "../extensions/Extensions";
 import { symbolFor } from "../lib/markSymbols";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { listCrds, type ClusterContext, type CrdRef } from "@srelens/core";
 import { Mark, ResourceTree, Sidebar, StatusPill, type ResourceNode, type StatusKind } from "@srelens/ui-kit";
 import { saveNavigationWidth, setNavigationWidth, useNavigationWidth } from "../lib/navigationWidth";
@@ -9,7 +9,7 @@ import { Icons } from "../lib/icons";
 import { useMark } from "../lib/marks";
 import { resolveContext } from "../lib/clusters";
 import { openTab, useActiveCluster, useTabs } from "../lib/tabsStore";
-import { crdNodes, glyph, INVESTIGATE, kindNodes, routeForNode } from "../lib/tree";
+import { crdNodes, navNodes, routeForNode } from "../lib/tree";
 import { useAssistantAllowed } from "../lib/assistant";
 import { useResource } from "../lib/useResource";
 import { useSidebarCounts } from "../lib/sidebarCounts";
@@ -102,6 +102,14 @@ export function Nav({ contexts }: NavProps) {
     },
     [name, paused],
   );
+  // App pages are hidden by this list (#1024), so it is read again, quietly, when the
+  // window gets focus: that is where a CRD installed by another process, helm in a
+  // terminal say, shows — as the app inventory does.
+  const { refresh: rediscover } = discovery;
+  useEffect(() => {
+    window.addEventListener("focus", rediscover);
+    return () => window.removeEventListener("focus", rediscover);
+  }, [rediscover]);
   const crds = useMemo(() => discovery.data ?? [], [discovery.data]);
   // How many of each kind, for the rows under an open fold (#402).
   const counts = useSidebarCounts({ ctx, paused, expanded: ctx ? view.expanded[ctx.stableId] ?? NO_FOLDS : NO_FOLDS, crds });
@@ -120,24 +128,14 @@ export function Nav({ contexts }: NavProps) {
   const nodes = useMemo<ResourceNode[]>(() => {
     // App routes and app scope both name the cluster by its key, which no two contexts share
     // (#623, #695); a window opened for one of two sharing a stable ID pins its key.
-    const apps = ctx && extensions.data ? appNavigation(extensions.data.plugins, ctx.key) : null;
-    const kinds = kindNodes(counts);
-    return [
-      ...kinds.slice(0, 1),
-      ...(apps ? [apps] : []),
-      ...kinds.slice(1),
-      { id: "crds", label: "Custom resources", icon: Icons.crds, defaultExpanded: false, children: crdChildren },
-      {
-        id: "investigate",
-        label: "Investigate",
-        icon: Icons.investigate,
-        children: INVESTIGATE
-          // No Agent entry where the AI Assistant may not act (#968).
-          .filter((i) => assistantOn || i.id !== "agent")
-          .map((i) => ({ id: `route:${i.route}`, label: i.label, icon: glyph(i.id) })),
-      },
-    ];
-  }, [crdChildren, ctx, extensions.data, counts, assistantOn]);
+    // A page reading a CRD the cluster doesn't serve is left out (#1024), and one that may
+    // is held back until discovery answers: a row that appears is easier on the pointer than
+    // one that vanishes from under it. A failed discovery, or a paused cluster that is not
+    // asked, is unknown rather than missing, so every page shows.
+    const served = discovery.status === "error" || paused ? undefined : discovery.data ?? [];
+    const apps = ctx && extensions.data ? appNavigation(extensions.data.plugins, ctx.key, served) : [];
+    return navNodes({ counts, apps, crds: crdChildren, agent: assistantOn });
+  }, [crdChildren, ctx, extensions.data, counts, assistantOn, discovery.status, discovery.data, paused]);
 
   const link = ctx
     ? (paused ? { word: "Paused", kind: "neutral" as const } : view.links[ctx.stableId] ? LINK[view.links[ctx.stableId].state] : UNKNOWN)
