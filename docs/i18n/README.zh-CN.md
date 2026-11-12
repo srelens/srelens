@@ -196,7 +196,7 @@ srectl --help               # 查看全部参数
 | --- | --- | --- |
 | macOS | 适用于 Apple Silicon 和 Intel 的 `.dmg` | 已使用 Developer ID 签名并经过公证 |
 | Linux | `.AppImage`、`.deb`、`.rpm`，以及 AUR 上的 [`srelens-bin`](https://aur.archlinux.org/packages/srelens-bin) | AppImage 支持应用内更新 |
-| Windows | `.exe`、`.msi` | 代码签名仍在路线图中，在此之前 Windows 可能会弹出 SmartScreen 提示 |
+| Windows | `.exe`、`.msi`、`winget install srelens.srelens` | 代码签名仍在路线图中，在此之前 Windows 可能会弹出 SmartScreen 提示 |
 
 ### 终端界面
 
@@ -206,6 +206,12 @@ macOS（Homebrew）：
 
 ```bash
 brew install srelens/tap/srectl
+```
+
+Windows (winget):
+
+```powershell
+winget install srelens.srectl
 ```
 
 Linux，一行命令：

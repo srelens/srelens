@@ -225,7 +225,7 @@ srectl --help               # 전체 플래그 보기
 | --- | --- | --- |
 | macOS | Apple Silicon 및 Intel용 `.dmg` | Developer ID 서명 및 공증(notarization) 완료 |
 | Linux | `.AppImage`, `.deb`, `.rpm`, 그리고 AUR의 [`srelens-bin`](https://aur.archlinux.org/packages/srelens-bin) | AppImage는 앱 내 업데이터를 지원합니다 |
-| Windows | `.exe`, `.msi` | 코드 서명이 아직 로드맵 단계이므로 Windows에서 SmartScreen 경고가 표시될 수 있습니다 |
+| Windows | `.exe`, `.msi`, `winget install srelens.srelens` | 코드 서명이 아직 로드맵 단계이므로 Windows에서 SmartScreen 경고가 표시될 수 있습니다 |
 
 ### 터미널 UI
 
@@ -235,6 +235,12 @@ macOS(Homebrew):
 
 ```bash
 brew install srelens/tap/srectl
+```
+
+Windows (winget):
+
+```powershell
+winget install srelens.srectl
 ```
 
 Linux에서는 한 줄로 설치합니다:
