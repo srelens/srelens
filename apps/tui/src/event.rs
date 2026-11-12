@@ -22,6 +22,15 @@ pub enum AppEvent {
         title: String,
         result: Result<String, String>,
     },
+    /// A list of a custom resource's instances, from `fetch_crd_instances`.
+    CrdInstancesResult {
+        context: String,
+        namespace: String,
+        /// The CRD's name, or its kind when it has none.
+        crd: String,
+        /// The rows as a JSON array.
+        result: Result<String, String>,
+    },
     LineageResult {
         kind: String,
         name: String,

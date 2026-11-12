@@ -81,7 +81,9 @@ impl ClusterPaneState {
                 &mut app.assistant_state,
                 crate::views::assistant_view::AssistantViewState::new(),
             ),
-            ai_settings: std::mem::take(&mut app.ai_settings),
+            // Cloned, not taken: `apply_to_app` reads the shared fields from
+            // what `app` holds.
+            ai_settings: app.ai_settings.clone(),
             active_log_channel: app.active_log_channel.take(),
             node_metrics_history: std::mem::take(&mut app.node_metrics_history),
             pod_metrics_history: std::mem::take(&mut app.pod_metrics_history),
@@ -112,7 +114,14 @@ impl ClusterPaneState {
         app.namespace_discovery_error = self.namespace_discovery_error;
         app.cluster_overview_data = self.cluster_overview_data;
         app.assistant_state = self.assistant_state;
-        app.ai_settings = self.ai_settings;
+        // Keys, endpoints, limits and the theme are shared; only the agent,
+        // provider and model choices are the pane's own. Each pane saves its
+        // whole copy to the one settings file, so a pane coming back with an
+        // older copy would erase what the other just saved (#1079).
+        app.ai_settings = self.ai_settings.with_shared_from(&app.ai_settings);
+        if let ActiveView::Settings(view) = &mut app.active_view {
+            view.settings = view.settings.with_shared_from(&app.ai_settings);
+        }
         app.active_log_channel = self.active_log_channel;
         app.node_metrics_history = self.node_metrics_history;
         app.pod_metrics_history = self.pod_metrics_history;

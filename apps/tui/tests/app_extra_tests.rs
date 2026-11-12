@@ -242,6 +242,26 @@ async fn action_result(
     .unwrap_or_else(|_| panic!("no '{}' event within 20s", title))
 }
 
+/// The next list of `crd`'s instances on the channel.
+async fn crd_instances_result(
+    rx: &mut UnboundedReceiver<AppEvent>,
+    crd: &str,
+) -> Result<String, String> {
+    tokio::time::timeout(Duration::from_secs(20), async {
+        loop {
+            match rx.recv().await {
+                Some(AppEvent::CrdInstancesResult { crd: c, result, .. }) if c == crd => {
+                    return result
+                }
+                Some(_) => continue,
+                None => panic!("event channel closed before the {} list", crd),
+            }
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("no {} list within 20s", crd))
+}
+
 fn toast(app: &App) -> String {
     app.toast
         .as_ref()
@@ -784,7 +804,7 @@ async fn custom_resource_instances_are_published_with_name_namespace_and_age() {
     let (_settings, mut app, mut rx) = app_on(&cluster).await;
 
     app.fetch_crd_instances(widget_crd());
-    let payload = action_result(&mut rx, "crd_instances:widgets.example.com")
+    let payload = crd_instances_result(&mut rx, "widgets.example.com")
         .await
         .expect("the namespaced list is published");
     let items: Vec<Value> = serde_json::from_str(&payload).expect("a JSON array");
@@ -808,7 +828,7 @@ async fn custom_resource_instances_are_published_with_name_namespace_and_age() {
     );
 
     app.fetch_crd_instances(gadget_crd());
-    let payload = action_result(&mut rx, "crd_instances:gadgets.example.com")
+    let payload = crd_instances_result(&mut rx, "gadgets.example.com")
         .await
         .expect("the cluster-scoped list is published");
     let items: Vec<Value> = serde_json::from_str(&payload).expect("a JSON array");
@@ -3002,7 +3022,7 @@ async fn a_warm_watch_with_an_empty_cache_refetches_the_list() {
     let (_settings, mut app, mut rx) = app_on(&cluster).await;
     app.crds = vec![widget_crd()];
     app.switch_view_to_crd(widget_crd()).await;
-    action_result(&mut rx, "crd_instances:widgets.example.com")
+    crd_instances_result(&mut rx, "widgets.example.com")
         .await
         .expect("the first list");
 
@@ -3010,7 +3030,7 @@ async fn a_warm_watch_with_an_empty_cache_refetches_the_list() {
     app.resource_cache.clear();
     app.restart_active_watch().await;
 
-    action_result(&mut rx, "crd_instances:widgets.example.com")
+    crd_instances_result(&mut rx, "widgets.example.com")
         .await
         .expect("the table is refilled by a fresh list, not left on Loading");
 }

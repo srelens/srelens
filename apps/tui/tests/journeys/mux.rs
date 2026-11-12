@@ -871,3 +871,241 @@ async fn journey_mux_close_cancels_active_assistant_turn() {
     assert_eq!(app.active_context, "cluster-left");
     assert!(!app.assistant_state.is_busy);
 }
+
+/// Opens `command` in the left pane, then presses Ctrl+b while its fetch is
+/// still in flight, so the left pane is parked with a loading view.
+async fn park_a_loading_view_on_the_left(app: &mut srectl::app::App, command: &str) {
+    app.contexts = vec![
+        ctx("cluster-left", "c-left", "default"),
+        ctx("cluster-right", "c-right", "default"),
+    ];
+    press(app, ch(':')).await;
+    type_str(app, "mux").await;
+    press(app, key(KeyCode::Enter)).await;
+    press(app, key(KeyCode::Enter)).await;
+    press(app, ctrl('b')).await;
+    assert_eq!(app.active_context, "cluster-left");
+
+    press(app, ch(':')).await;
+    type_str(app, command).await;
+    press(app, key(KeyCode::Enter)).await;
+
+    press(app, ctrl('b')).await;
+    assert_eq!(app.active_context, "cluster-right");
+}
+
+fn parked_view(app: &srectl::app::App) -> &ActiveView {
+    &app.mux_state
+        .as_ref()
+        .and_then(|mux| mux.inactive_pane.as_ref())
+        .expect("the left pane should be parked")
+        .active_view
+}
+
+/// D5: a Topology fetch that finishes after Ctrl+b parked its pane lands in
+/// that pane, so switching back shows the result, not a spinner (#1079).
+#[tokio::test]
+async fn journey_mux_late_topology_result_reaches_the_parked_pane() {
+    let _settings = common::env::isolate_settings();
+    let (mut app, _rx) = common::app_with("cluster-left", "default").await;
+    park_a_loading_view_on_the_left(&mut app, "topology").await;
+    assert!(matches!(parked_view(&app), ActiveView::Topology(t) if t.is_loading));
+
+    app.handle_topology_result("cluster-left", vec![], Err("topology refused".to_string()));
+
+    press(&mut app, ctrl('b')).await;
+    assert_eq!(app.active_context, "cluster-left");
+    let ActiveView::Topology(topo) = &app.active_view else {
+        panic!("the left pane should still show Topology");
+    };
+    assert!(
+        !topo.is_loading,
+        "the late result must end the loading state"
+    );
+    assert_eq!(topo.error.as_deref(), Some("topology refused"));
+}
+
+/// D5: the same for GPU info (#1079).
+#[tokio::test]
+async fn journey_mux_late_gpu_info_result_reaches_the_parked_pane() {
+    let _settings = common::env::isolate_settings();
+    let (mut app, _rx) = common::app_with("cluster-left", "default").await;
+    park_a_loading_view_on_the_left(&mut app, "gpuinfo").await;
+    assert!(matches!(parked_view(&app), ActiveView::GpuInfo(g) if g.is_loading));
+
+    app.handle_gpu_info_result("cluster-left", Err("gpu refused".to_string()));
+
+    press(&mut app, ctrl('b')).await;
+    let ActiveView::GpuInfo(gpu) = &app.active_view else {
+        panic!("the left pane should still show GPU info");
+    };
+    assert!(
+        !gpu.is_loading,
+        "the late result must end the loading state"
+    );
+    assert_eq!(gpu.error.as_deref(), Some("gpu refused"));
+}
+
+/// D5: the same for BGP (#1079).
+#[tokio::test]
+async fn journey_mux_late_bgp_result_reaches_the_parked_pane() {
+    let _settings = common::env::isolate_settings();
+    let (mut app, _rx) = common::app_with("cluster-left", "default").await;
+    park_a_loading_view_on_the_left(&mut app, "bgp").await;
+    assert!(matches!(parked_view(&app), ActiveView::Bgp(b) if b.is_loading));
+
+    app.handle_bgp_result("cluster-left", Err("bgp refused".to_string()));
+
+    press(&mut app, ctrl('b')).await;
+    let ActiveView::Bgp(bgp) = &app.active_view else {
+        panic!("the left pane should still show BGP");
+    };
+    assert!(
+        !bgp.is_loading,
+        "the late result must end the loading state"
+    );
+    assert_eq!(bgp.error.as_deref(), Some("bgp refused"));
+}
+
+/// D5: an API key one pane saved survives the other pane opening and leaving
+/// Settings. Each pane saves its whole copy of the settings to the one file,
+/// so the other pane's older copy used to erase the key (#1079).
+#[tokio::test]
+async fn journey_mux_a_key_saved_in_one_pane_survives_the_other_panes_settings() {
+    let _settings = common::env::isolate_settings();
+    let (mut app, _rx) = common::app_with("cluster-left", "default").await;
+    app.contexts = vec![
+        ctx("cluster-left", "c-left", "default"),
+        ctx("cluster-right", "c-right", "default"),
+    ];
+    press(&mut app, ch(':')).await;
+    type_str(&mut app, "mux").await;
+    press(&mut app, key(KeyCode::Enter)).await;
+    press(&mut app, key(KeyCode::Enter)).await;
+    assert_eq!(app.active_context, "cluster-right");
+
+    // The right pane picks its own agent and saves a key, as Settings does.
+    app.ai_settings.agent = srelens_agent::adapter::AgentKind::Cursor;
+    app.ai_settings
+        .api_keys
+        .insert("openai".to_string(), "sk-right-pane".to_string());
+    app.ai_settings.save().expect("the right pane saves");
+
+    press(&mut app, ctrl('b')).await;
+    assert_eq!(app.active_context, "cluster-left");
+    press(&mut app, ch(':')).await;
+    type_str(&mut app, "settings").await;
+    press(&mut app, key(KeyCode::Enter)).await;
+    assert!(matches!(app.active_view, ActiveView::Settings(_)));
+    press(&mut app, key(KeyCode::Esc)).await;
+
+    let saved = srectl::ai_config::AiSettings::load();
+    assert_eq!(
+        saved.api_keys.get("openai").map(String::as_str),
+        Some("sk-right-pane"),
+        "leaving Settings in the left pane must not erase the right pane's key"
+    );
+    assert_eq!(
+        app.ai_settings.agent,
+        srelens_agent::adapter::AgentKind::Srelens,
+        "the left pane keeps its own agent"
+    );
+}
+
+/// D5: opening a cluster in the right pane brings back the conversation it
+/// already had, as switching context does (#1079).
+#[tokio::test]
+async fn journey_mux_right_pane_restores_the_clusters_conversation() {
+    let _settings = common::env::isolate_settings();
+    let (mut app, _rx) = common::app_with("cluster-a", "default").await;
+    app.contexts = vec![
+        ctx("cluster-a", "c-a", "default"),
+        ctx("cluster-b", "c-b", "default"),
+    ];
+    let mut earlier = srectl::views::assistant_view::AssistantViewState::for_context("cluster-b");
+    earlier.add_assistant_message("checkout is slow because of the cart service".to_string());
+    earlier.input = "and the cart?".to_string();
+    app.assistant_states
+        .insert("cluster-b".to_string(), earlier);
+
+    press(&mut app, ch(':')).await;
+    type_str(&mut app, "mux").await;
+    press(&mut app, key(KeyCode::Enter)).await;
+    press(&mut app, key(KeyCode::Enter)).await;
+    assert_eq!(app.active_context, "cluster-b");
+
+    assert_eq!(
+        app.assistant_state.input, "and the cart?",
+        "the draft is kept"
+    );
+    assert!(
+        app.assistant_state
+            .messages
+            .iter()
+            .any(|m| m.content.contains("cart service")),
+        "the history is kept"
+    );
+    assert!(
+        !app.assistant_states.contains_key("cluster-b"),
+        "the conversation moves into the pane, so a late reply finds it there"
+    );
+}
+
+fn widget_crd() -> srectl::commands::CrdMeta {
+    srectl::commands::CrdMeta {
+        crd_name: "widgets.example.com".to_string(),
+        group: "example.com".to_string(),
+        version: "v1".to_string(),
+        kind: "Widget".to_string(),
+        plural: "widgets".to_string(),
+        singular: "widget".to_string(),
+        namespaced: true,
+        short_names: vec![],
+        printer_columns: vec![],
+        created_at: None,
+    }
+}
+
+/// D3: a custom-resource list that comes back after `:mux` parked the pane
+/// that asked for it goes to that pane, not to the focused pane showing the
+/// same kind on another cluster (#1079).
+#[tokio::test]
+async fn journey_mux_late_custom_resource_list_reaches_the_pane_that_asked() {
+    let _settings = common::env::isolate_settings();
+    let (mut app, _rx) = common::app_with("cluster-left", "default").await;
+    app.contexts = vec![
+        ctx("cluster-left", "c-left", "default"),
+        ctx("cluster-right", "c-right", "default"),
+    ];
+    app.crds = vec![widget_crd()];
+    app.switch_view_to_crd(widget_crd()).await;
+
+    // The right pane opens on the same kind while the left list is in flight.
+    press(&mut app, ch(':')).await;
+    type_str(&mut app, "mux").await;
+    press(&mut app, key(KeyCode::Enter)).await;
+    press(&mut app, key(KeyCode::Enter)).await;
+    assert_eq!(app.active_context, "cluster-right");
+
+    let rows = serde_json::json!([{ "name": "w-left", "namespace": "default" }]).to_string();
+    app.handle_crd_instances_update_for("cluster-left", "default", "widgets.example.com", &rows);
+
+    let ActiveView::Table(right) = &app.active_view else {
+        panic!("the right pane should show the Widget table");
+    };
+    assert!(
+        right.raw_items.is_empty(),
+        "the left cluster's rows must not land in the right pane"
+    );
+    assert!(
+        !app.resource_cache
+            .keys()
+            .any(|(c, _, _)| c == "cluster-right"),
+        "nor in the right cluster's cache"
+    );
+    let ActiveView::Table(left) = parked_view(&app) else {
+        panic!("the left pane should still show the Widget table");
+    };
+    assert_eq!(left.raw_items.len(), 1, "the left pane gets its rows");
+    assert!(!left.is_loading);
+}
