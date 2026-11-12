@@ -1012,6 +1012,61 @@ async fn journey_mux_a_key_saved_in_one_pane_survives_the_other_panes_settings()
     );
 }
 
+/// D4: a Settings view left under another view keeps its stale copy, so
+/// coming back to it with Esc and leaving again saved the old keys (#1079).
+#[tokio::test]
+async fn journey_mux_a_key_saved_in_one_pane_survives_a_settings_view_in_the_others_history() {
+    let _settings = common::env::isolate_settings();
+    let (mut app, _rx) = common::app_with("cluster-left", "default").await;
+    app.contexts = vec![
+        ctx("cluster-left", "c-left", "default"),
+        ctx("cluster-right", "c-right", "default"),
+    ];
+    press(&mut app, ch(':')).await;
+    type_str(&mut app, "mux").await;
+    press(&mut app, key(KeyCode::Enter)).await;
+    press(&mut app, key(KeyCode::Enter)).await;
+    press(&mut app, ctrl('b')).await;
+    assert_eq!(app.active_context, "cluster-left");
+
+    // The left pane opens Settings, then moves on to Pods, so Settings
+    // waits in its navigation history.
+    press(&mut app, ch(':')).await;
+    type_str(&mut app, "settings").await;
+    press(&mut app, key(KeyCode::Enter)).await;
+    assert!(matches!(app.active_view, ActiveView::Settings(_)));
+    press(&mut app, ch(':')).await;
+    type_str(&mut app, "pods").await;
+    press(&mut app, key(KeyCode::Enter)).await;
+    assert!(matches!(
+        app.nav_stack.last(),
+        Some(ActiveView::Settings(_))
+    ));
+
+    press(&mut app, ctrl('b')).await;
+    assert_eq!(app.active_context, "cluster-right");
+    app.ai_settings
+        .api_keys
+        .insert("openai".to_string(), "sk-right-pane".to_string());
+    app.ai_settings.save().expect("the right pane saves");
+
+    press(&mut app, ctrl('b')).await;
+    assert_eq!(app.active_context, "cluster-left");
+    press(&mut app, key(KeyCode::Esc)).await;
+    assert!(
+        matches!(app.active_view, ActiveView::Settings(_)),
+        "Esc from Pods returns to the Settings view in the history"
+    );
+    press(&mut app, key(KeyCode::Esc)).await;
+
+    let saved = srectl::ai_config::AiSettings::load();
+    assert_eq!(
+        saved.api_keys.get("openai").map(String::as_str),
+        Some("sk-right-pane"),
+        "leaving the restored Settings view must not erase the right pane's key"
+    );
+}
+
 /// D5: opening a cluster in the right pane brings back the conversation it
 /// already had, as switching context does (#1079).
 #[tokio::test]

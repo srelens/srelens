@@ -118,9 +118,13 @@ impl ClusterPaneState {
         // provider and model choices are the pane's own. Each pane saves its
         // whole copy to the one settings file, so a pane coming back with an
         // older copy would erase what the other just saved (#1079).
+        // Settings views waiting in the history hold copies too, and saving
+        // on the way out of one would bring the old keys back.
         app.ai_settings = self.ai_settings.with_shared_from(&app.ai_settings);
-        if let ActiveView::Settings(view) = &mut app.active_view {
-            view.settings = view.settings.with_shared_from(&app.ai_settings);
+        for view in std::iter::once(&mut app.active_view).chain(app.nav_stack.iter_mut()) {
+            if let ActiveView::Settings(view) = view {
+                view.settings = view.settings.with_shared_from(&app.ai_settings);
+            }
         }
         app.active_log_channel = self.active_log_channel;
         app.node_metrics_history = self.node_metrics_history;
