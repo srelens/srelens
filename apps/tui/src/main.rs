@@ -407,8 +407,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 app.handle_crds_update_for_context(event_ctx, &msg);
                             } else if title == "update_available" {
                                 app.handle_update_available(&msg);
-                            } else if title.starts_with("crd_instances:") {
-                                app.handle_crd_instances_update(&title, &msg);
                             } else if action.starts_with("ai_") {
                                 let target_state = app.assistant_state_mut_for_context(event_ctx);
 
@@ -497,8 +495,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 || title == "crds_failed"
                             {
                                 app.handle_crds_failed_for_context(event_ctx, &err);
-                            } else if title.starts_with("crd_instances:") || title.starts_with("crd_instances_failed:") {
-                                app.handle_crd_instances_failed(&title, &err);
                             } else if action == "cluster_overview_updated" || title == "cluster_overview_updated" {
                                 // Best-effort: ignore if cluster overview cannot connect
                             } else if action == "pod_metrics_updated"
@@ -520,6 +516,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                     }
                 }
+                AppEvent::CrdInstancesResult { context, namespace, crd, result } => match result {
+                    Ok(rows) => app.handle_crd_instances_update_for(&context, &namespace, &crd, &rows),
+                    Err(err) => app.handle_crd_instances_failed_for(&context, &crd, &err),
+                },
                 AppEvent::LineageResult { kind, name, result } => {
                     app.handle_lineage_result(&kind, &name, result);
                 }

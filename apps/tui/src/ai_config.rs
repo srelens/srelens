@@ -292,6 +292,19 @@ impl AiSettings {
         serde_json::from_value(value)
     }
 
+    /// This copy's agent, provider and model choices over the rest of
+    /// `shared`: keys, endpoints, limits, theme and anything added later.
+    /// Each `:mux` pane keeps its own choices but saves its whole copy.
+    pub fn with_shared_from(&self, shared: &AiSettings) -> AiSettings {
+        AiSettings {
+            agent: self.agent,
+            agent_models: self.agent_models.clone(),
+            default_provider: self.default_provider,
+            models: self.models.clone(),
+            ..shared.clone()
+        }
+    }
+
     pub fn save(&self) -> Result<PathBuf, String> {
         let path = Self::config_path();
         if let Some(parent) = path.parent() {

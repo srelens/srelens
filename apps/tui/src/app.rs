@@ -880,6 +880,25 @@ impl App {
             .or_insert_with(|| crate::views::assistant_view::AssistantViewState::for_context(ctx))
     }
 
+    /// The view, CRDs and filter of the pane showing `context`: the focused
+    /// pane, or the one `:mux` parked. A result that comes back after Ctrl+b
+    /// still belongs to the pane that asked for it (#1079).
+    fn pane_for_context(&mut self, context: &str) -> Option<(&mut ActiveView, &[CrdMeta], &str)> {
+        if self.active_context == context {
+            return Some((
+                &mut self.active_view,
+                self.crds.as_slice(),
+                self.filter_buffer.as_str(),
+            ));
+        }
+        let pane = self.mux_state.as_mut()?.inactive_pane.as_mut()?;
+        (pane.context == context).then_some((
+            &mut pane.active_view,
+            pane.crds.as_slice(),
+            pane.filter_buffer.as_str(),
+        ))
+    }
+
     pub fn refresh_pod_metrics(&self) {
         let event_tx = self.event_tx.clone();
         let cache = self.client_cache.clone();
@@ -1819,78 +1838,104 @@ impl App {
         }
     }
 
+    /// A list of `title`'s custom resource for the focused pane.
     pub fn handle_crd_instances_update(&mut self, title: &str, json_str: &str) {
-        if let Ok(items) = serde_json::from_str::<Vec<serde_json::Value>>(json_str) {
-            let crd_identifier = title.strip_prefix("crd_instances:").unwrap_or(title);
-            let ctx = self.active_context.clone();
-            // Cache under the scope `restart_active_watch` reads: a cluster-
-            // scoped CRD's list belongs to no namespace. Keyed by the active
-            // namespace instead, it was never found again, and a table shown
-            // after an apply sat on Loading.
-            let discovered = self
-                .crds
-                .iter()
-                .find(|c| c.crd_name == crd_identifier)
-                .cloned()
-                .or_else(|| {
-                    self.crds
-                        .iter()
-                        .find(|c| c.kind == crd_identifier || c.plural == crd_identifier)
-                        .cloned()
-                });
-            let cluster_scoped = discovered.as_ref().is_some_and(|c| !c.namespaced);
-            let ns = if cluster_scoped {
-                String::new()
-            } else {
-                self.active_namespace.clone()
-            };
-            self.resource_cache.insert(
-                (ctx.clone(), ns.clone(), crd_identifier.to_string()),
-                items.clone(),
-            );
-            if let Some(ref d) = discovered {
-                self.resource_cache
-                    .insert((ctx.clone(), ns.clone(), d.crd_name.clone()), items.clone());
-                self.resource_cache
-                    .insert((ctx.clone(), ns.clone(), d.kind.clone()), items.clone());
-                self.resource_cache
-                    .insert((ctx.clone(), ns.clone(), d.plural.clone()), items.clone());
-            }
+        let crd_identifier = title.strip_prefix("crd_instances:").unwrap_or(title);
+        let (ctx, ns) = (self.active_context.clone(), self.active_namespace.clone());
+        self.handle_crd_instances_update_for(&ctx, &ns, crd_identifier, json_str);
+    }
 
-            if let ActiveView::Table(table) = &mut self.active_view {
-                if let ResourceKind::CustomResource(crd) = &mut table.kind {
-                    let matches_table = crd.crd_name == crd_identifier
-                        || (discovered
-                            .as_ref()
-                            .is_some_and(|d| d.crd_name == crd.crd_name))
-                        || crd.kind == crd_identifier
-                        || crd.plural == crd_identifier;
-                    if matches_table {
-                        if crd.printer_columns.is_empty() {
-                            if let Some(ref d) = discovered {
-                                crd.printer_columns = d.printer_columns.clone();
-                                table.columns =
-                                    crate::views::resource_table::default_columns_for_kind(
-                                        &table.kind,
-                                    );
-                            }
+    /// A list of `crd_identifier`'s instances that `fetch_crd_instances` read
+    /// on `context` and `namespace`. It is cached for that context and shown
+    /// in the pane showing it, even one `:mux` parked while it was in flight.
+    pub fn handle_crd_instances_update_for(
+        &mut self,
+        context: &str,
+        namespace: &str,
+        crd_identifier: &str,
+        json_str: &str,
+    ) {
+        let Ok(items) = serde_json::from_str::<Vec<serde_json::Value>>(json_str) else {
+            return;
+        };
+        let discovered = self.pane_for_context(context).and_then(|(_, crds, _)| {
+            crds.iter()
+                .find(|c| c.crd_name == crd_identifier)
+                .or_else(|| {
+                    crds.iter()
+                        .find(|c| c.kind == crd_identifier || c.plural == crd_identifier)
+                })
+                .cloned()
+        });
+        // Cache under the scope `restart_active_watch` reads: a cluster-
+        // scoped CRD's list belongs to no namespace. Keyed by the active
+        // namespace instead, it was never found again, and a table shown
+        // after an apply sat on Loading.
+        let cluster_scoped = discovered.as_ref().is_some_and(|c| !c.namespaced);
+        let ns = if cluster_scoped {
+            String::new()
+        } else {
+            namespace.to_string()
+        };
+        let ctx = context.to_string();
+        self.resource_cache.insert(
+            (ctx.clone(), ns.clone(), crd_identifier.to_string()),
+            items.clone(),
+        );
+        if let Some(ref d) = discovered {
+            self.resource_cache
+                .insert((ctx.clone(), ns.clone(), d.crd_name.clone()), items.clone());
+            self.resource_cache
+                .insert((ctx.clone(), ns.clone(), d.kind.clone()), items.clone());
+            self.resource_cache
+                .insert((ctx.clone(), ns.clone(), d.plural.clone()), items.clone());
+        }
+
+        if let Some((ActiveView::Table(table), _, filter)) = self.pane_for_context(context) {
+            if let ResourceKind::CustomResource(crd) = &mut table.kind {
+                let matches_table = crd.crd_name == crd_identifier
+                    || (discovered
+                        .as_ref()
+                        .is_some_and(|d| d.crd_name == crd.crd_name))
+                    || crd.kind == crd_identifier
+                    || crd.plural == crd_identifier;
+                if matches_table {
+                    if crd.printer_columns.is_empty() {
+                        if let Some(ref d) = discovered {
+                            crd.printer_columns = d.printer_columns.clone();
+                            table.columns =
+                                crate::views::resource_table::default_columns_for_kind(&table.kind);
                         }
-                        table.set_items(items, &self.filter_buffer);
-                        table.is_loading = false;
-                        table.error = None;
                     }
+                    table.set_items(items, filter);
+                    table.is_loading = false;
+                    table.error = None;
                 }
             }
         }
     }
 
+    /// A failed list of `title`'s custom resource for the focused pane.
     pub fn handle_crd_instances_failed(&mut self, title: &str, err: &str) {
         let crd_identifier = title
             .strip_prefix("crd_instances_failed:")
             .or_else(|| title.strip_prefix("crd_instances:"))
             .unwrap_or(title);
+        let ctx = self.active_context.clone();
+        self.handle_crd_instances_failed_for(&ctx, crd_identifier, err);
+    }
+
+    /// A failed list of `crd_identifier` on `context`: the table of the pane
+    /// showing it stops loading, and the focused pane says why.
+    pub fn handle_crd_instances_failed_for(
+        &mut self,
+        context: &str,
+        crd_identifier: &str,
+        err: &str,
+    ) {
+        let focused = self.active_context == context;
         let mut toast_kind = None;
-        if let ActiveView::Table(table) = &mut self.active_view {
+        if let Some((ActiveView::Table(table), _, _)) = self.pane_for_context(context) {
             if let ResourceKind::CustomResource(crd) = &table.kind {
                 if crd.crd_name == crd_identifier
                     || crd.kind == crd_identifier
@@ -1901,7 +1946,7 @@ impl App {
                 }
             }
         }
-        if let Some(kind) = toast_kind {
+        if let Some(kind) = toast_kind.filter(|_| focused) {
             self.set_toast(
                 format!("Failed to list {}: {}", kind, err),
                 Theme::status_error(),
@@ -10238,7 +10283,6 @@ impl App {
 
         // 1. Snapshot the left pane from App into ClusterPaneState
         let left_pane = crate::mux::ClusterPaneState::extract_from_app(self);
-        self.ai_settings = left_pane.ai_settings.clone();
 
         // Inherit the left pane's resource view kind if applicable (e.g. Pods, Deployments)
         let target_kind = match &left_pane.active_view {
@@ -10280,8 +10324,14 @@ impl App {
         self.namespaces.clear();
         self.namespace_discovery_error = None;
         self.cluster_overview_data = None;
-        self.assistant_state =
-            crate::views::assistant_view::AssistantViewState::for_context(&new_context);
+        // Bring back the conversation this cluster already had, as
+        // `switch_context_internal` does (#1079).
+        self.assistant_state = self
+            .assistant_states
+            .remove(&new_context)
+            .unwrap_or_else(|| {
+                crate::views::assistant_view::AssistantViewState::for_context(&new_context)
+            });
         self.assistant_state.caveman_level = self.ai_settings.get_caveman_level();
         self.input_mode = crate::ui::statusbar::InputMode::Normal;
         self.command_buffer.clear();
@@ -10360,6 +10410,15 @@ impl App {
                     self.logs_manager.stop(log_ch);
                 }
                 self.assistant_state.cancel_turn();
+                // Keep the closed cluster's conversation for its next visit,
+                // as a context switch does: `:mux` took it out of
+                // `assistant_states` when the pane opened (#1079).
+                let closed_state = std::mem::replace(
+                    &mut self.assistant_state,
+                    crate::views::assistant_view::AssistantViewState::new(),
+                );
+                self.assistant_states
+                    .insert(closed_ctx.clone(), closed_state);
 
                 // 2. Promote the parked/inactive pane into self as the surviving view
                 inactive.apply_to_app(self);
@@ -10932,13 +10991,18 @@ impl App {
         };
 
         tokio::spawn(async move {
+            // The reply names the cluster and namespace it was read from, so
+            // a list that lands after `:mux` moved focus reaches its own pane.
+            let reply = |result| AppEvent::CrdInstancesResult {
+                context: ctx.clone(),
+                namespace: ns.clone(),
+                crd: crd_identifier.clone(),
+                result,
+            };
             let client = match cache.get(&ctx).await {
                 Ok(c) => c,
                 Err(e) => {
-                    let _ = event_tx.send(AppEvent::ActionResult {
-                        title: format!("crd_instances_failed:{}", crd_identifier),
-                        result: Err(e.to_string()),
-                    });
+                    let _ = event_tx.send(reply(Err(e.to_string())));
                     return;
                 }
             };
@@ -10971,16 +11035,11 @@ impl App {
                         .map(|item| crd_row_value(item, &ar.api_version, &crd.kind))
                         .collect();
 
-                    let _ = event_tx.send(AppEvent::ActionResult {
-                        title: format!("crd_instances:{}", crd_identifier),
-                        result: Ok(serde_json::to_string(&items).unwrap_or_default()),
-                    });
+                    let _ =
+                        event_tx.send(reply(Ok(serde_json::to_string(&items).unwrap_or_default())));
                 }
                 Err(e) => {
-                    let _ = event_tx.send(AppEvent::ActionResult {
-                        title: format!("crd_instances_failed:{}", crd_identifier),
-                        result: Err(e.to_string()),
-                    });
+                    let _ = event_tx.send(reply(Err(e.to_string())));
                 }
             }
         });
@@ -12572,12 +12631,10 @@ impl App {
         _namespaces: Vec<String>,
         result: Result<srelens_kube::topology::TopologyGraphOut, String>,
     ) {
-        if let ActiveView::Topology(topo) = &mut self.active_view {
-            if self.active_context == context {
-                match result {
-                    Ok(graph) => topo.set_graph(graph),
-                    Err(err) => topo.set_error(err),
-                }
+        if let Some((ActiveView::Topology(topo), _, _)) = self.pane_for_context(context) {
+            match result {
+                Ok(graph) => topo.set_graph(graph),
+                Err(err) => topo.set_error(err),
             }
         }
     }
@@ -12608,12 +12665,10 @@ impl App {
         context: &str,
         result: Result<srelens_kube::gpu_info::GpuClusterInfo, String>,
     ) {
-        if let ActiveView::GpuInfo(gpu) = &mut self.active_view {
-            if self.active_context == context {
-                match result {
-                    Ok(info) => gpu.set_info(info),
-                    Err(err) => gpu.set_error(err),
-                }
+        if let Some((ActiveView::GpuInfo(gpu), _, _)) = self.pane_for_context(context) {
+            match result {
+                Ok(info) => gpu.set_info(info),
+                Err(err) => gpu.set_error(err),
             }
         }
     }
@@ -12644,12 +12699,10 @@ impl App {
         context: &str,
         result: Result<srelens_kube::bgp::BgpClusterSummary, String>,
     ) {
-        if let ActiveView::Bgp(bgp) = &mut self.active_view {
-            if self.active_context == context {
-                match result {
-                    Ok(summary) => bgp.set_summary(summary),
-                    Err(err) => bgp.set_error(err),
-                }
+        if let Some((ActiveView::Bgp(bgp), _, _)) = self.pane_for_context(context) {
+            match result {
+                Ok(summary) => bgp.set_summary(summary),
+                Err(err) => bgp.set_error(err),
             }
         }
     }
