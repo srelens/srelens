@@ -85,8 +85,92 @@ it.each(themes)("keeps the %s GitHub pill legible, and visible on the bar it sit
   for (const ground of grounds) expect(contrast(values["gh-line"], values[ground]), ground).toBeGreaterThanOrEqual(3);
 });
 
+// #1001: the active row's wash was ~1.1:1 on the sidebar, the same as hover.
+// Its text is ink rather than accent: no wash at 1.3:1 can also carry accent
+// text at 4.5:1 for paper's amber, or at 7:1 for the contrast theme's blue.
+it.each(themes)("gives the %s active row a fill distinct from the ground", theme => {
+  const floor = theme === "contrast" ? 7 : 4.5;
+  for (const accent of accents) {
+    const values = tokens(theme, accent);
+    const wash = values["accent-wash-strong"];
+    expect(wash, accent).toMatch(/^#[\da-fA-F]{6}$/);
+    expect(contrast(wash, values["surface-sunk"]), `${accent} wash on surface-sunk`).toBeGreaterThanOrEqual(1.3);
+    for (const ink of ["ink", "ink-soft"]) expect(contrast(values[ink], wash), `${accent} ${ink}`).toBeGreaterThanOrEqual(floor);
+    // The bar and the icon: graphics, so 3:1.
+    expect(contrast(values.accent, wash), `${accent} bar`).toBeGreaterThanOrEqual(3);
+  }
+});
+
+it("gives tree rows and Settings' nav one active style", () => {
+  const kit = readFileSync(join(__dirname, "styles/kit.css"), "utf8");
+  const rule = [...kit.matchAll(/([^{}]+)\{([^{}]*)\}/g)].find(([, selectors]) =>
+    selectors.includes('.tree-row[data-active="true"]') && selectors.includes('.nav-item[data-active="true"]'));
+  expect(rule, "one rule for both").toBeDefined();
+  // The third, WorkspaceTree's ink-and-bar `.tree-cluster`, went with it.
+  expect(kit).not.toContain(".tree-cluster");
+  for (const decl of ["background: var(--accent-wash-strong)", "color: var(--ink)", "font-weight: 600", "box-shadow: inset 3px 0 0 var(--accent)"]) {
+    expect(rule![2]).toContain(decl);
+  }
+});
+
+// A paused or unreachable cluster's mark is dimmed; it must still be seen.
+it.each(themes)("keeps an unavailable %s rail mark at 3:1 against the rail", theme => {
+  const kit = readFileSync(join(__dirname, "styles/kit.css"), "utf8");
+  const opacity = Number(kit.match(/\[data-unavailable="true"\]\s*\{\s*opacity:\s*([\d.]+)/)?.[1]);
+  expect(opacity).toBeGreaterThan(0);
+  const rgb = (hex: string) => [1, 3, 5].map(i => parseInt(hex.slice(i, i + 2), 16));
+  const over = (top: string, ground: string) =>
+    "#" + rgb(top).map((v, i) => Math.round(v * opacity + rgb(ground)[i] * (1 - opacity)).toString(16).padStart(2, "0")).join("");
+  for (const accent of accents) {
+    const values = tokens(theme, accent);
+    const rail = values["canvas-deep"];
+    const marks = [...Object.keys(values).filter(name => name.startsWith("mark-")), "accent"];
+    expect(marks.length).toBe(12);
+    for (const mark of marks) expect(contrast(over(values[mark], rail), rail), `${accent} ${mark}`).toBeGreaterThanOrEqual(3);
+  }
+});
+
 it.each(themes)("gives %s form boundaries enough contrast against their surfaces", theme => {
   const values = tokens(theme, "violet");
   expect(values["control-line"]).toMatch(/^#[\da-fA-F]{6}$/);
   for (const ground of grounds) expect(contrast(values["control-line"], values[ground]), ground).toBeGreaterThanOrEqual(3);
+});
+
+// #1001: the right rail's edge and the rules between the blocks in it, and in
+// the quick-details peek, were --rule: about 1.2:1, a line you had to look for.
+// They take the left side panel's band rule (#1006), which must stay a line
+// you can see on the grounds it divides.
+it("rules off the right rail and the blocks in it in --rule-strong", () => {
+  const kit = readFileSync(join(__dirname, "styles/kit.css"), "utf8");
+  const body = (selector: string) => {
+    const start = kit.indexOf(`${selector} {`);
+    expect(start, selector).toBeGreaterThan(-1);
+    return kit.slice(start, kit.indexOf("}", start));
+  };
+  expect(body(".side-rail")).toContain("border-left: 1px solid var(--rule-strong)");
+  // The peek's own edge: a right-docked pane is ruled off by its grip.
+  expect(body('.resize-handle[data-edge="left"]')).toContain("border-left: 1px solid var(--rule-strong)");
+  expect(body(".section + .section")).toContain("border-top: 1px solid var(--rule-strong)");
+  for (const theme of themes) {
+    for (const accent of accents) {
+      const values = tokens(theme, accent);
+      for (const ground of ["surface", "surface-sunk"]) {
+        expect(contrast(values["rule-strong"], values[ground]), `${theme} ${accent} on ${ground}`).toBeGreaterThanOrEqual(1.3);
+      }
+    }
+  }
+});
+
+// #1001: the small-caps heads (a pane's, the right rail's, a banded list's)
+// were 10px in --ink-faint, the faintest text on screen naming what sits under
+// it. --ink-soft on every ground is pinned for every theme and accent by the
+// suite at the top of this file; the band draws on --surface-sunk.
+it("draws small-caps heads at the metadata size in --ink-soft", () => {
+  const kit = readFileSync(join(__dirname, "styles/kit.css"), "utf8");
+  for (const selector of [".pane-head", ".subhead-caps"]) {
+    const start = kit.indexOf(`${selector} {`);
+    const body = kit.slice(start, kit.indexOf("}", start));
+    expect(body, selector).toContain("font-size: var(--text-meta)");
+    expect(body, selector).toContain("color: var(--ink-soft)");
+  }
 });

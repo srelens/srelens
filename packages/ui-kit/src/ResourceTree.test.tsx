@@ -425,3 +425,90 @@ describe("ResourceTree inside a form", () => {
     }
   });
 });
+
+/** #1001: where you are, and how the tree is arranged, at a glance. */
+describe("ResourceTree arrangement", () => {
+  const banded: ResourceNode[] = [
+    { id: "overview", label: "Overview", band: "cluster" },
+    { id: "nodes", label: "Nodes", band: "cluster" },
+    { id: "workloads", label: "Workloads", band: "resources", children: [{ id: "pods", label: "Pods" }] },
+    { id: "config", label: "Config", band: "resources", children: [{ id: "secrets", label: "Secrets" }] },
+    { id: "helm", label: "Helm releases", band: "tools" },
+  ];
+  const sequence = (container: HTMLElement) =>
+    [...container.querySelectorAll('[role="tree"] > li')].map((li) =>
+      li.getAttribute("data-slot") === "band-rule" ? "—" : li.textContent?.trim());
+
+  it("draws a rule where the band changes, and none at the top or inside a band", () => {
+    const { container } = render(<ResourceTree label="Resources" nodes={banded} onActivate={() => {}} />);
+    expect(sequence(container)).toEqual(["Overview", "Nodes", "—", "Workloads", "Pods", "Config", "Secrets", "—", "Helm releases"]);
+    // Drawn, not announced: the rule is not a row of the tree.
+    for (const rule of container.querySelectorAll('[data-slot="band-rule"]')) expect(rule.getAttribute("aria-hidden")).toBe("true");
+  });
+
+  it("spaces top-level entries inside a band, but not the first of a band", () => {
+    const { container } = render(<ResourceTree label="Resources" nodes={banded} onActivate={() => {}} />);
+    const gapped = [...container.querySelectorAll("li[data-gap]")].map((li) => li.textContent?.trim());
+    expect(gapped).toEqual(["Nodes", "Config"]);
+  });
+
+  it("marks a closed group that holds the active row as the location, without opening it", () => {
+    const { container } = render(
+      <ResourceTree label="Resources" nodes={banded} active="pods" expanded={[]} onActivate={() => {}} />,
+    );
+    const workloads = screen.getByRole("treeitem", { name: "Workloads" });
+    expect(workloads.getAttribute("aria-current")).toBe("location");
+    expect(workloads.getAttribute("aria-expanded")).toBe("false");
+    expect(workloads.querySelector('[data-slot="here"]')).not.toBeNull();
+    expect(screen.getByRole("treeitem", { name: "Config" }).getAttribute("aria-current")).toBeNull();
+    expect(container.querySelectorAll('[data-slot="here"]')).toHaveLength(1);
+  });
+
+  it("drops the location mark once the group is open and the row itself shows", () => {
+    render(<ResourceTree label="Resources" nodes={banded} active="pods" expanded={["workloads"]} onActivate={() => {}} />);
+    expect(screen.getByRole("treeitem", { name: "Workloads" }).getAttribute("aria-current")).toBeNull();
+    expect(screen.getByRole("treeitem", { name: "Pods" }).getAttribute("aria-selected")).toBe("true");
+  });
+
+  it("puts the mark on the closed group you can see, however deep the row is", () => {
+    const deep: ResourceNode[] = [
+      { id: "crds", label: "Custom resources", children: [{ id: "g", label: "cert-manager.io", children: [{ id: "certs", label: "Certificate" }] }] },
+    ];
+    render(<ResourceTree label="Resources" nodes={deep} active="certs" expanded={["crds"]} onActivate={() => {}} />);
+    expect(screen.getByRole("treeitem", { name: "Custom resources" }).getAttribute("aria-current")).toBeNull();
+    expect(screen.getByRole("treeitem", { name: "cert-manager.io" }).getAttribute("aria-current")).toBe("location");
+  });
+
+  it("indents children one step past their heading's icon", () => {
+    const tree: ResourceNode[] = [
+      { id: "overview", label: "Overview" },
+      { id: "crds", label: "Custom resources", children: [{ id: "g", label: "acme.io", children: [{ id: "w", label: "Widget" }] }] },
+    ];
+    render(<ResourceTree label="Resources" nodes={tree} onActivate={() => {}} />);
+    const pad = (name: string) => parseFloat(screen.getByRole("treeitem", { name }).style.paddingLeft);
+    // A top-level leaf's icon lines up with a top-level group's, past its caret…
+    expect(pad("Overview")).toBe(pad("Custom resources") + 16);
+    // …and each level moves one step right of the one above it.
+    expect(pad("acme.io")).toBe(pad("Custom resources") + 12);
+    expect(pad("Widget")).toBe(pad("Overview") + 24);
+  });
+
+  it("names a clipped row in the kit's tooltip, and no row in a native title", async () => {
+    render(<ResourceTree label="Resources" nodes={banded} onActivate={() => {}} />);
+    const helm = screen.getByRole("treeitem", { name: "Helm releases" });
+    expect(helm.getAttribute("title")).toBeNull();
+
+    const label = helm.querySelector(".truncate") as HTMLElement;
+    Object.defineProperty(label, "scrollWidth", { configurable: true, value: 200 });
+    Object.defineProperty(label, "clientWidth", { configurable: true, value: 80 });
+    await userEvent.hover(helm);
+    expect((await screen.findByRole("tooltip")).textContent).toBe("Helm releases");
+  });
+
+  it("offers no tooltip for a label that fits", async () => {
+    render(<ResourceTree label="Resources" nodes={banded} onActivate={() => {}} />);
+    await userEvent.hover(screen.getByRole("treeitem", { name: "Overview" }));
+    await new Promise((r) => setTimeout(r, 800));
+    expect(screen.queryByRole("tooltip")).toBeNull();
+  });
+});

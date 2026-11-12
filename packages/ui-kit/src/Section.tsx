@@ -52,6 +52,11 @@ export interface SectionProps {
    * are the frame that asks for the other.
    */
   smallCaps?: boolean;
+  /**
+   * Name the block as a landmark, for a block a page finds by name. Left off,
+   * a section is a plain block under its heading.
+   */
+  "aria-label"?: string;
 }
 
 /** Inline rather than an icon-set import: the kit takes no dependency on lucide. */
@@ -131,6 +136,7 @@ export function Section({
   onToggle,
   padded = true,
   smallCaps = false,
+  "aria-label": ariaLabel,
 }: SectionProps) {
   const headed = filled(title);
   const folds = headed && onToggle !== undefined;
@@ -139,6 +145,7 @@ export function Section({
   return (
     <section
       className={cx("section", className)}
+      aria-label={ariaLabel}
       data-open={folds ? showing : undefined}
       data-padded={padded ? undefined : "false"}
       /*

@@ -9,6 +9,7 @@ vi.mock("@srelens/core/react", async (importOriginal) => {
 });
 import { useAccess } from "@srelens/core/react";
 
+import { interactiveShell } from "@srelens/core";
 import { NodeCordonAction } from "./NodeCordonAction";
 
 beforeEach(() => {
@@ -159,7 +160,7 @@ describe("NodeCordonAction RBAC gating", () => {
         namespace: "default",
         pod: "srelens-node-debug-x1",
         container: "debug",
-        execCommand: expect.arrayContaining(["nsenter", "/bin/sh"]),
+        execCommand: ["nsenter", "--target", "1", "--mount", "--uts", "--ipc", "--net", "--pid", "--", ...interactiveShell()],
         deleteOnClose: { context: "kind-dev", namespace: "default", pod: "srelens-node-debug-x1" },
       }),
     );

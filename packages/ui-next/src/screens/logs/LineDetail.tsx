@@ -7,7 +7,7 @@ import {
   type HealthKind,
   type QueryClause,
 } from "@srelens/core";
-import { CopyButton, StatusPill } from "@srelens/ui-kit";
+import { CopyButton, IconButton, StatusPill } from "@srelens/ui-kit";
 import { Icons } from "../../lib/icons";
 
 /** What the panel needs from a row. */
@@ -84,9 +84,7 @@ export function LineDetail({
         {/* The kit's copy control, so the click answers: "Copied", or "Copy failed" when the clipboard refuses.
             Keyed by the line so moving to another line starts it fresh rather than carrying the last answer. */}
         <CopyButton key={line.raw} text={line.raw} label="Copy line" />
-        <button type="button" className="icon-btn" aria-label="Close the line detail" onClick={onClose}>
-          <Icons.close size={13} aria-hidden="true" />
-        </button>
+        <IconButton icon={Icons.close} label="Close the line detail" onClick={onClose} />
       </header>
       <div className="scroll min-h-0 flex-1 px-3 py-1.5 font-mono text-[0.75rem]">
         <table className="w-full border-collapse">
@@ -108,24 +106,21 @@ export function LineDetail({
                   <td className="w-[1%] whitespace-nowrap pl-2">
                     {target !== undefined && (
                       <>
-                        <button
-                          type="button"
-                          className="icon-btn"
+                        {/* No tooltip: the names carry the line's own value. */}
+                        <IconButton
+                          icon={Icons.add}
                           aria-pressed={state === "include"}
-                          aria-label={`Filter for ${target.field} = ${target.value}`}
+                          label={`Filter for ${target.field} = ${target.value}`}
+                          title={null}
                           onClick={() => onToggle(target, "include")}
-                        >
-                          <span aria-hidden="true">+</span>
-                        </button>
-                        <button
-                          type="button"
-                          className="icon-btn"
+                        />
+                        <IconButton
+                          icon={Icons.minus}
                           aria-pressed={state === "exclude"}
-                          aria-label={`Filter out ${target.field} = ${target.value}`}
+                          label={`Filter out ${target.field} = ${target.value}`}
+                          title={null}
                           onClick={() => onToggle(target, "exclude")}
-                        >
-                          <span aria-hidden="true">−</span>
-                        </button>
+                        />
                       </>
                     )}
                   </td>

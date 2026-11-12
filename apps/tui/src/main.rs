@@ -90,6 +90,7 @@ mod deep_link;
 mod event;
 mod mcp_server;
 mod model_list;
+mod mux;
 mod sink;
 mod theme;
 mod tui_config;
@@ -391,33 +392,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 AppEvent::ActionResult { title, result } => {
                     let (action, event_ctx) = if let Some((act, c)) = title.split_once(':') {
-                        if act.starts_with("ai_") {
-                            (act, Some(c))
-                        } else {
-                            (title.as_str(), None)
-                        }
+                        (act, Some(c))
                     } else {
                         (title.as_str(), None)
                     };
 
                     match result {
                         Ok(msg) => {
-                            if title == "cluster_info_updated" {
-                                app.handle_cluster_info_update(&msg);
-                            } else if title == "cluster_overview_updated" {
+                            if action == "cluster_info_updated" || title == "cluster_info_updated" {
+                                app.handle_cluster_info_update_for_context(event_ctx, &msg);
+                            } else if action == "cluster_overview_updated" || title == "cluster_overview_updated" {
                                 app.handle_cluster_overview_update(&msg);
-                            } else if title == "crds_updated" {
-                                app.handle_crds_update(&msg);
+                            } else if action == "crds_updated" || title == "crds_updated" {
+                                app.handle_crds_update_for_context(event_ctx, &msg);
                             } else if title == "update_available" {
                                 app.handle_update_available(&msg);
-                            } else if title.starts_with("crd_instances:") {
-                                app.handle_crd_instances_update(&title, &msg);
                             } else if action.starts_with("ai_") {
-                                let target_state = match event_ctx {
-                                    Some(ctx) if ctx == app.active_context => &mut app.assistant_state,
-                                    Some(ctx) => app.assistant_states.entry(ctx.to_string()).or_insert_with(|| views::assistant_view::AssistantViewState::for_context(ctx)),
-                                    None => &mut app.assistant_state,
-                                };
+                                let target_state = app.assistant_state_mut_for_context(event_ctx);
 
                                 if action == "ai_reply" {
                                     target_state.add_assistant_message(msg);
@@ -473,10 +464,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 } else if action == "ai_done" {
                                     target_state.finish_turn();
                                 }
-                            } else if title == "pod_metrics_updated" {
-                                app.handle_pod_metrics_update(&msg);
-                            } else if title == "node_metrics_updated" {
-                                app.handle_node_metrics_update(&msg);
+                            } else if action == "pod_metrics_updated" || title == "pod_metrics_updated" {
+                                app.handle_pod_metrics_update_for_context(event_ctx, &msg);
+                            } else if action == "node_metrics_updated" || title == "node_metrics_updated" {
+                                app.handle_node_metrics_update_for_context(event_ctx, &msg);
                             } else if title.starts_with("yaml_applied") {
                                 app.handle_yaml_applied(&title, &msg);
                             } else {
@@ -492,22 +483,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             }
                         }
                         Err(err) => {
-                            if title == "cluster_info_updated" || title == "cluster_info_failed" {
-                                app.handle_cluster_info_failure(&err);
-                            } else if title == "crds_updated" || title == "crds_failed" {
-                                app.handle_crds_failed(&err);
-                            } else if title.starts_with("crd_instances:") || title.starts_with("crd_instances_failed:") {
-                                app.handle_crd_instances_failed(&title, &err);
-                            } else if title == "cluster_overview_updated" {
+                            if action == "cluster_info_updated"
+                                || action == "cluster_info_failed"
+                                || title == "cluster_info_updated"
+                                || title == "cluster_info_failed"
+                            {
+                                app.handle_cluster_info_failure_for_context(event_ctx, &err);
+                            } else if action == "crds_updated"
+                                || action == "crds_failed"
+                                || title == "crds_updated"
+                                || title == "crds_failed"
+                            {
+                                app.handle_crds_failed_for_context(event_ctx, &err);
+                            } else if action == "cluster_overview_updated" || title == "cluster_overview_updated" {
                                 // Best-effort: ignore if cluster overview cannot connect
-                            } else if title == "pod_metrics_updated" || title == "node_metrics_updated" {
+                            } else if action == "pod_metrics_updated"
+                                || action == "node_metrics_updated"
+                                || title == "pod_metrics_updated"
+                                || title == "node_metrics_updated"
+                            {
                                 // Best-effort: ignore if metrics-server is unavailable
                             } else if action.starts_with("ai_") {
-                                let target_state = match event_ctx {
-                                    Some(ctx) if ctx == app.active_context => &mut app.assistant_state,
-                                    Some(ctx) => app.assistant_states.entry(ctx.to_string()).or_insert_with(|| views::assistant_view::AssistantViewState::for_context(ctx)),
-                                    None => &mut app.assistant_state,
-                                };
+                                let target_state = app.assistant_state_mut_for_context(event_ctx);
                                 target_state.append_stream_chunk(&format!("\n[Error: {}]", err));
                                 target_state.finish_turn();
                                 app.set_toast(err, theme::Theme::status_error());
@@ -519,6 +516,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                     }
                 }
+                AppEvent::CrdInstancesResult { context, namespace, crd, result } => match result {
+                    Ok(rows) => app.handle_crd_instances_update_for(&context, &namespace, &crd, &rows),
+                    Err(err) => app.handle_crd_instances_failed_for(&context, &crd, &err),
+                },
                 AppEvent::LineageResult { kind, name, result } => {
                     app.handle_lineage_result(&kind, &name, result);
                 }

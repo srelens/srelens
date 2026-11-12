@@ -165,8 +165,8 @@ describe("extension performance budgets (#581)", () => {
     const plugins = fiftyApps();
     const nav = appNavigation(plugins, "prod-key");
     // Every app with a page, each under its own node, its grouped pages nested.
-    expect(nav?.children).toHaveLength(APPS);
-    const flux = nav!.children![0];
+    expect(nav).toHaveLength(APPS);
+    const flux = nav[0];
     expect(flux.label).toBe("Flux 0");
     expect(flux.children!.map((node) => node.label)).toEqual([
       "Overview", "Kustomizations", "Helm", "Sources", "Image Automation", "Notifications",
@@ -176,7 +176,7 @@ describe("extension performance budgets (#581)", () => {
     const samples = await time(5, 50, () => appNavigation(plugins, "prod-key"));
     hold({
       name: "navigation-build-50-apps",
-      what: "the sidebar's Apps group from 50 installed apps",
+      what: "the sidebar's app entries from 50 installed apps",
       targetMs: 10,
       ceilingMs: 50,
     }, samples, { apps: APPS, pages });
@@ -219,11 +219,11 @@ describe("extension performance budgets (#581)", () => {
     const argo = joins("org.example.argo", ["applications"]);
     const rows = Array.from({ length: 1_000 }, (_, index) => ({ uid: `uid-${index}`, name: `api-${index}`, namespace: "team" }));
     function Part({ capability }: { capability: string }) {
-      useLiveReaders({ plugin: flux, capabilities: [capability], context: "kind-demo", namespace: "team", label: "part", onChange: () => {} });
+      useLiveReaders({ plugin: flux, capabilities: [capability], context: "kind-demo", namespaces: ["team"], label: "part", onChange: () => {} });
       return null;
     }
     function Table() {
-      useResolvedColumns({ plugins: [security, argo], context: "kind-demo", namespace: "team", kind: "apps/Deployment", rows });
+      useResolvedColumns({ plugins: [security, argo], context: "kind-demo", namespaces: ["team"], kind: "apps/Deployment", rows });
       return null;
     }
     const page = render(

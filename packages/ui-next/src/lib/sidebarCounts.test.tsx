@@ -125,21 +125,22 @@ afterEach(() => {
 });
 
 describe("useSidebarCounts", () => {
-  it("asks nothing while every group is closed", async () => {
+  it("with every group closed, counts only the cluster band, which is always in sight", async () => {
     const { result } = counts();
-    await act(() => vi.advanceTimersByTimeAsync(10));
-    expect(countResources).not.toHaveBeenCalled();
-    expect(result.current.size).toBe(0);
+    await waitFor(() => expect(result.current.get("kind:nodes")).toBe("1"));
+    expect(countResources).toHaveBeenCalledTimes(1);
+    expect([...kindsAsked()].sort()).toEqual(["Event", "Namespace", "Node"]);
+    expect([...result.current.keys()].filter((id) => id.startsWith("kind:")).sort()).toEqual(["kind:events", "kind:namespaces", "kind:nodes"]);
   });
 
-  it("opening Workloads counts exactly its seven kinds in the tab's namespaces", async () => {
+  it("opening Workloads adds exactly its seven kinds to the cluster band's, in the tab's namespaces", async () => {
     setNamespaces(PROD.stableId, ["shop"]);
     answering({ Pod: 38 });
     const { result } = counts({ expanded: ["workloads"] });
     await waitFor(() => expect(result.current.get("kind:pods")).toBe("38"));
     expect(countResources).toHaveBeenCalledTimes(1);
     expect(asked()[0]).toBe("prod-eu");
-    expect([...kindsAsked()].sort()).toEqual(["CronJob", "DaemonSet", "Deployment", "Job", "Pod", "ReplicaSet", "StatefulSet"]);
+    expect([...kindsAsked()].sort()).toEqual(["CronJob", "DaemonSet", "Deployment", "Event", "Job", "Namespace", "Node", "Pod", "ReplicaSet", "StatefulSet"]);
     expect(asked()[2]).toEqual(["shop"]);
   });
 
@@ -176,6 +177,9 @@ describe("useSidebarCounts", () => {
     render(<>{result.current.get("kind:pods")}</>);
     const shown = screen.getByTitle(/^Counted at .+; could not refresh$/);
     expect(shown.textContent).toMatch(/^38/);
+    // Marked, not faded: at opacity 0.6 the number fell to 2.5:1 (#1001).
+    expect(shown.className).toContain("decoration-dotted");
+    expect(shown.className).not.toContain("opacity-60");
     // Opacity and a hover title reach no screen reader: the row's name has to
     // say it too, or a stale number is read out as current.
     expect(shown.querySelector(".sr-only")?.textContent).toMatch(/not refreshed/);
@@ -184,7 +188,7 @@ describe("useSidebarCounts", () => {
   it("a selection change recounts, a reordered one does not", async () => {
     setNamespaces(PROD.stableId, ["a", "b"]);
     const { result } = counts({ expanded: ["workloads"] });
-    await waitFor(() => expect(result.current.size).toBe(7));
+    await waitFor(() => expect(result.current.get("kind:pods")).toBe("1"));
     expect(countResources).toHaveBeenCalledTimes(1);
     act(() => setNamespaces(PROD.stableId, ["b", "a"]));
     await act(() => vi.advanceTimersByTimeAsync(10));
@@ -200,14 +204,16 @@ describe("useSidebarCounts", () => {
     await waitFor(() => expect(result.current.get("kind:pods")).toBe("0"));
     expect(result.current.get("kind:persistentvolumeclaims")).toBe("0");
     await waitFor(() => expect(countResources).toHaveBeenCalled());
-    expect(kindsAsked()).toEqual(["PersistentVolume", "StorageClass"]);
+    // Cluster-scoped: counted whatever the selection, as the list would be.
+    expect(kindsAsked()).toEqual(["Namespace", "Node", "PersistentVolume", "StorageClass"]);
   });
 
   it("a collection still resolving gives namespaced kinds no number", async () => {
     scopeTo("prod", "waiting");
     const { result } = counts({ expanded: ["workloads", "storage"] });
     await waitFor(() => expect(countResources).toHaveBeenCalled());
-    expect(kindsAsked()).toEqual(["PersistentVolume", "StorageClass"]);
+    // Cluster-scoped: counted whatever the selection, as the list would be.
+    expect(kindsAsked()).toEqual(["Namespace", "Node", "PersistentVolume", "StorageClass"]);
     await waitFor(() => expect(result.current.get("kind:storageclasses")).toBe("1"));
     expect(result.current.has("kind:pods")).toBe(false);
   });
@@ -215,8 +221,8 @@ describe("useSidebarCounts", () => {
   it("a collection that narrows a kind by name leaves that kind out", async () => {
     scopeTo("web", ["a"], { kinds: ["Pod"], nameRegex: "^web-" });
     const { result } = counts({ expanded: ["workloads"] });
-    await waitFor(() => expect(countResources).toHaveBeenCalled());
-    expect(asked()[2]).toEqual(["a"]);
+    // The cluster band's cluster-scoped kinds may be asked before the collection resolves.
+    await waitFor(() => expect(countResources.mock.calls.at(-1)?.[2]).toEqual(["a"]));
     await waitFor(() => expect(result.current.get("kind:deployments")).toBe("1"));
     expect(result.current.has("kind:pods")).toBe(false);
   });
@@ -249,18 +255,18 @@ describe("useSidebarCounts", () => {
   });
 
   it("CRDs are sent with all four hints, only when both folds are open", async () => {
+    const certificates = () => countResources.mock.calls.flatMap((call) => call[1] as CountKindRef[]).filter((k) => k.kind === "Certificate");
     const { rerender } = counts({ expanded: ["crds"], crds: [CERTS] });
     await act(() => vi.advanceTimersByTimeAsync(10));
-    expect(countResources).not.toHaveBeenCalled();
+    expect(certificates()).toEqual([]);
     rerender({ ctx: PROD, paused: false, expanded: ["crds", "crdgroup:cert-manager.io"], crds: [CERTS] });
-    await waitFor(() => expect(countResources).toHaveBeenCalledTimes(1));
-    expect(asked()[1]).toEqual([{ kind: "Certificate", group: "cert-manager.io", version: "v1", plural: "certificates", namespaced: true }]);
+    await waitFor(() => expect(certificates()).toEqual([{ kind: "Certificate", group: "cert-manager.io", version: "v1", plural: "certificates", namespaced: true }]));
   });
 
   it("no refresh while hidden", async () => {
     Object.defineProperty(document, "visibilityState", { configurable: true, get: () => "hidden" });
     const { result } = counts({ expanded: ["workloads"] });
-    await waitFor(() => expect(result.current.size).toBe(7));
+    await waitFor(() => expect(result.current.get("kind:pods")).toBe("1"));
     await act(() => vi.advanceTimersByTimeAsync(3 * CACHE_TTL_MS));
     expect(countResources).toHaveBeenCalledTimes(1);
   });
@@ -281,9 +287,10 @@ describe("useSidebarCounts", () => {
       { context: "prod-eu", status: "failed" },
       { context: "staging", status: "active" },
     ] as ActiveForward[];
-    const { result, rerender } = counts({ expanded: ["cluster"] });
+    // A row of its own in the last band, so always in sight.
+    const { result, rerender } = counts();
     await waitFor(() => expect(result.current.get("route:/forwards")).toBe("2"));
-    rerender({ ctx: PROD, paused: false, expanded: [], crds: [] });
+    rerender({ ctx: PROD, paused: true, expanded: [], crds: [] });
     expect(result.current.has("route:/forwards")).toBe(false);
   });
 });

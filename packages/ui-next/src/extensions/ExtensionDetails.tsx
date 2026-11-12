@@ -1,4 +1,4 @@
-import { useContext, useState } from "react";
+import { useState } from "react";
 import {
   NETWORK_HTTP,
   clearExtensionSecret,
@@ -9,14 +9,13 @@ import {
   type ExtensionPreviousVersion,
   type InstalledExtension,
 } from "@srelens/core";
-import { CodeEditor } from "@srelens/ui-kit";
+import { Button, CodeEditor, EmptyState, Tabs, Toolbar } from "@srelens/ui-kit";
 import { saveOrDownload } from "../lib/saveOrDownload";
 import { ExtensionClusters } from "./ExtensionClusters";
 import { ExtensionNetwork } from "./ExtensionNetwork";
 import { ExtensionBindings } from "./ExtensionBindings";
 import { describeGrant, installedOn, origin } from "./detailsText";
 import { networkReach, networkRequests, reachText } from "./networkText";
-import { ExtensionControls } from "./ExtensionControls";
 import { ExtensionInspector } from "./ExtensionInspector";
 import { ExtensionLogs } from "./ExtensionLogs";
 import { escapeFormatCharacters } from "./displayText";
@@ -51,9 +50,9 @@ export function ExtensionDetails({
   plugin: InstalledExtension;
   busy: boolean;
   change(action: ExtensionChange): Promise<boolean>;
-  onError(message: string): void;
+  /** What failed, as a headline, and the reason under it. */
+  onError(title: string, reason: string): void;
 }) {
-  const { Button, Tabs } = useContext(ExtensionControls);
   // The Overview first, as Details opened before the Inspector and Logs (#575) existed.
   const [tab, setTab] = useState<DetailsTab>("overview");
   const [resetting, setResetting] = useState(false);
@@ -74,7 +73,7 @@ export function ExtensionDetails({
       try {
         await clearExtensionSecret(manifest.id);
       } catch (e) {
-        onError(e instanceof Error ? e.message : String(e));
+        onError("Could not reset the settings", e instanceof Error ? e.message : String(e));
         return;
       }
     }
@@ -86,7 +85,7 @@ export function ExtensionDetails({
       // A browser download on the web, which has no `save_text_file` command.
       await saveOrDownload(`${manifest.id}-settings.json`, `${JSON.stringify(plugin.settings, null, 2)}\n`);
     } catch (e) {
-      onError(e instanceof Error ? e.message : String(e));
+      onError("Could not export the settings", e instanceof Error ? e.message : String(e));
     }
   }
 
@@ -156,14 +155,14 @@ export function ExtensionDetails({
           <p className="extension-message">
             Settings are exported as saved. A secret is never saved in settings, so an export never holds one.
           </p>
-          <div className="extension-toolbar">
+          <Toolbar wrap>
             <Button variant="secondary" disabled={busy} onClick={() => void exportSettings()}>
               Export settings
             </Button>
             <Button variant="secondary" disabled={busy} onClick={() => setResetting(true)}>
               Reset settings
             </Button>
-          </div>
+          </Toolbar>
           {resetting && (
             <div
               className="extension-install"
@@ -193,7 +192,7 @@ export function ExtensionDetails({
 
           <h3>Previous versions</h3>
           {plugin.history.length === 0 ? (
-            <p className="extension-message">No earlier version is kept. Each update keeps up to three.</p>
+            <EmptyState compact title="No earlier version is kept" hint="Each update keeps up to three." />
           ) : (
             <ul className="extension-versions" aria-label="Previous versions">
               {plugin.history.map((version) => (

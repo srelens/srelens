@@ -91,9 +91,10 @@ To exercise the local installer instead:
 2. Open **Settings → Apps → Install a local manifest**, paste it, review the
    manifest, then install and grant `k8s.listCustomResource`. Flux also requests
    `k8s.listEvents` for its dashboard.
-3. Open pages beneath **Apps → app name** in the connected cluster's sidebar. The
-   classic design opens separate app tabs; both designs pin the cluster. Settings has
-   no cluster selector or page launcher; it manages app-wide installation only.
+3. Open pages beneath **Apps → app name** in the connected cluster's sidebar. Each
+   page is pinned to that cluster. Settings has no cluster selector or page launcher;
+   it manages app-wide installation only. Apps are in the new design only: the
+   deprecated classic design shows a notice in their place.
 4. Open a Namespace's resource overview. Its **Apps** section contains the declared
    detail view and an **App links** menu, scoped to that namespace.
 5. Disable or remove the app to remove its contributions, or install the same ID

@@ -1,4 +1,4 @@
-import { ExtensionManager } from "./Extensions";
+import { ClassicAppsNotice } from "./ClassicDeprecationBanner";
 import React, { useEffect, useRef, useState } from "react";
 import {
   Boxes,
@@ -171,6 +171,7 @@ export function SettingsView({
   contexts: passedContexts = null,
   contextsError = "",
   onDeleteContext,
+  unsavedDrafts = 0,
 }: {
   theme: Theme;
   onThemeNameChange: (name: ThemeName) => void;
@@ -190,6 +191,8 @@ export function SettingsView({
   contexts?: ClusterContext[] | null;
   contextsError?: string;
   onDeleteContext?: (name: string) => Promise<void>;
+  /** Open editor drafts, so the Apps notice can ask before its switch reloads the window. */
+  unsavedDrafts?: number;
 }) {
   // MCP and Updates are desktop-only surfaces (their content is already
   // isTauri()-gated below); drop the nav entries entirely on the web instead
@@ -1130,7 +1133,7 @@ export function SettingsView({
             </SectionPanel>
           )}
 
-          {section === "extensions" && <ExtensionManager />}
+          {section === "extensions" && <ClassicAppsNotice unsavedDrafts={unsavedDrafts} />}
           {section === "updates" && isTauri() && (
             <SectionPanel title="Updates" description="Check for and install new versions of srelens.">
               <div className="fl-settings-update">

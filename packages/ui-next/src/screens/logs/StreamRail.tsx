@@ -13,7 +13,8 @@ import {
   type QueryLine,
   type TermLine,
 } from "@srelens/core";
-import { Badge, Checkbox, Section, StatusPill, toneWash } from "@srelens/ui-kit";
+import { Badge, Checkbox, IconButton, Section, StatusPill, toneWash } from "@srelens/ui-kit";
+import { Icons } from "../../lib/icons";
 import { groupNumber } from "../../lib/numbers";
 
 /**
@@ -29,8 +30,7 @@ export interface StreamPod {
   name: string;
   /**
    * `rev 119`. Absent for a subject whose revision nothing has told us; the
-   * row then omits the label rather than drawing it blank, which is the rule
-   * `AboutKind` follows for a CRD field the cluster did not report.
+   * row then omits the label rather than drawing it blank.
    */
   revision?: string;
   /** Whether this pod's lines are in view. */
@@ -188,15 +188,15 @@ function FacetRow({
         </span>
         <span className="path shrink-0 text-faint">{groupNumber(count)}</span>
       </button>
-      <button
-        type="button"
+      <IconButton
+        icon={Icons.minus}
         aria-pressed={state === "exclude"}
-        aria-label={`Exclude ${name}`}
+        label={`Exclude ${name}`}
+        // The name is a term off the log, and a tooltip would put it on show.
+        title={null}
         onClick={() => onToggle("exclude")}
-        className="icon-btn shrink-0 opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 focus-visible:opacity-100 aria-pressed:opacity-100"
-      >
-        <span aria-hidden="true">−</span>
-      </button>
+        className="shrink-0 opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 focus-visible:opacity-100 aria-pressed:opacity-100"
+      />
     </div>
   );
 }

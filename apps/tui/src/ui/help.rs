@@ -36,7 +36,7 @@ pub fn render_help_modal(f: &mut Frame, area: Rect) {
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(Theme::border_type())
-        .border_style(Style::default().fg(Theme::accent()))
+        .border_style(Style::default().fg(Theme::border_focus()))
         .title(" SRElens & k9s Keybindings Cheat Sheet (Press Esc to close) ");
 
     let inner = block.inner(modal_area);

@@ -1,7 +1,8 @@
 import { useId, useRef, useState, type PointerEvent } from "react";
 import { GripVertical } from "lucide-react";
 import { deleteContext, describeError, isTauri, listContexts, removeClusterNamespace, unprefixedName, type ClusterContext } from "@srelens/core";
-import { Button, ConfirmDialog, CustomizeMark, Field, Mark, Switch, TextInput } from "@srelens/ui-kit";
+import { Button, ConfirmDialog, CustomizeMark, EmptyState, Field, FilterBar, KV, LoadingState, Mark, PaneIntro, Switch, TextInput, useListFilter } from "@srelens/ui-kit";
+import { FailureAlert } from "../../lib/errorCopy";
 import { getAssistantSaveError, setClusterAssistant, useAssistant } from "../../lib/assistant";
 import { getContexts, getKubeconfigFiles, setContexts, useContexts, useContextsError, useContextsStatus } from "../../lib/clusters";
 import { moveContext, moveContextBy, removeContextFromOrder, useOrderedContexts } from "../../lib/contextOrder";
@@ -22,21 +23,22 @@ function ContextEditor({ context, onRemove }: { context: ClusterContext; onRemov
       <TextInput value={mark.imageSrc ?? ""} onValueChange={imageSrc => setMark(context.stableId, { ...mark, imageSrc })} />
     </Field></div>}
     <div className="pane-head border-t border-rule">Connection details</div>
-    <dl className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-4 gap-y-2 p-3 text-[0.75rem]">
+    {/* Identifiers, so each stays whole on its line and scrolls (#1001). */}
+    <div className="p-3">
       {[["Context", context.name], ["Cluster", context.cluster], ["API server", context.server],
         ["Kubeconfig", context.sourceFile], ["Authentication", context.authKind],
-        ["Namespace", context.namespace || "default"]].map(([label, value]) => <div key={label} className="contents">
-        <dt className="text-muted">{label}</dt><dd className="overflow-x-auto whitespace-nowrap font-mono" title={value}>{value}</dd>
-      </div>)}
-    </dl>
+        ["Namespace", context.namespace || "default"]].map(([label, value]) =>
+        <KV key={label} k={label} v={value} mono wrap={false} />)}
+    </div>
     {/* #968: off-only. Global off wins, and this cluster's choice is kept for when it is back on. */}
     <div className="pane-head border-t border-rule">AI Assistant</div>
     <div className="p-3">
       <Switch label="Allow AI Assistant" on={!assistant.disabledClusters.includes(context.stableId)}
         disabled={!assistant.enabled} hint={assistant.enabled ? undefined : "Turned off for every cluster in Settings › AI Assistant."}
         onChange={on => setClusterAssistant(context.stableId, on)} />
-      {getAssistantSaveError() !== null && <p role="alert" className="mt-2 text-[0.75rem]" style={{ color: "var(--sev)" }}>
-        Could not save the AI Assistant setting: {describeError(getAssistantSaveError()).detail}</p>}
+      {getAssistantSaveError() !== null && (
+        <FailureAlert tone="sev" className="mt-2" title="Could not save the AI Assistant setting" error={getAssistantSaveError()} domain="local" />
+      )}
     </div>
     {isTauri() && <div className="border-t border-rule p-3"><Button variant="danger" onClick={onRemove}>Remove context</Button></div>}
   </section>;
@@ -48,7 +50,7 @@ export function ClustersPane() {
   const status = useContextsStatus();
   const listingError = useContextsError();
   const [selected, setSelected] = useState<string | null>(null);
-  const [query, setQuery] = useState("");
+  const filter = useListFilter();
   const [pending, setPending] = useState<ClusterContext | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
@@ -92,7 +94,7 @@ export function ClustersPane() {
   const current = contexts.find(c => c.stableId === selected) ?? contexts[0];
   const visible = contexts.filter(c => {
     const mark = getMark(c.stableId, c.name);
-    return [c.name, c.server, mark.name, mark.short].join(" ").toLowerCase().includes(query.toLowerCase());
+    return [c.name, c.server, mark.name, mark.short].some(filter.matches);
   });
   async function reload() {
     setBusy(true);
@@ -138,20 +140,16 @@ export function ClustersPane() {
     finally { setBusy(false); }
   }
   return <div className="context-management flex h-full min-h-0 flex-col">
-    <header className="flex flex-wrap items-center justify-between gap-2 border-b border-rule px-3 py-2">
-      <div><h2 className="text-[0.8125rem] font-semibold">Contexts</h2><p className="text-[0.75rem] text-muted">Names, appearance and order are shared with the classic design.</p></div>
-      <Button variant="secondary" onClick={() => openTab("/connections")}>Open Connections</Button>
-    </header>
-    {error && <p role="alert" className="border-b border-rule p-3 text-[0.75rem]">Could not remove context: {error}</p>}
-    {status === "failed" && <div role="alert" className="border-b border-rule p-3 text-[0.75rem]">
-      Could not list contexts: {describeError(listingError).raw} <Button disabled={busy} onClick={() => void reload()}>Retry</Button>
-    </div>}
-    {status === "loading" ? <p role="status" className="p-3 text-muted">Loading contexts…</p> : contexts.length === 0 ?
-      status !== "failed" && <p className="p-3 text-[0.75rem] text-muted">No contexts configured. Add a kubeconfig or cluster in Connections.</p> :
+    <PaneIntro title="Contexts" description="Names, appearance and order are shared with the classic design."
+      actions={<Button variant="secondary" onClick={() => openTab("/connections")}>Open Connections</Button>} />
+    {error && <FailureAlert tone="sev" className="m-3" title="Could not remove the context" error={error} domain="local" />}
+    {status === "failed" && <FailureAlert tone="sev" className="m-3" title="Could not list contexts" error={listingError} domain="local" onRetry={() => void reload()} />}
+    {status === "loading" ? <LoadingState label="Loading contexts" /> : contexts.length === 0 ?
+      status !== "failed" && <EmptyState title="No contexts configured" hint="Add a kubeconfig or cluster in Connections." /> :
       <div className="context-management-layout min-h-0 flex-1">
         <section aria-label="Context order" className="flex min-h-0 min-w-0 flex-col border-r border-rule">
-          <div className="border-b border-rule p-3"><TextInput aria-label="Filter contexts" placeholder="Filter contexts…" value={query} onValueChange={setQuery} />
-            <p id={reorderHint} className="mt-2 text-[0.6875rem] text-muted">Drag to reorder. Focus a handle and use ↑/↓ with a keyboard.</p></div>
+          <FilterBar {...filter} label="Filter contexts" placeholder="Filter contexts…" />
+          <p id={reorderHint} className="border-b border-rule px-3 py-1.5 text-[0.6875rem] text-muted">Drag to reorder. Focus a handle and use ↑/↓ with a keyboard.</p>
           <ul ref={list} className="scroll min-h-0 flex-1" aria-label="Contexts" onDragStart={event => event.preventDefault()}>{visible.map(context => {
             const mark = getMark(context.stableId, context.name);
             const index = contexts.indexOf(context);
@@ -183,7 +181,7 @@ export function ClustersPane() {
               </button>
             </li>;
           })}</ul>
-          {visible.length === 0 && <p className="p-3 text-[0.75rem] text-muted">No matching contexts.</p>}
+          {visible.length === 0 && <EmptyState compact title="No matching contexts" />}
         </section>
         {current && <ContextEditor key={current.stableId} context={current} onRemove={() => { setError(""); setPending(current); }} />}
       </div>}

@@ -4,7 +4,7 @@ import { listNamespaces, selectsNothing, type ClusterContext, type Collection } 
 /** How often a collection-scoped view reads the namespaces again. */
 export const RELIST_MS = 30_000;
 import type { NamespaceOptions } from "@srelens/core/react";
-import { Alert, Button, MultiSelect, PickerRow, RawError, Spinner } from "@srelens/ui-kit";
+import { Alert, Button, LoadingState, MultiSelect, PickerRow, RawError, Spinner } from "@srelens/ui-kit";
 import { friendly } from "../../lib/errorCopy";
 import { byRecentUse, useCollections } from "../../lib/collections";
 import { noteNamespaceListing, useCollectionScope, useListing } from "../../lib/collectionScope";
@@ -162,9 +162,11 @@ export function NamespaceScopePicker({
         }}
         footerExtra={
           <>
-            <button
+            <Button
               type="button"
-              className="btn whitespace-nowrap !py-0"
+              variant="secondary"
+              size="xs"
+              className="whitespace-nowrap"
               disabled={handPicked.length === 0}
               title={
                 handPicked.length > 0
@@ -176,16 +178,18 @@ export function NamespaceScopePicker({
               onClick={() => setSaving(handPicked)}
             >
               Save as collection…
-            </button>
-            <button
+            </Button>
+            <Button
               type="button"
-              className="btn ml-auto whitespace-nowrap !py-0"
+              variant="secondary"
+              size="xs"
+              className="ml-auto whitespace-nowrap"
               aria-label="Manage collections…"
               title="Manage collections in Settings"
               onClick={() => openSettings("collections")}
             >
               Manage…
-            </button>
+            </Button>
           </>
         }
       />
@@ -237,10 +241,7 @@ export function CollectionScopeNotice({ context }: { context: ClusterContext }) 
   }
   if (scope.status !== "ready" || !scope.resolution) {
     return (
-      <p className="mx-3 mt-2 flex items-center gap-1.5 text-[0.75rem] text-muted" role="status">
-        <Spinner label={`Working out ${names}`} />
-        Working out which namespaces {names} covers on {context.name}…
-      </p>
+      <LoadingState compact label={`Working out which namespaces ${names} covers on ${context.name}`} className="mx-3 mt-2" />
     );
   }
   const problems = scope.resolution.collections.filter((c) => c.problem);
@@ -289,12 +290,7 @@ export function CollectionNameNotice({ filter, noun }: { filter: CollectionNameF
     );
   }
   if (state.status === "matching") {
-    return (
-      <p className="mx-3 mt-2 flex items-center gap-1.5 text-[0.75rem] text-muted" role="status">
-        <Spinner label="Matching names" />
-        Narrowing {noun} to names matching {rules}…
-      </p>
-    );
+    return <LoadingState compact label={`Narrowing ${noun} to names matching ${rules}`} className="mx-3 mt-2" />;
   }
   if (state.problems.length > 0) {
     return (

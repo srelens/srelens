@@ -314,18 +314,18 @@ lUc3RsBva1V3RlPz+Jo=
   });
 
   describe("composition with GenericBody", () => {
-    it("states the Secret's namespace once and renders no Pods section", async () => {
-      const s = secret({ token: "" });
+    it("leaves the lead facts to the screen, and renders no Pods section", async () => {
+      const s = secret({ token: "" }, {}, { name: "s-1", namespace: "default", creationTimestamp: "2026-08-20T00:00:00Z" });
       render(
         <GenericBody kind="Secret" object={s} context="ctx">
           <SecretDetailsBody object={s} context="ctx" />
         </GenericBody>,
       );
       await waitFor(() => expect(getSecret).toHaveBeenCalled());
-      // The namespace is a fact the SCREEN draws, off the one derivation both
-      // screens read; neither wrapper nor body states it again.
-      expect(detailFacts({ kind: "Secret", object: s }).map((f) => f.label)).toContain("Namespace");
-      expect(screen.queryByText("Namespace")).toBeNull();
+      // The lead facts are the SCREEN's to draw, off the one derivation both
+      // screens read; neither wrapper nor body states them again.
+      expect(detailFacts({ kind: "Secret", object: s }).map((f) => f.label)).toContain("Created");
+      expect(screen.queryByText("Created")).toBeNull();
       expect(screen.queryAllByRole("heading", { name: "Pods" })).toHaveLength(0);
       expect(podsForSelector).not.toHaveBeenCalled();
     });
@@ -440,5 +440,41 @@ describe("when the values could not be read (getSecret refused, getObject's blan
     getSecret.mockRejectedValue(new Error(REFUSED));
     render(<SecretDetailsBody object={blanked(["token"])} context="ctx" />);
     await waitFor(() => expect(screen.getByText("This Secret's values could not be read")).toBeDefined());
+  });
+
+  it("reads the values again on Retry, and offers Reveal once they land", async () => {
+    render(<SecretDetailsBody object={blanked(["token"])} context="ctx" />);
+    const retry = await screen.findByRole("button", { name: "Retry" });
+
+    getSecret.mockResolvedValue({ data: { token: FIXTURE_B64 } });
+    await userEvent.click(retry);
+    await waitFor(() => expect((screen.getByRole("button", { name: "Reveal" }) as HTMLButtonElement).disabled).toBe(false));
+    expect(getSecret).toHaveBeenCalledTimes(2);
+    expect(screen.queryByText("This Secret's values could not be read")).toBeNull();
+  });
+
+  it("says it is reading on one line, not a page's worth of waiting", () => {
+    getSecret.mockImplementation(() => new Promise(() => {}));
+    render(
+      <SecretDetailsBody
+        object={blanked(["tls.crt", "tls.key"], { type: "kubernetes.io/tls" })}
+        context="ctx"
+      />,
+    );
+    expect(screen.getByRole("status").getAttribute("aria-label")).toBe("Reading this Secret's certificate and private key");
+    expect(document.body.innerHTML).not.toContain("py-16");
+  });
+});
+
+describe("a revealed value", () => {
+  it("sits in the content's own ink, at the size of a value (#1001)", async () => {
+    getSecret.mockResolvedValue({ data: { token: FIXTURE_B64 } });
+    render(<SecretDetailsBody object={secret({ token: "" })} context="ctx" />);
+    await waitFor(() => expect((screen.getByRole("button", { name: "Reveal" }) as HTMLButtonElement).disabled).toBe(false));
+    await userEvent.click(screen.getByRole("button", { name: "Reveal" }));
+    const value = document.querySelector("pre")!;
+    expect(value.className).toContain("text-ink");
+    expect(value.className).toContain("text-[0.75rem]");
+    expect(value.className).not.toContain("text-muted");
   });
 });

@@ -138,10 +138,6 @@ jobs:
         with:
           node-version-file: .nvmrc
           cache: pnpm
-      # tauri-build validates that frontendDist exists at compile time,
-      # so build the frontend before compiling the Rust workspace.
-      - run: pnpm install --frozen-lockfile
-      - run: pnpm build
       # Pinned by SHA, so `toolchain` has to be explicit: this action reads the
       # ref it was called by to decide which toolchain to install, and a SHA
       # names no channel.
@@ -149,8 +145,19 @@ jobs:
         with:
           toolchain: stable
           components: llvm-tools-preview
+      # Check every committed Cargo workspace lockfile before any
+      # repository-controlled install or build script can change it. `metadata`
+      # is built into Cargo, so an alias cannot replace it with a no-op.
+      - name: Verify Cargo.lock files are current
+        run: |
+          cargo metadata --locked --format-version 1 >/dev/null
+          cargo metadata --locked --manifest-path spikes/sidecar-sandbox/Cargo.toml --format-version 1 >/dev/null
+      # tauri-build validates that frontendDist exists at compile time,
+      # so build the frontend before compiling the Rust workspace.
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
       # Same reason: pinned, so the tool comes from an input rather than the tag.
-      - uses: taiki-e/install-action@1e29709c0ec63babbe8f266397a465f29a825f91 # v2
+      - uses: taiki-e/install-action@68a389c788b2cd04016ce8c80ee23b80d2ab3d68 # v2
         with:
           tool: cargo-llvm-cov
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
@@ -177,9 +184,9 @@ jobs:
           # anonymous runner pool 403s intermittently (krew/helm "latest").
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          cargo llvm-cov --no-report --workspace
-          cargo llvm-cov --no-report -p srelens-desktop --test e2e -- --ignored --nocapture --test-threads=1
-          cargo llvm-cov --no-report -p srelens-kube --test helm_lifecycle -- --ignored --nocapture --test-threads=1
+          cargo llvm-cov --locked --no-report --workspace
+          cargo llvm-cov --locked --no-report -p srelens-desktop --test e2e -- --ignored --nocapture --test-threads=1
+          cargo llvm-cov --locked --no-report -p srelens-kube --test helm_lifecycle -- --ignored --nocapture --test-threads=1
       - name: Enforce the coverage floor
         # Only the process entries stay excluded (the desktop app's lib.rs and
         # main.rs, the server's bin, and the TUI's main.rs — they execute solely

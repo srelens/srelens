@@ -9,7 +9,7 @@ import {
   setUiScale,
   uiScaleFactor,
 } from "@srelens/core";
-import { Button, Checkbox, Panel } from "@srelens/ui-kit";
+import { Button, Checkbox, Panel, Tabs } from "@srelens/ui-kit";
 import {
   ACCENTS,
   APPEARANCE_KEY,
@@ -379,29 +379,21 @@ export function AppearancePane({ ported, onSwitchToClassic }: AppearancePaneProp
               </span>
             </span>
             {/*
-              `data-variant="segmented"` and `min-w-0`: eight steps is wider
-              than this pane at any nav-rail layout, and the kit's variant makes
-              the control carry its own overflow instead of pushing the pane
-              sideways. Without the `min-w-0` the flex item's `min-width: auto`
-              refuses to shrink and the `max-width: 100%` inside never bites.
+              `min-w-0`: eight steps is wider than this pane at any nav-rail
+              layout, and the segmented variant carries its own overflow
+              instead of pushing the pane sideways. Without the `min-w-0` the
+              flex item's `min-width: auto` refuses to shrink and the
+              control's `max-width: 100%` never bites.
             */}
-            <span className="seg min-w-0 shrink" data-variant="segmented" role="radiogroup" aria-label="Interface zoom">
-              {ZOOM_STEPS.map((percent) => (
-                <label
-                  key={percent}
-                  className="seg-btn cursor-pointer has-[:focus-visible]:[outline:2px_solid_var(--accent)]"
-                  data-on={scale === percent}
-                >
-                  <input
-                    type="radio"
-                    name="next-zoom"
-                    className="sr-only"
-                    checked={scale === percent}
-                    onChange={() => pickScale(percent)}
-                  />
-                  <span data-testid="zoom-label">{percent}%</span>
-                </label>
-              ))}
+            <span className="min-w-0 shrink">
+              <Tabs
+                variant="segmented"
+                mode="radio"
+                label="Interface zoom"
+                tabs={ZOOM_STEPS.map((percent) => ({ id: String(percent), label: `${percent}%` }))}
+                active={String(scale)}
+                onChange={(percent) => pickScale(Number(percent))}
+              />
             </span>
           </div>
         ) : (
@@ -428,29 +420,21 @@ export function AppearancePane({ ported, onSwitchToClassic }: AppearancePaneProp
               Text size does not change; Interface zoom is what scales that.
             </span>
           </span>
-          {/* The variant here too, though three segments usually fit: with the
+          {/* Shrinkable here too, though three segments usually fit: with the
               row wrapped, the control gets its own line and `Comfortable` can
               still be wider than a narrow content pane. Carrying its own
               overflow keeps that from becoming a horizontal scroll on the
               whole page — which is what an un-shrinkable flex child does, and
               jsdom shows none of it. */}
-          <span className="seg min-w-0 shrink" data-variant="segmented" role="radiogroup" aria-label="Density">
-            {DENSITIES.map((option) => (
-              <label
-                key={option.id}
-                className="seg-btn cursor-pointer has-[:focus-visible]:[outline:2px_solid_var(--accent)]"
-                data-on={density === option.id}
-              >
-                <input
-                  type="radio"
-                  name="next-density"
-                  className="sr-only"
-                  checked={density === option.id}
-                  onChange={() => pickDensity(option.id)}
-                />
-                <span data-testid="density-label">{option.label}</span>
-              </label>
-            ))}
+          <span className="min-w-0 shrink">
+            <Tabs
+              variant="segmented"
+              mode="radio"
+              label="Density"
+              tabs={DENSITIES.map((option) => ({ id: option.id, label: option.label }))}
+              active={density}
+              onChange={(id) => pickDensity(id as DensityId)}
+            />
           </span>
         </div>
       </Panel>

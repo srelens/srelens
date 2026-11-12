@@ -490,6 +490,7 @@ mod tests {
             filter_buffer: String::new(),
             modal: None,
             show_help: false,
+            mux_state: None,
             toast: None,
             client_cache,
             watch_manager,
@@ -609,6 +610,7 @@ mod tests {
             filter_buffer: String::new(),
             modal: None,
             show_help: false,
+            mux_state: None,
             toast: None,
             client_cache,
             watch_manager,
@@ -740,6 +742,7 @@ mod tests {
             filter_buffer: String::new(),
             modal: None,
             show_help: false,
+            mux_state: None,
             toast: None,
             client_cache,
             watch_manager,
@@ -857,23 +860,29 @@ mod tests {
             Some("sk-test-openai-key")
         );
 
-        // 7. Test navigating past the last provider, which reaches the Agent
-        // card above the list, and then the first provider again.
-        // Currently at OpenAi (index 1), press 'j' 4 times to get back to Anthropic (index 0)
+        // 7. Test navigating past the last provider, which reaches the agent
+        // rows below the list, and then the first provider again.
+        // Currently at OpenAi (index 1), press 'j' 7 times to get back to Anthropic (index 0)
         app.handle_key_event(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE))
             .await; // Gemini (2)
         app.handle_key_event(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE))
             .await; // OpenAICompatible (3)
         app.handle_key_event(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE))
-            .await; // the Agent card
+            .await; // srelens, the first agent
         if let ActiveView::Settings(s) = &app.active_view {
-            assert!(s.agent_card_focused);
+            assert!(s.agents_focused);
+            assert_eq!(
+                s.focused_agent(),
+                srelens_agent::adapter::AgentKind::Srelens
+            );
         }
-        app.handle_key_event(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE))
-            .await; // Anthropic (0)
+        for _ in 0..4 {
+            app.handle_key_event(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE))
+                .await; // Claude Code, Codex, Cursor, then Anthropic (0)
+        }
 
         if let ActiveView::Settings(s) = &app.active_view {
-            assert!(!s.agent_card_focused);
+            assert!(!s.agents_focused);
             assert_eq!(s.current_provider(), AiProvider::Anthropic);
             assert_eq!(s.selected_field, SettingField::ProviderToggle);
         }
@@ -966,62 +975,69 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn k_from_the_first_provider_reaches_the_agent_card() {
+    async fn k_from_the_first_provider_wraps_to_the_last_agent() {
         use crossterm::event::KeyCode;
         use srectl::ai_config::AiProvider;
-        use srectl::views::SettingField;
-        let _settings = crate::common::env::isolate_settings();
-        let (mut app, _rx) = crate::common::app().await;
-        open_settings(&mut app).await;
-
-        app.handle_key_event(crate::common::ch('k')).await;
-        let s = settings_view(&app);
-        assert!(s.agent_card_focused);
-        assert_eq!(s.selected_field, SettingField::Agent);
-
-        // Up again wraps to the last provider; down comes back to the card
-        // and down once more to the first provider.
-        app.handle_key_event(crate::common::key(KeyCode::Up)).await;
-        assert_eq!(
-            settings_view(&app).current_provider(),
-            AiProvider::OpenAiCompatible
-        );
-        app.handle_key_event(crate::common::key(KeyCode::Down))
-            .await;
-        assert!(settings_view(&app).agent_card_focused);
-        app.handle_key_event(crate::common::ch('j')).await;
-        let s = settings_view(&app);
-        assert!(!s.agent_card_focused);
-        assert_eq!(s.current_provider(), AiProvider::Anthropic);
-    }
-
-    #[tokio::test]
-    async fn space_on_the_agent_field_moves_to_the_next_agent_and_saves() {
-        use crossterm::event::KeyCode;
         use srectl::views::SettingField;
         use srelens_agent::adapter::AgentKind;
         let _settings = crate::common::env::isolate_settings();
         let (mut app, _rx) = crate::common::app().await;
         open_settings(&mut app).await;
+
         app.handle_key_event(crate::common::ch('k')).await;
-        assert_eq!(settings_view(&app).selected_field, SettingField::Agent);
+        let s = settings_view(&app);
+        assert!(s.agents_focused);
+        assert_eq!(s.focused_agent(), AgentKind::Cursor);
+        assert_eq!(s.selected_field, SettingField::Agent);
+
+        // Up again is the agent above; down comes back to the last agent and
+        // down once more to the first provider.
+        app.handle_key_event(crate::common::key(KeyCode::Up)).await;
+        assert_eq!(settings_view(&app).focused_agent(), AgentKind::Codex);
+        app.handle_key_event(crate::common::key(KeyCode::Down))
+            .await;
+        assert_eq!(settings_view(&app).focused_agent(), AgentKind::Cursor);
+        app.handle_key_event(crate::common::ch('j')).await;
+        let s = settings_view(&app);
+        assert!(!s.agents_focused);
+        assert_eq!(s.current_provider(), AiProvider::Anthropic);
+    }
+
+    /// The cursor on agent row `idx` (srelens, Claude Code, Codex, Cursor),
+    /// reached as a user would: down from the last provider.
+    async fn go_to_agent(app: &mut srectl::app::App, idx: usize) {
+        match &mut app.active_view {
+            srectl::app::ActiveView::Settings(s) => {
+                s.agents_focused = false;
+                s.selected_provider_idx = 3;
+                s.selected_field = srectl::views::SettingField::ProviderToggle;
+            }
+            _ => panic!("expected the settings view"),
+        }
+        for _ in 0..=idx {
+            app.handle_key_event(crate::common::ch('j')).await;
+        }
+        assert!(settings_view(app).agents_focused);
+    }
+
+    #[tokio::test]
+    async fn space_on_an_agent_row_makes_it_the_assistants_agent_and_saves() {
+        use crossterm::event::KeyCode;
+        use srelens_agent::adapter::AgentKind;
+        let _settings = crate::common::env::isolate_settings();
+        let (mut app, _rx) = crate::common::app().await;
+        open_settings(&mut app).await;
         assert_eq!(app.ai_settings.agent, AgentKind::Srelens);
 
-        // Space, Enter and `e` each take one step: srelens, Claude Code,
-        // Codex, Cursor, and round to srelens.
-        let keys = [
-            crate::common::ch(' '),
-            crate::common::key(KeyCode::Enter),
-            crate::common::ch('e'),
-            crate::common::ch(' '),
+        // Space, Enter and `e` on an agent's row each make it the agent.
+        let steps = [
+            (3, crate::common::ch(' '), AgentKind::Cursor),
+            (2, crate::common::key(KeyCode::Enter), AgentKind::Codex),
+            (1, crate::common::ch('e'), AgentKind::Claude),
+            (0, crate::common::ch(' '), AgentKind::Srelens),
         ];
-        let agents = [
-            AgentKind::Claude,
-            AgentKind::Codex,
-            AgentKind::Cursor,
-            AgentKind::Srelens,
-        ];
-        for (k, agent) in keys.into_iter().zip(agents) {
+        for (row, k, agent) in steps {
+            go_to_agent(&mut app, row).await;
             app.handle_key_event(k).await;
             assert_eq!(app.ai_settings.agent, agent, "the Assistant follows");
             assert_eq!(settings_view(&app).settings.agent, agent);
@@ -1040,6 +1056,7 @@ mod tests {
             );
         }
 
+        go_to_agent(&mut app, 1).await;
         app.handle_key_event(crate::common::ch(' ')).await;
         let screen = crate::common::render_app(&mut app, 160, 40);
         assert!(
@@ -1052,7 +1069,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn e_on_the_agent_cards_model_field_opens_the_active_agents_picker() {
+    async fn e_on_an_agent_rows_model_field_opens_that_agents_picker() {
         use crossterm::event::KeyCode;
         use srectl::ai_config::AiProvider;
         use srectl::views::settings_view::PickerTarget;
@@ -1062,7 +1079,7 @@ mod tests {
         settings.remove_env("ANTHROPIC_API_KEY");
         let (mut app, _rx) = crate::common::app().await;
         open_settings(&mut app).await;
-        app.handle_key_event(crate::common::ch('k')).await;
+        go_to_agent(&mut app, 0).await;
         app.handle_key_event(crate::common::key(KeyCode::Tab)).await;
         assert_eq!(
             settings_view(&app).selected_field,
@@ -1077,18 +1094,18 @@ mod tests {
         app.handle_key_event(crate::common::key(KeyCode::Esc)).await;
         assert!(settings_view(&app).picker.is_none());
 
-        // Space on the card steps the agent whichever of its fields is
-        // focused; the Model field then lists that agent's models.
-        app.handle_key_event(crate::common::ch(' ')).await;
-        assert_eq!(app.ai_settings.agent, AgentKind::Claude);
+        // Down to Claude Code's Model: its own list, while srelens stays the
+        // agent.
+        app.handle_key_event(crate::common::ch('j')).await;
         app.handle_key_event(crate::common::key(KeyCode::Enter))
             .await;
         let picker = settings_view(&app).picker.as_ref().expect("a picker");
         assert_eq!(picker.target, PickerTarget::Agent(AgentKind::Claude));
+        assert_eq!(app.ai_settings.agent, AgentKind::Srelens);
     }
 
     #[tokio::test]
-    async fn cursors_api_key_is_set_and_cleared_on_the_agent_card_and_shown_masked() {
+    async fn cursors_api_key_is_set_and_cleared_on_its_row_and_shown_masked() {
         use crossterm::event::KeyCode;
         use srectl::views::SettingField;
         use srelens_agent::adapter::AgentKind;
@@ -1097,11 +1114,7 @@ mod tests {
         settings.remove_env("CURSOR_API_KEY");
         let (mut app, _rx) = crate::common::app().await;
         open_settings(&mut app).await;
-        match &mut app.active_view {
-            srectl::app::ActiveView::Settings(s) => s.settings.agent = AgentKind::Claude,
-            _ => panic!("expected the settings view"),
-        }
-        app.handle_key_event(crate::common::ch('k')).await;
+        go_to_agent(&mut app, 1).await;
 
         // Claude Code has no key of its own here: Agent, Model and Timeout.
         for _ in 0..3 {
@@ -1111,11 +1124,9 @@ mod tests {
         let screen = crate::common::render_app(&mut app, 160, 40);
         assert!(!screen.contains("cursor auth"), "{screen}");
 
-        // Cursor's card has its API Key, after its Model.
-        match &mut app.active_view {
-            srectl::app::ActiveView::Settings(s) => s.settings.agent = AgentKind::Cursor,
-            _ => panic!("expected the settings view"),
-        }
+        // Cursor's row has its API Key, after its Model.
+        app.handle_key_event(crate::common::ch('j')).await;
+        app.handle_key_event(crate::common::ch('j')).await;
         let screen = crate::common::render_app(&mut app, 160, 40);
         assert!(
             screen.contains("API Key: auto (uses logged-in cursor auth or CURSOR_API_KEY)"),
@@ -1160,16 +1171,16 @@ mod tests {
         );
         assert!(!screen.contains(KEY), "{screen}");
 
-        // Space from the key steps to an agent without one: back on Agent.
+        // Space from the key makes Cursor the agent; the cursor stays put.
         app.handle_key_event(crate::common::ch(' ')).await;
-        assert_eq!(app.ai_settings.agent, AgentKind::Srelens);
-        assert_eq!(settings_view(&app).selected_field, SettingField::Agent);
+        assert_eq!(app.ai_settings.agent, AgentKind::Cursor);
+        assert_eq!(settings_view(&app).selected_field, SettingField::ApiKey);
     }
 
-    /// A local agent's turn timeout is its own, set on the Agent card after
-    /// its model (and Cursor's key), and leaves the provider's alone.
+    /// A local agent's turn timeout is its own, set on its row after its
+    /// model (and Cursor's key), and leaves the provider's alone.
     #[tokio::test]
-    async fn a_local_agents_timeout_is_set_on_the_agent_card() {
+    async fn a_local_agents_timeout_is_set_on_its_row() {
         use crossterm::event::KeyCode;
         use srectl::views::SettingField;
         use srelens_agent::adapter::AgentKind;
@@ -1178,11 +1189,7 @@ mod tests {
         open_settings(&mut app).await;
         let provider = app.ai_settings.default_provider;
         let provider_timeout = app.ai_settings.get_timeout_seconds(provider);
-        match &mut app.active_view {
-            srectl::app::ActiveView::Settings(s) => s.settings.agent = AgentKind::Codex,
-            _ => panic!("expected the settings view"),
-        }
-        app.handle_key_event(crate::common::ch('k')).await;
+        go_to_agent(&mut app, 2).await;
         app.handle_key_event(crate::common::key(KeyCode::Tab)).await;
         app.handle_key_event(crate::common::key(KeyCode::Tab)).await;
         assert_eq!(settings_view(&app).selected_field, SettingField::Timeout);
@@ -1213,85 +1220,23 @@ mod tests {
 
     const CLAUDE_URL: &str = "https://docs.anthropic.com/en/docs/claude-code/setup";
 
-    /// The Settings view with Claude Code as the agent and no agent CLI
-    /// found (`common::app` looks for none), and the settings guard the app
-    /// was made under.
-    async fn open_settings_with_claude_missing(
-    ) -> (crate::common::env::SettingsGuard, srectl::app::App) {
-        let settings = crate::common::env::isolate_settings();
+    // The classic 80x24 terminal: 15 rows between the chrome, the view's
+    // frame and the hints.
+
+    #[tokio::test]
+    async fn on_80x24_a_missing_agents_row_says_in_full_where_to_get_it() {
+        let _settings = crate::common::env::isolate_settings();
         let (mut app, _rx) = crate::common::app().await;
         open_settings(&mut app).await;
-        match &mut app.active_view {
-            srectl::app::ActiveView::Settings(s) => {
-                s.settings.agent = srelens_agent::adapter::AgentKind::Claude
-            }
-            _ => panic!("expected the settings view"),
-        }
-        (settings, app)
-    }
+        go_to_agent(&mut app, 1).await;
 
-    // Through the real chrome (3 header rows, 2 footer rows, the view's border)
-    // Claude's full card (with its timeout row) needs a 41-row terminal.
-    #[tokio::test]
-    async fn a_folded_agent_card_still_says_whether_the_active_agent_is_installed() {
-        let (_settings, mut app) = open_settings_with_claude_missing().await;
-
-        let full = crate::common::render_app(&mut app, 120, 41);
-        assert!(full.contains("○ Codex"), "{full}");
-
-        let folded = crate::common::render_app(&mut app, 120, 40);
-        assert!(!folded.contains("○ Codex"), "{folded}");
-        assert!(
-            folded.contains(&format!(
-                "Agent: ● Claude Code · Default · not installed — {CLAUDE_URL}"
-            )),
-            "{folded}"
-        );
-    }
-
-    #[tokio::test]
-    async fn the_agent_card_is_drawn_in_full_while_it_has_the_cursor() {
-        let (_settings, mut app) = open_settings_with_claude_missing().await;
-        app.handle_key_event(crate::common::ch('k')).await;
-
-        let screen = crate::common::render_app(&mut app, 120, 39);
-        for row in ["○ srelens", "● Claude Code", "○ Codex", "○ Cursor"] {
-            assert!(screen.contains(row), "{row}: {screen}");
-        }
-        assert!(screen.contains("Model:   Default"), "{screen}");
-
-        // Back on a provider, the card folds again.
-        app.handle_key_event(crate::common::ch('j')).await;
-        let screen = crate::common::render_app(&mut app, 120, 39);
-        assert!(!screen.contains("○ Codex"), "{screen}");
-    }
-
-    #[tokio::test]
-    async fn an_install_link_wider_than_the_card_moves_to_its_own_line() {
-        let (_settings, mut app) = open_settings_with_claude_missing().await;
-
-        // The full card, with room: the row is 83 columns, the card 76.
-        let screen = crate::common::render_app(&mut app, 80, 60);
-        assert!(
-            screen.contains(&format!("not installed — {CLAUDE_URL}")),
-            "{screen}"
-        );
-
-        // The folded card on a classic 80x24 terminal.
         let screen = crate::common::render_app(&mut app, 80, 24);
-        assert!(!screen.contains("○ Codex"), "{screen}");
+        assert!(screen.contains("○ Claude Code"), "{screen}");
         assert!(
-            screen.contains(&format!("not installed — {CLAUDE_URL}")),
-            "{screen}"
-        );
-        assert!(
-            screen.contains("Agent: ● Claude Code · Default"),
+            screen.contains(&format!("Install: {CLAUDE_URL}")),
             "{screen}"
         );
     }
-
-    // The classic 80x24 terminal: 17 rows inside the chrome and the view's
-    // border, of which the description takes 3 and the hints 2.
 
     /// A fake `codex` as the only agent CLI the app finds, then the Settings
     /// view with `agent` active.
@@ -1322,66 +1267,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn on_80x24_an_installed_agent_shows_on_the_folded_card() {
-        let _settings = crate::common::env::isolate_settings();
-        let bin = tempfile::tempdir().unwrap();
-        let mut app =
-            open_settings_on_a_small_terminal(bin.path(), srelens_agent::adapter::AgentKind::Codex)
-                .await;
-
-        let screen = crate::common::render_app(&mut app, 80, 24);
-        assert!(
-            screen.contains("Agent: ● Codex · Default · installed"),
-            "{screen}"
-        );
-        assert!(screen.contains("1. Anthropic (Claude)"), "{screen}");
-    }
-
-    #[tokio::test]
-    async fn on_80x24_srelens_shows_on_the_folded_card_and_the_first_provider_keeps_its_fields() {
-        let _settings = crate::common::env::isolate_settings();
-        let bin = tempfile::tempdir().unwrap();
-        let mut app = open_settings_on_a_small_terminal(
-            bin.path(),
-            srelens_agent::adapter::AgentKind::Srelens,
-        )
-        .await;
-
-        let screen = crate::common::render_app(&mut app, 80, 24);
-        assert!(
-            screen.contains("Agent: ● srelens · Anthropic (Claude) · claude-3-7-sonnet-20250219"),
-            "{screen}"
-        );
-        // The providers fill the rows in order at their natural height; the
-        // first one has every row, and the rest are cut off at the bottom.
-        assert!(screen.contains("1. Anthropic (Claude)"), "{screen}");
-        assert!(screen.contains("API Key:"), "{screen}");
-        assert!(
-            screen.contains("Model:   claude-3-7-sonnet-20250219"),
-            "{screen}"
-        );
-    }
-
-    #[tokio::test]
-    async fn on_80x24_a_missing_agent_and_the_first_provider_are_both_readable() {
-        let _settings = crate::common::env::isolate_settings();
-        let bin = tempfile::tempdir().unwrap();
-        let mut app = open_settings_on_a_small_terminal(
-            bin.path(),
-            srelens_agent::adapter::AgentKind::Claude,
-        )
-        .await;
-
-        let screen = crate::common::render_app(&mut app, 80, 24);
-        assert!(
-            screen.contains(&format!("not installed — {CLAUDE_URL}")),
-            "{screen}"
-        );
-        assert!(screen.contains("1. Anthropic (Claude)"), "{screen}");
-    }
-
-    #[tokio::test]
-    async fn on_80x24_the_selected_provider_never_leaves_the_screen() {
+    async fn on_80x24_the_row_under_the_cursor_never_leaves_the_screen() {
         let _settings = crate::common::env::isolate_settings();
         let bin = tempfile::tempdir().unwrap();
         let mut app = open_settings_on_a_small_terminal(
@@ -1391,14 +1277,21 @@ mod tests {
         .await;
 
         for name in [
-            "2. OpenAI (GPT-4o)",
-            "3. Google Gemini",
-            "4. OpenAI-Compatible / Ollama (Local)",
+            "○ OpenAI",
+            "○ Google Gemini",
+            "○ OpenAI-Compatible / Ollama (Local)",
+            "● srelens (built-in)",
+            "○ Claude Code",
+            "○ Codex",
+            "○ Cursor",
+            "● Anthropic (Claude)",
         ] {
             app.handle_key_event(crate::common::ch('j')).await;
             let screen = crate::common::render_app(&mut app, 80, 24);
             assert!(screen.contains(name), "{name}: {screen}");
-            assert!(screen.contains("Agent: ● srelens"), "{name}: {screen}");
+            if name == "○ Codex" {
+                assert!(screen.contains("installed · Default"), "{screen}");
+            }
         }
     }
 
@@ -1440,6 +1333,7 @@ mod tests {
             filter_buffer: String::new(),
             modal: None,
             show_help: false,
+            mux_state: None,
             toast: None,
             client_cache,
             watch_manager,
@@ -1679,6 +1573,7 @@ mod tests {
             filter_buffer: String::new(),
             modal: None,
             show_help: false,
+            mux_state: None,
             toast: None,
             client_cache,
             watch_manager,
@@ -1877,6 +1772,7 @@ mod tests {
             filter_buffer: String::new(),
             modal: None,
             show_help: false,
+            mux_state: None,
             toast: None,
             client_cache,
             watch_manager,
@@ -2049,6 +1945,7 @@ mod tests {
             filter_buffer: String::new(),
             modal: None,
             show_help: false,
+            mux_state: None,
             toast: None,
             client_cache,
             watch_manager,
@@ -2437,6 +2334,7 @@ mod tests {
             filter_buffer: String::new(),
             modal: None,
             show_help: false,
+            mux_state: None,
             toast: None,
             client_cache,
             watch_manager,
@@ -2606,6 +2504,7 @@ mod tests {
             filter_buffer: String::new(),
             modal: None,
             show_help: false,
+            mux_state: None,
             toast: None,
             client_cache,
             watch_manager,
@@ -2725,6 +2624,7 @@ mod tests {
             filter_buffer: String::new(),
             modal: None,
             show_help: false,
+            mux_state: None,
             toast: None,
             client_cache,
             watch_manager,
@@ -2838,6 +2738,7 @@ mod tests {
             filter_buffer: String::new(),
             modal: None,
             show_help: false,
+            mux_state: None,
             toast: None,
             client_cache,
             watch_manager,
@@ -2968,6 +2869,7 @@ mod tests {
                     is_current: true,
                     is_local: false,
                     provider: Some("EKS".to_string()),
+                    distribution: None,
                     source_file: "config".to_string(),
                     auth_kind: "token".to_string(),
                 },
@@ -2983,6 +2885,7 @@ mod tests {
                     is_current: false,
                     is_local: true,
                     provider: Some("kind".to_string()),
+                    distribution: None,
                     source_file: "config".to_string(),
                     auth_kind: "client certificate".to_string(),
                 },
@@ -2999,6 +2902,7 @@ mod tests {
             filter_buffer: String::new(),
             modal: None,
             show_help: false,
+            mux_state: None,
             toast: None,
             client_cache,
             watch_manager,
@@ -3162,6 +3066,7 @@ mod tests {
                     is_current: true,
                     is_local: false,
                     provider: Some("EKS".to_string()),
+                    distribution: None,
                     source_file: "config".to_string(),
                     auth_kind: "token".to_string(),
                 },
@@ -3177,6 +3082,7 @@ mod tests {
                     is_current: false,
                     is_local: true,
                     provider: Some("kind".to_string()),
+                    distribution: None,
                     source_file: "config".to_string(),
                     auth_kind: "client certificate".to_string(),
                 },
@@ -3193,6 +3099,7 @@ mod tests {
             filter_buffer: String::new(),
             modal: None,
             show_help: false,
+            mux_state: None,
             toast: None,
             client_cache,
             watch_manager,
@@ -3363,6 +3270,7 @@ mod tests {
                     is_current: true,
                     is_local: false,
                     provider: Some("EKS".to_string()),
+                    distribution: None,
                     source_file: "config".to_string(),
                     auth_kind: "token".to_string(),
                 },
@@ -3378,6 +3286,7 @@ mod tests {
                     is_current: false,
                     is_local: false,
                     provider: Some("GKE".to_string()),
+                    distribution: None,
                     source_file: "config".to_string(),
                     auth_kind: "token".to_string(),
                 },
@@ -3398,6 +3307,7 @@ mod tests {
             filter_buffer: String::new(),
             modal: None,
             show_help: false,
+            mux_state: None,
             toast: None,
             client_cache,
             watch_manager,
@@ -3536,6 +3446,7 @@ mod tests {
             filter_buffer: String::new(),
             modal: None,
             show_help: false,
+            mux_state: None,
             toast: None,
             client_cache,
             watch_manager,
@@ -4071,6 +3982,7 @@ mod tests {
             toast: None,
             modal: None,
             show_help: false,
+            mux_state: None,
             client_cache,
             watch_manager,
             logs_manager,
@@ -4246,6 +4158,7 @@ mod tests {
             toast: None,
             modal: None,
             show_help: false,
+            mux_state: None,
             client_cache,
             watch_manager,
             logs_manager,
@@ -4537,6 +4450,7 @@ mod tests {
             filter_buffer: String::new(),
             modal: None,
             show_help: false,
+            mux_state: None,
             event_tx,
             client_cache,
             watch_manager,
@@ -4699,6 +4613,7 @@ mod tests {
             filter_buffer: String::new(),
             modal: None,
             show_help: false,
+            mux_state: None,
             event_tx,
             client_cache,
             watch_manager,
@@ -4856,6 +4771,7 @@ mod tests {
             filter_buffer: String::new(),
             modal: None,
             show_help: false,
+            mux_state: None,
             event_tx: tx,
             client_cache,
             watch_manager,
@@ -5091,6 +5007,7 @@ mod tests {
             filter_buffer: String::new(),
             modal: None,
             show_help: false,
+            mux_state: None,
             event_tx: tx,
             client_cache,
             watch_manager,
@@ -5324,6 +5241,7 @@ mod tests {
             filter_buffer: String::new(),
             modal: None,
             show_help: false,
+            mux_state: None,
             event_tx: tx,
             client_cache,
             watch_manager,
@@ -6369,6 +6287,7 @@ mod tests {
             filter_buffer: String::new(),
             modal: None,
             show_help: false,
+            mux_state: None,
             event_tx: tx,
             client_cache,
             watch_manager,
@@ -6603,6 +6522,7 @@ mod tests {
             filter_buffer: String::new(),
             modal: None,
             show_help: false,
+            mux_state: None,
             event_tx: tx,
             client_cache,
             watch_manager,
@@ -6892,6 +6812,7 @@ mod tests {
             filter_buffer: String::new(),
             modal: None,
             show_help: false,
+            mux_state: None,
             toast: None,
             client_cache,
             watch_manager,
@@ -7067,6 +6988,7 @@ mod tests {
             filter_buffer: String::new(),
             modal: None,
             show_help: false,
+            mux_state: None,
             toast: None,
             client_cache,
             watch_manager,
@@ -8177,6 +8099,7 @@ mod tests {
             filter_buffer: String::new(),
             modal: None,
             show_help: false,
+            mux_state: None,
             event_tx: tx,
             client_cache,
             watch_manager,
@@ -8405,6 +8328,7 @@ mod tests {
             filter_buffer: String::new(),
             modal: None,
             show_help: false,
+            mux_state: None,
             event_tx: tx,
             client_cache,
             watch_manager,
@@ -8579,6 +8503,7 @@ mod tests {
             filter_buffer: String::new(),
             modal: None,
             show_help: false,
+            mux_state: None,
             event_tx: tx,
             client_cache,
             watch_manager,
@@ -8801,6 +8726,7 @@ mod tests {
             filter_buffer: String::new(),
             modal: None,
             show_help: false,
+            mux_state: None,
             event_tx: tx,
             client_cache,
             watch_manager,

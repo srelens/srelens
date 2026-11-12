@@ -23,6 +23,7 @@ import {
   ConfirmDialog,
   DiffLines,
   EmptyState,
+  LoadingState,
   Screen,
   type EditorDiagnostic,
 } from "@srelens/ui-kit";
@@ -30,13 +31,11 @@ import { useAsk } from "../console";
 import { getKubeconfigFiles, useActiveContext } from "../lib/clusters";
 import { useClusterGate } from "../lib/clusterMoved";
 import { useProtection } from "../lib/protection";
-import { SLUG_BY_K8S_KIND, isCustomKind, resolveCrdGvk } from "../lib/crdGvk";
+import { deleteTarget, isCustomKind, resolveCrdGvk } from "../lib/crdGvk";
 import { parseEditRoute, parseNewRoute, type EditRouteParts } from "../lib/detailRoute";
 import { FailureAlert } from "../lib/errorCopy";
 import { collapseDiff, diffCounts } from "../lib/diffCollapse";
 import { keysAt, schemaCompletions, useManifestSchema } from "../lib/manifestSchema";
-import { CUSTOM_RESOURCE_ACTIONS } from "../lib/kinds/custom";
-import { descriptorFor } from "../lib/kinds/descriptors";
 import { useResource } from "../lib/useResource";
 import { EditAnalysis, ProblemsDot, type DryRunState } from "./EditAnalysis";
 import { NamespaceChoice, NoClusterScreen } from "./resourceShell";
@@ -434,8 +433,8 @@ function Changes({ docs, computing, error }: { docs: DiffDoc[] | null; computing
       </div>
     );
   }
-  if (computing && !docs) return <p className="p-3 text-sm text-muted">Comparing with the cluster…</p>;
-  if (!docs || docs.length === 0) return <p className="p-3 text-sm text-muted">No changes.</p>;
+  if (computing && !docs) return <LoadingState compact label="Comparing with the cluster" className="p-3" />;
+  if (!docs || docs.length === 0) return <EmptyState compact title="No changes" />;
   return (
     <div className="flex flex-col gap-4 p-3">
       {docs.map((d, i) => (
@@ -458,16 +457,6 @@ function EditExisting({ context, parts }: { context: ClusterContext; parts: Edit
   // — or, on a route with no group, when the kind is outside the built-in
   // table.
   const custom = isCustomKind(kind, parts.group);
-
-  // Whether Delete is offered at all: the same verdict the list menu and the
-  // detail footer reach from the kind's descriptor. `k8s.deleteResource`
-  // resolves kinds from a closed table with no CRD path — the manifest read
-  // below is told a custom kind's group, delete cannot be — so for a custom
-  // resource it fails every time, after a confirm that read as real; and for
-  // a custom kind that shares a built-in's name it would delete the built-in.
-  // See `KindActions.delete`.
-  const actions = custom ? CUSTOM_RESOURCE_ACTIONS : descriptorFor(SLUG_BY_K8S_KIND[kind])?.actions;
-  const canDelete = actions?.delete !== false;
 
   /**
    * A Secret's values stay out of the DOM until the reader reveals them.
@@ -604,7 +593,8 @@ function EditExisting({ context, parts }: { context: ClusterContext; parts: Edit
     }
     setDeleteBusy(true);
     setDeleteError("");
-    const out = await deleteResource(pinned, kind, namespace, name);
+    const { crd, error } = await deleteTarget(pinned, kind, parts.group);
+    const out = error ? { error } : await deleteResource(pinned, kind, namespace, name, undefined, crd);
     setDeleteBusy(false);
     if (out.error) {
       setDeleteError(describeError(out.error).detail);
@@ -694,18 +684,16 @@ function EditExisting({ context, parts }: { context: ClusterContext; parts: Edit
           >
             {analysis.dryRun.status === "running" ? "Dry run…" : "Dry run"}
           </Button>
-          {canDelete && (
-            <Button
-              variant="danger"
-              onClick={() => {
-                setDeleteError("");
-                editor.gate.reset();
-                setDeleting(true);
-              }}
-            >
-              Delete
-            </Button>
-          )}
+          <Button
+            variant="danger"
+            onClick={() => {
+              setDeleteError("");
+              editor.gate.reset();
+              setDeleting(true);
+            }}
+          >
+            Delete
+          </Button>
           <Button
             variant="primary"
             disabled={
@@ -756,7 +744,7 @@ function EditExisting({ context, parts }: { context: ClusterContext; parts: Edit
               gutter; a document does not. */}
           <div className="min-h-0 min-w-0 flex-1">
             {manifest.status === "loading" ? (
-              <p className="p-3 text-sm text-muted">Loading the manifest…</p>
+              <LoadingState label="Loading the manifest" />
             ) : manifest.status === "error" ? null : (
               <CodeEditor
                 value={yaml}

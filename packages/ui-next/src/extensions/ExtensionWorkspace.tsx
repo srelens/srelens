@@ -2,12 +2,17 @@ import { ExtensionLogo } from "./ExtensionLogo";
 import { ExtensionRequirements } from "./ExtensionRequirements";
 import { AgeCell } from "../lib/ageCell";
 import { useNamespaceOptions } from "@srelens/core/react";
-import { Fragment, useContext, useEffect, useState } from "react";
+import { Fragment, useEffect, useMemo, useState } from "react";
+import { createPortal } from "react-dom";
 import {
+  ageSortValue,
+  eventVerdict,
   loadKubeconfigFiles,
   onExtensionResourceChanged,
   readExtension,
   itemStatuses,
+  rowInSelection,
+  type ClusterContext,
   type ExtensionDashboardCard,
   type ExtensionPage,
   type InstalledExtension,
@@ -16,11 +21,19 @@ import {
 } from "@srelens/core";
 import { AppCards } from "./DashboardCards";
 import { plainText } from "./displayText";
-import { STATUS_WORD } from "./StatusBadge";
-import { ExtensionControls } from "./ExtensionControls";
-import { ErrorNotice, ExtensionResults } from "./ExtensionResults";
+import { STATUS_WORD } from "./AppStatus";
+import { Button, ColumnPicker, EmptyState, FilterBar, LoadingState, StatusPill, Table, Tabs, Toolbar, filterMatcher, tableFilterError, type Column } from "@srelens/ui-kit";
+import { ExtensionResults } from "./ExtensionResults";
 import { useResource } from "../lib/useResource";
 import { LiveNotice, LiveReaders, LiveStatus, useLiveReaders } from "./liveReaders";
+import { readAcross, readerKind, readerNamespaces, readsClusterScope } from "./readAcross";
+import { nameFilterAnswered, useCollectionNameFilter } from "../lib/collectionNameFilter";
+import { FailureAlert, FailureState, NamespaceFailuresAlert } from "../lib/errorCopy";
+import { useFallbackNamespace, useInCollectionScope, useNamespaces, useSetNamespaces } from "../lib/workspace";
+import { CollectionNameNotice, CollectionScopeNotice, NamespaceScopePicker } from "../screens/collections/NamespaceScope";
+import { ListCount } from "../screens/ListCount";
+import { StaleSelectionAlert, columnOptionsFor, emptyTableCopy, useResourceTabView } from "../screens/resourceShell";
+import { toggleColumn, useHiddenColumns } from "../lib/columnPrefs";
 
 // The six normalized statuses (#541), each counted and listed by its word:
 // the legend names every one, zero included, so no colour is the only signal.
@@ -97,40 +110,39 @@ function Summary({
   plugin,
   page,
   context,
-  namespace,
+  clusterId,
+  namespaces: selected,
   refresh,
   onPage,
 }: {
   plugin: InstalledExtension;
   page: ExtensionPage;
   context: string;
-  namespace: string;
+  clusterId: string;
+  namespaces: string[];
   refresh: number;
   onPage(id: string): void;
 }) {
-  const { Button } = useContext(ExtensionControls);
+  const namespaces = readerNamespaces(plugin, page.capability, selected);
   const data = useResource(
-    () =>
-      readExtension(
-        plugin.manifest.id,
-        plugin.revision,
-        page.capability,
-        context,
-        namespace,
-      ),
+    async () => {
+      const { answers, failures } = await readAcross(namespaces, (namespace) =>
+        readExtension(plugin.manifest.id, plugin.revision, page.capability, context, namespace));
+      return { items: answers.flatMap((answer) => answer.items), failures };
+    },
     [
       plugin.manifest.id,
       plugin.revision,
       page.capability,
       context,
-      namespace,
+      namespaces.join("\u0000"),
       refresh,
     ],
   );
   const { reload } = data;
   // Counts follow the reader's kind (#566), re-read in place on every change.
   const live = useLiveReaders({
-    plugin, capabilities: [page.capability], context, namespace, label: `summary:${page.id}`, onChange: data.refresh,
+    plugin, capabilities: [page.capability], context, namespaces, label: `summary:${page.id}`, onChange: data.refresh,
   });
   // Status counts change when an action on one of these resources is accepted.
   useEffect(
@@ -140,15 +152,17 @@ function Summary({
           changed.id === plugin.manifest.id &&
           changed.context === context &&
           changed.capability === page.capability &&
-          (!namespace || changed.namespace === namespace)
+          rowInSelection(changed.namespace, namespaces)
         )
           reload();
       }),
-    [plugin.manifest.id, context, page.capability, namespace, reload],
+    [plugin.manifest.id, context, page.capability, namespaces.join("\u0000"), reload],
   );
+  // The same rows the page's list shows once a collection's name filter narrows it.
+  const nameFilter = useCollectionNameFilter(clusterId, readerKind(plugin, page.capability), data.data?.items ?? []);
   // The host's resolved status per row; a page still on the deprecated
   // `statusColumns` is read through the same mapping (`itemStatus`).
-  const resolved = itemStatuses(data.data?.items ?? [], page.statusColumns);
+  const resolved = itemStatuses(nameFilter.apply(data.data?.items ?? []), page.statusColumns);
   const counts = statuses.map((status) => resolved.filter((found) => found === status).length);
   const total = counts.reduce((a, b) => a + b, 0);
   const ring = donutBackground(
@@ -162,11 +176,13 @@ function Summary({
       {/* In words, where the counts are: a tint or a tooltip alone says nothing to most readers. */}
       <LiveStatus live={live} />
       <LiveNotice live={live} what="counts" />
+      <NamespaceFailuresAlert what={plainText(page.title).toLowerCase()} failures={data.data?.failures ?? []} />
+      <CollectionNameNotice filter={nameFilter} noun={plainText(page.title).toLowerCase()} />
       {data.status === "error" ? (
-        <ErrorNotice cluster message={data.error} retry={data.reload} />
+        <FailureState error={data.error} onRetry={data.reload} />
       ) : data.status === "loading" ? (
-        <p role="status">Loading…</p>
-      ) : (
+        <LoadingState compact label={`Counting ${plainText(page.title).toLowerCase()}`} />
+      ) : !nameFilterAnswered(nameFilter) ? null : (
         <div className="extension-summary-body">
           <div
             className="extension-donut"
@@ -188,345 +204,306 @@ function Summary({
     </section>
   );
 }
+const eventKey = (event: EventSummary) => `${event.namespace}/${event.name}`;
+const EVENT_PINNED = "message";
+const EVENT_COLUMNS: Column<EventSummary>[] = [
+  {
+    key: "type",
+    header: "Type",
+    render: (event) => {
+      const { health, bad } = eventVerdict(event.type);
+      return <StatusPill status={event.type || "—"} kind={health} tinted={bad} />;
+    },
+  },
+  { key: EVENT_PINNED, header: "Message", sortable: false, render: (event) => <span className="block max-w-[32rem] truncate" title={event.message}>{event.message}</span> },
+  { key: "namespace", header: "Namespace", render: (event) => event.namespace || "—" },
+  { key: "object", header: "Involved object", render: (event) => event.object || "—" },
+  { key: "source", header: "Source", render: (event) => event.source || "—" },
+  { key: "count", header: "Count", align: "end" },
+  {
+    key: "firstAge",
+    header: "Age",
+    align: "end",
+    getSortValue: (event) => ageSortValue({ created: event.firstCreated, age: event.firstAge }),
+    render: (event) => <AgeCell created={event.firstCreated} age={event.firstAge} />,
+  },
+  { key: "age", header: "Last seen", align: "end", getSortValue: ageSortValue, render: (event) => <AgeCell created={event.created} age={event.age} /> },
+];
+
 function Events({
   plugin,
   config,
   context,
-  namespace,
+  namespaces,
   search,
+  regex,
   refresh,
+  header,
 }: {
   plugin: InstalledExtension;
   config: NonNullable<
     NonNullable<ExtensionPage["dashboard"]>["events"]
   >;
   context: string;
-  namespace: string;
+  namespaces: string[];
   search: string;
+  regex: boolean;
   refresh: number;
+  header: HTMLElement | null;
 }) {
   const result = useResource(
-    () =>
-      readExtension<{ events: EventSummary[]; truncated?: boolean }>(
-        plugin.manifest.id,
-        plugin.revision,
-        config.capability,
-        context,
-        namespace,
-      ),
+    async () => {
+      const { answers, failures } = await readAcross(namespaces, (namespace) =>
+        readExtension<{ events: EventSummary[]; truncated?: boolean }>(plugin.manifest.id, plugin.revision, config.capability, context, namespace));
+      return { events: answers.flatMap((answer) => answer.events ?? []), truncated: answers.some((answer) => answer.truncated), failures };
+    },
     [
       plugin.manifest.id,
       plugin.revision,
       config.capability,
       context,
-      namespace,
+      namespaces.join("\u0000"),
       refresh,
     ],
   );
   const live = useLiveReaders({
-    plugin, capabilities: [config.capability], context, namespace, label: "events", onChange: result.refresh,
+    plugin, capabilities: [config.capability], context, namespaces, label: "events", onChange: result.refresh,
   });
-  // Bound how many matching rows enter the DOM; Load more reveals the next page
-  // of the already-capped backend result (#609).
-  const PAGE = 100;
-  const [visible, setVisible] = useState(PAGE);
-  useEffect(() => {
-    setVisible(PAGE);
-  }, [plugin.manifest.id, plugin.revision, config.capability, context, namespace, search, refresh]);
+  const columnsKey = `extension:${plugin.manifest.id}:${config.capability}`;
+  const hidden = useHiddenColumns(columnsKey);
+  const columns = useMemo(() => EVENT_COLUMNS.filter((column) => column.key === EVENT_PINNED || !hidden.has(column.key)), [hidden]);
   if (result.status === "error")
-    return <ErrorNotice cluster message={result.error} retry={result.reload} />;
-  if (result.status === "loading")
-    return (
-      <p className="extension-message" role="status">
-        Loading events…
-      </p>
-    );
-  const events = (result.data?.events ?? []).filter(
-    (event) =>
-      config.apiGroups.includes(event.objectApiVersion?.split("/")[0] ?? "") &&
-      [event.message, event.object, event.namespace, event.reason, event.source]
-        .join(" ")
-        .toLowerCase()
-        .includes(search.toLowerCase()),
+    return <FailureState error={result.error} onRetry={result.reload} />;
+  if (result.status === "loading") return <LoadingState compact label="Loading events" />;
+  const matches = filterMatcher(search, regex);
+  const ours = (result.data?.events ?? []).filter((event) => config.apiGroups.includes(event.objectApiVersion?.split("/")[0] ?? ""));
+  const events = ours.filter((event) =>
+    [event.message, event.object, event.namespace, event.reason, event.source].some((value) => matches(value ?? "")),
   );
-  const shown = events.slice(0, visible);
-  const hidden = Math.max(0, events.length - shown.length);
   return (
     <section className="extension-results">
-      <h3 className="extension-message">
-        Events <small>({events.length}{result.data?.truncated ? "+" : ""})</small>
-      </h3>
+      <div className="extension-resource-list">
+      <h3 className="extension-message">Events</h3>
+      {header && createPortal(
+        <>
+          <ListCount total={ours.length} shown={events.length} truncated={result.data?.truncated} noun="events" />
+          <ColumnPicker columns={columnOptionsFor(EVENT_COLUMNS)} hidden={hidden} onToggle={(key) => toggleColumn(columnsKey, key)} pinnedKey={EVENT_PINNED} />
+        </>,
+        header,
+      )}
+      <NamespaceFailuresAlert what="events" failures={result.data?.failures ?? []} />
       <LiveNotice live={live} what="events" />
       {result.data?.truncated && (
         <p className="extension-message" role="status">
           Showing the first {(result.data.events ?? []).length.toLocaleString()} events; more remain on the cluster.
         </p>
       )}
-      {shown.length ? (
-        <div className="extension-table-scroll">
-          <table>
-            <thead>
-              <tr>
-                {[
-                  "Type",
-                  "Message",
-                  "Namespace",
-                  "Involved object",
-                  "Source",
-                  "Count",
-                  "Age",
-                  "Last seen",
-                ].map((h) => (
-                  <th key={h}>{h}</th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {shown.map((e) => (
-                <tr key={e.name}>
-                  <td>{e.type}</td>
-                  <td title={e.message}>{e.message}</td>
-                  <td>{e.namespace}</td>
-                  <td>{e.object}</td>
-                  <td>{e.source || "—"}</td>
-                  <td>{e.count}</td>
-                  <td><AgeCell created={e.firstCreated} age={e.firstAge} /></td>
-                  <td><AgeCell created={e.created} age={e.age} /></td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-          {hidden > 0 && (
-            <p className="extension-message">
-              <button type="button" className="extension-resource-link" onClick={() => setVisible((n) => n + PAGE)}>
-                Show {Math.min(PAGE, hidden).toLocaleString()} more
-              </button>
-              <span> · {hidden.toLocaleString()} matching rows not shown</span>
-            </p>
-          )}
-        </div>
-      ) : (
-        <p className="extension-message">No matching events.</p>
-      )}
+      <div className="extension-table-scroll">
+        <Table
+          columns={columns}
+          data={events}
+          getRowKey={eventKey}
+          {...(ours.length ? emptyTableCopy(ours.length, "events", "", "") : { emptyText: "No events", emptyHint: "This app's resources have no recent events." })}
+        />
+      </div>
+      </div>
     </section>
   );
 }
 
 /** The same host-resolved figures as the cluster overview, following this page's readers. */
-function OverviewCards({plugin,context,namespace,refresh,onOpen}: {
-  plugin: InstalledExtension; context: string; namespace: string; refresh: number;
+function OverviewCards({plugin,context,namespaces,refresh,onOpen}: {
+  plugin: InstalledExtension; context: string; namespaces: string[]; refresh: number;
   onOpen(card: ExtensionDashboardCard): void;
 }) {
   const [pulse,setPulse] = useState(0);
   const cards = plugin.manifest.contributions.dashboardCards ?? [];
-  const live = useLiveReaders({plugin,context,namespace,capabilities:cards.map(card=>card.source),label:"overview:cards",onChange:()=>setPulse(n=>n+1)});
+  const live = useLiveReaders({plugin,context,namespaces,capabilities:cards.map(card=>card.source),label:"overview:cards",onChange:()=>setPulse(n=>n+1)});
   useEffect(()=>onExtensionResourceChanged(changed=>{
-    if (changed.id===plugin.manifest.id && changed.context===context && cards.some(card=>card.source===changed.capability) && (!namespace || changed.namespace===namespace)) setPulse(n=>n+1);
-  }),[plugin.manifest.id,context,namespace,cards.map(card=>card.source).join("\u0000")]);
+    if (changed.id===plugin.manifest.id && changed.context===context && cards.some(card=>card.source===changed.capability) && rowInSelection(changed.namespace,namespaces)) setPulse(n=>n+1);
+  }),[plugin.manifest.id,context,namespaces.join("\u0000"),cards.map(card=>card.source).join("\u0000")]);
   return <>
     <div className="extension-overview-live"><LiveStatus live={live}/><LiveNotice live={live} what="figures"/></div>
-    <AppCards plugin={plugin} host={context} selection={namespace?[namespace]:[]} refresh={refresh} pulse={pulse} cards={cards} onOpen={onOpen} previewLists/>
+    <AppCards plugin={plugin} host={context} selection={namespaces} refresh={refresh} pulse={pulse} cards={cards} onOpen={onOpen} previewLists/>
   </>;
 }
-
-/** The picker value standing for a card target's own namespaces; never a namespace name. */
-const CARD_SCOPE = "\u0000card";
 
 /** Native, data-only extension workspace. Every reader stays pinned to this route's context. */
 export function ExtensionWorkspace({
   plugin,
   page,
+  cluster,
   context,
-  namespace: initialNamespace = "",
+  route,
+  actions,
+  namespace: cardNamespace = "",
   onPage,
   onCard,
-  onNamespace,
-  card: routeCard,
+  card,
   cardNamespaces,
-  onLeaveCard,
 }: {
   plugin: InstalledExtension;
   page: ExtensionPage;
+  /** The cluster this route names, whose namespaces the tab has selected. */
+  cluster: ClusterContext;
+  /** Its pinned ID, which the host is asked by. */
   context: string;
+  /** This tab's route, which its filter is kept with. */
+  route: string;
+  /** Where the page's header actions go, in the screen's header. */
+  actions: HTMLElement | null;
+  /** On a card's target: the one namespace it counted in. */
   namespace?: string;
-  onPage?(id: string, namespace: string): void;
-  onCard?(id: string, namespace: string, card: string): void;
-  onNamespace?(namespace: string): void;
+  onPage(id: string): void;
+  onCard(id: string, namespaces: string[], card: string): void;
   /** A dashboard card whose rows the page shows (#540); the whole list when absent. */
   card?: string;
   /** The several namespaces the card counted in, when it counted in more than one. */
   cardNamespaces?: string[];
-  /** On a card's target: the picker chose another namespace, whose plain page this is not. */
-  onLeaveCard?(namespace: string): void;
 }) {
-  const { Button, Combobox } = useContext(ExtensionControls);
-  const [localPage, setLocalPage] = useState(page.id);
-  const [localCard,setLocalCard] = useState<{id:string;namespace:string}>();
-  const card = routeCard ?? localCard?.id;
-  const [selectedNamespace, setNamespace] = useState(initialNamespace);
-  const [search, setSearch] = useState("");
+  const view = useResourceTabView(route, []);
   const [refresh, setRefresh] = useState(0);
-  const {namespaces, scope, error:namespaceError} = useNamespaceOptions(context, loadKubeconfigFiles(), refresh);
+  const namespaceOptions = useNamespaceOptions(context, loadKubeconfigFiles(), refresh);
+  const {namespaces: listed, scope, error:namespaceError} = namespaceOptions;
+  const selection = useNamespaces(cluster.stableId);
+  const setNamespaces = useSetNamespaces();
+  useFallbackNamespace(cluster.stableId, scope);
+  const scopedByCollection = useInCollectionScope(cluster.stableId);
+  const [count, setCount] = useState<HTMLElement | null>(null);
+  const [bulkBar, setBulkBar] = useState<HTMLElement | null>(null);
   // A card's target reads exactly the namespaces the card counted in — one (in
   // the route's path), several (its list) or every one — and nothing else: its
   // route, not a restricted credential's one namespace or the picker, says what
   // the page shows. A credential that cannot read them gets the host's refusal
   // for the card's scope, never quietly another namespace's rows.
-  const namespace = routeCard ? initialNamespace : localCard ? localCard.namespace : scope || selectedNamespace;
-  // What the picker shows on a card's target: the card's scope, whatever it is.
-  const cardScope = card
-    ? namespace || (cardNamespaces?.length ? cardNamespaces.join(", ") : "All namespaces")
-    : "";
-  const current = onPage && !localCard
-    ? page
-    : (plugin.manifest.contributions.pages.find((p) => p.id === localPage) ??
-      page);
-  const navigate = (id: string) => {
-    setSearch("");
-    setLocalCard(undefined);
-    if (onPage) onPage(id, namespace);
-    else setLocalPage(id);
-  };
-  const openCard = (card: ExtensionDashboardCard) => {
-    if (!card.target) return;
-    setSearch("");
-    if (onCard) onCard(card.target.page,namespace,card.id);
-    else {setLocalPage(card.target.page);setLocalCard({id:card.id,namespace});}
-  };
-  const cards = plugin.manifest.contributions.dashboardCards ?? [];
+  const namespaces = card
+    ? cardNamespace ? [cardNamespace] : cardNamespaces ?? []
+    : scope && !scopedByCollection ? [scope] : selection;
   const pages = plugin.manifest.contributions.pages;
+  const cards = plugin.manifest.contributions.dashboardCards ?? [];
+  // Every reader this page shows. A dashboard's own capability reads nothing of it.
+  const readers = page.dashboard
+    ? [
+        ...pages.filter((p) => page.dashboard!.pages.includes(p.id)).map((p) => p.capability),
+        ...(page.dashboard.events ? [page.dashboard.events.capability] : []),
+        ...cards.map((card) => card.source),
+      ]
+    : [page.capability];
+  const clusterScoped = readers.every((reader) => readsClusterScope(plugin, reader));
   const groups = [...new Set(pages.map((p) => p.group ?? p.title))];
-  if (!context)
-    return (
-      <p className="extension-message">
-        Choose a cluster before opening an app page.
-      </p>
-    );
+  const openCard = (opened: ExtensionDashboardCard) => {
+    if (opened.target) onCard(opened.target.page, namespaces, opened.id);
+  };
+  if (!context) return <EmptyState title="No cluster in focus" hint="Pick a cluster in the rail to open this app page." />;
+  const noun = page.dashboard ? "events" : plainText(page.title).toLowerCase();
+  const scopeControl = card
+    ? <span className="extension-card-scope">{cardNamespace || cardNamespaces?.join(", ") || "All namespaces"}</span>
+    : !clusterScoped && <NamespaceScopePicker context={cluster} options={namespaceOptions} />;
   return (
     // One view (#566): every reader this page shows is watched once, and the
     // watches end with the page.
     <LiveReaders plugin={plugin} label={`page:${page.id}`}>
-    <div className="extension-workspace">
-      <nav
-        className="extension-toolbar extension-navigation"
-        aria-label={`${plugin.manifest.name} pages`}
-      >
-        <ExtensionLogo icon={plugin.icon} name={plugin.manifest.name} />
-        {groups.map((group) => (
-          <Button
-            key={group}
-            variant="ghost"
-            aria-pressed={(current.group ?? current.title) === group}
-            onClick={() =>
-              navigate(pages.find((p) => (p.group ?? p.title) === group)!.id)
-            }
-          >
-            {group}
-          </Button>
-        ))}
-      </nav>
-      {current.group && (
-        <nav
-          className="extension-toolbar extension-navigation extension-subnavigation"
-          aria-label={`${current.group} pages`}
-        >
-          {pages
-            .filter((p) => p.group === current.group)
-            .map((p) => (
-              <Button
-                key={p.id}
-                variant="ghost"
-                aria-pressed={p.id === current.id}
-                onClick={() => navigate(p.id)}
-              >
-                {p.title}
-              </Button>
-            ))}
-        </nav>
-      )}
-      <ExtensionRequirements plugin={plugin} page={current} context={context} refresh={refresh}>
-      <div className="extension-toolbar extension-filters">
-        {namespaces === null ? <Button variant="secondary" disabled>Loading namespaces…</Button> : <Combobox
-          ariaLabel="App namespace"
-          value={cardScope ? CARD_SCOPE : namespace}
-          onValueChange={(value) => {
-            if (value === CARD_SCOPE) return;
-            // A card's target shows what the card counted, where it counted it.
-            // Another namespace is another page: leave the card's route for it,
-            // and keep this one showing what its route says.
-            if (card && onLeaveCard) { onLeaveCard(value); return; }
-            if (localCard) { setLocalCard(undefined); onPage?.(current.id,value); }
-            setNamespace(value); onNamespace?.(value);
-          }}
-          options={[
-            ...(cardScope ? [{ value: CARD_SCOPE, label: cardScope }] : []),
-            // The card's scope is named once: an ordinary entry with the same
-            // label (`prod`, or "All namespaces") would be a second, identical
-            // choice that left the card for the plain page.
-            ...[
-              ...(scope ? [] : [{ value: "", label: "All namespaces" }]),
-              ...(namespaces ?? []).map(n=>({value:n,label:n})),
-            ].filter((option) => option.label !== cardScope),
-          ]}
-          placeholder={
-            namespaces === null
-              ? "Loading namespaces…"
-              : "Namespace"
-          }
-        />}
-        {(!current.dashboard || current.dashboard.events) && <input
-          className="extension-search"
-          aria-label="Search app resources"
-          placeholder={
-            current.dashboard ? "Search events…" : "Search resources…"
-          }
-          value={search}
-          onChange={(e) => setSearch(e.target.value)}
-        />}
+    {actions && createPortal(
+      <>
+        <span ref={setCount} className="contents" />
         <Button variant="secondary" onClick={() => setRefresh((v) => v + 1)}>
           Refresh
         </Button>
-      </div>
-      {namespaceError && (
-        <ErrorNotice
-          cluster
-          message={namespaceError}
-          retry={()=>setRefresh(v=>v+1)}
-        />
+      </>,
+      actions,
+    )}
+    <div className="extension-workspace">
+      {/* A page's tabs scroll sideways rather than wrapping, as the built-in tab strip does. */}
+      <nav aria-label={`${plugin.manifest.name} pages`}>
+        <Toolbar className="overflow-x-auto">
+          <ExtensionLogo icon={plugin.icon} name={plugin.manifest.name} />
+          <Tabs
+            variant="underline"
+            activation="manual"
+            label={`${plugin.manifest.name} sections`}
+            tabs={groups.map((group) => ({ id: group, label: group }))}
+            active={page.group ?? page.title}
+            onChange={(group) => onPage(pages.find((p) => (p.group ?? p.title) === group)!.id)}
+          />
+        </Toolbar>
+      </nav>
+      {page.group && (
+        <nav aria-label={`${page.group} pages`}>
+          <Toolbar className="extension-subnavigation overflow-x-auto">
+            <Tabs
+              variant="underline"
+              activation="manual"
+              label={`${page.group} pages`}
+              tabs={pages.filter((p) => p.group === page.group).map((p) => ({ id: p.id, label: p.title }))}
+              active={page.id}
+              onChange={onPage}
+            />
+          </Toolbar>
+        </nav>
       )}
-      {namespaces === null ? <p role="status" className="extension-message">Loading namespaces…</p> : current.dashboard ? (
+      <ExtensionRequirements plugin={plugin} page={page} context={context} refresh={refresh}>
+      {!page.dashboard || page.dashboard.events ? (
+        <FilterBar
+          value={view.filter}
+          onValueChange={view.setFilter}
+          regex={view.regex}
+          onRegexChange={view.setRegex}
+          invalid={tableFilterError(view.filter, view.regex) !== null}
+          label={`Filter ${noun}`}
+          placeholder={`Filter ${noun}…`}
+          leading={<span ref={setBulkBar} className="contents" />}
+        >
+          {scopeControl}
+        </FilterBar>
+      ) : scopeControl && <Toolbar wrap>{scopeControl}</Toolbar>}
+      {namespaceError && (
+        <FailureAlert tone="sev" title="Could not list namespaces" error={namespaceError} onRetry={()=>setRefresh(v=>v+1)} />
+      )}
+      {!card && !clusterScoped && (
+        <>
+          <CollectionScopeNotice context={cluster} />
+          <StaleSelectionAlert selection={selection} namespaces={listed} onReset={() => setNamespaces(cluster.stableId, [])} />
+        </>
+      )}
+      {listed === null ? <LoadingState label="Loading namespaces" /> : page.dashboard ? (
         <>
           <div className={cards.length ? "extension-overview" : "extension-summaries"}>
-            {current.dashboard.pages.map((id,index) => {
+            {page.dashboard.pages.map((id,index) => {
               const p = pages.find(p => p.id === id);
               return p && <Fragment key={id}>
-                <Summary plugin={plugin} page={p} context={context} namespace={namespace} refresh={refresh} onPage={navigate}/>
-                {index === 0 && cards.length > 0 && <OverviewCards plugin={plugin} context={context} namespace={namespace} refresh={refresh} onOpen={openCard}/>}
+                <Summary plugin={plugin} page={p} context={context} clusterId={cluster.stableId} namespaces={namespaces} refresh={refresh} onPage={onPage}/>
+                {index === 0 && cards.length > 0 && <OverviewCards plugin={plugin} context={context} namespaces={namespaces} refresh={refresh} onOpen={openCard}/>}
               </Fragment>;
             })}
           </div>
-          {current.dashboard.events && (
+          {page.dashboard.events && (
             <Events
               plugin={plugin}
-              config={current.dashboard.events}
+              config={page.dashboard.events}
               context={context}
-              namespace={namespace}
-              search={search}
+              namespaces={namespaces}
+              search={view.filter}
+              regex={view.regex}
               refresh={refresh}
+              header={count}
             />
           )}
         </>
       ) : (
         <ExtensionResults
           plugin={plugin}
-          capability={current.capability}
+          capability={page.capability}
           context={context}
-          namespace={namespace}
-          search={search}
+          clusterId={cluster.stableId}
+          namespaces={namespaces}
+          search={view.filter}
+          regex={view.regex}
           refresh={refresh}
           hideToolbar
           card={card}
-          cardNamespaces={namespace ? undefined : cardNamespaces}
+          noun={noun}
+          header={count}
+          bulkBar={bulkBar}
         />
       )}
       </ExtensionRequirements>

@@ -28,7 +28,6 @@ import {
 } from "@srelens/core";
 import {
   Button,
-  KV,
   LoadingState,
   PairList,
   StatusPill,
@@ -59,7 +58,7 @@ export function StringList({ items }: { items: string[] }) {
   return (
     <ul className="flex flex-col gap-0.5">
       {items.map((item, i) => (
-        <li key={`${item}-${i}`} className="font-mono text-[0.8125rem]">
+        <li key={`${item}-${i}`} className="font-mono text-[0.75rem]">
           {item}
         </li>
       ))}
@@ -78,8 +77,9 @@ export interface ConditionsSectionProps {
 }
 
 /**
- * An object's conditions: one row each, the condition's name beside its
- * status and reason.
+ * An object's conditions: one row each, the condition's name, then its status
+ * and reason, its message beneath. A list and not `KV`s: a condition's name is
+ * data, and the key column clipped a long one at a third of the pane. (#1001)
  *
  * The one implementation, replacing three. Conditions used to render a
  * sortable four-column `Table` for a generic kind, a three-part flex row for a
@@ -106,9 +106,11 @@ export interface ConditionsSectionProps {
  * rule applies here.
  *
  * The status and reason read as one value, `False · MinimumReplicasUnavailable`,
- * with an em dash standing in when there is no reason — an empty half of a
- * two-part value reads as a rendering fault. A condition's message, when it
- * has one, reads beneath that in quiet ink: an operator puts its useful words
+ * and a condition with no reason reads its status alone. An em dash used to
+ * stand in for the missing half, on the grounds that an empty half reads as a
+ * rendering fault — but with no separator there is no half, and on a healthy
+ * pod it made five rows of `True · —` (#1070). A condition's message, when it
+ * has one, reads beneath that in the content's own ink: an operator puts its useful words
  * there ("ComparisonError: repository not found"), and a custom resource's
  * conditions are often all a reader gets of its state (#919).
  *
@@ -134,37 +136,33 @@ export function ConditionsSection({ conditions }: ConditionsSectionProps) {
   if (shown.length === 0) return null;
   return (
     <Section title="Conditions">
-      {shown.map((condition, index) => {
-        const hasStatus = typeof condition.status === "string";
-        // Text or nothing, like the message: an operator's object here would
-        // take the window down, or read "[object Object]" (#940).
-        const reason = typeof condition.reason === "string" && condition.reason ? condition.reason : "—";
-        return (
-          <KV
+      <ul className="flex flex-col gap-1.5 text-[0.75rem]">
+        {shown.map((condition, index) => {
+          const hasStatus = typeof condition.status === "string";
+          // Text or nothing, like the message: an operator's object here would
+          // take the window down, or read "[object Object]" (#940).
+          const reason = typeof condition.reason === "string" ? condition.reason : "";
+          const said = [hasStatus ? condition.status : "", reason].filter(Boolean).join(" · ");
+          return (
             // Positional: an operator may report one type twice.
-            key={`${index}:${condition.type}`}
-            k={
-              <StatusPill
-                status={condition.type}
-                kind={conditionKindWithReason(hasStatus ? condition : { ...condition, status: "Unknown" })}
-                tinted
-              />
-            }
-            v={
-              <>
-                <span>
-                  {hasStatus ? `${condition.status} · ${reason}` : reason}
+            <li key={`${index}:${condition.type}`} className="[overflow-wrap:anywhere]">
+              <div className="flex flex-wrap items-baseline gap-x-2">
+                <StatusPill
+                  status={condition.type}
+                  kind={conditionKindWithReason(hasStatus ? condition : { ...condition, status: "Unknown" })}
+                  tinted
+                />
+                {said && <span>{said}</span>}
+              </div>
+              {typeof condition.message === "string" && condition.message && (
+                <span data-slot="condition-message" className="block text-ink">
+                  {condition.message}
                 </span>
-                {typeof condition.message === "string" && condition.message && (
-                  <span data-slot="condition-message" className="block text-[0.75rem] text-muted">
-                    {condition.message}
-                  </span>
-                )}
-              </>
-            }
-          />
-        );
-      })}
+              )}
+            </li>
+          );
+        })}
+      </ul>
     </Section>
   );
 }
@@ -289,7 +287,7 @@ function AnnotationsToggle({ annotations }: { annotations: Record<string, string
       {open && (
         <ul className="flex flex-col gap-0.5">
           {entries.map(([k, v]) => (
-            <li key={k} className="break-all font-mono text-[0.8125rem]">
+            <li key={k} className="break-all font-mono text-[0.75rem]">
               {k}={v}
             </li>
           ))}
@@ -454,9 +452,9 @@ export function RelatedPodsSection({
     // the identical screen — see {@link useSectionList}.
     <Section title="Pods">
       {state.status === "loading" ? (
-        <LoadingState label="Loading pods" />
+        <LoadingState compact label="Loading pods" />
       ) : state.status === "error" ? (
-        <SectionFailure error={state.error} />
+        <SectionFailure what="pods" error={state.error} onRetry={state.retry} />
       ) : (
         <Table columns={RELATED_POD_COLUMNS} data={state.data ?? []} getRowKey={(p) => p.name} emptyText="No pods" />
       )}
@@ -519,9 +517,9 @@ export function NodePodsSection({ context, node }: { context: string; node: stri
   return (
     <Section title={state.status === "ready" ? `Pods (${all.length})` : "Pods"} id="Pods">
       {state.status === "loading" ? (
-        <LoadingState label={`Loading pods on ${node}`} />
+        <LoadingState compact label={`Loading pods on ${node}`} />
       ) : state.status === "error" ? (
-        <SectionFailure error={state.error} />
+        <SectionFailure what="pods" error={state.error} onRetry={state.retry} />
       ) : (
         <>
           <Table

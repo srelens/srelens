@@ -106,7 +106,9 @@ impl ExecRunner {
         Ok(())
     }
 
-    /// Builds the Command for an interactive pod exec shell
+    /// Builds the Command for an interactive pod exec shell: `shell_cmd`, or
+    /// without one the shell the desktop would pick on this OS (zsh or bash
+    /// when the image has one, else /bin/sh; see `srelens_kube::exec::shell_command`).
     pub fn build_pod_shell_command(
         context: &str,
         namespace: &str,
@@ -114,7 +116,6 @@ impl ExecRunner {
         container: Option<&str>,
         shell_cmd: Option<&str>,
     ) -> Command {
-        let shell = shell_cmd.unwrap_or("/bin/sh");
         let mut cmd = Command::new("kubectl");
         if !context.is_empty() {
             cmd.args(["--context", context]);
@@ -128,13 +129,14 @@ impl ExecRunner {
             cmd.args(["-c", c]);
         }
 
-        cmd.args(["--", shell]);
+        cmd.arg("--");
+        cmd.args(srelens_kube::exec::shell_command(shell_cmd));
         cmd
     }
 
     /// Launches an interactive pod exec shell via kubectl with the current context and namespace.
-    /// When shell_cmd is None, automatically tries fallback shells (/bin/sh -> sh -> bash -> /bin/bash)
-    /// if the container does not have /bin/sh.
+    /// When shell_cmd is None, starts the default shell (which needs /bin/sh), then falls back
+    /// to sh -> bash -> /bin/bash if the container does not have /bin/sh.
     pub fn run_pod_shell(
         context: &str,
         namespace: &str,
@@ -147,11 +149,11 @@ impl ExecRunner {
             return Self::run_interactive_command(cmd);
         }
 
-        let candidate_shells = ["/bin/sh", "sh", "bash", "/bin/bash"];
+        let candidate_shells = [None, Some("sh"), Some("bash"), Some("/bin/bash")];
         let mut last_err = String::new();
 
         for shell in candidate_shells {
-            let cmd = Self::build_pod_shell_command(context, namespace, pod_name, container, Some(shell));
+            let cmd = Self::build_pod_shell_command(context, namespace, pod_name, container, shell);
             match Self::run_interactive_command(cmd) {
                 Ok(()) => return Ok(()),
                 Err(err) => {
@@ -292,7 +294,11 @@ mod tests {
     fn test_build_pod_shell_command_minimal() {
         let cmd = ExecRunner::build_pod_shell_command("", "", "my-pod", None, None);
         let args: Vec<String> = cmd.get_args().map(|s| s.to_string_lossy().to_string()).collect();
-        assert_eq!(args, vec!["exec", "-i", "-t", "my-pod", "--", "/bin/sh"]);
+        // The desktop's shell (#1040): zsh or bash when the image has one,
+        // not plain /bin/sh, which is dash on Debian images.
+        let mut expected: Vec<String> = ["exec", "-i", "-t", "my-pod", "--"].map(String::from).to_vec();
+        expected.extend(srelens_kube::exec::shell_command(None));
+        assert_eq!(args, expected);
     }
 
     #[test]

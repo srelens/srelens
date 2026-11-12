@@ -134,6 +134,14 @@ describe("AuditPane", () => {
     core.readPromptIssues.mockResolvedValue([]);
   });
 
+  it("runs the trail's table to the card's edges", async () => {
+    // Inside the card's inset, the table's row rules stopped short of its border.
+    render(<AuditPane />);
+    const table = await screen.findByRole("table");
+    expect(table.closest(".card")).not.toBeNull();
+    expect(table.closest(".section-body")).toBeNull();
+  });
+
   it("says how much of the trail it is showing", async () => {
     render(<AuditPane />);
     expect(await screen.findByText(new RegExp(String(LIMIT)))).toBeTruthy();
@@ -291,11 +299,11 @@ describe("AuditPane", () => {
     expect(screen.queryByRole("alert")).toBeNull();
   });
 
-  it("says Export is not offered here, once", async () => {
+  it("offers export after the audit window has loaded", async () => {
     render(<AuditPane />);
     await screen.findByText("secret.read");
-    expect(screen.queryByRole("button", { name: /export/i })).toBeNull();
-    expect(screen.getAllByText(/no way to export/i)).toHaveLength(1);
+    expect((screen.getByRole("button", { name: "Export audit trail" }) as HTMLButtonElement).disabled).toBe(false);
+    expect(screen.queryByText(/no way to export/i)).toBeNull();
   });
 
   it("reports a failed read through describeError, never the backend's raw string", async () => {

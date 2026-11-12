@@ -28,6 +28,20 @@ describe("what a question asked from a route is about", () => {
     });
   });
 
+  it("carries a custom kind's API group off a detail route (#1076)", () => {
+    // `Deployment` in `acme.io` is not a Deployment. Without the group the
+    // agent reads `apps/v1`, and `k8s.getCustomResource`, which takes a group,
+    // has nothing to call with.
+    const route = detailRoute("Deployment", "checkout", "api", { cluster: "prod-eu", group: "acme.io" });
+    expect(askContextFor(route, "prod-eu")).toEqual({
+      cluster: "prod-eu",
+      namespace: "checkout",
+      kind: "Deployment",
+      group: "acme.io",
+      name: "api",
+    });
+  });
+
   it("asks about a pinned detail tab's own cluster, not the rail's (#834)", () => {
     // The tab shows staging's api while the rail is on prod; a question about
     // "this" is about the object on screen.

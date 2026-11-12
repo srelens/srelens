@@ -19,6 +19,8 @@ import {
   Field,
   LoadingState,
   Mark,
+  Panel,
+  TextArea,
   type IconComponent,
 } from "@srelens/ui-kit";
 import {
@@ -401,14 +403,7 @@ function PasteDialog({
             own beside…" — the label plus a paragraph. The label is the name;
             this is a remark beside it. */}
         <Field label="Kubeconfig YAML">
-          <textarea
-            value={yaml}
-            onChange={(e) => setYaml(e.target.value)}
-            rows={12}
-            spellCheck={false}
-            className="w-full rounded-md border px-2 py-1 font-mono text-[0.75rem] leading-relaxed outline-none"
-            style={{ background: "var(--surface-sunk)", borderColor: "var(--rule)" }}
-          />
+          <TextArea value={yaml} onValueChange={setYaml} rows={12} spellCheck={false} />
         </Field>
         {/* **Where the file actually goes.** This said "beside your other
             kubeconfigs" and it does not go there: `savePastedKubeconfig` ->
@@ -637,17 +632,8 @@ export function Connect({ route }: { route: string }) {
           </p>
         </header>
 
-        <div className="card min-w-0">
-          <div className="card-head">
-            <span className="card-title">Contexts found</span>
-            {count !== undefined && (
-              <span data-testid="connect-count" className="eyebrow shrink-0">
-                {count}
-              </span>
-            )}
-          </div>
-
-          <div className="flex min-w-0 flex-col gap-2 p-2.5">
+        <Panel title="Contexts found" count={count} className="min-w-0">
+          <div className="flex min-w-0 flex-col gap-2">
             {addError !== null && (
               // `sev`: the reader asked for a file to be added and it was not.
               // This is not a remark about the rows under it.
@@ -711,7 +697,7 @@ export function Connect({ route }: { route: string }) {
               <p className="px-1 py-1 text-[0.8125rem] leading-relaxed text-muted">{WEB_ONLY}</p>
             )}
           </div>
-        </div>
+        </Panel>
 
         <div
           data-testid="connect-footer"

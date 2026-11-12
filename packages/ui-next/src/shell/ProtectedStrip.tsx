@@ -5,29 +5,51 @@ import { useProtection } from "../lib/protection";
 import { isClusterScopedRoute } from "../lib/routes";
 
 /**
- * The context name an extension app's page names for itself, resolved the way
+ * The concrete context an extension app's page names for itself, resolved the way
  * `ExtensionPage` and `ExtensionOperation` resolve it: by key, else by stable ID
- * while one context holds it, else (a route from before keys) the display name
- * itself. `undefined` when the route is not an app's page; `null` when it names
- * a cluster the list does not hold, or not alone: the page opens nothing then,
- * so there is nothing for the strip to be about.
+ * while one context holds it. `undefined` when the route is not an app's page;
+ * `null` when it names a cluster the list does not hold, or not alone: the page
+ * opens nothing then, so there is nothing for the strip to be about.
  *
- * ponytail: a route from before keys names a display name, and two contexts can
- * share one. The page opens the first; `protectionFor` answers for any of them,
- * which is the safe side. Resolve it by `find` here if the strip ever has to
- * agree with the page about which.
+ * A route from before keys names only a replaceable display name. ExtensionPage
+ * remembers the concrete key it first resolved, but this stateless resolver
+ * cannot share that memory. Returning no context is safer than letting a later
+ * rename and name reuse move the tab's colour to a different cluster.
  */
-function appPageCluster(route: string, contexts: readonly ClusterContext[]): string | null | undefined {
+export function appPageContext(route: string, contexts: readonly ClusterContext[]): ClusterContext | null | undefined {
   const operation = parseExtensionOperationRoute(route);
-  if (operation) return contexts.find((c) => c.key === operation.contextKey)?.name ?? null;
+  if (operation) return contexts.find((c) => c.key === operation.contextKey) ?? null;
   const page = parseExtensionRoute(route);
   if (!page) return undefined;
-  if (page.contextKey !== undefined) return contexts.find((c) => c.key === page.contextKey)?.name ?? null;
+  if (page.contextKey !== undefined) return contexts.find((c) => c.key === page.contextKey) ?? null;
   if (page.clusterId !== undefined) {
     const holders = contexts.filter((c) => c.stableId === page.clusterId);
-    return holders.length === 1 ? holders[0].name : null;
+    return holders.length === 1 ? holders[0] : null;
   }
-  return page.context;
+  return null;
+}
+
+/** The concrete context a tab route reads from, or `null` for an app-level or unresolved route. */
+export function clusterContextForRoute(
+  route: string,
+  activeContext: ClusterContext | null,
+  contexts: readonly ClusterContext[],
+): ClusterContext | null {
+  const pinned = parseDetailRoute(route)?.cluster ?? parseEditRoute(route)?.cluster ?? parseNewRoute(route)?.cluster;
+  if (pinned) return contexts.find((context) => context.name === pinned) ?? null;
+  const page = appPageContext(route, contexts);
+  if (page !== undefined) return page;
+  return isClusterScopedRoute(route) ? activeContext : null;
+}
+
+function appPageProtectionCluster(route: string, contexts: readonly ClusterContext[]): string | null | undefined {
+  const context = appPageContext(route, contexts);
+  if (context !== null) return context?.name;
+  const page = parseExtensionRoute(route);
+  // Only protection keeps the conservative name-only behaviour used before
+  // context keys existed. A concrete-context consumer must not treat this
+  // replaceable token as identity; appPageContext deliberately returns null.
+  return page && page.contextKey === undefined && page.clusterId === undefined ? page.context : null;
 }
 
 /**
@@ -48,7 +70,7 @@ export function protectedStripCluster(
 ): string | null {
   const pinned = parseDetailRoute(route)?.cluster ?? parseEditRoute(route)?.cluster ?? parseNewRoute(route)?.cluster;
   if (pinned) return pinned;
-  const page = appPageCluster(route, contexts);
+  const page = appPageProtectionCluster(route, contexts);
   if (page !== undefined) return page;
   return isClusterScopedRoute(route) ? activeContextName : null;
 }

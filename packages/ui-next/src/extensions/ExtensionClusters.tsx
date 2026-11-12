@@ -1,4 +1,4 @@
-import { useContext, useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   KUBECONFIG_FILES_CHANGED,
   listContexts,
@@ -6,8 +6,8 @@ import {
   type ExtensionChange,
   type InstalledExtension,
 } from "@srelens/core";
-import { ExtensionControls } from "./ExtensionControls";
-import { ErrorNotice } from "./ExtensionResults";
+import { Button, Combobox, EmptyState, LoadingState, Radio } from "@srelens/ui-kit";
+import { FailureAlert } from "../lib/errorCopy";
 import { useResource } from "../lib/useResource";
 
 /**
@@ -27,7 +27,6 @@ export function ExtensionClusters({
   busy: boolean;
   change(action: ExtensionChange): Promise<boolean>;
 }) {
-  const { Button, Combobox } = useContext(ExtensionControls);
   const saved = plugin.contexts;
   const [limited, setLimited] = useState(Boolean(saved));
   const [chosen, setChosen] = useState<string[]>(saved ?? []);
@@ -63,24 +62,14 @@ export function ExtensionClusters({
   return (
     <fieldset className="extension-clusters">
       <legend>Clusters</legend>
-      <label>
-        <input type="radio" name={group} checked={!limited} disabled={busy} onChange={() => setLimited(false)} />{" "}
-        All clusters
-      </label>
-      <label>
-        <input type="radio" name={group} checked={limited} disabled={busy} onChange={() => setLimited(true)} />{" "}
-        Only these clusters
-      </label>
+      <Radio name={group} checked={!limited} disabled={busy} onChange={() => setLimited(false)} label="All clusters" />
+      <Radio name={group} checked={limited} disabled={busy} onChange={() => setLimited(true)} label="Only these clusters" />
       {limited && (
         <>
           {failure ? (
-            <ErrorNotice title="Could not list clusters" message={failure} retry={listing.reload} />
+            <FailureAlert tone="sev" title="Could not list clusters" error={failure} domain="local" onRetry={listing.reload} />
           ) : (
-            listing.status === "loading" && (
-              <p role="status" className="extension-message">
-                Loading clusters…
-              </p>
-            )
+            listing.status === "loading" && <LoadingState compact label="Loading clusters" />
           )}
           <Combobox
             value=""
@@ -93,7 +82,7 @@ export function ExtensionClusters({
             ariaLabel="Add a cluster"
           />
           {chosen.length === 0 ? (
-            <p className="extension-message">No cluster chosen yet.</p>
+            <EmptyState compact title="No cluster chosen yet" />
           ) : (
             <ul className="extension-cluster-list" aria-label="Chosen clusters">
               {chosen.map((id) => (

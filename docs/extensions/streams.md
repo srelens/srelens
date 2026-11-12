@@ -175,7 +175,11 @@ that binding may read it:
 The cluster is the stream's `context`, resolved and scope-checked exactly as
 `extensions.read` resolves it. A namespaced kind is watched in the stream's
 `namespace` — the view's — or in every namespace when that is empty, as the
-reader would list it; a cluster-scoped kind ignores the namespace. The open is
+reader would list it; a cluster-scoped kind ignores the namespace. An app page
+with several namespaces selected opens one stream with an empty `namespace`,
+because an app's 8 streams would not cover one per namespace per reader; a
+credential that cannot watch every namespace sees the page as not live, and
+Refresh still reads each namespace it selected. The open is
 authorized by the same check a read makes (installed, enabled, this revision,
 enabled for this cluster, the binding still valid against its grants, the
 CustomResourceDefinition serving it). The app's part of the check runs again on

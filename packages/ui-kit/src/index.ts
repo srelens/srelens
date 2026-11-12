@@ -70,6 +70,7 @@ export { PickerGroup, PickerRow, type PickerRowProps } from "./picker";
 export { NavIcon, type NavIconProps } from "./NavIcon";
 export { PairList, type PairListProps } from "./PairList";
 export { Panel, type PanelProps } from "./Panel";
+export { PaneIntro, type PaneIntroProps } from "./PaneIntro";
 export { OptionCheck } from "./OptionCheck";
 export { Popover, type PopoverProps } from "./Popover";
 export {
@@ -101,16 +102,17 @@ export { StatusRow, type StatusRowProps } from "./StatusRow";
 export { SubHead, type SubHeadProps, type SubHeadVariant } from "./SubHead";
 export { SurfaceToast, type SurfaceToastProps } from "./SurfaceToast";
 export { Switch, type SwitchProps } from "./Switch";
-export { Table, computeVisibleRange, filterTableData, tableFilterError, nextSort, type Column, type TableProps, type TableSelection, type TableSort } from "./Table";
+export { filterMatcher, tableFilterError, useListFilter } from "./filter";
+export { Table, computeVisibleRange, filterTableData, nextSort, type Column, type TableProps, type TableSelection, type TableSort } from "./Table";
 export { Tabs, type TabItem, type TabsProps, type TabsVariant } from "./Tabs";
 export { TabStrip, type StripTab, type TabStripProps } from "./TabStrip";
+export { TextArea, type TextAreaProps } from "./TextArea";
 export { TextInput, type TextInputProps } from "./TextInput";
 export { Titlebar, type TitlebarProps } from "./Titlebar";
 export { Toast, type ToastProps } from "./Toast";
 export { Toolbar, type ToolbarProps } from "./Toolbar";
 export { Tooltip, type TooltipProps } from "./Tooltip";
 export { WorkspaceSwitcher, type WorkspaceSummary, type WorkspaceSwitcherProps } from "./WorkspaceSwitcher";
-export { type ClusterLink, type WorkspaceCluster, WorkspaceTree, type WorkspaceTreeProps } from "./WorkspaceTree";
 export { cx } from "./cx";
 export { loadTone, toneColor, toneWash, type Tone } from "./tone";
 // `COPIED_MS` stays unexported: the gallery test reads every capitalised name

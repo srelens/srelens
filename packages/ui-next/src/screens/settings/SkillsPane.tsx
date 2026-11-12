@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   deleteSkill,
   listSkills,
@@ -11,7 +11,7 @@ import {
   skillsDirPath,
   type SkillMeta,
 } from "@srelens/core";
-import { Badge, Button, ConfirmDialog, Dialog, EmptyState, Field, Switch, TextInput } from "@srelens/ui-kit";
+import { Badge, Button, ConfirmDialog, Dialog, EmptyState, Field, FilterBar, LoadingState, PaneIntro, Switch, TextArea, TextInput, useListFilter } from "@srelens/ui-kit";
 import { FailureAlert } from "../../lib/errorCopy";
 import {
   estimateTokens,
@@ -64,7 +64,7 @@ type Read = { state: "loading" } | { state: "failed"; error: unknown } | { state
 export function SkillsPane() {
   const [read, setRead] = useState<Read>({ state: "loading" });
   const [attempt, setAttempt] = useState(0);
-  const [query, setQuery] = useState("");
+  const filter = useListFilter();
   const [removing, setRemoving] = useState<Listed | null>(null);
   const [removeError, setRemoveError] = useState<unknown>(null);
   const [folder, setFolder] = useState<string | null>(null);
@@ -120,11 +120,7 @@ export function SkillsPane() {
   }
 
   const skills = read.state === "ready" ? read.skills : [];
-  const shown = useMemo(() => {
-    const needle = query.trim().toLowerCase();
-    if (!needle) return skills;
-    return skills.filter((s) => s.name.toLowerCase().includes(needle) || s.description.toLowerCase().includes(needle));
-  }, [skills, query]);
+  const shown = skills.filter((s) => [s.name, s.description].some(filter.matches));
 
   const enabled = skills.filter((s) => on.includes(s.name));
   const cost = enabled.reduce((sum, s) => sum + (s.tokens ?? 0), 0);
@@ -149,17 +145,19 @@ export function SkillsPane() {
 
   return (
     <div className="min-w-0 text-[0.8125rem]">
-      <section className="border-b border-rule px-4 py-3" aria-label="About skills">
-        <h2 className="font-semibold text-ink">Skills</h2>
-        <p className="mt-1 max-w-[70ch] text-muted">
-          Short runbooks the agent follows: how to triage a crash loop, what to check before a rollout is called
-          stuck. A skill that is on is sent with every question, in every new conversation, until you turn it off.
-          The switches on the agent screen are separate: they turn a skill on or off for the conversations in that
-          window until it is closed, and do not change what is kept here.
-        </p>
-      </section>
+      <PaneIntro
+        title="Skills"
+        description={
+          <>
+            Short runbooks the agent follows: how to triage a crash loop, what to check before a rollout is called
+            stuck. A skill that is on is sent with every question, in every new conversation, until you turn it off.
+            The switches on the agent screen are separate: they turn a skill on or off for the conversations in that
+            window until it is closed, and do not change what is kept here.
+          </>
+        }
+      />
 
-      <section className="border-b border-rule px-4 py-3" aria-label="What the skills that are on cost">
+      <section className="border-b border-rule px-3 py-3" aria-label="What the skills that are on cost">
         <p className="flex flex-wrap items-baseline gap-x-2">
           <span className="eyebrow">Added to every question</span>
           <span className="num text-[1.125rem] text-ink" data-slot="skills-cost">
@@ -179,11 +177,8 @@ export function SkillsPane() {
         </p>
       </section>
 
-      <section className="flex flex-wrap items-center gap-2 border-b border-rule px-4 py-2" aria-label="Find a skill">
-        <span className="font-semibold">Installed ({skills.length})</span>
-        <span className="min-w-[12rem] flex-1">
-          <TextInput value={query} onValueChange={setQuery} placeholder="Search installed skills…" aria-label="Search installed skills" />
-        </span>
+      <section className="flex flex-wrap items-center gap-2 border-b border-rule px-3 py-2" aria-label="Installed skills">
+        <span className="mr-auto font-semibold">Installed ({skills.length})</span>
         <Button variant="secondary" disabled={read.state === "loading"} onClick={() => setAttempt((n) => n + 1)}>
           {read.state === "loading" ? "Refreshing…" : "Refresh"}
         </Button>
@@ -192,7 +187,7 @@ export function SkillsPane() {
         </Button>
       </section>
 
-      <section className="flex flex-wrap items-center gap-x-3 gap-y-1 border-b border-rule px-4 py-2" aria-label="Where skill files are kept">
+      <section className="flex flex-wrap items-center gap-x-3 gap-y-1 border-b border-rule px-3 py-2" aria-label="Where skill files are kept">
         <span className="text-muted">Skills you install are kept in</span>
         {folder === null ? (
           <span className="text-muted">a folder that could not be found.</span>
@@ -215,33 +210,33 @@ export function SkillsPane() {
       </section>
 
       {fileError !== null && (
-        <div className="px-4 py-3">
+        <div className="px-3 py-3">
           <FailureAlert tone="sev" title={fileError.title} error={fileError.cause} />
         </div>
       )}
 
       {removeError !== null && (
-        <div className="px-4 py-3">
+        <div className="px-3 py-3">
           <FailureAlert tone="sev" title="Could not remove the skill" error={removeError} />
         </div>
       )}
 
+      <FilterBar {...filter} label="Filter skills" placeholder="Filter skills…" />
+
       {read.state === "failed" ? (
-        <div className="flex flex-col items-start gap-2 px-4 py-3">
+        <div className="flex flex-col items-start gap-2 px-3 py-3">
           <FailureAlert tone="sev" title="Could not load skills" error={read.error} />
           <Button variant="secondary" onClick={() => setAttempt((n) => n + 1)}>
             Try again
           </Button>
         </div>
       ) : read.state === "loading" && skills.length === 0 ? (
-        <p className="px-4 py-3 text-muted" role="status">
-          Loading skills…
-        </p>
+        <LoadingState label="Loading skills" />
       ) : shown.length === 0 ? (
         <EmptyState
           compact
           title={skills.length === 0 ? "No skills" : "No skill matches"}
-          hint={skills.length === 0 ? "Install one with Install skill…" : `Nothing installed matches “${query.trim()}”.`}
+          hint={skills.length === 0 ? "Install one with Install skill…" : `Nothing installed matches “${filter.value.trim()}”.`}
         />
       ) : (
         <ul aria-label="Installed skills">
@@ -249,7 +244,7 @@ export function SkillsPane() {
             const isOn = on.includes(skill.name);
             const used = uses[skill.name] ?? 0;
             return (
-              <li key={skill.name} className="border-b border-rule px-4 py-2.5" data-skill={skill.name}>
+              <li key={skill.name} className="border-b border-rule px-3 py-2.5" data-skill={skill.name}>
                 <div className="flex items-start gap-3">
                   <div className="min-w-0 flex-1">
                     <p className="flex flex-wrap items-center gap-2">
@@ -453,12 +448,7 @@ function InstallSkillDialog({
           <TextInput value={description} onValueChange={setDescription} placeholder="How this team rolls back a release" />
         </Field>
         <Field label="Instructions" hint={body === "" ? "What the agent should do, step by step." : `≈${formatTokens(estimateTokens(body))} tokens when on`}>
-          <textarea
-            value={body}
-            onChange={(e) => setBody(e.target.value)}
-            rows={9}
-            className="scroll w-full rounded-md border border-[var(--control-line)] bg-transparent px-2 py-1.5 font-mono text-[0.75rem] outline-none focus:border-[var(--accent)]"
-          />
+          <TextArea value={body} onValueChange={setBody} rows={9} />
         </Field>
         {replaces && (
           <p className="text-muted" role="status">

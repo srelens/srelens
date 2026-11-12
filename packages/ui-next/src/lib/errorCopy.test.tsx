@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
+import { vi } from "vitest";
 import { describeError } from "@srelens/core";
 import { FailureAlert, FailureState, FailureWord, NamespaceFailuresAlert, StaleListAlert, friendly, summarise } from "./errorCopy";
 
@@ -145,6 +146,35 @@ describe("FailureState", () => {
     expect(screen.getByText("Something went wrong")).toBeDefined();
   });
 
+  // #1001: what ErrorNotice's `guidance` did, so a screen that knows more can say it.
+  it("says the screen's own explanation in place of the classification's", () => {
+    const { container } = render(
+      <FailureState title="Application API unavailable" detail="This app reads applications from argoproj.io/v1alpha1." error={API_401} />,
+    );
+    expect(container.querySelector('[data-slot="detail"]')?.textContent).toBe("This app reads applications from argoproj.io/v1alpha1.");
+    expect(screen.queryByText(/rejected your credentials/)).toBeNull();
+  });
+
+  it("keeps the original behind its own explanation, even one nothing classified", () => {
+    const { container } = render(
+      <FailureState title="Could not check requirements" detail="CRD discovery failed." error="discovery: boom" />,
+    );
+    expect(container.querySelector('[data-slot="raw"]')?.textContent).toContain("discovery: boom");
+  });
+
+  it("keeps every original of a list behind its own explanation (#1030 review)", () => {
+    const { container } = render(
+      <FailureState
+        title="Could not check requirements"
+        detail="CRD discovery failed."
+        error={["discovery: boom", "discovery: bust"]}
+      />,
+    );
+    const raw = container.querySelector('[data-slot="raw"]')?.textContent;
+    expect(raw).toContain("discovery: boom");
+    expect(raw).toContain("discovery: bust");
+  });
+
   it("passes the caller's domain to the classifier", () => {
     render(
       <FailureState
@@ -159,6 +189,34 @@ describe("FailureState", () => {
 });
 
 describe("FailureAlert", () => {
+  it("offers Retry when there is something to retry (#1001)", () => {
+    const onRetry = vi.fn();
+    render(<FailureAlert title="Pods could not be read" error={API_401} onRetry={onRetry} />);
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    expect(onRetry).toHaveBeenCalledTimes(1);
+  });
+
+  it("sets Retry on its own line, not on the end of the sentence", () => {
+    // A button is inline, so a margin on it alone moves nothing: seen live,
+    // "refused for the tour [Retry]".
+    render(<FailureAlert title="Pods could not be read" error={API_401} onRetry={() => {}} />);
+    const line = screen.getByRole("button", { name: "Retry" }).parentElement;
+    expect(line?.getAttribute("data-slot")).not.toBe("alert-body");
+    expect(line?.className).toContain("mt-2");
+  });
+
+  it("names Retry for what it reads again, where several sit side by side", () => {
+    // A row of app cards that each failed: "Retry, Retry, Retry" out of context
+    // says nothing about which one.
+    render(<FailureAlert title="Couldn’t read" error={API_401} onRetry={() => {}} retryLabel="Retry Expiring" />);
+    expect(screen.getByRole("button", { name: "Retry Expiring" }).textContent).toBe("Retry");
+  });
+
+  it("offers no button when there is not", () => {
+    render(<FailureAlert title="These pods are stale" error={API_401} />);
+    expect(screen.queryByRole("button", { name: "Retry" })).toBeNull();
+  });
+
   it("keeps the caller's sentence about the rows and rewrites only the reason", () => {
     render(<FailureAlert title="These pods are stale" error={API_401} />);
     expect(screen.getByText("These pods are stale")).toBeDefined();
@@ -174,6 +232,14 @@ describe("FailureAlert", () => {
   it("carries the original under it", () => {
     const { container } = render(<FailureAlert title="These pods are stale" error={API_401} />);
     expect(container.querySelector('[data-slot="raw"]')?.textContent).toContain("ListMeta");
+  });
+
+  it("says the screen's own explanation, and keeps the original behind it", () => {
+    const { container } = render(
+      <FailureAlert title="Could not check requirements" detail="CRD discovery failed." error="discovery: boom" />,
+    );
+    expect(container.querySelector('[data-slot="alert-body"]')?.textContent).toMatch(/^CRD discovery failed./);
+    expect(container.querySelector('[data-slot="raw"]')?.textContent).toContain("discovery: boom");
   });
 });
 

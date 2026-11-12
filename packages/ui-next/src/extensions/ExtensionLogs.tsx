@@ -1,4 +1,4 @@
-import { useContext, useEffect, useId, useLayoutEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import {
   EXTENSION_LOG_LEVELS,
   extensionLogs,
@@ -7,8 +7,8 @@ import {
   type ExtensionRuntime,
   type InstalledExtension,
 } from "@srelens/core";
-import { ExtensionControls } from "./ExtensionControls";
-import { ErrorNotice } from "./ExtensionResults";
+import { EmptyState, LoadingState, LogLine, Tabs } from "@srelens/ui-kit";
+import { FailureAlert } from "../lib/errorCopy";
 import { plainText } from "./displayText";
 import { extensionLabel } from "./inventoryStore";
 
@@ -28,29 +28,20 @@ export function clock(ms: number, milliseconds = true) {
 export const writer = (source: ExtensionLogLine["source"]) => (source === "sidecar" ? "app" : "srelens");
 
 /**
- * One line of an app's log (#575), as one row of machine text that does not wrap. The
- * fields are separated by spaces, not only by layout, so a copied line reads as one.
- * `level` is left out where every line has the same one, as in the Inspector's errors.
+ * One line of an app's log (#575) on the kit's `LogLine`, as the built-in logs draw
+ * theirs. `level` is left out where every line has the same one, as in the Inspector's
+ * errors.
  */
-export function LogLineRow({ line, level = true }: { line: ExtensionLogLine; level?: boolean }) {
+export function AppLogLine({ line, level = true }: { line: ExtensionLogLine; level?: boolean }) {
   return (
-    <div className="extension-app-log-line">
-      <time className="extension-log-time" dateTime={new Date(line.at).toISOString()}>
-        {clock(line.at)}
-      </time>{" "}
-      {level && (
-        <>
-          {/* The level is a word; its tint only helps. */}
-          <span className="extension-log-level" data-level={line.level}>
-            {line.level}
-          </span>{" "}
-        </>
-      )}
-      <span className="extension-log-source">{writer(line.source)}</span>{" "}
-      {/* The host has redacted it, but it is still the app's text: its control and
-          direction characters are drawn as escapes, so it cannot reorder the row. */}
-      <span className="extension-log-text">{plainText(line.text)}</span>
-    </div>
+    <LogLine
+      ts={<time dateTime={new Date(line.at).toISOString()}>{clock(line.at)}</time>}
+      source={writer(line.source)}
+      level={level ? line.level : undefined}
+      // The host has redacted it, but it is still the app's text: its control and
+      // direction characters are drawn as escapes, so it cannot reorder the row.
+      message={plainText(line.text)}
+    />
   );
 }
 
@@ -59,9 +50,7 @@ export function LogLineRow({ line, level = true }: { line: ExtensionLogLine; lev
  * about it. Read on open and then every two seconds for the lines after the last one held.
  */
 export function ExtensionLogs({ plugin }: { plugin: InstalledExtension }) {
-  const { Button } = useContext(ExtensionControls);
   const id = plugin.manifest.id;
-  const levelsLabel = useId();
   const [level, setLevel] = useState<ExtensionLogLevel>("trace");
   const [lines, setLines] = useState<ExtensionLogLine[]>([]);
   /** Whether the lines held answer the chosen level; false until its first read comes back. */
@@ -132,15 +121,19 @@ export function ExtensionLogs({ plugin }: { plugin: InstalledExtension }) {
           }`}
         </p>
       )}
-      <div className="extension-log-levels" role="group" aria-labelledby={levelsLabel}>
-        <span id={levelsLabel}>Minimum level</span>
-        {EXTENSION_LOG_LEVELS.map((each) => (
-          <Button key={each} variant="ghost" size="xs" aria-pressed={each === level} onClick={() => choose(each)}>
-            {each}
-          </Button>
-        ))}
+      <div className="extension-log-levels">
+        {/* Shown, and said once: the group carries the same name. */}
+        <span aria-hidden="true">Minimum level</span>
+        <Tabs
+          variant="segmented"
+          mode="radio"
+          label="Minimum level"
+          tabs={EXTENSION_LOG_LEVELS.map((each) => ({ id: each, label: each }))}
+          active={level}
+          onChange={(each) => choose(each as ExtensionLogLevel)}
+        />
       </div>
-      {error !== undefined && <ErrorNotice title="Could not read this app's log" message={error} retry={retry} />}
+      {error !== undefined && <FailureAlert tone="sev" title="Could not read this app's log" error={error} domain="local" onRetry={retry} />}
       {lines.length > 0 ? (
         // Focusable: it scrolls both ways, and a keyboard must be able to reach the rest.
         <div
@@ -155,21 +148,15 @@ export function ExtensionLogs({ plugin }: { plugin: InstalledExtension }) {
           }}
         >
           {lines.map((line) => (
-            <LogLineRow key={line.seq} line={line} />
+            <AppLogLine key={line.seq} line={line} />
           ))}
         </div>
       ) : error !== undefined ? null : !ready ? (
-        <p role="status" className="extension-message">
-          Loading the log…
-        </p>
+        <LoadingState compact label="Loading the log" />
+      ) : store?.runtime === "declarative" ? (
+        <EmptyState compact title="No log" hint="This app has no process, so nothing writes to its log." />
       ) : (
-        <p className="extension-message">
-          {store?.runtime === "declarative"
-            ? "This app has no process, so nothing writes to its log."
-            : level === "trace"
-              ? "Nothing logged yet."
-              : `No lines at ${level} or above.`}
-        </p>
+        <EmptyState compact title={level === "trace" ? "Nothing logged yet" : `No lines at ${level} or above`} />
       )}
     </div>
   );

@@ -103,13 +103,13 @@ export function Sidebar({
       )}
 
       {filled(header) && (
-        <div data-slot="header" className="rule-b px-2.5 py-2">
+        <div data-slot="header" className="border-b border-rule-strong px-2.5 py-2">
           {header}
         </div>
       )}
 
       {onQueryChange && (
-        <div className="rule-b px-2 py-1.5">
+        <div className="border-b border-rule-strong px-2 py-1.5">
           {/* The kit's input rather than the mock's bare one, which had a
               placeholder and no label — and a placeholder disappears the moment
               anything is typed into it. */}

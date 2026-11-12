@@ -833,13 +833,14 @@ export function LockGate({ children, brandMarkSrc, onReady }: LockGateProps) {
             <Field
               label="Master passphrase"
               action={
-                <button
+                <Button
                   type="button"
-                  className="text-[0.6875rem] text-muted underline decoration-dotted underline-offset-2"
+                  variant="link"
+                  className="text-[0.6875rem] text-muted"
                   onClick={() => setRevealed((on) => !on)}
                 >
                   {revealed ? "Hide passphrase" : "Show passphrase"}
-                </button>
+                </Button>
               }
               hint={setup ? `At least ${MIN_PASSPHRASE_LENGTH} characters.` : undefined}
             >
@@ -972,14 +973,15 @@ export function LockGate({ children, brandMarkSrc, onReady }: LockGateProps) {
 
             {!setup && (
               <div className="mt-3 text-center">
-                <button
+                <Button
                   type="button"
-                  className="text-[0.6875rem] text-muted underline decoration-dotted underline-offset-2"
+                  variant="link"
+                  className="text-[0.6875rem] text-muted"
                   disabled={busy !== null}
                   onClick={recover}
                 >
                   Forgot your passphrase?
-                </button>
+                </Button>
               </div>
             )}
           </div>

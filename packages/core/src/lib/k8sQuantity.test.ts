@@ -30,6 +30,24 @@ describe("parseQuantity — the NaN-after-match path", () => {
 // classic's moved test never reaches an unrecognized unit suffix (every
 // tested suffix is either "", "m", or a key in the binary/decimal maps).
 // Written here to prove the final fallback line is live, not dead.
+// A quantity may be written with a decimal exponent, and CPU in nano- or
+// micro-cores. The backend's `cpu_millicores`/`mem_mib` read all of these, and
+// a pod's bounds read here must come to the same figure (#1074).
+describe("parseQuantity — the forms the backend also reads", () => {
+  it("reads a decimal exponent, in either case", () => {
+    expect(parseQuantity("1e9")).toBe(1e9);
+    expect(parseQuantity("12E6")).toBe(12e6);
+    expect(parseQuantity("1.5e3")).toBe(1500);
+  });
+  it("still reads a bare E as exa", () => {
+    expect(parseQuantity("1E")).toBe(1e18);
+  });
+  it("reads nano and micro", () => {
+    expect(parseQuantity("250000000n")).toBeCloseTo(0.25);
+    expect(parseQuantity("500u")).toBeCloseTo(0.0005);
+  });
+});
+
 describe("parseQuantity — unrecognized unit fallback", () => {
   it("treats an unrecognized unit as a no-op multiplier, keeping the numeric value as-is", () => {
     expect(parseQuantity("5Q")).toBe(5);

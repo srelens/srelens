@@ -3,7 +3,7 @@ import { act, render, screen, within, fireEvent } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { loadClusterNamespaces, loadContextProfiles, loadContextOrder, readAssistantSetting, saveClusterNamespaces, saveContextProfiles, saveContextOrder, type ClusterContext } from "@srelens/core";
 import { __resetAssistantForTests, assistantSaved, setAssistantEnabled, setClusterAssistant } from "../../lib/assistant";
-import { setContexts } from "../../lib/clusters";
+import { resetContexts, setContexts } from "../../lib/clusters";
 import { loadMarks } from "../../lib/marks";
 import { ClustersPane } from "./ClustersPane";
 import { activeCluster, currentWorkspace, setState } from "../../lib/tabsStore";
@@ -130,8 +130,14 @@ it("does not let a post-removal relist overwrite a concurrent context update", a
 it("filters by saved short name and distinguishes list failure from an empty list", async () => {
   const user = userEvent.setup();
   const view = render(<ClustersPane />);
-  await user.type(screen.getByLabelText("Filter contexts"), "PE");
+  expect(screen.getByRole("search", {name: "Filter contexts"})).toBeTruthy();
+  await user.type(screen.getByRole("searchbox", {name: "Filter contexts"}), "PE");
   expect(screen.getAllByRole("listitem")).toHaveLength(1);
+  await user.keyboard("{Escape}");
+  await user.click(screen.getByRole("button", {name: "Use regular expression"}));
+  await user.type(screen.getByRole("searchbox", {name: "Filter contexts"}), "^PE$");
+  expect(screen.getAllByRole("listitem")).toHaveLength(1);
+  await user.keyboard("{Escape}");
   view.unmount();
   setContexts([], "kubeconfig permission denied");
   const added = { ...contexts[1], name: "new-context", stableId: "new-id", key: "new-id" };
@@ -145,6 +151,12 @@ it("filters by saved short name and distinguishes list failure from an empty lis
   await user.click(screen.getByRole("button", { name: "Retry" }));
   expect(await screen.findByRole("button", { name: "Edit staging" })).toBeTruthy();
   expect(screen.getByRole("button", { name: "Edit new-context" })).toBeTruthy();
+});
+
+it("says it is loading the contexts until the listing answers", () => {
+  resetContexts();
+  render(<ClustersPane />);
+  expect(screen.getByRole("status", { name: "Loading contexts" })).toBeTruthy();
 });
 
 it("reorders through the pointer drag handle and cancels without saving", async () => {
@@ -223,7 +235,21 @@ it("says the cluster switch could not be saved, and shows what the file holds", 
   await user.click(screen.getByRole("switch", { name: "Allow AI Assistant" }));
   await act(async () => { await assistantSaved(); });
   onTestFinished(__resetAssistantForTests);
-  const alert = screen.getByText(/Could not save the AI Assistant setting/);
+  const alert = screen.getByText(/Could not save the AI Assistant setting/).closest("[role]") as HTMLElement;
   expect(alert.getAttribute("role")).toBe("alert");
   expect(alert.textContent).toContain("settings.json is locked");
+});
+
+it("lists a context's connection details as the kit's rows, each identifier whole on one line", async () => {
+  // #1001: machine text does not wrap. A server URL or a kubeconfig path broken
+  // mid-token is misread; a long one scrolls, with no second copy in a title.
+  const user = userEvent.setup(); render(<ClustersPane />);
+  await user.click(screen.getByRole("button", { name: "Edit Production Europe" }));
+  const details = within(screen.getByRole("region", { name: "Context details" }));
+  expect(details.getAllByRole("term").map(term => term.textContent)).toEqual(["Context", "Cluster", "API server", "Kubeconfig", "Authentication", "Namespace"]);
+  const server = details.getByText("https://prod");
+  expect(server.closest("dl")?.classList.contains("kv")).toBe(true);
+  expect(server.classList.contains("code")).toBe(true);
+  expect(server.classList.contains("whitespace-pre")).toBe(true);
+  expect(server.hasAttribute("title")).toBe(false);
 });

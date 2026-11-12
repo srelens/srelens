@@ -21,6 +21,10 @@ pub fn build_request(model: &str, system: &str, turns: &[Turn], tools: &[ToolDef
         "stream_options": { "include_usage": true },
         "messages": messages,
     });
+    // GPT-6 Luna requires non-reasoning mode for Chat Completions function tools.
+    if model == "gpt-6-luna" {
+        body["reasoning_effort"] = json!("none");
+    }
     if !tools.is_empty() {
         body["tools"] = json!(tools
             .iter()
@@ -293,6 +297,32 @@ mod tests {
     fn tools_key_is_omitted_when_there_are_none() {
         let req = build_request("m", "s", &[Turn::User("hi".into())], &[]);
         assert!(req.get("tools").is_none());
+    }
+
+    #[test]
+    fn luna_disables_reasoning_for_chat_completions_tool_calls() {
+        let req = build_request(
+            "gpt-6-luna",
+            "sys",
+            &[Turn::User("hi".into())],
+            &[tool("k8s_listPods")],
+        );
+        assert_eq!(req["model"], "gpt-6-luna");
+        assert_eq!(req["reasoning_effort"], "none");
+        assert_eq!(req["tools"][0]["function"]["name"], "k8s_listPods");
+        for param in [
+            "temperature",
+            "top_p",
+            "logprobs",
+            "top_logprobs",
+            "max_tokens",
+        ] {
+            assert!(req.get(param).is_none(), "{param}");
+        }
+        for model in ["gpt-4o", "llama3.2"] {
+            let req = build_request(model, "sys", &[], &[tool("k8s_listPods")]);
+            assert!(req.get("reasoning_effort").is_none(), "{model}");
+        }
     }
 
     #[test]

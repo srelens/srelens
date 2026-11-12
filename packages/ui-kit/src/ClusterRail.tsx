@@ -37,8 +37,12 @@ export interface ClusterRailItem {
    * told in opacity alone.
    */
   unavailable?: string;
+  /** Out of reach because the reader paused it: drawn with a pause glyph. */
+  paused?: boolean;
   /** Items sharing one sit together; a change draws a rule between them. */
   group?: string;
+  /** Human wording for the group, included in the mark's name and hint. */
+  groupLabel?: string;
 }
 
 /**
@@ -314,7 +318,7 @@ export function ClusterRail({
     <nav
       aria-label={label}
       onKeyDown={onKeyDown}
-      className={cx("rule-r flex shrink-0 flex-col items-center gap-1.5 bg-[var(--ground-deep)] py-2", className)}
+      className={cx("flex min-h-0 shrink-0 flex-col items-center gap-1.5 border-r border-rule-strong bg-[var(--ground-deep)] py-2", className)}
       style={{ width }}
     >
       {/* What a move did, for anyone who cannot see the marks change places.
@@ -347,7 +351,7 @@ export function ClusterRail({
         <p className="px-1 text-center text-[0.5625rem] leading-tight text-faint">{emptyLabel}</p>
       ) : (
         <ul
-          className="flex w-full flex-col items-center gap-1.5"
+          className="cluster-rail-list flex min-h-0 w-full flex-1 flex-col items-center gap-1.5 overflow-y-auto overscroll-contain"
           onDragOver={(event) => {
             if (!dragId.current) return;
             event.preventDefault();
@@ -372,10 +376,10 @@ export function ClusterRail({
             const active = item.id === activeId;
             const markers = item.markers ?? [];
             const away = filled(item.unavailable);
-            const spoken = [item.name, item.unavailable, ...markers.map((m) => m.label)]
+            const spoken = [item.name, item.groupLabel, item.unavailable, ...markers.map((m) => m.label)]
               .filter((part) => filled(part))
               .join(", ");
-            const hint = [item.name, item.detail].filter((part) => filled(part)).join(" — ");
+            const hint = [item.name, item.groupLabel, item.detail].filter((part) => filled(part)).join(" — ");
             // Offered to the caller's menu rather than called by it directly,
             // so a move picked from the menu is the rail's own move: announced
             // like the keyboard's and the drag's, which a caller reordering
@@ -462,7 +466,7 @@ export function ClusterRail({
                     }}
                     onDoubleClick={onOpen ? () => onOpen(item.id) : undefined}
                     className="relative flex w-full flex-col items-center gap-0.5"
-                    style={dragging === item.id ? { opacity: 0.55 } : away ? { opacity: 0.42 } : undefined}
+                    style={dragging === item.id ? { opacity: 0.55 } : undefined}
                   >
                     <span
                       className="relative inline-flex shrink-0 items-center justify-center"
@@ -470,12 +474,25 @@ export function ClusterRail({
                     >
                       {active && (
                         <span
+                          data-slot="active-indicator"
                           aria-hidden="true"
                           className="absolute top-1/2 h-4 w-[3px] -translate-y-1/2 rounded-full"
-                          style={{ left: -9, background: item.color ?? "var(--accent)" }}
+                          style={{ left: -8, background: item.color ?? "var(--accent)" }}
                         />
                       )}
                       {item.mark}
+                      {item.paused && (
+                        // A picture of the word already in the button's name.
+                        <span
+                          data-slot="paused"
+                          aria-hidden="true"
+                          className="absolute -bottom-1 -right-1 flex h-[11px] w-[11px] items-center justify-center rounded-full bg-canvas-deep text-soft ring-1 ring-rule-strong"
+                        >
+                          <svg width="7" height="7" viewBox="0 0 8 8" fill="none">
+                            <path d="M2.5 1.5v5M5.5 1.5v5" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
+                          </svg>
+                        </span>
+                      )}
                       {markers.length > 0 && (
                         <span aria-hidden="true" className="absolute -bottom-0.5 -right-0.5 flex gap-px">
                           {markers.map((marker) => (
@@ -529,7 +546,7 @@ export function ClusterRail({
             type="button"
             aria-label={addLabel}
             onClick={onAdd}
-            className="mt-1 flex shrink-0 items-center justify-center rounded-[7px] border border-dashed border-rule-strong text-faint transition-colors hover:text-ink"
+            className="mt-1 flex shrink-0 items-center justify-center rounded-[7px] border border-dashed border-control-line text-faint transition-colors hover:text-ink"
             style={{ width: mark, height: mark }}
           >
             <AddIcon size={13} aria-hidden="true" />
@@ -537,7 +554,7 @@ export function ClusterRail({
         </Tooltip>
       )}
 
-      <span className="flex-1" aria-hidden="true" />
+      {items.length === 0 && <span className="flex-1" aria-hidden="true" />}
 
       {filled(footer) && <div data-slot="footer">{footer}</div>}
     </nav>

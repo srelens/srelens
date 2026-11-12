@@ -1,7 +1,7 @@
 import { getMark, useMark } from "../../lib/marks";
 import { useId } from "react";
 import { plural } from "@srelens/core";
-import { Badge, Button, Section, cx } from "@srelens/ui-kit";
+import { Badge, Button, EmptyState, Section, cx } from "@srelens/ui-kit";
 import type { ClusterRow } from "./ClusterTable";
 import { joined, latencyLabel, viaOf } from "./clusterText";
 
@@ -217,7 +217,7 @@ export function SourcesRail({ rows, files, onAddFile, desktop, className }: Sour
         <Section title={filesHead}>
           <div className="flex min-w-0 flex-col gap-2.5">
             {sources.length === 0 ? (
-              <p className="text-[0.8125rem] leading-snug text-muted">No kubeconfig files.</p>
+              <EmptyState compact title="No kubeconfig files" />
             ) : (
               sources.map((source) => (
                 <div

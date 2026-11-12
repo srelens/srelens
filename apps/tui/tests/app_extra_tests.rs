@@ -227,7 +227,12 @@ async fn action_result(
     tokio::time::timeout(Duration::from_secs(20), async {
         loop {
             match rx.recv().await {
-                Some(AppEvent::ActionResult { title: t, result }) if t == title => return result,
+                Some(AppEvent::ActionResult { title: t, result })
+                    if t == title
+                        || t.split_once(':').map(|(a, _)| a == title).unwrap_or(false) =>
+                {
+                    return result
+                }
                 Some(_) => continue,
                 None => panic!("event channel closed before '{}'", title),
             }
@@ -235,6 +240,26 @@ async fn action_result(
     })
     .await
     .unwrap_or_else(|_| panic!("no '{}' event within 20s", title))
+}
+
+/// The next list of `crd`'s instances on the channel.
+async fn crd_instances_result(
+    rx: &mut UnboundedReceiver<AppEvent>,
+    crd: &str,
+) -> Result<String, String> {
+    tokio::time::timeout(Duration::from_secs(20), async {
+        loop {
+            match rx.recv().await {
+                Some(AppEvent::CrdInstancesResult { crd: c, result, .. }) if c == crd => {
+                    return result
+                }
+                Some(_) => continue,
+                None => panic!("event channel closed before the {} list", crd),
+            }
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("no {} list within 20s", crd))
 }
 
 fn toast(app: &App) -> String {
@@ -533,7 +558,7 @@ async fn crd_discovery_stays_silent_when_the_definitions_cannot_be_listed() {
     assert!(app.crds.is_empty());
     assert!(
         common::drain(&mut rx).iter().all(
-            |ev| !matches!(ev, AppEvent::ActionResult { title, .. } if title == "crds_updated")
+            |ev| !matches!(ev, AppEvent::ActionResult { title, .. } if title == "crds_updated" || title.starts_with("crds_updated:"))
         ),
         "a failed list publishes no CRD update"
     );
@@ -779,7 +804,7 @@ async fn custom_resource_instances_are_published_with_name_namespace_and_age() {
     let (_settings, mut app, mut rx) = app_on(&cluster).await;
 
     app.fetch_crd_instances(widget_crd());
-    let payload = action_result(&mut rx, "crd_instances:widgets.example.com")
+    let payload = crd_instances_result(&mut rx, "widgets.example.com")
         .await
         .expect("the namespaced list is published");
     let items: Vec<Value> = serde_json::from_str(&payload).expect("a JSON array");
@@ -803,7 +828,7 @@ async fn custom_resource_instances_are_published_with_name_namespace_and_age() {
     );
 
     app.fetch_crd_instances(gadget_crd());
-    let payload = action_result(&mut rx, "crd_instances:gadgets.example.com")
+    let payload = crd_instances_result(&mut rx, "gadgets.example.com")
         .await
         .expect("the cluster-scoped list is published");
     let items: Vec<Value> = serde_json::from_str(&payload).expect("a JSON array");
@@ -970,6 +995,29 @@ async fn the_yaml_view_serialises_the_live_object_for_builtin_and_custom_kinds()
         "a CRD is matched by its plural too"
     );
     assert_eq!(app.nav_stack.len(), 4, "each view stacks on the last");
+}
+
+/// #1046: the YAML view keeps the order the API server sent, as Freelens and
+/// Lens show it, with `apiVersion` and `kind` on top as kubectl puts them.
+/// The body is raw text because `route` serves a `serde_json::Value`, which
+/// has sorted its keys already.
+#[tokio::test]
+async fn the_yaml_view_keeps_the_servers_key_order() {
+    let cluster = fake_cluster(vec![Route {
+        prefix: "/api/v1/namespaces/default/configmaps/web".into(),
+        status: 200,
+        body: r#"{"kind":"ConfigMap","apiVersion":"v1","metadata":{"name":"web","namespace":"default","uid":"u1","resourceVersion":"7","labels":{"tier":"web","app":"shop"},"managedFields":[{"manager":"kubectl"}]},"data":{"zeta":"1","alpha":"2"}}"#.into(),
+    }])
+    .await;
+    let (_settings, mut app, _rx) = app_on(&cluster).await;
+
+    app.open_yaml_view("web".into(), "ConfigMap".into(), Some("default".into()))
+        .await;
+
+    assert_eq!(
+        yaml_text(&app),
+        "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: web\n  namespace: default\n  uid: u1\n  resourceVersion: '7'\n  labels:\n    tier: web\n    app: shop\ndata:\n  zeta: '1'\n  alpha: '2'\n",
+    );
 }
 
 /// The YAML view holds no manifest: its first line names the object, the
@@ -2974,7 +3022,7 @@ async fn a_warm_watch_with_an_empty_cache_refetches_the_list() {
     let (_settings, mut app, mut rx) = app_on(&cluster).await;
     app.crds = vec![widget_crd()];
     app.switch_view_to_crd(widget_crd()).await;
-    action_result(&mut rx, "crd_instances:widgets.example.com")
+    crd_instances_result(&mut rx, "widgets.example.com")
         .await
         .expect("the first list");
 
@@ -2982,7 +3030,7 @@ async fn a_warm_watch_with_an_empty_cache_refetches_the_list() {
     app.resource_cache.clear();
     app.restart_active_watch().await;
 
-    action_result(&mut rx, "crd_instances:widgets.example.com")
+    crd_instances_result(&mut rx, "widgets.example.com")
         .await
         .expect("the table is refilled by a fresh list, not left on Loading");
 }

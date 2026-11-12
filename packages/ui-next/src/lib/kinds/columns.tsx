@@ -76,7 +76,7 @@ export function ownHistory(row: Pick<PodRow, "created" | "usageHistory">): Usage
 }
 
 /** "3 minutes", "40 seconds" — how much past a graph is showing. */
-function spanWords(ms: number): string {
+export function spanWords(ms: number): string {
   const minutes = Math.round(ms / 60_000);
   if (minutes >= 1) return `${minutes} minute${minutes === 1 ? "" : "s"}`;
   const seconds = Math.round(ms / 1000);
@@ -215,10 +215,7 @@ function PodUsageCell({
   const amount = format(used);
   const share = usage === null ? null : `${Math.round(usage.percent)}%`;
   const against = usage === null ? "no request or limit set" : `${share} of ${format(usage.bound)} ${usage.of}`;
-  // By load against a limit: near it is near being throttled or killed.
-  // Against a request it is not a verdict at all, so one quiet tone however
-  // far past it goes.
-  const tone = usage === null ? "muted" : usage.of === "request" ? "info" : loadTone(usage.percent);
+  const tone = usageTone(usage);
   if (as === "bar") {
     return (
       <div className={USAGE_CELL} title={`${amount}, ${against}`}>
@@ -263,6 +260,16 @@ function PodUsageCell({
       <span className="num w-9 shrink-0 text-right text-[0.6875rem] text-muted">{share}</span>
     </div>
   );
+}
+
+/**
+ * The colour of a pod's usage, in the list and on the pod's own page alike: by
+ * load against a limit, since near it is near being throttled or killed.
+ * Against a request it is not a verdict at all, so one quiet tone however far
+ * past it goes; with no bound, nothing to judge by.
+ */
+export function usageTone(usage: PodResourceUsage | null): Tone {
+  return usage === null ? "muted" : usage.of === "request" ? "info" : loadTone(usage.percent);
 }
 
 /** Short enough to sit inside a row at every density without growing it. */

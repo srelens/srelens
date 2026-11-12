@@ -62,7 +62,7 @@ vi.mock("../../lib/shortcuts", async (orig) => {
 const tabs = vi.hoisted(() => ({ openTab: vi.fn() }));
 vi.mock("../../lib/tabsStore", async (orig) => ({ ...await orig<object>(), openTab: tabs.openTab }));
 
-import { AccessibilityPane, ShortcutsPane, ClustersPane } from "./SmallPanes";
+import { AccessibilityPane, ShortcutsPane, ClustersPane, DeepLinksPane } from "./SmallPanes";
 
 beforeEach(async () => {
   vi.clearAllMocks();
@@ -234,5 +234,15 @@ describe("ClustersPane", () => {
   it("names Connections for source management", () => {
     render(<ClustersPane />);
     expect(screen.getAllByText(/connections/i).length).toBeGreaterThan(0);
+  });
+});
+
+describe("DeepLinksPane", () => {
+  it("runs the link forms table to the card's edges", () => {
+    // Inside the card's inset, the table's row rules stopped short of its border.
+    render(<DeepLinksPane />);
+    const table = screen.getByRole("table");
+    expect(table.closest(".card")).not.toBeNull();
+    expect(table.closest(".section-body")).toBeNull();
   });
 });

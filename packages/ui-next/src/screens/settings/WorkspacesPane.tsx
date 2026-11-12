@@ -1,6 +1,6 @@
 import { useId, useState } from "react";
 import { describeError, plural, type ClusterContext } from "@srelens/core";
-import { Button, Combobox, ConfirmDialog, IconButton, Switch, TextInput } from "@srelens/ui-kit";
+import { Button, Combobox, ConfirmDialog, IconButton, PaneIntro, Switch, TextInput } from "@srelens/ui-kit";
 import { useContexts, useContextsError, useContextsStatus } from "../../lib/clusters";
 import { useOrderedContexts } from "../../lib/contextOrder";
 import { Icons } from "../../lib/icons";
@@ -104,10 +104,7 @@ export function WorkspacesPane() {
   const rest = workspaces.filter((w) => w !== target);
   const landing = target?.id === current.id ? rest[Math.min(workspaces.indexOf(target), rest.length - 1)] : undefined;
   return <div className="flex h-full min-h-0 flex-col">
-    <header className="border-b border-rule px-3 py-2">
-      <h2 className="text-[0.8125rem] font-semibold">Workspaces</h2>
-      <p className="text-[0.75rem] text-muted">Each workspace has its own clusters and tabs. Switch between them from the title bar.</p>
-    </header>
+    <PaneIntro title="Workspaces" description="Each workspace has its own clusters and tabs. Switch between them from the title bar." />
     <ul aria-label="Workspaces" className="scroll min-h-0 flex-1">
       {workspaces.map((w) => <WorkspaceRow key={w.id} workspace={w} contexts={contexts} current={w.id === current.id}
         lone={workspaces.length <= 1} onDelete={() => setDeleting(w.id)} />)}
