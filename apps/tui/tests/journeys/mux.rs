@@ -1051,6 +1051,47 @@ async fn journey_mux_right_pane_restores_the_clusters_conversation() {
     );
 }
 
+/// D5: closing a pane keeps its cluster's conversation for the next visit.
+/// `:mux` takes it out of `assistant_states`, so closing the pane has to put
+/// it back (#1079).
+#[tokio::test]
+async fn journey_mux_closing_a_pane_keeps_its_clusters_conversation() {
+    let _settings = common::env::isolate_settings();
+    let (mut app, _rx) = common::app_with("cluster-a", "default").await;
+    app.contexts = vec![
+        ctx("cluster-a", "c-a", "default"),
+        ctx("cluster-b", "c-b", "default"),
+    ];
+    let mut earlier = srectl::views::assistant_view::AssistantViewState::for_context("cluster-b");
+    earlier.add_assistant_message("checkout is slow because of the cart service".to_string());
+    earlier.input = "and the cart?".to_string();
+    app.assistant_states
+        .insert("cluster-b".to_string(), earlier);
+
+    press(&mut app, ch(':')).await;
+    type_str(&mut app, "mux").await;
+    press(&mut app, key(KeyCode::Enter)).await;
+    press(&mut app, key(KeyCode::Enter)).await;
+    assert_eq!(app.active_context, "cluster-b");
+
+    press(&mut app, shift(KeyCode::Char('D'))).await;
+    press(&mut app, ch('y')).await;
+    assert!(app.mux_state.is_none(), "the split is closed");
+    assert_eq!(app.active_context, "cluster-a");
+
+    let kept = app
+        .assistant_states
+        .get("cluster-b")
+        .expect("closing cluster-b's pane must keep its conversation");
+    assert_eq!(kept.input, "and the cart?", "the draft is kept");
+    assert!(
+        kept.messages
+            .iter()
+            .any(|m| m.content.contains("cart service")),
+        "the history is kept"
+    );
+}
+
 fn widget_crd() -> srectl::commands::CrdMeta {
     srectl::commands::CrdMeta {
         crd_name: "widgets.example.com".to_string(),

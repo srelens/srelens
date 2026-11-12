@@ -10410,6 +10410,15 @@ impl App {
                     self.logs_manager.stop(log_ch);
                 }
                 self.assistant_state.cancel_turn();
+                // Keep the closed cluster's conversation for its next visit,
+                // as a context switch does: `:mux` took it out of
+                // `assistant_states` when the pane opened (#1079).
+                let closed_state = std::mem::replace(
+                    &mut self.assistant_state,
+                    crate::views::assistant_view::AssistantViewState::new(),
+                );
+                self.assistant_states
+                    .insert(closed_ctx.clone(), closed_state);
 
                 // 2. Promote the parked/inactive pane into self as the surviving view
                 inactive.apply_to_app(self);
