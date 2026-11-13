@@ -11,6 +11,18 @@ Prefer to build from source? See the [developer guide](DEVELOPMENT.md).
 
 Builds are Developer-ID signed and notarized, so they open without warnings.
 
+With Homebrew:
+
+```bash
+brew install --cask srelens/tap/srelens
+```
+
+The built-in updater remains available; you can also update the cask with
+`brew upgrade --cask srelens`. The cask installs the same signed and notarized
+DMG published on GitHub.
+
+To install directly:
+
 1. Download the `.dmg` for your chip:
    - Apple Silicon (M1/M2/M3/…): `srelens_<version>_aarch64.dmg`
    - Intel: `srelens_<version>_x64.dmg`
