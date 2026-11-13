@@ -557,9 +557,52 @@ pub fn render_statusbar(f: &mut Frame, area: Rect, props: StatusBarProps) {
                 spans.push(Span::styled("│ ", Style::default().fg(Theme::border())));
             }
 
-            for (key, desc) in hints {
-                spans.push(Span::styled(*key, Theme::key_hint_key()));
-                spans.push(Span::styled(format!(" {} ", desc), Theme::key_hint_desc()));
+            match Theme::status_style() {
+                crate::theme::StatusStyle::FunctionKeys => {
+                    for (i, (key, desc)) in hints.iter().enumerate() {
+                        if i > 0 {
+                            spans.push(Span::raw(" "));
+                        }
+                        let clean_key = key.trim_matches(|c| c == '<' || c == '>');
+                        spans.push(Span::styled(
+                            format!(" {} ", clean_key),
+                            Style::default()
+                                .bg(Theme::accent())
+                                .fg(Color::Rgb(0, 0, 0))
+                                .add_modifier(Modifier::BOLD),
+                        ));
+                        spans.push(Span::styled(
+                            format!(" {} ", desc),
+                            Style::default()
+                                .fg(Theme::fg())
+                                .add_modifier(Modifier::BOLD),
+                        ));
+                    }
+                }
+                crate::theme::StatusStyle::Minimal => {
+                    for (i, (key, desc)) in hints.iter().enumerate() {
+                        if i > 0 {
+                            spans.push(Span::styled("  ·  ", Style::default().fg(Theme::dim())));
+                        }
+                        let clean_key = key.trim_matches(|c| c == '<' || c == '>');
+                        spans.push(Span::styled(
+                            clean_key,
+                            Style::default()
+                                .fg(Theme::cyan())
+                                .add_modifier(Modifier::BOLD),
+                        ));
+                        spans.push(Span::styled(
+                            format!(" {}", desc.to_lowercase()),
+                            Style::default().fg(Theme::dim()),
+                        ));
+                    }
+                }
+                crate::theme::StatusStyle::Standard => {
+                    for (key, desc) in hints {
+                        spans.push(Span::styled(*key, Theme::key_hint_key()));
+                        spans.push(Span::styled(format!(" {} ", desc), Theme::key_hint_desc()));
+                    }
+                }
             }
 
             if !props.filter_input.is_empty() {

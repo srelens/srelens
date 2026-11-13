@@ -8,6 +8,15 @@ pub enum HeaderStyle {
     Standard,
     FinoTime,
     Minimal,
+    TurboVision,
+    NocDeck,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum StatusStyle {
+    Standard,
+    FunctionKeys,
+    Minimal,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -27,6 +36,8 @@ pub enum ThemeId {
     SreHighContrast,
     TokyoStorm,
     GitHubDarkHc,
+    TurboVision,
+    NocDeck,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -64,6 +75,7 @@ pub struct ThemePalette {
     pub marked_bg: Color,
     pub marked_fg: Color,
     pub header_style: HeaderStyle,
+    pub status_style: StatusStyle,
     pub border_type: BorderType,
     pub prompt_glyph: &'static str,
     pub bullet_glyph: &'static str,
@@ -95,6 +107,7 @@ pub static ALL_THEMES: &[ThemePalette] = &[
         marked_bg: Color::Rgb(60, 40, 90),
         marked_fg: Color::Yellow,
         header_style: HeaderStyle::Standard,
+        status_style: StatusStyle::Standard,
         border_type: BorderType::Rounded,
         prompt_glyph: ":",
         bullet_glyph: "●",
@@ -124,6 +137,7 @@ pub static ALL_THEMES: &[ThemePalette] = &[
         marked_bg: Color::Rgb(65, 45, 80),
         marked_fg: Color::Rgb(224, 175, 104),
         header_style: HeaderStyle::Standard,
+        status_style: StatusStyle::Standard,
         border_type: BorderType::Rounded,
         prompt_glyph: ":",
         bullet_glyph: "●",
@@ -153,6 +167,7 @@ pub static ALL_THEMES: &[ThemePalette] = &[
         marked_bg: Color::Rgb(70, 45, 85),
         marked_fg: Color::Rgb(241, 250, 140),
         header_style: HeaderStyle::Standard,
+        status_style: StatusStyle::Standard,
         border_type: BorderType::Rounded,
         prompt_glyph: ":",
         bullet_glyph: "●",
@@ -182,6 +197,7 @@ pub static ALL_THEMES: &[ThemePalette] = &[
         marked_bg: Color::Rgb(60, 50, 75),
         marked_fg: Color::Rgb(235, 203, 139),
         header_style: HeaderStyle::Minimal,
+        status_style: StatusStyle::Minimal,
         border_type: BorderType::Plain,
         prompt_glyph: "❯ ",
         bullet_glyph: "◆",
@@ -211,6 +227,7 @@ pub static ALL_THEMES: &[ThemePalette] = &[
         marked_bg: Color::Rgb(80, 50, 40),
         marked_fg: Color::Rgb(250, 189, 47),
         header_style: HeaderStyle::Standard,
+        status_style: StatusStyle::Standard,
         border_type: BorderType::Plain,
         prompt_glyph: ":",
         bullet_glyph: "●",
@@ -240,6 +257,7 @@ pub static ALL_THEMES: &[ThemePalette] = &[
         marked_bg: Color::Rgb(20, 45, 60),
         marked_fg: Color::Rgb(181, 137, 0),
         header_style: HeaderStyle::Minimal,
+        status_style: StatusStyle::Minimal,
         border_type: BorderType::Plain,
         prompt_glyph: ":",
         bullet_glyph: "●",
@@ -269,6 +287,7 @@ pub static ALL_THEMES: &[ThemePalette] = &[
         marked_bg: Color::Rgb(70, 50, 55),
         marked_fg: Color::Rgb(255, 216, 102),
         header_style: HeaderStyle::Standard,
+        status_style: StatusStyle::Standard,
         border_type: BorderType::Rounded,
         prompt_glyph: "▶ ",
         bullet_glyph: "▪",
@@ -298,6 +317,7 @@ pub static ALL_THEMES: &[ThemePalette] = &[
         marked_bg: Color::Rgb(220, 210, 230),
         marked_fg: Color::Rgb(136, 57, 239),
         header_style: HeaderStyle::Standard,
+        status_style: StatusStyle::Standard,
         border_type: BorderType::Rounded,
         prompt_glyph: ":",
         bullet_glyph: "●",
@@ -327,6 +347,7 @@ pub static ALL_THEMES: &[ThemePalette] = &[
         marked_bg: Color::Rgb(55, 55, 75),
         marked_fg: Color::Rgb(250, 204, 21),
         header_style: HeaderStyle::FinoTime,
+        status_style: StatusStyle::Standard,
         border_type: BorderType::Rounded,
         prompt_glyph: "╰─○ ",
         bullet_glyph: "○",
@@ -356,6 +377,7 @@ pub static ALL_THEMES: &[ThemePalette] = &[
         marked_bg: Color::Rgb(65, 45, 75),
         marked_fg: Color::Rgb(246, 193, 119),
         header_style: HeaderStyle::Standard,
+        status_style: StatusStyle::Minimal,
         border_type: BorderType::Rounded,
         prompt_glyph: "❯ ",
         bullet_glyph: "◆",
@@ -385,6 +407,7 @@ pub static ALL_THEMES: &[ThemePalette] = &[
         marked_bg: Color::Rgb(70, 15, 60),
         marked_fg: Color::Rgb(255, 222, 0),
         header_style: HeaderStyle::Standard,
+        status_style: StatusStyle::Standard,
         border_type: BorderType::Thick,
         prompt_glyph: "▶ ",
         bullet_glyph: "▪",
@@ -414,6 +437,7 @@ pub static ALL_THEMES: &[ThemePalette] = &[
         marked_bg: Color::Rgb(55, 55, 75),
         marked_fg: Color::Rgb(229, 192, 123),
         header_style: HeaderStyle::Standard,
+        status_style: StatusStyle::Standard,
         border_type: BorderType::Plain,
         prompt_glyph: ":",
         bullet_glyph: "●",
@@ -443,6 +467,7 @@ pub static ALL_THEMES: &[ThemePalette] = &[
         marked_bg: Color::Rgb(67, 56, 202),
         marked_fg: Color::Rgb(250, 204, 21),
         header_style: HeaderStyle::Standard,
+        status_style: StatusStyle::Standard,
         border_type: BorderType::Rounded,
         prompt_glyph: "❯ ",
         bullet_glyph: "●",
@@ -472,6 +497,7 @@ pub static ALL_THEMES: &[ThemePalette] = &[
         marked_bg: Color::Rgb(65, 50, 95),
         marked_fg: Color::Rgb(224, 175, 104),
         header_style: HeaderStyle::Standard,
+        status_style: StatusStyle::Standard,
         border_type: BorderType::Rounded,
         prompt_glyph: "▶ ",
         bullet_glyph: "●",
@@ -501,11 +527,72 @@ pub static ALL_THEMES: &[ThemePalette] = &[
         marked_bg: Color::Rgb(56, 40, 80),
         marked_fg: Color::Rgb(210, 153, 34),
         header_style: HeaderStyle::Standard,
+        status_style: StatusStyle::Standard,
         border_type: BorderType::Rounded,
         prompt_glyph: ":",
         bullet_glyph: "●",
         brand_icon: "⚡ ",
         show_live_clock: false,
+    },
+    ThemePalette {
+        id: ThemeId::TurboVision,
+        name: "turbo-vision",
+        display_name: "Turbo Vision (Norton)",
+        description: "Borland C++ & Norton classic — double frames, cobalt blue, action buttons",
+        is_light: false,
+        bg: Color::Reset,
+        fg: Color::Rgb(255, 255, 255),
+        label: Color::Rgb(170, 210, 240),
+        dim: Color::Rgb(165, 185, 215),
+        accent: Color::Rgb(255, 255, 85),
+        cyan: Color::Rgb(85, 255, 255),
+        green: Color::Rgb(85, 255, 85),
+        yellow: Color::Rgb(255, 255, 85),
+        red: Color::Rgb(255, 85, 85),
+        orange: Color::Rgb(255, 170, 0),
+        border: Color::Rgb(0, 170, 170),
+        border_focus: Color::Rgb(255, 255, 85),
+        sel_bg: Color::Rgb(0, 120, 180),
+        sel_fg: Color::Rgb(255, 255, 255),
+        marked_bg: Color::Rgb(120, 80, 0),
+        marked_fg: Color::Rgb(255, 255, 85),
+        header_style: HeaderStyle::TurboVision,
+        status_style: StatusStyle::FunctionKeys,
+        border_type: BorderType::Double,
+        prompt_glyph: "▶ ",
+        bullet_glyph: "■",
+        brand_icon: "═ ",
+        show_live_clock: true,
+    },
+    ThemePalette {
+        id: ThemeId::NocDeck,
+        name: "noc-deck",
+        display_name: "NOC Telemetry Deck",
+        description: "Flight director & telemetry HUD — thin hairlines, live clock, status pips",
+        is_light: false,
+        bg: Color::Reset,
+        fg: Color::Rgb(230, 238, 245),
+        label: Color::Rgb(165, 185, 205),
+        dim: Color::Rgb(145, 165, 185),
+        accent: Color::Rgb(0, 225, 255),
+        cyan: Color::Rgb(0, 225, 255),
+        green: Color::Rgb(0, 255, 136),
+        yellow: Color::Rgb(255, 191, 0),
+        red: Color::Rgb(255, 51, 85),
+        orange: Color::Rgb(255, 128, 0),
+        border: Color::Rgb(40, 60, 80),
+        border_focus: Color::Rgb(0, 225, 255),
+        sel_bg: Color::Rgb(20, 45, 70),
+        sel_fg: Color::Rgb(255, 255, 255),
+        marked_bg: Color::Rgb(45, 30, 70),
+        marked_fg: Color::Rgb(0, 225, 255),
+        header_style: HeaderStyle::NocDeck,
+        status_style: StatusStyle::Standard,
+        border_type: BorderType::Plain,
+        prompt_glyph: "◈ ",
+        bullet_glyph: "◆",
+        brand_icon: "◈ ",
+        show_live_clock: true,
     },
 ];
 
@@ -603,6 +690,17 @@ impl Theme {
                 || (lower == "github-dark" && p.id == ThemeId::GitHubDarkHc)
                 || (lower == "githubhc" && p.id == ThemeId::GitHubDarkHc)
                 || (lower == "github-dark-hc" && p.id == ThemeId::GitHubDarkHc)
+                || (lower == "turbovision" && p.id == ThemeId::TurboVision)
+                || (lower == "turbo-vision" && p.id == ThemeId::TurboVision)
+                || (lower == "turbo" && p.id == ThemeId::TurboVision)
+                || (lower == "borland" && p.id == ThemeId::TurboVision)
+                || (lower == "norton" && p.id == ThemeId::TurboVision)
+                || (lower == "mc" && p.id == ThemeId::TurboVision)
+                || (lower == "noc" && p.id == ThemeId::NocDeck)
+                || (lower == "nocdeck" && p.id == ThemeId::NocDeck)
+                || (lower == "noc-deck" && p.id == ThemeId::NocDeck)
+                || (lower == "telemetry" && p.id == ThemeId::NocDeck)
+                || (lower == "deck" && p.id == ThemeId::NocDeck)
             {
                 ACTIVE_THEME_IDX.store(i, Ordering::Relaxed);
                 return Some(p);
@@ -618,6 +716,9 @@ impl Theme {
     // Visual chrome and layout accessors
     pub fn header_style() -> HeaderStyle {
         Self::active_palette().header_style
+    }
+    pub fn status_style() -> StatusStyle {
+        Self::active_palette().status_style
     }
     pub fn border_type() -> BorderType {
         Self::active_palette().border_type
