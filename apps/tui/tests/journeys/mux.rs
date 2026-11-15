@@ -1230,6 +1230,7 @@ async fn journey_mux_failed_custom_resource_list_stays_on_the_parked_table() {
 
     app.handle_crd_instances_failed_for(
         "cluster-left",
+        "default",
         "widgets.example.com",
         "connection refused",
     );

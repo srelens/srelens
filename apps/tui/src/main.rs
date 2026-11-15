@@ -518,7 +518,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 AppEvent::CrdInstancesResult { context, namespace, crd, result } => match result {
                     Ok(rows) => app.handle_crd_instances_update_for(&context, &namespace, &crd, &rows),
-                    Err(err) => app.handle_crd_instances_failed_for(&context, &crd, &err),
+                    Err(err) => {
+                        app.handle_crd_instances_failed_for(&context, &namespace, &crd, &err)
+                    }
                 },
                 AppEvent::LineageResult { kind, name, result } => {
                     app.handle_lineage_result(&kind, &name, result);
