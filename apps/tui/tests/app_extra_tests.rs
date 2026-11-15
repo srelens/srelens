@@ -2409,6 +2409,84 @@ async fn a_cluster_without_a_metrics_server_publishes_no_metrics_at_all() {
     assert!(app.node_metrics_history.is_empty());
 }
 
+fn mux_context(name: &str) -> srelens_kube::contexts::ContextDto {
+    srelens_kube::contexts::ContextDto {
+        name: name.to_string(),
+        stable_id: format!("file/{}", name),
+        key: format!("file/{}", name),
+        pinned_id: None,
+        cluster: name.to_string(),
+        server: format!("https://{}.example.invalid", name),
+        namespace: "default".to_string(),
+        is_current: false,
+        is_local: false,
+        provider: None,
+        distribution: None,
+        source_file: "config".to_string(),
+        auth_kind: "token".to_string(),
+    }
+}
+
+/// A `:mux` pane parked on Top keeps asking its own cluster for pod and node
+/// metrics, so comparing two clusters side by side does not mix live
+/// readings with frozen ones (#1083).
+#[tokio::test]
+async fn a_parked_mux_pane_keeps_requesting_its_clusters_metrics() {
+    let cluster = fake_cluster(vec![
+        route(
+            "/apis/metrics.k8s.io/v1beta1/namespaces/default/pods",
+            json!({ "kind": "PodMetricsList", "metadata": {}, "items": [{
+                "metadata": { "name": "web-0", "namespace": "default" },
+                "containers": [{ "name": "app", "usage": { "cpu": "200m", "memory": "1Gi" } }],
+            }] }),
+        ),
+        route(
+            "/apis/metrics.k8s.io/v1beta1/nodes",
+            json!({ "kind": "NodeMetricsList", "metadata": {}, "items": [{
+                "metadata": { "name": "node-a" },
+                "usage": { "cpu": "750m", "memory": "3072Mi" },
+            }] }),
+        ),
+    ])
+    .await;
+    let (_settings, mut app, mut rx) = app_on(&cluster).await;
+    app.contexts = vec![mux_context(FAKE_CONTEXT), mux_context("cluster-right")];
+    app.active_view = ActiveView::Top(srectl::views::top_view::TopViewState::new(
+        srectl::views::top_view::TopTab::Pods,
+    ));
+
+    app.handle_key_event(common::ch(':')).await;
+    for c in "mux".chars() {
+        app.handle_key_event(common::ch(c)).await;
+    }
+    app.handle_key_event(common::key(KeyCode::Enter)).await;
+    app.handle_key_event(common::key(KeyCode::Enter)).await;
+    assert_eq!(app.active_context, "cluster-right");
+    // The app starts on Pods, whose watch also asks for pod metrics. Let that
+    // reply land first, so only what the tick asks for counts below.
+    let _ = tokio::time::timeout(
+        Duration::from_secs(2),
+        action_result(&mut rx, "pod_metrics_updated"),
+    )
+    .await;
+    common::drain(&mut rx);
+
+    app.handle_tick();
+
+    let mut asked = std::collections::BTreeSet::new();
+    tokio::time::timeout(Duration::from_secs(20), async {
+        while asked.len() < 2 {
+            if let Some(AppEvent::ActionResult { title, .. }) = rx.recv().await {
+                if title.ends_with(&format!("_metrics_updated:{FAKE_CONTEXT}")) {
+                    asked.insert(title);
+                }
+            }
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("the parked pane's cluster got only {:?}", asked));
+}
+
 // ---------------------------------------------------------------------------
 // Command resolution
 // ---------------------------------------------------------------------------

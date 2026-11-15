@@ -184,4 +184,7 @@ pub struct MuxState {
     pub picker: Option<ContextPickerState>,
     /// The inactive cluster pane (parked while the other pane is active in `App`)
     pub inactive_pane: Option<ClusterPaneState>,
+    /// Paces the parked pane's metric requests, as `App`'s counters pace the
+    /// focused pane's.
+    pub parked_metrics_tick_counter: usize,
 }

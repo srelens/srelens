@@ -520,11 +520,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     Ok(rows) => app.handle_crd_instances_update_for(&context, &namespace, &crd, &rows),
                     Err(err) => app.handle_crd_instances_failed_for(&context, &crd, &err),
                 },
-                AppEvent::LineageResult { kind, name, result } => {
-                    app.handle_lineage_result(&kind, &name, result);
+                AppEvent::LineageResult { context, kind, name, result } => {
+                    app.handle_lineage_result_for(&context, &kind, &name, result);
                 }
-                AppEvent::NodeInspectorResult { node_name, result } => {
-                    app.handle_node_inspector_result(&node_name, result);
+                AppEvent::NodeInspectorResult { context, node_name, result } => {
+                    app.handle_node_inspector_result_for(&context, &node_name, result);
                 }
                 AppEvent::TopologyResult { context, namespaces, result } => {
                     app.handle_topology_result(&context, namespaces, result);

@@ -804,6 +804,37 @@ impl App {
             }
         }
 
+        // A pane `:mux` parked on Pods, Nodes or Top is still on screen: keep
+        // asking its own cluster on the same cadence, or its readings freeze
+        // beside the focused pane's live ones (#1083). Replies already route
+        // to it by context.
+        let parked_due = self.mux_state.as_mut().and_then(|mux| {
+            let pane = mux.inactive_pane.as_ref()?;
+            let (pods, nodes) = match &pane.active_view {
+                ActiveView::Table(t) => (
+                    t.kind == ResourceKind::Pods || t.kind == ResourceKind::Workloads,
+                    t.kind == ResourceKind::Nodes,
+                ),
+                ActiveView::Top(_) => (true, true),
+                ActiveView::NodeInspector(_) => (false, true),
+                _ => (false, false),
+            };
+            if !(pods || nodes) {
+                return None;
+            }
+            mux.parked_metrics_tick_counter = mux.parked_metrics_tick_counter.saturating_add(1);
+            (mux.parked_metrics_tick_counter % 40 == 1)
+                .then(|| (pane.context.clone(), pane.namespace.clone(), pods, nodes))
+        });
+        if let Some((ctx, ns, pods, nodes)) = parked_due {
+            if pods {
+                self.refresh_pod_metrics_for(ctx.clone(), ns);
+            }
+            if nodes {
+                self.refresh_node_metrics_for(ctx);
+            }
+        }
+
         if matches!(self.active_view, ActiveView::PortForwards(_)) {
             self.sync_port_forwards();
         }
@@ -900,10 +931,13 @@ impl App {
     }
 
     pub fn refresh_pod_metrics(&self) {
+        self.refresh_pod_metrics_for(self.active_context.clone(), self.active_namespace.clone());
+    }
+
+    /// Ask `ctx` for the pod metrics of `ns`; the reply names `ctx`.
+    pub fn refresh_pod_metrics_for(&self, ctx: String, ns: String) {
         let event_tx = self.event_tx.clone();
         let cache = self.client_cache.clone();
-        let ctx = self.active_context.clone();
-        let ns = self.active_namespace.clone();
 
         tokio::spawn(async move {
             if let Ok(metrics) = srelens_kube::metrics::fetch_pod_metrics(cache, &ctx, &ns).await {
@@ -1447,9 +1481,13 @@ impl App {
     }
 
     pub fn refresh_node_metrics(&self) {
+        self.refresh_node_metrics_for(self.active_context.clone());
+    }
+
+    /// Ask `ctx` for its node metrics; the reply names `ctx`.
+    pub fn refresh_node_metrics_for(&self, ctx: String) {
         let event_tx = self.event_tx.clone();
         let cache = self.client_cache.clone();
-        let ctx = self.active_context.clone();
 
         tokio::spawn(async move {
             if let Ok(metrics) = srelens_kube::metrics::fetch_node_metrics(cache, &ctx).await {
@@ -10244,6 +10282,7 @@ impl App {
                 filter: String::new(),
             }),
             inactive_pane: None,
+            parked_metrics_tick_counter: 0,
         });
 
         self.set_toast(
@@ -12527,6 +12566,7 @@ impl App {
                 Err(e) => Err(format!("Failed to connect to cluster: {}", e)),
             };
             let _ = event_tx.send(crate::event::AppEvent::LineageResult {
+                context: ctx,
                 kind: k,
                 name: n,
                 result: res,
@@ -12534,13 +12574,27 @@ impl App {
         });
     }
 
+    /// A lineage result for the focused pane.
     pub fn handle_lineage_result(
         &mut self,
         kind: &str,
         name: &str,
         result: Result<srelens_kube::lineage::LineageNode, String>,
     ) {
-        if let ActiveView::Tree(tree) = &mut self.active_view {
+        let ctx = self.active_context.clone();
+        self.handle_lineage_result_for(&ctx, kind, name, result);
+    }
+
+    /// A lineage result read from `context`: it fills the Resource Tree of the
+    /// pane showing that cluster, focused or parked by `:mux` (#1083).
+    pub fn handle_lineage_result_for(
+        &mut self,
+        context: &str,
+        kind: &str,
+        name: &str,
+        result: Result<srelens_kube::lineage::LineageNode, String>,
+    ) {
+        if let Some((ActiveView::Tree(tree), _, _)) = self.pane_for_context(context) {
             if tree.root_kind.eq_ignore_ascii_case(kind) && tree.root_name == name {
                 match result {
                     Ok(node) => tree.set_tree(node),
@@ -12575,18 +12629,32 @@ impl App {
                 Err(e) => Err(format!("Failed to connect to cluster: {}", e)),
             };
             let _ = event_tx.send(crate::event::AppEvent::NodeInspectorResult {
+                context: ctx,
                 node_name: n,
                 result: res,
             });
         });
     }
 
+    /// A Node Inspector result for the focused pane.
     pub fn handle_node_inspector_result(
         &mut self,
         node_name: &str,
         result: Result<srelens_kube::node_inspector::NodeInspectorDetails, String>,
     ) {
-        if let ActiveView::NodeInspector(inspector) = &mut self.active_view {
+        let ctx = self.active_context.clone();
+        self.handle_node_inspector_result_for(&ctx, node_name, result);
+    }
+
+    /// A Node Inspector result read from `context`: it fills the inspector of
+    /// the pane showing that cluster, focused or parked by `:mux` (#1083).
+    pub fn handle_node_inspector_result_for(
+        &mut self,
+        context: &str,
+        node_name: &str,
+        result: Result<srelens_kube::node_inspector::NodeInspectorDetails, String>,
+    ) {
+        if let Some((ActiveView::NodeInspector(inspector), _, _)) = self.pane_for_context(context) {
             if inspector.node_name == node_name {
                 match result {
                     Ok(details) => inspector.set_details(details),

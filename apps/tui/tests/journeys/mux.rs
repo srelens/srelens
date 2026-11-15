@@ -874,7 +874,8 @@ async fn journey_mux_close_cancels_active_assistant_turn() {
 
 /// Opens `command` in the left pane, then presses Ctrl+b while its fetch is
 /// still in flight, so the left pane is parked with a loading view.
-async fn park_a_loading_view_on_the_left(app: &mut srectl::app::App, command: &str) {
+/// Open `:mux` on `cluster-right` and move focus back to `cluster-left`.
+async fn split_with_the_left_focused(app: &mut srectl::app::App) {
     app.contexts = vec![
         ctx("cluster-left", "c-left", "default"),
         ctx("cluster-right", "c-right", "default"),
@@ -885,6 +886,10 @@ async fn park_a_loading_view_on_the_left(app: &mut srectl::app::App, command: &s
     press(app, key(KeyCode::Enter)).await;
     press(app, ctrl('b')).await;
     assert_eq!(app.active_context, "cluster-left");
+}
+
+async fn park_a_loading_view_on_the_left(app: &mut srectl::app::App, command: &str) {
+    split_with_the_left_focused(app).await;
 
     press(app, ch(':')).await;
     type_str(app, command).await;
@@ -965,6 +970,66 @@ async fn journey_mux_late_bgp_result_reaches_the_parked_pane() {
         "the late result must end the loading state"
     );
     assert_eq!(bgp.error.as_deref(), Some("bgp refused"));
+}
+
+/// D5: a Node Inspector fetch that finishes after Ctrl+b parked its pane
+/// lands in that pane, so switching back shows the result (#1083).
+#[tokio::test]
+async fn journey_mux_late_node_inspector_result_reaches_the_parked_pane() {
+    let _settings = common::env::isolate_settings();
+    let (mut app, _rx) = common::app_with("cluster-left", "default").await;
+    split_with_the_left_focused(&mut app).await;
+    app.open_node_inspector("node-1".to_string());
+    press(&mut app, ctrl('b')).await;
+    assert_eq!(app.active_context, "cluster-right");
+    assert!(matches!(parked_view(&app), ActiveView::NodeInspector(n) if n.is_loading));
+
+    app.handle_node_inspector_result_for("cluster-left", "node-1", Err("inspect refused".into()));
+
+    press(&mut app, ctrl('b')).await;
+    let ActiveView::NodeInspector(inspector) = &app.active_view else {
+        panic!("the left pane should still show the Node Inspector");
+    };
+    assert!(
+        !inspector.is_loading,
+        "the late result must end the loading state"
+    );
+    assert_eq!(inspector.error.as_deref(), Some("inspect refused"));
+}
+
+/// D5: a Resource Tree fetch that finishes after Ctrl+b parked its pane
+/// lands in that pane, so switching back shows the result (#1083).
+#[tokio::test]
+async fn journey_mux_late_lineage_result_reaches_the_parked_pane() {
+    let _settings = common::env::isolate_settings();
+    let (mut app, _rx) = common::app_with("cluster-left", "default").await;
+    split_with_the_left_focused(&mut app).await;
+    app.open_resource_tree(
+        "Deployment".to_string(),
+        "web".to_string(),
+        Some("default".to_string()),
+        None,
+    );
+    press(&mut app, ctrl('b')).await;
+    assert_eq!(app.active_context, "cluster-right");
+    assert!(matches!(parked_view(&app), ActiveView::Tree(t) if t.is_loading));
+
+    app.handle_lineage_result_for(
+        "cluster-left",
+        "Deployment",
+        "web",
+        Err("tree refused".into()),
+    );
+
+    press(&mut app, ctrl('b')).await;
+    let ActiveView::Tree(tree) = &app.active_view else {
+        panic!("the left pane should still show the Resource Tree");
+    };
+    assert!(
+        !tree.is_loading,
+        "the late result must end the loading state"
+    );
+    assert_eq!(tree.error.as_deref(), Some("tree refused"));
 }
 
 /// D5: an API key one pane saved survives the other pane opening and leaving
