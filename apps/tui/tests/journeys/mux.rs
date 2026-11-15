@@ -1205,3 +1205,56 @@ async fn journey_mux_late_custom_resource_list_reaches_the_pane_that_asked() {
     assert_eq!(left.raw_items.len(), 1, "the left pane gets its rows");
     assert!(!left.is_loading);
 }
+
+/// A custom-resource list that fails after `:mux` parked its pane leaves the
+/// error on that pane's table, so going back shows the failure, not an
+/// ordinary table that looks like the cluster's answer (#1081).
+#[tokio::test]
+async fn journey_mux_failed_custom_resource_list_stays_on_the_parked_table() {
+    let _settings = common::env::isolate_settings();
+    let (mut app, _rx) = common::app_with("cluster-left", "default").await;
+    app.contexts = vec![
+        ctx("cluster-left", "c-left", "default"),
+        ctx("cluster-right", "c-right", "default"),
+    ];
+    app.crds = vec![widget_crd()];
+    app.switch_view_to_crd(widget_crd()).await;
+    let rows = serde_json::json!([{ "name": "w-left", "namespace": "default" }]).to_string();
+    app.handle_crd_instances_update_for("cluster-left", "default", "widgets.example.com", &rows);
+
+    press(&mut app, ch(':')).await;
+    type_str(&mut app, "mux").await;
+    press(&mut app, key(KeyCode::Enter)).await;
+    press(&mut app, key(KeyCode::Enter)).await;
+    assert_eq!(app.active_context, "cluster-right");
+
+    app.handle_crd_instances_failed_for(
+        "cluster-left",
+        "widgets.example.com",
+        "connection refused",
+    );
+
+    let ActiveView::Table(right) = &app.active_view else {
+        panic!("the right pane should show the Widget table");
+    };
+    assert_eq!(
+        right.error, None,
+        "the left cluster's failure is not the right pane's"
+    );
+
+    press(&mut app, ctrl('b')).await;
+    assert_eq!(app.active_context, "cluster-left");
+    let ActiveView::Table(left) = &app.active_view else {
+        panic!("the left pane should still show the Widget table");
+    };
+    assert_eq!(
+        left.error.as_deref(),
+        Some("connection refused"),
+        "the left table must say its list failed"
+    );
+    assert!(
+        left.raw_items.is_empty(),
+        "rows from before the failure are not shown as current"
+    );
+    assert!(!left.is_loading);
+}

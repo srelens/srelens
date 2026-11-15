@@ -3971,5 +3971,10 @@ async fn crd_stream_error_payload_and_instances_failed_clears_loading() {
         panic!("expected table")
     };
     assert!(!t.is_loading, "instance fetch error must clear is_loading");
+    assert_eq!(
+        t.error.as_deref(),
+        Some("connection timeout"),
+        "the table must keep the failure after the toast fades (#1081)"
+    );
     assert!(toast(&app).contains("Failed to list VirtualMachine: connection timeout"));
 }

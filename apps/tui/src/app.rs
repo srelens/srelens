@@ -1926,7 +1926,9 @@ impl App {
     }
 
     /// A failed list of `crd_identifier` on `context`: the table of the pane
-    /// showing it stops loading, and the focused pane says why.
+    /// showing it keeps the error, as a failed watch does, so a parked pane
+    /// shows it on return and no pane passes old rows off as current. The
+    /// focused pane also toasts it.
     pub fn handle_crd_instances_failed_for(
         &mut self,
         context: &str,
@@ -1941,8 +1943,8 @@ impl App {
                     || crd.kind == crd_identifier
                     || crd.plural == crd_identifier
                 {
-                    table.is_loading = false;
                     toast_kind = Some(crd.kind.clone());
+                    table.set_error(err.to_string());
                 }
             }
         }
