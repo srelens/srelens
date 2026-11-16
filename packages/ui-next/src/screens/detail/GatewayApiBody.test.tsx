@@ -184,6 +184,16 @@ describe("a route's pane", () => {
     expect(screen.queryByRole("button", { name: "infra/edge" })).toBeNull();
   });
 
+  it("writes resource values in the UI font, on one line (design.md)", async () => {
+    const { container } = render(<GatewayApiBody object={ROUTE} context="prod-eu" />);
+    const gateway = render(<GatewayApiBody object={GATEWAY} context="prod-eu" />);
+    await gateway.findByRole("heading", { name: "Routes (1)" });
+    for (const root of [container, gateway.container]) {
+      expect(root.querySelectorAll(".font-mono")).toHaveLength(0);
+    }
+    expect(screen.getByText("PathPrefix /api").className).toContain("whitespace-nowrap");
+  });
+
   it("asks the cluster for nothing", () => {
     render(<GatewayApiBody object={ROUTE} context="prod-eu" />);
     expect(listCrds).not.toHaveBeenCalled();

@@ -19,22 +19,23 @@ import { openTab } from "../../lib/tabsStore";
 import { Section } from "./Section";
 import { SectionFailure, useSectionList } from "./sectionList";
 
-const mono = (text: string) => <span className="font-mono">{text || "—"}</span>;
+// Resource values keep the UI font and one line (design.md).
+const value = (text: string) => <span className="whitespace-nowrap">{text || "—"}</span>;
 
 /** A resource named in a cell, as the way to it: a tab of its own, on this cluster. */
 function Opens({ label, route, context }: { label: string; route: string; context: string }) {
   return (
     <Button type="button" variant="link" onClick={() => openTab(route, { clusterName: context })}>
-      <span className="whitespace-nowrap font-mono">{label}</span>
+      <span className="whitespace-nowrap">{label}</span>
     </Button>
   );
 }
 
 const LISTENER_COLUMNS: Column<GatewayListener>[] = [
-  { key: "name", header: "Listener", render: (l) => mono(l.name) },
+  { key: "name", header: "Listener", render: (l) => value(l.name) },
   { key: "protocol", header: "Protocol", render: (l) => l.protocol || "—" },
-  { key: "port", header: "Port", render: (l) => mono(l.port) },
-  { key: "hostname", header: "Hostname", render: (l) => mono(l.hostname) },
+  { key: "port", header: "Port", render: (l) => value(l.port) },
+  { key: "hostname", header: "Hostname", render: (l) => value(l.hostname) },
   { key: "routes", header: "Routes", align: "end", render: (l) => (l.attachedRoutes === null ? "—" : String(l.attachedRoutes)) },
   { key: "programmed", header: "Programmed", render: (l) => l.programmed || "—" },
 ];
@@ -46,7 +47,7 @@ interface AttachedRoute {
 }
 
 const ATTACHED_COLUMNS: Column<AttachedRoute>[] = [
-  { key: "name", header: "Route", render: (r) => mono(r.name) },
+  { key: "name", header: "Route", render: (r) => value(r.name) },
   { key: "namespace", header: "Namespace", render: (r) => r.namespace },
   { key: "kind", header: "Kind", render: (r) => r.kind },
 ];
@@ -186,13 +187,13 @@ function parentColumns(context: string): Column<RouteParent>[] {
           />
         ) : (
           // A Service parent is a mesh route; another kind is an implementation's own.
-          mono(`${p.group ? `${p.kind}.${p.group}` : p.kind}/${p.namespace}/${p.name}`)
+          value(`${p.group ? `${p.kind}.${p.group}` : p.kind}/${p.namespace}/${p.name}`)
         ),
     },
     {
       key: "section",
       header: "Listener",
-      render: (p) => mono([p.sectionName, p.port && `:${p.port}`].filter(Boolean).join(" ")),
+      render: (p) => value([p.sectionName, p.port && `:${p.port}`].filter(Boolean).join(" ")),
     },
     { key: "accepted", header: "Accepted", render: (p) => p.accepted || "—" },
     { key: "resolved", header: "Resolved refs", render: (p) => p.resolvedRefs || "—" },
@@ -213,7 +214,7 @@ function Backend({ backend, routeNamespace, context }: { backend: RouteBackend; 
           context={context}
         />
       ) : (
-        mono(`${backend.kind}/${elsewhere}${backend.name}${port}`)
+        value(`${backend.kind}/${elsewhere}${backend.name}${port}`)
       )}
       {weight}
     </li>
@@ -222,7 +223,7 @@ function Backend({ backend, routeNamespace, context }: { backend: RouteBackend; 
 
 function ruleColumns(routeNamespace: string, context: string): Column<RouteRule>[] {
   return [
-    { key: "matches", header: "Matches", render: (r) => mono(r.matches) },
+    { key: "matches", header: "Matches", render: (r) => value(r.matches) },
     {
       key: "backends",
       header: "Backends",
