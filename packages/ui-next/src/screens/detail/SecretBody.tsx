@@ -14,7 +14,7 @@ import {
   type DockerRegistryRow,
   type K8sObject,
 } from "@srelens/core";
-import { Button, EmptyState, KV, LoadingState, StatusPill, Table, type Column } from "@srelens/ui-kit";
+import { Button, CopyButton, EmptyState, KV, LoadingState, StatusPill, Table, type Column } from "@srelens/ui-kit";
 import { FailureAlert } from "../../lib/errorCopy";
 import { Section } from "./Section";
 import { StringList } from "./sections";
@@ -102,16 +102,16 @@ const CERTIFICATE_COLUMNS: Column<CertificateRow>[] = [
 ];
 
 /**
- * One Secret entry — key and value, the value masked until the reader
- * explicitly reveals it (classic's `ConfigDataEntry` with `secret: true`).
+ * One Secret entry — key and value, the value shown, decoded, as soon as
+ * `k8s.getSecret` has answered (#1085). It used to sit behind a Reveal click
+ * per key; the read that fetches it is the audited one either way, so the mask
+ * hid nothing from anything but the reader who had just opened the Secret.
  *
- * THE RULING THIS PORTS EXACTLY: a Secret's values are secret. Before
- * `revealed` flips true, `decodeBase64(value)` is never called and the
- * decoded text never becomes a child of anything — the masked placeholder
- * "••••••••" is the only value in the tree, so there is nothing for a
- * screen reader, a DOM inspector or a copy-all to find. No `title`,
- * `aria-label`, or `data-*` carries the value either; the toggle's own label
- * is just "Reveal"/"Hide", never the key's value.
+ * Hide is the reader's own, per key, for a screen someone else can see — and a
+ * hidden value is OUT OF THE DOCUMENT, not merely out of sight: the
+ * placeholder "••••••••" is the only value in the tree, and no `title`,
+ * `aria-label` or `data-*` carries the value. Copy is offered only over a
+ * value that is on screen.
  *
  * The toggle is DISABLED, with the reason beside it, when the values are not on
  * hand ({@link SecretDataState}). Left enabled it decodes `""` and reveals an
@@ -121,41 +121,43 @@ const CERTIFICATE_COLUMNS: Column<CertificateRow>[] = [
  * merely out of reach, and the label beside it says why.
  */
 function SecretEntry({ name, value, state }: { name: string; value: string; state: SecretDataState }) {
-  const [revealed, setRevealed] = useState(false);
+  const [hidden, setHidden] = useState(false);
   const available = hasValues(state);
+  const shown = available && !hidden;
   return (
     <div className="flex flex-col gap-1">
       <div className="flex items-center justify-between gap-2">
         <span className="font-mono text-[0.75rem] font-medium">{name}</span>
         <div className="flex items-center gap-2">
           {!available && <span className="text-[0.75rem] text-muted">{withheldReason(state)}</span>}
+          {shown && <CopyButton iconOnly label={`Copy ${name}`} text={() => decodeBase64(value)} />}
           <Button
             type="button"
             variant="ghost"
             size="xs"
             disabled={!available}
-            onClick={() => setRevealed((r) => !r)}
+            onClick={() => setHidden((h) => !h)}
           >
-            {revealed ? "Hide" : "Reveal"}
+            {shown ? "Hide" : "Reveal"}
           </Button>
         </div>
       </div>
       <pre className="whitespace-pre-wrap break-all font-mono text-[0.75rem] text-ink">
-        {available && revealed ? decodeBase64(value) : "••••••••"}
+        {shown ? decodeBase64(value) : "••••••••"}
       </pre>
     </div>
   );
 }
 
 /**
- * A Secret's `data` keys, each behind its own reveal toggle — classic's
+ * A Secret's `data` keys, each shown with its own Hide — classic's
  * `SecretData`, shared by all three Secret bodies below (TLS and Docker
  * secrets show it after their own summary section; a general Secret shows it
  * as its only section besides "Secret summary").
  *
  * The key names and the count are `getObject`'s, and they survive a `getSecret`
  * refusal intact — so this section is drawn in full either way, and only the
- * per-key reveal is withheld.
+ * per-key value is withheld.
  */
 function SecretDataSection({ state }: { state: SecretDataState }) {
   const keys = Object.keys(state.data);
@@ -163,7 +165,7 @@ function SecretDataSection({ state }: { state: SecretDataState }) {
     // Remembered as `Data`, not as `Data (3 keys)`: the heading counts what
     // is in the object, and a memory keyed on it would be lost the first
     // time someone added a key.
-    <Section id="Data" title={`Data (${plural(keys.length, "key")})`}>
+    <Section id="Data" title={`Data (${plural(keys.length, "key")})`} defaultOpen>
       {keys.length === 0 ? (
         <EmptyState title="No data" />
       ) : (
@@ -189,9 +191,9 @@ function SecretDataSection({ state }: { state: SecretDataState }) {
  * via a dynamic `import()`, not a static one, so it stays out of the main
  * bundle for every consumer, ui-next included).
  *
- * None of these facts come from the private key, so none of them sit behind
- * the reveal gate — same as classic. Only the raw `tls.crt`/`tls.key` bytes
- * stay masked, via `SecretDataSection` below.
+ * None of these facts come from the private key. The raw `tls.crt`/`tls.key`
+ * bytes are shown beneath, in `SecretDataSection`, like any other key — same
+ * as classic.
  */
 function TlsSection({ state }: { state: SecretDataState }) {
   const { data } = state;
@@ -324,8 +326,8 @@ function GeneralSection({ object, keyCount }: { object: K8sObject; keyCount: num
  * Fetch a Secret's real (base64) values via the gated `getSecret` —
  * `getObject` redacts Secret data (the keys are present, the values blank),
  * so this is how the detail view reaches the actual values. The fetched values
- * sit in memory once resolved, but nothing here renders them: `SecretEntry`
- * keeps every value masked until its own reveal toggle is used.
+ * are shown as soon as they resolve: `SecretEntry` draws each one decoded,
+ * with its own Hide (#1085).
  *
  * Returns a {@link SecretDataState} rather than a bare map, and reads `r.error`
  * as well as `r.data`. It used to do neither: `.then((r) => { if (r.data)

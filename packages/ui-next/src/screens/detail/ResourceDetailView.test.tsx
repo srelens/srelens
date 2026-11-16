@@ -12,8 +12,11 @@ import type { KindDescriptor, ListRow } from "../../lib/kinds/types";
 // manifest. All four are core's, mocked here so a test controls what "the
 // cluster said" without one — `importOriginal` keeps everything else
 // (K8S_KIND, and the real types) intact.
-const { getObject, getManifest, listEvents, listCrds, deleteResource, podsOnNode, podMetrics } = vi.hoisted(() => ({
+const { getObject, getManifest, getSecret, listEvents, listCrds, deleteResource, podsOnNode, podMetrics } = vi.hoisted(() => ({
   getObject: vi.fn(async (): Promise<{ object?: K8sObject; error?: string }> => ({})),
+  // The audited read a Secret's values come through. Refused unless a test
+  // says otherwise, which is what it was here before it was mocked at all.
+  getSecret: vi.fn(async (): Promise<{ data?: Record<string, string>; error?: string }> => ({ error: "refused" })),
   getManifest: vi.fn(async (): Promise<{ yaml?: string; error?: string }> => ({ yaml: "" })),
   listEvents: vi.fn(async (): Promise<{ events?: EventSummary[]; truncated?: boolean; error?: string }> => ({ events: [] })),
   listCrds: vi.fn(async (): Promise<{ crds?: CrdRef[]; error?: string }> => ({ crds: [] })),
@@ -30,6 +33,7 @@ vi.mock("@srelens/core", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@srelens/core")>()),
   getObject,
   getManifest,
+  getSecret,
   listEvents,
   listCrds,
   deleteResource,
@@ -222,6 +226,7 @@ describe("ResourceDetailView", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     getManifest.mockResolvedValue({ yaml: "kind: Pod\n" });
+    getSecret.mockResolvedValue({ error: "refused" });
     listEvents.mockResolvedValue({ events: [] });
     listCrds.mockResolvedValue({ crds: [] });
     podsOnNode.mockResolvedValue({ pods: [] });
@@ -1052,11 +1057,11 @@ describe("ResourceDetailView", () => {
         expect(screen.getByText("level=info")).toBeDefined();
       });
 
-      it("leaves a Secret's Data shut, whose pane says more than the values", async () => {
-        // Not the same shape, and the safer answer where the difference is
-        // arguable: a Secret's pane heads its data with a summary block, so
-        // it never opens empty, and less disclosed by default is the right
-        // way to be wrong about a Secret.
+      it("opens a Secret's Data too, with its values shown (#1085)", async () => {
+        // It used to stay shut, on "less disclosed by default". The reader
+        // opened a Secret to read it, and a shut block over masked values was
+        // two clicks per key before anything was on screen.
+        getSecret.mockResolvedValue({ data: { token: FIXTURE_B64 } });
         getObject.mockResolvedValue({
           object: {
             kind: "Secret",
@@ -1070,8 +1075,8 @@ describe("ResourceDetailView", () => {
           <ResourceDetailView context="ctx" kind="Secret" namespace="default" name="subject-1" />,
         );
         await waitFor(() => expect(view.getByRole("tab", { name: "Overview" })).toBeDefined());
-        expect(screen.getByRole("button", { name: /^Data/ }).getAttribute("aria-expanded")).toBe("false");
-        expect(screen.queryByRole("button", { name: "Reveal" })).toBeNull();
+        expect(screen.getByRole("button", { name: /^Data/ }).getAttribute("aria-expanded")).toBe("true");
+        await waitFor(() => expect(screen.getByText(atob(FIXTURE_B64))).toBeDefined());
       });
     });
 
@@ -1149,11 +1154,50 @@ describe("ResourceDetailView", () => {
     });
   });
 
-  describe("the Secret YAML pane's redaction", () => {
-    // The Overview pane gates a Secret's values behind an explicit reveal.
-    // The YAML pane sits one tab over and, left alone, would hand the very
-    // same values over with no gate at all whenever `k8s.getManifest` carries
-    // them — the host blanks them now (#661), and the pane redacts again on
+  describe("the Secret YAML pane's values (#1085)", () => {
+    const openYaml = async () => {
+      const view = render(<ResourceDetailView context="ctx" kind="Secret" namespace="default" name="s-1" />);
+      await waitFor(() => expect(view.getByRole("tab", { name: "YAML" })).toBeDefined());
+      await userEvent.click(view.getByRole("tab", { name: "YAML" }));
+      return view;
+    };
+    const editorText = (container: HTMLElement) => container.querySelector(".cm-content")?.textContent ?? "";
+
+    it("shows the data as the cluster has it, read through k8s.getSecret", async () => {
+      getObject.mockResolvedValue({ object: SECRET });
+      // What a current host sends on the ungated read: every value blanked.
+      getManifest.mockResolvedValue({
+        yaml: 'apiVersion: v1\nkind: Secret\nmetadata:\n  name: s-1\ndata:\n  token: ""\n',
+      });
+      getSecret.mockResolvedValue({ data: { token: FIXTURE_B64 } });
+      const { container, queryByRole } = await openYaml();
+
+      await waitFor(() => expect(editorText(container)).toContain(`token: ${FIXTURE_B64}`));
+      expect(getSecret).toHaveBeenCalledWith("ctx", "default", "s-1");
+      expect(editorText(container)).not.toContain("REDACTED");
+      // Nothing is missing from this manifest, so there is nothing to say.
+      expect(queryByRole("status")).toBeNull();
+    });
+
+    it("keeps annotation values out, and says those are what is missing", async () => {
+      getObject.mockResolvedValue({ object: SECRET });
+      getManifest.mockResolvedValue({
+        yaml: `apiVersion: v1\nkind: Secret\nmetadata:\n  name: s-1\n  annotations:\n    note: annotation-fixture\ndata:\n  token: ""\n`,
+      });
+      getSecret.mockResolvedValue({ data: { token: FIXTURE_B64 } });
+      const { container, getByRole } = await openYaml();
+
+      await waitFor(() => expect(editorText(container)).toContain(`token: ${FIXTURE_B64}`));
+      expect(editorText(container)).toContain("note: REDACTED");
+      expect(documentContains("annotation-fixture")).toBe(false);
+      expect(getByRole("status").textContent).toContain("Annotation values redacted");
+    });
+  });
+
+  describe("the Secret YAML pane's redaction, when k8s.getSecret refuses", () => {
+    // The values reach this pane only through `k8s.getSecret`, the audited
+    // read. When that refuses, what `k8s.getManifest` carried must not stand
+    // in for it — the host blanks it now (#661), and the pane redacts again on
     // arrival rather than trust that alone. Classic's drawer YAML view does
     // the same (#659).
     it("keeps a Secret's values out of the document entirely", async () => {
@@ -1174,7 +1218,7 @@ describe("ResourceDetailView", () => {
       expect(documentContains(FIXTURE_B64)).toBe(false);
     });
 
-    it("tells the reader the values are redacted and where to reveal them", async () => {
+    it("tells the reader the values are redacted and where to find out why", async () => {
       getObject.mockResolvedValue({ object: SECRET });
       getManifest.mockResolvedValue({ yaml: `kind: Secret\ndata:\n  token: ${FIXTURE_B64}\n` });
       const { getByRole, container } = render(

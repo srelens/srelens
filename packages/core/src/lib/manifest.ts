@@ -229,6 +229,31 @@ export function redactSecretManifest(yaml: string): { yaml?: string; error?: str
   }
 }
 
+/**
+ * A Secret's manifest with its `data` as the cluster has it: the base64
+ * values `k8s.getSecret` returned, put back into the redacted manifest (#1085).
+ *
+ * Built ON the redactor rather than beside it, so everything it refuses is
+ * refused here too, and the only values in the result are the ones handed in:
+ * a key `data` does not name stays `REDACTED`, whatever the manifest carried.
+ * Annotation values stay blanked — `k8s.getSecret` returns `data` alone, and
+ * the applied-configuration annotation holds the whole map — and
+ * `annotationsRedacted` says whether there were any, so the pane can tell the
+ * reader what is still missing.
+ */
+export function revealSecretManifest(
+  yaml: string,
+  data: Record<string, string>,
+): { yaml?: string; annotationsRedacted?: boolean; error?: string } {
+  const redacted = redactSecretManifest(yaml);
+  if (redacted.yaml === undefined) return { error: redacted.error };
+  // The redactor's own output: one mapping, already parsed once.
+  const doc = parseDocument(redacted.yaml);
+  for (const [key, value] of Object.entries(data)) doc.setIn(["data", key], value);
+  const annotations = doc.getIn(["metadata", "annotations"], true);
+  return { yaml: doc.toString(), annotationsRedacted: isMap(annotations) && annotations.items.length > 0 };
+}
+
 /** A Kubernetes object as returned by `k8s.getObject` (loosely typed JSON). */
 export type K8sObject = {
   apiVersion?: string;
@@ -275,8 +300,8 @@ export async function getObject(
 /**
  * Read a Secret's values via the dedicated, consent-gateable `k8s.getSecret`.
  * `k8s.getObject` redacts Secret data, so this is the only structured path to
- * the (base64-encoded) values — fetched lazily, only when the user reveals a
- * key.
+ * the (base64-encoded) values — fetched when a Secret is opened, and shown
+ * then (#1085).
  */
 export async function getSecret(
   context: string,

@@ -82,9 +82,12 @@ button anywhere for weeks.
 The host blanks a Secret's `data`, `stringData` and every annotation value on
 every ungated read — `k8s.getObject`, `k8s.getManifest`, `k8s.diffManifest` —
 through `redact_secret_data`. The frontend redacts again on arrival with
-`redactSecretManifest` and fails closed; keep the editor read-only until the
-reader reveals through `k8s.getSecret`, the consent-gated read. Apply stays off
-while placeholders are shown, or applying writes the placeholders over the
+`redactSecretManifest` and fails closed. A Secret's values reach the window
+only through `k8s.getSecret`, the audited, consent-gated read: the detail
+pane's Overview and YAML show what it answered as soon as it answers (#1085),
+through `revealSecretManifest` for the YAML, and stay redacted when it
+refuses. Keep the Edit screen read-only until the reader reveals. Apply stays
+off while placeholders are shown, or applying writes the placeholders over the
 values.
 
 **Add the redaction to the path, not to the file.** `k8s.getManifest` was left

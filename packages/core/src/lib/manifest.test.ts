@@ -10,6 +10,7 @@ import {
   listEvents,
   listResource,
   redactSecretManifest,
+  revealSecretManifest,
 } from "./manifest";
 
 describe("getManifest", () => {
@@ -400,5 +401,45 @@ describe("redactSecretManifest", () => {
       expect(out.yaml).toBeUndefined();
       expect(out.error).not.toContain(FIXTURE_VALUE);
     });
+  });
+});
+
+describe("revealSecretManifest", () => {
+  it("puts the values k8s.getSecret returned back under data, as the cluster has them", () => {
+    const out = revealSecretManifest(secretManifest('data:\n  token: ""\n  other: ""\n'), {
+      token: FIXTURE_VALUE,
+      other: FIXTURE_VALUE_2,
+    });
+    expect(out.error).toBeUndefined();
+    expect(out.yaml).toContain(`token: ${FIXTURE_VALUE}`);
+    expect(out.yaml).toContain(`other: ${FIXTURE_VALUE_2}`);
+    expect(out.annotationsRedacted).toBe(false);
+  });
+
+  it("keeps every annotation value blanked, and says it did", () => {
+    // `k8s.getSecret` returns `data` alone, and the applied-configuration
+    // annotation carries the whole data map — so it is never put back.
+    const out = revealSecretManifest(
+      `apiVersion: v1\nkind: Secret\nmetadata:\n  name: s-1\n  annotations:\n    note: annotation-value\ndata:\n  token: ""\n`,
+      { token: FIXTURE_VALUE },
+    );
+    expect(out.yaml).toContain("note: REDACTED");
+    expect(out.yaml).not.toContain("annotation-value");
+    expect(out.yaml).toContain(`token: ${FIXTURE_VALUE}`);
+    expect(out.annotationsRedacted).toBe(true);
+  });
+
+  it("leaves a key k8s.getSecret did not answer for redacted, never as the manifest had it", () => {
+    const out = revealSecretManifest(secretManifest(`data:\n  token: ""\n  stale: ${FIXTURE_VALUE_2}\n`), {
+      token: FIXTURE_VALUE,
+    });
+    expect(out.yaml).toContain("stale: REDACTED");
+    expect(out.yaml).not.toContain(FIXTURE_VALUE_2);
+  });
+
+  it("fails closed on a manifest the redactor does not understand", () => {
+    const out = revealSecretManifest(`kind: Secret\ndata:\n\ttoken: ""\n`, { token: FIXTURE_VALUE });
+    expect(out.yaml).toBeUndefined();
+    expect(out.error).toContain("could not be parsed");
   });
 });

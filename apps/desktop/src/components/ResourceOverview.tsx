@@ -1318,10 +1318,10 @@ function CronJobBody({
 }
 
 /** One ConfigMap/Secret entry: key + value. Secret values are base64-decoded
- *  and masked behind a reveal toggle. */
+ *  and shown, with a per-key Hide that masks them again (#1085). */
 function ConfigDataEntry({ name, value, secret }: { name: string; value: string; secret: boolean }) {
-  const [revealed, setRevealed] = useState(false);
-  const display = secret ? (revealed ? decodeBase64(value) : "••••••••") : value;
+  const [hidden, setHidden] = useState(false);
+  const display = secret ? (hidden ? "••••••••" : decodeBase64(value)) : value;
   return (
     <div className="fl-secret-entry">
       <div className="fl-secret-entry__header">
@@ -1329,10 +1329,10 @@ function ConfigDataEntry({ name, value, secret }: { name: string; value: string;
         {secret && (
           <button
             type="button"
-            onClick={() => setRevealed((r) => !r)}
+            onClick={() => setHidden((h) => !h)}
             className="fl-secret-entry__toggle"
           >
-            {revealed ? "Hide" : "Reveal"}
+            {hidden ? "Reveal" : "Hide"}
           </button>
         )}
       </div>
@@ -1477,8 +1477,8 @@ function DockerSecretBody({ data, type }: { data: Record<string, string>; type: 
  * Fetch a Secret's real (base64) values via the gated `getSecret`. `getObject`
  * redacts Secret data, so this is how the detail views get the actual values.
  * Falls back to the redacted keys (blank values) while loading or when there's
- * no context (a static preview). Values sit in memory but stay masked in the
- * DOM until the user reveals a key.
+ * no context (a static preview). Values are shown as soon as they arrive; a
+ * key the user hides is masked in the DOM again.
  */
 function useSecretData(
   context: string,
@@ -1562,8 +1562,8 @@ function SecretBody({
 }
 
 /**
- * Editable key/value data for ConfigMaps and Secrets. Secret values are masked
- * until the user reveals a key (which decodes it for editing); Save only sends
+ * Editable key/value data for ConfigMaps and Secrets. Secret values are shown
+ * decoded for editing, with a per-key Hide (#1085); Save only sends
  * the keys that actually changed, as plaintext (the backend patches
  * ConfigMap `data` / Secret `stringData`, so the apiserver handles encoding).
  * Editing is only enabled when a `context` is available (i.e. the live detail).
@@ -1590,7 +1590,7 @@ export function ConfigDataEditor({
   // Baseline plaintext per key (Secret values decoded for editing).
   const [baseline, setBaseline] = useState<Record<string, string>>({});
   const [edited, setEdited] = useState<Record<string, string>>({});
-  const [revealed, setRevealed] = useState<Record<string, boolean>>({});
+  const [hidden, setHidden] = useState<Record<string, boolean>>({});
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
   const [copied, setCopied] = useState<string | null>(null);
@@ -1617,7 +1617,7 @@ export function ConfigDataEditor({
 
   useEffect(() => {
     setEdited({});
-    setRevealed({});
+    setHidden({});
   }, [context, kind, namespace, name]);
 
   const valueOf = (k: string) => edited[k] ?? baseline[k] ?? "";
@@ -1625,7 +1625,7 @@ export function ConfigDataEditor({
   const editable = context !== "";
 
   function reveal(k: string) {
-    setRevealed((r) => ({ ...r, [k]: !r[k] }));
+    setHidden((h) => ({ ...h, [k]: !h[k] }));
   }
 
   async function copy(k: string) {
@@ -1658,7 +1658,7 @@ export function ConfigDataEditor({
   return (
     <div className="flex flex-col gap-3">
       {keys.map((k) => {
-        const shown = !secret || revealed[k];
+        const shown = !secret || !hidden[k];
         return (
           <div key={k} className="fl-secret-entry">
             <div className="fl-secret-entry__header">
@@ -1680,7 +1680,7 @@ export function ConfigDataEditor({
                     className="fl-secret-entry__toggle"
                     onClick={() => void reveal(k)}
                   >
-                    {revealed[k] ? "Hide" : "Reveal"}
+                    {hidden[k] ? "Reveal" : "Hide"}
                   </button>
                 )}
               </span>

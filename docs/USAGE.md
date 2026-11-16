@@ -188,7 +188,9 @@ The detail drawer has three tabs:
 CPU and memory sparklines with a 5m/10m/30m/1h range picker, when a metrics server
 is installed.
 
-**Secrets.** Secret values are masked; use **Reveal**/**Hide** per key. Secrets and
+**Secrets.** Secret values are shown, decoded, when you open a Secret; use
+**Hide**/**Reveal** per key to mask one. The YAML tab shows the `data` as the
+cluster has it (base64), with annotation values redacted. Secrets and
 ConfigMaps can be edited inline — only the keys you changed are sent, and the edit
 respects your RBAC permissions.
 
