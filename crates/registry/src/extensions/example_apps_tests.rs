@@ -264,8 +264,8 @@ fn every_example_app_installs_and_declares_what_its_row_says() {
         }
 
         // An overview keeps a live stream open per page it lists, and an app may hold
-        // eight (srelens-streams). Twelve pages are a valid dashboard that stops updating
-        // as it opens, so the examples leave room for the events feed and one more view.
+        // eight (srelens-streams). Eleven pages were a valid dashboard that stopped
+        // updating as it opened; six were seen updating with one other view open.
         for page in raw["contributions"]["pages"].as_array().unwrap() {
             let listed = page["dashboard"]["pages"].as_array().map_or(0, Vec::len);
             assert!(listed <= 6, "{file}: the {} dashboard lists {listed} pages", page["id"]);

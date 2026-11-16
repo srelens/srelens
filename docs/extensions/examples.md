@@ -44,9 +44,11 @@ Two limits worth knowing when you copy one:
   binding are used only when the cluster's CRD cannot be read. To add a column the CRD
   lacks, declare a table column over a join of the kind to itself by name, as
   `velero.json` does for backups: a table column sees the list's summary row, and the
-  join is what lets it read `spec` and `status`.
+  join is what lets it read `spec` and `status`. The joined list is read a second time
+  and fails as incomplete beyond 2,000 objects, so keep it to kinds that stay small.
 - **Keep an overview short.** It holds a live stream for every page it lists, and an
-  app may hold eight. The examples list at most six.
+  app may hold eight: an overview of eleven pages stopped updating as it opened. The
+  examples list at most six, which was seen updating with one other view open.
 
 ## Screenshots
 
@@ -120,7 +122,7 @@ Each app on a cluster that serves its CRDs, with sample objects and no controlle
 
 <img alt="The KubeSwift overview: counts by status for its main kinds" src="../assets/screenshots/apps/kubeswift-overview.png" width="100%">
 
-<img alt="KubeSwift: a stopped guest, with Start" src="../assets/screenshots/apps/kubeswift-detail.png" width="100%">
+<img alt="KubeSwift: a guest whose run policy is already Running, so Start is unavailable" src="../assets/screenshots/apps/kubeswift-detail.png" width="100%">
 
 </details>
 
