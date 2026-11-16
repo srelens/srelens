@@ -127,6 +127,15 @@ describe("a Gateway's pane", () => {
     expect(screen.getByText(/Could not list GRPCRoute: forbidden/)).toBeDefined();
   });
 
+  it("does not present a list cut at the row cap as complete", async () => {
+    // Past the shared cap the routes that attach here may be the ones not read.
+    listCustomResource.mockResolvedValue({ items: [], truncated: true });
+    render(<GatewayApiBody object={GATEWAY} context="prod-eu" />);
+    expect(await screen.findByRole("heading", { name: "Routes (0+)" })).toBeDefined();
+    expect(screen.getByText(/stops at the shared list row cap/)).toBeDefined();
+    expect(screen.queryByText("No routes attach to this gateway")).toBeNull();
+  });
+
   it("says so when the routes could not be listed", async () => {
     listCustomResource.mockResolvedValue({ error: "forbidden" });
     render(<GatewayApiBody object={GATEWAY} context="prod-eu" />);

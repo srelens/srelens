@@ -1,5 +1,5 @@
 import { listCrds, listCustomResource, str, type K8sObject } from "@srelens/core";
-import { Button, LoadingState, Table, type Column } from "@srelens/ui-kit";
+import { Alert, Button, LoadingState, Table, type Column } from "@srelens/ui-kit";
 import { detailRoute } from "../../lib/detailRoute";
 import {
   GATEWAY_API_GROUP,
@@ -60,7 +60,7 @@ const ATTACHED_COLUMNS: Column<AttachedRoute>[] = [
  */
 function GatewayRoutesSection({ object, context }: { object: K8sObject; context: string }) {
   const gateway = { namespace: str(object.metadata?.namespace), name: str(object.metadata?.name) };
-  const state = useSectionList<{ rows: AttachedRoute[]; failed: string[] }>(true, [context, gateway.namespace, gateway.name], async () => {
+  const state = useSectionList<{ rows: AttachedRoute[]; failed: string[]; truncated: boolean }>(true, [context, gateway.namespace, gateway.name], async () => {
     const discovered = await listCrds(context);
     if (discovered.error) return { error: discovered.error };
     const kinds = (discovered.crds ?? []).filter(
@@ -80,6 +80,9 @@ function GatewayRoutesSection({ object, context }: { object: K8sObject; context:
     return {
       data: {
         failed,
+        // Filtered from a list cut at the row cap, the routes that attach
+        // here may be the ones past it: say so rather than claim the count.
+        truncated: lists.some((list) => list.truncated),
         rows: lists.flatMap((list, i) =>
           routesAttachedTo(list.items ?? [], gateway).map((row) => ({
             kind: kinds[i].kind,
@@ -92,13 +95,14 @@ function GatewayRoutesSection({ object, context }: { object: K8sObject; context:
   });
   const rows = state.data?.rows ?? [];
   const failed = state.data?.failed ?? [];
+  const truncated = state.data?.truncated ?? false;
   const open = (route: AttachedRoute) =>
     openTab(detailRoute(route.kind, route.namespace, route.name, { cluster: context, group: GATEWAY_API_GROUP }), {
       clusterName: context,
     });
 
   return (
-    <Section title={state.status === "ready" ? `Routes (${rows.length})` : "Routes"} id="Routes">
+    <Section title={state.status === "ready" ? `Routes (${rows.length}${truncated ? "+" : ""})` : "Routes"} id="Routes">
       {state.status === "loading" ? (
         <LoadingState compact label={`Loading routes attached to ${gateway.name}`} />
       ) : state.status === "error" ? (
@@ -108,11 +112,17 @@ function GatewayRoutesSection({ object, context }: { object: K8sObject; context:
           {failed.length > 0 && (
             <p className="mb-2 text-[0.8125rem] text-muted">Could not list {failed.join("; ")}</p>
           )}
+          {truncated && (
+            <Alert tone="info" title="Not every route was read" className="mb-2">
+              More routes remain on the cluster. This list stops at the shared list row cap, so routes
+              attached here past it are not shown.
+            </Alert>
+          )}
           <Table
             columns={ATTACHED_COLUMNS}
             data={rows}
             getRowKey={(r) => `${r.kind}/${r.namespace}/${r.name}`}
-            emptyText="No routes attach to this gateway"
+            emptyText={truncated ? "None among the routes read" : "No routes attach to this gateway"}
             onRowClick={open}
             onRowActivate={open}
           />
