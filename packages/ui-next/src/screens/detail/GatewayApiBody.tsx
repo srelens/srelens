@@ -60,28 +60,38 @@ const ATTACHED_COLUMNS: Column<AttachedRoute>[] = [
  */
 function GatewayRoutesSection({ object, context }: { object: K8sObject; context: string }) {
   const gateway = { namespace: str(object.metadata?.namespace), name: str(object.metadata?.name) };
-  const state = useSectionList<AttachedRoute[]>(true, [context, gateway.namespace, gateway.name], async () => {
+  const state = useSectionList<{ rows: AttachedRoute[]; failed: string[] }>(true, [context, gateway.namespace, gateway.name], async () => {
     const discovered = await listCrds(context);
     if (discovered.error) return { error: discovered.error };
     const kinds = (discovered.crds ?? []).filter(
       (crd) => crd.group === GATEWAY_API_GROUP && ROUTE_KINDS.includes(crd.kind),
     );
+    // A role bound in one namespace cannot list cluster-wide: fall back to the
+    // gateway's own namespace. A kind still unreadable is named, not fatal.
     const lists = await Promise.all(
-      kinds.map((crd) => listCustomResource(context, { ...crd, printerColumns: PARENT_COLUMNS }, null)),
+      kinds.map(async (crd) => {
+        const ref = { ...crd, printerColumns: PARENT_COLUMNS };
+        const all = await listCustomResource(context, ref, null);
+        return all.error ? listCustomResource(context, ref, gateway.namespace) : all;
+      }),
     );
-    const failed = lists.find((list) => list.error);
-    if (failed) return { error: failed.error };
+    const failed = kinds.flatMap((crd, i) => (lists[i].error ? [`${crd.kind}: ${lists[i].error}`] : []));
+    if (kinds.length > 0 && failed.length === kinds.length) return { error: lists[0].error };
     return {
-      data: lists.flatMap((list, i) =>
-        routesAttachedTo(list.items ?? [], gateway).map((row) => ({
-          kind: kinds[i].kind,
-          namespace: row.namespace,
-          name: row.name,
-        })),
-      ),
+      data: {
+        failed,
+        rows: lists.flatMap((list, i) =>
+          routesAttachedTo(list.items ?? [], gateway).map((row) => ({
+            kind: kinds[i].kind,
+            namespace: row.namespace,
+            name: row.name,
+          })),
+        ),
+      },
     };
   });
-  const rows = state.data ?? [];
+  const rows = state.data?.rows ?? [];
+  const failed = state.data?.failed ?? [];
   const open = (route: AttachedRoute) =>
     openTab(detailRoute(route.kind, route.namespace, route.name, { cluster: context, group: GATEWAY_API_GROUP }), {
       clusterName: context,
@@ -94,14 +104,19 @@ function GatewayRoutesSection({ object, context }: { object: K8sObject; context:
       ) : state.status === "error" ? (
         <SectionFailure what="routes" error={state.error} onRetry={state.retry} />
       ) : (
-        <Table
-          columns={ATTACHED_COLUMNS}
-          data={rows}
-          getRowKey={(r) => `${r.kind}/${r.namespace}/${r.name}`}
-          emptyText="No routes attach to this gateway"
-          onRowClick={open}
-          onRowActivate={open}
-        />
+        <>
+          {failed.length > 0 && (
+            <p className="mb-2 text-[0.8125rem] text-muted">Could not list {failed.join("; ")}</p>
+          )}
+          <Table
+            columns={ATTACHED_COLUMNS}
+            data={rows}
+            getRowKey={(r) => `${r.kind}/${r.namespace}/${r.name}`}
+            emptyText="No routes attach to this gateway"
+            onRowClick={open}
+            onRowActivate={open}
+          />
+        </>
       )}
     </Section>
   );

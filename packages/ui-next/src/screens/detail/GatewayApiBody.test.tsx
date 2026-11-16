@@ -113,6 +113,20 @@ describe("a Gateway's pane", () => {
     expect(lastRoute()).toBe(`/k/prod-eu/${encodeURIComponent(`${G}/HTTPRoute`)}/store/shop`);
   });
 
+  it("falls back to the gateway's namespace, and names a kind it still could not read", async () => {
+    // A role bound in one namespace cannot list cluster-wide; a role without
+    // grpcroutes cannot list them at all. Neither empties the section.
+    listCustomResource.mockImplementation(async (_context: string, ref: CrdRef, namespace: string | null) =>
+      ref.kind === "HTTPRoute" && namespace === "infra"
+        ? { items: [{ name: "local", namespace: "infra", age: "", columns: ["edge", "", "", "", "", "", "", ""] }] }
+        : { error: "forbidden" },
+    );
+    render(<GatewayApiBody object={GATEWAY} context="prod-eu" />);
+    expect(await screen.findByRole("heading", { name: "Routes (1)" })).toBeDefined();
+    expect(screen.getByText("local")).toBeDefined();
+    expect(screen.getByText(/Could not list GRPCRoute: forbidden/)).toBeDefined();
+  });
+
   it("says so when the routes could not be listed", async () => {
     listCustomResource.mockResolvedValue({ error: "forbidden" });
     render(<GatewayApiBody object={GATEWAY} context="prod-eu" />);
