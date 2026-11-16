@@ -2089,7 +2089,7 @@ pub fn apply_observed(
     applied
 }
 
-const GATEWAY_API_GROUP: &str = "gateway.networking.k8s.io";
+pub const GATEWAY_API_GROUP: &str = "gateway.networking.k8s.io";
 
 /// A string field of a Gateway API object, or `""`.
 fn text<'v>(value: &'v serde_json::Value, key: &str) -> &'v str {

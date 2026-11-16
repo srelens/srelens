@@ -240,6 +240,23 @@ impl TopologyViewState {
     }
 }
 
+/// The `group/version` to open a Gateway API node at (#1089), so a CRD of the
+/// same kind in another group is never read in its place. `None` for every
+/// other node: those keep the built-in kind lookup.
+pub fn pinned_api_version(node: &TopologyNode, crds: &[crate::commands::CrdMeta]) -> Option<String> {
+    use srelens_kube::topology::GATEWAY_API_GROUP;
+    let gateway_api = node.lane == Lane::Gateway
+        || (node.lane == Lane::Route && matches!(node.kind.as_str(), "HTTPRoute" | "GRPCRoute"));
+    if !gateway_api {
+        return None;
+    }
+    let version = crds
+        .iter()
+        .find(|c| c.group == GATEWAY_API_GROUP && c.kind == node.kind)
+        .map_or("v1", |c| c.version.as_str());
+    Some(format!("{GATEWAY_API_GROUP}/{version}"))
+}
+
 pub fn render_topology_view(f: &mut Frame, area: Rect, state: &TopologyViewState) {
     let block = Block::default()
         .borders(Borders::ALL)
@@ -709,6 +726,52 @@ mod tests {
         let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
         terminal.draw(|f| render_topology_view(f, f.area(), state)).unwrap();
         terminal.backend().buffer().content().iter().map(|c| c.symbol()).collect()
+    }
+
+    fn crd(group: &str, version: &str, kind: &str) -> crate::commands::CrdMeta {
+        serde_json::from_value(serde_json::json!({
+            "crd_name": format!("{}s.{group}", kind.to_lowercase()), "group": group, "version": version,
+            "kind": kind, "plural": format!("{}s", kind.to_lowercase()), "singular": kind.to_lowercase(),
+            "namespaced": true, "short_names": [],
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn a_gateway_api_node_opens_in_its_own_group_not_a_same_named_kind() {
+        // acme.io sorts first; a bare "Gateway" would resolve to it (#1089).
+        let crds = vec![
+            crd("acme.io", "v1", "Gateway"),
+            crd("gateway.networking.k8s.io", "v1beta1", "Gateway"),
+            crd("gateway.networking.k8s.io", "v1beta1", "HTTPRoute"),
+        ];
+        let node = |kind: &str, lane| TopologyNode {
+            id: format!("{kind}/shop/edge"),
+            kind: kind.to_string(),
+            name: "edge".to_string(),
+            namespace: "shop".to_string(),
+            lane,
+            detail: String::new(),
+            ready: None,
+            desired: None,
+            health: Health::Ok,
+        };
+        assert_eq!(
+            pinned_api_version(&node("Gateway", Lane::Gateway), &crds).as_deref(),
+            Some("gateway.networking.k8s.io/v1beta1")
+        );
+        assert_eq!(
+            pinned_api_version(&node("HTTPRoute", Lane::Route), &crds).as_deref(),
+            Some("gateway.networking.k8s.io/v1beta1")
+        );
+        // Not discovered yet: still the Gateway API's, at its stable version.
+        assert_eq!(
+            pinned_api_version(&node("GRPCRoute", Lane::Route), &crds).as_deref(),
+            Some("gateway.networking.k8s.io/v1")
+        );
+        // Everything else keeps the built-in lookup.
+        assert_eq!(pinned_api_version(&node("Ingress", Lane::Route), &crds), None);
+        assert_eq!(pinned_api_version(&node("Service", Lane::Service), &crds), None);
     }
 
     #[test]
