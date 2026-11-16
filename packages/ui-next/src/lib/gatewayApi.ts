@@ -276,18 +276,33 @@ const PARENTS_READ = 4;
 export const PARENT_COLUMNS: PrinterColumn[] = Array.from({ length: PARENTS_READ }, (_, i) => [
   { name: `parent${i}`, type: "string", jsonPath: `.spec.parentRefs[${i}].name` },
   { name: `parentNamespace${i}`, type: "string", jsonPath: `.spec.parentRefs[${i}].namespace` },
+  { name: `parentKind${i}`, type: "string", jsonPath: `.spec.parentRefs[${i}].kind` },
+  { name: `parentGroup${i}`, type: "string", jsonPath: `.spec.parentRefs[${i}].group` },
 ]).flat();
 
-/** The rows, listed with {@link PARENT_COLUMNS}, whose route attaches to `gateway`. */
+/** Columns {@link PARENT_COLUMNS} asks for per parent. */
+const PER_PARENT = 4;
+
+/**
+ * The rows, listed with {@link PARENT_COLUMNS}, whose route attaches to `gateway`.
+ *
+ * A parent is a Gateway only by the API's defaults (kind `Gateway`, group
+ * `gateway.networking.k8s.io`): a mesh route's Service parent of the same name
+ * is not attached here.
+ */
 export function routesAttachedTo<Row extends CustomRow>(
   rows: Row[],
   gateway: { namespace: string; name: string },
 ): Row[] {
   return rows.filter((row) =>
-    Array.from({ length: PARENTS_READ }, (_, i) => i).some(
-      (i) =>
-        row.columns?.[2 * i] === gateway.name &&
-        (row.columns?.[2 * i + 1] || row.namespace) === gateway.namespace,
-    ),
+    Array.from({ length: PARENTS_READ }, (_, i) => i * PER_PARENT).some((at) => {
+      const [name, namespace, kind, group] = row.columns?.slice(at, at + PER_PARENT) ?? [];
+      return (
+        name === gateway.name &&
+        (namespace || row.namespace) === gateway.namespace &&
+        (kind || "Gateway") === "Gateway" &&
+        (group || GATEWAY_API_GROUP) === GATEWAY_API_GROUP
+      );
+    }),
   );
 }

@@ -102,8 +102,8 @@ describe("a Gateway's pane", () => {
     // Every namespace, with the parent columns: a route may attach from anywhere.
     const asked = listCustomResource.mock.calls.map(([, ref, namespace]) => [ref.kind, namespace, ref.printerColumns.length]);
     expect(asked).toEqual([
-      ["HTTPRoute", null, 8],
-      ["GRPCRoute", null, 8],
+      ["HTTPRoute", null, 16],
+      ["GRPCRoute", null, 16],
     ]);
   });
 

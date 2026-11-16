@@ -194,18 +194,35 @@ describe("reading a route", () => {
 });
 
 describe("finding a gateway's routes", () => {
-  it("asks for the first four parents of every route", () => {
-    expect(PARENT_COLUMNS.map((c) => c.jsonPath).slice(0, 2)).toEqual([".spec.parentRefs[0].name", ".spec.parentRefs[0].namespace"]);
-    expect(PARENT_COLUMNS).toHaveLength(8);
+  /** Columns as PARENT_COLUMNS asks for them: name, namespace, kind, group per parent, four parents. */
+  const parents = (...refs: [string, string?, string?, string?][]) =>
+    Array.from({ length: 4 }, (_, i) => refs[i] ?? ["", "", "", ""]).flatMap(([name, ns = "", kind = "", group = ""]) => [name, ns, kind, group]);
+
+  it("asks for the name, namespace, kind and group of the first four parents of every route", () => {
+    expect(PARENT_COLUMNS.map((c) => c.jsonPath).slice(0, 4)).toEqual([
+      ".spec.parentRefs[0].name",
+      ".spec.parentRefs[0].namespace",
+      ".spec.parentRefs[0].kind",
+      ".spec.parentRefs[0].group",
+    ]);
+    expect(PARENT_COLUMNS).toHaveLength(16);
   });
 
   it("keeps the rows that name the gateway, in its namespace or by default their own", () => {
     const rows = [
-      { name: "a", namespace: "infra", age: "", columns: ["edge", "", "", "", "", "", "", ""] },
-      { name: "b", namespace: "store", age: "", columns: ["other", "", "edge", "infra", "", "", "", ""] },
-      { name: "c", namespace: "store", age: "", columns: ["edge", "", "", "", "", "", "", ""] },
+      { name: "a", namespace: "infra", age: "", columns: parents(["edge"]) },
+      { name: "b", namespace: "store", age: "", columns: parents(["other"], ["edge", "infra"]) },
+      { name: "c", namespace: "store", age: "", columns: parents(["edge"]) },
       { name: "d", namespace: "store", age: "" },
     ];
     expect(routesAttachedTo(rows, { namespace: "infra", name: "edge" }).map((r) => r.name)).toEqual(["a", "b"]);
+  });
+
+  it("does not take a mesh route's Service parent for a gateway of the same name", () => {
+    const rows = [
+      { name: "mesh", namespace: "infra", age: "", columns: parents(["edge", "", "Service", ""]) },
+      { name: "named", namespace: "infra", age: "", columns: parents(["edge", "", "Gateway", "gateway.networking.k8s.io"]) },
+    ];
+    expect(routesAttachedTo(rows, { namespace: "infra", name: "edge" }).map((r) => r.name)).toEqual(["named"]);
   });
 });
