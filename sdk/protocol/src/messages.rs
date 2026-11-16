@@ -11,6 +11,7 @@ use serde_json::json;
 use serde_json::Value;
 
 use crate::bounds::MAX_CLUSTER_ID_BYTES;
+use crate::TUNNEL_WINDOW_BYTES;
 // What only the schema's patterns and limits read.
 #[cfg(feature = "schema")]
 use crate::bounds::{
@@ -198,7 +199,11 @@ pub struct HostReadParams {
     #[cfg_attr(feature = "schema", schemars(schema_with = "identifier"))]
     pub capability: String,
     /// Opaque continuation from this binding's previous page (API 0.2).
-    #[serde(default, deserialize_with = "read_cursor", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "read_cursor",
+        skip_serializing_if = "Option::is_none"
+    )]
     #[cfg_attr(feature = "schema", schemars(schema_with = "cursor_schema"))]
     pub cursor: Option<String>,
 }
@@ -206,7 +211,9 @@ pub struct HostReadParams {
 fn read_cursor<'de, D: Deserializer<'de>>(d: D) -> Result<Option<String>, D::Error> {
     let cursor = String::deserialize(d)?;
     if cursor.len() > 8192 || !cursor.bytes().all(|b| b.is_ascii_graphic()) {
-        return Err(serde::de::Error::custom("cursor needs at most 8192 ASCII graphic bytes"));
+        return Err(serde::de::Error::custom(
+            "cursor needs at most 8192 ASCII graphic bytes",
+        ));
     }
     Ok(Some(cursor))
 }
@@ -310,6 +317,144 @@ fn binding_names(generator: &mut SchemaGenerator) -> Schema {
     schema(
         json!({"type":"array", "minItems":1, "maxItems":16, "uniqueItems":true, "items": identifier(generator)}),
     )
+}
+
+/// Open a TCP connection to a pod's port as tunnel `tunnel`, under the
+/// declared `capability` (API 0.3). Names exactly one of `pod` and `service`;
+/// `name` picks one of the capability's declared ports.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
+#[serde(rename_all = "camelCase", deny_unknown_fields, remote = "Self")]
+#[cfg_attr(feature = "schema", schemars(rename = "HostConnectParams"))]
+pub struct HostConnectParams {
+    pub context: JobContext,
+    #[cfg_attr(feature = "schema", schemars(schema_with = "identifier"))]
+    pub capability: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schema", schemars(schema_with = "object_name"))]
+    pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schema", schemars(schema_with = "object_name"))]
+    pub pod: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schema", schemars(schema_with = "object_name"))]
+    pub service: Option<String>,
+    #[serde(deserialize_with = "read_tunnel")]
+    #[cfg_attr(feature = "schema", schemars(schema_with = "tunnel_id"))]
+    pub tunnel: u64,
+}
+
+// Written out, not in `object_only!`: reading also checks that exactly one of
+// `pod` and `service` is named.
+impl Serialize for HostConnectParams {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        HostConnectParams::serialize(self, serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for HostConnectParams {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let fields = serde_json::Map::<String, Value>::deserialize(deserializer)?;
+        let params = HostConnectParams::deserialize(Value::Object(fields))
+            .map_err(serde::de::Error::custom)?;
+        if params.pod.is_some() == params.service.is_some() {
+            return Err(serde::de::Error::custom(
+                "name exactly one of `pod` and `service`",
+            ));
+        }
+        Ok(params)
+    }
+}
+
+/// The answer to `host/connect`: the pod the tunnel reaches (a service's
+/// resolves to one of its ready pods).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
+pub struct HostConnectResult {
+    pub pod: String,
+}
+
+/// `tunnel/data`'s params: bytes for tunnel `tunnel`, in base64.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
+#[serde(deny_unknown_fields, remote = "Self")]
+#[cfg_attr(feature = "schema", schemars(rename = "TunnelDataParams"))]
+pub struct TunnelDataParams {
+    #[serde(deserialize_with = "read_tunnel")]
+    #[cfg_attr(feature = "schema", schemars(schema_with = "tunnel_id"))]
+    pub tunnel: u64,
+    #[serde(deserialize_with = "read_base64")]
+    #[cfg_attr(feature = "schema", schemars(schema_with = "base64_text"))]
+    pub data: String,
+}
+
+/// `tunnel/credit`'s params: the sender of this frame may send `bytes` more
+/// on tunnel `tunnel`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
+#[serde(deny_unknown_fields, remote = "Self")]
+#[cfg_attr(feature = "schema", schemars(rename = "TunnelCreditParams"))]
+pub struct TunnelCreditParams {
+    #[serde(deserialize_with = "read_tunnel")]
+    #[cfg_attr(feature = "schema", schemars(schema_with = "tunnel_id"))]
+    pub tunnel: u64,
+    #[serde(deserialize_with = "read_credit")]
+    #[cfg_attr(feature = "schema", schemars(schema_with = "credit_bytes"))]
+    pub bytes: u32,
+}
+
+/// `tunnel/close`'s params: tunnel `tunnel` ended, and why if it failed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
+#[serde(deny_unknown_fields, remote = "Self")]
+#[cfg_attr(feature = "schema", schemars(rename = "TunnelCloseParams"))]
+pub struct TunnelCloseParams {
+    #[serde(deserialize_with = "read_tunnel")]
+    #[cfg_attr(feature = "schema", schemars(schema_with = "tunnel_id"))]
+    pub tunnel: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+}
+
+fn read_tunnel<'de, D: Deserializer<'de>>(d: D) -> Result<u64, D::Error> {
+    match u64::deserialize(d)? {
+        0 => Err(serde::de::Error::custom("a tunnel is numbered from 1")),
+        tunnel => Ok(tunnel),
+    }
+}
+
+fn read_credit<'de, D: Deserializer<'de>>(d: D) -> Result<u32, D::Error> {
+    let bytes = u32::deserialize(d)?;
+    if !(1..=TUNNEL_WINDOW_BYTES).contains(&bytes) {
+        return Err(serde::de::Error::custom("credit is 1 to 262144 bytes"));
+    }
+    Ok(bytes)
+}
+
+fn read_base64<'de, D: Deserializer<'de>>(d: D) -> Result<String, D::Error> {
+    let data = String::deserialize(d)?;
+    if !crate::shape::is_base64(&data) {
+        return Err(serde::de::Error::custom("data is base64 text"));
+    }
+    Ok(data)
+}
+
+#[cfg(feature = "schema")]
+fn tunnel_id(_: &mut SchemaGenerator) -> Schema {
+    schema(json!({"type": "integer", "minimum": 1}))
+}
+
+#[cfg(feature = "schema")]
+fn credit_bytes(_: &mut SchemaGenerator) -> Schema {
+    schema(json!({"type": "integer", "minimum": 1, "maximum": TUNNEL_WINDOW_BYTES}))
+}
+
+#[cfg(feature = "schema")]
+fn base64_text(_: &mut SchemaGenerator) -> Schema {
+    schema(json!({
+        "type": "string",
+        "pattern": "^([A-Za-z0-9+/]{4})*([A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$",
+    }))
 }
 
 /// `host/resource`'s params: inspect object `name` of a declared
@@ -444,7 +589,10 @@ object_only!(
     HostActionParams,
     HostBindingAvailabilityParams,
     HostRunJobParams,
-    JobContext
+    JobContext,
+    TunnelDataParams,
+    TunnelCreditParams,
+    TunnelCloseParams
 );
 
 /// A required field that may be null: absent is refused, null is `None`.
@@ -648,7 +796,10 @@ mod tests {
         let read: HostReadParams =
             serde_json::from_value(json!({"context": context, "capability": "apps"})).unwrap();
         assert_eq!(read.capability, "apps");
-        assert!(serde_json::from_value::<HostReadParams>(json!({"context":context,"capability":"apps","cursor":"next-page"})).is_ok());
+        assert!(serde_json::from_value::<HostReadParams>(
+            json!({"context":context,"capability":"apps","cursor":"next-page"})
+        )
+        .is_ok());
         let action: HostActionParams = serde_json::from_value(json!({"context": context,
             "capability": "apps", "name": "web", "action": "sync", "uid": "u-1",
             "resourceVersion": "42"}))
@@ -805,5 +956,80 @@ mod tests {
         // What `new` builds always validates.
         let built = CallContext::new("kind-dev", Some("team")).unwrap();
         assert_eq!(built.validate(), Ok(()));
+    }
+
+    fn connect() -> Value {
+        json!({"context": {"clusterId": "prod", "namespace": "team"},
+            "capability": "kafka", "pod": "broker-0", "tunnel": 1})
+    }
+
+    #[test]
+    fn connect_takes_exactly_one_of_pod_and_service() {
+        let ok: HostConnectParams = serde_json::from_value(connect()).unwrap();
+        assert_eq!(ok.pod.as_deref(), Some("broker-0"));
+        assert_eq!(serde_json::to_value(&ok).unwrap(), connect());
+        let mut service = connect();
+        service.as_object_mut().unwrap().remove("pod");
+        service["service"] = json!("kafka");
+        assert!(serde_json::from_value::<HostConnectParams>(service).is_ok());
+        let mut both = connect();
+        both["service"] = json!("kafka");
+        assert!(serde_json::from_value::<HostConnectParams>(both).is_err());
+        let mut neither = connect();
+        neither.as_object_mut().unwrap().remove("pod");
+        assert!(serde_json::from_value::<HostConnectParams>(neither).is_err());
+    }
+
+    #[test]
+    fn connect_refuses_tunnel_zero() {
+        let mut zero = connect();
+        zero["tunnel"] = json!(0);
+        assert!(serde_json::from_value::<HostConnectParams>(zero).is_err());
+        assert!(
+            serde_json::from_value::<TunnelDataParams>(json!({"tunnel": 0, "data": ""})).is_err()
+        );
+        assert!(serde_json::from_value::<TunnelCloseParams>(json!({"tunnel": 0})).is_err());
+    }
+
+    #[test]
+    fn connect_refuses_a_null_namespace() {
+        let mut null = connect();
+        null["context"]["namespace"] = Value::Null;
+        assert!(serde_json::from_value::<HostConnectParams>(null).is_err());
+    }
+
+    #[test]
+    fn credit_is_1_to_the_window() {
+        let credit = |bytes: u64| {
+            serde_json::from_value::<TunnelCreditParams>(json!({"tunnel": 1, "bytes": bytes}))
+        };
+        assert!(credit(0).is_err());
+        assert_eq!(credit(1).unwrap().bytes, 1);
+        assert_eq!(credit(262_144).unwrap().bytes, TUNNEL_WINDOW_BYTES);
+        assert!(credit(262_145).is_err());
+    }
+
+    #[test]
+    fn tunnel_data_is_base64_text() {
+        let data = |text: &str| {
+            serde_json::from_value::<TunnelDataParams>(json!({"tunnel": 1, "data": text}))
+        };
+        for ok in ["", "aGk=", "aGkh", "aA=="] {
+            assert!(data(ok).is_ok(), "{ok:?}");
+        }
+        for bad in ["aGk", "aGk=\n", "a=Gk", "a-Gk", "aGk=aGk=", "=", "é==="] {
+            assert!(data(bad).is_err(), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn tunnel_close_may_say_why() {
+        let close: TunnelCloseParams = serde_json::from_value(json!({"tunnel": 2})).unwrap();
+        assert_eq!(close.message, None);
+        assert_eq!(serde_json::to_value(&close).unwrap(), json!({"tunnel": 2}));
+        assert!(serde_json::from_value::<TunnelCloseParams>(
+            json!({"tunnel": 2, "message": "eof", "x": 1})
+        )
+        .is_err());
     }
 }

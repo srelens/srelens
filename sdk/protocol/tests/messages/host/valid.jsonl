@@ -12,3 +12,7 @@
 {"jsonrpc":"2.0","id":7,"error":{"code":-32002,"message":"The person declined the action"}}
 {"jsonrpc":"2.0","id":6,"method":"deactivate","params":{}}
 {"jsonrpc":"2.0","id":7,"method":"shutdown","params":{}}
+# A pod tunnel (0.3): the host's bytes, credit for the sidecar's, and a close
+{"jsonrpc":"2.0","method":"tunnel/data","params":{"tunnel":1,"data":"aGVsbG8="}}
+{"jsonrpc":"2.0","method":"tunnel/credit","params":{"tunnel":1,"bytes":262144}}
+{"jsonrpc":"2.0","method":"tunnel/close","params":{"tunnel":1,"message":"the pod closed the connection"}}

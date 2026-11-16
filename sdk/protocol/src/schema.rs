@@ -23,9 +23,10 @@ use schemars::JsonSchema;
 use serde_json::{json, Map, Value};
 
 use crate::messages::{
-    CancelParams, Empty, HostActionParams, HostBindingAvailabilityParams, HostReadParams,
-    HostResourceParams, HostRunJobParams, InitializeParams, InitializeResult, StreamCancelParams,
-    StreamCloseParams, StreamDataParams, StreamErrorParams, StreamOpenParams,
+    CancelParams, Empty, HostActionParams, HostBindingAvailabilityParams, HostConnectParams,
+    HostConnectResult, HostReadParams, HostResourceParams, HostRunJobParams, InitializeParams,
+    InitializeResult, StreamCancelParams, StreamCloseParams, StreamDataParams, StreamErrorParams,
+    StreamOpenParams, TunnelCloseParams, TunnelCreditParams, TunnelDataParams,
 };
 use crate::methods::{Kind, METHODS};
 use crate::{
@@ -94,6 +95,14 @@ static METHOD_SCHEMAS: &[MethodSchema] = &[
         of::<Value>,
     ),
     request_types(method::HOST_RUN_JOB, of::<HostRunJobParams>, of::<Value>),
+    request_types(
+        method::HOST_CONNECT,
+        of::<HostConnectParams>,
+        of::<HostConnectResult>,
+    ),
+    notification_types(method::TUNNEL_DATA, of::<TunnelDataParams>),
+    notification_types(method::TUNNEL_CREDIT, of::<TunnelCreditParams>),
+    notification_types(method::TUNNEL_CLOSE, of::<TunnelCloseParams>),
 ];
 
 /// The newest sidecar API line, `0.1` for 0.1.0.
@@ -182,6 +191,9 @@ pub fn schema() -> Value {
     sidecar.push(response(host_id, rpc_error));
 
     let mut definitions = to_value(generator.take_definitions());
+    // The derive cannot say "exactly one of": `oneOf` over the two `required`s does.
+    definitions["HostConnectParams"]["oneOf"] =
+        json!([{"required": ["pod"]}, {"required": ["service"]}]);
     definitions["HostMessage"] = json!({
         "description": "One line srelens writes to a sidecar's stdin.",
         "oneOf": host,
