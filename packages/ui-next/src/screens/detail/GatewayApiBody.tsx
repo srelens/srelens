@@ -1,6 +1,7 @@
 import { listCrds, listCustomResource, str, type K8sObject } from "@srelens/core";
 import { Alert, Button, LoadingState, Table, type Column } from "@srelens/ui-kit";
 import { detailRoute } from "../../lib/detailRoute";
+import { FailureAlert } from "../../lib/errorCopy";
 import {
   GATEWAY_API_GROUP,
   PARENT_COLUMNS,
@@ -60,7 +61,7 @@ const ATTACHED_COLUMNS: Column<AttachedRoute>[] = [
  */
 function GatewayRoutesSection({ object, context }: { object: K8sObject; context: string }) {
   const gateway = { namespace: str(object.metadata?.namespace), name: str(object.metadata?.name) };
-  const state = useSectionList<{ rows: AttachedRoute[]; failed: string[]; truncated: boolean }>(true, [context, gateway.namespace, gateway.name], async () => {
+  const state = useSectionList<{ rows: AttachedRoute[]; failed: { kind: string; error: string }[]; truncated: boolean }>(true, [context, gateway.namespace, gateway.name], async () => {
     const discovered = await listCrds(context);
     if (discovered.error) return { error: discovered.error };
     const kinds = (discovered.crds ?? []).filter(
@@ -75,7 +76,10 @@ function GatewayRoutesSection({ object, context }: { object: K8sObject; context:
         return all.error ? listCustomResource(context, ref, gateway.namespace) : all;
       }),
     );
-    const failed = kinds.flatMap((crd, i) => (lists[i].error ? [`${crd.kind}: ${lists[i].error}`] : []));
+    const failed = kinds.flatMap((crd, i) => {
+      const error = lists[i].error;
+      return error ? [{ kind: crd.kind, error }] : [];
+    });
     if (kinds.length > 0 && failed.length === kinds.length) return { error: lists[0].error };
     return {
       data: {
@@ -110,7 +114,13 @@ function GatewayRoutesSection({ object, context }: { object: K8sObject; context:
       ) : (
         <>
           {failed.length > 0 && (
-            <p className="mb-2 text-[0.8125rem] text-muted">Could not list {failed.join("; ")}</p>
+            // The rows that were read stay; the kinds that were not say why and can be asked again.
+            <FailureAlert
+              title={`Could not list ${failed.map((f) => f.kind).join(", ")}`}
+              error={failed[0].error}
+              onRetry={state.retry}
+              className="mb-2"
+            />
           )}
           {truncated && (
             <Alert tone="info" title="Not every route was read" className="mb-2">
@@ -149,7 +159,11 @@ function parentColumns(context: string): Column<RouteParent>[] {
           mono(`${p.kind}/${p.namespace}/${p.name}`)
         ),
     },
-    { key: "section", header: "Listener", render: (p) => mono(p.sectionName) },
+    {
+      key: "section",
+      header: "Listener",
+      render: (p) => mono([p.sectionName, p.port && `:${p.port}`].filter(Boolean).join(" ")),
+    },
     { key: "accepted", header: "Accepted", render: (p) => p.accepted || "—" },
     { key: "resolved", header: "Resolved refs", render: (p) => p.resolvedRefs || "—" },
   ];
@@ -221,7 +235,7 @@ export function GatewayApiBody({ object, context }: { object: K8sObject; context
         <Table
           columns={parentColumns(context)}
           data={routeParents(object)}
-          getRowKey={(p) => `${p.kind}/${p.namespace}/${p.name}/${p.sectionName}`}
+          getRowKey={(p) => `${p.kind}/${p.namespace}/${p.name}/${p.sectionName}/${p.port}`}
           emptyText="Attached to nothing"
         />
       </Section>

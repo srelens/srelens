@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { render, screen, within } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { ClusterContext, CrdRef, K8sObject } from "@srelens/core";
 
@@ -124,7 +124,12 @@ describe("a Gateway's pane", () => {
     render(<GatewayApiBody object={GATEWAY} context="prod-eu" />);
     expect(await screen.findByRole("heading", { name: "Routes (1)" })).toBeDefined();
     expect(screen.getByText("local")).toBeDefined();
-    expect(screen.getByText(/Could not list GRPCRoute: forbidden/)).toBeDefined();
+    expect(screen.getByText("Could not list GRPCRoute")).toBeDefined();
+    // The shared failure display: the reason, and a way to ask again.
+    const calls = listCustomResource.mock.calls.length;
+    await userEvent.click(screen.getByRole("button", { name: "Retry" }));
+    await waitFor(() => expect(listCustomResource.mock.calls.length).toBeGreaterThan(calls));
+    expect(screen.getByText("local")).toBeDefined();
   });
 
   it("does not present a list cut at the row cap as complete", async () => {
