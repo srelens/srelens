@@ -287,6 +287,31 @@ pub fn render_topology_view(f: &mut Frame, area: Rect, state: &TopologyViewState
         return;
     };
 
+    // Gateway API kinds the graph could not read (#1089): said on a line of
+    // their own above the graph, so their missing gateways and routes are not
+    // taken for a cluster that has none.
+    let mut inner = inner;
+    if !graph.unread.is_empty() {
+        let what = graph
+            .unread
+            .iter()
+            .map(|u| format!("{} in {}: {}", u.kind, u.namespace, u.reason))
+            .collect::<Vec<_>>()
+            .join("; ");
+        let rows = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(1), Constraint::Min(0)])
+            .split(inner);
+        f.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled(format!("⚠ Could not read {what}"), Theme::status_warn()),
+                Span::styled("  — press <r> to retry", Style::default().fg(Theme::dim())),
+            ])),
+            rows[0],
+        );
+        inner = rows[1];
+    }
+
     if graph.nodes.is_empty() {
         let msg = Paragraph::new(Line::from(vec![
             Span::styled("No workloads, services or ingresses found in this namespace scope.", Style::default().fg(Theme::dim())),
@@ -671,6 +696,34 @@ mod tests {
             probe: None,
             unread: Vec::new(),
         }
+    }
+
+    /// What the view draws at 120x30, as one string.
+    fn drawn(state: &TopologyViewState) -> String {
+        use ratatui::{backend::TestBackend, Terminal};
+        let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+        terminal.draw(|f| render_topology_view(f, f.area(), state)).unwrap();
+        terminal.backend().buffer().content().iter().map(|c| c.symbol()).collect()
+    }
+
+    #[test]
+    fn gateway_api_kinds_it_could_not_read_are_said_not_left_out() {
+        // AGENTS.md: a failed read must not pass for "there are none" (#1089).
+        let unread = vec![srelens_kube::topology::UnreadSource {
+            namespace: "shop".to_string(),
+            kind: "HTTPRoute".to_string(),
+            reason: "forbidden".to_string(),
+        }];
+        let mut with_nodes = TopologyViewState::new(vec!["shop".to_string()]);
+        with_nodes.set_graph(TopologyGraphOut { unread: unread.clone(), ..sample_graph() });
+        let screen = drawn(&with_nodes);
+        assert!(screen.contains("Could not read HTTPRoute in shop: forbidden"), "{screen}");
+        assert!(screen.contains("<r> to retry"), "{screen}");
+
+        // Nothing else drawn is still not "nothing found".
+        let mut empty = TopologyViewState::new(vec!["shop".to_string()]);
+        empty.set_graph(TopologyGraphOut { nodes: vec![], edges: vec![], probe: None, unread });
+        assert!(drawn(&empty).contains("Could not read HTTPRoute in shop"));
     }
 
     #[test]
