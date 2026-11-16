@@ -141,6 +141,8 @@ export interface RouteParent {
   namespace: string;
   name: string;
   sectionName: string;
+  /** The listener port the reference names, or `""`: part of which parent it is. */
+  port: string;
   /** The parent's `Accepted` and `ResolvedRefs` conditions: `True`, `False`, or `""`. */
   accepted: string;
   resolvedRefs: string;
@@ -153,6 +155,7 @@ function parentKey(ref: Record<string, unknown>, routeNamespace: string) {
     namespace: str(ref.namespace) || routeNamespace,
     name: str(ref.name),
     sectionName: str(ref.sectionName),
+    port: ref.port == null ? "" : String(ref.port),
   };
 }
 
@@ -168,7 +171,8 @@ export function routeParents(object: K8sObject): RouteParent[] {
         theirs.kind === parent.kind &&
         theirs.namespace === parent.namespace &&
         theirs.name === parent.name &&
-        theirs.sectionName === parent.sectionName
+        theirs.sectionName === parent.sectionName &&
+        theirs.port === parent.port
       );
     });
     return {

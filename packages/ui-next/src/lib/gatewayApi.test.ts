@@ -132,8 +132,26 @@ describe("reading a route", () => {
 
   it("joins each parent to its verdict, defaulting the namespace to the route's", () => {
     expect(routeParents(route)).toEqual([
-      { kind: "Gateway", namespace: "infra", name: "edge", sectionName: "https", accepted: "True", resolvedRefs: "False" },
-      { kind: "Gateway", namespace: "store", name: "local", sectionName: "", accepted: "", resolvedRefs: "" },
+      { kind: "Gateway", namespace: "infra", name: "edge", sectionName: "https", port: "", accepted: "True", resolvedRefs: "False" },
+      { kind: "Gateway", namespace: "store", name: "local", sectionName: "", port: "", accepted: "", resolvedRefs: "" },
+    ]);
+  });
+
+  it("tells two references to one gateway apart by port", () => {
+    const route: K8sObject = {
+      kind: "HTTPRoute",
+      metadata: { name: "split", namespace: "store" },
+      spec: { parentRefs: [{ name: "edge", port: 80 }, { name: "edge", port: 443 }] },
+      status: {
+        parents: [
+          { parentRef: { name: "edge", port: 80 }, conditions: [{ type: "Accepted", status: "True" }] },
+          { parentRef: { name: "edge", port: 443 }, conditions: [{ type: "Accepted", status: "False" }] },
+        ],
+      },
+    };
+    expect(routeParents(route).map((p) => [p.port, p.accepted])).toEqual([
+      ["80", "True"],
+      ["443", "False"],
     ]);
   });
 
