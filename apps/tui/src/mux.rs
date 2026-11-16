@@ -187,4 +187,6 @@ pub struct MuxState {
     /// Paces the parked pane's metric requests, as `App`'s counters pace the
     /// focused pane's.
     pub parked_metrics_tick_counter: usize,
+    /// The same for the parked pane's Helm list or release.
+    pub parked_helm_tick_counter: usize,
 }
