@@ -112,6 +112,9 @@ func nested(o object, path string) error {
 	return nil
 }
 
+// base64Pattern is the one pattern that may go without a maxLength.
+const base64Pattern = `^([A-Za-z0-9+/]{4})*([A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$`
+
 func oneLine(s string) string { return strings.Join(strings.Fields(s), " ") }
 
 // generate is protocol_gen.go for schema, gofmt'd.
@@ -540,10 +543,13 @@ func (g *generator) shapes() error {
 			}
 			max, ok := p["maxLength"].(json.Number)
 			if !ok {
-				// A pattern with no maxLength (tunnel/data's base64) is no field
-				// rule for a broker to hold: the line size bounds it, and the SDK
-				// writes it with encoding/base64 rather than checking it.
-				continue
+				if pattern == base64Pattern {
+					// tunnel/data's base64 is no field rule for a broker to hold:
+					// the line size bounds it, and the SDK writes it with
+					// encoding/base64 rather than checking it.
+					continue
+				}
+				return fmt.Errorf("definitions.%s.properties.%s: a pattern needs a maxLength", name, prop)
 			}
 			var not []string
 			if n, ok := p["not"].(object); ok {

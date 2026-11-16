@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"os"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -244,12 +245,23 @@ func TestAnIntegerMaximumGeneratesAnUnsignedField(t *testing.T) {
 	}
 }
 
-func TestAPatternWithoutAMaxLengthIsNoFieldShape(t *testing.T) {
-	code, err := generate(minimal(`"Blob": {"type":"object","additionalProperties":false,"required":["data"],"properties":{"data":{"type":"string","pattern":"^[A-Za-z0-9+/=]*$"}}}`))
+// The one pattern allowed to go without a maxLength: tunnel/data's base64,
+// which the line size bounds and the SDK writes with encoding/base64.
+const base64Schema = `^([A-Za-z0-9+/]{4})*([A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$`
+
+func TestTheBase64PatternWithoutAMaxLengthIsNoFieldShape(t *testing.T) {
+	code, err := generate(minimal(`"Blob": {"type":"object","additionalProperties":false,"required":["data"],"properties":{"data":{"type":"string","pattern":` + strconv.Quote(base64Schema) + `}}}`))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if bytes.Contains(code, []byte(`"Blob.data"`)) {
 		t.Fatalf("an unbounded pattern became a shape: %s", code)
+	}
+}
+
+func TestAnyOtherPatternWithoutAMaxLengthStillFailsGeneration(t *testing.T) {
+	_, err := generate(minimal(`"Blob": {"type":"object","additionalProperties":false,"required":["data"],"properties":{"data":{"type":"string","pattern":"^[A-Za-z0-9+/=]*$"}}}`))
+	if err == nil || !strings.Contains(err.Error(), "a pattern needs a maxLength") || !strings.Contains(err.Error(), "Blob") {
+		t.Fatalf("expected a refusal, got %v", err)
 	}
 }

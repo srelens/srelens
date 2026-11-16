@@ -444,3 +444,98 @@ func TestTheSessionEndingEndsTheConn(t *testing.T) {
 		t.Fatal("the session's end left a Read blocked")
 	}
 }
+
+// Two writers each own the conn for a whole Write: their chunks never
+// interleave, and a credit wakes whichever is next, never leaving one asleep.
+func TestConcurrentWritesDoNotInterleave(t *testing.T) {
+	r := newRig(t, "0.3.0")
+	_, c := r.dial(kafkaPod)
+	const filler = window - 50000
+	if n, err := c.Write(make([]byte, filler)); n != filler || err != nil {
+		t.Fatalf("%d, %v", n, err)
+	}
+	for got := 0; got < filler; {
+		got += len(decoded(t, r.frame("tunnel/data")))
+	}
+	a, b := bytes.Repeat([]byte("A"), 100*1024), bytes.Repeat([]byte("B"), 100*1024)
+	errs := make(chan error, 2)
+	write := func(p []byte) {
+		n, err := c.Write(p)
+		if err == nil && n != len(p) {
+			err = io.ErrShortWrite
+		}
+		errs <- err
+	}
+	go write(a)
+	var got []byte
+	for len(got) < 50000 { // A sends what the window holds, then blocks
+		got = append(got, decoded(t, r.frame("tunnel/data"))...)
+	}
+	go write(b)
+	time.Sleep(20 * time.Millisecond) // B is now waiting behind A
+	r.notify("tunnel/credit", map[string]any{"tunnel": 1, "bytes": window})
+	for len(got) < len(a)+len(b) {
+		got = append(got, decoded(t, r.frame("tunnel/data"))...)
+	}
+	for range 2 {
+		if err := <-errs; err != nil {
+			t.Fatal(err)
+		}
+	}
+	if !bytes.Equal(got, append(append([]byte{}, a...), b...)) {
+		t.Fatalf("the Writes interleaved (first byte %q)", got[0])
+	}
+	if err := r.finish(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// A second caller queued behind a blocked first one returns when the conn is
+// closed, as the first does.
+func TestCloseUnblocksTwoBlockedWritersAndTwoBlockedReaders(t *testing.T) {
+	r := newRig(t, "0.3.0")
+	_, c := r.dial(kafkaPod)
+	errs := make(chan error, 4)
+	for range 2 {
+		go func() { _, err := c.Read(make([]byte, 1)); errs <- err }()
+		go func() { _, err := c.Write(make([]byte, window+1)); errs <- err }()
+	}
+	for sent := 0; sent < window; sent += 65536 {
+		r.frame("tunnel/data")
+	}
+	time.Sleep(20 * time.Millisecond) // let all four block
+	c.Close()
+	r.frame("tunnel/close")
+	for range 4 {
+		select {
+		case err := <-errs:
+			if !errors.Is(err, net.ErrClosed) {
+				t.Fatalf("%v", err)
+			}
+		case <-time.After(wait):
+			t.Fatal("Close left a caller blocked")
+		}
+	}
+	if err := r.finish(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// A deadline ends a caller waiting behind another, too.
+func TestAQueuedWriteStopsAtItsDeadline(t *testing.T) {
+	r := newRig(t, "0.3.0")
+	_, c := r.dial(kafkaPod)
+	go c.Write(make([]byte, window+1)) // takes the window, then blocks for credit
+	for sent := 0; sent < window; sent += 65536 {
+		r.frame("tunnel/data")
+	}
+	c.SetWriteDeadline(time.Now().Add(50 * time.Millisecond))
+	if _, err := c.Write([]byte("x")); !errors.Is(err, os.ErrDeadlineExceeded) {
+		t.Fatalf("%v", err)
+	}
+	c.Close()
+	r.frame("tunnel/close")
+	if err := r.finish(); err != nil {
+		t.Fatal(err)
+	}
+}

@@ -33,7 +33,8 @@ type PodTarget struct {
 }
 
 // Dial opens a TCP connection to the pod target names, through srelens (API
-// 0.3). The conn is a net.Conn for one reader, one writer, and Close from any
+// 0.3). The conn is a net.Conn: calls of the same method are serialised, each
+// Write whole, and Close and deadlines may come from any
 // goroutine; its addresses are placeholders. Close it: an open conn holds one
 // of the sidecar's tunnels at srelens until it is closed or the session ends.
 func (h *Host) Dial(ctx context.Context, cc CallContext, target PodTarget) (net.Conn, error) {
@@ -101,6 +102,14 @@ func (h *Host) Dial(ctx context.Context, cc CallContext, target PodTarget) (net.
 	answer, err := h.await(ctx, id, p)
 	if err != nil {
 		h.forgetTunnel(c.id) // a cancelled call leaves no conn: later frames for the id are dropped
+		if ctx.Err() != nil && errors.Is(err, ctx.Err()) {
+			// srelens may have accepted the connect before the $/cancelRequest
+			// await sent reached it. The pipe is ordered: if the cancel won, this
+			// close is a frame for a tunnel that is not open and is dropped; if the
+			// answer won, it ends the tunnel, which would otherwise hold one of the
+			// sidecar's tunnels until the session ends.
+			c.sendClose(nil)
+		}
 		return nil, err
 	}
 	var result protocol.HostConnectResult
@@ -201,6 +210,8 @@ type tunnelConn struct {
 	id     uint64
 	remote net.Addr
 	rd, wd deadline      // fired for good by Close
+	rlock  chan struct{} // held for the whole of a Read
+	wlock  chan struct{} // held for the whole of a Write
 	rsig   chan struct{} // woken by data, a close, or the session's end
 	wsig   chan struct{} // woken by credit, a close, or the session's end
 
@@ -217,7 +228,7 @@ func newTunnelConn(h *Host, id uint64) *tunnelConn {
 	return &tunnelConn{
 		h: h, id: id, remote: tunnelAddr("pod"),
 		rd: newDeadline(), wd: newDeadline(),
-		rsig: make(chan struct{}, 1), wsig: make(chan struct{}, 1),
+		rlock: make(chan struct{}, 1), wlock: make(chan struct{}, 1), rsig: make(chan struct{}, 1), wsig: make(chan struct{}, 1),
 		allowed: tunnelWindow, credit: tunnelWindow,
 	}
 }
@@ -248,6 +259,10 @@ func (c *tunnelConn) Read(p []byte) (int, error) {
 	if len(p) == 0 {
 		return 0, nil
 	}
+	if err := c.acquire(c.rlock, &c.rd); err != nil {
+		return 0, err
+	}
+	defer func() { <-c.rlock }()
 	c.flushCredit() // credit an earlier Read could not send
 	for {
 		c.mu.Lock()
@@ -304,6 +319,10 @@ func (c *tunnelConn) flushCredit() {
 // Write sends p in chunks of at most 64 KiB, each spending credit, and waits
 // for credit when it has none.
 func (c *tunnelConn) Write(p []byte) (int, error) {
+	if err := c.acquire(c.wlock, &c.wd); err != nil {
+		return 0, err
+	}
+	defer func() { <-c.wlock }()
 	sent := 0
 	for len(p) > 0 {
 		n, err := c.reserve(len(p))
@@ -356,6 +375,17 @@ func (c *tunnelConn) reserve(want int) (int, error) {
 		case <-c.wsig:
 		case <-c.wd.wait():
 		}
+	}
+}
+
+// acquire takes a Read's or a Write's lock, waiting behind another caller
+// until Close or the deadline ends the wait.
+func (c *tunnelConn) acquire(lock chan struct{}, d *deadline) error {
+	select {
+	case lock <- struct{}{}:
+		return nil
+	case <-d.wait():
+		return c.stoppedErr()
 	}
 }
 

@@ -56,6 +56,14 @@ func TestDialCancelledLeavesNoConn(t *testing.T) {
 	if note == nil || note.Method != protocol.MethodCancelRequest || json.Unmarshal(note.Params, &cancelled) != nil || cancelled.ID != req.ID {
 		t.Fatalf("expected $/cancelRequest for %v, got %+v", req.ID, note)
 	}
+	// srelens may have accepted the connect before the cancel reached it, so
+	// the close follows the cancel: the pipe is ordered, and a close for a
+	// tunnel that is not open is dropped.
+	note = queued(t, out).Notification
+	var closed protocol.TunnelCloseParams
+	if note == nil || note.Method != protocol.MethodTunnelClose || json.Unmarshal(note.Params, &closed) != nil || closed.Tunnel != 1 || closed.Message != nil {
+		t.Fatalf("expected tunnel/close for tunnel 1, got %+v", note)
+	}
 	h.tmu.Lock()
 	open := len(h.tunnels)
 	h.tmu.Unlock()
