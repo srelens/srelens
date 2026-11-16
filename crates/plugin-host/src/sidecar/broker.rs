@@ -556,6 +556,7 @@ impl Broker for CapabilityBroker {
         ask: HostConnectParams,
     ) -> Pin<Box<dyn Future<Output = Result<Tunnel, RpcError>> + Send + 'a>> {
         Box::pin(async move {
+            check_connect(&ask)?;
             self.count_connect(&ask)?;
             self.pods.connect(&self.app, &ask).await
         })
@@ -581,12 +582,19 @@ fn call_context(context: Option<Value>) -> Result<CallContext, RpcError> {
     }
     let parsed: CallContext =
         serde_json::from_value(context).map_err(|e| invalid(format!("{CONTEXT_SHAPE} ({e})")))?;
-    if !is_cluster_id(&parsed.cluster_id) {
+    check_context(&parsed.cluster_id, parsed.namespace.as_deref())?;
+    Ok(parsed)
+}
+
+/// The shape of a call's cluster and namespace, shared by every call a
+/// sidecar makes.
+fn check_context(cluster_id: &str, namespace: Option<&str>) -> Result<(), RpcError> {
+    if !is_cluster_id(cluster_id) {
         return Err(invalid(format!(
             "`context.clusterId` must name a cluster, in at most {MAX_CLUSTER_ID_BYTES} bytes"
         )));
     }
-    if let Some(namespace) = &parsed.namespace {
+    if let Some(namespace) = namespace {
         if !is_namespace(namespace) {
             return Err(invalid(format!(
                 "`context.namespace` must be a Kubernetes namespace name, or null for none; not {:?}",
@@ -594,7 +602,21 @@ fn call_context(context: Option<Value>) -> Result<CallContext, RpcError> {
             )));
         }
     }
-    Ok(parsed)
+    Ok(())
+}
+
+/// A `host/connect`'s fields, held to the shapes `host_call` holds its own to.
+fn check_connect(ask: &HostConnectParams) -> Result<(), RpcError> {
+    check_context(&ask.context.cluster_id, Some(&ask.context.namespace))?;
+    if !is_identifier(&ask.capability) {
+        return Err(invalid(format!("`capability` must be {IDENTIFIER}")));
+    }
+    for (field, value) in [("name", &ask.name), ("pod", &ask.pod), ("service", &ask.service)] {
+        if value.as_deref().is_some_and(|v| !is_object_name(v)) {
+            return Err(invalid(format!("`{field}` must be {OBJECT_NAME}")));
+        }
+    }
+    Ok(())
 }
 
 /// What a JSON value is, for a refusal: "a string", "an array", …
@@ -1705,5 +1727,47 @@ mod tests {
             let parsed = serde_json::from_value::<HostConnectParams>(params.clone()).is_ok();
             assert_eq!(parsed, validator.is_valid(&params), "{params}");
         }
+    }
+
+    #[tokio::test]
+    async fn a_malformed_connect_is_refused_before_anything_else() {
+        for (field, bad) in [
+            ("clusterId", json!("   ")),
+            ("namespace", json!("Not A Namespace")),
+            ("capability", json!("two words")),
+            ("pod", json!("kafka/0")),
+            ("service", json!("kafka
+")),
+            ("name", json!("a/b")),
+        ] {
+            let mut params = connect_params();
+            if field == "clusterId" || field == "namespace" {
+                params["context"][field] = bad;
+            } else {
+                params[field] = bad;
+            }
+            if field == "service" {
+                params.as_object_mut().unwrap().remove("pod");
+            }
+            let (broker, pods, audit) = with_pods(false);
+            let ask: HostConnectParams = serde_json::from_value(params).unwrap();
+            let error = broker.connect(ask).await.err().unwrap_or_else(|| panic!("{field} was accepted"));
+            assert_eq!(error.code, code::INVALID_PARAMS, "{field}");
+            assert!(pods.asked.lock().unwrap().is_empty(), "{field}");
+            assert!(audit.records().is_empty(), "{field}");
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_malformed_connect_does_not_count_against_the_limit() {
+        let (broker, pods, _) = with_pods(false);
+        let mut params = connect_params();
+        params["pod"] = json!("kafka/0");
+        for _ in 0..61 {
+            let ask: HostConnectParams = serde_json::from_value(params.clone()).unwrap();
+            assert!(broker.connect(ask).await.is_err());
+        }
+        assert!(broker.connect(connect_ask()).await.is_ok());
+        assert_eq!(pods.asked.lock().unwrap().len(), 1);
     }
 }
