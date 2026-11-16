@@ -858,17 +858,20 @@ impl App {
 
         // A parked Helm list or release is still on screen too: keep asking
         // its own cluster, or an upgrade or rollback never shows there (#1097).
-        // It leaves `helm_refreshing`, the focused pane's guard, alone.
+        // One fetch at a time, under the pane's own guard.
         let parked_helm = self.mux_state.as_mut().and_then(|mux| {
-            let pane = mux.inactive_pane.as_ref()?;
+            let pane = mux.inactive_pane.as_mut()?;
             let release = match &pane.active_view {
                 ActiveView::Helm(_) => None,
                 ActiveView::HelmDetail(d) => Some((d.release_name.clone(), d.namespace.clone())),
                 _ => return None,
             };
             mux.parked_helm_tick_counter = mux.parked_helm_tick_counter.saturating_add(1);
-            (mux.parked_helm_tick_counter % 35 == 1)
-                .then(|| (pane.context.clone(), pane.namespace.clone(), release))
+            if mux.parked_helm_tick_counter % 35 != 1 || pane.helm_refreshing {
+                return None;
+            }
+            pane.helm_refreshing = true;
+            Some((pane.context.clone(), pane.namespace.clone(), release))
         });
         match parked_helm {
             Some((ctx, ns, None)) => self.refresh_helm_releases_for(ctx, ns),
@@ -2666,6 +2669,9 @@ impl App {
 
             // 2. Switch context and namespace
             self.active_context = new_context;
+            // A Helm fetch still out is for the cluster just left, and its
+            // answer frees nothing (#1097), so free the guard here.
+            self.helm_refreshing = false;
 
             // 3. Restore or initialize assistant state for the target context
             if let Some(saved_state) = self.assistant_states.remove(&self.active_context) {
@@ -13390,11 +13396,8 @@ impl App {
         namespace: &str,
         result: Result<Vec<srelens_kube::helm::HelmReleaseSummary>, String>,
     ) {
-        // Any reply frees the focused pane to ask: a fetch still out across
-        // Ctrl+b answers for the pane it has become.
-        self.helm_refreshing = false;
+        let parked = self.release_helm_guard(context);
         let shown_ns = self.namespace_for_context(context).map(str::to_owned);
-        let parked = self.active_context != context;
         if let Some((ActiveView::Helm(helm), _, _)) = self.pane_for_context(context) {
             if shown_ns.as_deref() == Some(namespace) {
                 match result {
@@ -13403,16 +13406,35 @@ impl App {
                     }
                     Err(err) => helm.set_error(err),
                 }
-                // The parked pane's answer (#1097) is no reason for the focused
-                // list to ask, unless it is still waiting: its own `:helm`
-                // could not ask while this fetch was out.
-                if !parked || !matches!(&self.active_view, ActiveView::Helm(h) if h.is_loading) {
-                    return;
-                }
+                return;
             }
         }
-        if matches!(self.active_view, ActiveView::Helm(_)) {
+        // An answer the focused list cannot use held its guard while it was
+        // out, so ask again now. The parked pane's answers ask nothing of it.
+        if !parked && matches!(self.active_view, ActiveView::Helm(_)) {
             self.refresh_helm_releases();
+        }
+    }
+
+    /// A Helm answer ends the fetch of the pane that asked, and only that
+    /// one: one fetch at a time is per pane (#1097). Says whether that was
+    /// the parked pane. An answer for a cluster no pane shows frees nothing:
+    /// switching cluster freed the guard already.
+    fn release_helm_guard(&mut self, context: &str) -> bool {
+        if self.active_context == context {
+            self.helm_refreshing = false;
+            return false;
+        }
+        match self
+            .mux_state
+            .as_mut()
+            .and_then(|mux| mux.inactive_pane.as_mut())
+        {
+            Some(pane) if pane.context == context => {
+                pane.helm_refreshing = false;
+                true
+            }
+            _ => false,
         }
     }
 
@@ -13491,7 +13513,7 @@ impl App {
         revision: Option<i64>,
         result: Result<srelens_kube::helm::HelmReleaseDetail, String>,
     ) {
-        self.helm_refreshing = false;
+        self.release_helm_guard(context);
         let mut previous = None;
         // The focused pane's release, or the parked pane's (#1097).
         if let Some((ActiveView::HelmDetail(detail), _, _)) = self.pane_for_context(context) {

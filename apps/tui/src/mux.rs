@@ -47,6 +47,10 @@ pub struct ClusterPaneState {
         String,
         std::collections::VecDeque<srelens_kube::metrics::MetricSample>,
     >,
+    /// This pane's Helm fetch is still out (`App::helm_refreshing` while it
+    /// is focused). One at a time is per pane, so the other pane's answer
+    /// does not free it (#1097).
+    pub helm_refreshing: bool,
 }
 
 impl ClusterPaneState {
@@ -87,6 +91,7 @@ impl ClusterPaneState {
             active_log_channel: app.active_log_channel.take(),
             node_metrics_history: std::mem::take(&mut app.node_metrics_history),
             pod_metrics_history: std::mem::take(&mut app.pod_metrics_history),
+            helm_refreshing: std::mem::take(&mut app.helm_refreshing),
         }
     }
 
@@ -129,6 +134,7 @@ impl ClusterPaneState {
         app.active_log_channel = self.active_log_channel;
         app.node_metrics_history = self.node_metrics_history;
         app.pod_metrics_history = self.pod_metrics_history;
+        app.helm_refreshing = self.helm_refreshing;
     }
 
     /// Swap this pane snapshot with `app`'s active cluster state in place.
