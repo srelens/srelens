@@ -930,6 +930,15 @@ impl App {
         ))
     }
 
+    /// The namespace the pane showing `context` is on now.
+    fn namespace_for_context(&self, context: &str) -> Option<&str> {
+        if self.active_context == context {
+            return Some(self.active_namespace.as_str());
+        }
+        let pane = self.mux_state.as_ref()?.inactive_pane.as_ref()?;
+        (pane.context == context).then_some(pane.namespace.as_str())
+    }
+
     pub fn refresh_pod_metrics(&self) {
         self.refresh_pod_metrics_for(self.active_context.clone(), self.active_namespace.clone());
     }
@@ -1929,6 +1938,9 @@ impl App {
                 .insert((ctx.clone(), ns.clone(), d.plural.clone()), items.clone());
         }
 
+        // Rows read from a namespace the pane has since left are cached above
+        // for that namespace, but must not stand in for the one it shows now.
+        let shown_ns = self.namespace_for_context(context).map(str::to_owned);
         if let Some((ActiveView::Table(table), _, filter)) = self.pane_for_context(context) {
             if let ResourceKind::CustomResource(crd) = &mut table.kind {
                 let matches_table = crd.crd_name == crd_identifier
@@ -1937,7 +1949,8 @@ impl App {
                         .is_some_and(|d| d.crd_name == crd.crd_name))
                     || crd.kind == crd_identifier
                     || crd.plural == crd_identifier;
-                if matches_table {
+                let current = !crd.namespaced || shown_ns.as_deref() == Some(namespace);
+                if matches_table && current {
                     if crd.printer_columns.is_empty() {
                         if let Some(ref d) = discovered {
                             crd.printer_columns = d.printer_columns.clone();
@@ -1960,27 +1973,36 @@ impl App {
             .or_else(|| title.strip_prefix("crd_instances:"))
             .unwrap_or(title);
         let ctx = self.active_context.clone();
-        self.handle_crd_instances_failed_for(&ctx, crd_identifier, err);
+        let ns = self.active_namespace.clone();
+        self.handle_crd_instances_failed_for(&ctx, &ns, crd_identifier, err);
     }
 
-    /// A failed list of `crd_identifier` on `context`: the table of the pane
-    /// showing it stops loading, and the focused pane says why.
+    /// A failed list of `crd_identifier` in `namespace` on `context`: the
+    /// table of the pane showing it keeps the error, as a failed watch does,
+    /// so a parked pane shows it on return and no pane passes old rows off as
+    /// current. The focused pane also toasts it. A failure for a namespace
+    /// the pane has since left is not its table's, and is dropped.
     pub fn handle_crd_instances_failed_for(
         &mut self,
         context: &str,
+        namespace: &str,
         crd_identifier: &str,
         err: &str,
     ) {
         let focused = self.active_context == context;
+        // A failure for a namespace the pane has since left is not the
+        // table's: setting it would clear the rows it shows now.
+        let shown_ns = self.namespace_for_context(context).map(str::to_owned);
         let mut toast_kind = None;
         if let Some((ActiveView::Table(table), _, _)) = self.pane_for_context(context) {
             if let ResourceKind::CustomResource(crd) = &table.kind {
-                if crd.crd_name == crd_identifier
+                if (crd.crd_name == crd_identifier
                     || crd.kind == crd_identifier
-                    || crd.plural == crd_identifier
+                    || crd.plural == crd_identifier)
+                    && (!crd.namespaced || shown_ns.as_deref() == Some(namespace))
                 {
-                    table.is_loading = false;
                     toast_kind = Some(crd.kind.clone());
+                    table.set_error(err.to_string());
                 }
             }
         }

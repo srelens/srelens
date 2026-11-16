@@ -3984,5 +3984,82 @@ async fn crd_stream_error_payload_and_instances_failed_clears_loading() {
         panic!("expected table")
     };
     assert!(!t.is_loading, "instance fetch error must clear is_loading");
+    assert_eq!(
+        t.error.as_deref(),
+        Some("connection timeout"),
+        "the table must keep the failure after the toast fades (#1081)"
+    );
     assert!(toast(&app).contains("Failed to list VirtualMachine: connection timeout"));
+}
+
+/// A VirtualMachine table that was opened in `default` and then moved to
+/// `other`, where it shows one row. A list sent for `default` may still be in
+/// flight.
+async fn vm_table_moved_to_another_namespace() -> (common::env::SettingsGuard, App) {
+    let settings = common::env::isolate_settings();
+    let (mut app, _rx) = common::app().await;
+    let vm_crd = CrdMeta {
+        crd_name: "virtualmachines.kubevirt.io".into(),
+        group: "kubevirt.io".into(),
+        version: "v1".into(),
+        kind: "VirtualMachine".into(),
+        plural: "virtualmachines".into(),
+        singular: "virtualmachine".into(),
+        namespaced: true,
+        short_names: vec![],
+        printer_columns: vec![],
+        created_at: None,
+    };
+    app.crds = vec![vm_crd.clone()];
+    app.switch_view_to_crd(vm_crd).await;
+    assert_eq!(app.active_namespace, "default");
+    app.switch_namespace("other".into()).await;
+    let ctx = app.active_context.clone();
+    let rows = json!([{ "name": "vm-other", "namespace": "other" }]).to_string();
+    app.handle_crd_instances_update_for(&ctx, "other", "virtualmachines.kubevirt.io", &rows);
+    (settings, app)
+}
+
+fn vm_table(app: &App) -> &ResourceTableState {
+    match &app.active_view {
+        ActiveView::Table(t) => t,
+        _ => panic!("expected the VirtualMachine table"),
+    }
+}
+
+#[tokio::test]
+async fn a_late_failure_for_a_namespace_left_behind_keeps_the_current_rows() {
+    let (_settings, mut app) = vm_table_moved_to_another_namespace().await;
+    let ctx = app.active_context.clone();
+
+    app.handle_crd_instances_failed_for(&ctx, "default", "virtualmachines.kubevirt.io", "timeout");
+
+    let t = vm_table(&app);
+    assert_eq!(
+        t.error, None,
+        "the old namespace's failure is not this table's"
+    );
+    assert_eq!(t.raw_items.len(), 1, "the current namespace's rows stay");
+}
+
+#[tokio::test]
+async fn late_rows_for_a_namespace_left_behind_do_not_replace_the_current_rows() {
+    let (_settings, mut app) = vm_table_moved_to_another_namespace().await;
+    let ctx = app.active_context.clone();
+
+    let old = json!([{ "name": "vm-a", "namespace": "default" }, { "name": "vm-b", "namespace": "default" }]);
+    app.handle_crd_instances_update_for(
+        &ctx,
+        "default",
+        "virtualmachines.kubevirt.io",
+        &old.to_string(),
+    );
+
+    let t = vm_table(&app);
+    assert_eq!(
+        t.raw_items.len(),
+        1,
+        "the old namespace's rows must not show here"
+    );
+    assert_eq!(t.raw_items[0]["name"], "vm-other");
 }
