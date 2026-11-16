@@ -727,14 +727,14 @@
       "preconditions": [
         {
           "jsonPath": ".metadata.annotations['autoscaling.keda.sh/paused']",
-          "absent": true,
+          "notEquals": "true",
           "reason": "Autoscaling is already paused"
         }
       ],
       "availableWhen": [
         {
           "jsonPath": ".metadata.annotations['autoscaling.keda.sh/paused']",
-          "absent": true,
+          "notEquals": "true",
           "reason": "Autoscaling is already paused"
         }
       ]
@@ -791,14 +791,14 @@
       "preconditions": [
         {
           "jsonPath": ".metadata.annotations['autoscaling.keda.sh/paused']",
-          "absent": true,
+          "notEquals": "true",
           "reason": "Autoscaling is already paused"
         }
       ],
       "availableWhen": [
         {
           "jsonPath": ".metadata.annotations['autoscaling.keda.sh/paused']",
-          "absent": true,
+          "notEquals": "true",
           "reason": "Autoscaling is already paused"
         }
       ]

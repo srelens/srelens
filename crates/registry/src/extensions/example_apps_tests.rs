@@ -316,3 +316,19 @@ fn a_pooler_takes_its_status_from_its_phase_not_its_replica_count() {
         );
     }
 }
+
+/// KEDA resumes scaling when the pause annotation is removed or set to "false", so a
+/// scaled object carrying "false" is running and must still offer Pause.
+#[test]
+fn keda_pause_is_blocked_only_while_the_annotation_says_true() {
+    let raw: Value = serde_json::from_str(&source("keda.json")).unwrap();
+    for name in ["pause", "pause-job"] {
+        let action = raw["actions"].as_array().unwrap().iter().find(|a| a["name"] == name).unwrap();
+        for list in ["preconditions", "availableWhen"] {
+            let gate = &action[list][0];
+            assert_eq!(gate["jsonPath"], ".metadata.annotations['autoscaling.keda.sh/paused']", "{name}.{list}");
+            assert_eq!(gate["notEquals"], "true", "{name}.{list}: {gate}");
+            assert!(gate.get("absent").is_none(), "{name}.{list}: {gate}");
+        }
+    }
+}
