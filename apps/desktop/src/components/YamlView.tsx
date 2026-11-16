@@ -1,5 +1,5 @@
 import React, { Suspense, lazy, useEffect, useState } from "react";
-import { getManifest, getSecret, redactSecretManifest, revealSecretManifest } from "@srelens/core";
+import { getManifest, redactSecretManifest } from "@srelens/core";
 import { Spinner } from "../ui";
 import { ManifestEditor } from "./ManifestEditor";
 
@@ -11,15 +11,15 @@ const CodeEditor = lazy(() => import("../ui/CodeEditor").then((m) => ({ default:
  * `k8s.getManifest`, then hands off to the shared {@link ManifestEditor} for
  * editing and server-side apply (behind a confirm).
  *
- * **Except a (core) Secret, which is shown read-only** — the new design's
- * detail-pane YAML (`YamlPane` in ui-next's `detailData.tsx`), not its Edit
- * screen. `k8s.getManifest` is an ungated read: the host blanks a Secret's
- * values on it (#661), and this redacts again on arrival, failing closed,
- * rather than trust that alone. The `data` then shown is what the audited
- * `k8s.getSecret` answered (#1085); if it refuses, the manifest stays
- * redacted. Annotation values stay blanked either way, and a manifest applied
- * back would write those placeholders over the Secret's annotations. So no
- * Apply. (#659)
+ * **Except a (core) Secret, which is shown redacted and read-only** — the new
+ * design's detail-pane YAML (`YamlPane` in ui-next's `detailData.tsx`), not
+ * its Edit screen. `k8s.getManifest` is an ungated read: the host blanks a
+ * Secret's values on it (#661), and this redacts again on arrival with
+ * `redactSecretManifest`, failing closed, rather than trust that alone. Then
+ * there is nothing on screen worth applying: a redacted manifest applied back
+ * writes its placeholders over every value and annotation the Secret has. So
+ * no Apply, and the reader is sent to the Overview tab, whose per-key reveal
+ * reads the values through the consent-gated `k8s.getSecret`. (#659)
  */
 export function YamlView({
   context,
@@ -38,8 +38,6 @@ export function YamlView({
   const [original, setOriginal] = useState<string | null>(null);
   const [draft, setDraft] = useState("");
   const [error, setError] = useState("");
-  /** What of a Secret is blanked on screen: every value, only annotation values, or nothing. */
-  const [redacted, setRedacted] = useState<"values" | "annotations" | null>("values");
   // The core Secret only. A CRD always has a group, so a custom kind that is
   // merely named `Secret` arrives with `crd` set — the host does not redact
   // it, and its drawer has no Overview tab to send anyone to.
@@ -49,8 +47,7 @@ export function YamlView({
     let active = true;
     setOriginal(null);
     setError("");
-    setRedacted("values");
-    void getManifest(context, kind, namespace, name, undefined, crd).then(async (out) => {
+    void getManifest(context, kind, namespace, name, undefined, crd).then((out) => {
       if (!active) return;
       if (out.error) {
         setError(out.error);
@@ -58,20 +55,14 @@ export function YamlView({
       }
       let yaml = out.yaml ?? "";
       if (isSecret) {
-        // The values come through `k8s.getSecret`, the audited read, and
-        // nothing else: what it answered is put into the redacted manifest,
-        // and when it refuses the redacted manifest is what is shown.
-        const secret = await getSecret(context, namespace ?? "", name);
-        if (!active) return;
         // Fails closed: on a shape it does not understand the redactor returns
         // a message and no YAML at all, and the message is all that is shown.
-        const shown = secret.data ? revealSecretManifest(yaml, secret.data) : redactSecretManifest(yaml);
-        if (shown.yaml === undefined) {
-          setError(shown.error ?? "");
+        const redacted = redactSecretManifest(yaml);
+        if (redacted.error !== undefined) {
+          setError(redacted.error);
           return;
         }
-        yaml = shown.yaml;
-        setRedacted("annotationsRedacted" in shown ? (shown.annotationsRedacted ? "annotations" : null) : "values");
+        yaml = redacted.yaml ?? "";
       }
       setOriginal(yaml);
       setDraft(yaml);
@@ -92,23 +83,12 @@ export function YamlView({
         {/* Told, not silently shown less: blanked values read as an empty
             Secret, and as disagreeing with `kubectl get -o yaml` for no
             reason anyone could see. */}
-        {redacted !== null && (
-          <p className="text-xs text-muted-foreground" role="status">
-            {redacted === "annotations" ? (
-              <>
-                <strong>Annotation values redacted.</strong> This Secret's data is shown as the cluster has it.
-                Its annotation values are not, so it cannot be applied from here.
-              </>
-            ) : (
-              <>
-                <strong>Values redacted.</strong> This Secret's values could not be read, so they are not shown
-                here.
-              </>
-            )}
-          </p>
-        )}
+        <p className="text-xs text-muted-foreground" role="status">
+          <strong>Values redacted.</strong> This Secret's values are not shown here. Reveal them one key at a
+          time on the Overview tab.
+        </p>
         <Suspense fallback={<Spinner label="Loading editor" />}>
-          {/* Copy takes what is on screen, which came through the audited read. */}
+          {/* Copy is safe here: what it copies is the redacted text. */}
           <CodeEditor value={original} readOnly copy ariaLabel="Manifest YAML" minHeight={320} maxHeight={520} />
         </Suspense>
       </div>

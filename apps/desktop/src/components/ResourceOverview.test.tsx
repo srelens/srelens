@@ -691,7 +691,7 @@ describe("ObjectDetail (ConfigMap / Secret)", () => {
     expect((screen.getByLabelText("Value for app.conf") as HTMLTextAreaElement).value).toBe("level=info");
   });
 
-  it("fetches Secret values via getSecret and shows them, with a Hide per key (#1085)", async () => {
+  it("fetches Secret values via getSecret and masks them until revealed", async () => {
     // getObject redacts Secret data (values blank); getSecret is the gated path.
     getSecretMock.mockResolvedValue({ data: { token: "aGVsbG8=" } }); // "hello"
     const secret: K8sObject = {
@@ -701,30 +701,13 @@ describe("ObjectDetail (ConfigMap / Secret)", () => {
     };
     render(<ObjectDetail kind="Secret" obj={secret} now={NOW} context="kind-dev" />);
     await waitFor(() => expect(getSecretMock).toHaveBeenCalledWith("kind-dev", "default", "s"));
-    // No click: the value is on screen once the read answers.
+    // No editable field or plaintext is exposed until the user reveals the key.
+    expect(screen.queryByLabelText("Value for token")).toBeNull();
+    expect(screen.queryByDisplayValue("hello")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: /Reveal/ }));
     await waitFor(() =>
       expect((screen.getByLabelText("Value for token") as HTMLTextAreaElement).value).toBe("hello"),
     );
-    // Hidden, neither the field nor the plaintext is in the document.
-    fireEvent.click(screen.getByRole("button", { name: "Hide" }));
-    expect(screen.queryByLabelText("Value for token")).toBeNull();
-    expect(screen.queryByDisplayValue("hello")).toBeNull();
-    fireEvent.click(screen.getByRole("button", { name: "Reveal" }));
-    expect((screen.getByLabelText("Value for token") as HTMLTextAreaElement).value).toBe("hello");
-  });
-
-  it("shows a TLS Secret's raw keys too, without a reveal (#1085)", async () => {
-    getSecretMock.mockResolvedValue({ data: { "tls.key": "aGVsbG8=" } }); // "hello"
-    const secret: K8sObject = {
-      kind: "Secret",
-      type: "kubernetes.io/tls",
-      metadata: { name: "s", namespace: "default" },
-      data: { "tls.key": "" },
-    };
-    render(<ObjectDetail kind="Secret" obj={secret} now={NOW} context="kind-dev" />);
-    await waitFor(() => expect(screen.getByText("hello")).toBeDefined());
-    fireEvent.click(screen.getByRole("button", { name: "Hide" }));
-    expect(screen.queryByText("hello")).toBeNull();
   });
 
   it("saves an edited ConfigMap value via updateConfigData", async () => {

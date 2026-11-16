@@ -192,8 +192,7 @@ function SecretDataSection({ state }: { state: SecretDataState }) {
  * bundle for every consumer, ui-next included).
  *
  * None of these facts come from the private key. The raw `tls.crt`/`tls.key`
- * bytes are shown beneath, in `SecretDataSection`, like any other key — same
- * as classic.
+ * bytes are shown beneath, in `SecretDataSection`, like any other key.
  */
 function TlsSection({ state }: { state: SecretDataState }) {
   const { data } = state;

@@ -2,14 +2,13 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, waitFor, fireEvent } from "@testing-library/react";
 import React from "react";
 
-const { getManifestMock, getSecretMock, applyManifestMock } = vi.hoisted(() => ({
+const { getManifestMock, applyManifestMock } = vi.hoisted(() => ({
   getManifestMock: vi.fn(),
-  getSecretMock: vi.fn(),
   applyManifestMock: vi.fn(),
 }));
 vi.mock("@srelens/core/lib/manifest", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@srelens/core/lib/manifest")>();
-  return { ...actual, getManifest: getManifestMock, getSecret: getSecretMock, applyManifest: applyManifestMock };
+  return { ...actual, getManifest: getManifestMock, applyManifest: applyManifestMock };
 });
 // CodeMirror needs real layout (unavailable in jsdom); stand in a controlled
 // textarea that mirrors the editor's value/onChange/aria-label contract.
@@ -73,10 +72,6 @@ data:
 beforeEach(() => {
   getManifestMock.mockReset();
   applyManifestMock.mockReset();
-  // The audited read a Secret's values come through. Refused unless a test
-  // says otherwise, which is what it was here before it was mocked at all.
-  getSecretMock.mockReset();
-  getSecretMock.mockResolvedValue({ error: "refused" });
 });
 
 describe("YamlView", () => {
@@ -110,23 +105,7 @@ describe("YamlView", () => {
     expect(secret.value).not.toContain(SECRET_VALUE);
   });
 
-  it("shows a Secret's data as the cluster has it, read through k8s.getSecret (#1085)", async () => {
-    getManifestMock.mockResolvedValue({
-      yaml: 'apiVersion: v1\nkind: Secret\nmetadata:\n  name: api\n  namespace: default\n  annotations:\n    note: ""\ndata:\n  password: ""\n',
-    });
-    getSecretMock.mockResolvedValue({ data: { password: SECRET_VALUE } });
-    render(<YamlView context="kind-dev" kind="Secret" namespace="default" name="api" />);
-    const editor = (await screen.findByLabelText("Manifest YAML")) as HTMLTextAreaElement;
-    expect(getSecretMock).toHaveBeenCalledWith("kind-dev", "default", "api");
-    expect(editor.value).toContain(`password: ${SECRET_VALUE}`);
-    // Still read-only: its annotations are blanked, and Apply would write that back.
-    expect(editor.readOnly).toBe(true);
-    expect(screen.queryByRole("button", { name: "Apply" })).toBeNull();
-    expect(editor.value).toContain("note: REDACTED");
-    expect(screen.getByRole("status").textContent).toMatch(/Annotation values redacted/);
-  });
-
-  it("redacts a Secret's values on arrival when k8s.getSecret refuses, and says so", async () => {
+  it("redacts a Secret's values on arrival, and says so", async () => {
     // `k8s.getManifest` is an ungated read. The host blanks a Secret's values
     // on it now (#661), but AGENTS.md asks the frontend to redact again on
     // arrival rather than trust that — this is the case where it has to.

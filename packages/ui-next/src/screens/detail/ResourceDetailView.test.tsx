@@ -1229,11 +1229,31 @@ describe("ResourceDetailView", () => {
       await waitFor(() => expect(container.querySelector(".cm-content")?.textContent).toContain("REDACTED"));
 
       // Shown less, and TOLD so — a silently shortened manifest reads as the
-      // real one. `Alert` tone "info" is a `status` region, not an `alert`,
-      // so it never collides with the pane's own error state.
+      // real one. And told WHY by this pane's own read: the Overview makes a
+      // separate one, which may have gone through.
+      // A warning over content that is still there, so a `status`, not an `alert`.
       const notice = getByRole("status").textContent ?? "";
-      expect(notice.toLowerCase()).toContain("redacted");
-      expect(notice).toContain("Overview");
+      expect(notice).toContain("values could not be read");
+      expect(notice).toContain("refused");
+    });
+
+    it("reads the values again on Retry, in this pane", async () => {
+      getObject.mockResolvedValue({ object: SECRET });
+      getManifest.mockResolvedValue({ yaml: 'kind: Secret\ndata:\n  token: ""\n' });
+      const { getByRole, queryByRole, container } = render(
+        <ResourceDetailView context="ctx" kind="Secret" namespace="default" name="s-1" />,
+      );
+      await waitFor(() => expect(getByRole("tab", { name: "YAML" })).toBeDefined());
+      await userEvent.click(getByRole("tab", { name: "YAML" }));
+      await waitFor(() => expect(container.querySelector(".cm-content")?.textContent).toContain("REDACTED"));
+
+      getSecret.mockResolvedValue({ data: { token: FIXTURE_B64 } });
+      await userEvent.click(getByRole("button", { name: "Retry" }));
+      await waitFor(() =>
+        expect(container.querySelector(".cm-content")?.textContent).toContain(`token: ${FIXTURE_B64}`),
+      );
+      // Nothing is missing any more, so the warning is gone with it.
+      expect(queryByRole("status")).toBeNull();
     });
 
     it("shows an error, and never the raw manifest, when a Secret's manifest cannot be redacted", async () => {

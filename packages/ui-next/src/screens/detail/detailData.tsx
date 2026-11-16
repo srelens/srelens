@@ -22,7 +22,7 @@ import {
   type Column,
   type TabItem,
 } from "@srelens/ui-kit";
-import { FailureState } from "../../lib/errorCopy";
+import { FailureAlert, FailureState } from "../../lib/errorCopy";
 import { descriptorFor } from "../../lib/kinds/descriptors";
 import { SLUG_BY_K8S_KIND, isCustomKind, resolveCrdGvk } from "../../lib/crdGvk";
 import { useObject } from "../../lib/useObject";
@@ -558,7 +558,7 @@ export function useDetailPaneState({
       const redacted = redactSecretManifest(result.yaml);
       return redacted.yaml === undefined
         ? { error: redacted.error }
-        : { data: { yaml: redacted.yaml, redacted: "values" } };
+        : { data: { yaml: redacted.yaml, redacted: "values", refusal: secret.error } };
     }
     const revealed = revealSecretManifest(result.yaml, secret.data);
     return revealed.yaml === undefined
@@ -595,6 +595,8 @@ interface ManifestShown {
   /** `values`: `k8s.getSecret` refused, so every value is blanked.
    *  `annotations`: the values are shown and only annotation values are not. */
   redacted?: "values" | "annotations";
+  /** Why `k8s.getSecret` refused, raw, when `redacted` is `values`. */
+  refusal?: string;
 }
 
 /**
@@ -654,10 +656,15 @@ function YamlPane({
           disagree. Tone "info" is a `status` region rather than an `alert`, so
           it never competes with this pane's own error state for a screen
           reader's attention. */}
+      {/* This pane's OWN read refused, so its own refusal and its own retry:
+          the Overview makes a separate read, which may have gone through, and
+          retrying there would not reload this manifest. */}
       {state.data.redacted === "values" && (
-        <Alert tone="info" title="Values redacted">
-          This Secret's values could not be read, so they are not shown here. The Overview pane says why.
-        </Alert>
+        <FailureAlert
+          title="This Secret's values could not be read, so they are redacted here"
+          error={state.data.refusal}
+          onRetry={state.reload}
+        />
       )}
       {state.data.redacted === "annotations" && (
         <Alert tone="info" title="Annotation values redacted">
