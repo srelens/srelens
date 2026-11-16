@@ -109,6 +109,9 @@ export interface TopologyGraph {
   edges: TopologyEdge[];
   /** Present only when the reader asked for the connection probe. */
   probe?: TopologyProbe | null;
+  /** Gateway API kinds that could not be listed in a namespace, and why: their
+   *  gateways and routes are missing, which is not the same as none (#1089). */
+  unread?: { namespace: string; kind: string; reason: string }[];
 }
 
 /**
@@ -141,7 +144,7 @@ export async function topologyGraph(
       connections ? "k8s.topologyProbe" : "k8s.topologyGraph",
       { context, namespaces, prometheus },
     );
-    return { graph: { nodes: out.nodes, edges: out.edges, probe: out.probe ?? null } };
+    return { graph: { nodes: out.nodes, edges: out.edges, probe: out.probe ?? null, unread: out.unread ?? [] } };
   } catch (e) {
     return { error: String(e) };
   }

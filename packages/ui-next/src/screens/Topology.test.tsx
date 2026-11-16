@@ -141,6 +141,18 @@ beforeEach(() => {
 });
 
 describe("Topology", () => {
+  it("says which Gateway API kinds it could not read, and reads again on Retry (#1089)", async () => {
+    core.topologyGraph.mockResolvedValue({
+      graph: { ...graph(), unread: [{ namespace: "checkout", kind: "HTTPRoute", reason: "httproutes is forbidden" }] },
+    });
+    render(<Topology />);
+    const alert = await screen.findByText(/Could not read HTTPRoute in checkout/);
+    expect(alert).toBeDefined();
+    const calls = core.topologyGraph.mock.calls.length;
+    await userEvent.click(screen.getByRole("button", { name: "Retry" }));
+    await waitFor(() => expect(core.topologyGraph.mock.calls.length).toBeGreaterThan(calls));
+  });
+
   it("draws every node the namespace returned", async () => {
     render(<Topology />);
     // Each node is a control, because selecting one is an action and the graph

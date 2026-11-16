@@ -239,6 +239,15 @@ function TopologyGraph({ context }: { context: ClusterContext }) {
                 {probeSummary(graph.data.probe)}
               </p>
             )}
+            {graph.data?.unread && graph.data.unread.length > 0 && (
+              // Missing gateways and routes, said as a failed read rather than
+              // left to look like a cluster that has none (#1089).
+              <FailureAlert
+                title={`Could not read ${graph.data.unread.map((u) => `${u.kind} in ${u.namespace}`).join(", ")}`}
+                error={graph.data.unread[0].reason}
+                onRetry={graph.reload}
+              />
+            )}
           </div>
           <div className="relative min-h-0 flex-1">
             {graph.status === "loading" && (

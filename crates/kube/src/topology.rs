@@ -315,12 +315,25 @@ pub struct Unlisted {
     pub reason: String,
 }
 
+/// An optional source the graph could not read in one namespace (#1089).
+#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
+pub struct UnreadSource {
+    pub namespace: String,
+    pub kind: String,
+    pub reason: String,
+}
+
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct TopologyGraphOut {
     pub nodes: Vec<TopologyNode>,
     pub edges: Vec<TopologyEdge>,
     /// Present only when the reader asked for the connection probe.
     pub probe: Option<ProbeReport>,
+    /// Gateway API kinds that could not be listed, and why. Their gateways and
+    /// routes are missing from the graph, which is not the same as there
+    /// being none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unread: Vec<UnreadSource>,
 }
 
 /// Ready and desired, reduced to a verdict.
@@ -1353,7 +1366,7 @@ pub fn build_graph(
 
     nodes.extend(externals.into_values());
 
-    let mut graph = TopologyGraphOut { nodes, edges, probe: None };
+    let mut graph = TopologyGraphOut { nodes, edges, probe: None, unread: Vec::new() };
     resolve_call_health(&mut graph);
     graph
 }
@@ -2240,23 +2253,23 @@ pub fn apply_gateway_api(
 /// [`apply_gateway_api`].
 ///
 /// `v1`, then `v1beta1` where the cluster does not serve `v1` — the same
-/// fields either way. Anything else that goes wrong reads as none: this is an
-/// optional source, like the metrics backend below, and a cluster without the
-/// CRDs, or a reader whose role does not reach them, must still get the graph
-/// it got before there was a Gateway API to draw.
+/// fields either way. Served at neither is a cluster without the CRDs: none.
+/// Anything else (refused, timed out) is `Err` with the reason, which the
+/// graph carries in [`TopologyGraphOut::unread`]: an optional source that must
+/// not take the graph down, but must not pass for an absent one either.
 async fn list_gateway_objects(
     client: kube::Client,
     namespace: &str,
     kind: &'static str,
     plural: &'static str,
-) -> Vec<serde_json::Value> {
+) -> Result<Vec<serde_json::Value>, String> {
     for version in ["v1", "v1beta1"] {
         let resource = crate::crds::custom_api_resource(GATEWAY_API_GROUP, version, kind, plural);
         let api: Api<kube::api::DynamicObject> =
             Api::namespaced_with(client.clone(), namespace, &resource);
         match tokio::time::timeout(request_timeout(), api.list(&ListParams::default())).await {
             Ok(Ok(list)) => {
-                return list
+                return Ok(list
                     .items
                     .iter()
                     .filter_map(|object| serde_json::to_value(object).ok())
@@ -2265,13 +2278,14 @@ async fn list_gateway_objects(
                         value["kind"] = kind.into();
                         value
                     })
-                    .collect();
+                    .collect());
             }
             Ok(Err(kube::Error::Api(status))) if status.code == 404 => continue,
-            _ => return Vec::new(),
+            Ok(Err(error)) => return Err(error.to_string()),
+            Err(_) => return Err("timed out".to_string()),
         }
     }
-    Vec::new()
+    Ok(Vec::new())
 }
 
 /// Everything the graph is built from, accumulated across the namespaces asked
@@ -2289,6 +2303,7 @@ struct Fetched {
     policies: Vec<NetworkPolicy>,
     gateways: Vec<serde_json::Value>,
     routes: Vec<serde_json::Value>,
+    unread: Vec<UnreadSource>,
 }
 
 /// `k8s.topologyGraph` — the route/service/workload/revision/dependency graph
@@ -2375,9 +2390,17 @@ pub async fn build_topology(
                         list_gateway_objects(client.clone(), ns, "HTTPRoute", "httproutes"),
                         list_gateway_objects(client.clone(), ns, "GRPCRoute", "grpcroutes"),
                     );
-                    all.gateways.extend(gateways);
-                    all.routes.extend(http_routes);
-                    all.routes.extend(grpc_routes);
+                    for (kind, listed) in [("Gateway", gateways), ("HTTPRoute", http_routes), ("GRPCRoute", grpc_routes)] {
+                        match listed {
+                            Ok(objects) if kind == "Gateway" => all.gateways.extend(objects),
+                            Ok(objects) => all.routes.extend(objects),
+                            Err(reason) => all.unread.push(UnreadSource {
+                                namespace: ns.clone(),
+                                kind: kind.to_string(),
+                                reason,
+                            }),
+                        }
+                    }
                 }
                 // Built once over everything, not once per namespace and merged:
                 // a `checkout` that calls `payments-api.payments.svc` only
@@ -2401,6 +2424,7 @@ pub async fn build_topology(
                 // Before the policies and the telemetry, which both read the
                 // finished set of nodes.
                 apply_gateway_api(&mut graph, &all.gateways, &all.routes);
+                graph.unread = all.unread;
                 // Measured traffic, when there is somewhere to read it from.
                 // A metrics backend that cannot be reached must NOT take the
                 // graph down with it: the structural half is still true and
@@ -4399,6 +4423,36 @@ mod tests {
         // The line from the gateway says what it leads to.
         let to_route = g.edges.iter().find(|e| e.to == "HTTPRoute/checkout/shop").unwrap();
         assert_eq!(to_route.health, Health::Failing);
+    }
+
+    /// A client answering every request with `status` and a `Status` body.
+    fn status_client(status: u16) -> kube::Client {
+        let service = tower::service_fn(move |_request: http::Request<kube::client::Body>| async move {
+            let body = serde_json::json!({"apiVersion": "v1", "kind": "Status", "status": "Failure", "code": status, "message": "gateways is forbidden"});
+            Ok::<_, std::convert::Infallible>(
+                http::Response::builder()
+                    .status(status)
+                    .header("content-type", "application/json")
+                    .body(kube::client::Body::from(body.to_string().into_bytes()))
+                    .unwrap(),
+            )
+        });
+        kube::Client::new(service, "default")
+    }
+
+    #[tokio::test]
+    async fn gateways_the_reader_may_not_list_are_a_failure_not_an_absence() {
+        // AGENTS.md: a failed read must not read as "there are none".
+        let reason = list_gateway_objects(status_client(403), "shop", "Gateway", "gateways")
+            .await
+            .unwrap_err();
+        assert!(reason.contains("forbidden"), "{reason}");
+    }
+
+    #[tokio::test]
+    async fn a_cluster_that_serves_no_gateway_api_has_none() {
+        let listed = list_gateway_objects(status_client(404), "shop", "Gateway", "gateways").await;
+        assert_eq!(listed.unwrap(), Vec::<serde_json::Value>::new());
     }
 
     #[test]

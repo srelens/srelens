@@ -669,6 +669,7 @@ mod tests {
             nodes,
             edges,
             probe: None,
+            unread: Vec::new(),
         }
     }
 
@@ -800,6 +801,7 @@ mod tests {
             nodes: vec![],
             edges: vec![],
             probe: None,
+            unread: Vec::new(),
         });
         terminal
             .draw(|f| {
@@ -890,6 +892,7 @@ mod tests {
             nodes: Vec::new(),
             edges: Vec::new(),
             probe: None,
+            unread: Vec::new(),
         };
         for i in 0..15 {
             many_nodes_graph.nodes.push(TopologyNode {
