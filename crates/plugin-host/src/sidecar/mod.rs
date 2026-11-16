@@ -28,6 +28,7 @@ mod metrics;
 pub mod protocol;
 pub mod sandbox;
 mod supervisor;
+mod tunnel;
 
 pub use crate::app_log::{AppLog, LogLevel, LogLine, LogSource, LOG_LINES, LOG_LINE_BYTES};
 pub use broker::{AppIdentity, CallContext, CapabilityBroker, Consent, ConsentRequest, NoConsent};
@@ -40,3 +41,4 @@ pub use sandbox::{
     Process, SandboxConfig, SidecarCommand,
 };
 pub use supervisor::{Action, SidecarConfig, SidecarStatus, Supervisor, UNEXPECTED_EXIT};
+pub use tunnel::{Tunnel, TunnelIo, TUNNEL_LANE};

@@ -16,8 +16,12 @@ use std::time::Duration;
 use tokio::sync::{mpsc, oneshot, OwnedSemaphorePermit, Semaphore};
 
 use super::protocol::{self, code, method, Incoming, RpcError, Violation};
+use super::tunnel::{self, OpenTunnel, Tunnel, TUNNEL_LANE};
 use super::Limits;
-use srelens_sidecar_protocol::{CancelParams, RequestId, StreamCancelParams, StreamOpenParams};
+use srelens_sidecar_protocol::{
+    CancelParams, HostConnectParams, HostConnectResult, RequestId, StreamCancelParams,
+    StreamOpenParams, MAX_TUNNELS,
+};
 
 /// Frames a stream may have waiting for its reader. A sidecar that gets this
 /// far ahead of the host has its stream stopped rather than buffered.
@@ -112,6 +116,20 @@ pub trait Broker: Send + Sync + 'static {
         method: &'a str,
         params: Value,
     ) -> Pin<Box<dyn Future<Output = Result<Value, RpcError>> + Send + 'a>>;
+
+    /// Open a connection to a pod for `host/connect` (#1091). Refused unless
+    /// the broker carries tunnels.
+    fn connect<'a>(
+        &'a self,
+        _ask: HostConnectParams,
+    ) -> Pin<Box<dyn Future<Output = Result<Tunnel, RpcError>> + Send + 'a>> {
+        Box::pin(async {
+            Err(RpcError::new(
+                code::METHOD_NOT_FOUND,
+                "srelens opens no pod connections for this sidecar",
+            ))
+        })
+    }
 }
 
 /// Refuses every call a sidecar makes: for a sidecar the host gives no
@@ -150,6 +168,7 @@ pub(crate) enum Outgoing {
 pub(crate) struct Outbox {
     host: mpsc::UnboundedReceiver<Outgoing>,
     answers: mpsc::Receiver<String>,
+    tunnels: mpsc::Receiver<String>,
 }
 
 /// How the reader stopped.
@@ -163,13 +182,20 @@ pub(crate) enum ReadEnd {
 
 type Answer = Result<Value, RequestError>;
 
+/// What the broker did for one of the sidecar's calls.
+enum Done {
+    Answer(Value),
+    /// `host/connect` opened tunnel `.0`, holding place `.2`.
+    Tunnel(u64, Tunnel, OwnedSemaphorePermit),
+}
+
 struct OpenStream {
     events: mpsc::Sender<StreamEvent>,
     _slot: OwnedSemaphorePermit,
 }
 
 #[derive(Default)]
-struct State {
+pub(super) struct State {
     api_version: Option<semver::Version>,
     /// The id the next request gets; every id below it has been sent.
     next_id: u64,
@@ -183,16 +209,23 @@ struct State {
     calls: HashMap<String, Option<oneshot::Sender<()>>>,
     /// Why the session ended, once it has.
     ended: Option<String>,
+    /// The highest tunnel id the sidecar has used; each is used once.
+    last_tunnel: u64,
+    pub(super) tunnels: HashMap<u64, OpenTunnel>,
 }
 
 struct Inner {
     limits: Limits,
     out: mpsc::UnboundedSender<Outgoing>,
     answers: mpsc::Sender<String>,
+    /// The tunnel lane: lowest of the three, and bounded.
+    tunnels: mpsc::Sender<String>,
     state: Mutex<State>,
     requests: Arc<Semaphore>,
     streams: Arc<Semaphore>,
     callbacks: Arc<Semaphore>,
+    /// Places for tunnels, open or being connected.
+    tunnel_slots: Arc<Semaphore>,
 }
 
 #[derive(Clone)]
@@ -208,11 +241,14 @@ impl Connection {
     pub(crate) fn new(limits: Limits) -> (Connection, Outbox) {
         let (out, host) = mpsc::unbounded_channel();
         let (answers, answered) = mpsc::channel(ANSWER_BUFFER);
+        let (tunnels, tunnelled) = mpsc::channel(TUNNEL_LANE);
         let inner = Inner {
             answers,
+            tunnels,
             requests: Arc::new(Semaphore::new(limits.max_concurrent_requests)),
             streams: Arc::new(Semaphore::new(limits.max_streams)),
             callbacks: Arc::new(Semaphore::new(limits.max_concurrent_requests)),
+            tunnel_slots: Arc::new(Semaphore::new(MAX_TUNNELS)),
             limits,
             out,
             state: Mutex::new(State {
@@ -228,11 +264,12 @@ impl Connection {
             Outbox {
                 host,
                 answers: answered,
+                tunnels: tunnelled,
             },
         )
     }
 
-    fn state(&self) -> std::sync::MutexGuard<'_, State> {
+    pub(super) fn state(&self) -> std::sync::MutexGuard<'_, State> {
         // Nothing panics while holding it; a poisoned lock still holds a
         // consistent table.
         self.inner.state.lock().unwrap_or_else(|p| p.into_inner())
@@ -463,6 +500,9 @@ impl Connection {
                     self.finish(stream, StreamEvent::Failed(message.to_owned()));
                     Ok(())
                 }
+                method::TUNNEL_DATA | method::TUNNEL_CREDIT | method::TUNNEL_CLOSE => {
+                    self.tunnel_frame(&method, params)
+                }
                 // Nothing else is sent to the host: a method from a newer SDK.
                 _ => Ok(()),
             },
@@ -538,13 +578,42 @@ impl Connection {
                 "is not reading its standard input: {ANSWER_BUFFER} answers to its calls are waiting for it"
             )));
         };
-        if (matches!(name.as_str(), method::HOST_BINDING_AVAILABILITY | method::HOST_RUN_JOB)
-            || (name == method::HOST_READ && params.get("cursor").is_some()))
-            && !self.state().api_version.as_ref().is_some_and(|version| version >= &semver::Version::new(0, 2, 0))
-        {
-            place.send(protocol::response(&id, &Err(RpcError::new(code::METHOD_NOT_FOUND, "This callback requires negotiated sidecar API 0.2.0"))));
-            return Ok(());
+        let needs = match name.as_str() {
+            method::HOST_CONNECT => Some(semver::Version::new(0, 3, 0)),
+            method::HOST_BINDING_AVAILABILITY | method::HOST_RUN_JOB => {
+                Some(semver::Version::new(0, 2, 0))
+            }
+            method::HOST_READ if params.get("cursor").is_some() => {
+                Some(semver::Version::new(0, 2, 0))
+            }
+            _ => None,
+        };
+        if let Some(needs) = needs {
+            if !self
+                .state()
+                .api_version
+                .as_ref()
+                .is_some_and(|version| version >= &needs)
+            {
+                let error = RpcError::new(
+                    code::METHOD_NOT_FOUND,
+                    format!("This callback requires negotiated sidecar API {needs}"),
+                );
+                place.send(protocol::response(&id, &Err(error)));
+                return Ok(());
+            }
         }
+        let connect = if name == method::HOST_CONNECT {
+            match self.admit_tunnel(&params) {
+                Ok(admitted) => Some(admitted),
+                Err(error) => {
+                    place.send(protocol::response(&id, &Err(error)));
+                    return Ok(());
+                }
+            }
+        } else {
+            None
+        };
         let Ok(permit) = self.inner.callbacks.clone().try_acquire_owned() else {
             let error = RpcError::new(
                 code::INTERNAL_ERROR,
@@ -566,16 +635,27 @@ impl Connection {
             state.calls.insert(key.clone(), Some(cancel));
         }
         let connection = self.clone();
+        let lane = self.inner.tunnels.clone();
         tokio::spawn(async move {
             let cancelled_error =
                 || RpcError::new(code::REQUEST_CANCELLED, format!("`{name}` was cancelled"));
+            let work = async {
+                match connect {
+                    Some((ask, slot)) => {
+                        let tunnel = ask.tunnel;
+                        let opened = broker.connect(ask).await;
+                        opened.map(|opened| Done::Tunnel(tunnel, opened, slot))
+                    }
+                    None => broker.call(&name, params).await.map(Done::Answer),
+                }
+            };
             let outcome = tokio::select! {
                 // A cancellation already accepted wins over an answer ready
                 // in the same moment: the sidecar was told it is cancelled.
                 biased;
                 // Cancelled by the sidecar, or the session ended.
                 _ = cancelled => Err(cancelled_error()),
-                outcome = broker.call(&name, params) => outcome,
+                outcome = work => outcome,
             };
             drop(permit);
             // Settled under the lock the reader takes a cancellation under,
@@ -585,10 +665,20 @@ impl Connection {
             // admitted only once this answer is queued ahead of its own.
             let mut state = connection.state();
             let accepted = matches!(state.calls.remove(&key), Some(None));
-            let outcome = if accepted {
-                Err(cancelled_error())
-            } else {
-                outcome
+            let outcome = match (accepted, outcome) {
+                // A connection that opened anyway is dropped here, so a
+                // cancelled connect leaves nothing.
+                (true, _) => Err(cancelled_error()),
+                (false, Ok(Done::Answer(answer))) => Ok(answer),
+                (false, Ok(Done::Tunnel(tunnel, opened, slot))) => {
+                    let result = HostConnectResult {
+                        pod: opened.pod.clone(),
+                    };
+                    let open = tunnel::open(&connection, lane, tunnel, opened, slot);
+                    state.tunnels.insert(tunnel, open);
+                    Ok(protocol::params(&result))
+                }
+                (false, Err(error)) => Err(error),
             };
             place.send(protocol::response(&id, &outcome));
             drop(state);
@@ -596,11 +686,46 @@ impl Connection {
         Ok(())
     }
 
+    /// Admit `host/connect`'s tunnel: its id is used up whatever happens
+    /// next, and it takes a tunnel place before the broker is asked.
+    fn admit_tunnel(
+        &self,
+        params: &Value,
+    ) -> Result<(HostConnectParams, OwnedSemaphorePermit), RpcError> {
+        let ask = serde_json::from_value::<HostConnectParams>(params.clone())
+            .map_err(|e| RpcError::new(code::INVALID_PARAMS, format!("`host/connect`: {e}")))?;
+        {
+            let mut state = self.state();
+            if ask.tunnel <= state.last_tunnel {
+                return Err(RpcError::new(
+                    code::INVALID_PARAMS,
+                    format!(
+                        "Tunnel {} is not greater than {}, the last tunnel this extension used",
+                        ask.tunnel, state.last_tunnel
+                    ),
+                ));
+            }
+            state.last_tunnel = ask.tunnel;
+        }
+        let slot = self
+            .inner
+            .tunnel_slots
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| {
+                RpcError::new(
+                    code::INTERNAL_ERROR,
+                    format!("The extension already has {MAX_TUNNELS} open tunnels, the most one extension may have; close one first"),
+                )
+            })?;
+        Ok((ask, slot))
+    }
+
     /// End the session: every request still waiting gets `why`, every open
-    /// stream fails with it, every call of the sidecar's is cancelled, and
-    /// nothing new is admitted.
+    /// stream fails with it, every call of the sidecar's is cancelled, every
+    /// tunnel's connection to its pod is dropped, and nothing new is admitted.
     pub(crate) fn end(&self, why: &str) {
-        let (pending, open, calls) = {
+        let (pending, open, calls, tunnels) = {
             let mut state = self.state();
             if state.ended.is_none() {
                 state.ended = Some(why.to_owned());
@@ -617,8 +742,11 @@ impl Connection {
                     .values_mut()
                     .filter_map(Option::take)
                     .collect::<Vec<_>>(),
+                std::mem::take(&mut state.tunnels),
             )
         };
+        // Each pump is stopped, wherever it waits, as its entry drops.
+        drop(tunnels);
         // No one will read the answers to the sidecar's calls: stop them. A
         // broker call that has begun a write finishes it on its own task.
         for cancel in calls {
@@ -677,13 +805,15 @@ impl Connection {
 }
 
 /// Write the outbox to the sidecar's stdin until the session closes it: the
-/// host's own messages first, then answers to the sidecar's calls.
+/// host's own messages first, then answers to the sidecar's calls, then
+/// tunnel frames.
 pub(crate) async fn write<W>(mut outbox: Outbox, mut stdin: W)
 where
     W: tokio::io::AsyncWrite + Unpin,
 {
     use tokio::io::AsyncWriteExt;
     let mut answers_open = true;
+    let mut tunnels_open = true;
     loop {
         let mut line = tokio::select! {
             biased;
@@ -695,6 +825,13 @@ where
                 Some(line) => line,
                 None => {
                     answers_open = false;
+                    continue;
+                }
+            },
+            frame = outbox.tunnels.recv(), if tunnels_open => match frame {
+                Some(line) => line,
+                None => {
+                    tunnels_open = false;
                     continue;
                 }
             },
@@ -1233,9 +1370,22 @@ mod tests {
             (method::HOST_RUN_JOB, json!({})),
             (method::HOST_READ, json!({"cursor":""})),
         ] {
-            connection.handle(Incoming::Request { id: json!(name), method: name.into(), params }, &broker()).unwrap();
+            connection
+                .handle(
+                    Incoming::Request {
+                        id: json!(name),
+                        method: name.into(),
+                        params,
+                    },
+                    &broker(),
+                )
+                .unwrap();
             let answer: Value = serde_json::from_str(&lines.answers.recv().await.unwrap()).unwrap();
-            assert_eq!(answer["error"]["code"], code::METHOD_NOT_FOUND, "{name}: {answer}");
+            assert_eq!(
+                answer["error"]["code"],
+                code::METHOD_NOT_FOUND,
+                "{name}: {answer}"
+            );
             assert!(answer["error"]["message"].as_str().unwrap().contains("0.2"));
         }
     }
@@ -1559,5 +1709,619 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(read, "{\"a\":1}\n{\"b\":2}\n");
+    }
+
+    // Pod tunnels (#1091).
+
+    use base64::engine::general_purpose::STANDARD as BASE64;
+    use base64::Engine as _;
+    use srelens_sidecar_protocol::{
+        HostConnectParams, MAX_TUNNELS, MAX_TUNNEL_CHUNK_BYTES, TUNNEL_WINDOW_BYTES,
+    };
+    use tokio::io::{AsyncReadExt, AsyncWriteExt, DuplexStream};
+
+    const WINDOW: usize = TUNNEL_WINDOW_BYTES as usize;
+
+    /// The pod's end of a tunnel, and the way to end the tunnel as the
+    /// registry would when the pod leaves the scope.
+    struct Upstream {
+        pod: DuplexStream,
+        end: oneshot::Sender<String>,
+    }
+
+    /// Connects each tunnel to an in-memory pipe of `size` bytes, handing the
+    /// test the pod's end. Refuses the pod named `gone`.
+    struct Pods {
+        upstreams: mpsc::UnboundedSender<Upstream>,
+        size: usize,
+    }
+
+    fn pipe(size: usize, pod: String, upstreams: &mpsc::UnboundedSender<Upstream>) -> Tunnel {
+        let (host, far) = tokio::io::duplex(size);
+        let (end, ended) = oneshot::channel::<String>();
+        let _ = upstreams.send(Upstream { pod: far, end });
+        Tunnel {
+            io: Box::new(host),
+            pod,
+            ended: Box::pin(async move {
+                match ended.await {
+                    Ok(why) => why,
+                    Err(_) => std::future::pending().await,
+                }
+            }),
+        }
+    }
+
+    impl Broker for Pods {
+        fn call<'a>(
+            &'a self,
+            method: &'a str,
+            params: Value,
+        ) -> Pin<Box<dyn Future<Output = Result<Value, RpcError>> + Send + 'a>> {
+            NoBroker.call(method, params)
+        }
+
+        fn connect<'a>(
+            &'a self,
+            ask: HostConnectParams,
+        ) -> Pin<Box<dyn Future<Output = Result<Tunnel, RpcError>> + Send + 'a>> {
+            Box::pin(async move {
+                let pod = ask.pod.expect("tests name a pod");
+                if pod == "hang" {
+                    std::future::pending::<()>().await;
+                }
+                if pod == "gone" {
+                    return Err(RpcError::new(
+                        code::CAPABILITY_FAILED,
+                        "Pod team/gone is not running",
+                    ));
+                }
+                Ok(pipe(self.size, pod, &self.upstreams))
+            })
+        }
+    }
+
+    fn pods(size: usize) -> (Arc<dyn Broker>, mpsc::UnboundedReceiver<Upstream>) {
+        let (upstreams, opened) = mpsc::unbounded_channel();
+        (Arc::new(Pods { upstreams, size }), opened)
+    }
+
+    fn tunnel_session() -> (Connection, Outbox) {
+        let (connection, lines) = Connection::new(limits());
+        connection.set_api_version(semver::Version::new(0, 3, 0));
+        (connection, lines)
+    }
+
+    fn ask_connect(connection: &Connection, broker: &Arc<dyn Broker>, tunnel: u64, pod: &str) {
+        connection
+            .handle(
+                Incoming::Request {
+                    id: json!(format!("c{tunnel}")),
+                    method: method::HOST_CONNECT.into(),
+                    params: json!({"context": {"clusterId": "prod", "namespace": "team"},
+                        "capability": "kafka", "pod": pod, "tunnel": tunnel}),
+                },
+                broker,
+            )
+            .expect("a connect is not a violation");
+    }
+
+    /// The answer to `host/connect` for `tunnel`.
+    async fn connect(
+        connection: &Connection,
+        lines: &mut Outbox,
+        broker: &Arc<dyn Broker>,
+        tunnel: u64,
+        pod: &str,
+    ) -> Value {
+        ask_connect(connection, broker, tunnel, pod);
+        let reply = answered(lines).await;
+        assert_eq!(reply["id"], format!("c{tunnel}"));
+        reply
+    }
+
+    /// Open tunnel `tunnel` to kafka-0, returning the pod's end.
+    async fn opened_tunnel(
+        connection: &Connection,
+        lines: &mut Outbox,
+        broker: &Arc<dyn Broker>,
+        upstreams: &mut mpsc::UnboundedReceiver<Upstream>,
+        tunnel: u64,
+    ) -> Upstream {
+        let reply = connect(connection, lines, broker, tunnel, "kafka-0").await;
+        assert_eq!(reply["result"], json!({"pod": "kafka-0"}), "{reply}");
+        upstreams.try_recv().expect("the broker connected")
+    }
+
+    /// The next tunnel frame the host queued, failing at a virtual deadline
+    /// like `sent`.
+    async fn tunnel_frame(lines: &mut Outbox) -> Value {
+        let next = tokio::time::timeout(Duration::from_secs(24 * 3600), lines.tunnels.recv());
+        let line = next.await.expect("no tunnel frame came").expect("a frame");
+        serde_json::from_str(&line).expect("JSON")
+    }
+
+    /// No tunnel frame comes while everything else runs as far as it can.
+    async fn no_tunnel_frame(lines: &mut Outbox) {
+        let quiet = tokio::time::timeout(Duration::from_secs(1), lines.tunnels.recv()).await;
+        assert!(quiet.is_err(), "a tunnel frame was queued: {quiet:?}");
+    }
+
+    fn decoded(frame: &Value) -> Vec<u8> {
+        assert_eq!(frame["method"], "tunnel/data", "{frame}");
+        BASE64
+            .decode(frame["params"]["data"].as_str().expect("data"))
+            .expect("base64")
+    }
+
+    fn data(tunnel: u64, bytes: &[u8]) -> Value {
+        json!({"tunnel": tunnel, "data": BASE64.encode(bytes)})
+    }
+
+    /// The pod's end reads to EOF: srelens dropped its end of the connection.
+    async fn reads_eof(pod: &mut DuplexStream) {
+        let mut rest = Vec::new();
+        tokio::time::timeout(Duration::from_secs(24 * 3600), pod.read_to_end(&mut rest))
+            .await
+            .expect("the connection to the pod was never dropped")
+            .expect("in-memory reads succeed");
+    }
+
+    fn open_tunnels(connection: &Connection) -> usize {
+        connection.state().tunnels.len()
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn connect_needs_api_0_3() {
+        let (connection, mut lines) = Connection::new(limits());
+        connection.set_api_version(semver::Version::new(0, 2, 0));
+        let (broker, mut upstreams) = pods(1024);
+        let reply = connect(&connection, &mut lines, &broker, 1, "kafka-0").await;
+        assert_eq!(reply["error"]["code"], code::METHOD_NOT_FOUND, "{reply}");
+        assert_eq!(
+            reply["error"]["message"],
+            "This callback requires negotiated sidecar API 0.3.0"
+        );
+        assert!(upstreams.try_recv().is_err(), "the broker was asked");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn connect_answers_the_pod() {
+        let (connection, mut lines) = tunnel_session();
+        let (broker, mut upstreams) = pods(1024);
+        let _upstream = opened_tunnel(&connection, &mut lines, &broker, &mut upstreams, 1).await;
+        assert_eq!(open_tunnels(&connection), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_tunnel_id_must_grow() {
+        let (connection, mut lines) = tunnel_session();
+        let (broker, mut upstreams) = pods(1024);
+        let _five = opened_tunnel(&connection, &mut lines, &broker, &mut upstreams, 5).await;
+        for again in [5, 4] {
+            let reply = connect(&connection, &mut lines, &broker, again, "kafka-0").await;
+            assert_eq!(reply["error"]["code"], code::INVALID_PARAMS, "{reply}");
+        }
+        let refused = connect(&connection, &mut lines, &broker, 6, "gone").await;
+        assert_eq!(
+            refused["error"]["code"],
+            code::CAPABILITY_FAILED,
+            "{refused}"
+        );
+        let reused = connect(&connection, &mut lines, &broker, 6, "kafka-0").await;
+        assert_eq!(reused["error"]["code"], code::INVALID_PARAMS, "{reused}");
+        let _seven = opened_tunnel(&connection, &mut lines, &broker, &mut upstreams, 7).await;
+        assert_eq!(open_tunnels(&connection), 2);
+    }
+
+    /// A broker whose connection opens in the same moment the reader accepts
+    /// the sidecar's cancellation of the connect.
+    struct CancelledAsItConnects {
+        connection: Connection,
+        upstreams: mpsc::UnboundedSender<Upstream>,
+    }
+
+    impl Broker for CancelledAsItConnects {
+        fn call<'a>(
+            &'a self,
+            method: &'a str,
+            params: Value,
+        ) -> Pin<Box<dyn Future<Output = Result<Value, RpcError>> + Send + 'a>> {
+            NoBroker.call(method, params)
+        }
+
+        fn connect<'a>(
+            &'a self,
+            ask: HostConnectParams,
+        ) -> Pin<Box<dyn Future<Output = Result<Tunnel, RpcError>> + Send + 'a>> {
+            Box::pin(async move {
+                cancel_call(
+                    &self.connection,
+                    &broker(),
+                    json!(format!("c{}", ask.tunnel)),
+                );
+                Ok(pipe(1024, "kafka-0".into(), &self.upstreams))
+            })
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_cancelled_connect_leaves_no_tunnel() {
+        let (connection, mut lines) = tunnel_session();
+        let (upstreams, mut opened) = mpsc::unbounded_channel();
+        let broker: Arc<dyn Broker> = Arc::new(CancelledAsItConnects {
+            connection: connection.clone(),
+            upstreams,
+        });
+        let reply = connect(&connection, &mut lines, &broker, 1, "kafka-0").await;
+        assert_eq!(reply["error"]["code"], code::REQUEST_CANCELLED, "{reply}");
+        assert_eq!(open_tunnels(&connection), 0);
+        let mut upstream = opened.try_recv().expect("the broker connected");
+        reads_eof(&mut upstream.pod).await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_seventeenth_tunnel_is_refused() {
+        let (connection, mut lines) = tunnel_session();
+        let (broker, mut upstreams) = pods(1024);
+        let mut open = Vec::new();
+        for tunnel in 1..=MAX_TUNNELS as u64 {
+            open.push(
+                opened_tunnel(&connection, &mut lines, &broker, &mut upstreams, tunnel).await,
+            );
+        }
+        let reply = connect(&connection, &mut lines, &broker, 17, "kafka-0").await;
+        assert_eq!(reply["error"]["code"], code::INTERNAL_ERROR, "{reply}");
+        assert!(upstreams.try_recv().is_err(), "the broker was asked");
+        assert_eq!(open_tunnels(&connection), MAX_TUNNELS);
+        // Each of the 16 still carries bytes.
+        for (n, upstream) in open.iter_mut().enumerate() {
+            upstream.pod.write_all(b"x").await.unwrap();
+            let frame = tunnel_frame(&mut lines).await;
+            assert_eq!(decoded(&frame), b"x", "tunnel {}", n + 1);
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn connects_in_flight_count_against_the_tunnel_limit() {
+        let (connection, mut lines) = tunnel_session();
+        let (broker, mut upstreams) = pods(1024);
+        let mut open = Vec::new();
+        for tunnel in 1..=9 {
+            open.push(
+                opened_tunnel(&connection, &mut lines, &broker, &mut upstreams, tunnel).await,
+            );
+        }
+        // Seven more whose pods never answer: within the eight call places.
+        for tunnel in 10..=16 {
+            ask_connect(&connection, &broker, tunnel, "hang");
+        }
+        tokio::task::yield_now().await;
+        let reply = connect(&connection, &mut lines, &broker, 17, "kafka-0").await;
+        assert_eq!(reply["error"]["code"], code::INTERNAL_ERROR, "{reply}");
+        let message = reply["error"]["message"].as_str().unwrap();
+        assert!(message.contains("16 open tunnels"), "{message}");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_tunnel_frame_with_no_tunnel_id_breaks_the_protocol() {
+        let (connection, _lines) = tunnel_session();
+        for params in [json!({}), json!({"tunnel": 0}), json!({"tunnel": "1"})] {
+            let Err(Violation(why)) = frame(&connection, "tunnel/close", params.clone()) else {
+                panic!("{params} was accepted");
+            };
+            assert!(why.contains("tunnel id"), "{why}");
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn pod_bytes_arrive_in_chunks() {
+        let (connection, mut lines) = tunnel_session();
+        let (broker, mut upstreams) = pods(256 * 1024);
+        let mut upstream = opened_tunnel(&connection, &mut lines, &broker, &mut upstreams, 1).await;
+        let sent: Vec<u8> = (0..100 * 1024).map(|n| (n % 251) as u8).collect();
+        upstream.pod.write_all(&sent).await.unwrap();
+        let mut got = Vec::new();
+        while got.len() < sent.len() {
+            let frame = tunnel_frame(&mut lines).await;
+            assert_eq!(frame["params"]["tunnel"], 1);
+            let chunk = decoded(&frame);
+            assert!(
+                chunk.len() <= MAX_TUNNEL_CHUNK_BYTES,
+                "{} bytes",
+                chunk.len()
+            );
+            assert!(!chunk.is_empty());
+            got.extend(chunk);
+        }
+        assert_eq!(got, sent);
+    }
+
+    /// The pod's bytes framed until no more come.
+    async fn framed(lines: &mut Outbox) -> usize {
+        let mut bytes = 0;
+        while let Ok(Some(line)) =
+            tokio::time::timeout(Duration::from_secs(1), lines.tunnels.recv()).await
+        {
+            bytes += decoded(&serde_json::from_str(&line).unwrap()).len();
+        }
+        bytes
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_host_stops_at_the_window() {
+        let (connection, mut lines) = tunnel_session();
+        let (broker, mut upstreams) = pods(1024 * 1024);
+        let mut upstream = opened_tunnel(&connection, &mut lines, &broker, &mut upstreams, 1).await;
+        upstream
+            .pod
+            .write_all(&vec![7; WINDOW + 2 * 65536])
+            .await
+            .unwrap();
+        assert_eq!(framed(&mut lines).await, WINDOW);
+        frame(
+            &connection,
+            "tunnel/credit",
+            json!({"tunnel": 1, "bytes": 65536}),
+        )
+        .unwrap();
+        assert_eq!(framed(&mut lines).await, 65536);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn sidecar_bytes_reach_the_pod_and_earn_credit() {
+        let (connection, mut lines) = tunnel_session();
+        let (broker, mut upstreams) = pods(1024);
+        let mut upstream = opened_tunnel(&connection, &mut lines, &broker, &mut upstreams, 1).await;
+        frame(&connection, "tunnel/data", data(1, b"hello")).unwrap();
+        let mut read = [0; 5];
+        upstream.pod.read_exact(&mut read).await.unwrap();
+        assert_eq!(&read, b"hello");
+        let credit = tunnel_frame(&mut lines).await;
+        assert_eq!(credit["method"], "tunnel/credit");
+        assert_eq!(credit["params"], json!({"tunnel": 1, "bytes": 5}));
+    }
+
+    /// Tunnel `tunnel` was closed by srelens, saying why: the frame and the
+    /// dropped connection to the pod. The session goes on.
+    async fn closed_saying(
+        connection: &Connection,
+        lines: &mut Outbox,
+        upstream: &mut Upstream,
+        tunnel: u64,
+        says: &str,
+    ) {
+        let close = tunnel_frame(lines).await;
+        assert_eq!(close["method"], "tunnel/close", "{close}");
+        assert_eq!(close["params"]["tunnel"], tunnel);
+        let message = close["params"]["message"].as_str().expect("a message");
+        assert!(message.contains(says), "{message}");
+        reads_eof(&mut upstream.pod).await;
+        assert!(!connection.is_ended());
+        assert!(!connection.state().tunnels.contains_key(&tunnel));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn sending_past_the_window_closes_the_tunnel() {
+        let (connection, mut lines) = tunnel_session();
+        // The pod reads nothing, so nothing is credited back.
+        let (broker, mut upstreams) = pods(1024);
+        let mut upstream = opened_tunnel(&connection, &mut lines, &broker, &mut upstreams, 1).await;
+        let chunk = vec![1; MAX_TUNNEL_CHUNK_BYTES];
+        for _ in 0..WINDOW / MAX_TUNNEL_CHUNK_BYTES {
+            assert_eq!(frame(&connection, "tunnel/data", data(1, &chunk)), Ok(()));
+        }
+        assert_eq!(open_tunnels(&connection), 1, "the window itself is allowed");
+        assert_eq!(frame(&connection, "tunnel/data", data(1, b"!")), Ok(()));
+        closed_saying(&connection, &mut lines, &mut upstream, 1, "window").await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_oversized_or_undecodable_chunk_closes_the_tunnel() {
+        let (connection, mut lines) = tunnel_session();
+        let (broker, mut upstreams) = pods(1024 * 1024);
+        let mut big = opened_tunnel(&connection, &mut lines, &broker, &mut upstreams, 1).await;
+        let oversized = data(1, &vec![0; MAX_TUNNEL_CHUNK_BYTES + 1]);
+        assert_eq!(frame(&connection, "tunnel/data", oversized), Ok(()));
+        closed_saying(&connection, &mut lines, &mut big, 1, "65536").await;
+
+        for (tunnel, params) in [
+            // Base64-shaped, but its last symbol has bits set past the bytes.
+            (2, json!({"tunnel": 2, "data": "aGl="})),
+            (3, json!({"tunnel": 3, "data": "not base64"})),
+            (4, json!({"tunnel": 4})),
+        ] {
+            let mut upstream =
+                opened_tunnel(&connection, &mut lines, &broker, &mut upstreams, tunnel).await;
+            assert_eq!(frame(&connection, "tunnel/data", params), Ok(()));
+            closed_saying(&connection, &mut lines, &mut upstream, tunnel, "base64").await;
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn credit_past_the_window_closes_the_tunnel() {
+        let (connection, mut lines) = tunnel_session();
+        let (broker, mut upstreams) = pods(1024 * 1024);
+        // The host has sent nothing yet, so its whole window is still open.
+        let mut first = opened_tunnel(&connection, &mut lines, &broker, &mut upstreams, 1).await;
+        assert_eq!(
+            frame(
+                &connection,
+                "tunnel/credit",
+                json!({"tunnel": 1, "bytes": 1})
+            ),
+            Ok(())
+        );
+        closed_saying(&connection, &mut lines, &mut first, 1, "credit").await;
+
+        // Credit for what was sent is fine; one byte more is not.
+        let mut second = opened_tunnel(&connection, &mut lines, &broker, &mut upstreams, 2).await;
+        second.pod.write_all(b"abc").await.unwrap();
+        assert_eq!(decoded(&tunnel_frame(&mut lines).await), b"abc");
+        assert_eq!(
+            frame(
+                &connection,
+                "tunnel/credit",
+                json!({"tunnel": 2, "bytes": 3})
+            ),
+            Ok(())
+        );
+        assert_eq!(open_tunnels(&connection), 1);
+        assert_eq!(
+            frame(
+                &connection,
+                "tunnel/credit",
+                json!({"tunnel": 2, "bytes": 1})
+            ),
+            Ok(())
+        );
+        closed_saying(&connection, &mut lines, &mut second, 2, "credit").await;
+
+        // More than a window in one frame.
+        let mut third = opened_tunnel(&connection, &mut lines, &broker, &mut upstreams, 3).await;
+        let over = json!({"tunnel": 3, "bytes": WINDOW + 1});
+        assert_eq!(frame(&connection, "tunnel/credit", over), Ok(()));
+        closed_saying(&connection, &mut lines, &mut third, 3, "credit").await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn either_side_closes() {
+        let (connection, mut lines) = tunnel_session();
+        let (broker, mut upstreams) = pods(1024);
+        let mut first = opened_tunnel(&connection, &mut lines, &broker, &mut upstreams, 1).await;
+        assert_eq!(
+            frame(&connection, "tunnel/close", json!({"tunnel": 1})),
+            Ok(())
+        );
+        reads_eof(&mut first.pod).await;
+        assert_eq!(open_tunnels(&connection), 0);
+        no_tunnel_frame(&mut lines).await;
+
+        let second = opened_tunnel(&connection, &mut lines, &broker, &mut upstreams, 2).await;
+        drop(second.pod);
+        let close = tunnel_frame(&mut lines).await;
+        assert_eq!(close["method"], "tunnel/close");
+        assert_eq!(
+            close["params"],
+            json!({"tunnel": 2}),
+            "an EOF is not a failure"
+        );
+        assert_eq!(open_tunnels(&connection), 0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn ended_closes_with_its_reason() {
+        let (connection, mut lines) = tunnel_session();
+        let (broker, mut upstreams) = pods(1024);
+        let mut upstream = opened_tunnel(&connection, &mut lines, &broker, &mut upstreams, 1).await;
+        let end = std::mem::replace(&mut upstream.end, oneshot::channel().0);
+        end.send("Pod team/kafka-0 left the scope".into()).unwrap();
+        let close = tunnel_frame(&mut lines).await;
+        assert_eq!(
+            close["params"],
+            json!({"tunnel": 1, "message": "Pod team/kafka-0 left the scope"})
+        );
+        reads_eof(&mut upstream.pod).await;
+        assert_eq!(open_tunnels(&connection), 0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn frames_for_no_tunnel_are_dropped() {
+        let (connection, mut lines) = tunnel_session();
+        for (method, params) in [
+            ("tunnel/data", data(9, b"late")),
+            ("tunnel/credit", json!({"tunnel": 9, "bytes": 5})),
+            ("tunnel/close", json!({"tunnel": 9})),
+        ] {
+            assert_eq!(frame(&connection, method, params), Ok(()), "{method}");
+        }
+        no_tunnel_frame(&mut lines).await;
+        assert!(lines.host.try_recv().is_err(), "the host wrote something");
+        assert!(!connection.is_ended());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn health_is_written_before_tunnel_frames() {
+        let (connection, lines) = tunnel_session();
+        for n in 0..TUNNEL_LANE {
+            connection
+                .inner
+                .tunnels
+                .try_send(format!("{{\"frame\":{n}}}"))
+                .expect("the lane has room");
+        }
+        assert!(
+            connection.inner.tunnels.try_send("{}".into()).is_err(),
+            "the lane holds {TUNNEL_LANE} frames"
+        );
+        let health = tokio::spawn({
+            let connection = connection.clone();
+            async move {
+                connection
+                    .call("health", &json!({}), Duration::from_secs(10))
+                    .await
+            }
+        });
+        tokio::task::yield_now().await;
+        let (stdin, sidecar) = tokio::io::duplex(64 * 1024);
+        tokio::spawn(write(lines, stdin));
+        let mut first = String::new();
+        tokio::io::AsyncBufReadExt::read_line(&mut tokio::io::BufReader::new(sidecar), &mut first)
+            .await
+            .unwrap();
+        let first: Value = serde_json::from_str(&first).unwrap();
+        assert_eq!(first["method"], "health", "{first}");
+        health.abort();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_reader_that_stops_holds_no_more_than_the_lane() {
+        let (connection, mut lines) = tunnel_session();
+        // A small pipe, so each read of the pod is a small frame.
+        let (broker, mut upstreams) = pods(1024);
+        let upstream = opened_tunnel(&connection, &mut lines, &broker, &mut upstreams, 1).await;
+        let written = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let pod = tokio::spawn({
+            let written = written.clone();
+            let mut pod = upstream.pod;
+            async move {
+                loop {
+                    pod.write_all(&[3; 1024]).await.unwrap();
+                    written.fetch_add(1024, std::sync::atomic::Ordering::SeqCst);
+                }
+            }
+        });
+        // Nothing drains the lane: the writer is stalled.
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        assert_eq!(lines.tunnels.len(), TUNNEL_LANE);
+        let written = written.load(std::sync::atomic::Ordering::SeqCst);
+        assert!(
+            written <= WINDOW,
+            "the pump read {written} bytes from the pod"
+        );
+        pod.abort();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn ending_the_session_drops_every_upstream() {
+        let (connection, mut lines) = tunnel_session();
+        let (broker, mut upstreams) = pods(1024);
+        let mut open = Vec::new();
+        for tunnel in 1..=3 {
+            open.push(
+                opened_tunnel(&connection, &mut lines, &broker, &mut upstreams, tunnel).await,
+            );
+        }
+        // Tunnel 1's pump is parked on a full lane.
+        for _ in 0..TUNNEL_LANE {
+            connection.inner.tunnels.try_send("{}".into()).unwrap();
+        }
+        open[0].pod.write_all(b"parked").await.unwrap();
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        connection.end("The extension was stopped");
+        for upstream in &mut open {
+            reads_eof(&mut upstream.pod).await;
+        }
+        assert_eq!(open_tunnels(&connection), 0);
     }
 }
