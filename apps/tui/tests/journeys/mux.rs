@@ -1438,3 +1438,254 @@ async fn journey_mux_a_chat_drag_ends_when_its_pane_loses_focus() {
         "back on the left, the chat is not still selecting"
     );
 }
+
+fn helm_release(name: &str, revision: i64) -> srelens_kube::helm::HelmReleaseSummary {
+    srelens_kube::helm::HelmReleaseSummary {
+        name: name.into(),
+        namespace: "default".into(),
+        revision,
+        status: "deployed".into(),
+        chart: name.into(),
+        chart_version: "1.0.0".into(),
+        app_version: "1.0".into(),
+        updated: "2026-11-16".into(),
+    }
+}
+
+/// A Helm list that comes back for the parked pane's cluster is that pane's.
+/// It starts no fetch for the focused pane, which is on Helm too and already
+/// has its list (#1097).
+#[tokio::test]
+async fn journey_mux_late_helm_releases_reach_the_parked_pane() {
+    let _settings = common::env::isolate_settings();
+    let (mut app, _rx) = common::app_with("cluster-left", "default").await;
+    park_a_loading_view_on_the_left(&mut app, "helm").await;
+    press(&mut app, ch(':')).await;
+    type_str(&mut app, "helm").await;
+    press(&mut app, key(KeyCode::Enter)).await;
+    app.handle_helm_releases_result("cluster-right", "default", Ok(vec![helm_release("api", 3)]));
+    assert!(!app.helm_refreshing);
+
+    app.handle_helm_releases_result("cluster-left", "default", Ok(vec![helm_release("web", 2)]));
+
+    let ActiveView::Helm(left) = parked_view(&app) else {
+        panic!("the left pane should still show Helm");
+    };
+    assert_eq!(
+        left.releases
+            .iter()
+            .map(|r| (r.name.as_str(), r.revision))
+            .collect::<Vec<_>>(),
+        [("web", 2)],
+        "the left list must take its own cluster's answer"
+    );
+    let ActiveView::Helm(right) = &app.active_view else {
+        panic!("the right pane should still show Helm");
+    };
+    assert_eq!(right.releases.len(), 1);
+    assert_eq!(right.releases[0].name, "api");
+    assert!(
+        !app.helm_refreshing,
+        "the left pane's answer must not start a fetch for the right pane"
+    );
+}
+
+/// Waits for the next Helm list answer for `context`, up to `secs`.
+async fn next_helm_answer(
+    rx: &mut tokio::sync::mpsc::UnboundedReceiver<srectl::event::AppEvent>,
+    context: &str,
+    secs: u64,
+) -> Option<(
+    String,
+    Result<Vec<srelens_kube::helm::HelmReleaseSummary>, String>,
+)> {
+    tokio::time::timeout(std::time::Duration::from_secs(secs), async {
+        loop {
+            if let Some(srectl::event::AppEvent::HelmReleasesResult {
+                context: from,
+                namespace,
+                result,
+            }) = rx.recv().await
+            {
+                if from == context {
+                    break (namespace, result);
+                }
+            }
+        }
+    })
+    .await
+    .ok()
+}
+
+/// One Helm fetch at a time is per pane. The left pane's list is still out
+/// when Ctrl+b moves to the right, and the right pane's `:helm` asks at once
+/// all the same (#1097).
+#[tokio::test]
+async fn journey_mux_a_helm_fetch_moves_with_its_pane() {
+    let _settings = common::env::isolate_settings();
+    let (mut app, mut rx) = common::app_with("cluster-left", "default").await;
+    park_a_loading_view_on_the_left(&mut app, "helm").await;
+
+    press(&mut app, ch(':')).await;
+    type_str(&mut app, "helm").await;
+    press(&mut app, key(KeyCode::Enter)).await;
+
+    assert!(
+        next_helm_answer(&mut rx, "cluster-right", 10)
+            .await
+            .is_some(),
+        "the right pane must ask its own cluster at once"
+    );
+}
+
+/// The right pane is refreshing its Helm list when the parked left pane's
+/// answer lands. That answer frees only the left pane's guard: the right
+/// pane is still refreshing, so a rollback there still waits (#1097).
+#[tokio::test]
+async fn journey_mux_a_parked_helm_answer_leaves_the_focused_guard() {
+    let _settings = common::env::isolate_settings();
+    let (mut app, _rx) = common::app_with("cluster-left", "default").await;
+    park_a_loading_view_on_the_left(&mut app, "helm").await;
+    press(&mut app, ch(':')).await;
+    type_str(&mut app, "helm").await;
+    press(&mut app, key(KeyCode::Enter)).await;
+    app.handle_helm_releases_result("cluster-right", "default", Ok(vec![helm_release("api", 3)]));
+    press(&mut app, ch('R')).await;
+    assert!(app.helm_refreshing, "the right pane is refreshing");
+
+    app.handle_helm_releases_result("cluster-left", "default", Ok(vec![helm_release("web", 2)]));
+
+    assert!(
+        app.helm_refreshing,
+        "the left pane's answer must not end the right pane's refresh"
+    );
+    press(&mut app, ch('r')).await;
+    assert!(
+        app.toast
+            .as_ref()
+            .is_some_and(|(msg, _, _)| msg.contains("before rollback")),
+        "a rollback must still wait for the refresh, got {:?}",
+        app.toast.as_ref().map(|(msg, _, _)| msg)
+    );
+}
+
+/// A parked Helm list asks again only once its last fetch has answered: a
+/// slow cluster gets one fetch at a time, not one every 35 ticks (#1097).
+#[tokio::test]
+async fn journey_mux_a_parked_helm_fetch_waits_for_its_answer() {
+    let _settings = common::env::isolate_settings();
+    let (mut app, mut rx) = common::app_with("cluster-left", "default").await;
+    park_a_loading_view_on_the_left(&mut app, "helm").await;
+    let (namespace, result) = next_helm_answer(&mut rx, "cluster-left", 10)
+        .await
+        .expect("the left pane's own fetch answers");
+    app.handle_helm_releases_result("cluster-left", &namespace, result);
+
+    // Ticks 1 and 36 are both due; nothing answers in between.
+    for _ in 0..36 {
+        app.handle_tick();
+    }
+
+    assert!(next_helm_answer(&mut rx, "cluster-left", 10)
+        .await
+        .is_some());
+    assert!(
+        next_helm_answer(&mut rx, "cluster-left", 2).await.is_none(),
+        "the parked pane must not ask again before its fetch answers"
+    );
+}
+
+/// A Helm release that comes back for the parked pane's cluster is that
+/// pane's, and its previous revision is asked of the same cluster (#1097).
+#[tokio::test]
+async fn journey_mux_late_helm_release_reaches_the_parked_pane() {
+    let _settings = common::env::isolate_settings();
+    let (mut app, mut rx) = common::app_with("cluster-left", "default").await;
+    split_with_the_left_focused(&mut app).await;
+    app.open_helm_detail(
+        "web".into(),
+        "default".into(),
+        srectl::views::HelmDetailTab::Overview,
+    );
+    press(&mut app, ctrl('b')).await;
+    assert_eq!(app.active_context, "cluster-right");
+    common::drain(&mut rx);
+
+    let release = helm_release("web", 2);
+    app.handle_helm_detail_result(
+        "cluster-left",
+        "default",
+        "web",
+        None,
+        Ok(srelens_kube::helm::HelmReleaseDetail {
+            name: release.name,
+            namespace: release.namespace,
+            revision: release.revision,
+            status: release.status,
+            chart: release.chart,
+            chart_version: release.chart_version,
+            app_version: release.app_version,
+            updated: release.updated,
+            values_yaml: String::new(),
+            chart_values_yaml: String::new(),
+            computed_values_yaml: String::new(),
+            manifest: String::new(),
+            notes: String::new(),
+            history: vec![],
+        }),
+    );
+
+    let ActiveView::HelmDetail(left) = parked_view(&app) else {
+        panic!("the left pane should still show the release");
+    };
+    assert_eq!(
+        left.detail.as_ref().map(|d| d.revision),
+        Some(2),
+        "the left release must take its own cluster's answer"
+    );
+    let asked = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            if let Some(srectl::event::AppEvent::HelmDetailResult {
+                context,
+                revision: Some(1),
+                ..
+            }) = rx.recv().await
+            {
+                break context;
+            }
+        }
+    })
+    .await
+    .expect("revision 1 was never asked for");
+    assert_eq!(
+        asked, "cluster-left",
+        "revision 1 comes from the same cluster"
+    );
+}
+
+/// A Helm fetch still out when `:ctx` leaves its cluster must not block the
+/// next cluster's `:helm`. Its answer names a cluster no pane shows and frees
+/// nothing (one fetch at a time is per pane), so the switch frees the guard
+/// (#1097).
+#[tokio::test]
+async fn journey_a_helm_fetch_for_a_cluster_left_behind_does_not_block_the_next() {
+    let _settings = common::env::isolate_settings();
+    let (mut app, mut rx) = common::app_with("cluster-left", "default").await;
+    press(&mut app, ch(':')).await;
+    type_str(&mut app, "helm").await;
+    press(&mut app, key(KeyCode::Enter)).await;
+    assert!(app.helm_refreshing);
+
+    app.switch_context_forced("cluster-right".into()).await;
+    press(&mut app, ch(':')).await;
+    type_str(&mut app, "helm").await;
+    press(&mut app, key(KeyCode::Enter)).await;
+    app.handle_helm_releases_result("cluster-left", "default", Ok(vec![]));
+
+    assert!(
+        next_helm_answer(&mut rx, "cluster-right", 10)
+            .await
+            .is_some(),
+        "the new cluster's Helm list must be asked for"
+    );
+}
