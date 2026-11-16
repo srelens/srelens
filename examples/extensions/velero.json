@@ -38,24 +38,14 @@
             "type": "integer"
           },
           {
-            "name": "Started",
-            "jsonPath": ".status.startTimestamp",
-            "type": "date"
-          },
-          {
-            "name": "Completed",
-            "jsonPath": ".status.completionTimestamp",
-            "type": "date"
-          },
-          {
-            "name": "Expires",
-            "jsonPath": ".status.expiration",
-            "type": "string"
-          },
-          {
             "name": "Storage Location",
             "jsonPath": ".spec.storageLocation",
             "type": "string"
+          },
+          {
+            "name": "Started",
+            "jsonPath": ".status.startTimestamp",
+            "type": "date"
           }
         ]
       },
@@ -98,11 +88,6 @@
           {
             "name": "Started",
             "jsonPath": ".status.startTimestamp",
-            "type": "date"
-          },
-          {
-            "name": "Completed",
-            "jsonPath": ".status.completionTimestamp",
             "type": "date"
           }
         ]
@@ -550,6 +535,194 @@
         "title": "Data downloads",
         "capability": "datadownloads",
         "group": "Data movement"
+      }
+    ],
+    "joins": [
+      {
+        "id": "backups-self",
+        "capability": "backups",
+        "match": {
+          "name": true
+        }
+      },
+      {
+        "id": "restores-self",
+        "capability": "restores",
+        "match": {
+          "name": true
+        }
+      },
+      {
+        "id": "volumesnapshotlocations-self",
+        "capability": "volumesnapshotlocations",
+        "match": {
+          "name": true
+        }
+      },
+      {
+        "id": "backuprepositories-self",
+        "capability": "backuprepositories",
+        "match": {
+          "name": true
+        }
+      }
+    ],
+    "tableColumns": [
+      {
+        "id": "backups-errors",
+        "title": "Errors",
+        "forKinds": [
+          "velero.io/Backup"
+        ],
+        "source": {
+          "join": "backups-self",
+          "jsonPath": ".status.errors"
+        },
+        "format": "number",
+        "sortable": true
+      },
+      {
+        "id": "backups-warnings",
+        "title": "Warnings",
+        "forKinds": [
+          "velero.io/Backup"
+        ],
+        "source": {
+          "join": "backups-self",
+          "jsonPath": ".status.warnings"
+        },
+        "format": "number",
+        "sortable": true
+      },
+      {
+        "id": "backups-storage-location",
+        "title": "Storage Location",
+        "forKinds": [
+          "velero.io/Backup"
+        ],
+        "source": {
+          "join": "backups-self",
+          "jsonPath": ".spec.storageLocation"
+        },
+        "format": "text",
+        "sortable": true
+      },
+      {
+        "id": "backups-started",
+        "title": "Started",
+        "forKinds": [
+          "velero.io/Backup"
+        ],
+        "source": {
+          "join": "backups-self",
+          "jsonPath": ".status.startTimestamp"
+        },
+        "format": "date",
+        "sortable": true
+      },
+      {
+        "id": "restores-backup",
+        "title": "Backup",
+        "forKinds": [
+          "velero.io/Restore"
+        ],
+        "source": {
+          "join": "restores-self",
+          "jsonPath": ".spec.backupName"
+        },
+        "format": "text",
+        "sortable": true
+      },
+      {
+        "id": "restores-errors",
+        "title": "Errors",
+        "forKinds": [
+          "velero.io/Restore"
+        ],
+        "source": {
+          "join": "restores-self",
+          "jsonPath": ".status.errors"
+        },
+        "format": "number",
+        "sortable": true
+      },
+      {
+        "id": "restores-warnings",
+        "title": "Warnings",
+        "forKinds": [
+          "velero.io/Restore"
+        ],
+        "source": {
+          "join": "restores-self",
+          "jsonPath": ".status.warnings"
+        },
+        "format": "number",
+        "sortable": true
+      },
+      {
+        "id": "restores-started",
+        "title": "Started",
+        "forKinds": [
+          "velero.io/Restore"
+        ],
+        "source": {
+          "join": "restores-self",
+          "jsonPath": ".status.startTimestamp"
+        },
+        "format": "date",
+        "sortable": true
+      },
+      {
+        "id": "volumesnapshotlocations-provider",
+        "title": "Provider",
+        "forKinds": [
+          "velero.io/VolumeSnapshotLocation"
+        ],
+        "source": {
+          "join": "volumesnapshotlocations-self",
+          "jsonPath": ".spec.provider"
+        },
+        "format": "text",
+        "sortable": true
+      },
+      {
+        "id": "backuprepositories-storage-location",
+        "title": "Storage Location",
+        "forKinds": [
+          "velero.io/BackupRepository"
+        ],
+        "source": {
+          "join": "backuprepositories-self",
+          "jsonPath": ".spec.backupStorageLocation"
+        },
+        "format": "text",
+        "sortable": true
+      },
+      {
+        "id": "backuprepositories-volume-namespace",
+        "title": "Volume Namespace",
+        "forKinds": [
+          "velero.io/BackupRepository"
+        ],
+        "source": {
+          "join": "backuprepositories-self",
+          "jsonPath": ".spec.volumeNamespace"
+        },
+        "format": "text",
+        "sortable": true
+      },
+      {
+        "id": "backuprepositories-last-maintenance",
+        "title": "Last Maintenance",
+        "forKinds": [
+          "velero.io/BackupRepository"
+        ],
+        "source": {
+          "join": "backuprepositories-self",
+          "jsonPath": ".status.lastMaintenanceTime"
+        },
+        "format": "date",
+        "sortable": true
       }
     ],
     "detailPanels": [

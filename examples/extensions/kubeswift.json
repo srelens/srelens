@@ -875,15 +875,10 @@
           "pages": [
             "swiftguests",
             "swiftimages",
-            "swiftkernels",
             "swiftsnapshots",
-            "swiftrestores",
             "swiftmigrations",
             "swiftsandboxes",
-            "swiftsandboxpools",
-            "swiftvolumeattachments",
-            "swiftgpunodes",
-            "clusters"
+            "swiftgpunodes"
           ],
           "events": {
             "capability": "events",

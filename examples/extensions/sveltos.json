@@ -132,24 +132,19 @@
             "type": "string"
           },
           {
-            "name": "Helm Charts",
+            "name": "HelmCharts",
             "jsonPath": ".status.featureSummaries[?(@.featureID==\"Helm\")].status",
             "type": "string"
           },
           {
-            "name": "Kustomize",
+            "name": "KustomizeRefs",
             "jsonPath": ".status.featureSummaries[?(@.featureID==\"Kustomize\")].status",
             "type": "string"
           },
           {
-            "name": "Resources",
+            "name": "PolicyRefs",
             "jsonPath": ".status.featureSummaries[?(@.featureID==\"Resources\")].status",
             "type": "string"
-          },
-          {
-            "name": "Next Reconcile",
-            "jsonPath": ".status.nextReconcileTime",
-            "type": "date"
           }
         ]
       },
@@ -358,6 +353,234 @@
         "id": "classifiers",
         "title": "Classifiers",
         "capability": "classifiers"
+      }
+    ],
+    "joins": [
+      {
+        "id": "clusterprofiles-self",
+        "capability": "clusterprofiles",
+        "match": {
+          "name": true
+        }
+      },
+      {
+        "id": "profiles-self",
+        "capability": "profiles",
+        "match": {
+          "name": true
+        }
+      },
+      {
+        "id": "clustersummaries-self",
+        "capability": "clustersummaries",
+        "match": {
+          "name": true
+        }
+      },
+      {
+        "id": "clusterreports-self",
+        "capability": "clusterreports",
+        "match": {
+          "name": true
+        }
+      },
+      {
+        "id": "eventsources-self",
+        "capability": "eventsources",
+        "match": {
+          "name": true
+        }
+      },
+      {
+        "id": "eventtriggers-self",
+        "capability": "eventtriggers",
+        "match": {
+          "name": true
+        }
+      }
+    ],
+    "tableColumns": [
+      {
+        "id": "clusterprofiles-sync-mode",
+        "title": "Sync Mode",
+        "forKinds": [
+          "config.projectsveltos.io/ClusterProfile"
+        ],
+        "source": {
+          "join": "clusterprofiles-self",
+          "jsonPath": ".spec.syncMode"
+        },
+        "format": "text",
+        "sortable": true
+      },
+      {
+        "id": "clusterprofiles-tier",
+        "title": "Tier",
+        "forKinds": [
+          "config.projectsveltos.io/ClusterProfile"
+        ],
+        "source": {
+          "join": "clusterprofiles-self",
+          "jsonPath": ".spec.tier"
+        },
+        "format": "number",
+        "sortable": true
+      },
+      {
+        "id": "clusterprofiles-suspended",
+        "title": "Suspended",
+        "forKinds": [
+          "config.projectsveltos.io/ClusterProfile"
+        ],
+        "source": {
+          "join": "clusterprofiles-self",
+          "jsonPath": ".status.reconciliationSuspended"
+        },
+        "format": "text",
+        "sortable": true
+      },
+      {
+        "id": "profiles-sync-mode",
+        "title": "Sync Mode",
+        "forKinds": [
+          "config.projectsveltos.io/Profile"
+        ],
+        "source": {
+          "join": "profiles-self",
+          "jsonPath": ".spec.syncMode"
+        },
+        "format": "text",
+        "sortable": true
+      },
+      {
+        "id": "profiles-tier",
+        "title": "Tier",
+        "forKinds": [
+          "config.projectsveltos.io/Profile"
+        ],
+        "source": {
+          "join": "profiles-self",
+          "jsonPath": ".spec.tier"
+        },
+        "format": "number",
+        "sortable": true
+      },
+      {
+        "id": "profiles-suspended",
+        "title": "Suspended",
+        "forKinds": [
+          "config.projectsveltos.io/Profile"
+        ],
+        "source": {
+          "join": "profiles-self",
+          "jsonPath": ".status.reconciliationSuspended"
+        },
+        "format": "text",
+        "sortable": true
+      },
+      {
+        "id": "clustersummaries-cluster",
+        "title": "Cluster",
+        "forKinds": [
+          "config.projectsveltos.io/ClusterSummary"
+        ],
+        "source": {
+          "join": "clustersummaries-self",
+          "jsonPath": ".spec.clusterName"
+        },
+        "format": "text",
+        "sortable": true
+      },
+      {
+        "id": "clustersummaries-cluster-namespace",
+        "title": "Cluster Namespace",
+        "forKinds": [
+          "config.projectsveltos.io/ClusterSummary"
+        ],
+        "source": {
+          "join": "clustersummaries-self",
+          "jsonPath": ".spec.clusterNamespace"
+        },
+        "format": "text",
+        "sortable": true
+      },
+      {
+        "id": "clusterreports-cluster",
+        "title": "Cluster",
+        "forKinds": [
+          "config.projectsveltos.io/ClusterReport"
+        ],
+        "source": {
+          "join": "clusterreports-self",
+          "jsonPath": ".spec.clusterName"
+        },
+        "format": "text",
+        "sortable": true
+      },
+      {
+        "id": "clusterreports-cluster-namespace",
+        "title": "Cluster Namespace",
+        "forKinds": [
+          "config.projectsveltos.io/ClusterReport"
+        ],
+        "source": {
+          "join": "clusterreports-self",
+          "jsonPath": ".spec.clusterNamespace"
+        },
+        "format": "text",
+        "sortable": true
+      },
+      {
+        "id": "eventsources-collect-resources",
+        "title": "Collect Resources",
+        "forKinds": [
+          "lib.projectsveltos.io/EventSource"
+        ],
+        "source": {
+          "join": "eventsources-self",
+          "jsonPath": ".spec.collectResources"
+        },
+        "format": "text",
+        "sortable": true
+      },
+      {
+        "id": "eventtriggers-event-source",
+        "title": "Event Source",
+        "forKinds": [
+          "lib.projectsveltos.io/EventTrigger"
+        ],
+        "source": {
+          "join": "eventtriggers-self",
+          "jsonPath": ".spec.eventSourceName"
+        },
+        "format": "text",
+        "sortable": true
+      },
+      {
+        "id": "eventtriggers-one-per-event",
+        "title": "One Per Event",
+        "forKinds": [
+          "lib.projectsveltos.io/EventTrigger"
+        ],
+        "source": {
+          "join": "eventtriggers-self",
+          "jsonPath": ".spec.oneForEvent"
+        },
+        "format": "text",
+        "sortable": true
+      },
+      {
+        "id": "eventtriggers-sync-mode",
+        "title": "Sync Mode",
+        "forKinds": [
+          "lib.projectsveltos.io/EventTrigger"
+        ],
+        "source": {
+          "join": "eventtriggers-self",
+          "jsonPath": ".spec.syncMode"
+        },
+        "format": "text",
+        "sortable": true
       }
     ],
     "detailPanels": [

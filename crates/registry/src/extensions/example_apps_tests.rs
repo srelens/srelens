@@ -263,6 +263,14 @@ fn every_example_app_installs_and_declares_what_its_row_says() {
             assert_eq!(gated, row.gated, "{file}: {name} gating");
         }
 
+        // An overview keeps a live stream open per page it lists, and an app may hold
+        // eight (srelens-streams). Twelve pages are a valid dashboard that stops updating
+        // as it opens, so the examples leave room for the events feed and one more view.
+        for page in raw["contributions"]["pages"].as_array().unwrap() {
+            let listed = page["dashboard"]["pages"].as_array().map_or(0, Vec::len);
+            assert!(listed <= 6, "{file}: the {} dashboard lists {listed} pages", page["id"]);
+        }
+
         let manifest = Manifest::parse(&raw.to_string()).unwrap_or_else(|error| panic!("{file}: {error}"));
         if let Err(errors) = validate_app_for_tests(&manifest, fake_core()) {
             panic!("{file}: {errors:?}");

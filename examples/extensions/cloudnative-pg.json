@@ -419,9 +419,7 @@
             "scheduledbackups",
             "poolers",
             "databases",
-            "databaseroles",
-            "publications",
-            "subscriptions"
+            "databaseroles"
           ],
           "events": {
             "capability": "events",
@@ -500,6 +498,89 @@
         "title": "Cluster image catalogs",
         "capability": "clusterimagecatalogs",
         "group": "Images"
+      }
+    ],
+    "joins": [
+      {
+        "id": "objectstores-self",
+        "capability": "objectstores",
+        "match": {
+          "name": true
+        }
+      },
+      {
+        "id": "failoverquorums-self",
+        "capability": "failoverquorums",
+        "match": {
+          "name": true
+        }
+      }
+    ],
+    "tableColumns": [
+      {
+        "id": "objectstores-destination",
+        "title": "Destination",
+        "forKinds": [
+          "barmancloud.cnpg.io/ObjectStore"
+        ],
+        "source": {
+          "join": "objectstores-self",
+          "jsonPath": ".spec.configuration.destinationPath"
+        },
+        "format": "text",
+        "sortable": true
+      },
+      {
+        "id": "objectstores-retention",
+        "title": "Retention",
+        "forKinds": [
+          "barmancloud.cnpg.io/ObjectStore"
+        ],
+        "source": {
+          "join": "objectstores-self",
+          "jsonPath": ".spec.retentionPolicy"
+        },
+        "format": "text",
+        "sortable": true
+      },
+      {
+        "id": "failoverquorums-method",
+        "title": "Method",
+        "forKinds": [
+          "postgresql.cnpg.io/FailoverQuorum"
+        ],
+        "source": {
+          "join": "failoverquorums-self",
+          "jsonPath": ".status.method"
+        },
+        "format": "text",
+        "sortable": true
+      },
+      {
+        "id": "failoverquorums-primary",
+        "title": "Primary",
+        "forKinds": [
+          "postgresql.cnpg.io/FailoverQuorum"
+        ],
+        "source": {
+          "join": "failoverquorums-self",
+          "jsonPath": ".status.primary"
+        },
+        "format": "text",
+        "sortable": true
+      },
+      {
+        "id": "failoverquorums-standbys",
+        "title": "Standbys",
+        "forKinds": [
+          "postgresql.cnpg.io/FailoverQuorum"
+        ],
+        "source": {
+          "join": "failoverquorums-self",
+          "jsonPath": ".status.standbyNumber"
+        },
+        "format": "number",
+        "sortable": true
       }
     ],
     "detailPanels": [
