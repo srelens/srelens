@@ -371,6 +371,26 @@ export async function diffManifest(
   }
 }
 
+/**
+ * Diff a Secret manifest against the cluster via `k8s.diffSecret`: the dry-run
+ * diff of {@link diffManifest} with the values left in (#1085). It is the
+ * audited, consent-gated read, so call it only when the reader is looking at
+ * the diff.
+ */
+export async function diffSecret(
+  context: string,
+  yaml: string,
+  namespace?: string,
+  invoke: Invoker = invokeCapability,
+): Promise<{ documents?: DiffDoc[]; error?: string }> {
+  try {
+    const out = await invoke<{ documents: DiffDoc[] }>("k8s.diffSecret", { context, yaml, namespace });
+    return { documents: out.documents };
+  } catch (e) {
+    return { error: String(e) };
+  }
+}
+
 /** Read `metadata.resourceVersion` from a manifest, for stale-edit detection. */
 export function parseResourceVersion(yaml: string): string | null {
   try {

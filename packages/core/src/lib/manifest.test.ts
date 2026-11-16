@@ -5,6 +5,7 @@ import {
   listNodes,
   applyManifest,
   diffManifest,
+  diffSecret,
   validateManifest,
   parseResourceVersion,
   listEvents,
@@ -205,6 +206,24 @@ describe("diffManifest", () => {
     const out = await diffManifest("ctx", "kind: ConfigMap", "team-a", invoke);
     expect(invoke).toHaveBeenCalledWith("k8s.diffManifest", { context: "ctx", yaml: "kind: ConfigMap", namespace: "team-a" });
     expect(out.documents?.[0].currentResourceVersion).toBe("9");
+  });
+});
+
+describe("diffSecret", () => {
+  it("calls the gated k8s.diffSecret and returns its documents", async () => {
+    const invoke = vi.fn().mockResolvedValue({
+      documents: [{ kind: "Secret", name: "db", exists: true, changed: true, rows: [], currentResourceVersion: "3" }],
+    });
+    const out = await diffSecret("ctx", "kind: Secret", "team-a", invoke);
+    expect(invoke).toHaveBeenCalledWith("k8s.diffSecret", { context: "ctx", yaml: "kind: Secret", namespace: "team-a" });
+    expect(out.documents?.[0].changed).toBe(true);
+  });
+
+  it("returns a refusal as an error, not as no changes", async () => {
+    const invoke = vi.fn().mockRejectedValue(new Error("consent denied for k8s.diffSecret"));
+    const out = await diffSecret("ctx", "kind: Secret", undefined, invoke);
+    expect(out.documents).toBeUndefined();
+    expect(out.error).toContain("consent denied");
   });
 });
 

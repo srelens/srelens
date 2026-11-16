@@ -393,6 +393,15 @@
     "confirm": null
   },
   {
+    "id": "k8s.diffSecret",
+    "readOnly": true,
+    "destructive": false,
+    "requiresConfirm": true,
+    "sensitive": true,
+    "impact": "medium",
+    "confirm": "Reveal secret material[ from {resource}][ in cluster {cluster}] to the caller?"
+  },
+  {
     "id": "k8s.drainNode",
     "readOnly": false,
     "destructive": true,

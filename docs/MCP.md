@@ -161,7 +161,7 @@ limits do.
   | Flag | Authorizes |
   | --- | --- |
   | `--mcp-allow-destructive` | anything that changes state — delete, drain, scale, apply, helm install, installing local tooling |
-  | `--mcp-allow-sensitive-reads` | reads that return secret material — `k8s.getSecret`, or the SSH node diagnostics, whose host logs and process arguments can carry credentials (the full set is under "sensitive read" in [mcp-catalog.md](mcp-catalog.md)) |
+  | `--mcp-allow-sensitive-reads` | reads that return secret material — `k8s.getSecret` and `k8s.diffSecret`, or the SSH node diagnostics, whose host logs and process arguments can carry credentials (the full set is under "sensitive read" in [mcp-catalog.md](mcp-catalog.md)) |
 
   So an agent allowed to read a Secret still cannot drain a node, and an
   agent allowed to drain nodes cannot read your Secrets. Both flags apply to
@@ -349,6 +349,11 @@ has both combinations, on purpose:
   `--mcp-allow-destructive` — reading a Secret is not a mutation, so it
   would be wrong to lump it in with tools that drain nodes or delete
   resources.
+- `k8s.diffSecret` is the same dry-run diff as `k8s.diffManifest`, for
+  Secrets only and with their values left in on both sides. It reveals what
+  `k8s.getSecret` does, so it is a **sensitive read** too, behind the same
+  flag and confirm. The desktop's Edit screen calls it only while its diff
+  panel is open on a Secret.
 
 If you only remember one thing from this section: don't infer whether a
 tool needs confirmation from whether the catalog marked it `sensitive` — go

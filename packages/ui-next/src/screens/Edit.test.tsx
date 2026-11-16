@@ -16,6 +16,7 @@ const core = vi.hoisted(() => ({
   getManifest: vi.fn(),
   applyManifest: vi.fn(),
   diffManifest: vi.fn(),
+  diffSecret: vi.fn(),
   validateManifest: vi.fn(),
   deleteResource: vi.fn(),
   getSecret: vi.fn(),
@@ -152,6 +153,7 @@ beforeEach(() => {
     applied: true,
   });
   core.diffManifest.mockReset().mockResolvedValue({ documents: [] });
+  core.diffSecret.mockReset().mockResolvedValue({ documents: [] });
   core.validateManifest.mockReset().mockResolvedValue({ valid: true, errors: [] });
   core.deleteResource.mockReset().mockResolvedValue({ ok: true });
   core.getSecret.mockReset().mockResolvedValue({ data: { password: "czNjcmV0" }, annotations: {}, yaml: SECRET });
@@ -317,6 +319,29 @@ describe("EditResource", () => {
     expect(latestEditor().readOnly).not.toBe(true);
     expect(screen.queryByRole("button", { name: "Reveal values" })).toBeNull();
     expect(screen.queryByTestId("secret-redacted")).toBeNull();
+  });
+
+  it("diffs a Secret through the gated k8s.diffSecret while the panel is open, so a changed value shows (#1085)", async () => {
+    // `k8s.diffManifest` blanks a Secret on both sides, so a changed value
+    // came back as an unchanged blank line. It still runs in the background
+    // for the "changed elsewhere" check; the audited read runs only while the
+    // reader is looking at the diff.
+    core.diffManifest.mockResolvedValue({
+      documents: [{ kind: "Secret", name: "db", exists: true, changed: false, currentResourceVersion: "1", rows: [{ tag: "same", left: '  password: ""', right: '  password: ""' }] }],
+    });
+    core.diffSecret.mockResolvedValue({
+      documents: [{ kind: "Secret", name: "db", exists: true, changed: true, currentResourceVersion: "1", rows: [{ tag: "replace", left: "  password: czNjcmV0", right: "  password: bmV3LXMzY3JldA==" }] }],
+    });
+    render(<EditResource route="/edit/prod-eu/Secret/checkout/db" />);
+    await waitFor(() => expect(latestEditor()?.value).toBe(SECRET));
+    act(() => latestEditor().onChange(SECRET.replace("czNjcmV0", "bmV3LXMzY3JldA==")));
+    await waitFor(() => expect(core.diffManifest).toHaveBeenCalled(), { timeout: 3000 });
+    expect(core.diffSecret).not.toHaveBeenCalled();
+
+    await userEvent.click(screen.getByRole("button", { name: "Diff" }));
+    const panel = await screen.findByRole("complementary", { name: "Diff" });
+    await waitFor(() => expect(panel.textContent).toContain("bmV3LXMzY3JldA=="), { timeout: 3000 });
+    expect(core.diffSecret).toHaveBeenCalledWith("prod-eu", expect.stringContaining("bmV3LXMzY3JldA=="));
   });
 
   it("says a Secret could not be read, rather than opening a blanked manifest to edit", async () => {

@@ -1538,8 +1538,96 @@ fn diff_document(
     })
 }
 
+/// Diff every document in `input` against the cluster: the live object
+/// (current) against a server dry-run apply (proposed), as aligned rows. A
+/// Secret is blanked on both sides unless `reveal`, which only the gated
+/// `k8s.diffSecret` passes, and which takes Secrets only.
+async fn diff_documents(
+    cache: Arc<ClientCache>,
+    input: DiffIn,
+    reveal: bool,
+) -> Result<DiffOut, CapabilityError> {
+    let docs = split_documents(&input.yaml)?;
+    let client = cache
+        .get(&input.context)
+        .await
+        .map_err(CapabilityError::Handler)?;
+    let mut documents = Vec::with_capacity(docs.len());
+    for value in docs {
+        let r = match resource_ref(&value) {
+            Some(r) => r,
+            // Incomplete document (e.g. still being typed) — skip
+            // it rather than aborting the whole diff.
+            None => continue,
+        };
+        let (group, _) = parse_api_version(&r.api_version);
+        // Refused before any request, so a non-Secret never reaches the
+        // cluster through the gated read.
+        let is_secret = r.kind == "Secret" && group.is_empty();
+        if reveal && !is_secret {
+            return Err(CapabilityError::Handler(format!(
+                "k8s.diffSecret compares Secrets only; {} {} is not a core Secret — use k8s.diffManifest",
+                r.kind, r.name
+            )));
+        }
+        let (ar, namespaced) = resolve_manifest_resource(&client, &r).await?;
+        let (api, effective_namespace) = manifest_api(
+            client.clone(),
+            &ar,
+            namespaced,
+            r.namespace.as_deref(),
+            input.namespace.as_deref(),
+        );
+
+        // Current live object (may not exist).
+        let current = tokio::time::timeout(request_timeout(), api.get_opt(&r.name))
+            .await
+            .map_err(|_| CapabilityError::Handler("diff get timed out".into()))?
+            .map_err(|e| CapabilityError::Handler(e.to_string()))?;
+        let current_resource_version = current
+            .as_ref()
+            .and_then(|o| o.metadata.resource_version.clone());
+        let exists = current.is_some();
+        let current_json = match current {
+            Some(o) => serde_json::to_value(o)
+                .map_err(|e| CapabilityError::Handler(e.to_string()))?,
+            None => serde_json::json!({}),
+        };
+
+        // Proposed = server dry-run apply (force to compute merged end-state).
+        let params = PatchParams {
+            field_manager: Some("srelens".into()),
+            dry_run: true,
+            force: true,
+            field_validation: None,
+        };
+        let proposed = tokio::time::timeout(
+            request_timeout(),
+            api.patch(&r.name, &params, &Patch::Apply(&value)),
+        )
+        .await
+        .map_err(|_| CapabilityError::Handler("diff dry-run timed out".into()))?
+        .map_err(|e| CapabilityError::Handler(clean_kube_error(e)))?;
+        let proposed_json = serde_json::to_value(proposed)
+            .map_err(|e| CapabilityError::Handler(e.to_string()))?;
+
+        documents.push(diff_document(
+            r.kind,
+            r.name,
+            effective_namespace,
+            exists,
+            current_resource_version,
+            current_json,
+            proposed_json,
+            is_secret && !reveal,
+        )?);
+    }
+    Ok(DiffOut { documents })
+}
+
 /// `k8s.diffManifest` — for each document, diff the live object against the
-/// server dry-run apply result (current | proposed) as aligned rows.
+/// server dry-run apply result (current | proposed) as aligned rows. A Secret's
+/// values are blanked on both sides, for every caller.
 pub fn diff_manifest_capability(cache: Arc<ClientCache>) -> Capability {
     Capability::typed::<DiffIn, DiffOut, _, _>(
         "k8s.diffManifest",
@@ -1551,79 +1639,21 @@ pub fn diff_manifest_capability(cache: Arc<ClientCache>) -> Capability {
             sensitive: true,
             ..Annotations::READ_ONLY
         },
-        move |input: DiffIn| {
-            let cache = cache.clone();
-            async move {
-                let docs = split_documents(&input.yaml)?;
-                let client = cache
-                    .get(&input.context)
-                    .await
-                    .map_err(CapabilityError::Handler)?;
-                let mut documents = Vec::with_capacity(docs.len());
-                for value in docs {
-                    let r = match resource_ref(&value) {
-                        Some(r) => r,
-                        // Incomplete document (e.g. still being typed) — skip
-                        // it rather than aborting the whole diff.
-                        None => continue,
-                    };
-                    let (group, _) = parse_api_version(&r.api_version);
-                    let (ar, namespaced) = resolve_manifest_resource(&client, &r).await?;
-                    let (api, effective_namespace) = manifest_api(
-                        client.clone(),
-                        &ar,
-                        namespaced,
-                        r.namespace.as_deref(),
-                        input.namespace.as_deref(),
-                    );
-                    let is_secret = r.kind == "Secret" && group.is_empty();
+        move |input: DiffIn| diff_documents(cache.clone(), input, false),
+    )
+}
 
-                    // Current live object (may not exist).
-                    let current = tokio::time::timeout(request_timeout(), api.get_opt(&r.name))
-                        .await
-                        .map_err(|_| CapabilityError::Handler("diff get timed out".into()))?
-                        .map_err(|e| CapabilityError::Handler(e.to_string()))?;
-                    let current_resource_version = current
-                        .as_ref()
-                        .and_then(|o| o.metadata.resource_version.clone());
-                    let exists = current.is_some();
-                    let current_json = match current {
-                        Some(o) => serde_json::to_value(o)
-                            .map_err(|e| CapabilityError::Handler(e.to_string()))?,
-                        None => serde_json::json!({}),
-                    };
-
-                    // Proposed = server dry-run apply (force to compute merged end-state).
-                    let params = PatchParams {
-                        field_manager: Some("srelens".into()),
-                        dry_run: true,
-                        force: true,
-                        field_validation: None,
-                    };
-                    let proposed = tokio::time::timeout(
-                        request_timeout(),
-                        api.patch(&r.name, &params, &Patch::Apply(&value)),
-                    )
-                    .await
-                    .map_err(|_| CapabilityError::Handler("diff dry-run timed out".into()))?
-                    .map_err(|e| CapabilityError::Handler(clean_kube_error(e)))?;
-                    let proposed_json = serde_json::to_value(proposed)
-                        .map_err(|e| CapabilityError::Handler(e.to_string()))?;
-
-                    documents.push(diff_document(
-                        r.kind,
-                        r.name,
-                        effective_namespace,
-                        exists,
-                        current_resource_version,
-                        current_json,
-                        proposed_json,
-                        is_secret,
-                    )?);
-                }
-                Ok(DiffOut { documents })
-            }
-        },
+/// `k8s.diffSecret` — `k8s.diffManifest` for Secrets, with the values left
+/// in (#1085). The desktop's Edit screen uses it while its diff panel is open
+/// on a Secret, so a changed value shows as changed. `SENSITIVE_READ`, like
+/// `k8s.getSecret`: audited, and over MCP behind
+/// `--mcp-allow-sensitive-reads` and a confirm.
+pub fn diff_secret_capability(cache: Arc<ClientCache>) -> Capability {
+    Capability::typed::<DiffIn, DiffOut, _, _>(
+        "k8s.diffSecret",
+        "diff a Secret manifest against the cluster via server dry-run apply, values included (sensitive)",
+        Annotations::SENSITIVE_READ,
+        move |input: DiffIn| diff_documents(cache.clone(), input, true),
     )
 }
 
@@ -2160,6 +2190,106 @@ metadata:
         // And align_rows over the two now shows no changes.
         let rows = align_rows(&cy, &sy);
         assert!(rows.iter().all(|r| matches!(r.tag, DiffTag::Same)));
+    }
+
+    /// A stand-in API server for a diff: a GET answers with the live object, a
+    /// PATCH (the dry-run apply) with the merged one.
+    async fn diff_server(current: serde_json::Value, proposed: serde_json::Value) -> kube::Client {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            while let Ok((mut stream, _)) = listener.accept().await {
+                let (current, proposed) = (current.clone(), proposed.clone());
+                tokio::spawn(async move {
+                    let mut buf = vec![0u8; 16384];
+                    let n = stream.read(&mut buf).await.unwrap_or(0);
+                    let req = String::from_utf8_lossy(&buf[..n]).to_string();
+                    let body = if req.starts_with("PATCH") { proposed } else { current }.to_string();
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    let _ = stream.write_all(response.as_bytes()).await;
+                });
+            }
+        });
+        let config = kube::Config::new(format!("http://{addr}").parse().unwrap());
+        kube::Client::try_from(config).unwrap()
+    }
+
+    fn secret_with(token_b64: &str) -> serde_json::Value {
+        serde_json::json!({
+            "apiVersion": "v1",
+            "kind": "Secret",
+            "metadata": { "name": "db", "namespace": "team", "resourceVersion": "7" },
+            "type": "Opaque",
+            "data": { "token": token_b64 },
+        })
+    }
+
+    const OLD_TOKEN: &str = "b2xkLWZpeHR1cmUtdmFsdWU="; // old-fixture-value
+    const NEW_TOKEN: &str = "bmV3LWZpeHR1cmUtdmFsdWU="; // new-fixture-value
+    const SECRET_DRAFT: &str =
+        "apiVersion: v1\nkind: Secret\nmetadata:\n  name: db\n  namespace: team\ndata:\n  token: bmV3LWZpeHR1cmUtdmFsdWU=\n";
+
+    async fn diff_with(capability: Capability, yaml: &str) -> Result<serde_json::Value, CapabilityError> {
+        (capability.handler)(serde_json::json!({ "context": "fake", "yaml": yaml })).await
+    }
+
+    async fn cache_for_secret_diff() -> Arc<ClientCache> {
+        let cache = ClientCache::new(PathBuf::from("/x"));
+        cache
+            .preload("fake", diff_server(secret_with(OLD_TOKEN), secret_with(NEW_TOKEN)).await)
+            .await;
+        cache
+    }
+
+    /// The desktop's Edit screen compares a Secret's draft with the cluster
+    /// through this read (#1085), so a changed value shows as changed. It is
+    /// the audited, consent-gated twin of `k8s.diffManifest`.
+    #[test]
+    fn diff_secret_capability_is_a_sensitive_read() {
+        let cap = diff_secret_capability(ClientCache::new(PathBuf::from("/x")));
+        assert_eq!(cap.id, "k8s.diffSecret");
+        assert_eq!(cap.annotations, Annotations::SENSITIVE_READ);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_diff_secret_handler_shows_a_changed_value_on_both_sides() {
+        let out = diff_with(diff_secret_capability(cache_for_secret_diff().await), SECRET_DRAFT)
+            .await
+            .expect("the fake API server answers");
+        let doc = &out["documents"][0];
+        assert_eq!(doc["changed"], true, "a changed value is a change");
+        let text = doc["rows"].to_string();
+        assert!(text.contains(OLD_TOKEN), "the live value is on the left");
+        assert!(text.contains(NEW_TOKEN), "the draft's value is on the right");
+        assert_eq!(doc["currentResourceVersion"], "7");
+    }
+
+    /// The ungated diff is unchanged by the gated one: still blanked, so what
+    /// an MCP client can read without the gate is what it was.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_ungated_diff_still_blanks_the_same_secret() {
+        let out = diff_with(diff_manifest_capability(cache_for_secret_diff().await), SECRET_DRAFT)
+            .await
+            .expect("the fake API server answers");
+        let text = out.to_string();
+        assert!(!text.contains(OLD_TOKEN), "the live value left the ungated diff");
+        assert!(!text.contains(NEW_TOKEN), "the draft's value left the ungated diff");
+    }
+
+    /// Its confirm says it reveals secret material, so it takes Secrets only.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn diff_secret_refuses_a_document_that_is_not_a_secret() {
+        let err = diff_with(
+            diff_secret_capability(cache_for_secret_diff().await),
+            "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: db\n  namespace: team\n",
+        )
+        .await
+        .expect_err("a ConfigMap is not a Secret");
+        assert!(err.to_string().contains("Secret"), "says why: {err}");
     }
 
     #[test]

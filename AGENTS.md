@@ -88,7 +88,10 @@ The desktop app shows a Secret whole, with nothing redacted (#1085), and it
 does so through one read: `k8s.getSecret`, the audited, consent-gated one,
 which returns the values, the annotations and the manifest in server order.
 The detail pane's Overview, annotations and YAML and the Edit screen all draw
-from it. The one mask left is the Overview's Data block: each value starts
+from it. The Edit screen's diff panel, while open on a Secret, compares
+through `k8s.diffSecret`, the gated twin of `k8s.diffManifest` with the values
+left in; the background "changed elsewhere" check stays on the ungated diff so
+typing does not fill the audit trail. The one mask left is the Overview's Data block: each value starts
 masked behind its own Reveal, so opening a Secret on a shared screen does not
 show them all. Do not un-redact an ungated read to feed a screen; read
 `k8s.getSecret` instead. When it refuses, a pane says so with a Retry: the

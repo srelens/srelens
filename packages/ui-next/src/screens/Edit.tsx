@@ -4,6 +4,7 @@ import {
   deleteResource,
   describeError,
   diffManifest,
+  diffSecret,
   getManifest,
   getSecret,
   notify,
@@ -529,7 +530,13 @@ function EditExisting({ context, parts }: { context: ClusterContext; parts: Edit
    * open, because its side product — the live resourceVersion — is what says
    * the object changed under the reader, and that is worth knowing before
    * they open anything.
+   *
+   * A Secret's diff comes from `k8s.diffManifest` blanked on both sides, so
+   * while the panel is open it comes from `k8s.diffSecret` instead, which
+   * leaves the values in (#1085). That read is audited, so it runs only while
+   * the reader is looking at the diff, not on every pause in typing.
    */
+  const revealDiff = isSecret && showChanges;
   const [diff, setDiff] = useState<DiffDoc[] | null>(null);
   const [diffing, setDiffing] = useState(false);
   // Kept apart from `diff` rather than folded into an empty list: an empty
@@ -546,7 +553,7 @@ function EditExisting({ context, parts }: { context: ClusterContext; parts: Edit
     let active = true;
     setDiffing(true);
     const t = setTimeout(() => {
-      void diffManifest(pinned, yaml).then((out) => {
+      void (revealDiff ? diffSecret : diffManifest)(pinned, yaml).then((out) => {
         if (!active) return;
         setDiff(out.error ? null : (out.documents ?? []));
         setDiffError(out.error ? describeError(out.error).detail : "");
@@ -557,7 +564,7 @@ function EditExisting({ context, parts }: { context: ClusterContext; parts: Edit
       active = false;
       clearTimeout(t);
     };
-  }, [pinned, yaml, dirty]);
+  }, [pinned, yaml, dirty, revealDiff]);
   const stale = useMemo(
     () =>
       diff?.some(

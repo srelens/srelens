@@ -76,6 +76,19 @@ describe("AgentAccess", () => {
   });
 
   /**
+   * `k8s.diffSecret` returns Secret values too (#1085), so the copy cannot say
+   * there is one capability that does.
+   */
+  it("lists the gated Secret diff, and does not claim one capability returns Secret values", () => {
+    render(<AgentAccess />);
+    const chips = screen.getAllByTestId("gated-capability").map((c) => c.textContent);
+    expect(chips).toContain("k8s.diffSecret");
+    for (const id of ["agent-consent", "gated-count"]) {
+      expect(screen.getByTestId(id).textContent).not.toMatch(/the one (capability )?that returns Secret values/);
+    }
+  });
+
+  /**
    * A web build does not register the host settings capabilities
    * (`a_web_users_registry_has_apps_but_no_desktop_settings`), so naming `settings.set`
    * there would be this pane inventing an id again, one instead of six.
