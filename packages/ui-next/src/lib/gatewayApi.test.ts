@@ -178,6 +178,29 @@ describe("reading a route", () => {
     expect(rules.map((r) => r.matches)).toEqual(["GET PathPrefix /api header x-env=canary, Exact /health", "*"]);
   });
 
+  it("tells a regular-expression header or query match from an exact one", () => {
+    const regex: K8sObject = {
+      kind: "HTTPRoute",
+      metadata: { name: "re", namespace: "store" },
+      spec: {
+        rules: [
+          {
+            matches: [
+              {
+                headers: [
+                  { type: "RegularExpression", name: "x-tenant", value: "acme.*" },
+                  { type: "Exact", name: "x-env", value: "acme.*" },
+                ],
+                queryParams: [{ type: "RegularExpression", name: "v", value: "2.*" }],
+              },
+            ],
+          },
+        ],
+      },
+    };
+    expect(routeRules(regex)[0].matches).toBe("header x-tenant=~acme.* header x-env=acme.* query v=~2.*");
+  });
+
   it("reads a gRPC rule's service and method", () => {
     const grpc: K8sObject = {
       kind: "GRPCRoute",

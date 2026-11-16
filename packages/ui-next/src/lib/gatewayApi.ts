@@ -205,8 +205,12 @@ export interface RouteRule {
   backends: RouteBackend[];
 }
 
+// `=~` for a regular expression, so `acme.*` the pattern never reads as `acme.*` the literal.
 const pairs = (label: string, items: unknown) =>
-  asArray(items).map((item) => `${label} ${str(asRecord(item).name)}=${str(asRecord(item).value)}`);
+  asArray(items).map((item) => {
+    const { name, value, type } = asRecord(item);
+    return `${label} ${str(name)}${type === "RegularExpression" ? "=~" : "="}${str(value)}`;
+  });
 
 /** One match: an HTTP method, path, headers and query, or a gRPC service and method. */
 function matchText(match: Record<string, unknown>): string {
