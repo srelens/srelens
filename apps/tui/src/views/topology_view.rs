@@ -292,23 +292,28 @@ pub fn render_topology_view(f: &mut Frame, area: Rect, state: &TopologyViewState
     // taken for a cluster that has none.
     let mut inner = inner;
     if !graph.unread.is_empty() {
-        let what = graph
-            .unread
-            .iter()
-            .map(|u| format!("{} in {}: {}", u.kind, u.namespace, u.reason))
-            .collect::<Vec<_>>()
-            .join("; ");
+        // The hint first, so a long reason can never push it off the row; then
+        // each source on its own wrapped line, so every one stays readable.
+        let n = graph.unread.len();
+        let mut lines = vec![Line::from(vec![
+            Span::styled(
+                format!("⚠ Could not read {n} Gateway API {}", if n == 1 { "list" } else { "lists" }),
+                Theme::status_warn(),
+            ),
+            Span::styled("  — press <r> to retry", Style::default().fg(Theme::dim())),
+        ])];
+        lines.extend(graph.unread.iter().map(|u| {
+            Line::from(Span::styled(format!("  {} in {}: {}", u.kind, u.namespace, u.reason), Style::default().fg(Theme::fg())))
+        }));
+        let width = inner.width.max(1) as usize;
+        let wrapped: usize = lines.iter().map(|l| l.width().max(1).div_ceil(width)).sum();
+        // Never more than half the view: the graph is still the point.
+        let height = wrapped.min((inner.height / 2).max(1) as usize) as u16;
         let rows = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([Constraint::Length(1), Constraint::Min(0)])
+            .constraints([Constraint::Length(height), Constraint::Min(0)])
             .split(inner);
-        f.render_widget(
-            Paragraph::new(Line::from(vec![
-                Span::styled(format!("⚠ Could not read {what}"), Theme::status_warn()),
-                Span::styled("  — press <r> to retry", Style::default().fg(Theme::dim())),
-            ])),
-            rows[0],
-        );
+        f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), rows[0]);
         inner = rows[1];
     }
 
@@ -717,13 +722,30 @@ mod tests {
         let mut with_nodes = TopologyViewState::new(vec!["shop".to_string()]);
         with_nodes.set_graph(TopologyGraphOut { unread: unread.clone(), ..sample_graph() });
         let screen = drawn(&with_nodes);
-        assert!(screen.contains("Could not read HTTPRoute in shop: forbidden"), "{screen}");
+        assert!(screen.contains("HTTPRoute in shop: forbidden"), "{screen}");
         assert!(screen.contains("<r> to retry"), "{screen}");
+
+        // A real permission error is longer than a row: the retry hint and
+        // every later kind must still be on screen.
+        let long = "httproutes.gateway.networking.k8s.io is forbidden: User \"system:serviceaccount:team:reader\" cannot list resource \"httproutes\" in API group \"gateway.networking.k8s.io\" in the namespace \"shop\"";
+        let mut wordy = TopologyViewState::new(vec!["shop".to_string()]);
+        wordy.set_graph(TopologyGraphOut {
+            unread: vec![
+                srelens_kube::topology::UnreadSource { namespace: "shop".into(), kind: "HTTPRoute".into(), reason: long.into() },
+                srelens_kube::topology::UnreadSource { namespace: "shop".into(), kind: "GRPCRoute".into(), reason: "timed out".into() },
+            ],
+            ..sample_graph()
+        });
+        let screen = drawn(&wordy);
+        assert!(screen.contains("<r> to retry"), "{screen}");
+        assert!(screen.contains("GRPCRoute in shop: timed out"), "{screen}");
 
         // Nothing else drawn is still not "nothing found".
         let mut empty = TopologyViewState::new(vec!["shop".to_string()]);
         empty.set_graph(TopologyGraphOut { nodes: vec![], edges: vec![], probe: None, unread });
-        assert!(drawn(&empty).contains("Could not read HTTPRoute in shop"));
+        let screen = drawn(&empty);
+        assert!(screen.contains("HTTPRoute in shop: forbidden"), "{screen}");
+        assert!(screen.contains("<r> to retry"), "{screen}");
     }
 
     #[test]
