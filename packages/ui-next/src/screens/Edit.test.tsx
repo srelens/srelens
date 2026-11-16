@@ -344,6 +344,28 @@ describe("EditResource", () => {
     expect(core.diffSecret).toHaveBeenCalledWith("prod-eu", "checkout", "db", expect.stringContaining("bmV3LXMzY3JldA=="));
   });
 
+  it("says it is comparing while a Secret's gated diff is on its way, not the blanked 'unchanged' (#1085)", async () => {
+    // The background diff blanks the values, so a changed value reads as an
+    // unchanged line. Shown under the open panel until the gated diff came
+    // back, it told the reader nothing would change.
+    core.diffManifest.mockResolvedValue({
+      documents: [{ kind: "Secret", name: "db", exists: true, changed: false, currentResourceVersion: "1", rows: [{ tag: "same", left: '  password: ""', right: '  password: ""' }] }],
+    });
+    core.diffSecret.mockImplementation(() => new Promise(() => {}));
+    render(<EditResource route="/edit/prod-eu/Secret/checkout/db" />);
+    await waitFor(() => expect(latestEditor()?.value).toBe(SECRET));
+    act(() => latestEditor().onChange(SECRET.replace("czNjcmV0", "bmV3LXMzY3JldA==")));
+    await waitFor(() => expect(core.diffManifest).toHaveBeenCalled(), { timeout: 3000 });
+    await waitFor(() => expect(screen.queryByText("Not compared")).toBeNull());
+
+    await userEvent.click(screen.getByRole("button", { name: "Diff" }));
+    const panel = await screen.findByRole("complementary", { name: "Diff" });
+    expect(panel.textContent).not.toContain('password: ""');
+    expect(within(panel).getByText("Comparing with the cluster")).toBeDefined();
+    await waitFor(() => expect(core.diffSecret).toHaveBeenCalled(), { timeout: 3000 });
+    expect(panel.textContent).not.toContain('password: ""');
+  });
+
   it("says a Secret could not be read, rather than opening a blanked manifest to edit", async () => {
     core.getManifest.mockResolvedValue({ yaml: 'kind: Secret\ndata:\n  password: ""\n' });
     core.getSecret.mockResolvedValue({ error: "secrets \"db\" is forbidden" });

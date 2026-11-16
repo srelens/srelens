@@ -544,6 +544,12 @@ function EditExisting({ context, parts }: { context: ClusterContext; parts: Edit
   // shown as that answer was false reassurance right before Apply — and
   // silently switched off the "changed elsewhere" check with it.
   const [diffError, setDiffError] = useState("");
+  // Which comparison `diff` and `diffError` came from. Opening the panel on a
+  // Secret switches to the gated one; until it answers, the blanked
+  // background result reads a changed value as unchanged, so the panel shows
+  // only a result from the comparison it asked for.
+  const [diffRevealed, setDiffRevealed] = useState(false);
+  const panelCurrent = diffRevealed === revealDiff;
   useEffect(() => {
     if (!dirty) {
       setDiff(null);
@@ -558,6 +564,7 @@ function EditExisting({ context, parts }: { context: ClusterContext; parts: Edit
         if (!active) return;
         setDiff(out.error ? null : (out.documents ?? []));
         setDiffError(out.error ? describeError(out.error).detail : "");
+        setDiffRevealed(revealDiff);
         setDiffing(false);
       });
     }, 600);
@@ -737,7 +744,11 @@ function EditExisting({ context, parts }: { context: ClusterContext; parts: Edit
               a manifest diff is wide, and 360px of it was unreadable. */}
           {showChanges && dirty && (
             <aside className="rule-l scroll w-[30rem] shrink-0" aria-label="Diff">
-              <Changes docs={diff} computing={diffing} error={diffError} />
+              <Changes
+                docs={panelCurrent ? diff : null}
+                computing={diffing || !panelCurrent}
+                error={panelCurrent ? diffError : ""}
+              />
             </aside>
           )}
           {manifest.status === "ready" && (
