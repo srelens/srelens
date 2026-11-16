@@ -4,6 +4,7 @@ import {
   deleteResource,
   describeError,
   diffManifest,
+  diffSecret,
   getManifest,
   getSecret,
   notify,
@@ -529,7 +530,13 @@ function EditExisting({ context, parts }: { context: ClusterContext; parts: Edit
    * open, because its side product — the live resourceVersion — is what says
    * the object changed under the reader, and that is worth knowing before
    * they open anything.
+   *
+   * A Secret's diff comes from `k8s.diffManifest` blanked on both sides, so
+   * while the panel is open it comes from `k8s.diffSecret` instead, which
+   * leaves the values in (#1085). That read is audited, so it runs only while
+   * the reader is looking at the diff, not on every pause in typing.
    */
+  const revealDiff = isSecret && showChanges;
   const [diff, setDiff] = useState<DiffDoc[] | null>(null);
   const [diffing, setDiffing] = useState(false);
   // Kept apart from `diff` rather than folded into an empty list: an empty
@@ -537,6 +544,12 @@ function EditExisting({ context, parts }: { context: ClusterContext; parts: Edit
   // shown as that answer was false reassurance right before Apply — and
   // silently switched off the "changed elsewhere" check with it.
   const [diffError, setDiffError] = useState("");
+  // Which comparison `diff` and `diffError` came from. Opening the panel on a
+  // Secret switches to the gated one; until it answers, the blanked
+  // background result reads a changed value as unchanged, so the panel shows
+  // only a result from the comparison it asked for.
+  const [diffRevealed, setDiffRevealed] = useState(false);
+  const panelCurrent = diffRevealed === revealDiff;
   useEffect(() => {
     if (!dirty) {
       setDiff(null);
@@ -546,10 +559,12 @@ function EditExisting({ context, parts }: { context: ClusterContext; parts: Edit
     let active = true;
     setDiffing(true);
     const t = setTimeout(() => {
-      void diffManifest(pinned, yaml).then((out) => {
+      const compare = revealDiff ? diffSecret(pinned, namespace ?? "", name, yaml) : diffManifest(pinned, yaml);
+      void compare.then((out) => {
         if (!active) return;
         setDiff(out.error ? null : (out.documents ?? []));
         setDiffError(out.error ? describeError(out.error).detail : "");
+        setDiffRevealed(revealDiff);
         setDiffing(false);
       });
     }, 600);
@@ -557,7 +572,7 @@ function EditExisting({ context, parts }: { context: ClusterContext; parts: Edit
       active = false;
       clearTimeout(t);
     };
-  }, [pinned, yaml, dirty]);
+  }, [pinned, yaml, dirty, revealDiff, namespace, name]);
   const stale = useMemo(
     () =>
       diff?.some(
@@ -729,7 +744,11 @@ function EditExisting({ context, parts }: { context: ClusterContext; parts: Edit
               a manifest diff is wide, and 360px of it was unreadable. */}
           {showChanges && dirty && (
             <aside className="rule-l scroll w-[30rem] shrink-0" aria-label="Diff">
-              <Changes docs={diff} computing={diffing} error={diffError} />
+              <Changes
+                docs={panelCurrent ? diff : null}
+                computing={diffing || !panelCurrent}
+                error={panelCurrent ? diffError : ""}
+              />
             </aside>
           )}
           {manifest.status === "ready" && (

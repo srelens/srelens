@@ -7,7 +7,7 @@ Everything this server exposes over MCP, generated from the live registry so it 
 
 ## Tools
 
-139 tools, grouped by area and then by how a call is gated. Argument schemas are not reproduced here — call `tools/list` for those, which cannot go stale.
+140 tools, grouped by area and then by how a call is gated. Argument schemas are not reproduced here — call `tools/list` for those, which cannot go stale.
 
 **Impact** is how much a successful call disturbs — `low`, `medium` or `high` — and is a different question from the section heading, which is how the call is gated. A capability that accepts several named operations carries the highest level any of them reaches; the per-operation level travels with the resource.
 
@@ -82,10 +82,11 @@ Everything this server exposes over MCP, generated from the live registry so it 
 | `k8s.whyNotReady` | low | assembles structured root-cause evidence for unready or crashing pods (container states, exit codes, failing probes, warning events, and capped log tail) |
 | `k8s.whyPending` | low | diagnoses why a pod is stuck pending by evaluating scheduler node rejection counts, pod resource requests, unbound PVCs, and scheduling events |
 
-### Kubernetes — sensitive read (6)
+### Kubernetes — sensitive read (7)
 
 | Tool | Impact | Summary |
 | --- | --- | --- |
+| `k8s.diffSecret` | medium | diff one Secret's draft against the cluster via server dry-run apply, values included (sensitive) |
 | `k8s.getSecret` | medium | read a Secret's values, annotations and manifest (sensitive; data is base64-encoded) |
 | `k8s.nodeJournalLogs` | medium | retrieve journalctl logs for a service on a node via SSH |
 | `k8s.nodeRuntimeDiagnostics` | medium | run non-invasive host diagnostics (containers, dmesg, disk, memory, process) on a node via SSH |

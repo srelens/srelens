@@ -1784,6 +1784,22 @@ async fn run_suite() {
         .unwrap();
     assert_eq!(String::from_utf8(decoded).unwrap(), "hunter2");
 
+    // The gated diff shows a changed Secret value on both sides (#1085); the
+    // ungated `k8s.diffManifest` blanks them.
+    let secret_draft = format!(
+        "apiVersion: v1\nkind: Secret\nmetadata:\n  name: {SECRET}\n  namespace: {NS}\ndata:\n  password: aHVudGVyMw==\n"
+    );
+    let out = h
+        .ok(
+            "k8s.diffSecret",
+            json!({ "context": ctx, "namespace": NS, "name": SECRET, "yaml": secret_draft }),
+        )
+        .await;
+    let doc = &out["documents"][0];
+    assert_eq!(doc["changed"], true, "hunter2 -> hunter3 must be a diff");
+    let rows = doc["rows"].to_string();
+    assert!(rows.contains("aHVudGVyMg==") && rows.contains("aHVudGVyMw=="), "both values are in the gated diff");
+
     let out = h
         .ok(
             "k8s.openApiSchema",
