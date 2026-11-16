@@ -9,7 +9,8 @@ import { Icons } from "../lib/icons";
 import { useMark } from "../lib/marks";
 import { resolveContext } from "../lib/clusters";
 import { openTab, useActiveCluster, useTabs } from "../lib/tabsStore";
-import { crdNodes, navNodes, routeForNode } from "../lib/tree";
+import { crdNodes, gatewayNodes, navNodes, routeForNode } from "../lib/tree";
+import { splitGatewayCrds } from "../lib/gatewayApi";
 import { useAssistantAllowed } from "../lib/assistant";
 import { useResource } from "../lib/useResource";
 import { useSidebarCounts } from "../lib/sidebarCounts";
@@ -111,6 +112,8 @@ export function Nav({ contexts }: NavProps) {
     return () => window.removeEventListener("focus", rediscover);
   }, [rediscover]);
   const crds = useMemo(() => discovery.data ?? [], [discovery.data]);
+  // The Gateway API kinds stand in a group of their own, and so not under Custom resources (#1089).
+  const split = useMemo(() => splitGatewayCrds(crds), [crds]);
   // How many of each kind, for the rows under an open fold (#402).
   const counts = useSidebarCounts({ ctx, paused, expanded: ctx ? view.expanded[ctx.stableId] ?? NO_FOLDS : NO_FOLDS, crds });
 
@@ -123,7 +126,7 @@ export function Nav({ contexts }: NavProps) {
   const crdChildren: ResourceNode[] =
     discovery.status === "error"
       ? [{ id: CRD_ERROR_ID, label: "Custom resources unavailable — retry", icon: Icons.warn }]
-      : crdNodes(crds, counts);
+      : crdNodes(split.rest, counts);
 
   const nodes = useMemo<ResourceNode[]>(() => {
     // App routes and app scope both name the cluster by its key, which no two contexts share
@@ -134,8 +137,8 @@ export function Nav({ contexts }: NavProps) {
     // asked, is unknown rather than missing, so every page shows.
     const served = discovery.status === "error" || paused ? undefined : discovery.data ?? [];
     const apps = ctx && extensions.data ? appNavigation(extensions.data.plugins, ctx.key, served) : [];
-    return navNodes({ counts, apps, crds: crdChildren, agent: assistantOn });
-  }, [crdChildren, ctx, extensions.data, counts, assistantOn, discovery.status, discovery.data, paused]);
+    return navNodes({ counts, apps, crds: crdChildren, gateway: gatewayNodes(split.gateway, counts), agent: assistantOn });
+  }, [crdChildren, split, ctx, extensions.data, counts, assistantOn, discovery.status, discovery.data, paused]);
 
   const link = ctx
     ? (paused ? { word: "Paused", kind: "neutral" as const } : view.links[ctx.stableId] ? LINK[view.links[ctx.stableId].state] : UNKNOWN)

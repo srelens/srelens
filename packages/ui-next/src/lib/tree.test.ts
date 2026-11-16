@@ -3,7 +3,7 @@ import { BadgeCheck } from "lucide-react";
 import type { CrdRef } from "@srelens/core";
 import { Icons } from "./icons";
 import type { ResourceNode } from "@srelens/ui-kit";
-import { crdNodes, kindNodes, NAV_GROUPS, navLabel, navNodes, routeForNode } from "./tree";
+import { crdNodes, gatewayNodes, kindNodes, NAV_GROUPS, navLabel, navNodes, routeForNode } from "./tree";
 
 const labels = (nodes: ResourceNode[] | undefined) => (nodes ?? []).map((n) => n.label);
 const ids = (nodes: ResourceNode[] | undefined) => (nodes ?? []).map((n) => n.id);
@@ -204,5 +204,34 @@ describe("counts on nodes", () => {
     const crds = crdNodes([CERTS], new Map([["crd:certificates.cert-manager.io", "4"]]));
     expect(leaf(crds, "crd:certificates.cert-manager.io")?.count).toBe("4");
     expect(leaf(navNodes({ counts: new Map([["route:/forwards", "2"]]), crds: [], agent: false }), "route:/forwards")?.count).toBe("2");
+  });
+});
+
+describe("the Gateway API group (#1089)", () => {
+  const GW = crd("gateways.gateway.networking.k8s.io", "gateway.networking.k8s.io", "Gateway");
+  const POLICY = crd("backendtlspolicies.gateway.networking.k8s.io", "gateway.networking.k8s.io", "BackendTLSPolicy");
+  const OTHER = crd("meshes.gateway.networking.k8s.io", "gateway.networking.k8s.io", "Mesh");
+
+  it("names each kind in the plural, as the built-in kinds are", () => {
+    expect(labels(gatewayNodes([GW, POLICY, OTHER]))).toEqual(["Gateways", "BackendTLSPolicies", "Mesh"]);
+  });
+
+  it("makes each row a CRD row, so it routes and counts as one", () => {
+    const nodes = gatewayNodes([GW], new Map([["crd:gateways.gateway.networking.k8s.io", 4]]));
+    expect(nodes[0].id).toBe("crd:gateways.gateway.networking.k8s.io");
+    expect(nodes[0].count).toBe(4);
+    expect(routeForNode(nodes[0].id, [GW])).toBe("/k/gateways.gateway.networking.k8s.io");
+  });
+
+  it("stands directly after Network, among the resources", () => {
+    const nodes = navNodes({ crds: [], agent: true, gateway: gatewayNodes([GW]) });
+    const at = ids(nodes).indexOf("network");
+    expect(nodes[at + 1]).toMatchObject({ id: "gatewayapi", label: "Gateway API", band: "resources" });
+    expect(labels(nodes[at + 1].children)).toEqual(["Gateways"]);
+  });
+
+  it("is not there at all on a cluster without the CRDs", () => {
+    expect(ids(navNodes({ crds: [], agent: true, gateway: [] }))).not.toContain("gatewayapi");
+    expect(ids(navNodes({ crds: [], agent: true }))).not.toContain("gatewayapi");
   });
 });
