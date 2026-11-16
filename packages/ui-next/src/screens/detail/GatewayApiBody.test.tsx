@@ -173,6 +173,17 @@ describe("a route's pane", () => {
     expect(screen.queryByRole("button", { name: /far/ })).toBeNull();
   });
 
+  it("does not open a Gateway of another API group as the Gateway API's own", () => {
+    const foreign: K8sObject = {
+      ...ROUTE,
+      spec: { parentRefs: [{ group: "example.com", kind: "Gateway", name: "edge", namespace: "infra" }] },
+      status: {},
+    };
+    render(<GatewayApiBody object={foreign} context="prod-eu" />);
+    expect(screen.getByText("Gateway.example.com/infra/edge")).toBeDefined();
+    expect(screen.queryByRole("button", { name: "infra/edge" })).toBeNull();
+  });
+
   it("asks the cluster for nothing", () => {
     render(<GatewayApiBody object={ROUTE} context="prod-eu" />);
     expect(listCrds).not.toHaveBeenCalled();

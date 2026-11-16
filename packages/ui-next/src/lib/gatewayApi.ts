@@ -138,6 +138,8 @@ export function gatewayListeners(object: K8sObject): GatewayListener[] {
 
 export interface RouteParent {
   kind: string;
+  /** The parent's API group, defaulted to the Gateway API's as the API does. */
+  group: string;
   namespace: string;
   name: string;
   sectionName: string;
@@ -152,6 +154,8 @@ export interface RouteParent {
 function parentKey(ref: Record<string, unknown>, routeNamespace: string) {
   return {
     kind: str(ref.kind) || "Gateway",
+    // Unset is the Gateway API's group; set to "" it is the core group (a Service).
+    group: ref.group == null ? GATEWAY_API_GROUP : str(ref.group),
     namespace: str(ref.namespace) || routeNamespace,
     name: str(ref.name),
     sectionName: str(ref.sectionName),
@@ -169,6 +173,7 @@ export function routeParents(object: K8sObject): RouteParent[] {
       const theirs = parentKey(asRecord(s.parentRef), namespace);
       return (
         theirs.kind === parent.kind &&
+        theirs.group === parent.group &&
         theirs.namespace === parent.namespace &&
         theirs.name === parent.name &&
         theirs.sectionName === parent.sectionName &&

@@ -176,7 +176,9 @@ function parentColumns(context: string): Column<RouteParent>[] {
       key: "parent",
       header: "Parent",
       render: (p) =>
-        p.kind === "Gateway" ? (
+        // Only the Gateway API's own Gateway opens as one; a same-named kind
+        // in another group is an implementation's own resource.
+        p.kind === "Gateway" && p.group === GATEWAY_API_GROUP ? (
           <Opens
             label={`${p.namespace}/${p.name}`}
             route={detailRoute("Gateway", p.namespace, p.name, { cluster: context, group: GATEWAY_API_GROUP })}
@@ -184,7 +186,7 @@ function parentColumns(context: string): Column<RouteParent>[] {
           />
         ) : (
           // A Service parent is a mesh route; another kind is an implementation's own.
-          mono(`${p.kind}/${p.namespace}/${p.name}`)
+          mono(`${p.group ? `${p.kind}.${p.group}` : p.kind}/${p.namespace}/${p.name}`)
         ),
     },
     {
@@ -263,7 +265,7 @@ export function GatewayApiBody({ object, context }: { object: K8sObject; context
         <Table
           columns={parentColumns(context)}
           data={routeParents(object)}
-          getRowKey={(p) => `${p.kind}/${p.namespace}/${p.name}/${p.sectionName}/${p.port}`}
+          getRowKey={(p) => `${p.group}/${p.kind}/${p.namespace}/${p.name}/${p.sectionName}/${p.port}`}
           emptyText="Attached to nothing"
         />
       </Section>

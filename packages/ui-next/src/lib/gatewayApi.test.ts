@@ -132,8 +132,26 @@ describe("reading a route", () => {
 
   it("joins each parent to its verdict, defaulting the namespace to the route's", () => {
     expect(routeParents(route)).toEqual([
-      { kind: "Gateway", namespace: "infra", name: "edge", sectionName: "https", port: "", accepted: "True", resolvedRefs: "False" },
-      { kind: "Gateway", namespace: "store", name: "local", sectionName: "", port: "", accepted: "", resolvedRefs: "" },
+      { kind: "Gateway", group: G, namespace: "infra", name: "edge", sectionName: "https", port: "", accepted: "True", resolvedRefs: "False" },
+      { kind: "Gateway", group: G, namespace: "store", name: "local", sectionName: "", port: "", accepted: "", resolvedRefs: "" },
+    ]);
+  });
+
+  it("keeps a parent's API group, and joins it only to its own verdict", () => {
+    const route: K8sObject = {
+      kind: "HTTPRoute",
+      metadata: { name: "own", namespace: "store" },
+      spec: { parentRefs: [{ name: "edge" }, { group: "example.com", kind: "Gateway", name: "edge" }] },
+      status: {
+        parents: [
+          { parentRef: { group: "example.com", kind: "Gateway", name: "edge" }, conditions: [{ type: "Accepted", status: "False" }] },
+          { parentRef: { name: "edge" }, conditions: [{ type: "Accepted", status: "True" }] },
+        ],
+      },
+    };
+    expect(routeParents(route).map((p) => [p.group, p.accepted])).toEqual([
+      [G, "True"],
+      ["example.com", "False"],
     ]);
   });
 
