@@ -1,0 +1,823 @@
+{
+  "$schema": "https://raw.githubusercontent.com/srelens/srelens/main/schemas/extension-manifest.v0.5.json",
+  "id": "org.srelens.keda",
+  "name": "KEDA",
+  "version": "0.1.0",
+  "srelensApiVersion": "^0.5",
+  "kind": "declarative",
+  "permissions": [
+    "k8s.listCustomResource",
+    "k8s.listEvents",
+    "k8s.annotate",
+    "k8s.mergePatch"
+  ],
+  "capabilities": [
+    {
+      "name": "scaledobjects",
+      "title": "List Scaled objects",
+      "target": "k8s.listCustomResource",
+      "arguments": {
+        "group": "keda.sh",
+        "version": "v1alpha1",
+        "plural": "scaledobjects",
+        "kind": "ScaledObject",
+        "namespaced": true,
+        "printerColumns": [
+          {
+            "name": "ScaleTargetKind",
+            "jsonPath": ".status.scaleTargetKind",
+            "type": "string"
+          },
+          {
+            "name": "ScaleTargetName",
+            "jsonPath": ".spec.scaleTargetRef.name",
+            "type": "string"
+          },
+          {
+            "name": "Min",
+            "jsonPath": ".spec.minReplicaCount",
+            "type": "integer"
+          },
+          {
+            "name": "Max",
+            "jsonPath": ".spec.maxReplicaCount",
+            "type": "integer"
+          },
+          {
+            "name": "Ready",
+            "jsonPath": ".status.conditions[?(@.type==\"Ready\")].status",
+            "type": "string"
+          },
+          {
+            "name": "Active",
+            "jsonPath": ".status.conditions[?(@.type==\"Active\")].status",
+            "type": "string"
+          },
+          {
+            "name": "Fallback",
+            "jsonPath": ".status.conditions[?(@.type==\"Fallback\")].status",
+            "type": "string"
+          },
+          {
+            "name": "Paused",
+            "jsonPath": ".status.conditions[?(@.type==\"Paused\")].status",
+            "type": "string"
+          },
+          {
+            "name": "Triggers",
+            "jsonPath": ".status.triggersTypes",
+            "type": "string"
+          },
+          {
+            "name": "Authentications",
+            "jsonPath": ".status.authenticationsTypes",
+            "type": "string"
+          }
+        ]
+      },
+      "inputs": [
+        "context",
+        "namespace"
+      ]
+    },
+    {
+      "name": "scaledjobs",
+      "title": "List Scaled jobs",
+      "target": "k8s.listCustomResource",
+      "arguments": {
+        "group": "keda.sh",
+        "version": "v1alpha1",
+        "plural": "scaledjobs",
+        "kind": "ScaledJob",
+        "namespaced": true,
+        "printerColumns": [
+          {
+            "name": "Min",
+            "jsonPath": ".spec.minReplicaCount",
+            "type": "integer"
+          },
+          {
+            "name": "Max",
+            "jsonPath": ".spec.maxReplicaCount",
+            "type": "integer"
+          },
+          {
+            "name": "Ready",
+            "jsonPath": ".status.conditions[?(@.type==\"Ready\")].status",
+            "type": "string"
+          },
+          {
+            "name": "Active",
+            "jsonPath": ".status.conditions[?(@.type==\"Active\")].status",
+            "type": "string"
+          },
+          {
+            "name": "Paused",
+            "jsonPath": ".status.conditions[?(@.type==\"Paused\")].status",
+            "type": "string"
+          },
+          {
+            "name": "Triggers",
+            "jsonPath": ".status.triggersTypes",
+            "type": "string"
+          },
+          {
+            "name": "Authentications",
+            "jsonPath": ".status.authenticationsTypes",
+            "type": "string"
+          }
+        ]
+      },
+      "inputs": [
+        "context",
+        "namespace"
+      ]
+    },
+    {
+      "name": "triggerauthentications",
+      "title": "List Trigger authentications",
+      "target": "k8s.listCustomResource",
+      "arguments": {
+        "group": "keda.sh",
+        "version": "v1alpha1",
+        "plural": "triggerauthentications",
+        "kind": "TriggerAuthentication",
+        "namespaced": true,
+        "printerColumns": [
+          {
+            "name": "PodIdentity",
+            "jsonPath": ".spec.podIdentity.provider",
+            "type": "string"
+          },
+          {
+            "name": "VaultAddress",
+            "jsonPath": ".spec.hashiCorpVault.address",
+            "type": "string"
+          },
+          {
+            "name": "ScaledObjects",
+            "jsonPath": ".status.scaledobjects",
+            "type": "string"
+          },
+          {
+            "name": "ScaledJobs",
+            "jsonPath": ".status.scaledjobs",
+            "type": "string"
+          }
+        ]
+      },
+      "inputs": [
+        "context",
+        "namespace"
+      ]
+    },
+    {
+      "name": "clustertriggerauthentications",
+      "title": "List Cluster trigger authentications",
+      "target": "k8s.listCustomResource",
+      "arguments": {
+        "group": "keda.sh",
+        "version": "v1alpha1",
+        "plural": "clustertriggerauthentications",
+        "kind": "ClusterTriggerAuthentication",
+        "namespaced": false,
+        "printerColumns": [
+          {
+            "name": "PodIdentity",
+            "jsonPath": ".spec.podIdentity.provider",
+            "type": "string"
+          },
+          {
+            "name": "FilePath",
+            "jsonPath": ".spec.filePath",
+            "type": "string"
+          },
+          {
+            "name": "VaultAddress",
+            "jsonPath": ".spec.hashiCorpVault.address",
+            "type": "string"
+          },
+          {
+            "name": "ScaledObjects",
+            "jsonPath": ".status.scaledobjects",
+            "type": "string"
+          },
+          {
+            "name": "ScaledJobs",
+            "jsonPath": ".status.scaledjobs",
+            "type": "string"
+          }
+        ]
+      },
+      "inputs": [
+        "context",
+        "namespace"
+      ]
+    },
+    {
+      "name": "events",
+      "title": "List events",
+      "target": "k8s.listEvents",
+      "arguments": {},
+      "inputs": [
+        "context",
+        "namespace"
+      ]
+    }
+  ],
+  "contributions": {
+    "pages": [
+      {
+        "id": "overview",
+        "title": "Overview",
+        "capability": "scaledobjects",
+        "dashboard": {
+          "pages": [
+            "scaledobjects",
+            "scaledjobs"
+          ],
+          "events": {
+            "capability": "events",
+            "apiGroups": [
+              "keda.sh"
+            ]
+          }
+        }
+      },
+      {
+        "id": "scaledobjects",
+        "title": "Scaled objects",
+        "capability": "scaledobjects"
+      },
+      {
+        "id": "scaledjobs",
+        "title": "Scaled jobs",
+        "capability": "scaledjobs"
+      },
+      {
+        "id": "triggerauthentications",
+        "title": "Trigger authentications",
+        "capability": "triggerauthentications",
+        "group": "Authentication"
+      },
+      {
+        "id": "clustertriggerauthentications",
+        "title": "Cluster trigger authentications",
+        "capability": "clustertriggerauthentications",
+        "group": "Authentication"
+      }
+    ],
+    "detailPanels": [
+      {
+        "id": "scaledobject-summary",
+        "title": "Scaled object",
+        "forKinds": [
+          "keda.sh/ScaledObject"
+        ],
+        "sections": [
+          {
+            "type": "fields",
+            "fields": [
+              {
+                "label": "Scale target",
+                "jsonPath": ".spec.scaleTargetRef.name"
+              },
+              {
+                "label": "Target kind",
+                "jsonPath": ".status.scaleTargetKind"
+              },
+              {
+                "label": "Minimum replicas",
+                "jsonPath": ".spec.minReplicaCount",
+                "format": "number"
+              },
+              {
+                "label": "Maximum replicas",
+                "jsonPath": ".spec.maxReplicaCount",
+                "format": "number"
+              },
+              {
+                "label": "Idle replicas",
+                "jsonPath": ".spec.idleReplicaCount",
+                "format": "number"
+              },
+              {
+                "label": "Polling interval (s)",
+                "jsonPath": ".spec.pollingInterval",
+                "format": "number"
+              },
+              {
+                "label": "Cooldown period (s)",
+                "jsonPath": ".spec.cooldownPeriod",
+                "format": "number"
+              },
+              {
+                "label": "Fallback replicas",
+                "jsonPath": ".spec.fallback.replicas",
+                "format": "number"
+              },
+              {
+                "label": "Triggers",
+                "jsonPath": ".status.triggersTypes"
+              },
+              {
+                "label": "Authentications",
+                "jsonPath": ".status.authenticationsTypes"
+              },
+              {
+                "label": "Autoscaler",
+                "jsonPath": ".status.hpaName"
+              },
+              {
+                "label": "Replicas before scaling",
+                "jsonPath": ".status.originalReplicaCount",
+                "format": "number"
+              },
+              {
+                "label": "Paused at replicas",
+                "jsonPath": ".status.pausedReplicaCount",
+                "format": "number"
+              },
+              {
+                "label": "Last active",
+                "jsonPath": ".status.lastActiveTime",
+                "format": "date"
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "id": "scaledjob-summary",
+        "title": "Scaled job",
+        "forKinds": [
+          "keda.sh/ScaledJob"
+        ],
+        "sections": [
+          {
+            "type": "fields",
+            "fields": [
+              {
+                "label": "Minimum jobs",
+                "jsonPath": ".spec.minReplicaCount",
+                "format": "number"
+              },
+              {
+                "label": "Maximum jobs",
+                "jsonPath": ".spec.maxReplicaCount",
+                "format": "number"
+              },
+              {
+                "label": "Polling interval (s)",
+                "jsonPath": ".spec.pollingInterval",
+                "format": "number"
+              },
+              {
+                "label": "Scaling strategy",
+                "jsonPath": ".spec.scalingStrategy.strategy"
+              },
+              {
+                "label": "Rollout strategy",
+                "jsonPath": ".spec.rollout.strategy"
+              },
+              {
+                "label": "Successful jobs kept",
+                "jsonPath": ".spec.successfulJobsHistoryLimit",
+                "format": "number"
+              },
+              {
+                "label": "Failed jobs kept",
+                "jsonPath": ".spec.failedJobsHistoryLimit",
+                "format": "number"
+              },
+              {
+                "label": "Triggers",
+                "jsonPath": ".status.triggersTypes"
+              },
+              {
+                "label": "Authentications",
+                "jsonPath": ".status.authenticationsTypes"
+              },
+              {
+                "label": "Last active",
+                "jsonPath": ".status.lastActiveTime",
+                "format": "date"
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "id": "scaling-conditions",
+        "title": "Conditions",
+        "forKinds": [
+          "keda.sh/ScaledObject",
+          "keda.sh/ScaledJob"
+        ],
+        "sections": [
+          {
+            "type": "conditions",
+            "jsonPath": ".status.conditions"
+          }
+        ]
+      },
+      {
+        "id": "triggerauthentication-summary",
+        "title": "Trigger authentication",
+        "forKinds": [
+          "keda.sh/TriggerAuthentication",
+          "keda.sh/ClusterTriggerAuthentication"
+        ],
+        "sections": [
+          {
+            "type": "fields",
+            "fields": [
+              {
+                "label": "Pod identity",
+                "jsonPath": ".spec.podIdentity.provider"
+              },
+              {
+                "label": "Vault address",
+                "jsonPath": ".spec.hashiCorpVault.address"
+              },
+              {
+                "label": "Azure Key Vault",
+                "jsonPath": ".spec.azureKeyVault.vaultUri"
+              },
+              {
+                "label": "File path",
+                "jsonPath": ".spec.filePath"
+              },
+              {
+                "label": "Used by scaled objects",
+                "jsonPath": ".status.scaledobjects"
+              },
+              {
+                "label": "Used by scaled jobs",
+                "jsonPath": ".status.scaledjobs"
+              }
+            ]
+          }
+        ]
+      }
+    ],
+    "detailTabs": [],
+    "detailLinks": [],
+    "commands": [
+      {
+        "id": "open-overview",
+        "title": "Open overview",
+        "target": {
+          "page": "overview"
+        }
+      },
+      {
+        "id": "open-scaledobjects",
+        "title": "Open scaled objects",
+        "target": {
+          "page": "scaledobjects"
+        }
+      },
+      {
+        "id": "open-scaledjobs",
+        "title": "Open scaled jobs",
+        "target": {
+          "page": "scaledjobs"
+        }
+      },
+      {
+        "id": "open-triggerauthentications",
+        "title": "Open trigger authentications",
+        "target": {
+          "page": "triggerauthentications"
+        }
+      },
+      {
+        "id": "open-clustertriggerauthentications",
+        "title": "Open cluster trigger authentications",
+        "target": {
+          "page": "clustertriggerauthentications"
+        }
+      },
+      {
+        "id": "pause",
+        "title": "Pause autoscaling",
+        "target": {
+          "action": "pause"
+        },
+        "forKinds": [
+          "keda.sh/ScaledObject"
+        ]
+      },
+      {
+        "id": "scale-to-zero",
+        "title": "Pause and scale to zero",
+        "target": {
+          "action": "scale-to-zero"
+        },
+        "forKinds": [
+          "keda.sh/ScaledObject"
+        ]
+      },
+      {
+        "id": "resume",
+        "title": "Resume autoscaling",
+        "target": {
+          "action": "resume"
+        },
+        "forKinds": [
+          "keda.sh/ScaledObject"
+        ]
+      },
+      {
+        "id": "pause-job",
+        "title": "Pause scaled job",
+        "target": {
+          "action": "pause-job"
+        },
+        "forKinds": [
+          "keda.sh/ScaledJob"
+        ]
+      },
+      {
+        "id": "resume-job",
+        "title": "Resume scaled job",
+        "target": {
+          "action": "resume-job"
+        },
+        "forKinds": [
+          "keda.sh/ScaledJob"
+        ]
+      }
+    ],
+    "statusResolvers": [
+      {
+        "forKinds": [
+          "keda.sh/ScaledObject",
+          "keda.sh/ScaledJob"
+        ],
+        "rules": [
+          {
+            "when": [
+              {
+                "jsonPath": ".status.conditions[?(@.type==\"Paused\")].status",
+                "equals": "True"
+              }
+            ],
+            "status": "suspended",
+            "label": "Paused",
+            "reason": ".status.conditions[?(@.type==\"Paused\")].message"
+          },
+          {
+            "when": [
+              {
+                "jsonPath": ".status.conditions[?(@.type==\"Ready\")].status",
+                "equals": "False"
+              }
+            ],
+            "status": "error",
+            "label": "Not ready",
+            "reason": ".status.conditions[?(@.type==\"Ready\")].message"
+          },
+          {
+            "when": [
+              {
+                "jsonPath": ".status.conditions[?(@.type==\"Fallback\")].status",
+                "equals": "True"
+              }
+            ],
+            "status": "warning",
+            "label": "Fallback",
+            "reason": ".status.conditions[?(@.type==\"Fallback\")].message"
+          },
+          {
+            "when": [
+              {
+                "jsonPath": ".status.conditions[?(@.type==\"Active\")].status",
+                "equals": "True"
+              }
+            ],
+            "status": "healthy",
+            "label": "Active",
+            "reason": ".status.conditions[?(@.type==\"Active\")].message"
+          },
+          {
+            "when": [
+              {
+                "jsonPath": ".status.conditions[?(@.type==\"Ready\")].status",
+                "equals": "True"
+              }
+            ],
+            "status": "healthy",
+            "label": "Ready",
+            "reason": ".status.conditions[?(@.type==\"Active\")].message"
+          },
+          {
+            "when": [],
+            "status": "unknown",
+            "label": "Unknown"
+          }
+        ]
+      }
+    ],
+    "dashboardCards": [
+      {
+        "id": "scaledobjects-by-status",
+        "title": "Scaled objects by status",
+        "size": "m",
+        "type": "countByStatus",
+        "source": "scaledobjects",
+        "target": {
+          "page": "scaledobjects"
+        }
+      },
+      {
+        "id": "scaledobjects-not-ready",
+        "title": "Scaled objects not ready",
+        "size": "s",
+        "type": "count",
+        "source": "scaledobjects",
+        "predicate": {
+          "jsonPath": ".status.conditions[?(@.type==\"Ready\")].status",
+          "equals": "False"
+        },
+        "target": {
+          "page": "scaledobjects"
+        }
+      },
+      {
+        "id": "scaledobjects-paused",
+        "title": "Paused scaled objects",
+        "size": "s",
+        "type": "count",
+        "source": "scaledobjects",
+        "predicate": {
+          "jsonPath": ".status.conditions[?(@.type==\"Paused\")].status",
+          "equals": "True"
+        },
+        "target": {
+          "page": "scaledobjects"
+        }
+      },
+      {
+        "id": "scaledjobs-by-status",
+        "title": "Scaled jobs by status",
+        "size": "m",
+        "type": "countByStatus",
+        "source": "scaledjobs",
+        "target": {
+          "page": "scaledjobs"
+        }
+      },
+      {
+        "id": "scaledjobs-not-ready",
+        "title": "Scaled jobs not ready",
+        "size": "s",
+        "type": "count",
+        "source": "scaledjobs",
+        "predicate": {
+          "jsonPath": ".status.conditions[?(@.type==\"Ready\")].status",
+          "equals": "False"
+        },
+        "target": {
+          "page": "scaledjobs"
+        }
+      }
+    ],
+    "resourceLinks": [
+      {
+        "id": "scaledobject-deployment",
+        "from": "keda.sh/ScaledObject",
+        "to": "apps/Deployment",
+        "relation": "references",
+        "match": {
+          "path": ".spec.scaleTargetRef"
+        }
+      },
+      {
+        "id": "scaledobject-autoscaler",
+        "from": "keda.sh/ScaledObject",
+        "to": "autoscaling/HorizontalPodAutoscaler",
+        "relation": "references",
+        "match": {
+          "path": ".status.hpaName"
+        }
+      },
+      {
+        "id": "triggerauthentication-secret",
+        "from": "keda.sh/TriggerAuthentication",
+        "to": "/Secret",
+        "relation": "references",
+        "match": {
+          "path": ".spec.secretTargetRef[*]"
+        }
+      }
+    ]
+  },
+  "actions": [
+    {
+      "name": "pause",
+      "title": "Pause autoscaling",
+      "target": "k8s.annotate",
+      "resource": "scaledobjects",
+      "arguments": {
+        "key": "autoscaling.keda.sh/paused",
+        "value": "true"
+      },
+      "preconditions": [
+        {
+          "jsonPath": ".metadata.annotations['autoscaling.keda.sh/paused']",
+          "absent": true,
+          "reason": "Autoscaling is already paused"
+        }
+      ],
+      "availableWhen": [
+        {
+          "jsonPath": ".metadata.annotations['autoscaling.keda.sh/paused']",
+          "absent": true,
+          "reason": "Autoscaling is already paused"
+        }
+      ]
+    },
+    {
+      "name": "scale-to-zero",
+      "title": "Scale to zero",
+      "target": "k8s.annotate",
+      "resource": "scaledobjects",
+      "arguments": {
+        "key": "autoscaling.keda.sh/paused-replicas",
+        "value": "0"
+      },
+      "preconditions": [
+        {
+          "jsonPath": ".metadata.annotations['autoscaling.keda.sh/paused-replicas']",
+          "absent": true,
+          "reason": "This scaled object is already held at a fixed replica count"
+        }
+      ],
+      "availableWhen": [
+        {
+          "jsonPath": ".metadata.annotations['autoscaling.keda.sh/paused-replicas']",
+          "absent": true,
+          "reason": "This scaled object is already held at a fixed replica count"
+        }
+      ]
+    },
+    {
+      "name": "resume",
+      "title": "Resume autoscaling",
+      "target": "k8s.mergePatch",
+      "resource": "scaledobjects",
+      "arguments": {
+        "patch": {
+          "metadata": {
+            "annotations": {
+              "autoscaling.keda.sh/paused": null,
+              "autoscaling.keda.sh/paused-replicas": null
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "pause-job",
+      "title": "Pause autoscaling",
+      "target": "k8s.annotate",
+      "resource": "scaledjobs",
+      "arguments": {
+        "key": "autoscaling.keda.sh/paused",
+        "value": "true"
+      },
+      "preconditions": [
+        {
+          "jsonPath": ".metadata.annotations['autoscaling.keda.sh/paused']",
+          "absent": true,
+          "reason": "Autoscaling is already paused"
+        }
+      ],
+      "availableWhen": [
+        {
+          "jsonPath": ".metadata.annotations['autoscaling.keda.sh/paused']",
+          "absent": true,
+          "reason": "Autoscaling is already paused"
+        }
+      ]
+    },
+    {
+      "name": "resume-job",
+      "title": "Resume autoscaling",
+      "target": "k8s.mergePatch",
+      "resource": "scaledjobs",
+      "arguments": {
+        "patch": {
+          "metadata": {
+            "annotations": {
+              "autoscaling.keda.sh/paused": null,
+              "autoscaling.keda.sh/paused-replicas": null
+            }
+          }
+        }
+      }
+    }
+  ]
+}
