@@ -218,7 +218,8 @@ function matchText(match: Record<string, unknown>): string {
   if (typeof match.method === "string") parts.push(match.method);
   else if (match.method) {
     const method = asRecord(match.method);
-    parts.push([str(method.service), str(method.method)].filter(Boolean).join("/"));
+    const name = [str(method.service), str(method.method)].filter(Boolean).join("/");
+    parts.push(name && method.type === "RegularExpression" ? `RegularExpression ${name}` : name);
   }
   const path = asRecord(match.path);
   if (path.value !== undefined) parts.push(`${str(path.type) || "PathPrefix"} ${str(path.value)}`);
@@ -231,12 +232,11 @@ export function routeRules(object: K8sObject): RouteRule[] {
   const namespace = str(asRecord(object.metadata).namespace);
   return asArray(asRecord(object.spec).rules).map((r, index) => {
     const rule = asRecord(r);
-    const matches = asArray(rule.matches)
-      .map((m) => matchText(asRecord(m)))
-      .filter(Boolean);
+    // Matches are alternatives: one empty match lets every request through.
+    const matches = asArray(rule.matches).map((m) => matchText(asRecord(m)));
     return {
       key: String(index),
-      matches: matches.join(", ") || "*",
+      matches: matches.length === 0 || matches.includes("") ? "*" : matches.join(", "),
       backends: asArray(rule.backendRefs).map((b) => {
         const ref = asRecord(b);
         const kind = str(ref.kind) || "Service";

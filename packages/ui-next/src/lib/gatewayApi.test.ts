@@ -210,6 +210,25 @@ describe("reading a route", () => {
     expect(routeRules(grpc)[0].matches).toBe("cart.Cart/Add");
   });
 
+  it("tells a regular-expression gRPC method from an exact one", () => {
+    const grpc: K8sObject = {
+      kind: "GRPCRoute",
+      metadata: { name: "g", namespace: "store" },
+      spec: { rules: [{ matches: [{ method: { type: "RegularExpression", service: "cart\\..*", method: "Add" } }] }] },
+    };
+    expect(routeRules(grpc)[0].matches).toBe("RegularExpression cart\\..*/Add");
+  });
+
+  it("reads a rule with an empty match among others as matching everything", () => {
+    // Matches are alternatives; an empty one matches every request.
+    const any: K8sObject = {
+      kind: "HTTPRoute",
+      metadata: { name: "any", namespace: "store" },
+      spec: { rules: [{ matches: [{}, { path: { type: "Exact", value: "/health" } }] }] },
+    };
+    expect(routeRules(any)[0].matches).toBe("*");
+  });
+
   it("names each backend, and knows which are Services", () => {
     expect(routeRules(route)[0].backends).toEqual([
       { kind: "Service", namespace: "store", name: "api", port: "8080", weight: "90", isService: true },
