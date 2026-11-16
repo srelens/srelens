@@ -488,3 +488,67 @@ fn a_pod_binding_is_granted_like_any_other() {
     value["capabilities"].as_array_mut().unwrap().remove(EXEC);
     assert_eq!(one(&value).code, ValidationCode::PermissionMismatch);
 }
+
+/// An executable app that reads StrimziPodSets and connects to port 9092 of their pods.
+fn connecting(api: &str, arguments: Value) -> Value {
+    json!({
+        "id":"org.example.kafka", "name":"Kafka", "version":"0.1.0",
+        "srelensApiVersion": api, "kind":"executable",
+        "permissions":["k8s.listCustomResource", "k8s.connectPod"],
+        "capabilities":[
+            {"name":"podsets","title":"Pod sets","target":"k8s.listCustomResource",
+                "inputs":["context","namespace"],
+                "arguments":{"group":"core.strimzi.io","version":"v1beta2","plural":"strimzipodsets",
+                    "kind":"StrimziPodSet","namespaced":true}},
+            {"name":"broker","title":"Kafka broker","target":"k8s.connectPod","inputs":[],
+                "arguments":arguments}
+        ],
+        "sidecar":{"binaries":{"linux-amd64":"bin/linux-amd64/kafka"},"operations":[{"name":"scan","title":"Scan","inputs":[]}]},
+        "contributions":{"pages":[],"detailTabs":[],"detailLinks":[]}
+    })
+}
+
+/// The broker binding with `extra` arguments added to (or replacing) its own.
+fn broker(extra: Value) -> Value {
+    let mut arguments = json!({"resource":"podsets","selector":".spec.selector","port":9092});
+    arguments.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+    connecting("^0.9", arguments)
+}
+
+#[test]
+fn connect_pod_needs_api_0_9() {
+    let value = connecting(
+        "^0.8",
+        json!({"resource":"podsets","selector":".spec.selector","port":9092}),
+    );
+    let found = errors(&value);
+    assert!(found.iter().any(|e| e.message.contains("0.9.0")), "{found:?}");
+}
+
+#[test]
+fn connect_pod_takes_the_forward_arguments() {
+    parse(&broker(json!({"service": true})));
+    for (key, bad, path) in [
+        ("port", json!(0), "capabilities[1].arguments.port"),
+        ("service", json!("yes"), "capabilities[1].arguments.service"),
+        ("command", json!(["kafka"]), "capabilities[1].arguments.command"),
+    ] {
+        let found = problems(&broker(json!({ key: bad })));
+        assert!(
+            found.iter().any(|(_, at)| at == path),
+            "{key}: {found:?}"
+        );
+    }
+}
+
+#[test]
+fn a_connect_permission_may_grant_namespaces() {
+    let mut value = connecting("^0.9", json!({"port":9092}));
+    value["permissions"][1] = json!({"capability":"k8s.connectPod","namespaces":["kafka"]});
+    let parsed = parse(&value);
+    assert_eq!(parsed.pod_namespaces("k8s.connectPod"), ["kafka"]);
+    match parsed.pod_scope(&parsed.capabilities[1]).unwrap() {
+        PodScope::Namespaces(namespaces) => assert_eq!(namespaces, ["kafka"]),
+        other => panic!("{other:?}"),
+    }
+}

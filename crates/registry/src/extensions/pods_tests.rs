@@ -1749,3 +1749,47 @@ async fn a_forward_says_when_its_connections_fail() {
         .iter()
         .all(|f| f["type"] != "close" && f["type"] != "error"));
 }
+
+fn kafka() -> Value {
+    json!({
+        "id":"org.example.kafka", "name":"Kafka", "version":"0.1.0", "srelensApiVersion":"^0.9",
+        "kind":"executable",
+        "permissions":["k8s.listCustomResource", "k8s.connectPod"],
+        "capabilities":[
+            {"name":"podsets","title":"Pod sets","target":"k8s.listCustomResource",
+                "inputs":["context","namespace"],
+                "arguments":{"group":"core.strimzi.io","version":"v1beta2","plural":"strimzipodsets",
+                    "kind":"StrimziPodSet","namespaced":true}},
+            {"name":"broker","title":"Kafka broker","target":"k8s.connectPod","inputs":[],
+                "arguments":{"resource":"podsets","selector":".spec.selector","port":9092}}],
+        "sidecar":{"binaries":{"linux-amd64":"bin/linux-amd64/kafka"},"operations":[{"name":"scan","title":"Scan","inputs":[]}]},
+        "contributions":{"pages":[],"detailTabs":[],"detailLinks":[]}
+    })
+}
+
+#[test]
+fn connect_pod_needs_an_executable_app() {
+    let mut value = kafka();
+    value["kind"] = json!("declarative");
+    value.as_object_mut().unwrap().remove("sidecar");
+    let manifest = parsed(&value);
+    let found = super::validate_app(&manifest, &manifest.permission_names(), fake_core())
+        .expect_err("a declarative app may not connect to pods");
+    let error = found.0
+        .iter()
+        .find(|e| e.path == "capabilities[1].target")
+        .unwrap_or_else(|| panic!("{found:?}"));
+    assert_eq!(error.code, srelens_plugin_host::ValidationCode::UnsupportedTarget);
+    assert!(error.message.contains("Pod connections require an executable app"), "{error:?}");
+}
+
+#[test]
+fn the_access_review_says_what_a_pod_connection_reaches() {
+    let items = super::access_items(&parsed(&kafka()), &["k8s.listCustomResource".into(), "k8s.connectPod".into()]);
+    assert!(
+        items.iter().any(|item| item.starts_with(
+            "Lets this app's program connect to port 9092 of pods selected by each StrimziPodSet"
+        ) && item.ends_with("with k8s.connectPod")),
+        "{items:#?}"
+    );
+}

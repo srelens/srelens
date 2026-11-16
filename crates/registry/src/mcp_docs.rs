@@ -497,6 +497,7 @@ pub fn render_app_tools(reg: &srelens_capability::Registry) -> String {
             .iter()
             .filter_map(|primitive| reg.get(primitive).map(|c| c.annotations))
             .min_by_key(|annotations| annotations.impact),
+        false,
     );
     out.push_str(&format!(
         "| sidecar operation, of an app that declares actions | its app's readers and declared actions, through the broker | {} | at least {}, and at least its highest action's |\n\n",

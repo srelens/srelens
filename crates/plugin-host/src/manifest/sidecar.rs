@@ -62,6 +62,17 @@ pub const SIDECAR_OPERATION: Annotations = Annotations {
     ..Annotations::READ_ONLY
 };
 
+/// What a sidecar operation runs under when its app declares no action but
+/// connects to pods (`k8s.connectPod`): what its sidecar sends through a tunnel
+/// can change whatever listens there, so it is not a read, and it is High
+/// impact. Not gated: the grant was given at install, and the app's own pages
+/// run its operations.
+pub const SIDECAR_OPERATION_CONNECTING: Annotations = Annotations {
+    read_only: false,
+    impact: srelens_capability::Impact::High,
+    ..SIDECAR_OPERATION
+};
+
 /// The host's sentence for an operation of an app that declares actions: what
 /// is asked, and that every change it leads to is asked about again.
 pub const SIDECAR_OPERATION_CONFIRM: &str =
@@ -70,7 +81,9 @@ pub const SIDECAR_OPERATION_CONFIRM: &str =
 /// What a sidecar operation runs under, given the host rows of the actions its
 /// app declares (`actions`).
 ///
-/// With none, [`SIDECAR_OPERATION`]. With any, the sidecar may ask the broker
+/// With none, [`SIDECAR_OPERATION`], or [`SIDECAR_OPERATION_CONNECTING`] when
+/// `connects_to_pods`: the app has a `k8s.connectPod` binding. With any, the
+/// sidecar may ask the broker
 /// to run them, so the operation is not a read: it inherits the strongest of
 /// their rows through [`Annotations::for_binding`] — gated, at least their
 /// impact, destructive if one is — and the host's own
@@ -80,10 +93,11 @@ pub const SIDECAR_OPERATION_CONFIRM: &str =
 /// named.
 pub fn sidecar_operation_annotations(
     actions: impl IntoIterator<Item = Annotations>,
+    connects_to_pods: bool,
 ) -> Annotations {
     let mut actions = actions.into_iter().peekable();
     if actions.peek().is_none() {
-        return SIDECAR_OPERATION;
+        return if connects_to_pods { SIDECAR_OPERATION_CONNECTING } else { SIDECAR_OPERATION };
     }
     let reach = actions.fold(Annotations::WEAKEST, Annotations::at_least);
     let mut row = Annotations::for_binding(reach, SIDECAR_OPERATION);

@@ -362,3 +362,36 @@ async fn declared_image_cursor_is_exposed_and_accepts_bounded_pages_only() {
         .await
         .is_err());
 }
+
+#[test]
+fn an_app_that_connects_to_pods_has_no_read_only_operations() {
+    let (route, _) = recording();
+    let mut value = manifest();
+    value.as_object_mut().unwrap().remove("actions");
+    value["srelensApiVersion"] = json!("^0.9");
+    value["permissions"] = json!(["k8s.listCustomResource", "k8s.connectPod"]);
+    value["capabilities"] = json!([
+        {"name":"applications","title":"List applications","target":"k8s.listCustomResource",
+         "arguments":{"group":"argoproj.io","version":"v1alpha1","plural":"applications",
+             "kind":"Application","namespaced":true},
+         "inputs":["context","namespace"]},
+        {"name":"broker","title":"Broker","target":"k8s.connectPod","inputs":[],
+         "arguments":{"resource":"applications","selector":".spec.selector","port":9092}}]);
+    value["contributions"]["pages"] = json!([]);
+    let (reg, _) = register(&value, route.clone()).unwrap();
+    let operation = reg
+        .get("plugin/org.example.gitops/diff")
+        .unwrap()
+        .annotations;
+    assert!(!operation.read_only && !operation.requires_confirm);
+    assert_eq!(operation.impact, Impact::High);
+    // Without the binding, the same app is still a read.
+    value["permissions"] = json!(["k8s.listCustomResource"]);
+    value["capabilities"].as_array_mut().unwrap().pop();
+    let (reg, _) = register(&value, route).unwrap();
+    let operation = reg
+        .get("plugin/org.example.gitops/diff")
+        .unwrap()
+        .annotations;
+    assert_eq!(operation, SIDECAR_OPERATION);
+}
