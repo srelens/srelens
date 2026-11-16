@@ -263,6 +263,17 @@ describe("useSidebarCounts", () => {
     await waitFor(() => expect(certificates()).toEqual([{ kind: "Certificate", group: "cert-manager.io", version: "v1", plural: "certificates", namespaced: true }]));
   });
 
+  it("the Gateway API's kinds are counted under their own fold, not Custom resources' (#1089)", async () => {
+    const GATEWAYS: CrdRef = { name: "gateways.gateway.networking.k8s.io", group: "gateway.networking.k8s.io", version: "v1", kind: "Gateway", plural: "gateways", namespaced: true };
+    const gateways = () => countResources.mock.calls.flatMap((call) => call[1] as CountKindRef[]).filter((k) => k.kind === "Gateway");
+    // Its old home's folds no longer hold it.
+    const { rerender } = counts({ expanded: ["crds", "crdgroup:gateway.networking.k8s.io"], crds: [GATEWAYS] });
+    await act(() => vi.advanceTimersByTimeAsync(10));
+    expect(gateways()).toEqual([]);
+    rerender({ ctx: PROD, paused: false, expanded: ["gatewayapi"], crds: [GATEWAYS] });
+    await waitFor(() => expect(gateways()).toEqual([{ kind: "Gateway", group: "gateway.networking.k8s.io", version: "v1", plural: "gateways", namespaced: true }]));
+  });
+
   it("no refresh while hidden", async () => {
     Object.defineProperty(document, "visibilityState", { configurable: true, get: () => "hidden" });
     const { result } = counts({ expanded: ["workloads"] });
